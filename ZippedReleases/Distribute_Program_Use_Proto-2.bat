@@ -1,10 +1,10 @@
 @echo off
-echo Copying MSGFPlus.jar to C:\DMS_Programs\ and \\pnl\projects\OmicsSW\DMS_Programs\AnalysisToolManagerDistribution\
+echo Copying MSGFPlus.jar to C:\DMS_Programs\ and \\Proto-3\DMS_Programs_Dist\AnalysisToolManagerDistribution\
 pause
 
 @echo on
 xcopy \\proto-2\CI_Publish\MSGFPlus\msgfplus.jar C:\DMS_Programs\MSGFPlus\ /Y
-xcopy \\proto-2\CI_Publish\MSGFPlus\msgfplus.jar \\pnl\projects\OmicsSW\DMS_Programs\AnalysisToolManagerDistribution\MSGFPlus\ /y
+xcopy \\proto-2\CI_Publish\MSGFPlus\msgfplus.jar \\Proto-3\DMS_Programs_Dist\AnalysisToolManagerDistribution\MSGFPlus\ /y
 
 @echo off
 pause

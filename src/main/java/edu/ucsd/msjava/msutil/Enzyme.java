@@ -388,6 +388,11 @@ public class Enzyme implements ParamObject {
     public static final Enzyme NoCleavage;
 
     /**
+     * Trypsin plus C (cleave after K, R, or C)
+     */
+    public static final Enzyme TrypsinPlusC;
+
+    /**
      * Custom enzyme file path
      * @return
      */
@@ -503,6 +508,8 @@ public class Enzyme implements ParamObject {
         // Do not allow cleavage after any residue
         NoCleavage = new Enzyme("NoCleavage", null, false, "no cleavage", "MS:1001955");
 
+        TrypsinPlusC = new Enzyme("TrypPlusC", "KRC", false, "Trypsin plus C", "MS:1001251");
+
         enzymeTable = new HashMap<String, Enzyme>();
         registeredEnzymeList = new ArrayList<Enzyme>();
 
@@ -520,6 +527,7 @@ public class Enzyme implements ParamObject {
         register(AspN.name, AspN);                    // 7
         register(ALP.name, ALP);                      // 8
         register(NoCleavage.name, NoCleavage);        // 9
+        register(TrypsinPlusC.name, TrypsinPlusC);    // 10
 
         customEnzymeFilePath = "";
         customEnzymeMessages  = new ArrayList<String>();

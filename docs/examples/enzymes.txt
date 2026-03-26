@@ -20,6 +20,7 @@
 # AspN,D,N,Asp-N                            # 7
 # aLP,null,C,alphaLP                        # 8
 # NoCleavage,null,C,no cleavage             # 9: Endogenous peptides
+# TrypPlusC,KRC,C,TrypPlusC                 # 10: Cleave after K, R, or C
 #
 # If you want to redefine a pre-configured enzyme (e.g. change CleaveAt of Asp-N to "DE"), specify the enzyme again.
 # Specify one enzyme per line.

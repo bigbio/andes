@@ -30,7 +30,7 @@ InstrumentID=1
 # Enzyme ID
 #  0 means unspecific cleavage (cleave after any residue)
 #  1 means Trypsin (Default); optionally use this along with NTT=0 for a no-enzyme-specificity search of a tryptically digested sample
-#  2: Chymotrypsin, 3: Lys-C, 4: Lys-N, 5: Glu-C, 6: Arg-C, 7: Asp-N, 8: alphaLP, 9: No Cleavage (for peptidomics)
+#  2: Chymotrypsin, 3: Lys-C, 4: Lys-N, 5: Glu-C, 6: Arg-C, 7: Asp-N, 8: alphaLP, 9: No Cleavage (for peptidomics), 10: TrypPlusC (cleave after K, R, or C)
 EnzymeID=1
 
 # Isotope error range

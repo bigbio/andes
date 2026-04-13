@@ -51,6 +51,8 @@ public class SearchParams {
     private int maxMissedCleavages;
     private int maxNumMods;
     private boolean allowDenseCentroidedPeaks;
+    private int minMSLevel;
+    private int maxMSLevel;
 
     public SearchParams() {
     }
@@ -218,6 +220,16 @@ public class SearchParams {
     // Used by MS-GF+
     public boolean getAllowDenseCentroidedPeaks() {
         return allowDenseCentroidedPeaks;
+    }
+
+    // Used by MS-GF+
+    public int getMinMSLevel() {
+        return minMSLevel;
+    }
+
+    // Used by MS-GF+
+    public int getMaxMSLevel() {
+        return maxMSLevel;
     }
 
     /**
@@ -410,6 +422,10 @@ public class SearchParams {
         
         allowDenseCentroidedPeaks = paramManager.getAllowDenseCentroidedPeaks() == 1;
 
+        IntRangeParameter msLevelParam = paramManager.getMSLevelParameter();
+        minMSLevel = msLevelParam.getMin();
+        maxMSLevel = msLevelParam.getMax();
+
         maxNumMods = paramManager.getMaxNumModsPerPeptide();
         int maxNumModsCompare = aaSet.getMaxNumberOfVariableModificationsPerPeptide();
 
@@ -594,6 +610,7 @@ public class SearchParams {
             buf.append(" (custom)\n");
         }
 
+        buf.append("\tMSLevel: " + this.minMSLevel + "," + this.maxMSLevel + "\n");
         buf.append("\tMinNumPeaksPerSpectrum: " + this.minNumPeaksPerSpectrum + "\n");
         buf.append("\tNumIsoforms: " + this.maxNumVariantsPerPeptide + "\n");
 

@@ -68,7 +68,9 @@ public class SpecKey extends Pair<Integer, Integer> {
             int maxCharge,
             ActivationMethod activationMethod,
             int minNumPeaksPerSpectrum,
-            boolean allowDenseCentroidedData) {
+            boolean allowDenseCentroidedData,
+            int minMSLevel,
+            int maxMSLevel) {
 
         Iterator<Spectrum> itr = specAcc.getSpecItr();
 
@@ -80,7 +82,9 @@ public class SpecKey extends Pair<Integer, Integer> {
                 maxCharge,
                 activationMethod,
                 minNumPeaksPerSpectrum,
-                allowDenseCentroidedData);
+                allowDenseCentroidedData,
+                minMSLevel,
+                maxMSLevel);
 
 
         SpectrumParser parser = specAcc.getSpectrumParser();
@@ -104,7 +108,9 @@ public class SpecKey extends Pair<Integer, Integer> {
             int maxCharge,
             ActivationMethod activationMethod,
             int minNumPeaksPerSpectrum,
-            boolean allowDenseCentroidedData) {
+            boolean allowDenseCentroidedData,
+            int minMSLevel,
+            int maxMSLevel) {
 
         if (activationMethod == ActivationMethod.FUSION)
             return getFusedSpecKeyList(itr, startSpecIndex, endSpecIndex, minCharge, maxCharge);
@@ -114,6 +120,7 @@ public class SpecKey extends Pair<Integer, Integer> {
         int numProfileSpectra = 0;
         int numDenseCentroidedSpectra = 0;
         int numSpectraWithTooFewPeaks = 0;
+        int numFilteredByMSLevel = 0;
         final int MAX_INFORMATIVE_MESSAGES = 10;
         int informativeMessageCount = 0;
 
@@ -125,6 +132,11 @@ public class SpecKey extends Pair<Integer, Integer> {
                 continue;
             if (specIndex >= endSpecIndex)
                 continue;
+
+            if (spec.getMSLevel() < minMSLevel || spec.getMSLevel() > maxMSLevel) {
+                numFilteredByMSLevel++;
+                continue;
+            }
 
             spec.setChargeIfSinglyCharged();
             int charge = spec.getCharge();
@@ -217,6 +229,9 @@ public class SpecKey extends Pair<Integer, Integer> {
         }
 
         System.out.println("Ignoring " + numProfileSpectra + " profile spectra.");
+        if (numFilteredByMSLevel > 0) {
+            System.out.println("Ignoring " + numFilteredByMSLevel + " spectra with MS level outside range [" + minMSLevel + "," + maxMSLevel + "].");
+        }
         System.out.println("Ignoring " + numSpectraWithTooFewPeaks + " spectra having less than " + minNumPeaksPerSpectrum + " peaks.");
         if (numDenseCentroidedSpectra > 0) {
             System.out.println("Ignoring " + numDenseCentroidedSpectra + " spectra marked as centroid with dense peaks (<50ppm median distance).\n" +

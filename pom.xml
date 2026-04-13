@@ -5,7 +5,7 @@
     <version>1.0.0-SNAPSHOT</version>
     <name>MSGF-Plus</name>
     <properties>
-        <skipTests>true</skipTests>
+        <skipTests>false</skipTests>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
     <build>
@@ -25,8 +25,8 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.8.1</version>
                 <configuration>
-                    <source>1.8</source>
-                    <target>1.8</target>
+                    <source>17</source>
+                    <target>17</target>
                 </configuration>
             </plugin>
             <plugin>
@@ -95,72 +95,9 @@
                                         <exclude>META-INF/*.RSA</exclude>
                                     </excludes>
                                 </filter>
-                                <filter>
-                                    <artifact>it.unimi.dsi:fastutil</artifact>
-                                    <includes>
-                                        <!-- Added a maven shade plugin step with minimize-jar set to true to mzIdentML pom to determine the needed fastutil classes.
-                                             Then used Beyond Compare 4 to compare the resulting jar vs. the result of this step until the fastutil classes matched. -->
-                                        <!-- booleans -->
-                                        <include>it/unimi/dsi/fastutil/booleans/BooleanArrays**</include>
-                                        <include>it/unimi/dsi/fastutil/booleans/BooleanComparator**</include>
-                                        <!-- chars -->
-                                        <include>it/unimi/dsi/fastutil/chars/AbstractCharBidirectionalIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/AbstractCharCollection**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/AbstractCharIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/AbstractCharList**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/AbstractCharListIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/AbstractCharSet**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharArrayList**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharArrays**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharBidirectionalIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharCollection**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharComparator**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharIterable**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharIterators**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharList**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharListIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharOpenHashSet**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharSet**</include>
-                                        <include>it/unimi/dsi/fastutil/chars/CharStack**</include>
-                                        <!-- ints -->
-                                        <include>it/unimi/dsi/fastutil/ints/IntArrays**</include>
-                                        <include>it/unimi/dsi/fastutil/ints/IntComparator**</include>
-                                        <!-- objects -->
-                                        <include>it/unimi/dsi/fastutil/objects/AbstractObjectBidirectionalIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/AbstractObjectCollection**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/AbstractObjectIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/AbstractObjectList**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/AbstractObjectListIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectArrayList**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectArrays**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectBidirectionalIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectCollection**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectIterable**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectIterators**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectList**</include>
-                                        <include>it/unimi/dsi/fastutil/objects/ObjectListIterator**</include>
-                                        <!-- base-level objects -->
-                                        <include>it/unimi/dsi/fastutil/Arrays**</include>
-                                        <include>it/unimi/dsi/fastutil/BidirectionalIterator**</include>
-                                        <include>it/unimi/dsi/fastutil/Hash**</include>
-                                        <include>it/unimi/dsi/fastutil/HashCommon**</include>
-                                        <include>it/unimi/dsi/fastutil/Stack**</include>
-                                        <include>it/unimi/dsi/fastutil/Swapper**</include>
-                                    </includes>
-                                    <excludes>
-                                        <exclude>it/unimi/dsi/fastutil/chars/AbstractChar2**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/chars/Char2**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/ints/IntComparators**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/objects/ObjectCollections**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/objects/ObjectLists**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/chars/CharCollections**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/chars/CharComparators**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/chars/CharLists**</exclude>
-                                        <exclude>it/unimi/dsi/fastutil/chars/CharSets**</exclude>
-                                    </excludes>
-                                </filter>
+                                <!-- fastutil shade filter removed: jmzml 1.7.11 requires
+                                     additional fastutil classes beyond the original whitelist.
+                                     Full fastutil 8.5.12 is now included as an explicit dependency. -->
                                 <filter>
                                     <artifact>*:*</artifact>
                                     <excludes>
@@ -237,6 +174,31 @@
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-text</artifactId>
             <version>1.11.0</version>
+        </dependency>
+        <dependency>
+            <groupId>uk.ac.ebi.jmzml</groupId>
+            <artifactId>jmzml</artifactId>
+            <version>1.7.11</version>
+        </dependency>
+        <dependency>
+            <groupId>it.unimi.dsi</groupId>
+            <artifactId>fastutil</artifactId>
+            <version>8.5.12</version>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>1.7.36</version>
+        </dependency>
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.2.12</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>2.15.1</version>
         </dependency>
     </dependencies>
   

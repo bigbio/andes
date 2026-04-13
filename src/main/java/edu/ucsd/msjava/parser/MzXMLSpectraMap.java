@@ -26,7 +26,7 @@ public class MzXMLSpectraMap implements SpectrumAccessorBySpecIndex {
 
     // if(maxMSLevel >= minMSLevel > 0) only spectra within [minMSLevel, maxMSLevel] will be returned
     private int minMSLevel = 2;        // inclusive
-    private int maxMSLevel = Integer.MAX_VALUE;        // exclusive
+    private int maxMSLevel = Integer.MAX_VALUE;        // inclusive
 
     /***** CONSTRUCTORS *****/
     /**
@@ -64,7 +64,7 @@ public class MzXMLSpectraMap implements SpectrumAccessorBySpecIndex {
 
         if (scanObj == null) return null;
         int msLevel = scanObj.getHeader().getMsLevel();
-        if (msLevel < minMSLevel || msLevel >= maxMSLevel)
+        if (msLevel < minMSLevel || msLevel > maxMSLevel)
             return null;
         // get peak list array (mass, intensities) pairs
         double[][] peakList = scanObj.getMassIntensityList();
@@ -168,7 +168,7 @@ public class MzXMLSpectraMap implements SpectrumAccessorBySpecIndex {
 
         if (scanObj == null) return null;
         int msLevel = scanObj.getHeader().getMsLevel();
-        if (msLevel < minMSLevel || msLevel >= maxMSLevel)
+        if (msLevel < minMSLevel || msLevel > maxMSLevel)
             return null;
         return String.valueOf(specIndex);
     }
@@ -187,7 +187,7 @@ public class MzXMLSpectraMap implements SpectrumAccessorBySpecIndex {
 
         if (scanObj == null) return null;
         int msLevel = scanObj.getHeader().getMsLevel();
-        if (msLevel < minMSLevel || msLevel >= maxMSLevel)
+        if (msLevel < minMSLevel || msLevel > maxMSLevel)
             return null;
 
         ScanHeader header = scanObj.getHeader();

@@ -18,7 +18,7 @@ public class MzMLAdapter {
     private final File specFile;
     private MzMLUnmarshaller unmarshaller;
     private int minMSLevel = 2;        // inclusive
-    private int maxMSLevel = Integer.MAX_VALUE;        // exclusive
+    private int maxMSLevel = Integer.MAX_VALUE;        // inclusive
     private CvParam spectrumIDFormatCvParam = null;
 
     public MzMLAdapter(File specFile) {

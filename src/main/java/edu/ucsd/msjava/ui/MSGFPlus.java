@@ -263,12 +263,16 @@ public class MSGFPlus {
         System.out.printf("Opening %s %s\n", specFormat.getPSIName(), specFile.getName());
 
         SpectraAccessor specAcc = new SpectraAccessor(specFile, specFormat);
+        int minMSLevel = params.getMinMSLevel();
+        int maxMSLevel = params.getMaxMSLevel();
+        specAcc.setMSLevelRange(minMSLevel, maxMSLevel);
 
         if (specAcc.getSpecMap() == null || specAcc.getSpecItr() == null)
             return "Error while parsing spectrum file: " + specFile.getPath();
 
         ArrayList<SpecKey> specKeyList = SpecKey.getSpecKeyList(specAcc,
-                startSpecIndex, endSpecIndex, minCharge, maxCharge, activationMethod, minNumPeaksPerSpectrum, allowDenseCentroidedPeaks);
+                startSpecIndex, endSpecIndex, minCharge, maxCharge, activationMethod, minNumPeaksPerSpectrum, allowDenseCentroidedPeaks,
+                minMSLevel, maxMSLevel);
 
         int specSize = specKeyList.size();
         if (specSize == 0)

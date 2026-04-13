@@ -122,6 +122,11 @@ public class ParamManager {
         SPEC_INDEX("index", "SpecIndex", "Range of spectrum indices to be considered",
                 "For example, to analyze the first 1000 spectra use -index 1,1000"),
 
+        MS_LEVEL("msLevel", "MSLevel", "MS level or range of MS levels to consider; Default: 2",
+                "Accepts a single value or a comma-separated range.\n" +
+                "\t   For example, -msLevel 2 to search only MS2 spectra\n" +
+                "\t   Or -msLevel 2,3 to search both MS2 and MS3 spectra"),
+
         MAX_MISSED_CLEAVAGES("maxMissedCleavages", "MaxMissedCleavages", "Exclude peptides with more than this number of missed cleavages from the search; Default: -1 (no limit)", null),
 
         TDA_STRATEGY("tda", "TDA", "Target decoy strategy",
@@ -695,6 +700,14 @@ public class ParamManager {
         addParameter(specIndexParam);
     }
 
+    private void addMSLevelParam() {
+        IntRangeParameter msLevelParam = new IntRangeParameter(ParamNameEnum.MS_LEVEL);
+        msLevelParam.minValue(1);
+        msLevelParam.setMaxInclusive();
+        msLevelParam.defaultValue("2,2");
+        addParameter(msLevelParam);
+    }
+
     private void addEdgeScoreParam(boolean isHidden) {
         EnumParameter edgeScoreParam = new EnumParameter(ParamNameEnum.EDGE_SCORE.key);
         edgeScoreParam.registerEntry("Use edge scoring").setDefault();
@@ -792,6 +805,7 @@ public class ParamManager {
         addMaxNumModsParam();
         
         addAllowDenseCentroidedPeaksParam();
+        addMSLevelParam();
 
         addExample("Example (high-precision): java -Xmx3500M -jar MSGFPlus.jar -s test.mzML -d IPI_human_3.79.fasta -inst 1 -t 20ppm -ti -1,2 -ntt 2 -tda 1 -o testMSGFPlus.mzid -mod Mods.txt");
         addExample("Example (low-precision):  java -Xmx3500M -jar MSGFPlus.jar -s test.mzML -d IPI_human_3.79.fasta -inst 0 -t 0.5Da,2.5Da    -ntt 2 -tda 1 -o testMSGFPlus.mzid -mod Mods.txt");
@@ -1101,6 +1115,10 @@ public class ParamManager {
 
     public IntRangeParameter getSpecIndexParameter() {
         return ((IntRangeParameter) getParameter(ParamNameEnum.SPEC_INDEX.key));
+    }
+
+    public IntRangeParameter getMSLevelParameter() {
+        return ((IntRangeParameter) getParameter(ParamNameEnum.MS_LEVEL.key));
     }
 
     public int getTDA() {

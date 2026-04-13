@@ -101,6 +101,7 @@ public class TestMSGFPlus {
         assertTrue(resultMsg == null);
     }
 
+    @Ignore("Requires Windows-specific DMS files at C:\\DMS_WorkDir1")
     @Test
     public void TestMzML()
     {

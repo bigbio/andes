@@ -61,9 +61,7 @@ public class SpectraAccessor {
 
     public SpectrumAccessorBySpecIndex getSpecMap() {
         if (specMap == null) {
-            if (specFormat == SpecFileFormat.MZXML)
-                specMap = new MzXMLSpectraMap(specFile.getPath()).msLevel(minMSLevel, maxMSLevel);
-            else if (specFormat == SpecFileFormat.MZML) {
+            if (specFormat == SpecFileFormat.MZML) {
                 if (staxParser == null) {
                     try {
                         staxParser = new StaxMzMLParser(specFile);
@@ -100,9 +98,7 @@ public class SpectraAccessor {
 
     public Iterator<Spectrum> getSpecItr() {
         if (specItr == null) {
-            if (specFormat == SpecFileFormat.MZXML)
-                specItr = new MzXMLSpectraIterator(specFile.getPath(), minMSLevel, maxMSLevel);
-            else if (specFormat == SpecFileFormat.MZML) {
+            if (specFormat == SpecFileFormat.MZML) {
                 if (staxParser == null) {
                     try {
                         staxParser = new StaxMzMLParser(specFile);
@@ -176,8 +172,6 @@ public class SpectraAccessor {
                 || specFormat == SpecFileFormat.MS2
         )
             cvParam = Constants.makeCvParam("MS:1000774", "multiple peak list nativeID format");
-        else if (specFormat == SpecFileFormat.MZXML)
-            cvParam = Constants.makeCvParam("MS:1000776", "scan number only nativeID format");
         else if (specFormat == SpecFileFormat.MZDATA)
             cvParam = Constants.makeCvParam("MS:1000777", "spectrum identifier nativeID format");
         else if (specFormat == SpecFileFormat.MZML) {

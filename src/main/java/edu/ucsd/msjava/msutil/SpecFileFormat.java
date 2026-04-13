@@ -22,7 +22,6 @@ public class SpecFileFormat extends FileFormat {
     }
 
     public static final SpecFileFormat MGF;
-    public static final SpecFileFormat MZXML;
     public static final SpecFileFormat MZML;
     public static final SpecFileFormat MS2;
     public static final SpecFileFormat PKL;
@@ -44,7 +43,6 @@ public class SpecFileFormat extends FileFormat {
 
     static {
         MGF = new SpecFileFormat(".mgf", "MS:1001062", "Mascot MGF file");
-        MZXML = new SpecFileFormat(".mzXML", "MS:1000566", "ISB mzXML file");
         MZML = new SpecFileFormat(".mzML", "MS:1000584", "mzML file");
         MS2 = new SpecFileFormat(".ms2", "MS:1001466", "MS2 file");
         PKL = new SpecFileFormat(".pkl", "MS:1000565", "Micromass PKL file");
@@ -53,7 +51,6 @@ public class SpecFileFormat extends FileFormat {
 
         specFileFormatList = new ArrayList<SpecFileFormat>();
         specFileFormatList.add(MGF);
-        specFileFormatList.add(MZXML);
         specFileFormatList.add(MZML);
         specFileFormatList.add(MS2);
         specFileFormatList.add(PKL);

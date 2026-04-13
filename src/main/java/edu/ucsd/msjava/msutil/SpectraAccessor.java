@@ -20,6 +20,9 @@ public class SpectraAccessor {
 
     private MzMLAdapter mzmlAdapter = null;
 
+    private int minMSLevel = 2;
+    private int maxMSLevel = 2;
+
     SpectrumAccessorBySpecIndex specMap = null;
     Iterator<Spectrum> specItr = null;
 
@@ -45,13 +48,25 @@ public class SpectraAccessor {
         this.spectrumParser = null;
     }
 
+    /**
+     * Set the MS level range for spectrum filtering (both inclusive).
+     *
+     * @param minMSLevel minimum MS level to consider (inclusive).
+     * @param maxMSLevel maximum MS level to consider (inclusive).
+     */
+    public void setMSLevelRange(int minMSLevel, int maxMSLevel) {
+        this.minMSLevel = minMSLevel;
+        this.maxMSLevel = maxMSLevel;
+    }
+
     public SpectrumAccessorBySpecIndex getSpecMap() {
         if (specMap == null) {
             if (specFormat == SpecFileFormat.MZXML)
-                specMap = new MzXMLSpectraMap(specFile.getPath());
+                specMap = new MzXMLSpectraMap(specFile.getPath()).msLevel(minMSLevel, maxMSLevel);
             else if (specFormat == SpecFileFormat.MZML) {
                 if (mzmlAdapter == null)
                     mzmlAdapter = new MzMLAdapter(specFile);
+                mzmlAdapter.msLevel(minMSLevel, maxMSLevel);
                 specMap = new MzMLSpectraMap(mzmlAdapter);
             } else if (specFormat == SpecFileFormat.DTA_TXT)
                 specMap = new PNNLSpectraMap(specFile.getPath());
@@ -82,10 +97,11 @@ public class SpectraAccessor {
     public Iterator<Spectrum> getSpecItr() {
         if (specItr == null) {
             if (specFormat == SpecFileFormat.MZXML)
-                specItr = new MzXMLSpectraIterator(specFile.getPath());
+                specItr = new MzXMLSpectraIterator(specFile.getPath(), minMSLevel, maxMSLevel);
             else if (specFormat == SpecFileFormat.MZML) {
                 if (mzmlAdapter == null)
                     mzmlAdapter = new MzMLAdapter(specFile);
+                mzmlAdapter.msLevel(minMSLevel, maxMSLevel);
                 specItr = new MzMLSpectraIterator(mzmlAdapter);
             } else if (specFormat == SpecFileFormat.DTA_TXT)
                 try {

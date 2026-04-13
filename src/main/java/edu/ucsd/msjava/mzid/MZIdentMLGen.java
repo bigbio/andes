@@ -260,6 +260,10 @@ public class MZIdentMLGen {
                 continue;
 
             edu.ucsd.msjava.msutil.Spectrum spec = specAcc.getSpecMap().getSpectrumBySpecIndex(specIndex);
+            if (spec == null) {
+                System.err.println("Warning: spectrum index " + specIndex + " not found in spectrum file; skipping");
+                continue;
+            }
             String specID = spec.getID();
             float precursorMz = spec.getPrecursorPeak().getMz();
 
@@ -322,7 +326,7 @@ public class MZIdentMLGen {
                 DatabaseMatch match = matchList.get(i);
 
                 if (match.getDeNovoScore() < params.getMinDeNovoScore())
-                    break;
+                    continue;
 
 //				int pepIndex = match.getIndex();	// Position of preAA
                 int length = match.getLength();        // Peptide length + 2

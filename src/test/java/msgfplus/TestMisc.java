@@ -10,8 +10,6 @@ import edu.ucsd.msjava.ui.MSGFPlus;
 import org.junit.Ignore;
 import org.junit.Test;
 
-import edu.ucsd.msjava.misc.ConvertToMgf;
-import edu.ucsd.msjava.misc.VennDiagram;
 import edu.ucsd.msjava.msgf.NominalMass;
 import edu.ucsd.msjava.msscorer.NewRankScorer;
 import edu.ucsd.msjava.msscorer.NewScoredSpectrum;
@@ -94,30 +92,6 @@ public class TestMisc {
         System.out.println(scanNum);
     }
     
-    @Test
-    public void testVennDiagram()
-    {
-        File result1 = new File("/Users/kims336/Research/Data/Tao/Global/MSGFPlus_10ppm_TI1/CPTAC_OvC_JB5427_iTRAQ_01_9Apr12_Cougar_12-03-21_dta.tsv");
-        File result2 = new File("/Users/kims336/Research/Data/Tao/Global/MSGFPlus_20ppm_TI2/CPTAC_OvC_JB5427_iTRAQ_01_9Apr12_Cougar_12-03-21_dta.tsv");
-        
-        try {
-            VennDiagram.vennDiagram(result1, result2, 0.01f);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-    
-    @Test
-    public void testMzMLParser() throws URISyntaxException, IOException {
-        File mzMLFile = new File(TestMisc.class.getClassLoader().getResource("tiny.pwiz.mzML").toURI());
-        File mgfFile = File.createTempFile("tiny.pwiz", "mgf");
-        try {
-            ConvertToMgf.convert(mzMLFile, mgfFile, false, null, null, -1, -1, -1, false);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        mgfFile.deleteOnExit();
-    }
 
     
     @Test

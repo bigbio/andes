@@ -2,7 +2,6 @@ package edu.ucsd.msjava.params;
 
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.sequences.Constants;
-import edu.ucsd.msjava.ui.MSGF;
 import edu.ucsd.msjava.ui.MSGFPlus;
 
 import java.io.File;
@@ -1272,25 +1271,4 @@ public class ParamManager {
         numModsParam.parse(String.valueOf(numMods));
     }
 
-    // This class is not typically instantiated
-    @Deprecated
-    public static void main(String argv[]) {
-        ParamManager paramManager = new ParamManager("MSGF", MSGF.VERSION, MSGF.RELEASE_DATE, "java -Xmx2000M -jar MSGFDB.jar");
-        paramManager.addMSGFDBParams();
-
-//		FileListParameter testParam = new FileListParameter("test", "test", "test");
-//		testParam.addFileFormat(SpecFileFormat.MGF);
-//		testParam.addFileFormat(SpecFileFormat.MZXML);
-//		paramManager.addParameter(testParam);
-
-        String errMessage = paramManager.parseParams(argv);
-        if (errMessage == null) {
-            paramManager.printValues();
-        } else {
-            System.out.println();
-            System.err.println("[Error] " + errMessage);
-            System.out.println();
-            paramManager.printUsageInfo();
-        }
-    }
 }

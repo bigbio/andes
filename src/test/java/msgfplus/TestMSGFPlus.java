@@ -22,7 +22,7 @@ import edu.ucsd.msjava.msutil.Peptide;
 import edu.ucsd.msjava.msutil.SpectraAccessor;
 import edu.ucsd.msjava.msutil.Spectrum;
 import edu.ucsd.msjava.mzid.MzIDTest;
-import edu.ucsd.msjava.mzml.MzMLAdapter;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.parser.BufferedLineReader;
 import edu.ucsd.msjava.ui.MSGFPlus;
@@ -451,7 +451,7 @@ public class TestMSGFPlus {
         String[] argv = {"-i", resultPath.getPath(), "-d", specPath.getPath(), "-m", "2", "-inst", "1", "-e", "0", "-protocol", "3"};
         ParamManager paramManager = new ParamManager("ScoringParamGen", String.valueOf(ScoringParamGen.VERSION), ScoringParamGen.DATE,
                 "java -Xmx2000M -cp MSGFPlus.jar edu.ucsd.msjava.ui.ScoringParamGen");
-        MzMLAdapter.turnOffLogs();
+        StaxMzMLParser.turnOffLogs();
         paramManager.addScoringParamGenParams();
         paramManager.parseParams(argv);
         
@@ -694,7 +694,7 @@ public class TestMSGFPlus {
         String[] argv = {"-i", resultPath.getPath(), "-d", specPath.getPath(), "-m", "1", "-inst", "0", "-e", "1"};
         ParamManager paramManager = new ParamManager("ScoringParamGen", String.valueOf(ScoringParamGen.VERSION), ScoringParamGen.DATE,
                 "java -Xmx2000M -cp MSGFPlus.jar edu.ucsd.msjava.ui.ScoringParamGen");
-        MzMLAdapter.turnOffLogs();
+        StaxMzMLParser.turnOffLogs();
         paramManager.addScoringParamGenParams();
         paramManager.parseParams(argv);
         

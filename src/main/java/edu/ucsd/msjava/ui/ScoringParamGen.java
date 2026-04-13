@@ -3,7 +3,7 @@ package edu.ucsd.msjava.ui;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msscorer.ScoringParameterGeneratorWithErrors;
 import edu.ucsd.msjava.msutil.*;
-import edu.ucsd.msjava.mzml.MzMLAdapter;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.params.ParamManager;
 
 import java.io.*;
@@ -17,7 +17,7 @@ public class ScoringParamGen {
         ParamManager paramManager = new ParamManager("ScoringParamGen", String.valueOf(VERSION), DATE,
                 "java -Xmx2000M -cp MSGFPlus.jar edu.ucsd.msjava.ui.ScoringParamGen");
 
-        MzMLAdapter.turnOffLogs();
+        StaxMzMLParser.turnOffLogs();
         paramManager.addScoringParamGenParams();
 
         if (argv.length == 0) {

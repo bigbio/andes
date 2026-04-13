@@ -5,6 +5,10 @@ import edu.ucsd.msjava.msutil.CvParamInfo;
 import edu.ucsd.msjava.msutil.Peak;
 import edu.ucsd.msjava.msutil.Spectrum;
 
+import org.slf4j.LoggerFactory;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.LoggerContext;
+
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
@@ -55,6 +59,9 @@ public class StaxMzMLParser {
     private final Map<Integer, SpectrumIndex> indexBySpecIdx; // specIndex -> index entry
     private final Map<String, SpectrumIndex> indexById;       // id -> index entry
 
+    // Referenceable param groups: group ID -> list of [accession, name, value, unitAccession, unitName]
+    private final Map<String, List<String[]>> refParamGroups;
+
     // Full spectrum cache (populated on first random access)
     private final Map<Integer, Spectrum> cache;
     private volatile boolean allLoaded = false;
@@ -78,6 +85,7 @@ public class StaxMzMLParser {
         this.indexList = new ArrayList<>();
         this.indexBySpecIdx = new HashMap<>();
         this.indexById = new HashMap<>();
+        this.refParamGroups = new HashMap<>();
         this.cache = new HashMap<>();
         buildIndex();
     }
@@ -250,6 +258,8 @@ public class StaxMzMLParser {
         boolean inPrecursor = false;
         boolean inSelectedIon = false;
         boolean inScan = false;
+        boolean inRefParamGroup = false;
+        String curRefGroupId = null;
 
         // Current spectrum being indexed
         int curIndex = -1;
@@ -266,8 +276,24 @@ public class StaxMzMLParser {
             if (event == XMLStreamConstants.START_ELEMENT) {
                 String name = reader.getLocalName();
 
-                if ("spectrum".equals(name)) {
+                if ("referenceableParamGroup".equals(name)) {
+                    inRefParamGroup = true;
+                    curRefGroupId = reader.getAttributeValue(null, "id");
+                    if (curRefGroupId != null)
+                        refParamGroups.put(curRefGroupId, new ArrayList<>());
+                } else if (inRefParamGroup && "cvParam".equals(name)) {
+                    if (curRefGroupId != null) {
+                        String acc = reader.getAttributeValue(null, "accession");
+                        String cvName = reader.getAttributeValue(null, "name");
+                        String val = reader.getAttributeValue(null, "value");
+                        String unitAcc = reader.getAttributeValue(null, "unitAccession");
+                        String unitName = reader.getAttributeValue(null, "unitName");
+                        refParamGroups.get(curRefGroupId).add(
+                                new String[]{acc, cvName, val, unitAcc, unitName});
+                    }
+                } else if ("spectrum".equals(name)) {
                     inSpectrum = true;
+                    inRefParamGroup = false;
                     curByteOffset = cis.getBytesRead();
                     curId = reader.getAttributeValue(null, "id");
                     String indexStr = reader.getAttributeValue(null, "index");
@@ -277,6 +303,18 @@ public class StaxMzMLParser {
                     curScanNum = parseScanNumber(curId);
                     curMsLevel = 0;
                     curPrecursorMz = -1;
+                } else if (inSpectrum && "referenceableParamGroupRef".equals(name)) {
+                    // Resolve referenced param group during indexing for MS level
+                    String ref = reader.getAttributeValue(null, "ref");
+                    if (ref != null) {
+                        List<String[]> params = refParamGroups.get(ref);
+                        if (params != null) {
+                            for (String[] p : params) {
+                                if ("MS:1000511".equals(p[0]) && p[2] != null)
+                                    curMsLevel = Integer.parseInt(p[2]);
+                            }
+                        }
+                    }
                 } else if (inSpectrum && "cvParam".equals(name)) {
                     String acc = reader.getAttributeValue(null, "accession");
                     if (acc != null) {
@@ -302,7 +340,10 @@ public class StaxMzMLParser {
                 }
             } else if (event == XMLStreamConstants.END_ELEMENT) {
                 String name = reader.getLocalName();
-                if ("spectrum".equals(name)) {
+                if ("referenceableParamGroup".equals(name)) {
+                    inRefParamGroup = false;
+                    curRefGroupId = null;
+                } else if ("spectrum".equals(name)) {
                     SpectrumIndex si = new SpectrumIndex(
                             curIndex, curId, curScanNum, curMsLevel,
                             curPrecursorMz, curByteOffset, curArrayLength);
@@ -471,6 +512,38 @@ public class StaxMzMLParser {
                             case "MS:1000576": compressed = false; break; // no compression
                             case "MS:1000514": isMzArray = true; break;
                             case "MS:1000515": isIntensityArray = true; break;
+                        }
+                    }
+                }
+                else if ("referenceableParamGroupRef".equals(name)) {
+                    // Resolve referenced param group - apply its CV params in current context
+                    String ref = reader.getAttributeValue(null, "ref");
+                    if (ref != null) {
+                        List<String[]> params = refParamGroups.get(ref);
+                        if (params != null) {
+                            for (String[] p : params) {
+                                String pAcc = p[0];
+                                String pVal = p[2];
+                                String pUnitAcc = p[3];
+                                if (pAcc == null) continue;
+
+                                // Apply in current context (spectrum-level or scan-level)
+                                if (!inScan && !inPrecursor && !inBinaryDataArray) {
+                                    switch (pAcc) {
+                                        case "MS:1000511": msLevel = parseInt(pVal, 0); break;
+                                        case "MS:1000127": isCentroided = true; break;
+                                        case "MS:1000128": isCentroided = false; break;
+                                        case "MS:1000129": polarity = Spectrum.Polarity.NEGATIVE; break;
+                                        case "MS:1000130": polarity = Spectrum.Polarity.POSITIVE; break;
+                                    }
+                                } else if (inScan && !inPrecursor) {
+                                    if ("MS:1000016".equals(pAcc)) {
+                                        scanStartTime = parseFloat(pVal, -1);
+                                        if ("UO:0000031".equals(pUnitAcc)) scanStartTimeIsSeconds = false;
+                                        else if ("UO:0000010".equals(pUnitAcc)) scanStartTimeIsSeconds = true;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -812,6 +885,26 @@ public class StaxMzMLParser {
                 if (reader != null) reader.close();
                 if (inputStream != null) inputStream.close();
             } catch (Exception e) { /* ignore */ }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Logging utility (replaces MzMLAdapter.turnOffLogs)
+    // -----------------------------------------------------------------------
+
+    private static boolean logOff = false;
+
+    /**
+     * Suppress all logback logging. Called at startup to silence noisy
+     * library output (jmzidml, etc.).
+     */
+    public static void turnOffLogs() {
+        if (!logOff) {
+            LoggerContext context = (LoggerContext) LoggerFactory.getILoggerFactory();
+            context.reset();
+            Logger rootLogger = context.getLogger(Logger.ROOT_LOGGER_NAME);
+            rootLogger.detachAndStopAllAppenders();
+            logOff = true;
         }
     }
 }

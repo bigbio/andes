@@ -11,7 +11,7 @@ import org.junit.Test;
 import edu.ucsd.msjava.msscorer.NewRankScorer;
 import edu.ucsd.msjava.msscorer.ScoringParameterGeneratorWithErrors;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
-import edu.ucsd.msjava.mzml.MzMLAdapter;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.ui.ScoringParamGen;
 
@@ -51,7 +51,7 @@ public class TestScoring {
         ParamManager paramManager = new ParamManager("ScoringParamGen", "Test", "Test",
                 "java -Xmx2000M -cp MSGFPlus.jar edu.ucsd.msjava.ui.ScoringParamGen");
             
-        MzMLAdapter.turnOffLogs();
+        StaxMzMLParser.turnOffLogs();
         paramManager.addScoringParamGenParams();
         paramManager.parseParams(argv);
         ScoringParamGen.runScoringParamGen(paramManager);

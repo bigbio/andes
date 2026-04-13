@@ -266,6 +266,21 @@ public class TestStaxMzMLParser {
     }
 
     @Test
+    public void testReferenceableParamGroupResolution() throws Exception {
+        StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile());
+        // scan=19 (MS1) references CommonMS1SpectrumParams which contains MS:1000130 (positive scan)
+        // The polarity should be resolved from the referenceableParamGroupRef
+        Spectrum spec = parser.getSpectrumBySpecIndex(1);
+        Assert.assertNotNull(spec);
+        Assert.assertEquals(Spectrum.Polarity.POSITIVE, spec.getScanPolarity());
+
+        // scan=20 (MS2) references CommonMS2SpectrumParams which also contains MS:1000130
+        Spectrum spec2 = parser.getSpectrumBySpecIndex(2);
+        Assert.assertNotNull(spec2);
+        Assert.assertEquals(Spectrum.Polarity.POSITIVE, spec2.getScanPolarity());
+    }
+
+    @Test
     public void testBinaryDataDecoding() {
         // Test the static decodeBinaryData method directly
         // 64-bit float, no compression, 3 values: 1.0, 2.0, 3.0

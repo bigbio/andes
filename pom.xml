@@ -95,9 +95,7 @@
                                         <exclude>META-INF/*.RSA</exclude>
                                     </excludes>
                                 </filter>
-                                <!-- fastutil shade filter removed: jmzml 1.7.11 requires
-                                     additional fastutil classes beyond the original whitelist.
-                                     Full fastutil 8.5.12 is now included as an explicit dependency. -->
+                                <!-- jmzml and fastutil dependencies removed: replaced by StaxMzMLParser -->
                                 <filter>
                                     <artifact>*:*</artifact>
                                     <excludes>
@@ -175,11 +173,7 @@
             <artifactId>commons-text</artifactId>
             <version>1.11.0</version>
         </dependency>
-        <dependency>
-            <groupId>uk.ac.ebi.jmzml</groupId>
-            <artifactId>jmzml</artifactId>
-            <version>1.7.11</version>
-        </dependency>
+        <!-- jmzml removed: replaced by StaxMzMLParser -->
         <dependency>
             <groupId>it.unimi.dsi</groupId>
             <artifactId>fastutil</artifactId>

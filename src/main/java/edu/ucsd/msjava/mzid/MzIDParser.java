@@ -2,7 +2,7 @@ package edu.ucsd.msjava.mzid;
 
 import edu.ucsd.msjava.msutil.AminoAcidSet;
 import edu.ucsd.msjava.msutil.Composition;
-import edu.ucsd.msjava.mzml.MzMLAdapter;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import uk.ac.ebi.jmzidml.model.mzidml.*;
 import uk.ac.ebi.jmzidml.xml.io.MzIdentMLUnmarshaller;
 
@@ -380,7 +380,7 @@ public class MzIDParser {
 
     public static void main(String argv[]) throws Exception {
         long time = System.currentTimeMillis();
-        MzMLAdapter.turnOffLogs();
+        StaxMzMLParser.turnOffLogs();
 //		File mzidFile = new File(System.getProperty("user.home")+"/Research/Data/QCShew/test.mzid");
 //		File outputFile = null;
 

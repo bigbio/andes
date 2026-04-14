@@ -6,12 +6,14 @@ import edu.ucsd.msjava.msdbsearch.*;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msutil.*;
+import edu.ucsd.msjava.mzid.DirectTSVWriter;
 import edu.ucsd.msjava.mzid.MZIdentMLGen;
 import edu.ucsd.msjava.mzml.MzMLAdapter;
 import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.sequences.Constants;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -455,15 +457,26 @@ public class MSGFPlus {
         System.out.println("Writing results...");
         Collections.sort(resultList);
 
-        MZIdentMLGen mzidGen = new MZIdentMLGen(params, aaSet, sa, specAcc, ioIndex);
-        mzidGen.addSpectrumIdentificationResults(resultList);
+        if (params.writeTsv()) {
+            File tsvFile = new File(outputFile.getPath().replaceAll("\\.mzid$", ".tsv"));
+            DirectTSVWriter tsvWriter = new DirectTSVWriter(params, aaSet, sa, specAcc, ioIndex);
+            try {
+                tsvWriter.writeResults(resultList, tsvFile);
+            } catch (IOException e) {
+                return "Error writing TSV output: " + e.getMessage();
+            }
+            System.out.println("TSV file: " + tsvFile.getPath());
+        }
 
-        mzidGen.writeResults(outputFile);
+        if (params.writeMzid()) {
+            MZIdentMLGen mzidGen = new MZIdentMLGen(params, aaSet, sa, specAcc, ioIndex);
+            mzidGen.addSpectrumIdentificationResults(resultList);
+            mzidGen.writeResults(outputFile);
+            System.out.println("File: " + outputFile.getPath());
+        }
 
         System.out.print("Writing results finished ");
         System.out.format("(elapsed time: %.2f sec)\n", (float) (System.currentTimeMillis() - saveResultsStartTime) / 1000);
-
-        System.out.println("File: " + outputFile.getPath());
         return null;
     }
 }

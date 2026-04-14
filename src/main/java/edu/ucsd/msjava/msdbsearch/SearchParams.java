@@ -53,6 +53,7 @@ public class SearchParams {
     private boolean allowDenseCentroidedPeaks;
     private int minMSLevel;
     private int maxMSLevel;
+    private int outputFormat; // 0=mzid, 1=tsv, 2=both
 
     public SearchParams() {
     }
@@ -230,6 +231,19 @@ public class SearchParams {
     // Used by MS-GF+
     public int getMaxMSLevel() {
         return maxMSLevel;
+    }
+
+    /** 0=mzid, 1=tsv, 2=both */
+    public int getOutputFormat() {
+        return outputFormat;
+    }
+
+    public boolean writeMzid() {
+        return outputFormat == 0 || outputFormat == 2;
+    }
+
+    public boolean writeTsv() {
+        return outputFormat == 1 || outputFormat == 2;
     }
 
     /**
@@ -421,6 +435,7 @@ public class SearchParams {
         }
         
         allowDenseCentroidedPeaks = paramManager.getAllowDenseCentroidedPeaks() == 1;
+        outputFormat = paramManager.getOutputFormat();
 
         IntRangeParameter msLevelParam = paramManager.getMSLevelParameter();
         minMSLevel = msLevelParam.getMin();

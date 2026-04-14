@@ -161,7 +161,12 @@ public class ParamManager {
 
         VERBOSE("verbose", null, "Console output message verbosity",
                 "0 means Report total progress only\n" +
-                        "\t   1 means Report total and per-thread progress/status");
+                        "\t   1 means Report total and per-thread progress/status"),
+
+        OUTPUT_FORMAT("outputFormat", "OutputFormat", "Output format for search results; Default: mzid",
+                "mzid: Write mzIdentML (default, compatible with all downstream tools)\n" +
+                        "\t   tsv: Write TSV directly (faster, smaller files, compatible with OpenMS MSGFPlusAdapter)\n" +
+                        "\t   both: Write both mzid and tsv");
 
         private String key;
         private String name;
@@ -637,6 +642,18 @@ public class ParamManager {
         addParameter(addFeatureParam);
     }
 
+    private void addOutputFormatParam() {
+        EnumParameter outputFormatParam = new EnumParameter(ParamNameEnum.OUTPUT_FORMAT);
+        outputFormatParam.registerEntry("mzid").setDefault();
+        outputFormatParam.registerEntry("tsv");
+        outputFormatParam.registerEntry("both");
+        addParameter(outputFormatParam);
+    }
+
+    public int getOutputFormat() {
+        return ((EnumParameter) getParameter(ParamNameEnum.OUTPUT_FORMAT.key)).getValue();
+    }
+
     private void addChargeCarrierMassParam() {
         DoubleParameter chargeCarrierMassParam = new DoubleParameter(ParamNameEnum.CHARGE_CARRIER_MASSES);
         chargeCarrierMassParam.minValue(0.1);
@@ -799,6 +816,7 @@ public class ParamManager {
 
         addNumMatchesPerSpecParam();
         addAddFeaturesParam();
+        addOutputFormatParam();
         addChargeCarrierMassParam();
         addMaxMissedCleavagesParam();
         addMaxNumModsParam();

@@ -43,6 +43,9 @@ public class SpectraAccessor {
      * @param specFormat
      */
     public SpectraAccessor(File specFile, SpecFileFormat specFormat) {
+        if (specFormat == null) {
+            throw new IllegalArgumentException("Unsupported spectrum file format: " + specFile.getName());
+        }
         this.specFile = specFile;
         this.specFormat = specFormat;
         this.spectrumParser = null;
@@ -186,9 +189,8 @@ public class SpectraAccessor {
             if (idFormat != null) {
                 cvParam = Constants.makeCvParam(idFormat[0], idFormat[1]);
             } else {
-                System.err.println("Unsupported mzML format: " + specFile.getAbsolutePath()
+                throw new IllegalStateException("Unsupported mzML format: " + specFile.getAbsolutePath()
                         + " does not contain a child term of MS:1000767 (native spectrum identifier format)");
-                System.exit(-1);
             }
         }
 

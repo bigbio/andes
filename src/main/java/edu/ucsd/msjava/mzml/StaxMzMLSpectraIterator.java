@@ -4,6 +4,7 @@ import edu.ucsd.msjava.msutil.Spectrum;
 import edu.ucsd.msjava.parser.SpectrumParser;
 
 import java.util.Iterator;
+import java.util.NoSuchElementException;
 
 /**
  * StAX-based mzML spectrum iterator with MS level filtering.
@@ -28,6 +29,8 @@ public class StaxMzMLSpectraIterator implements Iterator<Spectrum>, Iterable<Spe
 
     @Override
     public Spectrum next() {
+        if (!hasNext) throw new NoSuchElementException("No more spectra");
+
         Spectrum cur = currentSpectrum;
         currentSpectrum = delegate.hasNext() ? delegate.next() : null;
         if (currentSpectrum == null) hasNext = false;

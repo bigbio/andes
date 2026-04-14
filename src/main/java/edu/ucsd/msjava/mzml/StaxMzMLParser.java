@@ -17,6 +17,7 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
 
@@ -27,9 +28,8 @@ import java.util.zip.Inflater;
  * - Single-pass index build: scans the file once to record byte offsets and
  *   lightweight metadata (MS level, precursor m/z) for every spectrum.
  * - Random access: seeks to the byte offset and parses only the requested spectrum.
- * - In-memory spectrum caching: parsed spectra are retained to avoid re-parsing
- *   spectra accessed multiple times during search; the current implementation
- *   may preload/cache all spectra rather than enforce a bounded LRU policy.
+ * - Full preload cache: on first random access, all spectra are parsed and cached
+ *   in memory to avoid repeated XML parsing during the database search phase.
  * - Extracts only the 11 fields MSGF+ needs (no full JAXB object model).
  */
 public class StaxMzMLParser {
@@ -64,8 +64,8 @@ public class StaxMzMLParser {
     // Referenceable param groups: group ID -> list of [accession, name, value, unitAccession, unitName]
     private final Map<String, List<String[]>> refParamGroups;
 
-    // Full spectrum cache (populated on first random access)
-    private final Map<Integer, Spectrum> cache;
+    // Full spectrum cache (populated on first random access, thread-safe)
+    private final ConcurrentHashMap<Integer, Spectrum> cache;
     private volatile boolean allLoaded = false;
 
     // Reusable XMLInputFactory (thread-safe for creation)
@@ -88,7 +88,7 @@ public class StaxMzMLParser {
         this.indexBySpecIdx = new HashMap<>();
         this.indexById = new HashMap<>();
         this.refParamGroups = new HashMap<>();
-        this.cache = new HashMap<>();
+        this.cache = new ConcurrentHashMap<>();
         buildIndex();
     }
 
@@ -142,20 +142,20 @@ public class StaxMzMLParser {
      * This avoids O(N) scans from the start for each random-access lookup.
      */
     public Spectrum getSpectrumBySpecIndex(int specIndex) {
+        if (allLoaded) return cache.get(specIndex);
+
         Spectrum cached = cache.get(specIndex);
         if (cached != null) return cached;
 
-        if (!allLoaded) {
-            try {
-                preloadAllSpectra();
-            } catch (Exception e) {
-                System.err.println("Error preloading spectra: " + e.getMessage());
-                return null;
-            }
-            return cache.get(specIndex);
-        }
+        // Return null immediately for unknown indices instead of triggering a full preload
+        if (!indexBySpecIdx.containsKey(specIndex)) return null;
 
-        return null; // Not in cache after full load = doesn't exist
+        try {
+            preloadAllSpectra();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to preload spectra while retrieving spectrum index " + specIndex, e);
+        }
+        return cache.get(specIndex);
     }
 
     /**

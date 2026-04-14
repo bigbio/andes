@@ -5,6 +5,7 @@ import edu.ucsd.msjava.msdbsearch.DatabaseMatch;
 import edu.ucsd.msjava.msdbsearch.MSGFPlusMatch;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msutil.*;
+import edu.ucsd.msjava.msutil.Pair;
 import edu.ucsd.msjava.msdbsearch.CompactFastaSequence;
 
 import java.io.*;
@@ -67,28 +68,44 @@ public class DirectTSVWriter {
         }
     }
 
+    /** Feature names from PSMFeatureFinder, in stable order for TSV columns. */
+    private static final String[] ADDITIONAL_FEATURE_NAMES = {
+            "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
+            "MS2IonCurrent", "MS1IonCurrent", "IsolationWindowEfficiency",
+            "NumMatchedMainIons",
+            "MeanErrorAll", "StdevErrorAll", "MeanErrorTop7", "StdevErrorTop7",
+            "MeanRelErrorAll", "StdevRelErrorAll", "MeanRelErrorTop7", "StdevRelErrorTop7"
+    };
+
     public void writeResults(List<MSGFPlusMatch> resultList, File outputFile) throws IOException {
         String specFileName = params.getDBSearchIOList().get(ioIndex).getSpecFile().getName();
         boolean showQValue = params.useTDA();
+        boolean hasAdditionalFeatures = params.outputAdditionalFeatures();
 
         try (PrintStream out = new PrintStream(new BufferedOutputStream(new FileOutputStream(outputFile), 256 * 1024))) {
             // Header
-            out.println("#SpecFile"
-                    + "\tSpecID"
-                    + "\tScanNum"
-                    + (isMgf ? "\tTitle" : "")
-                    + "\tFragMethod"
-                    + "\tPrecursor"
-                    + "\tIsotopeError"
-                    + "\tPrecursorError(" + (isPrecursorTolerancePPM ? "ppm" : "Da") + ")"
-                    + "\tCharge"
-                    + "\tPeptide"
-                    + "\tProtein"
-                    + "\tDeNovoScore"
-                    + "\tMSGFScore"
-                    + "\tSpecEValue"
-                    + "\tEValue"
-                    + (showQValue ? "\tQValue\tPepQValue" : ""));
+            StringBuilder header = new StringBuilder();
+            header.append("#SpecFile")
+                    .append("\tSpecID")
+                    .append("\tScanNum");
+            if (isMgf) header.append("\tTitle");
+            header.append("\tFragMethod")
+                    .append("\tPrecursor")
+                    .append("\tIsotopeError")
+                    .append("\tPrecursorError(").append(isPrecursorTolerancePPM ? "ppm" : "Da").append(")")
+                    .append("\tCharge")
+                    .append("\tPeptide")
+                    .append("\tProtein")
+                    .append("\tDeNovoScore")
+                    .append("\tMSGFScore")
+                    .append("\tSpecEValue")
+                    .append("\tEValue");
+            if (showQValue) header.append("\tQValue\tPepQValue");
+            if (hasAdditionalFeatures) {
+                for (String name : ADDITIONAL_FEATURE_NAMES)
+                    header.append("\t").append(name);
+            }
+            out.println(header.toString());
 
             for (MSGFPlusMatch mpMatch : resultList) {
                 int specIndex = mpMatch.getSpecIndex();
@@ -188,6 +205,16 @@ public class DirectTSVWriter {
                         Float pepQValue = match.getPepQValue();
                         out.print("\t" + (psmQValue != null ? psmQValue : "")
                                 + "\t" + (pepQValue != null ? pepQValue : ""));
+                    }
+                    if (hasAdditionalFeatures) {
+                        Map<String, String> featureMap = new HashMap<>();
+                        List<Pair<String, String>> features = match.getAdditionalFeatureList();
+                        if (features != null) {
+                            for (Pair<String, String> f : features)
+                                featureMap.put(f.getFirst(), f.getSecond());
+                        }
+                        for (String name : ADDITIONAL_FEATURE_NAMES)
+                            out.print("\t" + featureMap.getOrDefault(name, ""));
                     }
                     out.println();
                 }

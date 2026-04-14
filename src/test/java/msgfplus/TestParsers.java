@@ -9,6 +9,10 @@ import org.junit.Test;
 
 import edu.ucsd.msjava.msutil.SpectraAccessor;
 import edu.ucsd.msjava.msutil.Spectrum;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
+
+import javax.xml.stream.XMLStreamException;
+import java.io.IOException;
 
 public class TestParsers {
 
@@ -24,30 +28,25 @@ public class TestParsers {
         }
         Assert.assertTrue(numSpecs == 5760);
     }
-    
-    @Test
-    public void testMzML() throws URISyntaxException, IOException {
-        File mzMLFile = new File(TestParsers.class.getClassLoader().getResource("tiny.pwiz.mzML").toURI());
-        File mgfFile = File.createTempFile("test", ".mgf");
-        try {
-            ConvertToMgf.convert(mzMLFile, mgfFile, false, null, null, -1, -1, -1, false);
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        mgfFile.deleteOnExit();
 
+    @Test
+    public void testMzML() throws URISyntaxException, IOException, XMLStreamException {
+        File mzMLFile = new File(TestParsers.class.getClassLoader().getResource("tiny.pwiz.mzML").toURI());
+        StaxMzMLParser parser = new StaxMzMLParser(mzMLFile);
+        Assert.assertTrue("Should have at least 1 spectrum", parser.getSpectrumCount() > 0);
     }
 
-
     @Test
-    public void testMzMLParser() throws URISyntaxException, IOException {
+    public void testMzMLSpectraAccessor() throws URISyntaxException {
         File mzMLFile = new File(TestParsers.class.getClassLoader().getResource("tiny.pwiz.mzML").toURI());
-        File mgfFile = File.createTempFile("test", ".mgf");
-        try {
-            ConvertToMgf.convert(mzMLFile, mgfFile, false, null, null, 43536, -1, -1, false);
-        } catch (Exception e) {
-            e.printStackTrace();
+        SpectraAccessor specAcc = new SpectraAccessor(mzMLFile);
+        Iterator<Spectrum> itr = specAcc.getSpecItr();
+        int numSpecs = 0;
+        while(itr.hasNext()) {
+            itr.next();
+            numSpecs++;
         }
+        Assert.assertTrue("Should parse spectra from mzML", numSpecs > 0);
     }
 
 }

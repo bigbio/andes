@@ -27,7 +27,9 @@ import java.util.zip.Inflater;
  * - Single-pass index build: scans the file once to record byte offsets and
  *   lightweight metadata (MS level, precursor m/z) for every spectrum.
  * - Random access: seeks to the byte offset and parses only the requested spectrum.
- * - Bounded LRU cache: avoids re-parsing spectra accessed multiple times during search.
+ * - In-memory spectrum caching: parsed spectra are retained to avoid re-parsing
+ *   spectra accessed multiple times during search; the current implementation
+ *   may preload/cache all spectra rather than enforce a bounded LRU policy.
  * - Extracts only the 11 fields MSGF+ needs (no full JAXB object model).
  */
 public class StaxMzMLParser {

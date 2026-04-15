@@ -2,7 +2,7 @@ package edu.ucsd.msjava.ui;
 
 import edu.ucsd.msjava.msutil.FileFormat;
 import edu.ucsd.msjava.mzid.MzIDParser;
-import edu.ucsd.msjava.mzml.MzMLAdapter;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.params.EnumParameter;
 import edu.ucsd.msjava.params.FileParameter;
 import edu.ucsd.msjava.params.ParamManager;
@@ -65,7 +65,7 @@ public class MzIDToTsv {
             return;
         }
 
-        MzMLAdapter.turnOffLogs();
+        StaxMzMLParser.turnOffLogs();
 
         // Parse parameters
         String errMessage = paramManager.parseParams(argv);

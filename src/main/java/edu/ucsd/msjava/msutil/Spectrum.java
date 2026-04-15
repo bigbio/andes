@@ -1025,8 +1025,8 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
         int posDot = specFileName.lastIndexOf('.');
         if (posDot >= 0) {
             String extension = specFileName.substring(posDot);
-            if (extension.equalsIgnoreCase(".mzXML") || extension.equalsIgnoreCase(".mzML"))
-                specFormat = SpecFileFormat.MZXML;
+            if (extension.equalsIgnoreCase(".mzML"))
+                specFormat = SpecFileFormat.MZML;
             else if (extension.equalsIgnoreCase(".mgf"))
                 specFormat = SpecFileFormat.MGF;
             else if (extension.equalsIgnoreCase(".ms2"))

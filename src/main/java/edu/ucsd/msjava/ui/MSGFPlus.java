@@ -8,7 +8,7 @@ import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.mzid.DirectTSVWriter;
 import edu.ucsd.msjava.mzid.MZIdentMLGen;
-import edu.ucsd.msjava.mzml.MzMLAdapter;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.sequences.Constants;
 
@@ -44,7 +44,7 @@ public class MSGFPlus {
             return;
         }
 
-        MzMLAdapter.turnOffLogs();
+        StaxMzMLParser.turnOffLogs();
 
         // Parse parameters
         String errMessage = paramManager.parseParams(argv);

@@ -1,9 +1,9 @@
 package edu.ucsd.msjava.msutil;
 
 import edu.ucsd.msjava.mzid.Constants;
-import edu.ucsd.msjava.mzml.MzMLAdapter;
-import edu.ucsd.msjava.mzml.MzMLSpectraIterator;
-import edu.ucsd.msjava.mzml.MzMLSpectraMap;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
+import edu.ucsd.msjava.mzml.StaxMzMLSpectraIterator;
+import edu.ucsd.msjava.mzml.StaxMzMLSpectraMap;
 import edu.ucsd.msjava.parser.*;
 import uk.ac.ebi.jmzidml.model.mzidml.CvParam;
 
@@ -18,7 +18,7 @@ public class SpectraAccessor {
 
     private SpectrumParser spectrumParser;
 
-    private MzMLAdapter mzmlAdapter = null;
+    private StaxMzMLParser staxParser = null;
 
     private int minMSLevel = 2;
     private int maxMSLevel = 2;
@@ -43,6 +43,9 @@ public class SpectraAccessor {
      * @param specFormat
      */
     public SpectraAccessor(File specFile, SpecFileFormat specFormat) {
+        if (specFormat == null) {
+            throw new IllegalArgumentException("Unsupported spectrum file format: " + specFile.getName());
+        }
         this.specFile = specFile;
         this.specFormat = specFormat;
         this.spectrumParser = null;
@@ -61,13 +64,15 @@ public class SpectraAccessor {
 
     public SpectrumAccessorBySpecIndex getSpecMap() {
         if (specMap == null) {
-            if (specFormat == SpecFileFormat.MZXML)
-                specMap = new MzXMLSpectraMap(specFile.getPath()).msLevel(minMSLevel, maxMSLevel);
-            else if (specFormat == SpecFileFormat.MZML) {
-                if (mzmlAdapter == null)
-                    mzmlAdapter = new MzMLAdapter(specFile);
-                mzmlAdapter.msLevel(minMSLevel, maxMSLevel);
-                specMap = new MzMLSpectraMap(mzmlAdapter);
+            if (specFormat == SpecFileFormat.MZML) {
+                if (staxParser == null) {
+                    try {
+                        staxParser = new StaxMzMLParser(specFile);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to parse mzML file: " + specFile.getAbsolutePath(), e);
+                    }
+                }
+                specMap = new StaxMzMLSpectraMap(staxParser, minMSLevel, maxMSLevel);
             } else if (specFormat == SpecFileFormat.DTA_TXT)
                 specMap = new PNNLSpectraMap(specFile.getPath());
             else {
@@ -96,13 +101,15 @@ public class SpectraAccessor {
 
     public Iterator<Spectrum> getSpecItr() {
         if (specItr == null) {
-            if (specFormat == SpecFileFormat.MZXML)
-                specItr = new MzXMLSpectraIterator(specFile.getPath(), minMSLevel, maxMSLevel);
-            else if (specFormat == SpecFileFormat.MZML) {
-                if (mzmlAdapter == null)
-                    mzmlAdapter = new MzMLAdapter(specFile);
-                mzmlAdapter.msLevel(minMSLevel, maxMSLevel);
-                specItr = new MzMLSpectraIterator(mzmlAdapter);
+            if (specFormat == SpecFileFormat.MZML) {
+                if (staxParser == null) {
+                    try {
+                        staxParser = new StaxMzMLParser(specFile);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Failed to parse mzML file: " + specFile.getAbsolutePath(), e);
+                    }
+                }
+                specItr = new StaxMzMLSpectraIterator(staxParser, minMSLevel, maxMSLevel);
             } else if (specFormat == SpecFileFormat.DTA_TXT)
                 try {
                     specItr = new PNNLSpectraIterator(specFile.getPath());
@@ -168,14 +175,23 @@ public class SpectraAccessor {
                 || specFormat == SpecFileFormat.MS2
         )
             cvParam = Constants.makeCvParam("MS:1000774", "multiple peak list nativeID format");
-        else if (specFormat == SpecFileFormat.MZXML)
-            cvParam = Constants.makeCvParam("MS:1000776", "scan number only nativeID format");
         else if (specFormat == SpecFileFormat.MZDATA)
             cvParam = Constants.makeCvParam("MS:1000777", "spectrum identifier nativeID format");
         else if (specFormat == SpecFileFormat.MZML) {
-            if (mzmlAdapter == null)
-                mzmlAdapter = new MzMLAdapter(specFile);
-            cvParam = mzmlAdapter.getSpectrumIDFormatCvParam();
+            if (staxParser == null) {
+                try {
+                    staxParser = new StaxMzMLParser(specFile);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to parse mzML file: " + specFile.getAbsolutePath(), e);
+                }
+            }
+            String[] idFormat = staxParser.detectSpectrumIDFormat();
+            if (idFormat != null) {
+                cvParam = Constants.makeCvParam(idFormat[0], idFormat[1]);
+            } else {
+                throw new IllegalStateException("Unsupported mzML format: " + specFile.getAbsolutePath()
+                        + " does not contain a child term of MS:1000767 (native spectrum identifier format)");
+            }
         }
 
         return cvParam;

@@ -9,6 +9,10 @@ import org.junit.Test;
 
 import edu.ucsd.msjava.msutil.SpectraAccessor;
 import edu.ucsd.msjava.msutil.Spectrum;
+import edu.ucsd.msjava.mzml.StaxMzMLParser;
+
+import javax.xml.stream.XMLStreamException;
+import java.io.IOException;
 
 public class TestParsers {
 
@@ -24,20 +28,25 @@ public class TestParsers {
         }
         Assert.assertTrue(numSpecs == 5760);
     }
-    
+
     @Test
-    public void testReadingMzXML() throws URISyntaxException {
-        File mzXMLFile = new File(TestParsers.class.getClassLoader().getResource("testfile.mzXML").toURI());
-        SpectraAccessor specAccessor = new SpectraAccessor(mzXMLFile);
-        Iterator<Spectrum> specItr = specAccessor.getSpecItr();
-        while(specItr.hasNext())
-        {
-            Spectrum spec = specItr.next();
-            if(!spec.isCentroided())
-            {
-                System.out.println(spec.getScanNum() + " is not centroided.");
-            }
+    public void testMzML() throws URISyntaxException, IOException, XMLStreamException {
+        File mzMLFile = new File(TestParsers.class.getClassLoader().getResource("tiny.pwiz.mzML").toURI());
+        StaxMzMLParser parser = new StaxMzMLParser(mzMLFile);
+        Assert.assertTrue("Should have at least 1 spectrum", parser.getSpectrumCount() > 0);
+    }
+
+    @Test
+    public void testMzMLSpectraAccessor() throws URISyntaxException {
+        File mzMLFile = new File(TestParsers.class.getClassLoader().getResource("tiny.pwiz.mzML").toURI());
+        SpectraAccessor specAcc = new SpectraAccessor(mzMLFile);
+        Iterator<Spectrum> itr = specAcc.getSpecItr();
+        int numSpecs = 0;
+        while(itr.hasNext()) {
+            itr.next();
+            numSpecs++;
         }
+        Assert.assertTrue("Should parse spectra from mzML", numSpecs > 0);
     }
 
 }

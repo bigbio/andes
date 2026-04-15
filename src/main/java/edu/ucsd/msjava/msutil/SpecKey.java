@@ -1,6 +1,5 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.parser.MzXMLSpectraIterator;
 import edu.ucsd.msjava.parser.SpectrumParser;
 
 import java.util.ArrayList;
@@ -292,20 +291,5 @@ public class SpecKey extends Pair<Integer, Integer> {
         return specKeyList;
     }
 
-    public static void main(String argv[]) throws Exception {
-        test();
-    }
-
-    public static void test() throws Exception {
-        String fileName = "/home/sangtaekim/Research/Data/HeckRevision/CIDETDPairs/mzXML/090121_NM_Trypsin_20.mzXML";
-        int minCharge = 2, maxCharge = 3;
-        MzXMLSpectraIterator itr = new MzXMLSpectraIterator(fileName);
-        ArrayList<SpecKey> list = SpecKey.getFusedSpecKeyList(itr, 0, Integer.MAX_VALUE, minCharge, maxCharge);
-        for (SpecKey specKey : list) {
-            if (specKey.getSpecIndexList() == null || specKey.getSpecIndexList().size() != 2)
-                System.out.println(specKey.getSpecKeyString() + "\t" + specKey.getSpecIndexList());
-        }
-        System.out.println("Size: " + list.size());
-    }
 
 }

@@ -404,7 +404,6 @@ public class ParamManager {
             specFileParam.setAsOptional();
         }
         specFileParam.addFileFormat(SpecFileFormat.MZML);
-        specFileParam.addFileFormat(SpecFileFormat.MZXML);
         specFileParam.addFileFormat(SpecFileFormat.MGF);
         specFileParam.addFileFormat(SpecFileFormat.MS2);
         specFileParam.addFileFormat(SpecFileFormat.PKL);

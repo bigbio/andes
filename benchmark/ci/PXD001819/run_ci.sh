@@ -92,15 +92,17 @@ time_path, mzid_path, metrics_path, wall, java_rc = sys.argv[1:6]
 wall_sec = float(wall)
 text = Path(time_path).read_text(errors="replace")
 m = re.search(r"Maximum resident set size \(kbytes\): (\d+)", text)
-rss_kb = m.group(1) if m else ""
+rss_kb = m.group(1) if m else "NA"
 m2 = re.search(r"Percent of CPU this job got: (\d+)", text)
-cpu_pct = m2.group(1) if m2 else ""
+cpu_pct = m2.group(1) if m2 else "NA"
 
 mzid = Path(mzid_path)
 sii = 0
+# Count only opening <SpectrumIdentificationItem ...> tags; \b rejects closing
+# </...> and the distinct <SpectrumIdentificationItemRef ...> element.
+sii_open = re.compile(r"<SpectrumIdentificationItem\b")
 for line in mzid.open(errors="replace"):
-    if "SpectrumIdentificationItem" in line:
-        sii += 1
+    sii += len(sii_open.findall(line))
 
 psm_1pct = 0
 with mzid.open(errors="replace") as f:
@@ -119,11 +121,9 @@ lines = [
     f"java_exit={java_rc}",
     f"sii_count={sii}",
     f"psm_1pct_fdr={psm_1pct}",
+    f"peak_rss_kb={rss_kb}",
+    f"cpu_percent={cpu_pct}",
 ]
-if rss_kb:
-    lines.append(f"peak_rss_kb={rss_kb}")
-if cpu_pct:
-    lines.append(f"cpu_percent={cpu_pct}")
 Path(metrics_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 print(Path(metrics_path).read_text())
 PY

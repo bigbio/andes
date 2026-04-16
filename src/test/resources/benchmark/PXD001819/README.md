@@ -13,6 +13,6 @@ Used by `benchmark/ci/PXD001819/run_ci.sh`; see [`benchmark/ci/README.md`](../..
 
 `mods.txt` in this directory matches the LFQ yeast + UPS1 setup (fixed Carbamidomethyl C, variable Oxidation M, variable Acetyl protein N-term).
 
-## Search flags (must match `benchmark/run_pxd001819_benchmark.sh`)
+## Search flags (must match `benchmark/ci/PXD001819/run_ci.sh`)
 
 Trypsin/P (`-e 1`), CID (`-m 0`), LTQ Orbitrap (`-inst 0`), 5 ppm precursor (`-t 5ppm`), isotope `0,1`, TDA on, MS2 only (`-msLevel 2`), `-addFeatures 1`, `-n 1`, missed cleavages 2, charges 2–4.

@@ -1,6 +1,6 @@
-metric	min	max	notes
-wall_time_sec	60	900	Wide window for first CI runs; tighten after a green workflow on ubuntu-latest
-peak_rss_kb	400000	12000000	Optional RSS (kB) from GNU time -v; omit tightening until stable
-psm_1pct_fdr	12000	17000	PSMs with Q-value <= 0.01 (same heuristic as benchmark/run_pxd001819_benchmark.sh)
-sii_count	65000	95000	SpectrumIdentificationItem count in mzIdentML
-distinct_peptides				Reserved: fill min/max when Phase 2 adds peptide counting
+metric	min	max	optional	notes
+wall_time_sec	60	900	no	Wide window for first CI runs; tighten after a green workflow on the self-hosted msgf-benchmark runner
+peak_rss_kb	400000	12000000	yes	RSS (kB) from GNU time -v; optional because not all runners expose this counter
+psm_1pct_fdr	12000	17000	no	PSMs with Q-value <= 0.01 (MS:1002054) in mzIdentML
+sii_count	20000	95000	no	Opening <SpectrumIdentificationItem> tag count in mzIdentML; wide pending first self-hosted run
+distinct_peptides				no	Reserved: fill min/max when Phase 2 adds peptide counting

@@ -1,7 +1,6 @@
 # PXD001819 benchmark inputs (public)
 
-Used by `benchmark/ci/PXD001819/run_ci.sh` and documented in  
-[`.claude/plans/pxd001819-ci-benchmark.md`](../../../../../.claude/plans/pxd001819-ci-benchmark.md).
+Used by `benchmark/ci/PXD001819/run_ci.sh`; see [`benchmark/ci/README.md`](../../../../../benchmark/ci/README.md) for CI usage.
 
 ## Public data (downloaded in CI, not committed)
 

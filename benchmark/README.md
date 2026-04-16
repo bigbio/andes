@@ -54,4 +54,4 @@ End-to-end search on public PRIDE mzML + `quantms-test-datasets` FASTA, with met
 
 The workflow runs on a fixed self-hosted runner profile (`self-hosted,linux,msgf-benchmark`) to keep CPU/memory comparable between runs.
 
-See [`.claude/plans/pxd001819-ci-benchmark.md`](../.claude/plans/pxd001819-ci-benchmark.md) and [`benchmark/ci/README.md`](ci/README.md).
+See [`benchmark/ci/README.md`](ci/README.md).

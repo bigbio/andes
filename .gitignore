@@ -54,7 +54,26 @@ target/
 .idea/
 .settings
 .metadata
-benchmark/
+
+# Benchmark: keep only CI scaffold, ignore heavy local artifacts
+benchmark/*
+!benchmark/README.md
+!benchmark/ci/
+!benchmark/ci/**
+benchmark/**/data/
+benchmark/**/results/
+benchmark/**/baseline/
+benchmark/**/new/
+benchmark/**/parser_only/
+benchmark/**/*.mzML
+benchmark/**/*.mzML.gz
+benchmark/**/*.mzid
+benchmark/**/*.fasta
+benchmark/**/*.canno
+benchmark/**/*.cnlcp
+benchmark/**/*.csarr
+benchmark/**/*.cseq
+benchmark/**/*.revCat.*
 
 # Generated suffix-array index files (large; reproducible)
 *.revCat.canno

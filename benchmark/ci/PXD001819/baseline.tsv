@@ -1,0 +1,6 @@
+metric	min	max	notes
+wall_time_sec	60	900	Wide window for first CI runs; tighten after a green workflow on ubuntu-latest
+peak_rss_kb	400000	12000000	Optional RSS (kB) from GNU time -v; omit tightening until stable
+psm_1pct_fdr	12000	17000	PSMs with Q-value <= 0.01 (same heuristic as benchmark/run_pxd001819_benchmark.sh)
+sii_count	65000	95000	SpectrumIdentificationItem count in mzIdentML
+distinct_peptides				Reserved: fill min/max when Phase 2 adds peptide counting

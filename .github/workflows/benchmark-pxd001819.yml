@@ -1,0 +1,55 @@
+# Public PXD001819 benchmark: downloads mzML + FASTA at runtime; compares metrics to baseline TSV.
+# Trigger manually: Actions → "Benchmark PXD001819" → Run workflow.
+name: Benchmark PXD001819
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pxd001819:
+    # Use a fixed-capacity self-hosted runner for comparable benchmarks.
+    runs-on: [self-hosted, linux, msgf-benchmark]
+    timeout-minutes: 45
+    env:
+      MSGFPLUS_THREADS: "8"
+      MSGFPLUS_MEMORY: "4096m"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Show runner CPU and memory
+        run: |
+          nproc
+          free -h
+
+      - name: Check GNU time
+        run: /usr/bin/time -v true
+
+      - name: Build shaded JAR
+        run: mvn -B package -DskipTests
+
+      - name: Run PXD001819 search and collect metrics
+        run: bash benchmark/ci/PXD001819/run_ci.sh
+
+      - name: Compare metrics to baseline TSV
+        run: python3 benchmark/ci/PXD001819/compare_metrics.py benchmark/results/PXD001819/ci/ci_metrics.txt benchmark/ci/PXD001819/baseline.tsv
+
+      - name: Upload metrics and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pxd001819-ci-metrics
+          path: |
+            benchmark/results/PXD001819/ci/ci_metrics.txt
+            benchmark/results/PXD001819/ci/*.log
+            benchmark/results/PXD001819/ci/gnu_time.txt

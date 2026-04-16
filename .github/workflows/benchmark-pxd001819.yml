@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   pxd001819:
+    name: PXD001819 benchmark
     # Use a fixed-capacity self-hosted runner for comparable benchmarks.
     runs-on: [self-hosted, linux, msgf-benchmark]
     timeout-minutes: 45
@@ -48,7 +49,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pxd001819-ci-metrics
+          name: PXD001819-ci-metrics
           path: |
             benchmark/results/PXD001819/ci/ci_metrics.txt
             benchmark/results/PXD001819/ci/*.log

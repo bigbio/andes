@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set Maven project version from tag
+        run: mvn -B versions:set -DnewVersion=${{ steps.version.outputs.VERSION }} -DgenerateBackupPoms=false
+
+      - name: Build and test with Maven
+        run: mvn -B verify
+
+      - name: Verify shaded JAR exists
+        run: test -f target/MSGFPlus.jar
+
+      - name: Assemble release zip
+        run: |
+          STAGING="staging/MSGFPlus"
+          mkdir -p "$STAGING/docs"
+
+          cp target/MSGFPlus.jar "$STAGING/"
+          cp README.md            "$STAGING/" 2>/dev/null || true
+          cp LICENSE.txt          "$STAGING/" 2>/dev/null || true
+
+          if [ -d docs ]; then
+            cp -r docs/* "$STAGING/docs/"
+          fi
+
+          cd staging
+          zip -r "../MSGFPlus_v${{ steps.version.outputs.VERSION }}-bigbio.zip" MSGFPlus/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: "MS-GF+ ${{ steps.version.outputs.VERSION }}-bigbio"
+          generate_release_notes: true
+          files: MSGFPlus_v${{ steps.version.outputs.VERSION }}-bigbio.zip

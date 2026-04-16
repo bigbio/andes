@@ -1,18 +1,31 @@
-# MS-GF+
+# MS-GF+ (bigbio fork for quantms)
 
 [![CI](https://github.com/bigbio/msgfplus/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/msgfplus/actions/workflows/ci.yml)
 
+> **This is a lightweight fork of [MS-GF+](https://github.com/MSGFPlus/msgfplus) maintained by [bigbio](https://github.com/bigbio) for use in the [quantms](https://github.com/bigbio/quantms) pipeline.** It contains targeted performance improvements (streaming mzML parsing, reduced memory footprint) and CI/release automation. The primary maintained input formats in this fork are mzML and MGF; legacy text-based readers (including mzXML) remain available for compatibility.
+>
+> **For the full-featured, officially maintained version of MS-GF+** and the latest upstream features, please use the original repository:
+>
+> **[https://github.com/MSGFPlus/msgfplus](https://github.com/MSGFPlus/msgfplus)**
+
+## What is MS-GF+?
+
 MS-GF+ (aka MSGF+ or MSGFPlus) performs peptide identification by scoring
 MS/MS spectra against peptides derived from a protein sequence database.
-It supports the HUPO PSI standard input file (mzML) and saves results in
+It supports the HUPO PSI standard input file (mzML) and additional legacy spectrum inputs, and saves results in
 the mzIdentML format, though results can easily be transformed to TSV.
 ProteomeXchange supports Complete data submissions using MS-GF+ search results.
 
-MS-GF+ is optimized for a variety of spectral types, i.e., combinations
-of fragmentation method, instrument, enzyme, and experimental protocols.
-It supports a variety of input file formats, including mzML, mzXML,
-Mascot Generic File (mgf), MS2 files, Micromass Peak List files (pkl),
-and Concatenated DTA files (_dta.txt).
+MS-GF+ is developed by Sangtae Kim and the PNNL Proteomics team at the
+Center for Computational Mass Spectrometry, University of California, San Diego.
+
+## What is different in this fork?
+
+- **Streaming mzML parser** -- replaces the in-memory preload with a single-pass StAX parser, significantly reducing memory usage for large files
+- **Primary maintained formats: mzML and MGF** -- legacy formats (including mzXML) are still available, but not the main optimization target in this fork
+- **Java 17 minimum** -- updated from Java 8
+- **CI/CD** -- GitHub Actions for automated testing and releases
+- **Direct TSV output** -- optional TSV output alongside mzIdentML
 
 ## Requirements
 
@@ -21,10 +34,7 @@ and Concatenated DTA files (_dta.txt).
 
 ## Installation
 
-```bash
-# Download the latest release JAR
-# Place MSGFPlus.jar in any folder
-```
+Download the latest release from the [Releases page](https://github.com/bigbio/msgfplus/releases). The zip contains `MSGFPlus.jar` with all dependencies bundled.
 
 ## Quick Start
 
@@ -147,22 +157,15 @@ DynamicMod=H-1N-1O1,  NQ,  opt, any,       Deamidated        # Deamidation
 # Position options: any, N-term, C-term, Prot-N-term, Prot-C-term
 ```
 
-See [`docs/examples/MSGFPlus_Params.txt`](docs/examples/MSGFPlus_Params.txt) for a complete example configuration file.
-
-## Configuration File
-
-All parameters can also be specified in a configuration file (passed via `-conf`). Command-line options override configuration file settings. Use the parameter's config name (e.g., `PrecursorMassTolerance=20ppm`) instead of the flag form.
+See [`docs/examples/MSGFPlus_Params.txt`](docs/examples/MSGFPlus_Params.txt) for a complete example configuration file, and [`docs/examples/README.md`](docs/examples/README.md) for what else lives in that folder. Long-form usage topics (MzID→TSV, BuildSA, changelog, and so on) live under [`docs/README.md`](docs/README.md).
 
 ## Building from Source
 
 ```bash
-# Requires Java 17+ and Maven
-mvn package
+# Requires Java 17+ and Maven (same as CI)
+mvn -B verify
 
-# Run tests
-mvn test
-
-# The JAR is produced at target/MSGFPlus.jar
+# The shaded JAR is produced at target/MSGFPlus.jar
 ```
 
 ## Publications
@@ -179,5 +182,9 @@ Kim S., Gupta N., and Pevzner P.A.,
 
 ## Contact
 
+For the official MS-GF+ tool: [MSGFPlus/msgfplus](https://github.com/MSGFPlus/msgfplus)
+
 PNNL Proteomics: proteomics@pnnl.gov
 Sangtae Kim: sangtae.kim (at) gmail.com
+
+For this fork (quantms integration): [bigbio/msgfplus](https://github.com/bigbio/msgfplus)

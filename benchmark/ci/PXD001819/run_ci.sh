@@ -8,7 +8,7 @@ DATA_DIR="${DATA_DIR:-$REPO_ROOT/benchmark/data/PXD001819}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/benchmark/results/PXD001819/ci}"
 JAR="${JAR:-$REPO_ROOT/target/MSGFPlus.jar}"
 MODS="${MODS:-$REPO_ROOT/src/test/resources/benchmark/PXD001819/mods.txt}"
-THREAD_COUNT="${MSGFPLUS_THREADS:-4}"
+THREAD_COUNT="${MSGFPLUS_THREADS:-8}"
 JVM_MEM="${MSGFPLUS_MEMORY:-4096m}"
 
 PRIDE_MZML_GZ="https://ftp.pride.ebi.ac.uk/pub/databases/pride/resources/proteomes/benchmarks/lfq/LTQOrbitrapVelos/PXD001819/UPS1_5000amol_R1.mzML.gz"
@@ -21,7 +21,26 @@ MZID="$OUT_DIR/ci_output.mzid"
 TIME_TXT="$OUT_DIR/gnu_time.txt"
 METRICS="$OUT_DIR/ci_metrics.txt"
 
-SEARCH_ARGS="-tda 1 -t 5ppm -ti 0,1 -m 0 -inst 0 -e 1 -protocol 0 -ntt 2 -minLength 6 -maxLength 40 -minNumPeaks 10 -minCharge 2 -maxCharge 4 -maxMissedCleavages 2 -n 1 -addFeatures 1 -msLevel 2 -thread $THREAD_COUNT"
+SEARCH_ARGS=(
+  -tda 1
+  -t 5ppm
+  -ti 0,1
+  -m 0
+  -inst 0
+  -e 1
+  -protocol 0
+  -ntt 2
+  -minLength 6
+  -maxLength 40
+  -minNumPeaks 10
+  -minCharge 2
+  -maxCharge 4
+  -maxMissedCleavages 2
+  -n 1
+  -addFeatures 1
+  -msLevel 2
+  -thread "$THREAD_COUNT"
+)
 
 mkdir -p "$DATA_DIR" "$OUT_DIR"
 
@@ -35,19 +54,25 @@ if [[ ! -f "$MODS" ]]; then
 fi
 
 download_if_missing() {
-  local url="$1" dest="$2"
+  local url="$1" dest="$2" tmp="${2}.part"
   if [[ -f "$dest" ]]; then
     echo "OK (cached): $dest"
     return 0
   fi
   echo "Downloading $(basename "$dest") ..."
-  curl -fL --retry 3 --connect-timeout 30 -o "$dest" "$url"
+  curl -fL --retry 3 --connect-timeout 30 -o "$tmp" "$url"
+  mv "$tmp" "$dest"
 }
 
 download_if_missing "$PRIDE_MZML_GZ" "$MZML_GZ"
+if ! gunzip -t "$MZML_GZ" >/dev/null 2>&1; then
+  echo "ERROR: Cached gzip is invalid: $MZML_GZ (remove it and rerun)" >&2
+  exit 1
+fi
 if [[ ! -f "$MZML" ]]; then
   echo "Decompressing mzML ..."
-  gunzip -c "$MZML_GZ" >"$MZML"
+  gunzip -c "$MZML_GZ" >"$MZML.part"
+  mv "$MZML.part" "$MZML"
 fi
 download_if_missing "$FASTA_URL" "$FASTA"
 
@@ -62,7 +87,7 @@ set +e
     -d "$FASTA" \
     -mod "$MODS" \
     -o "$MZID" \
-    $SEARCH_ARGS \
+    "${SEARCH_ARGS[@]}" \
     >"$OUT_DIR/run.stdout.log" 2>"$OUT_DIR/run.stderr.log"
 JAVA_RC=$?
 set -e
@@ -84,48 +109,10 @@ if [[ "$JAVA_RC" -ne 0 ]]; then
   exit "$JAVA_RC"
 fi
 
-python3 - "$TIME_TXT" "$MZID" "$METRICS" "$WALL" "$JAVA_RC" <<'PY'
-import re, sys
-from pathlib import Path
-
-time_path, mzid_path, metrics_path, wall, java_rc = sys.argv[1:6]
-wall_sec = float(wall)
-text = Path(time_path).read_text(errors="replace")
-m = re.search(r"Maximum resident set size \(kbytes\): (\d+)", text)
-rss_kb = m.group(1) if m else "NA"
-m2 = re.search(r"Percent of CPU this job got: (\d+)", text)
-cpu_pct = m2.group(1) if m2 else "NA"
-
-mzid = Path(mzid_path)
-sii = 0
-# Count only opening <SpectrumIdentificationItem ...> tags; \b rejects closing
-# </...> and the distinct <SpectrumIdentificationItemRef ...> element.
-sii_open = re.compile(r"<SpectrumIdentificationItem\b")
-for line in mzid.open(errors="replace"):
-    sii += len(sii_open.findall(line))
-
-psm_1pct = 0
-with mzid.open(errors="replace") as f:
-    for line in f:
-        m = re.search(r'accession="MS:1002054".*?value="([^"]+)"', line)
-        if m:
-            try:
-                if float(m.group(1)) <= 0.01:
-                    psm_1pct += 1
-            except ValueError:
-                pass
-
-lines = [
-    "dataset=PXD001819",
-    f"wall_time_sec={wall_sec}",
-    f"java_exit={java_rc}",
-    f"sii_count={sii}",
-    f"psm_1pct_fdr={psm_1pct}",
-    f"peak_rss_kb={rss_kb}",
-    f"cpu_percent={cpu_pct}",
-]
-Path(metrics_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-print(Path(metrics_path).read_text())
-PY
+python3 "$(dirname "$0")/extract_metrics.py" \
+  --time "$TIME_TXT" \
+  --mzid "$MZID" \
+  --wall "$WALL" \
+  --output "$METRICS"
 
 echo "Wrote $METRICS"

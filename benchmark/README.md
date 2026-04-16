@@ -19,7 +19,9 @@ benchmark/
     README.md                    # how to run/compare CI benchmark(s)
     PXD001819/
       run_ci.sh                  # downloads public data, runs MS-GF+, emits metrics
+      extract_metrics.py         # streams mzIdentML + time(1) output into metrics file
       compare_metrics.py         # compares metrics against baseline ranges
+      test_compare_metrics.py    # unit tests for the comparator
       baseline.tsv               # acceptable metric ranges
 ```
 

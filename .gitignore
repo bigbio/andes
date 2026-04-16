@@ -54,7 +54,15 @@ target/
 .idea/
 .settings
 .metadata
-benchmark/
+
+# Python bytecode cache (benchmark helper scripts)
+__pycache__/
+*.pyc
+
+# Benchmark: keep only CI scaffold, ignore heavy local artifacts
+benchmark/*
+!benchmark/README.md
+!benchmark/ci/
 
 # Generated suffix-array index files (large; reproducible)
 *.revCat.canno

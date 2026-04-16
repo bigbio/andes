@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/bigbio/msgfplus/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/msgfplus/actions/workflows/ci.yml)
 
-> **This is a lightweight fork of [MS-GF+](https://github.com/MSGFPlus/msgfplus) maintained by [bigbio](https://github.com/bigbio) for use in the [quantms](https://github.com/bigbio/quantms) pipeline.** It contains targeted performance improvements (streaming mzML parsing, reduced memory footprint) and CI/release automation. The primary maintained input formats in this fork are mzML and MGF; legacy text-based readers (including mzXML) remain available for compatibility.
+> **This is a lightweight fork of [MS-GF+](https://github.com/MSGFPlus/msgfplus) maintained by [bigbio](https://github.com/bigbio) for use in the [quantms](https://github.com/bigbio/quantms) pipeline.** It contains targeted performance improvements (streaming mzML parsing, reduced memory footprint) and CI/release automation. The primary maintained input formats in this fork are mzML and MGF; mzXML is not available in this fork.
 >
 > **For the full-featured, officially maintained version of MS-GF+** and the latest upstream features, please use the original repository:
 >
@@ -22,7 +22,7 @@ Center for Computational Mass Spectrometry, University of California, San Diego.
 ## What is different in this fork?
 
 - **Streaming mzML parser** -- replaces the in-memory preload with a single-pass StAX parser, significantly reducing memory usage for large files
-- **Primary maintained formats: mzML and MGF** -- legacy formats (including mzXML) are still available, but not the main optimization target in this fork
+- **Primary maintained formats: mzML and MGF** -- mzXML is not available in this fork
 - **Java 17 minimum** -- updated from Java 8
 - **CI/CD** -- GitHub Actions for automated testing and releases
 - **Direct TSV output** -- optional TSV output alongside mzIdentML
@@ -70,7 +70,7 @@ java -cp MSGFPlus.jar edu.ucsd.msjava.ui.MzIDToTsv \
 
 | Flag | Name | Description |
 |------|------|-------------|
-| `-s` | SpectrumFile | Input spectrum file (`*.mzML`, `*.mzXML`, `*.mgf`, `*.ms2`, `*.pkl`, `*_dta.txt`). Spectra should be centroided. |
+| `-s` | SpectrumFile | Input spectrum file (`*.mzML`, `*.mgf`, `*.ms2`, `*.pkl`, `*_dta.txt`). Spectra should be centroided. |
 | `-d` | DatabaseFile | Protein sequence database (`*.fasta`, `*.fa`, `*.faa`). |
 
 ### Core Search Parameters

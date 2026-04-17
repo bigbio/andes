@@ -9,7 +9,8 @@ import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Paths;
-import java.util.Hashtable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 public class NewScorerFactory {
     private static final String IONSTAT_RESOURCE_DIR = "ionstat/";
@@ -78,7 +79,7 @@ public class NewScorerFactory {
         private Protocol protocol;
     }
 
-    private static Hashtable<SpecDataType, NewRankScorer> scorerTable = new Hashtable<SpecDataType, NewRankScorer>();
+    private static final Map<SpecDataType, NewRankScorer> scorerTable = new ConcurrentHashMap<SpecDataType, NewRankScorer>();
 
     /**
      * @param method

@@ -252,7 +252,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
         partitionSet = new TreeSet<Partition>();
 
 
-        Hashtable<Integer, ArrayList<Float>> parentMassMap = new Hashtable<Integer, ArrayList<Float>>();
+        HashMap<Integer, ArrayList<Float>> parentMassMap = new HashMap<Integer, ArrayList<Float>>();
         for (Spectrum spec : specContainer) {
             int charge = spec.getCharge();
             if (charge <= 0)
@@ -324,7 +324,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
                 continue;
             ArrayList<PrecursorOffsetFrequency> precursorOffsetList = new ArrayList<PrecursorOffsetFrequency>();
             int numSpecs = 0;
-            Hashtable<Integer, Histogram<Integer>> histList = new Hashtable<Integer, Histogram<Integer>>();
+            HashMap<Integer, Histogram<Integer>> histList = new HashMap<Integer, Histogram<Integer>>();
             for (int c = charge; c >= 2; c--)
                 histList.put(c, new Histogram<Integer>());
 
@@ -404,7 +404,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
             return;
         }
 
-        fragOFFTable = new Hashtable<Partition, ArrayList<FragmentOffsetFrequency>>();
+        fragOFFTable = new HashMap<Partition, ArrayList<FragmentOffsetFrequency>>();
 
         for (Partition partition : partitionSet) {
             int charge = partition.getCharge();
@@ -474,7 +474,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
             return;
         }
 
-        rankDistTable = new Hashtable<Partition, Hashtable<IonType, Float[]>>();
+        rankDistTable = new HashMap<Partition, HashMap<IonType, Float[]>>();
         this.maxRank = maxRank;
 
         for (Partition partition : partitionSet) {
@@ -487,9 +487,9 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
             int seg = partition.getSegNum();
 
             int numSpec = 0;
-            Hashtable<IonType, Histogram<Integer>> rankDist = new Hashtable<IonType, Histogram<Integer>>();
-            Hashtable<IonType, Float> rankDistMaxRank = new Hashtable<IonType, Float>();
-            Hashtable<IonType, Float> rankDistUnexplained = new Hashtable<IonType, Float>();
+            HashMap<IonType, Histogram<Integer>> rankDist = new HashMap<IonType, Histogram<Integer>>();
+            HashMap<IonType, Float> rankDistMaxRank = new HashMap<IonType, Float>();
+            HashMap<IonType, Float> rankDistUnexplained = new HashMap<IonType, Float>();
 
             for (IonType ion : ionTypes) {
                 rankDist.put(ion, new Histogram<Integer>());
@@ -521,7 +521,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
                 int srmMassIndex = 0;
 
                 HashSet<Peak> explainedPeakSet = new HashSet<Peak>();
-                Hashtable<IonType, Integer> numExplainedMaxRankPeaks = new Hashtable<IonType, Integer>();
+                HashMap<IonType, Integer> numExplainedMaxRankPeaks = new HashMap<IonType, Integer>();
                 for (IonType ion : ionTypes) {
                     numExplainedMaxRankPeaks.put(ion, 0);
                 }
@@ -602,7 +602,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
                 noiseDist[maxRank + 1] += (numBinsAtThisSegment - numPeaksAtThisSegment) * (annotation.size() - 1) / numSegments / numBinsAtThisSegment;
             }
 
-            Hashtable<IonType, Float[]> freqDist = new Hashtable<IonType, Float[]>();
+            HashMap<IonType, Float[]> freqDist = new HashMap<IonType, Float[]>();
             for (IonType ion : ionTypes) {
                 Float[] dist = new Float[maxRank + 1];
                 Histogram<Integer> hist = rankDist.get(ion);
@@ -634,8 +634,8 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
     }
 
     private void generateIonErrorDist() {
-        ionErrDistTable = new Hashtable<Partition, Float[]>();
-        ionExistenceTable = new Hashtable<Partition, Float[]>();
+        ionErrDistTable = new HashMap<Partition, Float[]>();
+        ionExistenceTable = new HashMap<Partition, Float[]>();
         for (Partition partition : partitionSet) {
             int charge = partition.getCharge();
             Pair<Float, Float> parentMassRange = getPrecursorMassRange(partition);
@@ -745,7 +745,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
     }
 
     private void generateNoiseErrorDist() {
-        this.noiseErrDistTable = new Hashtable<Partition, Float[]>();
+        this.noiseErrDistTable = new HashMap<Partition, Float[]>();
         AminoAcidSet aaSet = AminoAcidSet.getStandardAminoAcidSetWithFixedCarbamidomethylatedCys();
         AminoAcid aaK = aaSet.getAminoAcid('K');
         AminoAcid aaQ = aaSet.getAminoAcid('Q');
@@ -829,7 +829,7 @@ public class ScoringParameterGeneratorWithErrors extends NewRankScorer {
             return;
         assert (smoothingRanks.length == smoothingWindowSize.length);
         for (Partition partition : rankDistTable.keySet()) {
-            Hashtable<IonType, Float[]> table = this.rankDistTable.get(partition);
+            HashMap<IonType, Float[]> table = this.rankDistTable.get(partition);
             for (IonType ion : table.keySet()) {
                 Float[] freq = table.get(ion);
                 Float[] smoothedFreq = new Float[freq.length];

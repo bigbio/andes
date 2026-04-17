@@ -25,9 +25,9 @@ public class NewRankScorer implements NewAdditiveScorer {
     protected Histogram<Integer> chargeHist = null;
     protected TreeSet<Partition> partitionSet = null;
     protected TreeMap<Integer, ArrayList<PrecursorOffsetFrequency>> precursorOFFMap = null;    // charge -> precursorOffsetList
-    protected Hashtable<Partition, ArrayList<FragmentOffsetFrequency>> fragOFFTable = null;    // partition -> ionTypes
-    protected Hashtable<Partition, ArrayList<FragmentOffsetFrequency>> insignificantFragOFFTable = null;    // for noise error distribution
-    protected Hashtable<Partition, Hashtable<IonType, Float[]>> rankDistTable = null;
+    protected HashMap<Partition, ArrayList<FragmentOffsetFrequency>> fragOFFTable = null;    // partition -> ionTypes
+    protected HashMap<Partition, ArrayList<FragmentOffsetFrequency>> insignificantFragOFFTable = null;    // for noise error distribution
+    protected HashMap<Partition, HashMap<IonType, Float[]>> rankDistTable = null;
 
     protected Tolerance mme = new Tolerance(0.5f);
 
@@ -40,9 +40,9 @@ public class NewRankScorer implements NewAdditiveScorer {
 
     // For edge scoring
     protected int errorScalingFactor = 0;    // if 0, don't user errors, 10 for low accuracy, 100 for high accuracy
-    protected Hashtable<Partition, Float[]> ionErrDistTable = null;
-    protected Hashtable<Partition, Float[]> noiseErrDistTable = null;
-    protected Hashtable<Partition, Float[]> ionExistenceTable = null;
+    protected HashMap<Partition, Float[]> ionErrDistTable = null;
+    protected HashMap<Partition, Float[]> noiseErrDistTable = null;
+    protected HashMap<Partition, Float[]> ionExistenceTable = null;
 
     // Ion Types
     private HashMap<Partition, IonType> mainIonTable;
@@ -100,7 +100,7 @@ public class NewRankScorer implements NewAdditiveScorer {
 
     public float getNodeScore(Partition part, IonType ionType, int rank) {
         // ion score
-        Hashtable<IonType, Float[]> rankTable = rankDistTable.get(part);    // rank -> probability
+        HashMap<IonType, Float[]> rankTable = rankDistTable.get(part);    // rank -> probability
         assert (rankTable != null);
         int rankIndex = rank > maxRank ? maxRank - 1 : rank - 1;
         float ionScore = getScoreFromTable(rankIndex, rankTable, ionType, false);
@@ -109,7 +109,7 @@ public class NewRankScorer implements NewAdditiveScorer {
     }
 
     public float getMissingIonScore(Partition part, IonType ionType) {
-        Hashtable<IonType, Float[]> table = rankDistTable.get(part);
+        HashMap<IonType, Float[]> table = rankDistTable.get(part);
         assert (table != null);
         int rankIndex = maxRank;
         return getScoreFromTable(rankIndex, table, ionType, false);
@@ -145,7 +145,7 @@ public class NewRankScorer implements NewAdditiveScorer {
         return (float) Math.log(ionExistenceProb[index] / noiseExistenceProb);
     }
 
-    private float getScoreFromTable(int index, Hashtable<IonType, Float[]> table, IonType ionType, boolean isError) {
+    private float getScoreFromTable(int index, HashMap<IonType, Float[]> table, IonType ionType, boolean isError) {
         Float[] frequencies = table.get(ionType);
         assert (frequencies != null) : ionType.getName() + " is not supported!";
         float ionFrequency = frequencies[index];
@@ -311,7 +311,7 @@ public class NewRankScorer implements NewAdditiveScorer {
             // Fragment ion offset frequency function
             if (verbose)
                 System.out.println("FragmentOFF");
-            fragOFFTable = new Hashtable<Partition, ArrayList<FragmentOffsetFrequency>>();
+            fragOFFTable = new HashMap<Partition, ArrayList<FragmentOffsetFrequency>>();
             for (Partition partition : partitionSet) {
                 if (verbose)
                     System.out.println(partition.getCharge() + "\t" + partition.getSegNum() + "\t" + partition.getParentMass());
@@ -336,14 +336,14 @@ public class NewRankScorer implements NewAdditiveScorer {
 
             determineIonTypes();
             // Rank distributions
-            rankDistTable = new Hashtable<Partition, Hashtable<IonType, Float[]>>();
+            rankDistTable = new HashMap<Partition, HashMap<IonType, Float[]>>();
             maxRank = in.readInt();
             if (verbose)
                 System.out.println("RankDistribution," + maxRank);
             for (Partition partition : partitionSet) {
                 if (verbose)
                     System.out.println(partition.getCharge() + "\t" + partition.getSegNum() + "\t" + partition.getParentMass());
-                Hashtable<IonType, Float[]> table = new Hashtable<IonType, Float[]>();
+                HashMap<IonType, Float[]> table = new HashMap<IonType, Float[]>();
                 ArrayList<IonType> ionTypeList = new ArrayList<IonType>();
                 IonType[] ionTypes = getIonTypes(partition);
                 if (ionTypes == null || ionTypes.length == 0)
@@ -376,9 +376,9 @@ public class NewRankScorer implements NewAdditiveScorer {
                 if (verbose)
                     System.out.println("ErrorDistribution," + errorScalingFactor);
 
-                ionErrDistTable = new Hashtable<Partition, Float[]>();
-                noiseErrDistTable = new Hashtable<Partition, Float[]>();
-                ionExistenceTable = new Hashtable<Partition, Float[]>();
+                ionErrDistTable = new HashMap<Partition, Float[]>();
+                noiseErrDistTable = new HashMap<Partition, Float[]>();
+                ionExistenceTable = new HashMap<Partition, Float[]>();
 
                 for (Partition partition : partitionSet) {
                     if (verbose)
@@ -505,11 +505,11 @@ public class NewRankScorer implements NewAdditiveScorer {
         return this.fragOFFTable.get(partition);
     }
 
-    protected Hashtable<IonType, Float[]> getRankDistTable(int charge, float parentMass, int segNum) {
+    protected HashMap<IonType, Float[]> getRankDistTable(int charge, float parentMass, int segNum) {
         return getRankDistTable(getPartition(charge, parentMass, segNum));
     }
 
-    protected Hashtable<IonType, Float[]> getRankDistTable(Partition partition) {
+    protected HashMap<IonType, Float[]> getRankDistTable(Partition partition) {
         return this.rankDistTable.get(partition);
     }
 
@@ -702,7 +702,7 @@ public class NewRankScorer implements NewAdditiveScorer {
 //				if(partition.getParentMass() > 4100 && partition.getCharge() == 5 && partition.getSegNum() == 1)
 //					System.out.println("Debug");
 
-                Hashtable<IonType, Float[]> rankDistTable = getRankDistTable(partition);
+                HashMap<IonType, Float[]> rankDistTable = getRankDistTable(partition);
                 if (rankDistTable == null)
                     continue;
                 IonType[] ionTypes = getIonTypes(partition);
@@ -823,7 +823,7 @@ public class NewRankScorer implements NewAdditiveScorer {
         // Rank distributions
         out.println("#RankDistributions\t" + partitionSet.size());
         for (Partition partition : partitionSet) {
-            Hashtable<IonType, Float[]> rankDistTable = getRankDistTable(partition);
+            HashMap<IonType, Float[]> rankDistTable = getRankDistTable(partition);
             IonType[] ionTypes = getIonTypes(partition);
             if (ionTypes == null || ionTypes.length == 0)
                 continue;

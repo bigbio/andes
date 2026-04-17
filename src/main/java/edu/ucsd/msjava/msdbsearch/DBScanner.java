@@ -632,8 +632,7 @@ public class DBScanner {
             maxPeptideMassIndex = maxNominalPeptideMass + Math.round(tolDaLeft - 0.4999f);
             minPeptideMassIndex = minNominalPeptideMass - Math.round(tolDaRight - 0.4999f);
 
-            int numMassIndices = maxPeptideMassIndex - minPeptideMassIndex + 1;
-            PrimitiveGeneratingFunctionGroup gf = new PrimitiveGeneratingFunctionGroup(numMassIndices);
+            PrimitiveGeneratingFunctionGroup gf = new PrimitiveGeneratingFunctionGroup();
 
             for (int peptideMassIndex = minPeptideMassIndex; peptideMassIndex <= maxPeptideMassIndex; peptideMassIndex++) {
                 PrimitiveAminoAcidGraph graph = new PrimitiveAminoAcidGraph(
@@ -644,13 +643,13 @@ public class DBScanner {
                         useProtNTerm,
                         useProtCTerm
                 );
-
                 PrimitiveGeneratingFunction gfi = new PrimitiveGeneratingFunction(graph);
                 gfi.setUpScoreThreshold(minScore);
-                gf.register(gfi);
+                gf.accept(gfi);
+                // graph, gfi leave scope → eligible for GC before next mass index.
             }
 
-            boolean isGFComputed = gf.computeGeneratingFunction();
+            boolean isGFComputed = gf.isComputed();
 
             for (DatabaseMatch match : matchQueue) {
                 if (!isGFComputed || match.getNominalPeptideMass() < minPeptideMassIndex || match.getNominalPeptideMass() > maxPeptideMassIndex) {

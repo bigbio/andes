@@ -197,7 +197,7 @@ public class SpecKey extends Pair<Integer, Integer> {
                     message += "peaks are too dense. Pass -allowDenseCentroidedPeaks 1 if the spectrum is already centroided.";
                     numDenseCentroidedSpectra++;
                 } else {
-                    message += "it is not centroided. Re-run MSConvert with --filter \"peakPicking true 1-\" to centroid the spectra.";
+                    message += "it is not centroided. Re-run raw-file conversion with peak-picking enabled (ThermoRawFileParser centroids Thermo MS2 by default; MSConvert --filter \"peakPicking true 1-\").";
                     numProfileSpectra++;
                 }
                 

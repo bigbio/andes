@@ -75,10 +75,18 @@ public class ParamManager {
         NUM_TASKS("tasks", "NumTasks", "Override the number of tasks to use on the threads; Default: (internally calculated based on inputs)",
                 "More tasks than threads will reduce the memory requirements of the search, but will be slower (how much depends on the inputs).\n" +
                 "\t   1 <= tasks <= numThreads: will create one task per thread, which is the original behavior.\n" +
-                "\t   tasks = 0: use default calculation - minimum of: (threads*3) and (numSpectra/250).\n" +
+                "\t   tasks = 0: use default calculation - minimum of: (threads*3) and (numSpectra/minSpectraPerThread).\n" +
                 "\t   tasks < 0: multiply number of threads by abs(tasks) to determine number of tasks (i.e., -2 means \"2 * numThreads\" tasks).\n" +
                 "\t   One task per thread will use the most memory, but will usually finish the fastest.\n" +
                 "\t   2-3 tasks per thread will use comparably less memory, but may cause the search to take 1.5 to 2 times as long."),
+
+        MIN_SPECTRA_PER_THREAD("minSpectraPerThread", "MinSpectraPerThread",
+                "Minimum number of spectra to assign per thread/task; Default: 250",
+                "Controls the per-thread workload floor used when auto-selecting numThreads and numTasks.\n" +
+                "\t   The effective thread count is capped at max(1, round(numSpectra / minSpectraPerThread)).\n" +
+                "\t   Lower this value to raise parallelism on small inputs running on many-core hosts\n" +
+                "\t   (e.g. set to 50 when searching ~1,000 spectra on a 20-core machine).\n" +
+                "\t   Going too low increases per-thread setup overhead and can slow the search."),
 
         // Used by MS-GF+
         ISOTOPE_ERROR("ti", "IsotopeErrorRange", "Range of allowed isotope peak errors; Default: 0,1",
@@ -592,6 +600,13 @@ public class ParamManager {
         addParameter(numTasksParam);
     }
 
+    private void addMinSpectraPerThreadParam() {
+        IntParameter minSpectraParam = new IntParameter(ParamNameEnum.MIN_SPECTRA_PER_THREAD);
+        minSpectraParam.defaultValue(250);
+        minSpectraParam.minValue(1);
+        addParameter(minSpectraParam);
+    }
+
     private void addTdaParam() {
         EnumParameter tdaParam = new EnumParameter(ParamNameEnum.TDA_STRATEGY);
         tdaParam.registerEntry("Don't search decoy database").setDefault();
@@ -796,6 +811,7 @@ public class ParamManager {
 
         addNumThreadsParam();
         addNumTasksParam();
+        addMinSpectraPerThreadParam();
         addVerboseModeParam();
 
         addTdaParam();
@@ -909,6 +925,7 @@ public class ParamManager {
         addOutputFileParam();
 
         addNumThreadsParam();
+        addMinSpectraPerThreadParam();
 
         addTdaParam();
 
@@ -1175,6 +1192,10 @@ public class ParamManager {
 
     public int getNumTasks() {
         return getIntValue(ParamNameEnum.NUM_TASKS.key);
+    }
+
+    public int getMinSpectraPerThread() {
+        return getIntValue(ParamNameEnum.MIN_SPECTRA_PER_THREAD.key);
     }
 
     public int getVerboseFlag() {

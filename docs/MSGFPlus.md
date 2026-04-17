@@ -38,10 +38,15 @@ Usage: java -Xmx3500M -jar MSGFPlus.jar
 [-tasks NumTasks] (Override the number of tasks to use on the threads; Default: internally calculated based on inputs)
    More tasks than threads will reduce the memory requirements of the search, but will be slower (how much depends on the inputs).
    1 <= tasks <= numThreads: will create one task per thread, which is the original behavior.
-   tasks = 0: use default calculation - minimum of: (threads*3) and (numSpectra/250).
+   tasks = 0: use default calculation - minimum of: (threads*3) and (numSpectra/minSpectraPerThread).
    tasks < 0: multiply number of threads by abs(tasks) to determine number of tasks (i.e., -2 means "2 * numThreads" tasks).
    One task per thread will use the most memory, but will usually finish the fastest.
    2-3 tasks per thread will use comparably less memory, but may cause the search to take 1.5 to 2 times as long.
+
+[-minSpectraPerThread MinSpectraPerThread] (Minimum number of spectra to assign per thread/task; Default: 250)
+   Controls the per-thread workload floor used when auto-selecting numThreads and numTasks.
+   The effective thread count is capped at max(1, round(numSpectra / minSpectraPerThread)).
+   Lower this value to raise parallelism on small inputs on many-core hosts (see issue #52).
 
 [-verbose 0/1] (Console output message verbosity; Default: 0)
    0: Report total progress only

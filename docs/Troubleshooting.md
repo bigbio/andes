@@ -89,7 +89,15 @@ java -Xmx8G -jar MSGFPlus.jar -s spectra.mzML -d db.fasta -thread 8 -tasks -3
 
 By default MS-GF+ caps concurrent threads at `min(availableCores, numSpectra / 250)`. On a 20-core machine with ~1,000 spectra you will see only ~4 active threads. This is intentional to avoid I/O contention, but can surprise users with small input files on large hosts.
 
-**Workaround** — process multiple mzML files in parallel as separate MS-GF+ processes, or accept the cap on a single small file.
+**Override** — lower the per-thread spectrum floor with `-minSpectraPerThread N` (default 250). For example, to force ~20 threads on a 1,000-spectrum file:
+
+```bash
+java -Xmx8G -jar MSGFPlus.jar -s small.mzML -d db.fasta -thread 20 -minSpectraPerThread 50
+```
+
+Going below ~50 usually makes the search slower because per-thread setup overhead starts to dominate; benchmark your own data.
+
+**Alternative workaround** — process multiple mzML files in parallel as separate MS-GF+ processes.
 
 Related issue: [#52](https://github.com/MSGFPlus/msgfplus/issues/52).
 

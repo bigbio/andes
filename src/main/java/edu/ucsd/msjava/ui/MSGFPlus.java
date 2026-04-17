@@ -1,6 +1,8 @@
 package edu.ucsd.msjava.ui;
 
 import edu.ucsd.msjava.fdr.ComputeFDR;
+import edu.ucsd.msjava.misc.MSGFLogger;
+import edu.ucsd.msjava.misc.RunManifestWriter;
 import edu.ucsd.msjava.misc.ThreadPoolExecutorWithExceptions;
 import edu.ucsd.msjava.msdbsearch.*;
 import edu.ucsd.msjava.msgf.Tolerance;
@@ -33,8 +35,14 @@ public class MSGFPlus {
     // Set this to true when debugging
     private static final boolean DISABLE_THREADING = false;
 
+    // Snapshot of the original CLI argv, captured in main() so that
+    // RunManifestWriter can record it alongside the mzid without
+    // threading argv through runMSGFPlus's many call sites.
+    private static volatile String[] argvSnapshot = new String[0];
+
     public static void main(String argv[]) {
         long startTime = System.currentTimeMillis();
+        argvSnapshot = argv == null ? new String[0] : argv.clone();
 
         ParamManager paramManager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "java -Xmx3500M -jar MSGFPlus.jar");
         paramManager.addMSGFPlusParams();
@@ -49,11 +57,14 @@ public class MSGFPlus {
         // Parse parameters
         String errMessage = paramManager.parseParams(argv);
         if (errMessage != null) {
-            System.err.println("[Error] " + errMessage);
+            MSGFLogger.error(errMessage);
             System.out.println();
             paramManager.printUsageInfo();
             System.exit(-1);
         }
+
+        // Propagate verbose flag to the shared logger before any downstream code logs.
+        MSGFLogger.setVerbose(paramManager.getVerboseFlag() == 1);
 
         // Running MS-GF+
         paramManager.printToolInfo();
@@ -67,11 +78,11 @@ public class MSGFPlus {
         }
 
         if (errorMessage != null) {
-            System.err.println("[Error] " + errorMessage);
+            MSGFLogger.error(errorMessage);
             System.out.println();
             System.exit(-1);
         } else
-            System.out.format("MS-GF+ complete (total elapsed time: %.2f sec)\n", (System.currentTimeMillis() - startTime) / (float) 1000);
+            MSGFLogger.info("MS-GF+ complete (total elapsed time: %.2f sec)", (System.currentTimeMillis() - startTime) / (float) 1000);
     }
 
     public static String runMSGFPlus(ParamManager paramManager) {
@@ -85,9 +96,9 @@ public class MSGFPlus {
         List<DBSearchIOFiles> ioList = params.getDBSearchIOList();
         boolean multiFiles = false;
         if (ioList.size() >= 2) {
-            System.out.println("Processing " + ioList.size() + " spectra");
+            MSGFLogger.info("Processing " + ioList.size() + " spectra");
             for (DBSearchIOFiles ioFiles : ioList) {
-                System.out.println("\t" + ioFiles.getSpecFile().getName());
+                MSGFLogger.debug("\t" + ioFiles.getSpecFile().getName());
             }
             multiFiles = true;
         }
@@ -101,21 +112,23 @@ public class MSGFPlus {
 
             if (multiFiles) {
                 if (!outputFile.exists()) {
-                    System.out.println("\nProcessing " + specFile.getPath());
-                    System.out.println("Writing results to " + outputFile.getPath());
+                    MSGFLogger.info("\nProcessing " + specFile.getPath());
+                    MSGFLogger.debug("Writing results to " + outputFile.getPath());
                     String errMsg = runMSGFPlus(ioIndex, specFormat, outputFile, params);
                     if (errMsg != null) {
                         return errMsg;
                     }
+                    RunManifestWriter.write(ioFiles, params, VERSION, argvSnapshot);
                 } else {
-                    System.out.println("\nIgnoring " + specFile.getPath());
-                    System.out.println("Output file " + outputFile.getPath() + " exists.");
+                    MSGFLogger.info("\nIgnoring " + specFile.getPath());
+                    MSGFLogger.debug("Output file " + outputFile.getPath() + " exists.");
                 }
             } else {
                 String errMsg = runMSGFPlus(ioIndex, specFormat, outputFile, params);
                 if (errMsg != null) {
                     return errMsg;
                 }
+                RunManifestWriter.write(ioFiles, params, VERSION, argvSnapshot);
             }
         }
 
@@ -246,9 +259,9 @@ public class MSGFPlus {
 
             float fractionDecoyProteins = fastaSequence.getFractionDecoyProteins();
             if (fractionDecoyProteins < 0.4f || fractionDecoyProteins > 0.6f) {
-                System.err.println("Error while reading: " + databaseFile.getName() + " (fraction of decoy proteins: " + fractionDecoyProteins + ")");
-                System.err.println("Delete " + databaseFile.getName() + " and run MS-GF+ again.");
-                System.err.println("Decoy protein names should start with " + fastaSequence.getDecoyProteinPrefix());
+                MSGFLogger.error("Error while reading: " + databaseFile.getName() + " (fraction of decoy proteins: " + fractionDecoyProteins + ")");
+                MSGFLogger.error("Delete " + databaseFile.getName() + " and run MS-GF+ again.");
+                MSGFLogger.error("Decoy protein names should start with " + fastaSequence.getDecoyProteinPrefix());
                 System.exit(-1);
             }
         }
@@ -286,8 +299,9 @@ public class MSGFPlus {
         if (numThreads <= 0)
             numThreads = 1;
 
-        // Use 250 spectra/task(or thread) minimum for efficiency; going smaller slows down processing
-        int spectraPerTaskMinimum = 250;
+        // Minimum spectra/task(or thread) floor for efficiency; going smaller slows down processing.
+        // Configurable via -minSpectraPerThread for users on many-core hosts with small inputs (see #52).
+        int spectraPerTaskMinimum = params.getMinSpectraPerThread();
         int maxThreads = Math.max(1, Math.round((float) specSize / spectraPerTaskMinimum));
         if (maxThreads < numThreads) {
             if (maxThreads == 1) {

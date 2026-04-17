@@ -246,6 +246,10 @@ public class SearchParams {
         return outputFormat == 1 || outputFormat == 2;
     }
 
+    public boolean writePin() {
+        return outputFormat == 3;
+    }
+
     /**
      * Look for # in dataLine
      * If present, remove that character and any comment after it

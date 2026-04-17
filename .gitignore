@@ -74,3 +74,5 @@ benchmark/*
 # Cursor / Codacy (local tooling)
 .cursor/
 .codacy/
+
+.claude/investigations/msgfplus_research_report.md

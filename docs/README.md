@@ -19,6 +19,8 @@ Static HTML under `docs/` was replaced with these Markdown pages so they read we
 - [MzIdentML → TSV](MzidToTsv.md)
 - [Suffix array builder (BuildSA)](BuildSA.md)
 - [Training scoring models (ScoringParamGen)](ScoringParamGen.md)
+- [Isobaric labelling: TMT / TMTpro / iTRAQ recipes](IsobaricLabeling.md)
+- [Troubleshooting & common errors](Troubleshooting.md)
 - [MS-GFDB (obsolete)](MS-GFDB.md)
 
 ### Publications

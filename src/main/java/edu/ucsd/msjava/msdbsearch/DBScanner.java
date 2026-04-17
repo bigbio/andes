@@ -619,16 +619,11 @@ public class DBScanner {
                     minScore = m.getScore();
             }
 
-            GeneratingFunctionGroup<NominalMass> gf = new GeneratingFunctionGroup<NominalMass>();
             SimpleDBSearchScorer<NominalMass> scoredSpec = specScanner.getSpecKeyScorerMap().get(specKey);
             float peptideMass = scoredSpec.getPrecursorPeak().getMass() - (float) Composition.H2O;
             int nominalPeptideMass = NominalMass.toNominalMass(peptideMass);
             int minNominalPeptideMass = nominalPeptideMass - specScanner.getMaxIsotopeError();
             int maxNominalPeptideMass = nominalPeptideMass - specScanner.getMinIsotopeError();
-
-            // Debug
-//			System.out.println("***Debug " + threadName + ": " + scoredSpec.getPrecursorPeak().getMz() + "," + scoredSpec.getPrecursorPeak().getCharge());
-            ///
 
             float tolDaLeft = specScanner.getLeftPrecursorMassTolerance().getToleranceAsDa(peptideMass);
             float tolDaRight = specScanner.getRightPrecursorMassTolerance().getToleranceAsDa(peptideMass);
@@ -637,8 +632,10 @@ public class DBScanner {
             maxPeptideMassIndex = maxNominalPeptideMass + Math.round(tolDaLeft - 0.4999f);
             minPeptideMassIndex = minNominalPeptideMass - Math.round(tolDaRight - 0.4999f);
 
+            PrimitiveGeneratingFunctionGroup gf = new PrimitiveGeneratingFunctionGroup();
+
             for (int peptideMassIndex = minPeptideMassIndex; peptideMassIndex <= maxPeptideMassIndex; peptideMassIndex++) {
-                DeNovoGraph<NominalMass> graph = new FlexAminoAcidGraph(
+                PrimitiveAminoAcidGraph graph = new PrimitiveAminoAcidGraph(
                         aaSet,
                         peptideMassIndex,
                         enzyme,
@@ -646,15 +643,13 @@ public class DBScanner {
                         useProtNTerm,
                         useProtCTerm
                 );
-
-                GeneratingFunction<NominalMass> gfi = new GeneratingFunction<NominalMass>(graph)
-                        .doNotBacktrack()
-                        .doNotCalcNumber();
+                PrimitiveGeneratingFunction gfi = new PrimitiveGeneratingFunction(graph);
                 gfi.setUpScoreThreshold(minScore);
-                gf.registerGF(graph.getPMNode(), gfi);
+                gf.accept(gfi);
+                // graph, gfi leave scope → eligible for GC before next mass index.
             }
 
-            boolean isGFComputed = gf.computeGeneratingFunction();
+            boolean isGFComputed = gf.isComputed();
 
             for (DatabaseMatch match : matchQueue) {
                 if (!isGFComputed || match.getNominalPeptideMass() < minPeptideMassIndex || match.getNominalPeptideMass() > maxPeptideMassIndex) {

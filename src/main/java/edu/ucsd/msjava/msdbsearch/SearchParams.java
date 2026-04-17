@@ -41,6 +41,7 @@ public class SearchParams {
     private int maxCharge;
     private int numThreads;
     private int numTasks;
+    private int minSpectraPerThread;
     private boolean verbose;
     private boolean doNotUseEdgeScore;
     private File dbIndexDir;
@@ -179,6 +180,10 @@ public class SearchParams {
 
     public int getNumTasks() {
         return numTasks;
+    }
+
+    public int getMinSpectraPerThread() {
+        return minSpectraPerThread;
     }
 
     public boolean getVerbose() {
@@ -415,6 +420,7 @@ public class SearchParams {
 
         numThreads = paramManager.getNumThreads();
         numTasks = paramManager.getNumTasks();
+        minSpectraPerThread = paramManager.getMinSpectraPerThread();
         verbose = paramManager.getVerboseFlag() == 1;
         doNotUseEdgeScore = paramManager.getEdgeScoreFlag() == 1;
 

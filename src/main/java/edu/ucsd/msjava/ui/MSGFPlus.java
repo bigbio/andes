@@ -286,8 +286,9 @@ public class MSGFPlus {
         if (numThreads <= 0)
             numThreads = 1;
 
-        // Use 250 spectra/task(or thread) minimum for efficiency; going smaller slows down processing
-        int spectraPerTaskMinimum = 250;
+        // Minimum spectra/task(or thread) floor for efficiency; going smaller slows down processing.
+        // Configurable via -minSpectraPerThread for users on many-core hosts with small inputs (see #52).
+        int spectraPerTaskMinimum = params.getMinSpectraPerThread();
         int maxThreads = Math.max(1, Math.round((float) specSize / spectraPerTaskMinimum));
         if (maxThreads < numThreads) {
             if (maxThreads == 1) {

@@ -12,13 +12,21 @@ Common failure modes and how to work around them. If the issue is not listed her
 
 MS-GF+ requires centroided MS/MS spectra. Profile spectra are detected automatically and skipped. If every scan is skipped, the input is profile, not centroided.
 
-**Fix** — run MSConvert (part of [ProteoWizard](https://proteowizard.sourceforge.io/)) with the peakPicking filter:
+**Fix — pick the tool that matches your workflow.**
 
-```bash
-msconvert --mzML --32 --filter "peakPicking true 1-" DatasetName.raw
-```
+- **ThermoRawFileParser** (used by nf-core/quantms, bigbio/quantms, SDRF-based pipelines). Centroids Thermo MS2 by default:
+  ```bash
+  ThermoRawFileParser.sh -i DatasetName.raw -f 2 -o .     # -f 2 = indexed mzML; centroiding is on by default
+  ```
+  Pass `-p` / `--noPeakPicking` only if you deliberately want profile output — that's the case that produces the error.
 
-The `1-` argument peak-picks MS level 1 and up. Use `2-` if you only want to peak-pick MS2.
+- **MSConvert** (ProteoWizard, works on Thermo, Bruker, SCIEX, Waters, Agilent). Peak-picking is opt-in via the `peakPicking` filter:
+  ```bash
+  msconvert --mzML --32 --filter "peakPicking true 1-" DatasetName.raw
+  ```
+  The `1-` argument peak-picks MS level 1 and up. Use `2-` if you only want to peak-pick MS2.
+
+- **OpenMS `FileConverter`** / **`PeakPickerHiRes`** — alternative if you already have an OpenMS pipeline.
 
 **Override** — if your mzML/mzXML is centroided but MS-GF+'s own profile detector (median distance between consecutive peaks < 50 ppm) disagrees, add `-allowDenseCentroidedPeaks 1`.
 

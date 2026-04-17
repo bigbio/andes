@@ -194,10 +194,10 @@ public class SpecKey extends Pair<Integer, Integer> {
             if (!spec.isCentroided() && !(spec.isCentroidedWithDensePeaks() && allowDenseCentroidedData)) {
                 String message = "Skip spectrum " + spec.getID() + " since ";
                 if (spec.isCentroidedWithDensePeaks()) {
-                    message += "peaks are too dense";
+                    message += "peaks are too dense. Pass -allowDenseCentroidedPeaks 1 if the spectrum is already centroided.";
                     numDenseCentroidedSpectra++;
                 } else {
-                    message += "it is not centroided";
+                    message += "it is not centroided. Re-run raw-file conversion with peak-picking enabled (ThermoRawFileParser centroids Thermo MS2 by default; MSConvert --filter \"peakPicking true 1-\").";
                     numProfileSpectra++;
                 }
                 

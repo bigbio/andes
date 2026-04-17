@@ -2,6 +2,7 @@ package edu.ucsd.msjava.ui;
 
 import edu.ucsd.msjava.fdr.ComputeFDR;
 import edu.ucsd.msjava.misc.MSGFLogger;
+import edu.ucsd.msjava.misc.RunManifestWriter;
 import edu.ucsd.msjava.misc.ThreadPoolExecutorWithExceptions;
 import edu.ucsd.msjava.msdbsearch.*;
 import edu.ucsd.msjava.msgf.Tolerance;
@@ -34,8 +35,14 @@ public class MSGFPlus {
     // Set this to true when debugging
     private static final boolean DISABLE_THREADING = false;
 
+    // Snapshot of the original CLI argv, captured in main() so that
+    // RunManifestWriter can record it alongside the mzid without
+    // threading argv through runMSGFPlus's many call sites.
+    private static volatile String[] argvSnapshot = new String[0];
+
     public static void main(String argv[]) {
         long startTime = System.currentTimeMillis();
+        argvSnapshot = argv == null ? new String[0] : argv.clone();
 
         ParamManager paramManager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "java -Xmx3500M -jar MSGFPlus.jar");
         paramManager.addMSGFPlusParams();
@@ -111,6 +118,7 @@ public class MSGFPlus {
                     if (errMsg != null) {
                         return errMsg;
                     }
+                    RunManifestWriter.write(ioFiles, params, VERSION, argvSnapshot);
                 } else {
                     MSGFLogger.info("\nIgnoring " + specFile.getPath());
                     MSGFLogger.debug("Output file " + outputFile.getPath() + " exists.");
@@ -120,6 +128,7 @@ public class MSGFPlus {
                 if (errMsg != null) {
                     return errMsg;
                 }
+                RunManifestWriter.write(ioFiles, params, VERSION, argvSnapshot);
             }
         }
 

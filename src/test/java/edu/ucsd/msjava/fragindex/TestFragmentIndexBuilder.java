@@ -1,9 +1,13 @@
 package edu.ucsd.msjava.fragindex;
 
+import edu.ucsd.msjava.msdbsearch.CompactFastaSequence;
 import edu.ucsd.msjava.msutil.AminoAcidSet;
+import edu.ucsd.msjava.msutil.Enzyme;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.io.File;
+import java.io.PrintStream;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -85,5 +89,41 @@ public class TestFragmentIndexBuilder {
         FragmentIndex idx = newBuilder().build(Collections.singletonList("PEPTIDE"));
         Assert.assertEquals(1, idx.totalPeptideEntries());
         Assert.assertEquals(1, idx.peptideTable(5).size());
+    }
+
+    @Test
+    public void buildFromSuffixArrayYieldsSameIndexAsExplicitPeptideList() throws Exception {
+        // Tiny FASTA fixture that SuffixArrayPeptideWalker can walk.
+        File fasta = File.createTempFile("msgfplus-frag-sa-", ".fasta");
+        fasta.deleteOnExit();
+        try (PrintStream ps = new PrintStream(fasta)) {
+            ps.println(">sp|TEST|Protein1 test");
+            ps.println("MAEKVLRK");
+        }
+
+        // Load via CompactFastaSequence.
+        CompactFastaSequence seq = new CompactFastaSequence(fasta.getAbsolutePath());
+        Enzyme trypsin = Enzyme.TRYPSIN;
+
+        // Collect the same peptides via walker.collect().
+        List<String> peptides = new SuffixArrayPeptideWalker(seq, trypsin, 3, 10, 0).collect();
+
+        // Build both indexes and compare their per-slab peptide counts.
+        AminoAcidSet aaSet = AminoAcidSet.getStandardAminoAcidSet();
+        SlabAssigner slabAssigner = new SlabAssigner(100.0, 4000.0, 50.0, 0.0);
+        FragmentIndexBuilder builder = new FragmentIndexBuilder(aaSet, slabAssigner, 1.0005);
+
+        FragmentIndex fromList = builder.build(peptides);
+        FragmentIndex fromSA = builder.buildFromSuffixArray(seq, trypsin, 3, 10, 0);
+
+        // Both must have the same peptide count in every slab.
+        Assert.assertEquals("numSlabs should match", fromList.numSlabs(), fromSA.numSlabs());
+        for (int s = 0; s < fromList.numSlabs(); s++) {
+            Assert.assertEquals("slab " + s + " peptide count should match",
+                    fromList.slab(s).peptideCount(),
+                    fromSA.slab(s).peptideCount());
+        }
+        // Also assert total peptide entries match as a sanity check.
+        Assert.assertEquals(fromList.totalPeptideEntries(), fromSA.totalPeptideEntries());
     }
 }

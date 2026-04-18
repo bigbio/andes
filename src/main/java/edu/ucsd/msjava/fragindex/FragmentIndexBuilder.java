@@ -1,8 +1,10 @@
 package edu.ucsd.msjava.fragindex;
 
+import edu.ucsd.msjava.msdbsearch.CompactFastaSequence;
 import edu.ucsd.msjava.msutil.AminoAcid;
 import edu.ucsd.msjava.msutil.AminoAcidSet;
 import edu.ucsd.msjava.msutil.Composition;
+import edu.ucsd.msjava.msutil.Enzyme;
 
 import java.util.List;
 
@@ -45,6 +47,28 @@ public final class FragmentIndexBuilder {
         this.slabAssigner = slabAssigner;
         this.fragmentBinWidthDa = fragmentBinWidthDa;
         this.fragmentGenerator = new TheoreticalFragmentGenerator(aaSet);
+    }
+
+    /**
+     * Builds a fragment index from every qualifying tryptic peptide in a FASTA.
+     * Delegates to {@link #build(List)} after the walker collects the peptides,
+     * so there is only one build code path.
+     *
+     * @param sequence FASTA sequence to walk (read-only).
+     * @param enzyme enzyme for cleavage rules (e.g. {@link Enzyme#TRYPSIN}).
+     * @param minLen minimum peptide length (inclusive).
+     * @param maxLen maximum peptide length (inclusive).
+     * @param maxMissedCleavages max missed cleavage sites to allow per peptide.
+     * @return the built FragmentIndex.
+     */
+    public FragmentIndex buildFromSuffixArray(CompactFastaSequence sequence,
+                                              Enzyme enzyme,
+                                              int minLen,
+                                              int maxLen,
+                                              int maxMissedCleavages) {
+        SuffixArrayPeptideWalker walker = new SuffixArrayPeptideWalker(
+                sequence, enzyme, minLen, maxLen, maxMissedCleavages);
+        return build(walker.collect());
     }
 
     public FragmentIndex build(List<String> peptides) {

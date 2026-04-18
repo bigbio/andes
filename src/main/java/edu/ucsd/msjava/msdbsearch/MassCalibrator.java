@@ -108,6 +108,18 @@ public class MassCalibrator {
      * @return learned ppm shift, or 0.0 if the pre-pass had insufficient data
      */
     public double learnPrecursorShiftPpm(int ioIndex) {
+        // Cheap guard: on a file too small to possibly reach MIN_CONFIDENT_PSMS
+        // even if every sampled spectrum matched at 1e-6 SpecEValue, we skip the
+        // pre-pass entirely. Running the pre-pass calls preProcessSpectra() on a
+        // subset of shared Spectrum objects, which mutates their scored state and
+        // causes a tiny (~0.1%) PSM-list drift vs -precursorCal off when the main
+        // search later re-processes those same spectra. Skipping here preserves
+        // the -precursorCal off ≡ no-flag bit-identity invariant for small runs,
+        // which is the hard correctness gate. On large runs the guard is a no-op.
+        int minFeasibleSpecCount = MIN_CONFIDENT_PSMS * SAMPLING_STRIDE;
+        if (specKeyList == null || specKeyList.size() < minFeasibleSpecCount) {
+            return 0.0;
+        }
         List<Double> residuals = collectResiduals(ioIndex);
         if (residuals.size() < MIN_CONFIDENT_PSMS) {
             return 0.0;

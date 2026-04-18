@@ -8,6 +8,7 @@ import edu.ucsd.msjava.msdbsearch.*;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msutil.*;
+import edu.ucsd.msjava.mzid.DirectPinWriter;
 import edu.ucsd.msjava.mzid.DirectTSVWriter;
 import edu.ucsd.msjava.mzid.MZIdentMLGen;
 import edu.ucsd.msjava.mzml.StaxMzMLParser;
@@ -487,6 +488,17 @@ public class MSGFPlus {
             mzidGen.addSpectrumIdentificationResults(resultList);
             mzidGen.writeResults(outputFile);
             System.out.println("File: " + outputFile.getPath());
+        }
+
+        if (params.writePin()) {
+            File pinFile = new File(outputFile.getPath().replaceAll("\\.mzid$", ".pin"));
+            DirectPinWriter pinWriter = new DirectPinWriter(params, aaSet, sa, specAcc, ioIndex);
+            try {
+                pinWriter.writeResults(resultList, pinFile);
+            } catch (IOException e) {
+                return "Error writing pin output: " + e.getMessage();
+            }
+            System.out.println("PIN file: " + pinFile.getPath());
         }
 
         System.out.print("Writing results finished ");

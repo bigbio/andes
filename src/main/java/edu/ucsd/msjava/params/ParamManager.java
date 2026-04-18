@@ -661,6 +661,7 @@ public class ParamManager {
         outputFormatParam.registerEntry("mzid").setDefault();
         outputFormatParam.registerEntry("tsv");
         outputFormatParam.registerEntry("both");
+        outputFormatParam.registerEntry("pin");
         addParameter(outputFormatParam);
     }
 

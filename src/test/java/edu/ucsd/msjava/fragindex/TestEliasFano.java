@@ -34,4 +34,22 @@ public class TestEliasFano {
         int[] decoded = EliasFano.decode(EliasFano.encode(original));
         Assert.assertArrayEquals(original, decoded);
     }
+
+    @Test
+    public void iteratorMatchesArray() {
+        int[] original = {2, 3, 5, 7, 11, 13, 17, 19};
+        byte[] encoded = EliasFano.encode(original);
+        EliasFano.Cursor it = EliasFano.open(encoded);
+        int i = 0;
+        while (it.hasNext()) {
+            Assert.assertEquals(original[i++], it.next());
+        }
+        Assert.assertEquals(original.length, i);
+    }
+
+    @Test
+    public void iteratorOnEmpty() {
+        EliasFano.Cursor it = EliasFano.open(EliasFano.encode(new int[0]));
+        Assert.assertFalse(it.hasNext());
+    }
 }

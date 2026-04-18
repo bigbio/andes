@@ -34,4 +34,30 @@ public final class EliasFano {
         for (int i = 0; i < n; i++) out[i] = buf.getInt();
         return out;
     }
+
+    public static final class Cursor {
+        private final ByteBuffer buf;
+        private final int total;
+        private int index;
+
+        Cursor(ByteBuffer buf, int total) {
+            this.buf = buf;
+            this.total = total;
+            this.index = 0;
+        }
+
+        public boolean hasNext() { return index < total; }
+        public int next() {
+            int v = buf.getInt();
+            index++;
+            return v;
+        }
+    }
+
+    public static Cursor open(byte[] encoded) {
+        ByteBuffer buf = ByteBuffer.wrap(encoded).order(ByteOrder.LITTLE_ENDIAN);
+        int n = buf.getInt();
+        buf.getInt();           // max (unused)
+        return new Cursor(buf, n);
+    }
 }

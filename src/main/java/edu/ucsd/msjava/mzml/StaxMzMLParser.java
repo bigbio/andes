@@ -205,7 +205,12 @@ public class StaxMzMLParser {
                     .append(specFile.getName()).append("\" | xxd`; a BOM shows as `ef bb bf`). Re-converting the raw file with ThermoRawFileParser or MSConvert usually resolves it. See docs/Troubleshooting.md for details.");
         }
         sb.append(" Underlying parser error: ").append(msg);
-        XMLStreamException wrapped = new XMLStreamException(sb.toString(), e.getLocation(), e);
+        // Note: XMLStreamException(msg, location, nested) stores the cause as a
+        // "nested exception" but does NOT invoke Throwable.initCause, so
+        // getCause() returns null. Call initCause() explicitly so standard
+        // Java chaining (printStackTrace, causal frames) works.
+        XMLStreamException wrapped = new XMLStreamException(sb.toString(), e.getLocation());
+        wrapped.initCause(e);
         return wrapped;
     }
 

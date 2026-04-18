@@ -16,6 +16,47 @@ import static edu.ucsd.msjava.msutil.Composition.PROTON;
 import static edu.ucsd.msjava.msutil.Composition.SODIUM_CHARGE_CARRIER_MASS;
 
 public class SearchParams {
+
+    /**
+     * Two-pass precursor mass calibration (P2-cal) mode.
+     *
+     * <ul>
+     *     <li>{@link #AUTO} (default) — run the pre-pass, apply the learned shift
+     *         only if at least 200 high-confidence PSMs are collected; otherwise
+     *         fall through with a 0 ppm shift.</li>
+     *     <li>{@link #ON} — run the pre-pass and always apply the learned shift,
+     *         even when fewer than 200 confident PSMs are collected.</li>
+     *     <li>{@link #OFF} — skip calibration entirely. The code path MUST be
+     *         bit-identical to a baseline build without the flag.</li>
+     * </ul>
+     */
+    public enum PrecursorCalMode {
+        AUTO,
+        ON,
+        OFF;
+
+        /**
+         * Case-insensitive string to enum conversion. Unknown values fall
+         * back to {@link #AUTO} so that downstream code never crashes if a
+         * typo slips past CLI parsing.
+         */
+        public static PrecursorCalMode fromString(String s) {
+            if (s == null) return AUTO;
+            String normalized = s.trim().toLowerCase();
+            switch (normalized) {
+                case "on":
+                    return ON;
+                case "off":
+                    return OFF;
+                case "auto":
+                case "":
+                    return AUTO;
+                default:
+                    return AUTO;
+            }
+        }
+    }
+
     private List<DBSearchIOFiles> dbSearchIOList;
     private File databaseFile;
     private String decoyProteinPrefix;
@@ -55,8 +96,17 @@ public class SearchParams {
     private int minMSLevel;
     private int maxMSLevel;
     private int outputFormat; // 0=mzid, 1=tsv, 2=both
+    private PrecursorCalMode precursorCalMode = PrecursorCalMode.AUTO;
 
     public SearchParams() {
+    }
+
+    /**
+     * Returns the configured precursor mass calibration mode; defaults
+     * to {@link PrecursorCalMode#AUTO}.
+     */
+    public PrecursorCalMode getPrecursorCalMode() {
+        return precursorCalMode;
     }
 
     // Used by MS-GF+
@@ -446,6 +496,7 @@ public class SearchParams {
         
         allowDenseCentroidedPeaks = paramManager.getAllowDenseCentroidedPeaks() == 1;
         outputFormat = paramManager.getOutputFormat();
+        precursorCalMode = PrecursorCalMode.fromString(paramManager.getPrecursorCalRawValue());
 
         IntRangeParameter msLevelParam = paramManager.getMSLevelParameter();
         minMSLevel = msLevelParam.getMin();

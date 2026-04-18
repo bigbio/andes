@@ -174,7 +174,12 @@ public class ParamManager {
         OUTPUT_FORMAT("outputFormat", "OutputFormat", "Output format for search results; Default: mzid",
                 "mzid: Write mzIdentML (default, compatible with all downstream tools)\n" +
                         "\t   tsv: Write TSV directly (faster, smaller files, compatible with OpenMS MSGFPlusAdapter)\n" +
-                        "\t   both: Write both mzid and tsv");
+                        "\t   both: Write both mzid and tsv"),
+
+        PRECURSOR_CAL("precursorCal", "PrecursorCal", "Precursor mass calibration mode; Default: auto",
+                "auto: Run a quick pre-pass and apply a per-file ppm shift only when >= 200 confident PSMs are collected (default)\n" +
+                        "\t   on:   Always apply the learned shift, even if fewer PSMs are collected\n" +
+                        "\t   off:  Skip calibration entirely (bit-identical to builds without the flag)");
 
         private String key;
         private String name;
@@ -669,6 +674,22 @@ public class ParamManager {
         return ((EnumParameter) getParameter(ParamNameEnum.OUTPUT_FORMAT.key)).getValue();
     }
 
+    private void addPrecursorCalParam() {
+        StringParameter precursorCalParam = new StringParameter(ParamNameEnum.PRECURSOR_CAL);
+        precursorCalParam.defaultValue("auto");
+        addParameter(precursorCalParam);
+    }
+
+    /**
+     * Returns the raw value of the {@code -precursorCal} flag; one of
+     * {@code "auto"}, {@code "on"}, or {@code "off"} (case-insensitive).
+     * Use {@link SearchParams#getPrecursorCalMode()} for the parsed enum.
+     */
+    public String getPrecursorCalRawValue() {
+        StringParameter param = (StringParameter) getParameter(ParamNameEnum.PRECURSOR_CAL.key);
+        return param == null ? "auto" : param.value;
+    }
+
     private void addChargeCarrierMassParam() {
         DoubleParameter chargeCarrierMassParam = new DoubleParameter(ParamNameEnum.CHARGE_CARRIER_MASSES);
         chargeCarrierMassParam.minValue(0.1);
@@ -833,6 +854,7 @@ public class ParamManager {
         addNumMatchesPerSpecParam();
         addAddFeaturesParam();
         addOutputFormatParam();
+        addPrecursorCalParam();
         addChargeCarrierMassParam();
         addMaxMissedCleavagesParam();
         addMaxNumModsParam();

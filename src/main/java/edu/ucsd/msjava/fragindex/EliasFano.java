@@ -1,24 +1,37 @@
 package edu.ucsd.msjava.fragindex;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
 /**
- * Elias-Fano compression for sorted (monotonically non-decreasing) int[] lists.
- * Used by the fragment index to store peptide-id lists per fragment-mass bucket
- * at ~0.5-1 byte per entry.
+ * Simple Elias-Fano-inspired codec for sorted non-decreasing int[] lists.
  *
- * Empty-list case handled here; monotonic-list encoding lands in a later task.
+ * Layout (little-endian):
+ *   [4 bytes: length N]
+ *   [4 bytes: max value U, or 0 if N==0]
+ *   [for each value i: 4 bytes raw int]
+ *
+ * This first cut is correctness-only — plain int array encoding. A compact
+ * Elias-Fano layout replaces this in Task 7 once the API shape is stable.
  */
 public final class EliasFano {
     private EliasFano() {}
 
     public static byte[] encode(int[] values) {
-        if (values.length == 0) return new byte[]{0, 0, 0, 0}; // length prefix only
-        throw new UnsupportedOperationException("non-empty encode not implemented yet");
+        int n = values.length;
+        ByteBuffer buf = ByteBuffer.allocate(8 + 4 * n).order(ByteOrder.LITTLE_ENDIAN);
+        buf.putInt(n);
+        buf.putInt(n == 0 ? 0 : values[n - 1]);
+        for (int v : values) buf.putInt(v);
+        return buf.array();
     }
 
     public static int[] decode(byte[] encoded) {
-        int len = (encoded[0] & 0xff) | ((encoded[1] & 0xff) << 8)
-                | ((encoded[2] & 0xff) << 16) | ((encoded[3] & 0xff) << 24);
-        if (len == 0) return new int[0];
-        throw new UnsupportedOperationException("non-empty decode not implemented yet");
+        ByteBuffer buf = ByteBuffer.wrap(encoded).order(ByteOrder.LITTLE_ENDIAN);
+        int n = buf.getInt();
+        buf.getInt(); // max value; unused in this naive layout
+        int[] out = new int[n];
+        for (int i = 0; i < n; i++) out[i] = buf.getInt();
+        return out;
     }
 }

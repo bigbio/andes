@@ -19,6 +19,13 @@ public class ScoredSpectraMap {
     private final int minIsotopeError;
     private final int maxIsotopeError;
     private final SpecDataType specDataType;
+    /**
+     * Achievement B (P2-cal) precursor mass shift in ppm. Applied to each
+     * precursor mass when it first materialises from the spectrum. Zero means
+     * no correction — the code path is bit-identical to a pre-calibration
+     * build when this value is 0.0 (enforced by {@link #applyShift(float)}).
+     */
+    private final double precursorMassShiftPpm;
 
     private SortedMap<Double, SpecKey> pepMassSpecKeyMap;
     private Map<SpecKey, SimpleDBSearchScorer<NominalMass>> specKeyScorerMap;
@@ -41,7 +48,8 @@ public class ScoredSpectraMap {
             int maxIsotopeError,
             SpecDataType specDataType,
             boolean storeRankScorer,
-            boolean supportSpectrumSpecificErrorTolerance
+            boolean supportSpectrumSpecificErrorTolerance,
+            double precursorMassShiftPpm
     ) {
         this.specAcc = specAcc;
         this.specKeyList = specKeyList;
@@ -50,6 +58,7 @@ public class ScoredSpectraMap {
         this.minIsotopeError = minIsotopeError;
         this.maxIsotopeError = maxIsotopeError;
         this.specDataType = specDataType;
+        this.precursorMassShiftPpm = precursorMassShiftPpm;
 
         pepMassSpecKeyMap = Collections.synchronizedSortedMap((new TreeMap<Double, SpecKey>()));
         specKeyScorerMap = Collections.synchronizedMap(new HashMap<SpecKey, SimpleDBSearchScorer<NominalMass>>());
@@ -62,6 +71,27 @@ public class ScoredSpectraMap {
         if (storeRankScorer)
             specKeyRankScorerMap = Collections.synchronizedMap(new HashMap<SpecKey, NewRankScorer>());
         progress = null;
+    }
+
+    /**
+     * Backwards-compatible ctor that defaults {@code precursorMassShiftPpm}
+     * to 0.0. Existing callers that do not participate in calibration pick
+     * up the no-op path and stay bit-identical.
+     */
+    public ScoredSpectraMap(
+            SpectraAccessor specAcc,
+            List<SpecKey> specKeyList,
+            Tolerance leftPrecursorMassTolerance,
+            Tolerance rightPrecursorMassTolerance,
+            int minIsotopeError,
+            int maxIsotopeError,
+            SpecDataType specDataType,
+            boolean storeRankScorer,
+            boolean supportSpectrumSpecificErrorTolerance
+    ) {
+        this(specAcc, specKeyList, leftPrecursorMassTolerance, rightPrecursorMassTolerance,
+                minIsotopeError, maxIsotopeError, specDataType,
+                storeRankScorer, supportSpectrumSpecificErrorTolerance, 0.0);
     }
 
     public ScoredSpectraMap(
@@ -165,6 +195,7 @@ public class ScoredSpectraMap {
             int specIndex = specKey.getSpecIndex();
             Spectrum spec = specAcc.getSpectrumBySpecIndex(specIndex);
             float peptideMass = (spec.getPrecursorPeak().getMz() - (float) Composition.ChargeCarrierMass()) * specKey.getCharge() - (float) Composition.H2O;
+            peptideMass = applyShift(peptideMass);
 
             if (peptideMass > 0) {
                 for (int delta = this.minIsotopeError; delta <= maxIsotopeError; delta++) {
@@ -242,6 +273,7 @@ public class ScoredSpectraMap {
             NewScoredSpectrum<NominalMass> scoredSpec = scorer.getScoredSpectrum(spec);
 
             float peptideMass = spec.getPrecursorMass() - (float) Composition.H2O;
+            peptideMass = applyShift(peptideMass);
             float tolDaLeft = leftPrecursorMassTolerance.getToleranceAsDa(peptideMass);
             int maxNominalPeptideMass = NominalMass.toNominalMass(peptideMass) + Math.round(tolDaLeft - 0.4999f) - this.minIsotopeError;
 
@@ -272,6 +304,26 @@ public class ScoredSpectraMap {
             String threadName = Thread.currentThread().getName();
             System.out.println("Warning: Ignored " + countIgnored + " spectra with invalid precursor ions (" + threadName + ")");
         }
+    }
+
+    /**
+     * Applies the learned precursor-mass calibration shift to a single mass.
+     *
+     * <p>When {@code precursorMassShiftPpm == 0.0} (the default and the
+     * {@code -precursorCal off} path), this method returns the input
+     * unchanged — the comparison is against the same {@code double} literal
+     * that was stored in the field, so the check is exact and the code path
+     * is bit-identical to a pre-calibration build. This is the non-negotiable
+     * correctness gate for the feature.
+     *
+     * <p>When non-zero, applies {@code mass * (1 - shiftPpm * 1e-6)}, which
+     * removes the positive bias learned by {@link MassCalibrator}.
+     */
+    private float applyShift(float peptideMass) {
+        if (precursorMassShiftPpm == 0.0) {
+            return peptideMass;
+        }
+        return peptideMass * (1.0f - (float) (precursorMassShiftPpm * 1e-6));
     }
 
     private void preProcessFusedSpectra(int fromIndex, int toIndex) {

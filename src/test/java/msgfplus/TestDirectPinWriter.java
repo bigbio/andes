@@ -1,7 +1,10 @@
 package msgfplus;
 
+import edu.ucsd.msjava.msdbsearch.DatabaseMatch;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
+import edu.ucsd.msjava.msutil.ActivationMethod;
+import edu.ucsd.msjava.mzid.DirectPinWriter;
 import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.ui.MSGFPlus;
 import org.junit.Assert;
@@ -11,6 +14,10 @@ import java.io.File;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Shape tests for the Percolator {@code .pin} output path (Q7).
@@ -119,11 +126,133 @@ public class TestDirectPinWriter {
                 "PepLen", "dM", "absdM",
                 "Charge2", "Charge3", "Charge4",
                 "NumMatchedMainIons", "ExplainedIonCurrentRatio",
+                "lnDeltaSpecEValue", "matchedIonRatio",
                 "Peptide", "Proteins"}) {
             Assert.assertTrue("Pin header should contain " + required + ": " + header,
                     header.contains(required));
         }
         // Column separator should be tab.
         Assert.assertTrue("Header should be tab-separated", header.contains("\t"));
+        // The two extra features must come after the match-list features and before Peptide.
+        int idxLast = header.indexOf("StdevRelErrorTop7");
+        int idxLnDelta = header.indexOf("lnDeltaSpecEValue");
+        int idxRatio = header.indexOf("matchedIonRatio");
+        int idxPeptide = header.indexOf("Peptide");
+        Assert.assertTrue("lnDeltaSpecEValue should come after StdevRelErrorTop7",
+                idxLast > 0 && idxLnDelta > idxLast);
+        Assert.assertTrue("matchedIonRatio should come after lnDeltaSpecEValue",
+                idxRatio > idxLnDelta);
+        Assert.assertTrue("Peptide should follow the extra features",
+                idxPeptide > idxRatio);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper tests for the two extra PSM-level features.
+    // -----------------------------------------------------------------------
+
+    @Test
+    public void lnDeltaSpecEValueReturnsZeroForNonRank1() {
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeLnDeltaSpecEValue(2, 1e-10, 1e-5), 0.0);
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeLnDeltaSpecEValue(3, 1e-10, 1e-5), 0.0);
+    }
+
+    @Test
+    public void lnDeltaSpecEValueReturnsLogRatioForRank1() {
+        double rank1 = 1e-10;
+        double rank2 = 1e-5;
+        double expected = Math.log(rank1 / rank2); // negative: rank-1 more significant
+        Assert.assertEquals(expected,
+                DirectPinWriter.computeLnDeltaSpecEValue(1, rank1, rank2), 1e-12);
+    }
+
+    @Test
+    public void lnDeltaSpecEValueIsZeroWhenRank2Missing() {
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeLnDeltaSpecEValue(1, 1e-10, Double.NaN), 0.0);
+    }
+
+    @Test
+    public void lnDeltaSpecEValueIsZeroForNonPositiveInputs() {
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeLnDeltaSpecEValue(1, 0.0, 1e-5), 0.0);
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeLnDeltaSpecEValue(1, 1e-10, 0.0), 0.0);
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeLnDeltaSpecEValue(1, -1.0, 1e-5), 0.0);
+    }
+
+    @Test
+    public void matchedIonRatioComputesNumMatchedOverPepLen() {
+        Assert.assertEquals(0.5,
+                DirectPinWriter.computeMatchedIonRatio("5", 10), 1e-12);
+        Assert.assertEquals(1.0,
+                DirectPinWriter.computeMatchedIonRatio("12", 12), 1e-12);
+    }
+
+    @Test
+    public void matchedIonRatioHandlesMissingOrInvalidInput() {
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeMatchedIonRatio(null, 10), 0.0);
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeMatchedIonRatio("", 10), 0.0);
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeMatchedIonRatio("not-a-number", 10), 0.0);
+    }
+
+    @Test
+    public void matchedIonRatioHandlesZeroOrNegativePepLen() {
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeMatchedIonRatio("5", 0), 0.0);
+        Assert.assertEquals(0.0,
+                DirectPinWriter.computeMatchedIonRatio("5", -1), 0.0);
+    }
+
+    @Test
+    public void findRank2ReturnsDistinctNextBestSpecEValue() {
+        // matchList is ordered worst-to-best: last element is rank-1.
+        List<DatabaseMatch> matches = new ArrayList<>();
+        matches.add(newMatch(1e-5));  // rank 3
+        matches.add(newMatch(1e-8));  // rank 2
+        matches.add(newMatch(1e-10)); // rank 1
+
+        Assert.assertEquals(1e-8,
+                DirectPinWriter.findRank2SpecEValue(matches, 0), 0.0);
+    }
+
+    @Test
+    public void findRank2SkipsTiesWithRank1() {
+        // Rank-1 and the next entry share a SpecEValue (tied rank-1 group);
+        // rank-2 is the first *distinct* value below them.
+        List<DatabaseMatch> matches = new ArrayList<>();
+        matches.add(newMatch(1e-5));  // rank 3
+        matches.add(newMatch(1e-10)); // rank 1 (tie)
+        matches.add(newMatch(1e-10)); // rank 1 (tie)
+
+        Assert.assertEquals(1e-5,
+                DirectPinWriter.findRank2SpecEValue(matches, 0), 0.0);
+    }
+
+    @Test
+    public void findRank2ReturnsNaNWhenOnlyOneRank() {
+        List<DatabaseMatch> matches = new ArrayList<>();
+        matches.add(newMatch(1e-10));
+        Assert.assertTrue(
+                Double.isNaN(DirectPinWriter.findRank2SpecEValue(matches, 0)));
+    }
+
+    @Test
+    public void findRank2ReturnsNaNForEmptyList() {
+        Assert.assertTrue(
+                Double.isNaN(DirectPinWriter.findRank2SpecEValue(Collections.emptyList(), 0)));
+    }
+
+    private static DatabaseMatch newMatch(double specEValue) {
+        DatabaseMatch m = new DatabaseMatch(0, (byte) 10, 100, 1000f, 1000, 2,
+                "PEPTIDER", new ActivationMethod[]{ActivationMethod.CID});
+        m.setSpecProb(specEValue);
+        // DeNovoScore defaults to 0; test uses minDeNovoScore=0 so all matches qualify.
+        return m;
     }
 }

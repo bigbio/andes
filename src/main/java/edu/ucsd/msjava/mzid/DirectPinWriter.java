@@ -43,6 +43,7 @@ import java.util.SortedSet;
  *   NumMatchedMainIons  ExplainedIonCurrentRatio  NTermIonCurrentRatio
  *   CTermIonCurrentRatio  MS2IonCurrent  IsolationWindowEfficiency
  *   MeanErrorTop7  StdevErrorTop7  MeanRelErrorTop7  StdevRelErrorTop7
+ *   lnDeltaSpecEValue  matchedIonRatio
  *   Peptide  Proteins
  * </pre>
  *
@@ -65,12 +66,21 @@ public class DirectPinWriter {
     private final String decoyProteinPrefix;
     private final Map<String, List<Double>> fixedModMasses;
 
-    /** Feature names surfaced in the pin, in stable order. */
+    /** Feature names sourced from {@code Match.getAdditionalFeatureList()}, in stable order. */
     private static final String[] PIN_FEATURES = {
             "NumMatchedMainIons",
             "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
             "MS2IonCurrent", "IsolationWindowEfficiency",
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7"
+    };
+
+    /**
+     * Extra PSM-level features computed here (not sourced from the match list):
+     *  - lnDeltaSpecEValue: log(rank1 SpecEValue / rank2 SpecEValue) for rank-1 PSMs; 0 otherwise.
+     *  - matchedIonRatio:   NumMatchedMainIons / PepLen.
+     */
+    private static final String[] PIN_EXTRA_FEATURES = {
+            "lnDeltaSpecEValue", "matchedIonRatio"
     };
 
     public DirectPinWriter(SearchParams params, AminoAcidSet aaSet,
@@ -104,6 +114,8 @@ public class DirectPinWriter {
                 int scanNum = spec.getScanNum();
                 float precursorMz = spec.getPrecursorPeak().getMz();
 
+                double rank2SpecEValue = findRank2SpecEValue(matchList, params.getMinDeNovoScore());
+
                 int rank = 0;
                 double prevSpecEValue = Double.NaN;
                 for (int i = matchList.size() - 1; i >= 0; --i) {
@@ -113,7 +125,8 @@ public class DirectPinWriter {
                     if (match.getSpecEValue() != prevSpecEValue) ++rank;
                     prevSpecEValue = match.getSpecEValue();
 
-                    writeRow(out, specID, scanNum, rank, precursorMz, match, minCharge, maxCharge);
+                    writeRow(out, specID, scanNum, rank, precursorMz, match, minCharge, maxCharge,
+                            rank2SpecEValue);
                 }
             }
         }
@@ -128,12 +141,14 @@ public class DirectPinWriter {
             h.append("\tCharge").append(c);
         }
         for (String f : PIN_FEATURES) h.append('\t').append(f);
+        for (String f : PIN_EXTRA_FEATURES) h.append('\t').append(f);
         h.append("\tPeptide\tProteins");
         out.println(h);
     }
 
     private void writeRow(PrintStream out, String specID, int scanNum, int rank,
-                          float precursorMz, DatabaseMatch match, int minCharge, int maxCharge) {
+                          float precursorMz, DatabaseMatch match, int minCharge, int maxCharge,
+                          double rank2SpecEValue) {
         int length = match.getLength();
         int charge = match.getCharge();
         float peptideMass = match.getPeptideMass();
@@ -179,6 +194,10 @@ public class DirectPinWriter {
             String v = features.get(f);
             row.append('\t').append(v == null || v.isEmpty() ? "0" : v);
         }
+        double lnDeltaSpecEValue = computeLnDeltaSpecEValue(rank, specEValue, rank2SpecEValue);
+        double matchedIonRatio = computeMatchedIonRatio(features.get("NumMatchedMainIons"), length);
+        row.append('\t').append(formatDouble(lnDeltaSpecEValue))
+                .append('\t').append(formatDouble(matchedIonRatio));
         // Peptide in Percolator "flanking.PEPTIDE.flanking" format.
         row.append('\t').append(proteins.pre).append('.').append(peptideSeq).append('.').append(proteins.post);
         for (String acc : proteins.accessions) row.append('\t').append(acc);
@@ -198,6 +217,52 @@ public class DirectPinWriter {
             for (Pair<String, String> p : featureList) m.put(p.getFirst(), p.getSecond());
         }
         return m;
+    }
+
+    /**
+     * Scans the match list (ordered worst-to-best like {@code writeResults}) and returns the
+     * SpecEValue of the rank-2 PSM: the first distinct SpecEValue encountered after the
+     * rank-1 value, skipping duplicates (ties share a rank) and matches below
+     * {@code minDeNovoScore}. Returns {@link Double#NaN} if no rank-2 exists.
+     */
+    public static double findRank2SpecEValue(List<DatabaseMatch> matchList, int minDeNovoScore) {
+        double rank1 = Double.NaN;
+        for (int i = matchList.size() - 1; i >= 0; --i) {
+            DatabaseMatch m = matchList.get(i);
+            if (m.getDeNovoScore() < minDeNovoScore) continue;
+            double se = m.getSpecEValue();
+            if (Double.isNaN(rank1)) {
+                rank1 = se;
+            } else if (se != rank1) {
+                return se;
+            }
+        }
+        return Double.NaN;
+    }
+
+    /**
+     * {@code log(rank1 SpecEValue / rank2 SpecEValue)} for rank-1 PSMs; {@code 0} otherwise
+     * or when either SpecEValue is non-positive / NaN. Larger (more negative) values mean
+     * the top hit is more separated from the next best, which Percolator / MS²Rescore /
+     * Mokapot can exploit for rescoring.
+     */
+    public static double computeLnDeltaSpecEValue(int rank, double rank1SpecEValue, double rank2SpecEValue) {
+        if (rank != 1) return 0.0;
+        if (Double.isNaN(rank1SpecEValue) || Double.isNaN(rank2SpecEValue)) return 0.0;
+        if (rank1SpecEValue <= 0 || rank2SpecEValue <= 0) return 0.0;
+        return Math.log(rank1SpecEValue / rank2SpecEValue);
+    }
+
+    /** {@code NumMatchedMainIons / PepLen}: peptide-length-normalized ion-match density. */
+    public static double computeMatchedIonRatio(String numMatchedMainIons, int pepLen) {
+        if (pepLen <= 0) return 0.0;
+        if (numMatchedMainIons == null || numMatchedMainIons.isEmpty()) return 0.0;
+        try {
+            double n = Double.parseDouble(numMatchedMainIons);
+            return n / pepLen;
+        } catch (NumberFormatException e) {
+            return 0.0;
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -179,10 +179,50 @@ public class StaxMzMLParser {
             } finally {
                 reader.close();
             }
+        } catch (XMLStreamException e) {
+            throw annotate(e, "preload");
         }
         allLoaded = true;
         long elapsed = System.currentTimeMillis() - startTime;
         System.out.println("StAX mzML preload: " + cache.size() + " spectra loaded in " + elapsed + " ms");
+    }
+
+    /**
+     * Rethrow an {@link XMLStreamException} with a context-rich message. If
+     * the underlying error looks like a BOM or XML-prolog / encoding issue
+     * (the most common cause of "ParseError in XML prolog" on Windows),
+     * suggest the concrete fix.
+     *
+     * @param e      the original Stax exception; wrapped as cause
+     * @param phase  short tag identifying the parse phase ("index", "preload")
+     */
+    private XMLStreamException annotate(XMLStreamException e, String phase) {
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        StringBuilder sb = new StringBuilder();
+        sb.append("Could not parse mzML file '").append(specFile.getAbsolutePath()).append("' during ").append(phase).append(".");
+        if (looksLikeBomOrPrologIssue(msg)) {
+            sb.append(" This usually means the file has a byte-order mark (BOM) or an encoding mismatch in the XML prolog. Verify that the file starts with `<?xml version=\"1.0\" encoding=\"UTF-8\"?>` with no leading whitespace or BOM (on Linux/macOS: `head -c 3 \"")
+                    .append(specFile.getName()).append("\" | xxd`; a BOM shows as `ef bb bf`). Re-converting the raw file with ThermoRawFileParser or MSConvert usually resolves it. See docs/Troubleshooting.md for details.");
+        }
+        sb.append(" Underlying parser error: ").append(msg);
+        // Note: XMLStreamException(msg, location, nested) stores the cause as a
+        // "nested exception" but does NOT invoke Throwable.initCause, so
+        // getCause() returns null. Call initCause() explicitly so standard
+        // Java chaining (printStackTrace, causal frames) works.
+        XMLStreamException wrapped = new XMLStreamException(sb.toString(), e.getLocation());
+        wrapped.initCause(e);
+        return wrapped;
+    }
+
+    private static boolean looksLikeBomOrPrologIssue(String msg) {
+        if (msg == null) return false;
+        String m = msg.toLowerCase(java.util.Locale.ROOT);
+        return m.contains("prolog")
+                || m.contains("bom")
+                || m.contains("byte order mark")
+                || m.contains("encoding")
+                || m.contains("invalid character")
+                || m.contains("content is not allowed");
     }
 
     /** Parse and return the full spectrum by its string ID. */
@@ -251,6 +291,8 @@ public class StaxMzMLParser {
             } finally {
                 reader.close();
             }
+        } catch (XMLStreamException e) {
+            throw annotate(e, "index");
         }
     }
 

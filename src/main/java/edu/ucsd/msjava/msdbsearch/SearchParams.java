@@ -315,14 +315,9 @@ public class SearchParams {
         return maxMSLevel;
     }
 
-    /** 0=pin (default), 1=tsv. mzid output removed in favour of Percolator pipeline. */
+    /** 0=pin (default), 1=tsv. */
     public int getOutputFormat() {
         return outputFormat;
-    }
-
-    /** Retained for API compatibility; always returns false after mzid removal. */
-    public boolean writeMzid() {
-        return false;
     }
 
     public boolean writeTsv() {
@@ -382,10 +377,9 @@ public class SearchParams {
             // Output file
             File outputFile = paramManager.getOutputFileParam().getFile();
             if (outputFile == null) {
-                String outputFilePath = specPath.getPath().substring(0, specPath.getPath().lastIndexOf('.')) + ".mzid";
+                String defaultExt = outputFormat == 1 ? ".tsv" : ".pin";
+                String outputFilePath = specPath.getPath().substring(0, specPath.getPath().lastIndexOf('.')) + defaultExt;
                 outputFile = new File(outputFilePath);
-//				if (outputFile.exists())
-//					return outputFile.getPath() + " already exists!";
             }
 
             dbSearchIOList = new ArrayList<>();
@@ -393,10 +387,11 @@ public class SearchParams {
         } else    // spectrum directory
         {
             dbSearchIOList = new ArrayList<>();
+            String defaultExt = outputFormat == 1 ? ".tsv" : ".pin";
             for (File f : specPath.listFiles()) {
                 SpecFileFormat specFormat = SpecFileFormat.getSpecFileFormat(f.getName());
                 if (specParam.isSupported(specFormat)) {
-                    String outputFileName = f.getName().substring(0, f.getName().lastIndexOf('.')) + ".mzid";
+                    String outputFileName = f.getName().substring(0, f.getName().lastIndexOf('.')) + defaultExt;
                     File outputFile = new File(outputFileName);
 //					if (outputFile.exists())
 //						return outputFile.getPath() + " already exists!";

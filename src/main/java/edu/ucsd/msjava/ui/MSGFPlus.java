@@ -540,28 +540,23 @@ public class MSGFPlus {
         Collections.sort(resultList);
 
         if (params.writeTsv()) {
-            File tsvFile = new File(outputFile.getPath().replaceAll("\\.mzid$", ".tsv"));
             DirectTSVWriter tsvWriter = new DirectTSVWriter(params, aaSet, sa, specAcc, ioIndex);
             try {
-                tsvWriter.writeResults(resultList, tsvFile);
+                tsvWriter.writeResults(resultList, outputFile);
             } catch (IOException e) {
                 return "Error writing TSV output: " + e.getMessage();
             }
-            System.out.println("TSV file: " + tsvFile.getPath());
+            System.out.println("TSV file: " + outputFile.getPath());
         }
 
-        // mzid export removed: MS-GF+ output feeds Percolator via the .pin
-        // format. See PR describing the removal for historical mzid support.
-
         if (params.writePin()) {
-            File pinFile = new File(outputFile.getPath().replaceAll("\\.mzid$", ".pin"));
             DirectPinWriter pinWriter = new DirectPinWriter(params, aaSet, sa, specAcc, ioIndex);
             try {
-                pinWriter.writeResults(resultList, pinFile);
+                pinWriter.writeResults(resultList, outputFile);
             } catch (IOException e) {
                 return "Error writing pin output: " + e.getMessage();
             }
-            System.out.println("PIN file: " + pinFile.getPath());
+            System.out.println("PIN file: " + outputFile.getPath());
         }
 
         System.out.print("Writing results finished ");

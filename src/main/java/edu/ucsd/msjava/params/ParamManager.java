@@ -37,7 +37,7 @@ public class ParamManager {
                 "Prefix for decoy protein names; Default: " + MSGFPlus.DEFAULT_DECOY_PROTEIN_PREFIX, null),
 
         // Used by MS-GF+
-        MZID_OUTPUT_FILE("o", "OutputFile (*.mzid)", "Default: [SpectrumFileName].mzid", null),
+        SEARCH_OUTPUT_FILE("o", "OutputFile (*.pin or *.tsv)", "Default: [SpectrumFileName].pin", null),
 
         // Used by MSGF and MS-GFDB
         OUTPUT_FILE("o", "OutputFile", "Default: stdout", null),
@@ -474,11 +474,12 @@ public class ParamManager {
     }
 
     /**
-     * -o for MS-GF+
+     * -o for MS-GF+. Accepts only .pin (default) and .tsv after mzid removal.
      */
     private void addMzIdOutputFileParam() {
-        FileParameter outputParam = new FileParameter(ParamNameEnum.MZID_OUTPUT_FILE);
-        outputParam.addFileFormat(new FileFormat(".mzid").setCaseSensitive());
+        FileParameter outputParam = new FileParameter(ParamNameEnum.SEARCH_OUTPUT_FILE);
+        outputParam.addFileFormat(new FileFormat(".pin"));
+        outputParam.addFileFormat(new FileFormat(".tsv"));
         outputParam.setAsOptional();
         addParameter(outputParam);
     }
@@ -844,7 +845,7 @@ public class ParamManager {
         addDBFileParam(true);
         addDecoyPrefixParam();
 
-        // [-o OutputFile (*.mzid)] (Default: [SpectrumFileName].mzid)
+        // [-o OutputFile (*.pin or *.tsv)] (Default: [SpectrumFileName].pin)
         addMzIdOutputFileParam();
 
         addPrecursorMassToleranceParam();
@@ -884,8 +885,8 @@ public class ParamManager {
         addAllowDenseCentroidedPeaksParam();
         addMSLevelParam();
 
-        addExample("Example (high-precision): java -Xmx3500M -jar MSGFPlus.jar -s test.mzML -d IPI_human_3.79.fasta -inst 1 -t 20ppm -ti -1,2 -ntt 2 -tda 1 -o testMSGFPlus.mzid -mod Mods.txt");
-        addExample("Example (low-precision):  java -Xmx3500M -jar MSGFPlus.jar -s test.mzML -d IPI_human_3.79.fasta -inst 0 -t 0.5Da,2.5Da    -ntt 2 -tda 1 -o testMSGFPlus.mzid -mod Mods.txt");
+        addExample("Example (high-precision): java -Xmx3500M -jar MSGFPlus.jar -s test.mzML -d IPI_human_3.79.fasta -inst 1 -t 20ppm -ti -1,2 -ntt 2 -tda 1 -o testMSGFPlus.pin -mod Mods.txt");
+        addExample("Example (low-precision):  java -Xmx3500M -jar MSGFPlus.jar -s test.mzML -d IPI_human_3.79.fasta -inst 0 -t 0.5Da,2.5Da    -ntt 2 -tda 1 -o testMSGFPlus.pin -mod Mods.txt");
 
         // Hidden parameters
         addDbIndexDirParam(true);
@@ -898,66 +899,8 @@ public class ParamManager {
 
     } // MSGFPlusParams
 
-    /**
-     * Used by class edu.ucsd.msjava.ui.ScoringParamGen
-     */
-    public void addScoringParamGenParams() {
-        FileListParameter resFileParam = new FileListParameter("i", "ResultPath", "MSGFDBResultFile (*.mzid) or MSGFDBResultDir");
-        resFileParam.addFileFormat(new FileFormat(".mzid"));
-        resFileParam.addFileFormat(new FileFormat(".tsv"));
-        resFileParam.setAdditionalDescription("mzid files are converted to tsv using default settings before use.\n" +
-                "\t   If you are going to run ScoringParamGen multiple times on the same data (with different parameters),\n" +
-                "\t   convert any mzid files to tsv prior to running ScoringParamGen.");
-        addParameter(resFileParam);
-
-        FileParameter specDirParam = new FileParameter("d", "SpecDir", "Path to directory containing spectrum files");
-        specDirParam.mustBeADirectory();
-        specDirParam.fileMustExist();
-        addParameter(specDirParam);
-
-        // ActivationMethod
-        ObjectEnumParameter<ActivationMethod> fragParam = new ObjectEnumParameter<>(ParamNameEnum.FRAG_METHOD);
-        ActivationMethod[] methods = ActivationMethod.getAllRegisteredActivationMethods();
-        for (int i = 1; i < methods.length; i++) {
-            ActivationMethod m = methods[i];
-            if (m != ActivationMethod.FUSION)
-                fragParam.registerObject(m);
-        }
-        addParameter(fragParam);
-
-        // Instrument type
-        addInstTypeParam(null);
-
-        // Enzyme
-        addEnzymeParam();
-
-        // Protocol
-        addProtocolParam();
-
-        IntParameter numThreadsParam = addNumThreadsParam();
-        numThreadsParam.defaultValue(Runtime.getRuntime().availableProcessors() / 2);
-
-        EnumParameter dropErrors = new EnumParameter("dropErrors");
-        dropErrors.setAdditionalDescription("If 0, stop processing if an error occurs; if 1, discard results from datasets with errors.");
-        dropErrors.registerEntry("Fail on first dataset with errors").setDefault();
-        dropErrors.registerEntry("Drop results from datasets with errors");
-        addParameter(dropErrors);
-
-        addExample("Example (high-precision): java -Xmx4G -cp MSGFPlus.jar edu.ucsd.msjava.ui.ScoringParamGen -i resultsFolder -d spectraFolder -m 2 -e 1 -protocol 5 -thread 4 -dropErrors 1");
-
-        EnumParameter mgfParam = new EnumParameter("mgf");
-        mgfParam.registerEntry("Do not create annotated mgf").setDefault();
-        mgfParam.registerEntry("Create annotated mgf");
-        mgfParam.setHidden();
-        addParameter(mgfParam);
-
-//		paramManager.addModFileParam();
-//		StringParameter nlParam = new StringParameter("nl", "NeutralLosses", "Comma separated neutral losses to consider. Specify compositions or masses");
-//		nlParam.setAdditionalDescription("E.g. '-nl H3PO4', '-nl 97.995,64.064'");
-//		nlParam.defaultValue(null);
-//		paramManager.addParameter(nlParam);
-
-    }
+    // ScoringParamGen has been removed along with the rest of the mzid
+    // pipeline. The former addScoringParamGenParams() method is deleted.
 
     @Deprecated
     public void addMSGFDBParams() {

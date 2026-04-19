@@ -14,7 +14,7 @@ Primary integration branch: `dev`
 - `src/main/java/edu/ucsd/msjava/` — core Java source
   - `msdbsearch/` — database search engine (DBScanner, ScoredSpectraMap)
   - `msutil/` — spectrum utilities (SpecKey, SpecKeyResult, SpectrumMetadata)
-  - `mzid/` — `DirectPinWriter` + `DirectTSVWriter` (mzIdentML output removed; `MZIdentMLGen` retained only for `MzIDToTsv` legacy conversion tool)
+  - `mzid/` — `DirectPinWriter` + `DirectTSVWriter` (only writers retained; all mzIdentML classes + consumers deleted)
   - `mzml/` — mzML parser (StaxMzMLParser — streaming rewrite)
   - `parser/` — input file parsers (MgfSpectrumParser, etc.)
   - `ui/` — CLI entry points (MSGFPlus, MSGFDB)

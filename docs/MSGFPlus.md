@@ -17,7 +17,7 @@ Usage: java -Xmx3500M -jar MSGFPlus.jar
 
 [-decoy DecoyPrefix] (Prefix for decoy protein names; Default: XXX)
 
-[-o OutputFile (*.pin)] (Default: [SpectrumFileName].mzid)
+[-o OutputFile (*.pin)] (Default: [SpectrumFileName].pin)
 
 [-t PrecursorMassTolerance] (e.g. 2.5Da, 20ppm or 0.5Da,2.5Da; Default: 20ppm)
    Use a comma to define asymmetric values. 
@@ -177,7 +177,7 @@ Example command (low-precision spectra):
 - **-o OutputFile** (\*.pin or \*.tsv)
   - Filename where the output will be written.
   - Default output format is Percolator `.pin` (see `-outputFormat` below). mzIdentML (`.mzid`) output has been removed; MS-GF+ now feeds downstream Percolator pipelines directly via `.pin`.
-  - For backward compatibility, passing a path with `.mzid` extension is accepted — the extension is rewritten to `.pin` (or `.tsv`) at write time.
+  - The file extension must be `.pin` or `.tsv`. `.mzid` is no longer accepted (no backward-compatibility shim).
   - By default, the output file name is "\[SpectrumFileName\].pin".
 
 - **-outputFormat** (Default: pin)
@@ -330,10 +330,9 @@ Example command (low-precision spectra):
 
 MS-GF+ writes results as a Percolator `.pin` file by default (or TSV with `-outputFormat tsv`). The `.pin` feeds directly into Percolator or a Percolator-compatible rescorer such as OpenMS `PercolatorAdapter`, which produces the final FDR-controlled PSM list.
 
-**Note:** mzIdentML (`.mzid`) output has been removed. If you need `.mzid`:
+**Note:** mzIdentML (`.mzid`) output has been removed entirely, along with the legacy `MzIDToTsv` and `ScoringParamGen` tools that consumed it. If you need `.mzid`:
 - Run Percolator on the `.pin` and use its XML output, OR
-- Use an older MS-GF+ release (v2026.03.25 or earlier), OR
-- Convert a previously-generated `.mzid` to TSV with the `MzIDToTsv` utility (still shipped in the jar; see [MzIDToTsv](MzidToTsv.md)).
+- Use an older MS-GF+ release (v2026.03.25 or earlier).
 
 Each row in the `.pin` has the per-PSM Percolator-standard columns plus the MS-GF+-specific features below. All score semantics are preserved from the old mzid output; the data format is the only change:
 

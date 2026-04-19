@@ -64,7 +64,6 @@ public class TestDirectPinWriter {
         Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
 
         Assert.assertTrue("writePin() should be true when outputFormat=pin", params.writePin());
-        Assert.assertFalse("writeMzid() should always be false after mzid removal", params.writeMzid());
         Assert.assertFalse("writeTsv() should be false when outputFormat=pin", params.writeTsv());
     }
 

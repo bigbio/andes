@@ -17,9 +17,7 @@ Static HTML under `docs/` was replaced with these Markdown pages so they read we
 
 - [MS-GF+ usage](MSGFPlus.md) — [Change log](Changelog.md)
 - [MS-GF+ parameter files](https://github.com/MSGFPlus/msgfplus/tree/master/docs/ParameterFiles) (config examples on the upstream repo)
-- [MzIdentML → TSV](MzidToTsv.md)
 - [Suffix array builder (BuildSA)](BuildSA.md)
-- [Training scoring models (ScoringParamGen)](ScoringParamGen.md)
 - [Isobaric labelling: TMT / TMTpro / iTRAQ recipes](IsobaricLabeling.md)
 - [Troubleshooting & common errors](Troubleshooting.md)
 - [MS-GFDB (obsolete)](MS-GFDB.md)

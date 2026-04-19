@@ -44,6 +44,17 @@ public class MassCalibrator {
     private static final int MIN_CONFIDENT_PSMS = 200;
     /** SpecEValue threshold for "confident" pre-pass PSMs. Tight enough to exclude decoys. */
     private static final double MAX_SPEC_EVALUE = 1e-6;
+    /**
+     * Size-guard threshold in SpecKeys. Below this, skip the pre-pass entirely.
+     * SpecKey count is typically ~3× the spectrum count because charges 2-4 each get
+     * their own SpecKey. The 10_000 threshold means "skip on anything smaller than a
+     * ~3000-spectrum file" — too small to yield 200 confident PSMs reliably, and
+     * small enough that the pre-pass's Spectrum-state mutation side-effect (which
+     * would otherwise drift off-mode vs auto-mode results) is visible at unit-test
+     * scale. Real datasets (PXD001819 ~66K SpecKeys, Astral ~75K, TMT ~40K) are
+     * comfortably above this and run the calibrator as intended.
+     */
+    private static final int MIN_SPECKEYS_FOR_PREPASS = 10_000;
 
     private final SpectraAccessor specAcc;
     private final CompactSuffixArray sa;
@@ -108,16 +119,18 @@ public class MassCalibrator {
      * @return learned ppm shift, or 0.0 if the pre-pass had insufficient data
      */
     public double learnPrecursorShiftPpm(int ioIndex) {
-        // Cheap guard: on a file too small to possibly reach MIN_CONFIDENT_PSMS
-        // even if every sampled spectrum matched at 1e-6 SpecEValue, we skip the
-        // pre-pass entirely. Running the pre-pass calls preProcessSpectra() on a
-        // subset of shared Spectrum objects, which mutates their scored state and
-        // causes a tiny (~0.1%) PSM-list drift vs -precursorCal off when the main
-        // search later re-processes those same spectra. Skipping here preserves
-        // the -precursorCal off ≡ no-flag bit-identity invariant for small runs,
-        // which is the hard correctness gate. On large runs the guard is a no-op.
-        int minFeasibleSpecCount = MIN_CONFIDENT_PSMS * SAMPLING_STRIDE;
-        if (specKeyList == null || specKeyList.size() < minFeasibleSpecCount) {
+        // Cheap guard: skip the pre-pass entirely on small files. Running the
+        // pre-pass calls preProcessSpectra() on a subset of shared Spectrum
+        // objects, which mutates their scored state and causes a ~0.1% PSM-list
+        // drift vs -precursorCal off when the main search later re-processes
+        // those same spectra. This is the hard correctness gate.
+        //
+        // Threshold of 10_000 SpecKeys corresponds to ~3000-spectrum files, which
+        // is both (a) too small to reliably yield MIN_CONFIDENT_PSMS confident
+        // matches, and (b) small enough that the state-mutation side-effect is
+        // noticeable. Real datasets (PXD001819 ~66K, Astral ~75K, TMT ~40K) are
+        // comfortably above the threshold and run the calibrator as intended.
+        if (specKeyList == null || specKeyList.size() < MIN_SPECKEYS_FOR_PREPASS) {
             return 0.0;
         }
         List<Double> residuals = collectResiduals(ioIndex);

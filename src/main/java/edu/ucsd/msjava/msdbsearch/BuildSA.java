@@ -1,5 +1,10 @@
 package edu.ucsd.msjava.msdbsearch;
 
+import edu.ucsd.msjava.fragindex.FragmentIndex;
+import edu.ucsd.msjava.fragindex.FragmentIndexBuilder;
+import edu.ucsd.msjava.fragindex.SlabAssigner;
+import edu.ucsd.msjava.msutil.AminoAcidSet;
+import edu.ucsd.msjava.msutil.Enzyme;
 import edu.ucsd.msjava.ui.MSGFPlus;
 import org.apache.commons.io.FilenameUtils;
 
@@ -27,6 +32,7 @@ public class BuildSA {
         File outputDir = null;
         int mode = 2;
         String decoyProteinPrefix = MSGFPlus.DEFAULT_DECOY_PROTEIN_PREFIX;
+        boolean buildFragIndex = false;
 
         for (int i = 0; i < argv.length; i += 2) {
             if (!argv[i].startsWith("-") || i + 1 >= argv.length)
@@ -48,12 +54,19 @@ public class BuildSA {
                     printUsageAndExit("Invalid parameter: -tda " + argv[i + 1]);
             } else if (argv[i].equalsIgnoreCase("-decoy")) {
                 decoyProteinPrefix = argv[i + 1];
+            } else if (argv[i].equalsIgnoreCase("-buildFragIndex")) {
+                if (argv[i + 1].equals("1"))
+                    buildFragIndex = true;
+                else if (argv[i + 1].equals("0"))
+                    buildFragIndex = false;
+                else
+                    printUsageAndExit("Invalid parameter: -buildFragIndex " + argv[i + 1]);
             }
         }
         if (dbPath == null)
             printUsageAndExit("Database must be specified!");
 
-        buildSA(dbPath, outputDir, mode, decoyProteinPrefix);
+        buildSA(dbPath, outputDir, mode, decoyProteinPrefix, buildFragIndex);
     }
 
     /**
@@ -71,6 +84,7 @@ public class BuildSA {
         System.out.println("\t[-tda 0/1/2] (0: Target database only, 1: Concatenated target-decoy database only, 2: Both (Default))");
         System.out.println("\t[-o OutputDir] (Directory to save index files; default is the same as the input file)");
         System.out.println("\t[-decoy DecoyPrefix] (Prefix for decoy protein names; default is " + MSGFPlus.DEFAULT_DECOY_PROTEIN_PREFIX + ")");
+        System.out.println("\t[-buildFragIndex 0/1] (0: suffix array only (Default), 1: also build a DirectStore fragment index)");
         System.out.println();
         System.out.println("Documentation: https://github.com/MSGFPlus/msgfplus");
 
@@ -85,18 +99,77 @@ public class BuildSA {
      * @param decoyProteinPrefix
      */
     public static void buildSA(File dbPath, File outputDir, int mode, String decoyProteinPrefix) {
+        buildSA(dbPath, outputDir, mode, decoyProteinPrefix, false);
+    }
+
+    /**
+     * Index a directory with several FASTA files, or the specified FASTA file.
+     * When {@code buildFragIndex} is true, additionally construct a DirectStore
+     * fragment index from the target suffix array using default Phase 2
+     * parameters (Trypsin, minLen=6, maxLen=40, missedCleavages=2).
+     *
+     * @param dbPath
+     * @param outputDir
+     * @param mode
+     * @param decoyProteinPrefix
+     * @param buildFragIndex If true, build a fragment index after the suffix array.
+     */
+    public static void buildSA(File dbPath, File outputDir, int mode, String decoyProteinPrefix, boolean buildFragIndex) {
         if (dbPath.isDirectory()) {
             for (File f : dbPath.listFiles()) {
                 if (isFastaFile(f.getName())) {
                     buildSAFiles(f, outputDir, mode, decoyProteinPrefix);
+                    if (buildFragIndex) {
+                        buildFragmentIndex(f, outputDir);
+                    }
                 }
             }
         } else {
             if (isFastaFile(dbPath.getName())) {
                 buildSAFiles(dbPath, outputDir, mode, decoyProteinPrefix);
+                if (buildFragIndex) {
+                    buildFragmentIndex(dbPath, outputDir);
+                }
             }
         }
         System.out.println("Done");
+    }
+
+    /**
+     * Build a DirectStore fragment index for the given FASTA and log a
+     * one-line summary to stdout. Uses Phase 2 defaults: Trypsin,
+     * minLen=6, maxLen=40, missedCleavages=2, 50 Da slabs over 100-4000 Da,
+     * 1.0005 Da fragment bins.
+     *
+     * @param databaseFile the target FASTA file
+     * @param outputDir the output dir (may be null — resolves to the FASTA's parent)
+     */
+    static void buildFragmentIndex(File databaseFile, File outputDir) {
+        File resolvedOutputDir = outputDir != null
+                ? outputDir
+                : databaseFile.getAbsoluteFile().getParentFile();
+        File targetDBFile = new File(Paths.get(resolvedOutputDir.getPath(), databaseFile.getName()).toString());
+
+        CompactFastaSequence sequence = new CompactFastaSequence(targetDBFile.getPath());
+
+        Enzyme enzyme = Enzyme.TRYPSIN;
+        int minLen = 6;
+        int maxLen = 40;
+        int maxMissedCleavages = 2;
+        AminoAcidSet aaSet = AminoAcidSet.getStandardAminoAcidSet();
+        SlabAssigner slabAssigner = new SlabAssigner(100.0, 4000.0, 50.0, 0.0);
+        double fragmentBinWidthDa = 1.0005;
+
+        FragmentIndexBuilder builder = new FragmentIndexBuilder(aaSet, slabAssigner, fragmentBinWidthDa);
+        FragmentIndex index = builder.buildFromSuffixArray(sequence, enzyme, minLen, maxLen, maxMissedCleavages);
+
+        System.out.println(String.format(
+                "Fragment index built for %s: %d peptides across %d slabs (%.1f-%.1f Da)",
+                databaseFile.getName(),
+                index.totalPeptideEntries(),
+                index.numSlabs(),
+                slabAssigner.slabLowMass(0),
+                slabAssigner.slabHighMass(index.numSlabs() - 1)));
     }
 
     /**

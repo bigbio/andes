@@ -10,7 +10,8 @@ Static HTML under `docs/` was replaced with these Markdown pages so they read we
 ### Summary
 
 - MS-GF+ is an MS/MS database search tool that is sensitive (it identifies more peptides than other database search tools and as many peptides as spectral library search tools) and universal (works well for diverse types of spectra, different configurations of MS instruments and different experimental protocols).
-- MS-GF+ supports the HUPO PSI standard input (mzML) and output (mzIdentML).
+- Input: HUPO PSI standard mzML (also mzXML / MGF / MS2 / PKL).
+- Output: Percolator `.pin` (default, for rescoring) or TSV. **mzIdentML (`.mzid`) output has been removed as of the next release** — MS-GF+ now feeds downstream Percolator pipelines directly via `.pin`. See [Changelog](Changelog.md) for migration notes.
 
 ### Usage and help
 

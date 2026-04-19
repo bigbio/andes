@@ -51,31 +51,39 @@ public class TestDirectPinWriter {
     @Test
     public void pinOutputFormatFlagIsAccepted() throws URISyntaxException {
         ParamManager manager = buildParamManager();
-        String err = manager.getParameter("outputFormat").parse("3");
-        Assert.assertNull("parse('pin') should succeed but returned: " + err, err);
+        String err = manager.getParameter("outputFormat").parse("0");
+        Assert.assertNull("parse('pin'=0) should succeed but returned: " + err, err);
     }
 
     @Test
     public void writePinGetterReflectsOutputFormat() throws URISyntaxException {
         ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("outputFormat").parse("3"));
+        Assert.assertNull(manager.getParameter("outputFormat").parse("0"));
 
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
 
         Assert.assertTrue("writePin() should be true when outputFormat=pin", params.writePin());
-        Assert.assertFalse("writeMzid() should be false when outputFormat=pin", params.writeMzid());
+        Assert.assertFalse("writeMzid() should always be false after mzid removal", params.writeMzid());
         Assert.assertFalse("writeTsv() should be false when outputFormat=pin", params.writeTsv());
     }
 
     @Test
     public void allOutputFormatEnumIndicesAreAccepted() throws URISyntaxException {
-        // Sanity guard that adding the "pin" (index 3) entry didn't shift any
-        // existing index. 0=mzid, 1=tsv, 2=both, 3=pin.
-        for (String value : new String[]{"0", "1", "2", "3"}) {
+        // After mzid removal, the valid outputFormat values are:
+        //   0 = pin (default)
+        //   1 = tsv
+        // Old values 2 (both) and 3 (pin under the previous layout) are rejected.
+        for (String value : new String[]{"0", "1"}) {
             ParamManager manager = buildParamManager();
             String err = manager.getParameter("outputFormat").parse(value);
             Assert.assertNull("parse('" + value + "') should succeed but returned: " + err, err);
+        }
+        // Regression gate: old "mzid" / "both" indices (2, 3) must be rejected.
+        for (String value : new String[]{"2", "3"}) {
+            ParamManager manager = buildParamManager();
+            String err = manager.getParameter("outputFormat").parse(value);
+            Assert.assertNotNull("parse('" + value + "') should FAIL — mzid/both have been removed", err);
         }
     }
 
@@ -85,7 +93,7 @@ public class TestDirectPinWriter {
         // We don't need real matches; an empty resultList still produces the
         // header row, which is what we're testing.
         ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("outputFormat").parse("3"));
+        Assert.assertNull(manager.getParameter("outputFormat").parse("0"));
 
         SearchParams params = new SearchParams();
         Assert.assertNull(params.parse(manager));

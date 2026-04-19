@@ -13,7 +13,6 @@ import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.mzid.DirectPinWriter;
 import edu.ucsd.msjava.mzid.DirectTSVWriter;
-import edu.ucsd.msjava.mzid.MZIdentMLGen;
 import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.sequences.Constants;
@@ -551,12 +550,8 @@ public class MSGFPlus {
             System.out.println("TSV file: " + tsvFile.getPath());
         }
 
-        if (params.writeMzid()) {
-            MZIdentMLGen mzidGen = new MZIdentMLGen(params, aaSet, sa, specAcc, ioIndex);
-            mzidGen.addSpectrumIdentificationResults(resultList);
-            mzidGen.writeResults(outputFile);
-            System.out.println("File: " + outputFile.getPath());
-        }
+        // mzid export removed: MS-GF+ output feeds Percolator via the .pin
+        // format. See PR describing the removal for historical mzid support.
 
         if (params.writePin()) {
             File pinFile = new File(outputFile.getPath().replaceAll("\\.mzid$", ".pin"));

@@ -75,7 +75,7 @@ public class TestFragmentIndexRunMSGFPlusWiring {
         PrintStream originalOut = System.out;
         ByteArrayOutputStream captured = new ByteArrayOutputStream();
         try {
-            File outFile = new File(workDir.toFile(), "off.mzid");
+            File outFile = new File(workDir.toFile(), "off.pin");
             ParamManager manager = buildParamManager(outFile);
             Assert.assertNull(manager.getParameter("useFragmentIndex").parse("off"));
 
@@ -94,7 +94,7 @@ public class TestFragmentIndexRunMSGFPlusWiring {
             Assert.assertFalse(
                     "OFF mode must NOT emit the 'Fragment index built' log line; saw:\n" + stdout,
                     stdout.contains("Fragment index built"));
-            Assert.assertTrue("off.mzid must exist", outFile.exists());
+            Assert.assertTrue("off.pin must exist", outFile.exists());
         } finally {
             System.setOut(originalOut);
             deleteRecursively(workDir.toFile());

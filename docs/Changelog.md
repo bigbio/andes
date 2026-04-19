@@ -2,6 +2,17 @@
 
 [MS-GF+ Documentation home](README.md)
 
+**vNEXT — Unreleased (breaking change)**
+
+- **BREAKING:** Removed mzIdentML (`.mzid`) output format. MS-GF+ now feeds directly into Percolator via the `.pin` format, which is the expected downstream pipeline. Users who previously relied on `.mzid` output should:
+  - Switch to `-outputFormat pin` (the new default) and process the `.pin` with Percolator.
+  - Or use `-outputFormat tsv` for a simple tabular summary.
+  - Or use an older release (v2026.03.25 or earlier) if legacy `.mzid` output is strictly required.
+- `-outputFormat` enum values changed: `0=pin` (new default), `1=tsv`. The previous `0=mzid`, `2=both`, `3=pin` layout is retired. Integer `2` and `3` are now rejected.
+- Added precursor mass calibration: `-precursorCal auto|on|off` (default `auto`). Merged via PR #22.
+- Added experimental fragment-index-based Tier-1 search: `-useFragmentIndex off|on|compare` (default `off`). Off path is bit-identical to the SA-walk baseline; on path is experimental and not yet recommended for production use.
+- Added Percolator `.pin` output with OpenMS-parity features (`enzN`, `enzC`, `enzInt`, `mass`, `lnDeltaSpecEValue`, `matchedIonRatio`) and lowercase renames (`peplen`, `charge2/3/4`, `dm`, `absdm`, `isotope_error`) for OpenMS `PercolatorAdapter` interoperability. Merged via PR #22.
+
 **v2026.03.25**
 
 - Add EnzymeID 10: TrypPlusC (cleave after K, R, or C)

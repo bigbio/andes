@@ -113,7 +113,7 @@ public class SearchParams {
     private boolean allowDenseCentroidedPeaks;
     private int minMSLevel;
     private int maxMSLevel;
-    private int outputFormat; // 0=mzid, 1=tsv, 2=both
+    private int outputFormat; // 0=pin (default), 1=tsv — mzid output removed
     private PrecursorCalMode precursorCalMode = PrecursorCalMode.AUTO;
     private FragmentIndexMode fragmentIndexMode = FragmentIndexMode.OFF;
 
@@ -315,21 +315,22 @@ public class SearchParams {
         return maxMSLevel;
     }
 
-    /** 0=mzid, 1=tsv, 2=both */
+    /** 0=pin (default), 1=tsv. mzid output removed in favour of Percolator pipeline. */
     public int getOutputFormat() {
         return outputFormat;
     }
 
+    /** Retained for API compatibility; always returns false after mzid removal. */
     public boolean writeMzid() {
-        return outputFormat == 0 || outputFormat == 2;
+        return false;
     }
 
     public boolean writeTsv() {
-        return outputFormat == 1 || outputFormat == 2;
+        return outputFormat == 1;
     }
 
     public boolean writePin() {
-        return outputFormat == 3;
+        return outputFormat == 0;
     }
 
     /**

@@ -45,7 +45,16 @@ public final class FragmentIndexCandidateGenerator {
      * fingerprint halves) required for a peptide to survive the Tier-1a
      * pre-filter. Hardcoded for now; a CLI flag may come later.
      */
-    public static final int FP_THRESHOLD = 0;  // TEMP: diagnose recall — skip pre-filter entirely
+    /**
+     * Minimum Hamming overlap between spectrum fingerprint and peptide fingerprint
+     * (popcount of bitwise AND over the two 64-bit halves) required for a peptide
+     * to survive the Tier-1a pre-filter. The design doc's projection was 8; the
+     * architecture-review agent (2026-04-19) recommended starting at 3-4 to
+     * protect recall while still providing 50-500× pruning. FP_THRESHOLD=0 was a
+     * diagnostic setting that disabled the pre-filter entirely — never ship that
+     * to users, it makes Step 3 a no-op and balloons wall time.
+     */
+    public static final int FP_THRESHOLD = 4;
 
     /** Number of highest-intensity peaks used to build the spectrum fingerprint. */
     private static final int FINGERPRINT_TOP_PEAKS = 20;

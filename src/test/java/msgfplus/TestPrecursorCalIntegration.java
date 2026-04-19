@@ -74,14 +74,14 @@ public class TestPrecursorCalIntegration {
     public void precursorCalOffMatchesBaseline() throws Exception {
         Path workDir = Files.createTempDirectory("msgfplus-p2cal-integration-");
         try {
-            File offOut = new File(workDir.toFile(), "off.mzid");
-            File baselineOut = new File(workDir.toFile(), "baseline.mzid");
+            File offOut = new File(workDir.toFile(), "off.pin");
+            File baselineOut = new File(workDir.toFile(), "baseline.pin");
 
             ParamManager offManager = buildParamManager(offOut);
             Assert.assertNull(offManager.getParameter("precursorCal").parse("off"));
             String offErr = MSGFPlus.runMSGFPlus(offManager);
             Assert.assertNull("runMSGFPlus(off) failed: " + offErr, offErr);
-            Assert.assertTrue("off.mzid must exist", offOut.exists());
+            Assert.assertTrue("off.pin must exist", offOut.exists());
 
             ParamManager baselineManager = buildParamManager(baselineOut);
             // No -precursorCal flag: picks up the default (AUTO). On the tiny
@@ -89,7 +89,7 @@ public class TestPrecursorCalIntegration {
             // PSMs (<200), so it returns 0.0 and the fast path kicks in.
             String baseErr = MSGFPlus.runMSGFPlus(baselineManager);
             Assert.assertNull("runMSGFPlus(baseline) failed: " + baseErr, baseErr);
-            Assert.assertTrue("baseline.mzid must exist", baselineOut.exists());
+            Assert.assertTrue("baseline.pin must exist", baselineOut.exists());
 
             List<String> offPsms = extractPsmItems(offOut);
             List<String> basePsms = extractPsmItems(baselineOut);
@@ -117,8 +117,8 @@ public class TestPrecursorCalIntegration {
     public void precursorCalOffIsDeterministic() throws Exception {
         Path workDir = Files.createTempDirectory("msgfplus-p2cal-determinism-");
         try {
-            File firstOut = new File(workDir.toFile(), "first.mzid");
-            File secondOut = new File(workDir.toFile(), "second.mzid");
+            File firstOut = new File(workDir.toFile(), "first.pin");
+            File secondOut = new File(workDir.toFile(), "second.pin");
 
             ParamManager firstManager = buildParamManager(firstOut);
             Assert.assertNull(firstManager.getParameter("precursorCal").parse("off"));
@@ -151,7 +151,7 @@ public class TestPrecursorCalIntegration {
     public void insufficientPsmsLeavesShiftAtZero() throws Exception {
         Path workDir = Files.createTempDirectory("msgfplus-p2cal-auto-");
         try {
-            File autoOut = new File(workDir.toFile(), "auto.mzid");
+            File autoOut = new File(workDir.toFile(), "auto.pin");
             ParamManager manager = buildParamManager(autoOut);
             // Leave -precursorCal at default (AUTO). The pre-pass will run
             // but should not collect enough confident PSMs.
@@ -167,7 +167,7 @@ public class TestPrecursorCalIntegration {
             // precursorCalOffMatchesBaseline: if auto DID apply a non-zero
             // shift, the baseline output would differ from off and that
             // test would fail.
-            Assert.assertTrue("auto.mzid must exist", autoOut.exists());
+            Assert.assertTrue("auto.pin must exist", autoOut.exists());
 
             // Additionally confirm the DBSearchIOFiles default via a fresh
             // construction (defensive regression for the field initialiser).

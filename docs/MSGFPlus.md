@@ -17,7 +17,7 @@ Usage: java -Xmx3500M -jar MSGFPlus.jar
 
 [-decoy DecoyPrefix] (Prefix for decoy protein names; Default: XXX)
 
-[-o OutputFile (*.mzid)] (Default: [SpectrumFileName].mzid)
+[-o OutputFile (*.pin)] (Default: [SpectrumFileName].mzid)
 
 [-t PrecursorMassTolerance] (e.g. 2.5Da, 20ppm or 0.5Da,2.5Da; Default: 20ppm)
    Use a comma to define asymmetric values. 
@@ -138,11 +138,11 @@ Example command (using a parameter file):
 
 Example command (high-precision spectra, using arguments):
 
-`java -Xmx3500M -jar MSGFPlus.jar -s Dataset.mzML -d IPI_human_3.79.fasta -inst 1 -t 20ppm -ti -1,2 -ntt 2 -tda 1 -o PSMs.mzid`
+`java -Xmx3500M -jar MSGFPlus.jar -s Dataset.mzML -d IPI_human_3.79.fasta -inst 1 -t 20ppm -ti -1,2 -ntt 2 -tda 1 -o PSMs.pin`
 
 Example command (low-precision spectra):
 
-`java -Xmx3500M -jar MSGFPlus.jar -s Dataset.mzML -d IPI_human_3.79.fasta -inst 0 -t 0.5Da,2.5Da -ntt 2 -tda 1 -o PSMs.mzid`
+`java -Xmx3500M -jar MSGFPlus.jar -s Dataset.mzML -d IPI_human_3.79.fasta -inst 0 -t 0.5Da,2.5Da -ntt 2 -tda 1 -o PSMs.pin`
 
 ### Parameters:
 
@@ -174,11 +174,16 @@ Example command (low-precision spectra):
 
 <!-- -->
 
-- **-o OutputFile** (\*.mzid)
-  - Filename where the output (mzIdentML 1.1 format) will be written.
-  - File extension must be "mzid" (case sensitive).
-  - By default, the output file name will be "\[SpectrumFileName\].mzid".
-  - E.g. for the input spectrum file "test.mzML", the output will be written to "test.mzid" if this parameter is not specified.
+- **-o OutputFile** (\*.pin or \*.tsv)
+  - Filename where the output will be written.
+  - Default output format is Percolator `.pin` (see `-outputFormat` below). mzIdentML (`.mzid`) output has been removed; MS-GF+ now feeds downstream Percolator pipelines directly via `.pin`.
+  - For backward compatibility, passing a path with `.mzid` extension is accepted — the extension is rewritten to `.pin` (or `.tsv`) at write time.
+  - By default, the output file name is "\[SpectrumFileName\].pin".
+
+- **-outputFormat** (Default: pin)
+  - `pin` — Percolator `.pin` format (default; feeds into Percolator for rescoring).
+  - `tsv` — tab-separated values (compatible with OpenMS `MSGFPlusAdapter`).
+  - Integer aliases: `0` → pin, `1` → tsv. Older values `2` (both) and `3` (pin, when mzid was `0`) are no longer accepted.
 
 - **-t PrecursorMassTolerance** (Default: 20ppm)
   - Precursor mass tolerance in Da. or ppm. There must be no space between the number and the unit. E.g. `2.5Da` or `20ppm`
@@ -323,38 +328,25 @@ Example command (low-precision spectra):
 
 ### MS-GF+ output
 
-MS-GF+ outputs results as an mzIdentML (version 1.1) file. See <http://www.psidev.info/mzidentml/> for details on the mzIdentML format. For every PSM, MS-GF+ reports the following scores:
+MS-GF+ writes results as a Percolator `.pin` file by default (or TSV with `-outputFormat tsv`). The `.pin` feeds directly into Percolator or a Percolator-compatible rescorer such as OpenMS `PercolatorAdapter`, which produces the final FDR-controlled PSM list.
 
-- **MS-GF:RawScore**: MS-GF+ raw score of the peptide-spectrum match
-- **MS-GF:DeNovoScore:** the score of the optimal scoring peptide for the spectrum (not necessary in the database) (MS-GF:RawScore \<= MS-GF:DeNovoScore)
-- **MS-GF:SpecEValue**: spectral E-value (spectrum level E-value) of the peptide-spectrum match - the lower the better
-- **MS-GF:EValue**: database level E-value (expected number of peptides in a random database having equal or better scores than the PSM score) - the lower the better
-- **MS-GF:QValue**
-  - PSM-level Q-value estimated using the target-decoy approach.
-  - MS-GF:QValue is computed solely based on MS-GF:SpecEValue.
-- **MS-GF:PepQValue**
-  - Peptide-level Q-value estimated using the target-decoy approach.
-  - Reported only if "-tda 1" is specified.
-  - If multiple spectra are matched to the same peptide, only the best scoring PSM (lowest SpecProb) is retained.  
-    After that, MS-GF:PepQValue is calculated as \#DecoyPSMs\>s / \#TargetPSMs\>s among the retained PSMs.  
-    This approximates the Q-value of the set of unique peptides.
-  - In the MS-GF+ output, the same PepQValue value is given to all PSMs sharing the peptide.
-    - Thus, even a low-quality PSM may get a low PepQValue (if it has a high-quality "sibling" PSM sharing the peptide).
-    - Note that this should not be used to count the number of identified PSMs.
+**Note:** mzIdentML (`.mzid`) output has been removed. If you need `.mzid`:
+- Run Percolator on the `.pin` and use its XML output, OR
+- Use an older MS-GF+ release (v2026.03.25 or earlier), OR
+- Convert a previously-generated `.mzid` to TSV with the `MzIDToTsv` utility (still shipped in the jar; see [MzIDToTsv](MzidToTsv.md)).
 
-### MS-GF+ output example
+Each row in the `.pin` has the per-PSM Percolator-standard columns plus the MS-GF+-specific features below. All score semantics are preserved from the old mzid output; the data format is the only change:
 
-Shown below is a sample of the MS-GF+ output in table form, as extracted from a simple MzIdentML file: [test.mzid](examples/test.mzid)
+- **RawScore**: MS-GF+ raw score of the peptide-spectrum match
+- **DeNovoScore**: score of the optimal scoring peptide for the spectrum (not necessarily in the database); `RawScore ≤ DeNovoScore`
+- **lnSpecEValue**: natural log of spectral E-value (spectrum level; lower = better)
+- **lnEValue**: natural log of database E-value
+- **lnDeltaSpecEValue**: log-ratio of rank-1 vs rank-2 SpecEValue (new in the mzid-removal release)
+- **matchedIonRatio**: fraction of main ions matched, normalised by peptide length
+- **enzN, enzC, enzInt**: OpenMS `PercolatorAdapter`-compatible enzymatic cleavage features
+- Standard Percolator columns: `SpecId`, `Label` (1=target, -1=decoy), `ScanNr`, `ExpMass`, `CalcMass`, `charge2/3/4`, `peplen`, `dm`, `absdm`, `isotope_error`, plus the `Peptide` / `Proteins` columns at the end.
 
-There are two options for converting an MS-GF+ output file (**.mzid**) into a tab-separated file (**.tsv**).
-
-1.  The MzIDToTsv utility built into MSGFPlus.jar (see the [MzIDToTsv](MzidToTsv.md) page)
-    - Easy to access (though syntax is a bit tricky)
-    - Can be slow for large .mzid files
-2.  The Mzid-To-Tsv-Converter standalone application, [available on GitHub](https://github.com/PNNL-Comp-Mass-Spec/Mzid-To-Tsv-Converter/releases)
-    - Fast conversion
-    - Handles large .mzid files
-    - Runs natively on Windows, but requires mono to use on Linux
+FDR (PSM-level QValue, PepQValue) is produced downstream by Percolator, not by MS-GF+ itself.
 
 
 | \#SpecFile | SpecID | ScanNum | FragMethod | Precursor | IsotopeError | PrecursorError(ppm) | Charge | Peptide | Protein | DeNovoScore | MSGFScore | SpecEValue | EValue | QValue | PepQValue |

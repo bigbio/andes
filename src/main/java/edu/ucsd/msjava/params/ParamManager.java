@@ -171,10 +171,9 @@ public class ParamManager {
                 "0 means Report total progress only\n" +
                         "\t   1 means Report total and per-thread progress/status"),
 
-        OUTPUT_FORMAT("outputFormat", "OutputFormat", "Output format for search results; Default: mzid",
-                "mzid: Write mzIdentML (default, compatible with all downstream tools)\n" +
-                        "\t   tsv: Write TSV directly (faster, smaller files, compatible with OpenMS MSGFPlusAdapter)\n" +
-                        "\t   both: Write both mzid and tsv"),
+        OUTPUT_FORMAT("outputFormat", "OutputFormat", "Output format for search results; Default: pin",
+                "pin: Write Percolator .pin format directly (default; feeds into Percolator for rescoring)\n" +
+                        "\t   tsv: Write TSV directly (faster, smaller files, compatible with OpenMS MSGFPlusAdapter)"),
 
         PRECURSOR_CAL("precursorCal", "PrecursorCal", "Precursor mass calibration mode; Default: auto",
                 "auto: Run a quick pre-pass and apply a per-file ppm shift only when >= 200 confident PSMs are collected (default)\n" +
@@ -667,11 +666,12 @@ public class ParamManager {
     }
 
     private void addOutputFormatParam() {
+        // mzid output has been removed — MS-GF+ results feed into Percolator
+        // via the .pin format. Only pin (default) and tsv are supported now.
+        // Previous integer mappings 0=mzid, 2=both are no longer accepted.
         EnumParameter outputFormatParam = new EnumParameter(ParamNameEnum.OUTPUT_FORMAT);
-        outputFormatParam.registerEntry("mzid").setDefault();
+        outputFormatParam.registerEntry("pin").setDefault();
         outputFormatParam.registerEntry("tsv");
-        outputFormatParam.registerEntry("both");
-        outputFormatParam.registerEntry("pin");
         addParameter(outputFormatParam);
     }
 

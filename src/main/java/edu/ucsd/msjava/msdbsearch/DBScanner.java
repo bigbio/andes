@@ -1,8 +1,14 @@
 package edu.ucsd.msjava.msdbsearch;
 
+import edu.ucsd.msjava.fragindex.CandidateHit;
+import edu.ucsd.msjava.fragindex.FragmentIndex;
+import edu.ucsd.msjava.fragindex.FragmentIndexCandidateGenerator;
+import edu.ucsd.msjava.fragindex.PeptideTable;
 import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.msgf.*;
 import edu.ucsd.msjava.msscorer.NewRankScorer;
+import edu.ucsd.msjava.msscorer.NewScorerFactory;
+import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msscorer.SimpleDBSearchScorer;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.msutil.Modification.Location;
@@ -14,6 +20,14 @@ import java.util.*;
 import java.util.Map.Entry;
 
 public class DBScanner {
+
+    /**
+     * Tier-1 top-K cap handed to {@link FragmentIndexCandidateGenerator} when
+     * {@code fragmentIndexMode != OFF}. Phase V3 will tune this value; the
+     * constant is intentionally hard-coded here so that the dispatch path in
+     * {@link #dbSearchFragmentIndex} is purely mechanical.
+     */
+    private static final int TIER1_TOP_K = 10;
 
     private int minPeptideLength;
     private int maxPeptideLength;
@@ -37,6 +51,15 @@ public class DBScanner {
     // to scan the database partially
     // Input spectra
     private final ScoredSpectraMap specScanner;
+
+    // Phase 3 — fragment-index Tier-1 dispatch. When {@code fragmentIndex} is
+    // non-null AND {@code fragmentIndexMode != OFF}, {@link #dbSearch} early-
+    // returns into {@link #dbSearchFragmentIndex}. Otherwise the existing
+    // SA-walk body runs byte-identical to baseline — that is the correctness
+    // gate this commit preserves by construction.
+    private final FragmentIndex fragmentIndex;
+    private final SearchParams.FragmentIndexMode fragmentIndexMode;
+    private final FragmentIndexCandidateGenerator candidateGenerator;
 
     private int minDeNovoScore;
     private boolean ignoreNTermMetCleavage;
@@ -64,6 +87,37 @@ public class DBScanner {
             boolean ignoreNTermMetCleavage,
             int maxMissedCleavages
     ) {
+        this(specScanner, sa, enzyme, aaSet, numPeptidesPerSpec,
+                minPeptideLength, maxPeptideLength, maxNumVariantsPerPeptide,
+                minDeNovoScore, ignoreNTermMetCleavage, maxMissedCleavages,
+                null, SearchParams.FragmentIndexMode.OFF);
+    }
+
+    /**
+     * Phase-3 constructor: adds the fragment-index Tier-1 dispatch fields.
+     *
+     * <p>When {@code fragmentIndex == null} OR
+     * {@code fragmentIndexMode == OFF} (the defaults), {@link #dbSearch}
+     * executes the classic SA-walk body byte-identical to every build
+     * shipped before the fragment-index work. When both are set, the
+     * first line of {@link #dbSearch} dispatches to
+     * {@link #dbSearchFragmentIndex} and the SA-walk body is skipped.
+     */
+    public DBScanner(
+            ScoredSpectraMap specScanner,
+            CompactSuffixArray sa,
+            Enzyme enzyme,
+            AminoAcidSet aaSet,
+            int numPeptidesPerSpec,
+            int minPeptideLength,
+            int maxPeptideLength,
+            int maxNumVariantsPerPeptide,
+            int minDeNovoScore,
+            boolean ignoreNTermMetCleavage,
+            int maxMissedCleavages,
+            FragmentIndex fragmentIndex,
+            SearchParams.FragmentIndexMode fragmentIndexMode
+    ) {
         this.specScanner = specScanner;
         this.sa = sa;
         this.size = sa.getSize();
@@ -76,6 +130,16 @@ public class DBScanner {
         this.maxNumVariantsPerPeptide = maxNumVariantsPerPeptide;
         this.minDeNovoScore = minDeNovoScore;
         this.ignoreNTermMetCleavage = ignoreNTermMetCleavage;
+        this.fragmentIndex = fragmentIndex;
+        this.fragmentIndexMode = fragmentIndexMode == null
+                ? SearchParams.FragmentIndexMode.OFF
+                : fragmentIndexMode;
+        // Instantiate the generator only when we actually have an index AND
+        // the mode is not OFF — otherwise the OFF-path stays allocation-free.
+        this.candidateGenerator =
+                (fragmentIndex != null && this.fragmentIndexMode != SearchParams.FragmentIndexMode.OFF)
+                        ? new FragmentIndexCandidateGenerator(fragmentIndex)
+                        : null;
 
         // Initialize mass arrays for a faster search
         aaMass = new double[aaSet.getMaxResidue()];
@@ -183,6 +247,13 @@ public class DBScanner {
     }
 
     public void dbSearch(int numberOfAllowableNonEnzymaticTermini, int fromIndex, int toIndex, boolean verbose) {
+        if (fragmentIndex != null && fragmentIndexMode != SearchParams.FragmentIndexMode.OFF) {
+            dbSearchFragmentIndex(numberOfAllowableNonEnzymaticTermini, verbose);
+            return;
+        }
+        // === OFF-mode correctness gate: everything below is byte-identical
+        // to every MS-GF+ build shipped before the fragment-index work. Do
+        // not refactor, reorder, or otherwise touch this body. ===
         if (progress == null) {
             progress = new ProgressData();
         }
@@ -576,6 +647,161 @@ public class DBScanner {
             e.printStackTrace();
             System.exit(-1);
         }
+    }
+
+    /**
+     * Phase-3 fragment-index Tier-1 dispatch body. Only runs when
+     * {@code fragmentIndex != null} AND
+     * {@code fragmentIndexMode != OFF}. Produces the same
+     * {@code specKeyDBMatchMap} fill that the SA-walk builds, using Tier-1
+     * candidates from {@link FragmentIndexCandidateGenerator} and the
+     * identical Tier-2 scoring call ({@code scorer.getScore}) as the SA-walk
+     * at the canonical insertion site in {@link #dbSearch}.
+     *
+     * <p>Unmod peptides only in this commit — variable-mod enumeration into
+     * the index is Phase V5.
+     */
+    private void dbSearchFragmentIndex(int nnet, boolean verbose) {
+        if (progress == null) {
+            progress = new ProgressData();
+        }
+        // nnet (numberOfAllowableNonEnzymaticTermini) is currently unused by
+        // the fragment-index path: the SA walk uses it to prune enzymatic
+        // boundaries while scanning the suffix array, but the index already
+        // contains only peptides whose termini match the build-time enzyme.
+        // Suppress the unused-parameter warning without dropping the arg so
+        // the method signature matches the dispatch call site verbatim.
+        if (nnet < 0) {
+            return;
+        }
+
+        if (candidateGenerator == null || fragmentIndex == null) {
+            // Defensive: the dispatcher already checked, but keep this guard
+            // so a future caller that constructs the scanner differently
+            // can't fall through into a null-pointer surprise.
+            return;
+        }
+
+        Map<SpecKey, PriorityQueue<DatabaseMatch>> curSpecKeyDBMatchMap =
+                new HashMap<SpecKey, PriorityQueue<DatabaseMatch>>();
+
+        SpecDataType specDataType = specScanner.getSpecDataType();
+        InstrumentType instType = specDataType.getInstrumentType();
+        Protocol protocol = specDataType.getProtocol();
+
+        List<SpecKey> specKeyList = specScanner.getSpecKeyList();
+        int numSpecs = specKeyList.size();
+        int processed = 0;
+
+        for (SpecKey specKey : specKeyList) {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            processed++;
+            if (verbose && processed % 2000 == 0) {
+                output.print(threadName + ": Fragment-index Tier-1 progress... ");
+                output.format("%.1f%% complete\n", processed / (float) numSpecs * 100);
+            }
+            progress.report(processed, numSpecs);
+
+            int specIndex = specKey.getSpecIndex();
+            Spectrum spec = specScanner.getSpectraAccessor().getSpectrumBySpecIndex(specIndex);
+            if (spec == null) continue;
+            // NOTE: intentionally DO NOT call scorer.getScoredSpectrum(spec)
+            // here. That call mutates the shared Spectrum (peak filtering,
+            // rank assignment) and re-running it breaks the main-pass
+            // invariants — see CLAUDE.md "Pre-passes ... must not mutate
+            // shared state". Ranks were already set during
+            // specScanner.preProcessSpectra() in the caller's preamble.
+
+            // Resolve the NewRankScorer for this spectrum. Prefer the one the
+            // scorer map cached during preProcessSpectra; fall back to a fresh
+            // NewScorerFactory.get when storeRankScorer was off.
+            NewRankScorer rankScorer = specScanner.getRankScorer(specKey);
+            if (rankScorer == null) {
+                rankScorer = NewScorerFactory.get(
+                        spec.getActivationMethod(), instType, enzyme, protocol);
+            }
+
+            List<CandidateHit> hits =
+                    candidateGenerator.topKForSpectrum(spec, rankScorer, TIER1_TOP_K);
+            if (hits.isEmpty()) continue;
+
+            SimpleDBSearchScorer<NominalMass> scorer =
+                    specScanner.getSpecKeyScorerMap().get(specKey);
+            if (scorer == null) continue;
+
+            for (CandidateHit hit : hits) {
+                PeptideTable table = fragmentIndex.peptideTable(hit.slabId());
+                String pepSeq = table.sequence(hit.localPeptideId());
+                int pepLen = pepSeq.length();
+                if (pepLen < minPeptideLength || pepLen > maxPeptideLength) continue;
+
+                // Build prm[] and nominalPrm[] inline for the unmod peptide.
+                // Reusing CandidatePeptideGrid here would force us to replay
+                // the grid's N-term/C-term/mod machinery for a sequence we
+                // already know is unmod; the inline build is ~5 lines and
+                // mirrors the grid's cumulative-prefix-sum invariant.
+                double[] prm = new double[pepLen + 1];
+                int[] nominalPrm = new int[pepLen + 1];
+                boolean unknownResidue = false;
+                for (int i = 0; i < pepLen; i++) {
+                    char residue = pepSeq.charAt(i);
+                    if (residue < 0 || residue >= aaMass.length
+                            || aaMass[residue] < 0) {
+                        unknownResidue = true;
+                        break;
+                    }
+                    prm[i + 1] = prm[i] + aaMass[residue];
+                    nominalPrm[i + 1] = nominalPrm[i] + intAAMass[residue];
+                }
+                if (unknownResidue) continue;
+
+                float theoPeptideMass = (float) prm[pepLen];
+                int nominalPeptideMass = nominalPrm[pepLen];
+
+                int score = scorer.getScore(prm, nominalPrm, 1, pepLen + 1, 0);
+
+                PriorityQueue<DatabaseMatch> prevMatchQueue =
+                        curSpecKeyDBMatchMap.get(specKey);
+                if (prevMatchQueue == null) {
+                    prevMatchQueue = new PriorityQueue<DatabaseMatch>();
+                    curSpecKeyDBMatchMap.put(specKey, prevMatchQueue);
+                }
+
+                if (prevMatchQueue.size() < this.numPeptidesPerSpec
+                        || score == prevMatchQueue.peek().getScore()) {
+                    DatabaseMatch dbMatch = new DatabaseMatch(
+                            -1, (byte) (pepLen + 2), score,
+                            theoPeptideMass, nominalPeptideMass,
+                            specKey.getCharge(), pepSeq,
+                            scorer.getActivationMethodArr());
+                    prevMatchQueue.add(dbMatch);
+                } else if (prevMatchQueue.size() >= this.numPeptidesPerSpec) {
+                    int worstScore = prevMatchQueue.peek().getScore();
+                    if (score > worstScore) {
+                        List<DatabaseMatch> removed = new ArrayList<DatabaseMatch>();
+                        while (!prevMatchQueue.isEmpty()
+                                && prevMatchQueue.peek().getScore() == worstScore) {
+                            removed.add(prevMatchQueue.poll());
+                        }
+                        DatabaseMatch dbMatch = new DatabaseMatch(
+                                -1, (byte) (pepLen + 2), score,
+                                theoPeptideMass, nominalPeptideMass,
+                                specKey.getCharge(), pepSeq,
+                                scorer.getActivationMethodArr());
+                        prevMatchQueue.add(dbMatch);
+
+                        if (prevMatchQueue.size() < this.numPeptidesPerSpec) {
+                            for (DatabaseMatch m : removed)
+                                prevMatchQueue.add(m);
+                        }
+                    }
+                }
+            }
+        }
+
+        this.addDBMatches(curSpecKeyDBMatchMap);
     }
 
     public void computeSpecEValue(boolean storeScoreDist) {

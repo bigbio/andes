@@ -8,6 +8,7 @@ import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msutil.AminoAcid;
 import edu.ucsd.msjava.msutil.AminoAcidSet;
 import edu.ucsd.msjava.msutil.Composition;
+import edu.ucsd.msjava.msutil.Enzyme;
 import edu.ucsd.msjava.msutil.Modification;
 import edu.ucsd.msjava.msutil.ModifiedAminoAcid;
 import edu.ucsd.msjava.msutil.Pair;
@@ -34,15 +35,22 @@ import java.util.SortedSet;
  * by Percolator (<a href="https://github.com/percolator/percolator">percolator</a>)
  * and downstream MS²Rescore / Mokapot pipelines.
  *
- * <p>Column layout (tab-separated, header on first line):
+ * <p>Column layout (tab-separated, header on first line) — matches the schema
+ * produced by OpenMS {@code PercolatorAdapter} so that downstream tools
+ * (Percolator itself, MS²Rescore, Mokapot) can consume either source
+ * interchangeably. Case-sensitive names {@code peplen}, {@code charge2..K},
+ * {@code dm}, {@code absdm}, {@code isotope_error} are required by
+ * {@code PercolatorInfile::load}'s regex parsing.
  * <pre>
- *   SpecId  Label  ScanNr  ExpMass  CalcMass
- *   RawScore  DeNovoScore  lnSpecEValue  lnEValue  IsotopeError
- *   PepLen  dM  absdM
- *   Charge2 … ChargeK          (one-hot over params.getMinCharge()..params.getMaxCharge())
+ *   SpecId  Label  ScanNr  ExpMass  CalcMass  mass
+ *   RawScore  DeNovoScore  lnSpecEValue  lnEValue  isotope_error
+ *   peplen  dm  absdm
+ *   charge2 … chargeK         (one-hot over params.getMinCharge()..params.getMaxCharge())
+ *   enzN  enzC  enzInt
  *   NumMatchedMainIons  ExplainedIonCurrentRatio  NTermIonCurrentRatio
  *   CTermIonCurrentRatio  MS2IonCurrent  IsolationWindowEfficiency
  *   MeanErrorTop7  StdevErrorTop7  MeanRelErrorTop7  StdevRelErrorTop7
+ *   lnDeltaSpecEValue  matchedIonRatio
  *   Peptide  Proteins
  * </pre>
  *
@@ -65,12 +73,21 @@ public class DirectPinWriter {
     private final String decoyProteinPrefix;
     private final Map<String, List<Double>> fixedModMasses;
 
-    /** Feature names surfaced in the pin, in stable order. */
+    /** Feature names sourced from {@code Match.getAdditionalFeatureList()}, in stable order. */
     private static final String[] PIN_FEATURES = {
             "NumMatchedMainIons",
             "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
             "MS2IonCurrent", "IsolationWindowEfficiency",
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7"
+    };
+
+    /**
+     * Extra PSM-level features computed here (not sourced from the match list):
+     *  - lnDeltaSpecEValue: log(rank1 SpecEValue / rank2 SpecEValue) for rank-1 PSMs; 0 otherwise.
+     *  - matchedIonRatio:   NumMatchedMainIons / PepLen.
+     */
+    private static final String[] PIN_EXTRA_FEATURES = {
+            "lnDeltaSpecEValue", "matchedIonRatio"
     };
 
     public DirectPinWriter(SearchParams params, AminoAcidSet aaSet,
@@ -104,6 +121,8 @@ public class DirectPinWriter {
                 int scanNum = spec.getScanNum();
                 float precursorMz = spec.getPrecursorPeak().getMz();
 
+                double rank2SpecEValue = findRank2SpecEValue(matchList, params.getMinDeNovoScore());
+
                 int rank = 0;
                 double prevSpecEValue = Double.NaN;
                 for (int i = matchList.size() - 1; i >= 0; --i) {
@@ -113,7 +132,8 @@ public class DirectPinWriter {
                     if (match.getSpecEValue() != prevSpecEValue) ++rank;
                     prevSpecEValue = match.getSpecEValue();
 
-                    writeRow(out, specID, scanNum, rank, precursorMz, match, minCharge, maxCharge);
+                    writeRow(out, specID, scanNum, rank, precursorMz, match, minCharge, maxCharge,
+                            rank2SpecEValue);
                 }
             }
         }
@@ -121,19 +141,25 @@ public class DirectPinWriter {
 
     private void writeHeader(PrintStream out, int minCharge, int maxCharge) {
         StringBuilder h = new StringBuilder(256);
-        h.append("SpecId\tLabel\tScanNr\tExpMass\tCalcMass")
-                .append("\tRawScore\tDeNovoScore\tlnSpecEValue\tlnEValue\tIsotopeError")
-                .append("\tPepLen\tdM\tabsdM");
+        // mass duplicates ExpMass for OpenMS PercolatorAdapter layout parity.
+        // Renamed columns (peplen/dm/absdm/isotope_error/chargeK) use the lowercase
+        // forms required by PercolatorInfile::load regex matching.
+        h.append("SpecId\tLabel\tScanNr\tExpMass\tCalcMass\tmass")
+                .append("\tRawScore\tDeNovoScore\tlnSpecEValue\tlnEValue\tisotope_error")
+                .append("\tpeplen\tdm\tabsdm");
         for (int c = minCharge; c <= maxCharge; c++) {
-            h.append("\tCharge").append(c);
+            h.append("\tcharge").append(c);
         }
+        h.append("\tenzN\tenzC\tenzInt");
         for (String f : PIN_FEATURES) h.append('\t').append(f);
+        for (String f : PIN_EXTRA_FEATURES) h.append('\t').append(f);
         h.append("\tPeptide\tProteins");
         out.println(h);
     }
 
     private void writeRow(PrintStream out, String specID, int scanNum, int rank,
-                          float precursorMz, DatabaseMatch match, int minCharge, int maxCharge) {
+                          float precursorMz, DatabaseMatch match, int minCharge, int maxCharge,
+                          double rank2SpecEValue) {
         int length = match.getLength();
         int charge = match.getCharge();
         float peptideMass = match.getPeptideMass();
@@ -158,12 +184,25 @@ public class DirectPinWriter {
         String psmId = specID + "_" + scanNum + "_" + rank;
         Map<String, String> features = collectFeatures(match);
 
+        // Enzymatic-boundary features (mirror OpenMS PercolatorInfile). Uses the
+        // pre/post flanking residues already resolved by formatProteinsForPin so
+        // we don't re-walk the suffix array.
+        String openMsEnz = openMsEnzymeName(params.getEnzyme());
+        String unmodPep = buildUnmodifiedPeptide(match.getPepSeq());
+        int enzN = isEnzymaticBoundary(proteins.pre,
+                unmodPep.isEmpty() ? '-' : unmodPep.charAt(0), openMsEnz) ? 1 : 0;
+        int enzC = isEnzymaticBoundary(unmodPep.isEmpty() ? '-' : unmodPep.charAt(unmodPep.length() - 1),
+                proteins.post, openMsEnz) ? 1 : 0;
+        int enzInt = countInternalEnzymatic(unmodPep, openMsEnz);
+
         StringBuilder row = new StringBuilder(512);
+        String expMassStr = formatDouble(expMass);
         row.append(psmId)
                 .append('\t').append(label)
                 .append('\t').append(scanNum)
-                .append('\t').append(formatDouble(expMass))
+                .append('\t').append(expMassStr)
                 .append('\t').append(formatDouble(theoMass))
+                .append('\t').append(expMassStr)               // mass — duplicate of ExpMass
                 .append('\t').append(match.getScore())
                 .append('\t').append(match.getDeNovoScore())
                 .append('\t').append(formatDouble(specEValue > 0 ? Math.log(specEValue) : -Double.MAX_VALUE))
@@ -175,10 +214,17 @@ public class DirectPinWriter {
         for (int c = minCharge; c <= maxCharge; c++) {
             row.append('\t').append(c == charge ? 1 : 0);
         }
+        row.append('\t').append(enzN)
+                .append('\t').append(enzC)
+                .append('\t').append(enzInt);
         for (String f : PIN_FEATURES) {
             String v = features.get(f);
-            row.append('\t').append(v == null || v.isEmpty() ? "0" : v);
+            row.append('\t').append(sanitizeFeatureValue(v));
         }
+        double lnDeltaSpecEValue = computeLnDeltaSpecEValue(rank, specEValue, rank2SpecEValue);
+        double matchedIonRatio = computeMatchedIonRatio(features.get("NumMatchedMainIons"), length);
+        row.append('\t').append(formatDouble(lnDeltaSpecEValue))
+                .append('\t').append(formatDouble(matchedIonRatio));
         // Peptide in Percolator "flanking.PEPTIDE.flanking" format.
         row.append('\t').append(proteins.pre).append('.').append(peptideSeq).append('.').append(proteins.post);
         for (String acc : proteins.accessions) row.append('\t').append(acc);
@@ -198,6 +244,173 @@ public class DirectPinWriter {
             for (Pair<String, String> p : featureList) m.put(p.getFirst(), p.getSecond());
         }
         return m;
+    }
+
+    /**
+     * Scans the match list (ordered worst-to-best like {@code writeResults}) and returns the
+     * SpecEValue of the rank-2 PSM: the first distinct SpecEValue encountered after the
+     * rank-1 value, skipping duplicates (ties share a rank) and matches below
+     * {@code minDeNovoScore}. Returns {@link Double#NaN} if no rank-2 exists.
+     */
+    public static double findRank2SpecEValue(List<DatabaseMatch> matchList, int minDeNovoScore) {
+        double rank1 = Double.NaN;
+        for (int i = matchList.size() - 1; i >= 0; --i) {
+            DatabaseMatch m = matchList.get(i);
+            if (m.getDeNovoScore() < minDeNovoScore) continue;
+            double se = m.getSpecEValue();
+            if (Double.isNaN(rank1)) {
+                rank1 = se;
+            } else if (se != rank1) {
+                return se;
+            }
+        }
+        return Double.NaN;
+    }
+
+    /**
+     * {@code log(rank1 SpecEValue / rank2 SpecEValue)} for rank-1 PSMs; {@code 0} otherwise
+     * or when either SpecEValue is non-positive / NaN. Larger (more negative) values mean
+     * the top hit is more separated from the next best, which Percolator / MS²Rescore /
+     * Mokapot can exploit for rescoring.
+     */
+    public static double computeLnDeltaSpecEValue(int rank, double rank1SpecEValue, double rank2SpecEValue) {
+        if (rank != 1) return 0.0;
+        if (Double.isNaN(rank1SpecEValue) || Double.isNaN(rank2SpecEValue)) return 0.0;
+        if (rank1SpecEValue <= 0 || rank2SpecEValue <= 0) return 0.0;
+        return Math.log(rank1SpecEValue / rank2SpecEValue);
+    }
+
+    /**
+     * Sanitizes a feature value coming from {@code Match.getAdditionalFeatureList()}.
+     * MS-GF+'s scorer can produce {@code NaN} / {@code Infinity} strings for
+     * statistics like {@code MeanErrorTop7} / {@code StdevErrorTop7} when a
+     * PSM has too few matched ions to compute variance. Percolator rejects
+     * non-finite feature values — we emit {@code "0"} for any such token,
+     * matching the zero-fill convention already used for missing features.
+     */
+    public static String sanitizeFeatureValue(String v) {
+        if (v == null || v.isEmpty()) return "0";
+        if (v.equalsIgnoreCase("NaN")) return "0";
+        if (v.equalsIgnoreCase("Infinity")) return "0";
+        if (v.equalsIgnoreCase("-Infinity")) return "0";
+        if (v.equalsIgnoreCase("Inf") || v.equalsIgnoreCase("-Inf")) return "0";
+        return v;
+    }
+
+    /** {@code NumMatchedMainIons / PepLen}: peptide-length-normalized ion-match density. */
+    public static double computeMatchedIonRatio(String numMatchedMainIons, int pepLen) {
+        if (pepLen <= 0) return 0.0;
+        if (numMatchedMainIons == null || numMatchedMainIons.isEmpty()) return 0.0;
+        try {
+            double n = Double.parseDouble(numMatchedMainIons);
+            return n / pepLen;
+        } catch (NumberFormatException e) {
+            return 0.0;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Enzymatic-boundary helpers (mirror OpenMS PercolatorInfile::isEnz_).
+    // -----------------------------------------------------------------------
+
+    /**
+     * Verbatim Java port of OpenMS
+     * {@code PercolatorInfile::isEnz_(const char& n, const char& c, const std::string& enz)}
+     * from {@code src/openms/source/FORMAT/PercolatorInfile.cpp}. Returns {@code true} when
+     * the boundary between residues {@code n} and {@code c} is consistent with the named
+     * enzyme's cleavage rule.
+     *
+     * <p>Protein-boundary flanking character {@code '-'} always counts as enzymatic. An
+     * unknown or empty enzyme name returns {@code true}, matching OpenMS's default "else"
+     * branch — Percolator treats unspecific-cleavage PSMs as "any site is allowed." A
+     * {@code null} enzyme name is treated as unknown.
+     */
+    public static boolean isEnzymaticBoundary(char n, char c, String openMsEnzName) {
+        if (openMsEnzName == null) return true;
+        switch (openMsEnzName) {
+            case "trypsin":
+                return ((n == 'K' || n == 'R') && c != 'P') || n == '-' || c == '-';
+            case "trypsinp":
+                return (n == 'K' || n == 'R') || n == '-' || c == '-';
+            case "chymotrypsin":
+                return ((n == 'F' || n == 'W' || n == 'Y' || n == 'L') && c != 'P') || n == '-' || c == '-';
+            case "thermolysin":
+                return ((c == 'A' || c == 'F' || c == 'I' || c == 'L' || c == 'M' || c == 'V'
+                        || (n == 'R' && c == 'G')) && n != 'D' && n != 'E') || n == '-' || c == '-';
+            case "proteinasek":
+                return (n == 'A' || n == 'E' || n == 'F' || n == 'I' || n == 'L' || n == 'T'
+                        || n == 'V' || n == 'W' || n == 'Y') || n == '-' || c == '-';
+            case "pepsin":
+                return ((c == 'F' || c == 'L' || c == 'W' || c == 'Y' || n == 'F' || n == 'L'
+                        || n == 'W' || n == 'Y') && n != 'R') || n == '-' || c == '-';
+            case "elastase":
+                return ((n == 'L' || n == 'V' || n == 'A' || n == 'G') && c != 'P') || n == '-' || c == '-';
+            case "lys-n":
+                return (c == 'K') || n == '-' || c == '-';
+            case "lys-c":
+                return ((n == 'K') && c != 'P') || n == '-' || c == '-';
+            case "arg-c":
+                return ((n == 'R') && c != 'P') || n == '-' || c == '-';
+            case "asp-n":
+                return (c == 'D') || n == '-' || c == '-';
+            case "glu-c":
+                return ((n == 'E') && (c != 'P')) || n == '-' || c == '-';
+            default:
+                return true;
+        }
+    }
+
+    /**
+     * Maps an MS-GF+ {@link Enzyme} singleton to the OpenMS enzyme-name string expected by
+     * {@link #isEnzymaticBoundary}. Mapping is by reference identity (the singletons are
+     * {@code public static final}), not by {@code getName()} — short names like "Tryp" vs
+     * "trypsin" differ between the two toolchains.
+     *
+     * <p>Unmapped, {@link Enzyme#UnspecificCleavage}, {@link Enzyme#NoCleavage},
+     * {@link Enzyme#ALP}, {@link Enzyme#TrypsinPlusC} and {@code null} all map to the empty
+     * string, which causes {@link #isEnzymaticBoundary} to fall through to OpenMS's default
+     * "any boundary is enzymatic" branch — the correct Percolator behaviour for
+     * unspecific-cleavage searches.
+     */
+    public static String openMsEnzymeName(Enzyme e) {
+        if (e == null) return "";
+        if (e == Enzyme.TRYPSIN) return "trypsin";
+        if (e == Enzyme.CHYMOTRYPSIN) return "chymotrypsin";
+        if (e == Enzyme.LysC) return "lys-c";
+        if (e == Enzyme.LysN) return "lys-n";
+        if (e == Enzyme.GluC) return "glu-c";
+        if (e == Enzyme.ArgC) return "arg-c";
+        if (e == Enzyme.AspN) return "asp-n";
+        // ALP, NoCleavage, TrypsinPlusC, UnspecificCleavage, and any custom enzyme fall
+        // through — OpenMS has no direct counterpart and defaults to "true" everywhere,
+        // which matches Percolator's unspecific-cleavage semantics.
+        return "";
+    }
+
+    /**
+     * Counts internal cleavage-consistent positions {@code i ∈ [1, peplen)} where
+     * {@code isEnz_(peptide[i-1], peptide[i], enz)} is {@code true}. Mirrors the counting
+     * loop OpenMS runs when filling the {@code enzInt} feature. For an unknown or empty
+     * enzyme, {@code isEnzymaticBoundary} returns {@code true} at every interior position,
+     * so this method returns {@code peplen - 1}.
+     */
+    public static int countInternalEnzymatic(String peptideUnmod, String openMsEnzName) {
+        if (peptideUnmod == null || peptideUnmod.length() < 2) return 0;
+        int count = 0;
+        for (int i = 1; i < peptideUnmod.length(); i++) {
+            if (isEnzymaticBoundary(peptideUnmod.charAt(i - 1), peptideUnmod.charAt(i), openMsEnzName)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Builds a plain (unmodified) residue string from a possibly-annotated MS-GF+ peptide sequence. */
+    private String buildUnmodifiedPeptide(String pepSeq) {
+        Peptide peptide = aaSet.getPeptide(pepSeq);
+        StringBuilder sb = new StringBuilder(peptide.size());
+        for (AminoAcid aa : peptide) sb.append(aa.getUnmodResidue());
+        return sb.toString();
     }
 
     // -----------------------------------------------------------------------

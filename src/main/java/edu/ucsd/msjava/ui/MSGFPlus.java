@@ -322,6 +322,41 @@ public class MSGFPlus {
 
         SpecDataType specDataType = new SpecDataType(activationMethod, instType, enzyme, protocol);
 
+        // Achievement B — two-pass precursor mass calibration (P2-cal).
+        // Runs a sampled pre-pass over the current file's SpecKeys to learn
+        // a per-file ppm shift, then stores it on DBSearchIOFiles so every
+        // task-local ScoredSpectraMap picks it up. OFF mode is a strict
+        // no-op: we skip the pre-pass entirely and never call the setter,
+        // so DBSearchIOFiles.precursorMassShiftPpm stays at its 0.0 default
+        // and ScoredSpectraMap.applyShift() takes its exact-zero fast path.
+        DBSearchIOFiles currentIoFiles = params.getDBSearchIOList().get(ioIndex);
+        if (params.getPrecursorCalMode() != SearchParams.PrecursorCalMode.OFF) {
+            long calStart = System.currentTimeMillis();
+            MassCalibrator calibrator = new MassCalibrator(
+                    specAcc,
+                    sa,
+                    aaSet,
+                    params,
+                    specKeyList,
+                    leftPrecursorMassTolerance,
+                    rightPrecursorMassTolerance,
+                    minIsotopeError,
+                    maxIsotopeError,
+                    specDataType);
+            double shiftPpm = calibrator.learnPrecursorShiftPpm(ioIndex);
+            boolean applyLearnedShift = shiftPpm != 0.0
+                    || params.getPrecursorCalMode() == SearchParams.PrecursorCalMode.ON;
+            if (applyLearnedShift) {
+                currentIoFiles.setPrecursorMassShiftPpm(shiftPpm);
+                System.out.printf("Precursor mass shift learned: %.3f ppm (elapsed: %.2f sec)%n",
+                        shiftPpm, (System.currentTimeMillis() - calStart) / 1000.0);
+            } else {
+                System.out.printf("Precursor mass calibration skipped (insufficient confident PSMs; elapsed: %.2f sec)%n",
+                        (System.currentTimeMillis() - calStart) / 1000.0);
+            }
+        }
+        double precursorMassShiftPpm = currentIoFiles.getPrecursorMassShiftPpm();
+
         List<MSGFPlusMatch> resultList = Collections.synchronizedList(new ArrayList<MSGFPlusMatch>());
 
         int toIndexGlobal = specSize;
@@ -398,7 +433,8 @@ public class MSGFPlus {
                         maxIsotopeError,
                         specDataType,
                         params.outputAdditionalFeatures(),
-                        false
+                        false,
+                        precursorMassShiftPpm
                 );
                 if (doNotUseEdgeScore)
                     specScanner.turnOffEdgeScoring();

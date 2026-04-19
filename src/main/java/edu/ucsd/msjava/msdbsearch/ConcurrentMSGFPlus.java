@@ -1,5 +1,6 @@
 package edu.ucsd.msjava.msdbsearch;
 
+import edu.ucsd.msjava.fragindex.FragmentIndex;
 import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.misc.ProgressReporter;
 
@@ -15,6 +16,11 @@ public class ConcurrentMSGFPlus {
         SearchParams params;
         List<MSGFPlusMatch> resultList;
         private final int taskNum;
+        // Phase 3 — fragment-index Tier-1 pre-filter. Carried here since commit
+        // 3.2 and consumed by the DBScanner tier wiring in commit 3.4. May be
+        // null when -useFragmentIndex is off; downstream code MUST null-check.
+        @SuppressWarnings("unused")
+        private final FragmentIndex fragmentIndex;
         private ProgressData progress;
 
         @Override
@@ -32,7 +38,8 @@ public class ConcurrentMSGFPlus {
                 CompactSuffixArray sa,
                 SearchParams params,
                 List<MSGFPlusMatch> resultList,
-                int taskNum
+                int taskNum,
+                FragmentIndex fragmentIndex
         ) {
             this.specScanner = specScanner;
             this.params = params;
@@ -51,6 +58,7 @@ public class ConcurrentMSGFPlus {
             );
             this.resultList = resultList;
             this.taskNum = taskNum;
+            this.fragmentIndex = fragmentIndex;
             progress = null;
         }
 

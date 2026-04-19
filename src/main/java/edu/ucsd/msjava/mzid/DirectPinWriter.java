@@ -219,7 +219,7 @@ public class DirectPinWriter {
                 .append('\t').append(enzInt);
         for (String f : PIN_FEATURES) {
             String v = features.get(f);
-            row.append('\t').append(v == null || v.isEmpty() ? "0" : v);
+            row.append('\t').append(sanitizeFeatureValue(v));
         }
         double lnDeltaSpecEValue = computeLnDeltaSpecEValue(rank, specEValue, rank2SpecEValue);
         double matchedIonRatio = computeMatchedIonRatio(features.get("NumMatchedMainIons"), length);
@@ -278,6 +278,23 @@ public class DirectPinWriter {
         if (Double.isNaN(rank1SpecEValue) || Double.isNaN(rank2SpecEValue)) return 0.0;
         if (rank1SpecEValue <= 0 || rank2SpecEValue <= 0) return 0.0;
         return Math.log(rank1SpecEValue / rank2SpecEValue);
+    }
+
+    /**
+     * Sanitizes a feature value coming from {@code Match.getAdditionalFeatureList()}.
+     * MS-GF+'s scorer can produce {@code NaN} / {@code Infinity} strings for
+     * statistics like {@code MeanErrorTop7} / {@code StdevErrorTop7} when a
+     * PSM has too few matched ions to compute variance. Percolator rejects
+     * non-finite feature values — we emit {@code "0"} for any such token,
+     * matching the zero-fill convention already used for missing features.
+     */
+    public static String sanitizeFeatureValue(String v) {
+        if (v == null || v.isEmpty()) return "0";
+        if (v.equalsIgnoreCase("NaN")) return "0";
+        if (v.equalsIgnoreCase("Infinity")) return "0";
+        if (v.equalsIgnoreCase("-Infinity")) return "0";
+        if (v.equalsIgnoreCase("Inf") || v.equalsIgnoreCase("-Inf")) return "0";
+        return v;
     }
 
     /** {@code NumMatchedMainIons / PepLen}: peptide-length-normalized ion-match density. */

@@ -298,6 +298,20 @@ public class TestDirectPinWriter {
     }
 
     @Test
+    public void sanitizeFeatureValueHandlesNaNAndInfinity() {
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue(null));
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue(""));
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue("NaN"));
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue("nan"));
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue("Infinity"));
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue("-Infinity"));
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue("Inf"));
+        Assert.assertEquals("0", DirectPinWriter.sanitizeFeatureValue("-Inf"));
+        Assert.assertEquals("1.5", DirectPinWriter.sanitizeFeatureValue("1.5"));
+        Assert.assertEquals("-0.003", DirectPinWriter.sanitizeFeatureValue("-0.003"));
+    }
+
+    @Test
     public void matchedIonRatioHandlesMissingOrInvalidInput() {
         Assert.assertEquals(0.0,
                 DirectPinWriter.computeMatchedIonRatio(null, 10), 0.0);

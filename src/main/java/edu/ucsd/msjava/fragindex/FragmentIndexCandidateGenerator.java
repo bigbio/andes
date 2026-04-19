@@ -1,10 +1,6 @@
 package edu.ucsd.msjava.fragindex;
 
-import edu.ucsd.msjava.msscorer.NewRankScorer;
-import edu.ucsd.msjava.msscorer.Partition;
-import edu.ucsd.msjava.msscorer.ScorerPartitionAccess;
 import edu.ucsd.msjava.msutil.Composition;
-import edu.ucsd.msjava.msutil.IonType;
 import edu.ucsd.msjava.msutil.Peak;
 import edu.ucsd.msjava.msutil.Spectrum;
 
@@ -79,28 +75,14 @@ public final class FragmentIndexCandidateGenerator {
      * <p>If the spectrum contains no peaks, or its precursor mass falls
      * outside the slab range, returns an empty list.
      */
-    public List<CandidateHit> topKForSpectrum(Spectrum spec,
-                                              NewRankScorer rankScorer,
-                                              int K) {
+    public List<CandidateHit> topKForSpectrum(Spectrum spec, int K) {
         if (K <= 0 || spec == null || spec.isEmpty()) {
             return new ArrayList<>();
         }
 
-        // --- Step 1: partition + ion types ------------------------------------
         int charge = spec.getCharge();
         float parentMass = spec.getPrecursorMass();
         if (charge <= 0 || parentMass <= 0f) return new ArrayList<>();
-
-        Partition part = ScorerPartitionAccess.lastSegmentPartition(rankScorer, charge, parentMass);
-        if (part == null) return new ArrayList<>();
-
-        IonType[] ions = rankScorer.getIonTypes(charge, parentMass, 0);
-        if (ions == null || ions.length < 2) {
-            // Parameter file doesn't distinguish b/y for this (charge, mass) — skip.
-            return new ArrayList<>();
-        }
-        IonType bIon = ions[0];
-        IonType yIon = ions[1];
 
         // --- Step 2: slab selection (single slab only) ------------------------
         double peptideMass = parentMass;    // spec.getPrecursorMass() returns the neutral mass
@@ -150,17 +132,23 @@ public final class FragmentIndexCandidateGenerator {
 
         if (fpSurvivors.isEmpty()) return new ArrayList<>();
 
-        // --- Step 4: bucket walk + NewRankSum accumulation --------------------
+        // --- Step 4: bucket walk + peak-rank-weighted hit accumulation --------
         // Zero the score buffer for the peptide range in use.
         for (int i = 0; i < n; i++) scoreAccum[i] = 0f;
 
-        final double halfMass = peptideMass * 0.5;
+        // Scoring function: top-ranked peaks contribute more. A peak at rank 1
+        // (highest intensity) scores ~1.0; rank 50 scores ~0.5. Rank 0 means
+        // unranked (setRanksOfPeaks not called) — treat as rank 1.
+        // This avoids the NewRankScorer partition-lookup path (which needs
+        // per-segment, per-ion data populated via the full ScoredSpectrum
+        // construction). Tier-2 re-scores via the existing SimpleDBSearchScorer
+        // in DBScanner, which carries the full partition / ion-type logic.
         for (Peak p : spec) {
             double mz = p.getMz();
             if (mz <= 0) continue;
             int bucket = (int) (mz / bw);
-            IonType ion = (mz < halfMass) ? bIon : yIon;
-            float s = rankScorer.getNodeScore(part, ion, p.getRank());
+            int rank = p.getRank() > 0 ? p.getRank() : 1;
+            float s = 1f / (1f + 0.02f * (rank - 1));   // rank 1 → 1.0, rank 50 → 0.5
             EliasFano.Cursor cur = slab.bucketCursor(bucket);
             while (cur.hasNext()) {
                 int pid = cur.next();

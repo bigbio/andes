@@ -104,7 +104,7 @@ public class TestFragmentIndexCandidateGenerator {
     public void topOneReturnsSingleCandidate() {
         Spectrum spec = buildSpectrumFor("PEPTIDER");
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 1);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 1);
         Assert.assertEquals("K=1 must return 1 hit", 1, hits.size());
     }
 
@@ -112,7 +112,7 @@ public class TestFragmentIndexCandidateGenerator {
     public void topOneIsThePeptideMatchingTheSpectrum() {
         Spectrum spec = buildSpectrumFor("PEPTIDER");
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 5);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 5);
         Assert.assertFalse("expected at least one hit", hits.isEmpty());
         CandidateHit top = hits.get(0);
         String seq = index.peptideTable(top.slabId()).sequence(top.localPeptideId());
@@ -125,7 +125,7 @@ public class TestFragmentIndexCandidateGenerator {
     public void scoresAreDescendingInOutputOrder() {
         Spectrum spec = buildSpectrumFor("PEPTIDER");
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 5);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 5);
         for (int i = 1; i < hits.size(); i++) {
             Assert.assertTrue(
                     "hits must be sorted by score descending: " + hits.get(i - 1).newRankSum()
@@ -143,7 +143,7 @@ public class TestFragmentIndexCandidateGenerator {
         // regardless of K.
         Spectrum spec = buildSpectrumFor("PEPTIDER");
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 100);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 100);
         Assert.assertFalse("must return at least one hit", hits.isEmpty());
         int slabId = hits.get(0).slabId();
         Assert.assertTrue(
@@ -161,7 +161,7 @@ public class TestFragmentIndexCandidateGenerator {
         // no peaks added; setRanksOfPeaks is a no-op on empty
         spec.setRanksOfPeaks();
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 5);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 5);
         Assert.assertTrue("empty spectrum must yield no candidates", hits.isEmpty());
     }
 
@@ -169,7 +169,7 @@ public class TestFragmentIndexCandidateGenerator {
     public void zeroKReturnsEmptyList() {
         Spectrum spec = buildSpectrumFor("PEPTIDER");
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 0);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 0);
         Assert.assertTrue(hits.isEmpty());
     }
 
@@ -179,7 +179,7 @@ public class TestFragmentIndexCandidateGenerator {
         // survives the FP pre-filter must score strictly lower than PEPTIDER.
         Spectrum spec = buildSpectrumFor("PEPTIDER");
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 100);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 100);
         Assert.assertFalse(hits.isEmpty());
         CandidateHit top = hits.get(0);
         Assert.assertEquals("PEPTIDER",
@@ -198,7 +198,7 @@ public class TestFragmentIndexCandidateGenerator {
     public void candidateResolvesToSequenceAndMassViaPeptideTable() {
         Spectrum spec = buildSpectrumFor("PEPTIDER");
         FragmentIndexCandidateGenerator gen = new FragmentIndexCandidateGenerator(index);
-        List<CandidateHit> hits = gen.topKForSpectrum(spec, rankScorer, 1);
+        List<CandidateHit> hits = gen.topKForSpectrum(spec, 1);
         Assert.assertEquals(1, hits.size());
         CandidateHit h = hits.get(0);
         PeptideTable table = index.peptideTable(h.slabId());

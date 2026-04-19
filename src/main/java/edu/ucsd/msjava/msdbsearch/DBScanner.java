@@ -724,7 +724,7 @@ public class DBScanner {
             }
 
             List<CandidateHit> hits =
-                    candidateGenerator.topKForSpectrum(spec, rankScorer, TIER1_TOP_K);
+                    candidateGenerator.topKForSpectrum(spec, TIER1_TOP_K);
             if (hits.isEmpty()) continue;
 
             SimpleDBSearchScorer<NominalMass> scorer =

@@ -723,8 +723,25 @@ public class DBScanner {
                         spec.getActivationMethod(), instType, enzyme, protocol);
             }
 
+            // Pass the search's precursor mass tolerance so the generator can
+            // filter out candidates that fall outside DBScanner.computeSpecEValue's
+            // mass window. With -ti a,b the TRUE peptide mass is
+            // parentMass - k * 1.00335 for k in [a, b], so a candidate's stored
+            // precursorMass must lie within:
+            //   [parentMass - b*1.00335 - tolRight, parentMass - a*1.00335 + tolLeft]
+            float parentMass = spec.getPrecursorMass();
+            float peptideMassApprox = parentMass - (float) Composition.H2O;
+            double tolLeftDa = specScanner.getLeftPrecursorMassTolerance()
+                    .getToleranceAsDa(peptideMassApprox);
+            double tolRightDa = specScanner.getRightPrecursorMassTolerance()
+                    .getToleranceAsDa(peptideMassApprox);
+            double isoShiftBelowDa = Math.max(specScanner.getMaxIsotopeError(), 0) * 1.00335;
+            double isoShiftAboveDa = Math.max(-specScanner.getMinIsotopeError(), 0) * 1.00335;
+            double tolMinus = tolRightDa + isoShiftBelowDa;    // how far BELOW parentMass a candidate may be
+            double tolPlus  = tolLeftDa  + isoShiftAboveDa;    // how far ABOVE parentMass
             List<CandidateHit> hits =
-                    candidateGenerator.topKForSpectrum(spec, TIER1_TOP_K);
+                    candidateGenerator.topKForSpectrum(
+                            spec, TIER1_TOP_K, tolMinus, tolPlus);
             if (hits.isEmpty()) continue;
 
             SimpleDBSearchScorer<NominalMass> scorer =

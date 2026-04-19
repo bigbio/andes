@@ -433,6 +433,24 @@ public class DirectPinWriter {
 
         boolean firstRealCaptured = false;
         for (int index : indices) {
+            // Fragment-index-derived matches carry index = -1 because they don't
+            // come from a suffix-array walk. Emit an "unknown-protein" annotation
+            // instead of crashing on seq.getByteAt(-1). The peptide sequence
+            // itself is still accurate; downstream FDR + rescoring use the
+            // sequence as the primary key, so the loss of protein-accession
+            // precision is acceptable for the Tier-1-derived matches.
+            if (index < 0) {
+                String accession = "unknown_protein";
+                if (!seen.add(accession)) continue;
+                res.accessions.add(accession);
+                if (!firstRealCaptured) {
+                    res.pre = '-';
+                    res.post = '-';
+                    res.allDecoy = false;
+                    firstRealCaptured = true;
+                }
+                continue;
+            }
             boolean isNTermMetCleaved = false;
             if (seq.getByteAt(index) == 0 && seq.getCharAt(index + 1) == 'M') {
                 Peptide peptide = aaSet.getPeptide(match.getPepSeq());

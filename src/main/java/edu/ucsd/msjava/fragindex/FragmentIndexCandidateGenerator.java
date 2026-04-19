@@ -45,7 +45,7 @@ public final class FragmentIndexCandidateGenerator {
      * fingerprint halves) required for a peptide to survive the Tier-1a
      * pre-filter. Hardcoded for now; a CLI flag may come later.
      */
-    public static final int FP_THRESHOLD = 4;
+    public static final int FP_THRESHOLD = 0;  // TEMP: diagnose recall — skip pre-filter entirely
 
     /** Number of highest-intensity peaks used to build the spectrum fingerprint. */
     private static final int FINGERPRINT_TOP_PEAKS = 20;
@@ -75,17 +75,44 @@ public final class FragmentIndexCandidateGenerator {
      * <p>If the spectrum contains no peaks, or its precursor mass falls
      * outside the slab range, returns an empty list.
      */
+    /**
+     * Same as {@link #topKForSpectrum(Spectrum, int)} but additionally filters
+     * candidate peptides to those whose stored precursor mass lies within
+     * {@code [parentMass - tolMinus, parentMass + tolPlus]} Da. This is
+     * essential for correctness: without the filter, slab-level candidate
+     * selection is far coarser than the search's ppm tolerance (50 Da slab
+     * vs 0.005 Da at 5 ppm), so the top-K returned would mostly fall outside
+     * the mass window expected by {@code DBScanner.computeSpecEValue}, which
+     * would then set {@code DeNovoScore = MIN_VALUE} and the PSM gets
+     * dropped by the pin writer.
+     *
+     * @param tolMinus how far below parentMass a candidate's stored
+     *                 precursor mass may fall (in Da, positive)
+     * @param tolPlus  how far above parentMass it may fall (in Da, positive)
+     */
+    public List<CandidateHit> topKForSpectrum(Spectrum spec, int K,
+                                              double tolMinus, double tolPlus) {
+        return topKForSpectrumImpl(spec, K, tolMinus, tolPlus);
+    }
+
     public List<CandidateHit> topKForSpectrum(Spectrum spec, int K) {
+        return topKForSpectrumImpl(spec, K, Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY);
+    }
+
+    private List<CandidateHit> topKForSpectrumImpl(Spectrum spec, int K,
+                                                   double tolMinus, double tolPlus) {
         if (K <= 0 || spec == null || spec.isEmpty()) {
             return new ArrayList<>();
         }
 
         int charge = spec.getCharge();
-        float parentMass = spec.getPrecursorMass();
+        float parentMass = spec.getPrecursorMass();    // neutral monoisotopic parent mass (peptide + H2O)
         if (charge <= 0 || parentMass <= 0f) return new ArrayList<>();
 
         // --- Step 2: slab selection (single slab only) ------------------------
-        double peptideMass = parentMass;    // spec.getPrecursorMass() returns the neutral mass
+        // FragmentIndexBuilder builds slabs on peptide mass = residue sum + H2O,
+        // matching spec.getPrecursorMass() semantics. Use parentMass directly.
+        double peptideMass = parentMass;
         int[] slabIds = index.slabAssigner().slabsFor(peptideMass);
         if (slabIds.length == 0) return new ArrayList<>();
         int slabId = slabIds[0];
@@ -96,17 +123,20 @@ public final class FragmentIndexCandidateGenerator {
         final double bw = index.fragmentBinWidthDa();
 
         // --- Step 3: fingerprint pre-filter -----------------------------------
+        // Ion mass relationship: b_i + y_{L-i} = parentMass + 2*PROTON
+        // So for a peak at mz, its complementary partner is (parentMass + 2*PROTON - mz).
+        // Set the b-bucket at mz, and the y-bucket at the partner mass so that
+        // a peak that could be either ion type sets both halves of the FP.
         Fingerprint128 specFp = new Fingerprint128();
-        // Collect up to FINGERPRINT_TOP_PEAKS peaks by intensity rank (rank 1 = highest).
         int limit = Math.min(FINGERPRINT_TOP_PEAKS, spec.size());
-        // Indices of peaks with rank <= limit.
+        final double partnerOffset = peptideMass + 2.0 * Composition.PROTON;
         for (Peak p : spec) {
             int r = p.getRank();
             if (r >= 1 && r <= limit) {
                 double mz = p.getMz();
                 if (mz <= 0) continue;
                 int bBucket = (int) (mz / bw);
-                double yMass = peptideMass + Composition.H2O - mz;
+                double yMass = partnerOffset - mz;
                 if (yMass <= 0) continue;
                 int yBucket = (int) (yMass / bw);
                 specFp.setBIonBucket(bBucket);
@@ -156,6 +186,26 @@ public final class FragmentIndexCandidateGenerator {
                 if (!fpSurvivors.get(pid)) continue;
                 scoreAccum[pid] += s;
             }
+        }
+
+        // --- Step 4b: mass-tolerance filter -----------------------------------
+        // Drop survivors whose stored precursor mass is outside the search's
+        // precursor tolerance window. This is the key correctness fix over v1:
+        // without it the top-K candidates are slab-wide (50 Da) but the
+        // downstream computeSpecEValue filter is ppm-wide (0.005 Da), so
+        // virtually none of the top-K would survive Tier-2.
+        if (!Double.isInfinite(tolMinus) || !Double.isInfinite(tolPlus)) {
+            PeptideTable pt = index.peptideTable(slabId);
+            double lo = peptideMass - tolMinus;
+            double hi = peptideMass + tolPlus;
+            for (int pid = fpSurvivors.nextSetBit(0); pid >= 0;
+                 pid = fpSurvivors.nextSetBit(pid + 1)) {
+                double pmass = pt.precursorMass(pid);
+                if (pmass < lo || pmass > hi) {
+                    fpSurvivors.clear(pid);
+                }
+            }
+            if (fpSurvivors.isEmpty()) return new ArrayList<>();
         }
 
         // --- Step 5: top-K extraction -----------------------------------------

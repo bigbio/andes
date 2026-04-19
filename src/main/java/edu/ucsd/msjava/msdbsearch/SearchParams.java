@@ -57,6 +57,24 @@ public class SearchParams {
         }
     }
 
+    /**
+     * Fragment-index Tier-1 search mode.
+     *
+     * <ul>
+     *     <li>{@link #OFF} (default) — disable the fragment-index Tier-1 pass
+     *         entirely. Behaviour is bit-identical to builds without the flag.</li>
+     *     <li>{@link #ON} — run the fragment-index Tier-1 pass and use its
+     *         candidate set for scoring.</li>
+     *     <li>{@link #COMPARE} — run the fragment-index Tier-1 pass alongside
+     *         the classic search and emit comparison diagnostics.</li>
+     * </ul>
+     */
+    public enum FragmentIndexMode {
+        OFF,
+        ON,
+        COMPARE
+    }
+
     private List<DBSearchIOFiles> dbSearchIOList;
     private File databaseFile;
     private String decoyProteinPrefix;
@@ -97,6 +115,7 @@ public class SearchParams {
     private int maxMSLevel;
     private int outputFormat; // 0=mzid, 1=tsv, 2=both
     private PrecursorCalMode precursorCalMode = PrecursorCalMode.AUTO;
+    private FragmentIndexMode fragmentIndexMode = FragmentIndexMode.OFF;
 
     public SearchParams() {
     }
@@ -107,6 +126,14 @@ public class SearchParams {
      */
     public PrecursorCalMode getPrecursorCalMode() {
         return precursorCalMode;
+    }
+
+    /**
+     * Returns the configured fragment-index Tier-1 mode; defaults to
+     * {@link FragmentIndexMode#OFF}.
+     */
+    public FragmentIndexMode getFragmentIndexMode() {
+        return fragmentIndexMode;
     }
 
     // Used by MS-GF+
@@ -497,6 +524,20 @@ public class SearchParams {
         allowDenseCentroidedPeaks = paramManager.getAllowDenseCentroidedPeaks() == 1;
         outputFormat = paramManager.getOutputFormat();
         precursorCalMode = PrecursorCalMode.fromString(paramManager.getPrecursorCalRawValue());
+
+        String fragIndexStr = paramManager.getUseFragmentIndexRawValue();
+        if (fragIndexStr != null) {
+            String normalized = fragIndexStr.trim().toLowerCase();
+            if (normalized.equals("off") || normalized.isEmpty()) {
+                fragmentIndexMode = FragmentIndexMode.OFF;
+            } else if (normalized.equals("on")) {
+                fragmentIndexMode = FragmentIndexMode.ON;
+            } else if (normalized.equals("compare")) {
+                fragmentIndexMode = FragmentIndexMode.COMPARE;
+            } else {
+                return "Invalid value for useFragmentIndex: " + fragIndexStr;
+            }
+        }
 
         IntRangeParameter msLevelParam = paramManager.getMSLevelParameter();
         minMSLevel = msLevelParam.getMin();

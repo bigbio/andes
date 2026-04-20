@@ -10,7 +10,7 @@
   - `-outputFormat` now accepts only `pin` (default) and `tsv`. Integer aliases: `0=pin, 1=tsv`. Previous `0=mzid, 2=both, 3=pin` layout is rejected.
   - `-o OutputFile` must end in `.pin` or `.tsv`. `.mzid` paths are rejected.
 - Added precursor mass calibration: `-precursorCal auto|on|off` (default `auto`). Merged via PR #22.
-- Added experimental fragment-index-based Tier-1 search: `-useFragmentIndex off|on|compare` (default `off`). Off path is bit-identical to the SA-walk baseline; on path is experimental and not yet recommended for production use.
+- Added experimental fragment-index-based Tier-1 search: `-useFragmentIndex off|on` (default `off`). Off path is bit-identical to the SA-walk baseline; on path is experimental and not yet recommended for production use.
 - Added Percolator `.pin` output with OpenMS-parity features (`enzN`, `enzC`, `enzInt`, `mass`, `lnDeltaSpecEValue`, `matchedIonRatio`) and lowercase renames (`peplen`, `charge2/3/4`, `dm`, `absdm`, `isotope_error`) for OpenMS `PercolatorAdapter` interoperability. Merged via PR #22.
 
 **v2026.03.25**

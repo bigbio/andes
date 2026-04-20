@@ -76,3 +76,7 @@ benchmark/*
 .codacy/
 
 .claude/investigations/msgfplus_research_report.md
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md

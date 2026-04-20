@@ -260,7 +260,8 @@ public class CandidatePeptideGrid {
                             nominalPRM[newIndex][k] = nominalPRM[parentIndex][k];
                             prm[newIndex][k] = prm[parentIndex][k];
                         }
-                        peptide[newIndex] = new StringBuffer(peptide[parentIndex].substring(0, length - 1));
+                        peptide[newIndex] = new StringBuffer(length);
+                        peptide[newIndex].append(peptide[parentIndex], 0, length - 1);
                         nominalPRM[newIndex][length] = nominalPRM[newIndex][length - 1] + aaNominalMassArr[j];
                         prm[newIndex][length] = prm[newIndex][length - 1] + aaMassArr[j];
                         numMods[newIndex][length] = numModParent + 1;

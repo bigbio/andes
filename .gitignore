@@ -80,3 +80,7 @@ benchmark/*
 
 #Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
+
+# Session-local state
+.claude/SESSION_STATUS.md
+.claude/scheduled_tasks.lock

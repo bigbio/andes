@@ -1,9 +1,6 @@
 package edu.ucsd.msjava.ui;
 
 import edu.ucsd.msjava.fdr.ComputeFDR;
-import edu.ucsd.msjava.fragindex.FragmentIndex;
-import edu.ucsd.msjava.fragindex.FragmentIndexBuilder;
-import edu.ucsd.msjava.fragindex.SlabAssigner;
 import edu.ucsd.msjava.misc.MSGFLogger;
 import edu.ucsd.msjava.misc.RunManifestWriter;
 import edu.ucsd.msjava.misc.ThreadPoolExecutorWithExceptions;
@@ -299,34 +296,6 @@ public class MSGFPlus {
         System.out.print("Reading spectra finished ");
         System.out.format("(elapsed time: %.2f sec)\n", (float) (System.currentTimeMillis() - startTime) / 1000);
 
-        // Phase 3 — fragment-index Tier-1 pre-filter build (not yet consumed).
-        // Built once per input FASTA when -useFragmentIndex is not off; the
-        // resulting index (or null) is threaded into every RunMSGFPlus worker.
-        // When mode is OFF this block is skipped entirely, keeping the legacy
-        // path bit-identical to HEAD.
-        FragmentIndex fragmentIndex = null;
-        if (params.getFragmentIndexMode() != SearchParams.FragmentIndexMode.OFF) {
-            System.out.println("Building fragment index for Tier-1 pre-filter...");
-            long fragIndexStart = System.currentTimeMillis();
-            AminoAcidSet fragIndexAaSet = params.getAASet(); // reuse main-search aaSet
-            SlabAssigner slabAssigner = new SlabAssigner(100.0, 4000.0, 50.0, 0.0);
-            double fragmentBinWidthDa = 1.0005;
-            FragmentIndexBuilder builder = new FragmentIndexBuilder(fragIndexAaSet, slabAssigner, fragmentBinWidthDa);
-            fragmentIndex = builder.buildFromSuffixArray(
-                    sa.getSequence(),
-                    params.getEnzyme(),
-                    params.getMinPeptideLength(),
-                    params.getMaxPeptideLength(),
-                    params.getMaxMissedCleavages());
-            long fragIndexMs = System.currentTimeMillis() - fragIndexStart;
-            System.out.println(String.format(
-                    "Fragment index built for %s: %d peptides across %d slabs (%.1fs).",
-                    databaseFile.getName(),
-                    fragmentIndex.totalPeptideEntries(),
-                    fragmentIndex.numSlabs(),
-                    fragIndexMs / 1000.0));
-        }
-
         if (numThreads <= 0)
             numThreads = 1;
 
@@ -474,8 +443,7 @@ public class MSGFPlus {
                         sa,
                         params,
                         resultList,
-                        i + 1,
-                        fragmentIndex
+                        i + 1
                 );
 
                 if (DISABLE_THREADING) {

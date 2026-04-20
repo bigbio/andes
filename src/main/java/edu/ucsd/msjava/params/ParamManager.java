@@ -178,12 +178,7 @@ public class ParamManager {
         PRECURSOR_CAL("precursorCal", "PrecursorCal", "Precursor mass calibration mode; Default: auto",
                 "auto: Run a quick pre-pass and apply a per-file ppm shift only when >= 200 confident PSMs are collected (default)\n" +
                         "\t   on:   Always apply the learned shift, even if fewer PSMs are collected\n" +
-                        "\t   off:  Skip calibration entirely (bit-identical to builds without the flag)"),
-
-        USE_FRAGMENT_INDEX("useFragmentIndex", "UseFragmentIndex", "Fragment-index-based Tier-1 search; Default: off",
-                "off:     Disable the fragment-index Tier-1 pass (default; bit-identical to builds without the flag)\n" +
-                        "\t   on:      Run the fragment-index Tier-1 pass and use its candidate set for scoring\n" +
-                        "\t   compare: Run the fragment-index Tier-1 pass alongside the classic search and emit comparison diagnostics");
+                        "\t   off:  Skip calibration entirely (bit-identical to builds without the flag)");
 
         private String key;
         private String name;
@@ -696,22 +691,6 @@ public class ParamManager {
         return param == null ? "auto" : param.value;
     }
 
-    private void addUseFragmentIndexParam() {
-        StringParameter useFragmentIndexParam = new StringParameter(ParamNameEnum.USE_FRAGMENT_INDEX);
-        useFragmentIndexParam.defaultValue("off");
-        addParameter(useFragmentIndexParam);
-    }
-
-    /**
-     * Returns the raw value of the {@code -useFragmentIndex} flag; one of
-     * {@code "off"}, {@code "on"}, or {@code "compare"} (case-insensitive).
-     * Use {@link SearchParams#getFragmentIndexMode()} for the parsed enum.
-     */
-    public String getUseFragmentIndexRawValue() {
-        StringParameter param = (StringParameter) getParameter(ParamNameEnum.USE_FRAGMENT_INDEX.key);
-        return param == null ? "off" : param.value;
-    }
-
     private void addChargeCarrierMassParam() {
         DoubleParameter chargeCarrierMassParam = new DoubleParameter(ParamNameEnum.CHARGE_CARRIER_MASSES);
         chargeCarrierMassParam.minValue(0.1);
@@ -877,7 +856,6 @@ public class ParamManager {
         addAddFeaturesParam();
         addOutputFormatParam();
         addPrecursorCalParam();
-        addUseFragmentIndexParam();
         addChargeCarrierMassParam();
         addMaxMissedCleavagesParam();
         addMaxNumModsParam();

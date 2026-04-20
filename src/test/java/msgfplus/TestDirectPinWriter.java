@@ -134,7 +134,8 @@ public class TestDirectPinWriter {
                 "peplen", "dm", "absdm",
                 "charge2", "charge3", "charge4",
                 "enzN", "enzC", "enzInt",
-                "NumMatchedMainIons", "ExplainedIonCurrentRatio",
+                "NumMatchedMainIons", "longest_b", "longest_y", "longest_y_pct",
+                "ExplainedIonCurrentRatio",
                 "lnDeltaSpecEValue", "matchedIonRatio",
                 "Peptide", "Proteins"}) {
             Assert.assertTrue("Pin header should contain " + required + ": " + header,
@@ -166,6 +167,20 @@ public class TestDirectPinWriter {
         Assert.assertTrue("enzInt should come after enzC", idxEnzInt > idxEnzC);
         Assert.assertTrue("NumMatchedMainIons should come after enzInt",
                 idxNumMatched > idxEnzInt);
+        // Ion-series run-length features must follow NumMatchedMainIons and precede
+        // the ExplainedIonCurrent* ratios (they're part of the ion-structure block).
+        int idxLongestB = header.indexOf("longest_b");
+        int idxLongestY = header.indexOf("longest_y\t"); // tab-anchor to avoid matching longest_y_pct
+        int idxLongestYPct = header.indexOf("longest_y_pct");
+        int idxEIC = header.indexOf("ExplainedIonCurrentRatio");
+        Assert.assertTrue("longest_b should come after NumMatchedMainIons",
+                idxLongestB > idxNumMatched);
+        Assert.assertTrue("longest_y should come after longest_b",
+                idxLongestY > idxLongestB);
+        Assert.assertTrue("longest_y_pct should come after longest_y",
+                idxLongestYPct > idxLongestY);
+        Assert.assertTrue("ExplainedIonCurrentRatio should come after longest_y_pct",
+                idxEIC > idxLongestYPct);
         // The two extra features must come after the match-list features and before Peptide.
         int idxLast = header.indexOf("StdevRelErrorTop7");
         int idxLnDelta = header.indexOf("lnDeltaSpecEValue");

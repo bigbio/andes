@@ -73,6 +73,7 @@ public class DirectTSVWriter {
             "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
             "MS2IonCurrent", "MS1IonCurrent", "IsolationWindowEfficiency",
             "NumMatchedMainIons",
+            "longest_b", "longest_y", "longest_y_pct",
             "MeanErrorAll", "StdevErrorAll", "MeanErrorTop7", "StdevErrorTop7",
             "MeanRelErrorAll", "StdevRelErrorAll", "MeanRelErrorTop7", "StdevRelErrorTop7"
     };

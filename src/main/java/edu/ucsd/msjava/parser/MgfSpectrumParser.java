@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Hashtable;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static edu.ucsd.msjava.misc.TextParsingUtils.isInteger;
 
@@ -15,6 +17,8 @@ import static edu.ucsd.msjava.misc.TextParsingUtils.isInteger;
  * @author sangtaekim
  */
 public class MgfSpectrumParser implements SpectrumParser {
+    private static final Pattern TITLE_SCAN_KEY_VALUE_PATTERN =
+            Pattern.compile("(?i)(?:^|[\\s;])(?:scan|scans|spectrum)=(\\d+)(?:\\b|$)");
 
     private long linesRead;
 
@@ -231,6 +235,9 @@ public class MgfSpectrumParser implements SpectrumParser {
                             int scanNum = Integer.parseInt(token[0].substring("Scan:".length()));
                             spec.setScanNum(scanNum);
 
+                        } else if (extractScanNumFromTitleKeyValue(spec, title)) {
+                            // Title line contains key/value metadata, e.g. scan=41
+                            // (common in PRIDE/ProteomeXchange generated MGF files).
                         } else if (title.matches(".+\\.\\d+\\.\\d+\\.\\d+$") ||
                                 title.matches(".+\\.\\d+\\.\\d+\\.$")) {
                             // Title line is of the form DatasetName.ScanStart.ScanEnd.Charge or DatasetName.ScanStart.ScanEnd.
@@ -389,6 +396,17 @@ public class MgfSpectrumParser implements SpectrumParser {
                 System.out.println("Expected format is DatasetName.ScanStart.ScanEnd.Charge");
             }
         }
+    }
+
+    private boolean extractScanNumFromTitleKeyValue(Spectrum spec, String title) {
+        Matcher matcher = TITLE_SCAN_KEY_VALUE_PATTERN.matcher(title);
+        if (!matcher.find()) {
+            return false;
+        }
+
+        int scanNum = Integer.parseInt(matcher.group(1));
+        spec.setScanNum(scanNum);
+        return true;
     }
 
     // test code

@@ -30,6 +30,21 @@ public class TestParsers {
     }
 
     @Test
+    public void testReadingMgfExtractsPrideScanFromTitle() throws URISyntaxException {
+        File mgfFile = new File(TestParsers.class.getClassLoader().getResource("test.mgf").toURI());
+        SpectraAccessor specAcc = new SpectraAccessor(mgfFile);
+        Iterator<Spectrum> itr = specAcc.getSpecItr();
+
+        Assert.assertTrue("Expected at least one spectrum in test.mgf", itr.hasNext());
+        Spectrum firstSpec = itr.next();
+        Assert.assertEquals("Should parse scan number from PRIDE-style TITLE", 41, firstSpec.getScanNum());
+
+        Assert.assertTrue("Expected a second spectrum in test.mgf", itr.hasNext());
+        Spectrum secondSpec = itr.next();
+        Assert.assertEquals("Should parse scan number from PRIDE-style TITLE", 136, secondSpec.getScanNum());
+    }
+
+    @Test
     public void testMzML() throws URISyntaxException, IOException, XMLStreamException {
         File mzMLFile = new File(TestParsers.class.getClassLoader().getResource("tiny.pwiz.mzML").toURI());
         StaxMzMLParser parser = new StaxMzMLParser(mzMLFile);

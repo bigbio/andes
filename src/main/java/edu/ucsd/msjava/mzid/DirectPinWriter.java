@@ -47,7 +47,8 @@ import java.util.SortedSet;
  *   peplen  dm  absdm
  *   charge2 … chargeK         (one-hot over params.getMinCharge()..params.getMaxCharge())
  *   enzN  enzC  enzInt
- *   NumMatchedMainIons  ExplainedIonCurrentRatio  NTermIonCurrentRatio
+ *   NumMatchedMainIons  longest_b  longest_y  longest_y_pct
+ *   ExplainedIonCurrentRatio  NTermIonCurrentRatio
  *   CTermIonCurrentRatio  MS2IonCurrent  IsolationWindowEfficiency
  *   MeanErrorTop7  StdevErrorTop7  MeanRelErrorTop7  StdevRelErrorTop7
  *   lnDeltaSpecEValue  matchedIonRatio
@@ -76,6 +77,7 @@ public class DirectPinWriter {
     /** Feature names sourced from {@code Match.getAdditionalFeatureList()}, in stable order. */
     private static final String[] PIN_FEATURES = {
             "NumMatchedMainIons",
+            "longest_b", "longest_y", "longest_y_pct",
             "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
             "MS2IonCurrent", "IsolationWindowEfficiency",
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7"
@@ -175,8 +177,14 @@ public class DirectPinWriter {
         double adjustedExpMz = precursorMz - Composition.ISOTOPE * isotopeError / charge;
         double dM = adjustedExpMz - theoMz;
 
-        String peptideSeq = formatPeptideWithMods(match.getPepSeq());
-        ProteinFormatResult proteins = formatProteinsForPin(match, length);
+        // Parse the peptide sequence ONCE per PSM. aaSet.getPeptide(seq) is
+        // O(peptide length) with per-char hash lookup + ArrayList allocation;
+        // prior code re-parsed 3× (formatPeptideWithMods, buildUnmodifiedPeptide,
+        // formatProteinsForPin's N-term-Met branch).
+        Peptide peptide = aaSet.getPeptide(match.getPepSeq());
+        String unmodPep = unmodResidueString(peptide);
+        String peptideSeq = formatPeptideWithMods(peptide);
+        ProteinFormatResult proteins = formatProteinsForPin(match, length, unmodPep);
 
         // Drop all-decoy matches? Percolator prefers to see them with Label=-1.
         int label = proteins.allDecoy ? -1 : 1;
@@ -188,7 +196,6 @@ public class DirectPinWriter {
         // pre/post flanking residues already resolved by formatProteinsForPin so
         // we don't re-walk the suffix array.
         String openMsEnz = openMsEnzymeName(params.getEnzyme());
-        String unmodPep = buildUnmodifiedPeptide(match.getPepSeq());
         int enzN = isEnzymaticBoundary(proteins.pre,
                 unmodPep.isEmpty() ? '-' : unmodPep.charAt(0), openMsEnz) ? 1 : 0;
         int enzC = isEnzymaticBoundary(unmodPep.isEmpty() ? '-' : unmodPep.charAt(unmodPep.length() - 1),
@@ -405,9 +412,8 @@ public class DirectPinWriter {
         return count;
     }
 
-    /** Builds a plain (unmodified) residue string from a possibly-annotated MS-GF+ peptide sequence. */
-    private String buildUnmodifiedPeptide(String pepSeq) {
-        Peptide peptide = aaSet.getPeptide(pepSeq);
+    /** Builds a plain (unmodified) residue string from a parsed {@link Peptide}. */
+    private static String unmodResidueString(Peptide peptide) {
         StringBuilder sb = new StringBuilder(peptide.size());
         for (AminoAcid aa : peptide) sb.append(aa.getUnmodResidue());
         return sb.toString();
@@ -425,7 +431,7 @@ public class DirectPinWriter {
         List<String> accessions = new ArrayList<>();
     }
 
-    private ProteinFormatResult formatProteinsForPin(DatabaseMatch match, int length) {
+    private ProteinFormatResult formatProteinsForPin(DatabaseMatch match, int length, String unmodPep) {
         ProteinFormatResult res = new ProteinFormatResult();
         SortedSet<Integer> indices = match.getIndices();
         CompactFastaSequence seq = sa.getSequence();
@@ -433,16 +439,30 @@ public class DirectPinWriter {
 
         boolean firstRealCaptured = false;
         for (int index : indices) {
+            // Fragment-index-derived matches carry index = -1 because they don't
+            // come from a suffix-array walk. Emit an "unknown-protein" annotation
+            // instead of crashing on seq.getByteAt(-1). The peptide sequence
+            // itself is still accurate; downstream FDR + rescoring use the
+            // sequence as the primary key, so the loss of protein-accession
+            // precision is acceptable for the Tier-1-derived matches.
+            if (index < 0) {
+                String accession = "unknown_protein";
+                if (!seen.add(accession)) continue;
+                res.accessions.add(accession);
+                if (!firstRealCaptured) {
+                    res.pre = '-';
+                    res.post = '-';
+                    res.allDecoy = false;
+                    firstRealCaptured = true;
+                }
+                continue;
+            }
             boolean isNTermMetCleaved = false;
             if (seq.getByteAt(index) == 0 && seq.getCharAt(index + 1) == 'M') {
-                Peptide peptide = aaSet.getPeptide(match.getPepSeq());
-                StringBuilder pepUnmod = new StringBuilder();
-                for (AminoAcid aa : peptide) pepUnmod.append(aa.getUnmodResidue());
-                String pepSeqStr = pepUnmod.toString();
-                isNTermMetCleaved = match.isNTermMetCleaved() || pepSeqStr.charAt(0) != 'M';
+                isNTermMetCleaved = match.isNTermMetCleaved() || unmodPep.charAt(0) != 'M';
                 if (!isNTermMetCleaved) {
-                    String matchSequence = seq.getSubsequence(index + 2, index + 3 + pepSeqStr.length());
-                    isNTermMetCleaved = matchSequence.startsWith(pepSeqStr);
+                    String matchSequence = seq.getSubsequence(index + 2, index + 3 + unmodPep.length());
+                    isNTermMetCleaved = matchSequence.startsWith(unmodPep);
                 }
             }
 
@@ -506,8 +526,7 @@ public class DirectPinWriter {
         }
     }
 
-    private String formatPeptideWithMods(String pepSeq) {
-        Peptide peptide = aaSet.getPeptide(pepSeq);
+    private String formatPeptideWithMods(Peptide peptide) {
         StringBuilder unmodSeq = new StringBuilder();
         String[] modArr = new String[peptide.size() + 2];
 

@@ -1,10 +1,10 @@
 # MS-GFDB Modification File Example
 
 This mod file was used by MS-GFDB, an old application that is no longer under development.  
-It was supserseded by [MS-GF+](MSGFPlus.md), which supports a [modification file](examples/Mods.txt) with additional features
+It was supserseded by [MS-GF+](msgfplus.md), which supports a [modification file](examples/Mods.txt) with additional features
 
-- [MS-GF+ Documentation home](README.md)
-- [MS-GFDB help page](MS-GFDB.md)
+- [MS-GF+ Documentation home](readme.md)
+- [MS-GFDB help page](ms-gfdb.md)
 
 
 ```text

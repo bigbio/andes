@@ -34,6 +34,15 @@ public class PSMFeatureFinder {
     private Float errRSD7 = null;
     private Float errRMean7 = null;
 
+    // Longest consecutive run of matched b- and y-ions along the backbone. The
+    // longest-y run is additionally normalized by peptide length (number of
+    // inter-residue bonds). Exposed to Percolator as longest_b / longest_y /
+    // longest_y_pct so the SVM can exploit ion-series contiguity — a signal
+    // that survives target/decoy shuffling far better than the scalar peak
+    // count NumMatchedMainIons alone.
+    private int longestB = 0;
+    private int longestY = 0;
+
     //	private Float ms1IonCurrent;
 //	private Float isolationWindowEfficiency;
     private Tolerance mme;
@@ -86,6 +95,12 @@ public class PSMFeatureFinder {
         if (this.numExplainedPeaks != null)
             list.add(new Pair<String, String>("NumMatchedMainIons", String.valueOf(numExplainedPeaks)));
 
+        list.add(new Pair<String, String>("longest_b", String.valueOf(longestB)));
+        list.add(new Pair<String, String>("longest_y", String.valueOf(longestY)));
+        int bonds = Math.max(peptide.size() - 1, 1);
+        float longestYPct = (float) longestY / (float) bonds;
+        list.add(new Pair<String, String>("longest_y_pct", String.valueOf(longestYPct)));
+
         if (this.errMeanAll != null)
             list.add(new Pair<String, String>("MeanErrorAll", String.valueOf(errMeanAll)));
 
@@ -131,11 +146,19 @@ public class PSMFeatureFinder {
 
         MassErrorStat errStat = new MassErrorStat();
         double prm = 0, srm = 0;
+        int runB = 0, runY = 0;
         for (int i = 0; i < peptide.size() - 1; i++) {
             prm += peptide.get(i).getAccurateMass();
             srm += peptide.get(peptide.size() - 1 - i).getAccurateMass();
-            nTermIonCurrent += scoredSpec.getExplainedIonCurrent((float) prm, true, mme);
-            cTermIonCurrent += scoredSpec.getExplainedIonCurrent((float) srm, false, mme);
+            float bIC = scoredSpec.getExplainedIonCurrent((float) prm, true, mme);
+            float yIC = scoredSpec.getExplainedIonCurrent((float) srm, false, mme);
+            nTermIonCurrent += bIC;
+            cTermIonCurrent += yIC;
+
+            if (bIC > 0f) { runB++; if (runB > longestB) longestB = runB; }
+            else runB = 0;
+            if (yIC > 0f) { runY++; if (runY > longestY) longestY = runY; }
+            else runY = 0;
 
             Pair<Float, Float> err;
             if ((err = scoredSpec.getMassErrorWithIntensity((float) prm, true, mme)) != null)

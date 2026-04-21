@@ -4,12 +4,14 @@ public class Partition implements Comparable<Partition> {
     private int charge;
     private float parentMass;
     private int segIndex;
+    private int cachedHashCode;
 
     public Partition(int charge, float parentMass, int segIndex) {
         super();
         this.charge = charge;
         this.parentMass = parentMass;
         this.segIndex = segIndex;
+        recomputeHashCode();
     }
 
     public int getCharge() {
@@ -18,6 +20,7 @@ public class Partition implements Comparable<Partition> {
 
     public void setCharge(int charge) {
         this.charge = charge;
+        recomputeHashCode();
     }
 
     public float getParentMass() {
@@ -26,6 +29,7 @@ public class Partition implements Comparable<Partition> {
 
     public void setParentMass(float parentMass) {
         this.parentMass = parentMass;
+        recomputeHashCode();
     }
 
     public int getSegNum() {
@@ -34,6 +38,7 @@ public class Partition implements Comparable<Partition> {
 
     public void setPosIndex(int posIndex) {
         this.segIndex = posIndex;
+        recomputeHashCode();
     }
 
     public int compareTo(Partition o) {
@@ -69,6 +74,10 @@ public class Partition implements Comparable<Partition> {
 
     @Override
     public int hashCode() {
-        return new Float(parentMass).hashCode() + charge * 10 + segIndex;
+        return cachedHashCode;
+    }
+
+    private void recomputeHashCode() {
+        cachedHashCode = Float.floatToIntBits(parentMass) + charge * 10 + segIndex;
     }
 }	

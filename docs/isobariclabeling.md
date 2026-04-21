@@ -1,6 +1,6 @@
 # Isobaric-labelling searches: TMT, TMTpro, iTRAQ
 
-[MS-GF+ Documentation home](README.md) · [ChangeLog](Changelog.md)
+[MS-GF+ Documentation home](readme.md) · [ChangeLog](changelog.md)
 
 MS-GF+ supports isobaric-labelled samples (TMT-6/10/11/16, TMTpro-18, iTRAQ-4/8) natively — **no code change is needed for new plex levels**. The label is expressed as a fixed (static) modification on the peptide N-terminus and on lysine, plus the matching `-protocol` flag so the scoring model is tuned for enriched spectra.
 

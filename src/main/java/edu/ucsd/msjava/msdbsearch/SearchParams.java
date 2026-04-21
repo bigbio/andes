@@ -95,7 +95,7 @@ public class SearchParams {
     private boolean allowDenseCentroidedPeaks;
     private int minMSLevel;
     private int maxMSLevel;
-    private int outputFormat; // 0=mzid, 1=tsv, 2=both
+    private int outputFormat; // 0=pin (default), 1=tsv — mzid output removed
     private PrecursorCalMode precursorCalMode = PrecursorCalMode.AUTO;
 
     public SearchParams() {
@@ -288,21 +288,17 @@ public class SearchParams {
         return maxMSLevel;
     }
 
-    /** 0=mzid, 1=tsv, 2=both */
+    /** 0=pin (default), 1=tsv. */
     public int getOutputFormat() {
         return outputFormat;
     }
 
-    public boolean writeMzid() {
-        return outputFormat == 0 || outputFormat == 2;
-    }
-
     public boolean writeTsv() {
-        return outputFormat == 1 || outputFormat == 2;
+        return outputFormat == 1;
     }
 
     public boolean writePin() {
-        return outputFormat == 3;
+        return outputFormat == 0;
     }
 
     /**
@@ -334,6 +330,11 @@ public class SearchParams {
         Composition.setChargeCarrierMass(chargeCarrierMass);
 
         // Spectrum file
+        // Read outputFormat up-front so the default-output-file extension
+        // logic below (inside both the single-file and directory branches)
+        // sees the user-supplied value, not the field's zero initializer.
+        outputFormat = paramManager.getOutputFormat();
+
         FileParameter specParam = paramManager.getSpecFileParam();
         File specPath = specParam.getFile();
 
@@ -354,10 +355,9 @@ public class SearchParams {
             // Output file
             File outputFile = paramManager.getOutputFileParam().getFile();
             if (outputFile == null) {
-                String outputFilePath = specPath.getPath().substring(0, specPath.getPath().lastIndexOf('.')) + ".mzid";
+                String defaultExt = outputFormat == 1 ? ".tsv" : ".pin";
+                String outputFilePath = specPath.getPath().substring(0, specPath.getPath().lastIndexOf('.')) + defaultExt;
                 outputFile = new File(outputFilePath);
-//				if (outputFile.exists())
-//					return outputFile.getPath() + " already exists!";
             }
 
             dbSearchIOList = new ArrayList<>();
@@ -365,10 +365,11 @@ public class SearchParams {
         } else    // spectrum directory
         {
             dbSearchIOList = new ArrayList<>();
+            String defaultExt = outputFormat == 1 ? ".tsv" : ".pin";
             for (File f : specPath.listFiles()) {
                 SpecFileFormat specFormat = SpecFileFormat.getSpecFileFormat(f.getName());
                 if (specParam.isSupported(specFormat)) {
-                    String outputFileName = f.getName().substring(0, f.getName().lastIndexOf('.')) + ".mzid";
+                    String outputFileName = f.getName().substring(0, f.getName().lastIndexOf('.')) + defaultExt;
                     File outputFile = new File(outputFileName);
 //					if (outputFile.exists())
 //						return outputFile.getPath() + " already exists!";
@@ -495,7 +496,8 @@ public class SearchParams {
         }
         
         allowDenseCentroidedPeaks = paramManager.getAllowDenseCentroidedPeaks() == 1;
-        outputFormat = paramManager.getOutputFormat();
+        // outputFormat was read earlier in parse() so the default-filename-
+        // extension logic in the spec-path branches sees the user's value.
         precursorCalMode = PrecursorCalMode.fromString(paramManager.getPrecursorCalRawValue());
 
         IntRangeParameter msLevelParam = paramManager.getMSLevelParameter();

@@ -1,6 +1,16 @@
 # MS-GF+ ChangeLog
 
-[MS-GF+ Documentation home](README.md)
+[MS-GF+ Documentation home](readme.md)
+
+**vNEXT — Unreleased (breaking change)**
+
+- **BREAKING:** mzIdentML (`.mzid`) support fully removed — no backward-compatibility shim. MS-GF+ now writes only Percolator `.pin` (default) or TSV, and every `.mzid`-related utility has been deleted:
+  - **Output:** `MZIdentMLGen`, `AnalysisProtocolCollectionGen`, `MzIDTest` — deleted. `-o foo.mzid` is rejected at argument-parse time (no extension rewrite). `Unimod` and `UnimodComposition` are retained for future PTM-aware enhancements to `DirectPinWriter` — they carry the modification-accession + mass tables that a richer pin output would need to populate the `Peptide` column with proper Unimod references.
+  - **Input / legacy tools:** `MzIDToTsv` (CLI `edu.ucsd.msjava.ui.MzIDToTsv`), `MzIDParser`, `AnnotatedSpectra`, `ScoringParamGen` — deleted. Users who need to post-process legacy `.mzid` files must use MS-GF+ v2026.03.25 or earlier, or an external mzid converter.
+  - `-outputFormat` now accepts only `pin` (default) and `tsv`. Integer aliases: `0=pin, 1=tsv`. Previous `0=mzid, 2=both, 3=pin` layout is rejected.
+  - `-o OutputFile` must end in `.pin` or `.tsv`. `.mzid` paths are rejected.
+- Added precursor mass calibration: `-precursorCal auto|on|off` (default `auto`). Merged via PR #22.
+- Added Percolator `.pin` output with OpenMS-parity features (`enzN`, `enzC`, `enzInt`, `mass`, `lnDeltaSpecEValue`, `matchedIonRatio`, `longest_b`, `longest_y`, `longest_y_pct`) and lowercase renames (`peplen`, `charge2/3/4`, `dm`, `absdm`, `isotope_error`) for OpenMS `PercolatorAdapter` interoperability. Merged via PR #22 + this PR.
 
 **v2026.03.25**
 

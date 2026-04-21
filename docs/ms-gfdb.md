@@ -1,8 +1,8 @@
 # MS-GFDB
 
-[MS-GF+ Documentation home](README.md)
+[MS-GF+ Documentation home](readme.md)
 
-MS-GFDB is an old application that is no longer under development. It was supserseded by [MS-GF+](MSGFPlus.md).  
+MS-GFDB is an old application that is no longer under development. It was supserseded by [MS-GF+](msgfplus.md).  
 MS-GF+ has all the functionalities provided by MS-GFDB, plus numerous improvements.
 
 ### Differences between MS-GF+ and MS-GFDB
@@ -129,7 +129,7 @@ If -tda 1 is specified, MS-GFDB automatically creates a combined target/reversed
 - **-mod ModificationFile** (Default: standard amino acids with fixed C+57)\]
   - Modification file name. ModificationFile contains the modifications to be considered in the search.
   - If -mod option is not specified, standard amino acids with fixed Carbamidomethylation C will be used.
-  - See an [example MS-GFDB modification file](MSGFDB_ModFile.md).
+  - See an [example MS-GFDB modification file](msgfdb_modfile.md).
 - **-minLength MinPepLength** (Default: 6)
   - Minimum length of the peptide to be considered.
 - **-maxLength MaxPepLength** (Default: 40)

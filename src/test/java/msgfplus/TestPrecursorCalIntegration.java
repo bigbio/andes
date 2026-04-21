@@ -15,8 +15,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * End-to-end integration tests for Achievement B — two-pass precursor mass
@@ -30,19 +28,15 @@ import java.util.regex.Pattern;
  * </blockquote>
  * We enforce it by running two full searches on the bundled
  * {@code test.mgf} + {@code human-uniprot-contaminants.fasta} pair and
- * comparing every {@code <SpectrumIdentificationItem>} element from the two
- * {@code .mzid} outputs. A drift here would be a silent FDR-inflating bug,
- * so we demand strict equality on the PSM list.
+ * comparing every PSM data row from the two {@code .pin} outputs. A drift
+ * here would be a silent FDR-inflating bug, so we demand strict equality
+ * on the PSM list.
  *
  * <p>Because the {@code test.mgf} fixture is small, the default {@code auto}
  * mode takes the "insufficient confident PSMs" branch and also produces a
  * 0.0 ppm shift, so the comparison is against the same no-op-shift baseline.
  */
 public class TestPrecursorCalIntegration {
-
-    /** Regex that strips volatile mzid attributes (timestamps, UUIDs, paths). */
-    private static final Pattern VOLATILE_ATTRS = Pattern.compile(
-            "\\s(?:creationDate|id|location|name)=\"[^\"]*\"");
 
     private ParamManager buildParamManager(File outputFile) throws URISyntaxException {
         ParamManager manager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE,
@@ -68,7 +62,7 @@ public class TestPrecursorCalIntegration {
      *
      * <p>The test runs both searches in a fresh temp dir to avoid colliding
      * with any cached suffix-array artefacts from other tests, then
-     * compares the {@code <SpectrumIdentificationItem>} blocks line by line.
+     * compares the pin-file PSM data rows line by line.
      */
     @Test
     public void precursorCalOffMatchesBaseline() throws Exception {
@@ -184,26 +178,21 @@ public class TestPrecursorCalIntegration {
     // ------------------------------------------------------------------
 
     /**
-     * Extract every {@code <SpectrumIdentificationItem ...>} element from
-     * an mzid file and normalise out volatile attributes (timestamps,
-     * internal ids, absolute paths). The returned list preserves document
-     * order so indexed comparisons are meaningful.
+     * Extract every PSM data row from a Percolator {@code .pin} file. The
+     * first line is the tab-delimited header and is excluded; the remainder
+     * are per-PSM rows whose order matches scoring order, so indexed
+     * comparisons are meaningful. Blank trailing lines are skipped so a
+     * final newline doesn't produce a spurious empty element.
      */
-    private static List<String> extractPsmItems(File mzidFile) throws Exception {
-        String content = new String(Files.readAllBytes(mzidFile.toPath()),
-                java.nio.charset.StandardCharsets.UTF_8);
+    private static List<String> extractPsmItems(File pinFile) throws Exception {
         List<String> items = new ArrayList<>();
-        // Match <SpectrumIdentificationItem .../> or full <...>...</...> blocks.
-        Pattern itemPattern = Pattern.compile(
-                "<SpectrumIdentificationItem\\b[^>]*(?:/>|>.*?</SpectrumIdentificationItem>)",
-                Pattern.DOTALL);
-        Matcher m = itemPattern.matcher(content);
-        while (m.find()) {
-            String item = m.group();
-            // Strip volatile attributes that don't belong to the PSM's
-            // scientific content (creationDate, generated ids, etc.).
-            item = VOLATILE_ATTRS.matcher(item).replaceAll("");
-            items.add(item);
+        List<String> lines = Files.readAllLines(pinFile.toPath(),
+                java.nio.charset.StandardCharsets.UTF_8);
+        if (lines.size() <= 1) return items; // header only, no PSMs
+        for (int i = 1; i < lines.size(); i++) {
+            String line = lines.get(i);
+            if (line.isEmpty()) continue;
+            items.add(line);
         }
         return items;
     }

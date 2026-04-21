@@ -108,6 +108,10 @@ Computed across the seven highest-intensity matched peaks in the spectrum.
 | `Peptide` | Percolator-style annotation: `flanking.PEPTIDE_WITH_MODS.flanking`. Modifications are written as `+mass` after the modified residue, or as `[+mass]-PEPTIDE` at peptide N-term. Fixed modifications ARE included. |
 | `Proteins` | One column per matching protein accession (tab-separated). Prefixed with the decoy tag (default `XXX_`) when the match is a decoy. |
 
+### Example file
+
+A trimmed sample `.pin` from a PXD001819 search (20 target PSMs + 10 decoys, curated for peptide-sequence diversity so every feature column has data) is at [`examples/pxd001819_example.pin`](examples/pxd001819_example.pin). Open it in any TSV viewer to inspect the schema; the full MS-GF+ output on the same dataset has ~39 K rows.
+
 ### Using the `.pin` with Percolator
 
 ```bash

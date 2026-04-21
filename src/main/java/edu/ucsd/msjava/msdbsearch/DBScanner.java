@@ -3,8 +3,6 @@ package edu.ucsd.msjava.msdbsearch;
 import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.msgf.*;
 import edu.ucsd.msjava.msscorer.NewRankScorer;
-import edu.ucsd.msjava.msscorer.NewScorerFactory;
-import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msscorer.SimpleDBSearchScorer;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.msutil.Modification.Location;

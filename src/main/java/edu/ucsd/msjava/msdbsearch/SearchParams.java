@@ -330,6 +330,11 @@ public class SearchParams {
         Composition.setChargeCarrierMass(chargeCarrierMass);
 
         // Spectrum file
+        // Read outputFormat up-front so the default-output-file extension
+        // logic below (inside both the single-file and directory branches)
+        // sees the user-supplied value, not the field's zero initializer.
+        outputFormat = paramManager.getOutputFormat();
+
         FileParameter specParam = paramManager.getSpecFileParam();
         File specPath = specParam.getFile();
 
@@ -491,7 +496,8 @@ public class SearchParams {
         }
         
         allowDenseCentroidedPeaks = paramManager.getAllowDenseCentroidedPeaks() == 1;
-        outputFormat = paramManager.getOutputFormat();
+        // outputFormat was read earlier in parse() so the default-filename-
+        // extension logic in the spec-path branches sees the user's value.
         precursorCalMode = PrecursorCalMode.fromString(paramManager.getPrecursorCalRawValue());
 
         IntRangeParameter msLevelParam = paramManager.getMSLevelParameter();

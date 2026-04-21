@@ -17,7 +17,7 @@ Usage: java -Xmx3500M -jar MSGFPlus.jar
 
 [-decoy DecoyPrefix] (Prefix for decoy protein names; Default: XXX)
 
-[-o OutputFile (*.pin)] (Default: [SpectrumFileName].pin)
+[-o OutputFile (*.pin or *.tsv)] (Default: [SpectrumFileName].pin; extension is derived from `-outputFormat`)
 
 [-t PrecursorMassTolerance] (e.g. 2.5Da, 20ppm or 0.5Da,2.5Da; Default: 20ppm)
    Use a comma to define asymmetric values. 

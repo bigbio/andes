@@ -11,16 +11,17 @@ Static HTML under `docs/` was replaced with these Markdown pages so they read we
 
 - MS-GF+ is an MS/MS database search tool that is sensitive (it identifies more peptides than other database search tools and as many peptides as spectral library search tools) and universal (works well for diverse types of spectra, different configurations of MS instruments and different experimental protocols).
 - Input: HUPO PSI standard mzML (also mzXML / MGF / MS2 / PKL).
-- Output: Percolator `.pin` (default, for rescoring) or TSV. **mzIdentML (`.mzid`) output has been removed as of the next release** — MS-GF+ now feeds downstream Percolator pipelines directly via `.pin`. See [Changelog](Changelog.md) for migration notes.
+- Output: Percolator `.pin` (default, for rescoring) or TSV. **mzIdentML (`.mzid`) output has been removed as of the next release** — MS-GF+ now feeds downstream Percolator pipelines directly via `.pin`. See [Changelog](changelog.md) for migration notes.
 
 ### Usage and help
 
-- [MS-GF+ usage](MSGFPlus.md) — [Change log](Changelog.md)
-- [MS-GF+ parameter files](https://github.com/MSGFPlus/msgfplus/tree/master/docs/ParameterFiles) (config examples on the upstream repo)
-- [Suffix array builder (BuildSA)](BuildSA.md)
-- [Isobaric labelling: TMT / TMTpro / iTRAQ recipes](IsobaricLabeling.md)
-- [Troubleshooting & common errors](Troubleshooting.md)
-- [MS-GFDB (obsolete)](MS-GFDB.md)
+- [MS-GF+ usage](msgfplus.md) — [Change log](changelog.md)
+- [Output formats — pin / tsv column reference](output.md)
+- [MS-GF+ parameter files](https://github.com/MSGFPlus/msgfplus/tree/master/docs/parameterfiles) (config examples on the upstream repo)
+- [Suffix array builder (BuildSA)](buildsa.md)
+- [Isobaric labelling: TMT / TMTpro / iTRAQ recipes](isobariclabeling.md)
+- [Troubleshooting & common errors](troubleshooting.md)
+- [MS-GFDB (obsolete)](ms-gfdb.md)
 
 ### Publications
 

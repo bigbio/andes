@@ -1,6 +1,6 @@
 # MS-GF+ ChangeLog
 
-[MS-GF+ Documentation home](README.md)
+[MS-GF+ Documentation home](readme.md)
 
 **vNEXT — Unreleased (breaking change)**
 

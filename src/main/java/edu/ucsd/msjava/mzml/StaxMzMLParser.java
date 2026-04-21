@@ -202,7 +202,7 @@ public class StaxMzMLParser {
         sb.append("Could not parse mzML file '").append(specFile.getAbsolutePath()).append("' during ").append(phase).append(".");
         if (looksLikeBomOrPrologIssue(msg)) {
             sb.append(" This usually means the file has a byte-order mark (BOM) or an encoding mismatch in the XML prolog. Verify that the file starts with `<?xml version=\"1.0\" encoding=\"UTF-8\"?>` with no leading whitespace or BOM (on Linux/macOS: `head -c 3 \"")
-                    .append(specFile.getName()).append("\" | xxd`; a BOM shows as `ef bb bf`). Re-converting the raw file with ThermoRawFileParser or MSConvert usually resolves it. See docs/Troubleshooting.md for details.");
+                    .append(specFile.getName()).append("\" | xxd`; a BOM shows as `ef bb bf`). Re-converting the raw file with ThermoRawFileParser or MSConvert usually resolves it. See docs/troubleshooting.md for details.");
         }
         sb.append(" Underlying parser error: ").append(msg);
         // Note: XMLStreamException(msg, location, nested) stores the cause as a

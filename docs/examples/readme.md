@@ -1,6 +1,6 @@
 # Example configuration and sample outputs
 
-Broader manuals (MS-GF+ CLI, BuildSA, MzID→TSV, changelog, …) are Markdown pages one level up: [`../README.md`](../README.md).
+Broader manuals (MS-GF+ CLI, BuildSA, MzID→TSV, changelog, …) are Markdown pages one level up: [`../readme.md`](../readme.md).
 
 This directory holds **small text examples** shipped with the repository:
 

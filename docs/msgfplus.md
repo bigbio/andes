@@ -1,6 +1,6 @@
 # MS-GF+
 
-[MS-GF+ Documentation home](README.md) · [ChangeLog](Changelog.md "MS-GF+ ChangeLog")
+[MS-GF+ Documentation home](readme.md) · [ChangeLog](changelog.md "MS-GF+ ChangeLog")
 
 
 ```text
@@ -8,7 +8,7 @@ Usage: java -Xmx3500M -jar MSGFPlus.jar
 
 [-conf ConfigurationFile] (Configuration file path; options specified at the command line will override settings in the config file)
    An example parameter file is at https://github.com/MSGFPlus/msgfplus/blob/master/docs/examples/MSGFPlus_Params.txt
-   Additional parameter files are at https://github.com/MSGFPlus/msgfplus/tree/master/docs/ParameterFiles
+   Additional parameter files are at https://github.com/MSGFPlus/msgfplus/tree/master/docs/parameterfiles
 
 [-s SpectrumFile] (*.mzML, *.mzXML, *.mgf, *.ms2, *.pkl or *_dta.txt)
    Spectra should be centroided (see below for MSConvert example). Profile spectra will be ignored.
@@ -159,13 +159,13 @@ Example command (low-precision spectra):
   - Path to the protein database file. If the database file does not have auxiliary index files (\*.canno, \*.cnlcp, \*.csarr, and \*.cseq), MS-GF+ will create them.
   - When "-tda 1" option is used, the database specified here must contain only target protein sequences.
 
-  If multiple MS-GF+ processes access the same database file, it is strongly recommended to index the database prior to the database search by [running BuildSA](BuildSA.md).
+  If multiple MS-GF+ processes access the same database file, it is strongly recommended to index the database prior to the database search by [running BuildSA](buildsa.md).
 
 - **-conf ConfigurationFile**
   - Path to the configuration file (aka parameter file) that defines settings for MS-GF+
   - Options specified at the command line will override settings in the config file
   - Example parameter file: [MSGFPlus_Params.txt](https://github.com/MSGFPlus/msgfplus/blob/master/docs/examples/MSGFPlus_Params.txt)
-  - See also these additional [example parameter files](https://github.com/MSGFPlus/msgfplus/tree/master/docs/ParameterFiles)
+  - See also these additional [example parameter files](https://github.com/MSGFPlus/msgfplus/tree/master/docs/parameterfiles)
 
 - **-decoy DecoyPrefix**
   - Text to prepend to protein names when including decoy (reverse sequence) proteins in the .revCat.fasta file and related index files

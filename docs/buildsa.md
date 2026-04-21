@@ -1,6 +1,6 @@
 # BuildSA
 
-[MS-GF+ Documentation home](README.md)
+[MS-GF+ Documentation home](readme.md)
 
 # BuildSA
 
@@ -33,7 +33,7 @@ Usage: java -Xmx3500M -cp MSGFPlus.jar edu.ucsd.msjava.msdbsearch.BuildSA
   - Text to prepend to protein names when including decoy (reverse sequence) proteins in the .revCat.fasta file and related index files
   - Defaults to XXX (though an underscore is also added, giving names like `XXX_Contaminant_TRYP_BOVIN`)
   - Use `-decoy REV` to get names like `REV_Contaminant_TRYP_BOVIN`
-  - If -decoy is used with BuildSA it should also be used with [MS-GF+](MSGFPlus.md)
+  - If -decoy is used with BuildSA it should also be used with [MS-GF+](msgfplus.md)
 
 BuildSA creates a suffix array of the protein database. For an input database file DBFileName.fasta, BuildSA will generate 4 auxiliary files:
 

@@ -1,6 +1,6 @@
 # MS-GF+ Troubleshooting
 
-[MS-GF+ Documentation home](README.md) · [ChangeLog](Changelog.md)
+[MS-GF+ Documentation home](readme.md) · [ChangeLog](changelog.md)
 
 Common failure modes and how to work around them. If the issue is not listed here, open a ticket at <https://github.com/bigbio/msgfplus/issues>.
 

@@ -3,7 +3,9 @@ package edu.ucsd.msjava.msdbsearch;
 import edu.ucsd.msjava.msutil.AminoAcid;
 import edu.ucsd.msjava.msutil.AminoAcidSet;
 import edu.ucsd.msjava.sequences.Constants;
+import edu.ucsd.msjava.suffixarray.ByteSequence;
 import edu.ucsd.msjava.suffixarray.SuffixFactory;
+import it.unimi.dsi.fastutil.ints.IntArrays;
 
 import java.io.*;
 import java.text.DateFormat;
@@ -269,6 +271,30 @@ public class CompactSuffixArray {
     /**
      * Helper method that creates the suffixFile.
      *
+     * <p>Algorithm: two-phase radix-then-sort. Each suffix is hashed by its
+     * first {@link #BUCKET_SIZE} residues into one of {@code alphabetSize^BUCKET_SIZE}
+     * buckets; within a bucket, suffixes are sorted lexicographically from offset
+     * {@code BUCKET_SIZE} onward (the bucket prefix is shared by construction).
+     *
+     * <p>Scaling notes:
+     *
+     * <ul>
+     *   <li>Buckets store raw {@code int[]} indices and are sorted in-place via
+     *       {@link IntArrays#quickSort} with a comparator that reads from the
+     *       sequence directly. Prior revisions materialised a
+     *       {@code SuffixFactory.Suffix[]} per bucket before sorting; that
+     *       allocated ~32 bytes of Java object overhead per suffix, which on a
+     *       100 MB+ FASTA added multiple GB of transient heap churn and tripped
+     *       OOM on an 8 GB JVM. The int-based path stores 4 bytes per suffix
+     *       and reuses the sequence directly during compare/LCP.</li>
+     *   <li>LCP between adjacent suffixes is computed by an int-based helper
+     *       on the sequence — no {@code ByteSequence} wrappers allocated in the
+     *       sort/write loop.</li>
+     *   <li>Output is written sequentially: one bucket finalised + freed before
+     *       the next begins, so peak memory during sort is dominated by the
+     *       largest individual bucket rather than the full set.</li>
+     * </ul>
+     *
      * @param sequence  the Adapter object that represents the database (text).
      * @param indexFile newly created index file.
      * @param nlcpFile  newly created nlcp file.
@@ -276,45 +302,35 @@ public class CompactSuffixArray {
     private void createSuffixArrayFiles(CompactFastaSequence sequence, File indexFile, File nlcpFile) {
         System.out.println("Creating the suffix array indexed file... Size: " + sequence.getSize());
 
-        // helper local class
+        // helper local class: a growable int[] buffer for suffix indices.
         class Bucket {
 
             private int[] items;
             private int size;
 
-            /**
-             * Constructor.
-             */
             public Bucket() {
                 this.items = new int[10];
                 this.size = 0;
             }
 
-            /**
-             * Add item to the bucket.
-             * @param item the item to add.
-             */
             public void add(int item) {
                 if (this.size >= items.length) {
-					// Double the capacity of this.items
                     this.items = Arrays.copyOf(this.items, this.size * 2);
-//					if(this.size > 100)
-//						System.out.println(item+":"+this.size);
                 }
                 this.items[this.size++] = item;
             }
 
             /**
-             * Get a sorted version of this bucket.
-             * @return
+             * Trim + sort the bucket's indices lexicographically by suffix, starting
+             * from offset {@link #BUCKET_SIZE} since all members of a bucket share
+             * the first {@code BUCKET_SIZE} residues by hash construction. Returns
+             * a new {@code int[]} of exactly {@link #size} entries; the internal
+             * storage can be released after this call.
              */
-            public SuffixFactory.Suffix[] getSortedSuffixes() {
-                SuffixFactory.Suffix[] sa = new SuffixFactory.Suffix[this.size];
-                for (int i = 0; i < this.size; i++) {
-                    sa[i] = factory.makeSuffix(this.items[i]);
-                }
-                Arrays.sort(sa);
-                return sa;
+            public int[] sortedIndexArray() {
+                int[] out = (this.size == this.items.length) ? this.items : Arrays.copyOf(this.items, this.size);
+                IntArrays.quickSort(out, (a, b) -> compareSuffixesFrom(sequence, a, b, BUCKET_SIZE));
+                return out;
             }
         }
 
@@ -354,7 +370,6 @@ public class CompactSuffixArray {
                 System.out.printf("Suffix creation: %.2f%% complete.\n", j * 100.0 / numResiduesInSequence);
             }
 
-//			System.out.println(j);
             // quick wait to derive the next hash, since we are reading the sequence in order
             byte b = Constants.TERMINATOR;
             if (i < numResiduesInSequence)
@@ -369,8 +384,6 @@ public class CompactSuffixArray {
             bucketSuffixes[currentHash].add(j);
         }
 
-        System.gc();
-
         try {
             DataOutputStream indexOut = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(indexFile)));
             DataOutputStream nlcpOut = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(nlcpFile)));
@@ -378,8 +391,10 @@ public class CompactSuffixArray {
             indexOut.writeInt(sequence.getId());
             nlcpOut.writeInt(numResiduesInSequence);
             nlcpOut.writeInt(sequence.getId());
-            SuffixFactory.Suffix prevBucketSuffix = null;
-//			byte[] neighboringLcps = new byte[numResiduesInSequence];         // the computed neighboring lcps
+            // Track the last index emitted across bucket boundaries so we can
+            // compute the LCP between the last suffix of the previous bucket
+            // and the first suffix of the current one. -1 = no predecessor.
+            int prevBucketFirstIndex = -1;
 
             System.out.println("Sorting suffixes... Size: " + bucketSuffixes.length);
             lastStatusTime = System.currentTimeMillis();
@@ -391,31 +406,32 @@ public class CompactSuffixArray {
                     System.out.printf("Sorting: %.2f%% complete.\n", i * 100.0 / bucketSuffixes.length);
                 }
 
-                if (bucketSuffixes[i] != null) {
+                Bucket bucket = bucketSuffixes[i];
+                if (bucket == null) continue;
 
-                    SuffixFactory.Suffix[] sortedSuffixes = bucketSuffixes[i].getSortedSuffixes();
+                int[] sortedIndices = bucket.sortedIndexArray();
+                bucketSuffixes[i] = null; // release the Bucket wrapper ASAP
 
-                    SuffixFactory.Suffix first = sortedSuffixes[0];
-                    byte lcp = 0;
-                    if (prevBucketSuffix != null) {
-                        lcp = first.getLCP(prevBucketSuffix);
-                    }
-                    // write information to file
-                    indexOut.writeInt(first.getIndex());
-                    nlcpOut.writeByte(lcp);
-                    SuffixFactory.Suffix prevSuffix = first;
-
-                    for (int j = 1; j < sortedSuffixes.length; j++) {
-                        SuffixFactory.Suffix thisSuffix = sortedSuffixes[j];
-                        //store the information
-                        indexOut.writeInt(thisSuffix.getIndex());
-                        lcp = thisSuffix.getLCP(prevSuffix, BUCKET_SIZE);
-                        nlcpOut.writeByte(lcp);
-                        prevSuffix = thisSuffix;
-                    }
-                    prevBucketSuffix = sortedSuffixes[0];
-                    bucketSuffixes[i] = null;    // deallocate the memory
+                int first = sortedIndices[0];
+                byte lcp = 0;
+                if (prevBucketFirstIndex >= 0) {
+                    // Inter-bucket LCP starts at offset 0 (buckets only share prefix
+                    // with their OWN members, not neighbours).
+                    lcp = computeLcpByte(sequence, first, prevBucketFirstIndex, 0);
                 }
+                indexOut.writeInt(first);
+                nlcpOut.writeByte(lcp);
+                int prev = first;
+
+                for (int j = 1; j < sortedIndices.length; j++) {
+                    int thisIndex = sortedIndices[j];
+                    indexOut.writeInt(thisIndex);
+                    // Intra-bucket: shared prefix of BUCKET_SIZE bytes is guaranteed.
+                    lcp = computeLcpByte(sequence, thisIndex, prev, BUCKET_SIZE);
+                    nlcpOut.writeByte(lcp);
+                    prev = thisIndex;
+                }
+                prevBucketFirstIndex = first;
             }
 
             bucketSuffixes = null;
@@ -437,6 +453,51 @@ public class CompactSuffixArray {
             System.exit(-1);
         }
         return;
+    }
+
+    /**
+     * Compare two suffixes of {@code sequence} starting at the given offset. Sign
+     * semantics match {@link Comparable#compareTo}; magnitude is not preserved
+     * (we only need the sort order, not the LCP — that's computed separately).
+     * Comparison length is capped at {@link ByteSequence#MAX_COMPARISON_LENGTH}
+     * to match the legacy {@code Suffix.compareTo} behaviour.
+     */
+    private static int compareSuffixesFrom(CompactFastaSequence sequence, int idxA, int idxB, int startOffset) {
+        if (idxA == idxB) return 0;
+        long seqSize = sequence.getSize();
+        long remainA = seqSize - idxA;
+        long remainB = seqSize - idxB;
+        long limitLong = Math.min(remainA, remainB);
+        int limit = limitLong > ByteSequence.MAX_COMPARISON_LENGTH
+                ? ByteSequence.MAX_COMPARISON_LENGTH
+                : (int) limitLong;
+        for (int offset = startOffset; offset < limit; offset++) {
+            byte a = sequence.getByteAt(idxA + offset);
+            byte b = sequence.getByteAt(idxB + offset);
+            if (a != b) return Byte.compare(a, b); // signed compare, matches ByteSequence.compareTo
+        }
+        // Shorter suffix sorts first (matches ByteSequence.compareTo semantics).
+        return Long.compare(remainA, remainB);
+    }
+
+    /**
+     * Compute the LCP (longest common prefix length) of two suffixes starting
+     * from {@code startOffset}. Capped at {@link Byte#MAX_VALUE} so the result
+     * fits in a single byte for on-disk storage.
+     */
+    private static byte computeLcpByte(CompactFastaSequence sequence, int idxA, int idxB, int startOffset) {
+        long seqSize = sequence.getSize();
+        long remainA = seqSize - idxA;
+        long remainB = seqSize - idxB;
+        long limitLong = Math.min(remainA, remainB);
+        int limit = limitLong > Byte.MAX_VALUE ? Byte.MAX_VALUE : (int) limitLong;
+        int offset = startOffset;
+        for (; offset < limit; offset++) {
+            byte a = sequence.getByteAt(idxA + offset);
+            byte b = sequence.getByteAt(idxB + offset);
+            if (a != b) return (byte) offset;
+        }
+        return (byte) offset;
     }
 
     @Override

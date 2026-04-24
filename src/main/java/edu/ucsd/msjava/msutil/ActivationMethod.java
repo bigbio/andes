@@ -1,9 +1,7 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.mzid.Constants;
 import edu.ucsd.msjava.params.ParamObject;
 import edu.ucsd.msjava.params.UserParam;
-import uk.ac.ebi.jmzidml.model.mzidml.CvParam;
 
 import java.io.File;
 import java.nio.file.Paths;
@@ -16,7 +14,7 @@ public class ActivationMethod implements ParamObject {
     private String fullName;
     private boolean electronBased = false;
     private String accession;
-    private CvParam cvParam;
+    private CvParamInfo cvParam;
 
     private ActivationMethod(String name, String fullName) {
         this(name, fullName, null);
@@ -27,7 +25,7 @@ public class ActivationMethod implements ParamObject {
         this.fullName = fullName;
         this.accession = accession;
         if (accession != null)
-            this.cvParam = Constants.makeCvParam(accession, fullName);
+            this.cvParam = new CvParamInfo(accession, fullName, null);
     }
 
     private ActivationMethod electronBased() {
@@ -55,7 +53,7 @@ public class ActivationMethod implements ParamObject {
         return electronBased;
     }
 
-    public CvParam getCvParam() {
+    public CvParamInfo getCvParam() {
         return cvParam;
     }
 

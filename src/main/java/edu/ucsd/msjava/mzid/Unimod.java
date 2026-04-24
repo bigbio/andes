@@ -8,6 +8,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class Unimod {
+    private static final String UNIMOD_RESOURCE_PATH = "unimod.obo";
 
     public static Unimod getUnimod() {
         return unimod;
@@ -29,7 +30,7 @@ public class Unimod {
     }
 
     private void readUnimodOBOFile() {
-        InputStream is = Unimod.class.getClassLoader().getResourceAsStream(Constants.UNIMOD_RESOURCE_PATH);
+        InputStream is = Unimod.class.getClassLoader().getResourceAsStream(UNIMOD_RESOURCE_PATH);
         if (is == null) {
             System.err.println("Unable to access \"unimod.obo\".");
             System.exit(-1);

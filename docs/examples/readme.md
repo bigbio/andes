@@ -1,6 +1,6 @@
 # Example configuration and sample outputs
 
-Broader manuals (MS-GF+ CLI, BuildSA, MzID→TSV, changelog, …) are Markdown pages one level up: [`../readme.md`](../readme.md).
+Broader manuals (MS-GF+ CLI, BuildSA, changelog, …) are Markdown pages one level up: [`../readme.md`](../readme.md).
 
 This directory holds **small text examples** shipped with the repository:
 
@@ -12,7 +12,6 @@ This directory holds **small text examples** shipped with the repository:
 | `protocols.txt` | Example custom protocols for `params/protocols.txt`. |
 | `Mods.txt` | Example modification file. |
 | `pxd001819_example.pin` | **Sample Percolator `.pin` output** from a PXD001819 (yeast + UPS1 on LTQ Orbitrap Velos) search. Header + 20 target PSMs + 10 decoy PSMs, chosen for peptide-sequence diversity so every column is represented. Use this to inspect the `.pin` schema without running a full search. Full column reference in [`../output.md`](../output.md). |
-| `test.mzid` | Tiny mzIdentML sample used in static documentation. |
 | `test.tsv`, `test_Unrolled.tsv` | Example TSV exports for documentation. |
 
 **Not stored here:** tutorial spreadsheets, plots, or bundled FASTA/index files. Those are either removed as non-essential bloat or live under `src/test/resources/` for automated tests.

@@ -940,7 +940,7 @@ public class StaxMzMLParser {
 
     /**
      * Suppress all logback logging. Called at startup to silence noisy
-     * library output (jmzidml, etc.).
+     * library output.
      */
     public static void turnOffLogs() {
         if (!logOff) {

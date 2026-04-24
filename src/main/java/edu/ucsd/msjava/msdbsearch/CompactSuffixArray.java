@@ -10,9 +10,15 @@ import it.unimi.dsi.fastutil.ints.IntArrays;
 import java.io.*;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * SuffixArray class for fast exact matching.
@@ -268,6 +274,13 @@ public class CompactSuffixArray {
         return 0;
     }
 
+    /** Sysprop to override the number of threads used during the sort+LCP phase. */
+    static final String SA_BUILD_THREADS_PROPERTY = "msgfplus.buildsa.threads";
+
+    /** Default bucket-range thread count cap. Higher values give diminishing returns and
+     *  can thrash IO/caches; 4–8 is a reasonable upper bound. */
+    private static final int MAX_DEFAULT_SA_BUILD_THREADS = 8;
+
     /**
      * Helper method that creates the suffixFile.
      *
@@ -290,9 +303,13 @@ public class CompactSuffixArray {
      *   <li>LCP between adjacent suffixes is computed by an int-based helper
      *       on the sequence — no {@code ByteSequence} wrappers allocated in the
      *       sort/write loop.</li>
-     *   <li>Output is written sequentially: one bucket finalised + freed before
-     *       the next begins, so peak memory during sort is dominated by the
-     *       largest individual bucket rather than the full set.</li>
+     *   <li>The sort + LCP phase is parallelised across contiguous bucket-id
+     *       ranges (one worker thread per range). Each worker produces a
+     *       thread-local buffer of sorted indices + intra-range LCPs; the
+     *       merge step fixes up a single cross-range boundary LCP per
+     *       range-to-range transition and streams the buffers into the final
+     *       files sequentially. Writing stays single-threaded to preserve the
+     *       on-disk suffix-array ordering.</li>
      * </ul>
      *
      * @param sequence  the Adapter object that represents the database (text).
@@ -301,38 +318,6 @@ public class CompactSuffixArray {
      */
     private void createSuffixArrayFiles(CompactFastaSequence sequence, File indexFile, File nlcpFile) {
         System.out.println("Creating the suffix array indexed file... Size: " + sequence.getSize());
-
-        // helper local class: a growable int[] buffer for suffix indices.
-        class Bucket {
-
-            private int[] items;
-            private int size;
-
-            public Bucket() {
-                this.items = new int[10];
-                this.size = 0;
-            }
-
-            public void add(int item) {
-                if (this.size >= items.length) {
-                    this.items = Arrays.copyOf(this.items, this.size * 2);
-                }
-                this.items[this.size++] = item;
-            }
-
-            /**
-             * Trim + sort the bucket's indices lexicographically by suffix, starting
-             * from offset {@link #BUCKET_SIZE} since all members of a bucket share
-             * the first {@code BUCKET_SIZE} residues by hash construction. Returns
-             * a new {@code int[]} of exactly {@link #size} entries; the internal
-             * storage can be released after this call.
-             */
-            public int[] sortedIndexArray() {
-                int[] out = (this.size == this.items.length) ? this.items : Arrays.copyOf(this.items, this.size);
-                IntArrays.quickSort(out, (a, b) -> compareSuffixesFrom(sequence, a, b, BUCKET_SIZE));
-                return out;
-            }
-        }
 
         // the size of the alphabet to make the hashes
         int hashBase = sequence.getAlphabetSize();
@@ -391,50 +376,9 @@ public class CompactSuffixArray {
             indexOut.writeInt(sequence.getId());
             nlcpOut.writeInt(numResiduesInSequence);
             nlcpOut.writeInt(sequence.getId());
-            // Track the last index emitted across bucket boundaries so we can
-            // compute the LCP between the last suffix of the previous bucket
-            // and the first suffix of the current one. -1 = no predecessor.
-            int prevBucketFirstIndex = -1;
 
             System.out.println("Sorting suffixes... Size: " + bucketSuffixes.length);
-            lastStatusTime = System.currentTimeMillis();
-
-            for (int i = 0; i < bucketSuffixes.length; i++) {
-                // print progress
-                if (i % 100000 == 0 && System.currentTimeMillis() - lastStatusTime > 2000) {
-                    lastStatusTime = System.currentTimeMillis();
-                    System.out.printf("Sorting: %.2f%% complete.\n", i * 100.0 / bucketSuffixes.length);
-                }
-
-                Bucket bucket = bucketSuffixes[i];
-                if (bucket == null) continue;
-
-                int[] sortedIndices = bucket.sortedIndexArray();
-                bucketSuffixes[i] = null; // release the Bucket wrapper ASAP
-
-                int first = sortedIndices[0];
-                byte lcp = 0;
-                if (prevBucketFirstIndex >= 0) {
-                    // Inter-bucket LCP starts at offset 0 (buckets only share prefix
-                    // with their OWN members, not neighbours).
-                    lcp = computeLcpByte(sequence, first, prevBucketFirstIndex, 0);
-                }
-                indexOut.writeInt(first);
-                nlcpOut.writeByte(lcp);
-                int prev = first;
-
-                for (int j = 1; j < sortedIndices.length; j++) {
-                    int thisIndex = sortedIndices[j];
-                    indexOut.writeInt(thisIndex);
-                    // Intra-bucket: shared prefix of BUCKET_SIZE bytes is guaranteed.
-                    lcp = computeLcpByte(sequence, thisIndex, prev, BUCKET_SIZE);
-                    nlcpOut.writeByte(lcp);
-                    prev = thisIndex;
-                }
-                prevBucketFirstIndex = first;
-            }
-
-            bucketSuffixes = null;
+            sortAndWriteBuckets(sequence, bucketSuffixes, indexOut, nlcpOut);
 
             long lastModified = sequence.getLastModified();
             indexOut.writeLong(lastModified);
@@ -453,6 +397,302 @@ public class CompactSuffixArray {
             System.exit(-1);
         }
         return;
+    }
+
+    /**
+     * Sort + LCP compute phase. Parallelises across contiguous bucket-id ranges
+     * (one per worker thread); writes a single interleaved stream of indices +
+     * LCP bytes to disk. Thread count is picked from
+     * {@link #SA_BUILD_THREADS_PROPERTY} if set, else
+     * {@code min(availableProcessors, MAX_DEFAULT_SA_BUILD_THREADS)}, else 1.
+     *
+     * <p>Each worker produces a {@link RangeBuffer} with its local indices and
+     * LCPs. The merge step then walks ranges in bucket-id order, rewrites the
+     * first-LCP byte of each range against the previous range's last-bucket
+     * first suffix (a single fixup per range boundary), and streams the buffers
+     * into the output files.
+     */
+    private static void sortAndWriteBuckets(CompactFastaSequence sequence,
+                                            Bucket[] bucketSuffixes,
+                                            DataOutputStream indexOut,
+                                            DataOutputStream nlcpOut) throws IOException {
+        int numThreads = resolveSortThreads();
+        int[][] ranges = partitionBucketIds(bucketSuffixes, numThreads);
+
+        // Single-thread fast path: stream directly to the output without
+        // materialising a RangeBuffer. Matches the pre-parallel-refactor
+        // memory + CPU profile byte-for-byte on the sysprop-disabled path.
+        if (ranges.length == 1) {
+            writeBucketsDirect(sequence, bucketSuffixes, ranges[0][0], ranges[0][1], indexOut, nlcpOut);
+            return;
+        }
+
+        List<RangeBuffer> rangeBuffers = new ArrayList<>(ranges.length);
+        {
+            ExecutorService pool = Executors.newFixedThreadPool(ranges.length, r -> {
+                Thread t = new Thread(r, "buildsa-sort");
+                t.setDaemon(true);
+                return t;
+            });
+            try {
+                List<Future<RangeBuffer>> futures = new ArrayList<>(ranges.length);
+                for (int[] range : ranges) {
+                    final int from = range[0];
+                    final int to = range[1];
+                    futures.add(pool.submit(() -> processBucketRange(sequence, bucketSuffixes, from, to)));
+                }
+                for (Future<RangeBuffer> f : futures) {
+                    rangeBuffers.add(f.get());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while building suffix array", e);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                if (cause instanceof IOException) throw (IOException) cause;
+                throw new IOException("Suffix array sort worker failed", cause != null ? cause : e);
+            } finally {
+                pool.shutdown();
+            }
+        }
+
+        // Merge: fix up the cross-range boundary LCP, then stream each range
+        // into the output files in bucket-id order.
+        int prevRangeLastBucketFirst = -1;
+        for (RangeBuffer buf : rangeBuffers) {
+            if (buf.numEntries == 0) continue;
+            if (prevRangeLastBucketFirst >= 0) {
+                buf.nlcps[0] = computeLcpByte(sequence, buf.firstSuffixIndex, prevRangeLastBucketFirst, 0);
+            }
+            writeBuffer(indexOut, nlcpOut, buf);
+            prevRangeLastBucketFirst = buf.lastBucketFirstSuffix;
+        }
+    }
+
+    private static int resolveSortThreads() {
+        String configured = System.getProperty(SA_BUILD_THREADS_PROPERTY);
+        if (configured != null) {
+            try {
+                int n = Integer.parseInt(configured.trim());
+                if (n > 0) return n;
+            } catch (NumberFormatException ignored) {
+                // fall through to default
+            }
+        }
+        int procs = Runtime.getRuntime().availableProcessors();
+        return Math.max(1, Math.min(procs, MAX_DEFAULT_SA_BUILD_THREADS));
+    }
+
+    /**
+     * Split the bucket-id range {@code [0, buckets.length)} into contiguous
+     * ranges, one per thread. Ranges are balanced by total suffix count (sum
+     * of {@code bucket.size}) so each worker has roughly the same amount of
+     * sort + LCP work rather than the same number of hash buckets.
+     */
+    private static int[][] partitionBucketIds(Bucket[] buckets, int numThreads) {
+        if (numThreads <= 1 || buckets.length == 0) {
+            return new int[][]{{0, buckets.length}};
+        }
+        long totalSuffixes = 0L;
+        for (Bucket b : buckets) {
+            if (b != null) totalSuffixes += b.size;
+        }
+        if (totalSuffixes == 0L) {
+            return new int[][]{{0, buckets.length}};
+        }
+        long perThread = (totalSuffixes + numThreads - 1) / numThreads;
+
+        int[][] ranges = new int[numThreads][];
+        int rangeStart = 0;
+        int rangeIdx = 0;
+        long running = 0L;
+        for (int i = 0; i < buckets.length; i++) {
+            Bucket b = buckets[i];
+            if (b != null) running += b.size;
+            if (running >= perThread && rangeIdx < numThreads - 1) {
+                ranges[rangeIdx++] = new int[]{rangeStart, i + 1};
+                rangeStart = i + 1;
+                running = 0L;
+            }
+        }
+        ranges[rangeIdx++] = new int[]{rangeStart, buckets.length};
+        // Trim to actual range count.
+        if (rangeIdx != numThreads) {
+            int[][] trimmed = new int[rangeIdx][];
+            System.arraycopy(ranges, 0, trimmed, 0, rangeIdx);
+            ranges = trimmed;
+        }
+        return ranges;
+    }
+
+    /**
+     * Process a contiguous bucket-id range: sort each bucket, compute intra-range
+     * LCPs, and accumulate the output into a thread-local buffer. The first LCP
+     * in the buffer is a placeholder (0) to be fixed up during merge against
+     * the previous range's last bucket.
+     *
+     * <p>Each bucket reference is released as soon as its int[] has been sorted,
+     * keeping peak heap bounded by the largest in-flight bucket per thread.
+     */
+    private static RangeBuffer processBucketRange(CompactFastaSequence sequence,
+                                                  Bucket[] buckets,
+                                                  int from,
+                                                  int to) {
+        long count = 0L;
+        for (int i = from; i < to; i++) {
+            if (buckets[i] != null) count += buckets[i].size;
+        }
+        if (count == 0L) {
+            return new RangeBuffer(new int[0], new byte[0], 0, -1, -1);
+        }
+        if (count > Integer.MAX_VALUE) {
+            throw new IllegalStateException("Suffix array bucket range exceeds Integer.MAX_VALUE entries");
+        }
+
+        int total = (int) count;
+        int[] indices = new int[total];
+        byte[] nlcps = new byte[total];
+        int pos = 0;
+        int firstSuffixIndex = -1;
+        int lastBucketFirstSuffix = -1;
+        int prevIntraBucketLast = -1;
+        int prevBucketFirst = -1;
+
+        for (int bucketId = from; bucketId < to; bucketId++) {
+            Bucket bucket = buckets[bucketId];
+            if (bucket == null) continue;
+
+            int[] sorted = bucket.trimmedArray();
+            buckets[bucketId] = null; // release
+            IntArrays.quickSort(sorted, (a, b) -> compareSuffixesFrom(sequence, a, b, BUCKET_SIZE));
+
+            int first = sorted[0];
+            indices[pos] = first;
+            if (firstSuffixIndex < 0) {
+                firstSuffixIndex = first;
+                // Placeholder — merge step rewrites this based on the previous
+                // range's last-bucket first suffix. For the globally-first
+                // bucket this stays 0.
+                nlcps[pos] = 0;
+            } else {
+                nlcps[pos] = computeLcpByte(sequence, first, prevBucketFirst, 0);
+            }
+            pos++;
+            prevIntraBucketLast = first;
+
+            for (int j = 1; j < sorted.length; j++) {
+                int thisIndex = sorted[j];
+                indices[pos] = thisIndex;
+                nlcps[pos] = computeLcpByte(sequence, thisIndex, prevIntraBucketLast, BUCKET_SIZE);
+                pos++;
+                prevIntraBucketLast = thisIndex;
+            }
+
+            prevBucketFirst = first;
+            lastBucketFirstSuffix = first;
+        }
+
+        return new RangeBuffer(indices, nlcps, pos, firstSuffixIndex, lastBucketFirstSuffix);
+    }
+
+    private static void writeBuffer(DataOutputStream indexOut, DataOutputStream nlcpOut, RangeBuffer buf) throws IOException {
+        for (int i = 0; i < buf.numEntries; i++) {
+            indexOut.writeInt(buf.indices[i]);
+            nlcpOut.writeByte(buf.nlcps[i]);
+        }
+    }
+
+    /**
+     * Single-thread direct-write path. Sorts each bucket, computes LCPs, and
+     * writes to disk in one pass — no thread-local buffer, no merge, no
+     * executor. Used when {@link #SA_BUILD_THREADS_PROPERTY} resolves to 1
+     * (typically for deterministic testing or low-core machines).
+     */
+    private static void writeBucketsDirect(CompactFastaSequence sequence,
+                                           Bucket[] buckets,
+                                           int from,
+                                           int to,
+                                           DataOutputStream indexOut,
+                                           DataOutputStream nlcpOut) throws IOException {
+        int prevBucketFirstIndex = -1;
+        long lastStatusTime = System.currentTimeMillis();
+        for (int i = from; i < to; i++) {
+            if (i % 100000 == 0 && System.currentTimeMillis() - lastStatusTime > 2000) {
+                lastStatusTime = System.currentTimeMillis();
+                System.out.printf("Sorting: %.2f%% complete.%n", (i - from) * 100.0 / (to - from));
+            }
+
+            Bucket bucket = buckets[i];
+            if (bucket == null) continue;
+
+            int[] sorted = bucket.trimmedArray();
+            buckets[i] = null;
+            IntArrays.quickSort(sorted, (a, b) -> compareSuffixesFrom(sequence, a, b, BUCKET_SIZE));
+
+            int first = sorted[0];
+            byte lcp = 0;
+            if (prevBucketFirstIndex >= 0) {
+                lcp = computeLcpByte(sequence, first, prevBucketFirstIndex, 0);
+            }
+            indexOut.writeInt(first);
+            nlcpOut.writeByte(lcp);
+            int prev = first;
+
+            for (int j = 1; j < sorted.length; j++) {
+                int thisIndex = sorted[j];
+                indexOut.writeInt(thisIndex);
+                lcp = computeLcpByte(sequence, thisIndex, prev, BUCKET_SIZE);
+                nlcpOut.writeByte(lcp);
+                prev = thisIndex;
+            }
+            prevBucketFirstIndex = first;
+        }
+    }
+
+    /** Per-thread sort + LCP output buffer. Owned by the worker that produced it;
+     *  consumed once in bucket-id order by the merge step. */
+    private static final class RangeBuffer {
+        final int[] indices;
+        final byte[] nlcps;
+        final int numEntries;
+        final int firstSuffixIndex;
+        final int lastBucketFirstSuffix;
+
+        RangeBuffer(int[] indices, byte[] nlcps, int numEntries, int firstSuffixIndex, int lastBucketFirstSuffix) {
+            this.indices = indices;
+            this.nlcps = nlcps;
+            this.numEntries = numEntries;
+            this.firstSuffixIndex = firstSuffixIndex;
+            this.lastBucketFirstSuffix = lastBucketFirstSuffix;
+        }
+    }
+
+    /** Growable {@code int[]} bucket of suffix indices. Shared between the
+     *  bucketing phase (sequential {@link #add}) and the per-range worker
+     *  threads (concurrent {@link #trimmedArray} — safe because bucketing
+     *  completes before any worker starts). */
+    private static final class Bucket {
+        private int[] items;
+        private int size;
+
+        Bucket() {
+            this.items = new int[10];
+            this.size = 0;
+        }
+
+        void add(int item) {
+            if (this.size >= items.length) {
+                this.items = Arrays.copyOf(this.items, this.size * 2);
+            }
+            this.items[this.size++] = item;
+        }
+
+        /** Return a fresh int[] of exactly {@code size} entries. The bucket's
+         *  internal storage can then be dropped. */
+        int[] trimmedArray() {
+            return (this.size == this.items.length) ? this.items : Arrays.copyOf(this.items, this.size);
+        }
     }
 
     /**

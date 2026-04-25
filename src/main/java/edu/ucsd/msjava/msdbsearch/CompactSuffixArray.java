@@ -8,6 +8,7 @@ import edu.ucsd.msjava.suffixarray.SuffixFactory;
 import it.unimi.dsi.fastutil.ints.IntArrays;
 
 import java.io.*;
+import java.nio.file.Files;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -378,7 +379,7 @@ public class CompactSuffixArray {
             nlcpOut.writeInt(sequence.getId());
 
             System.out.println("Sorting suffixes... Size: " + bucketSuffixes.length);
-            sortAndWriteBuckets(sequence, bucketSuffixes, indexOut, nlcpOut);
+            sortAndWriteBuckets(sequence, bucketSuffixes, indexFile, indexOut, nlcpOut);
 
             long lastModified = sequence.getLastModified();
             indexOut.writeLong(lastModified);
@@ -406,43 +407,56 @@ public class CompactSuffixArray {
      * {@link #SA_BUILD_THREADS_PROPERTY} if set, else
      * {@code min(availableProcessors, MAX_DEFAULT_SA_BUILD_THREADS)}, else 1.
      *
-     * <p>Each worker produces a {@link RangeBuffer} with its local indices and
-     * LCPs. The merge step then walks ranges in bucket-id order, rewrites the
-     * first-LCP byte of each range against the previous range's last-bucket
-     * first suffix (a single fixup per range boundary), and streams the buffers
-     * into the output files.
+     * <p>Each worker streams its sorted indices + intra-range LCPs into a
+     * pair of per-range temp files (alongside the final {@code .csarr}). The
+     * merge step then walks ranges in bucket-id order, rewrites the first-LCP
+     * byte of each range against the previous range's last-bucket first suffix
+     * (a single fixup per range boundary), and streams the temp files into the
+     * output files. Temp files are deleted in a {@code finally} block on both
+     * success and failure paths; {@link File#deleteOnExit} is also requested
+     * as a belt-and-braces fallback for hard crashes.
      */
     private static void sortAndWriteBuckets(CompactFastaSequence sequence,
                                             Bucket[] bucketSuffixes,
+                                            File indexFile,
                                             DataOutputStream indexOut,
                                             DataOutputStream nlcpOut) throws IOException {
         int numThreads = resolveSortThreads();
         int[][] ranges = partitionBucketIds(bucketSuffixes, numThreads);
 
         // Single-thread fast path: stream directly to the output without
-        // materialising a RangeBuffer. Matches the pre-parallel-refactor
+        // materialising any per-range buffer. Matches the pre-parallel-refactor
         // memory + CPU profile byte-for-byte on the sysprop-disabled path.
         if (ranges.length == 1) {
             writeBucketsDirect(sequence, bucketSuffixes, ranges[0][0], ranges[0][1], indexOut, nlcpOut);
             return;
         }
 
-        List<RangeBuffer> rangeBuffers = new ArrayList<>(ranges.length);
-        {
+        File parentDir = indexFile.getAbsoluteFile().getParentFile();
+        if (parentDir == null) parentDir = new File(".");
+        String tempBasename = indexFile.getName() + ".buildsa-tmp." + ProcessHandle.current().pid() + "." + System.nanoTime();
+
+        List<RangeMetadata> rangeMetadatas = new ArrayList<>(ranges.length);
+        try {
             ExecutorService pool = Executors.newFixedThreadPool(ranges.length, r -> {
                 Thread t = new Thread(r, "buildsa-sort");
                 t.setDaemon(true);
                 return t;
             });
             try {
-                List<Future<RangeBuffer>> futures = new ArrayList<>(ranges.length);
-                for (int[] range : ranges) {
-                    final int from = range[0];
-                    final int to = range[1];
-                    futures.add(pool.submit(() -> processBucketRange(sequence, bucketSuffixes, from, to)));
+                List<Future<RangeMetadata>> futures = new ArrayList<>(ranges.length);
+                for (int idx = 0; idx < ranges.length; idx++) {
+                    final int from = ranges[idx][0];
+                    final int to = ranges[idx][1];
+                    final File tempIndices = new File(parentDir, tempBasename + ".indices." + idx);
+                    final File tempLcps = new File(parentDir, tempBasename + ".lcps." + idx);
+                    tempIndices.deleteOnExit();
+                    tempLcps.deleteOnExit();
+                    futures.add(pool.submit(() -> processBucketRangeToTempFiles(
+                            sequence, bucketSuffixes, from, to, tempIndices, tempLcps)));
                 }
-                for (Future<RangeBuffer> f : futures) {
-                    rangeBuffers.add(f.get());
+                for (Future<RangeMetadata> f : futures) {
+                    rangeMetadatas.add(f.get());
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -455,18 +469,73 @@ public class CompactSuffixArray {
             } finally {
                 pool.shutdown();
             }
-        }
 
-        // Merge: fix up the cross-range boundary LCP, then stream each range
-        // into the output files in bucket-id order.
-        int prevRangeLastBucketFirst = -1;
-        for (RangeBuffer buf : rangeBuffers) {
-            if (buf.numEntries == 0) continue;
-            if (prevRangeLastBucketFirst >= 0) {
-                buf.nlcps[0] = computeLcpByte(sequence, buf.firstSuffixIndex, prevRangeLastBucketFirst, 0);
+            // Merge: stream each range's temp files into the output, fixing up
+            // the cross-range boundary LCP byte at each transition.
+            int prevRangeLastBucketFirst = -1;
+            for (RangeMetadata md : rangeMetadatas) {
+                if (md.numEntries == 0) continue;
+                mergeRangeIntoOutput(sequence, md, prevRangeLastBucketFirst, indexOut, nlcpOut);
+                prevRangeLastBucketFirst = md.lastBucketFirstSuffix;
             }
-            writeBuffer(indexOut, nlcpOut, buf);
-            prevRangeLastBucketFirst = buf.lastBucketFirstSuffix;
+        } finally {
+            // Best-effort cleanup of all temp files on both success and failure.
+            for (RangeMetadata md : rangeMetadatas) {
+                deleteQuietly(md.tempIndicesFile);
+                deleteQuietly(md.tempLcpsFile);
+            }
+            // Also pick up any temp files from workers that didn't finish (so
+            // their RangeMetadata never made it into the list).
+            cleanupOrphanedTempFiles(parentDir, tempBasename);
+        }
+    }
+
+    private static void deleteQuietly(File f) {
+        if (f == null) return;
+        try { Files.deleteIfExists(f.toPath()); } catch (IOException ignored) { }
+    }
+
+    /**
+     * Best-effort sweep of temp files matching {@code <tempBasename>.*} in
+     * {@code parentDir}. Used in the {@code finally} block to catch debris
+     * from workers that died before returning a {@link RangeMetadata}.
+     */
+    private static void cleanupOrphanedTempFiles(File parentDir, String tempBasename) {
+        if (parentDir == null || tempBasename == null) return;
+        File[] orphans = parentDir.listFiles((dir, name) -> name.startsWith(tempBasename));
+        if (orphans == null) return;
+        for (File f : orphans) deleteQuietly(f);
+    }
+
+    /**
+     * Stream one range's per-worker temp files into the final output streams.
+     * The first LCP byte is rewritten against {@code prevRangeLastBucketFirst}
+     * to bridge the cross-range boundary; the rest of the temp data is copied
+     * verbatim. Caller is responsible for deleting the temp files afterwards
+     * (handled in the {@code finally} block of {@link #sortAndWriteBuckets}).
+     */
+    private static void mergeRangeIntoOutput(CompactFastaSequence sequence,
+                                             RangeMetadata md,
+                                             int prevRangeLastBucketFirst,
+                                             DataOutputStream indexOut,
+                                             DataOutputStream nlcpOut) throws IOException {
+        try (DataInputStream idxIn = new DataInputStream(new BufferedInputStream(new FileInputStream(md.tempIndicesFile)));
+             DataInputStream lcpIn = new DataInputStream(new BufferedInputStream(new FileInputStream(md.tempLcpsFile)))) {
+            // First entry: rewrite LCP against the previous range's last-bucket
+            // first suffix. For the globally first range, prevRangeLastBucketFirst
+            // is -1 and we pass through the placeholder 0 written by the worker.
+            int firstIndex = idxIn.readInt();
+            byte firstLcp = lcpIn.readByte();
+            if (prevRangeLastBucketFirst >= 0) {
+                firstLcp = computeLcpByte(sequence, firstIndex, prevRangeLastBucketFirst, 0);
+            }
+            indexOut.writeInt(firstIndex);
+            nlcpOut.writeByte(firstLcp);
+
+            for (int i = 1; i < md.numEntries; i++) {
+                indexOut.writeInt(idxIn.readInt());
+                nlcpOut.writeByte(lcpIn.readByte());
+            }
         }
     }
 
@@ -528,79 +597,79 @@ public class CompactSuffixArray {
 
     /**
      * Process a contiguous bucket-id range: sort each bucket, compute intra-range
-     * LCPs, and accumulate the output into a thread-local buffer. The first LCP
-     * in the buffer is a placeholder (0) to be fixed up during merge against
-     * the previous range's last bucket.
+     * LCPs, and stream the output into per-worker temp files. The first LCP byte
+     * is a placeholder (0) to be fixed up during merge against the previous
+     * range's last bucket.
      *
      * <p>Each bucket reference is released as soon as its int[] has been sorted,
      * keeping peak heap bounded by the largest in-flight bucket per thread.
+     * No per-range int[] / byte[] is materialised — disk-backed instead, so peak
+     * heap during the parallel sort phase does not scale with FASTA size.
      */
-    private static RangeBuffer processBucketRange(CompactFastaSequence sequence,
-                                                  Bucket[] buckets,
-                                                  int from,
-                                                  int to) {
+    private static RangeMetadata processBucketRangeToTempFiles(CompactFastaSequence sequence,
+                                                               Bucket[] buckets,
+                                                               int from,
+                                                               int to,
+                                                               File tempIndicesFile,
+                                                               File tempLcpsFile) throws IOException {
         long count = 0L;
         for (int i = from; i < to; i++) {
             if (buckets[i] != null) count += buckets[i].size;
         }
         if (count == 0L) {
-            return new RangeBuffer(new int[0], new byte[0], 0, -1, -1);
+            // No work to do: return a sentinel; no temp files were created.
+            return new RangeMetadata(null, null, 0, -1, -1);
         }
         if (count > Integer.MAX_VALUE) {
             throw new IllegalStateException("Suffix array bucket range exceeds Integer.MAX_VALUE entries");
         }
 
-        int total = (int) count;
-        int[] indices = new int[total];
-        byte[] nlcps = new byte[total];
-        int pos = 0;
         int firstSuffixIndex = -1;
         int lastBucketFirstSuffix = -1;
         int prevIntraBucketLast = -1;
         int prevBucketFirst = -1;
+        int numEntries = 0;
 
-        for (int bucketId = from; bucketId < to; bucketId++) {
-            Bucket bucket = buckets[bucketId];
-            if (bucket == null) continue;
+        try (DataOutputStream idxOut = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(tempIndicesFile)));
+             DataOutputStream lcpOut = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(tempLcpsFile)))) {
+            for (int bucketId = from; bucketId < to; bucketId++) {
+                Bucket bucket = buckets[bucketId];
+                if (bucket == null) continue;
 
-            int[] sorted = bucket.trimmedArray();
-            buckets[bucketId] = null; // release
-            IntArrays.quickSort(sorted, (a, b) -> compareSuffixesFrom(sequence, a, b, BUCKET_SIZE));
+                int[] sorted = bucket.trimmedArray();
+                buckets[bucketId] = null; // release
+                IntArrays.quickSort(sorted, (a, b) -> compareSuffixesFrom(sequence, a, b, BUCKET_SIZE));
 
-            int first = sorted[0];
-            indices[pos] = first;
-            if (firstSuffixIndex < 0) {
-                firstSuffixIndex = first;
-                // Placeholder — merge step rewrites this based on the previous
-                // range's last-bucket first suffix. For the globally-first
-                // bucket this stays 0.
-                nlcps[pos] = 0;
-            } else {
-                nlcps[pos] = computeLcpByte(sequence, first, prevBucketFirst, 0);
+                int first = sorted[0];
+                idxOut.writeInt(first);
+                byte lcp;
+                if (firstSuffixIndex < 0) {
+                    firstSuffixIndex = first;
+                    // Placeholder — merge step rewrites this based on the previous
+                    // range's last-bucket first suffix. For the globally-first
+                    // bucket this stays 0.
+                    lcp = 0;
+                } else {
+                    lcp = computeLcpByte(sequence, first, prevBucketFirst, 0);
+                }
+                lcpOut.writeByte(lcp);
+                numEntries++;
+                prevIntraBucketLast = first;
+
+                for (int j = 1; j < sorted.length; j++) {
+                    int thisIndex = sorted[j];
+                    idxOut.writeInt(thisIndex);
+                    lcpOut.writeByte(computeLcpByte(sequence, thisIndex, prevIntraBucketLast, BUCKET_SIZE));
+                    numEntries++;
+                    prevIntraBucketLast = thisIndex;
+                }
+
+                prevBucketFirst = first;
+                lastBucketFirstSuffix = first;
             }
-            pos++;
-            prevIntraBucketLast = first;
-
-            for (int j = 1; j < sorted.length; j++) {
-                int thisIndex = sorted[j];
-                indices[pos] = thisIndex;
-                nlcps[pos] = computeLcpByte(sequence, thisIndex, prevIntraBucketLast, BUCKET_SIZE);
-                pos++;
-                prevIntraBucketLast = thisIndex;
-            }
-
-            prevBucketFirst = first;
-            lastBucketFirstSuffix = first;
         }
 
-        return new RangeBuffer(indices, nlcps, pos, firstSuffixIndex, lastBucketFirstSuffix);
-    }
-
-    private static void writeBuffer(DataOutputStream indexOut, DataOutputStream nlcpOut, RangeBuffer buf) throws IOException {
-        for (int i = 0; i < buf.numEntries; i++) {
-            indexOut.writeInt(buf.indices[i]);
-            nlcpOut.writeByte(buf.nlcps[i]);
-        }
+        return new RangeMetadata(tempIndicesFile, tempLcpsFile, numEntries, firstSuffixIndex, lastBucketFirstSuffix);
     }
 
     /**
@@ -650,18 +719,20 @@ public class CompactSuffixArray {
         }
     }
 
-    /** Per-thread sort + LCP output buffer. Owned by the worker that produced it;
-     *  consumed once in bucket-id order by the merge step. */
-    private static final class RangeBuffer {
-        final int[] indices;
-        final byte[] nlcps;
+    /** Per-worker sort + LCP output handle. The actual indices/LCPs live on disk
+     *  in {@link #tempIndicesFile} / {@link #tempLcpsFile}; this struct just
+     *  carries the small metadata the merge step needs. Workers with no entries
+     *  in their range create no temp files and return {@code null} paths. */
+    static final class RangeMetadata {
+        final File tempIndicesFile;
+        final File tempLcpsFile;
         final int numEntries;
         final int firstSuffixIndex;
         final int lastBucketFirstSuffix;
 
-        RangeBuffer(int[] indices, byte[] nlcps, int numEntries, int firstSuffixIndex, int lastBucketFirstSuffix) {
-            this.indices = indices;
-            this.nlcps = nlcps;
+        RangeMetadata(File tempIndicesFile, File tempLcpsFile, int numEntries, int firstSuffixIndex, int lastBucketFirstSuffix) {
+            this.tempIndicesFile = tempIndicesFile;
+            this.tempLcpsFile = tempLcpsFile;
             this.numEntries = numEntries;
             this.firstSuffixIndex = firstSuffixIndex;
             this.lastBucketFirstSuffix = lastBucketFirstSuffix;

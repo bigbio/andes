@@ -60,16 +60,16 @@ public class ScoredSpectraMap {
         this.specDataType = specDataType;
         this.precursorMassShiftPpm = precursorMassShiftPpm;
 
-        pepMassSpecKeyMap = Collections.synchronizedSortedMap((new TreeMap<Double, SpecKey>()));
-        specKeyScorerMap = Collections.synchronizedMap(new HashMap<SpecKey, SimpleDBSearchScorer<NominalMass>>());
-        specIndexChargeToSpecKeyMap = Collections.synchronizedMap(new HashMap<Pair<Integer, Integer>, SpecKey>());
-
-//		// To support spectrum-specific tolerance
-//		if(supportSpectrumSpecificErrorTolerance)
-//			specKeyToleranceMap = Collections.synchronizedMap(new HashMap<SpecKey,Tolerance>());
+        // Each ScoredSpectraMap is owned by exactly one RunMSGFPlus task (or the
+        // MassCalibrator pre-pass, also single-threaded). The synchronized wrappers
+        // these maps used to carry were defensive against a sharing pattern that
+        // does not occur in production code paths. Plain Map/SortedMap is enough.
+        pepMassSpecKeyMap = new TreeMap<>();
+        specKeyScorerMap = new HashMap<>();
+        specIndexChargeToSpecKeyMap = new HashMap<>();
 
         if (storeRankScorer)
-            specKeyRankScorerMap = Collections.synchronizedMap(new HashMap<SpecKey, NewRankScorer>());
+            specKeyRankScorerMap = new HashMap<>();
         progress = null;
     }
 

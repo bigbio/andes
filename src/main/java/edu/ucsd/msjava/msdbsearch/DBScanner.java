@@ -89,8 +89,12 @@ public class DBScanner {
             intAAMass[aa.getResidue()] = aa.getNominalMass();
         }
 
-        specKeyDBMatchMap = Collections.synchronizedMap(new HashMap<SpecKey, PriorityQueue<DatabaseMatch>>());
-        specIndexDBMatchMap = Collections.synchronizedMap(new HashMap<Integer, PriorityQueue<DatabaseMatch>>());
+        // DBScanner is owned by exactly one RunMSGFPlus / ConcurrentMSGFDB task.
+        // No internal fork-out (verified: no ExecutorService / Thread creation in
+        // dbSearch). Plain HashMap is enough; the synchronized wrappers were
+        // defensive against a sharing pattern that does not occur in production.
+        specKeyDBMatchMap = new HashMap<>();
+        specIndexDBMatchMap = new HashMap<>();
 
         progress = null;
         output = System.out;
@@ -116,7 +120,7 @@ public class DBScanner {
         return this;
     }
 
-    public synchronized void addDBMatches(Map<SpecKey, PriorityQueue<DatabaseMatch>> map) {
+    public void addDBMatches(Map<SpecKey, PriorityQueue<DatabaseMatch>> map) {
         if (map == null)
             return;
         Iterator<Entry<SpecKey, PriorityQueue<DatabaseMatch>>> itr = map.entrySet().iterator();
@@ -668,7 +672,7 @@ public class DBScanner {
         }
     }
 
-    public synchronized void generateSpecIndexDBMatchMap() {
+    public void generateSpecIndexDBMatchMap() {
         Iterator<Entry<SpecKey, PriorityQueue<DatabaseMatch>>> itr = specKeyDBMatchMap.entrySet().iterator();
         int numPeptidesPerSpec = this.numPeptidesPerSpec;
 
@@ -728,7 +732,7 @@ public class DBScanner {
         }
     }
 
-    public synchronized void addResultsToList(List<MSGFPlusMatch> resultList) {
+    public void addResultsToList(List<MSGFPlusMatch> resultList) {
         Iterator<Entry<Integer, PriorityQueue<DatabaseMatch>>> itr = specIndexDBMatchMap.entrySet().iterator();
         while (itr.hasNext()) {
             Entry<Integer, PriorityQueue<DatabaseMatch>> entry = itr.next();
@@ -761,7 +765,7 @@ public class DBScanner {
     }
 
     // for MS-GFDB
-    public synchronized void addDBSearchResults(List<MSGFDBResultGenerator.DBMatch> gen, String specFileName, boolean replicateMergedResults) {
+    public void addDBSearchResults(List<MSGFDBResultGenerator.DBMatch> gen, String specFileName, boolean replicateMergedResults) {
         Map<Integer, PriorityQueue<DatabaseMatch>> specIndexDBMatchMap = new HashMap<Integer, PriorityQueue<DatabaseMatch>>();
 
         Iterator<Entry<SpecKey, PriorityQueue<DatabaseMatch>>> itr = specKeyDBMatchMap.entrySet().iterator();

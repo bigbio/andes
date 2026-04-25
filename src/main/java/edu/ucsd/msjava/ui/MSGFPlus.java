@@ -356,7 +356,9 @@ public class MSGFPlus {
         }
         double precursorMassShiftPpm = currentIoFiles.getPrecursorMassShiftPpm();
 
-        List<MSGFPlusMatch> resultList = Collections.synchronizedList(new ArrayList<MSGFPlusMatch>());
+        // Drained from per-task buffers after awaitTermination; no shared
+        // mutation during the search itself.
+        List<MSGFPlusMatch> resultList = new ArrayList<>();
 
         int toIndexGlobal = specSize;
         while (toIndexGlobal < specSize) {
@@ -438,7 +440,7 @@ public class MSGFPlus {
                         () -> {
                             ScoredSpectraMap specScanner = new ScoredSpectraMap(
                                     specAcc,
-                                    Collections.synchronizedList(specKeyList.subList(taskStartIndex, taskEndIndex)),
+                                    specKeyList.subList(taskStartIndex, taskEndIndex),
                                     leftPrecursorMassTolerance,
                                     rightPrecursorMassTolerance,
                                     minIsotopeError,
@@ -454,7 +456,6 @@ public class MSGFPlus {
                         },
                         sa,
                         params,
-                        resultList,
                         taskNum
                 );
 
@@ -483,6 +484,14 @@ public class MSGFPlus {
 
             // Output completed progress report.
             executor.outputProgressReport();
+
+            // Drain per-task result buffers into the global resultList. Done
+            // single-threaded after awaitTermination — the executor's termination
+            // provides happens-before on every task's writes (JLS §17.4.5), so
+            // no synchronization is needed on the per-task ArrayList.
+            for (ConcurrentMSGFPlus.RunMSGFPlus t : submittedTasks) {
+                resultList.addAll(t.getResults());
+            }
 
             // T1: tail-imbalance summary across the just-completed tasks.
             // Cheap diagnostic; only printed when there's more than one task.

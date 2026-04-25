@@ -32,12 +32,23 @@ public class ConcurrentMSGFPlus {
         private final Supplier<ScoredSpectraMap> specScannerSupplier;
         private final CompactSuffixArray sa;
         SearchParams params;
-        List<MSGFPlusMatch> resultList;
+        /** Task-local result buffer. Each task fills its own list inside
+         *  {@link #run()} and exposes it via {@link #getResults()} for the
+         *  main thread to drain after {@code awaitTermination}. Replaces the
+         *  prior shared-synchronizedList-with-N-writers pattern. */
+        private final List<MSGFPlusMatch> resultList;
         private final int taskNum;
         private ProgressData progress;
         private ScoredSpectraMap specScanner;
         private DBScanner scanner;
         private volatile TaskWallStats wallStats;
+
+        /** Drain the task-local result buffer. Safe to call from another
+         *  thread after the executor has terminated; awaitTermination
+         *  provides happens-before on the buffer's writes. */
+        public List<MSGFPlusMatch> getResults() {
+            return resultList;
+        }
 
         /** Wall stats captured at the end of {@link #run()}, or {@code null}
          *  if the task didn't complete (e.g. interrupted). Read from the main
@@ -60,13 +71,12 @@ public class ConcurrentMSGFPlus {
                 Supplier<ScoredSpectraMap> specScannerSupplier,
                 CompactSuffixArray sa,
                 SearchParams params,
-                List<MSGFPlusMatch> resultList,
                 int taskNum
         ) {
+            this.resultList = new java.util.ArrayList<>();
             this.specScannerSupplier = specScannerSupplier;
             this.sa = sa;
             this.params = params;
-            this.resultList = resultList;
             this.taskNum = taskNum;
             progress = null;
         }

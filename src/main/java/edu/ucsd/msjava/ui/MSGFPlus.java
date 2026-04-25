@@ -377,7 +377,13 @@ public class MSGFPlus {
         ThreadPoolExecutorWithExceptions executor = ThreadPoolExecutorWithExceptions.newFixedThreadPool(numThreads);
         executor.setTaskName("Search");
 
-        int numTasks = Math.min(numThreads * 3, Math.round((float) specSize / spectraPerTaskMinimum));
+        // T2: numTasks-per-thread multiplier is configurable via
+        // -Dmsgfplus.numTasksPerThread=N. Higher values reduce tail
+        // imbalance when SpecKey distribution is uneven (heavier tasks
+        // get stolen earlier from the queue) at the cost of slightly more
+        // per-task heap. Default 3 keeps the prior behavior.
+        int tasksPerThread = resolveTasksPerThread();
+        int numTasks = Math.min(numThreads * tasksPerThread, Math.round((float) specSize / spectraPerTaskMinimum));
         if (numThreads <= 1) {
             numTasks = 1;
         }
@@ -559,6 +565,21 @@ public class MSGFPlus {
         System.out.print("Writing results finished ");
         System.out.format("(elapsed time: %.2f sec)\n", (float) (System.currentTimeMillis() - saveResultsStartTime) / 1000);
         return null;
+    }
+
+    /** Sysprop overriding the numTasks-per-thread multiplier (T2). */
+    static final String TASKS_PER_THREAD_PROPERTY = "msgfplus.numTasksPerThread";
+    static final int DEFAULT_TASKS_PER_THREAD = 3;
+
+    private static int resolveTasksPerThread() {
+        String v = System.getProperty(TASKS_PER_THREAD_PROPERTY);
+        if (v != null) {
+            try {
+                int n = Integer.parseInt(v.trim());
+                if (n >= 1) return n;
+            } catch (NumberFormatException ignored) { /* fall through */ }
+        }
+        return DEFAULT_TASKS_PER_THREAD;
     }
 
     /**

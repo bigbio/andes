@@ -119,17 +119,20 @@ public class MassCalibrator {
      * @return learned ppm shift, or 0.0 if the pre-pass had insufficient data
      */
     public double learnPrecursorShiftPpm(int ioIndex) {
-        // Cheap guard: skip the pre-pass entirely on small files. Running the
-        // pre-pass calls preProcessSpectra() on a subset of shared Spectrum
-        // objects, which mutates their scored state and causes a ~0.1% PSM-list
-        // drift vs -precursorCal off when the main search later re-processes
-        // those same spectra. This is the hard correctness gate.
+        // Size guard: skip the pre-pass on small files where it can't yield
+        // MIN_CONFIDENT_PSMS reliably.
         //
-        // Threshold of 10_000 SpecKeys corresponds to ~3000-spectrum files, which
-        // is both (a) too small to reliably yield MIN_CONFIDENT_PSMS confident
-        // matches, and (b) small enough that the state-mutation side-effect is
-        // noticeable. Real datasets (PXD001819 ~66K, Astral ~75K, TMT ~40K) are
-        // comfortably above the threshold and run the calibrator as intended.
+        // Historical context (kept here so the threshold isn't trimmed by accident):
+        // the 10_000 SpecKey floor was originally also a workaround for state-
+        // mutation drift — the StaxMzMLParser cache returned the SAME Spectrum
+        // instance to the pre-pass and main pass, and preProcessSpectra mutated
+        // peak ranks / charge in-place, causing ~0.1% PSM-list drift vs
+        // -precursorCal off. As of the big-FASTA / Astral-OOM PR
+        // (feature/improve-mzid-suffix-big-fasta), the parser returns a defensive
+        // copy on every getSpectrumBySpecIndex, so the mutation pathway is closed.
+        // The threshold remains as a "is there enough data to learn from" gate;
+        // it is no longer a correctness shield. If the calibrator ever needs to
+        // run on smaller files, this floor can be lowered safely.
         if (specKeyList == null || specKeyList.size() < MIN_SPECKEYS_FOR_PREPASS) {
             return 0.0;
         }

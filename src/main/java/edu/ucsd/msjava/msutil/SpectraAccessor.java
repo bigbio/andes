@@ -65,7 +65,7 @@ public class SpectraAccessor {
             if (specFormat == SpecFileFormat.MZML) {
                 if (staxParser == null) {
                     try {
-                        staxParser = new StaxMzMLParser(specFile);
+                        staxParser = new StaxMzMLParser(specFile, minMSLevel, maxMSLevel);
                     } catch (Exception e) {
                         throw new RuntimeException("Failed to parse mzML file: " + specFile.getAbsolutePath(), e);
                     }
@@ -102,7 +102,7 @@ public class SpectraAccessor {
             if (specFormat == SpecFileFormat.MZML) {
                 if (staxParser == null) {
                     try {
-                        staxParser = new StaxMzMLParser(specFile);
+                        staxParser = new StaxMzMLParser(specFile, minMSLevel, maxMSLevel);
                     } catch (Exception e) {
                         throw new RuntimeException("Failed to parse mzML file: " + specFile.getAbsolutePath(), e);
                     }

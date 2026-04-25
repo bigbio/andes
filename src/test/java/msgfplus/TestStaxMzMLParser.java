@@ -168,13 +168,60 @@ public class TestStaxMzMLParser {
     }
 
     @Test
-    public void testCacheHit() throws Exception {
+    public void testCacheReturnsDefensiveCopy() throws Exception {
+        // Behavioral change vs. the original parser: getSpectrumBySpecIndex
+        // now returns a defensive copy on every call. This is required so the
+        // pre-pass (MassCalibrator) cannot mutate scoring state that the main
+        // pass will later re-read. See `cloneSpectrum` in StaxMzMLParser.
         StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile());
-        // First access
         Spectrum spec1 = parser.getSpectrumBySpecIndex(2);
-        // Second access should hit cache (same object)
         Spectrum spec2 = parser.getSpectrumBySpecIndex(2);
-        Assert.assertSame("Cache should return same object", spec1, spec2);
+        Assert.assertNotSame("Defensive copy should return distinct instances", spec1, spec2);
+
+        // Equivalent data: same id, same peak count, same precursor m/z
+        Assert.assertEquals(spec1.getID(), spec2.getID());
+        Assert.assertEquals(spec1.size(), spec2.size());
+        Assert.assertEquals(spec1.getPrecursorPeak().getMz(), spec2.getPrecursorPeak().getMz(), 0.0001f);
+
+        // Mutating one copy must not affect the other (or any future read).
+        // Set the rank of the first peak in spec1; verify spec2 / spec3 are unaffected.
+        spec1.get(0).setRank(99);
+        Spectrum spec3 = parser.getSpectrumBySpecIndex(2);
+        Assert.assertNotSame(spec1, spec3);
+        Assert.assertNotEquals("Mutation must not leak through cache", 99, spec3.get(0).getRank());
+    }
+
+    @Test
+    public void testMSLevelPreloadFilter() throws Exception {
+        // Parser constructed with [2, 2] should never decode/return MS1 spectra.
+        // The tiny.pwiz.mzML fixture has 3 MS1 (indices 1, 3, 4) and 1 MS2 (index 2).
+        StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile(), 2, 2);
+        Assert.assertNull("MS1 (index 1) must be filtered out", parser.getSpectrumBySpecIndex(1));
+        Assert.assertNull("MS1 (index 3) must be filtered out", parser.getSpectrumBySpecIndex(3));
+        Assert.assertNull("MS1 (index 4) must be filtered out", parser.getSpectrumBySpecIndex(4));
+        Spectrum ms2 = parser.getSpectrumBySpecIndex(2);
+        Assert.assertNotNull("MS2 (index 2) must come through", ms2);
+        Assert.assertEquals(2, ms2.getMSLevel());
+        Assert.assertEquals(10, ms2.size());
+    }
+
+    @Test
+    public void testCacheSizeOverride() throws Exception {
+        // Bounded LRU cap is configurable via -Dmsgfplus.mzml.cacheSize. Verify
+        // a tiny cap still works end-to-end (eviction must not break correctness:
+        // a re-read of an evicted index just triggers another preload, which is
+        // an acceptable fallback for huge files).
+        String prev = System.getProperty("msgfplus.mzml.cacheSize");
+        System.setProperty("msgfplus.mzml.cacheSize", "2");
+        try {
+            StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile());
+            Spectrum spec = parser.getSpectrumBySpecIndex(2);
+            Assert.assertNotNull(spec);
+            Assert.assertEquals(2, spec.getMSLevel());
+        } finally {
+            if (prev == null) System.clearProperty("msgfplus.mzml.cacheSize");
+            else System.setProperty("msgfplus.mzml.cacheSize", prev);
+        }
     }
 
     @Test

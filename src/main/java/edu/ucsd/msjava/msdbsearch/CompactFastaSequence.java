@@ -540,7 +540,12 @@ public class CompactFastaSequence implements Sequence {
             long lastModified = in.readLong();
 
             sequence = new byte[size];
-            in.read(sequence);
+            // readFully: a plain in.read() is allowed to return fewer bytes than
+            // requested even on a BufferedInputStream-wrapped FileInputStream, which
+            // silently corrupts the in-memory sequence on large .cseq files (>2GB
+            // not yet reachable due to int-indexed `size`, but the short-read failure
+            // mode is real on any file whose payload exceeds the buffer's chunk).
+            in.readFully(sequence);
 
             in.close();
             return new FileSignature(formatId, id, lastModified);

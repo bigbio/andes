@@ -421,6 +421,10 @@ public class MSGFPlus {
             }
         }
 
+        // Retain task references so we can pull TaskWallStats after termination
+        // for the tail-imbalance summary (T1 instrumentation).
+        List<ConcurrentMSGFPlus.RunMSGFPlus> submittedTasks = new ArrayList<>(numTasks);
+
         try {
             for (int i = 0; i < numTasks; i++) {
                 final int taskStartIndex = startIndex[i];
@@ -454,6 +458,8 @@ public class MSGFPlus {
                         taskNum
                 );
 
+                submittedTasks.add(msgfplusExecutor);
+
                 if (DISABLE_THREADING) {
                     msgfplusExecutor.run();
                 } else {
@@ -477,6 +483,12 @@ public class MSGFPlus {
 
             // Output completed progress report.
             executor.outputProgressReport();
+
+            // T1: tail-imbalance summary across the just-completed tasks.
+            // Cheap diagnostic; only printed when there's more than one task.
+            if (numTasks > 1) {
+                printTaskWallSummary(submittedTasks);
+            }
 
         } catch (OutOfMemoryError ex) {
             ex.printStackTrace();
@@ -538,5 +550,33 @@ public class MSGFPlus {
         System.out.print("Writing results finished ");
         System.out.format("(elapsed time: %.2f sec)\n", (float) (System.currentTimeMillis() - saveResultsStartTime) / 1000);
         return null;
+    }
+
+    /**
+     * Print a one-line tail-imbalance summary across all completed tasks.
+     * Reports min / median / p95 / max wall in seconds and the absolute tail
+     * gap (max - median). A high gap indicates uneven SpecKey distribution
+     * across tasks — input for deciding whether finer task granularity (T2)
+     * or work-stealing (T3) would help.
+     */
+    private static void printTaskWallSummary(List<ConcurrentMSGFPlus.RunMSGFPlus> tasks) {
+        List<Long> walls = new ArrayList<>(tasks.size());
+        for (ConcurrentMSGFPlus.RunMSGFPlus t : tasks) {
+            ConcurrentMSGFPlus.TaskWallStats s = t.getWallStats();
+            if (s != null) walls.add(s.totalMs);
+        }
+        if (walls.isEmpty()) return;
+        Collections.sort(walls);
+        long min = walls.get(0);
+        long max = walls.get(walls.size() - 1);
+        long median = walls.get(walls.size() / 2);
+        long p95 = walls.get(Math.min(walls.size() - 1, (int) Math.ceil(walls.size() * 0.95) - 1));
+        long sum = 0L;
+        for (long w : walls) sum += w;
+        System.out.format(
+                "Task wall summary (n=%d): min=%.1fs median=%.1fs p95=%.1fs max=%.1fs total=%.1fs tail_gap=%.1fs (%.0f%% of median)%n",
+                walls.size(), min / 1000.0, median / 1000.0, p95 / 1000.0, max / 1000.0,
+                sum / 1000.0, (max - median) / 1000.0,
+                median > 0 ? 100.0 * (max - median) / median : 0.0);
     }
 }

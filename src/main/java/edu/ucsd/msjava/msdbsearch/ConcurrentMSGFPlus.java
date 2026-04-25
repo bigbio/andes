@@ -10,6 +10,24 @@ import java.util.function.Supplier;
 import org.apache.commons.io.output.NullOutputStream;
 
 public class ConcurrentMSGFPlus {
+    /** Per-task wall stats captured during {@link RunMSGFPlus#run()}. Used by
+     *  {@code MSGFPlus.runMSGFPlus} to report a tail-imbalance summary across
+     *  all tasks (T1 instrumentation). All units are milliseconds. */
+    public static final class TaskWallStats {
+        public final int taskNum;
+        public final long preprocessMs;
+        public final long dbSearchMs;
+        public final long computeEvalueMs;
+        public final long totalMs;
+        TaskWallStats(int taskNum, long preprocessMs, long dbSearchMs, long computeEvalueMs, long totalMs) {
+            this.taskNum = taskNum;
+            this.preprocessMs = preprocessMs;
+            this.dbSearchMs = dbSearchMs;
+            this.computeEvalueMs = computeEvalueMs;
+            this.totalMs = totalMs;
+        }
+    }
+
     public static class RunMSGFPlus implements Runnable, ProgressReporter {
         private final Supplier<ScoredSpectraMap> specScannerSupplier;
         private final CompactSuffixArray sa;
@@ -19,6 +37,14 @@ public class ConcurrentMSGFPlus {
         private ProgressData progress;
         private ScoredSpectraMap specScanner;
         private DBScanner scanner;
+        private volatile TaskWallStats wallStats;
+
+        /** Wall stats captured at the end of {@link #run()}, or {@code null}
+         *  if the task didn't complete (e.g. interrupted). Read from the main
+         *  thread after {@code awaitTermination}. */
+        public TaskWallStats getWallStats() {
+            return wallStats;
+        }
 
         @Override
         public void setProgressData(ProgressData data) {
@@ -47,6 +73,8 @@ public class ConcurrentMSGFPlus {
 
         @Override
         public void run() {
+            long taskStartNs = System.nanoTime();
+            long preprocessMs = 0, dbSearchMs = 0, computeEvalueMs = 0;
             if (progress == null) {
                 progress = new ProgressData();
             }
@@ -98,8 +126,9 @@ public class ConcurrentMSGFPlus {
             if (Thread.currentThread().isInterrupted()) {
                 return;
             }
+            preprocessMs = System.currentTimeMillis() - startTimePreprocess;
             output.print(threadName + ": Preprocessing spectra finished ");
-            output.format("(elapsed time: %.2f sec)\n", (float) ((System.currentTimeMillis() - startTimePreprocess) / 1000));
+            output.format("(elapsed time: %.2f sec)\n", preprocessMs / 1000.0f);
 
             specScanner.getProgressObj().setParentProgressObj(null);
             progress.report(5.0);
@@ -124,8 +153,9 @@ public class ConcurrentMSGFPlus {
             if (Thread.currentThread().isInterrupted()) {
                 return;
             }
+            dbSearchMs = System.currentTimeMillis() - startTimeDbSearch;
             output.print(threadName + ": Database search finished ");
-            output.format("(elapsed time: %.2f sec)\n", (float) ((System.currentTimeMillis() - startTimeDbSearch) / 1000));
+            output.format("(elapsed time: %.2f sec)\n", dbSearchMs / 1000.0f);
 
             progress.stepRange(95.0);
 
@@ -138,8 +168,9 @@ public class ConcurrentMSGFPlus {
             if (Thread.currentThread().isInterrupted()) {
                 return;
             }
+            computeEvalueMs = System.currentTimeMillis() - startTimeComputeEvalue;
             output.print(threadName + ": Computing spectral E-values finished ");
-            output.format("(elapsed time: %.2f sec)\n", (float) ((System.currentTimeMillis() - startTimeComputeEvalue) / 1000));
+            output.format("(elapsed time: %.2f sec)\n", computeEvalueMs / 1000.0f);
 
             scanner.getProgressObj().setParentProgressObj(null);
             progress.stepRange(100);
@@ -161,6 +192,8 @@ public class ConcurrentMSGFPlus {
 
             progress.report(100.0);
 //			gen.addSpectrumIdentificationResults(scanner.getSpecIndexDBMatchMap());
+            long totalMs = (System.nanoTime() - taskStartNs) / 1_000_000L;
+            wallStats = new TaskWallStats(taskNum, preprocessMs, dbSearchMs, computeEvalueMs, totalMs);
             output.println(threadName + ": Task " + taskNum + " completed.");
         }
     }

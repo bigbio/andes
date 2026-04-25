@@ -5,17 +5,20 @@ import edu.ucsd.msjava.misc.ProgressReporter;
 
 import java.io.PrintStream;
 import java.util.List;
+import java.util.function.Supplier;
 
 import org.apache.commons.io.output.NullOutputStream;
 
 public class ConcurrentMSGFPlus {
     public static class RunMSGFPlus implements Runnable, ProgressReporter {
-        private final ScoredSpectraMap specScanner;
-        private final DBScanner scanner;
+        private final Supplier<ScoredSpectraMap> specScannerSupplier;
+        private final CompactSuffixArray sa;
         SearchParams params;
         List<MSGFPlusMatch> resultList;
         private final int taskNum;
         private ProgressData progress;
+        private ScoredSpectraMap specScanner;
+        private DBScanner scanner;
 
         @Override
         public void setProgressData(ProgressData data) {
@@ -28,27 +31,15 @@ public class ConcurrentMSGFPlus {
         }
 
         public RunMSGFPlus(
-                ScoredSpectraMap specScanner,
+                Supplier<ScoredSpectraMap> specScannerSupplier,
                 CompactSuffixArray sa,
                 SearchParams params,
                 List<MSGFPlusMatch> resultList,
                 int taskNum
         ) {
-            this.specScanner = specScanner;
+            this.specScannerSupplier = specScannerSupplier;
+            this.sa = sa;
             this.params = params;
-            this.scanner = new DBScanner(
-                    specScanner,
-                    sa,
-                    params.getEnzyme(),
-                    params.getAASet(),
-                    params.getNumMatchesPerSpec(),
-                    params.getMinPeptideLength(),
-                    params.getMaxPeptideLength(),
-                    params.getMaxNumVariantsPerPeptide(),
-                    params.getMinDeNovoScore(),
-                    params.ignoreMetCleavage(),
-                    params.getMaxMissedCleavages()
-            );
             this.resultList = resultList;
             this.taskNum = taskNum;
             progress = null;
@@ -58,6 +49,23 @@ public class ConcurrentMSGFPlus {
         public void run() {
             if (progress == null) {
                 progress = new ProgressData();
+            }
+
+            if (specScanner == null) {
+                specScanner = specScannerSupplier.get();
+                scanner = new DBScanner(
+                        specScanner,
+                        sa,
+                        params.getEnzyme(),
+                        params.getAASet(),
+                        params.getNumMatchesPerSpec(),
+                        params.getMinPeptideLength(),
+                        params.getMaxPeptideLength(),
+                        params.getMaxNumVariantsPerPeptide(),
+                        params.getMinDeNovoScore(),
+                        params.ignoreMetCleavage(),
+                        params.getMaxMissedCleavages()
+                );
             }
 
             PrintStream output;

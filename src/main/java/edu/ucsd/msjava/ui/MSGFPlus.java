@@ -423,27 +423,35 @@ public class MSGFPlus {
 
         try {
             for (int i = 0; i < numTasks; i++) {
-                ScoredSpectraMap specScanner = new ScoredSpectraMap(
-                        specAcc,
-                        Collections.synchronizedList(specKeyList.subList(startIndex[i], endIndex[i])),
-                        leftPrecursorMassTolerance,
-                        rightPrecursorMassTolerance,
-                        minIsotopeError,
-                        maxIsotopeError,
-                        specDataType,
-                        params.outputAdditionalFeatures(),
-                        false,
-                        precursorMassShiftPpm
-                );
-                if (doNotUseEdgeScore)
-                    specScanner.turnOffEdgeScoring();
+                final int taskStartIndex = startIndex[i];
+                final int taskEndIndex = endIndex[i];
+                final boolean storeRankScorer = params.outputAdditionalFeatures();
+                final int taskNum = i + 1;
 
+                // Defer ScoredSpectraMap construction to the worker thread so all
+                // tasks' spectrum heaps aren't allocated up front when queued.
                 ConcurrentMSGFPlus.RunMSGFPlus msgfplusExecutor = new ConcurrentMSGFPlus.RunMSGFPlus(
-                        specScanner,
+                        () -> {
+                            ScoredSpectraMap specScanner = new ScoredSpectraMap(
+                                    specAcc,
+                                    Collections.synchronizedList(specKeyList.subList(taskStartIndex, taskEndIndex)),
+                                    leftPrecursorMassTolerance,
+                                    rightPrecursorMassTolerance,
+                                    minIsotopeError,
+                                    maxIsotopeError,
+                                    specDataType,
+                                    storeRankScorer,
+                                    false,
+                                    precursorMassShiftPpm
+                            );
+                            if (doNotUseEdgeScore)
+                                specScanner.turnOffEdgeScoring();
+                            return specScanner;
+                        },
                         sa,
                         params,
                         resultList,
-                        i + 1
+                        taskNum
                 );
 
                 if (DISABLE_THREADING) {

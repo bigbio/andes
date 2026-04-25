@@ -168,13 +168,34 @@ public class TestStaxMzMLParser {
     }
 
     @Test
-    public void testCacheHit() throws Exception {
+    public void testCacheReturnsDefensiveCopy() throws Exception {
         StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile());
-        // First access
         Spectrum spec1 = parser.getSpectrumBySpecIndex(2);
-        // Second access should hit cache (same object)
         Spectrum spec2 = parser.getSpectrumBySpecIndex(2);
-        Assert.assertSame("Cache should return same object", spec1, spec2);
+        Assert.assertNotSame("Defensive copy should return distinct instances", spec1, spec2);
+
+        Assert.assertEquals(spec1.getID(), spec2.getID());
+        Assert.assertEquals(spec1.size(), spec2.size());
+        Assert.assertEquals(spec1.getPrecursorPeak().getMz(), spec2.getPrecursorPeak().getMz(), 0.0001f);
+
+        // Mutation on one copy must not leak to a future read.
+        spec1.get(0).setRank(99);
+        Spectrum spec3 = parser.getSpectrumBySpecIndex(2);
+        Assert.assertNotSame(spec1, spec3);
+        Assert.assertNotEquals("Mutation must not leak through cache", 99, spec3.get(0).getRank());
+    }
+
+    @Test
+    public void testMSLevelPreloadFilter() throws Exception {
+        // tiny.pwiz.mzML has MS1 at indices 1, 3, 4 and MS2 at index 2.
+        StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile(), 2, 2);
+        Assert.assertNull("MS1 (index 1) must be filtered out", parser.getSpectrumBySpecIndex(1));
+        Assert.assertNull("MS1 (index 3) must be filtered out", parser.getSpectrumBySpecIndex(3));
+        Assert.assertNull("MS1 (index 4) must be filtered out", parser.getSpectrumBySpecIndex(4));
+        Spectrum ms2 = parser.getSpectrumBySpecIndex(2);
+        Assert.assertNotNull("MS2 (index 2) must come through", ms2);
+        Assert.assertEquals(2, ms2.getMSLevel());
+        Assert.assertEquals(10, ms2.size());
     }
 
     @Test

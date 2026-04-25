@@ -1,11 +1,9 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.mzid.Constants;
 import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.mzml.StaxMzMLSpectraIterator;
 import edu.ucsd.msjava.mzml.StaxMzMLSpectraMap;
 import edu.ucsd.msjava.parser.*;
-import uk.ac.ebi.jmzidml.model.mzidml.CvParam;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -67,7 +65,7 @@ public class SpectraAccessor {
             if (specFormat == SpecFileFormat.MZML) {
                 if (staxParser == null) {
                     try {
-                        staxParser = new StaxMzMLParser(specFile);
+                        staxParser = new StaxMzMLParser(specFile, minMSLevel, maxMSLevel);
                     } catch (Exception e) {
                         throw new RuntimeException("Failed to parse mzML file: " + specFile.getAbsolutePath(), e);
                     }
@@ -104,7 +102,7 @@ public class SpectraAccessor {
             if (specFormat == SpecFileFormat.MZML) {
                 if (staxParser == null) {
                     try {
-                        staxParser = new StaxMzMLParser(specFile);
+                        staxParser = new StaxMzMLParser(specFile, minMSLevel, maxMSLevel);
                     } catch (Exception e) {
                         throw new RuntimeException("Failed to parse mzML file: " + specFile.getAbsolutePath(), e);
                     }
@@ -167,16 +165,16 @@ public class SpectraAccessor {
         return getSpecMap().getTitle(specIndex);
     }
 
-    public CvParam getSpectrumIDFormatCvParam() {
-        CvParam cvParam = null;
+    public CvParamInfo getSpectrumIDFormatCvParam() {
+        CvParamInfo cvParam = null;
         if (specFormat == SpecFileFormat.DTA_TXT
                 || specFormat == SpecFileFormat.MGF
                 || specFormat == SpecFileFormat.PKL
                 || specFormat == SpecFileFormat.MS2
         )
-            cvParam = Constants.makeCvParam("MS:1000774", "multiple peak list nativeID format");
+            cvParam = new CvParamInfo("MS:1000774", "multiple peak list nativeID format", null);
         else if (specFormat == SpecFileFormat.MZDATA)
-            cvParam = Constants.makeCvParam("MS:1000777", "spectrum identifier nativeID format");
+            cvParam = new CvParamInfo("MS:1000777", "spectrum identifier nativeID format", null);
         else if (specFormat == SpecFileFormat.MZML) {
             if (staxParser == null) {
                 try {
@@ -187,7 +185,7 @@ public class SpectraAccessor {
             }
             String[] idFormat = staxParser.detectSpectrumIDFormat();
             if (idFormat != null) {
-                cvParam = Constants.makeCvParam(idFormat[0], idFormat[1]);
+                cvParam = new CvParamInfo(idFormat[0], idFormat[1], null);
             } else {
                 throw new IllegalStateException("Unsupported mzML format: " + specFile.getAbsolutePath()
                         + " does not contain a child term of MS:1000767 (native spectrum identifier format)");

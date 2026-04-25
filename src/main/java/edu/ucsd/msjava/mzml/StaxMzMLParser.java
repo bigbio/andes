@@ -17,7 +17,6 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
 
@@ -64,8 +63,13 @@ public class StaxMzMLParser {
     // Referenceable param groups: group ID -> list of [accession, name, value, unitAccession, unitName]
     private final Map<String, List<String[]>> refParamGroups;
 
-    // Full spectrum cache (populated on first random access, thread-safe)
-    private final ConcurrentHashMap<Integer, Spectrum> cache;
+    /** MS-level filter: spectra outside this range are never decoded or cached. */
+    private final int minMSLevel;
+    private final int maxMSLevel;
+
+    /** Synchronized cache of in-filter spectra. Returns defensive copies on read
+     *  so pre-pass mutations cannot leak to the main pass. */
+    private final Map<Integer, Spectrum> cache;
     private volatile boolean allLoaded = false;
 
     // Reusable XMLInputFactory (thread-safe for creation)
@@ -79,16 +83,28 @@ public class StaxMzMLParser {
     }
 
     /**
-     * Construct a parser for the given mzML file.
-     * Immediately builds the spectrum index (single sequential pass).
+     * Construct a parser for the given mzML file with no MS-level filter.
+     * Prefer {@link #StaxMzMLParser(File, int, int)} so MS1 spectra can be
+     * skipped during the binary-decode preload.
      */
     public StaxMzMLParser(File specFile) throws IOException, XMLStreamException {
+        this(specFile, 1, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Construct a parser for the given mzML file, decoding/caching only spectra
+     * with MS level inside {@code [minMSLevel, maxMSLevel]}. Immediately builds
+     * the spectrum index (single sequential pass; no peak decode).
+     */
+    public StaxMzMLParser(File specFile, int minMSLevel, int maxMSLevel) throws IOException, XMLStreamException {
         this.specFile = specFile;
+        this.minMSLevel = minMSLevel;
+        this.maxMSLevel = maxMSLevel;
         this.indexList = new ArrayList<>();
         this.indexBySpecIdx = new HashMap<>();
         this.indexById = new HashMap<>();
         this.refParamGroups = new HashMap<>();
-        this.cache = new ConcurrentHashMap<>();
+        this.cache = Collections.synchronizedMap(new HashMap<>());
         buildIndex();
     }
 
@@ -138,41 +154,59 @@ public class StaxMzMLParser {
 
     /**
      * Parse and return the full spectrum (with peaks) for the given 1-based index.
-     * On first cache miss, preloads ALL spectra in a single sequential pass.
-     * This avoids O(N) scans from the start for each random-access lookup.
+     * On first cache miss, performs a bulk preload of all in-filter spectra; every
+     * subsequent call returns a defensive copy from the cache. Returns {@code null}
+     * for unknown indices and for spectra outside the configured MS-level filter.
      */
     public Spectrum getSpectrumBySpecIndex(int specIndex) {
-        if (allLoaded) return cache.get(specIndex);
+        SpectrumIndex si = indexBySpecIdx.get(specIndex);
+        if (si == null) return null;
+        if (si.msLevel < minMSLevel || si.msLevel > maxMSLevel) return null;
 
-        Spectrum cached = cache.get(specIndex);
-        if (cached != null) return cached;
-
-        // Return null immediately for unknown indices instead of triggering a full preload
-        if (!indexBySpecIdx.containsKey(specIndex)) return null;
-
-        try {
-            preloadAllSpectra();
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to preload spectra while retrieving spectrum index " + specIndex, e);
+        if (!allLoaded && !cache.containsKey(specIndex)) {
+            try {
+                preloadAllSpectra();
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to preload spectra while retrieving spectrum index " + specIndex, e);
+            }
         }
-        return cache.get(specIndex);
+        return cloneSpectrum(cache.get(specIndex));
     }
 
     /**
-     * Parse all spectra in a single sequential pass and populate the cache.
+     * Walk the file once and cache every in-filter spectrum. Out-of-filter
+     * spectra are skipped without binary decode — no {@link Spectrum} or
+     * {@code Peak} objects allocated.
      */
     private synchronized void preloadAllSpectra() throws IOException, XMLStreamException {
         if (allLoaded) return;
         long startTime = System.currentTimeMillis();
+        int loaded = 0, skipped = 0;
         try (InputStream is = new BufferedInputStream(new FileInputStream(specFile), 256 * 1024)) {
             XMLStreamReader reader = XML_INPUT_FACTORY.createXMLStreamReader(is);
             try {
                 while (reader.hasNext()) {
                     int event = reader.next();
                     if (event == XMLStreamConstants.START_ELEMENT && "spectrum".equals(reader.getLocalName())) {
+                        // Skip out-of-filter spectra without binary decode by consulting
+                        // the pre-built index via the spectrum's id attribute.
+                        String id = reader.getAttributeValue(null, "id");
+                        SpectrumIndex si = id != null ? indexById.get(id) : null;
+                        if (si != null && (si.msLevel < minMSLevel || si.msLevel > maxMSLevel)) {
+                            skipElement(reader, "spectrum");
+                            skipped++;
+                            continue;
+                        }
                         Spectrum spec = parseOneSpectrum(reader);
                         if (spec != null) {
+                            int ms = spec.getMSLevel();
+                            if (ms < minMSLevel || ms > maxMSLevel) {
+                                // Index lookup missed (malformed mzML id mismatch); drop post-parse.
+                                skipped++;
+                                continue;
+                            }
                             cache.put(spec.getSpecIndex(), spec);
+                            loaded++;
                         }
                     }
                 }
@@ -184,7 +218,37 @@ public class StaxMzMLParser {
         }
         allLoaded = true;
         long elapsed = System.currentTimeMillis() - startTime;
-        System.out.println("StAX mzML preload: " + cache.size() + " spectra loaded in " + elapsed + " ms");
+        System.out.println("StAX mzML preload: " + loaded + " spectra loaded (" + skipped + " filtered out by MS level) in " + elapsed + " ms");
+    }
+
+    /**
+     * Defensive copy of a cached {@link Spectrum}. Mirrors the field set
+     * populated by {@link #parseOneSpectrum}; keep the two in lock-step.
+     */
+    private static Spectrum cloneSpectrum(Spectrum src) {
+        if (src == null) return null;
+        Spectrum dst = new Spectrum();
+        dst.setID(src.getID());
+        dst.setSpecIndex(src.getSpecIndex());
+        if (src.getScanNum() > 0) dst.setScanNum(src.getScanNum());
+        dst.setMsLevel(src.getMSLevel());
+        dst.setIsCentroided(src.isCentroided());
+        if (src.getScanPolarity() != null) dst.setScanPolarity(src.getScanPolarity());
+        dst.setRt(src.getRt());
+        dst.setRtIsSeconds(src.getRtIsSeconds());
+        dst.setIsolationWindowTargetMz(src.getIsolationWindowTargetMz());
+        if (src.getPrecursorPeak() != null) {
+            Peak p = src.getPrecursorPeak();
+            dst.setPrecursor(new Peak(p.getMz(), p.getIntensity(), p.getCharge()));
+        }
+        if (src.getActivationMethod() != null) dst.setActivationMethod(src.getActivationMethod());
+        if (src.getAddlCvParams() != null) {
+            for (CvParamInfo cv : src.getAddlCvParams()) dst.addAddlCvParam(cv);
+        }
+        for (Peak p : src) {
+            dst.add(new Peak(p.getMz(), p.getIntensity(), p.getCharge()));
+        }
+        return dst;
     }
 
     /**
@@ -940,7 +1004,7 @@ public class StaxMzMLParser {
 
     /**
      * Suppress all logback logging. Called at startup to silence noisy
-     * library output (jmzidml, etc.).
+     * library output.
      */
     public static void turnOffLogs() {
         if (!logOff) {

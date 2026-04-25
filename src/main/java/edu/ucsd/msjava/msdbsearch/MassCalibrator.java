@@ -119,17 +119,7 @@ public class MassCalibrator {
      * @return learned ppm shift, or 0.0 if the pre-pass had insufficient data
      */
     public double learnPrecursorShiftPpm(int ioIndex) {
-        // Cheap guard: skip the pre-pass entirely on small files. Running the
-        // pre-pass calls preProcessSpectra() on a subset of shared Spectrum
-        // objects, which mutates their scored state and causes a ~0.1% PSM-list
-        // drift vs -precursorCal off when the main search later re-processes
-        // those same spectra. This is the hard correctness gate.
-        //
-        // Threshold of 10_000 SpecKeys corresponds to ~3000-spectrum files, which
-        // is both (a) too small to reliably yield MIN_CONFIDENT_PSMS confident
-        // matches, and (b) small enough that the state-mutation side-effect is
-        // noticeable. Real datasets (PXD001819 ~66K, Astral ~75K, TMT ~40K) are
-        // comfortably above the threshold and run the calibrator as intended.
+        // Skip the pre-pass on small files where MIN_CONFIDENT_PSMS can't be reached.
         if (specKeyList == null || specKeyList.size() < MIN_SPECKEYS_FOR_PREPASS) {
             return 0.0;
         }

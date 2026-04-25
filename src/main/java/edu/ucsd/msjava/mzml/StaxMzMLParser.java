@@ -179,7 +179,7 @@ public class StaxMzMLParser {
      * Parse and return the full spectrum (with peaks) for the given 1-based index.
      *
      * <p>On first cache miss, performs a bulk preload of all spectra inside the
-     * MS-level filter. Subsequent calls hit the bounded LRU cache. On a hit, a
+     * MS-level filter. Subsequent calls hit the in-memory cache. On every hit, a
      * defensive copy is returned so caller mutations (peak ranking, charge
      * resolution, etc.) cannot leak to other readers.
      *
@@ -214,11 +214,11 @@ public class StaxMzMLParser {
      * {@code Peak} objects allocated). On Orbitrap / Astral mzML this drops
      * the bulk of the heap because MS1 is the peak-count-heavy tier.
      *
-     * <p>If the cache cap ({@link #maxCacheSize}) is smaller than the in-filter
-     * spectrum count, the LRU eviction kicks in during the preload — eldest
-     * entries get dropped, making {@code allLoaded} mean "we attempted to
-     * preload everything" rather than "every spectrum is in cache." Subsequent
-     * misses still work (we just re-parse via the seek path).
+     * <p>The cache is unbounded by design: every in-filter spectrum is
+     * retained for the lifetime of the parser. A hard memory ceiling is
+     * deferred to a follow-up that adds accurate byte-offset tracking + a
+     * seek-on-demand fallback so cache misses (after eviction) can re-parse
+     * a single spectrum cheaply.
      */
     private synchronized void preloadAllSpectra() throws IOException, XMLStreamException {
         if (allLoaded) return;

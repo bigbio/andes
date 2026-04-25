@@ -119,20 +119,7 @@ public class MassCalibrator {
      * @return learned ppm shift, or 0.0 if the pre-pass had insufficient data
      */
     public double learnPrecursorShiftPpm(int ioIndex) {
-        // Size guard: skip the pre-pass on small files where it can't yield
-        // MIN_CONFIDENT_PSMS reliably.
-        //
-        // Historical context (kept here so the threshold isn't trimmed by accident):
-        // the 10_000 SpecKey floor was originally also a workaround for state-
-        // mutation drift — the StaxMzMLParser cache returned the SAME Spectrum
-        // instance to the pre-pass and main pass, and preProcessSpectra mutated
-        // peak ranks / charge in-place, causing ~0.1% PSM-list drift vs
-        // -precursorCal off. As of the big-FASTA / Astral-OOM PR
-        // (feature/improve-mzid-suffix-big-fasta), the parser returns a defensive
-        // copy on every getSpectrumBySpecIndex, so the mutation pathway is closed.
-        // The threshold remains as a "is there enough data to learn from" gate;
-        // it is no longer a correctness shield. If the calibrator ever needs to
-        // run on smaller files, this floor can be lowered safely.
+        // Skip the pre-pass on small files where MIN_CONFIDENT_PSMS can't be reached.
         if (specKeyList == null || specKeyList.size() < MIN_SPECKEYS_FOR_PREPASS) {
             return 0.0;
         }

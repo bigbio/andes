@@ -9,8 +9,6 @@ import org.slf4j.LoggerFactory;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.LoggerContext;
 
-import edu.ucsd.msjava.msutil.CvParamInfo;
-
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
@@ -65,23 +63,12 @@ public class StaxMzMLParser {
     // Referenceable param groups: group ID -> list of [accession, name, value, unitAccession, unitName]
     private final Map<String, List<String[]>> refParamGroups;
 
-    /** MS-level filter from {@link StaxMzMLSpectraMap}. Spectra outside this
-     *  range are never decoded and never cached, so MS1 (typically the bulk of
-     *  mzML peaks) doesn't sit in heap during an MS2-only search. */
+    /** MS-level filter: spectra outside this range are never decoded or cached. */
     private final int minMSLevel;
     private final int maxMSLevel;
 
-    /** Synchronized cache of in-filter spectra. Returns DEFENSIVE COPIES on
-     *  read so that pre-pass mutations (peak ranking, charge resolution, etc.)
-     *  cannot leak to the main pass. Memory is bounded by the in-filter
-     *  spectrum count after the MS-level filter — for an MS2-only search on a
-     *  typical Orbitrap / Astral file that's ~25-75K Spectrum objects, well
-     *  within heap budgets. Hard-capping (LRU eviction) requires a
-     *  seek-on-demand fallback for cache misses; without that, evicting a
-     *  spectrum would corrupt the search. Adding a real ceiling is a
-     *  follow-up: needs accurate byte-offset tracking (current offsets are
-     *  recorded at the StAX-internal-buffer granularity, not at element
-     *  start) plus a re-parse path. */
+    /** Synchronized cache of in-filter spectra. Returns defensive copies on read
+     *  so pre-pass mutations cannot leak to the main pass. */
     private final Map<Integer, Spectrum> cache;
     private volatile boolean allLoaded = false;
 
@@ -96,13 +83,9 @@ public class StaxMzMLParser {
     }
 
     /**
-     * Construct a parser for the given mzML file with no MS-level filter
-     * (caches every spectrum). Immediately builds the spectrum index.
-     *
-     * <p>Prefer the {@link #StaxMzMLParser(File, int, int)} overload — passing
-     * the MS-level filter through to the parser is what lets MS1 spectra be
-     * skipped entirely during the binary-decode preload, which is the dominant
-     * heap saving on Orbitrap / Astral mzML files.
+     * Construct a parser for the given mzML file with no MS-level filter.
+     * Prefer {@link #StaxMzMLParser(File, int, int)} so MS1 spectra can be
+     * skipped during the binary-decode preload.
      */
     public StaxMzMLParser(File specFile) throws IOException, XMLStreamException {
         this(specFile, 1, Integer.MAX_VALUE);
@@ -112,12 +95,6 @@ public class StaxMzMLParser {
      * Construct a parser for the given mzML file, decoding/caching only spectra
      * with MS level inside {@code [minMSLevel, maxMSLevel]}. Immediately builds
      * the spectrum index (single sequential pass; no peak decode).
-     *
-     * <p>Caveat: if a future feature needs the parent MS1 of an MS2 scan
-     * (precursor refinement à la MaxQuant, chimeric-spectrum analysis, etc.),
-     * widen this filter or add a separate MS1-only accessor — do not silently
-     * widen the filter here, which would re-introduce the OOM regression this
-     * preload-filter is fixing.
      */
     public StaxMzMLParser(File specFile, int minMSLevel, int maxMSLevel) throws IOException, XMLStreamException {
         this.specFile = specFile;
@@ -177,48 +154,29 @@ public class StaxMzMLParser {
 
     /**
      * Parse and return the full spectrum (with peaks) for the given 1-based index.
-     *
-     * <p>On first cache miss, performs a bulk preload of all spectra inside the
-     * MS-level filter. Subsequent calls hit the in-memory cache. On every hit, a
-     * defensive copy is returned so caller mutations (peak ranking, charge
-     * resolution, etc.) cannot leak to other readers.
-     *
-     * <p>Returns {@code null} for unknown indices and for spectra outside the
-     * configured MS-level filter (matching the existing {@link StaxMzMLSpectraMap}
-     * contract).
+     * On first cache miss, performs a bulk preload of all in-filter spectra; every
+     * subsequent call returns a defensive copy from the cache. Returns {@code null}
+     * for unknown indices and for spectra outside the configured MS-level filter.
      */
     public Spectrum getSpectrumBySpecIndex(int specIndex) {
         SpectrumIndex si = indexBySpecIdx.get(specIndex);
         if (si == null) return null;
         if (si.msLevel < minMSLevel || si.msLevel > maxMSLevel) return null;
 
-        if (!allLoaded) {
-            Spectrum cached = cache.get(specIndex);
-            if (cached == null) {
-                try {
-                    preloadAllSpectra();
-                } catch (Exception e) {
-                    throw new RuntimeException("Failed to preload spectra while retrieving spectrum index " + specIndex, e);
-                }
+        if (!allLoaded && !cache.containsKey(specIndex)) {
+            try {
+                preloadAllSpectra();
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to preload spectra while retrieving spectrum index " + specIndex, e);
             }
         }
-        Spectrum cached = cache.get(specIndex);
-        return cloneSpectrum(cached);
+        return cloneSpectrum(cache.get(specIndex));
     }
 
     /**
-     * Bulk preload pass: walks the file once and inserts every in-filter
-     * spectrum into the cache. Spectra with MS level outside
-     * {@code [minMSLevel, maxMSLevel]} are skipped without binary decode (the
-     * {@code <spectrum>} element is advanced past, no {@link Spectrum} or
-     * {@code Peak} objects allocated). On Orbitrap / Astral mzML this drops
-     * the bulk of the heap because MS1 is the peak-count-heavy tier.
-     *
-     * <p>The cache is unbounded by design: every in-filter spectrum is
-     * retained for the lifetime of the parser. A hard memory ceiling is
-     * deferred to a follow-up that adds accurate byte-offset tracking + a
-     * seek-on-demand fallback so cache misses (after eviction) can re-parse
-     * a single spectrum cheaply.
+     * Walk the file once and cache every in-filter spectrum. Out-of-filter
+     * spectra are skipped without binary decode — no {@link Spectrum} or
+     * {@code Peak} objects allocated.
      */
     private synchronized void preloadAllSpectra() throws IOException, XMLStreamException {
         if (allLoaded) return;
@@ -230,9 +188,8 @@ public class StaxMzMLParser {
                 while (reader.hasNext()) {
                     int event = reader.next();
                     if (event == XMLStreamConstants.START_ELEMENT && "spectrum".equals(reader.getLocalName())) {
-                        // Look up MS level from the pre-built index to decide whether to
-                        // pay the binary-decode cost. We can't trust the <spectrum> element's
-                        // index attribute alone here; use the id attribute that the index built.
+                        // Skip out-of-filter spectra without binary decode by consulting
+                        // the pre-built index via the spectrum's id attribute.
                         String id = reader.getAttributeValue(null, "id");
                         SpectrumIndex si = id != null ? indexById.get(id) : null;
                         if (si != null && (si.msLevel < minMSLevel || si.msLevel > maxMSLevel)) {
@@ -244,8 +201,7 @@ public class StaxMzMLParser {
                         if (spec != null) {
                             int ms = spec.getMSLevel();
                             if (ms < minMSLevel || ms > maxMSLevel) {
-                                // Belt-and-braces: index lookup didn't catch it (rare — id
-                                // mismatch on malformed mzML), drop it post-parse.
+                                // Index lookup missed (malformed mzML id mismatch); drop post-parse.
                                 skipped++;
                                 continue;
                             }
@@ -266,15 +222,8 @@ public class StaxMzMLParser {
     }
 
     /**
-     * Defensive copy of a cached {@link Spectrum}. The cache is shared across
-     * pre-pass (e.g. {@link edu.ucsd.msjava.msdbsearch.MassCalibrator}) and main
-     * pass; both can mutate the returned Spectrum (peak ranking via
-     * {@link edu.ucsd.msjava.msutil.Peak#setRank}, charge resolution, peak
-     * filtering). Returning a fresh {@link Spectrum} with cloned {@link Peak}s
-     * preserves the master parser's "every read is a fresh object" semantics
-     * and removes the silent state-mutation drift that
-     * {@link edu.ucsd.msjava.msdbsearch.MassCalibrator}'s 10K-SpecKey gate is
-     * currently working around.
+     * Defensive copy of a cached {@link Spectrum}. Mirrors the field set
+     * populated by {@link #parseOneSpectrum}; keep the two in lock-step.
      */
     private static Spectrum cloneSpectrum(Spectrum src) {
         if (src == null) return null;
@@ -289,15 +238,15 @@ public class StaxMzMLParser {
         dst.setRtIsSeconds(src.getRtIsSeconds());
         dst.setIsolationWindowTargetMz(src.getIsolationWindowTargetMz());
         if (src.getPrecursorPeak() != null) {
-            edu.ucsd.msjava.msutil.Peak p = src.getPrecursorPeak();
-            dst.setPrecursor(new edu.ucsd.msjava.msutil.Peak(p.getMz(), p.getIntensity(), p.getCharge()));
+            Peak p = src.getPrecursorPeak();
+            dst.setPrecursor(new Peak(p.getMz(), p.getIntensity(), p.getCharge()));
         }
         if (src.getActivationMethod() != null) dst.setActivationMethod(src.getActivationMethod());
         if (src.getAddlCvParams() != null) {
             for (CvParamInfo cv : src.getAddlCvParams()) dst.addAddlCvParam(cv);
         }
-        for (edu.ucsd.msjava.msutil.Peak p : src) {
-            dst.add(new edu.ucsd.msjava.msutil.Peak(p.getMz(), p.getIntensity(), p.getCharge()));
+        for (Peak p : src) {
+            dst.add(new Peak(p.getMz(), p.getIntensity(), p.getCharge()));
         }
         return dst;
     }

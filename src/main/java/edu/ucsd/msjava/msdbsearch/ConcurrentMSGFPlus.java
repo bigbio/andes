@@ -45,33 +45,28 @@ public class ConcurrentMSGFPlus {
             progress = null;
         }
 
-        private void ensureSearchStateInitialized() {
-            if (specScanner != null) {
-                return;
-            }
-            specScanner = specScannerSupplier.get();
-            scanner = new DBScanner(
-                    specScanner,
-                    sa,
-                    params.getEnzyme(),
-                    params.getAASet(),
-                    params.getNumMatchesPerSpec(),
-                    params.getMinPeptideLength(),
-                    params.getMaxPeptideLength(),
-                    params.getMaxNumVariantsPerPeptide(),
-                    params.getMinDeNovoScore(),
-                    params.ignoreMetCleavage(),
-                    params.getMaxMissedCleavages()
-            );
-        }
-
         @Override
         public void run() {
             if (progress == null) {
                 progress = new ProgressData();
             }
 
-            ensureSearchStateInitialized();
+            if (specScanner == null) {
+                specScanner = specScannerSupplier.get();
+                scanner = new DBScanner(
+                        specScanner,
+                        sa,
+                        params.getEnzyme(),
+                        params.getAASet(),
+                        params.getNumMatchesPerSpec(),
+                        params.getMinPeptideLength(),
+                        params.getMaxPeptideLength(),
+                        params.getMaxNumVariantsPerPeptide(),
+                        params.getMinDeNovoScore(),
+                        params.ignoreMetCleavage(),
+                        params.getMaxMissedCleavages()
+                );
+            }
 
             PrintStream output;
             if (params.getVerbose()) {

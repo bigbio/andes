@@ -12,14 +12,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
 /**
- * BuildSA bit-identity test: the parallel temp-file path must produce
- * byte-identical .csarr/.cnlcp output to the single-thread direct-write path
- * past the 8-byte header (size + id; the id changes per-build via
- * non-deterministic UUID-hash in CompactFastaSequence).
- *
- * <p>Runs the same FASTA through both paths, captures the resulting bytes,
- * and verifies they match. Also verifies that the parallel path leaves no
- * temp files behind on success.
+ * Bit-identity test: the parallel sort path must produce byte-identical
+ * .csarr/.cnlcp output to the single-thread path between the header and footer
+ * (header id and footer mtime are non-deterministic between builds).
  */
 public class TestBuildSAParallelBitIdentity {
 
@@ -60,7 +55,6 @@ public class TestBuildSAParallelBitIdentity {
             Assert.assertArrayEquals(".csarr post-header bytes must be identical between N=1 and N=4", singleCsarr, parallelCsarr);
             Assert.assertArrayEquals(".cnlcp post-header bytes must be identical between N=1 and N=4", singleCnlcp, parallelCnlcp);
 
-            // No temp debris left behind in the parallel build's directory.
             File parentDir = parallelArtifacts.getAbsoluteFile().getParentFile();
             File[] debris = parentDir.listFiles((dir, name) -> name.contains(".buildsa-tmp."));
             Assert.assertNotNull(debris);
@@ -72,11 +66,7 @@ public class TestBuildSAParallelBitIdentity {
         }
     }
 
-    /**
-     * Copies the {@link #FIXTURE} into a fresh temp directory so we can build
-     * {@code .canno / .cseq / .csarr / .cnlcp} alongside it without polluting
-     * {@code src/test/resources}.
-     */
+    /** Copies the FASTA fixture into a fresh temp dir so build artifacts don't pollute test resources. */
     private static File stageFastaIntoTempDir(String prefix) throws Exception {
         Path tempDir = Files.createTempDirectory(prefix);
         File source = new File(TestBuildSAParallelBitIdentity.class.getClassLoader().getResource(FIXTURE).toURI());
@@ -86,17 +76,14 @@ public class TestBuildSAParallelBitIdentity {
     }
 
     /**
-     * Read the file and skip both the 8-byte header (size int + id int — the id
-     * is non-deterministic UUID-hash) and the 12-byte footer (lastModified long
-     * + formatId int — the lastModified differs because the test stages the
-     * fixture into a fresh temp dir per run, so the FASTA's mtime differs
-     * between the two runs). The bytes between are the actual sort output we
-     * want to compare bit-for-bit.
+     * Read the file with the 8-byte header (size + id) and 12-byte footer
+     * (lastModified + formatId) trimmed off. Both are non-deterministic between
+     * runs; the body in between is the actual sort output to compare.
      */
     private static byte[] readBodyBytes(File f) throws IOException {
         byte[] all = Files.readAllBytes(f.toPath());
-        int headerSize = 8;       // int size + int id
-        int footerSize = 8 + 4;   // long lastModified + int formatId
+        int headerSize = 8;
+        int footerSize = 8 + 4;
         Assert.assertTrue("Output file too small: " + f, all.length >= headerSize + footerSize);
         int bodyLen = all.length - headerSize - footerSize;
         byte[] body = new byte[bodyLen];

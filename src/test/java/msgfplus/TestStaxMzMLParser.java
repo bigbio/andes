@@ -169,22 +169,16 @@ public class TestStaxMzMLParser {
 
     @Test
     public void testCacheReturnsDefensiveCopy() throws Exception {
-        // Behavioral change vs. the original parser: getSpectrumBySpecIndex
-        // now returns a defensive copy on every call. This is required so the
-        // pre-pass (MassCalibrator) cannot mutate scoring state that the main
-        // pass will later re-read. See `cloneSpectrum` in StaxMzMLParser.
         StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile());
         Spectrum spec1 = parser.getSpectrumBySpecIndex(2);
         Spectrum spec2 = parser.getSpectrumBySpecIndex(2);
         Assert.assertNotSame("Defensive copy should return distinct instances", spec1, spec2);
 
-        // Equivalent data: same id, same peak count, same precursor m/z
         Assert.assertEquals(spec1.getID(), spec2.getID());
         Assert.assertEquals(spec1.size(), spec2.size());
         Assert.assertEquals(spec1.getPrecursorPeak().getMz(), spec2.getPrecursorPeak().getMz(), 0.0001f);
 
-        // Mutating one copy must not affect the other (or any future read).
-        // Set the rank of the first peak in spec1; verify spec2 / spec3 are unaffected.
+        // Mutation on one copy must not leak to a future read.
         spec1.get(0).setRank(99);
         Spectrum spec3 = parser.getSpectrumBySpecIndex(2);
         Assert.assertNotSame(spec1, spec3);
@@ -193,8 +187,7 @@ public class TestStaxMzMLParser {
 
     @Test
     public void testMSLevelPreloadFilter() throws Exception {
-        // Parser constructed with [2, 2] should never decode/return MS1 spectra.
-        // The tiny.pwiz.mzML fixture has 3 MS1 (indices 1, 3, 4) and 1 MS2 (index 2).
+        // tiny.pwiz.mzML has MS1 at indices 1, 3, 4 and MS2 at index 2.
         StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile(), 2, 2);
         Assert.assertNull("MS1 (index 1) must be filtered out", parser.getSpectrumBySpecIndex(1));
         Assert.assertNull("MS1 (index 3) must be filtered out", parser.getSpectrumBySpecIndex(3));
@@ -204,7 +197,6 @@ public class TestStaxMzMLParser {
         Assert.assertEquals(2, ms2.getMSLevel());
         Assert.assertEquals(10, ms2.size());
     }
-
 
     @Test
     public void testIteratorWithMSLevelFilter() throws Exception {

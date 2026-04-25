@@ -428,10 +428,10 @@ public class MSGFPlus {
                 final boolean storeRankScorer = params.outputAdditionalFeatures();
                 final int taskNum = i + 1;
 
+                // Defer ScoredSpectraMap construction to the worker thread so all
+                // tasks' spectrum heaps aren't allocated up front when queued.
                 ConcurrentMSGFPlus.RunMSGFPlus msgfplusExecutor = new ConcurrentMSGFPlus.RunMSGFPlus(
                         () -> {
-                            // Build task-local spectrum state only when a worker thread
-                            // actually starts running to avoid queueing all task heaps.
                             ScoredSpectraMap specScanner = new ScoredSpectraMap(
                                     specAcc,
                                     Collections.synchronizedList(specKeyList.subList(taskStartIndex, taskEndIndex)),

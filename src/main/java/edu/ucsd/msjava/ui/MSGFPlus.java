@@ -20,6 +20,8 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -373,9 +375,22 @@ public class MSGFPlus {
 
         System.out.println("Spectrum 0-" + (toIndexGlobal - 1) + " (total: " + specSize + ")");
 
-        // Thread pool
-        ThreadPoolExecutorWithExceptions executor = ThreadPoolExecutorWithExceptions.newFixedThreadPool(numThreads);
-        executor.setTaskName("Search");
+        // T3: -Dmsgfplus.useForkJoin=true swaps the search executor to a
+        // ForkJoinPool. For our flat-task model the wall-clock difference vs
+        // ThreadPoolExecutor + numThreads*N tasks is small (the queue
+        // oversubscription already gets us most of the load-balance benefit).
+        // Kept as opt-in so it can be A/B-tested on uneven workloads. Default
+        // path is unchanged.
+        boolean useForkJoin = Boolean.getBoolean("msgfplus.useForkJoin");
+
+        // Default thread pool (with progress reporting + exception capture).
+        ThreadPoolExecutorWithExceptions executor =
+                useForkJoin ? null : ThreadPoolExecutorWithExceptions.newFixedThreadPool(numThreads);
+        if (executor != null) executor.setTaskName("Search");
+        // FJP-mode pool, used when useForkJoin=true. Sized to numThreads to
+        // match the default executor's parallelism.
+        ForkJoinPool fjp = useForkJoin ? new ForkJoinPool(numThreads) : null;
+        List<Future<?>> fjpFutures = useForkJoin ? new ArrayList<>() : null;
 
         // T2: numTasks-per-thread multiplier is configurable via
         // -Dmsgfplus.numTasksPerThread=N. Higher values reduce tail
@@ -469,27 +484,50 @@ public class MSGFPlus {
 
                 if (DISABLE_THREADING) {
                     msgfplusExecutor.run();
+                } else if (useForkJoin) {
+                    fjpFutures.add(fjp.submit(msgfplusExecutor));
                 } else {
                     executor.execute(msgfplusExecutor);
                 }
 
             }
-            // Output initial progress report.
-            executor.outputProgressReport();
 
-            executor.shutdown();
-
-            try {
-                executor.awaitTerminationWithExceptions(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
-            } catch (InterruptedException e) {
-                if (!executor.HasThrownData()) {
-                    e.printStackTrace();
+            if (useForkJoin) {
+                // FJP path: submit + drain Futures for exception propagation.
+                fjp.shutdown();
+                try {
+                    fjp.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, e.getMessage(), e);
                 }
-            }
+                for (Future<?> f : fjpFutures) {
+                    try { f.get(); }
+                    catch (java.util.concurrent.ExecutionException ex) {
+                        Throwable cause = ex.getCause();
+                        Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, cause.getMessage(), cause);
+                        return "Search failed: " + cause.getMessage();
+                    }
+                    catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
+                }
+            } else {
+                // Output initial progress report.
+                executor.outputProgressReport();
 
-            // Output completed progress report.
-            executor.outputProgressReport();
+                executor.shutdown();
+
+                try {
+                    executor.awaitTerminationWithExceptions(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+                } catch (InterruptedException e) {
+                    if (!executor.HasThrownData()) {
+                        e.printStackTrace();
+                        Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, e.getMessage(), e);
+                    }
+                }
+
+                // Output completed progress report.
+                executor.outputProgressReport();
+            }
 
             // Drain per-task result buffers into the global resultList. Done
             // single-threaded after awaitTermination — the executor's termination
@@ -508,7 +546,7 @@ public class MSGFPlus {
         } catch (OutOfMemoryError ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            executor.shutdownNow();
+            if (executor != null) executor.shutdownNow(); else if (fjp != null) fjp.shutdownNow();
             int taskMult = numTasks / numThreads;
             return "Task terminated; results incomplete. Please run again with a greater amount of memory, using \"-Xmx4G\", for example.\n" +
                     "\tYou can also use less memory by increasing the number of tasks used for the search, at the cost of more time.\n" +
@@ -516,12 +554,12 @@ public class MSGFPlus {
         } catch (Exception ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            executor.shutdownNow();
+            if (executor != null) executor.shutdownNow(); else if (fjp != null) fjp.shutdownNow();
             return "Task terminated; results incomplete. Please run again.";
         } catch (Throwable ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            executor.shutdownNow();
+            if (executor != null) executor.shutdownNow(); else if (fjp != null) fjp.shutdownNow();
             return "Task terminated; results incomplete. Please run again.";
         }
 

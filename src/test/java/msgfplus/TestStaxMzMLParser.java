@@ -205,24 +205,6 @@ public class TestStaxMzMLParser {
         Assert.assertEquals(10, ms2.size());
     }
 
-    @Test
-    public void testCacheSizeOverride() throws Exception {
-        // Bounded LRU cap is configurable via -Dmsgfplus.mzml.cacheSize. Verify
-        // a tiny cap still works end-to-end (eviction must not break correctness:
-        // a re-read of an evicted index just triggers another preload, which is
-        // an acceptable fallback for huge files).
-        String prev = System.getProperty("msgfplus.mzml.cacheSize");
-        System.setProperty("msgfplus.mzml.cacheSize", "2");
-        try {
-            StaxMzMLParser parser = new StaxMzMLParser(getMzMLFile());
-            Spectrum spec = parser.getSpectrumBySpecIndex(2);
-            Assert.assertNotNull(spec);
-            Assert.assertEquals(2, spec.getMSLevel());
-        } finally {
-            if (prev == null) System.clearProperty("msgfplus.mzml.cacheSize");
-            else System.setProperty("msgfplus.mzml.cacheSize", prev);
-        }
-    }
 
     @Test
     public void testIteratorWithMSLevelFilter() throws Exception {

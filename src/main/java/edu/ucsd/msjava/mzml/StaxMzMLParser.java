@@ -65,24 +65,24 @@ public class StaxMzMLParser {
     // Referenceable param groups: group ID -> list of [accession, name, value, unitAccession, unitName]
     private final Map<String, List<String[]>> refParamGroups;
 
-    /** Sysprop overriding the LRU cache cap. Default {@link #DEFAULT_CACHE_SIZE}. */
-    static final String CACHE_SIZE_PROPERTY = "msgfplus.mzml.cacheSize";
-    /** Default cache cap (entries). For typical Astral / PXD MS2 counts the cap
-     *  is never hit; for huge DIA / metaproteomic files it bounds heap. */
-    static final int DEFAULT_CACHE_SIZE = 50_000;
-
     /** MS-level filter from {@link StaxMzMLSpectraMap}. Spectra outside this
      *  range are never decoded and never cached, so MS1 (typically the bulk of
      *  mzML peaks) doesn't sit in heap during an MS2-only search. */
     private final int minMSLevel;
     private final int maxMSLevel;
 
-    /** Bounded access-order LRU cache. Synchronized for concurrent
-     *  preProcess / output-writer access. Returns DEFENSIVE COPIES on read so
-     *  that pre-pass mutations (peak ranking, charge resolution, etc.) cannot
-     *  leak to the main pass. */
+    /** Synchronized cache of in-filter spectra. Returns DEFENSIVE COPIES on
+     *  read so that pre-pass mutations (peak ranking, charge resolution, etc.)
+     *  cannot leak to the main pass. Memory is bounded by the in-filter
+     *  spectrum count after the MS-level filter — for an MS2-only search on a
+     *  typical Orbitrap / Astral file that's ~25-75K Spectrum objects, well
+     *  within heap budgets. Hard-capping (LRU eviction) requires a
+     *  seek-on-demand fallback for cache misses; without that, evicting a
+     *  spectrum would corrupt the search. Adding a real ceiling is a
+     *  follow-up: needs accurate byte-offset tracking (current offsets are
+     *  recorded at the StAX-internal-buffer granularity, not at element
+     *  start) plus a re-parse path. */
     private final Map<Integer, Spectrum> cache;
-    private final int maxCacheSize;
     private volatile boolean allLoaded = false;
 
     // Reusable XMLInputFactory (thread-safe for creation)
@@ -127,47 +127,8 @@ public class StaxMzMLParser {
         this.indexBySpecIdx = new HashMap<>();
         this.indexById = new HashMap<>();
         this.refParamGroups = new HashMap<>();
-        // Build the index first so we can size the cache based on the in-filter
-        // spectrum count.
+        this.cache = Collections.synchronizedMap(new HashMap<>());
         buildIndex();
-        // Effective cache cap: max(configured cap, in-filter spectrum count).
-        // The in-filter floor matters because there is no seek-on-demand
-        // fallback yet — if the cap evicted an in-filter spectrum and the
-        // caller later asked for it, we'd return null. This PR keeps the
-        // bounded-LRU plumbing but only enforces it when it can't break
-        // correctness; a future PR can add accurate byte-offset tracking +
-        // seek-on-demand and let the cap fire as a hard memory ceiling.
-        int configuredCap = resolveCacheSize();
-        int inFilterCount = 0;
-        for (SpectrumIndex si : indexList) {
-            if (si.msLevel >= minMSLevel && si.msLevel <= maxMSLevel) inFilterCount++;
-        }
-        if (configuredCap < inFilterCount) {
-            System.out.println("StAX mzML cache cap " + configuredCap
-                    + " is smaller than in-filter spectrum count " + inFilterCount
-                    + "; raising effective cap to " + inFilterCount
-                    + " (seek-on-demand fallback not yet implemented).");
-            configuredCap = inFilterCount;
-        }
-        this.maxCacheSize = configuredCap;
-        final int cap = this.maxCacheSize;
-        this.cache = Collections.synchronizedMap(new LinkedHashMap<Integer, Spectrum>(16, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<Integer, Spectrum> eldest) {
-                return size() > cap;
-            }
-        });
-    }
-
-    private static int resolveCacheSize() {
-        String v = System.getProperty(CACHE_SIZE_PROPERTY);
-        if (v != null) {
-            try {
-                int n = Integer.parseInt(v.trim());
-                if (n > 0) return n;
-            } catch (NumberFormatException ignored) { /* fall through */ }
-        }
-        return DEFAULT_CACHE_SIZE;
     }
 
     // -----------------------------------------------------------------------

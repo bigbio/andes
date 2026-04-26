@@ -1,4 +1,4 @@
-package edu.ucsd.msjava.mzid;
+package edu.ucsd.msjava.output;
 
 import edu.ucsd.msjava.msdbsearch.CompactSuffixArray;
 import edu.ucsd.msjava.msdbsearch.DatabaseMatch;

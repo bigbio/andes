@@ -11,7 +11,7 @@ import java.nio.file.Paths;
 import static org.junit.Assert.*;
 
 import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Test;
 
 

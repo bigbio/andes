@@ -6,7 +6,7 @@ import java.util.*;
 
 import edu.ucsd.msjava.msdbsearch.CompactFastaSequence;
 import edu.ucsd.msjava.msdbsearch.ReverseDB;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Ignore;
 import org.junit.Test;
 

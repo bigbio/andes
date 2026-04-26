@@ -2,7 +2,7 @@ package edu.ucsd.msjava.msdbsearch;
 
 import edu.ucsd.msjava.sequences.Constants;
 import edu.ucsd.msjava.sequences.Sequence;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 import java.io.*;
 import java.text.SimpleDateFormat;

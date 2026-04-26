@@ -4,7 +4,7 @@ import java.io.File;
 import java.net.URISyntaxException;
 
 import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Test;
 import edu.ucsd.msjava.msutil.AminoAcidSet;
 import edu.ucsd.msjava.msutil.IonType;

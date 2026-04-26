@@ -2,7 +2,7 @@ package edu.ucsd.msjava.params;
 
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.sequences.Constants;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 import java.io.File;
 import java.util.ArrayList;

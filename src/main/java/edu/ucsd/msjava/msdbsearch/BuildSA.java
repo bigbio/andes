@@ -1,6 +1,6 @@
 package edu.ucsd.msjava.msdbsearch;
 
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 import org.apache.commons.io.FilenameUtils;
 
 import java.io.BufferedWriter;

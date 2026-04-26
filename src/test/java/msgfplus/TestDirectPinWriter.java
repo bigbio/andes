@@ -5,9 +5,9 @@ import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.ActivationMethod;
 import edu.ucsd.msjava.msutil.Enzyme;
-import edu.ucsd.msjava.mzid.DirectPinWriter;
+import edu.ucsd.msjava.output.DirectPinWriter;
 import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -24,7 +24,7 @@ import java.util.List;
  * Shape tests for the Percolator {@code .pin} output path (Q7).
  *
  * These exercise the CLI/flag plumbing and the header emitted by
- * {@link edu.ucsd.msjava.mzid.DirectPinWriter}. A full end-to-end
+ * {@link edu.ucsd.msjava.output.DirectPinWriter}. A full end-to-end
  * search-to-pin run is exercised by the integration tests under
  * {@code src/test/resources/} when external spectra are available;
  * here we focus on the parts we can verify without running the
@@ -106,14 +106,14 @@ public class TestDirectPinWriter {
         // stream. We assert the header line contains the Percolator-required
         // column names.
         java.lang.reflect.Method writeHeader =
-                edu.ucsd.msjava.mzid.DirectPinWriter.class.getDeclaredMethod(
+                edu.ucsd.msjava.output.DirectPinWriter.class.getDeclaredMethod(
                         "writeHeader", java.io.PrintStream.class, int.class, int.class);
         writeHeader.setAccessible(true);
 
         // Build a DirectPinWriter with null sa/specAcc — header path doesn't
         // touch them. If the constructor starts using them, this test needs
         // to evolve; for now it's a pure shape check.
-        java.lang.reflect.Constructor<?> ctor = edu.ucsd.msjava.mzid.DirectPinWriter.class
+        java.lang.reflect.Constructor<?> ctor = edu.ucsd.msjava.output.DirectPinWriter.class
                 .getDeclaredConstructor(
                         SearchParams.class,
                         edu.ucsd.msjava.msutil.AminoAcidSet.class,

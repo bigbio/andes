@@ -2,7 +2,7 @@ package edu.ucsd.msjava.msdbsearch;
 
 import edu.ucsd.msjava.params.FileParameter;
 import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Assert;
 import org.junit.Test;
 

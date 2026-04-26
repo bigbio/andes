@@ -1,6 +1,5 @@
 package edu.ucsd.msjava.parser;
 
-import net.pempek.unicode.UnicodeBOMInputStream;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.io.FileInputStream;
@@ -95,23 +94,23 @@ public class BufferedRandomAccessLineReader implements LineReader {
         int copyOffset = 0;
 
         if (buf.length >= 4) {
-            if (bytesMatchBOM(buf, net.pempek.unicode.UnicodeBOMInputStream.BOM.UTF_32_LE)) {
+            if (bytesMatchBOM(buf, UnicodeBOMInputStream.BOM.UTF_32_LE)) {
                 copyOffset = 4;
-            } else if (bytesMatchBOM(buf, net.pempek.unicode.UnicodeBOMInputStream.BOM.UTF_32_BE)) {
+            } else if (bytesMatchBOM(buf, UnicodeBOMInputStream.BOM.UTF_32_BE)) {
                 copyOffset = 4;
             }
         }
 
         if (copyOffset == 0 && buf.length >= 3) {
-            if (bytesMatchBOM(buf, net.pempek.unicode.UnicodeBOMInputStream.BOM.UTF_8)) {
+            if (bytesMatchBOM(buf, UnicodeBOMInputStream.BOM.UTF_8)) {
                 copyOffset = 3;
             }
         }
 
         if (copyOffset == 0 && buf.length >= 2) {
-            if (bytesMatchBOM(buf, net.pempek.unicode.UnicodeBOMInputStream.BOM.UTF_16_LE)) {
+            if (bytesMatchBOM(buf, UnicodeBOMInputStream.BOM.UTF_16_LE)) {
                 copyOffset = 2;
-            } else if (bytesMatchBOM(buf, net.pempek.unicode.UnicodeBOMInputStream.BOM.UTF_16_BE)) {
+            } else if (bytesMatchBOM(buf, UnicodeBOMInputStream.BOM.UTF_16_BE)) {
                 copyOffset = 2;
             }
         }

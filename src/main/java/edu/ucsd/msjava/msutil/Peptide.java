@@ -6,7 +6,7 @@ import edu.ucsd.msjava.msgf.MassListComparator;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msutil.Modification.Location;
 import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;

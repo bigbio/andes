@@ -1,4 +1,4 @@
-package edu.ucsd.msjava.ui;
+package edu.ucsd.msjava.cli;
 
 import edu.ucsd.msjava.msdbsearch.*;
 import edu.ucsd.msjava.msgf.MSGFDBResultGenerator;

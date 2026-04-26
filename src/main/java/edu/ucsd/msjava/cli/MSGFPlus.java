@@ -97,18 +97,14 @@ public class MSGFPlus {
     }
 
     /**
-     * Phase 1 of the parameter-modernization plan: route MSGFPlus argv
-     * through the typed picocli-based {@link MSGFPlusOptions} class and
-     * adapter, falling back to {@link ParamManager#parseParams(String[])}
-     * for {@code -conf} (config-file input) until Phase 2 ports the
-     * config-file reader. See {@code .claude/plans/parameter-modernization.md}.
+     * Route MSGFPlus argv through the typed picocli-based
+     * {@link MSGFPlusOptions} class + adapter. Config-file values are
+     * applied later by {@link edu.ucsd.msjava.msdbsearch.SearchParams#parse}
+     * for any parameter the CLI did not assign, so {@code -conf} works
+     * uniformly through this single path. See
+     * {@code .claude/plans/parameter-modernization.md}.
      */
     private static String parseArgs(String[] argv, ParamManager paramManager) {
-        for (String arg : argv) {
-            if ("-conf".equals(arg)) {
-                return paramManager.parseParams(argv);
-            }
-        }
         MSGFPlusOptions opts = new MSGFPlusOptions();
         try {
             new CommandLine(opts).parseArgs(argv);

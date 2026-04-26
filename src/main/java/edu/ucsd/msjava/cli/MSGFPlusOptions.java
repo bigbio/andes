@@ -29,14 +29,16 @@ import java.io.File;
         description = "MS-GF+: peptide identification by database search of mass spectra.")
 public final class MSGFPlusOptions {
 
-    // ---------- required input ----------
+    // ---------- input (required at runtime, but may be provided via -conf) ----------
 
-    @Option(names = "-s", required = true, paramLabel = "SpectrumFile",
-            description = "Input spectrum file (*.mzML, *.mzXML, *.mgf, *.ms2, *.pkl, *_dta.txt) or directory of spectra")
+    @Option(names = "-s", paramLabel = "SpectrumFile",
+            description = "Input spectrum file (*.mzML, *.mzXML, *.mgf, *.ms2, *.pkl, *_dta.txt) or directory of spectra. "
+                    + "Required, unless provided via -conf as SpectrumFile=...")
     public File spectrumFile;
 
-    @Option(names = "-d", required = true, paramLabel = "DatabaseFile",
-            description = "Database file (*.fasta, *.fa, *.faa)")
+    @Option(names = "-d", paramLabel = "DatabaseFile",
+            description = "Database file (*.fasta, *.fa, *.faa). "
+                    + "Required, unless provided via -conf as DatabaseFile=...")
     public File databaseFile;
 
     // ---------- optional config + output ----------

@@ -65,14 +65,16 @@ public class MSGFPlusOptionsAdapterTest {
     }
 
     @Test
-    public void picocliPathRejectsMissingRequiredFlags() {
+    public void picocliPathAcceptsConfigOnlyInvocation() {
+        // -conf may supply -s/-d via the config file, so picocli must
+        // not reject CLI invocations that omit them. Matches legacy
+        // ParamManager behavior (FileParameter.setAsOptional() on -s/-d).
+        ParamManager pm = freshMSGFPlusParamManager();
         MSGFPlusOptions opts = new MSGFPlusOptions();
-        try {
-            new CommandLine(opts).parseArgs(new String[] {"-t", "20ppm"});
-            Assert.fail("expected picocli to reject CLI missing -s and -d");
-        } catch (CommandLine.MissingParameterException expected) {
-            // ok
-        }
+        new CommandLine(opts).parseArgs(new String[] {"-conf", "src/test/resources/HCD_QExactive_Tryp.param"});
+        String err = MSGFPlusOptionsAdapter.adapt(opts, pm);
+        Assert.assertNull("adapter rejected -conf-only CLI: " + err, err);
+        Assert.assertNotNull("config file param not set", pm.getConfigFileParam().getFile());
     }
 
     @Test

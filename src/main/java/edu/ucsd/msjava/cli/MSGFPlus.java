@@ -13,6 +13,8 @@ import edu.ucsd.msjava.output.DirectTSVWriter;
 import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.sequences.Constants;
+import picocli.CommandLine;
+import picocli.CommandLine.ParameterException;
 
 import java.io.File;
 import java.io.IOException;
@@ -61,8 +63,10 @@ public class MSGFPlus {
 
         StaxMzMLParser.turnOffLogs();
 
-        // Parse parameters
-        String errMessage = paramManager.parseParams(argv);
+        // Parse parameters. The new picocli-based path runs by default;
+        // the legacy ParamManager.parseParams handles -conf (config-file
+        // input) until Phase 2 ports it. See parameter-modernization.md.
+        String errMessage = parseArgs(argv, paramManager);
         if (errMessage != null) {
             MSGFLogger.error(errMessage);
             System.out.println();
@@ -90,6 +94,28 @@ public class MSGFPlus {
             System.exit(-1);
         } else
             MSGFLogger.info("MS-GF+ complete (total elapsed time: %.2f sec)", (System.currentTimeMillis() - startTime) / (float) 1000);
+    }
+
+    /**
+     * Phase 1 of the parameter-modernization plan: route MSGFPlus argv
+     * through the typed picocli-based {@link MSGFPlusOptions} class and
+     * adapter, falling back to {@link ParamManager#parseParams(String[])}
+     * for {@code -conf} (config-file input) until Phase 2 ports the
+     * config-file reader. See {@code .claude/plans/parameter-modernization.md}.
+     */
+    private static String parseArgs(String[] argv, ParamManager paramManager) {
+        for (String arg : argv) {
+            if ("-conf".equals(arg)) {
+                return paramManager.parseParams(argv);
+            }
+        }
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        try {
+            new CommandLine(opts).parseArgs(argv);
+        } catch (ParameterException e) {
+            return e.getMessage();
+        }
+        return MSGFPlusOptionsAdapter.adapt(opts, paramManager);
     }
 
     public static String runMSGFPlus(ParamManager paramManager) {

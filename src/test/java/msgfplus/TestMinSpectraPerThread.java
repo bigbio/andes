@@ -36,11 +36,4 @@ public class TestMinSpectraPerThread {
         Assert.assertNotNull("'0' must be rejected (minValue is 1)", param.parse("0"));
     }
 
-    @Test
-    @SuppressWarnings("deprecation")
-    public void msgfdbEntryPointAlsoRegistersTheParam() {
-        ParamManager pm = new ParamManager("MSGFDB", "test", "test", "java -jar MSGFDB.jar");
-        pm.addMSGFDBParams();
-        Assert.assertEquals(250, pm.getMinSpectraPerThread());
-    }
 }

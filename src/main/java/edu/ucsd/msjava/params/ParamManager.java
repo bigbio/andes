@@ -36,13 +36,9 @@ public class ParamManager {
         DECOY_PREFIX("decoy", "DecoyPrefix",
                 "Prefix for decoy protein names; Default: " + MSGFPlus.DEFAULT_DECOY_PROTEIN_PREFIX, null),
 
-        // Used by MS-GF+
+        // -o for MS-GF+ search output
         SEARCH_OUTPUT_FILE("o", "OutputFile (*.pin or *.tsv)", "Default: [SpectrumFileName].pin", null),
 
-        // Used by MSGF and MS-GFDB
-        OUTPUT_FILE("o", "OutputFile", "Default: stdout", null),
-
-        //  MS-GF+, MSGF, and MS-GFDB
         PRECURSOR_MASS_TOLERANCE("t", "PrecursorMassTolerance", "e.g. 2.5Da, 20ppm or 0.5Da,2.5Da; Default: 20ppm",
                 "Use a comma to define asymmetric values. E.g. \"-t 0.5Da,2.5Da\" will set 0.5Da to the left (ObsMass < TheoMass) and 2.5Da to the right (ObsMass > TheoMass)"),
 
@@ -97,15 +93,6 @@ public class ParamManager {
         ENZYME_SPECIFICITY("ntt", "NTT", "Number of Tolerable Termini",
                 "E.g. For trypsin, 0: non-tryptic, 1: semi-tryptic, 2: fully-tryptic peptides only."),
 
-        // Used by MS-GFDB
-        C13("c13", null, "Precursor isotope peak error",
-                "0 means consider only peptides matching precursor mass\n" +
-                        "\t   1 means Consider peptides having one 13C (Default)\n" +
-                        "\t   2 means Consider peptides having up to two 13C"),
-
-        // Used by MS-GFDB
-        NNET("nnet", null, "Number of allowed non-enzymatic termini", null),
-
         MIN_PEPTIDE_LENGTH("minLength", "MinPepLength", "Minimum peptide length to consider; Default: 6", null),
         MAX_PEPTIDE_LENGTH("maxLength", "MaxPepLength", "Maximum peptide length to consider; Default: 40", null),
 
@@ -152,10 +139,6 @@ public class ParamManager {
         EDGE_SCORE("edgeScore", "EdgeScore", "Toggle edge scoring",
                 "0 means Use Edge Scoring (Default)\n" +
                 "\t   1 means Do not use edge scoring"),
-
-        // Only used by MS-GFDB
-        @Deprecated
-        UNIFORM_AA_PROBABILITY("uniformAAProb", "UniformAAProb", null, null),
 
         MAX_NUM_MODS("numMods", "NumMods", "Maximum number of dynamic (variable) modifications per peptide; Default: 3", null),
 
@@ -441,16 +424,6 @@ public class ParamManager {
         addParameter(dbFileParam);
     }
 
-    private void addDBFileParam(String key, String description, boolean isOptional) {
-        FileParameter dbFileParam = new FileParameter(key, ParamNameEnum.DB_FILE.name, description);
-        if (isOptional)
-            dbFileParam.setAsOptional();
-        dbFileParam.addFileFormat(DBFileFormat.FASTA);
-        dbFileParam.fileMustExist();
-        dbFileParam.mustBeAFile();
-        addParameter(dbFileParam);
-    }
-
     private void addDecoyPrefixParam() {
         addDecoyPrefixParam(MSGFPlus.DEFAULT_DECOY_PROTEIN_PREFIX);
     }
@@ -476,16 +449,6 @@ public class ParamManager {
         outputParam.addFileFormat(new FileFormat(".pin"));
         outputParam.addFileFormat(new FileFormat(".tsv"));
         outputParam.setAsOptional();
-        addParameter(outputParam);
-    }
-
-    /**
-     * -o for MSGF and MS-GFDB
-     */
-    private void addOutputFileParam() {
-        FileParameter outputParam = new FileParameter(ParamNameEnum.OUTPUT_FILE);
-        outputParam.setAsOptional();
-        outputParam.fileMustNotExist();
         addParameter(outputParam);
     }
 
@@ -877,188 +840,6 @@ public class ParamManager {
 
     } // MSGFPlusParams
 
-    // ScoringParamGen has been removed along with the rest of the mzid
-    // pipeline. The former addScoringParamGenParams() method is deleted.
-
-    @Deprecated
-    public void addMSGFDBParams() {
-        addSpecFileParam(false);
-        addDBFileParam(false);
-
-        addPrecursorMassToleranceParam();
-        addPrecursorMassToleranceUnitsParam(true);
-
-        addOutputFileParam();
-
-        addNumThreadsParam();
-        addMinSpectraPerThreadParam();
-
-        addTdaParam();
-
-        addFragMethodParam(ActivationMethod.ASWRITTEN, false);
-        addInstTypeParam();
-        addEnzymeParam();
-        addProtocolParam();
-
-        EnumParameter c13Param = new EnumParameter(ParamNameEnum.C13);
-        c13Param.registerEntry("Consider only peptides matching precursor mass");
-        c13Param.registerEntry("Consider peptides having one 13C").setDefault();
-        c13Param.registerEntry("Consider peptides having up to two 13C");
-        addParameter(c13Param);
-
-        EnumParameter nnetParam = new EnumParameter(ParamNameEnum.NNET);
-        nnetParam.registerEntry("");
-        nnetParam.registerEntry("").setDefault();
-        nnetParam.registerEntry("");
-        addParameter(nnetParam);
-
-        addModFileParam();
-
-//		FloatRangeParameter itraqParam = new FloatRangeParameter("itraq", "minMass,maxMass", "Remove MS/MS peaks in the mass range between minMass and maxMass (for iTRAQ analysis).");
-//		itraqParam.minValue(0f);
-//		itraqParam.setMaxInclusive();
-//		itraqParam.defaultValue("0,0");
-//		itraqParam.setHidden();
-//		addParameter(itraqParam);
-
-        addMinPeptideLengthParam();
-        addMaxPeptideLengthParam();
-        addMinChargeParam();
-        addMaxChargeParam();
-
-        addNumMatchesPerSpecParam();
-
-        EnumParameter uniformAAProb = new EnumParameter(ParamNameEnum.UNIFORM_AA_PROBABILITY);
-        uniformAAProb.registerEntry("Use amino acid probabilities computed from the input database").setDefault();
-        uniformAAProb.registerEntry("Use probability 0.05 for all amino acids");
-        addParameter(uniformAAProb);
-        
-        addAllowDenseCentroidedPeaksParam();
-
-        addExample("Example (high-precision): java -Xmx2000M -jar MSGFDB.jar -s test.mzXML -d IPI_human_3.79.fasta -t 30ppm -c13 1 -nnet 0 -tda 1 -o testMSGFDB.tsv");
-        addExample("Example (low-precision):  java -Xmx2000M -jar MSGFDB.jar -s test.mzXML -d IPI_human_3.79.fasta -t 0.5Da,2.5Da  -nnet 0 -tda 1 -o testMSGFDB.tsv");
-
-        // Hidden parameters
-        addDbIndexDirParam(true);
-        addSpecIndexRangeParam(true);
-
-        EnumParameter showFDRParam = new EnumParameter("showFDR");
-        showFDRParam.registerEntry("Do not show FDRs");
-        showFDRParam.registerEntry("Show FDRs").setDefault();
-        showFDRParam.setHidden();
-        addParameter(showFDRParam);
-
-        EnumParameter showDecoyParam = new EnumParameter("showDecoy");
-        showDecoyParam.registerEntry("Do not show decoy PSMs").setDefault();
-        showDecoyParam.registerEntry("Show decoy PSMs");
-        showDecoyParam.setHidden();
-        addParameter(showDecoyParam);
-
-        EnumParameter replicateMergedResParam = new EnumParameter("replicate");
-        replicateMergedResParam.registerEntry("Show merged spectra").setDefault();
-        replicateMergedResParam.registerEntry("Show individual spectra");
-        replicateMergedResParam.setHidden();
-        addParameter(replicateMergedResParam);
-
-        addEdgeScoreParam(true);
-
-//		EnumParameter percolatorParam = new EnumParameter("percolator");
-//		edgeScoreParam.registerEntry("normal").setDefault();
-//		edgeScoreParam.registerEntry("for MS-GF+Percolator");
-//		edgeScoreParam.setHidden();
-//		addParameter(percolatorParam);
-
-    } // MSGFDBParams
-
-    public void addMSGFParams() {
-        // SpectrumFile
-        FileParameter resFileParam = new FileParameter("i", "ResultFile", "ResultFile");
-        resFileParam.fileMustExist();
-        addParameter(resFileParam);
-
-        // SpecDir
-        FileParameter specDirParam = new FileParameter("d", "SpecDir", "Path to directory containing spectrum files");
-        specDirParam.mustBeADirectory();
-        specDirParam.fileMustExist();
-        addParameter(specDirParam);
-
-        // OutputFileName
-        addOutputFileParam();
-
-        // DBFile
-        addDBFileParam("db", "To get AA frequencies, if not specified, 1/20 is used for all AAs", true);
-
-        // Fragmentation method
-        addFragMethodParam(ActivationMethod.ASWRITTEN, true);
-
-        // Instrument type
-        addInstTypeParam();
-
-        // Enzyme
-        addEnzymeParam();
-
-        // FixedMod
-        EnumParameter fixModParam = new EnumParameter("fixMod");
-        fixModParam.registerEntry("NoCysteineProtection");
-        fixModParam.registerEntry("Carbamidomethyl-C").setDefault();
-        fixModParam.registerEntry("Carboxymethyl-C");
-        addParameter(fixModParam);
-
-        // -x
-        EnumParameter numSpecParam = new EnumParameter("x");
-        numSpecParam.registerEntry("All").setDefault();
-        numSpecParam.registerEntry("OnePerSpec");
-        addParameter(numSpecParam);
-
-        // -p
-        FloatParameter spThParam = new FloatParameter("p", "SpecProbThreshold", "Spectral probability threshold (Default: 1)");
-        spThParam.minValue(0f).setMinExclusive();
-        spThParam.maxValue(1f).setMaxInclusive();
-        spThParam.defaultValue(1f);
-        addParameter(spThParam);
-
-        // -addScore
-        EnumParameter addScoreParam = new EnumParameter("addScore");
-        addScoreParam.registerEntry("Don't add MSGFScore").setDefault();
-        addScoreParam.registerEntry("Add MSGFScore");
-        addParameter(addScoreParam);
-    }
-
-    public void addMSGFLibParams() {
-        addSpecFileParam(false);
-
-        // Add library file param
-        FileParameter libFileParam = new FileParameter("d", "LibraryFile", "*.sptxt");
-        libFileParam.addFileFormat(new FileFormat(".sptxt"));
-        libFileParam.fileMustExist();
-        libFileParam.mustBeAFile();
-        addParameter(libFileParam);
-
-        addPrecursorMassToleranceParam();
-
-        addOutputFileParam();
-
-        addNumThreadsParam();
-
-        addFragMethodParam(ActivationMethod.ASWRITTEN, false);
-        addInstTypeParam();
-        addEnzymeParam();
-        addProtocolParam();
-
-        EnumParameter c13Param = new EnumParameter(ParamNameEnum.C13);
-        c13Param.registerEntry("Consider only peptides matching precursor mass");
-        c13Param.registerEntry("Consider peptides having one 13C").setDefault();
-        c13Param.registerEntry("Consider peptides having up to two 13C");
-        addParameter(c13Param);
-
-        IntParameter numMatchesParam = new IntParameter("n", "NumMatchesPerSpec", "Number of matches per spectrum to be reported, Default: 1");
-        numMatchesParam.minValue(1);
-        numMatchesParam.defaultValue(1);
-        addParameter(numMatchesParam);
-
-        addExample("Example: java -Xmx2000M -jar MSGFLib.jar -s test.mzXML -d IPI_human_3.79.fasta -t 30ppm -c13 1 -nnet 0 -o testMSGFDB.tsv");
-    }
-
     public FileParameter getSpecFileParam() {
         return ((FileParameter) getParameter(ParamNameEnum.SPECTRUM_FILE.key));
     }
@@ -1089,7 +870,7 @@ public class ParamManager {
     }
 
     public FileParameter getOutputFileParam() {
-        return ((FileParameter) getParameter(ParamNameEnum.OUTPUT_FILE.key));
+        return ((FileParameter) getParameter(ParamNameEnum.SEARCH_OUTPUT_FILE.key));
     }
 
     public ActivationMethod getActivationMethod() {

@@ -46,14 +46,17 @@ public final class MSGFPlusOptionsAdapter {
         if ((err = setIfPresent(paramManager, ParamNameEnum.DD_DIRECTORY,
                 opts.dbIndexDir == null ? null : opts.dbIndexDir.getPath())) != null) return err;
 
-        // Plain strings / domain strings parsed by ToleranceParameter / RangeParameter / EnumParameter
+        // Plain strings / domain strings parsed by ToleranceParameter / RangeParameter / EnumParameter.
+        // Typed fields (PrecursorTolerance, IntRange) are converted back to their canonical String
+        // form via toString() since the Phase 1 round-trip still feeds Parameter.parse(String);
+        // Phase 4c step 3 deletes that round-trip.
         if ((err = setIfPresent(paramManager, ParamNameEnum.DECOY_PREFIX, opts.decoyPrefix)) != null) return err;
-        if ((err = setIfPresent(paramManager, ParamNameEnum.PRECURSOR_MASS_TOLERANCE, opts.precursorTolerance)) != null) return err;
-        if ((err = setIfPresent(paramManager, ParamNameEnum.ISOTOPE_ERROR, opts.isotopeErrorRange)) != null) return err;
+        if ((err = setIfPresent(paramManager, ParamNameEnum.PRECURSOR_MASS_TOLERANCE, asString(opts.precursorTolerance))) != null) return err;
+        if ((err = setIfPresent(paramManager, ParamNameEnum.ISOTOPE_ERROR, asString(opts.isotopeErrorRange))) != null) return err;
         if ((err = setIfPresent(paramManager, ParamNameEnum.OUTPUT_FORMAT, opts.outputFormat)) != null) return err;
         if ((err = setIfPresent(paramManager, ParamNameEnum.PRECURSOR_CAL, opts.precursorCalMode)) != null) return err;
-        if ((err = setIfPresent(paramManager, ParamNameEnum.MS_LEVEL, opts.msLevel)) != null) return err;
-        if ((err = setIfPresent(paramManager, ParamNameEnum.SPEC_INDEX, opts.specIndexRange)) != null) return err;
+        if ((err = setIfPresent(paramManager, ParamNameEnum.MS_LEVEL, asString(opts.msLevel))) != null) return err;
+        if ((err = setIfPresent(paramManager, ParamNameEnum.SPEC_INDEX, asString(opts.specIndexRange))) != null) return err;
 
         // Integer-valued flags (enum + numeric)
         if ((err = setIfPresent(paramManager, ParamNameEnum.PRECURSOR_MASS_TOLERANCE_UNITS, opts.precursorToleranceUnits)) != null) return err;
@@ -110,5 +113,9 @@ public final class MSGFPlusOptionsAdapter {
     private static String setIfPresent(ParamManager paramManager, ParamNameEnum name, Double value) {
         if (value == null) return null;
         return setIfPresent(paramManager, name, value.toString());
+    }
+
+    private static String asString(Object value) {
+        return value == null ? null : value.toString();
     }
 }

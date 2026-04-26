@@ -58,17 +58,19 @@ public final class MSGFPlusOptions {
     // ---------- precursor mass tolerance ----------
 
     @Option(names = "-t", paramLabel = "Tolerance",
+            converter = PrecursorTolerance.Converter.class,
             description = "Precursor mass tolerance, e.g. 20ppm or 0.5Da or 0.5Da,2.5Da; Default: 20ppm. " +
                     "Asymmetric form sets left tolerance (ObsMass < TheoMass) and right tolerance (ObsMass > TheoMass).")
-    public String precursorTolerance;
+    public PrecursorTolerance precursorTolerance;
 
     @Option(names = "-u", paramLabel = "Units", hidden = true,
             description = "Tolerance units (legacy): 0=Da, 1=ppm, 2=as written in -t (Default: 2)")
     public Integer precursorToleranceUnits;
 
     @Option(names = "-ti", paramLabel = "Range",
+            converter = IntRange.Converter.class,
             description = "Isotope-error range, e.g. -1,2 (both inclusive); Default: 0,1")
-    public String isotopeErrorRange;
+    public IntRange isotopeErrorRange;
 
     // ---------- threading / parallelism ----------
 
@@ -173,8 +175,9 @@ public final class MSGFPlusOptions {
     public Integer allowDenseCentroidedPeaks;
 
     @Option(names = "-msLevel", paramLabel = "Range",
+            converter = IntRange.Converter.class,
             description = "MS level or range, e.g. 2 or 2,3; Default: 2,2")
-    public String msLevel;
+    public IntRange msLevel;
 
     // ---------- hidden flags ----------
 
@@ -183,8 +186,9 @@ public final class MSGFPlusOptions {
     public File dbIndexDir;
 
     @Option(names = "-index", paramLabel = "Range", hidden = true,
+            converter = IntRange.Converter.class,
             description = "Spectrum index range, e.g. 1,1000 (both inclusive)")
-    public String specIndexRange;
+    public IntRange specIndexRange;
 
     @Option(names = "-edgeScore", paramLabel = "N", hidden = true,
             description = "Edge scoring: 0=use (Default), 1=skip")

@@ -4,6 +4,7 @@ import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.misc.ProgressReporter;
 
 import java.io.PrintStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -12,42 +13,24 @@ import org.apache.commons.io.output.NullOutputStream;
 public class ConcurrentMSGFPlus {
     private static final PrintStream NULL_PRINT_STREAM = new PrintStream(new NullOutputStream());
 
-    /** Per-task wall stats captured during {@link RunMSGFPlus#run()}. Used by
-     *  {@code MSGFPlus.runMSGFPlus} to report a tail-imbalance summary across
-     *  all tasks (T1 instrumentation). All units are milliseconds. */
-    public static final class TaskWallStats {
-        public final int taskNum;
-        public final long preprocessMs;
-        public final long dbSearchMs;
-        public final long computeEvalueMs;
-        public final long totalMs;
-        TaskWallStats(int taskNum, long preprocessMs, long dbSearchMs, long computeEvalueMs, long totalMs) {
-            this.taskNum = taskNum;
-            this.preprocessMs = preprocessMs;
-            this.dbSearchMs = dbSearchMs;
-            this.computeEvalueMs = computeEvalueMs;
-            this.totalMs = totalMs;
-        }
-    }
+    /** Per-task wall stats in milliseconds. {@code null} if the task didn't
+     *  complete (interrupted). */
+    public record TaskWallStats(int taskNum, long preprocessMs, long dbSearchMs,
+                                long computeEvalueMs, long totalMs) {}
 
     public static class RunMSGFPlus implements Runnable, ProgressReporter {
         private final Supplier<ScoredSpectraMap> specScannerSupplier;
         private final CompactSuffixArray sa;
         SearchParams params;
-        /** Task-local result buffer. Each task fills its own list inside
-         *  {@link #run()} and exposes it via {@link #getResults()} for the
-         *  main thread to drain after {@code awaitTermination}. Replaces the
-         *  prior shared-synchronizedList-with-N-writers pattern. */
         private final List<MSGFPlusMatch> resultList;
         private final int taskNum;
         private ProgressData progress;
         private ScoredSpectraMap specScanner;
         private DBScanner scanner;
-        private volatile TaskWallStats wallStats;
+        // Written once at end of run(); read by the main thread only after
+        // executor.awaitTermination, which establishes happens-before.
+        private TaskWallStats wallStats;
 
-        /** Drain the task-local result buffer. Safe to call from another
-         *  thread after the executor has terminated; awaitTermination
-         *  provides happens-before on the buffer's writes. */
         public List<MSGFPlusMatch> getResults() {
             return resultList;
         }
@@ -61,9 +44,6 @@ public class ConcurrentMSGFPlus {
             resultList.clear();
         }
 
-        /** Wall stats captured at the end of {@link #run()}, or {@code null}
-         *  if the task didn't complete (e.g. interrupted). Read from the main
-         *  thread after {@code awaitTermination}. */
         public TaskWallStats getWallStats() {
             return wallStats;
         }
@@ -84,7 +64,7 @@ public class ConcurrentMSGFPlus {
                 SearchParams params,
                 int taskNum
         ) {
-            this.resultList = new java.util.ArrayList<>();
+            this.resultList = new ArrayList<>();
             this.specScannerSupplier = specScannerSupplier;
             this.sa = sa;
             this.params = params;

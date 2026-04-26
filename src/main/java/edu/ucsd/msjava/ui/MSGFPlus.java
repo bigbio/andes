@@ -37,6 +37,10 @@ public class MSGFPlus {
     // Set this to true when debugging
     private static final boolean DISABLE_THREADING = false;
 
+    private static final String TASKS_PER_THREAD_PROPERTY = "msgfplus.numTasksPerThread";
+    private static final int DEFAULT_TASKS_PER_THREAD = 3;
+    private static final String USE_FORK_JOIN_PROPERTY = "msgfplus.useForkJoin";
+
     // Snapshot of the original CLI argv, captured in main() so that
     // RunManifestWriter can record it alongside the mzid without
     // threading argv through runMSGFPlus's many call sites.
@@ -358,8 +362,6 @@ public class MSGFPlus {
         }
         double precursorMassShiftPpm = currentIoFiles.getPrecursorMassShiftPpm();
 
-        // Drained from per-task buffers after awaitTermination; no shared
-        // mutation during the search itself.
         List<MSGFPlusMatch> resultList;
 
         int toIndexGlobal = specSize;
@@ -375,28 +377,14 @@ public class MSGFPlus {
 
         System.out.println("Spectrum 0-" + (toIndexGlobal - 1) + " (total: " + specSize + ")");
 
-        // T3: -Dmsgfplus.useForkJoin=true swaps the search executor to a
-        // ForkJoinPool. For our flat-task model the wall-clock difference vs
-        // ThreadPoolExecutor + numThreads*N tasks is small (the queue
-        // oversubscription already gets us most of the load-balance benefit).
-        // Kept as opt-in so it can be A/B-tested on uneven workloads. Default
-        // path is unchanged.
-        boolean useForkJoin = Boolean.getBoolean("msgfplus.useForkJoin");
+        boolean useForkJoin = Boolean.getBoolean(USE_FORK_JOIN_PROPERTY);
 
-        // Default thread pool (with progress reporting + exception capture).
         ThreadPoolExecutorWithExceptions executor =
                 useForkJoin ? null : ThreadPoolExecutorWithExceptions.newFixedThreadPool(numThreads);
         if (executor != null) executor.setTaskName("Search");
-        // FJP-mode pool, used when useForkJoin=true. Sized to numThreads to
-        // match the default executor's parallelism.
         ForkJoinPool fjp = useForkJoin ? new ForkJoinPool(numThreads) : null;
         List<Future<?>> fjpFutures = useForkJoin ? new ArrayList<>() : null;
 
-        // T2: numTasks-per-thread multiplier is configurable via
-        // -Dmsgfplus.numTasksPerThread=N. Higher values reduce tail
-        // imbalance when SpecKey distribution is uneven (heavier tasks
-        // get stolen earlier from the queue) at the cost of slightly more
-        // per-task heap. Default 3 keeps the prior behavior.
         int tasksPerThread = resolveTasksPerThread();
         int numTasks = Math.min(numThreads * tasksPerThread, Math.round((float) specSize / spectraPerTaskMinimum));
         if (numThreads <= 1) {
@@ -444,8 +432,6 @@ public class MSGFPlus {
             }
         }
 
-        // Retain task references so we can pull TaskWallStats after termination
-        // for the tail-imbalance summary (T1 instrumentation).
         List<ConcurrentMSGFPlus.RunMSGFPlus> submittedTasks = new ArrayList<>(numTasks);
 
         try {
@@ -455,8 +441,8 @@ public class MSGFPlus {
                 final boolean storeRankScorer = params.outputAdditionalFeatures();
                 final int taskNum = i + 1;
 
-                // Defer ScoredSpectraMap construction to the worker thread so all
-                // tasks' spectrum heaps aren't allocated up front when queued.
+                // Defer ScoredSpectraMap construction to the worker so the
+                // per-task spectrum heap isn't queued up front.
                 ConcurrentMSGFPlus.RunMSGFPlus msgfplusExecutor = new ConcurrentMSGFPlus.RunMSGFPlus(
                         () -> {
                             ScoredSpectraMap specScanner = new ScoredSpectraMap(
@@ -493,7 +479,6 @@ public class MSGFPlus {
             }
 
             if (useForkJoin) {
-                // FJP path: submit + drain Futures for exception propagation.
                 fjp.shutdown();
                 try {
                     fjp.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
@@ -506,16 +491,14 @@ public class MSGFPlus {
                     catch (java.util.concurrent.ExecutionException ex) {
                         Throwable cause = ex.getCause();
                         Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, cause.getMessage(), cause);
+                        fjp.shutdownNow();
                         return "Search failed: " + cause.getMessage();
                     }
                     catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
                 }
             } else {
-                // Output initial progress report.
                 executor.outputProgressReport();
-
                 executor.shutdown();
-
                 try {
                     executor.awaitTerminationWithExceptions(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
                 } catch (InterruptedException e) {
@@ -524,15 +507,12 @@ public class MSGFPlus {
                         Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, e.getMessage(), e);
                     }
                 }
-
-                // Output completed progress report.
                 executor.outputProgressReport();
             }
 
-            // Drain per-task result buffers into the global resultList. Done
-            // single-threaded after awaitTermination — the executor's termination
-            // provides happens-before on every task's writes (JLS §17.4.5), so
-            // no synchronization is needed on the per-task ArrayList.
+            // awaitTermination above establishes happens-before on every
+            // task's writes (JLS §17.4.5), so the per-task ArrayLists can
+            // be drained single-threaded with no synchronization.
             int totalResults = 0;
             for (ConcurrentMSGFPlus.RunMSGFPlus t : submittedTasks) {
                 totalResults += t.getResultCount();
@@ -542,8 +522,6 @@ public class MSGFPlus {
                 t.drainResultsTo(resultList);
             }
 
-            // T1: tail-imbalance summary across the just-completed tasks.
-            // Cheap diagnostic; only printed when there's more than one task.
             if (numTasks > 1) {
                 printTaskWallSummary(submittedTasks);
             }
@@ -552,7 +530,7 @@ public class MSGFPlus {
         } catch (OutOfMemoryError ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            if (executor != null) executor.shutdownNow(); else if (fjp != null) fjp.shutdownNow();
+            shutdownPoolNow(executor, fjp);
             int taskMult = numTasks / numThreads;
             return "Task terminated; results incomplete. Please run again with a greater amount of memory, using \"-Xmx4G\", for example.\n" +
                     "\tYou can also use less memory by increasing the number of tasks used for the search, at the cost of more time.\n" +
@@ -560,12 +538,12 @@ public class MSGFPlus {
         } catch (Exception ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            if (executor != null) executor.shutdownNow(); else if (fjp != null) fjp.shutdownNow();
+            shutdownPoolNow(executor, fjp);
             return "Task terminated; results incomplete. Please run again.";
         } catch (Throwable ex) {
             ex.printStackTrace();
             Logger.getLogger(MSGFPlus.class.getName()).log(Level.SEVERE, null, ex);
-            if (executor != null) executor.shutdownNow(); else if (fjp != null) fjp.shutdownNow();
+            shutdownPoolNow(executor, fjp);
             return "Task terminated; results incomplete. Please run again.";
         }
 
@@ -611,10 +589,6 @@ public class MSGFPlus {
         return null;
     }
 
-    /** Sysprop overriding the numTasks-per-thread multiplier (T2). */
-    static final String TASKS_PER_THREAD_PROPERTY = "msgfplus.numTasksPerThread";
-    static final int DEFAULT_TASKS_PER_THREAD = 3;
-
     private static int resolveTasksPerThread() {
         String v = System.getProperty(TASKS_PER_THREAD_PROPERTY);
         if (v != null) {
@@ -626,18 +600,21 @@ public class MSGFPlus {
         return DEFAULT_TASKS_PER_THREAD;
     }
 
+    private static void shutdownPoolNow(ThreadPoolExecutorWithExceptions executor, ForkJoinPool fjp) {
+        if (executor != null) executor.shutdownNow();
+        else if (fjp != null) fjp.shutdownNow();
+    }
+
     /**
-     * Print a one-line tail-imbalance summary across all completed tasks.
-     * Reports min / median / p95 / max wall in seconds and the absolute tail
-     * gap (max - median). A high gap indicates uneven SpecKey distribution
-     * across tasks — input for deciding whether finer task granularity (T2)
-     * or work-stealing (T3) would help.
+     * One-line wall-time summary across completed tasks. tail_gap (max -
+     * median) is the load-balance signal; high values point at uneven
+     * SpecKey distribution and motivate raising tasksPerThread.
      */
     private static void printTaskWallSummary(List<ConcurrentMSGFPlus.RunMSGFPlus> tasks) {
         List<Long> walls = new ArrayList<>(tasks.size());
         for (ConcurrentMSGFPlus.RunMSGFPlus t : tasks) {
             ConcurrentMSGFPlus.TaskWallStats s = t.getWallStats();
-            if (s != null) walls.add(s.totalMs);
+            if (s != null) walls.add(s.totalMs());
         }
         if (walls.isEmpty()) return;
         Collections.sort(walls);

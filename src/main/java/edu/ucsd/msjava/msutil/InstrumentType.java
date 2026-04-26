@@ -1,6 +1,5 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.params.ParamObject;
 
 import java.util.LinkedHashMap;
 

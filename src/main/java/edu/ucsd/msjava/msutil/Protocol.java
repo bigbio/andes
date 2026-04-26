@@ -1,7 +1,5 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.params.ParamObject;
-import edu.ucsd.msjava.params.UserParam;
 
 import java.io.File;
 import java.nio.file.Paths;

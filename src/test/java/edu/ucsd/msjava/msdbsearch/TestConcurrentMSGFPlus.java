@@ -3,6 +3,8 @@ package edu.ucsd.msjava.msdbsearch;
 import org.junit.Assert;
 import org.junit.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class TestConcurrentMSGFPlus {
@@ -32,5 +34,24 @@ public class TestConcurrentMSGFPlus {
         }
 
         Assert.assertEquals(1, buildCount.get());
+    }
+
+    @Test
+    public void drainsTaskLocalResultsIntoCallerBuffer() {
+        ConcurrentMSGFPlus.RunMSGFPlus task = new ConcurrentMSGFPlus.RunMSGFPlus(
+                () -> null,
+                null,
+                null,
+                1
+        );
+
+        task.getResults().add(null);
+        task.getResults().add(null);
+
+        List<MSGFPlusMatch> merged = new ArrayList<>();
+        task.drainResultsTo(merged);
+
+        Assert.assertEquals(2, merged.size());
+        Assert.assertTrue("Drain should clear the task-local buffer", task.getResults().isEmpty());
     }
 }

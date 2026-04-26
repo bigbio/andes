@@ -360,7 +360,7 @@ public class MSGFPlus {
 
         // Drained from per-task buffers after awaitTermination; no shared
         // mutation during the search itself.
-        List<MSGFPlusMatch> resultList = new ArrayList<>();
+        List<MSGFPlusMatch> resultList;
 
         int toIndexGlobal = specSize;
         while (toIndexGlobal < specSize) {
@@ -533,8 +533,13 @@ public class MSGFPlus {
             // single-threaded after awaitTermination — the executor's termination
             // provides happens-before on every task's writes (JLS §17.4.5), so
             // no synchronization is needed on the per-task ArrayList.
+            int totalResults = 0;
             for (ConcurrentMSGFPlus.RunMSGFPlus t : submittedTasks) {
-                resultList.addAll(t.getResults());
+                totalResults += t.getResultCount();
+            }
+            resultList = new ArrayList<>(totalResults);
+            for (ConcurrentMSGFPlus.RunMSGFPlus t : submittedTasks) {
+                t.drainResultsTo(resultList);
             }
 
             // T1: tail-imbalance summary across the just-completed tasks.
@@ -542,6 +547,7 @@ public class MSGFPlus {
             if (numTasks > 1) {
                 printTaskWallSummary(submittedTasks);
             }
+            submittedTasks.clear();
 
         } catch (OutOfMemoryError ex) {
             ex.printStackTrace();

@@ -10,6 +10,8 @@ import java.util.function.Supplier;
 import org.apache.commons.io.output.NullOutputStream;
 
 public class ConcurrentMSGFPlus {
+    private static final PrintStream NULL_PRINT_STREAM = new PrintStream(new NullOutputStream());
+
     /** Per-task wall stats captured during {@link RunMSGFPlus#run()}. Used by
      *  {@code MSGFPlus.runMSGFPlus} to report a tail-imbalance summary across
      *  all tasks (T1 instrumentation). All units are milliseconds. */
@@ -48,6 +50,15 @@ public class ConcurrentMSGFPlus {
          *  provides happens-before on the buffer's writes. */
         public List<MSGFPlusMatch> getResults() {
             return resultList;
+        }
+
+        public int getResultCount() {
+            return resultList.size();
+        }
+
+        public void drainResultsTo(List<MSGFPlusMatch> destination) {
+            destination.addAll(resultList);
+            resultList.clear();
         }
 
         /** Wall stats captured at the end of {@link #run()}, or {@code null}
@@ -110,7 +121,7 @@ public class ConcurrentMSGFPlus {
             if (params.getVerbose()) {
                 output = System.out;
             } else {
-                output = new PrintStream(new NullOutputStream());
+                output = NULL_PRINT_STREAM;
             }
 
             progress.stepRange(5.0);
@@ -204,6 +215,8 @@ public class ConcurrentMSGFPlus {
 //			gen.addSpectrumIdentificationResults(scanner.getSpecIndexDBMatchMap());
             long totalMs = (System.nanoTime() - taskStartNs) / 1_000_000L;
             wallStats = new TaskWallStats(taskNum, preprocessMs, dbSearchMs, computeEvalueMs, totalMs);
+            scanner = null;
+            specScanner = null;
             output.println(threadName + ": Task " + taskNum + " completed.");
         }
     }

@@ -37,7 +37,8 @@ public class MSGFPlus {
     // Set this to true when debugging
     private static final boolean DISABLE_THREADING = false;
 
-    private static final String TASKS_PER_THREAD_PROPERTY = "msgfplus.numTasksPerThread";
+    /** Default numTasks-per-thread multiplier when {@code -tasks} is not
+     *  passed. Users can override at the CLI via {@code -tasks -N}. */
     private static final int DEFAULT_TASKS_PER_THREAD = 3;
     private static final String USE_FORK_JOIN_PROPERTY = "msgfplus.useForkJoin";
 
@@ -385,8 +386,7 @@ public class MSGFPlus {
         ForkJoinPool fjp = useForkJoin ? new ForkJoinPool(numThreads) : null;
         List<Future<?>> fjpFutures = useForkJoin ? new ArrayList<>() : null;
 
-        int tasksPerThread = resolveTasksPerThread();
-        int numTasks = Math.min(numThreads * tasksPerThread, Math.round((float) specSize / spectraPerTaskMinimum));
+        int numTasks = Math.min(numThreads * DEFAULT_TASKS_PER_THREAD, Math.round((float) specSize / spectraPerTaskMinimum));
         if (numThreads <= 1) {
             numTasks = 1;
         }
@@ -589,17 +589,6 @@ public class MSGFPlus {
         return null;
     }
 
-    private static int resolveTasksPerThread() {
-        String v = System.getProperty(TASKS_PER_THREAD_PROPERTY);
-        if (v != null) {
-            try {
-                int n = Integer.parseInt(v.trim());
-                if (n >= 1) return n;
-            } catch (NumberFormatException ignored) { /* fall through */ }
-        }
-        return DEFAULT_TASKS_PER_THREAD;
-    }
-
     private static void shutdownPoolNow(ThreadPoolExecutorWithExceptions executor, ForkJoinPool fjp) {
         if (executor != null) executor.shutdownNow();
         else if (fjp != null) fjp.shutdownNow();
@@ -608,7 +597,7 @@ public class MSGFPlus {
     /**
      * One-line wall-time summary across completed tasks. tail_gap (max -
      * median) is the load-balance signal; high values point at uneven
-     * SpecKey distribution and motivate raising tasksPerThread.
+     * SpecKey distribution and motivate raising the {@code -tasks -N} multiplier.
      */
     private static void printTaskWallSummary(List<ConcurrentMSGFPlus.RunMSGFPlus> tasks) {
         List<Long> walls = new ArrayList<>(tasks.size());

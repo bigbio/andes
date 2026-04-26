@@ -320,7 +320,7 @@ public class MSGFDB {
             for (int i = 0; i < numThreads; i++) {
                 ScoredSpectraMap specScanner = new ScoredSpectraMap(
                         specAcc,
-                        Collections.synchronizedList(specKeyList.subList(startIndex[i], endIndex[i])),
+                        specKeyList.subList(startIndex[i], endIndex[i]),
                         leftPrecursorMassTolerance,
                         rightPrecursorMassTolerance,
                         numAllowedC13,

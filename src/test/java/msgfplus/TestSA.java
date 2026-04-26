@@ -5,7 +5,7 @@ import java.net.URISyntaxException;
 
 import edu.ucsd.msjava.msdbsearch.SuffixArrayForMSGFDB;
 import edu.ucsd.msjava.msutil.Composition;
-import edu.ucsd.msjava.params.ParamManager;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
 import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Ignore;
 import org.junit.Test;
@@ -33,7 +33,7 @@ public class TestSA {
     
     @Test
     public void getNumCandidatePeptides() throws URISyntaxException {
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         File dbFile = new File(TestSA.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI());
         SuffixArraySequence sequence = new SuffixArraySequence(dbFile.getPath());
         SuffixArray sa = new SuffixArray(sequence);
@@ -85,8 +85,8 @@ public class TestSA {
         System.out.println("NumUnique10: " + length10);
     }
 
-    private ParamManager getParamManager() {
-        return new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "java -Xmx3500M -jar MSGFPlus.jar");
+    private MSGFPlusOptions getParamManager() {
+        return new MSGFPlusOptions();
     }
 
 }

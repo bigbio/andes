@@ -1,10 +1,18 @@
 package edu.ucsd.msjava.cli;
 
-import edu.ucsd.msjava.params.ParamManager.ParamNameEnum;
+import edu.ucsd.msjava.msutil.ActivationMethod;
+import edu.ucsd.msjava.msutil.Enzyme;
+import edu.ucsd.msjava.msutil.InstrumentType;
+import edu.ucsd.msjava.msutil.Protocol;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Typed command-line options for MS-GF+. Replaces the imperative
@@ -209,4 +217,251 @@ public final class MSGFPlusOptions {
     @Option(names = "-minDeNovoScore", paramLabel = "N", hidden = true,
             description = "Minimum de novo score")
     public Integer minDeNovoScore;
+
+    // ---------- config-file-only entries (populated by applyConfigFile) ----------
+
+    /** {@code DynamicMod=...} entries from the config file (or {@code -mod} file). */
+    public final List<String> dynamicMods = new ArrayList<>();
+    /** {@code StaticMod=...} entries from the config file (or {@code -mod} file). */
+    public final List<String> staticMods = new ArrayList<>();
+    /** {@code CustomAA=...} entries from the config file (or {@code -mod} file). */
+    public final List<String> customAAs = new ArrayList<>();
+
+    /** Set when {@link #applyConfigFile(File)} encounters {@code MaxNumModsPerPeptide=}
+     *  via the legacy alias path; allows the config-file value to feed the
+     *  {@link #effectiveMaxNumMods()} default. */
+    private Integer configMaxNumMods;
+
+    // ---------- effective-value resolvers (CLI value, else config-file value, else default) ----------
+
+    public int effectiveMinPeptideLength()        { return minPeptideLength        != null ? minPeptideLength        : 6; }
+    public int effectiveMaxPeptideLength()        { return maxPeptideLength        != null ? maxPeptideLength        : 40; }
+    public int effectiveMinCharge()               { return minCharge               != null ? minCharge               : 2; }
+    public int effectiveMaxCharge()               { return maxCharge               != null ? maxCharge               : 3; }
+    public int effectiveNumMatchesPerSpec()       { return numMatchesPerSpec       != null ? numMatchesPerSpec       : 1; }
+    public int effectiveNumThreads()              { return numThreads              != null ? numThreads              : Runtime.getRuntime().availableProcessors(); }
+    public int effectiveNumTasks()                { return numTasks                != null ? numTasks                : 0; }
+    public int effectiveMinSpectraPerThread()     { return minSpectraPerThread     != null ? minSpectraPerThread     : 250; }
+    public int effectiveVerbose()                 { return verbose                 != null ? verbose                 : 0; }
+    public int effectiveTdaStrategy()             { return tdaStrategy             != null ? tdaStrategy             : 0; }
+    public int effectiveAddFeatures()             { return addFeatures             != null ? addFeatures             : 0; }
+    public int effectiveMaxMissedCleavages()      { return maxMissedCleavages      != null ? maxMissedCleavages      : -1; }
+    public int effectiveMaxNumMods()              { return maxNumMods              != null ? maxNumMods              : (configMaxNumMods != null ? configMaxNumMods : 3); }
+    public int effectiveAllowDenseCentroidedPeaks() { return allowDenseCentroidedPeaks != null ? allowDenseCentroidedPeaks : 0; }
+    public int effectiveNumTolerableTermini()     { return numTolerableTermini     != null ? numTolerableTermini     : 2; }
+    public int effectiveEdgeScore()               { return edgeScore               != null ? edgeScore               : 0; }
+    public int effectiveIgnoreMetCleavage()       { return ignoreMetCleavage       != null ? ignoreMetCleavage       : 0; }
+    public int effectiveMinNumPeaks()             { return minNumPeaks             != null ? minNumPeaks             : edu.ucsd.msjava.sequences.Constants.MIN_NUM_PEAKS_PER_SPECTRUM; }
+    public int effectiveNumIsoforms()             { return numIsoforms             != null ? numIsoforms             : edu.ucsd.msjava.sequences.Constants.NUM_VARIANTS_PER_PEPTIDE; }
+    public int effectiveMinDeNovoScore()          { return minDeNovoScore          != null ? minDeNovoScore          : edu.ucsd.msjava.sequences.Constants.MIN_DE_NOVO_SCORE; }
+    public int effectiveToleranceUnits()          { return precursorToleranceUnits != null ? precursorToleranceUnits : 2; }
+    public double effectiveChargeCarrierMass()    { return chargeCarrierMass       != null ? chargeCarrierMass       : 1.00727649; }
+
+    public String effectiveDecoyPrefix()          { return decoyPrefix             != null ? decoyPrefix             : "XXX"; }
+    public String effectivePrecursorCalRaw()      { return precursorCalMode        != null ? precursorCalMode        : "auto"; }
+
+    /** 0 = pin (default), 1 = tsv. */
+    public int effectiveOutputFormat() {
+        if (outputFormat == null) return 0;
+        String n = outputFormat.trim().toLowerCase();
+        if (n.equals("tsv") || n.equals("1")) return 1;
+        return 0;
+    }
+
+    public PrecursorTolerance effectivePrecursorTolerance() {
+        return precursorTolerance != null ? precursorTolerance : PrecursorTolerance.parse("20ppm");
+    }
+
+    public IntRange effectiveIsotopeErrorRange() {
+        return isotopeErrorRange != null ? isotopeErrorRange : new IntRange(0, 1);
+    }
+
+    public IntRange effectiveMSLevel() {
+        return msLevel != null ? msLevel : new IntRange(2, 2);
+    }
+
+    public IntRange effectiveSpecIndexRange() {
+        return specIndexRange != null ? specIndexRange : new IntRange(1, Integer.MAX_VALUE - 1);
+    }
+
+    /** Resolves {@code -m} index to {@link ActivationMethod}. MSGFPlus exposes
+     *  0=ASWRITTEN, 1=CID, 2=ETD, 3=HCD (FUSION is excluded by
+     *  {@code addFragMethodParam(..., doNotAddMergeMode=true)}). */
+    public ActivationMethod effectiveActivationMethod() {
+        int idx = fragMethodId != null ? fragMethodId : 0;
+        switch (idx) {
+            case 0: return ActivationMethod.ASWRITTEN;
+            case 1: return ActivationMethod.CID;
+            case 2: return ActivationMethod.ETD;
+            case 3: return ActivationMethod.HCD;
+            default: throw new IllegalArgumentException("invalid -m index: " + idx);
+        }
+    }
+
+    public InstrumentType effectiveInstrumentType() {
+        InstrumentType[] all = InstrumentType.getAllRegisteredInstrumentTypes();
+        int idx = instrumentTypeId != null ? instrumentTypeId : 0;
+        if (idx < 0 || idx >= all.length) throw new IllegalArgumentException("invalid -inst index: " + idx);
+        return all[idx];
+    }
+
+    public Enzyme effectiveEnzyme() {
+        Enzyme[] all = Enzyme.getAllRegisteredEnzymes();
+        // TRYPSIN is registered at index 1 (UnspecificCleavage at 0). See Enzyme static init.
+        int idx = enzymeId != null ? enzymeId : 1;
+        if (idx < 0 || idx >= all.length) throw new IllegalArgumentException("invalid -e index: " + idx);
+        return all[idx];
+    }
+
+    public Protocol effectiveProtocol() {
+        Protocol[] all = Protocol.getAllRegisteredProtocols();
+        int idx = protocolId != null ? protocolId : 0;
+        if (idx < 0 || idx >= all.length) throw new IllegalArgumentException("invalid -protocol index: " + idx);
+        return all[idx];
+    }
+
+    // ---------- config-file overlay ----------
+
+    /**
+     * Read {@code -conf} config file and populate any fields the CLI did not
+     * already set. Recognizes legacy aliases (IsotopeError → IsotopeErrorRange,
+     * etc.) and collects repeated {@code DynamicMod=}, {@code StaticMod=},
+     * {@code CustomAA=} entries.
+     *
+     * @return null on success, error string otherwise.
+     */
+    public String applyConfigFile(File file) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            String line;
+            int lineNum = 0;
+            while ((line = reader.readLine()) != null) {
+                lineNum++;
+                String trimmed = stripComment(line);
+                if (trimmed.isEmpty()) continue;
+                int eq = trimmed.indexOf('=');
+                if (eq <= 0) continue;
+                String rawKey = trimmed.substring(0, eq).trim();
+                String value = trimmed.substring(eq + 1).trim();
+                String key = canonicalConfigKey(rawKey);
+                String err = applyConfigEntry(key, value, file.getName());
+                if (err != null) {
+                    return "Error parsing line " + lineNum + " of " + file.getName() + ": " + err;
+                }
+            }
+        } catch (IOException e) {
+            return "Error reading config file " + file.getPath() + ": " + e.getMessage();
+        }
+        return null;
+    }
+
+    private String applyConfigEntry(String key, String value, String fileName) {
+        // Repeated entries: collect into lists. "none" is treated as no entry.
+        if (key.equalsIgnoreCase("DynamicMod")) {
+            if (!value.equalsIgnoreCase("none")) dynamicMods.add(value);
+            return null;
+        }
+        if (key.equalsIgnoreCase("StaticMod")) {
+            if (!value.equalsIgnoreCase("none")) staticMods.add(value);
+            return null;
+        }
+        if (key.equalsIgnoreCase("CustomAA")) {
+            if (!value.equalsIgnoreCase("none")) customAAs.add(value);
+            return null;
+        }
+        // Single-valued entries: only fill in if CLI did not set the field.
+        try {
+            switch (key) {
+                case "SpectrumFile":           if (spectrumFile == null)             spectrumFile = new File(value); return null;
+                case "DatabaseFile":           if (databaseFile == null)             databaseFile = new File(value); return null;
+                case "OutputFile":             if (outputFile == null)               outputFile = new File(value); return null;
+                case "ModificationFileName":
+                case "ModificationFile":       if (modificationFile == null)         modificationFile = new File(value); return null;
+                case "DBIndexDir":             if (dbIndexDir == null)               dbIndexDir = new File(value); return null;
+                case "DecoyPrefix":            if (decoyPrefix == null)              decoyPrefix = value; return null;
+                case "PrecursorMassTolerance": if (precursorTolerance == null)       precursorTolerance = PrecursorTolerance.parse(value); return null;
+                case "PrecursorMassToleranceUnits":
+                                               if (precursorToleranceUnits == null)  precursorToleranceUnits = Integer.parseInt(value); return null;
+                case "IsotopeErrorRange":      if (isotopeErrorRange == null)        isotopeErrorRange = IntRange.parse(value); return null;
+                case "FragmentationMethodID":  if (fragMethodId == null)             fragMethodId = Integer.parseInt(value); return null;
+                case "InstrumentID":           if (instrumentTypeId == null)         instrumentTypeId = Integer.parseInt(value); return null;
+                case "EnzymeID":               if (enzymeId == null)                 enzymeId = Integer.parseInt(value); return null;
+                case "ProtocolID":             if (protocolId == null)               protocolId = Integer.parseInt(value); return null;
+                case "NTT":                    if (numTolerableTermini == null)      numTolerableTermini = Integer.parseInt(value); return null;
+                case "MinPepLength":           if (minPeptideLength == null)         minPeptideLength = Integer.parseInt(value); return null;
+                case "MaxPepLength":           if (maxPeptideLength == null)         maxPeptideLength = Integer.parseInt(value); return null;
+                case "MinCharge":              if (minCharge == null)                minCharge = Integer.parseInt(value); return null;
+                case "MaxCharge":              if (maxCharge == null)                maxCharge = Integer.parseInt(value); return null;
+                case "NumMatchesPerSpec":      if (numMatchesPerSpec == null)        numMatchesPerSpec = Integer.parseInt(value); return null;
+                case "NumThreads":             if (numThreads == null)               { if (!value.equalsIgnoreCase("all")) numThreads = Integer.parseInt(value); } return null;
+                case "NumTasks":               if (numTasks == null)                 numTasks = Integer.parseInt(value); return null;
+                case "MinSpectraPerThread":    if (minSpectraPerThread == null)      minSpectraPerThread = Integer.parseInt(value); return null;
+                case "Verbose":                if (verbose == null)                  verbose = Integer.parseInt(value); return null;
+                case "TDA":                    if (tdaStrategy == null)              tdaStrategy = Integer.parseInt(value); return null;
+                case "AddFeatures":            if (addFeatures == null)              addFeatures = Integer.parseInt(value); return null;
+                case "OutputFormat":           if (outputFormat == null)             outputFormat = value; return null;
+                case "PrecursorCal":           if (precursorCalMode == null)         precursorCalMode = value; return null;
+                case "ChargeCarrierMass":      if (chargeCarrierMass == null)        chargeCarrierMass = Double.parseDouble(value); return null;
+                case "MaxMissedCleavages":     if (maxMissedCleavages == null)       maxMissedCleavages = Integer.parseInt(value); return null;
+                case "NumMods":                if (maxNumMods == null)               configMaxNumMods = Integer.parseInt(value); return null;
+                case "AllowDenseCentroidedPeaks":
+                                               if (allowDenseCentroidedPeaks == null) allowDenseCentroidedPeaks = Integer.parseInt(value); return null;
+                case "MSLevel":                if (msLevel == null)                  msLevel = IntRange.parse(value); return null;
+                case "SpecIndex":              if (specIndexRange == null)           specIndexRange = IntRange.parse(value); return null;
+                case "EdgeScore":              if (edgeScore == null)                edgeScore = Integer.parseInt(value); return null;
+                case "MinNumPeaksPerSpectrum": if (minNumPeaks == null)              minNumPeaks = Integer.parseInt(value); return null;
+                case "NumIsoforms":            if (numIsoforms == null)              numIsoforms = Integer.parseInt(value); return null;
+                case "IgnoreMetCleavage":      if (ignoreMetCleavage == null)        ignoreMetCleavage = Integer.parseInt(value); return null;
+                case "MinDeNovoScore":         if (minDeNovoScore == null)           minDeNovoScore = Integer.parseInt(value); return null;
+                default:
+                    if (!key.toLowerCase().startsWith("enzymedef")) {
+                        System.out.println("Warning, unrecognized parameter '" + key + "=" + value + "' in config file " + fileName);
+                    }
+                    return null;
+            }
+        } catch (IllegalArgumentException e) {
+            return "invalid value for '" + key + "': " + value + " (" + e.getMessage() + ")";
+        }
+    }
+
+    private static String stripComment(String line) {
+        int hash = line.indexOf('#');
+        return (hash >= 0 ? line.substring(0, hash) : line).trim();
+    }
+
+    /** Normalize legacy / alternate config-file keys to canonical form.
+     *  Mirrors the rewrites previously in {@code ParamNameEnum.getParamNameFromLine}. */
+    private static String canonicalConfigKey(String key) {
+        if (key.equalsIgnoreCase("IsotopeError"))          return "IsotopeErrorRange";
+        if (key.equalsIgnoreCase("TargetDecoyAnalysis"))   return "TDA";
+        if (key.equalsIgnoreCase("FragmentationMethod"))   return "FragmentationMethodID";
+        if (key.equalsIgnoreCase("Instrument"))            return "InstrumentID";
+        if (key.equalsIgnoreCase("Enzyme"))                return "EnzymeID";
+        if (key.equalsIgnoreCase("Protocol"))              return "ProtocolID";
+        if (key.equalsIgnoreCase("NumTolerableTermini"))   return "NTT";
+        if (key.equalsIgnoreCase("MinNumPeaks"))           return "MinNumPeaksPerSpectrum";
+        if (key.equalsIgnoreCase("MaxNumMods"))            return "NumMods";
+        if (key.equalsIgnoreCase("MaxNumModsPerPeptide"))  return "NumMods";
+        if (key.equalsIgnoreCase("minLength"))             return "MinPepLength";
+        if (key.equalsIgnoreCase("MinPeptideLength"))      return "MinPepLength";
+        if (key.equalsIgnoreCase("maxLength"))             return "MaxPepLength";
+        if (key.equalsIgnoreCase("MaxPeptideLength"))      return "MaxPepLength";
+        if (key.equalsIgnoreCase("PMTolerance"))           return "PrecursorMassTolerance";
+        if (key.equalsIgnoreCase("ParentMassTolerance"))   return "PrecursorMassTolerance";
+        return key;
+    }
+
+    /** Validates required-input invariants that the CLI alone can't enforce
+     *  (since {@code -s}/{@code -d} may come from {@code -conf}). */
+    public String validateRequired() {
+        if (spectrumFile == null) return "Spectrum file is not defined; use -s at the command line or SpectrumFile in a config file";
+        if (databaseFile == null) return "Database file is not defined; use -d at the command line or DatabaseFile in a config file";
+        return null;
+    }
+
+    /** Mutator used by {@code AminoAcidSet} when the parsed mod metadata
+     *  changes the effective max-num-mods (the AA set is authoritative once
+     *  loaded). Mirrors the legacy {@code ParamManager.setMaxNumMods}. */
+    public void setMaxNumModsFromMetadata(int n) {
+        this.maxNumMods = n;
+    }
 }

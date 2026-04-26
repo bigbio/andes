@@ -1,12 +1,11 @@
 package msgfplus;
 
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msdbsearch.SearchParams.PrecursorCalMode;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.DBSearchIOFiles;
 import edu.ucsd.msjava.msutil.SpecFileFormat;
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -31,58 +30,47 @@ import java.net.URISyntaxException;
  */
 public class TestPrecursorCalScaffolding {
 
-    private ParamManager buildParamManager() throws URISyntaxException {
-        ParamManager manager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE,
-                "java -Xmx3500M -jar MSGFPlus.jar");
-        manager.addMSGFPlusParams();
-
-        URI paramUri = SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI();
-        manager.getParameter("conf").parse(new File(paramUri).getAbsolutePath());
-
-        URI specUri = SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI();
-        manager.getParameter("s").parse(new File(specUri).getAbsolutePath());
-
-        URI dbUri = SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI();
-        manager.getParameter("d").parse(new File(dbUri).getAbsolutePath());
-        return manager;
+    private MSGFPlusOptions buildOpts() throws URISyntaxException {
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        opts.configFile   = new File(SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI());
+        opts.spectrumFile = new File(SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI());
+        opts.databaseFile = new File(SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI());
+        return opts;
     }
 
     @Test
     public void precursorCalDefaultIsAuto() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
+        MSGFPlusOptions opts = buildOpts();
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals("Default -precursorCal should be AUTO",
                 PrecursorCalMode.AUTO, params.getPrecursorCalMode());
     }
 
     @Test
     public void precursorCalOnIsParsed() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("precursorCal").parse("on"));
-
+        MSGFPlusOptions opts = buildOpts();
+        opts.precursorCalMode = "on";
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals(PrecursorCalMode.ON, params.getPrecursorCalMode());
     }
 
     @Test
     public void precursorCalOffIsParsed() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("precursorCal").parse("off"));
-
+        MSGFPlusOptions opts = buildOpts();
+        opts.precursorCalMode = "off";
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals(PrecursorCalMode.OFF, params.getPrecursorCalMode());
     }
 
     @Test
     public void precursorCalIsCaseInsensitive() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("precursorCal").parse("OFF"));
-
+        MSGFPlusOptions opts = buildOpts();
+        opts.precursorCalMode = "OFF";
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals(PrecursorCalMode.OFF, params.getPrecursorCalMode());
     }
 

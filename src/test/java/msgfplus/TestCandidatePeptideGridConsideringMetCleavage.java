@@ -10,7 +10,7 @@ import java.nio.file.Paths;
 
 import static org.junit.Assert.*;
 
-import edu.ucsd.msjava.params.ParamManager;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
 import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Test;
 
@@ -28,7 +28,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_No_Modified_Residues() {
         System.out.println("Test Unmodified Residues");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.TRYPSIN, 4, 8, 1);
@@ -56,7 +56,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Modified_Residues() {
         System.out.println("Test Modified Residues");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.TRYPSIN, 4, 8, 1);
@@ -85,7 +85,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Modified_and_Unmodified_Residues() {
         System.out.println("Test Mixture of Modified and Unmodified Residues");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.TRYPSIN, 4, 8, 1);
@@ -113,7 +113,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Size_Reset() {
         System.out.println("Test Reusing the Grid for a New Peptide");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.TRYPSIN, 3, 8, 1);
@@ -135,7 +135,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Missed_Cleavages_CTerm_Enzyme() {
         System.out.println("Test Missed Cleavages - C-term Enzyme");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.TRYPSIN, 4, 8, 1);
@@ -178,7 +178,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Missed_Cleavages_NTerm_Enzyme() {
         System.out.println("Test Missed Cleavages - N-term Enzyme");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.AspN, 5, 8, 1);
@@ -223,7 +223,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Missed_Cleavages_Unspecific_Enzyme() {
         System.out.println("Test Missed Cleavages - Unspecific Enzyme");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.UnspecificCleavage, 5, 8, 1);
@@ -252,7 +252,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Missed_Cleavages_NoCleavage_Enzyme() {
         System.out.println("Test Missed Cleavages - NoCleavage Enzyme");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.NoCleavage, 5, 8, 1);
@@ -281,7 +281,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Missed_Cleavages_Reuse() {
         System.out.println("Test Missed Cleavages When Reusing the Grid");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
         CandidatePeptideGridConsideringMetCleavage candidatePepGrid = new CandidatePeptideGridConsideringMetCleavage(aminoAcidSet, Enzyme.TRYPSIN, 3, 8, 1);
@@ -309,7 +309,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_Missed_Cleavages_No_Limit() {
         System.out.println("Test Missed Cleavages - No Limit on Maximum");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
 
@@ -335,7 +335,7 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
     @Test
     public void testCandidatePeptideGridConsideringMetCleavage_No_Missed_Cleavages_Allowed() {
         System.out.println("Test Missed Cleavages - No Limit on Maximum");
-        ParamManager paramManager = getParamManager();
+        MSGFPlusOptions paramManager = getParamManager();
         String modFilePath = getTestCandidatePeptideGridPath();
         AminoAcidSet aminoAcidSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath, paramManager);
 
@@ -357,8 +357,8 @@ public class TestCandidatePeptideGridConsideringMetCleavage {
         assertEquals("grid should always return that it is over the max number of allowed missed cleavages", true, result);
     }
 
-    private ParamManager getParamManager() {
-        return new ParamManager("MS-GF+ Test", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "n/a");
+    private MSGFPlusOptions getParamManager() {
+        return new MSGFPlusOptions();
     }
 
     private String getTestCandidatePeptideGridPath() {

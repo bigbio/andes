@@ -886,9 +886,9 @@ public class Peptide extends Sequence<AminoAcid> implements Comparable<Peptide> 
   }
      */
     public static void main(String[] a) {
-        ParamManager paramManager = new ParamManager("MS-GF+ Peptide", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "n/a");
+        edu.ucsd.msjava.cli.MSGFPlusOptions opts = new edu.ucsd.msjava.cli.MSGFPlusOptions();
         Path modFilePath = Paths.get(System.getProperty("user.home") + "Research", "ToolDistribution", "mods.txt");
-        AminoAcidSet aaSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath.toString(), paramManager);
+        AminoAcidSet aaSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath.toString(), opts);
         Peptide p = new Peptide("+42.011+15.995MDNKTPVTLAK", aaSet);
         System.out.println(p);
         for (AminoAcid aa : p)

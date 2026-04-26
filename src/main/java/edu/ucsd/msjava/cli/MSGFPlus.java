@@ -11,7 +11,6 @@ import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.output.DirectPinWriter;
 import edu.ucsd.msjava.output.DirectTSVWriter;
 import edu.ucsd.msjava.mzml.StaxMzMLParser;
-import edu.ucsd.msjava.params.ParamManager;
 import edu.ucsd.msjava.sequences.Constants;
 import picocli.CommandLine;
 import picocli.CommandLine.ParameterException;
@@ -53,36 +52,44 @@ public class MSGFPlus {
         long startTime = System.currentTimeMillis();
         argvSnapshot = argv == null ? new String[0] : argv.clone();
 
-        ParamManager paramManager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "java -Xmx3500M -jar MSGFPlus.jar");
-        paramManager.addMSGFPlusParams();
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        CommandLine cl = new CommandLine(opts);
 
         if (argv.length == 0) {
-            paramManager.printUsageInfo();
+            printToolInfo();
+            cl.usage(System.out);
             return;
         }
 
         StaxMzMLParser.turnOffLogs();
 
-        // Parse parameters. The new picocli-based path runs by default;
-        // the legacy ParamManager.parseParams handles -conf (config-file
-        // input) until Phase 2 ports it. See parameter-modernization.md.
-        String errMessage = parseArgs(argv, paramManager);
-        if (errMessage != null) {
-            MSGFLogger.error(errMessage);
+        try {
+            cl.parseArgs(argv);
+        } catch (ParameterException e) {
+            MSGFLogger.error(e.getMessage());
             System.out.println();
-            paramManager.printUsageInfo();
+            cl.usage(System.out);
             System.exit(-1);
         }
 
-        // Propagate verbose flag to the shared logger before any downstream code logs.
-        MSGFLogger.setVerbose(paramManager.getVerboseFlag() == 1);
+        if (cl.isUsageHelpRequested()) {
+            cl.usage(System.out);
+            return;
+        }
+        if (cl.isVersionHelpRequested()) {
+            System.out.println(VERSION);
+            return;
+        }
 
-        // Running MS-GF+
-        paramManager.printToolInfo();
-        paramManager.printJVMInfo();
+        // Propagate verbose flag to the shared logger before any downstream code logs.
+        MSGFLogger.setVerbose(opts.effectiveVerbose() == 1);
+
+        printToolInfo();
+        printJVMInfo();
+
         String errorMessage = null;
         try {
-            errorMessage = runMSGFPlus(paramManager);
+            errorMessage = runMSGFPlus(opts);
         } catch (Exception e) {
             e.printStackTrace();
             System.exit(-1);
@@ -96,27 +103,18 @@ public class MSGFPlus {
             MSGFLogger.info("MS-GF+ complete (total elapsed time: %.2f sec)", (System.currentTimeMillis() - startTime) / (float) 1000);
     }
 
-    /**
-     * Route MSGFPlus argv through the typed picocli-based
-     * {@link MSGFPlusOptions} class + adapter. Config-file values are
-     * applied later by {@link edu.ucsd.msjava.msdbsearch.SearchParams#parse}
-     * for any parameter the CLI did not assign, so {@code -conf} works
-     * uniformly through this single path. See
-     * {@code .claude/plans/parameter-modernization.md}.
-     */
-    private static String parseArgs(String[] argv, ParamManager paramManager) {
-        MSGFPlusOptions opts = new MSGFPlusOptions();
-        try {
-            new CommandLine(opts).parseArgs(argv);
-        } catch (ParameterException e) {
-            return e.getMessage();
-        }
-        return MSGFPlusOptionsAdapter.adapt(opts, paramManager);
+    private static void printToolInfo() {
+        System.out.println("MS-GF+ " + VERSION + " (" + RELEASE_DATE + ")");
     }
 
-    public static String runMSGFPlus(ParamManager paramManager) {
+    private static void printJVMInfo() {
+        System.out.println("Java " + System.getProperty("java.version") + " (" + System.getProperty("java.vendor") + ")");
+        System.out.println(System.getProperty("os.name") + " (" + System.getProperty("os.arch") + ", version " + System.getProperty("os.version") + ")");
+    }
+
+    public static String runMSGFPlus(MSGFPlusOptions opts) {
         SearchParams params = new SearchParams();
-        String errorMessage = params.parse(paramManager);
+        String errorMessage = params.parse(opts);
 
         if (errorMessage != null) {
             return errorMessage;

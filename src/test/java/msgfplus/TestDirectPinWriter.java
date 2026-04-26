@@ -1,13 +1,12 @@
 package msgfplus;
 
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
 import edu.ucsd.msjava.msdbsearch.DatabaseMatch;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.ActivationMethod;
 import edu.ucsd.msjava.msutil.Enzyme;
 import edu.ucsd.msjava.output.DirectPinWriter;
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.cli.MSGFPlus;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -32,36 +31,28 @@ import java.util.List;
  */
 public class TestDirectPinWriter {
 
-    private ParamManager buildParamManager() throws URISyntaxException {
-        ParamManager manager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE,
-                "java -Xmx3500M -jar MSGFPlus.jar");
-        manager.addMSGFPlusParams();
-
-        URI paramUri = SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI();
-        manager.getParameter("conf").parse(new File(paramUri).getAbsolutePath());
-
-        URI specUri = SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI();
-        manager.getParameter("s").parse(new File(specUri).getAbsolutePath());
-
-        URI dbUri = SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI();
-        manager.getParameter("d").parse(new File(dbUri).getAbsolutePath());
-        return manager;
+    private MSGFPlusOptions buildOpts() throws URISyntaxException {
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        opts.configFile   = new File(SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI());
+        opts.spectrumFile = new File(SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI());
+        opts.databaseFile = new File(SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI());
+        return opts;
     }
 
     @Test
     public void pinOutputFormatFlagIsAccepted() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        String err = manager.getParameter("outputFormat").parse("0");
-        Assert.assertNull("parse('pin'=0) should succeed but returned: " + err, err);
+        MSGFPlusOptions opts = buildOpts();
+        opts.outputFormat = "pin";
+        Assert.assertEquals(0, opts.effectiveOutputFormat());
     }
 
     @Test
     public void writePinGetterReflectsOutputFormat() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("outputFormat").parse("0"));
+        MSGFPlusOptions opts = buildOpts();
+        opts.outputFormat = "pin";
 
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
 
         Assert.assertTrue("writePin() should be true when outputFormat=pin", params.writePin());
         Assert.assertFalse("writeTsv() should be false when outputFormat=pin", params.writeTsv());
@@ -69,33 +60,28 @@ public class TestDirectPinWriter {
 
     @Test
     public void allOutputFormatEnumIndicesAreAccepted() throws URISyntaxException {
-        // After mzid removal, the valid outputFormat values are:
-        //   0 = pin (default)
-        //   1 = tsv
-        // Old values 2 (both) and 3 (pin under the previous layout) are rejected.
-        for (String value : new String[]{"0", "1"}) {
-            ParamManager manager = buildParamManager();
-            String err = manager.getParameter("outputFormat").parse(value);
-            Assert.assertNull("parse('" + value + "') should succeed but returned: " + err, err);
+        // Valid outputFormat values after mzid removal: pin (default) and tsv.
+        for (String value : new String[]{"pin", "tsv", "0", "1"}) {
+            MSGFPlusOptions opts = buildOpts();
+            opts.outputFormat = value;
+            int eff = opts.effectiveOutputFormat();
+            Assert.assertTrue("'" + value + "' should map to 0 or 1 but got " + eff, eff == 0 || eff == 1);
         }
-        // Regression gate: old "mzid" / "both" indices (2, 3) must be rejected.
-        for (String value : new String[]{"2", "3"}) {
-            ParamManager manager = buildParamManager();
-            String err = manager.getParameter("outputFormat").parse(value);
-            Assert.assertNotNull("parse('" + value + "') should FAIL — mzid/both have been removed", err);
+        // Regression gate: old "mzid" and "both" (2, 3) collapse to pin.
+        for (String value : new String[]{"mzid", "both", "2", "3"}) {
+            MSGFPlusOptions opts = buildOpts();
+            opts.outputFormat = value;
+            Assert.assertEquals("Removed format '" + value + "' must collapse to pin (0)", 0, opts.effectiveOutputFormat());
         }
     }
 
     @Test
     public void pinHeaderColumnsIncludeRequiredPercolatorFields() throws Exception {
-        // Build a minimal result list so DirectPinWriter can emit a header.
-        // We don't need real matches; an empty resultList still produces the
-        // header row, which is what we're testing.
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("outputFormat").parse("0"));
+        MSGFPlusOptions opts = buildOpts();
+        opts.outputFormat = "pin";
 
         SearchParams params = new SearchParams();
-        Assert.assertNull(params.parse(manager));
+        Assert.assertNull(params.parse(opts));
 
         // DirectPinWriter needs a CompactSuffixArray and SpectraAccessor; we
         // can't construct those without running through BuildSA and loading

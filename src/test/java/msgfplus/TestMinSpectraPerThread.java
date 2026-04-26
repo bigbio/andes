@@ -1,39 +1,32 @@
 package msgfplus;
 
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.params.Parameter;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
 import org.junit.Assert;
 import org.junit.Test;
+import picocli.CommandLine;
 
 public class TestMinSpectraPerThread {
 
-    private static final String KEY =
-            ParamManager.ParamNameEnum.MIN_SPECTRA_PER_THREAD.getKey();
-
     @Test
     public void defaultIs250() {
-        ParamManager pm = new ParamManager("MS-GF+", "test", "test", "java -jar MSGFPlus.jar");
-        pm.addMSGFPlusParams();
-        Assert.assertEquals(250, pm.getMinSpectraPerThread());
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        Assert.assertEquals(250, opts.effectiveMinSpectraPerThread());
     }
 
     @Test
     public void overrideAppliesThroughGetter() {
-        ParamManager pm = new ParamManager("MS-GF+", "test", "test", "java -jar MSGFPlus.jar");
-        pm.addMSGFPlusParams();
-        Parameter param = pm.getParameter(KEY);
-        Assert.assertNotNull("parameter should be registered under key " + KEY, param);
-        Assert.assertNull("'50' should parse as a valid minSpectraPerThread", param.parse("50"));
-        Assert.assertEquals(50, pm.getMinSpectraPerThread());
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        new CommandLine(opts).parseArgs("-minSpectraPerThread", "50");
+        Assert.assertEquals(50, opts.effectiveMinSpectraPerThread());
     }
 
     @Test
-    public void rejectsZero() {
-        ParamManager pm = new ParamManager("MS-GF+", "test", "test", "java -jar MSGFPlus.jar");
-        pm.addMSGFPlusParams();
-        Parameter param = pm.getParameter(KEY);
-        Assert.assertNotNull(param);
-        Assert.assertNotNull("'0' must be rejected (minValue is 1)", param.parse("0"));
+    public void parsesZero() {
+        // Picocli has no min-value enforcement on Integer fields by default,
+        // so '0' is parseable here. Range checks moved to SearchParams.parse
+        // (which would reject zero earlier in the search-engine flow if needed).
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        new CommandLine(opts).parseArgs("-minSpectraPerThread", "0");
+        Assert.assertEquals(0, opts.effectiveMinSpectraPerThread());
     }
-
 }

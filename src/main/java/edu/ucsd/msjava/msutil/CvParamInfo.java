@@ -6,53 +6,21 @@ package edu.ucsd.msjava.msutil;
  *
  * @author Bryson Gibbons
  */
-public class CvParamInfo {
-    private final String accession;
-    private final String name;
-    private final String value;
-    private final String unitAccession;
-    private final String unitName;
-    private final Boolean hasUnit;
+public record CvParamInfo(String accession, String name, String value,
+                          String unitAccession, String unitName) {
 
     public CvParamInfo(String accession, String name, String value) {
-        this.accession = accession;
-        this.name = name;
-        this.value = value;
-        this.unitAccession = null;
-        this.unitName = null;
-        this.hasUnit = false;
+        this(accession, name, value, null, null);
     }
 
-    public CvParamInfo(String accession, String name, String value, String unitAccession, String unitName) {
-        this.accession = accession;
-        this.name = name;
-        this.value = value;
-        this.hasUnit = true;
-        this.unitAccession = unitAccession;
-        this.unitName = unitName;
+    public boolean hasUnit() {
+        return unitAccession != null;
     }
 
-    public String getAccession() {
-        return this.accession;
-    }
-
-    public String getName() {
-        return this.name;
-    }
-
-    public String getValue() {
-        return this.value;
-    }
-
-    public Boolean getHasUnit() {
-        return this.hasUnit;
-    }
-
-    public String getUnitAccession() {
-        return this.unitAccession;
-    }
-
-    public String getUnitName() {
-        return this.unitName;
-    }
+    public String getAccession()     { return accession; }
+    public String getName()          { return name; }
+    public String getValue()         { return value; }
+    public Boolean getHasUnit()      { return hasUnit(); }
+    public String getUnitAccession() { return unitAccession; }
+    public String getUnitName()      { return unitName; }
 }

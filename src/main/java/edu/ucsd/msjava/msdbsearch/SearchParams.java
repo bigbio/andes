@@ -314,8 +314,8 @@ public class SearchParams {
         decoyProteinPrefix = opts.decoyPrefix != null ? opts.decoyPrefix : "XXX";
 
         PrecursorTolerance tol = opts.precursorTolerance != null ? opts.precursorTolerance : PrecursorTolerance.parse("20ppm");
-        leftPrecursorMassTolerance = tol.left;
-        rightPrecursorMassTolerance = tol.right;
+        leftPrecursorMassTolerance = tol.left();
+        rightPrecursorMassTolerance = tol.right();
 
         int toleranceUnit = opts.precursorToleranceUnits != null ? opts.precursorToleranceUnits : 2;
         if (toleranceUnit != 2) {
@@ -325,8 +325,8 @@ public class SearchParams {
         }
 
         IntRange isotope = opts.isotopeErrorRange != null ? opts.isotopeErrorRange : new IntRange(0, 1);
-        this.minIsotopeError = isotope.min;
-        this.maxIsotopeError = isotope.max;
+        this.minIsotopeError = isotope.min();
+        this.maxIsotopeError = isotope.max();
 
         if (rightPrecursorMassTolerance.getToleranceAsDa(1000, 2) >= 0.5f ||
                 leftPrecursorMassTolerance.getToleranceAsDa(1000, 2) >= 0.5f) {
@@ -384,8 +384,8 @@ public class SearchParams {
         numMatchesPerSpec = opts.numMatchesPerSpec != null ? opts.numMatchesPerSpec : 1;
 
         IntRange specIdx = opts.specIndexRange != null ? opts.specIndexRange : new IntRange(1, Integer.MAX_VALUE - 1);
-        startSpecIndex = specIdx.min;
-        endSpecIndex = specIdx.max;
+        startSpecIndex = specIdx.min();
+        endSpecIndex = specIdx.max();
 
         useTDA = opts.effectiveTdaStrategy() == 1;
         ignoreMetCleavage = (opts.ignoreMetCleavage != null ? opts.ignoreMetCleavage : 0) == 1;
@@ -426,8 +426,8 @@ public class SearchParams {
         precursorCalMode = opts.precursorCalMode != null ? opts.precursorCalMode : PrecursorCalMode.AUTO;
 
         IntRange ms = opts.msLevel != null ? opts.msLevel : new IntRange(2, 2);
-        minMSLevel = ms.min;
-        maxMSLevel = ms.max;
+        minMSLevel = ms.min();
+        maxMSLevel = ms.max();
 
         maxNumMods = opts.effectiveMaxNumMods();
         int maxNumModsCompare = aaSet.getMaxNumberOfVariableModificationsPerPeptide();

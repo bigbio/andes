@@ -8,17 +8,12 @@ import picocli.CommandLine.TypeConversionException;
  * {@code "min,max"} or single value {@code "n"} (interpreted as
  * {@code n,n}). Used by {@code -ti}, {@code -msLevel}, {@code -index}.
  */
-public final class IntRange {
+public record IntRange(int min, int max) {
 
-    public final int min;
-    public final int max;
-
-    public IntRange(int min, int max) {
+    public IntRange {
         if (min > max) {
             throw new IllegalArgumentException("min (" + min + ") > max (" + max + ")");
         }
-        this.min = min;
-        this.max = max;
     }
 
     public static IntRange parse(String value) {

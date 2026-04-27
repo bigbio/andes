@@ -430,14 +430,14 @@ public class CompactSuffixArray {
 
             int prevRangeLastBucketFirst = -1;
             for (RangeMetadata md : rangeMetadatas) {
-                if (md.numEntries == 0) continue;
+                if (md.numEntries() == 0) continue;
                 mergeRangeIntoOutput(sequence, md, prevRangeLastBucketFirst, indexOut, nlcpOut);
-                prevRangeLastBucketFirst = md.lastBucketFirstSuffix;
+                prevRangeLastBucketFirst = md.lastBucketFirstSuffix();
             }
         } finally {
             for (RangeMetadata md : rangeMetadatas) {
-                deleteQuietly(md.tempIndicesFile);
-                deleteQuietly(md.tempLcpsFile);
+                deleteQuietly(md.tempIndicesFile());
+                deleteQuietly(md.tempLcpsFile());
             }
             // Sweep debris from workers that died before returning a RangeMetadata.
             File[] orphans = parentDir.listFiles((dir, name) -> name.startsWith(tempBasename));
@@ -464,8 +464,8 @@ public class CompactSuffixArray {
                                              int prevRangeLastBucketFirst,
                                              DataOutputStream indexOut,
                                              DataOutputStream nlcpOut) throws IOException {
-        try (DataInputStream idxIn = new DataInputStream(new BufferedInputStream(new FileInputStream(md.tempIndicesFile)));
-             DataInputStream lcpIn = new DataInputStream(new BufferedInputStream(new FileInputStream(md.tempLcpsFile)))) {
+        try (DataInputStream idxIn = new DataInputStream(new BufferedInputStream(new FileInputStream(md.tempIndicesFile())));
+             DataInputStream lcpIn = new DataInputStream(new BufferedInputStream(new FileInputStream(md.tempLcpsFile())))) {
             int firstIndex = idxIn.readInt();
             byte firstLcp = lcpIn.readByte();
             if (prevRangeLastBucketFirst >= 0) {
@@ -474,7 +474,7 @@ public class CompactSuffixArray {
             indexOut.writeInt(firstIndex);
             nlcpOut.writeByte(firstLcp);
 
-            for (int i = 1; i < md.numEntries; i++) {
+            for (int i = 1; i < md.numEntries(); i++) {
                 indexOut.writeInt(idxIn.readInt());
                 nlcpOut.writeByte(lcpIn.readByte());
             }
@@ -645,19 +645,7 @@ public class CompactSuffixArray {
     /** Per-worker sort+LCP output handle. Indices/LCPs live on disk; this carries
      *  the small metadata the merge step needs. Empty ranges return {@code null}
      *  file paths. */
-    static final class RangeMetadata {
-        final File tempIndicesFile;
-        final File tempLcpsFile;
-        final int numEntries;
-        final int lastBucketFirstSuffix;
-
-        RangeMetadata(File tempIndicesFile, File tempLcpsFile, int numEntries, int lastBucketFirstSuffix) {
-            this.tempIndicesFile = tempIndicesFile;
-            this.tempLcpsFile = tempLcpsFile;
-            this.numEntries = numEntries;
-            this.lastBucketFirstSuffix = lastBucketFirstSuffix;
-        }
-    }
+    record RangeMetadata(File tempIndicesFile, File tempLcpsFile, int numEntries, int lastBucketFirstSuffix) {}
 
     /** Growable {@code int[]} bucket of suffix indices. Shared between the
      *  bucketing phase (sequential {@link #add}) and the per-range worker

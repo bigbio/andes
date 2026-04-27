@@ -50,21 +50,9 @@ public class MassListComparator<T extends Matter> {
     }
 
 
-    public static class MatchedPair<T extends Matter> {
-        T m1, m2;
-
-        public MatchedPair(T m1, T m2) {
-            this.m1 = m1;
-            this.m2 = m2;
-        }
-
-        public T getMass1() {
-            return m1;
-        }
-
-        public T getMass2() {
-            return m2;
-        }
+    public record MatchedPair<T extends Matter>(T m1, T m2) {
+        public T getMass1() { return m1; }
+        public T getMass2() { return m2; }
     }
 
 }

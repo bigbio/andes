@@ -2,46 +2,16 @@ package edu.ucsd.msjava.msutil;
 
 import java.util.HashMap;
 
-public class Atom {
-    public Atom(String code, double mass, int nominalMass, String name) {
-        this.code = code;
-        this.mass = mass;
-        this.nominalMass = nominalMass;
-        this.name = name;
-    }
+public record Atom(String code, double mass, int nominalMass, String name) {
 
-    public String getCode() {
-        return code;
-    }
+    public String getCode()       { return code; }
+    public String getName()       { return name; }
+    public double getMass()       { return mass; }
+    public int getNominalMass()   { return nominalMass; }
 
-    public String getName() {
-        return name;
-    }
-
-    public double getMass() {
-        return mass;
-    }
-
-    public int getNominalMass() {
-        return nominalMass;
-    }
-
-    public static Atom[] getAtomarr() {
-        return atomArr;
-    }
-
-    public static HashMap<String, Atom> getAtomMap() {
-        return atomMap;
-    }
-
-    public static Atom get(String code) {
-        return atomMap.get(code);
-    }
-
-    private final String code;
-    private final String name;
-    private final double mass;
-    private final int nominalMass;
+    public static Atom[] getAtomarr() { return atomArr; }
+    public static HashMap<String, Atom> getAtomMap() { return atomMap; }
+    public static Atom get(String code) { return atomMap.get(code); }
 
     private static final Atom[] atomArr =
             {

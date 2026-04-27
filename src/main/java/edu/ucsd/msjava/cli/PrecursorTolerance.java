@@ -10,14 +10,18 @@ import picocli.CommandLine.TypeConversionException;
  * asymmetric form ({@code "0.5Da,2.5Da"}). Both sides must use the
  * same unit and be non-negative.
  */
-public final class PrecursorTolerance {
+public record PrecursorTolerance(Tolerance left, Tolerance right) {
 
-    public final Tolerance left;
-    public final Tolerance right;
-
-    private PrecursorTolerance(Tolerance left, Tolerance right) {
-        this.left = left;
-        this.right = right;
+    public PrecursorTolerance {
+        if (left == null || right == null) {
+            throw new IllegalArgumentException("left and right tolerances must be non-null");
+        }
+        if (left.isTolerancePPM() != right.isTolerancePPM()) {
+            throw new IllegalArgumentException("left and right tolerance units must be the same");
+        }
+        if (left.getValue() < 0 || right.getValue() < 0) {
+            throw new IllegalArgumentException("parent mass tolerance must not be negative");
+        }
     }
 
     public static PrecursorTolerance parse(String value) {
@@ -33,12 +37,6 @@ public final class PrecursorTolerance {
         }
         if (l == null || r == null) {
             throw new IllegalArgumentException("invalid tolerance value: " + value);
-        }
-        if (l.isTolerancePPM() != r.isTolerancePPM()) {
-            throw new IllegalArgumentException("left and right tolerance units must be the same");
-        }
-        if (l.getValue() < 0 || r.getValue() < 0) {
-            throw new IllegalArgumentException("parent mass tolerance must not be negative");
         }
         return new PrecursorTolerance(l, r);
     }

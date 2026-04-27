@@ -2,9 +2,9 @@ package msgfplus;
 
 import edu.ucsd.msjava.cli.MSGFPlus;
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
 import edu.ucsd.msjava.misc.RunManifestWriter;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
-import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.DBSearchIOFiles;
 import org.junit.Assert;
 import org.junit.Test;
@@ -25,12 +25,8 @@ import java.util.Map;
 public class TestRunManifestWriter {
 
     private SearchParams parsedSearchParams() throws URISyntaxException {
-        MSGFPlusOptions opts = new MSGFPlusOptions();
-        opts.configFile      = new File(SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI());
-        opts.spectrumFile    = new File(SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI());
-        opts.databaseFile    = new File(SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI());
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         opts.maxMissedCleavages = 2;
-
         SearchParams params = new SearchParams();
         String err = params.parse(opts);
         Assert.assertNull("SearchParams.parse should succeed: " + err, err);

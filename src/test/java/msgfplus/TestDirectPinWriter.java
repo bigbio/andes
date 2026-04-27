@@ -2,9 +2,9 @@ package msgfplus;
 
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
 import edu.ucsd.msjava.cli.OutputFormat;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
 import edu.ucsd.msjava.msdbsearch.DatabaseMatch;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
-import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.ActivationMethod;
 import edu.ucsd.msjava.msutil.Enzyme;
 import edu.ucsd.msjava.output.DirectPinWriter;
@@ -33,24 +33,16 @@ import java.util.List;
  */
 public class TestDirectPinWriter {
 
-    private MSGFPlusOptions buildOpts() throws URISyntaxException {
-        MSGFPlusOptions opts = new MSGFPlusOptions();
-        opts.configFile   = new File(SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI());
-        opts.spectrumFile = new File(SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI());
-        opts.databaseFile = new File(SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI());
-        return opts;
-    }
-
     @Test
     public void pinOutputFormatFlagIsAccepted() throws URISyntaxException {
-        MSGFPlusOptions opts = buildOpts();
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         opts.outputFormat = OutputFormat.PIN;
         Assert.assertEquals(OutputFormat.PIN, opts.effectiveOutputFormat());
     }
 
     @Test
     public void writePinGetterReflectsOutputFormat() throws URISyntaxException {
-        MSGFPlusOptions opts = buildOpts();
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         opts.outputFormat = OutputFormat.PIN;
 
         SearchParams params = new SearchParams();
@@ -83,7 +75,7 @@ public class TestDirectPinWriter {
 
     @Test
     public void pinHeaderColumnsIncludeRequiredPercolatorFields() throws Exception {
-        MSGFPlusOptions opts = buildOpts();
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         opts.outputFormat = OutputFormat.PIN;
 
         SearchParams params = new SearchParams();

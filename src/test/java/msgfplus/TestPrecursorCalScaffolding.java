@@ -1,6 +1,7 @@
 package msgfplus;
 
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msdbsearch.SearchParams.PrecursorCalMode;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
@@ -30,17 +31,10 @@ import java.net.URISyntaxException;
  */
 public class TestPrecursorCalScaffolding {
 
-    private MSGFPlusOptions buildOpts() throws URISyntaxException {
-        MSGFPlusOptions opts = new MSGFPlusOptions();
-        opts.configFile   = new File(SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI());
-        opts.spectrumFile = new File(SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI());
-        opts.databaseFile = new File(SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI());
-        return opts;
-    }
 
     @Test
     public void precursorCalDefaultIsAuto() throws URISyntaxException {
-        MSGFPlusOptions opts = buildOpts();
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals("Default -precursorCal should be AUTO",
@@ -49,7 +43,7 @@ public class TestPrecursorCalScaffolding {
 
     @Test
     public void precursorCalOnIsParsed() throws URISyntaxException {
-        MSGFPlusOptions opts = buildOpts();
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         opts.precursorCalMode = PrecursorCalMode.ON;
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
@@ -58,7 +52,7 @@ public class TestPrecursorCalScaffolding {
 
     @Test
     public void precursorCalOffIsParsed() throws URISyntaxException {
-        MSGFPlusOptions opts = buildOpts();
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         opts.precursorCalMode = PrecursorCalMode.OFF;
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));

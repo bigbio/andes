@@ -2,8 +2,8 @@ package msgfplus;
 
 import edu.ucsd.msjava.cli.MSGFPlus;
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
 import edu.ucsd.msjava.msdbsearch.SearchParams.PrecursorCalMode;
-import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.DBSearchIOFiles;
 import edu.ucsd.msjava.msutil.SpecFileFormat;
 import org.junit.Assert;
@@ -39,12 +39,9 @@ import java.util.List;
  */
 public class TestPrecursorCalIntegration {
 
-    private MSGFPlusOptions buildOpts(File outputFile) throws URISyntaxException {
-        MSGFPlusOptions opts = new MSGFPlusOptions();
-        opts.configFile   = new File(SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI());
-        opts.spectrumFile = new File(SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI());
-        opts.databaseFile = new File(SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI());
-        opts.outputFile   = outputFile;
+    private static MSGFPlusOptions buildOpts(File outputFile) throws URISyntaxException {
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.outputFile = outputFile;
         return opts;
     }
 

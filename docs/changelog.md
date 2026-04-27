@@ -2,15 +2,136 @@
 
 [MS-GF+ Documentation home](readme.md)
 
-**vNEXT — Unreleased (breaking change)**
+**vNEXT — Unreleased (multiple breaking changes)**
 
-- **BREAKING:** mzIdentML (`.mzid`) support fully removed — no backward-compatibility shim. MS-GF+ now writes only Percolator `.pin` (default) or TSV, and every `.mzid`-related utility has been deleted:
-  - **Output:** `MZIdentMLGen`, `AnalysisProtocolCollectionGen`, `MzIDTest` — deleted. `-o foo.mzid` is rejected at argument-parse time (no extension rewrite). `Unimod` and `UnimodComposition` are retained for future PTM-aware enhancements to `DirectPinWriter` — they carry the modification-accession + mass tables that a richer pin output would need to populate the `Peptide` column with proper Unimod references.
-  - **Input / legacy tools:** `MzIDToTsv` (CLI `edu.ucsd.msjava.ui.MzIDToTsv`), `MzIDParser`, `AnnotatedSpectra`, `ScoringParamGen` — deleted. Users who need to post-process legacy `.mzid` files must use MS-GF+ v2026.03.25 or earlier, or an external mzid converter.
-  - `-outputFormat` now accepts only `pin` (default) and `tsv`. Integer aliases: `0=pin, 1=tsv`. Previous `0=mzid, 2=both, 3=pin` layout is rejected.
-  - `-o OutputFile` must end in `.pin` or `.tsv`. `.mzid` paths are rejected.
-- Added precursor mass calibration: `-precursorCal auto|on|off` (default `auto`). Merged via PR #22.
-- Added Percolator `.pin` output with OpenMS-parity features (`enzN`, `enzC`, `enzInt`, `mass`, `lnDeltaSpecEValue`, `matchedIonRatio`, `longest_b`, `longest_y`, `longest_y_pct`) and lowercase renames (`peplen`, `charge2/3/4`, `dm`, `absdm`, `isotope_error`) for OpenMS `PercolatorAdapter` interoperability. Merged via PR #22 + this PR.
+This release modernises the CLI surface and trims a large amount of
+legacy code. Net change: roughly **−2,400 LOC** vs the previous
+release, with the CLI flag contract preserved for normal users and a
+few deliberate breaking changes called out below.
+
+### CLI parser modernisation
+
+- The CLI is now driven by [picocli](https://picocli.info) via
+  `edu.ucsd.msjava.cli.MSGFPlusOptions`. All flags are declared once
+  with typed Java fields; help (`-h`/`--help`) and version (`-V`) are
+  auto-generated.
+- `-conf` config-file inputs flow through the same path: any field
+  the CLI did not set is filled in from the config file (CLI takes
+  precedence). Legacy aliases continue to be recognised, including
+  `IsotopeError` → `IsotopeErrorRange`, `FragmentationMethod` →
+  `FragmentationMethodID`, `Instrument` → `InstrumentID`, `Enzyme`
+  → `EnzymeID`, `Protocol` → `ProtocolID`, `NumTolerableTermini` →
+  `NTT`, `MinNumPeaks` → `MinNumPeaksPerSpectrum`, `MaxNumMods` /
+  `MaxNumModsPerPeptide` → `NumMods`, `MinPeptideLength` /
+  `minLength` → `MinPepLength`, `MaxPeptideLength` / `maxLength` →
+  `MaxPepLength`, `PMTolerance` / `ParentMassTolerance` →
+  `PrecursorMassTolerance`. Config-file keys are matched
+  case-insensitively (so `minCharge=`, `MinCharge=`, and `MINCHARGE=`
+  all work).
+- `DynamicMod=`, `StaticMod=`, and `CustomAA=` config-file entries
+  continue to be repeatable; each line is collected into the AA set.
+- Validation surface restored: invalid numeric values (e.g.
+  `-thread 0`, `-ntt 5`, `-tda 2`) and out-of-range enum-like IDs
+  (e.g. `-m 99`, `-inst 99`) now produce a clean user-facing error
+  string instead of a stack trace.
+
+### Breaking changes
+
+- **`-outputFormat` accepts only named values.** `pin` (default) and
+  `tsv` are the supported forms (case-insensitive). The legacy
+  numeric aliases `0` and `1` are no longer accepted; users on those
+  invocations should switch to the named values.
+- **`-precursorCal` is now a typed enum.** `auto` (default), `on`,
+  and `off` are still the only valid values; invalid values now fail
+  fast at parse time instead of silently mapping to `auto`.
+- **Spectrum input narrowed to `*.mzML` and `*.mgf`.** Support for
+  `*.mzXML`, `*.ms2`, `*.pkl`, and `*_dta.txt` has been removed
+  along with their parsers. `MgfSpectrumParser`, `BufferedLineReader`,
+  `BufferedRandomAccessLineReader`, and the shared `LineReader` /
+  `SpectrumParser` interfaces moved from `edu.ucsd.msjava.parser` to
+  `edu.ucsd.msjava.mgf` to reflect the trimmed scope.
+- **Deprecated `MSGFDB` entry point removed.** `cli.MSGFDB` (legacy
+  v8091, "08/06/2012") and `docs/ms-gfdb.md` have been deleted, along
+  with `ParamManager.addMSGFDBParams` / `addMSGFParams` /
+  `addMSGFLibParams` (the latter two were dead — no entry points
+  existed). The MSGFDB-only `ParamNameEnum` entries `C13`, `NNET`,
+  `UNIFORM_AA_PROBABILITY`, and `OUTPUT_FILE` are gone, as are the
+  `showFDR`, `showDecoy`, and `replicate` config-file keys.
+- mzIdentML (`.mzid`) support remains fully removed (introduced in a
+  prior commit on this branch). MS-GF+ writes only `.pin` (default)
+  or `.tsv`. Every `.mzid`-related utility has been deleted:
+  - **Output:** `MZIdentMLGen`, `AnalysisProtocolCollectionGen`,
+    `MzIDTest`. `Unimod` and `UnimodComposition` are retained for
+    future PTM-aware enhancements to `DirectPinWriter` — they carry
+    the modification-accession + mass tables a richer pin output
+    would need.
+  - **Input / legacy tools:** `MzIDToTsv` (CLI
+    `edu.ucsd.msjava.ui.MzIDToTsv`), `MzIDParser`,
+    `AnnotatedSpectra`, `ScoringParamGen`. Users who need to
+    post-process legacy `.mzid` files must use MS-GF+ v2026.03.25
+    or earlier, or an external mzid converter.
+
+### Internal refactor
+
+- The entire `edu.ucsd.msjava.params` package has been deleted
+  (~2,100 LOC across 18 classes including `ParamManager`, the
+  `Parameter` / `IntParameter` / `FloatParameter` / `IntRangeParameter`
+  / `ToleranceParameter` / `EnumParameter` / `FileParameter` /
+  `StringParameter` hierarchy, and `ParamParser`). Two small helpers
+  (`ParamObject`, `UserParam`) moved to `edu.ucsd.msjava.msutil`
+  where their `ActivationMethod` / `Enzyme` / `InstrumentType` /
+  `Protocol` consumers already live.
+- Top-level package reorganisation:
+  - `edu.ucsd.msjava.ui.MSGFPlus` → `edu.ucsd.msjava.cli.MSGFPlus`.
+  - `edu.ucsd.msjava.mzid.{DirectPinWriter,DirectTSVWriter,Unimod,UnimodComposition}`
+    → `edu.ucsd.msjava.output.*`.
+  - `edu.ucsd.msjava.parser.*` → `edu.ucsd.msjava.mgf.*` (after
+    dropping the legacy-format parsers).
+  - `net.pempek.unicode.UnicodeBOMInputStream` →
+    `edu.ucsd.msjava.mgf.UnicodeBOMInputStream`.
+  - `edu.ucsd.msjava.mslibsearch.ProcessedSpectrum` deleted (no
+    references).
+- New typed value classes in `cli/`:
+  - `MSGFPlusOptions` — picocli `@Command` with all MSGFPlus flags.
+  - `PrecursorTolerance` — symmetric or asymmetric tolerance with
+    matching-unit + non-negative validation.
+  - `IntRange` — inclusive integer range used by `-ti`, `-msLevel`,
+    `-index`.
+  - `OutputFormat` — enum (`PIN`, `TSV`).
+- `picocli` 4.7.6 added as a runtime dependency.
+- New regression tests covering the `CustomAA=` config-file path,
+  the `-m 4 = UVPD` mapping, case-insensitive config keys, and
+  out-of-range flag rejection. The full scoped test sweep includes
+  78 tests.
+
+### Bench gate
+
+The Astral 3-arm correctness gate (`benchmark/run_astral_3arm.sh`,
+ProteoBench Module 8) on the prior modernisation pass confirmed
+**bit-identical PSM target/decoy counts** to the pre-PR#22 baseline
+JAR when `-precursorCal off` is supplied:
+
+| Arm | JAR | -precursorCal | targets | decoys |
+|---|---|---|---|---|
+| A | baseline (pre-PR #22) | n/a | 89,479 | 46,792 |
+| B | new branch | off | **89,479** | **46,792** |
+| C | new branch | auto | 89,360 | 46,913 |
+
+Arm C's small delta is the calibrator's expected effect when AUTO
+collects ≥200 confident PSMs. The CLI rewrite does not touch the
+search hot path, so this gate continues to apply for the additional
+fixes layered on top.
+
+### Earlier in this release cycle
+
+- Added precursor mass calibration: `-precursorCal auto|on|off`
+  (default `auto`). Merged via PR #22.
+- Added Percolator `.pin` output with OpenMS-parity features
+  (`enzN`, `enzC`, `enzInt`, `mass`, `lnDeltaSpecEValue`,
+  `matchedIonRatio`, `longest_b`, `longest_y`, `longest_y_pct`) and
+  lowercase column renames (`peplen`, `charge2/3/4`, `dm`, `absdm`,
+  `isotope_error`) for OpenMS `PercolatorAdapter` interoperability.
+  Merged via PR #22 + this PR.
 
 **v2026.03.25**
 

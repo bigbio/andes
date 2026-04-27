@@ -57,4 +57,68 @@ public class MSGFPlusOptionsConfigFileTest {
         Files.deleteIfExists(conf);
         Files.deleteIfExists(tmpDir);
     }
+
+    /**
+     * Regression for the case-insensitive config-key match. The legacy
+     * {@code ParamManager.parseConfigParamFile} matched names with
+     * {@code equalsIgnoreCase}; the Phase 4c switch was exact-case so
+     * {@code minCharge=} / {@code maxCharge=} from the test fixture
+     * silently fell back to defaults instead of overriding them.
+     */
+    @Test
+    public void configFileKeysAreMatchedCaseInsensitively() throws IOException {
+        Path tmpDir = Files.createTempDirectory("msgfplus-caseinsens-");
+        Path conf = tmpDir.resolve("mixed_case.txt");
+        // Mix of canonical, lowercased-first-letter, and ALLCAPS forms.
+        Files.write(conf, ("MinPepLength=8\n"
+                + "maxpepLength=42\n"
+                + "MINCHARGE=3\n"
+                + "maxcharge=7\n"
+                + "TDA=1\n").getBytes(StandardCharsets.UTF_8));
+
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        Assert.assertNull(opts.applyConfigFile(conf.toFile()));
+
+        Assert.assertEquals(8,  opts.effectiveMinPeptideLength());
+        Assert.assertEquals(42, opts.effectiveMaxPeptideLength());
+        Assert.assertEquals(3,  opts.effectiveMinCharge());
+        Assert.assertEquals(7,  opts.effectiveMaxCharge());
+        Assert.assertEquals(1,  opts.effectiveTdaStrategy());
+
+        Files.deleteIfExists(conf);
+        Files.deleteIfExists(tmpDir);
+    }
+
+    /**
+     * Pin the numeric/enum range validation that the legacy
+     * {@code IntParameter.minValue}/{@code maxValue} machinery used to
+     * enforce. After Phase 4c those checks initially disappeared; restoring
+     * them ensures invalid CLI input produces a clean error string instead
+     * of a stack trace from a downstream resolver.
+     */
+    @Test
+    public void validateRejectsOutOfRangeFlags() {
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        opts.spectrumFile = new File("anything.mgf");
+        opts.databaseFile = new File("anything.fasta");
+
+        opts.numThreads = 0;
+        Assert.assertNotNull("numThreads=0 must be rejected", opts.validate());
+        opts.numThreads = null;
+
+        opts.fragMethodId = 99;
+        Assert.assertNotNull("-m 99 must be rejected with a user-facing error", opts.validate());
+        opts.fragMethodId = null;
+
+        opts.numTolerableTermini = 5;
+        Assert.assertNotNull("-ntt 5 must be rejected (valid 0..2)", opts.validate());
+        opts.numTolerableTermini = null;
+
+        opts.tdaStrategy = 2;
+        Assert.assertNotNull("-tda 2 must be rejected (valid 0..1)", opts.validate());
+        opts.tdaStrategy = null;
+
+        // A clean invocation passes.
+        Assert.assertNull(opts.validate());
+    }
 }

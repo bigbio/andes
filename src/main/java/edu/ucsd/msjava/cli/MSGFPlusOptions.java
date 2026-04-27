@@ -15,18 +15,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Typed command-line options for MS-GF+. Replaces the imperative
- * {@code addParameter()} calls in {@code ParamManager.addMSGFPlusParams()}
- * with declarative picocli annotations.
- *
- * Phase 1 scope: every flag from {@link ParamNameEnum} that
- * {@code addMSGFPlusParams()} registers, parsed into typed fields.
- * Complex domain types (Tolerance, IntRange, dynamic enums) are
- * captured here as raw strings; the adapter at
- * {@code MSGFPlusOptionsAdapter} round-trips them through the existing
- * {@code params.Parameter#parse(String)} hierarchy to populate a
- * {@code ParamManager} that {@code SearchParams.parse(ParamManager)}
- * can consume unchanged. Phase 3 collapses that round-trip away.
+ * Typed command-line options for MS-GF+. Picocli reads {@code argv} into
+ * the {@code @Option}-annotated fields below; {@link #applyConfigFile}
+ * fills in any field the CLI did not set from a {@code -conf} file
+ * (CLI takes precedence). {@link #validate} enforces required-input
+ * and numeric/enum range invariants. Each {@code effectiveXxx()} accessor
+ * returns the user-supplied value or the legacy default.
  *
  * Flag inventory: see {@code .claude/plans/parameter-modernization-flag-inventory.md}.
  */
@@ -335,7 +329,7 @@ public final class MSGFPlusOptions {
      * @return null on success, error string otherwise.
      */
     public String applyConfigFile(File file) {
-        int unrecognizedCount = 0;
+        unrecognizedConfigEntries = 0;
         try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
             String line;
             int lineNum = 0;
@@ -348,17 +342,15 @@ public final class MSGFPlusOptions {
                 String rawKey = trimmed.substring(0, eq).trim();
                 String value = trimmed.substring(eq + 1).trim();
                 String key = canonicalConfigKey(rawKey);
-                int before = unrecognizedConfigEntries;
                 String err = applyConfigEntry(key, value, file.getName());
                 if (err != null) {
                     return "Error parsing line " + lineNum + " of " + file.getName() + ": " + err;
                 }
-                if (unrecognizedConfigEntries > before) unrecognizedCount++;
             }
         } catch (IOException e) {
             return "Error reading config file " + file.getPath() + ": " + e.getMessage();
         }
-        if (unrecognizedCount > 0) {
+        if (unrecognizedConfigEntries > 0) {
             System.out.println("Valid parameters are described in the example parameter file at " +
                     "https://github.com/MSGFPlus/msgfplus/blob/master/docs/examples/MSGFPlus_Params.txt");
         }
@@ -366,69 +358,66 @@ public final class MSGFPlusOptions {
     }
 
     /** Counter incremented inside {@link #applyConfigEntry} whenever an unknown
-     *  config-file key is seen; surfaced via the end-of-file URL hint. */
+     *  config-file key is seen; surfaced via the end-of-file URL hint and
+     *  reset at the start of each {@link #applyConfigFile} call. */
     private int unrecognizedConfigEntries;
 
     private String applyConfigEntry(String key, String value, String fileName) {
-        // Repeated entries: collect into lists. "none" is treated as no entry.
-        if (key.equalsIgnoreCase("DynamicMod")) {
-            if (!value.equalsIgnoreCase("none")) dynamicMods.add(value);
-            return null;
-        }
-        if (key.equalsIgnoreCase("StaticMod")) {
-            if (!value.equalsIgnoreCase("none")) staticMods.add(value);
-            return null;
-        }
-        if (key.equalsIgnoreCase("CustomAA")) {
-            if (!value.equalsIgnoreCase("none")) customAAs.add(value);
-            return null;
+        // Config-file matching is case-insensitive. canonicalConfigKey()
+        // already returns lowercase canonical names, so the switch labels
+        // are lowercase too. Repeated mod entries are matched first since
+        // they accumulate rather than overwrite.
+        switch (key) {
+            case "dynamicmod":  if (!value.equalsIgnoreCase("none")) dynamicMods.add(value); return null;
+            case "staticmod":   if (!value.equalsIgnoreCase("none")) staticMods.add(value); return null;
+            case "customaa":    if (!value.equalsIgnoreCase("none")) customAAs.add(value); return null;
+            default: break;
         }
         // Single-valued entries: only fill in if CLI did not set the field.
         try {
             switch (key) {
-                case "SpectrumFile":           if (spectrumFile == null)             spectrumFile = new File(value); return null;
-                case "DatabaseFile":           if (databaseFile == null)             databaseFile = new File(value); return null;
-                case "OutputFile":             if (outputFile == null)               outputFile = new File(value); return null;
-                case "ModificationFileName":
-                case "ModificationFile":       if (modificationFile == null)         modificationFile = new File(value); return null;
-                case "DBIndexDir":             if (dbIndexDir == null)               dbIndexDir = new File(value); return null;
-                case "DecoyPrefix":            if (decoyPrefix == null)              decoyPrefix = value; return null;
-                case "PrecursorMassTolerance": if (precursorTolerance == null)       precursorTolerance = PrecursorTolerance.parse(value); return null;
-                case "PrecursorMassToleranceUnits":
-                                               if (precursorToleranceUnits == null)  precursorToleranceUnits = Integer.parseInt(value); return null;
-                case "IsotopeErrorRange":      if (isotopeErrorRange == null)        isotopeErrorRange = IntRange.parse(value); return null;
-                case "FragmentationMethodID":  if (fragMethodId == null)             fragMethodId = Integer.parseInt(value); return null;
-                case "InstrumentID":           if (instrumentTypeId == null)         instrumentTypeId = Integer.parseInt(value); return null;
-                case "EnzymeID":               if (enzymeId == null)                 enzymeId = Integer.parseInt(value); return null;
-                case "ProtocolID":             if (protocolId == null)               protocolId = Integer.parseInt(value); return null;
-                case "NTT":                    if (numTolerableTermini == null)      numTolerableTermini = Integer.parseInt(value); return null;
-                case "MinPepLength":           if (minPeptideLength == null)         minPeptideLength = Integer.parseInt(value); return null;
-                case "MaxPepLength":           if (maxPeptideLength == null)         maxPeptideLength = Integer.parseInt(value); return null;
-                case "MinCharge":              if (minCharge == null)                minCharge = Integer.parseInt(value); return null;
-                case "MaxCharge":              if (maxCharge == null)                maxCharge = Integer.parseInt(value); return null;
-                case "NumMatchesPerSpec":      if (numMatchesPerSpec == null)        numMatchesPerSpec = Integer.parseInt(value); return null;
-                case "NumThreads":             if (numThreads == null)               { if (!value.equalsIgnoreCase("all")) numThreads = Integer.parseInt(value); } return null;
-                case "NumTasks":               if (numTasks == null)                 numTasks = Integer.parseInt(value); return null;
-                case "MinSpectraPerThread":    if (minSpectraPerThread == null)      minSpectraPerThread = Integer.parseInt(value); return null;
-                case "Verbose":                if (verbose == null)                  verbose = Integer.parseInt(value); return null;
-                case "TDA":                    if (tdaStrategy == null)              tdaStrategy = Integer.parseInt(value); return null;
-                case "AddFeatures":            if (addFeatures == null)              addFeatures = Integer.parseInt(value); return null;
-                case "OutputFormat":           if (outputFormat == null)             outputFormat = value; return null;
-                case "PrecursorCal":           if (precursorCalMode == null)         precursorCalMode = value; return null;
-                case "ChargeCarrierMass":      if (chargeCarrierMass == null)        chargeCarrierMass = Double.parseDouble(value); return null;
-                case "MaxMissedCleavages":     if (maxMissedCleavages == null)       maxMissedCleavages = Integer.parseInt(value); return null;
-                case "NumMods":                if (maxNumMods == null)               configMaxNumMods = Integer.parseInt(value); return null;
-                case "AllowDenseCentroidedPeaks":
-                                               if (allowDenseCentroidedPeaks == null) allowDenseCentroidedPeaks = Integer.parseInt(value); return null;
-                case "MSLevel":                if (msLevel == null)                  msLevel = IntRange.parse(value); return null;
-                case "SpecIndex":              if (specIndexRange == null)           specIndexRange = IntRange.parse(value); return null;
-                case "EdgeScore":              if (edgeScore == null)                edgeScore = Integer.parseInt(value); return null;
-                case "MinNumPeaksPerSpectrum": if (minNumPeaks == null)              minNumPeaks = Integer.parseInt(value); return null;
-                case "NumIsoforms":            if (numIsoforms == null)              numIsoforms = Integer.parseInt(value); return null;
-                case "IgnoreMetCleavage":      if (ignoreMetCleavage == null)        ignoreMetCleavage = Integer.parseInt(value); return null;
-                case "MinDeNovoScore":         if (minDeNovoScore == null)           minDeNovoScore = Integer.parseInt(value); return null;
+                case "spectrumfile":               if (spectrumFile == null)              spectrumFile = new File(value); return null;
+                case "databasefile":               if (databaseFile == null)              databaseFile = new File(value); return null;
+                case "outputfile":                 if (outputFile == null)                outputFile = new File(value); return null;
+                case "modificationfilename":
+                case "modificationfile":           if (modificationFile == null)          modificationFile = new File(value); return null;
+                case "dbindexdir":                 if (dbIndexDir == null)                dbIndexDir = new File(value); return null;
+                case "decoyprefix":                if (decoyPrefix == null)               decoyPrefix = value; return null;
+                case "precursormasstolerance":     if (precursorTolerance == null)        precursorTolerance = PrecursorTolerance.parse(value); return null;
+                case "precursormasstoleranceunits":if (precursorToleranceUnits == null)   precursorToleranceUnits = Integer.parseInt(value); return null;
+                case "isotopeerrorrange":          if (isotopeErrorRange == null)         isotopeErrorRange = IntRange.parse(value); return null;
+                case "fragmentationmethodid":      if (fragMethodId == null)              fragMethodId = Integer.parseInt(value); return null;
+                case "instrumentid":               if (instrumentTypeId == null)          instrumentTypeId = Integer.parseInt(value); return null;
+                case "enzymeid":                   if (enzymeId == null)                  enzymeId = Integer.parseInt(value); return null;
+                case "protocolid":                 if (protocolId == null)                protocolId = Integer.parseInt(value); return null;
+                case "ntt":                        if (numTolerableTermini == null)       numTolerableTermini = Integer.parseInt(value); return null;
+                case "minpeplength":               if (minPeptideLength == null)          minPeptideLength = Integer.parseInt(value); return null;
+                case "maxpeplength":               if (maxPeptideLength == null)          maxPeptideLength = Integer.parseInt(value); return null;
+                case "mincharge":                  if (minCharge == null)                 minCharge = Integer.parseInt(value); return null;
+                case "maxcharge":                  if (maxCharge == null)                 maxCharge = Integer.parseInt(value); return null;
+                case "nummatchesperspec":          if (numMatchesPerSpec == null)         numMatchesPerSpec = Integer.parseInt(value); return null;
+                case "numthreads":                 if (numThreads == null && !value.equalsIgnoreCase("all"))
+                                                       numThreads = Integer.parseInt(value); return null;
+                case "numtasks":                   if (numTasks == null)                  numTasks = Integer.parseInt(value); return null;
+                case "minspectraperthread":        if (minSpectraPerThread == null)       minSpectraPerThread = Integer.parseInt(value); return null;
+                case "verbose":                    if (verbose == null)                   verbose = Integer.parseInt(value); return null;
+                case "tda":                        if (tdaStrategy == null)               tdaStrategy = Integer.parseInt(value); return null;
+                case "addfeatures":                if (addFeatures == null)               addFeatures = Integer.parseInt(value); return null;
+                case "outputformat":               if (outputFormat == null)              outputFormat = value; return null;
+                case "precursorcal":               if (precursorCalMode == null)          precursorCalMode = value; return null;
+                case "chargecarriermass":          if (chargeCarrierMass == null)         chargeCarrierMass = Double.parseDouble(value); return null;
+                case "maxmissedcleavages":         if (maxMissedCleavages == null)        maxMissedCleavages = Integer.parseInt(value); return null;
+                case "nummods":                    if (maxNumMods == null)                configMaxNumMods = Integer.parseInt(value); return null;
+                case "allowdensecentroidedpeaks":  if (allowDenseCentroidedPeaks == null) allowDenseCentroidedPeaks = Integer.parseInt(value); return null;
+                case "mslevel":                    if (msLevel == null)                   msLevel = IntRange.parse(value); return null;
+                case "specindex":                  if (specIndexRange == null)            specIndexRange = IntRange.parse(value); return null;
+                case "edgescore":                  if (edgeScore == null)                 edgeScore = Integer.parseInt(value); return null;
+                case "minnumpeaksperspectrum":     if (minNumPeaks == null)               minNumPeaks = Integer.parseInt(value); return null;
+                case "numisoforms":                if (numIsoforms == null)               numIsoforms = Integer.parseInt(value); return null;
+                case "ignoremetcleavage":          if (ignoreMetCleavage == null)         ignoreMetCleavage = Integer.parseInt(value); return null;
+                case "mindenovoscore":             if (minDeNovoScore == null)            minDeNovoScore = Integer.parseInt(value); return null;
                 default:
-                    if (!key.toLowerCase().startsWith("enzymedef")) {
+                    if (!key.startsWith("enzymedef")) {
                         System.out.println("Warning, unrecognized parameter '" + key + "=" + value + "' in config file " + fileName);
                         unrecognizedConfigEntries++;
                     }
@@ -445,33 +434,107 @@ public final class MSGFPlusOptions {
     }
 
     /** Normalize legacy / alternate config-file keys to canonical form.
-     *  Mirrors the rewrites previously in {@code ParamNameEnum.getParamNameFromLine}. */
+     *  Returns lowercase so {@link #applyConfigEntry} can match
+     *  case-insensitively (the legacy {@code ParamManager.parseConfigParamFile}
+     *  matched names with {@code equalsIgnoreCase}). Mirrors the alias
+     *  rewrites previously in {@code ParamNameEnum.getParamNameFromLine}. */
     private static String canonicalConfigKey(String key) {
-        if (key.equalsIgnoreCase("IsotopeError"))          return "IsotopeErrorRange";
-        if (key.equalsIgnoreCase("TargetDecoyAnalysis"))   return "TDA";
-        if (key.equalsIgnoreCase("FragmentationMethod"))   return "FragmentationMethodID";
-        if (key.equalsIgnoreCase("Instrument"))            return "InstrumentID";
-        if (key.equalsIgnoreCase("Enzyme"))                return "EnzymeID";
-        if (key.equalsIgnoreCase("Protocol"))              return "ProtocolID";
-        if (key.equalsIgnoreCase("NumTolerableTermini"))   return "NTT";
-        if (key.equalsIgnoreCase("MinNumPeaks"))           return "MinNumPeaksPerSpectrum";
-        if (key.equalsIgnoreCase("MaxNumMods"))            return "NumMods";
-        if (key.equalsIgnoreCase("MaxNumModsPerPeptide"))  return "NumMods";
-        if (key.equalsIgnoreCase("minLength"))             return "MinPepLength";
-        if (key.equalsIgnoreCase("MinPeptideLength"))      return "MinPepLength";
-        if (key.equalsIgnoreCase("maxLength"))             return "MaxPepLength";
-        if (key.equalsIgnoreCase("MaxPeptideLength"))      return "MaxPepLength";
-        if (key.equalsIgnoreCase("PMTolerance"))           return "PrecursorMassTolerance";
-        if (key.equalsIgnoreCase("ParentMassTolerance"))   return "PrecursorMassTolerance";
-        return key;
+        String norm = key.toLowerCase(java.util.Locale.ROOT);
+        switch (norm) {
+            case "isotopeerror":         return "isotopeerrorrange";
+            case "targetdecoyanalysis":  return "tda";
+            case "fragmentationmethod":  return "fragmentationmethodid";
+            case "instrument":           return "instrumentid";
+            case "enzyme":               return "enzymeid";
+            case "protocol":             return "protocolid";
+            case "numtolerabletermini":  return "ntt";
+            case "minnumpeaks":          return "minnumpeaksperspectrum";
+            case "maxnummods":           return "nummods";
+            case "maxnummodsperpeptide": return "nummods";
+            case "minlength":            return "minpeplength";
+            case "minpeptidelength":     return "minpeplength";
+            case "maxlength":            return "maxpeplength";
+            case "maxpeptidelength":     return "maxpeplength";
+            case "pmtolerance":          return "precursormasstolerance";
+            case "parentmasstolerance":  return "precursormasstolerance";
+            default:                     return norm;
+        }
     }
 
-    /** Validates required-input invariants that the CLI alone can't enforce
-     *  (since {@code -s}/{@code -d} may come from {@code -conf}). */
-    public String validateRequired() {
+    /** Validates required-input invariants and the numeric/enum range
+     *  constraints the legacy {@code IntParameter.minValue}/{@code maxValue}
+     *  and {@code EnumParameter} machinery used to enforce. Returns
+     *  {@code null} on success or a user-facing error string otherwise.
+     *
+     *  <p>Required: {@code -s} and {@code -d} (either via CLI or {@code -conf}).
+     *  Numeric flags must satisfy their original lower bounds; enum-shaped
+     *  flags must fall in their defined index range. */
+    public String validate() {
         if (spectrumFile == null) return "Spectrum file is not defined; use -s at the command line or SpectrumFile in a config file";
         if (databaseFile == null) return "Database file is not defined; use -d at the command line or DatabaseFile in a config file";
+
+        String err;
+        if ((err = checkMin("-thread",                    numThreads,                1))    != null) return err;
+        if ((err = checkMin("-tasks",                     numTasks,                  -10))  != null) return err;
+        if ((err = checkMin("-minSpectraPerThread",       minSpectraPerThread,       1))    != null) return err;
+        if ((err = checkMin("-minLength",                 minPeptideLength,          1))    != null) return err;
+        if ((err = checkMin("-maxLength",                 maxPeptideLength,          1))    != null) return err;
+        if ((err = checkMin("-minCharge",                 minCharge,                 1))    != null) return err;
+        if ((err = checkMin("-maxCharge",                 maxCharge,                 1))    != null) return err;
+        if ((err = checkMin("-n",                         numMatchesPerSpec,         1))    != null) return err;
+        if ((err = checkMin("-maxMissedCleavages",        maxMissedCleavages,        -1))   != null) return err;
+        if ((err = checkMin("-numMods",                   maxNumMods,                0))    != null) return err;
+        if ((err = checkMin("-minNumPeaks",               minNumPeaks,               0))    != null) return err;
+        if ((err = checkMin("-iso",                       numIsoforms,               0))    != null) return err;
+        if ((err = checkMin("-minDeNovoScore",            minDeNovoScore,            Integer.MIN_VALUE)) != null) return err;
+
+        if ((err = checkRange("-ntt",                     numTolerableTermini,        0, 2)) != null) return err;
+        if ((err = checkRange("-tda",                     tdaStrategy,                0, 1)) != null) return err;
+        if ((err = checkRange("-verbose",                 verbose,                    0, 1)) != null) return err;
+        if ((err = checkRange("-addFeatures",             addFeatures,                0, 1)) != null) return err;
+        if ((err = checkRange("-allowDenseCentroidedPeaks", allowDenseCentroidedPeaks, 0, 1)) != null) return err;
+        if ((err = checkRange("-edgeScore",               edgeScore,                  0, 1)) != null) return err;
+        if ((err = checkRange("-ignoreMetCleavage",       ignoreMetCleavage,          0, 1)) != null) return err;
+        if ((err = checkRange("-u",                       precursorToleranceUnits,    0, 2)) != null) return err;
+
+        if (chargeCarrierMass != null && chargeCarrierMass <= 0.1) {
+            return "Invalid value for parameter -ccm: " + chargeCarrierMass + " (must be > 0.1)";
+        }
+
+        if (fragMethodId != null && (fragMethodId < 0 || fragMethodId > 4)) {
+            return "Invalid value for parameter -m: " + fragMethodId + " (valid: 0..4)";
+        }
+        int instMax = ActivationMethodAvailability.instCount() - 1;
+        if (instrumentTypeId != null && (instrumentTypeId < 0 || instrumentTypeId > instMax)) {
+            return "Invalid value for parameter -inst: " + instrumentTypeId + " (valid: 0.." + instMax + ")";
+        }
+        int enzMax = Enzyme.getAllRegisteredEnzymes().length - 1;
+        if (enzymeId != null && (enzymeId < 0 || enzymeId > enzMax)) {
+            return "Invalid value for parameter -e: " + enzymeId + " (valid: 0.." + enzMax + ")";
+        }
+        int protMax = Protocol.getAllRegisteredProtocols().length - 1;
+        if (protocolId != null && (protocolId < 0 || protocolId > protMax)) {
+            return "Invalid value for parameter -protocol: " + protocolId + " (valid: 0.." + protMax + ")";
+        }
         return null;
+    }
+
+    private static String checkMin(String flag, Integer value, int min) {
+        if (value == null) return null;
+        if (value < min) return "Invalid value for parameter " + flag + ": " + value + " (must be >= " + min + ")";
+        return null;
+    }
+
+    private static String checkRange(String flag, Integer value, int min, int max) {
+        if (value == null) return null;
+        if (value < min || value > max) return "Invalid value for parameter " + flag + ": " + value + " (valid: " + min + ".." + max + ")";
+        return null;
+    }
+
+    /** Helper that hides the {@link InstrumentType#getAllRegisteredInstrumentTypes}
+     *  call from {@code validate()} so the import block stays minimal. */
+    private static final class ActivationMethodAvailability {
+        static int instCount() { return InstrumentType.getAllRegisteredInstrumentTypes().length; }
     }
 
     /** Mutator used by {@code AminoAcidSet} when the parsed mod metadata

@@ -330,8 +330,11 @@ public class SearchParams {
             if (err != null) return err;
         }
 
-        // Required-input check now that CLI + config-file have both run.
-        String requiredErr = opts.validateRequired();
+        // Required-input + numeric/enum range check now that CLI +
+        // config-file have both run. Catches things like -m 99 with a
+        // user-facing error instead of the IllegalArgumentException
+        // the resolver would otherwise raise during search setup.
+        String requiredErr = opts.validate();
         if (requiredErr != null) return requiredErr;
 
         chargeCarrierMass = opts.effectiveChargeCarrierMass();

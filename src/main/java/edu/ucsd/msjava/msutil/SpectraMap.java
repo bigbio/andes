@@ -1,7 +1,7 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.parser.BufferedRandomAccessLineReader;
-import edu.ucsd.msjava.parser.SpectrumParser;
+import edu.ucsd.msjava.mgf.BufferedRandomAccessLineReader;
+import edu.ucsd.msjava.mgf.SpectrumParser;
 
 import java.util.*;
 import java.util.Map.Entry;

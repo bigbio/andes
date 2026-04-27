@@ -6,7 +6,7 @@ import edu.ucsd.msjava.msscorer.NewRankScorer;
 import edu.ucsd.msjava.msscorer.SimpleDBSearchScorer;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.msutil.Modification.Location;
-import edu.ucsd.msjava.parser.BufferedLineReader;
+import edu.ucsd.msjava.mgf.BufferedLineReader;
 import edu.ucsd.msjava.sequences.Constants;
 
 import java.io.*;

@@ -3,8 +3,8 @@ package edu.ucsd.msjava.msutil;
 import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.mzml.StaxMzMLSpectraIterator;
 import edu.ucsd.msjava.mzml.StaxMzMLSpectraMap;
-import edu.ucsd.msjava.parser.MgfSpectrumParser;
-import edu.ucsd.msjava.parser.SpectrumParser;
+import edu.ucsd.msjava.mgf.MgfSpectrumParser;
+import edu.ucsd.msjava.mgf.SpectrumParser;
 
 import java.io.File;
 import java.io.IOException;

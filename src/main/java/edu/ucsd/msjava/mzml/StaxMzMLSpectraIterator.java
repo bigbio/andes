@@ -1,7 +1,7 @@
 package edu.ucsd.msjava.mzml;
 
 import edu.ucsd.msjava.msutil.Spectrum;
-import edu.ucsd.msjava.parser.SpectrumParser;
+import edu.ucsd.msjava.mgf.SpectrumParser;
 
 import java.util.Iterator;
 import java.util.NoSuchElementException;

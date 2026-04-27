@@ -1,4 +1,4 @@
-package edu.ucsd.msjava.parser;
+package edu.ucsd.msjava.mgf;
 
 import java.io.*;
 

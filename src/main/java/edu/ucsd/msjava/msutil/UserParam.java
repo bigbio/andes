@@ -1,6 +1,6 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.parser.BufferedLineReader;
+import edu.ucsd.msjava.mgf.BufferedLineReader;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;

@@ -1,6 +1,6 @@
 // (‑●‑●)> released under the WTFPL v2 license, by Gregory Pakosz (@gpakosz)
 
-package edu.ucsd.msjava.parser;
+package edu.ucsd.msjava.mgf;
 
 import java.io.IOException;
 import java.io.InputStream;

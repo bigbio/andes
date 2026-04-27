@@ -7,7 +7,7 @@ import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.msutil.IonType.PrefixIon;
-import edu.ucsd.msjava.parser.MgfSpectrumParser;
+import edu.ucsd.msjava.mgf.MgfSpectrumParser;
 
 import java.io.File;
 import java.util.*;

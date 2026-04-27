@@ -3,7 +3,7 @@ package edu.ucsd.msjava.msutil;
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msutil.Modification.Location;
-import edu.ucsd.msjava.parser.BufferedLineReader;
+import edu.ucsd.msjava.mgf.BufferedLineReader;
 
 import java.io.File;
 import java.io.IOException;

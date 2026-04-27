@@ -1,6 +1,6 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.parser.SpectrumParser;
+import edu.ucsd.msjava.mgf.SpectrumParser;
 
 import java.util.ArrayList;
 import java.util.Collections;

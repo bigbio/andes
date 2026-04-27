@@ -37,7 +37,6 @@ public abstract class DeNovoGraph<T extends Matter> {
 
     public abstract int getNodeScore(T node);
 
-    //	public abstract int getEdgeScore(T curNode, T prevNode);
     public abstract ArrayList<Edge<T>> getEdges(T curNode);
 
     public abstract T getComplementNode(T node);

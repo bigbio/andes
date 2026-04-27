@@ -84,8 +84,6 @@ public class PrecursorOffsetFrequency implements Comparable<PrecursorOffsetFrequ
         float tolDa = granularity / 2 * (offList.size() - clusterStartIndex);
         clusteredOFF.add(new PrecursorOffsetFrequency(reducedCharge, offset, clusterFreq).tolerance(new Tolerance(tolDa)));
 
-//		for(PrecursorOffsetFrequency off : clusteredOFF)
-//			System.out.println(off.getReducedCharge()+"\t"+off.getOffset()+"\t"+off.getFrequency()+"\t"+off.getTolerance().toString());
         return clusteredOFF;
     }
 }

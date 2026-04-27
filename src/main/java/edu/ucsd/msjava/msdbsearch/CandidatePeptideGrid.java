@@ -155,11 +155,6 @@ public class CandidatePeptideGrid {
         return numMods[index][length];
     }
 
-//	public boolean addResidue(char residue)
-//	{
-//		return addResidue(length+1, residue);
-//	}
-
     /**
      * Add a residue to the candidate peptide grid
      * @param length

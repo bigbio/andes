@@ -408,8 +408,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
             System.err.println("Warning, MinScore is abnormally low; "
                     + "MinScore: " + curMinScore + ", MaxScore: " + curMaxScore + ", "
                     + "CurNode: " + curNode.getNominalMass() + ", CurNodeScore: " + curNodeScore);
-            // Could abort processing
-            // System.exit(-1);
             // Instead, skip this node
             return;
         }
@@ -418,8 +416,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
             System.err.println("Warning, MaxScore is abnormally high; "
                     + "MinScore: " + curMinScore + ", MaxScore: " + curMaxScore + ", "
                     + "CurNode: " + curNode.getNominalMass() + ", CurNodeScore: " + curNodeScore);
-            // Could abort processing
-            // System.exit(-1);
             // Instead, skip this node
             return;
         }

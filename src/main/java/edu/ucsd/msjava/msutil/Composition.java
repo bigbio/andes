@@ -48,10 +48,6 @@ public class Composition extends Matter {
      */
     int number;
 
-    // Unused:
-    // static final double[] monoMass = new double[]{C, H, N, O, S};
-    // static final float[] avgMass = new float[]{12.011f, 1.00794f, 14.00674f, 15.9994f, 32.066f};
-    
     public static final double OffsetY() {
         return offsetY;
     }
@@ -70,8 +66,6 @@ public class Composition extends Matter {
         offsetB = chargeCarrierMass;
     }
 
-
-    //  private Composition() {}
 
     public Composition(int C, int H, int N, int O, int S) {
         number = C * 0x01000000 + H * 0x00010000 + N * 0x00000400 + O * 0x00000010 + S;
@@ -129,15 +123,6 @@ public class Composition extends Matter {
                 compTable.get('S')).number;
 
     }
-    //  public static final Composition getInstance(int C, int H, int N, int O, int S)
-    // {
-    //	  int number = C*0x01000000 + H*0x00010000 + N*0x00000400 + O*0x00000010 + S;
-    // }
-
-    // public static final Composition getInstance(int number)
-    // {
-    //  }
-
     public int getC() {
         return (number & 0xFF000000) >>> 24;
     }
@@ -161,8 +146,6 @@ public class Composition extends Matter {
     public int getNumber() {
         return number;
     }
-    //  public int getIndex()	{ return number; }
-
     @Override
     public int hashCode() {
         return number;
@@ -176,16 +159,6 @@ public class Composition extends Matter {
                 ((number & 0x000003F0) >> 4) * Composition.O +
                 (number & 0x0000000F) * Composition.S);
     }
-
-    // Unused:
-    // public static float getAvgMass(int number) {
-    //     return
-    //             ((number & 0xFF000000) >>> 24) * avgMass[0] +
-    //                     ((number & 0x00FF0000) >> 16) * avgMass[1] +
-    //                    ((number & 0x0000FC00) >> 10) * avgMass[2] +
-    //                     ((number & 0x000003F0) >> 4) * avgMass[3] +
-    //                     (number & 0x0000000F) * avgMass[4];
-    // }
 
     @Override
     public float getMass() {
@@ -204,11 +177,6 @@ public class Composition extends Matter {
     public int getNominalMass() {
         return getC() * 12 + getH() * 1 + getN() * 14 + getO() * 16 + getS() * 32;
     }
-
-    // Unused:
-    //public float getAvgMass() {
-    //    return getC() * avgMass[0] + getH() * avgMass[1] + getN() * avgMass[2] + getO() * avgMass[3] + getS() * avgMass[4];
-    //}
 
     public String toString() {
         return new String(getC() + " " + getH() + " " + getN() + " " + getO() + " " + getS());
@@ -330,19 +298,6 @@ public class Composition extends Matter {
 
         return modMass;
     }
-
-	/*
-  public int compareTo(Composition c) 
-  {
-    float diff = getMass() - c.getMass();
-    if(diff == 0)
-      return this.number - c.number;
-    else if(diff > 0)
-      return 1;
-    else
-      return -1;
-  }
-	 */
 
     public static class CompositionComparator implements Comparator<Integer> {
         public int compare(Integer c1, Integer c2) {

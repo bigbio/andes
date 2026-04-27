@@ -73,8 +73,6 @@ public class Constants {
 
     public static String SPECTRUM_FILE_NAME = "";
 
-//  public static SpectraFileType SPECTRA_FILE_TYPE = SpectraFileType.DTA;
-
     public static String INSTRUMENTS_NAME = "QTOF";
 
     public static String PTM_FILE_NAME = "PTMDB.xml";
@@ -101,9 +99,6 @@ public class Constants {
 
     public static final int maxPTMSizePerGap = 5;
 
-    // public static final int maxPTMOccurrence   = 5;
-
-
     public static final String SPECTRUM_EXTENSION = ".unidta";
 
     public static final String ANALYSIS_EXTENSION = ".unidrawing";
@@ -119,9 +114,6 @@ public class Constants {
     public static final float MINIMUM_PRECURSOR_MASS_ERROR = -1.5f;
 
     public static final float MAXIMIM_PRECURSOR_MASS_ERROR = 1.5f;
-
-    // public static final boolean  IS_TRYPTIC = true; // not used currently
-
 
     // if true, write unidrawing only tag chains whose all gaps are annotated
 
@@ -180,39 +172,6 @@ public class Constants {
 
     public static float PTM_ADD_PENALTY = 0.2f;
 
-
-    // Can use Wysocki paper results?
-  /*
-  public static float getMissingPenaltyWeight(PeakProperty property)
-
-  {
-
-    if(property == PeakProperty.Y_ION)
-
-      return 0.4f;  
-
-    else if(property == PeakProperty.Y_MINUS_NH3_ION)
-
-      return 0;
-
-    else if(property == PeakProperty.Y_MINUS_H2O_ION)
-
-      return 0;
-
-    else if(property == PeakProperty.B_ION)
-
-      return 0;
-
-    else if(property == PeakProperty.A_ION)
-
-      return 0;
-
-    else
-
-      return 0;
-
-  }
-  */
 
     public static float getNotExplainedPenaltyWeight()
 

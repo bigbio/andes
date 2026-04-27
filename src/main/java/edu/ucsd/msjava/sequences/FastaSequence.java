@@ -25,7 +25,6 @@ public class FastaSequence implements Sequence {
 
     // the original serialized fasta file
     private ByteBuffer original;
-    //private char[] original;
 
     // the number of characters in the buffer
     private int size;
@@ -362,20 +361,11 @@ public class FastaSequence implements Sequence {
         char[] seq = new char[(int) (end - start)];
         for (long i = start; i < end; i++) {
             seq[(int) (i - start)] = (char) this.original.get((int) i);
-            //seq[(int)(i-start)] = this.original[(int)i];
         }
         return new String(seq);
     }
 
-	/*
-  public String toString(long start, int ext) {
-    return toString(start, start+ext);
-  }
-	 */
-
     public char getCharAt(long position) {
-        //return toChar(getByteAt(position));
-        //return this.original[(int)position];
         return (char) this.original.get((int) position);
     }
 
@@ -425,7 +415,6 @@ public class FastaSequence implements Sequence {
     public long getStartPosition(long position) {
         Integer startPos = annotations.floorKey((int) position);
         if (startPos == null) {
-            //System.err.println("There is no start for position " + position);
             return 0;
         }
         return startPos;

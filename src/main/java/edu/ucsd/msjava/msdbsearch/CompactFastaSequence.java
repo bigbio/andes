@@ -256,8 +256,6 @@ public class CompactFastaSequence implements Sequence {
 
     public byte getByteAt(long position) {
         // forget boundary check for faster access
-//		if(position >= this.size) return Constants.TERMINATOR;
-//		return this.sequence.get((int)position);
         return this.sequence[(int) position];
     }
 

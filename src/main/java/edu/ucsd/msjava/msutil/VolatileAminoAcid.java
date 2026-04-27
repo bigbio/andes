@@ -21,7 +21,6 @@ public class VolatileAminoAcid extends AminoAcid {
     public static AminoAcid getVolatileAminoAcid(float mass) {
         AminoAcid aa = table.get(mass);
         if (aa == null) {
-//			System.out.println("Register " + mass);
             aa = new VolatileAminoAcid(mass);
             table.put(mass, aa);
         }

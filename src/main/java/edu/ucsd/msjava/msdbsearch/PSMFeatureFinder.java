@@ -15,7 +15,6 @@ import java.util.List;
 public class PSMFeatureFinder {
 
     private final Spectrum spec;    // MS/MS spectrum
-    //	private final Spectrum precursorSpec;
     private final Peptide peptide;
     private final NewScoredSpectrum<NominalMass> scoredSpec;
 
@@ -43,15 +42,11 @@ public class PSMFeatureFinder {
     private int longestB = 0;
     private int longestY = 0;
 
-    //	private Float ms1IonCurrent;
-//	private Float isolationWindowEfficiency;
     private Tolerance mme;
 
     public PSMFeatureFinder(Spectrum spec, Spectrum precursorSpec, Peptide peptide, NewRankScorer scorer) {
         this.spec = spec;
         this.peptide = peptide;
-//		this.precursorSpec = precursorSpec;
-
         scoredSpec = scorer.getScoredSpectrum(spec);
         if (scorer.getSpecDataType().getInstrumentType().isHighResolution())
             mme = new Tolerance(20f, true);    // for high-precision MS/MS, set tolerance as 20ppm
@@ -208,12 +203,10 @@ public class PSMFeatureFinder {
     }
 
     public Float getMS1IonCurrent() {
-//		return ms1IonCurrent;
         return null;
     }
 
     public Float getIsolationWindowEfficiency() {
-//		return isolationWindowEfficiency;
         return null;
     }
 }

@@ -474,13 +474,6 @@ public class DBScanner {
                         double leftThr = (double) (theoPeptideMass - tolDaLeft);
                         double rightThr = (double) (theoPeptideMass + tolDaRight);
 
-//						float tolDaLeft = specScanner.getLeftPrecursorMassTolerance().getToleranceAsDa(peptideMass);
-//						float tolDaRight = specScanner.getRightPrecursorMassTolerance().getToleranceAsDa(peptideMass);
-//						int maxPeptideMassIndex, minPeptideMassIndex;
-//						
-//						maxPeptideMassIndex = maxNominalPeptideMass + Math.round(tolDaLeft-0.4999f);
-//						minPeptideMassIndex = minNominalPeptideMass - Math.round(tolDaRight-0.4999f);
-
                         if (leftThr < 1 || rightThr < 1) {
                             // Either or both of the thresholds is less than 1 (and probably negative)
                             // This can happen when a dynamic mod with a large negative mass is defined and is applied to a small peptide
@@ -494,11 +487,7 @@ public class DBScanner {
 
                         Collection<SpecKey> matchedSpecKeyList = specScanner.getPepMassSpecKeyMap().subMap(leftThr, rightThr).values();
                         if (matchedSpecKeyList.size() > 0) {
-                            //////
-//							System.out.println("\tMatch: " + sequence.getCharAt(index)+"."+sequence.getSubsequence(index+1, index+i+1)+"."+sequence.getCharAt(index+i+1));
-                            ///////
                             boolean isNTermMetCleaved = candidatePepGrid.isNTermMetCleaved(j);
-//							int pepLength = i;
                             int pepLength;
                             if (!isNTermMetCleaved)
                                 pepLength = peptideLengthIndex;
@@ -675,15 +664,6 @@ public class DBScanner {
                 Map<String, DatabaseMatch> pepSeqMap = new HashMap<String, DatabaseMatch>();
                 for (DatabaseMatch m : matchQueue) {
                     String pepSeq = m.getPepSeq();
-//					int index = m.getIndex();
-//					char pre = sa.getSequence().getCharAt(index);
-//					char post;
-//					if(m.isNTermMetCleaved())
-//						post = sa.getSequence().getCharAt(index+m.getLength());
-//					else
-//						post = sa.getSequence().getCharAt(index+m.getLength()-1);
-//					String key = pre+pepSeq+post;
-
                     String key = pepSeq + m.getScore();
                     DatabaseMatch existingMatch = pepSeqMap.get(key);
                     if (existingMatch == null)
@@ -819,7 +799,6 @@ public class DBScanner {
                 }
 
                 float expMass = scorer.getPrecursorPeak().getMass();
-//				float theoMass = pep.getParentMass();
                 float peptideMass = match.getPeptideMass();
                 float pmError = Float.MAX_VALUE;
                 float theoMass = peptideMass + (float) Composition.H2O;
@@ -830,7 +809,6 @@ public class DBScanner {
                         pmError = error;
                     }
                 }
-//				if(pmError > )
                 if (specScanner.getRightPrecursorMassTolerance().isTolerancePPM())
                     pmError = pmError / theoMass * 1e6f;
 

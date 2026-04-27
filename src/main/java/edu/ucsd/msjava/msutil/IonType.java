@@ -273,9 +273,7 @@ public abstract class IonType {
             }
         }
 
-//        System.out.println(maxCharge+"\t"+removeRedundancy+"\t"+nlString);
         Collections.sort(ionList, new IonTypeComparator());
-//        System.out.println("Sorting Done");
 
         if (!removeRedundancy)
             return ionList;

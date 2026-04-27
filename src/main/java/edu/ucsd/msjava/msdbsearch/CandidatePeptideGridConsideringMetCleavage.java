@@ -8,11 +8,6 @@ public class CandidatePeptideGridConsideringMetCleavage extends CandidatePeptide
     private final CandidatePeptideGrid candidatePepGridMetCleaved;        // For peptides with Met cleaved
     boolean isProteinNTermWithHeadingMet = false;
 
-//	public CandidatePeptideGridConsideringMetCleavage(AminoAcidSet aaSet, int maxPeptideLength)
-//	{
-//		this(aaSet, maxPeptideLength, Constants.NUM_VARIANTS_PER_PEPTIDE);
-//	}
-
     public CandidatePeptideGridConsideringMetCleavage(AminoAcidSet aaSet, Enzyme enzyme, int maxPeptideLength, int maxNumVariantsPerPeptide, int maxNumMissedCleavages) {
         super(aaSet, enzyme, maxPeptideLength, maxNumVariantsPerPeptide, maxNumMissedCleavages);
         candidatePepGridMetCleaved = new CandidatePeptideGrid(aaSet, enzyme, maxPeptideLength, maxNumVariantsPerPeptide, maxNumMissedCleavages);

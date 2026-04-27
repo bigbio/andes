@@ -106,7 +106,6 @@ public class TargetDecoyAnalysis {
             threshold = Float.MIN_VALUE;
 
             for (Entry<Float, Float> entry : map.entrySet()) {
-//                System.out.println(entry.getKey()+"\t"+entry.getValue());
                 if (entry.getValue() > fdrThreshold)
                     break;
                 else
@@ -177,7 +176,6 @@ public class TargetDecoyAnalysis {
                 fdrMap.put(decoyScore, fdr);
                 if (fdr >= 1)
                     break;
-//                System.out.println("1: " + decoyScore + ":" + fdr);
             }
         }
 
@@ -206,16 +204,6 @@ public class TargetDecoyAnalysis {
             finalFDRMap.put(entry.getKey(), fdr);
         }
 
-//        if(isGreaterBetter)
-//        {
-//            finalFDRMap.put(Float.POSITIVE_INFINITY, 0f);
-//            finalFDRMap.put(Float.NEGATIVE_INFINITY, 1f);
-//        }
-//        else
-//        {
-//            finalFDRMap.put(Float.POSITIVE_INFINITY, 1f);
-//            finalFDRMap.put(Float.NEGATIVE_INFINITY, 0f);
-//        }
         return finalFDRMap;
     }
 

@@ -408,8 +408,6 @@ public class NewRankScorer implements NewAdditiveScorer {
                     for (int i = 0; i < ionExTable.length; i++) {
                         ionExTable[i] = in.readFloat();
                         if (ionExTable[i] == 0) {
-//							System.out.println("IonExTable: " + partition.getCharge() + " " + partition.getSegNum() 
-//									+ " " + partition.getParentMass() + " " + ionExTable[i]);
                             ionExTable[i] = 0.001f;
                         }
                         assert (ionExTable[i] > 0);
@@ -764,9 +762,6 @@ public class NewRankScorer implements NewAdditiveScorer {
             // Rank distributions
             out.writeInt(maxRank);
             for (Partition partition : partitionSet) {
-//				if(partition.getParentMass() > 4100 && partition.getCharge() == 5 && partition.getSegNum() == 1)
-//					System.out.println("Debug");
-
                 HashMap<IonType, Float[]> rankDistTable = getRankDistTable(partition);
                 if (rankDistTable == null)
                     continue;
@@ -786,10 +781,6 @@ public class NewRankScorer implements NewAdditiveScorer {
             }
 
             // Error distribution
-//			protected int errorScalingFactor = 0;	// if 0, don't user errors, 10 for low accuracy, 100 for high accuracy
-//			protected Hashtable<Partition,Float[]> ionErrDistTable = null;
-//			protected Hashtable<Partition,Float[]> noiseErrDistTable = null;
-//			protected Hashtable<Partition,Float[]> ionExistenceTable = null;
             out.writeInt(errorScalingFactor);
             if (errorScalingFactor > 0) {
                 for (Partition partition : partitionSet) {

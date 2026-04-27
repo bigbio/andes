@@ -276,11 +276,6 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
 
         ArrayList<AminoAcid> aaList = aaSet.getAAList(location);
 
-//		if(enzymaticCleavageOnly && direction != enzyme.isNTerm())
-//			aaList = aaSet.getEnzymeAAList();
-//		else
-//			aaList = aaSet.getAAList(location);
-
         int peptideNominalMass = pmNode.getNominalMass();
         ArrayList<DeNovoGraph.Edge<NominalMass>> edges = new ArrayList<DeNovoGraph.Edge<NominalMass>>();
         for (AminoAcid aa : aaList) {
@@ -321,17 +316,9 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
                     aa.getProbability(),
                     aaSet.getIndex(aa),
                     aa.getMass());
-//			if(curNode.getNominalMass() == 57 && nextNode.getNominalMass() == 114)
-//				System.out.println("Debug");
             int errorScore = scoredSpec.getEdgeScore(nextNode, curNode, aa.getMass());
-//			if(aa.isModified())
-//				errorScore += MODIFIED_EDGE_PENALTY;
             if (errorScore < -100 || errorScore > 100) {
                 System.err.println("Warning, invalid ErrorScore: " + errorScore);
-
-                // Could abort the search
-                // System.exit(-1);
-
                 // Instead, use a score of -4
                 errorScore = -4;
             }
@@ -347,19 +334,4 @@ public class FlexAminoAcidGraph extends DeNovoGraph<NominalMass> {
         }
     }
 
-//	private void computeEdgeScores()
-//	{
-//		for(NominalMass curNode : intermediateNodes)
-//		{
-//			ArrayList<DeNovoGraph.Edge<NominalMass>> edges = edgeMap.get(curNode);
-//			for(DeNovoGraph.Edge<NominalMass> edge : edges)
-//			{
-//				NominalMass prevNode = edge.getPrevNode();
-//				int errorScore = scoredSpec.getEdgeScore(curNode, prevNode, edge.getEdgeMass());
-//				assert(errorScore == edge.getErrorScore());
-//				edge.setErrorScore(errorScore);
-//			}
-//			edgeMap.put(curNode, edges);
-//		}
-//	}	
 }

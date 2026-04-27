@@ -98,8 +98,6 @@ public class ProfileGF<T extends Matter> {
         int thresholdScore = gf.getThresholdScore(specProb) + 1;
         if (thresholdScore >= gf.getMaxScore())
             thresholdScore = gf.getMaxScore() - 1;
-//		else if(thresholdScore < gf.getMaxScore()-gf.getNumScoreBinsPerNode())
-//			thresholdScore = gf.getMaxScore()-gf.getNumScoreBinsPerNode();
 
         return computeProfile(thresholdScore);
     }
@@ -182,18 +180,6 @@ public class ProfileGF<T extends Matter> {
                 if (prevBwdDist != null)
                     prevBwdDist.addNumber(score - curNodeScore, numberRecs);
             }
-//			for(int aaIndex : pointer.getBacktrackAAIndexList(score))
-//			{
-//				if((bits & (1 << aaIndex)) == 0){
-//					bits |= (1 << aaIndex);
-//					T prevNode = gf.getGraph().getPreviousNode(curNode, gf.getGraph().getAASet().getAminoAcid(aaIndex));
-//					prevBwdDists[aaIndex] =  bwdTable.get(prevNode);
-//				}
-//				T prevNode = gf.getGraph().getPreviousNode(curNode, gf.getAASet().getAminoAcid(aaIndex));
-//				ScoreDist prevBwdDist = prevBwdDists[aaIndex];
-//				if(prevBwdDist != null)
-//					prevBwdDist.addNumber(score-curNodeScore, numberRecs);
-//			}
         }
     }
 }

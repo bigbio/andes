@@ -167,7 +167,6 @@ public class AminoAcid extends Matter {
                     new AminoAcid('V', "Valine",         new Composition(5, 9, 1, 1, 0)),   // 99.0684
                     new AminoAcid('T', "Threonine",      new Composition(4, 7, 1, 2, 0)),   // 101.0477
                     new AminoAcid('C', "Cystine",        new Composition(3, 5, 1, 1, 1)),   // 103.0092
-                    // new AminoAcid('O', "Hydroxyproline", new Composition(5, 7, 1, 2, 0)),   // 113.0477; note that O could be Hydroxyproline, Ornithine, or Pyrrolysine
                     new AminoAcid('L', "Leucine",        new Composition(6, 11, 1, 1, 0)),  // 113.0841
                     new AminoAcid('I', "Isoleucine",     new Composition(6, 11, 1, 1, 0)),  // 113.0841
                     new AminoAcid('N', "Asparagine",     new Composition(4, 6, 2, 2, 0)),   // 114.0429

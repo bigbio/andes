@@ -224,13 +224,6 @@ public class TSVPSMSet extends PSMSet {
         else
             pep = annotation;
 
-        // if there are flanking amino acids (e.g. R.ACDEFK.G), remove them
-//		int firstDotIndex = annotation.indexOf('.');
-//		int lastDotIndex = annotation.lastIndexOf('.');
-//		if(firstDotIndex < lastDotIndex)
-//			pep = annotation.substring(firstDotIndex+1, lastDotIndex);
-//		else
-//			pep = annotation;
         pep = pep.toUpperCase();
         return pep;
     }

@@ -209,7 +209,6 @@ public class ProteinFastaSequences implements MassSequence {
 
     public String getAnnotation(long position) {
         long pair = translate(position);
-        //System.out.println(this.files.get((int)(pair>>>32)) + " ");
         return getSequence((int) (pair >>> 32)).getAnnotation((int) pair);
     }
 

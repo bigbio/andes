@@ -190,9 +190,6 @@ public class CompactSuffixArray {
             }
         }
 
-        //System.out.println("LastModified times in the existing csarr and cnlcp files " +
-        //        "match the LastModified time of the sequence file (" + lastModified + ")");
-
         return true;
     }
 
@@ -730,17 +727,7 @@ public class CompactSuffixArray {
 
     @Override
     public String toString() {
-        String retVal = "Size of the suffix array: " + this.size + "\n";
-//		int rank = 0;
-//		while(indices.hasRemaining()) {
-//			int index = indices.get();
-//			int lcp = this.neighboringLcps.get(rank);
-//			retVal += rank + "\t" + index + "\t" + lcp + "\t" + sequence.toString(factory.makeSuffix(index).getSequence()) + "\n";
-//			rank++;
-//		}
-//		indices.rewind();        // reset marks after iteration
-//		neighboringLcps.rewind();
-        return retVal;
+        return "Size of the suffix array: " + this.size + "\n";
     }
 
     public void measureNominalMassError(AminoAcidSet aaSet) throws Exception {

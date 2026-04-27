@@ -1029,15 +1029,6 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
                 specFormat = SpecFileFormat.MZML;
             else if (extension.equalsIgnoreCase(".mgf"))
                 specFormat = SpecFileFormat.MGF;
-            else if (extension.equalsIgnoreCase(".ms2"))
-                specFormat = SpecFileFormat.MS2;
-            else if (extension.equalsIgnoreCase(".pkl"))
-                specFormat = SpecFileFormat.PKL;
-        }
-        if (specFormat == null && specFileName.length() > 8) {
-            String suffix = specFileName.substring(specFileName.length() - 8);
-            if (suffix.equalsIgnoreCase("_dta.txt"))
-                specFormat = SpecFileFormat.DTA_TXT;
         }
 
         return specFormat;

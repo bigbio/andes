@@ -40,7 +40,7 @@ public final class MSGFPlusOptions {
     // ---------- input (required at runtime, but may be provided via -conf) ----------
 
     @Option(names = "-s", paramLabel = "SpectrumFile",
-            description = "Input spectrum file (*.mzML, *.mzXML, *.mgf, *.ms2, *.pkl, *_dta.txt) or directory of spectra. "
+            description = "Input spectrum file (*.mzML, *.mgf) or directory of spectra. "
                     + "Required, unless provided via -conf as SpectrumFile=...")
     public File spectrumFile;
 

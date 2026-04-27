@@ -500,13 +500,10 @@ public class SearchParams {
         return null;
     }
 
-    /** Spectrum-format whitelist (formerly enforced by FileParameter.isSupported). */
+    /** Spectrum-format whitelist: only mzML and MGF are supported. */
     private static boolean isSupportedSpectrumFormat(SpecFileFormat fmt) {
         return fmt == SpecFileFormat.MZML
-                || fmt == SpecFileFormat.MGF
-                || fmt == SpecFileFormat.MS2
-                || fmt == SpecFileFormat.PKL
-                || fmt == SpecFileFormat.DTA_TXT;
+                || fmt == SpecFileFormat.MGF;
     }
 
 

@@ -23,10 +23,6 @@ public class SpecFileFormat extends FileFormat {
 
     public static final SpecFileFormat MGF;
     public static final SpecFileFormat MZML;
-    public static final SpecFileFormat MS2;
-    public static final SpecFileFormat PKL;
-    public static final SpecFileFormat MZDATA;
-    public static final SpecFileFormat DTA_TXT;
 
     public static SpecFileFormat getSpecFileFormat(String specFileName) {
         String lowerCaseFileName = specFileName.toLowerCase();
@@ -44,17 +40,9 @@ public class SpecFileFormat extends FileFormat {
     static {
         MGF = new SpecFileFormat(".mgf", "MS:1001062", "Mascot MGF file");
         MZML = new SpecFileFormat(".mzML", "MS:1000584", "mzML file");
-        MS2 = new SpecFileFormat(".ms2", "MS:1001466", "MS2 file");
-        PKL = new SpecFileFormat(".pkl", "MS:1000565", "Micromass PKL file");
-        MZDATA = new SpecFileFormat(".mzData", "MS:1000564", "PSI mzData file");
-        DTA_TXT = new SpecFileFormat("_dta.txt", "MS:XXXXXXX", "PNNL dta.txt file");
 
         specFileFormatList = new ArrayList<SpecFileFormat>();
         specFileFormatList.add(MGF);
         specFileFormatList.add(MZML);
-        specFileFormatList.add(MS2);
-        specFileFormatList.add(PKL);
-        specFileFormatList.add(MZDATA);
-        specFileFormatList.add(DTA_TXT);
     }
 }

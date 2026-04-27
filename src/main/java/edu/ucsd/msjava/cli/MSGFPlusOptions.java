@@ -105,7 +105,7 @@ public final class MSGFPlusOptions {
     public Integer tdaStrategy;
 
     @Option(names = "-m", paramLabel = "ID",
-            description = "Fragmentation method ID: 0=as written/CID (Default), 1=CID, 2=ETD, 3=HCD")
+            description = "Fragmentation method ID: 0=as written/CID (Default), 1=CID, 2=ETD, 3=HCD, 4=UVPD")
     public Integer fragMethodId;
 
     @Option(names = "-inst", paramLabel = "ID",
@@ -285,8 +285,11 @@ public final class MSGFPlusOptions {
     }
 
     /** Resolves {@code -m} index to {@link ActivationMethod}. MSGFPlus exposes
-     *  0=ASWRITTEN, 1=CID, 2=ETD, 3=HCD (FUSION is excluded by
-     *  {@code addFragMethodParam(..., doNotAddMergeMode=true)}). */
+     *  0=ASWRITTEN, 1=CID, 2=ETD, 3=HCD, 4=UVPD. The registry also defines
+     *  FUSION (merge-mode synthetic method) and PQD, but neither is exposed
+     *  as a user-selectable index by MSGFPlus -- FUSION was hidden by the
+     *  legacy {@code addFragMethodParam(..., doNotAddMergeMode=true)}, which
+     *  shifted UVPD from registry slot 5 down to user-facing index 4. */
     public ActivationMethod effectiveActivationMethod() {
         int idx = fragMethodId != null ? fragMethodId : 0;
         switch (idx) {
@@ -294,6 +297,7 @@ public final class MSGFPlusOptions {
             case 1: return ActivationMethod.CID;
             case 2: return ActivationMethod.ETD;
             case 3: return ActivationMethod.HCD;
+            case 4: return ActivationMethod.UVPD;
             default: throw new IllegalArgumentException("invalid -m index: " + idx);
         }
     }

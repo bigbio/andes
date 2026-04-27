@@ -60,7 +60,7 @@ public final class MSGFPlusOptions {
     public File outputFile;
 
     @Option(names = "-decoy", paramLabel = "Prefix",
-            description = "Decoy protein prefix; Default: DECOY_")
+            description = "Decoy protein prefix; Default: XXX")
     public String decoyPrefix;
 
     // ---------- precursor mass tolerance ----------
@@ -331,6 +331,7 @@ public final class MSGFPlusOptions {
      * @return null on success, error string otherwise.
      */
     public String applyConfigFile(File file) {
+        int unrecognizedCount = 0;
         try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
             String line;
             int lineNum = 0;
@@ -343,16 +344,26 @@ public final class MSGFPlusOptions {
                 String rawKey = trimmed.substring(0, eq).trim();
                 String value = trimmed.substring(eq + 1).trim();
                 String key = canonicalConfigKey(rawKey);
+                int before = unrecognizedConfigEntries;
                 String err = applyConfigEntry(key, value, file.getName());
                 if (err != null) {
                     return "Error parsing line " + lineNum + " of " + file.getName() + ": " + err;
                 }
+                if (unrecognizedConfigEntries > before) unrecognizedCount++;
             }
         } catch (IOException e) {
             return "Error reading config file " + file.getPath() + ": " + e.getMessage();
         }
+        if (unrecognizedCount > 0) {
+            System.out.println("Valid parameters are described in the example parameter file at " +
+                    "https://github.com/MSGFPlus/msgfplus/blob/master/docs/examples/MSGFPlus_Params.txt");
+        }
         return null;
     }
+
+    /** Counter incremented inside {@link #applyConfigEntry} whenever an unknown
+     *  config-file key is seen; surfaced via the end-of-file URL hint. */
+    private int unrecognizedConfigEntries;
 
     private String applyConfigEntry(String key, String value, String fileName) {
         // Repeated entries: collect into lists. "none" is treated as no entry.
@@ -415,6 +426,7 @@ public final class MSGFPlusOptions {
                 default:
                     if (!key.toLowerCase().startsWith("enzymedef")) {
                         System.out.println("Warning, unrecognized parameter '" + key + "=" + value + "' in config file " + fileName);
+                        unrecognizedConfigEntries++;
                     }
                     return null;
             }

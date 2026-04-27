@@ -351,6 +351,9 @@ public class SearchParams {
 
         if (!specPath.isDirectory()) {
             SpecFileFormat specFormat = SpecFileFormat.getSpecFileFormat(specPath.getName());
+            if (!isSupportedSpectrumFormat(specFormat)) {
+                return "Spectrum file extension does not match a supported format (*.mzML, *.mgf): " + specPath.getName();
+            }
             File outputFile = opts.outputFile;
             if (outputFile == null) {
                 String outputFilePath = specPath.getPath().substring(0, specPath.getPath().lastIndexOf('.')) + defaultExt;

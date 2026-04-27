@@ -823,7 +823,10 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
         ModificationMetadata modMetadata = new ModificationMetadata(opts.effectiveMaxNumMods());
 
         for (int i = 0; i < customAAEntries.size(); i++) {
-            if (!parseConfigEntry(configName, i + 1, "CustomAA=" + customAAEntries.get(i), mods, customAA, modMetadata)) {
+            // parseConfigEntry expects bare comma-separated mod definitions, not
+            // a "Key=value" line. MSGFPlusOptions.applyConfigEntry already strips
+            // the "CustomAA=" prefix when populating opts.customAAs.
+            if (!parseConfigEntry(configName, i + 1, customAAEntries.get(i), mods, customAA, modMetadata)) {
                 System.exit(-1);
             }
         }

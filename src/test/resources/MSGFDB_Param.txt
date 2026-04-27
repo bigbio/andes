@@ -1,8 +1,7 @@
-#Parent mass tolerance 
+#Precursor mass tolerance
 #  Examples: 2.5Da or 30ppm
 #  Use comma to set asymmetric values, for example "0.5Da,2.5Da" will set 0.5Da to the left (expMass<theoMass) and 2.5Da to the right (expMass>theoMass)
-#PMTolerance=20ppm
-ParentMassTolerance=20ppm
+PrecursorMassTolerance=20ppm
 
 #Max Number of Modifications per peptide 
 # If this value is large, the search will be slow
@@ -45,7 +44,7 @@ EnzymeID=1
 #  Ignored if the parent mass tolerance is > 0.5Da or 500ppm
 #  The combination of -t and -ti determins the precursor mass tolerance.
 #  e.g. "-t 20ppm -ti -1,2" tests abs(exp-calc-n*1.00335Da)<20ppm for n=-1, 0, 1, 2.
-IsotopeError=-1,2
+IsotopeErrorRange=-1,2
 
 #Number of tryptic termini
 #  The number of peptide termini that must have been cleaved by the enzyme (default 1)
@@ -56,11 +55,6 @@ NTT=2
 #  0 means don't search decoy database (default)
 #  1 means search decoy database to compute FDR (source FASTA file must be forward-only proteins)
 TDA=1
-
-#Include decoy peptides (only applicable when TDA=1)
-#  0 means to not include decoy (reverse) peptides
-#  1 means to include decoy PSMs after all target (forward) PSMs
-showDecoy=1
 
 #Number of Threads (by default, uses all available cores)
 #In DMS, a settings file entry for MSGFDBThreads will override this value
@@ -81,13 +75,6 @@ maxCharge=5
 #Number of matches per spectrum to be reported
 #If this value is greater than 1 then the FDR values computed by MS-GF+ will be skewed by high-scoring 2nd and 3rd hits
 NumMatchesPerSpec=2
-
-#Amino Acid Frequencies
-#  If 0, compute amino acid frequencies from the input database and use them as amino acid probabilities
-#  If 1, use uniform amino acid probability (preferable when the database size is small)
-#  If auto, then Analysis Manager will auto-set this to 0 if the .Fasta file is more than 20 KB in size
-uniformAAProb=auto
-
 
 #Amino Acid Modification Examples
 # Specify static modifications using one or more StaticMod= entries

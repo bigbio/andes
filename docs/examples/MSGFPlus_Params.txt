@@ -1,5 +1,5 @@
 # SpectrumFile
-#  *.mzML, *.mzXML, *.mgf, *.ms2, *.pkl or *_dta.txt
+#  *.mzML or *.mgf
 #  Spectra should be centroided (see below for MSConvert example). Profile spectra will be ignored.
 #  Use of -s at the command line will override this filename
 #SpectrumFile=InstrumentFile.mzML

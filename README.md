@@ -12,8 +12,8 @@
 
 MS-GF+ (aka MSGF+ or MSGFPlus) performs peptide identification by scoring
 MS/MS spectra against peptides derived from a protein sequence database.
-It supports the HUPO PSI standard input file (mzML) and additional legacy spectrum inputs, and saves results in
-the mzIdentML format, though results can easily be transformed to TSV.
+It supports the HUPO PSI standard input file (mzML) plus MGF, and writes
+Percolator `.pin` (default) or TSV output.
 ProteomeXchange supports Complete data submissions using MS-GF+ search results.
 
 MS-GF+ is developed by Sangtae Kim and the PNNL Proteomics team at the
@@ -22,10 +22,11 @@ Center for Computational Mass Spectrometry, University of California, San Diego.
 ## What is different in this fork?
 
 - **Streaming mzML parser** -- replaces the in-memory preload with a single-pass StAX parser, significantly reducing memory usage for large files
-- **Primary maintained formats: mzML and MGF** -- mzXML is not available in this fork
+- **Spectrum input narrowed to mzML and MGF** -- mzXML, MS2, PKL, and `_dta.txt` are not supported in this fork
+- **mzIdentML output removed** -- output is Percolator `.pin` (default) or TSV; feed `.pin` straight into Percolator for rescoring
+- **Picocli-based CLI** -- declarative typed flags with auto-generated `-h/--help`
 - **Java 17 minimum** -- updated from Java 8
 - **CI/CD** -- GitHub Actions for automated testing and releases
-- **Direct TSV output** -- optional TSV output alongside mzIdentML
 
 ## Requirements
 
@@ -39,13 +40,13 @@ Download the latest release from the [Releases page](https://github.com/bigbio/m
 ## Quick Start
 
 ```bash
-# Basic search
+# Basic search (writes results.pin in Percolator format)
 java -Xmx4G -jar MSGFPlus.jar \
   -s spectra.mzML \
   -d database.fasta \
-  -o results.mzid
+  -o results.pin
 
-# TMT search with target-decoy analysis
+# TMT search with target-decoy analysis, Percolator-ready output
 java -Xmx8G -jar MSGFPlus.jar \
   -s spectra.mzML \
   -d database.fasta \
@@ -56,11 +57,13 @@ java -Xmx8G -jar MSGFPlus.jar \
   -e 1 \
   -protocol 4 \
   -mod mods.txt \
-  -o results.mzid
+  -o results.pin
 
-# Convert mzid output to TSV
-java -cp MSGFPlus.jar edu.ucsd.msjava.ui.MzIDToTsv \
-  -i results.mzid \
+# Direct TSV output (skip Percolator)
+java -Xmx4G -jar MSGFPlus.jar \
+  -s spectra.mzML \
+  -d database.fasta \
+  -outputFormat tsv \
   -o results.tsv
 ```
 
@@ -70,14 +73,14 @@ java -cp MSGFPlus.jar edu.ucsd.msjava.ui.MzIDToTsv \
 
 | Flag | Name | Description |
 |------|------|-------------|
-| `-s` | SpectrumFile | Input spectrum file (`*.mzML`, `*.mgf`, `*.ms2`, `*.pkl`, `*_dta.txt`). Spectra should be centroided. |
+| `-s` | SpectrumFile | Input spectrum file (`*.mzML`, `*.mgf`). Spectra should be centroided. |
 | `-d` | DatabaseFile | Protein sequence database (`*.fasta`, `*.fa`, `*.faa`). |
 
 ### Core Search Parameters
 
 | Flag | Name | Default | Description |
 |------|------|---------|-------------|
-| `-o` | OutputFile | `[input].mzid` | Output file path (`.mzid` format). |
+| `-o` | OutputFile | `[input].pin` | Output file path (`.pin` Percolator format, default; `.tsv` if `-outputFormat tsv`). |
 | `-conf` | ConfigurationFile | — | Configuration file; command-line options override config file settings. |
 | `-t` | PrecursorMassTolerance | `20ppm` | Precursor mass tolerance (e.g., `2.5Da`, `20ppm`, or `0.5Da,2.5Da` for asymmetric). |
 | `-ti` | IsotopeErrorRange | `0,1` | Range of allowed isotope peak errors (e.g., `-1,2`). |

@@ -50,7 +50,7 @@ MS-GF+ currently uses `int`-indexed suffix-array and byte-array structures for t
 
 Affected workflows: metaproteomics, proteogenomics, antibody-repertoire searches, and pan-microbial databases.
 
-**Workaround today** — split the FASTA into chunks ≤ 250 MB, run one MS-GF+ search per chunk, and merge the resulting mzIdentML files. [MzidMerger](https://github.com/PNNL-Comp-Mass-Spec/Mzid-Merger) is the standard tool for the merge step.
+**Workaround today** — split the FASTA into chunks ≤ 250 MB, run one MS-GF+ search per chunk, and concatenate the resulting `.pin` (or `.tsv`) files. For `.pin` outputs the header line repeats per chunk; drop duplicate header rows after the first, then feed the merged file to Percolator.
 
 **Planned fix** — 64-bit indexed FASTA storage is tracked as Priority 1 in the `bigbio/msgfplus` performance roadmap. See the investigation note in `.claude/investigations/` (not shipped).
 
@@ -107,7 +107,7 @@ Related issue: [#52](https://github.com/MSGFPlus/msgfplus/issues/52).
 
 Reported in [OpenMS #1764](https://github.com/OpenMS/OpenMS/issues/1764). The command line works; TOPPAS fails because of how it passes environment and quoted arguments.
 
-**Workaround** — run MS-GF+ directly from the command line and import the resulting mzIdentML into OpenMS.
+**Workaround** — run MS-GF+ directly from the command line and feed the resulting `.pin` (or `.tsv`) into OpenMS via `PercolatorAdapter` / `MSGFPlusAdapter`.
 
 ---
 

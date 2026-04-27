@@ -171,28 +171,4 @@ public class NewScorerFactory {
         return scorer;
     }
 
-    public static void main(String argv[]) {
-        for (ActivationMethod method : ActivationMethod.getAllRegisteredActivationMethods()) {
-            if (method == ActivationMethod.FUSION || method == ActivationMethod.ASWRITTEN)
-                continue;
-            for (InstrumentType inst : InstrumentType.getAllRegisteredInstrumentTypes()) {
-                for (Enzyme enzyme : Enzyme.getAllRegisteredEnzymes()) {
-                    for (Protocol protocol : Protocol.getAllRegisteredProtocols()) {
-//						if(method == ActivationMethod.HCD && inst == InstrumentType.QEXACTIVE && enzyme == Enzyme.UnspecificCleavage && protocol == Protocol.NOPROTOCOL)
-//						{
-//							System.out.println("Debug");
-//						}
-                        NewRankScorer scorer = NewScorerFactory.get(method, inst, enzyme, protocol);
-                        System.out.print(method.getName() + "_" + inst.getName() + "_" + enzyme.getName() + "_" + protocol.getName() + " -> ");
-                        if (scorer != null) {
-                            System.out.println(scorer.getSpecDataType());
-                        } else {
-                            System.err.println("Null!");
-                            System.exit(-1);
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

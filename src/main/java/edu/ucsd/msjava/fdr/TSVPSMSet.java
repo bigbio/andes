@@ -235,18 +235,4 @@ public class TSVPSMSet extends PSMSet {
         return pep;
     }
 
-    public static void main(String argv[]) throws Exception {
-        File file = new File("/home/sangtaekim/Research/ToolDistribution/Test/inspect.out");
-        ArrayList<Pair<Integer, ArrayList<String>>> reqStrList = new ArrayList<Pair<Integer, ArrayList<String>>>();
-        ArrayList<String> charges = new ArrayList<String>();
-        charges.add("1");
-        charges.add("3");
-        ArrayList<String> peps = new ArrayList<String>();
-        peps.add("EE");
-        reqStrList.add(new Pair<Integer, ArrayList<String>>(2, peps));
-        reqStrList.add(new Pair<Integer, ArrayList<String>>(4, charges));
-        TSVPSMSet psmSet = new TSVPSMSet(file, "\t", true, 14, true, 0, 1, 2, reqStrList);
-        psmSet.read();
-        psmSet.printPeptideScoreTable();
-    }
 }

@@ -383,47 +383,6 @@ public class Composition extends Matter {
 
 
     /**
-     * Check compositions sums that are equal to another standard composition.
-     */
-    private static void checkEquality() {
-        // check which compositions are the sum of any two standard composition
-        AminoAcid[] stdAa = AminoAcid.getStandardAminoAcids();
-        Composition[] stdComp = new Composition[stdAa.length];
-        for (int i = 0; i < stdAa.length; i++) {
-            stdComp[i] = stdAa[i].getComposition();
-        }
-
-        System.out.println("Composition equalities: ");
-        for (int i = 0; i < stdAa.length; i++) {
-            for (int j = i; j < stdAa.length; j++) {
-                Composition sum = stdComp[i].getAddition(stdComp[j]);
-                for (int k = 0; k < stdAa.length; k++) {
-                    if (sum.equals(stdComp[k])) {
-                        System.out.println(stdAa[i].toString() + " plus " + stdAa[j].toString() + " equals " + stdAa[k].toString());
-                    }
-                }
-            }
-        }
-
-        int[] singleMasses = new int[stdAa.length];
-        for (int i = 0; i < stdAa.length; i++) {
-            singleMasses[i] = stdAa[i].getNominalMass();
-        }
-        System.out.println("Integer equalities: ");
-        for (int i = 0; i < stdAa.length; i++) {
-            for (int j = i; j < stdAa.length; j++) {
-                int sum = stdComp[i].getNominalMass() + stdComp[j].getNominalMass();
-                for (int k = 0; k < stdAa.length; k++) {
-                    if (sum == stdComp[k].getNominalMass()) {
-                        System.out.println(stdAa[i].toString() + " plus " + stdAa[j].toString() + " equals " + stdAa[k].toString());
-                    }
-                }
-            }
-        }
-
-    }
-
-    /**
      * Remove spaces and tab characters anywhere in the text
      * @param text
      * @return
@@ -432,30 +391,4 @@ public class Composition extends Matter {
         return text.replaceAll("[ \\t]", "").trim();
     }
 
-    public static void main(String argv[]) {
-        /*
-    Composition[] aa = {
-      new Composition(2,3,1,1,0),
-      new Composition(3,5,1,1,0),
-      new Composition(3,5,1,2,0),
-      new Composition(5,7,1,1,0),
-      new Composition(5,9,1,1,0),
-      new Composition(4,7,1,2,0),
-      new Composition(3,5,1,1,1),
-      new Composition(6,11,1,1,0),
-      new Composition(4,6,2,2,0),
-      new Composition(4,5,1,3,0),
-      new Composition(5,8,2,2,0),
-      new Composition(6,12,2,1,0),
-      new Composition(5,7,1,3,0),
-      new Composition(5,9,1,1,1),Serializable, 
-      new Composition(6,7,3,1,0),
-      new Composition(9,9,1,1,0),
-      new Composition(6,12,4,1,0),
-      new Composition(9,9,1,2,0),
-      new Composition(11,10,2,1,0),
-    };
-		 */
-        checkEquality();
-    }
 }

@@ -113,13 +113,10 @@
             <scope>test</scope>
             <type>jar</type>
         </dependency>
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-text</artifactId>
-            <version>1.11.0</version>
-        </dependency>
         <!-- jmzml removed: replaced by StaxMzMLParser -->
         <!-- jmzidml removed: pin-direct output; CvParamInfo replaces uk.ac.ebi.jmzidml types -->
+        <!-- commons-text removed: no callers -->
+        <!-- commons-io removed: replaced by OutputStream.nullOutputStream() (Java 11) and inline lastIndexOf('.') -->
         <dependency>
             <groupId>it.unimi.dsi</groupId>
             <artifactId>fastutil</artifactId>
@@ -134,11 +131,6 @@
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
             <version>1.2.12</version>
-        </dependency>
-        <dependency>
-            <groupId>commons-io</groupId>
-            <artifactId>commons-io</artifactId>
-            <version>2.15.1</version>
         </dependency>
         <dependency>
             <groupId>info.picocli</groupId>

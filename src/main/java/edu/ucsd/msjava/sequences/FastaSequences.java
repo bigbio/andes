@@ -220,21 +220,6 @@ public class FastaSequences implements Sequence {
         return getSequence((int) (pair >>> 32)).getCharAt((int) pair);
     }
 
-    public static void main(String[] args) {
-        String userHome = System.getProperty("user.home");
-        String directory = userHome + "/Data/Databases/Scerv/gen";
-        FastaSequences pfs = new FastaSequences(directory, false);
-
-        System.out.println("Total number of bases: " + pfs.getSize());
-        for (long start = 0; start < pfs.getSize(); start++) {
-            if (start % 1000000 == 0) {
-                if (pfs.isTerminator(start))
-                    System.out.println(pfs.getAnnotation(start));
-            }
-            pfs.getByteAt(start);
-        }
-    }
-
     public byte[] getBytes(int start, int end) {
         long pair1 = translate(start);
         long pair2 = translate(end);

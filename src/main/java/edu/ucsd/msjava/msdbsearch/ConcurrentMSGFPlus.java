@@ -3,15 +3,14 @@ package edu.ucsd.msjava.msdbsearch;
 import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.misc.ProgressReporter;
 
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
 
-import org.apache.commons.io.output.NullOutputStream;
-
 public class ConcurrentMSGFPlus {
-    private static final PrintStream NULL_PRINT_STREAM = new PrintStream(new NullOutputStream());
+    private static final PrintStream NULL_PRINT_STREAM = new PrintStream(OutputStream.nullOutputStream());
 
     /** Per-task wall stats in milliseconds. {@code null} if the task didn't
      *  complete (interrupted). */

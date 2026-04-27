@@ -317,19 +317,4 @@ public class ProteinFastaSequences implements MassSequence {
 
 
     /***** Main method to get the size of the database *****/
-    public static void main(String[] args) {
-        String userHome = System.getProperty("user.home");
-        String directory = userHome + "/Data/Databases/Hsapiens/translated";
-        ProteinFastaSequences pfs = new ProteinFastaSequences(directory, false);
-
-        System.out.println("Total number of bases: " + pfs.getSize());
-        for (long start = 0; start < pfs.getSize(); start++) {
-            if (start % 1000000 == 0) {
-                if (pfs.isTerminator(start))
-                    System.out.println(pfs.getAnnotation(start));
-            }
-            pfs.getByteAt(start);
-        }
-    }
-
 }

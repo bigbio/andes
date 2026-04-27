@@ -410,39 +410,4 @@ public class MgfSpectrumParser implements SpectrumParser {
     }
 
     // test code
-    public static void main(String argv[]) throws Exception {
-        long time = System.currentTimeMillis();
-        String mgfFile = "/Users/sangtaekim/Research/Data/PNNL/IPYS_TD_Scere010_Orbitrap_001a.mgf";
-//		String mgfFile = "/Users/sangtaekim/Research/Data/AgilentQTOF/notAnnotatedAgilentQTOF.mgf";
-
-	    /*
-        // SpectraIterator test
-		MgfSpectrumParser parser = new MgfSpectrumParser();
-	    SpectraIterator itr = new SpectraIterator(mgfFile, parser);
-	    int size = 0;
-	    while(itr.hasNext())
-	    {
-	    	Spectrum spec = itr.next();
-	    	size++;
-	    	System.out.println(spec.getScanNum()+" "+spec.getPrecursorPeak());
-	    }
-	    System.out.println("Size: " + size);
-	    */
-        //  SpectraMap test
-
-	    /*	SpectraMap test
-	    SpectraMap map = new SpectraMap(mgfFile, new MgfSpectrumParser());
-	    Spectrum spec = map.getSpectrumByScanNum(1585);
-	    System.out.println(spec.getScanNum() + " " + spec.getPrecursorPeak());
-	    */
-
-//	    SpectraContainer container = new SpectraContainer(mgfFile, new MgfSpectrumParser());
-//	    for(Spectrum spec : container)
-//	    	System.out.println(spec.getScanNum() + " " + spec.getPrecursorPeak());
-        ArrayList<Spectrum> specContainer = new ArrayList<Spectrum>();
-        SpectraIterator iterator = new SpectraIterator(mgfFile, new MgfSpectrumParser());
-        while (iterator.hasNext())
-            specContainer.add(iterator.next());
-        System.out.println("Time: " + (System.currentTimeMillis() - time));
-    }
 }

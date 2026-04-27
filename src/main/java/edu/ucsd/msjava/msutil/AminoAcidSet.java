@@ -7,8 +7,6 @@ import edu.ucsd.msjava.mgf.BufferedLineReader;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.text.DecimalFormat;
 import java.util.*;
 
@@ -1709,13 +1707,6 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
 
         for (Location loc : locMap.get(location))
             aaListMap.put(loc, new ArrayList<>(newAAList));
-    }
-
-    public static void main(String argv[]) {
-        MSGFPlusOptions opts = new MSGFPlusOptions();
-        Path modFilePath = Paths.get(System.getProperty("user.home") + "Research", "Data", "Debug", "mods.txt");
-        AminoAcidSet aaSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath.toString(), opts);
-        aaSet.printAASet();
     }
 
     private static class ModificationMetadata {

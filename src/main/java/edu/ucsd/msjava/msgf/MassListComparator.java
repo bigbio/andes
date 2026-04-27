@@ -67,19 +67,4 @@ public class MassListComparator<T extends Matter> {
         }
     }
 
-    public static void main(String argv[]) {
-        float[] data1 = {40, 40.1f, 40.2f, 50};
-        float[] data2 = {39.7f, 40.05f, 40.6f};
-        ArrayList<Mass> list1 = new ArrayList<Mass>();
-        ArrayList<Mass> list2 = new ArrayList<Mass>();
-
-        for (float f : data1)
-            list1.add(new Mass(f));
-        for (float f : data2)
-            list2.add(new Mass(f));
-
-        MassListComparator<Mass> comparator = new MassListComparator<Mass>(list1, list2);
-        for (MatchedPair<Mass> pair : comparator.getMatchedList(new Tolerance(0.5f)))
-            System.out.println(pair.m1.getMass() + "\t" + pair.m2.getMass());
-    }
 }

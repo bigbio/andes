@@ -93,9 +93,4 @@ public class ProteinFastaSequence extends FastaSequence implements MassSequence 
 
 
     /***** Main method to test the size of a sequence *****/
-    public static void main(String[] args) {
-        ProteinFastaSequence s = new ProteinFastaSequence(System.getProperty("user.home") + "/Data/Databases/ShewDB/SOne_uniprot_plus_contaminants.fasta");
-        //ProteinFastaSequence s = new ProteinFastaSequence(System.getProperty("user.home")+"/Data/Databases/Asp/pro/translated.fasta");
-        System.out.println("Size of database: " + s.getSize());
-    }
 }

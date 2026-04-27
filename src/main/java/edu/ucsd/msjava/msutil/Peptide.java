@@ -5,10 +5,6 @@ import edu.ucsd.msjava.msgf.IntMassFactory.IntMass;
 import edu.ucsd.msjava.msgf.MassListComparator;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msutil.Modification.Location;
-import edu.ucsd.msjava.cli.MSGFPlus;
-
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -884,15 +880,4 @@ public class Peptide extends Sequence<AminoAcid> implements Comparable<Peptide> 
     return modList;
   }
      */
-    public static void main(String[] a) {
-        edu.ucsd.msjava.cli.MSGFPlusOptions opts = new edu.ucsd.msjava.cli.MSGFPlusOptions();
-        Path modFilePath = Paths.get(System.getProperty("user.home") + "Research", "ToolDistribution", "mods.txt");
-        AminoAcidSet aaSet = AminoAcidSet.getAminoAcidSetFromModFile(modFilePath.toString(), opts);
-        Peptide p = new Peptide("+42.011+15.995MDNKTPVTLAK", aaSet);
-        System.out.println(p);
-        for (AminoAcid aa : p)
-            System.out.println(aa.getResidueStr() + " " + aa.getMass());
-        System.out.println(p.getMass());
-    }
-
 }

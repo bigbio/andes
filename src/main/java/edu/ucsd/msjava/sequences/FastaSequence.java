@@ -622,46 +622,9 @@ public class FastaSequence implements Sequence {
   }
 	 */
 
-	/*
-  public static void main(String[] args) {
-    debug();
-  }
-
-
-  private static void debug() {
-    long time = System.currentTimeMillis();
-    String fastaFile;
-    String userHome = System.getProperty("user.home");
-
-    //fastaFile = userHome+"/Data/Databases/uniprot_sprot.fasta";
-    //fastaFile = userHome+"/Data/Databases/small.fasta";
-    fastaFile = userHome+"/Data/Databases/tiny.fasta";
-
-    System.out.println("File name: "+fastaFile);
-    Adapter fr = new FastaSequence(fastaFile, Constants.AMINO_ACIDS_18);
-    //Adapter fr = new FastaSequence(fastaFile);
-
-    System.out.println(fr.getByteAt(2));
-    System.out.println("Total number of characters: " + fr.getSize());
-    System.out.println("Alphabet size: " + fr.getAlphabetSize());
-    System.out.println("Time to complete: " + (System.currentTimeMillis() - time)/1000.0 + "s");
-  }
-	 */
-
     /**
      * @author kyowon - will be erased soon
      */
     //public int getMatchingEntryStartPosition(long position){ return annotations.floorKey((int)position)+1; }
     //public int getMatchingEntryEndPosition(long position){ return annotations.higherKey((int)position); }
-    public static void main(String[] args) {
-        String userHome = System.getProperty("user.home");
-        //String filename = userHome+"/Data/Databases/Sone/pro/SOne_uniprot_plus_contaminants.fasta";
-        //String filename = userHome+"/Data/Databases/human/ipi.HUMAN.v3.72.fasta";
-        String filename = userHome + "/Data/Databases/uniprot_sprot.fasta";
-        FastaSequence fs = new FastaSequence(filename);
-        System.out.println("Total number of bases: " + fs.getSize());
-
-    }
-
-
 }

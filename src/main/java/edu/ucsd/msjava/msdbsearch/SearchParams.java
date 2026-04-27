@@ -482,14 +482,7 @@ public class SearchParams {
 
     @Override
     public String toString() {
-        StringBuffer buf = new StringBuffer();
-
-//		buf.append("Spectrum File(s):\n");
-//		for(DBSearchIOFiles ioFile : this.dbSearchIOList)
-//		{
-//			buf.append("\t"+ioFile.getSpecFile().getAbsolutePath()+"\n");
-//		}
-//		buf.append("Database File: " + this.databaseFile.getAbsolutePath() + "\n");
+        StringBuilder buf = new StringBuilder();
 
         buf.append("\tPrecursorMassTolerance: ");
         if (leftPrecursorMassTolerance.equals(rightPrecursorMassTolerance)) {

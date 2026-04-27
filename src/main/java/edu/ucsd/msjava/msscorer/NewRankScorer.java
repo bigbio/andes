@@ -946,11 +946,4 @@ public class NewRankScorer implements NewAdditiveScorer {
         out.close();
     }
 
-    public static void main(String argv[]) throws Exception {
-        readWriteTest();
-//		paramTest();
-    }
-
-    public static void readWriteTest() throws Exception {
-    }
 }

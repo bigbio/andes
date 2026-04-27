@@ -1,6 +1,5 @@
 package edu.ucsd.msjava.mgf;
 
-import org.apache.commons.lang3.tuple.Pair;
 
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -78,17 +77,17 @@ public class BufferedRandomAccessLineReader implements LineReader {
      * @return
      */
     public static String stripBOM(String str) {
-        Pair<String, Integer> result = stripBOMAndGetLength(str);
-        return result.getKey();
+        return stripBOMAndGetLength(str).text();
     }
 
+    /** Result of a BOM-strip: the updated string plus the BOM byte length. */
+    public record BomStripResult(String text, int bomLength) {}
+
     /**
-     * Check for a byte order mark at the start of str
-     * If found, remove it
-     * @param str
-     * @return Key/value pair where the key is the updated string and the value is the byte order mark length
+     * Check for a byte order mark at the start of {@code str}; if found,
+     * remove it. Returns the updated string and the BOM byte length.
      */
-    public static Pair<String, Integer> stripBOMAndGetLength(String str) {
+    public static BomStripResult stripBOMAndGetLength(String str) {
         // Check for byte order marks
         byte[] buf = str.getBytes();
         int copyOffset = 0;
@@ -119,7 +118,7 @@ public class BufferedRandomAccessLineReader implements LineReader {
             str = new String(java.util.Arrays.copyOfRange(buf, copyOffset, buf.length));
         }
 
-        return Pair.of(str, copyOffset);
+        return new BomStripResult(str, copyOffset);
     }
 
     private int fillBuffer() {
@@ -153,11 +152,11 @@ public class BufferedRandomAccessLineReader implements LineReader {
 
         if (startOfFile) {
             // Check for a byte order mark
-            Pair<String, Integer> result = stripBOMAndGetLength(str);
+            BomStripResult result = stripBOMAndGetLength(str);
 
-            bomLength = result.getValue();
+            bomLength = result.bomLength();
             if (bomLength > 0) {
-                str = result.getKey();
+                str = result.text();
             }
         }
 
@@ -241,25 +240,6 @@ public class BufferedRandomAccessLineReader implements LineReader {
 
     public void close() throws IOException {
         in.close();
-    }
-
-    public static void main(String argv[]) throws Exception {
-        long time = System.currentTimeMillis();
-        String fileName = "/home/sangtaekim/Research/Data/ABRF/2011/UniProt.Yeast.NFISnr.contamsS48.fasta";
-        BufferedRandomAccessLineReader in = new BufferedRandomAccessLineReader(fileName, 1 << 16);
-//		BufferedReader in = new BufferedReader(new FileReader(fileName));
-//		RandomAccessFile in = new RandomAccessFile(fileName, "r");
-        String s;
-        int lineNum = 0;
-        long pos = 0;
-        while ((s = in.readLine()) != null) {
-            lineNum++;
-            if (lineNum == 48232)
-                System.out.println(lineNum + " " + s + " " + (pos = in.getPosition()));
-        }
-        in.seek(pos);
-        System.out.println(in.readLine());
-        System.out.println("Time: " + (System.currentTimeMillis() - time));
     }
 
 }

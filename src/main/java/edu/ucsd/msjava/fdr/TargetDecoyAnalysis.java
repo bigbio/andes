@@ -28,47 +28,6 @@ public class TargetDecoyAnalysis {
         pepLevelFDRMap = getFDRMap(target.getPepScores(), decoy.getPepScores(), isGreaterBetter, pit);
     }
 
-//    public TargetDecoyPSMSet(
-//            File concatenatedFile, 
-//            String delimiter,
-//            boolean hasHeader,
-//            int scoreCol, 
-//            boolean isGreaterBetter, 
-//            int specFileCol,
-//            int specIndexCol, 
-//            int pepCol,
-//            ArrayList<Pair<Integer,ArrayList<String>>> reqStrList,
-//            int dbCol, String decoyPrefix)
-//    {
-//        target = new TSVPSMSet(concatenatedFile, delimiter, hasHeader, scoreCol, isGreaterBetter, specFileCol, specIndexCol, pepCol, reqStrList).decoy(dbCol, decoyPrefix, true).read();
-//        decoy = new TSVPSMSet(concatenatedFile, delimiter, hasHeader, scoreCol, isGreaterBetter, specFileCol, specIndexCol, pepCol, reqStrList).decoy(dbCol, decoyPrefix, false).read();
-//        this.isGreaterBetter = isGreaterBetter;
-//        isConcatenated = true;
-//        psmLevelFDRMap = getFDRMap(target.getPSMScores(), decoy.getPSMScores(), isGreaterBetter, isConcatenated, 1);
-//        pepLevelFDRMap = getFDRMap(target.getPepScores(), decoy.getPepScores(), isGreaterBetter, isConcatenated, 1);
-//    }
-//
-//    public TargetDecoyPSMSet(
-//            File targetFile, 
-//            File decoyFile, 
-//            String delimiter,
-//            boolean hasHeader,
-//            int scoreCol, 
-//            boolean isGreaterBetter, 
-//            int specFileCol,
-//            int specIndexCol, 
-//            int pepCol,
-//            ArrayList<Pair<Integer,ArrayList<String>>> reqStrListPSMSet,
-//            float pit
-//            )
-//    {
-//        target = new TSVPSMSet(targetFile, delimiter, hasHeader, scoreCol, isGreaterBetter, specFileCol, specIndexCol, pepCol, reqStrListPSMSet).read();
-//        decoy = new TSVPSMSet(decoyFile, delimiter, hasHeader, scoreCol, isGreaterBetter, specFileCol, specIndexCol, pepCol, reqStrListPSMSet).read();
-//        isConcatenated = false;
-//        psmLevelFDRMap = getFDRMap(target.getPSMScores(), decoy.getPSMScores(), isGreaterBetter, isConcatenated, pit);
-//        pepLevelFDRMap = getFDRMap(target.getPepScores(), decoy.getPepScores(), isGreaterBetter, isConcatenated, pit);
-//    }
-
     public PSMSet getTargetPSMSet() {
         return target;
     }

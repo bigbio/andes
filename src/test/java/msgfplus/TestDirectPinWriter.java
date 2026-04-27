@@ -56,7 +56,6 @@ public class TestDirectPinWriter {
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
 
-        Assert.assertTrue("writePin() should be true when outputFormat=pin", params.writePin());
         Assert.assertFalse("writeTsv() should be false when outputFormat=pin", params.writeTsv());
     }
 

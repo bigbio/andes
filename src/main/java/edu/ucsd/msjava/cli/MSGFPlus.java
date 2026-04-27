@@ -594,7 +594,7 @@ public class MSGFPlus {
             System.out.println("TSV file: " + outputFile.getPath());
         }
 
-        if (params.writePin()) {
+        if (!params.writeTsv()) {
             DirectPinWriter pinWriter = new DirectPinWriter(params, aaSet, sa, specAcc, ioIndex);
             try {
                 pinWriter.writeResults(resultList, outputFile);

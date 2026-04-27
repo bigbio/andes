@@ -241,44 +241,11 @@ public final class MSGFPlusOptions {
     public int effectiveMaxPeptideLength()        { return maxPeptideLength        != null ? maxPeptideLength        : 40; }
     public int effectiveMinCharge()               { return minCharge               != null ? minCharge               : 2; }
     public int effectiveMaxCharge()               { return maxCharge               != null ? maxCharge               : 3; }
-    public int effectiveNumMatchesPerSpec()       { return numMatchesPerSpec       != null ? numMatchesPerSpec       : 1; }
-    public int effectiveNumThreads()              { return numThreads              != null ? numThreads              : Runtime.getRuntime().availableProcessors(); }
-    public int effectiveNumTasks()                { return numTasks                != null ? numTasks                : 0; }
     public int effectiveMinSpectraPerThread()     { return minSpectraPerThread     != null ? minSpectraPerThread     : 250; }
     public int effectiveVerbose()                 { return verbose                 != null ? verbose                 : 0; }
     public int effectiveTdaStrategy()             { return tdaStrategy             != null ? tdaStrategy             : 0; }
-    public int effectiveAddFeatures()             { return addFeatures             != null ? addFeatures             : 0; }
-    public int effectiveMaxMissedCleavages()      { return maxMissedCleavages      != null ? maxMissedCleavages      : -1; }
     public int effectiveMaxNumMods()              { return maxNumMods              != null ? maxNumMods              : (configMaxNumMods != null ? configMaxNumMods : 3); }
-    public int effectiveAllowDenseCentroidedPeaks() { return allowDenseCentroidedPeaks != null ? allowDenseCentroidedPeaks : 0; }
-    public int effectiveNumTolerableTermini()     { return numTolerableTermini     != null ? numTolerableTermini     : 2; }
-    public int effectiveEdgeScore()               { return edgeScore               != null ? edgeScore               : 0; }
-    public int effectiveIgnoreMetCleavage()       { return ignoreMetCleavage       != null ? ignoreMetCleavage       : 0; }
-    public int effectiveMinNumPeaks()             { return minNumPeaks             != null ? minNumPeaks             : edu.ucsd.msjava.sequences.Constants.MIN_NUM_PEAKS_PER_SPECTRUM; }
-    public int effectiveNumIsoforms()             { return numIsoforms             != null ? numIsoforms             : edu.ucsd.msjava.sequences.Constants.NUM_VARIANTS_PER_PEPTIDE; }
-    public int effectiveMinDeNovoScore()          { return minDeNovoScore          != null ? minDeNovoScore          : edu.ucsd.msjava.sequences.Constants.MIN_DE_NOVO_SCORE; }
-    public int effectiveToleranceUnits()          { return precursorToleranceUnits != null ? precursorToleranceUnits : 2; }
-    public double effectiveChargeCarrierMass()    { return chargeCarrierMass       != null ? chargeCarrierMass       : 1.00727649; }
-
-    public String effectiveDecoyPrefix()          { return decoyPrefix             != null ? decoyPrefix             : "XXX"; }
-    public PrecursorCalMode effectivePrecursorCal() { return precursorCalMode      != null ? precursorCalMode        : PrecursorCalMode.AUTO; }
     public OutputFormat effectiveOutputFormat()   { return outputFormat            != null ? outputFormat            : OutputFormat.PIN; }
-
-    public PrecursorTolerance effectivePrecursorTolerance() {
-        return precursorTolerance != null ? precursorTolerance : PrecursorTolerance.parse("20ppm");
-    }
-
-    public IntRange effectiveIsotopeErrorRange() {
-        return isotopeErrorRange != null ? isotopeErrorRange : new IntRange(0, 1);
-    }
-
-    public IntRange effectiveMSLevel() {
-        return msLevel != null ? msLevel : new IntRange(2, 2);
-    }
-
-    public IntRange effectiveSpecIndexRange() {
-        return specIndexRange != null ? specIndexRange : new IntRange(1, Integer.MAX_VALUE - 1);
-    }
 
     /** Resolves {@code -m} index to {@link ActivationMethod}. MSGFPlus exposes
      *  0=ASWRITTEN, 1=CID, 2=ETD, 3=HCD, 4=UVPD. The registry also defines
@@ -430,7 +397,7 @@ public final class MSGFPlusOptions {
         }
     }
 
-    private static String stripComment(String line) {
+    public static String stripComment(String line) {
         int hash = line.indexOf('#');
         return (hash >= 0 ? line.substring(0, hash) : line).trim();
     }
@@ -474,6 +441,9 @@ public final class MSGFPlusOptions {
     public String validate() {
         if (spectrumFile == null) return "Spectrum file is not defined; use -s at the command line or SpectrumFile in a config file";
         if (databaseFile == null) return "Database file is not defined; use -d at the command line or DatabaseFile in a config file";
+        if (modificationFile != null && !modificationFile.exists()) {
+            return "Modification file not found: " + modificationFile.getPath();
+        }
 
         String err;
         if ((err = checkMin("-thread",                    numThreads,                1))    != null) return err;
@@ -506,7 +476,7 @@ public final class MSGFPlusOptions {
         if (fragMethodId != null && (fragMethodId < 0 || fragMethodId > 4)) {
             return "Invalid value for parameter -m: " + fragMethodId + " (valid: 0..4)";
         }
-        int instMax = ActivationMethodAvailability.instCount() - 1;
+        int instMax = InstrumentType.getAllRegisteredInstrumentTypes().length - 1;
         if (instrumentTypeId != null && (instrumentTypeId < 0 || instrumentTypeId > instMax)) {
             return "Invalid value for parameter -inst: " + instrumentTypeId + " (valid: 0.." + instMax + ")";
         }
@@ -531,12 +501,6 @@ public final class MSGFPlusOptions {
         if (value == null) return null;
         if (value < min || value > max) return "Invalid value for parameter " + flag + ": " + value + " (valid: " + min + ".." + max + ")";
         return null;
-    }
-
-    /** Helper that hides the {@link InstrumentType#getAllRegisteredInstrumentTypes}
-     *  call from {@code validate()} so the import block stays minimal. */
-    private static final class ActivationMethodAvailability {
-        static int instCount() { return InstrumentType.getAllRegisteredInstrumentTypes().length; }
     }
 
     /** Mutator used by {@code AminoAcidSet} when the parsed mod metadata

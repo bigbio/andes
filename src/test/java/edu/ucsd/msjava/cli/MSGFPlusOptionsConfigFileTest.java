@@ -121,4 +121,31 @@ public class MSGFPlusOptionsConfigFileTest {
         // A clean invocation passes.
         Assert.assertNull(opts.validate());
     }
+
+    @Test
+    public void validateRejectsMissingModificationFile() throws IOException {
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        opts.spectrumFile = new File("anything.mgf");
+        opts.databaseFile = new File("anything.fasta");
+
+        opts.modificationFile = new File("does-not-exist.mods");
+        Assert.assertEquals("Modification file not found: does-not-exist.mods", opts.validate());
+
+        Path tmpDir = Files.createTempDirectory("msgfplus-missing-mod-");
+        Path conf = tmpDir.resolve("missing_mod.txt");
+        Files.write(conf, "ModificationFile=does-not-exist-from-conf.mods\n".getBytes(StandardCharsets.UTF_8));
+
+        MSGFPlusOptions confOpts = new MSGFPlusOptions();
+        confOpts.spectrumFile = new File("anything.mgf");
+        confOpts.databaseFile = new File("anything.fasta");
+        confOpts.configFile = conf.toFile();
+
+        SearchParams params = new SearchParams();
+        Assert.assertEquals(
+                "Modification file not found: does-not-exist-from-conf.mods",
+                params.parse(confOpts));
+
+        Files.deleteIfExists(conf);
+        Files.deleteIfExists(tmpDir);
+    }
 }

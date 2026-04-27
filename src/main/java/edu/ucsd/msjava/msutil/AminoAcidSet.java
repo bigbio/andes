@@ -864,7 +864,7 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
             ArrayList<AminoAcid> customAA,
             ModificationMetadata modMetadata) {
 
-        String modSetting = SearchParams.getConfigLineWithoutComment(dataLine);
+        String modSetting = MSGFPlusOptions.stripComment(dataLine);
         if (modSetting.length() == 0) {
             return true;
         }

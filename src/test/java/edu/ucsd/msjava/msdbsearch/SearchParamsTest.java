@@ -28,7 +28,7 @@ public class SearchParamsTest {
         Assert.assertNull("SearchParams.parse returned: " + err, err);
 
         Assert.assertEquals("HighRes", opts.effectiveInstrumentType().getName());
-        Assert.assertEquals("20.0 ppm", opts.effectivePrecursorTolerance().left.toString());
-        Assert.assertEquals("20.0 ppm", opts.effectivePrecursorTolerance().right.toString());
+        Assert.assertEquals("20.0 ppm", params.getLeftPrecursorMassTolerance().toString());
+        Assert.assertEquals("20.0 ppm", params.getRightPrecursorMassTolerance().toString());
     }
 }

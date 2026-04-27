@@ -267,16 +267,8 @@ public class SearchParams {
         return maxMSLevel;
     }
 
-    public OutputFormat getOutputFormat() {
-        return outputFormat;
-    }
-
     public boolean writeTsv() {
         return outputFormat == OutputFormat.TSV;
-    }
-
-    public boolean writePin() {
-        return outputFormat == OutputFormat.PIN;
     }
 
     /**
@@ -287,11 +279,7 @@ public class SearchParams {
      * @return dataLine without the comment
      */
     public static String getConfigLineWithoutComment(String dataLine) {
-        String[] tokenArray = dataLine.split("#");
-        if (tokenArray.length == 0)
-            return "";
-
-        return tokenArray[0].trim();
+        return MSGFPlusOptions.stripComment(dataLine);
     }
 
     /**
@@ -316,7 +304,7 @@ public class SearchParams {
         String requiredErr = opts.validate();
         if (requiredErr != null) return requiredErr;
 
-        chargeCarrierMass = opts.effectiveChargeCarrierMass();
+        chargeCarrierMass = opts.chargeCarrierMass != null ? opts.chargeCarrierMass : 1.00727649;
         Composition.setChargeCarrierMass(chargeCarrierMass);
 
         // Read outputFormat up-front so the default-output-file extension logic
@@ -354,20 +342,20 @@ public class SearchParams {
         }
 
         databaseFile = opts.databaseFile;
-        decoyProteinPrefix = opts.effectiveDecoyPrefix();
+        decoyProteinPrefix = opts.decoyPrefix != null ? opts.decoyPrefix : "XXX";
 
-        PrecursorTolerance tol = opts.effectivePrecursorTolerance();
+        PrecursorTolerance tol = opts.precursorTolerance != null ? opts.precursorTolerance : PrecursorTolerance.parse("20ppm");
         leftPrecursorMassTolerance = tol.left;
         rightPrecursorMassTolerance = tol.right;
 
-        int toleranceUnit = opts.effectiveToleranceUnits();
+        int toleranceUnit = opts.precursorToleranceUnits != null ? opts.precursorToleranceUnits : 2;
         if (toleranceUnit != 2) {
             boolean isTolerancePPM = toleranceUnit != 0;
             leftPrecursorMassTolerance = new Tolerance(leftPrecursorMassTolerance.getValue(), isTolerancePPM);
             rightPrecursorMassTolerance = new Tolerance(rightPrecursorMassTolerance.getValue(), isTolerancePPM);
         }
 
-        IntRange isotope = opts.effectiveIsotopeErrorRange();
+        IntRange isotope = opts.isotopeErrorRange != null ? opts.isotopeErrorRange : new IntRange(0, 1);
         this.minIsotopeError = isotope.min;
         this.maxIsotopeError = isotope.max;
 
@@ -377,7 +365,7 @@ public class SearchParams {
         }
 
         enzyme = opts.effectiveEnzyme();
-        numTolerableTermini = opts.effectiveNumTolerableTermini();
+        numTolerableTermini = opts.numTolerableTermini != null ? opts.numTolerableTermini : 2;
         activationMethod = opts.effectiveActivationMethod();
         instType = opts.effectiveInstrumentType();
         if (activationMethod == ActivationMethod.HCD
@@ -424,19 +412,19 @@ public class SearchParams {
             }
         }
 
-        numMatchesPerSpec = opts.effectiveNumMatchesPerSpec();
+        numMatchesPerSpec = opts.numMatchesPerSpec != null ? opts.numMatchesPerSpec : 1;
 
-        IntRange specIdx = opts.effectiveSpecIndexRange();
+        IntRange specIdx = opts.specIndexRange != null ? opts.specIndexRange : new IntRange(1, Integer.MAX_VALUE - 1);
         startSpecIndex = specIdx.min;
         endSpecIndex = specIdx.max;
 
         useTDA = opts.effectiveTdaStrategy() == 1;
-        ignoreMetCleavage = opts.effectiveIgnoreMetCleavage() == 1;
-        outputAdditionalFeatures = opts.effectiveAddFeatures() == 1;
+        ignoreMetCleavage = (opts.ignoreMetCleavage != null ? opts.ignoreMetCleavage : 0) == 1;
+        outputAdditionalFeatures = (opts.addFeatures != null ? opts.addFeatures : 0) == 1;
 
         minPeptideLength = opts.effectiveMinPeptideLength();
         maxPeptideLength = opts.effectiveMaxPeptideLength();
-        maxNumVariantsPerPeptide = opts.effectiveNumIsoforms();
+        maxNumVariantsPerPeptide = opts.numIsoforms != null ? opts.numIsoforms : edu.ucsd.msjava.sequences.Constants.NUM_VARIANTS_PER_PEPTIDE;
 
         if (minPeptideLength > maxPeptideLength) {
             return "MinPepLength must not be larger than MaxPepLength";
@@ -448,27 +436,27 @@ public class SearchParams {
             return "MinCharge must not be larger than MaxCharge";
         }
 
-        numThreads = opts.effectiveNumThreads();
-        numTasks = opts.effectiveNumTasks();
+        numThreads = opts.numThreads != null ? opts.numThreads : Runtime.getRuntime().availableProcessors();
+        numTasks = opts.numTasks != null ? opts.numTasks : 0;
         minSpectraPerThread = opts.effectiveMinSpectraPerThread();
         verbose = opts.effectiveVerbose() == 1;
-        doNotUseEdgeScore = opts.effectiveEdgeScore() == 1;
+        doNotUseEdgeScore = (opts.edgeScore != null ? opts.edgeScore : 0) == 1;
 
         dbIndexDir = opts.dbIndexDir;
-        minNumPeaksPerSpectrum = opts.effectiveMinNumPeaks();
-        minDeNovoScore = opts.effectiveMinDeNovoScore();
+        minNumPeaksPerSpectrum = opts.minNumPeaks != null ? opts.minNumPeaks : edu.ucsd.msjava.sequences.Constants.MIN_NUM_PEAKS_PER_SPECTRUM;
+        minDeNovoScore = opts.minDeNovoScore != null ? opts.minDeNovoScore : edu.ucsd.msjava.sequences.Constants.MIN_DE_NOVO_SCORE;
 
-        maxMissedCleavages = opts.effectiveMaxMissedCleavages();
+        maxMissedCleavages = opts.maxMissedCleavages != null ? opts.maxMissedCleavages : -1;
         if (maxMissedCleavages > -1 && enzyme.getName().equals("UnspecificCleavage")) {
             return "Cannot specify a MaxMissedCleavages when using unspecific cleavage enzyme";
         } else if (maxMissedCleavages > -1 && enzyme.getName().equals("NoCleavage")) {
             return "Cannot specify a MaxMissedCleavages when using no cleavage enzyme";
         }
 
-        allowDenseCentroidedPeaks = opts.effectiveAllowDenseCentroidedPeaks() == 1;
-        precursorCalMode = opts.effectivePrecursorCal();
+        allowDenseCentroidedPeaks = (opts.allowDenseCentroidedPeaks != null ? opts.allowDenseCentroidedPeaks : 0) == 1;
+        precursorCalMode = opts.precursorCalMode != null ? opts.precursorCalMode : PrecursorCalMode.AUTO;
 
-        IntRange ms = opts.effectiveMSLevel();
+        IntRange ms = opts.msLevel != null ? opts.msLevel : new IntRange(2, 2);
         minMSLevel = ms.min;
         maxMSLevel = ms.max;
 

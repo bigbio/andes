@@ -62,10 +62,6 @@ public class FastScorer implements SimpleDBSearchScorer<NominalMass> {
         for (int i = fromIndex; i < toIndex - 1; i++) {
             int prefixMass = nominalPrefixMassArr[i];
             int suffixMass = peptideMass - prefixMass;
-//			if(prefixMass >= prefixScore.length || suffixMass >= suffixScore.length)
-//			{
-//				System.out.println("Debug");
-//			}
             int curScore;
             try {
                 curScore = Math.round(prefixScore[prefixMass] + suffixScore[suffixMass]);
@@ -80,9 +76,6 @@ public class FastScorer implements SimpleDBSearchScorer<NominalMass> {
     }
 
     public int getNodeScore(NominalMass prefixMass, NominalMass suffixMass) {
-//		if(prefixMass.getNominalMass() >= prefixScore.length ||
-//				suffixMass.getNominalMass() >= suffixScore.length)
-//			System.out.println("Debug");
         int preNormMass = prefixMass.getNominalMass();
         int sufNormMass = suffixMass.getNominalMass();
         if (preNormMass >= prefixScore.length || sufNormMass >= suffixScore.length || preNormMass < 0 || sufNormMass < 0)

@@ -1,7 +1,7 @@
 package edu.ucsd.msjava.fdr;
 
-import edu.ucsd.msjava.parser.BufferedLineReader;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.mgf.BufferedLineReader;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 import java.io.File;
 import java.util.ArrayList;

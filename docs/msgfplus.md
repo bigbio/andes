@@ -10,7 +10,7 @@ Usage: java -Xmx3500M -jar MSGFPlus.jar
    An example parameter file is at https://github.com/MSGFPlus/msgfplus/blob/master/docs/examples/MSGFPlus_Params.txt
    Additional parameter files are at https://github.com/MSGFPlus/msgfplus/tree/master/docs/parameterfiles
 
-[-s SpectrumFile] (*.mzML, *.mzXML, *.mgf, *.ms2, *.pkl or *_dta.txt)
+[-s SpectrumFile] (*.mzML or *.mgf)
    Spectra should be centroided (see below for MSConvert example). Profile spectra will be ignored.
 
 [-d DatabaseFile] (*.fasta or *.fa or *.faa)
@@ -123,9 +123,9 @@ Usage: java -Xmx3500M -jar MSGFPlus.jar
 
 [-numMods Count] (Maximum number of dynamic (variable) modifications per peptide; Default: 3)
 
-[-allowDenseCentroidedPeaks 0/1] (Default: 0 (disabled); 1: (for mzML/mzXML input only) allows inclusion of spectra with high-density centroid data in the search)
-   MS-GF+ checks the distance between consecutive peaks in the spectrum, and if the median distance is less than 50 ppm, they are considered profile spectra regardless of the value provided in mzML and mzXML files.
-   This parameter allows overriding this check when the mzML/mzXML file says the spectrum is centroided.
+[-allowDenseCentroidedPeaks 0/1] (Default: 0 (disabled); 1: (for mzML input only) allows inclusion of spectra with high-density centroid data in the search)
+   MS-GF+ checks the distance between consecutive peaks in the spectrum, and if the median distance is less than 50 ppm, they are considered profile spectra regardless of the value provided in the mzML file.
+   This parameter allows overriding this check when the mzML file says the spectrum is centroided.
       
 ```
 
@@ -146,10 +146,10 @@ Example command (low-precision spectra):
 
 ### Parameters:
 
-- **-s SpectrumFile** (.mzML\*, \*.mzXML, \*.mgf, \*.ms2, \*.pkl or \*\_dta.txt) - Required
+- **-s SpectrumFile** (\*.mzML or \*.mgf) - Required
 
-  - Spectrum file name. Currently, MS-GF+ supports the following file formats: mzML, mzXML, mzML, mgf, ms2, pkl and \_dta.txt.
-  - We recommend to use mzML, whenever possible.
+  - Spectrum file name. This fork supports two spectrum file formats: `mzML` and `mgf`. Legacy formats (`mzXML`, `ms2`, `pkl`, `_dta.txt`) are not supported.
+  - We recommend `mzML` whenever possible.
   - For Thermo .raw files, obtain a centroided .mzML using MSConvert, which is part of [ProteoWizard](http://proteowizard.sourceforge.net/).
 
   `MSConvert.exe --mzML --32 --filter "peakPicking true 1-" DatasetName.raw`

@@ -1,7 +1,6 @@
 package edu.ucsd.msjava.msdbsearch;
 
-import edu.ucsd.msjava.ui.MSGFPlus;
-import org.apache.commons.io.FilenameUtils;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -156,7 +155,9 @@ public class BuildSA {
                 if (databaseFile.getName().toLowerCase().endsWith(".revCat.fasta".toLowerCase())) {
                     System.err.println("Delete " + databaseFile.getName() + " and run MS-GF+ (or BuildSA) again.");
                 } else {
-                    String baseName = FilenameUtils.removeExtension(databaseFile.getName());
+                    String fileName = databaseFile.getName();
+                    int dot = fileName.lastIndexOf('.');
+                    String baseName = dot >= 0 ? fileName.substring(0, dot) : fileName;
                     System.err.println("Delete files starting with " + baseName +
                             " (but keep " + databaseFile.getName() + ") and run MS-GF+ (or BuildSA) again.");
                 }

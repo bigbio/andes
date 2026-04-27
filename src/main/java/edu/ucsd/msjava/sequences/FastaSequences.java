@@ -177,7 +177,6 @@ public class FastaSequences implements Sequence {
 
     public String getAnnotation(long position) {
         long pair = translate(position);
-        //System.out.println(this.files.get((int)(pair>>>32)) + " ");
         return getSequence((int) (pair >>> 32)).getAnnotation((int) pair);
     }
 
@@ -218,21 +217,6 @@ public class FastaSequences implements Sequence {
     public char getCharAt(long position) {
         long pair = translate(position);
         return getSequence((int) (pair >>> 32)).getCharAt((int) pair);
-    }
-
-    public static void main(String[] args) {
-        String userHome = System.getProperty("user.home");
-        String directory = userHome + "/Data/Databases/Scerv/gen";
-        FastaSequences pfs = new FastaSequences(directory, false);
-
-        System.out.println("Total number of bases: " + pfs.getSize());
-        for (long start = 0; start < pfs.getSize(); start++) {
-            if (start % 1000000 == 0) {
-                if (pfs.isTerminator(start))
-                    System.out.println(pfs.getAnnotation(start));
-            }
-            pfs.getByteAt(start);
-        }
     }
 
     public byte[] getBytes(int start, int end) {

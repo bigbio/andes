@@ -7,8 +7,9 @@ import java.io.File;
 import org.junit.Ignore;
 import org.junit.Test;
 
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import picocli.CommandLine;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 @Ignore
 public class TestCollaboration {
@@ -25,10 +26,9 @@ public class TestCollaboration {
         String[] argv = {"-s", specFile.getPath(), "-d", dbFile.getPath(), "-t", "2.5Da", "-mod", modFile.getPath()
                 }; 
 
-        ParamManager paramManager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "java -Xmx3500M -jar MSGFPlus.jar");
-        paramManager.addMSGFPlusParams();
+        MSGFPlusOptions paramManager = new MSGFPlusOptions();
         
-        String msg = paramManager.parseParams(argv);
+        String msg = null; MSGFPlusOptions.commandLine(paramManager).parseArgs(argv);
         if(msg != null)
             System.out.println(msg);
         assertTrue(msg == null);

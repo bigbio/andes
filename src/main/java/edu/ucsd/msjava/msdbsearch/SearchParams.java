@@ -1,14 +1,14 @@
 package edu.ucsd.msjava.msdbsearch;
 
+import edu.ucsd.msjava.cli.IntRange;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.OutputFormat;
+import edu.ucsd.msjava.cli.PrecursorTolerance;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msutil.*;
-import edu.ucsd.msjava.params.*;
-import edu.ucsd.msjava.parser.BufferedLineReader;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Hashtable;
 import java.util.List;
 
 import static edu.ucsd.msjava.msutil.Composition.POTASSIUM_CHARGE_CARRIER_MASS;
@@ -33,28 +33,7 @@ public class SearchParams {
     public enum PrecursorCalMode {
         AUTO,
         ON,
-        OFF;
-
-        /**
-         * Case-insensitive string to enum conversion. Unknown values fall
-         * back to {@link #AUTO} so that downstream code never crashes if a
-         * typo slips past CLI parsing.
-         */
-        public static PrecursorCalMode fromString(String s) {
-            if (s == null) return AUTO;
-            String normalized = s.trim().toLowerCase();
-            switch (normalized) {
-                case "on":
-                    return ON;
-                case "off":
-                    return OFF;
-                case "auto":
-                case "":
-                    return AUTO;
-                default:
-                    return AUTO;
-            }
-        }
+        OFF
     }
 
     private List<DBSearchIOFiles> dbSearchIOList;
@@ -95,7 +74,7 @@ public class SearchParams {
     private boolean allowDenseCentroidedPeaks;
     private int minMSLevel;
     private int maxMSLevel;
-    private int outputFormat; // 0=pin (default), 1=tsv — mzid output removed
+    private OutputFormat outputFormat;
     private PrecursorCalMode precursorCalMode = PrecursorCalMode.AUTO;
 
     public SearchParams() {
@@ -109,42 +88,34 @@ public class SearchParams {
         return precursorCalMode;
     }
 
-    // Used by MS-GF+
     public List<DBSearchIOFiles> getDBSearchIOList() {
         return dbSearchIOList;
     }
 
-    // Used by MS-GF+
     public File getDatabaseFile() {
         return databaseFile;
     }
 
-    // Used by MS-GF+
     public String getDecoyProteinPrefix() {
         return decoyProteinPrefix;
     }
 
-    // Used by MS-GF+
     public Tolerance getLeftPrecursorMassTolerance() {
         return leftPrecursorMassTolerance;
     }
 
-    // Used by MS-GF+
     public Tolerance getRightPrecursorMassTolerance() {
         return rightPrecursorMassTolerance;
     }
 
-    // Used by MS-GF+
     public int getMinIsotopeError() {
         return minIsotopeError;
     }
 
-    // Used by MS-GF+
     public int getMaxIsotopeError() {
         return maxIsotopeError;
     }
 
-    // Used by MS-GF+
     public Enzyme getEnzyme() {
         return enzyme;
     }
@@ -153,77 +124,62 @@ public class SearchParams {
         return numTolerableTermini;
     }
 
-    // Used by MS-GF+
     public ActivationMethod getActivationMethod() {
         return activationMethod;
     }
 
-    // Used by MS-GF+
     public InstrumentType getInstType() {
         return instType;
     }
 
-    // Used by MS-GF+
     public Protocol getProtocol() {
         return protocol;
     }
 
-    // Used by MS-GF+
     public AminoAcidSet getAASet() {
         return aaSet;
     }
 
-    // Used by MS-GF+
     public int getNumMatchesPerSpec() {
         return numMatchesPerSpec;
     }
 
-    // Used by MS-GF+
     public int getStartSpecIndex() {
         return startSpecIndex;
     }
 
-    // Used by MS-GF+
     public int getEndSpecIndex() {
         return endSpecIndex;
     }
 
-    // Used by MS-GF+
     public boolean useTDA() {
         return useTDA;
     }
 
-    // Used by MS-GF+
     public boolean ignoreMetCleavage() {
         return ignoreMetCleavage;
     }
 
-    // Used by MS-GF+
     public int getMinPeptideLength() {
         return minPeptideLength;
     }
 
-    // Used by MS-GF+
     public int getMaxPeptideLength() {
         return maxPeptideLength;
     }
 
-    // Used by MS-GF+
     public int getMaxNumVariantsPerPeptide() {
         return maxNumVariantsPerPeptide;
     }
 
-    // Used by MS-GF+
     public int getMinCharge() {
         return minCharge;
     }
 
-    // Used by MS-GF+
     public int getMaxCharge() {
         return maxCharge;
     }
 
-    // Used by MS-GF+
     public int getNumThreads() {
         return numThreads;
     }
@@ -240,12 +196,10 @@ public class SearchParams {
         return verbose;
     }
 
-    // Used by MS-GF+
     public boolean doNotUseEdgeScore() {
         return doNotUseEdgeScore;
     }
 
-    // Used by MS-GF+
     public File getDBIndexDir() {
         return dbIndexDir;
     }
@@ -254,12 +208,10 @@ public class SearchParams {
         return outputAdditionalFeatures;
     }
 
-    // Used by MS-GF+
     public int getMinNumPeaksPerSpectrum() {
         return minNumPeaksPerSpectrum;
     }
 
-    // Used by MS-GF+
     public int getMinDeNovoScore() {
         return minDeNovoScore;
     }
@@ -268,37 +220,24 @@ public class SearchParams {
         return chargeCarrierMass;
     }
 
-    // Used by MS-GF+
     public int getMaxMissedCleavages() {
         return maxMissedCleavages;
     }
 
-    // Used by MS-GF+
     public boolean getAllowDenseCentroidedPeaks() {
         return allowDenseCentroidedPeaks;
     }
 
-    // Used by MS-GF+
     public int getMinMSLevel() {
         return minMSLevel;
     }
 
-    // Used by MS-GF+
     public int getMaxMSLevel() {
         return maxMSLevel;
     }
 
-    /** 0=pin (default), 1=tsv. */
-    public int getOutputFormat() {
-        return outputFormat;
-    }
-
     public boolean writeTsv() {
-        return outputFormat == 1;
-    }
-
-    public boolean writePin() {
-        return outputFormat == 0;
+        return outputFormat == OutputFormat.TSV;
     }
 
     /**
@@ -309,338 +248,210 @@ public class SearchParams {
      * @return dataLine without the comment
      */
     public static String getConfigLineWithoutComment(String dataLine) {
-        String[] tokenArray = dataLine.split("#");
-        if (tokenArray.length == 0)
-            return "";
-
-        return tokenArray[0].trim();
+        return MSGFPlusOptions.stripComment(dataLine);
     }
 
-    // Used by MS-GF+
-    public String parse(ParamManager paramManager) {
-        AminoAcidSet configAASet = null;
-        FileParameter configFileParam = paramManager.getConfigFileParam();
-
-        if (configFileParam != null && configFileParam.getFile() != null) {
-            configAASet = parseConfigParamFile(paramManager);
+    /**
+     * Build a SearchParams from the typed CLI/config-file model. Reads {@code -conf}
+     * (when set) via {@link MSGFPlusOptions#applyConfigFile(File)} so any unset CLI
+     * fields are filled from the config file before the rest of the build runs.
+     *
+     * @return null on success; user-facing error string otherwise.
+     */
+    public String parse(MSGFPlusOptions opts) {
+        // Apply config-file overlay first: fills in any opts.* fields the CLI did
+        // not set, plus collects DynamicMod/StaticMod/CustomAA into opts.*Mods lists.
+        if (opts.configFile != null) {
+            String err = opts.applyConfigFile(opts.configFile);
+            if (err != null) return err;
         }
 
-        // Charge carrier mass
-        chargeCarrierMass = paramManager.getChargeCarrierMass();
+        // Required-input + numeric/enum range check now that CLI +
+        // config-file have both run. Catches things like -m 99 with a
+        // user-facing error instead of the IllegalArgumentException
+        // the resolver would otherwise raise during search setup.
+        String requiredErr = opts.validate();
+        if (requiredErr != null) return requiredErr;
+
+        chargeCarrierMass = opts.chargeCarrierMass != null ? opts.chargeCarrierMass : 1.00727649;
         Composition.setChargeCarrierMass(chargeCarrierMass);
 
-        // Spectrum file
-        // Read outputFormat up-front so the default-output-file extension
-        // logic below (inside both the single-file and directory branches)
-        // sees the user-supplied value, not the field's zero initializer.
-        outputFormat = paramManager.getOutputFormat();
+        // Read outputFormat up-front so the default-output-file extension logic
+        // below sees the user-supplied value, not the field's zero initializer.
+        outputFormat = opts.effectiveOutputFormat();
 
-        FileParameter specParam = paramManager.getSpecFileParam();
-        File specPath = specParam.getFile();
-
-        if (specPath == null)
-        {
-            return "Spectrum file is not defined; use -s at the command line or SpectrumFile in a config file";
-        }
-
+        File specPath = opts.spectrumFile;
         if (!specPath.exists()) {
             return "Spectrum file not found: " + specPath.getPath();
         }
 
         dbSearchIOList = new ArrayList<>();
+        String defaultExt = outputFormat == OutputFormat.TSV ? ".tsv" : ".pin";
 
         if (!specPath.isDirectory()) {
-            // Spectrum format
-            SpecFileFormat specFormat = (SpecFileFormat) specParam.getFileFormat();
-            // Output file
-            File outputFile = paramManager.getOutputFileParam().getFile();
+            SpecFileFormat specFormat = SpecFileFormat.getSpecFileFormat(specPath.getName());
+            if (!isSupportedSpectrumFormat(specFormat)) {
+                return "Spectrum file extension does not match a supported format (*.mzML, *.mgf): " + specPath.getName();
+            }
+            File outputFile = opts.outputFile;
             if (outputFile == null) {
-                String defaultExt = outputFormat == 1 ? ".tsv" : ".pin";
                 String outputFilePath = specPath.getPath().substring(0, specPath.getPath().lastIndexOf('.')) + defaultExt;
                 outputFile = new File(outputFilePath);
             }
-
-            dbSearchIOList = new ArrayList<>();
             dbSearchIOList.add(new DBSearchIOFiles(specPath, specFormat, outputFile));
-        } else    // spectrum directory
-        {
-            dbSearchIOList = new ArrayList<>();
-            String defaultExt = outputFormat == 1 ? ".tsv" : ".pin";
+        } else {
             for (File f : specPath.listFiles()) {
                 SpecFileFormat specFormat = SpecFileFormat.getSpecFileFormat(f.getName());
-                if (specParam.isSupported(specFormat)) {
+                if (isSupportedSpectrumFormat(specFormat)) {
                     String outputFileName = f.getName().substring(0, f.getName().lastIndexOf('.')) + defaultExt;
                     File outputFile = new File(outputFileName);
-//					if (outputFile.exists())
-//						return outputFile.getPath() + " already exists!";
                     dbSearchIOList.add(new DBSearchIOFiles(f, specFormat, outputFile));
                 }
             }
         }
 
-        // FASTA file
-        databaseFile = paramManager.getDBFileParam().getFile();
+        databaseFile = opts.databaseFile;
+        decoyProteinPrefix = opts.decoyPrefix != null ? opts.decoyPrefix : "XXX";
 
-        decoyProteinPrefix = paramManager.getDecoyProteinPrefix();
+        PrecursorTolerance tol = opts.precursorTolerance != null ? opts.precursorTolerance : PrecursorTolerance.parse("20ppm");
+        leftPrecursorMassTolerance = tol.left();
+        rightPrecursorMassTolerance = tol.right();
 
-        // Precursor mass tolerance
-        ToleranceParameter tol = paramManager.getPrecursorMassToleranceParam();
-        leftPrecursorMassTolerance = tol.getLeftTolerance();
-        rightPrecursorMassTolerance = tol.getRightTolerance();
-
-        int toleranceUnit = paramManager.getToleranceUnit();
+        int toleranceUnit = opts.precursorToleranceUnits != null ? opts.precursorToleranceUnits : 2;
         if (toleranceUnit != 2) {
-            boolean isTolerancePPM;
-            isTolerancePPM = toleranceUnit != 0;
+            boolean isTolerancePPM = toleranceUnit != 0;
             leftPrecursorMassTolerance = new Tolerance(leftPrecursorMassTolerance.getValue(), isTolerancePPM);
             rightPrecursorMassTolerance = new Tolerance(rightPrecursorMassTolerance.getValue(), isTolerancePPM);
         }
 
-        IntRangeParameter isotopeParam = paramManager.getIsotopeRangeParameter();
-        this.minIsotopeError = isotopeParam.getMin();
-        this.maxIsotopeError = isotopeParam.getMax();
+        IntRange isotope = opts.isotopeErrorRange != null ? opts.isotopeErrorRange : new IntRange(0, 1);
+        this.minIsotopeError = isotope.min();
+        this.maxIsotopeError = isotope.max();
 
         if (rightPrecursorMassTolerance.getToleranceAsDa(1000, 2) >= 0.5f ||
                 leftPrecursorMassTolerance.getToleranceAsDa(1000, 2) >= 0.5f) {
             minIsotopeError = maxIsotopeError = 0;
         }
 
-        enzyme = paramManager.getEnzyme();
-        numTolerableTermini = paramManager.getNumTolerableTermini();
-        activationMethod = paramManager.getActivationMethod();
-        instType = paramManager.getInstType();
-        if (activationMethod == ActivationMethod.HCD && instType != InstrumentType.HIGH_RESOLUTION_LTQ && instType != InstrumentType.QEXACTIVE)
-            instType = InstrumentType.QEXACTIVE;    // by default use Q-Exactive model for HCD
-
-        protocol = paramManager.getProtocol();
+        enzyme = opts.effectiveEnzyme();
+        numTolerableTermini = opts.numTolerableTermini != null ? opts.numTolerableTermini : 2;
+        activationMethod = opts.effectiveActivationMethod();
+        instType = opts.effectiveInstrumentType();
+        if (activationMethod == ActivationMethod.HCD
+                && instType != InstrumentType.HIGH_RESOLUTION_LTQ
+                && instType != InstrumentType.QEXACTIVE) {
+            instType = InstrumentType.QEXACTIVE; // default to Q-Exactive for HCD
+        }
+        protocol = opts.effectiveProtocol();
 
         aaSet = null;
-        File modFile = paramManager.getModFileParam().getFile();
-        if (modFile == null && configAASet == null)
+        File modFile = opts.modificationFile;
+        boolean hasConfigMods = !opts.dynamicMods.isEmpty()
+                || !opts.staticMods.isEmpty()
+                || !opts.customAAs.isEmpty();
+
+        if (modFile == null && !hasConfigMods) {
             aaSet = AminoAcidSet.getStandardAminoAcidSetWithFixedCarbamidomethylatedCys();
-        else {
+        } else {
             if (modFile != null) {
                 String modFileName = modFile.getName();
                 String ext = modFileName.substring(modFileName.lastIndexOf('.') + 1);
-                if (ext.equalsIgnoreCase("xml"))
+                if (ext.equalsIgnoreCase("xml")) {
                     aaSet = AminoAcidSet.getAminoAcidSetFromXMLFile(modFile.getPath());
-                else
-                    aaSet = AminoAcidSet.getAminoAcidSetFromModFile(modFile.getPath(), paramManager);
+                } else {
+                    aaSet = AminoAcidSet.getAminoAcidSetFromModFile(modFile.getPath(), opts);
+                }
             } else {
-                aaSet = configAASet;
+                List<String> mods = new ArrayList<>(opts.staticMods.size() + opts.dynamicMods.size());
+                mods.addAll(opts.staticMods);
+                mods.addAll(opts.dynamicMods);
+                aaSet = AminoAcidSet.getAminoAcidSetFromModEntries(
+                        opts.configFile != null ? opts.configFile.getName() : "config",
+                        opts.customAAs, mods, opts);
             }
 
             if (protocol == Protocol.AUTOMATIC) {
                 if (aaSet.containsITRAQ()) {
-                    if (aaSet.containsPhosphorylation())
-                        protocol = Protocol.ITRAQPHOSPHO;
-                    else
-                        protocol = Protocol.ITRAQ;
+                    protocol = aaSet.containsPhosphorylation() ? Protocol.ITRAQPHOSPHO : Protocol.ITRAQ;
                 } else if (aaSet.containsTMT()) {
                     protocol = Protocol.TMT;
                 } else {
-                    if (aaSet.containsPhosphorylation())
-                        protocol = Protocol.PHOSPHORYLATION;
-                    else
-                        protocol = Protocol.STANDARD;
+                    protocol = aaSet.containsPhosphorylation() ? Protocol.PHOSPHORYLATION : Protocol.STANDARD;
                 }
             }
         }
 
-        numMatchesPerSpec = paramManager.getNumMatchesPerSpectrum();
+        numMatchesPerSpec = opts.numMatchesPerSpec != null ? opts.numMatchesPerSpec : 1;
 
-        IntRangeParameter specIndexParam = paramManager.getSpecIndexParameter();
-        startSpecIndex = specIndexParam.getMin();
-        endSpecIndex = specIndexParam.getMax();
+        IntRange specIdx = opts.specIndexRange != null ? opts.specIndexRange : new IntRange(1, Integer.MAX_VALUE - 1);
+        startSpecIndex = specIdx.min();
+        endSpecIndex = specIdx.max();
 
-        useTDA = paramManager.getTDA() == 1;
-        ignoreMetCleavage = paramManager.getIgnoreMetCleavage() == 1;
-        outputAdditionalFeatures = paramManager.getOutputAdditionalFeatures() == 1;
+        useTDA = opts.effectiveTdaStrategy() == 1;
+        ignoreMetCleavage = (opts.ignoreMetCleavage != null ? opts.ignoreMetCleavage : 0) == 1;
+        outputAdditionalFeatures = (opts.addFeatures != null ? opts.addFeatures : 0) == 1;
 
-        minPeptideLength = paramManager.getMinPeptideLength();
-        maxPeptideLength = paramManager.getMaxPeptideLength();
-
-        // Number of isoforms to consider per peptide, Default: 128
-        maxNumVariantsPerPeptide = paramManager.getMaxNumVariantsPerPeptide();
+        minPeptideLength = opts.effectiveMinPeptideLength();
+        maxPeptideLength = opts.effectiveMaxPeptideLength();
+        maxNumVariantsPerPeptide = opts.numIsoforms != null ? opts.numIsoforms : edu.ucsd.msjava.sequences.Constants.NUM_VARIANTS_PER_PEPTIDE;
 
         if (minPeptideLength > maxPeptideLength) {
             return "MinPepLength must not be larger than MaxPepLength";
         }
 
-        minCharge = paramManager.getMinCharge();
-        maxCharge = paramManager.getMaxCharge();
+        minCharge = opts.effectiveMinCharge();
+        maxCharge = opts.effectiveMaxCharge();
         if (minCharge > maxCharge) {
             return "MinCharge must not be larger than MaxCharge";
         }
 
-        numThreads = paramManager.getNumThreads();
-        numTasks = paramManager.getNumTasks();
-        minSpectraPerThread = paramManager.getMinSpectraPerThread();
-        verbose = paramManager.getVerboseFlag() == 1;
-        doNotUseEdgeScore = paramManager.getEdgeScoreFlag() == 1;
+        numThreads = opts.numThreads != null ? opts.numThreads : Runtime.getRuntime().availableProcessors();
+        numTasks = opts.numTasks != null ? opts.numTasks : 0;
+        minSpectraPerThread = opts.effectiveMinSpectraPerThread();
+        verbose = opts.effectiveVerbose() == 1;
+        doNotUseEdgeScore = (opts.edgeScore != null ? opts.edgeScore : 0) == 1;
 
-        dbIndexDir = paramManager.getDatabaseIndexDir();
+        dbIndexDir = opts.dbIndexDir;
+        minNumPeaksPerSpectrum = opts.minNumPeaks != null ? opts.minNumPeaks : edu.ucsd.msjava.sequences.Constants.MIN_NUM_PEAKS_PER_SPECTRUM;
+        minDeNovoScore = opts.minDeNovoScore != null ? opts.minDeNovoScore : edu.ucsd.msjava.sequences.Constants.MIN_DE_NOVO_SCORE;
 
-        minNumPeaksPerSpectrum = paramManager.getMinNumPeaksPerSpectrum();
-
-        minDeNovoScore = paramManager.getMinDeNovoScore();
-
-        /* Make sure max missed cleavages is a valid value and that it is not
-         * being mixed with an unspecific or no-cleave enzyme
-         */
-        maxMissedCleavages = paramManager.getMaxMissedCleavages();
+        maxMissedCleavages = opts.maxMissedCleavages != null ? opts.maxMissedCleavages : -1;
         if (maxMissedCleavages > -1 && enzyme.getName().equals("UnspecificCleavage")) {
             return "Cannot specify a MaxMissedCleavages when using unspecific cleavage enzyme";
         } else if (maxMissedCleavages > -1 && enzyme.getName().equals("NoCleavage")) {
             return "Cannot specify a MaxMissedCleavages when using no cleavage enzyme";
         }
-        
-        allowDenseCentroidedPeaks = paramManager.getAllowDenseCentroidedPeaks() == 1;
-        // outputFormat was read earlier in parse() so the default-filename-
-        // extension logic in the spec-path branches sees the user's value.
-        precursorCalMode = PrecursorCalMode.fromString(paramManager.getPrecursorCalRawValue());
 
-        IntRangeParameter msLevelParam = paramManager.getMSLevelParameter();
-        minMSLevel = msLevelParam.getMin();
-        maxMSLevel = msLevelParam.getMax();
+        allowDenseCentroidedPeaks = (opts.allowDenseCentroidedPeaks != null ? opts.allowDenseCentroidedPeaks : 0) == 1;
+        precursorCalMode = opts.precursorCalMode != null ? opts.precursorCalMode : PrecursorCalMode.AUTO;
 
-        maxNumMods = paramManager.getMaxNumModsPerPeptide();
+        IntRange ms = opts.msLevel != null ? opts.msLevel : new IntRange(2, 2);
+        minMSLevel = ms.min();
+        maxMSLevel = ms.max();
+
+        maxNumMods = opts.effectiveMaxNumMods();
         int maxNumModsCompare = aaSet.getMaxNumberOfVariableModificationsPerPeptide();
-
         if (maxNumMods != maxNumModsCompare) {
-            System.err.println("Error, code bug: " +
-                    "MaxNumModsPerPeptide tracked by the ParamManager does not match the value tracked by the AminoAcidSet: " +
-                    maxNumMods + " vs. " + maxNumModsCompare);
+            System.err.println("Error, code bug: MaxNumModsPerPeptide tracked by MSGFPlusOptions ("
+                    + maxNumMods + ") does not match value tracked by AminoAcidSet ("
+                    + maxNumModsCompare + ")");
             System.exit(-1);
         }
 
-        // Make sure all unique modifications have unique identifiers...
         Modification.setModIdentifiers();
-
         return null;
     }
 
-    // Used by MS-GF+
-    private AminoAcidSet parseConfigParamFile(ParamManager paramManager) {
-
-        BufferedLineReader reader = null;
-
-        File paramFile = paramManager.getConfigFileParam().getFile();
-
-        try {
-            reader = new BufferedLineReader(paramFile.getPath());
-        } catch (IOException e) {
-            System.err.println("Error opening parameter file " + paramFile.getPath());
-            e.printStackTrace();
-            System.exit(-1);
-        }
-
-        String dataLine;
-        int lineNum = 0;
-
-        // Keys in this table are line numbers
-        // Values are the text from the config file, after the equals sign, defining a custom amino acid
-        Hashtable<Integer, String> customAAByLine = new Hashtable<>();
-
-        // Keys in this table are line numbers
-        // Values are the text from the config file, after the equals sign, defining a static or dynamic mod
-        Hashtable<Integer, String> modsByLine = new Hashtable<>();
-
-        // Parse the settings
-
-        int invalidParameterCount = 0;
-
-        assert reader != null;
-        while ((dataLine = reader.readLine()) != null) {
-            lineNum++;
-
-            String lineSetting = getConfigLineWithoutComment(dataLine);
-            if (lineSetting.length() == 0) {
-                continue;
-            }
-
-            String paramName = ParamManager.ParamNameEnum.getParamNameFromLine(lineSetting);
-            if (paramName.isEmpty()) {
-                continue;
-            }
-
-            if (ParamManager.ParamNameEnum.DYNAMIC_MODIFICATION.isThisParam(paramName) ||
-                    ParamManager.ParamNameEnum.STATIC_MODIFICATION.isThisParam(paramName) ||
-                    ParamManager.ParamNameEnum.CUSTOM_AA.isThisParam(paramName)) {
-
-                String value = lineSetting.split("=")[1].trim();
-                if (!value.equalsIgnoreCase("none")) {
-                    // Store the text after the equals sign
-                    if (ParamManager.ParamNameEnum.CUSTOM_AA.isThisParam(paramName))
-                        customAAByLine.put(lineNum, value);
-                    else
-                        modsByLine.put(lineNum, value);
-                }
-                continue;
-            }
-
-            boolean validParameter = false;
-            for (ParamManager.ParamNameEnum param : ParamManager.ParamNameEnum.values()) {
-                if (param.isThisParam(paramName)) {
-                    Parameter commandLineParam = paramManager.getParameter(param.getKey());
-                    if (commandLineParam != null) {
-                        validParameter = true;
-                        if (!commandLineParam.isValueAssigned()) {
-                            String value = lineSetting.split("=")[1].trim();
-                            String parseError = commandLineParam.parse(value);
-                            if (parseError == null || parseError.isEmpty()) {
-                                commandLineParam.setValueAssigned();
-                                continue;
-                            }
-
-                            if (commandLineParam.getKey().equals(ParamManager.ParamNameEnum.NUM_THREADS.getKey()) &&
-                                    value.equalsIgnoreCase("all")) {
-                                // Config file has: NumThreads=All
-                                // This is acceptable
-                                // Note that numThreads should have already been initialized to the number of cores on this system
-                                // (see method addNumThreadsParam in ParamManager)
-                                continue;
-                            }
-
-                            System.err.println("Error parsing '" + lineSetting + "' in config file " +
-                                    paramFile.getAbsolutePath() + ": " + parseError);
-                            System.exit(-1);
-                        }
-                    }
-                }
-            }
-
-            if (!validParameter) {
-                if (lineSetting.toLowerCase().startsWith("enzymedef")) {
-                    // DMS uses EnzymeDef to keep track of customize enzyme definitions
-                    // See, for example, https://github.com/PNNL-Comp-Mass-Spec/DMS-Analysis-Manager/blob/875533dfe95ed2c8252dc72b334cfd8ed651fa1c/Plugins/AM_MSGFDB_PlugIn/clsMSGFPlusUtils.cs#L2456
-                    // Thus, silently ignore this
-                } else {
-                    System.out.println("Warning, unrecognized parameter '" + lineSetting + "' in config file " + paramFile.getName());
-                    invalidParameterCount++;
-                }
-            }
-
-        }
-
-        if (invalidParameterCount > 0) {
-            System.out.println("Valid parameters are described in the example parameter file at " +
-                    "https://github.com/MSGFPlus/msgfplus/blob/master/docs/examples/MSGFPlus_Params.txt");
-        }
-
-        return AminoAcidSet.getAminoAcidSetFromList(paramFile.getName(), customAAByLine, modsByLine, paramManager);
+    /** Spectrum-format whitelist: only mzML and MGF are supported. */
+    private static boolean isSupportedSpectrumFormat(SpecFileFormat fmt) {
+        return fmt == SpecFileFormat.MZML
+                || fmt == SpecFileFormat.MGF;
     }
+
 
     @Override
     public String toString() {
-        StringBuffer buf = new StringBuffer();
-
-//		buf.append("Spectrum File(s):\n");
-//		for(DBSearchIOFiles ioFile : this.dbSearchIOList)
-//		{
-//			buf.append("\t"+ioFile.getSpecFile().getAbsolutePath()+"\n");
-//		}
-//		buf.append("Database File: " + this.databaseFile.getAbsolutePath() + "\n");
+        StringBuilder buf = new StringBuilder();
 
         buf.append("\tPrecursorMassTolerance: ");
         if (leftPrecursorMassTolerance.equals(rightPrecursorMassTolerance)) {

@@ -100,8 +100,6 @@ public class IonProbability {
                         }
                         if (spec.getPeakByMass(mz, tol) != null) {
                             numObservedPeaks[index]++;
-//							if(ion.getName().equals("y2-H3PO4"))
-//								System.out.println("Debug");
                         } else
                             numMissingPeaks[index]++;
                     }

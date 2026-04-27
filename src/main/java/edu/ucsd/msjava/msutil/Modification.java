@@ -5,15 +5,8 @@ import edu.ucsd.msjava.msgf.NominalMass;
 import java.util.Comparator;
 import java.util.HashMap;
 
-/**
- * A class representing a modification.
- *
- * @author sangtaekim
- */
 public class Modification {
-    /**
-     * Threshold to use when determining if two modifications have the same mass
-     */
+    /** Tolerance for treating two modification masses as equivalent (Da). */
     public static final double MOD_MASS_COMPARISON_THRESHOLD = 0.01;
 
     private final String name;
@@ -40,47 +33,23 @@ public class Modification {
         this.nominalMass = NominalMass.toNominalMass((float) mass);
     }
 
-    /**
-     * Modification name
-     *
-     * @return
-     */
     public String getName() {
         return name;
     }
 
-    /**
-     * Modification mass (as a float)
-     *
-     * @return
-     */
     public float getMass() {
         return (float) mass;
     }
 
-    /**
-     * Modification mass (as a double)
-     *
-     * @return
-     */
     public double getAccurateMass() {
         return mass;
     }
 
-    /**
-     * Modification mass (as an integer)
-     *
-     * @return
-     */
     public int getNominalMass() {
         return nominalMass;
     }
 
-    /**
-     * Modification identifier (used in mzid output)
-     *
-     * @return
-     */
+    /** Unique short identifier used in mzid output (e.g. "+57", "-18#1"). */
     public String getModId() {
         return modId;
     }
@@ -96,11 +65,6 @@ public class Modification {
         return composition;
     }
 
-    /**
-     * List of default modifications
-     *
-     * @return
-     */
     public static Modification[] getDefaultModList() {
         return defaultModList;
     }
@@ -157,13 +121,6 @@ public class Modification {
         return isModConflict(name, composition.getAccurateMass(), massTolerance);
     }
 
-    /**
-     * Register a modification by name and mass
-     *
-     * @param modName Modification name (though getAminoAcidSetFromXMLFile uses 'residueStr + " " + modMass')
-     * @param mass    Monoisotopic mass
-     * @return
-     */
     public static Modification register(String modName, double mass) {
         Modification mod = new Modification(modName, mass);
         setModIdentifier(mod);
@@ -171,13 +128,6 @@ public class Modification {
         return mod;
     }
 
-    /**
-     * Register a modification by name and composition
-     *
-     * @param name        Modification name
-     * @param composition Modification empirical formula
-     * @return
-     */
     public static Modification register(String name, Composition composition) {
         Modification mod = new Modification(name, composition);
         setModIdentifier(mod);
@@ -197,11 +147,6 @@ public class Modification {
         }
     }
 
-    /**
-     * Generate a unique identifier for the modification to be used in mzid output (in peptide and peptideEvidence IDs)
-     *
-     * @param mod
-     */
     private static void setModIdentifier(Modification mod) {
         double mass = mod.getAccurateMass();
         String baseId = "";
@@ -256,7 +201,6 @@ public class Modification {
     public static final Modification Acetyl = new Modification("Acetyl", new Composition(2, 2, 0, 1, 0));
     public static final Modification PyroCarbamidomethyl = new Modification("Pyro-carbamidomethyl", Composition.getMass("H-3N-1"));
 
-    // static member
     private static final Modification[] defaultModList =
             {
                     Carbamidomethyl,
@@ -272,10 +216,6 @@ public class Modification {
                     PyroCarbamidomethyl
             };
 
-    /**
-     * Keys are modification names
-     * Values are modification details
-     */
     private static final HashMap<String, Modification> modTable;
 
     static {
@@ -293,11 +233,6 @@ public class Modification {
         Protein_C_Term,
     }
 
-    /**
-     * A class representing the modification instance.
-     *
-     * @author sangtaekim
-     */
     public static class Instance {
         private final Modification mod;
         private final char residue;    // if null, no amino acid specificity

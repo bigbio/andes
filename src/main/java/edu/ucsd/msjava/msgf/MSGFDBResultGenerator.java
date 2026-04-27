@@ -127,17 +127,6 @@ public class MSGFDBResultGenerator {
 
         // returns cumulative probability <= specProbThreshold
         public double getSpectralProbability(double specProbThreshold) {
-//			int index = Arrays.binarySearch(cumScoreDist, specProbThreshold);
-//			if(index >= 0)
-//				return cumScoreDist[index];
-//			else
-//			{
-//				index = -index-1;
-//				if(index > 0)
-//					return cumScoreDist[index-1];
-//				else
-//					return 0;
-//			}
             while (curIndex < cumScoreDist.length - 1 && cumScoreDist[curIndex + 1] <= specProbThreshold)
                 ++curIndex;
 

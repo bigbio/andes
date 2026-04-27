@@ -197,14 +197,7 @@ public class NewRankScorer implements NewAdditiveScorer {
     private void readFromInputStream(InputStream is, boolean verbose) {
         DataInputStream in = new DataInputStream(is);
 
-        // Read the date
         try {
-//			int year = in.readInt();	// version information
-//			int month = in.readInt();
-//			int date = in.readInt();
-//			if(verbose)
-//			System.out.println("CreationDate: " + year + "/" + (month+1) + "/" + date);
-
             int version = in.readInt();
             if (verbose)
                 System.out.println("Version: " + version);
@@ -245,11 +238,6 @@ public class NewRankScorer implements NewAdditiveScorer {
                 for (byte i = 0; i < lenProtocol; i++)
                     bufProtocol.append(in.readChar());
                 protocol = Protocol.get(bufProtocol.toString());
-//				if(protocol == null)
-//				{
-//					System.out.println(bufProtocol.toString());
-//					System.exit(-1);
-//				}
             } else
                 protocol = Protocol.AUTOMATIC;
 
@@ -420,8 +408,6 @@ public class NewRankScorer implements NewAdditiveScorer {
                     for (int i = 0; i < ionExTable.length; i++) {
                         ionExTable[i] = in.readFloat();
                         if (ionExTable[i] == 0) {
-//							System.out.println("IonExTable: " + partition.getCharge() + " " + partition.getSegNum() 
-//									+ " " + partition.getParentMass() + " " + ionExTable[i]);
                             ionExTable[i] = 0.001f;
                         }
                         assert (ionExTable[i] > 0);
@@ -776,9 +762,6 @@ public class NewRankScorer implements NewAdditiveScorer {
             // Rank distributions
             out.writeInt(maxRank);
             for (Partition partition : partitionSet) {
-//				if(partition.getParentMass() > 4100 && partition.getCharge() == 5 && partition.getSegNum() == 1)
-//					System.out.println("Debug");
-
                 HashMap<IonType, Float[]> rankDistTable = getRankDistTable(partition);
                 if (rankDistTable == null)
                     continue;
@@ -798,10 +781,6 @@ public class NewRankScorer implements NewAdditiveScorer {
             }
 
             // Error distribution
-//			protected int errorScalingFactor = 0;	// if 0, don't user errors, 10 for low accuracy, 100 for high accuracy
-//			protected Hashtable<Partition,Float[]> ionErrDistTable = null;
-//			protected Hashtable<Partition,Float[]> noiseErrDistTable = null;
-//			protected Hashtable<Partition,Float[]> ionExistenceTable = null;
             out.writeInt(errorScalingFactor);
             if (errorScalingFactor > 0) {
                 for (Partition partition : partitionSet) {
@@ -946,11 +925,4 @@ public class NewRankScorer implements NewAdditiveScorer {
         out.close();
     }
 
-    public static void main(String argv[]) throws Exception {
-        readWriteTest();
-//		paramTest();
-    }
-
-    public static void readWriteTest() throws Exception {
-    }
 }

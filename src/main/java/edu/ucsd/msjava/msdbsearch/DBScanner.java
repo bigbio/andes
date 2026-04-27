@@ -6,7 +6,7 @@ import edu.ucsd.msjava.msscorer.NewRankScorer;
 import edu.ucsd.msjava.msscorer.SimpleDBSearchScorer;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.msutil.Modification.Location;
-import edu.ucsd.msjava.parser.BufferedLineReader;
+import edu.ucsd.msjava.mgf.BufferedLineReader;
 import edu.ucsd.msjava.sequences.Constants;
 
 import java.io.*;
@@ -89,8 +89,12 @@ public class DBScanner {
             intAAMass[aa.getResidue()] = aa.getNominalMass();
         }
 
-        specKeyDBMatchMap = Collections.synchronizedMap(new HashMap<SpecKey, PriorityQueue<DatabaseMatch>>());
-        specIndexDBMatchMap = Collections.synchronizedMap(new HashMap<Integer, PriorityQueue<DatabaseMatch>>());
+        // DBScanner is owned by exactly one RunMSGFPlus / ConcurrentMSGFDB task.
+        // No internal fork-out (verified: no ExecutorService / Thread creation in
+        // dbSearch). Plain HashMap is enough; the synchronized wrappers were
+        // defensive against a sharing pattern that does not occur in production.
+        specKeyDBMatchMap = new HashMap<>();
+        specIndexDBMatchMap = new HashMap<>();
 
         progress = null;
         output = System.out;
@@ -116,7 +120,7 @@ public class DBScanner {
         return this;
     }
 
-    public synchronized void addDBMatches(Map<SpecKey, PriorityQueue<DatabaseMatch>> map) {
+    public void addDBMatches(Map<SpecKey, PriorityQueue<DatabaseMatch>> map) {
         if (map == null)
             return;
         Iterator<Entry<SpecKey, PriorityQueue<DatabaseMatch>>> itr = map.entrySet().iterator();
@@ -247,10 +251,6 @@ public class DBScanner {
                 if (bufferIndex == 0)
                     lcp = 0;
 
-                // For debugging
-//				System.out.println(index+": " +sequence.getSubsequence(index, sequence.getSize()));
-//				if(index == 4)
-//					System.out.println("Debug");
                 // skip redundant peptides
 
                 if (Thread.currentThread().isInterrupted()) {
@@ -411,19 +411,12 @@ public class DBScanner {
                     if (peptideLengthIndex < minPeptideLength)
                         continue;
 
-//					System.out.println(sequence.getSubsequence(index+1, index+i+1));
-//					if(sequence.getSubsequence(index+1, index+i+1).equalsIgnoreCase("KYPCRYCEK"))
-//					{
-//						System.out.println("DebugSequence: " + sequence.getSubsequence(index, index+i+1));
-//					}
-
                     int cTermCleavageScore = 0;
                     if (enzyme != null) {
                         char cTermNeighboringResidue = sequence.getCharAt(index + peptideLengthIndex + 1);
                         isProteinCTerm = (cTermNeighboringResidue == Constants.TERMINATOR_CHAR);
                         if (enzyme.isCTerm()) {
-//							if(isProteinCTerm || enzyme.isCleavable(residue)) // || cTermNeighboringResidue == Constants.INVALID_CHAR)
-                            if (enzyme.isCleavable(residue)) // || cTermNeighboringResidue == Constants.INVALID_CHAR)	// changed by Sangtae to avoid SpecProb=0
+                            if (enzyme.isCleavable(residue)) // changed by Sangtae to avoid SpecProb=0
                                 cTermCleavageScore = peptideCleavageCredit;
                             else {
                                 cTermCleavageScore = peptideCleavagePenalty;
@@ -481,13 +474,6 @@ public class DBScanner {
                         double leftThr = (double) (theoPeptideMass - tolDaLeft);
                         double rightThr = (double) (theoPeptideMass + tolDaRight);
 
-//						float tolDaLeft = specScanner.getLeftPrecursorMassTolerance().getToleranceAsDa(peptideMass);
-//						float tolDaRight = specScanner.getRightPrecursorMassTolerance().getToleranceAsDa(peptideMass);
-//						int maxPeptideMassIndex, minPeptideMassIndex;
-//						
-//						maxPeptideMassIndex = maxNominalPeptideMass + Math.round(tolDaLeft-0.4999f);
-//						minPeptideMassIndex = minNominalPeptideMass - Math.round(tolDaRight-0.4999f);
-
                         if (leftThr < 1 || rightThr < 1) {
                             // Either or both of the thresholds is less than 1 (and probably negative)
                             // This can happen when a dynamic mod with a large negative mass is defined and is applied to a small peptide
@@ -501,11 +487,7 @@ public class DBScanner {
 
                         Collection<SpecKey> matchedSpecKeyList = specScanner.getPepMassSpecKeyMap().subMap(leftThr, rightThr).values();
                         if (matchedSpecKeyList.size() > 0) {
-                            //////
-//							System.out.println("\tMatch: " + sequence.getCharAt(index)+"."+sequence.getSubsequence(index+1, index+i+1)+"."+sequence.getCharAt(index+i+1));
-                            ///////
                             boolean isNTermMetCleaved = candidatePepGrid.isNTermMetCleaved(j);
-//							int pepLength = i;
                             int pepLength;
                             if (!isNTermMetCleaved)
                                 pepLength = peptideLengthIndex;
@@ -668,7 +650,7 @@ public class DBScanner {
         }
     }
 
-    public synchronized void generateSpecIndexDBMatchMap() {
+    public void generateSpecIndexDBMatchMap() {
         Iterator<Entry<SpecKey, PriorityQueue<DatabaseMatch>>> itr = specKeyDBMatchMap.entrySet().iterator();
         int numPeptidesPerSpec = this.numPeptidesPerSpec;
 
@@ -682,15 +664,6 @@ public class DBScanner {
                 Map<String, DatabaseMatch> pepSeqMap = new HashMap<String, DatabaseMatch>();
                 for (DatabaseMatch m : matchQueue) {
                     String pepSeq = m.getPepSeq();
-//					int index = m.getIndex();
-//					char pre = sa.getSequence().getCharAt(index);
-//					char post;
-//					if(m.isNTermMetCleaved())
-//						post = sa.getSequence().getCharAt(index+m.getLength());
-//					else
-//						post = sa.getSequence().getCharAt(index+m.getLength()-1);
-//					String key = pre+pepSeq+post;
-
                     String key = pepSeq + m.getScore();
                     DatabaseMatch existingMatch = pepSeqMap.get(key);
                     if (existingMatch == null)
@@ -728,7 +701,7 @@ public class DBScanner {
         }
     }
 
-    public synchronized void addResultsToList(List<MSGFPlusMatch> resultList) {
+    public void addResultsToList(List<MSGFPlusMatch> resultList) {
         Iterator<Entry<Integer, PriorityQueue<DatabaseMatch>>> itr = specIndexDBMatchMap.entrySet().iterator();
         while (itr.hasNext()) {
             Entry<Integer, PriorityQueue<DatabaseMatch>> entry = itr.next();
@@ -761,7 +734,7 @@ public class DBScanner {
     }
 
     // for MS-GFDB
-    public synchronized void addDBSearchResults(List<MSGFDBResultGenerator.DBMatch> gen, String specFileName, boolean replicateMergedResults) {
+    public void addDBSearchResults(List<MSGFDBResultGenerator.DBMatch> gen, String specFileName, boolean replicateMergedResults) {
         Map<Integer, PriorityQueue<DatabaseMatch>> specIndexDBMatchMap = new HashMap<Integer, PriorityQueue<DatabaseMatch>>();
 
         Iterator<Entry<SpecKey, PriorityQueue<DatabaseMatch>>> itr = specKeyDBMatchMap.entrySet().iterator();
@@ -826,7 +799,6 @@ public class DBScanner {
                 }
 
                 float expMass = scorer.getPrecursorPeak().getMass();
-//				float theoMass = pep.getParentMass();
                 float peptideMass = match.getPeptideMass();
                 float pmError = Float.MAX_VALUE;
                 float theoMass = peptideMass + (float) Composition.H2O;
@@ -837,7 +809,6 @@ public class DBScanner {
                         pmError = error;
                     }
                 }
-//				if(pmError > )
                 if (specScanner.getRightPrecursorMassTolerance().isTolerancePPM())
                     pmError = pmError / theoMass * 1e6f;
 

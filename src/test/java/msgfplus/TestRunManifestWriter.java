@@ -1,11 +1,11 @@
 package msgfplus;
 
+import edu.ucsd.msjava.cli.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
 import edu.ucsd.msjava.misc.RunManifestWriter;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
-import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.DBSearchIOFiles;
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -25,23 +25,10 @@ import java.util.Map;
 public class TestRunManifestWriter {
 
     private SearchParams parsedSearchParams() throws URISyntaxException {
-        ParamManager manager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE,
-                "java -Xmx3500M -jar MSGFPlus.jar");
-        manager.addMSGFPlusParams();
-
-        URI paramUri = SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI();
-        manager.getParameter("conf").parse(new File(paramUri).getAbsolutePath());
-
-        URI specUri = SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI();
-        manager.getParameter("s").parse(new File(specUri).getAbsolutePath());
-
-        URI dbUri = SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI();
-        manager.getParameter("d").parse(new File(dbUri).getAbsolutePath());
-
-        manager.getParameter("maxMissedCleavages").parse("2");
-
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.maxMissedCleavages = 2;
         SearchParams params = new SearchParams();
-        String err = params.parse(manager);
+        String err = params.parse(opts);
         Assert.assertNull("SearchParams.parse should succeed: " + err, err);
         return params;
     }

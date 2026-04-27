@@ -64,11 +64,6 @@ public class CandidatePeptideGrid {
     private int length;
     private int[] size;
 
-//	public CandidatePeptideGrid(AminoAcidSet aaSet, int maxPeptideLength)
-//	{
-//		this(aaSet, maxPeptideLength, Constants.NUM_VARIANTS_PER_PEPTIDE);
-//	}
-
     public CandidatePeptideGrid(AminoAcidSet aaSet, Enzyme enzyme, int maxPeptideLength, int maxNumVariantsPerPeptide, int maxMissedCleavages) {
         this.numMaxMods = aaSet.getMaxNumberOfVariableModificationsPerPeptide();
         this.maxPeptideLength = maxPeptideLength;
@@ -159,11 +154,6 @@ public class CandidatePeptideGrid {
     public int getNumMods(int index) {
         return numMods[index][length];
     }
-
-//	public boolean addResidue(char residue)
-//	{
-//		return addResidue(length+1, residue);
-//	}
 
     /**
      * Add a residue to the candidate peptide grid

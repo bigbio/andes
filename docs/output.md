@@ -8,8 +8,10 @@ Select the format with `-outputFormat`:
 
 | Flag | Format | Extension | Typical use |
 |---|---|---|---|
-| `-outputFormat 0` (default) | Percolator `.pin` | `.pin` | Feed to Percolator / MS²Rescore / Mokapot for FDR-calibrated rescoring |
-| `-outputFormat 1` | Tab-separated values | `.tsv` | Direct inspection / downstream tools that consume TSV |
+| `-outputFormat pin` (default) | Percolator `.pin` | `.pin` | Feed to Percolator / MS²Rescore / Mokapot for FDR-calibrated rescoring |
+| `-outputFormat tsv` | Tab-separated values | `.tsv` | Direct inspection / downstream tools that consume TSV |
+
+`-outputFormat` accepts the named values `pin` and `tsv` (case-insensitive). Numeric forms (`0`, `1`) accepted by older releases are no longer recognised — pass the named value instead.
 
 The output path (`-o`) must use the matching extension. If `-o` is omitted, MS-GF+ writes `<SpectrumFileName>.pin` (or `.tsv`) in the spectrum file's directory.
 

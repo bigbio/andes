@@ -1,6 +1,6 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.parser.SpectrumParser;
+import edu.ucsd.msjava.mgf.SpectrumParser;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -45,7 +45,6 @@ public class SpecKey extends Pair<Integer, Integer> {
     public void addSpecIndex(int scanNum) {
         if (specIndexList == null) {
             specIndexList = new ArrayList<Integer>();
-//			specIndexList.add(super.getFirst());
         }
         specIndexList.add(scanNum);
     }
@@ -142,9 +141,7 @@ public class SpecKey extends Pair<Integer, Integer> {
             ActivationMethod specActivationMethod = spec.getActivationMethod();
 
             if (activationMethod == ActivationMethod.ASWRITTEN) {
-                // System.out.println(
-                //   "Use spectrum " + spec.getID() +
-                //   " since assumed activationMethod is " + activationMethod.toString());
+                // no-op: accept all activation methods when user specified ASWRITTEN
             } else if (specActivationMethod != null) {
                 // If specActivationMethod is null, we use whatever was specified
                 //   - some supported spectra input types do not allow/require activation method
@@ -214,7 +211,6 @@ public class SpecKey extends Pair<Integer, Integer> {
             }
 
             if (spec.size() < minNumPeaksPerSpectrum) {
-//				System.out.println("Spectrum " + spec.getScanNum() + " has too few peaks (#Peaks: " + spec.size()+"): ignored.");
                 numSpectraWithTooFewPeaks++;
                 continue;
             }

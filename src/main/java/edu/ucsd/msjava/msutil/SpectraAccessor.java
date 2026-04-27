@@ -3,10 +3,10 @@ package edu.ucsd.msjava.msutil;
 import edu.ucsd.msjava.mzml.StaxMzMLParser;
 import edu.ucsd.msjava.mzml.StaxMzMLSpectraIterator;
 import edu.ucsd.msjava.mzml.StaxMzMLSpectraMap;
-import edu.ucsd.msjava.parser.*;
+import edu.ucsd.msjava.mgf.MgfSpectrumParser;
+import edu.ucsd.msjava.mgf.SpectrumParser;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.Iterator;
 
@@ -24,22 +24,10 @@ public class SpectraAccessor {
     SpectrumAccessorBySpecIndex specMap = null;
     Iterator<Spectrum> specItr = null;
 
-    /**
-     * Constructor that accepts a file
-     * Determines the file format based on the file extension
-     *
-     * @param specFile
-     */
     public SpectraAccessor(File specFile) {
         this(specFile, SpecFileFormat.getSpecFileFormat(specFile.getName()));
     }
 
-    /**
-     * Constructor that accepts a file and a file format
-     *
-     * @param specFile
-     * @param specFormat
-     */
     public SpectraAccessor(File specFile, SpecFileFormat specFormat) {
         if (specFormat == null) {
             throw new IllegalArgumentException("Unsupported spectrum file format: " + specFile.getName());
@@ -71,21 +59,12 @@ public class SpectraAccessor {
                     }
                 }
                 specMap = new StaxMzMLSpectraMap(staxParser, minMSLevel, maxMSLevel);
-            } else if (specFormat == SpecFileFormat.DTA_TXT)
-                specMap = new PNNLSpectraMap(specFile.getPath());
-            else {
-                SpectrumParser parser = null;
-                if (specFormat == SpecFileFormat.MGF)
-                    parser = new MgfSpectrumParser();
-                else if (specFormat == SpecFileFormat.MS2)
-                    parser = new MS2SpectrumParser();
-                else if (specFormat == SpecFileFormat.PKL)
-                    parser = new PklSpectrumParser();
-                else
-                    return null;
-
+            } else if (specFormat == SpecFileFormat.MGF) {
+                SpectrumParser parser = new MgfSpectrumParser();
                 spectrumParser = parser;
                 specMap = new SpectraMap(specFile.getPath(), parser);
+            } else {
+                return null;
             }
         }
 
@@ -108,29 +87,16 @@ public class SpectraAccessor {
                     }
                 }
                 specItr = new StaxMzMLSpectraIterator(staxParser, minMSLevel, maxMSLevel);
-            } else if (specFormat == SpecFileFormat.DTA_TXT)
-                try {
-                    specItr = new PNNLSpectraIterator(specFile.getPath());
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            else {
-                SpectrumParser parser = null;
-                if (specFormat == SpecFileFormat.MGF)
-                    parser = new MgfSpectrumParser();
-                else if (specFormat == SpecFileFormat.MS2)
-                    parser = new MS2SpectrumParser();
-                else if (specFormat == SpecFileFormat.PKL)
-                    parser = new PklSpectrumParser();
-                else
-                    return null;
-
+            } else if (specFormat == SpecFileFormat.MGF) {
+                SpectrumParser parser = new MgfSpectrumParser();
                 spectrumParser = parser;
                 try {
                     specItr = new SpectraIterator(specFile.getPath(), parser);
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
+            } else {
+                return null;
             }
         }
 
@@ -145,10 +111,6 @@ public class SpectraAccessor {
         return getSpecMap().getSpectrumById(specId);
     }
 
-    /**
-     * Get the current spectrum parser, or null if no parser
-     * @return
-     */
     public SpectrumParser getSpectrumParser() {
         return spectrumParser;
     }
@@ -167,14 +129,8 @@ public class SpectraAccessor {
 
     public CvParamInfo getSpectrumIDFormatCvParam() {
         CvParamInfo cvParam = null;
-        if (specFormat == SpecFileFormat.DTA_TXT
-                || specFormat == SpecFileFormat.MGF
-                || specFormat == SpecFileFormat.PKL
-                || specFormat == SpecFileFormat.MS2
-        )
+        if (specFormat == SpecFileFormat.MGF)
             cvParam = new CvParamInfo("MS:1000774", "multiple peak list nativeID format", null);
-        else if (specFormat == SpecFileFormat.MZDATA)
-            cvParam = new CvParamInfo("MS:1000777", "spectrum identifier nativeID format", null);
         else if (specFormat == SpecFileFormat.MZML) {
             if (staxParser == null) {
                 try {

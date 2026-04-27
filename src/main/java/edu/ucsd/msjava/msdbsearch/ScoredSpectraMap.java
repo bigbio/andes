@@ -33,8 +33,6 @@ public class ScoredSpectraMap {
 
     private Map<SpecKey, NewRankScorer> specKeyRankScorerMap;
 
-//	private Map<SpecKey,Tolerance> specKeyToleranceMap;
-
     private boolean turnOffEdgeScoring = false;
 
     private ProgressData progress;
@@ -60,16 +58,16 @@ public class ScoredSpectraMap {
         this.specDataType = specDataType;
         this.precursorMassShiftPpm = precursorMassShiftPpm;
 
-        pepMassSpecKeyMap = Collections.synchronizedSortedMap((new TreeMap<Double, SpecKey>()));
-        specKeyScorerMap = Collections.synchronizedMap(new HashMap<SpecKey, SimpleDBSearchScorer<NominalMass>>());
-        specIndexChargeToSpecKeyMap = Collections.synchronizedMap(new HashMap<Pair<Integer, Integer>, SpecKey>());
-
-//		// To support spectrum-specific tolerance
-//		if(supportSpectrumSpecificErrorTolerance)
-//			specKeyToleranceMap = Collections.synchronizedMap(new HashMap<SpecKey,Tolerance>());
+        // Each ScoredSpectraMap is owned by exactly one RunMSGFPlus task (or the
+        // MassCalibrator pre-pass, also single-threaded). The synchronized wrappers
+        // these maps used to carry were defensive against a sharing pattern that
+        // does not occur in production code paths. Plain Map/SortedMap is enough.
+        pepMassSpecKeyMap = new TreeMap<>();
+        specKeyScorerMap = new HashMap<>();
+        specIndexChargeToSpecKeyMap = new HashMap<>();
 
         if (storeRankScorer)
-            specKeyRankScorerMap = Collections.synchronizedMap(new HashMap<SpecKey, NewRankScorer>());
+            specKeyRankScorerMap = new HashMap<>();
         progress = null;
     }
 
@@ -158,7 +156,6 @@ public class ScoredSpectraMap {
         return rightPrecursorMassTolerance;
     }
 
-    //	public int getNumAllowedC13()								{ return numAllowedC13; }
     public int getMaxIsotopeError() {
         return maxIsotopeError;
     }
@@ -182,14 +179,6 @@ public class ScoredSpectraMap {
             return this.specKeyRankScorerMap.get(specKey);
     }
 
-//	public Tolerance getSpectrumSpecificPrecursorTolerance(SpecKey specKey)
-//	{
-//		if(specKeyToleranceMap == null)
-//			return null;
-//		else
-//			return specKeyToleranceMap.get(specKey);
-//	}
-
     public ScoredSpectraMap makePepMassSpecKeyMap() {
         for (SpecKey specKey : specKeyList) {
             int specIndex = specKey.getSpecIndex();
@@ -206,9 +195,6 @@ public class ScoredSpectraMap {
                     pepMassSpecKeyMap.put(mass1Key, specKey);
                 }
                 specIndexChargeToSpecKeyMap.put(new Pair<Integer, Integer>(specIndex, specKey.getCharge()), specKey);
-
-//			    if(specKeyToleranceMap != null && spec.getPrecursorTolerance() != null)
-//				    specKeyToleranceMap.put(specKey, spec.getPrecursorTolerance());
 
             } else {
                 // Skip since precursor m/z is zero
@@ -269,7 +255,6 @@ public class ScoredSpectraMap {
             int charge = specKey.getCharge();
             spec.setCharge(charge);
 
-            // System.out.println("GetScoredSpectrum for " + specKey.toString());
             NewScoredSpectrum<NominalMass> scoredSpec = scorer.getScoredSpectrum(spec);
 
             float peptideMass = spec.getPrecursorMass() - (float) Composition.H2O;
@@ -366,7 +351,6 @@ public class ScoredSpectraMap {
             float tolDaLeft = leftPrecursorMassTolerance.getToleranceAsDa(peptideMass);
             int maxNominalPeptideMass = NominalMass.toNominalMass(peptideMass) + Math.round(tolDaLeft - 0.4999f) + 1;
             if (supportEdgeScore)
-//				specKeyScorerMap.put(specKey, new DBScanScorerSum(scoredSpecList, maxNominalPeptideMass));
                 specKeyScorerMap.put(specKey, new FastScorer(scoredSpec, maxNominalPeptideMass));
             else
                 specKeyScorerMap.put(specKey, new FastScorer(scoredSpec, maxNominalPeptideMass));

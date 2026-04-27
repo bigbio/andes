@@ -42,7 +42,6 @@ public class ScoredSpectrumSum<T extends Matter> implements ScoredSpectrum<T> {
     }
 
     public boolean getMainIonDirection() {
-//		assert(false): "Not supported!";
         return false;
     }
 

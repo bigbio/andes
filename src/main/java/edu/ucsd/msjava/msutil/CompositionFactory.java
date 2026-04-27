@@ -254,6 +254,4 @@ public class CompositionFactory extends MassFactory<Composition> {
         finalizeCompositionSet();
     }
 
-    public static void main(String[] argv) {
-    }
 }

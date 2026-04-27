@@ -7,8 +7,9 @@ import java.io.File;
 import org.junit.Ignore;
 import org.junit.Test;
 
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import picocli.CommandLine;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 public class TestIPRG {
 
@@ -31,10 +32,9 @@ public class TestIPRG {
                 "-o", dir.getPath()+File.separator+"Test_"+versionString+".mzid"
                 }; 
 
-        ParamManager paramManager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE, "java -Xmx3500M -jar MSGFPlus.jar");
-        paramManager.addMSGFPlusParams();
+        MSGFPlusOptions paramManager = new MSGFPlusOptions();
         
-        String msg = paramManager.parseParams(argv);
+        String msg = null; MSGFPlusOptions.commandLine(paramManager).parseArgs(argv);
         if(msg != null)
             System.err.println("Error: " + msg);
         assertTrue(msg == null);

@@ -1,12 +1,12 @@
 package msgfplus;
 
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msdbsearch.SearchParams.PrecursorCalMode;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.DBSearchIOFiles;
 import edu.ucsd.msjava.msutil.SpecFileFormat;
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -31,68 +31,54 @@ import java.net.URISyntaxException;
  */
 public class TestPrecursorCalScaffolding {
 
-    private ParamManager buildParamManager() throws URISyntaxException {
-        ParamManager manager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE,
-                "java -Xmx3500M -jar MSGFPlus.jar");
-        manager.addMSGFPlusParams();
-
-        URI paramUri = SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI();
-        manager.getParameter("conf").parse(new File(paramUri).getAbsolutePath());
-
-        URI specUri = SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI();
-        manager.getParameter("s").parse(new File(specUri).getAbsolutePath());
-
-        URI dbUri = SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI();
-        manager.getParameter("d").parse(new File(dbUri).getAbsolutePath());
-        return manager;
-    }
 
     @Test
     public void precursorCalDefaultIsAuto() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals("Default -precursorCal should be AUTO",
                 PrecursorCalMode.AUTO, params.getPrecursorCalMode());
     }
 
     @Test
     public void precursorCalOnIsParsed() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("precursorCal").parse("on"));
-
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.precursorCalMode = PrecursorCalMode.ON;
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals(PrecursorCalMode.ON, params.getPrecursorCalMode());
     }
 
     @Test
     public void precursorCalOffIsParsed() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("precursorCal").parse("off"));
-
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.precursorCalMode = PrecursorCalMode.OFF;
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals(PrecursorCalMode.OFF, params.getPrecursorCalMode());
     }
 
     @Test
     public void precursorCalIsCaseInsensitive() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("precursorCal").parse("OFF"));
-
-        SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
-        Assert.assertEquals(PrecursorCalMode.OFF, params.getPrecursorCalMode());
+        // Picocli's enum matcher honours @Command(caseInsensitiveEnumValuesAllowed = true).
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        MSGFPlusOptions.commandLine(opts).parseArgs("-precursorCal", "OFF");
+        Assert.assertEquals(PrecursorCalMode.OFF, opts.precursorCalMode);
     }
 
     @Test
-    public void unknownPrecursorCalValueFallsBackToAuto() {
-        // Unit-level contract: unknown strings must not crash the search path;
-        // instead they silently fall back to AUTO.
-        Assert.assertEquals(PrecursorCalMode.AUTO, PrecursorCalMode.fromString("bogus"));
-        Assert.assertEquals(PrecursorCalMode.AUTO, PrecursorCalMode.fromString(null));
-        Assert.assertEquals(PrecursorCalMode.AUTO, PrecursorCalMode.fromString(""));
+    public void unknownPrecursorCalValueIsRejected() {
+        // The typed enum replaces the previous String + fromString fallback;
+        // invalid values are now rejected by picocli at parse time instead
+        // of silently mapping to AUTO.
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        try {
+            MSGFPlusOptions.commandLine(opts).parseArgs("-precursorCal", "bogus");
+            Assert.fail("'bogus' should not parse as a PrecursorCalMode");
+        } catch (picocli.CommandLine.ParameterException expected) {
+            // ok
+        }
     }
 
     @Test

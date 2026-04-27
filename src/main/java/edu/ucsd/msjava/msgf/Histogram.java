@@ -68,8 +68,6 @@ public class Histogram<T extends Comparable<T>> extends Hashtable<T, Integer> {
         Collections.sort(keyList);
         for (T key : keyList) {
             System.out.println(key + "\t" + this.get(key) + "\t" + this.get(key) / (float) totalCount);
-//			System.out.print(key+"\t"+this.get(key)+"\t");
-//			System.out.format("%.3f\n", this.get(key)/(float)totalCount);
         }
     }
 }

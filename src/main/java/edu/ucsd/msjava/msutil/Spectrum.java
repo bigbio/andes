@@ -48,96 +48,43 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
     private Boolean isCentroidedWithDensePeaks = false;
 
     private boolean isHighPrecision = false;
-//	private Tolerance precursorTolerance = null;
-//	private Integer minIsotopeError = null;
-//	private Integer maxIsotopeError = null;
-//	private Float fractionIonCurrent = null;
-//	private Integer numMS1Features = null;
 
     private ArrayList<CvParamInfo> addlCvParams;
 
     private Float isolationWindowTargetMz = null;
 
-    /***** CONSTRUCTORS *****/
-    /**
-     * Empty constructor.
-     */
     public Spectrum() {
     }
 
-    /**
-     * Constructor from a precursor peak.
-     *
-     * @param precursorPeak the precursor peak.
-     */
     public Spectrum(Peak precursorPeak) {
         this.precursor = precursorPeak;
     }
 
-    /**
-     * Constructor.
-     *
-     * @param precursorMz        m/z value read from the file.
-     * @param charge             charge read from the file.
-     * @param precursorIntensity intensity of the precursor peak.
-     */
     public Spectrum(float precursorMz, int charge, float precursorIntensity) {
         this.precursor = new Peak(precursorMz, precursorIntensity, charge);
     }
 
-
-    /***** GETTERS ****/
-    /**
-     * Gets the unique identifier of this spectrum.
-     *
-     * @return the unique identifier of this spectrum.
-     */
     public String getID() {
         return id;
     }
 
-    /**
-     * Gets the Peptide object of the annotation.
-     *
-     * @return the Peptide object representing the annotation or null if not annotated.
-     */
     public Peptide getAnnotation() {
         return annotation;
     }
 
-    /**
-     * Gets the annotation as a String object.
-     *
-     * @return the String object of the annotation. null if there is no annotation.
-     */
     public String getAnnotationStr() {
         if (annotation != null) return annotation.toString();
         return null;
     }
 
-    /**
-     * Gets the list of seq fi as String objects.
-     *
-     * @return the ArrayList of String objects of the annotations. null if there is no annotation.
-     */
     public ArrayList<String> getSeqList() {
         return seqList;
     }
 
-    /**
-     * Gets the charge of this spectrum.
-     *
-     * @return the integer charge.
-     */
     public int getCharge() {
         return precursor.getCharge();
     }
 
-    /**
-     * Gets the end scan number of this spectrum.
-     *
-     * @return the end scan for this spectrum if present. -1 otherwise.
-     */
     public int getEndScanNum() {
         return endScanNum;
     }
@@ -169,91 +116,43 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
             return 0;
     }
 
-    /**
-     * Gets the precursor peak member.
-     *
-     * @return the peak.
-     */
     public Peak getPrecursorPeak() {
         return precursor;
     }
 
-    /**
-     * Gets the scan number of this spectrum.
-     *
-     * @return the start scan number of this spectrum if present. -1 otherwise.
-     */
     public int getScanNum() {
         return getStartScanNum();
     }
 
-    /**
-     * Gets the spectrum index of this spectrum. Spectrum index is a 1-based sequential number of this spectrum in the file.
-     *
-     * @return the spectrum index of this spectrum if present. 0 otherwise.
-     */
     public int getSpecIndex() {
         return specIndex;
     }
 
-    /**
-     * Gets the start scan number of the spectrum.
-     *
-     * @return the start scan for this spectrum if present. -1 otherwise.
-     */
     public int getStartScanNum() {
         return startScanNum;
     }
 
-    /**
-     * Gets the title of this spectrum.
-     *
-     * @return the title of this spectrum or null if it was not specified.
-     */
     public String getTitle() {
         return title;
     }
 
-    /**
-     * Returns the retention time; see getRtIsSeconds for the units.
-     *
-     * @return the retention time if set, negative value otherwise.
-     */
     public float getRt() {
         return this.rt;
     }
 
-    /**
-     * Returns the retention time units - true if in seconds, false if in minutes
-     *
-     * @return true if retention time is in seconds, false if in minutes
-     */
+    /** Returns true if retention time is in seconds, false if in minutes. */
     public boolean getRtIsSeconds() {
         return this.rtIsSeconds;
     }
 
-    /**
-     * Returns the activation method.
-     *
-     * @return the activation method or null if not specified.
-     */
     public ActivationMethod getActivationMethod() {
         return this.activationMethod;
     }
 
-    /**
-     * Gets the polarity of this scan
-     *
-     */
     public Polarity getScanPolarity() {
         return this.scanPolarity;
     }
 
-    /**
-     * Returns whether this spectrum is centroided.
-     *
-     * @return true if this spectrum is centroided and false otherwise.
-     */
     public boolean isCentroided() {
         return this.isCentroided;
     }
@@ -267,228 +166,88 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
         return this.isCentroidedWithDensePeaks;
     }
 
-    /**
-     * Returns whether this spectrum peaks are measured with high-precision.
-     *
-     * @return true if this spectrum is centroided and false otherwise.
-     */
     public boolean isHighPrecision() {
         return this.isHighPrecision;
     }
 
-//	/**
-//	 * Returns the precursor tolerance.
-//	 * @return precursor tolerance
-//	 */
-//	public Tolerance getPrecursorTolerance() { return this.precursorTolerance; }
-//	
-//	/**
-//	 * Returns the minimum isotope error.
-//	 * @return minimum isotope error
-//	 */
-//	public Integer getMinIsotopeError() { return this.minIsotopeError; }
-//	
-//	/**
-//	 * Returns the maximum isotope error.
-//	 * @return maximum isotope error
-//	 */
-//	public Integer getMaxIsotopeError() { return this.maxIsotopeError; }
-
-    /**
-     * Returns the ms level.
-     *
-     * @return the ms level.
-     */
     public int getMSLevel() {
         return this.msLevel;
     }
 
-    /**
-     * Gets additional cvParams to output as cvParams under the mzIdentML SpectrumIdentificationResult
-     * @return cvParam necessary info
-     */
+    /** Returns additional cvParams to output under the mzIdentML SpectrumIdentificationResult. */
     public ArrayList<CvParamInfo> getAddlCvParams() {
         return this.addlCvParams;
     }
 
-    /***** SETTERS *****/
-
-    /**
-     * Sets the unique String id of this spectrum.
-     *
-     * @param id unique string identifier.
-     */
     public void setID(String id) {
         this.id = id;
     }
 
-    /**
-     * Sets the annotation with a Peptide object.
-     *
-     * @param annotation annotation object
-     */
     public void setAnnotation(Peptide annotation) {
         this.annotation = annotation;
     }
 
-    /**
-     * Sets the annotation with a Sequence string.
-     *
-     * @param seq annotation object.
-     */
     public void addSEQ(String seq) {
         if (seqList == null)
             seqList = new ArrayList<String>();
         this.seqList.add(seq);
     }
 
-    /**
-     * Set the precursor mass.
-     *
-     * @param precursor
-     */
     public void setPrecursor(Peak precursor) {
         this.precursor = precursor;
     }
 
-    /**
-     * Sets the starting scan number of this spectrum.
-     *
-     * @param startScanNum starting scan number from the file.
-     */
     public void setStartScanNum(int startScanNum) {
         this.startScanNum = startScanNum;
     }
 
-    /**
-     * Sets the ending scan number of this spectrum.
-     *
-     * @param endScanNum ending scan number from the file.
-     */
     public void setEndScanNum(int endScanNum) {
         this.endScanNum = endScanNum;
     }
 
-    /**
-     * Sets the scan number of this spectrum.
-     *
-     * @param scanNum scan number from the file.
-     */
     public void setScanNum(int scanNum) {
         this.startScanNum = scanNum;
     }
 
-    /**
-     * Sets the spectrum index of this spectrum.
-     *
-     * @param specIndex scan spectrum index.
-     */
     public void setSpecIndex(int specIndex) {
         this.specIndex = specIndex;
     }
 
-    /**
-     * Sets title property.
-     *
-     * @param title title from the file.
-     */
     public void setTitle(String title) {
         this.title = title;
     }
 
-    /**
-     * Sets the retention time of this Spectrum.
-     *
-     * @param rt the retention time. See setRtIsSeconds to specify the units correctly to minutes or seconds
-     */
+    /** @param rt retention time; see {@link #setRtIsSeconds} for units. */
     public void setRt(float rt) {
         this.rt = rt;
     }
 
-    /**
-     * Sets the units of the retention time - true for seconds, false for minutes
-     *
-     * @param isSeconds
-     */
+    /** Sets retention time units: true = seconds, false = minutes. */
     public void setRtIsSeconds(boolean isSeconds) {
         this.rtIsSeconds = isSeconds;
     }
 
-    /**
-     * Sets the fragmentation method of this Spectrum.
-     *
-     * @param fragMethod the fragmentation method.
-     */
     public void setActivationMethod(ActivationMethod fragMethod) {
         this.activationMethod = fragMethod;
     }
 
-    /**
-     * Sets the ms level of this Spectrum.
-     *
-     * @param msLevel the ms level.
-     */
     public void setMsLevel(int msLevel) {
         this.msLevel = msLevel;
     }
 
-    /**
-     * Sets the polarity of this scan (positive or negative)
-     *
-     * @param scanPolarity the scan polarity
-     */
     public void setScanPolarity(Polarity scanPolarity) {
         this.scanPolarity = scanPolarity;
     }
 
-    /**
-     * Sets isCentroided.
-     *
-     * @param isCentroided whether this spectrum is centroided.
-     */
     public void setIsCentroided(boolean isCentroided) {
         this.isCentroided = isCentroided;
-        // function is used for mzML and mzXML files, track that isCentroided was set outside of this class
+        // track that isCentroided was set from external reader (mzML/mzXML)
         this.externalSetIsCentroided = true;
     }
 
-    /**
-     * Sets isHighPrecision.
-     *
-     * @param isHighPrecision whether this spectrum (fragment peaks) is high-precision.
-     */
     public void setIsHighPrecision(boolean isHighPrecision) {
         this.isHighPrecision = isHighPrecision;
     }
-
-//	/**
-//	 * Sets precursorTolerance.
-//	 * @param precursorTolerance the precursor tolerance.
-//	 */
-//	public void setPrecursorTolerance(Tolerance precursorTolerance)
-//	{
-//		this.precursorTolerance = precursorTolerance;
-//	}
-//	
-//	/**
-//	 * Sets the isotope error range.
-//	 * @param minIsotopeError minimum isotope error.
-//	 * @param maxIsotopeError maximum isotope error.
-//	 */
-//	public void setIsotopeError(int minIsotopeError, int maxIsotopeError)
-//	{
-//		this.minIsotopeError = minIsotopeError;
-//		this.maxIsotopeError = maxIsotopeError;
-//	}
-//
-//	/**
-//	 * Sets fraction of ion current within the selection window explained by the MS1 feature 
-//	 * @param fractionIonCurrent the precursor tolerance.
-//	 */
-//	public void setFractionIonCurrent(float fractionIonCurrent)
-//	{
-//		this.fractionIonCurrent = fractionIonCurrent;
-//	}
 
     public void setIsolationWindowTargetMz(Float isolationWindowTargetMz) {
         this.isolationWindowTargetMz = isolationWindowTargetMz;
@@ -498,26 +257,9 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
         return isolationWindowTargetMz;
     }
 
-    /**
-     * Sets isCentroided by a simple testing.
-     */
     public void determineIsCentroided() {
         boolean centroidedCheckPass = true;
 
-//		if(this.size() > 100)
-//		{
-//			float[] diff = new float[100];
-//			float prevMz = this.get(0).getMz();
-//			for(int i=this.size()-100; i<this.size(); i++)
-//			{
-//				float curMz = this.get(i).getMz();
-//				diff[i-this.size()+100] = curMz - prevMz;
-//				prevMz = curMz;
-//			}
-//			Arrays.sort(diff);
-//			if(diff[diff.length/2] < 0.075f)
-//				isCentroided = false;
-//		}
         if (this.size() > 0) {
             ArrayList<Float> diff = new ArrayList<Float>();
             float prevMz = this.get(0).getMz();
@@ -575,17 +317,11 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
         addlCvParams.add(cvParam);
     }
 
-    /****** FUNCTIONS *****/
     @Override
     public String toString() {
         return "Spectrum - mz: " + getPrecursorPeak().getMz() + ", peaks: " + size();
     }
 
-    /**
-     * Gets a clone of this spectrum with no peaks
-     *
-     * @return a new spectrum without peaks
-     */
     public Spectrum getCloneWithoutPeakList() {
         Spectrum newSpec = new Spectrum();
         newSpec.precursor = this.precursor.clone();
@@ -610,11 +346,6 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
             if (ignore[i])
                 continue;
             Peak p = this.get(i);
-//			if(p.getMz() < 300)
-//			{
-//				deconvSpec.add(p);
-//				continue;
-//			}
             float pMz = p.getMz();
             for (int ionCharge = 2; ionCharge < charge && ionCharge < 4; ionCharge++) {
                 boolean isDeconvoluted = false;
@@ -652,19 +383,11 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
         return deconvSpec;
     }
 
-    /**
-     * Append a peak to the end of this spectrum.
-     *
-     * @param peak peak object to be added.
-     */
     public void addPeak(Peak peak) {
         this.add(peak);
     }
 
 
-    /**
-     * Correct parent mass according to annotation. Do nothing if annotation == null.
-     */
     public void correctParentMass() {
         if (this.annotation == null || this.getCharge() <= 0)
             return;
@@ -672,18 +395,10 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
             this.precursor.setMz((annotation.getParentMass() + precursor.getCharge() * (float) Composition.ChargeCarrierMass()) / precursor.getCharge());
     }
 
-    /**
-     * Correct parent mass according to parentMass.
-     *
-     * @param parentMass
-     */
     public void correctParentMass(float parentMass) {
         this.precursor.setMz((parentMass + precursor.getCharge() * (float) Composition.ChargeCarrierMass()) / precursor.getCharge());
     }
 
-    /**
-     * Correct parent mass according to input peptide.
-     */
     public void correctParentMass(Peptide pep) {
         if (this.getCharge() <= 0)
             return;
@@ -691,21 +406,10 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
             this.precursor.setMz((pep.getParentMass() + precursor.getCharge() * (float) Composition.ChargeCarrierMass()) / precursor.getCharge());
     }
 
-    /**
-     * Correct charge of the precursor and set the charge of the peaks of this
-     * spectrum to max(1, charge - 1).
-     *
-     * @param charge charge
-     */
     public void setCharge(int charge) {
         this.precursor.setCharge(charge);
     }
 
-    /**
-     * Set the charge of the precursor peak
-     *
-     * @param charge the new charge to use
-     */
     public void setPrecursorCharge(int charge) {
         this.precursor.setCharge(charge);
     }
@@ -771,10 +475,7 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
         return matchList;
     }
 
-    /**
-     * Goes through the peaks and set their rank by intensity.
-     * Rank 1: highest intensity peak
-     */
+    /** Ranks peaks by intensity descending; rank 1 = highest intensity. */
     public void setRanksOfPeaks() {
         ArrayList<Peak> intensitySorted = new ArrayList<Peak>(this);
         Collections.sort(intensitySorted, Collections.reverseOrder(new IntensityComparator()));
@@ -823,9 +524,6 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
     }
 
 
-    /**
-     * The order of the a spectrum is determined by their parent masses.
-     */
     public int compareTo(Spectrum s) {
         if (getPrecursorMass() > s.getPrecursorMass())
             return 1;
@@ -833,47 +531,6 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
             return -1;
         return 0;
     }
-
-	/*
-  public void outputDtaFile(String fileName)
-  {
-    PrintStream out = null;
-    try {
-      out = new PrintStream(new File(fileName));
-    } catch (FileNotFoundException e) {
-      e.printStackTrace();
-    }
-    out.println(getPrecursorMass()+Composition.H + " " + getCharge());
-    for(Peak p : this)
-    {
-      out.println(p.getMass() + " " + p.getIntensity());
-    }
-    out.close();
-  }
-
-  public void outputPklFile(String fileName)
-  {
-    PrintStream out = null;
-    try {
-      out = new PrintStream(new File(fileName));
-    } catch (FileNotFoundException e) {
-      e.printStackTrace();
-    }
-    out.println(precursor.getMass() + " " + precursor.getIntensity() + " " + getCharge());
-    for(Peak p : this)
-    {
-      out.println(p.getMass() + " " + p.getIntensity());
-    }
-    out.close();
-  }
-
-  public void outputPkl(PrintStream out)
-  {
-    out.println(precursor.getMass() + " " + precursor.getIntensity() + " " + getCharge());
-    for(Peak p : this)
-      out.println(p.getMass() + "\t" + p.getIntensity());
-  }
-	 */
 
     /**
      * Output this spectrum to the input PrintStream as the mgf format.
@@ -946,19 +603,8 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
         return sb.toString();
     }
 
-    /**
-     * Inner class for intensity sorting.
-     */
     class IntensityComparator implements Comparator<Peak> {
 
-
-        /**
-         * Determines the order of peak objects, when sorted by intensity.
-         *
-         * @param o1 the first peak object.
-         * @param o2 the second peak object.
-         * @return 1 if o1 > o2, -1 if o2 > o1 and 0 otherwise.
-         */
         public int compare(Peak o1, Peak o2) {
             if (o1.getIntensity() > o2.getIntensity()) return 1;
             if (o2.getIntensity() > o1.getIntensity()) return -1;
@@ -967,58 +613,12 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
             return 0;
         }
 
-
-        /**
-         * Determines equality according to intensities.
-         *
-         * @param o1 the first peak object.
-         * @param o2 the second peak object.
-         * @return true if they compare to 0, false otherwise.
-         */
         public boolean equals(Peak o1, Peak o2) {
             return compare(o1, o2) == 0;
         }
 
     }
 
-	/*
-     * Returns the most intense peak that is within tolerance of the target mass.
-	 * The current implementation takes linear time.
-	 * @param mass                       target mass.
-	 * @param toleranceDa                tolerance in Daltons.
-	 * @return a Peak object if there is match or null otherwise.
-  @Deprecated
-  public Peak getPeakByMass(float mass, float toleranceDa)
-  {
-    ArrayList<Peak> matchList = getPeakListByMassDa(mass, toleranceDa);
-    if(matchList == null || matchList.size() == 0)
-    	return null;
-    else
-    	return Collections.max(matchList, new IntensityComparator());
-  }
-	 */
-
-	/*
-	 * @param mass
-	 * @param tolerancePPM
-	 * @return
-  @Deprecated
-  public Peak getPeakByMass(float mass, int tolerancePPM)
-  {
-    ArrayList<Peak> matchList = getPeakListByMassDa(mass, tolerancePPM);
-    if(matchList == null || matchList.size() == 0)
-    	return null;
-    else
-    	return Collections.max(matchList, new IntensityComparator());
-  }
-	 */
-
-    /**
-     * Take a spectrum file name, infers the spectrum format by recognizing the extension and returns the spectrum file format.
-     *
-     * @param specFileName the spectrum file name.
-     * @return SpecFileFormat object corresponding to specFileName
-     */
     public static SpecFileFormat getSpectrumFileFormat(String specFileName) {
         SpecFileFormat specFormat = null;
 
@@ -1029,15 +629,6 @@ public class Spectrum extends ArrayList<Peak> implements Comparable<Spectrum> {
                 specFormat = SpecFileFormat.MZML;
             else if (extension.equalsIgnoreCase(".mgf"))
                 specFormat = SpecFileFormat.MGF;
-            else if (extension.equalsIgnoreCase(".ms2"))
-                specFormat = SpecFileFormat.MS2;
-            else if (extension.equalsIgnoreCase(".pkl"))
-                specFormat = SpecFileFormat.PKL;
-        }
-        if (specFormat == null && specFileName.length() > 8) {
-            String suffix = specFileName.substring(specFileName.length() - 8);
-            if (suffix.equalsIgnoreCase("_dta.txt"))
-                specFormat = SpecFileFormat.DTA_TXT;
         }
 
         return specFormat;

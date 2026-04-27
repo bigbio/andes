@@ -53,9 +53,6 @@ public class SuffixArray {
                 if (pos >= 0) {
                     String match = sequence.getSubsequence(sa.getPosition(pos), sa.getPosition(pos) + length);
                     if (match.equals(query)) {
-                        //System.out.println("We found correctly " + query + " at " + pos);
-                        //System.out.println(sequence.toString(sa.getPosition(pos), length));
-                        //System.exit(-1);
                         tp++;
                     } else {
                         fn++;
@@ -101,15 +98,7 @@ public class SuffixArray {
         String userHome = System.getProperty("user.home");
         int iterations = 1000000;
 
-        fastaFile = userHome + "/Data/Databases/tiny.fasta";
-        //fastaFile = userHome+"/Data/Databases/small.fasta";
-        //fastaFile = userHome+"/Data/Databases/single.fasta";
-        //fastaFile = userHome+"/Data/Databases/uniprot_sprot.fasta";
         fastaFile = userHome + "/Data/Databases/yeast_nr050706.fasta";
-        //fastaFile = "/home/sangtaekim/Research/Data/EColiDB/Ecol_protein_formatted.fasta";
-        //fastaFile = "/home/sangtaekim/Research/Data/SProt/uniprot_sprot.fasta";
-        //fastaFile = userHome+"/Desktop/test.fasta";
-        //fastaFile = "/home/sangtaekim/Research/Data/HumanGenome/translated/HSRM.NCBI36.54.translation.0.fasta";
 
         long time = System.currentTimeMillis();
         SuffixArraySequence sequence = new SuffixArraySequence(fastaFile);
@@ -118,15 +107,6 @@ public class SuffixArray {
         time = System.currentTimeMillis();
         SuffixArray sa = new SuffixArray(sequence);
         System.out.println("-- Loading SuffixArray file time: " + (System.currentTimeMillis() - time) / 1000.0 + "s");
-
-        //MatchSet match = sa.findAll("PKVPFDPKFKEKLYDSYLDKAAKTK");
-
-        //System.out.println("Translating _ " + sequence.toByte('_'));
-
-        // print out the matches
-        //for (int i=0; i< match.getSize(); i++) {
-        //  System.out.println(sequence.toString(match.getStart(i), 10));
-        //}
 
         time = System.currentTimeMillis();
         queryAllSubstrings(sa, sequence, iterations);
@@ -777,9 +757,6 @@ public class SuffixArray {
     }
 
 
-    // To-do (sangtae): search suffix array using partial matches
-    // public MatchSet search(MatchSet partialMatch, byte b)
-
     /**
      * Treat the parameter as the source of input. One line per query.
      *
@@ -790,8 +767,6 @@ public class SuffixArray {
     }
 
     public void printAllPeptides(AminoAcidSet aaSet, int minLength, int maxLength) {
-        //		  ArrayList<Pair<Float,Integer>> pepList = new ArrayList<Pair<Float,Integer>>();
-
         double[] aaMass = new double[128];
         for (int i = 0; i < aaMass.length; i++)
             aaMass[i] = -1;

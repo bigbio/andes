@@ -4,7 +4,7 @@ import edu.ucsd.msjava.msgf.*;
 import edu.ucsd.msjava.msscorer.SimpleDBSearchScorer;
 import edu.ucsd.msjava.msutil.*;
 import edu.ucsd.msjava.msutil.Modification.Location;
-import edu.ucsd.msjava.parser.BufferedLineReader;
+import edu.ucsd.msjava.mgf.BufferedLineReader;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;

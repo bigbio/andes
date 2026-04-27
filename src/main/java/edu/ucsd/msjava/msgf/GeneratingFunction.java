@@ -19,7 +19,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
     private boolean calcProb = true;
     private Enzyme enzyme = Enzyme.TRYPSIN;
 
-    //	private int numScoreBinsPerNode = 1000;
     private int gfTableCapacity;
 
     private ScoreDist distribution = null;
@@ -27,9 +26,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
 
     private class GFTable extends LinkedHashMap<T, ScoreDist> {
 
-        /**
-         *
-         */
         private static final long serialVersionUID = 1L;
         private final int capacity;
 
@@ -49,14 +45,11 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
 
     private boolean isGFComputed = false;
 
-//	private HashMap<T, Integer> srmScore = null;
-
     public GeneratingFunction(DeNovoGraph<T> graph) {
         this.graph = graph;
         this.gfTableCapacity = 1 + graph.intermediateNodes.size() + graph.sinkNodes.size();
     }
 
-    // Builder
     public GeneratingFunction<T> doNotBacktrack() {
         this.backtrack = false;
         return this;
@@ -77,7 +70,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
         return this;
     }
 
-    //	public GeneratingFunction<T> numScoreBinsPerNode(int numBins)	{ this.numScoreBinsPerNode = numBins; return this; }
     public GeneratingFunction<T> gfTableCapacity(int gfTableCapacity) {
         this.gfTableCapacity = gfTableCapacity;
         return this;
@@ -99,7 +91,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
         return enzyme;
     }
 
-    //	public int getNumScoreBinsPerNode()	{ return numScoreBinsPerNode; }
     public boolean isGFComputed() {
         return this.isGFComputed;
     }
@@ -417,8 +408,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
             System.err.println("Warning, MinScore is abnormally low; "
                     + "MinScore: " + curMinScore + ", MaxScore: " + curMaxScore + ", "
                     + "CurNode: " + curNode.getNominalMass() + ", CurNodeScore: " + curNodeScore);
-            // Could abort processing
-            // System.exit(-1);
             // Instead, skip this node
             return;
         }
@@ -427,8 +416,6 @@ public class GeneratingFunction<T extends Matter> implements GF<T> {
             System.err.println("Warning, MaxScore is abnormally high; "
                     + "MinScore: " + curMinScore + ", MaxScore: " + curMaxScore + ", "
                     + "CurNode: " + curNode.getNominalMass() + ", CurNodeScore: " + curNodeScore);
-            // Could abort processing
-            // System.exit(-1);
             // Instead, skip this node
             return;
         }

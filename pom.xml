@@ -38,7 +38,7 @@
                     <archive>
                         <manifest>
                             <addClasspath>true</addClasspath>
-                            <mainClass>edu.ucsd.msjava.ui.MSGFPlus</mainClass>
+                            <mainClass>edu.ucsd.msjava.cli.MSGFPlus</mainClass>
                         </manifest>
                     </archive>
                 </configuration>
@@ -80,7 +80,7 @@
                             <finalName>MSGFPlus</finalName>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>edu.ucsd.msjava.ui.MSGFPlus</mainClass>
+                                    <mainClass>edu.ucsd.msjava.cli.MSGFPlus</mainClass>
                                 </transformer>
                             </transformers>
                             <filters>
@@ -113,13 +113,10 @@
             <scope>test</scope>
             <type>jar</type>
         </dependency>
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-text</artifactId>
-            <version>1.11.0</version>
-        </dependency>
         <!-- jmzml removed: replaced by StaxMzMLParser -->
         <!-- jmzidml removed: pin-direct output; CvParamInfo replaces uk.ac.ebi.jmzidml types -->
+        <!-- commons-text removed: no callers -->
+        <!-- commons-io removed: replaced by OutputStream.nullOutputStream() (Java 11) and inline lastIndexOf('.') -->
         <dependency>
             <groupId>it.unimi.dsi</groupId>
             <artifactId>fastutil</artifactId>
@@ -136,9 +133,9 @@
             <version>1.2.12</version>
         </dependency>
         <dependency>
-            <groupId>commons-io</groupId>
-            <artifactId>commons-io</artifactId>
-            <version>2.15.1</version>
+            <groupId>info.picocli</groupId>
+            <artifactId>picocli</artifactId>
+            <version>4.7.6</version>
         </dependency>
     </dependencies>
   

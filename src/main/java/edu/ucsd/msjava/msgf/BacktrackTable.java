@@ -36,18 +36,6 @@ public class BacktrackTable<T extends Matter> extends HashMap<T, BacktrackPointe
 
         for (DeNovoGraph.Edge<T> edge : graph.getEdges(curNode)) {
             int edgeIndex = edge.getEdgeIndex();
-//			String residue;
-//			if(edgeIndex >= 0)
-//				residue = String.valueOf(graph.getAASet().getAminoAcid(edgeIndex).getResidue());
-//			else
-//			{
-//				if(edgeIndex == -2)
-//					residue="K.";
-//				else if(edgeIndex == -3)
-//					residue = "G.";
-//				else
-//					residue = "";
-//			}
             if (pointer.isSet(score, edgeIndex))
                 getReconstructions(edge.getPrevNode(), score - (edge.getEdgeScore() + pointer.getNodeScore()), prefix + graph.getAASet().getAminoAcid(edgeIndex).getResidueStr(), reconstructions, sa);
         }
@@ -64,12 +52,6 @@ public class BacktrackTable<T extends Matter> extends HashMap<T, BacktrackPointe
         {
             return prefix;
         }
-//		for(T prevNode : graph.getPreviousNodes(curNode))
-//		{
-//			int edgeIndex = graph.getEdgeIndex(curNode, prevNode);
-//			if(pointer.isSet(score, edgeIndex))
-//				getOneReconstruction(prevNode, score-pointer.getCurScore(), prefix+aaSet.getAminoAcid(edgeIndex).getResidue());
-//		}
         for (DeNovoGraph.Edge<T> edge : graph.getEdges(curNode)) {
             int edgeIndex = edge.getEdgeIndex();
             if (pointer.isSet(score, edgeIndex))

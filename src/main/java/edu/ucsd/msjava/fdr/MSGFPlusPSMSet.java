@@ -3,7 +3,7 @@ package edu.ucsd.msjava.fdr;
 import edu.ucsd.msjava.msdbsearch.CompactSuffixArray;
 import edu.ucsd.msjava.msdbsearch.DatabaseMatch;
 import edu.ucsd.msjava.msdbsearch.MSGFPlusMatch;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 import java.util.ArrayList;
 import java.util.HashMap;

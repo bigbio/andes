@@ -1,0 +1,346 @@
+package edu.ucsd.msjava.mgf;
+
+import edu.ucsd.msjava.msutil.*;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Hashtable;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static edu.ucsd.msjava.misc.TextParsingUtils.isInteger;
+
+public class MgfSpectrumParser implements SpectrumParser {
+    private static final Pattern TITLE_SCAN_KEY_VALUE_PATTERN =
+            Pattern.compile("(?i)(?:^|[\\s;])(?:scan|scans|spectrum)=(\\d+)(?:\\b|$)");
+
+    private long linesRead;
+
+    private long negativePolarityWarningCount;
+
+    private long scanMissingWarningCount;
+
+    public long getScanMissingWarningCount()
+    {
+        return scanMissingWarningCount;
+    }
+
+    private AminoAcidSet aaSet = AminoAcidSet.getStandardAminoAcidSetWithFixedCarbamidomethylatedCys();
+
+    public MgfSpectrumParser aaSet(AminoAcidSet aaSet) {
+        this.aaSet = aaSet;
+        linesRead = 0;
+        negativePolarityWarningCount = 0;
+        scanMissingWarningCount = 0;
+        return this;
+    }
+
+    public Spectrum readSpectrum(LineReader lineReader) {
+        Spectrum spec = null;
+        String title = null;
+
+        float precursorMz = 0;
+        float precursorIntensity = 0;
+        int precursorCharge = 0;
+        ActivationMethod activation = null;
+        float elutionTimeSeconds = 0;
+
+        String buf;
+        boolean parse = false;   // parse only after the BEGIN IONS
+        boolean sorted = true;
+        float prevMass = 0;
+
+        while (true) {
+            String dataLine = (buf = lineReader.readLine());
+            if (dataLine == null)
+                break;
+
+            if (linesRead == 0) {
+                buf = BufferedRandomAccessLineReader.stripBOM(buf);
+            }
+            linesRead++;
+
+            if (buf.length() == 0)
+                continue;
+
+            if (buf.startsWith("BEGIN IONS")) {
+                parse = true;
+                spec = new Spectrum();
+            } else if (parse) {
+                if (Character.isDigit(buf.charAt(0))) {
+                    assert (spec != null);
+                    String[] token = buf.split("\\s+");
+                    if (token.length < 2)
+                        continue;
+                    float mass = Float.parseFloat(token[0]);
+                    if (sorted && mass < prevMass)
+                        sorted = false;
+                    else
+                        prevMass = mass;
+                    float intensity = Float.parseFloat(token[1]);
+                    spec.add(new Peak(mass, intensity, 1));
+                } else if (buf.startsWith("TITLE")) {
+                    title = buf.substring(buf.indexOf('=') + 1);
+                    spec.setTitle(title);
+                } else if (buf.startsWith("CHARGE")) {
+                    // Charge state, e.g. CHARGE=2+
+                    // Extract the text after the equals sign
+                    String chargeStr = buf.substring(buf.indexOf("=") + 1).trim();
+
+                    // Only use the charge state if there is a single value listed
+                    // We will leave precursorCharge as 0 if the mgf file has lines like this:
+                    //  CHARGE=2+ and 3+
+                    //  CHARGE=2+,3+
+                    // First split on whitespace
+                    String[] chargeStrToken = chargeStr.split("\\s+");
+                    if (chargeStrToken.length == 1) {
+                        // Only one charge state is listed
+                        // Now split on commas
+                        String[] multipleChargeToken = chargeStr.split(",");
+                        if (chargeStr.length() > 0 && multipleChargeToken.length == 1) {
+                            // Only one value is present
+                            if (chargeStr.startsWith("+")) {
+                                // The charge is listed as +2 (which is non-standard)
+                                // Remove the plus sign
+                                chargeStr = chargeStr.substring(1);
+                            } else if (chargeStr.charAt(chargeStr.length() - 1) == '+') {
+                                // The charge is listed as 2+ (which is standard)
+                                // Remove the plus sign
+                                chargeStr = chargeStr.substring(0, chargeStr.length() - 1);
+                            } else if (chargeStr.startsWith("-")) {
+                                // The charge is listed as -2
+                                // This is a negative charge, which means negative scan polarity
+                                // MS-GF+ does not yet support this, but we'll store the charge anyway (as a positive number)
+                                warnNegativePolarity(buf);
+                                chargeStr = chargeStr.substring(1);
+                                spec.setScanPolarity(Spectrum.Polarity.NEGATIVE);
+                            } else if (chargeStr.charAt(chargeStr.length() - 1) == '-') {
+                                // The charge is listed as 2-
+                                // This is a negative charge, which means negative scan polarity
+                                // MS-GF+ does not yet support this, but we'll store the charge anyway (as a positive number)
+                                warnNegativePolarity(buf);
+                                chargeStr = chargeStr.substring(0, chargeStr.length() - 1);
+                                spec.setScanPolarity(Spectrum.Polarity.NEGATIVE);
+                            }
+
+                            // We should now have an integer to parse
+                            precursorCharge = Integer.valueOf(chargeStr);
+                        }
+                    }
+                } else if (buf.startsWith("SEQ")) {
+                    String annotationStr = buf.substring(buf.lastIndexOf('=') + 1);
+                    if (spec.getAnnotation() == null)
+                        spec.setAnnotation(new Peptide(annotationStr, aaSet));
+                    spec.addSEQ(annotationStr);
+                } else if (buf.startsWith("PEPMASS")) {
+                    String[] token = buf.substring(buf.indexOf("=") + 1).split("\\s+");
+                    precursorMz = Float.valueOf(token[0]);
+                } else if (buf.startsWith("SCANS")) {
+                    if (buf.matches(".+=\\d+-\\d+"))    // e.g. SCANS=953-959
+                    {
+                        // Scan range
+                        // SCANS=7654-7662
+                        int startScanNum = Integer.parseInt(buf.substring(buf.indexOf('=') + 1, buf.lastIndexOf('-')));
+                        int endScanNum = Integer.parseInt(buf.substring(buf.lastIndexOf('-') + 1));
+                        spec.setStartScanNum(startScanNum);
+                        spec.setEndScanNum(endScanNum);
+                    } else {
+                        // Single scan
+                        // SCANS=1106
+
+                        // Look for a single integer after the equals sign
+                        try {
+                            int scanNum = Integer.valueOf(buf.substring(buf.indexOf("=") + 1));
+                            spec.setScanNum(scanNum);
+                        } catch (NumberFormatException e) {
+                            // Not an integer; the scan number will be the zero based sequence number of the spectrum
+                        }
+                    }
+                } else if (buf.startsWith("ACTIVATION")) {
+                    String activationName = buf.substring(buf.indexOf("=") + 1);
+                    activation = ActivationMethod.get(activationName);
+                    spec.setActivationMethod(activation);
+                } else if (buf.startsWith("RTINSECONDS")) {
+                    // This could be a single time:
+                    // RTINSECONDS=347.9825
+
+                    // Or a time range
+                    // RTINSECONDS=200.1054-204.3903
+
+                    String[] token = buf.substring(buf.indexOf("=") + 1).split("\\s+");
+                    int dashIndex = token[0].indexOf("-");
+
+                    if (dashIndex > 0)
+                        elutionTimeSeconds = Float.valueOf(token[0].substring(0, dashIndex));
+                    else
+                        elutionTimeSeconds = Float.valueOf(token[0]);
+                }
+                else if (buf.startsWith("END IONS")) {
+                    assert (spec != null);
+                    if (spec.getScanNum() < 0 && title != null) {
+                        if (title.matches("Scan:\\d+\\s.+")) {
+                            // Title line is of the form Scan:ScanNumber AdditionalText
+                            // for example, "Scan:8492 Charge:2"
+                            // Extract the integer after "Scan:"
+                            // Split on spaces
+                            String[] token = title.split("\\s++");
+                            int scanNum = Integer.parseInt(token[0].substring("Scan:".length()));
+                            spec.setScanNum(scanNum);
+
+                        } else if (extractScanNumFromTitleKeyValue(spec, title)) {
+                            // Title line contains key/value metadata, e.g. scan=41
+                            // (common in PRIDE/ProteomeXchange generated MGF files).
+                        } else if (title.matches(".+\\.\\d+\\.\\d+\\.\\d+$") ||
+                                title.matches(".+\\.\\d+\\.\\d+\\.$")) {
+                            // Title line is of the form DatasetName.ScanStart.ScanEnd.Charge or DatasetName.ScanStart.ScanEnd.
+                            // for example, DatasetName.8492.8492.2
+                            extractScanRangeFromTitle(spec, title);
+
+                        } else if (title.contains(".") && title.contains(" ")) {
+                            // Remove text after the first space and try to match DatasetName.ScanStart.ScanEnd.Charge
+                            // Split on periods
+                            String titleStart = title.substring(0, title.indexOf(' '));
+                            extractScanRangeFromTitle(spec, titleStart);
+                        } else {
+                            warnScanNotFoundInTitle(title);
+                        }
+
+                        //Match result = dtaStyleMatcher.matcher(spec.Title)
+                    }
+                    spec.setPrecursor(new Peak(precursorMz, precursorIntensity, precursorCharge));
+                    if (elutionTimeSeconds > 0) {
+                        spec.setRt(elutionTimeSeconds);
+                        spec.setRtIsSeconds(true);
+                    }
+                    if (!sorted)
+                        Collections.sort(spec);
+
+                    return spec;
+                }
+            }
+        }
+        return null;
+    }
+
+    private void extractScanRangeFromTitle(Spectrum spec, String title) {
+        // Split on periods
+        String[] token = title.split("\\.");
+        String candidateStartScan;
+        String candidateEndScan;
+
+        if (token.length > 3) {
+            // Assume DatasetName.ScanStart.ScanEnd.Charge
+            // For example: DatasetName.10418.10418.4
+            candidateStartScan = token[token.length - 3];
+            candidateEndScan = token[token.length - 2];
+        } else if (token.length == 3 && title.endsWith(".")) {
+            // Charge not specified, but title does end with a period
+            // In this case, .split() only returns 3 items
+
+            // Assume DatasetName.ScanStart.ScanEnd.
+            // For example: DatasetName.40193.40193.
+            candidateStartScan = token[token.length - 2];
+            candidateEndScan = token[token.length - 1];
+        } else {
+            warnScanNotFoundInTitle(title);
+            return;
+        }
+
+        boolean success = false;
+        if (isInteger(candidateStartScan)) {
+            int startScanNum = Integer.parseInt(candidateStartScan);
+            spec.setStartScanNum(startScanNum);
+            success = true;
+        }
+
+        if (isInteger(candidateEndScan)) {
+            int endScanNum = Integer.parseInt(candidateEndScan);
+            spec.setEndScanNum(endScanNum);
+        }
+
+        if (!success) {
+            warnScanNotFoundInTitle(title);
+        }
+    }
+
+    public Map<Integer, SpectrumMetaInfo> getSpecMetaInfoMap(BufferedRandomAccessLineReader lineReader) {
+        Hashtable<Integer, SpectrumMetaInfo> specIndexMap = new Hashtable<Integer, SpectrumMetaInfo>();
+        String buf;
+        long offset = 0;
+        int specIndex = 0;
+        SpectrumMetaInfo metaInfo = null;
+        while (true) {
+            String dataLine = (buf = lineReader.readLine());
+            if (dataLine == null)
+                break;
+
+            if (offset == 0 && lineReader.getBOMLength() > 0) {
+                offset += lineReader.getBOMLength();
+            }
+
+            if (buf.startsWith("BEGIN IONS")) {
+                specIndex++;
+                metaInfo = new SpectrumMetaInfo();
+                metaInfo.setPosition(offset);
+                metaInfo.setID("index=" + String.valueOf(specIndex - 1));
+                specIndexMap.put(specIndex, metaInfo);
+            } else if (buf.startsWith("TITLE")) {
+                String title = buf.substring(buf.indexOf('=') + 1);
+                metaInfo.setAdditionalInfo("title", title);
+            } else if (buf.startsWith("PEPMASS")) {
+                // This could be a single mass
+                // PEPMASS=494.5596
+
+                // Or a mass, intensity, and charge
+                // PEPMASS=570.85805 2840724.1 2
+
+                String[] token = buf.substring(buf.indexOf("=") + 1).split("\\s+");
+                float precursorMz = Float.valueOf(token[0]);
+                metaInfo.setPrecursorMz(precursorMz);
+            }
+
+            offset = lineReader.getPosition();
+        }
+        return specIndexMap;
+    }
+
+    private void warnNegativePolarity(String currentLine) {
+        negativePolarityWarningCount++;
+        if (negativePolarityWarningCount > MAX_NEGATIVE_POLARITY_WARNINGS)
+            return;
+
+        if (negativePolarityWarningCount == 1) {
+            System.out.println(
+                    "Warning: negative precursor charge found, indicating a negative polarity spectrum; " +
+                    "you likely need to use a negative charge carrier");
+        }
+        System.out.println("Negative charge found on line " + Long.toString(linesRead) + ": " + currentLine);
+
+        if (negativePolarityWarningCount == MAX_NEGATIVE_POLARITY_WARNINGS) {
+            System.out.println("Additional warnings regarding negative polarity will not be shown");
+        }
+    }
+
+    void warnScanNotFoundInTitle(String title) {
+        scanMissingWarningCount++;
+        if (scanMissingWarningCount <= MAX_SCAN_MISSING_WARNINGS) {
+            System.out.println("Unable to extract the scan number from the title: " + title);
+            if (scanMissingWarningCount == 1) {
+                System.out.println("Expected format is DatasetName.ScanStart.ScanEnd.Charge");
+            }
+        }
+    }
+
+    private boolean extractScanNumFromTitleKeyValue(Spectrum spec, String title) {
+        Matcher matcher = TITLE_SCAN_KEY_VALUE_PATTERN.matcher(title);
+        if (!matcher.find()) {
+            return false;
+        }
+
+        int scanNum = Integer.parseInt(matcher.group(1));
+        spec.setScanNum(scanNum);
+        return true;
+    }
+
+}

@@ -1,10 +1,11 @@
 package msgfplus;
 
-import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
+import edu.ucsd.msjava.cli.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
+import edu.ucsd.msjava.msdbsearch.SearchParams.PrecursorCalMode;
 import edu.ucsd.msjava.msutil.DBSearchIOFiles;
 import edu.ucsd.msjava.msutil.SpecFileFormat;
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -38,22 +39,10 @@ import java.util.List;
  */
 public class TestPrecursorCalIntegration {
 
-    private ParamManager buildParamManager(File outputFile) throws URISyntaxException {
-        ParamManager manager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE,
-                "java -Xmx3500M -jar MSGFPlus.jar");
-        manager.addMSGFPlusParams();
-
-        URI paramUri = SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI();
-        manager.getParameter("conf").parse(new File(paramUri).getAbsolutePath());
-
-        URI specUri = SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI();
-        manager.getParameter("s").parse(new File(specUri).getAbsolutePath());
-
-        URI dbUri = SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI();
-        manager.getParameter("d").parse(new File(dbUri).getAbsolutePath());
-
-        manager.getParameter("o").parse(outputFile.getAbsolutePath());
-        return manager;
+    private static MSGFPlusOptions buildOpts(File outputFile) throws URISyntaxException {
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.outputFile = outputFile;
+        return opts;
     }
 
     /**
@@ -71,13 +60,13 @@ public class TestPrecursorCalIntegration {
             File offOut = new File(workDir.toFile(), "off.pin");
             File baselineOut = new File(workDir.toFile(), "baseline.pin");
 
-            ParamManager offManager = buildParamManager(offOut);
-            Assert.assertNull(offManager.getParameter("precursorCal").parse("off"));
+            MSGFPlusOptions offManager = buildOpts(offOut);
+            offManager.precursorCalMode = PrecursorCalMode.OFF;
             String offErr = MSGFPlus.runMSGFPlus(offManager);
             Assert.assertNull("runMSGFPlus(off) failed: " + offErr, offErr);
             Assert.assertTrue("off.pin must exist", offOut.exists());
 
-            ParamManager baselineManager = buildParamManager(baselineOut);
+            MSGFPlusOptions baselineManager = buildOpts(baselineOut);
             // No -precursorCal flag: picks up the default (AUTO). On the tiny
             // test.mgf dataset the pre-pass does not collect enough confident
             // PSMs (<200), so it returns 0.0 and the fast path kicks in.
@@ -114,12 +103,12 @@ public class TestPrecursorCalIntegration {
             File firstOut = new File(workDir.toFile(), "first.pin");
             File secondOut = new File(workDir.toFile(), "second.pin");
 
-            ParamManager firstManager = buildParamManager(firstOut);
-            Assert.assertNull(firstManager.getParameter("precursorCal").parse("off"));
+            MSGFPlusOptions firstManager = buildOpts(firstOut);
+            firstManager.precursorCalMode = PrecursorCalMode.OFF;
             Assert.assertNull(MSGFPlus.runMSGFPlus(firstManager));
 
-            ParamManager secondManager = buildParamManager(secondOut);
-            Assert.assertNull(secondManager.getParameter("precursorCal").parse("off"));
+            MSGFPlusOptions secondManager = buildOpts(secondOut);
+            secondManager.precursorCalMode = PrecursorCalMode.OFF;
             Assert.assertNull(MSGFPlus.runMSGFPlus(secondManager));
 
             List<String> firstPsms = extractPsmItems(firstOut);
@@ -146,7 +135,7 @@ public class TestPrecursorCalIntegration {
         Path workDir = Files.createTempDirectory("msgfplus-p2cal-auto-");
         try {
             File autoOut = new File(workDir.toFile(), "auto.pin");
-            ParamManager manager = buildParamManager(autoOut);
+            MSGFPlusOptions manager = buildOpts(autoOut);
             // Leave -precursorCal at default (AUTO). The pre-pass will run
             // but should not collect enough confident PSMs.
             Assert.assertNull(MSGFPlus.runMSGFPlus(manager));

@@ -112,19 +112,16 @@ public class StaxMzMLParser {
     // Public API
     // -----------------------------------------------------------------------
 
-    /** Number of spectra in the file. */
     public int getSpectrumCount() {
         return indexList.size();
     }
 
-    /** All spectrum indices (1-based), ordered. */
     public ArrayList<Integer> getSpecIndexList() {
         ArrayList<Integer> list = new ArrayList<>(indexList.size());
         for (SpectrumIndex si : indexList) list.add(si.specIndex);
         return list;
     }
 
-    /** All spectrum indices filtered by MS level range (both inclusive). */
     public ArrayList<Integer> getSpecIndexList(int minMSLevel, int maxMSLevel) {
         ArrayList<Integer> list = new ArrayList<>();
         for (SpectrumIndex si : indexList) {
@@ -134,18 +131,15 @@ public class StaxMzMLParser {
         return list;
     }
 
-    /** Get spectrum index metadata (without parsing peaks). */
     public SpectrumIndex getSpectrumIndex(int specIndex) {
         return indexBySpecIdx.get(specIndex);
     }
 
-    /** Get spectrum ID for a given 1-based index. */
     public String getID(int specIndex) {
         SpectrumIndex si = indexBySpecIdx.get(specIndex);
         return si != null ? si.id : null;
     }
 
-    /** Get precursor m/z for a given 1-based index (from index, no parsing). */
     public Float getPrecursorMz(int specIndex) {
         SpectrumIndex si = indexBySpecIdx.get(specIndex);
         if (si == null) return null;
@@ -289,7 +283,6 @@ public class StaxMzMLParser {
                 || m.contains("content is not allowed");
     }
 
-    /** Parse and return the full spectrum by its string ID. */
     public Spectrum getSpectrumById(String specId) {
         SpectrumIndex si = indexById.get(specId);
         if (si == null) return null;
@@ -305,7 +298,6 @@ public class StaxMzMLParser {
         return new StaxSequentialIterator(minMSLevel, maxMSLevel);
     }
 
-    /** Get the list of SpectrumIndex entries (for iteration without full parse). */
     public List<SpectrumIndex> getIndexList() {
         return Collections.unmodifiableList(indexList);
     }

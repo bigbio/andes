@@ -165,8 +165,6 @@ public class ComputeFDR {
 
         if (targetFile == null)
             printUsageAndExit("Target is missing!");
-//		if(specFileCol < 0)
-//			printUsageAndExit("specFileCol is missing or invalid!");
         if (scoreCol < 0)
             printUsageAndExit("scoreCol is missing or invalid!");
         if (pepCol < 0)

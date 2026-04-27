@@ -50,7 +50,6 @@ public class ScoreDist extends ScoreBound {
         double specProb = 0;
         int minIndex = (score >= minScore) ? score - minScore : 0;
         for (int t = minIndex; t < probDistribution.length; t++) {
-//			System.out.println("***********\t"+(t+minScore)+"\t"+probDistribution[t]);
             specProb += probDistribution[t];
         }
         if (specProb > 1.)
@@ -111,22 +110,5 @@ public class ScoreDist extends ScoreBound {
     public ScoreBound getPercentileRange(float percentile) {
         return null;
     }
-
-//	// added by kyowon.  Get a new ScoreDist instance. it has the same value as the original one from newMinScore to max score of the original ScoreDist
-//	static public ScoreDist getTruncatedScoreDist(ScoreDist original, int newMinScore){
-//		ScoreDistFactory factory = new ScoreDistFactory(original.isNumSet(), original.isProbSet());
-//		ScoreDist newDist = factory.getInstance(Math.max(newMinScore, original.getMinScore()), original.getMaxScore());
-//		
-//		for(int score = newDist.getMinScore(); score<newDist.getMaxScore(); score++){
-//			if(newDist.isNumSet()){
-//				newDist.setNumber(score, original.getNumberRecs(score));
-//			}
-//			if(newDist.isProbSet()){
-//				newDist.setProb(score, original.getProbability(score));
-//			}
-//		}
-//		
-//		return newDist;
-//	}
 
 }

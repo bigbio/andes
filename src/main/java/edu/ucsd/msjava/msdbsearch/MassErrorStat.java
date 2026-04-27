@@ -10,27 +10,19 @@ public class MassErrorStat {
     private List<Pair<Float, Float>> errorList; // (error, intensity)
 
     // for all peaks (absolute)
-//	private float sum;
     private float mean;
-    //	private float median;
     private float sd;
 
     // for top 7 peaks (absolute)
-//	private float sum7;
     private float mean7;
-    //	private float median7;
     private float sd7;
 
     // for all peaks (absolute)
-//	private float rSum;
     private float rMean;
-    //	private float rMedian;
     private float rSd;
 
     // for top 7 peaks (absolute)
-//	private float rSum7;
     private float rMean7;
-    //	private float rMedian7;
     private float rSd7;
 
     public MassErrorStat() {
@@ -80,10 +72,6 @@ public class MassErrorStat {
         return errorList.size();
     }
 
-//	public float getSum() {
-//		return sum;
-//	}
-
     public float getMean() {
         return mean;
     }
@@ -92,10 +80,6 @@ public class MassErrorStat {
         return rMean;
     }
 
-//	public float getMedian() {
-//		return median;
-//	}
-
     public float getSd() {
         return sd;
     }
@@ -103,14 +87,6 @@ public class MassErrorStat {
     public float getRSd() {
         return rSd;
     }
-
-//	public float getSum7() {
-//		return sum7;
-//	}
-
-//	public float getRSum7() {
-//		return rSum7;
-//	}
 
     public float getMean7() {
         return mean7;

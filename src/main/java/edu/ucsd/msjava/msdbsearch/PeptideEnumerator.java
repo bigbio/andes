@@ -4,7 +4,7 @@ import edu.ucsd.msjava.msutil.AminoAcidSet;
 import edu.ucsd.msjava.msutil.Composition;
 import edu.ucsd.msjava.msutil.Enzyme;
 import edu.ucsd.msjava.sequences.Constants;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.cli.MSGFPlus;
 
 import java.io.*;
 

@@ -1,13 +1,14 @@
 package msgfplus;
 
+import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.OutputFormat;
+import edu.ucsd.msjava.cli.SearchTestFixtures;
 import edu.ucsd.msjava.msdbsearch.DatabaseMatch;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
-import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.ActivationMethod;
 import edu.ucsd.msjava.msutil.Enzyme;
-import edu.ucsd.msjava.mzid.DirectPinWriter;
-import edu.ucsd.msjava.params.ParamManager;
-import edu.ucsd.msjava.ui.MSGFPlus;
+import edu.ucsd.msjava.output.DirectPinWriter;
+import picocli.CommandLine;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -24,7 +25,7 @@ import java.util.List;
  * Shape tests for the Percolator {@code .pin} output path (Q7).
  *
  * These exercise the CLI/flag plumbing and the header emitted by
- * {@link edu.ucsd.msjava.mzid.DirectPinWriter}. A full end-to-end
+ * {@link edu.ucsd.msjava.output.DirectPinWriter}. A full end-to-end
  * search-to-pin run is exercised by the integration tests under
  * {@code src/test/resources/} when external spectra are available;
  * here we focus on the parts we can verify without running the
@@ -32,70 +33,53 @@ import java.util.List;
  */
 public class TestDirectPinWriter {
 
-    private ParamManager buildParamManager() throws URISyntaxException {
-        ParamManager manager = new ParamManager("MS-GF+", MSGFPlus.VERSION, MSGFPlus.RELEASE_DATE,
-                "java -Xmx3500M -jar MSGFPlus.jar");
-        manager.addMSGFPlusParams();
-
-        URI paramUri = SearchParamsTest.class.getClassLoader().getResource("MSGFDB_Param.txt").toURI();
-        manager.getParameter("conf").parse(new File(paramUri).getAbsolutePath());
-
-        URI specUri = SearchParamsTest.class.getClassLoader().getResource("test.mgf").toURI();
-        manager.getParameter("s").parse(new File(specUri).getAbsolutePath());
-
-        URI dbUri = SearchParamsTest.class.getClassLoader().getResource("human-uniprot-contaminants.fasta").toURI();
-        manager.getParameter("d").parse(new File(dbUri).getAbsolutePath());
-        return manager;
-    }
-
     @Test
     public void pinOutputFormatFlagIsAccepted() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        String err = manager.getParameter("outputFormat").parse("0");
-        Assert.assertNull("parse('pin'=0) should succeed but returned: " + err, err);
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.outputFormat = OutputFormat.PIN;
+        Assert.assertEquals(OutputFormat.PIN, opts.effectiveOutputFormat());
     }
 
     @Test
     public void writePinGetterReflectsOutputFormat() throws URISyntaxException {
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("outputFormat").parse("0"));
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.outputFormat = OutputFormat.PIN;
 
         SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(manager));
+        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
 
-        Assert.assertTrue("writePin() should be true when outputFormat=pin", params.writePin());
         Assert.assertFalse("writeTsv() should be false when outputFormat=pin", params.writeTsv());
     }
 
     @Test
-    public void allOutputFormatEnumIndicesAreAccepted() throws URISyntaxException {
-        // After mzid removal, the valid outputFormat values are:
-        //   0 = pin (default)
-        //   1 = tsv
-        // Old values 2 (both) and 3 (pin under the previous layout) are rejected.
-        for (String value : new String[]{"0", "1"}) {
-            ParamManager manager = buildParamManager();
-            String err = manager.getParameter("outputFormat").parse(value);
-            Assert.assertNull("parse('" + value + "') should succeed but returned: " + err, err);
+    public void outputFormatAcceptsOnlyPinAndTsv() throws URISyntaxException {
+        // Picocli matches enum values case-insensitively per the @Command setting.
+        for (String value : new String[]{"pin", "PIN", "Pin", "tsv", "TSV", "Tsv"}) {
+            MSGFPlusOptions opts = new MSGFPlusOptions();
+            MSGFPlusOptions.commandLine(opts).parseArgs("-outputFormat", value);
+            Assert.assertNotNull("'" + value + "' should parse to a valid OutputFormat", opts.outputFormat);
         }
-        // Regression gate: old "mzid" / "both" indices (2, 3) must be rejected.
-        for (String value : new String[]{"2", "3"}) {
-            ParamManager manager = buildParamManager();
-            String err = manager.getParameter("outputFormat").parse(value);
-            Assert.assertNotNull("parse('" + value + "') should FAIL — mzid/both have been removed", err);
+        // Numeric forms (0/1) and removed legacy values (mzid, both, 2, 3) are
+        // intentionally rejected -- the typed enum is part of the consistency
+        // sweep called out in the parameter-modernization cleanup.
+        for (String value : new String[]{"0", "1", "2", "3", "mzid", "both", ""}) {
+            MSGFPlusOptions opts = new MSGFPlusOptions();
+            try {
+                MSGFPlusOptions.commandLine(opts).parseArgs("-outputFormat", value);
+                Assert.fail("'" + value + "' should be rejected by picocli enum matching");
+            } catch (CommandLine.ParameterException expected) {
+                // ok
+            }
         }
     }
 
     @Test
     public void pinHeaderColumnsIncludeRequiredPercolatorFields() throws Exception {
-        // Build a minimal result list so DirectPinWriter can emit a header.
-        // We don't need real matches; an empty resultList still produces the
-        // header row, which is what we're testing.
-        ParamManager manager = buildParamManager();
-        Assert.assertNull(manager.getParameter("outputFormat").parse("0"));
+        MSGFPlusOptions opts = SearchTestFixtures.standardOpts();
+        opts.outputFormat = OutputFormat.PIN;
 
         SearchParams params = new SearchParams();
-        Assert.assertNull(params.parse(manager));
+        Assert.assertNull(params.parse(opts));
 
         // DirectPinWriter needs a CompactSuffixArray and SpectraAccessor; we
         // can't construct those without running through BuildSA and loading
@@ -106,14 +90,14 @@ public class TestDirectPinWriter {
         // stream. We assert the header line contains the Percolator-required
         // column names.
         java.lang.reflect.Method writeHeader =
-                edu.ucsd.msjava.mzid.DirectPinWriter.class.getDeclaredMethod(
+                edu.ucsd.msjava.output.DirectPinWriter.class.getDeclaredMethod(
                         "writeHeader", java.io.PrintStream.class, int.class, int.class);
         writeHeader.setAccessible(true);
 
         // Build a DirectPinWriter with null sa/specAcc — header path doesn't
         // touch them. If the constructor starts using them, this test needs
         // to evolve; for now it's a pure shape check.
-        java.lang.reflect.Constructor<?> ctor = edu.ucsd.msjava.mzid.DirectPinWriter.class
+        java.lang.reflect.Constructor<?> ctor = edu.ucsd.msjava.output.DirectPinWriter.class
                 .getDeclaredConstructor(
                         SearchParams.class,
                         edu.ucsd.msjava.msutil.AminoAcidSet.class,

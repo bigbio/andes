@@ -273,9 +273,7 @@ public abstract class IonType {
             }
         }
 
-//        System.out.println(maxCharge+"\t"+removeRedundancy+"\t"+nlString);
         Collections.sort(ionList, new IonTypeComparator());
-//        System.out.println("Sorting Done");
 
         if (!removeRedundancy)
             return ionList;
@@ -368,9 +366,4 @@ public abstract class IonType {
         compositionOffsetTable.put("TMT", 229.162932f);
     }
 
-    public static void main(String[] args) {
-        ArrayList<IonType> allIons = IonType.getAllKnownIonTypes(3, true, true, false, true);
-        for (IonType ion : allIons)
-            System.out.println(ion.getName() + "\t" + ion.getOffset());
-    }
 }

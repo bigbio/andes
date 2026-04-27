@@ -1,7 +1,5 @@
 package edu.ucsd.msjava.msutil;
 
-import edu.ucsd.msjava.params.ParamObject;
-import edu.ucsd.msjava.params.UserParam;
 
 import java.io.File;
 import java.nio.file.Paths;
@@ -115,12 +113,10 @@ public class ActivationMethod implements ParamObject {
             registeredActMethods.add(actMethod);
     }
 
-    // add to the HashMap only
     private static void addAlias(String name, ActivationMethod actMethod) {
         table.put(name, actMethod);
     }
 
-    // add to the list only
     private static void addToList(ActivationMethod actMethod) {
         registeredActMethods.add(actMethod);
     }
@@ -150,7 +146,6 @@ public class ActivationMethod implements ParamObject {
         // Parse activation methods defined by a user
         File actMethodFile = Paths.get("params", "activationMethods.txt").toFile();
         if (actMethodFile.exists()) {
-//			System.out.println("Loading " + actMethodFile.getAbsolutePath());
             ArrayList<String> paramLines = UserParam.parseFromFile(actMethodFile.getPath(), 2);
             for (String paramLine : paramLines) {
                 String[] token = paramLine.split(",");

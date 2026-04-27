@@ -111,7 +111,6 @@ public class NominalMassFactory extends MassFactory<NominalMass> {
         return factory[index] != null;
     }
 
-    //	// static methods
     private static NominalMassFactory defaultNominalMassFactory = new NominalMassFactory(50);
 
     public static NominalMass getInstanceFor(float mass) {

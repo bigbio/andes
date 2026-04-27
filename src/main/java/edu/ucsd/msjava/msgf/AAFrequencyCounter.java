@@ -109,48 +109,4 @@ public class AAFrequencyCounter {
             return occ;
     }
 
-    public static void main(String argv[]) {
-        System.out.println(getRandomFrequency("AAA"));
-//		generate(3);
-        /*
-        AAFrequencyCounter counter = new AAFrequencyCounter();
-		counter.readFromFreqFile("/home/sangtaekim/Research/Data/AAFrequency/SProt_2mer.txt");
-		counter.frequencyTable.printSorted();
-		*/
-    }
-
-    public static void generate(int nMer) {
-        AAFrequencyCounter counter = new AAFrequencyCounter();
-        counter.setNMer(nMer);
-//		counter.readFromFasta("/home/sangtaekim/Research/Data/SProt/uniprot_sprot.fasta");
-        counter.readFromFasta("/home/sangtaekim/Research/Data/EColiDB/Ecol_protein_formatted.fasta");
-
-        System.out.println("n\t" + nMer);
-        System.out.println("size\t" + counter.sizeNMer);
-        String allAA = "GASPVTCLINDQKEMHFRYW";
-
-        if (nMer == 1) {
-            for (int i = 0; i < allAA.length(); i++) {
-                char c = allAA.charAt(i);
-                System.out.println(c + "\t" + counter.getOccurrence(String.valueOf(c)));
-            }
-
-        } else if (nMer == 2) {
-            for (int i = 0; i < allAA.length(); i++) {
-                for (int j = 0; j < allAA.length(); j++) {
-                    String s = "" + allAA.charAt(i) + allAA.charAt(j);
-                    System.out.println(s + "\t" + counter.getOccurrence(s));
-                }
-            }
-        } else if (nMer == 3) {
-            for (int i = 0; i < allAA.length(); i++) {
-                for (int j = 0; j < allAA.length(); j++) {
-                    for (int k = 0; k < allAA.length(); k++) {
-                        String s = "" + allAA.charAt(i) + allAA.charAt(j) + allAA.charAt(k);
-                        System.out.println(s + "\t" + counter.getOccurrence(s));
-                    }
-                }
-            }
-        }
-    }
 }

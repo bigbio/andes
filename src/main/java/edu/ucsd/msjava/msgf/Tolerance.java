@@ -3,9 +3,6 @@ package edu.ucsd.msjava.msgf;
 import java.io.Serializable;
 
 public class Tolerance implements Serializable { // Serializable is needed in order to make RankScorer serializable
-    /**
-     *
-     */
     public static final Tolerance ZERO_TOLERANCE = new Tolerance(0);
 
     private static final long serialVersionUID = 1L;
@@ -45,17 +42,11 @@ public class Tolerance implements Serializable { // Serializable is needed in or
         return unit;
     }
 
-    /**
-     * @return
-     */
     public boolean isTolerancePPM() {
         return unit == Unit.PPM;
     }
 
-    /**
-     * @param mass
-     * @return
-     */
+    /** Exits with an error if the unit is Th — use getToleranceAsDa(mass, charge) instead. */
     public float getToleranceAsDa(float mass) {
         if (unit == Unit.Th) {
             System.err.println("Use getToleranceAsDa(float mass, int charge) instead!");

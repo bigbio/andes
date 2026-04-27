@@ -197,14 +197,7 @@ public class NewRankScorer implements NewAdditiveScorer {
     private void readFromInputStream(InputStream is, boolean verbose) {
         DataInputStream in = new DataInputStream(is);
 
-        // Read the date
         try {
-//			int year = in.readInt();	// version information
-//			int month = in.readInt();
-//			int date = in.readInt();
-//			if(verbose)
-//			System.out.println("CreationDate: " + year + "/" + (month+1) + "/" + date);
-
             int version = in.readInt();
             if (verbose)
                 System.out.println("Version: " + version);
@@ -245,11 +238,6 @@ public class NewRankScorer implements NewAdditiveScorer {
                 for (byte i = 0; i < lenProtocol; i++)
                     bufProtocol.append(in.readChar());
                 protocol = Protocol.get(bufProtocol.toString());
-//				if(protocol == null)
-//				{
-//					System.out.println(bufProtocol.toString());
-//					System.exit(-1);
-//				}
             } else
                 protocol = Protocol.AUTOMATIC;
 

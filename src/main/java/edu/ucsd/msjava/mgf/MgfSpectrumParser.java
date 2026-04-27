@@ -11,11 +11,6 @@ import java.util.regex.Pattern;
 
 import static edu.ucsd.msjava.misc.TextParsingUtils.isInteger;
 
-/**
- * This class enables to parse spectrum file with mgf format.
- *
- * @author sangtaekim
- */
 public class MgfSpectrumParser implements SpectrumParser {
     private static final Pattern TITLE_SCAN_KEY_VALUE_PATTERN =
             Pattern.compile("(?i)(?:^|[\\s;])(?:scan|scans|spectrum)=(\\d+)(?:\\b|$)");
@@ -26,27 +21,13 @@ public class MgfSpectrumParser implements SpectrumParser {
 
     private long scanMissingWarningCount;
 
-    /**
-     * Number of scans where we could not determine the scan number
-     * This method is required by interface SpectrumParser
-     * @return
-     */
     public long getScanMissingWarningCount()
     {
         return scanMissingWarningCount;
     }
 
-    /**
-     * Amino acid set to be used to parse "SEQ="
-     */
     private AminoAcidSet aaSet = AminoAcidSet.getStandardAminoAcidSetWithFixedCarbamidomethylatedCys();
 
-    /**
-     * Specify amino acid set to be used to parse "SEQ=" field.
-     *
-     * @param aaSet amino acid set.
-     * @return this object.
-     */
     public MgfSpectrumParser aaSet(AminoAcidSet aaSet) {
         this.aaSet = aaSet;
         linesRead = 0;
@@ -55,14 +36,6 @@ public class MgfSpectrumParser implements SpectrumParser {
         return this;
     }
 
-    /**
-     * Implementation of readSpectrum method. Implicitly lineReader points to the start of a spectrum.
-     * Reads mgf file line by line until the spectrum ends, generate a Spectrum object and returns it.
-     * If it cannot read a spectrum, it returns null.
-     *
-     * @param lineReader a LineReader object points to the start of a spectrum
-     * @return a spectrum object. null if no spectrum can be generated.
-     */
     public Spectrum readSpectrum(LineReader lineReader) {
         Spectrum spec = null;
         String title = null;
@@ -72,8 +45,6 @@ public class MgfSpectrumParser implements SpectrumParser {
         int precursorCharge = 0;
         ActivationMethod activation = null;
         float elutionTimeSeconds = 0;
-//		Float toleranceVal = null;
-//		Tolerance.Unit toleranceUnit = null;
 
         String buf;
         boolean parse = false;   // parse only after the BEGIN IONS
@@ -112,7 +83,6 @@ public class MgfSpectrumParser implements SpectrumParser {
                 } else if (buf.startsWith("TITLE")) {
                     title = buf.substring(buf.indexOf('=') + 1);
                     spec.setTitle(title);
-//  				spec.setID(title);
                 } else if (buf.startsWith("CHARGE")) {
                     // Charge state, e.g. CHARGE=2+
                     // Extract the text after the equals sign
@@ -206,23 +176,6 @@ public class MgfSpectrumParser implements SpectrumParser {
                     else
                         elutionTimeSeconds = Float.valueOf(token[0]);
                 }
-//  			else if(buf.startsWith("TOL="))
-//  			{
-//  				String tolStr = buf.substring(buf.indexOf("=")+1);
-//  				float toleranceValue = Float.parseFloat(tolStr);
-//  				if(toleranceValue > 0)
-//  				{
-//  					toleranceVal = toleranceValue;
-//  				}
-//  			}
-//  			else if(buf.startsWith("TOLU="))
-//  			{
-//  				String tolUnitStr = buf.substring(buf.indexOf("=")+1);
-//  				if(tolUnitStr.equalsIgnoreCase("ppm"))
-//  					toleranceUnit = Tolerance.Unit.PPM;
-//  				else if(tolUnitStr.equalsIgnoreCase("Da"))
-//  					toleranceUnit = Tolerance.Unit.Da;
-//  			}
                 else if (buf.startsWith("END IONS")) {
                     assert (spec != null);
                     if (spec.getScanNum() < 0 && title != null) {
@@ -260,11 +213,6 @@ public class MgfSpectrumParser implements SpectrumParser {
                         spec.setRt(elutionTimeSeconds);
                         spec.setRtIsSeconds(true);
                     }
-//  				if(toleranceVal != null && toleranceUnit != null)
-//  				{
-//  					Tolerance precursorTolerance = new Tolerance(toleranceVal, toleranceUnit);
-//  					spec.setPrecursorTolerance(precursorTolerance);
-//  				}
                     if (!sorted)
                         Collections.sort(spec);
 
@@ -275,13 +223,6 @@ public class MgfSpectrumParser implements SpectrumParser {
         return null;
     }
 
-    /**
-     * Extract start and end scan from the title if it is of the form:
-     * DatasetName.ScanStart.ScanEnd.Charge
-     *
-     * @param spec  Spectrum
-     * @param title Title line
-     */
     private void extractScanRangeFromTitle(Spectrum spec, String title) {
         // Split on periods
         String[] token = title.split("\\.");
@@ -323,13 +264,6 @@ public class MgfSpectrumParser implements SpectrumParser {
         }
     }
 
-    /**
-     * Implementation of getSpecIndexMap object. Reads the entire spectrum file and
-     * generates a map from a spectrum index to the file position of the spectrum.
-     *
-     * @param lineReader a LineReader object that points to the start of a file.
-     * @return A map from spectrum indexes to the spectrum meta information.
-     */
     public Map<Integer, SpectrumMetaInfo> getSpecMetaInfoMap(BufferedRandomAccessLineReader lineReader) {
         Hashtable<Integer, SpectrumMetaInfo> specIndexMap = new Hashtable<Integer, SpectrumMetaInfo>();
         String buf;
@@ -409,5 +343,4 @@ public class MgfSpectrumParser implements SpectrumParser {
         return true;
     }
 
-    // test code
 }

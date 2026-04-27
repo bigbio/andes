@@ -28,7 +28,6 @@ public class NewScoredSpectrum<T extends Matter> implements ScoredSpectrum<T> {
         this.mme = scorer.mme;
         this.precursor = spec.getPrecursorPeak().clone();
         this.activationMethodArr = new ActivationMethod[1];
-//		activationMethodArr[0] = scorer.getActivationMethod();
         if (spec.getActivationMethod() != null)
             activationMethodArr[0] = spec.getActivationMethod();
         else
@@ -93,16 +92,6 @@ public class NewScoredSpectrum<T extends Matter> implements ScoredSpectrum<T> {
         float edgeScore = scorer.getIonExistenceScore(partition, ionExistenceIndex, probPeak);
         if (ionExistenceIndex == 3)
             edgeScore += scorer.getErrorScore(partition, curNodeMass - prevNodeMass - theoMass);
-
-//		// debug
-//		if(edgeScore < -1000 || edgeScore > 1000)
-//		{
-//			System.out.println("Error! EdgeScore = " + edgeScore);
-//			System.out.println("Spectrum ScanNum: " + spec.getScanNum());
-//			System.out.println("Partition: " + partition.getCharge() + " " + partition.getSegNum() + " " + partition.getParentMass());
-//			System.out.println("IonExistence: " + scorer.getIonExistenceScore(partition, ionExistenceIndex, probPeak));
-//			System.out.println("Error: " + scorer.getErrorScore(partition, curNodeMass-prevNodeMass-theoMass));
-//		}
         return Math.round(edgeScore);
     }
 
@@ -126,12 +115,7 @@ public class NewScoredSpectrum<T extends Matter> implements ScoredSpectrum<T> {
         return mainIon.isPrefixIon();
     }
 
-    /**
-     * returns the corrected mass of the node based on the peak observed in the spectrum
-     *
-     * @param node
-     * @return corrected mass of the node if peak exists, null -1
-     */
+    /** Returns the corrected m/z from the observed peak, or -1 if no peak was found. */
     public float getNodeMass(T node) {
         if (node.getNominalMass() == 0)
             return 0;
@@ -215,9 +199,6 @@ public class NewScoredSpectrum<T extends Matter> implements ScoredSpectrum<T> {
     public Pair<Float, Float> getMassErrorWithIntensity(float residueMass, boolean isPrefix, Tolerance fragmentTolerance) {
         Float error = null;
         float maxIntensity = 0;
-//		IonType bestIon = null;
-//		Peak bestPeak = null;
-//		float bestTheoMass = 0;
 
         for (int segIndex = 0; segIndex < scorer.getNumSegments(); segIndex++) {
             for (IonType ion : ionTypes[segIndex]) {
@@ -246,18 +227,10 @@ public class NewScoredSpectrum<T extends Matter> implements ScoredSpectrum<T> {
                 if (p != null)    // peak exists
                 {
                     float err = (p.getMz() - theoMass) / theoMass * 1e6f;
-//					float err = p.getMz() - theoMass;
-//					if(err < 0)
-//						err = -err;
                     float intensity = p.getIntensity();
-                    // Debug
-//					System.out.println(residueMass + " " + ion.getName() + " " + err + " " + intensity);
                     if (intensity > maxIntensity) {
                         error = err;
                         maxIntensity = intensity;
-//						bestIon = ion;
-//						bestPeak = p;
-//						bestTheoMass = theoMass;
                     }
                 }
             }
@@ -265,9 +238,6 @@ public class NewScoredSpectrum<T extends Matter> implements ScoredSpectrum<T> {
         if (error == null)
             return null;
         else {
-//			// Debug
-//			System.out.println("*\t" + residueMass + "\t" + bestIon.getName() + "\t" + error + "\t" + bestPeak.getRank() 
-//					+ "\t" + bestPeak.getMz() + "\t" + bestPeak.getIntensity() + "\t" + bestTheoMass);
             return new Pair<Float, Float>(error, maxIntensity);
         }
     }

@@ -251,10 +251,6 @@ public class DBScanner {
                 if (bufferIndex == 0)
                     lcp = 0;
 
-                // For debugging
-//				System.out.println(index+": " +sequence.getSubsequence(index, sequence.getSize()));
-//				if(index == 4)
-//					System.out.println("Debug");
                 // skip redundant peptides
 
                 if (Thread.currentThread().isInterrupted()) {
@@ -415,19 +411,12 @@ public class DBScanner {
                     if (peptideLengthIndex < minPeptideLength)
                         continue;
 
-//					System.out.println(sequence.getSubsequence(index+1, index+i+1));
-//					if(sequence.getSubsequence(index+1, index+i+1).equalsIgnoreCase("KYPCRYCEK"))
-//					{
-//						System.out.println("DebugSequence: " + sequence.getSubsequence(index, index+i+1));
-//					}
-
                     int cTermCleavageScore = 0;
                     if (enzyme != null) {
                         char cTermNeighboringResidue = sequence.getCharAt(index + peptideLengthIndex + 1);
                         isProteinCTerm = (cTermNeighboringResidue == Constants.TERMINATOR_CHAR);
                         if (enzyme.isCTerm()) {
-//							if(isProteinCTerm || enzyme.isCleavable(residue)) // || cTermNeighboringResidue == Constants.INVALID_CHAR)
-                            if (enzyme.isCleavable(residue)) // || cTermNeighboringResidue == Constants.INVALID_CHAR)	// changed by Sangtae to avoid SpecProb=0
+                            if (enzyme.isCleavable(residue)) // changed by Sangtae to avoid SpecProb=0
                                 cTermCleavageScore = peptideCleavageCredit;
                             else {
                                 cTermCleavageScore = peptideCleavagePenalty;

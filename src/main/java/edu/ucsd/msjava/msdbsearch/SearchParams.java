@@ -88,42 +88,34 @@ public class SearchParams {
         return precursorCalMode;
     }
 
-    // Used by MS-GF+
     public List<DBSearchIOFiles> getDBSearchIOList() {
         return dbSearchIOList;
     }
 
-    // Used by MS-GF+
     public File getDatabaseFile() {
         return databaseFile;
     }
 
-    // Used by MS-GF+
     public String getDecoyProteinPrefix() {
         return decoyProteinPrefix;
     }
 
-    // Used by MS-GF+
     public Tolerance getLeftPrecursorMassTolerance() {
         return leftPrecursorMassTolerance;
     }
 
-    // Used by MS-GF+
     public Tolerance getRightPrecursorMassTolerance() {
         return rightPrecursorMassTolerance;
     }
 
-    // Used by MS-GF+
     public int getMinIsotopeError() {
         return minIsotopeError;
     }
 
-    // Used by MS-GF+
     public int getMaxIsotopeError() {
         return maxIsotopeError;
     }
 
-    // Used by MS-GF+
     public Enzyme getEnzyme() {
         return enzyme;
     }
@@ -132,77 +124,62 @@ public class SearchParams {
         return numTolerableTermini;
     }
 
-    // Used by MS-GF+
     public ActivationMethod getActivationMethod() {
         return activationMethod;
     }
 
-    // Used by MS-GF+
     public InstrumentType getInstType() {
         return instType;
     }
 
-    // Used by MS-GF+
     public Protocol getProtocol() {
         return protocol;
     }
 
-    // Used by MS-GF+
     public AminoAcidSet getAASet() {
         return aaSet;
     }
 
-    // Used by MS-GF+
     public int getNumMatchesPerSpec() {
         return numMatchesPerSpec;
     }
 
-    // Used by MS-GF+
     public int getStartSpecIndex() {
         return startSpecIndex;
     }
 
-    // Used by MS-GF+
     public int getEndSpecIndex() {
         return endSpecIndex;
     }
 
-    // Used by MS-GF+
     public boolean useTDA() {
         return useTDA;
     }
 
-    // Used by MS-GF+
     public boolean ignoreMetCleavage() {
         return ignoreMetCleavage;
     }
 
-    // Used by MS-GF+
     public int getMinPeptideLength() {
         return minPeptideLength;
     }
 
-    // Used by MS-GF+
     public int getMaxPeptideLength() {
         return maxPeptideLength;
     }
 
-    // Used by MS-GF+
     public int getMaxNumVariantsPerPeptide() {
         return maxNumVariantsPerPeptide;
     }
 
-    // Used by MS-GF+
     public int getMinCharge() {
         return minCharge;
     }
 
-    // Used by MS-GF+
     public int getMaxCharge() {
         return maxCharge;
     }
 
-    // Used by MS-GF+
     public int getNumThreads() {
         return numThreads;
     }
@@ -219,12 +196,10 @@ public class SearchParams {
         return verbose;
     }
 
-    // Used by MS-GF+
     public boolean doNotUseEdgeScore() {
         return doNotUseEdgeScore;
     }
 
-    // Used by MS-GF+
     public File getDBIndexDir() {
         return dbIndexDir;
     }
@@ -233,12 +208,10 @@ public class SearchParams {
         return outputAdditionalFeatures;
     }
 
-    // Used by MS-GF+
     public int getMinNumPeaksPerSpectrum() {
         return minNumPeaksPerSpectrum;
     }
 
-    // Used by MS-GF+
     public int getMinDeNovoScore() {
         return minDeNovoScore;
     }
@@ -247,22 +220,18 @@ public class SearchParams {
         return chargeCarrierMass;
     }
 
-    // Used by MS-GF+
     public int getMaxMissedCleavages() {
         return maxMissedCleavages;
     }
 
-    // Used by MS-GF+
     public boolean getAllowDenseCentroidedPeaks() {
         return allowDenseCentroidedPeaks;
     }
 
-    // Used by MS-GF+
     public int getMinMSLevel() {
         return minMSLevel;
     }
 
-    // Used by MS-GF+
     public int getMaxMSLevel() {
         return maxMSLevel;
     }

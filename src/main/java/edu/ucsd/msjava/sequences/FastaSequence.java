@@ -5,12 +5,7 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.Map.Entry;
 
-/**
- * An implementation of the Sequence class allowing a fasta file to be used as
- * the database.
- *
- * @author jung
- */
+/** Sequence implementation backed by a FASTA file. */
 public class FastaSequence implements Sequence {
 
     //this is the file in which the sequence was generated
@@ -48,8 +43,7 @@ public class FastaSequence implements Sequence {
     private int id;
 
 
-    /***** HELPER METHODS *****/
-    // helper method, initialize the alphabet with given colon separated string
+    // initialize alphabet from a colon-separated string
     private void initializeAlphabet(String s) {
         String[] tokens = s.split(":");
         this.alpha2byte = new HashMap<Character, Byte>();
@@ -63,7 +57,6 @@ public class FastaSequence implements Sequence {
         }
     }
 
-    // the other helper method when the hashmap is not known before hand
     private void createObjectFromRawFile(String filepath) {
 
         // a rough estimate of the space required to hold everything
@@ -130,7 +123,6 @@ public class FastaSequence implements Sequence {
         writeSequence(original, sequence, size, id);
     }
 
-    // helper method to read and write the processed files given the alphabet
     private void createObjectFromRawFile(String filepath, String alphabet) {
 
         // estimate the length of the buffer
@@ -199,7 +191,6 @@ public class FastaSequence implements Sequence {
         writeSequence(original, sequence, size, id);
     }
 
-    // helper method that writes the metainformation into a file in text format.
     private void writeMetaInfo(HashMap<Integer, String> annotations, String alphabet, int size, int id) {
         String filepath = this.baseFilepath + this.seqExtension + "anno";
         try {
@@ -218,7 +209,6 @@ public class FastaSequence implements Sequence {
         }
     }
 
-    // read the metainformation file
     private int readMetaInfo() {
         String filepath = this.baseFilepath + this.seqExtension + "anno";
         try {
@@ -240,7 +230,6 @@ public class FastaSequence implements Sequence {
         return 0;
     }
 
-    // helper method to write the sequence in bynary format
     private void writeSequence(StringBuffer original, ByteBuffer sequence, int size, int id) {
         String filepath = this.baseFilepath + this.seqExtension;
         try {
@@ -259,29 +248,18 @@ public class FastaSequence implements Sequence {
         }
     }
 
-    // read the sequence in binary
     private int readSequence() {
         String filepath = this.baseFilepath + this.seqExtension;
         try {
-            // read the first integer which encodes for the size of the file
             DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(filepath)));
             int size = in.readInt();
             int id = in.readInt();
-
-            // Modified by Sangtae
-//			FileChannel fc = new FileInputStream(filepath).getChannel();
             byte[] sequenceArr = new byte[size];
             in.read(sequenceArr);
             sequence = ByteBuffer.wrap(sequenceArr).asReadOnlyBuffer();
-
-//			this.original = fc.map(FileChannel.MapMode.READ_ONLY, 2*Integer.SIZE/Byte.SIZE + size, size);
             byte[] originalArr = new byte[size];
             in.read(originalArr);
             original = ByteBuffer.wrap(originalArr).asReadOnlyBuffer();
-
-            //this.original = new char[size];
-            //ByteBuffer originalChars = fc.map(FileChannel.MapMode.READ_ONLY, 2*Integer.SIZE/Byte.SIZE + size, size);
-            //for (int index=0; index<size; index++) this.original[index] = (char)originalChars.get(index);
             in.close();
             return id;
         } catch (IOException e) {
@@ -292,38 +270,16 @@ public class FastaSequence implements Sequence {
     }
 
 
-    /***** CONSTRUCTORS *****/
-    /**
-     * Constructor. The alphabet will be created dynamically according from the
-     * fasta file.
-     *
-     * @param filepath the path to the fasta file.
-     */
     public FastaSequence(String filepath) {
         this(filepath, null);
     }
 
-    /**
-     * Constructor using the specified alphabet set. If there is a letter not in
-     * the alphabet, it will be encoded as the TERMINATOR byte.
-     *
-     * @param filepath the path to the fasta file.
-     * @param alphabet the specifications alphabet string. This could take the
-     *                 predefined AminoAcid strings defined in this class or customized strings.
-     */
+    /** Letters not in the alphabet are encoded as TERMINATOR. */
     public FastaSequence(String filepath, String alphabet) {
         this(filepath, alphabet, Constants.FILE_EXTENSION);
     }
 
-    /**
-     * Constructor using the specified alphabet set. If there is a letter not in
-     * the alphabet, it will be encoded as the TERMINATOR byte.
-     *
-     * @param filepath     the path to the fasta file.
-     * @param alphabet     the specifications alphabet string. This could take the
-     *                     predefined AminoAcid strings defined in this class or customized strings.
-     * @param seqExtension the extension to use for the sequence file.
-     */
+    /** Letters not in the alphabet are encoded as TERMINATOR. */
     public FastaSequence(String filepath, String alphabet, String seqExtension) {
 
         this.seqExtension = seqExtension;
@@ -367,7 +323,6 @@ public class FastaSequence implements Sequence {
     }
 
 
-    /***** CLASS METHODS *****/
     public Set<Byte> getAlphabetAsBytes() {
         return this.byte2alpha.keySet();
     }
@@ -497,41 +452,20 @@ public class FastaSequence implements Sequence {
         return this.getSubsequence(start + 1, end);
     }
 
-    /**
-     * Setter method.
-     *
-     * @param baseFilepath set the baseFilepath for this object. The baseFilepath
-     *                     has no extension.
-     */
     public void setBaseFilepath(String baseFilepath) {
         this.baseFilepath = baseFilepath;
     }
 
-    /**
-     * Getter method.
-     *
-     * @return the baseFilename with properties described in the setter method.
-     */
     public String getBaseFilepath() {
         return this.baseFilepath;
     }
 
-    /**
-     * This method allows modification of this sequence
-     *
-     * @param start the index to modify
-     * @param c     the character to put in there
-     */
     public void set(long start, char c) {
         this.sequence.put((int) start, this.alpha2byte.get(c));
         this.original.put((int) start, (byte) c);
-        //this.original[(int)start] = c;
     }
 
-    /**
-     * This method make the buffers writeable. This must be called before
-     * the set method is usable
-     */
+    /** Must be called before set() — read-only ByteBuffers do not support put(). */
     public void makeModifiable() {
         ByteBuffer sequenceCopy = ByteBuffer.allocateDirect(this.size);
         ByteBuffer originalCopy = ByteBuffer.allocateDirect(this.size);
@@ -541,90 +475,7 @@ public class FastaSequence implements Sequence {
         this.original = originalCopy;
     }
 
-    /**
-     * This method returns List of annotations.
-     *
-     * @return All annotations as a list of Strings
-     */
     public List<String> getAnnotations() {
         return new ArrayList<String>(annotations.values());
     }
-
-
-    /*****  Methods doomed to deprecation *****/
-    /**
-     * Returns the substring specified by the position and extension parameters of
-     * the concatenated original fasta sequence. If the coordinates cross a sequence
-     * boundary, the terminator will be represented by "_". If the coordinates
-     * specify a substring out of range, the out-of-range portion will be ignored.
-     * If position is negative, it will be rounded up to 0.
-     * @param position the starting position.
-     * @param extension how many characters to extend.
-     * @return the substring specified by the coordinates.
-     */
-    /*
-  public String getMatch(long position, int extension) {
-    char[] ba = new char[extension];
-    position = Math.max(0, position);
-    for(long i = position, limit = Math.min(position+extension, this.getSize()); i < limit; i++)
-      ba[(int)(i-position)] = this.getCharAt(i);
-    return new String(ba);
-  }
-	 */
-
-    /**
-     * Get the letter at a given position. This is the same as calling getMatch(position, 1).
-     * @param position the starting position.
-     * @return the letter specified by the coordinate.
-     */
-    /*
-  public Character getMatch(long position) {
-    if(position >= this.getSize() || position < 0)         return null; 
-    return this.getCharAt(position);
-  }*/
-
-    /**
-     * This function will check whether the sequence can be encoded into bytes.
-     * @param sequence the sequence to test.
-     * @return true if all letters are in the alphabet, false otherwise.
-     */
-	/*
-  public boolean isEncodable(String sequence) {
-    for(int i = 0; i < sequence.length(); i++) {
-      if(!alpha2byte.containsKey(sequence.charAt(i)))      return false;
-    }
-    return true;
-  }
-	 */
-
-    /**
-     * Return the set of bytes that are valid for sequence. This is the alphabet
-     * set in the form of bytes (including the terminator character, but excluding
-     * un-encodable characters).
-     * @return the byte alphabet set
-     */
-	/*
-  public Set<Byte> getAlphabetSetAsBytes() {
-    return this.byte2alpha.keySet();
-  }
-	 */
-
-    /**
-     * Return the alphabet set of this sequence as a Set of characters.
-     * @return the set of characters representing the alphabet
-     */
-	/*
-  public Collection<Character> getValidAlphabetSetAsChars() {
-    ArrayList<Character> results = new ArrayList<Character>();
-    for (char c : this.byte2alpha.values()) 
-      if (c!='_') results.add(c);
-    return results;
-  }
-	 */
-
-    /**
-     * @author kyowon - will be erased soon
-     */
-    //public int getMatchingEntryStartPosition(long position){ return annotations.floorKey((int)position)+1; }
-    //public int getMatchingEntryEndPosition(long position){ return annotations.higherKey((int)position); }
 }

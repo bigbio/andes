@@ -24,22 +24,10 @@ public class SpectraAccessor {
     SpectrumAccessorBySpecIndex specMap = null;
     Iterator<Spectrum> specItr = null;
 
-    /**
-     * Constructor that accepts a file
-     * Determines the file format based on the file extension
-     *
-     * @param specFile
-     */
     public SpectraAccessor(File specFile) {
         this(specFile, SpecFileFormat.getSpecFileFormat(specFile.getName()));
     }
 
-    /**
-     * Constructor that accepts a file and a file format
-     *
-     * @param specFile
-     * @param specFormat
-     */
     public SpectraAccessor(File specFile, SpecFileFormat specFormat) {
         if (specFormat == null) {
             throw new IllegalArgumentException("Unsupported spectrum file format: " + specFile.getName());
@@ -123,10 +111,6 @@ public class SpectraAccessor {
         return getSpecMap().getSpectrumById(specId);
     }
 
-    /**
-     * Get the current spectrum parser, or null if no parser
-     * @return
-     */
     public SpectrumParser getSpectrumParser() {
         return spectrumParser;
     }

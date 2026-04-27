@@ -9,27 +9,12 @@
  ***************************************************************************/
 package edu.ucsd.msjava.fdr;
 
-/**
- * The Class ScoredString.
- */
 public class ScoredString extends Pair<String, Float> implements Comparable<Pair<String, Float>> {
 
-    /**
-     * Instantiates a new scored string.
-     *
-     * @param peptide the peptide
-     * @param score   the score
-     */
     public ScoredString(String peptide, Float score) {
         super(peptide, score);
     }
 
-    /**
-     * Instantiates a new scored string, using an integer score.
-     *
-     * @param score
-     * @param peptide
-     */
     public ScoredString(String peptide, int score) {
         super(peptide, (float) score);
     }
@@ -42,20 +27,10 @@ public class ScoredString extends Pair<String, Float> implements Comparable<Pair
             return getFirst().compareTo(o.getFirst());
     }
 
-    /**
-     * Gets the str.
-     *
-     * @return the str
-     */
     public String getStr() {
         return super.getFirst();
     }
 
-    /**
-     * Gets the score.
-     *
-     * @return the score
-     */
     public float getScore() {
         return super.getSecond();
     }

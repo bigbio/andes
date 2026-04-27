@@ -16,23 +16,13 @@ import java.util.*;
  * @author sangtaekim
  */
 public class AminoAcidSet implements Iterable<AminoAcid> {
-    /**
-     *
-     */
     private static final AminoAcid[] EMPTY_AA_ARRAY = new AminoAcid[0];
 
     private HashMap<Location, ArrayList<AminoAcid>> aaListMap;
 
-    /**
-     * Mapping from Location Enum name to places where the location applies
-     */
     private static HashMap<Location, Location[]> locMap;
 
-    /**
-     * This tracks any default mods that the user has defined
-     * Keys are mod names and values are the mod mass that the user defined for this modification
-     * This list is used to warn users of non-standard mod masses for default mods
-     */
+    // maps mod name -> user-supplied mass; used to warn on non-standard masses for built-in mods
     private static Hashtable<String, Double> defaultModUsage = new Hashtable<>();
 
     static {
@@ -44,7 +34,6 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
         locMap.put(Location.Protein_C_Term, new Location[]{Location.Protein_C_Term});
     }
 
-    // for fast indexing
     private HashMap<Character, AminoAcid> residueMap;    // residue -> aa (residue must be unique)
     private HashMap<AminoAcid, Integer> aa2index;        // aa -> index
     private HashMap<Location, HashMap<Character, AminoAcid[]>> standardResidueAAArrayMap; // std residue -> array of amino acids
@@ -63,8 +52,6 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
     private HashSet<Character> modResidueSet = new HashSet<>();    // set of symbols used for residues
     private char nextResidue;
 
-    // for enzyme
-//	private ArrayList<AminoAcid> enzymeAAList;
     private int neighboringAACleavageCredit = 0;
     private int neighboringAACleavagePenalty = 0;
     private int peptideCleavageCredit = 0;
@@ -73,9 +60,6 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
 
     AminoAcid lightestAA, heaviestAA;
 
-    /**
-     * This tracks user-friendly descriptions of the modifications in use
-     */
     private ArrayList<String> modificationsInUse = new ArrayList<>();
 
     private AminoAcidSet() // prevents instantiation
@@ -88,11 +72,6 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
         nextResidue = 128;
     }
 
-    /**
-     * Returns the list of amino acids specific to the position.
-     *
-     * @return list of intermediate amino acids.
-     */
     public ArrayList<AminoAcid> getAAList(Location location) {
         return aaListMap.get(location);
     }
@@ -117,39 +96,18 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
         return modificationsInUse;
     }
 
-    /**
-     * Returns the iterator of anywhere amino acids
-     */
     public Iterator<AminoAcid> iterator() {
         return aaListMap.get(Location.Anywhere).iterator();
     }
 
-    /**
-     * Returns the size of amino acid depending on the location.
-     *
-     * @param location amino acid location
-     * @return
-     */
     public int size(Location location) {
         return aaListMap.get(location).size();
     }
 
-    /**
-     * Returns the size of anywhere amino acids
-     *
-     * @return the size of anywhere amino acids
-     */
     public int size() {
         return aaListMap.get(Location.Anywhere).size();
     }
 
-    /**
-     * Retrieve an array of amino acids given the specific standard residue.
-     *
-     * @param location          amino acid location
-     * @param standardAAResidue the standard residue to look up
-     * @return the array of amino acids or an empty array otherwise
-     */
     public AminoAcid[] getAminoAcids(Location location, char standardAAResidue) {
         AminoAcid[] matches = standardResidueAAArrayMap.get(location).get(standardAAResidue);
         if (matches != null)
@@ -158,44 +116,20 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
             return EMPTY_AA_ARRAY;
     }
 
-    /**
-     * Retrieve an array of amino acids given the specific nominal mass.
-     *
-     * @param location    amino acid location
-     * @param nominalMass nominal mass to look up
-     * @return the array of amino acids or an empty list otherwise
-     */
     public AminoAcid[] getAminoAcids(Location location, int nominalMass) {
         AminoAcid[] matches = nominalMass2aa.get(location).get(nominalMass);
         if (matches != null) return matches;
         return EMPTY_AA_ARRAY;
     }
 
-    /**
-     * Retrieve an array of amino acids given the specific nominal mass.
-     *
-     * @param nominalMass the mass to look up
-     * @return the array of amino acids or an empty list otherwise
-     */
     public AminoAcid[] getAminoAcids(int nominalMass) {
         return getAminoAcids(Location.Anywhere, nominalMass);
     }
 
-    /**
-     * Checks whether a residue belongs to this amino acid set
-     *
-     * @param residue a residue
-     * @return true if residue belongs to the amino acid set
-     */
     public boolean contains(char residue) {
         return residueMap.containsKey(residue);
     }
 
-    /**
-     * Returns a list of all residues without mods
-     *
-     * @return
-     */
     public ArrayList<Character> getResidueListWithoutMods() {
         ArrayList<Character> residues = new ArrayList<>();
         for (Map.Entry<Character, AminoAcid> aa : residueMap.entrySet()) {
@@ -207,22 +141,10 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
         return residues;
     }
 
-    /**
-     * Returns a list of all residues, including modified residues
-     *
-     * @return
-     */
     public ArrayList<Character> getResidueList() {
         return new ArrayList<>(residueMap.keySet());
     }
 
-    /**
-     * Get the amino acid mass of the residue.
-     *
-     * @param residue the amino acid mass. Use uppercase for standard aa (convention).
-     *                this method is case sensitive.
-     * @return the amino acid object. null if no aa corresponding to the residue
-     */
     public AminoAcid getAminoAcid(Location location, char residue) {
         AminoAcid[] aaArr = getAminoAcids(location, residue);
         for (AminoAcid aa : aaArr)
@@ -231,60 +153,26 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
         return null;
     }
 
-    /**
-     * Get the amino acid mass of the residue.
-     *
-     * @param residue the amino acid mass. Use uppercase for standard aa (convention).
-     *                this method is case sensitive.
-     * @return the amino acid object. null if no aa corresponding to the residue
-     */
     public AminoAcid getAminoAcid(char residue) {
         return residueMap.get(residue);
     }
 
-    /**
-     * Set the number of allowable variable modifications per peptide
-     *
-     * @param maxNumberOfVariableModificationsPerPeptide the number of allowable variable modifications per peptide
-     */
     public void setMaxNumberOfVariableModificationsPerPeptide(int maxNumberOfVariableModificationsPerPeptide) {
         this.maxNumberOfVariableModificationsPerPeptide = maxNumberOfVariableModificationsPerPeptide;
     }
 
-    /**
-     * Get the number of allowable variable modifications per peptide
-     *
-     * @return the number of allowable variable modifications per peptide
-     */
     public int getMaxNumberOfVariableModificationsPerPeptide() {
         return this.maxNumberOfVariableModificationsPerPeptide;
     }
 
-    /**
-     * Get all amino acids for all locations.
-     *
-     * @return an array of all amino acids.
-     */
     public AminoAcid[] getAllAminoAcidArr() {
         return this.allAminoAcidArr;
     }
 
-    /**
-     * Get the amino acid corresponding to the index
-     *
-     * @param index amino acid index
-     * @return amino acid object
-     */
     public AminoAcid getAminoAcid(int index) {
         return allAminoAcidArr[index];
     }
 
-    /**
-     * Get the index of the aa
-     *
-     * @param aa amino acid
-     * @return the index of aa. null if aa does not belong to this amino acid set
-     */
     public int getIndex(AminoAcid aa) {
         Integer index = aa2index.get(aa);
         if (index == null)
@@ -292,12 +180,6 @@ public class AminoAcidSet implements Iterable<AminoAcid> {
         return index;
     }
 
-    /**
-     * Get the peptide corresponding to the string sequence.
-     *
-     * @param sequence sequence of the peptide.
-     * @return peptide object of the sequence
-     */
     public Peptide getPeptide(String sequence) {
         boolean isModified = false;
         ArrayList<AminoAcid> aaArray = new ArrayList<>();

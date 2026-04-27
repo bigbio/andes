@@ -191,7 +191,6 @@ public class ConcurrentMSGFPlus {
             scanner.addResultsToList(resultList);
 
             progress.report(100.0);
-//			gen.addSpectrumIdentificationResults(scanner.getSpecIndexDBMatchMap());
             long totalMs = (System.nanoTime() - taskStartNs) / 1_000_000L;
             wallStats = new TaskWallStats(taskNum, preprocessMs, dbSearchMs, computeEvalueMs, totalMs);
             scanner = null;

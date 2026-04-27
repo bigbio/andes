@@ -2,6 +2,7 @@ package edu.ucsd.msjava.msdbsearch;
 
 import edu.ucsd.msjava.cli.IntRange;
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.OutputFormat;
 import edu.ucsd.msjava.cli.PrecursorTolerance;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msutil.*;
@@ -32,28 +33,7 @@ public class SearchParams {
     public enum PrecursorCalMode {
         AUTO,
         ON,
-        OFF;
-
-        /**
-         * Case-insensitive string to enum conversion. Unknown values fall
-         * back to {@link #AUTO} so that downstream code never crashes if a
-         * typo slips past CLI parsing.
-         */
-        public static PrecursorCalMode fromString(String s) {
-            if (s == null) return AUTO;
-            String normalized = s.trim().toLowerCase();
-            switch (normalized) {
-                case "on":
-                    return ON;
-                case "off":
-                    return OFF;
-                case "auto":
-                case "":
-                    return AUTO;
-                default:
-                    return AUTO;
-            }
-        }
+        OFF
     }
 
     private List<DBSearchIOFiles> dbSearchIOList;
@@ -94,7 +74,7 @@ public class SearchParams {
     private boolean allowDenseCentroidedPeaks;
     private int minMSLevel;
     private int maxMSLevel;
-    private int outputFormat; // 0=pin (default), 1=tsv — mzid output removed
+    private OutputFormat outputFormat;
     private PrecursorCalMode precursorCalMode = PrecursorCalMode.AUTO;
 
     public SearchParams() {
@@ -287,17 +267,16 @@ public class SearchParams {
         return maxMSLevel;
     }
 
-    /** 0=pin (default), 1=tsv. */
-    public int getOutputFormat() {
+    public OutputFormat getOutputFormat() {
         return outputFormat;
     }
 
     public boolean writeTsv() {
-        return outputFormat == 1;
+        return outputFormat == OutputFormat.TSV;
     }
 
     public boolean writePin() {
-        return outputFormat == 0;
+        return outputFormat == OutputFormat.PIN;
     }
 
     /**
@@ -350,7 +329,7 @@ public class SearchParams {
         }
 
         dbSearchIOList = new ArrayList<>();
-        String defaultExt = outputFormat == 1 ? ".tsv" : ".pin";
+        String defaultExt = outputFormat == OutputFormat.TSV ? ".tsv" : ".pin";
 
         if (!specPath.isDirectory()) {
             SpecFileFormat specFormat = SpecFileFormat.getSpecFileFormat(specPath.getName());
@@ -487,7 +466,7 @@ public class SearchParams {
         }
 
         allowDenseCentroidedPeaks = opts.effectiveAllowDenseCentroidedPeaks() == 1;
-        precursorCalMode = PrecursorCalMode.fromString(opts.effectivePrecursorCalRaw());
+        precursorCalMode = opts.effectivePrecursorCal();
 
         IntRange ms = opts.effectiveMSLevel();
         minMSLevel = ms.min;

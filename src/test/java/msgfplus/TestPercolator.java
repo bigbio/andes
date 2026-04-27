@@ -22,7 +22,7 @@ public class TestPercolator {
         String[] argv = {"-s", specFile.getPath(), "-d", dbFile.getPath(), "-addFeatures", "1", "-m", "3"};
 
         MSGFPlusOptions opts = new MSGFPlusOptions();
-        new CommandLine(opts).parseArgs(argv);
+        MSGFPlusOptions.commandLine(opts).parseArgs(argv);
 
         assertTrue(MSGFPlus.runMSGFPlus(opts) == null);
     }

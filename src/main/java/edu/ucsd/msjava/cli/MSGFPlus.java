@@ -53,7 +53,7 @@ public class MSGFPlus {
         argvSnapshot = argv == null ? new String[0] : argv.clone();
 
         MSGFPlusOptions opts = new MSGFPlusOptions();
-        CommandLine cl = new CommandLine(opts);
+        CommandLine cl = MSGFPlusOptions.commandLine(opts);
 
         if (argv.length == 0) {
             printToolInfo();

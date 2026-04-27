@@ -1,12 +1,14 @@
 package msgfplus;
 
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.cli.OutputFormat;
 import edu.ucsd.msjava.msdbsearch.DatabaseMatch;
 import edu.ucsd.msjava.msdbsearch.SearchParams;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.ActivationMethod;
 import edu.ucsd.msjava.msutil.Enzyme;
 import edu.ucsd.msjava.output.DirectPinWriter;
+import picocli.CommandLine;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -42,14 +44,14 @@ public class TestDirectPinWriter {
     @Test
     public void pinOutputFormatFlagIsAccepted() throws URISyntaxException {
         MSGFPlusOptions opts = buildOpts();
-        opts.outputFormat = "pin";
-        Assert.assertEquals(0, opts.effectiveOutputFormat());
+        opts.outputFormat = OutputFormat.PIN;
+        Assert.assertEquals(OutputFormat.PIN, opts.effectiveOutputFormat());
     }
 
     @Test
     public void writePinGetterReflectsOutputFormat() throws URISyntaxException {
         MSGFPlusOptions opts = buildOpts();
-        opts.outputFormat = "pin";
+        opts.outputFormat = OutputFormat.PIN;
 
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
@@ -59,26 +61,31 @@ public class TestDirectPinWriter {
     }
 
     @Test
-    public void allOutputFormatEnumIndicesAreAccepted() throws URISyntaxException {
-        // Valid outputFormat values after mzid removal: pin (default) and tsv.
-        for (String value : new String[]{"pin", "tsv", "0", "1"}) {
-            MSGFPlusOptions opts = buildOpts();
-            opts.outputFormat = value;
-            int eff = opts.effectiveOutputFormat();
-            Assert.assertTrue("'" + value + "' should map to 0 or 1 but got " + eff, eff == 0 || eff == 1);
+    public void outputFormatAcceptsOnlyPinAndTsv() throws URISyntaxException {
+        // Picocli matches enum values case-insensitively per the @Command setting.
+        for (String value : new String[]{"pin", "PIN", "Pin", "tsv", "TSV", "Tsv"}) {
+            MSGFPlusOptions opts = new MSGFPlusOptions();
+            MSGFPlusOptions.commandLine(opts).parseArgs("-outputFormat", value);
+            Assert.assertNotNull("'" + value + "' should parse to a valid OutputFormat", opts.outputFormat);
         }
-        // Regression gate: old "mzid" and "both" (2, 3) collapse to pin.
-        for (String value : new String[]{"mzid", "both", "2", "3"}) {
-            MSGFPlusOptions opts = buildOpts();
-            opts.outputFormat = value;
-            Assert.assertEquals("Removed format '" + value + "' must collapse to pin (0)", 0, opts.effectiveOutputFormat());
+        // Numeric forms (0/1) and removed legacy values (mzid, both, 2, 3) are
+        // intentionally rejected -- the typed enum is part of the consistency
+        // sweep called out in the parameter-modernization cleanup.
+        for (String value : new String[]{"0", "1", "2", "3", "mzid", "both", ""}) {
+            MSGFPlusOptions opts = new MSGFPlusOptions();
+            try {
+                MSGFPlusOptions.commandLine(opts).parseArgs("-outputFormat", value);
+                Assert.fail("'" + value + "' should be rejected by picocli enum matching");
+            } catch (CommandLine.ParameterException expected) {
+                // ok
+            }
         }
     }
 
     @Test
     public void pinHeaderColumnsIncludeRequiredPercolatorFields() throws Exception {
         MSGFPlusOptions opts = buildOpts();
-        opts.outputFormat = "pin";
+        opts.outputFormat = OutputFormat.PIN;
 
         SearchParams params = new SearchParams();
         Assert.assertNull(params.parse(opts));

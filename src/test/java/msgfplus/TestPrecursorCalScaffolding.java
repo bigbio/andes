@@ -50,7 +50,7 @@ public class TestPrecursorCalScaffolding {
     @Test
     public void precursorCalOnIsParsed() throws URISyntaxException {
         MSGFPlusOptions opts = buildOpts();
-        opts.precursorCalMode = "on";
+        opts.precursorCalMode = PrecursorCalMode.ON;
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals(PrecursorCalMode.ON, params.getPrecursorCalMode());
@@ -59,7 +59,7 @@ public class TestPrecursorCalScaffolding {
     @Test
     public void precursorCalOffIsParsed() throws URISyntaxException {
         MSGFPlusOptions opts = buildOpts();
-        opts.precursorCalMode = "off";
+        opts.precursorCalMode = PrecursorCalMode.OFF;
         SearchParams params = new SearchParams();
         Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
         Assert.assertEquals(PrecursorCalMode.OFF, params.getPrecursorCalMode());
@@ -67,20 +67,24 @@ public class TestPrecursorCalScaffolding {
 
     @Test
     public void precursorCalIsCaseInsensitive() throws URISyntaxException {
-        MSGFPlusOptions opts = buildOpts();
-        opts.precursorCalMode = "OFF";
-        SearchParams params = new SearchParams();
-        Assert.assertNull("SearchParams.parse should succeed", params.parse(opts));
-        Assert.assertEquals(PrecursorCalMode.OFF, params.getPrecursorCalMode());
+        // Picocli's enum matcher honours @Command(caseInsensitiveEnumValuesAllowed = true).
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        MSGFPlusOptions.commandLine(opts).parseArgs("-precursorCal", "OFF");
+        Assert.assertEquals(PrecursorCalMode.OFF, opts.precursorCalMode);
     }
 
     @Test
-    public void unknownPrecursorCalValueFallsBackToAuto() {
-        // Unit-level contract: unknown strings must not crash the search path;
-        // instead they silently fall back to AUTO.
-        Assert.assertEquals(PrecursorCalMode.AUTO, PrecursorCalMode.fromString("bogus"));
-        Assert.assertEquals(PrecursorCalMode.AUTO, PrecursorCalMode.fromString(null));
-        Assert.assertEquals(PrecursorCalMode.AUTO, PrecursorCalMode.fromString(""));
+    public void unknownPrecursorCalValueIsRejected() {
+        // The typed enum replaces the previous String + fromString fallback;
+        // invalid values are now rejected by picocli at parse time instead
+        // of silently mapping to AUTO.
+        MSGFPlusOptions opts = new MSGFPlusOptions();
+        try {
+            MSGFPlusOptions.commandLine(opts).parseArgs("-precursorCal", "bogus");
+            Assert.fail("'bogus' should not parse as a PrecursorCalMode");
+        } catch (picocli.CommandLine.ParameterException expected) {
+            // ok
+        }
     }
 
     @Test

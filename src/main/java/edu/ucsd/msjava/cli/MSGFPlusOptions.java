@@ -1,9 +1,11 @@
 package edu.ucsd.msjava.cli;
 
+import edu.ucsd.msjava.msdbsearch.SearchParams.PrecursorCalMode;
 import edu.ucsd.msjava.msutil.ActivationMethod;
 import edu.ucsd.msjava.msutil.Enzyme;
 import edu.ucsd.msjava.msutil.InstrumentType;
 import edu.ucsd.msjava.msutil.Protocol;
+import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
@@ -30,6 +32,13 @@ import java.util.List;
         sortOptions = false,
         description = "MS-GF+: peptide identification by database search of mass spectra.")
 public final class MSGFPlusOptions {
+
+    /** Build a {@link CommandLine} configured for MS-GF+: enums match
+     *  case-insensitively (so {@code -outputFormat pin} and {@code -outputFormat PIN}
+     *  both work) and the parser uses the standard MS-GF+ usage layout. */
+    public static CommandLine commandLine(MSGFPlusOptions opts) {
+        return new CommandLine(opts).setCaseInsensitiveEnumValuesAllowed(true);
+    }
 
     // ---------- input (required at runtime, but may be provided via -conf) ----------
 
@@ -154,11 +163,11 @@ public final class MSGFPlusOptions {
 
     @Option(names = "-outputFormat", paramLabel = "Format",
             description = "Output format: pin (Default) or tsv")
-    public String outputFormat;
+    public OutputFormat outputFormat;
 
     @Option(names = "-precursorCal", paramLabel = "Mode",
             description = "Precursor calibration mode: auto (Default), on, off")
-    public String precursorCalMode;
+    public PrecursorCalMode precursorCalMode;
 
     @Option(names = "-ccm", paramLabel = "Mass",
             description = "Charge carrier mass; Default: 1.00727649 (proton)")
@@ -252,15 +261,8 @@ public final class MSGFPlusOptions {
     public double effectiveChargeCarrierMass()    { return chargeCarrierMass       != null ? chargeCarrierMass       : 1.00727649; }
 
     public String effectiveDecoyPrefix()          { return decoyPrefix             != null ? decoyPrefix             : "XXX"; }
-    public String effectivePrecursorCalRaw()      { return precursorCalMode        != null ? precursorCalMode        : "auto"; }
-
-    /** 0 = pin (default), 1 = tsv. */
-    public int effectiveOutputFormat() {
-        if (outputFormat == null) return 0;
-        String n = outputFormat.trim().toLowerCase();
-        if (n.equals("tsv") || n.equals("1")) return 1;
-        return 0;
-    }
+    public PrecursorCalMode effectivePrecursorCal() { return precursorCalMode      != null ? precursorCalMode        : PrecursorCalMode.AUTO; }
+    public OutputFormat effectiveOutputFormat()   { return outputFormat            != null ? outputFormat            : OutputFormat.PIN; }
 
     public PrecursorTolerance effectivePrecursorTolerance() {
         return precursorTolerance != null ? precursorTolerance : PrecursorTolerance.parse("20ppm");
@@ -403,8 +405,8 @@ public final class MSGFPlusOptions {
                 case "verbose":                    if (verbose == null)                   verbose = Integer.parseInt(value); return null;
                 case "tda":                        if (tdaStrategy == null)               tdaStrategy = Integer.parseInt(value); return null;
                 case "addfeatures":                if (addFeatures == null)               addFeatures = Integer.parseInt(value); return null;
-                case "outputformat":               if (outputFormat == null)              outputFormat = value; return null;
-                case "precursorcal":               if (precursorCalMode == null)          precursorCalMode = value; return null;
+                case "outputformat":               if (outputFormat == null)              outputFormat = OutputFormat.valueOf(value.trim().toUpperCase(java.util.Locale.ROOT)); return null;
+                case "precursorcal":               if (precursorCalMode == null)          precursorCalMode = PrecursorCalMode.valueOf(value.trim().toUpperCase(java.util.Locale.ROOT)); return null;
                 case "chargecarriermass":          if (chargeCarrierMass == null)         chargeCarrierMass = Double.parseDouble(value); return null;
                 case "maxmissedcleavages":         if (maxMissedCleavages == null)        maxMissedCleavages = Integer.parseInt(value); return null;
                 case "nummods":                    if (maxNumMods == null)                configMaxNumMods = Integer.parseInt(value); return null;

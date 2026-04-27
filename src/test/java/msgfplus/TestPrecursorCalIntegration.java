@@ -2,6 +2,7 @@ package msgfplus;
 
 import edu.ucsd.msjava.cli.MSGFPlus;
 import edu.ucsd.msjava.cli.MSGFPlusOptions;
+import edu.ucsd.msjava.msdbsearch.SearchParams.PrecursorCalMode;
 import edu.ucsd.msjava.msdbsearch.SearchParamsTest;
 import edu.ucsd.msjava.msutil.DBSearchIOFiles;
 import edu.ucsd.msjava.msutil.SpecFileFormat;
@@ -63,7 +64,7 @@ public class TestPrecursorCalIntegration {
             File baselineOut = new File(workDir.toFile(), "baseline.pin");
 
             MSGFPlusOptions offManager = buildOpts(offOut);
-            offManager.precursorCalMode = "off";
+            offManager.precursorCalMode = PrecursorCalMode.OFF;
             String offErr = MSGFPlus.runMSGFPlus(offManager);
             Assert.assertNull("runMSGFPlus(off) failed: " + offErr, offErr);
             Assert.assertTrue("off.pin must exist", offOut.exists());
@@ -106,11 +107,11 @@ public class TestPrecursorCalIntegration {
             File secondOut = new File(workDir.toFile(), "second.pin");
 
             MSGFPlusOptions firstManager = buildOpts(firstOut);
-            firstManager.precursorCalMode = "off";
+            firstManager.precursorCalMode = PrecursorCalMode.OFF;
             Assert.assertNull(MSGFPlus.runMSGFPlus(firstManager));
 
             MSGFPlusOptions secondManager = buildOpts(secondOut);
-            secondManager.precursorCalMode = "off";
+            secondManager.precursorCalMode = PrecursorCalMode.OFF;
             Assert.assertNull(MSGFPlus.runMSGFPlus(secondManager));
 
             List<String> firstPsms = extractPsmItems(firstOut);

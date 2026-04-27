@@ -34,7 +34,7 @@ public class TestIPRG {
 
         MSGFPlusOptions paramManager = new MSGFPlusOptions();
         
-        String msg = null; new CommandLine(paramManager).parseArgs(argv);
+        String msg = null; MSGFPlusOptions.commandLine(paramManager).parseArgs(argv);
         if(msg != null)
             System.err.println("Error: " + msg);
         assertTrue(msg == null);

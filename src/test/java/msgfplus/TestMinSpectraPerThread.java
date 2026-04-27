@@ -16,7 +16,7 @@ public class TestMinSpectraPerThread {
     @Test
     public void overrideAppliesThroughGetter() {
         MSGFPlusOptions opts = new MSGFPlusOptions();
-        new CommandLine(opts).parseArgs("-minSpectraPerThread", "50");
+        MSGFPlusOptions.commandLine(opts).parseArgs("-minSpectraPerThread", "50");
         Assert.assertEquals(50, opts.effectiveMinSpectraPerThread());
     }
 
@@ -26,7 +26,7 @@ public class TestMinSpectraPerThread {
         // so '0' is parseable here. Range checks moved to SearchParams.parse
         // (which would reject zero earlier in the search-engine flow if needed).
         MSGFPlusOptions opts = new MSGFPlusOptions();
-        new CommandLine(opts).parseArgs("-minSpectraPerThread", "0");
+        MSGFPlusOptions.commandLine(opts).parseArgs("-minSpectraPerThread", "0");
         Assert.assertEquals(0, opts.effectiveMinSpectraPerThread());
     }
 }

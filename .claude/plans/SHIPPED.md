@@ -24,7 +24,9 @@ Output is `.pin` only (mzIdentML removed). Sensitivity leads Sage at 1 % FDR on 
 
 ## Abandoned
 
-**Fragment-index (abandoned 2026-04-20).** Sage-style inverted index as Tier-1 candidate generator. Failed all three gates: 1.78× *slower* on PXD001819, OOM on Astral, recall 95.3 % vs ≥ 99.5 % target. Five follow-up speed ideas distilled (graph-skeleton caching, adaptive precursor tolerance, Vector API, parallelism ceiling, SpecEValue caching) — current `feat/astral-speed-improvements` draws from these. Post-mortem: `~/.claude/plans/msgfplus-fragment-index/ABANDONED-2026-04-20.md`.
+**Fragment-index (abandoned 2026-04-20).** Sage-style inverted index as Tier-1 candidate generator. Failed all three gates: 1.78× *slower* on PXD001819, OOM on Astral, recall 95.3 % vs ≥ 99.5 % target. Five follow-up speed ideas distilled (graph-skeleton caching, adaptive precursor tolerance, Vector API, parallelism ceiling, SpecEValue caching). Post-mortem: `~/.claude/plans/msgfplus-fragment-index/ABANDONED-2026-04-20.md`.
+
+**Phase A — deisotoping + peak cap + GF candidate cap + scorer hot-path opt (attempted, reverted 2026-04-28).** Three independent optimization angles tried on `feat/astral-speed-improvements`. None moved Astral wall above run-to-run noise (six measured variants vs OFF baseline 690 s; best Phase A variant was 693 s). TMT showed 1.41× wall but with −0.25 % target / −4.6 % decoy drift — not a clean win. JFR-identified `HashMap.getNode` hot spot did not translate to wall improvement after elimination (JIT already optimizes the path). Branch reset to `eee9fa6`. Retrospective with measurements + lessons + what's untried: [`astral-phase-a-retrospective.md`](astral-phase-a-retrospective.md). Reverted code recoverable via `git show 5cdd21e` (walks back through 11 commits).
 
 ## Active
 

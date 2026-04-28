@@ -442,17 +442,23 @@ Touches:
 
 ## 11. My recommendation
 
-Try **Phase A first** as the opening big-win attempt:
+> **Update 2026-04-28: Phase A was attempted and reverted.** See [`astral-phase-a-retrospective.md`](astral-phase-a-retrospective.md) for measurements, lessons, and what's still untried. Three independent angles (deisotope+cap, GF candidate cap, scorer hot-path) all failed the Astral wall gate. TMT-as-inner-loop turned out unsafe — TMT's 1.41× win did not transfer to Astral. The 5× roadmap below is preserved for future agents but the strategy of "start with Phase A" is now disproven; future attempts should pick Phase B, C, or E and re-profile before betting on micro-optimizations.
 
-1. telemetry milestone commit (Iteration 0)
-2. spectrum cleanup milestone commit (Iteration 1, Phase A)
+Phase B (calibrated precursor-window tightening) and Phase E (parallelism ceiling) are the remaining lower-risk shots. Phase C (branch-and-bound) is the highest-variance / highest-upside option but needs the upfront design work the retrospective flags. Phase D is unlikely to be useful as a standalone lever on Astral given the GF candidate cap measurements.
 
-If Phase A delivers, continue with Phase B then Phase C as further milestone commits on the same branch. If Phase A fails its kill gate (no measurable wall win and no recall upside), drop to Iteration 0.5 fallback (memoization + GF candidate cap; see §0) and ship those as the iteration's deliverable.
+Original recommendation, preserved for context:
 
-Phase C is the centerpiece of 5× but the highest-variance phase; do not attempt it before Phase A is in place because cleaner spectra make C's upper bounds tighter.
+> Try **Phase A first** as the opening big-win attempt:
+> 1. telemetry milestone commit (Iteration 0)
+> 2. spectrum cleanup milestone commit (Iteration 1, Phase A)
+>
+> If Phase A delivers, continue with Phase B then Phase C as further milestone commits on the same branch. If Phase A fails its kill gate (no measurable wall win and no recall upside), drop to Iteration 0.5 fallback (memoization + GF candidate cap; see §0) and ship those as the iteration's deliverable.
+>
+> Phase C is the centerpiece of 5× but the highest-variance phase; do not attempt it before Phase A is in place because cleaner spectra make C's upper bounds tighter.
 
 ## 12. Reference
 
+- **Phase A attempt retrospective (read first):** [`astral-phase-a-retrospective.md`](astral-phase-a-retrospective.md)
 - Iteration retrospective: [SHIPPED.md](/Users/yperez/work/msgfplus-workspace/astral-speed/.claude/plans/SHIPPED.md:1)
 - Benchmark summary: `~/.claude/plans/benchmarks/3engine-results.md`
 - Fragment-index post-mortem: `~/.claude/plans/msgfplus-fragment-index/ABANDONED-2026-04-20.md`

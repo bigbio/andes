@@ -4,7 +4,7 @@ Implementation plans and design documents for MS-GF+ features and improvements.
 
 ## Active
 
-- [`astral-speed-improvements.md`](astral-speed-improvements.md) — current design.
+- [`astral-speed-5x-roadmap.md`](astral-speed-5x-roadmap.md) — current design. Targets the first credible 5× Astral speed path. Ships as milestone commits on `feat/astral-speed-improvements`, single closing PR at end of iteration.
 
 ## History
 

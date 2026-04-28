@@ -81,6 +81,76 @@ TMT did show a 1.41× wall reduction, but with **−0.25 % targets and −4.6 % 
 4. **Profile before betting on a hot-spot fix.** The JFR profile correctly identified the dominant hot spot, but eliminating it didn't translate to wall improvement. Future profile-driven attempts should run a *post-fix profile* before trusting the JFR delta.
 5. **Native target/decoy drift is a leading indicator.** Phase A's −0.25 % targets / −4.6 % decoys on TMT is the same shape, in miniature, as the recall regression that would have killed the experiment in production. If counts drift more than 0.5 % vs OFF on a measurement run, the optimization is not bit-identical-correctness and needs deeper recall validation before shipping.
 
+## Phase E parallelism investigation (added 2026-04-28, also reverted)
+
+After the Phase A retrospective above was committed, a follow-up Phase E
+attempt was made: thread-scaling sweep + ForkJoin-pool default selection.
+Findings recorded here for completeness; the code change was reverted
+because measurement variance was too high to confidently ship.
+
+**Thread-scaling sweep (default `ThreadPoolExecutor`, no flag overrides):**
+
+| Threads | Wall (s) | Note |
+|---:|---:|---|
+| 4 | 690.1 | morning baseline |
+| 6 | 675.0 | within noise of 4t |
+| 8 | 884.0 | **+28 % vs 4t — anti-scaling** |
+
+**ForkJoin opt-in (`-Dmsgfplus.useForkJoin=true`):**
+
+| Threads | Wall (s) | Note |
+|---:|---:|---|
+| 4 | 872.3 | +26 % vs default 4t — ForkJoin loses badly here |
+| 6 | (killed) | run was at >1500 s wall when stopped; either hung or extreme regression |
+| 8 | 520.9 | 1.32× vs default 4t baseline — only variant that cleared the 1.15× gate |
+
+**Smart-default attempt:** modified `MSGFPlus.runMSGFPlus` to auto-pick ForkJoin
+when `numThreads >= 8` (preserving 4t default-executor behaviour, activating
+ForkJoin only at the measured-win threshold). Code compiled, scoped tests
+passed (9/9 incl. concurrent + telemetry + precursor-cal scaffolding).
+
+**Confirmation runs (same JAR, smart-default change in flight):**
+
+| Run | Threads | Wall (s) | Expected | Δ |
+|---|---:|---:|---:|---:|
+| auto-FJ | 8 | 861.5 | ~520 | **+65 %** vs morning explicit-FJ |
+| auto-default | 4 | 904.3 | ~690 | **+31 %** vs morning measurement |
+
+Same JAR semantically (verified via `unzip -p ... | strings` finding the new
+`useForkJoinProp` symbol in the bytecode), same `-thread N` args, same
+spectrum/FASTA/mods. **Both metrics regressed ~30 % vs morning.** The
+machine state degraded across the day's benchmarking — likely thermal,
+accumulated process state, or background macOS work.
+
+**Conclusion:** the morning's ForkJoin-8t = 521 s measurement may have been
+real or may have been an outlier. With 30+ % run-to-run variance on the
+same JAR across hours, point measurements cannot distinguish a genuine
+1.3× ForkJoin win from a 30 % machine-state fluctuation. Reverted the
+smart-default change; the underlying `-Dmsgfplus.useForkJoin=true` opt-in
+remains in dev unchanged.
+
+**What future agents need to do this safely:**
+
+1. **Stable benchmark environment.** A reserved CI runner, an idle box with
+   thermal headroom, or a cloud VM with fixed CPU allocation. Not a
+   developer workstation that's been running benchmarks for hours.
+2. **Multi-run statistics, not point measurements.** Each variant run 3-5
+   times; report median + IQR. A single 521 s measurement that doesn't
+   replicate is a noise artefact, not a discovery.
+3. **Same-day sweep with fixed ordering.** Run all variants back-to-back
+   in the same machine state so cross-variant comparisons are valid.
+4. **Anti-scaling at 8t default-executor IS reproducible** (884 s and 861 s
+   in two measurements at different machine states; the relative slowdown
+   vs 4t survives the variance). That finding is real and worth digging
+   into — what's the contention point in `ThreadPoolExecutorWithExceptions`
+   that causes 8t to lose to 4t? `jfr print --events jdk.JavaMonitorWait`
+   on the 8t default-executor profile would identify the lock.
+5. **The post-mortem-fragment-index lesson #3 strikes again:** *"the JVM's
+   JIT optimizer is sophisticated; we reach for machine-level tuning too
+   early."* Wall-time deltas at the 30 % level are below the noise floor
+   for a single-machine benchmark of this size. Don't claim a win from
+   one measurement.
+
 ## What's still untried (for future agents)
 
 The 5× roadmap (`astral-speed-5x-roadmap.md`) specified five phases. Only Phase A was attempted. Remaining:
@@ -88,7 +158,7 @@ The 5× roadmap (`astral-speed-5x-roadmap.md`) specified five phases. Only Phase
 - **Phase B — calibrated precursor-window tightening.** Use Achievement B's calibration σ to shrink the effective precursor window post-calibration. Reduces candidate fan-out at the `pepMassSpecKeyMap.subMap(...)` site, which IS measurable in the current JFR profile (TreeMap operations ~4 % of CPU). Recall-risky; needs an integration test that asserts no FDR-1 % PSM survives outside the tightened window.
 - **Phase C — branch-and-bound during peptide extension.** The roadmap's centerpiece (1.5–2.5× projected). My review of the roadmap (in the git history before the reset, see commit `eee9fa6`'s plan) flagged three concrete sub-problems: dynamic threshold rises late in the SA walk, admissible-yet-selective upper bound is hard to define for a rank-based scorer, per-spectrum bookkeeping cost may exceed savings. Research-grade; should be planned as a multi-iteration investigation with a kill-by-exactness-audit clause.
 - **Phase D — GF threshold tightening via `setUpScoreThreshold`.** The current code already passes `minScore` to GF; tightening this further requires raising minScore by capping candidates (Angle 2 in this retrospective), which we showed doesn't bite on Astral. Phase D is unlikely to be useful as a standalone lever on Astral.
-- **Phase E — parallelism ceiling investigation.** The 2026-04-17 profile ran 4 threads on 11 cores. Today's JFR shows the same shape. If `ConcurrentMSGFPlus` caps near 4–6 effective cores, raising the ceiling would be a 1.3–1.5× win independent of per-spectrum optimization. The post-PR-#23/#25 search-sync-cleanup may already have moved the ceiling; would need a 1/2/4/6/8-thread scaling sweep on Astral to know.
+- **Phase E — parallelism ceiling investigation.** Attempted 2026-04-28 (see "Phase E parallelism investigation" above). **The default executor anti-scales past 6 threads is reproduced and real**, which is the kind of finding that deserves a real fix. ForkJoin at 8t showed 1.32× wall in one measurement but did not replicate across machine state — this needs multi-run statistics on a stable benchmark environment before any default-pool change can ship. The contention point in `ThreadPoolExecutorWithExceptions` is the next target for diagnostic work; a `jfr print --events jdk.JavaMonitorWait` on the 8t default-executor profile would localise the lock.
 - **Workload retargeting** — the original branch-name framing ("feat/big-fasta-peptide-candidate") was about metaproteomics / proteogenomics big-FASTA workloads, not Astral. Astral was a redirect during brainstorming. The big-FASTA framing has different bottlenecks (peptide redundancy across organisms, candidate dedup) that may be more amenable to per-spectrum optimization. Worth profiling on a metaproteomics dataset before assuming any per-spectrum lever is dead.
 - **HashMap-elimination in NewRankScorer (deeper version).** Angle 3 in this retrospective tried the shallow version (cache the array). A deeper version would refactor all 10 per-Partition `HashMap`s in `NewRankScorer` into a `PartitionScoringContext` record, looked up *once per spectrum* and held by reference for the duration of scoring. The shallow fix didn't move wall, but the deeper refactor *might* — JIT optimization of the lookup vs an entire object indirection chain is the open question. Should not be attempted without a post-fix profile to confirm the win.
 

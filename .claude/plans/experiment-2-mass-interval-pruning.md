@@ -1,6 +1,8 @@
 # Experiment 2 — Exact Prefix Mass-Interval Pruning
 
-**Status:** Design draft, not yet implemented
+**Status:** Design + Checkpoint 1 + Checkpoint 2 shipped 2026-04-29 (commit `4241fbb`); off by default (opt-in via system property). **Wall gate FAILED** — bookkeeping cost exceeds savings. Checkpoint 3 (overhead optimization) is the open follow-on.
+
+> **Result summary (Astral, remote pride-linux-vm.ebi.ac.uk):** native counts bit-identical to baseline in all variants (exact-by-construction validated ✓); 12.22 % prune rate at Checkpoint 1, 1.84 % with actual break; **but Phase B + Experiment 2 pruning regresses wall +11 %** vs Phase B alone (549 s vs 494 s). The bound test runs ~1.4 B times at ~40 ns each = ~55 s of pure overhead, dwarfing the cheap-score savings (the pruned pairings had ~0 matches anyway). Phase B remains the iteration's shippable Astral wall lever; Experiment 2 is parked as opt-in scaffolding for Checkpoint 3 follow-on work.
 **Date:** 2026-04-29
 **Context:** Phase B (commits `aac389c` and earlier) shipped −10.4 % Astral wall via calibrated precursor-window tightening. Plan §5 names this as the natural next attack — exact-by-construction pruning that attacks SA-walk fan-out *before* Phase B's pairing fan-out reduction kicks in. The two compose: Phase B reduces matched_speckeys per pairing call; Experiment 2 reduces the number of pairing calls.
 

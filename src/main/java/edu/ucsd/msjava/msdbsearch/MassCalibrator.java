@@ -43,6 +43,17 @@ public class MassCalibrator {
     public static final float DEFAULT_TIGHTENED_WINDOW_SIGMA_MULTIPLIER = 3.0f;
     /** Gaussian-equivalent scale factor for MAD. */
     private static final double MAD_TO_SIGMA_SCALE = 1.4826;
+    /**
+     * Reject residuals whose magnitude exceeds this threshold. A genuine mass-accuracy
+     * residual on any modern instrument is well under 50 ppm; values above this almost
+     * always come from isotope-error matches (e.g. M+1 isotope at +1.003 Da on a 2 kDa
+     * peptide = ~500 ppm residual) admitted by a wide {@code -ti} window. Filtering
+     * before computing median + MAD prevents these outliers from contaminating the
+     * robust spread estimate. Empirically the residual distribution drops off well
+     * before this floor; isotope-shift contamination clusters near integer multiples
+     * of (1.003 / mass) ppm.
+     */
+    static final double MAX_REASONABLE_RESIDUAL_PPM = 50.0;
 
     /** Sample every Nth SpecKey. Cap total sampled keys at {@link #MAX_SAMPLED}. */
     private static final int SAMPLING_STRIDE = 10;
@@ -71,8 +82,6 @@ public class MassCalibrator {
     private final List<SpecKey> specKeyList;
     private final Tolerance leftPrecursorMassTolerance;
     private final Tolerance rightPrecursorMassTolerance;
-    private final int minIsotopeError;
-    private final int maxIsotopeError;
     private final SpecDataType specDataType;
 
     /** Immutable summary of the sampled calibration residuals for one file. */
@@ -114,9 +123,12 @@ public class MassCalibrator {
      *                    {@value #MAX_SAMPLED}.
      * @param leftPrecursorMassTolerance main-pass left tolerance (reused for the pre-pass)
      * @param rightPrecursorMassTolerance main-pass right tolerance (reused for the pre-pass)
-     * @param minIsotopeError main-pass min isotope error
-     * @param maxIsotopeError main-pass max isotope error
      * @param specDataType scoring metadata (activation, instrument, enzyme, protocol)
+     *
+     * Note: the user's {@code -ti} isotope-error window is intentionally NOT
+     * propagated to the pre-pass. The pre-pass is fixed to isotope error 0 to
+     * prevent isotope-shift contamination of the residual distribution.
+     * See {@link #collectResiduals(int)}.
      */
     public MassCalibrator(
             SpectraAccessor specAcc,
@@ -126,8 +138,6 @@ public class MassCalibrator {
             List<SpecKey> specKeyList,
             Tolerance leftPrecursorMassTolerance,
             Tolerance rightPrecursorMassTolerance,
-            int minIsotopeError,
-            int maxIsotopeError,
             SpecDataType specDataType
     ) {
         this.specAcc = specAcc;
@@ -137,8 +147,6 @@ public class MassCalibrator {
         this.specKeyList = specKeyList;
         this.leftPrecursorMassTolerance = leftPrecursorMassTolerance;
         this.rightPrecursorMassTolerance = rightPrecursorMassTolerance;
-        this.minIsotopeError = minIsotopeError;
-        this.maxIsotopeError = maxIsotopeError;
         this.specDataType = specDataType;
     }
 
@@ -192,6 +200,12 @@ public class MassCalibrator {
             return Collections.emptyList();
         }
 
+        // Force isotope error to 0 for the pre-pass: residuals are only meaningful
+        // when the matched peptide's monoisotopic mass equals the observed precursor's
+        // monoisotopic mass. With the user's wider -ti window (e.g. -1,2 on Astral),
+        // PSMs whose precursor is the M+1 or M+2 isotope inject ~500 / ~1000 ppm
+        // residuals into the pre-pass, contaminating median + MAD. Restricting the
+        // pre-pass to isotope error 0 keeps the residual distribution clean.
         // numPeptidesPerSpec = 1 keeps the pre-pass tiny and fast. precursorMassShiftPpm = 0.0
         // because the whole point of the pre-pass is to LEARN the shift.
         ScoredSpectraMap prePassMap = new ScoredSpectraMap(
@@ -199,8 +213,8 @@ public class MassCalibrator {
                 sampled,
                 leftPrecursorMassTolerance,
                 rightPrecursorMassTolerance,
-                minIsotopeError,
-                maxIsotopeError,
+                0,  // pre-pass minIsotopeError (overrides user's -ti to keep residuals clean)
+                0,  // pre-pass maxIsotopeError
                 specDataType,
                 false, // storeRankScorer not needed for pre-pass
                 false
@@ -281,7 +295,13 @@ public class MassCalibrator {
             if (theoreticalPeptideMass <= 0) {
                 continue;
             }
-            residuals.add(residualPpm(observedPeptideMass, theoreticalPeptideMass));
+            double residual = residualPpm(observedPeptideMass, theoreticalPeptideMass);
+            // Reject isotope-error contamination before robust-stats aggregation.
+            // See MAX_REASONABLE_RESIDUAL_PPM doc.
+            if (Math.abs(residual) > MAX_REASONABLE_RESIDUAL_PPM) {
+                continue;
+            }
+            residuals.add(residual);
         }
         return residuals;
     }

@@ -369,8 +369,6 @@ public class MSGFPlus {
                     specKeyList,
                     leftPrecursorMassTolerance,
                     rightPrecursorMassTolerance,
-                    minIsotopeError,
-                    maxIsotopeError,
                     specDataType);
             calibrationStats = calibrator.learnCalibrationStats(ioIndex);
             double shiftPpm = calibrationStats.getShiftPpm();

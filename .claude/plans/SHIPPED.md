@@ -32,4 +32,25 @@ Output is `.pin` only (mzIdentML removed). Sensitivity leads Sage at 1 % FDR on 
 
 ## Active
 
-- [`astral-speed-improvements.md`](astral-speed-improvements.md) — gate B (1.3-1.5× Astral wall, no PSM regression). TMT-as-inner-loop, Astral-as-phase-gate.
+**Phase B (calibrated precursor-window tightening) — shipped on `feat/astral-speed-improvements` 2026-04-29.** Four enabling commits:
+
+- `781738e` opt-in `PhaseBTelemetry` counter (pairing fan-out verification via `-Dmsgfplus.phaseBTelemetry=true`)
+- `05ec066` calibrator pre-pass uses iso=[0,0] (rejects isotope-error contamination); +50 ppm outlier filter
+- `7c027f8` Phase B formula constants exposed as system properties (`-Dmsgfplus.tighteningSigmaMultiplier=<float>` etc.)
+- `aac389c` stratify residuals by spec_eValue, keep top MIN_CONFIDENT_PSMS — drops Astral sigma 4× (3.99 → 0.99 ppm)
+
+Astral measurements on `pride-linux-vm.ebi.ac.uk` (5 OFF + 3 AUTO replicates):
+
+| Metric | OFF (median) | AUTO stratified |
+|---|---:|---:|
+| Wall | 551 s | **494 s (−10.4 %)** |
+| Tightening | — | 10 ppm → 3.48 ppm |
+| mean_per_call | 0.77 | 0.26 (−66 %) |
+| Native targets | 89 479 | 89 580 (+0.11 %) |
+| Native decoys | 46 792 | 45 292 (−3.2 %) |
+| T/D ratio | 1.91 | 1.98 (sensitivity-favorable) |
+
+OFF-mode (`-precursorCal off`) is bit-identical to dev-tip. Tunable per-workload via `-Dmsgfplus.tighteningSigmaMultiplier=<float>` (default 3.0; k=2 was tested as falsification before stratification fix).
+
+- [`astral-next-experiments.md`](astral-next-experiments.md) — Phase B status notes; Experiment 2 (mass-interval pruning) still untried.
+- [`astral-speed-5x-roadmap.md`](astral-speed-5x-roadmap.md) — long-horizon roadmap; Phase B now shipped.

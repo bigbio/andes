@@ -458,8 +458,7 @@ public class DBScanner {
                                 + specScanner.getRightPrecursorMassTolerance().getToleranceAsDa(reachableMax);
                             double queryMin = (double) (reachableMin - maxTolDa);
                             double queryMax = (double) (reachableMax + maxTolDa);
-                            wouldPrune = specScanner.getPepMassSpecKeyMap()
-                                    .subMap(queryMin, queryMax).isEmpty();
+                            wouldPrune = !specScanner.hasSpecMassInRange(queryMin, queryMax);
                         }
                         if (Experiment2Telemetry.enabled()) {
                             Experiment2Telemetry.recordEvaluation(wouldPrune);

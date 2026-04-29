@@ -395,18 +395,28 @@ public class MSGFPlus {
                 && calibrationStats.hasReliableStats()
                 && leftPrecursorMassTolerance.isTolerancePPM()
                 && rightPrecursorMassTolerance.isTolerancePPM()) {
+            // Tightening formula constants are configurable via system properties for
+            // falsification sweeps (e.g. -Dmsgfplus.tighteningSigmaMultiplier=2 to test
+            // whether a 2-sigma envelope buys real wall improvement on Astral). Defaults
+            // match MassCalibrator.DEFAULT_TIGHTENED_WINDOW_*. Production OFF-mode
+            // semantics are unchanged.
+            float sigmaMultiplier = Float.parseFloat(System.getProperty(
+                    "msgfplus.tighteningSigmaMultiplier",
+                    String.valueOf(MassCalibrator.DEFAULT_TIGHTENED_WINDOW_SIGMA_MULTIPLIER)));
+            float floorPpm = Float.parseFloat(System.getProperty(
+                    "msgfplus.tighteningFloorPpm",
+                    String.valueOf(MassCalibrator.DEFAULT_TIGHTENED_WINDOW_FLOOR_PPM)));
+            float marginPpm = Float.parseFloat(System.getProperty(
+                    "msgfplus.tighteningMarginPpm",
+                    String.valueOf(MassCalibrator.DEFAULT_TIGHTENED_WINDOW_MARGIN_PPM)));
             float tightenedLeftPpm = MassCalibrator.tightenedTolerancePpm(
                     leftPrecursorMassTolerance.getValue(),
                     calibrationStats.getRobustSigmaPpm(),
-                    MassCalibrator.DEFAULT_TIGHTENED_WINDOW_SIGMA_MULTIPLIER,
-                    MassCalibrator.DEFAULT_TIGHTENED_WINDOW_FLOOR_PPM,
-                    MassCalibrator.DEFAULT_TIGHTENED_WINDOW_MARGIN_PPM);
+                    sigmaMultiplier, floorPpm, marginPpm);
             float tightenedRightPpm = MassCalibrator.tightenedTolerancePpm(
                     rightPrecursorMassTolerance.getValue(),
                     calibrationStats.getRobustSigmaPpm(),
-                    MassCalibrator.DEFAULT_TIGHTENED_WINDOW_SIGMA_MULTIPLIER,
-                    MassCalibrator.DEFAULT_TIGHTENED_WINDOW_FLOOR_PPM,
-                    MassCalibrator.DEFAULT_TIGHTENED_WINDOW_MARGIN_PPM);
+                    sigmaMultiplier, floorPpm, marginPpm);
             boolean tightened = tightenedLeftPpm < leftPrecursorMassTolerance.getValue()
                     || tightenedRightPpm < rightPrecursorMassTolerance.getValue();
             if (tightened) {

@@ -157,6 +157,35 @@ The afternoon's 4t-Xmx8g (904 s) vs morning's 4t-Xmx8g (690 s) is a
 day's accumulated machine-state degradation dwarfs any code-level signal.
 Six hours of benchmarking has hit the noise floor.
 
+**Replication batch (2026-04-29 morning, quieter machine, the iteration's final shot):**
+
+To bound how much of the apparent ForkJoin win was machine-state vs real,
+ran three Astral variants in tight back-to-back sequence on a less-loaded
+machine:
+
+| Run | Wall (s) | RSS (MB) |
+|---|---:|---:|
+| 4t default | 963.1 | 5 519 |
+| 8t default | 918.3 | 5 740 |
+| **8t ForkJoin** | **978.8** | 5 204 |
+
+All three within 6.5 % of each other (within noise). 8t-default is now
+*faster* than 4t-default by 4.7 % — directly opposite to yesterday's
+"anti-scaling" finding. **The yesterday-morning 4t=690 s baseline was an
+outlier**, not the truth — the 921 s machine reality was masked by a
+single fortunate quiet-machine measurement that morning. **The 521 s
+ForkJoin-8t was likewise an outlier**, not a real 1.32× win — three
+independent re-measurements (afternoon 861 s, today's 978 s) put it
+solidly above 850 s.
+
+**Corrected conclusion:** there is no Phase E win to ship. The "default
+executor anti-scales past 6 threads" claim earlier in this retrospective
+was *wrong*; it was a one-day correlation between morning-quiet-machine +
+4t and afternoon-noisy-machine + 8t, not a real algorithmic relationship.
+The ForkJoin path doesn't outperform default executor on Astral when
+measured in clean within-batch conditions. The single 521 s ForkJoin
+data point was unreplicable noise.
+
 **What future agents need to do this safely:**
 
 1. **Stable benchmark environment.** A reserved CI runner, an idle box with
@@ -186,7 +215,7 @@ The 5× roadmap (`astral-speed-5x-roadmap.md`) specified five phases. Only Phase
 - **Phase B — calibrated precursor-window tightening.** Use Achievement B's calibration σ to shrink the effective precursor window post-calibration. Reduces candidate fan-out at the `pepMassSpecKeyMap.subMap(...)` site, which IS measurable in the current JFR profile (TreeMap operations ~4 % of CPU). Recall-risky; needs an integration test that asserts no FDR-1 % PSM survives outside the tightened window.
 - **Phase C — branch-and-bound during peptide extension.** The roadmap's centerpiece (1.5–2.5× projected). My review of the roadmap (in the git history before the reset, see commit `eee9fa6`'s plan) flagged three concrete sub-problems: dynamic threshold rises late in the SA walk, admissible-yet-selective upper bound is hard to define for a rank-based scorer, per-spectrum bookkeeping cost may exceed savings. Research-grade; should be planned as a multi-iteration investigation with a kill-by-exactness-audit clause.
 - **Phase D — GF threshold tightening via `setUpScoreThreshold`.** The current code already passes `minScore` to GF; tightening this further requires raising minScore by capping candidates (Angle 2 in this retrospective), which we showed doesn't bite on Astral. Phase D is unlikely to be useful as a standalone lever on Astral.
-- **Phase E — parallelism ceiling investigation.** Attempted 2026-04-28 (see "Phase E parallelism investigation" above). **The default executor anti-scales past 6 threads is reproduced and real**, which is the kind of finding that deserves a real fix. ForkJoin at 8t showed 1.32× wall in one measurement but did not replicate across machine state — this needs multi-run statistics on a stable benchmark environment before any default-pool change can ship. The contention point in `ThreadPoolExecutorWithExceptions` is the next target for diagnostic work; a `jfr print --events jdk.JavaMonitorWait` on the 8t default-executor profile would localise the lock.
+- **Phase E — parallelism ceiling investigation.** Attempted 2026-04-28, multi-run replicated 2026-04-29 (see "Phase E parallelism investigation" + "Replication batch" above). **Initial "anti-scaling" finding was disproved by the replication batch** — when measured back-to-back in the same machine state, 8t-default is actually *faster* than 4t-default. The ForkJoin path also did not show any advantage in within-batch comparison. Both initial findings (anti-scaling + ForkJoin win) were noise artefacts. Future agents wanting a parallelism win must build a stable benchmark environment first; the conclusion changes between runs done at different times of day on this machine.
 - **Workload retargeting** — the original branch-name framing ("feat/big-fasta-peptide-candidate") was about metaproteomics / proteogenomics big-FASTA workloads, not Astral. Astral was a redirect during brainstorming. The big-FASTA framing has different bottlenecks (peptide redundancy across organisms, candidate dedup) that may be more amenable to per-spectrum optimization. Worth profiling on a metaproteomics dataset before assuming any per-spectrum lever is dead.
 - **HashMap-elimination in NewRankScorer (deeper version).** Angle 3 in this retrospective tried the shallow version (cache the array). A deeper version would refactor all 10 per-Partition `HashMap`s in `NewRankScorer` into a `PartitionScoringContext` record, looked up *once per spectrum* and held by reference for the duration of scoring. The shallow fix didn't move wall, but the deeper refactor *might* — JIT optimization of the lookup vs an entire object indirection chain is the open question. Should not be attempted without a post-fix profile to confirm the win.
 

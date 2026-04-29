@@ -17,7 +17,7 @@ FASTA_URL="https://raw.githubusercontent.com/bigbio/quantms-test-datasets/quantm
 MZML_GZ="$DATA_DIR/UPS1_5000amol_R1.mzML.gz"
 MZML="$DATA_DIR/UPS1_5000amol_R1.mzML"
 FASTA="$DATA_DIR/PXD001819_uniprot_yeast_ups.fasta"
-MZID="$OUT_DIR/ci_output.mzid"
+PIN="$OUT_DIR/ci_output.pin"
 TIME_TXT="$OUT_DIR/gnu_time.txt"
 METRICS="$OUT_DIR/ci_metrics.txt"
 
@@ -86,18 +86,18 @@ set +e
     -s "$MZML" \
     -d "$FASTA" \
     -mod "$MODS" \
-    -o "$MZID" \
+    -o "$PIN" \
     "${SEARCH_ARGS[@]}" \
     >"$OUT_DIR/run.stdout.log" 2>"$OUT_DIR/run.stderr.log"
 JAVA_RC=$?
 set -e
 WALL=$((SECONDS - START_SECONDS))
 
-if [[ ! -f "$MZID" ]]; then
-  echo "ERROR: mzIdentML not created (java exit $JAVA_RC)" >&2
+if [[ ! -f "$PIN" ]]; then
+  echo "ERROR: Percolator pin not created (java exit $JAVA_RC)" >&2
   {
     echo "dataset=PXD001819"
-    echo "error=missing_mzid"
+    echo "error=missing_pin"
     echo "java_exit=$JAVA_RC"
     echo "wall_time_sec=$WALL"
   } >"$METRICS"
@@ -111,7 +111,7 @@ fi
 
 python3 "$(dirname "$0")/extract_metrics.py" \
   --time "$TIME_TXT" \
-  --mzid "$MZID" \
+  --pin "$PIN" \
   --wall "$WALL" \
   --output "$METRICS"
 

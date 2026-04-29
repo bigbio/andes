@@ -1,8 +1,10 @@
 # Astral Next Experiments — Post-Retrospective Action Plan
 
-**Status:** Active working plan
+**Status:** Active working plan — Experiment 1 (Phase B) NOW WORKING after stratification fix
 **Date:** 2026-04-29
 **Purpose:** define the next experiments that are still justified after the Phase A and Phase E failures
+
+> **Update (2026-04-29 13:30): Phase B is alive on Astral.** After the calibrator iso=0 fix (`05ec066`), the configurable formula constants (`7c027f8`), and the spec_eValue stratification (`aac389c`), the AUTO-mode stratified calibrator delivers **−10.4 % Astral wall** (median 551 → 494 s across 5 OFF + 3 AUTO replicates), with **+0.11 % targets** and **−3.2 % decoys** (T/D ratio 1.91 → 1.98 — sensitivity-favorable, not a regression). Tightening fires aggressively: 10 ppm → 3.48 ppm. mean_per_call: 0.77 → 0.26 (−66 % fan-out). All 3 stratified-AUTO reps are bit-identical on native counts; wall variance ±1.2 % across reps. The previous "Phase B doesn't move Astral wall" finding was correct *for the unstratified calibrator* — once sigma is genuinely 1 ppm (not 4 ppm), the formula's `3·σ + 0.5` envelope fits well inside the 10 ppm Astral window and the cheap-score reduction is large enough to translate to wall.
 
 ## 1. What changed
 

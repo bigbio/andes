@@ -432,12 +432,20 @@ public class DBScanner {
                         }
                     }
 
+                    if (peptideLengthIndex < minPeptideLength)
+                        continue;
+
                     // Experiment 2: exact prefix mass-interval pruning.
                     // Compute the reachable final-peptide-mass interval for this prefix branch and
                     // ask whether ANY spectrum window in pepMassSpecKeyMap can intersect it. If
                     // not, the branch is dead. With -Dmsgfplus.experiment2Pruning=true the SA-walk
                     // residue-extension loop breaks immediately. With telemetry alone, the count
                     // is recorded but no break (Checkpoint 1 measurement mode).
+                    //
+                    // Hook is gated on peptideLengthIndex >= minPeptideLength: short prefixes
+                    // (length < minPeptideLength) have huge reachable intervals (R_max * maxAaMass
+                    // is many kDa wide) and almost never prune; the bound-test bookkeeping there
+                    // is dead weight (Checkpoint 4).
                     if (Experiment2Telemetry.boundComputationActive()) {
                         boolean wouldPrune = false;
                         int gridSize = candidatePepGrid.size();
@@ -450,8 +458,7 @@ public class DBScanner {
                                 if (m > prefixMax) prefixMax = m;
                             }
                             int rMax = Math.max(0, maxPeptideLength - peptideLengthIndex);
-                            int rMin = Math.max(0, minPeptideLength - peptideLengthIndex);
-                            float reachableMin = prefixMin + rMin * minAaMassBound;
+                            float reachableMin = prefixMin;
                             float reachableMax = prefixMax + rMax * maxAaMassBound;
                             float maxTolDa =
                                 specScanner.getLeftPrecursorMassTolerance().getToleranceAsDa(reachableMax)
@@ -467,9 +474,6 @@ public class DBScanner {
                             break;
                         }
                     }
-
-                    if (peptideLengthIndex < minPeptideLength)
-                        continue;
 
                     int cTermCleavageScore = 0;
                     if (enzyme != null) {

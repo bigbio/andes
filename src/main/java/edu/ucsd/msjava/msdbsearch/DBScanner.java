@@ -28,6 +28,12 @@ public class DBScanner {
     private AminoAcidSet aaSet;
     private double[] aaMass;
     private int[] intAAMass;
+    /** Smallest single-residue mass in {@code aaSet} (after mod application).
+     *  Used by Experiment 2 to bound the reachable final-peptide mass from below. */
+    private float minAaMassBound;
+    /** Largest single-residue mass in {@code aaSet} (after mod application).
+     *  Used by Experiment 2 to bound the reachable final-peptide mass from above. */
+    private float maxAaMassBound;
 
     private Enzyme enzyme;
     private int numPeptidesPerSpec;
@@ -88,6 +94,24 @@ public class DBScanner {
             aaMass[aa.getResidue()] = aa.getAccurateMass();
             intAAMass[aa.getResidue()] = aa.getNominalMass();
         }
+
+        // Cache the residue-mass bounds for Experiment 2 mass-interval pruning.
+        // Iterate every (residue × modification) variant in the set so that
+        // future-residue mass contributions are bounded conservatively.
+        double localMinAa = Double.POSITIVE_INFINITY;
+        double localMaxAa = 0.0;
+        for (AminoAcid aa : aaSet.getAllAminoAcidArr()) {
+            double m = aa.getAccurateMass();
+            if (m > 0) {
+                if (m < localMinAa) localMinAa = m;
+                if (m > localMaxAa) localMaxAa = m;
+            }
+        }
+        // Defensive defaults: if nothing was found, fall back to a permissive
+        // range (Glycine ~57 to Tryptophan + heavy mod ~300) so the bound never
+        // accidentally over-prunes.
+        this.minAaMassBound = (localMinAa == Double.POSITIVE_INFINITY) ? 57.0f : (float) localMinAa;
+        this.maxAaMassBound = (localMaxAa == 0.0) ? 300.0f : (float) localMaxAa;
 
         // DBScanner is owned by exactly one RunMSGFPlus / ConcurrentMSGFDB task.
         // No internal fork-out (verified: no ExecutorService / Thread creation in
@@ -405,6 +429,43 @@ public class DBScanner {
                                 if (!success)
                                     break;
                             }
+                        }
+                    }
+
+                    // Experiment 2: exact prefix mass-interval pruning.
+                    // Compute the reachable final-peptide-mass interval for this prefix branch and
+                    // ask whether ANY spectrum window in pepMassSpecKeyMap can intersect it. If
+                    // not, the branch is dead. With -Dmsgfplus.experiment2Pruning=true the SA-walk
+                    // residue-extension loop breaks immediately. With telemetry alone, the count
+                    // is recorded but no break (Checkpoint 1 measurement mode).
+                    if (Experiment2Telemetry.boundComputationActive()) {
+                        boolean wouldPrune = false;
+                        int gridSize = candidatePepGrid.size();
+                        if (gridSize > 0) {
+                            float prefixMin = Float.POSITIVE_INFINITY;
+                            float prefixMax = 0f;
+                            for (int gj = 0; gj < gridSize; gj++) {
+                                float m = candidatePepGrid.getPeptideMass(gj);
+                                if (m < prefixMin) prefixMin = m;
+                                if (m > prefixMax) prefixMax = m;
+                            }
+                            int rMax = Math.max(0, maxPeptideLength - peptideLengthIndex);
+                            int rMin = Math.max(0, minPeptideLength - peptideLengthIndex);
+                            float reachableMin = prefixMin + rMin * minAaMassBound;
+                            float reachableMax = prefixMax + rMax * maxAaMassBound;
+                            float maxTolDa =
+                                specScanner.getLeftPrecursorMassTolerance().getToleranceAsDa(reachableMax)
+                                + specScanner.getRightPrecursorMassTolerance().getToleranceAsDa(reachableMax);
+                            double queryMin = (double) (reachableMin - maxTolDa);
+                            double queryMax = (double) (reachableMax + maxTolDa);
+                            wouldPrune = specScanner.getPepMassSpecKeyMap()
+                                    .subMap(queryMin, queryMax).isEmpty();
+                        }
+                        if (Experiment2Telemetry.enabled()) {
+                            Experiment2Telemetry.recordEvaluation(wouldPrune);
+                        }
+                        if (wouldPrune && Experiment2Telemetry.pruningEnabled()) {
+                            break;
                         }
                     }
 

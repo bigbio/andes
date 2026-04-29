@@ -129,6 +129,34 @@ same JAR across hours, point measurements cannot distinguish a genuine
 smart-default change; the underlying `-Dmsgfplus.useForkJoin=true` opt-in
 remains in dev unchanged.
 
+**GC-pressure follow-up (2026-04-28, end of iteration):**
+
+After the smart-default revert, JFR analysis of the morning 4t profile
+showed **zero `JavaMonitorEnter` contention events and 100 %
+RUNNABLE samples** — confirming the 8t regression is not synchronized-lock
+contention. But 588 K `GCPhaseParallel` events suggested GC could be the
+cause. Tested by re-running 8t and 4t with `-Xmx16g` (double the heap):
+
+| Run | Wall (s) | RSS (MB) | GC count |
+|---|---:|---:|---:|
+| 8t + Xmx16g | 776.1 | 5 067 | 182 |
+| 4t + Xmx16g | 870.0 | 6 120 | 184 |
+| (compare) 8t + Xmx8g afternoon | 861.5 | 6 083 | (n/a) |
+| (compare) 4t + Xmx8g afternoon | 904.3 | 5 953 | (n/a) |
+
+GC-pressure hypothesis is *partially* confirmed: bigger heap helped 8t by
+~12 % wall (and dropped peak RSS by ~17 % because G1GC ran fewer
+collections) but only ~4 % at 4t. So GC contributes to the 8t regression
+but is not the entire story. Even with -Xmx16g, 8t is slower than the
+morning's 4t-Xmx8g baseline (776 vs 690 s). **No actionable recommendation
+to ship: heap-tuning helps 8t, but 8t still isn't competitive with 4t at
+default heap.**
+
+The afternoon's 4t-Xmx8g (904 s) vs morning's 4t-Xmx8g (690 s) is a
++31 % gap on the same JAR / same args / same machine — confirming the
+day's accumulated machine-state degradation dwarfs any code-level signal.
+Six hours of benchmarking has hit the noise floor.
+
 **What future agents need to do this safely:**
 
 1. **Stable benchmark environment.** A reserved CI runner, an idle box with

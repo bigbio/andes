@@ -41,14 +41,13 @@ Output is `.pin` only (mzIdentML removed). Sensitivity leads Sage at 1 % FDR on 
 
 Astral measurements on `pride-linux-vm.ebi.ac.uk` (5 OFF + 3 AUTO replicates):
 
-| Metric | OFF (median) | AUTO stratified |
-|---|---:|---:|
-| Wall | 551 s | **494 s (−10.4 %)** |
-| Tightening | — | 10 ppm → 3.48 ppm |
-| mean_per_call | 0.77 | 0.26 (−66 %) |
-| Native targets | 89 479 | 89 580 (+0.11 %) |
-| Native decoys | 46 792 | 45 292 (−3.2 %) |
-| T/D ratio | 1.91 | 1.98 (sensitivity-favorable) |
+| Workload | Window | Sigma | Tightened | Wall Δ | Targets Δ | T/D Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| **Astral** (ProteoBench Module 8) | 10 ppm | 0.99 ppm | → 3.48 ppm | **−10.4 %** | +0.11 % | +3.6 % ✓ |
+| **TMT** (PXD007683, Lumos) | 20 ppm | 2.05 ppm | → 6.67 ppm | **−18.0 %** | −2.05 % ⚠ | +1.3 % ✓ |
+| **PXD001819** (Velos) | 5 ppm | 2.15 ppm | safely no-tighten | ~0 % | +0.17 % | +0.5 % ✓ |
+
+Pattern: Phase B wins when calibrated sigma is materially smaller than the user's precursor window; safely no-ops otherwise. TMT's −2.05 % target drift is a known yellow flag — Lumos's wider residual tails are not fully covered by 3-σ. Mitigations for Phase B's broader rollout: instrument-aware k (e.g., k=4 for Lumos) or stricter stratification (top-100 by spec_eValue). T/D ratio still favors target on all three workloads.
 
 OFF-mode (`-precursorCal off`) is bit-identical to dev-tip. Tunable per-workload via `-Dmsgfplus.tighteningSigmaMultiplier=<float>` (default 3.0; k=2 was tested as falsification before stratification fix).
 

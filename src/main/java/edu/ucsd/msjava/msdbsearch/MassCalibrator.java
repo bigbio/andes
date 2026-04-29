@@ -35,6 +35,14 @@ import java.util.PriorityQueue;
  * immutably thereafter, so no synchronization is required.
  */
 public class MassCalibrator {
+    /** Conservative lower bound for a tightened ppm half-window. */
+    public static final float DEFAULT_TIGHTENED_WINDOW_FLOOR_PPM = 2.0f;
+    /** Safety margin added after converting MAD to a Gaussian-equivalent sigma. */
+    public static final float DEFAULT_TIGHTENED_WINDOW_MARGIN_PPM = 0.5f;
+    /** Number of robust sigmas to keep when tightening precursor windows. */
+    public static final float DEFAULT_TIGHTENED_WINDOW_SIGMA_MULTIPLIER = 3.0f;
+    /** Gaussian-equivalent scale factor for MAD. */
+    private static final double MAD_TO_SIGMA_SCALE = 1.4826;
 
     /** Sample every Nth SpecKey. Cap total sampled keys at {@link #MAX_SAMPLED}. */
     private static final int SAMPLING_STRIDE = 10;
@@ -66,6 +74,35 @@ public class MassCalibrator {
     private final int minIsotopeError;
     private final int maxIsotopeError;
     private final SpecDataType specDataType;
+
+    /** Immutable summary of the sampled calibration residuals for one file. */
+    public static final class CalibrationStats {
+        private final double shiftPpm;
+        private final double robustSigmaPpm;
+        private final int confidentPsmCount;
+
+        public CalibrationStats(double shiftPpm, double robustSigmaPpm, int confidentPsmCount) {
+            this.shiftPpm = shiftPpm;
+            this.robustSigmaPpm = robustSigmaPpm;
+            this.confidentPsmCount = confidentPsmCount;
+        }
+
+        public double getShiftPpm() {
+            return shiftPpm;
+        }
+
+        public double getRobustSigmaPpm() {
+            return robustSigmaPpm;
+        }
+
+        public int getConfidentPsmCount() {
+            return confidentPsmCount;
+        }
+
+        public boolean hasReliableStats() {
+            return confidentPsmCount >= MIN_CONFIDENT_PSMS;
+        }
+    }
 
     /**
      * @param specAcc spectra accessor for the current file (already MS-level filtered)
@@ -119,15 +156,25 @@ public class MassCalibrator {
      * @return learned ppm shift, or 0.0 if the pre-pass had insufficient data
      */
     public double learnPrecursorShiftPpm(int ioIndex) {
+        return learnCalibrationStats(ioIndex).getShiftPpm();
+    }
+
+    /**
+     * Runs the sampled pre-pass and returns both the learned median shift and a
+     * robust spread estimate for later tolerance tightening.
+     */
+    public CalibrationStats learnCalibrationStats(int ioIndex) {
         // Skip the pre-pass on small files where MIN_CONFIDENT_PSMS can't be reached.
         if (specKeyList == null || specKeyList.size() < MIN_SPECKEYS_FOR_PREPASS) {
-            return 0.0;
+            return new CalibrationStats(0.0, 0.0, 0);
         }
         List<Double> residuals = collectResiduals(ioIndex);
         if (residuals.size() < MIN_CONFIDENT_PSMS) {
-            return 0.0;
+            return new CalibrationStats(0.0, 0.0, residuals.size());
         }
-        return median(residuals);
+        double shiftPpm = median(residuals);
+        double robustSigmaPpm = robustSigmaPpm(residuals, shiftPpm);
+        return new CalibrationStats(shiftPpm, robustSigmaPpm, residuals.size());
     }
 
     /**
@@ -302,6 +349,39 @@ public class MassCalibrator {
         }
     }
 
+    /**
+     * Median absolute deviation around a known median. Empty list => 0.0.
+     */
+    static double medianAbsoluteDeviation(List<Double> values, double center) {
+        if (values == null || values.isEmpty()) {
+            return 0.0;
+        }
+        List<Double> deviations = new ArrayList<>(values.size());
+        for (double value : values) {
+            deviations.add(Math.abs(value - center));
+        }
+        return median(deviations);
+    }
+
+    /**
+     * Robust Gaussian-equivalent sigma estimate derived from MAD.
+     */
+    static double robustSigmaPpm(List<Double> residuals, double center) {
+        return MAD_TO_SIGMA_SCALE * medianAbsoluteDeviation(residuals, center);
+    }
+
+    /**
+     * Conservative tightened ppm half-window for a calibrated main pass.
+     */
+    public static float tightenedTolerancePpm(float userPpm, double robustSigmaPpm, float sigmaMultiplier,
+                                              float floorPpm, float marginPpm) {
+        if (userPpm <= 0) {
+            return userPpm;
+        }
+        double tightened = Math.max(floorPpm, sigmaMultiplier * robustSigmaPpm + marginPpm);
+        return (float) Math.min(userPpm, tightened);
+    }
+
     // ----- test-only public wrappers -------------------------------------
     //
     // These exist solely so the unit tests can pin the helper semantics
@@ -321,5 +401,22 @@ public class MassCalibrator {
     /** Test-only access to {@link #sampleEveryNth(List, int, int)}. */
     public static <T> List<T> sampleEveryNthForTests(List<T> source, int stride, int cap) {
         return sampleEveryNth(source, stride, cap);
+    }
+
+    /** Test-only access to {@link #medianAbsoluteDeviation(List, double)}. */
+    public static double medianAbsoluteDeviationForTests(List<Double> values, double center) {
+        return medianAbsoluteDeviation(values, center);
+    }
+
+    /** Test-only access to {@link #robustSigmaPpm(List, double)}. */
+    public static double robustSigmaPpmForTests(List<Double> residuals, double center) {
+        return robustSigmaPpm(residuals, center);
+    }
+
+    /** Test-only access to {@link #tightenedTolerancePpm(float, double, float, float, float)}. */
+    public static float tightenedTolerancePpmForTests(float userPpm, double robustSigmaPpm,
+                                                      float sigmaMultiplier, float floorPpm,
+                                                      float marginPpm) {
+        return tightenedTolerancePpm(userPpm, robustSigmaPpm, sigmaMultiplier, floorPpm, marginPpm);
     }
 }

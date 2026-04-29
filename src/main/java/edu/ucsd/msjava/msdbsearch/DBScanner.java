@@ -486,6 +486,7 @@ public class DBScanner {
                         }
 
                         Collection<SpecKey> matchedSpecKeyList = specScanner.getPepMassSpecKeyMap().subMap(leftThr, rightThr).values();
+                        if (PhaseBTelemetry.enabled()) PhaseBTelemetry.recordPairing(matchedSpecKeyList.size());
                         if (matchedSpecKeyList.size() > 0) {
                             boolean isNTermMetCleaved = candidatePepGrid.isNTermMetCleaved(j);
                             int pepLength;

@@ -4,6 +4,7 @@ Implementation plans and design documents for MS-GF+ features and improvements.
 
 ## Active
 
+- [`astral-next-experiments.md`](astral-next-experiments.md) — actionable next-step plan after the Phase A and Phase E retrospectives; prioritizes Phase B, exact mass-interval pruning, and a persistent peptide-DB design spike.
 - [`astral-speed-5x-roadmap.md`](astral-speed-5x-roadmap.md) — long-horizon design for the first credible 5× Astral speed path. Phase A was attempted (2026-04-27 to 2026-04-28) and reverted; see retrospective below. Phase B, C, E remain untried.
 - [`astral-phase-a-retrospective.md`](astral-phase-a-retrospective.md) — empirical findings from the Phase A attempt: six Astral measurements, lessons, and what's still untried. Read before re-attempting Astral speed work.
 

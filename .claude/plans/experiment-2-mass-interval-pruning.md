@@ -8,9 +8,18 @@
 >
 > **Checkpoint 3** (commit `0c697dd`, binary-search via `ScoredSpectraMap.hasSpecMassInRange`): bound test ~30 ns × 1.4 B = ~42 s overhead. Phase B + E2 pruning = 511 s vs Phase B alone 494 s (**+3.4 % wall regression** — still narrowly negative but ~75 % of the gap closed). OFF + E2 pruning = 559 s vs OFF baseline 551 s = +1.5 % (break-even within noise).
 >
-> **Checkpoint 4** (commit `8478651`, gate bound test on `peptideLengthIndex >= minPeptideLength`): short prefixes (length 1 to minPeptideLength-1) have reachable intervals many kDa wide and almost never prune; bound test there is dead weight. Code change skips ~25-30 % of evaluations without recall risk (the moved test is still a sound necessary condition). Tests pass (37/37 scoped suite). **Astral wall measurement pending** — remote SSH ControlMaster socket dropped after Checkpoint 3 run. With the +17 s gap from Checkpoint 3 and an estimated 10-14 s trim from skipping short-prefix bookkeeping, the optimistic outcome is +3-7 s vs Phase B alone, which is still within noise of break-even rather than a clear ≥5 % graduation.
+> **Checkpoint 4** (commit `8478651`, gate bound test on `peptideLengthIndex >= minPeptideLength`): short prefixes (length 1 to minPeptideLength-1) have reachable intervals many kDa wide and almost never prune; bound test there is dead weight. Code change skips ~3.7 % of evaluations (1.61 B → 1.55 B) without recall risk (the moved test is still a sound necessary condition). Tests pass (37/37 scoped suite).
 >
-> **Verdict:** four checkpoints of optimization, none clears the plan's ≥5 % wall improvement gate over Phase B alone. Phase B remains the durable Astral wall lever; Experiment 2 stays as opt-in via `-Dmsgfplus.experiment2Pruning=true`. Future paths if revisited: incremental prefix-mass cache (avoid the per-extension grid scan), or coarse-grained per-LCP-block bound (amortize across many SA traversals).
+> **Checkpoint 4 confirmation (5-trial interleaved bench, 2026-04-30):** with run-to-run variance properly accounted for, the effect is real but small.
+>
+> | config              | trials (s)              | n | mean (s) | σ (s) |
+> |---------------------|-------------------------|---|---------:|------:|
+> | `phaseB_only`       | 522, 518, 517, 529, 513 | 5 |    519.8 |  6.06 |
+> | `phaseB_plus_e2`    | 504, 507, 514, 503, 512 | 5 |    508.0 |  4.85 |
+>
+> **Δ = 11.8 s = −2.27 % vs Phase B alone**, 5/5 trials phaseB+E2 < phaseB_only, Welch's t ≈ 3.4 (p ≈ 0.01). Native target/decoy counts **bit-identical 89580 / 45292 across all 10 runs** — exact-by-construction validated at scale.
+>
+> **Verdict:** four checkpoints of optimization. The pruning is a real, statistically significant ~2.3 % improvement, but doesn't clear the plan's ≥5 % gate for default-on. Phase B remains the durable Astral wall lever (−10.4 % vs OFF). Experiment 2 stays as opt-in via `-Dmsgfplus.experiment2Pruning=true` — costs nothing in OFF mode, and is available for users who want to stack a small additional gain on top of Phase B. Future paths if revisited: incremental prefix-mass cache (avoid the per-extension grid scan), or coarse-grained per-LCP-block bound (amortize across many SA traversals).
 **Date:** 2026-04-29
 **Context:** Phase B (commits `aac389c` and earlier) shipped −10.4 % Astral wall via calibrated precursor-window tightening. Plan §5 names this as the natural next attack — exact-by-construction pruning that attacks SA-walk fan-out *before* Phase B's pairing fan-out reduction kicks in. The two compose: Phase B reduces matched_speckeys per pairing call; Experiment 2 reduces the number of pairing calls.
 

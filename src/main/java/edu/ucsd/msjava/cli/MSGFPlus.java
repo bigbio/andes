@@ -592,20 +592,6 @@ public class MSGFPlus {
             if (numTasks > 1) {
                 printTaskWallSummary(submittedTasks);
             }
-            if (PhaseBTelemetry.enabled()) {
-                long calls = PhaseBTelemetry.getPairingCalls();
-                long matched = PhaseBTelemetry.getMatchedSpecKeys();
-                System.out.printf(
-                        "[Phase B telemetry] pairing_calls=%d matched_speckeys=%d mean_per_call=%.2f%n",
-                        calls, matched, PhaseBTelemetry.meanMatchedPerCall());
-            }
-            if (Experiment2Telemetry.enabled()) {
-                long evaluated = Experiment2Telemetry.getPrefixesEvaluated();
-                long pruned = Experiment2Telemetry.getPrefixesPruned();
-                System.out.printf(
-                        "[Experiment 2 telemetry] prefixes_evaluated=%d prefixes_pruned=%d prune_ratio=%.4f%n",
-                        evaluated, pruned, Experiment2Telemetry.pruneRatio());
-            }
             submittedTasks.clear();
 
         } catch (OutOfMemoryError ex) {

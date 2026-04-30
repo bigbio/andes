@@ -54,10 +54,6 @@ public class MassCalibrator {
      * of (1.003 / mass) ppm.
      */
     static final double MAX_REASONABLE_RESIDUAL_PPM = 50.0;
-    /** When set, write a per-PSM diagnostic TSV (residual, charge, peptide mass / length / sequence,
-     *  spec-eValue) for offline stratification analysis. Empty / unset = no emission. */
-    static final String DEBUG_TSV_PROPERTY = "msgfplus.calibrationDebugTsv";
-
     /** Sample every Nth SpecKey. Cap total sampled keys at {@link #MAX_SAMPLED}. */
     private static final int SAMPLING_STRIDE = 10;
     /** Hard upper bound on sampled spectra to keep the pre-pass bounded on large runs. */
@@ -264,20 +260,6 @@ public class MassCalibrator {
             return residuals;
         }
 
-        // Optional per-PSM debug TSV for offline stratification analysis.
-        // Emitted only when -Dmsgfplus.calibrationDebugTsv=<path> is set.
-        String debugPath = System.getProperty(DEBUG_TSV_PROPERTY);
-        java.io.PrintWriter debug = null;
-        if (debugPath != null && !debugPath.isEmpty()) {
-            try {
-                debug = new java.io.PrintWriter(new java.io.BufferedWriter(new java.io.FileWriter(debugPath)));
-                debug.println("residual_ppm\tcharge\ttheo_peptide_mass\tpeptide_length\tspec_evalue\tpep_seq");
-            } catch (java.io.IOException e) {
-                System.err.println("WARNING: calibration debug TSV write failed: " + e.getMessage());
-                debug = null;
-            }
-        }
-
         // Collect (residual, eValue) pairs so we can keep the cleanest subset
         // by spec_eValue. Stratification on a 393-PSM Astral pre-pass showed
         // sigma drops 4x (3.99 -> 0.99 ppm) when restricted to the top-200
@@ -285,7 +267,6 @@ public class MassCalibrator {
         // adding signal — they get filtered out post-collection.
         List<double[]> residualWithEval = new ArrayList<>();
 
-        try {
         for (Map.Entry<Integer, PriorityQueue<DatabaseMatch>> entry : specIndexDBMatchMap.entrySet()) {
             PriorityQueue<DatabaseMatch> queue = entry.getValue();
             if (queue == null || queue.isEmpty()) {
@@ -327,14 +308,6 @@ public class MassCalibrator {
                 continue;
             }
             residualWithEval.add(new double[]{residual, top.getSpecEValue()});
-            if (debug != null) {
-                debug.printf("%.4f\t%d\t%.4f\t%d\t%.3e\t%s%n",
-                        residual, charge, theoreticalPeptideMass, top.getLength(),
-                        top.getSpecEValue(), top.getPepSeq() == null ? "" : top.getPepSeq());
-            }
-        }
-        } finally {
-            if (debug != null) debug.close();
         }
 
         // Keep the top MIN_CONFIDENT_PSMS by spec_eValue (lowest eValue =

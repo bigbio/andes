@@ -32,9 +32,8 @@ Output is `.pin` only (mzIdentML removed). Sensitivity leads Sage at 1 % FDR on 
 
 ## Active
 
-**Phase B (calibrated precursor-window tightening) — shipped on `feat/astral-speed-improvements` 2026-04-29.** Four enabling commits:
+**Phase B (calibrated precursor-window tightening) — shipped on `feat/astral-speed-improvements` 2026-04-29.** Production code keeps the calibrated main-pass tightening and its rollout knobs; branch-local telemetry and offline calibration diagnostics were used during validation and then removed from the cleaned shipping runtime path. Core enabling commits:
 
-- `781738e` opt-in `PhaseBTelemetry` counter (pairing fan-out verification via `-Dmsgfplus.phaseBTelemetry=true`)
 - `05ec066` calibrator pre-pass uses iso=[0,0] (rejects isotope-error contamination); +50 ppm outlier filter
 - `7c027f8` Phase B formula constants exposed as system properties (`-Dmsgfplus.tighteningSigmaMultiplier=<float>` etc.)
 - `aac389c` stratify residuals by spec_eValue, keep top MIN_CONFIDENT_PSMS — drops Astral sigma 4× (3.99 → 0.99 ppm)
@@ -51,5 +50,5 @@ Pattern: Phase B wins when calibrated sigma is materially smaller than the user'
 
 OFF-mode (`-precursorCal off`) is bit-identical to dev-tip. Tunable per-workload via `-Dmsgfplus.tighteningSigmaMultiplier=<float>` (default 3.0; k=2 was tested as falsification before stratification fix).
 
-- [`astral-next-experiments.md`](astral-next-experiments.md) — Phase B status notes; Experiment 2 (mass-interval pruning) still untried.
+- [`experiment-2-mass-interval-pruning.md`](experiment-2-mass-interval-pruning.md) — follow-on pruning attempt; reproducible but below the default-on graduation gate, so retained as retrospective only.
 - [`astral-speed-5x-roadmap.md`](astral-speed-5x-roadmap.md) — long-horizon roadmap; Phase B now shipped.

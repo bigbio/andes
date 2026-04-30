@@ -1,6 +1,6 @@
 # Experiment 2 — Exact Prefix Mass-Interval Pruning
 
-**Status:** Design + Checkpoints 1, 2, 3, 4 shipped 2026-04-29; off by default (opt-in via system property). **Wall gate FAILED across all four checkpoints** — bookkeeping cost approaches but never beats savings. Phase B (commit `aac389c`) remains the durable Astral wall lever; Experiment 2 stays as opt-in scaffolding for future work.
+**Status:** Design + Checkpoints 1, 2, 3, 4 completed 2026-04-30. The effect is real but below the default-on graduation gate, so the runtime scaffolding was removed from the cleaned shipping branch and this document is kept as a retrospective. Phase B (commit `aac389c`) remains the durable Astral wall lever.
 
 > **Result summary (Astral, remote pride-linux-vm.ebi.ac.uk):** native counts bit-identical to baseline in all variants (exact-by-construction validated ✓); 12.22 % prune rate at Checkpoint 1, 1.84 % with actual break.
 >
@@ -19,7 +19,7 @@
 >
 > **Δ = 11.8 s = −2.27 % vs Phase B alone**, 5/5 trials phaseB+E2 < phaseB_only, Welch's t ≈ 3.4 (p ≈ 0.01). Native target/decoy counts **bit-identical 89580 / 45292 across all 10 runs** — exact-by-construction validated at scale.
 >
-> **Verdict:** four checkpoints of optimization. The pruning is a real, statistically significant ~2.3 % improvement, but doesn't clear the plan's ≥5 % gate for default-on. Phase B remains the durable Astral wall lever (−10.4 % vs OFF). Experiment 2 stays as opt-in via `-Dmsgfplus.experiment2Pruning=true` — costs nothing in OFF mode, and is available for users who want to stack a small additional gain on top of Phase B. Future paths if revisited: incremental prefix-mass cache (avoid the per-extension grid scan), or coarse-grained per-LCP-block bound (amortize across many SA traversals).
+> **Verdict:** four checkpoints of optimization. The pruning is a real, statistically significant ~2.3 % improvement, but doesn't clear the plan's ≥5 % gate for default-on. Phase B remains the durable Astral wall lever (−10.4 % vs OFF). The cleaned branch keeps the retrospective but drops the runtime scaffolding. Future paths if revisited: incremental prefix-mass cache (avoid the per-extension grid scan), or coarse-grained per-LCP-block bound (amortize across many SA traversals).
 **Date:** 2026-04-29
 **Context:** Phase B (commits `aac389c` and earlier) shipped −10.4 % Astral wall via calibrated precursor-window tightening. Plan §5 names this as the natural next attack — exact-by-construction pruning that attacks SA-walk fan-out *before* Phase B's pairing fan-out reduction kicks in. The two compose: Phase B reduces matched_speckeys per pairing call; Experiment 2 reduces the number of pairing calls.
 

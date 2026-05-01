@@ -15,41 +15,41 @@ import java.util.Map.Entry;
 
 public class DBScanner {
 
-    private int minPeptideLength;
-    private int maxPeptideLength;
-    private int maxMissedCleavages;
+    protected int minPeptideLength;
+    protected int maxPeptideLength;
+    protected int maxMissedCleavages;
 
     /**
      * Number of isoforms to consider per peptide.
      * NUM_VARIANTS_PER_PEPTIDE is 128 in Constants.java
      */
-    private int maxNumVariantsPerPeptide;
+    protected int maxNumVariantsPerPeptide;
 
-    private AminoAcidSet aaSet;
+    protected AminoAcidSet aaSet;
     private double[] aaMass;
     private int[] intAAMass;
 
-    private Enzyme enzyme;
-    private int numPeptidesPerSpec;
+    protected Enzyme enzyme;
+    protected int numPeptidesPerSpec;
 
-    private final CompactSuffixArray sa;
-    private final int size;
+    protected final CompactSuffixArray sa;
+    protected final int size;
     // to scan the database partially
     // Input spectra
-    private final ScoredSpectraMap specScanner;
+    protected final ScoredSpectraMap specScanner;
 
-    private int minDeNovoScore;
-    private boolean ignoreNTermMetCleavage;
+    protected int minDeNovoScore;
+    protected boolean ignoreNTermMetCleavage;
 
     // DB search results
-    private Map<SpecKey, PriorityQueue<DatabaseMatch>> specKeyDBMatchMap;
-    private Map<Integer, PriorityQueue<DatabaseMatch>> specIndexDBMatchMap;
+    protected Map<SpecKey, PriorityQueue<DatabaseMatch>> specKeyDBMatchMap;
+    protected Map<Integer, PriorityQueue<DatabaseMatch>> specIndexDBMatchMap;
 
-    private ProgressData progress;
-    private PrintStream output;
+    protected ProgressData progress;
+    protected PrintStream output;
 
     // For output
-    private String threadName = "";
+    protected String threadName = "";
 
     public DBScanner(
             ScoredSpectraMap specScanner,

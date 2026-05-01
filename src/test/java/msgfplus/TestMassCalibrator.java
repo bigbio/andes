@@ -69,6 +69,55 @@ public class TestMassCalibrator {
                 1e-12);
     }
 
+    @Test
+    public void medianAbsoluteDeviationUsesProvidedCenter() {
+        List<Double> values = new ArrayList<>(Arrays.asList(1.0, 2.0, 4.0, 7.0));
+        // Deviations from center=3 are [2,1,1,4] -> sorted [1,1,2,4] -> median 1.5
+        Assert.assertEquals(1.5,
+                MassCalibrator.medianAbsoluteDeviationForTests(values, 3.0),
+                1e-12);
+    }
+
+    @Test
+    public void robustSigmaPpmScalesMad() {
+        List<Double> residuals = new ArrayList<>(Arrays.asList(9.0, 10.0, 11.0));
+        // center=10, MAD=1 -> robust sigma = 1.4826
+        Assert.assertEquals(1.4826,
+                MassCalibrator.robustSigmaPpmForTests(residuals, 10.0),
+                1e-6);
+    }
+
+    @Test
+    public void tightenedTolerancePpmRespectsUserUpperBound() {
+        float tightened = MassCalibrator.tightenedTolerancePpmForTests(
+                10.0f, 0.2, 3.0f, 2.0f, 0.5f);
+        // k*sigma + margin = 1.1, floor dominates -> 2.0 ppm
+        Assert.assertEquals(2.0f, tightened, 1e-6f);
+    }
+
+    @Test
+    public void tightenedTolerancePpmDoesNotExpandAlreadyTightWindow() {
+        float tightened = MassCalibrator.tightenedTolerancePpmForTests(
+                1.5f, 0.2, 3.0f, 2.0f, 0.5f);
+        Assert.assertEquals(1.5f, tightened, 1e-6f);
+    }
+
+    @Test
+    public void tightenedTolerancePpmTracksRobustSigmaWhenLargerThanFloor() {
+        float tightened = MassCalibrator.tightenedTolerancePpmForTests(
+                12.0f, 1.0, 3.0f, 2.0f, 0.5f);
+        Assert.assertEquals(3.5f, tightened, 1e-6f);
+    }
+
+    @Test
+    public void calibrationStatsCanBeReliableWithZeroShift() {
+        MassCalibrator.CalibrationStats stats = new MassCalibrator.CalibrationStats(0.0, 0.8, 250);
+        Assert.assertTrue(stats.hasReliableStats());
+        Assert.assertEquals(0.0, stats.getShiftPpm(), 0.0);
+        Assert.assertEquals(0.8, stats.getRobustSigmaPpm(), 1e-12);
+        Assert.assertEquals(250, stats.getConfidentPsmCount());
+    }
+
     // ---- residualPpm() sign convention ----------------------------------
 
     @Test
@@ -141,5 +190,83 @@ public class TestMassCalibrator {
         // Only index 0 hits the stride.
         Assert.assertEquals(1, sampled.size());
         Assert.assertEquals(Integer.valueOf(0), sampled.get(0));
+    }
+
+    // ---- system-property overrides for maxSampled / minConfidentPsms ----
+
+    @Test
+    public void propertyOverrideReturnsDefaultWhenUnset() {
+        // The property reader falls back to default for unset / empty / null.
+        String prop = "msgfplus.test.unsetProperty.unique." + System.nanoTime();
+        try {
+            System.clearProperty(prop);
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideParsesValidPositiveInt() {
+        String prop = "msgfplus.test.validInt." + System.nanoTime();
+        try {
+            System.setProperty(prop, "1000");
+            Assert.assertEquals(1000,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideTrimsWhitespace() {
+        String prop = "msgfplus.test.trimWhitespace." + System.nanoTime();
+        try {
+            System.setProperty(prop, "  500  ");
+            Assert.assertEquals(500,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideFallsBackOnNonNumeric() {
+        // A typo or letter sequence must not crash the run; fall back to default.
+        String prop = "msgfplus.test.nonNumeric." + System.nanoTime();
+        try {
+            System.setProperty(prop, "abc");
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideRejectsNonPositive() {
+        // 0 and negative values are nonsensical (sampling cap of 0 = skip;
+        // minConfidentPsms of 0 = trust any handful of PSMs); fall back to default.
+        String prop = "msgfplus.test.nonPositive." + System.nanoTime();
+        try {
+            System.setProperty(prop, "0");
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+            System.setProperty(prop, "-50");
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void publishedConstantsMatchHistoricalDefaults() {
+        // Pin the documented defaults so a future drift is loud.
+        Assert.assertEquals(500, MassCalibrator.DEFAULT_MAX_SAMPLED);
+        Assert.assertEquals(200, MassCalibrator.DEFAULT_MIN_CONFIDENT_PSMS);
+        Assert.assertEquals("msgfplus.maxSampled", MassCalibrator.MAX_SAMPLED_PROPERTY);
+        Assert.assertEquals("msgfplus.minConfidentPsms", MassCalibrator.MIN_CONFIDENT_PSMS_PROPERTY);
     }
 }

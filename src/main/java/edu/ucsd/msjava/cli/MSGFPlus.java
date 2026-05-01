@@ -350,12 +350,15 @@ public class MSGFPlus {
 
         // Achievement B — two-pass precursor mass calibration (P2-cal).
         // Runs a sampled pre-pass over the current file's SpecKeys to learn
-        // a per-file ppm shift, then stores it on DBSearchIOFiles so every
-        // task-local ScoredSpectraMap picks it up. OFF mode is a strict
-        // no-op: we skip the pre-pass entirely and never call the setter,
-        // so DBSearchIOFiles.precursorMassShiftPpm stays at its 0.0 default
-        // and ScoredSpectraMap.applyShift() takes its exact-zero fast path.
+        // a per-file ppm shift and a robust residual spread estimate. The
+        // shift is stored on DBSearchIOFiles so every task-local
+        // ScoredSpectraMap picks it up. When the user tolerance is ppm-based
+        // and the residuals are reliable, we also tighten the effective
+        // precursor window for the main pass. OFF mode is a strict no-op:
+        // we skip the pre-pass entirely, never call the setter, and keep the
+        // original tolerance objects unchanged.
         DBSearchIOFiles currentIoFiles = params.getDBSearchIOList().get(ioIndex);
+        MassCalibrator.CalibrationStats calibrationStats = null;
         if (params.getPrecursorCalMode() != SearchParams.PrecursorCalMode.OFF) {
             long calStart = System.currentTimeMillis();
             MassCalibrator calibrator = new MassCalibrator(
@@ -366,22 +369,66 @@ public class MSGFPlus {
                     specKeyList,
                     leftPrecursorMassTolerance,
                     rightPrecursorMassTolerance,
-                    minIsotopeError,
-                    maxIsotopeError,
                     specDataType);
-            double shiftPpm = calibrator.learnPrecursorShiftPpm(ioIndex);
+            calibrationStats = calibrator.learnCalibrationStats(ioIndex);
+            double shiftPpm = calibrationStats.getShiftPpm();
             boolean applyLearnedShift = shiftPpm != 0.0
                     || params.getPrecursorCalMode() == SearchParams.PrecursorCalMode.ON;
             if (applyLearnedShift) {
                 currentIoFiles.setPrecursorMassShiftPpm(shiftPpm);
-                System.out.printf("Precursor mass shift learned: %.3f ppm (elapsed: %.2f sec)%n",
-                        shiftPpm, (System.currentTimeMillis() - calStart) / 1000.0);
+            }
+            if (calibrationStats != null && calibrationStats.hasReliableStats()) {
+                System.out.printf("Precursor mass shift learned: %.3f ppm from %d confident PSMs (robust sigma %.3f ppm; elapsed: %.2f sec)%n",
+                        shiftPpm,
+                        calibrationStats.getConfidentPsmCount(),
+                        calibrationStats.getRobustSigmaPpm(),
+                        (System.currentTimeMillis() - calStart) / 1000.0);
             } else {
                 System.out.printf("Precursor mass calibration skipped (insufficient confident PSMs; elapsed: %.2f sec)%n",
                         (System.currentTimeMillis() - calStart) / 1000.0);
             }
         }
         double precursorMassShiftPpm = currentIoFiles.getPrecursorMassShiftPpm();
+        Tolerance resolvedLeftPrecursorMassTolerance = leftPrecursorMassTolerance;
+        Tolerance resolvedRightPrecursorMassTolerance = rightPrecursorMassTolerance;
+        if (calibrationStats != null
+                && calibrationStats.hasReliableStats()
+                && leftPrecursorMassTolerance.isTolerancePPM()
+                && rightPrecursorMassTolerance.isTolerancePPM()) {
+            // Tightening formula constants are configurable via system properties for
+            // falsification sweeps (e.g. -Dmsgfplus.tighteningSigmaMultiplier=2 to test
+            // whether a 2-sigma envelope buys real wall improvement on Astral). Defaults
+            // match MassCalibrator.DEFAULT_TIGHTENED_WINDOW_*. Production OFF-mode
+            // semantics are unchanged.
+            float sigmaMultiplier = Float.parseFloat(System.getProperty(
+                    "msgfplus.tighteningSigmaMultiplier",
+                    String.valueOf(MassCalibrator.DEFAULT_TIGHTENED_WINDOW_SIGMA_MULTIPLIER)));
+            float floorPpm = Float.parseFloat(System.getProperty(
+                    "msgfplus.tighteningFloorPpm",
+                    String.valueOf(MassCalibrator.DEFAULT_TIGHTENED_WINDOW_FLOOR_PPM)));
+            float marginPpm = Float.parseFloat(System.getProperty(
+                    "msgfplus.tighteningMarginPpm",
+                    String.valueOf(MassCalibrator.DEFAULT_TIGHTENED_WINDOW_MARGIN_PPM)));
+            float tightenedLeftPpm = MassCalibrator.tightenedTolerancePpm(
+                    leftPrecursorMassTolerance.getValue(),
+                    calibrationStats.getRobustSigmaPpm(),
+                    sigmaMultiplier, floorPpm, marginPpm);
+            float tightenedRightPpm = MassCalibrator.tightenedTolerancePpm(
+                    rightPrecursorMassTolerance.getValue(),
+                    calibrationStats.getRobustSigmaPpm(),
+                    sigmaMultiplier, floorPpm, marginPpm);
+            boolean tightened = tightenedLeftPpm < leftPrecursorMassTolerance.getValue()
+                    || tightenedRightPpm < rightPrecursorMassTolerance.getValue();
+            if (tightened) {
+                resolvedLeftPrecursorMassTolerance = new Tolerance(tightenedLeftPpm, true);
+                resolvedRightPrecursorMassTolerance = new Tolerance(tightenedRightPpm, true);
+                System.out.printf("Tightened precursor tolerance for main pass: left %.3f ppm -> %.3f ppm, right %.3f ppm -> %.3f ppm%n",
+                        leftPrecursorMassTolerance.getValue(), tightenedLeftPpm,
+                        rightPrecursorMassTolerance.getValue(), tightenedRightPpm);
+            }
+        }
+        final Tolerance effectiveLeftPrecursorMassTolerance = resolvedLeftPrecursorMassTolerance;
+        final Tolerance effectiveRightPrecursorMassTolerance = resolvedRightPrecursorMassTolerance;
 
         List<MSGFPlusMatch> resultList;
 
@@ -468,8 +515,8 @@ public class MSGFPlus {
                             ScoredSpectraMap specScanner = new ScoredSpectraMap(
                                     specAcc,
                                     specKeyList.subList(taskStartIndex, taskEndIndex),
-                                    leftPrecursorMassTolerance,
-                                    rightPrecursorMassTolerance,
+                                    effectiveLeftPrecursorMassTolerance,
+                                    effectiveRightPrecursorMassTolerance,
                                     minIsotopeError,
                                     maxIsotopeError,
                                     specDataType,

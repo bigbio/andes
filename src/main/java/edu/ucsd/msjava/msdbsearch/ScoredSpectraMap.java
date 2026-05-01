@@ -34,6 +34,7 @@ public class ScoredSpectraMap {
     private Map<SpecKey, NewRankScorer> specKeyRankScorerMap;
 
     private boolean turnOffEdgeScoring = false;
+    private boolean isolateSpectrumState = false;
 
     private ProgressData progress;
 
@@ -119,6 +120,17 @@ public class ScoredSpectraMap {
 
     public ScoredSpectraMap turnOffEdgeScoring() {
         this.turnOffEdgeScoring = true;
+        return this;
+    }
+
+    /**
+     * Use cloned Spectrum snapshots while preprocessing so callers like the
+     * calibration pre-pass do not mutate the shared SpectraAccessor cache.
+     * The default remains false for the main search path to preserve current
+     * behavior and allocation profile.
+     */
+    public ScoredSpectraMap isolateSpectrumState() {
+        this.isolateSpectrumState = true;
         return this;
     }
 
@@ -253,11 +265,11 @@ public class ScoredSpectraMap {
                     scorer.doNotUseError();
             }
             int charge = specKey.getCharge();
-            spec.setCharge(charge);
+            Spectrum scoringSpec = prepareSpectrumForScoring(spec, charge);
 
-            NewScoredSpectrum<NominalMass> scoredSpec = scorer.getScoredSpectrum(spec);
+            NewScoredSpectrum<NominalMass> scoredSpec = scorer.getScoredSpectrum(scoringSpec);
 
-            float peptideMass = spec.getPrecursorMass() - (float) Composition.H2O;
+            float peptideMass = scoringSpec.getPrecursorMass() - (float) Composition.H2O;
             peptideMass = applyShift(peptideMass);
             float tolDaLeft = leftPrecursorMassTolerance.getToleranceAsDa(peptideMass);
             int maxNominalPeptideMass = NominalMass.toNominalMass(peptideMass) + Math.round(tolDaLeft - 0.4999f) - this.minIsotopeError;
@@ -339,8 +351,8 @@ public class ScoredSpectraMap {
                 if (!scorer.supportEdgeScores())
                     supportEdgeScore = false;
                 int charge = specKey.getCharge();
-                spec.setCharge(charge);
-                NewScoredSpectrum<NominalMass> sSpec = scorer.getScoredSpectrum(spec);
+                Spectrum scoringSpec = prepareSpectrumForScoring(spec, charge);
+                NewScoredSpectrum<NominalMass> sSpec = scorer.getScoredSpectrum(scoringSpec);
                 scoredSpecList.add(sSpec);
             }
 
@@ -355,5 +367,23 @@ public class ScoredSpectraMap {
             else
                 specKeyScorerMap.put(specKey, new FastScorer(scoredSpec, maxNominalPeptideMass));
         }
+    }
+
+    Spectrum prepareSpectrumForScoring(Spectrum spec, int charge) {
+        if (isolateSpectrumState) {
+            Spectrum cloned = cloneSpectrum(spec);
+            cloned.setCharge(charge);
+            return cloned;
+        }
+        spec.setCharge(charge);
+        return spec;
+    }
+
+    private static Spectrum cloneSpectrum(Spectrum spec) {
+        Spectrum cloned = spec.getCloneWithoutPeakList();
+        for (Peak peak : spec) {
+            cloned.add(peak.clone());
+        }
+        return cloned;
     }
 }

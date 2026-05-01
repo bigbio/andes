@@ -217,7 +217,7 @@ public class MassCalibrator {
                 specDataType,
                 false, // storeRankScorer not needed for pre-pass
                 false
-        );
+        ).isolateSpectrumState();
         prePassMap.makePepMassSpecKeyMap();
         prePassMap.preProcessSpectra();
 

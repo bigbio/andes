@@ -191,4 +191,82 @@ public class TestMassCalibrator {
         Assert.assertEquals(1, sampled.size());
         Assert.assertEquals(Integer.valueOf(0), sampled.get(0));
     }
+
+    // ---- system-property overrides for maxSampled / minConfidentPsms ----
+
+    @Test
+    public void propertyOverrideReturnsDefaultWhenUnset() {
+        // The property reader falls back to default for unset / empty / null.
+        String prop = "msgfplus.test.unsetProperty.unique." + System.nanoTime();
+        try {
+            System.clearProperty(prop);
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideParsesValidPositiveInt() {
+        String prop = "msgfplus.test.validInt." + System.nanoTime();
+        try {
+            System.setProperty(prop, "1000");
+            Assert.assertEquals(1000,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideTrimsWhitespace() {
+        String prop = "msgfplus.test.trimWhitespace." + System.nanoTime();
+        try {
+            System.setProperty(prop, "  500  ");
+            Assert.assertEquals(500,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideFallsBackOnNonNumeric() {
+        // A typo or letter sequence must not crash the run; fall back to default.
+        String prop = "msgfplus.test.nonNumeric." + System.nanoTime();
+        try {
+            System.setProperty(prop, "abc");
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void propertyOverrideRejectsNonPositive() {
+        // 0 and negative values are nonsensical (sampling cap of 0 = skip;
+        // minConfidentPsms of 0 = trust any handful of PSMs); fall back to default.
+        String prop = "msgfplus.test.nonPositive." + System.nanoTime();
+        try {
+            System.setProperty(prop, "0");
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+            System.setProperty(prop, "-50");
+            Assert.assertEquals(200,
+                    MassCalibrator.readPositiveIntPropertyForTests(prop, 200));
+        } finally {
+            System.clearProperty(prop);
+        }
+    }
+
+    @Test
+    public void publishedConstantsMatchHistoricalDefaults() {
+        // Pin the documented defaults so a future drift is loud.
+        Assert.assertEquals(500, MassCalibrator.DEFAULT_MAX_SAMPLED);
+        Assert.assertEquals(200, MassCalibrator.DEFAULT_MIN_CONFIDENT_PSMS);
+        Assert.assertEquals("msgfplus.maxSampled", MassCalibrator.MAX_SAMPLED_PROPERTY);
+        Assert.assertEquals("msgfplus.minConfidentPsms", MassCalibrator.MIN_CONFIDENT_PSMS_PROPERTY);
+    }
 }

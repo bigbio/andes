@@ -54,12 +54,16 @@ public class MassCalibrator {
      * of (1.003 / mass) ppm.
      */
     static final double MAX_REASONABLE_RESIDUAL_PPM = 50.0;
-    /** Sample every Nth SpecKey. Cap total sampled keys at {@link #MAX_SAMPLED}. */
+    /** Sample every Nth SpecKey. Cap total sampled keys at {@link #maxSampled}. */
     private static final int SAMPLING_STRIDE = 10;
-    /** Hard upper bound on sampled spectra to keep the pre-pass bounded on large runs. */
-    private static final int MAX_SAMPLED = 500;
-    /** Minimum PSMs required before the learned shift is considered reliable. */
-    private static final int MIN_CONFIDENT_PSMS = 200;
+    /** Default upper bound on sampled spectra in the pre-pass. */
+    public static final int DEFAULT_MAX_SAMPLED = 500;
+    /** Default minimum PSMs required before the learned shift is considered reliable. */
+    public static final int DEFAULT_MIN_CONFIDENT_PSMS = 200;
+    /** System property to override {@link #DEFAULT_MAX_SAMPLED} at runtime. */
+    public static final String MAX_SAMPLED_PROPERTY = "msgfplus.maxSampled";
+    /** System property to override {@link #DEFAULT_MIN_CONFIDENT_PSMS} at runtime. */
+    public static final String MIN_CONFIDENT_PSMS_PROPERTY = "msgfplus.minConfidentPsms";
     /** SpecEValue threshold for "confident" pre-pass PSMs. Tight enough to exclude decoys. */
     private static final double MAX_SPEC_EVALUE = 1e-6;
     /**
@@ -82,6 +86,10 @@ public class MassCalibrator {
     private final Tolerance leftPrecursorMassTolerance;
     private final Tolerance rightPrecursorMassTolerance;
     private final SpecDataType specDataType;
+    /** Effective sampling cap; {@link #DEFAULT_MAX_SAMPLED} unless overridden via {@link #MAX_SAMPLED_PROPERTY}. */
+    private final int maxSampled;
+    /** Effective stratification floor; {@link #DEFAULT_MIN_CONFIDENT_PSMS} unless overridden via {@link #MIN_CONFIDENT_PSMS_PROPERTY}. */
+    private final int minConfidentPsms;
 
     /** Immutable summary of the sampled calibration residuals for one file. */
     public static final class CalibrationStats {
@@ -108,7 +116,9 @@ public class MassCalibrator {
         }
 
         public boolean hasReliableStats() {
-            return confidentPsmCount >= MIN_CONFIDENT_PSMS;
+            // The calibrator emits confidentPsmCount > 0 only when residuals
+            // cleared the (configurable) minConfidentPsms threshold.
+            return confidentPsmCount > 0;
         }
     }
 
@@ -119,7 +129,8 @@ public class MassCalibrator {
      * @param params parsed search params (used for enzyme, de novo score threshold, etc.)
      * @param specKeyList the full list of SpecKeys for the file; the calibrator
      *                    samples every {@value #SAMPLING_STRIDE}th entry up to
-     *                    {@value #MAX_SAMPLED}.
+     *                    {@value #DEFAULT_MAX_SAMPLED} (override via
+     *                    system property {@code msgfplus.maxSampled}).
      * @param leftPrecursorMassTolerance main-pass left tolerance (reused for the pre-pass)
      * @param rightPrecursorMassTolerance main-pass right tolerance (reused for the pre-pass)
      * @param specDataType scoring metadata (activation, instrument, enzyme, protocol)
@@ -147,11 +158,34 @@ public class MassCalibrator {
         this.leftPrecursorMassTolerance = leftPrecursorMassTolerance;
         this.rightPrecursorMassTolerance = rightPrecursorMassTolerance;
         this.specDataType = specDataType;
+        this.maxSampled = readPositiveIntProperty(MAX_SAMPLED_PROPERTY, DEFAULT_MAX_SAMPLED);
+        this.minConfidentPsms = readPositiveIntProperty(MIN_CONFIDENT_PSMS_PROPERTY, DEFAULT_MIN_CONFIDENT_PSMS);
+    }
+
+    /** Public accessor used by unit tests to exercise property parsing. */
+    public static int readPositiveIntPropertyForTests(String name, int defaultValue) {
+        return readPositiveIntProperty(name, defaultValue);
+    }
+
+    /**
+     * Reads a positive-integer system property; falls back to {@code defaultValue}
+     * for unset / non-numeric / non-positive values.
+     */
+    private static int readPositiveIntProperty(String name, int defaultValue) {
+        String raw = System.getProperty(name);
+        if (raw == null || raw.isEmpty()) return defaultValue;
+        try {
+            int parsed = Integer.parseInt(raw.trim());
+            return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     /**
      * Runs the sampled pre-pass and returns the median ppm shift, or
-     * {@code 0.0} if fewer than {@value #MIN_CONFIDENT_PSMS} high-confidence
+     * {@code 0.0} if fewer than {@value #DEFAULT_MIN_CONFIDENT_PSMS} (override
+     * via {@code msgfplus.minConfidentPsms}) high-confidence
      * PSMs are collected.
      *
      * <p>The {@code ioIndex} argument is accepted for future multi-file hooks
@@ -171,13 +205,15 @@ public class MassCalibrator {
      * robust spread estimate for later tolerance tightening.
      */
     public CalibrationStats learnCalibrationStats(int ioIndex) {
-        // Skip the pre-pass on small files where MIN_CONFIDENT_PSMS can't be reached.
+        // Skip the pre-pass on small files where minConfidentPsms can't be reached.
         if (specKeyList == null || specKeyList.size() < MIN_SPECKEYS_FOR_PREPASS) {
             return new CalibrationStats(0.0, 0.0, 0);
         }
         List<Double> residuals = collectResiduals(ioIndex);
-        if (residuals.size() < MIN_CONFIDENT_PSMS) {
-            return new CalibrationStats(0.0, 0.0, residuals.size());
+        if (residuals.size() < minConfidentPsms) {
+            // count=0 is the "unreliable, do not apply" sentinel; CalibrationStats.hasReliableStats()
+            // checks for count > 0.
+            return new CalibrationStats(0.0, 0.0, 0);
         }
         double shiftPpm = median(residuals);
         double robustSigmaPpm = robustSigmaPpm(residuals, shiftPpm);
@@ -194,7 +230,7 @@ public class MassCalibrator {
             return Collections.emptyList();
         }
 
-        List<SpecKey> sampled = sampleEveryNth(specKeyList, SAMPLING_STRIDE, MAX_SAMPLED);
+        List<SpecKey> sampled = sampleEveryNth(specKeyList, SAMPLING_STRIDE, maxSampled);
         if (sampled.isEmpty()) {
             return Collections.emptyList();
         }
@@ -310,12 +346,12 @@ public class MassCalibrator {
             residualWithEval.add(new double[]{residual, top.getSpecEValue()});
         }
 
-        // Keep the top MIN_CONFIDENT_PSMS by spec_eValue (lowest eValue =
+        // Keep the top minConfidentPsms by spec_eValue (lowest eValue =
         // most confident). On Astral this drops sigma from ~4 ppm to ~1 ppm
         // because the worst-half PSMs (eValue near the 1e-6 threshold) are
         // dominated by residual scatter, not real instrument bias.
         residualWithEval.sort((a, b) -> Double.compare(a[1], b[1]));
-        int keepN = Math.min(residualWithEval.size(), MIN_CONFIDENT_PSMS);
+        int keepN = Math.min(residualWithEval.size(), minConfidentPsms);
         for (int i = 0; i < keepN; i++) {
             residuals.add(residualWithEval.get(i)[0]);
         }

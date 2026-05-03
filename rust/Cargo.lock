@@ -111,13 +111,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "engine",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
-name = "core"
+name = "engine"
 version = "0.1.0"
 
 [[package]]
@@ -135,10 +145,6 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
-
-[[package]]
-name = "fasta"
-version = "0.1.0"
 
 [[package]]
 name = "fastrand"
@@ -164,10 +170,6 @@ dependencies = [
  "wasip2",
  "wasip3",
 ]
-
-[[package]]
-name = "gf"
-version = "0.1.0"
 
 [[package]]
 name = "hashbrown"
@@ -207,6 +209,10 @@ dependencies = [
  "serde",
  "serde_core",
 ]
+
+[[package]]
+name = "input"
+version = "0.1.0"
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -251,26 +257,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "model"
-version = "0.1.0"
-
-[[package]]
-name = "msgf-diff"
-version = "0.1.0"
-dependencies = [
- "clap",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "msgf-rust"
-version = "0.1.0"
-dependencies = [
- "core",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -281,6 +267,10 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "output"
+version = "0.1.0"
 
 [[package]]
 name = "prettyplease"
@@ -330,10 +320,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "search"
-version = "0.1.0"
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -380,10 +366,6 @@ dependencies = [
  "serde_core",
  "zmij",
 ]
-
-[[package]]
-name = "spectra"
-version = "0.1.0"
 
 [[package]]
 name = "strsim"

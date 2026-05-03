@@ -1,20 +1,36 @@
 //! Chemistry constants and mass utilities. Values pinned to Java
-//! `edu.ucsd.msjava.msutil.Composition` — see the value-table test in
-//! `tests/chemistry_constants_match_java.rs`.
+//! `edu.ucsd.msjava.msutil.Composition` and `Constants` — see
+//! `tests/chemistry_constants_match_java.rs` for the parity gate.
 
-/// Monoisotopic mass of H2O. Java: `Composition.H2O`. Used as the
-/// neutral-mass adjustment in `Peptide::mass`.
-pub const H2O: f64 = 18.010565;
+/// Monoisotopic mass of hydrogen. Java: `Composition.H = 1.007825035`.
+pub const H: f64 = 1.007825035;
 
-/// Monoisotopic mass of a proton (charge carrier). Java:
-/// `IsotopeMass.getProtonMass()` (1.007276466).
-pub const PROTON: f64 = 1.007276466;
+/// Monoisotopic mass of oxygen. Java: `Composition.O = 15.99491463`.
+pub const O: f64 = 15.99491463;
 
-/// Convert a monoisotopic mass to the integer "nominal" mass used by
-/// MS-GF+'s scoring DP table. Magic constant 0.9995 mirrors Java
-/// `Constants.NOMINAL_MASS_FACTOR`.
+/// Monoisotopic mass of H2O, computed as `H * 2 + O` so the IEEE 754
+/// rounding matches Java's `Composition.H2O` to the bit. The literal
+/// `18.010565` is *not* bit-equal (mantissa drifts by 0x05).
+pub const H2O: f64 = H * 2.0 + O;
+
+/// Proton mass used as the default charge carrier. Java:
+/// `Composition.PROTON = 1.00727649`.
+pub const PROTON: f64 = 1.00727649;
+
+/// Single-precision integer-mass scaler. Java:
+/// `Constants.INTEGER_MASS_SCALER = 0.999497f`. Used in `nominal_from`
+/// via float-domain arithmetic to mirror Java's
+/// `AminoAcid.java:33: Math.round(INTEGER_MASS_SCALER * (float) mass)`.
+pub const INTEGER_MASS_SCALER: f32 = 0.999497;
+
+/// Convert a monoisotopic mass to the integer "nominal" mass that
+/// indexes MS-GF+'s scoring DP table. Mirrors Java
+/// `AminoAcid.java:33`: `Math.round(INTEGER_MASS_SCALER * (float) mass)`
+/// — the multiply happens in f32 (single precision) before rounding.
+/// Java's `Math.round(float)` is `floor(x + 0.5)`; for non-negative
+/// inputs this matches Rust's `f32::round()`.
 pub fn nominal_from(mass: f64) -> i32 {
-    (mass * 0.9995 + 0.5) as i32
+    (INTEGER_MASS_SCALER * mass as f32).round() as i32
 }
 
 #[cfg(test)]
@@ -27,28 +43,34 @@ mod tests {
     }
 
     #[test]
-    fn nominal_from_small_positive() {
-        // 1.0 Da → 1 (1.0 * 0.9995 + 0.5 = 1.4995 → trunc to 1)
-        assert_eq!(nominal_from(1.0), 1);
-    }
-
-    #[test]
-    fn nominal_from_typical_aa() {
-        // Glycine residue mass 57.02146 → nominal 57
-        // 57.02146 * 0.9995 + 0.5 = 57.49294... → trunc to 57
+    fn nominal_from_glycine() {
+        // 0.999497f * 57.02146f = 57.0228... → round → 57
         assert_eq!(nominal_from(57.02146), 57);
     }
 
     #[test]
-    fn nominal_from_typical_peptide() {
-        // ~1000 Da peptide → 1000
-        // 1000.0 * 0.9995 + 0.5 = 1000.0 → trunc to 1000
-        assert_eq!(nominal_from(1000.0), 1000);
+    fn nominal_from_alanine() {
+        // 0.999497f * 71.03711f = 71.001... → round → 71
+        assert_eq!(nominal_from(71.03711), 71);
+    }
+
+    #[test]
+    fn nominal_from_tryptophan() {
+        // 0.999497f * 186.07931f = 185.9857... → round → 186
+        assert_eq!(nominal_from(186.07931), 186);
     }
 
     #[test]
     fn nominal_from_h2o() {
-        // 18.010565 * 0.9995 + 0.5 = 18.50156... → trunc 18
+        // 0.999497f * 18.010565f = 18.0014... → round → 18
         assert_eq!(nominal_from(18.010565), 18);
+    }
+
+    #[test]
+    fn nominal_from_one_kilodalton() {
+        // 0.999497f * 1000.0f = 999.497 → round → 999 (NOT 1000)
+        // Anchors that the f32 scaler is in use; the f64 literal 0.9995
+        // would give 1000 here.
+        assert_eq!(nominal_from(1000.0), 999);
     }
 }

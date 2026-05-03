@@ -1,7 +1,7 @@
 //! msgf-diff: parity comparison tool for MS-GF+ output files.
 
 use clap::{Parser, Subcommand};
-use msgf_diff::{compare_schemas, PinFile};
+use msgf_diff::{compare_schemas, compare_with_tolerance, PinFile, Tolerance};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -14,14 +14,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Compare two .pin files (schema + content).
-    Compare { a: PathBuf, b: PathBuf },
+    /// Compare two .pin files (schema + per-field tolerance).
+    Compare {
+        a: PathBuf,
+        b: PathBuf,
+        /// Comma-separated `Field:value` pairs of relative tolerance.
+        /// Example: `--tolerance "SpecEValue:1e-3,EValue:1e-3"`.
+        #[arg(long, default_value = "")]
+        tolerance: String,
+    },
+}
+
+fn parse_tolerance(spec: &str) -> Tolerance {
+    let mut map = Tolerance::new();
+    for entry in spec.split(',').filter(|s| !s.is_empty()) {
+        if let Some((field, value)) = entry.split_once(':') {
+            if let Ok(v) = value.parse::<f64>() {
+                map.insert(field.to_string(), v);
+            }
+        }
+    }
+    map
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Compare { a, b } => {
+        Cmd::Compare { a, b, tolerance } => {
             let pin_a = match PinFile::read(&a) {
                 Ok(p) => p,
                 Err(e) => {
@@ -40,15 +59,25 @@ fn main() -> ExitCode {
                 eprintln!("{msg}");
                 return ExitCode::from(3);
             }
-            // Schema OK; bodies will be byte-compared in Task 4 with
-            // tolerance support. For now, byte-equal bodies pass; otherwise
-            // we still flag with exit 1.
-            if pin_a.body == pin_b.body {
-                println!("identical");
-                ExitCode::from(0)
-            } else {
-                println!("different (rows differ; tolerance compare lands in Task 4)");
-                ExitCode::from(1)
+            let tol = parse_tolerance(&tolerance);
+            if tol.is_empty() {
+                return if pin_a.body == pin_b.body {
+                    println!("identical");
+                    ExitCode::from(0)
+                } else {
+                    println!("different (no --tolerance provided; byte-level fail)");
+                    ExitCode::from(1)
+                };
+            }
+            match compare_with_tolerance(&pin_a, &pin_b, &tol) {
+                Ok(()) => {
+                    println!("ok");
+                    ExitCode::from(0)
+                }
+                Err(report) => {
+                    eprintln!("{report}");
+                    ExitCode::from(1)
+                }
             }
         }
     }

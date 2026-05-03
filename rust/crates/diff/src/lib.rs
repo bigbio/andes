@@ -67,3 +67,6 @@ pub fn compare_schemas(a: &PinFile, b: &PinFile) -> Result<(), String> {
         only_b.join(",")
     ))
 }
+
+pub mod compare;
+pub use compare::{compare_with_tolerance, Tolerance};

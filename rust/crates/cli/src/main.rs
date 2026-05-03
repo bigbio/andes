@@ -1,7 +1,9 @@
 //! Placeholder for the msgf-rust CLI binary. Real implementation lands in
 //! phases 7-8 of the rewrite plan.
 
-fn main() {
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
     eprintln!("msgf-rust: implementation pending (M0 stub).");
-    std::process::exit(2);
+    ExitCode::from(2)
 }

@@ -7,7 +7,7 @@ Each plan is a separate markdown file named descriptively, e.g.:
 - `mgf-scan-number-parsing.md`
 
 Rust-port planning artefacts live outside the git repo at
-`/Users/yperez/work/msgfplus-workspace/docs/`:
+`/Users/yperez/work/msgfplus-workspace/docs/superpowers/`:
 - `rust-full-rewrite-roadmap.md`
 - `rust-incremental-jni-alternative.md`
 - `2026-05-03-msgf-rust-port-design.md` — approved design spec from the

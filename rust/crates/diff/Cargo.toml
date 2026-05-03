@@ -9,6 +9,10 @@ license.workspace = true
 name = "msgf-diff"
 path = "src/main.rs"
 
+[lib]
+name = "msgf_diff"
+path = "src/lib.rs"
+
 [dependencies]
 clap = { workspace = true }
 thiserror = { workspace = true }

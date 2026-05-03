@@ -1,11 +1,7 @@
 //! msgf-diff: parity comparison tool for MS-GF+ output files.
-//!
-//! v0 supports a single subcommand, `compare`, which exits 0 when two files
-//! are byte-identical and 1 when they differ. Schema-aware comparison and
-//! per-field tolerances land in Tasks 3 and 4.
 
 use clap::{Parser, Subcommand};
-use std::fs;
+use msgf_diff::{compare_schemas, PinFile};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -18,38 +14,40 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Compare two .pin files at the byte level.
-    Compare {
-        /// First file (Java reference).
-        a: PathBuf,
-        /// Second file (Rust output).
-        b: PathBuf,
-    },
+    /// Compare two .pin files (schema + content).
+    Compare { a: PathBuf, b: PathBuf },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Compare { a, b } => {
-            let bytes_a = match fs::read(&a) {
-                Ok(b) => b,
+            let pin_a = match PinFile::read(&a) {
+                Ok(p) => p,
                 Err(e) => {
-                    eprintln!("cannot read {}: {e}", a.display());
+                    eprintln!("{e}");
                     return ExitCode::from(2);
                 }
             };
-            let bytes_b = match fs::read(&b) {
-                Ok(b) => b,
+            let pin_b = match PinFile::read(&b) {
+                Ok(p) => p,
                 Err(e) => {
-                    eprintln!("cannot read {}: {e}", b.display());
+                    eprintln!("{e}");
                     return ExitCode::from(2);
                 }
             };
-            if bytes_a == bytes_b {
+            if let Err(msg) = compare_schemas(&pin_a, &pin_b) {
+                eprintln!("{msg}");
+                return ExitCode::from(3);
+            }
+            // Schema OK; bodies will be byte-compared in Task 4 with
+            // tolerance support. For now, byte-equal bodies pass; otherwise
+            // we still flag with exit 1.
+            if pin_a.body == pin_b.body {
                 println!("identical");
                 ExitCode::from(0)
             } else {
-                println!("different ({} vs {} bytes)", bytes_a.len(), bytes_b.len());
+                println!("different (rows differ; tolerance compare lands in Task 4)");
                 ExitCode::from(1)
             }
         }

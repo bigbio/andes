@@ -5,3 +5,4 @@
 //! `docs/superpowers/2026-05-03-phase1-engine-domain-model-design.md`.
 
 pub mod mass;
+pub mod tolerance;

@@ -1,7 +1,7 @@
-//! Placeholder for the `core` crate. Implementation lands in a later phase.
+//! Domain model for MS-GF+ Rust port.
+//!
+//! Phase 1 milestone: amino acids, modifications, peptides, enzymes,
+//! tolerances. Pure CPU + types. No I/O. See
+//! `docs/superpowers/2026-05-03-phase1-engine-domain-model-design.md`.
 
-/// Returns the crate name. Used only to keep `cargo build` from emitting an
-/// empty-crate warning during M0.
-pub fn placeholder() -> &'static str {
-    "core"
-}
+pub mod mass;

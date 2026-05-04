@@ -70,6 +70,25 @@ impl Hash for Peptide {
     }
 }
 
+impl std::fmt::Display for Peptide {
+    /// Phase 1 canonical text form: `pre.SEQ_WITH_MODS.post`.
+    /// Mod deltas render as `{:+.5}` (signed, 5 decimals) after each
+    /// modified residue. Charge is not rendered. This format is the
+    /// inverse of `Peptide::from_str` (Task 10) and is NOT a byte-parity
+    /// match against Java's `Peptide.toString()` — the PIN/TSV output
+    /// formats live in the Phase 7 output crate.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.", self.pre as char)?;
+        for aa in &self.residues {
+            write!(f, "{}", aa.residue as char)?;
+            if let Some(m) = &aa.mod_ {
+                write!(f, "{:+.5}", m.mass_delta)?;
+            }
+        }
+        write!(f, ".{}", self.post as char)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +171,93 @@ mod tests {
         let p2 = unmod_pep(b"PEPTIDE");
         let set: HashSet<_> = [p1, p2].into_iter().collect();
         assert_eq!(set.len(), 1);
+    }
+
+    fn modded(residue: u8, mod_name: &str, delta: f64) -> AminoAcid {
+        let aa = AminoAcid::standard(residue).unwrap();
+        let m = Modification {
+            name: mod_name.to_string(),
+            mass_delta: delta,
+            residue: ResidueSpec::Specific(residue),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+        };
+        aa.with_mod(m)
+    }
+
+    #[test]
+    fn display_unmodified() {
+        let p = unmod_pep(b"PEPTIDE");
+        assert_eq!(p.to_string(), "_.PEPTIDE.-");
+    }
+
+    #[test]
+    fn display_real_flanking() {
+        let mut p = unmod_pep(b"PEPTIDE");
+        p.pre = b'K';
+        p.post = b'R';
+        assert_eq!(p.to_string(), "K.PEPTIDE.R");
+    }
+
+    #[test]
+    fn display_single_mod() {
+        let residues = vec![
+            AminoAcid::standard(b'P').unwrap(),
+            AminoAcid::standard(b'E').unwrap(),
+            modded(b'C', "Carbamidomethyl", 57.02146),
+            AminoAcid::standard(b'I').unwrap(),
+            AminoAcid::standard(b'D').unwrap(),
+            AminoAcid::standard(b'E').unwrap(),
+        ];
+        let p = Peptide::new(residues, b'_', b'-');
+        assert_eq!(p.to_string(), "_.PEC+57.02146IDE.-");
+    }
+
+    #[test]
+    fn display_oxidation_m() {
+        let residues = vec![
+            AminoAcid::standard(b'M').unwrap(),
+            AminoAcid::standard(b'E').unwrap(),
+            modded(b'M', "Oxidation", 15.99491),
+            AminoAcid::standard(b'D').unwrap(),
+            AminoAcid::standard(b'E').unwrap(),
+        ];
+        let p = Peptide::new(residues, b'_', b'-');
+        assert_eq!(p.to_string(), "_.MEM+15.99491DE.-");
+    }
+
+    #[test]
+    fn display_negative_mass_mod() {
+        let residues = vec![
+            modded(b'K', "Pyro-glu", -17.02655),
+            AminoAcid::standard(b'R').unwrap(),
+            AminoAcid::standard(b'I').unwrap(),
+            AminoAcid::standard(b'P').unwrap(),
+            modded(b'M', "Oxidation", 15.99491),
+        ];
+        let p = Peptide::new(residues, b'_', b'-');
+        assert_eq!(p.to_string(), "_.K-17.02655RIPM+15.99491.-");
+    }
+
+    #[test]
+    fn display_multi_mod() {
+        let residues = vec![
+            AminoAcid::standard(b'P').unwrap(),
+            modded(b'C', "Carbamidomethyl", 57.02146),
+            AminoAcid::standard(b'P').unwrap(),
+            modded(b'M', "Oxidation", 15.99491),
+            AminoAcid::standard(b'D').unwrap(),
+            AminoAcid::standard(b'E').unwrap(),
+        ];
+        let p = Peptide::new(residues, b'_', b'-');
+        assert_eq!(p.to_string(), "_.PC+57.02146PM+15.99491DE.-");
+    }
+
+    #[test]
+    fn display_charge_not_rendered() {
+        let p = unmod_pep(b"AG").with_charge(2);
+        assert_eq!(p.to_string(), "_.AG.-");
+        assert_eq!(p.charge, Some(2));
     }
 }

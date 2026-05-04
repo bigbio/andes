@@ -75,12 +75,12 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param, ParamParseError> {
     let len_act = read_i8_as_u8(cursor)?;
     let act_str = read_utf16be_string(cursor, len_act)?;
     let activation = ActivationMethod::from_name(&act_str)
-        .ok_or_else(|| ParamParseError::BadEnum { kind: "ActivationMethod", value: act_str })?;
+        .ok_or(ParamParseError::BadEnum { kind: "ActivationMethod", value: act_str })?;
 
     let len_inst = read_i8_as_u8(cursor)?;
     let inst_str = read_utf16be_string(cursor, len_inst)?;
     let instrument = InstrumentType::from_name(&inst_str)
-        .ok_or_else(|| ParamParseError::BadEnum { kind: "InstrumentType", value: inst_str })?;
+        .ok_or(ParamParseError::BadEnum { kind: "InstrumentType", value: inst_str })?;
 
     let len_enz = read_i8_as_u8(cursor)?;
     let enzyme = if len_enz == 0 {
@@ -88,7 +88,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param, ParamParseError> {
     } else {
         let enz_str = read_utf16be_string(cursor, len_enz)?;
         Some(Enzyme::from_name(&enz_str)
-            .ok_or_else(|| ParamParseError::BadEnum { kind: "Enzyme", value: enz_str })?)
+            .ok_or(ParamParseError::BadEnum { kind: "Enzyme", value: enz_str })?)
     };
 
     let len_prot = read_i8_as_u8(cursor)?;
@@ -97,7 +97,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param, ParamParseError> {
     } else {
         let prot_str = read_utf16be_string(cursor, len_prot)?;
         Protocol::from_name(&prot_str)
-            .ok_or_else(|| ParamParseError::BadEnum { kind: "Protocol", value: prot_str })?
+            .ok_or(ParamParseError::BadEnum { kind: "Protocol", value: prot_str })?
     };
 
     let data_type = SpecDataType { activation, instrument, enzyme, protocol };
@@ -612,7 +612,7 @@ mod tests {
         let rank_table = p.rank_dist_table.get(&part).unwrap();
         // 2 ion types + NOISE = 3 entries
         assert_eq!(rank_table.len(), 3);
-        for (_, freqs) in rank_table {
+        for freqs in rank_table.values() {
             assert_eq!(freqs.len(), 3);
         }
     }

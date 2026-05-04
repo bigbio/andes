@@ -24,7 +24,7 @@ fn collect_param_files() -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read_dir {dir:?}: {e}"))
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map_or(false, |ext| ext == "param"))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "param"))
         .collect();
     files.sort();
     files

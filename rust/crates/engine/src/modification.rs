@@ -55,6 +55,71 @@ impl Modification {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum ModParseError {
+    #[error("expected 5 comma-separated fields, got {got}")]
+    WrongFieldCount { got: usize },
+    #[error("invalid mass delta {field:?}: {source}")]
+    BadMass { field: String, #[source] source: std::num::ParseFloatError },
+    #[error("invalid residue spec {field:?} (expected single ASCII upper char or `*`)")]
+    BadResidue { field: String },
+    #[error("invalid location {field:?} (expected `any|N-term|C-term|Prot-N-term|Prot-C-term`)")]
+    BadLocation { field: String },
+    #[error("invalid fixed/variable flag {field:?} (expected `fix|opt`)")]
+    BadFixedFlag { field: String },
+}
+
+impl Modification {
+    /// Parse a single non-empty, non-comment line from a Mods.txt file.
+    /// Empty lines and `# ...` comment lines should be filtered by the
+    /// caller (see `aa_set::AminoAcidSetBuilder::add_mods_from_file`).
+    pub fn from_mods_txt_line(line: &str) -> Result<Self, ModParseError> {
+        let fields: Vec<&str> = line.splitn(5, ',').collect();
+        if fields.len() != 5 {
+            return Err(ModParseError::WrongFieldCount { got: fields.len() });
+        }
+        let [mass_s, residues_s, fixity_s, location_s, name_s] = [
+            fields[0].trim(), fields[1].trim(), fields[2].trim(),
+            fields[3].trim(), fields[4].trim(),
+        ];
+
+        let mass_delta: f64 = mass_s.parse()
+            .map_err(|source| ModParseError::BadMass { field: mass_s.to_string(), source })?;
+
+        let residue = match residues_s {
+            "*" => ResidueSpec::Wildcard,
+            s if s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase() => {
+                ResidueSpec::Specific(s.as_bytes()[0])
+            }
+            _ => return Err(ModParseError::BadResidue { field: residues_s.to_string() }),
+        };
+
+        let fixed = match fixity_s.to_ascii_lowercase().as_str() {
+            "fix" => true,
+            "opt" => false,
+            _ => return Err(ModParseError::BadFixedFlag { field: fixity_s.to_string() }),
+        };
+
+        let location = match location_s.to_ascii_lowercase().as_str() {
+            "any"          => ModLocation::Anywhere,
+            "n-term"       => ModLocation::NTerm,
+            "c-term"       => ModLocation::CTerm,
+            "prot-n-term"  => ModLocation::ProtNTerm,
+            "prot-c-term"  => ModLocation::ProtCTerm,
+            _ => return Err(ModParseError::BadLocation { field: location_s.to_string() }),
+        };
+
+        Ok(Modification {
+            name: name_s.to_string(),
+            mass_delta,
+            residue,
+            location,
+            fixed,
+            accession: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +205,88 @@ mod tests {
         assert!(m.applies_to(b'A', ModLocation::NTerm));
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
         assert!(!m.applies_to(b'A', ModLocation::CTerm));
+    }
+
+    #[test]
+    fn parse_carbamidomethyl_c() {
+        let line = "57.021464,C,fix,any,Carbamidomethyl";
+        let m = Modification::from_mods_txt_line(line).unwrap();
+        assert_eq!(m.name, "Carbamidomethyl");
+        assert_eq!(m.mass_delta, 57.021464);
+        assert_eq!(m.residue, ResidueSpec::Specific(b'C'));
+        assert_eq!(m.location, ModLocation::Anywhere);
+        assert!(m.fixed);
+    }
+
+    #[test]
+    fn parse_oxidation_m_variable() {
+        let line = "15.994915,M,opt,any,Oxidation";
+        let m = Modification::from_mods_txt_line(line).unwrap();
+        assert!(!m.fixed);
+        assert_eq!(m.mass_delta, 15.994915);
+    }
+
+    #[test]
+    fn parse_wildcard_nterm() {
+        let line = "229.162932,*,fix,N-term,TMT6plex";
+        let m = Modification::from_mods_txt_line(line).unwrap();
+        assert_eq!(m.residue, ResidueSpec::Wildcard);
+        assert_eq!(m.location, ModLocation::NTerm);
+    }
+
+    #[test]
+    fn parse_protein_nterm_acetyl() {
+        let line = "42.010565,*,opt,Prot-N-term,Acetyl";
+        let m = Modification::from_mods_txt_line(line).unwrap();
+        assert_eq!(m.location, ModLocation::ProtNTerm);
+    }
+
+    #[test]
+    fn parse_negative_mass_delta() {
+        let line = "-17.026549,Q,opt,N-term,Pyro-glu";
+        let m = Modification::from_mods_txt_line(line).unwrap();
+        assert_eq!(m.mass_delta, -17.026549);
+    }
+
+    #[test]
+    fn parse_wrong_field_count() {
+        let line = "57.021464,C,fix,any";  // 4 fields
+        let err = Modification::from_mods_txt_line(line).unwrap_err();
+        assert!(matches!(err, ModParseError::WrongFieldCount { got: 4 }));
+    }
+
+    #[test]
+    fn parse_bad_mass() {
+        let line = "abc,C,fix,any,Bad";
+        let err = Modification::from_mods_txt_line(line).unwrap_err();
+        assert!(matches!(err, ModParseError::BadMass { .. }));
+    }
+
+    #[test]
+    fn parse_bad_residue() {
+        let line = "57.0,CC,fix,any,Bad";
+        let err = Modification::from_mods_txt_line(line).unwrap_err();
+        assert!(matches!(err, ModParseError::BadResidue { .. }));
+    }
+
+    #[test]
+    fn parse_bad_location() {
+        let line = "57.0,C,fix,middle,Bad";
+        let err = Modification::from_mods_txt_line(line).unwrap_err();
+        assert!(matches!(err, ModParseError::BadLocation { .. }));
+    }
+
+    #[test]
+    fn parse_bad_fixity() {
+        let line = "57.0,C,maybe,any,Bad";
+        let err = Modification::from_mods_txt_line(line).unwrap_err();
+        assert!(matches!(err, ModParseError::BadFixedFlag { .. }));
+    }
+
+    #[test]
+    fn parse_location_case_insensitive() {
+        let line = "229.162932,*,fix,n-term,TMT";
+        let m = Modification::from_mods_txt_line(line).unwrap();
+        assert_eq!(m.location, ModLocation::NTerm);
     }
 }

@@ -11,6 +11,7 @@ pub mod enzyme;
 pub mod instrument;
 pub mod mass;
 pub mod modification;
+pub mod param_model;
 pub mod peptide;
 pub mod protocol;
 pub mod tolerance;
@@ -24,6 +25,10 @@ pub use amino_acid::AminoAcid;
 pub use enzyme::Enzyme;
 pub use mass::{nominal_from, C, H, H2O, N, O, PROTON, S, INTEGER_MASS_SCALER};
 pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
+pub use param_model::{
+    FragmentOffsetFrequency, IonType, Param, ParamParseError, Partition,
+    PrecursorOffsetFrequency, SpecDataType,
+};
 pub use peptide::{Peptide, PeptideParseError};
 pub use protocol::Protocol;
 pub use tolerance::{PrecursorTolerance, Tolerance};

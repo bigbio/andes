@@ -7,3 +7,4 @@
 pub mod mass;
 pub mod tolerance;
 pub mod enzyme;
+pub mod modification;

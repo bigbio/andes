@@ -518,4 +518,53 @@ mod tests {
         assert_eq!(param.min_charge, 2);
         assert_eq!(param.max_charge, 3);
     }
+
+    #[test]
+    fn reader_partitions_and_precursor_off() {
+        let mut b = buf_sections_1_to_4();
+        // Partition info: size=2, num_segments=4
+        b.extend(&2_i32.to_be_bytes()); b.extend(&4_i32.to_be_bytes());
+        // Partition 1: charge=2, parentMass=500.0, segNum=0
+        b.extend(&2_i32.to_be_bytes());
+        b.extend(&500.0_f32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        // Partition 2: charge=2, parentMass=1500.0, segNum=1
+        b.extend(&2_i32.to_be_bytes());
+        b.extend(&1500.0_f32.to_be_bytes());
+        b.extend(&1_i32.to_be_bytes());
+        // Precursor OFF: size=1
+        b.extend(&1_i32.to_be_bytes());
+        // entry: charge=2, reducedCharge=1, offset=0.0, isTolPpm=false, tolVal=0.5, freq=0.8
+        b.extend(&2_i32.to_be_bytes());
+        b.extend(&1_i32.to_be_bytes());
+        b.extend(&0.0_f32.to_be_bytes());
+        b.push(0);
+        b.extend(&0.5_f32.to_be_bytes());
+        b.extend(&0.8_f32.to_be_bytes());
+        // Fragment OFF for both partitions: each empty (size=0)
+        b.extend(&0_i32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        // Rank distributions: max_rank=0; partitions skip because frag_list empty
+        b.extend(&0_i32.to_be_bytes());
+        // Error distributions: error_scaling_factor=0
+        b.extend(&0_i32.to_be_bytes());
+        // Validation
+        b.extend(&i32::MAX.to_be_bytes());
+
+        let p = Param::load_from_bytes(&b).unwrap();
+        assert_eq!(p.partitions.len(), 2);
+        // Sorted by (charge, parent_mass.to_bits(), seg_num)
+        assert_eq!(p.partitions[0].seg_num, 0);
+        assert_eq!(p.partitions[1].seg_num, 1);
+        assert_eq!(p.num_segments, 4);
+        assert_eq!(p.num_precursor_off, 1);
+
+        let off_list = p.precursor_off_map.get(&2).unwrap();
+        assert_eq!(off_list.len(), 1);
+        assert_eq!(off_list[0].reduced_charge, 1);
+        match off_list[0].tolerance {
+            Tolerance::Da(v) => assert_eq!(v, 0.5),
+            _ => panic!("expected Da"),
+        }
+    }
 }

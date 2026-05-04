@@ -18,6 +18,7 @@ pub mod peptide;
 pub mod protein;
 pub mod protocol;
 pub mod spectrum;
+pub mod suffix_array;
 pub mod tolerance;
 
 // Convenience re-exports for the most-used types. Downstream crates
@@ -39,4 +40,5 @@ pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
 pub use protein::{Protein, ProteinDb};
 pub use protocol::Protocol;
 pub use spectrum::Spectrum;
+pub use suffix_array::{SuffixArray, SuffixArrayError};
 pub use tolerance::{PrecursorTolerance, Tolerance};

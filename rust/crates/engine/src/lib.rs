@@ -16,6 +16,7 @@ pub mod mass;
 pub mod modification;
 pub mod param_model;
 pub mod peptide;
+pub mod precursor_matching;
 pub mod protein;
 pub mod protocol;
 pub mod psm;
@@ -41,6 +42,7 @@ pub use param_model::{
 };
 pub use candidate_gen::{enumerate_candidates, Candidate};
 pub use peptide::{Peptide, PeptideParseError};
+pub use precursor_matching::{matches_precursor, MassError};
 pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
 pub use protein::{Protein, ProteinDb};
 pub use protocol::Protocol;

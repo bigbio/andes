@@ -567,4 +567,53 @@ mod tests {
             _ => panic!("expected Da"),
         }
     }
+
+    #[test]
+    fn reader_fragment_off_and_rank_dist() {
+        let mut b = buf_sections_1_to_4();
+        // Partition info: 1 partition, num_segments=1
+        b.extend(&1_i32.to_be_bytes()); b.extend(&1_i32.to_be_bytes());
+        b.extend(&2_i32.to_be_bytes());
+        b.extend(&1000.0_f32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        // Precursor OFF: 0 entries
+        b.extend(&0_i32.to_be_bytes());
+        // Fragment OFF for partition 1: size=2 (1 prefix + 1 suffix)
+        b.extend(&2_i32.to_be_bytes());
+        // Frag entry 1: prefix, charge=1, offset=1.00782, freq=0.7
+        b.push(1);
+        b.extend(&1_i32.to_be_bytes());
+        b.extend(&1.00782_f32.to_be_bytes());
+        b.extend(&0.7_f32.to_be_bytes());
+        // Frag entry 2: suffix, charge=1, offset=18.01057, freq=0.6
+        b.push(0);
+        b.extend(&1_i32.to_be_bytes());
+        b.extend(&18.01057_f32.to_be_bytes());
+        b.extend(&0.6_f32.to_be_bytes());
+        // Rank distributions: max_rank=2, so 3 floats per ion type.
+        b.extend(&2_i32.to_be_bytes());
+        // 3 ion types: prefix, suffix, NOISE; 3 floats each
+        for &v in &[0.5_f32, 0.4, 0.3] { b.extend(&v.to_be_bytes()); }
+        for &v in &[0.45_f32, 0.35, 0.25] { b.extend(&v.to_be_bytes()); }
+        for &v in &[0.05_f32, 0.05, 0.05] { b.extend(&v.to_be_bytes()); }
+        // Error distributions: error_scaling_factor=0
+        b.extend(&0_i32.to_be_bytes());
+        // Validation
+        b.extend(&i32::MAX.to_be_bytes());
+
+        let p = Param::load_from_bytes(&b).unwrap();
+        assert_eq!(p.partitions.len(), 1);
+        let part = p.partitions[0];
+        let frags = p.frag_off_table.get(&part).unwrap();
+        assert_eq!(frags.len(), 2);
+        assert!(frags[0].ion_type.is_prefix());
+        assert!(frags[1].ion_type.is_suffix());
+        assert_eq!(p.max_rank, 2);
+        let rank_table = p.rank_dist_table.get(&part).unwrap();
+        // 2 ion types + NOISE = 3 entries
+        assert_eq!(rank_table.len(), 3);
+        for (_, freqs) in rank_table {
+            assert_eq!(freqs.len(), 3);
+        }
+    }
 }

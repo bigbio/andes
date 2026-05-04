@@ -2,7 +2,8 @@
 
 use engine::{
     enumerate_candidates, AminoAcidSet, AminoAcidSetBuilder, Enzyme,
-    Protein, ProteinDb, SearchIndex, SearchParams,
+    ModLocation, Modification, Protein, ProteinDb, ResidueSpec,
+    SearchIndex, SearchParams,
 };
 
 fn aa_set() -> AminoAcidSet {
@@ -173,4 +174,85 @@ fn missed_cleavages_zero_emits_only_perfectly_cleaved() {
         .filter(|c| !c.is_decoy)
         .count();
     assert_eq!(target_count, 3, "expected 3 perfectly-cleaved peptides, got {target_count}");
+}
+
+fn aa_set_with_oxidation() -> engine::AminoAcidSet {
+    let ox = Modification {
+        name: "Oxidation".into(),
+        mass_delta: 15.99491,
+        residue: ResidueSpec::Specific(b'M'),
+        location: ModLocation::Anywhere,
+        fixed: false,
+        accession: None,
+    };
+    engine::AminoAcidSetBuilder::new_standard()
+        .add_variable_mod(ox)
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn one_variable_mod_site_doubles_candidates() {
+    // "MKAR" — Trypsin spans (0,2)="MK" + (2,4)="AR".
+    // With Oxidation-M variable: "MK" → 2 versions (unmod + Mox); "AR" → 1.
+    // Total target = 3.
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"MKAR".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set_with_oxidation());
+    p.min_length = 2;
+    p.max_length = 4;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 3;
+    let target_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    assert_eq!(target_count, 3, "expected 3 target candidates (MK + MKox + AR)");
+}
+
+#[test]
+fn two_variable_mod_sites_quadruple_candidates() {
+    // "MMK" — single span (0,3) with 2 M positions.
+    // Combos: {none, M0_ox, M1_ox, both_ox} = 4.
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"MMK".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set_with_oxidation());
+    p.min_length = 2;
+    p.max_length = 5;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 3;
+    let target_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    assert_eq!(target_count, 4);
+}
+
+#[test]
+fn max_variable_mods_caps_combinations() {
+    // "MMMK" — 3 M sites. With max_mods=1: {none, M0_ox, M1_ox, M2_ox} = 4.
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"MMMK".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set_with_oxidation());
+    p.min_length = 2;
+    p.max_length = 5;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 1;
+    let target_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    assert_eq!(target_count, 4);
 }

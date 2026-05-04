@@ -74,24 +74,67 @@ fn enumerate_protein(
                 continue;
             }
 
-            let residues: Vec<AminoAcid> = span.iter()
-                .map(|&r| AminoAcid::standard(r).unwrap())
-                .collect();
-
             let pre = if start == 0 { b'_' } else { seq[start as usize - 1] };
             let post = if end as usize == seq.len() { b'-' } else { seq[end as usize] };
-            let peptide = Peptide::new(residues, pre, post);
 
-            out.push(Candidate {
-                peptide,
-                protein_index,
-                start_offset_in_protein: start as usize,
-                is_decoy,
-            });
+            let mod_combinations = expand_mod_combinations(span, params);
+            for residues in mod_combinations {
+                let peptide = Peptide::new(residues, pre, post);
+                out.push(Candidate {
+                    peptide,
+                    protein_index,
+                    start_offset_in_protein: start as usize,
+                    is_decoy,
+                });
+            }
         }
     }
 
     out
+}
+
+/// Generate every combination of variable-mod applications for `span`,
+/// up to `params.max_variable_mods_per_peptide` mods total.
+fn expand_mod_combinations(span: &[u8], params: &SearchParams) -> Vec<Vec<AminoAcid>> {
+    use crate::modification::ModLocation;
+
+    // For each position, the list of variants at that residue.
+    let position_variants: Vec<Vec<AminoAcid>> = span.iter().map(|&r| {
+        params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec()
+    }).collect();
+
+    let mut out = Vec::new();
+    let mut current = Vec::with_capacity(span.len());
+    expand_recursive(
+        &position_variants, 0, &mut current, 0,
+        params.max_variable_mods_per_peptide, &mut out,
+    );
+    out
+}
+
+fn expand_recursive(
+    position_variants: &[Vec<AminoAcid>],
+    pos: usize,
+    current: &mut Vec<AminoAcid>,
+    mods_used: u32,
+    max_mods: u32,
+    out: &mut Vec<Vec<AminoAcid>>,
+) {
+    if pos == position_variants.len() {
+        out.push(current.clone());
+        return;
+    }
+    for variant in &position_variants[pos] {
+        let new_mods = mods_used + if variant.is_modified() { 1 } else { 0 };
+        if new_mods > max_mods {
+            continue;
+        }
+        current.push(variant.clone());
+        expand_recursive(
+            position_variants, pos + 1, current, new_mods, max_mods, out,
+        );
+        current.pop();
+    }
 }
 
 /// Cleavage positions: 0 (start of protein), n (end of protein), and

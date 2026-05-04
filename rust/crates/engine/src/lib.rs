@@ -7,6 +7,7 @@
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
+pub mod decoy;
 pub mod enzyme;
 pub mod instrument;
 pub mod mass;
@@ -32,6 +33,7 @@ pub use param_model::{
     PrecursorOffsetFrequency, SpecDataType,
 };
 pub use peptide::{Peptide, PeptideParseError};
+pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
 pub use protein::{Protein, ProteinDb};
 pub use protocol::Protocol;
 pub use spectrum::Spectrum;

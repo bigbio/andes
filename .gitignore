@@ -64,6 +64,7 @@ benchmark/*
 !benchmark/README.md
 !benchmark/ci/
 !benchmark/capture-references.sh
+!benchmark/parity-fixtures/
 
 # Java reference outputs from `mvn -Pcapture-references` — large; not committed.
 references/

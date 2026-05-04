@@ -7,6 +7,7 @@
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
+pub mod candidate_gen;
 pub mod compact_fasta;
 pub mod decoy;
 pub mod enzyme;
@@ -37,6 +38,7 @@ pub use param_model::{
     FragmentOffsetFrequency, IonType, Param, ParamParseError, Partition,
     PrecursorOffsetFrequency, SpecDataType,
 };
+pub use candidate_gen::{enumerate_candidates, Candidate};
 pub use peptide::{Peptide, PeptideParseError};
 pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
 pub use protein::{Protein, ProteinDb};

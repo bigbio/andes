@@ -10,3 +10,4 @@ pub mod enzyme;
 pub mod modification;
 pub mod amino_acid;
 pub mod peptide;
+pub mod aa_set;

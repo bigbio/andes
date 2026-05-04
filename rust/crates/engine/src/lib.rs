@@ -13,6 +13,7 @@ pub mod mass;
 pub mod modification;
 pub mod param_model;
 pub mod peptide;
+pub mod protein;
 pub mod protocol;
 pub mod spectrum;
 pub mod tolerance;
@@ -31,6 +32,7 @@ pub use param_model::{
     PrecursorOffsetFrequency, SpecDataType,
 };
 pub use peptide::{Peptide, PeptideParseError};
+pub use protein::{Protein, ProteinDb};
 pub use protocol::Protocol;
 pub use spectrum::Spectrum;
 pub use tolerance::{PrecursorTolerance, Tolerance};

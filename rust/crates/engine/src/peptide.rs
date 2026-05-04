@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn nominal_mass_for_GA() {
+    fn nominal_mass_for_g_a() {
         let p = unmod_pep(b"GA");
         // G + A + H2O ≈ 146.069 → nominal 146
         assert_eq!(p.nominal_mass(), 146);

@@ -135,6 +135,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn oxidation_m() -> Modification {
         Modification {
             name: "Oxidation".to_string(),

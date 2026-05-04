@@ -12,6 +12,7 @@ pub mod instrument;
 pub mod mass;
 pub mod modification;
 pub mod peptide;
+pub mod protocol;
 pub mod tolerance;
 
 // Convenience re-exports for the most-used types. Downstream crates
@@ -24,4 +25,5 @@ pub use enzyme::Enzyme;
 pub use mass::{nominal_from, C, H, H2O, N, O, PROTON, S, INTEGER_MASS_SCALER};
 pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 pub use peptide::{Peptide, PeptideParseError};
+pub use protocol::Protocol;
 pub use tolerance::{PrecursorTolerance, Tolerance};

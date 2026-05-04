@@ -3,7 +3,7 @@
 //! the actual IEEE 754 bit patterns Java produces — verified against
 //! the Java source, not against the same Rust literals.
 
-use engine::mass::{nominal_from, H, H2O, INTEGER_MASS_SCALER, O, PROTON};
+use engine::mass::{nominal_from, C, H, H2O, INTEGER_MASS_SCALER, N, O, PROTON, S};
 
 /// Bit-equality on f64 — masses must match Java to the full mantissa.
 fn bit_eq(a: f64, b: f64) -> bool {
@@ -55,4 +55,15 @@ fn nominal_from_matches_java_aminoacid_constructor() {
     assert_eq!(nominal_from(113.08406), 113); // Leu/Ile
     assert_eq!(nominal_from(186.07931), 186); // Trp
     assert_eq!(nominal_from(1000.0), 999);    // boundary anchoring f32 scaler
+}
+
+#[test]
+fn c_n_s_match_java_literals() {
+    // Source: Composition.java
+    //   public static final double C = 12.0;
+    //   public static final double N = 14.003074;
+    //   public static final double S = 31.9720707;
+    assert_eq!(C.to_bits(), 12.0_f64.to_bits());
+    assert_eq!(N.to_bits(), 14.003074_f64.to_bits());
+    assert_eq!(S.to_bits(), 31.9720707_f64.to_bits());
 }

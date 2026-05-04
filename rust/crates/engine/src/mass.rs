@@ -8,6 +8,15 @@ pub const H: f64 = 1.007825035;
 /// Monoisotopic mass of oxygen. Java: `Composition.O = 15.99491463`.
 pub const O: f64 = 15.99491463;
 
+/// Monoisotopic mass of carbon-12. Java: `Composition.C = 12.0`.
+pub const C: f64 = 12.0;
+
+/// Monoisotopic mass of nitrogen-14. Java: `Composition.N = 14.003074`.
+pub const N: f64 = 14.003074;
+
+/// Monoisotopic mass of sulfur-32. Java: `Composition.S = 31.9720707`.
+pub const S: f64 = 31.9720707;
+
 /// Monoisotopic mass of H2O, computed as `H * 2 + O` so the IEEE 754
 /// rounding matches Java's `Composition.H2O` to the bit. The literal
 /// `18.010565` is *not* bit-equal (mantissa drifts by 0x05).

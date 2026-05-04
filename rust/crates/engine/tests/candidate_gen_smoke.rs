@@ -98,7 +98,7 @@ fn nonspecific_enzyme_emits_every_length_valid_span() {
     p.max_missed_cleavages = 0;
     p.max_variable_mods_per_peptide = 0;
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
-    let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
+    let _target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
     // For NonSpecific, every cleavage position can pair. With seq length 6
     // and missed=0, only ADJACENT cleavage positions form candidates.
     // Cleavage positions = [0, 1, 2, 3, 4, 5, 6]; adjacent spans have length 1.

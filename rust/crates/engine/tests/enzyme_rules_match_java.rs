@@ -13,6 +13,7 @@ fn java_rules() -> Vec<(Enzyme, &'static [u8], &'static [u8])> {
         (Enzyme::AspN,         b"",        b"D"),
         (Enzyme::GluC,         b"E",       b""),
         (Enzyme::LysN,         b"",        b"K"),
+        (Enzyme::ArgC,         b"R",       b""),
     ]
 }
 
@@ -55,5 +56,13 @@ fn nonspecific_universal_true() {
     for r in b'A'..=b'Z' {
         assert!(Enzyme::NonSpecific.is_cleavable_after(r));
         assert!(Enzyme::NonSpecific.is_cleavable_before(r));
+    }
+}
+
+#[test]
+fn alphalp_universal_true() {
+    for r in b'A'..=b'Z' {
+        assert!(Enzyme::AlphaLP.is_cleavable_after(r));
+        assert!(Enzyme::AlphaLP.is_cleavable_before(r));
     }
 }

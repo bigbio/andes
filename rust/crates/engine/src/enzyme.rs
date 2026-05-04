@@ -11,6 +11,8 @@ pub enum Enzyme {
     AspN,
     GluC,
     LysN,
+    ArgC,
+    AlphaLP,
     NoCleavage,
     NonSpecific,
 }
@@ -35,6 +37,8 @@ impl Enzyme {
             Enzyme::AspN          => EnzymeRules { after: b"",        before: b"D", universal: None },
             Enzyme::GluC          => EnzymeRules { after: b"E",       before: b"",  universal: None },
             Enzyme::LysN          => EnzymeRules { after: b"",        before: b"K", universal: None },
+            Enzyme::ArgC          => EnzymeRules { after: b"R",       before: b"",  universal: None },
+            Enzyme::AlphaLP       => EnzymeRules { after: b"",        before: b"",  universal: Some(true) },
             Enzyme::NoCleavage    => EnzymeRules { after: b"",        before: b"",  universal: Some(false) },
             Enzyme::NonSpecific   => EnzymeRules { after: b"",        before: b"",  universal: Some(true) },
         }
@@ -48,6 +52,8 @@ impl Enzyme {
             Enzyme::AspN         => "AspN",
             Enzyme::GluC         => "GluC",
             Enzyme::LysN         => "LysN",
+            Enzyme::ArgC         => "ArgC",
+            Enzyme::AlphaLP      => "aLP",
             Enzyme::NoCleavage   => "NoCleavage",
             Enzyme::NonSpecific  => "NonSpecific",
         }
@@ -64,6 +70,8 @@ impl Enzyme {
             "aspn" | "asp-n"          => Some(Enzyme::AspN),
             "gluc" | "glu-c"          => Some(Enzyme::GluC),
             "lysn" | "lys-n"          => Some(Enzyme::LysN),
+            "argc" | "arg-c"          => Some(Enzyme::ArgC),
+            "alp" | "alpha-lp" | "alphalp" => Some(Enzyme::AlphaLP),
             "nocleavage" | "none"     => Some(Enzyme::NoCleavage),
             "nonspecific" | "all"     => Some(Enzyme::NonSpecific),
             _                         => None,
@@ -157,10 +165,34 @@ mod tests {
     }
 
     #[test]
+    fn argc_cleaves_after_r() {
+        assert!(Enzyme::ArgC.is_cleavable_after(b'R'));
+        assert!(!Enzyme::ArgC.is_cleavable_after(b'K'));
+        assert!(!Enzyme::ArgC.is_cleavable_before(b'R'));
+    }
+
+    #[test]
+    fn alphalp_is_universal() {
+        for r in b'A'..=b'Z' {
+            assert!(Enzyme::AlphaLP.is_cleavable_after(r));
+            assert!(Enzyme::AlphaLP.is_cleavable_before(r));
+        }
+    }
+
+    #[test]
+    fn from_name_argc_and_alphalp() {
+        assert_eq!(Enzyme::from_name("ArgC"), Some(Enzyme::ArgC));
+        assert_eq!(Enzyme::from_name("Arg-C"), Some(Enzyme::ArgC));
+        assert_eq!(Enzyme::from_name("aLP"), Some(Enzyme::AlphaLP));
+        assert_eq!(Enzyme::from_name("AlphaLP"), Some(Enzyme::AlphaLP));
+    }
+
+    #[test]
     fn name_round_trips() {
         for e in [
             Enzyme::Trypsin, Enzyme::Chymotrypsin, Enzyme::LysC,
             Enzyme::AspN, Enzyme::GluC, Enzyme::LysN,
+            Enzyme::ArgC, Enzyme::AlphaLP,
             Enzyme::NoCleavage, Enzyme::NonSpecific,
         ] {
             let n = e.name();

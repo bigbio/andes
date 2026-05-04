@@ -8,6 +8,7 @@ pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
 pub mod enzyme;
+pub mod instrument;
 pub mod mass;
 pub mod modification;
 pub mod peptide;
@@ -17,6 +18,7 @@ pub mod tolerance;
 // (input/output/cli) prefer `use engine::Peptide` over the qualified path.
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};
 pub use activation::ActivationMethod;
+pub use instrument::InstrumentType;
 pub use amino_acid::AminoAcid;
 pub use enzyme::Enzyme;
 pub use mass::{nominal_from, C, H, H2O, N, O, PROTON, S, INTEGER_MASS_SCALER};

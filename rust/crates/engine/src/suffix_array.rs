@@ -4,6 +4,22 @@
 //! shape (`indices`, `nlcps`); algorithm differs (Java has its own
 //! implementation), so byte-bit parity with Java's `.csarr` is NOT
 //! required by Phase 4c (only candidate-set parity downstream in 4d).
+//!
+//! ## Wire format (`.csarr` / `.cnlcp`)
+//!
+//! Determined by reading `CompactSuffixArray.createSuffixArrayFiles()` in Java:
+//!
+//! ```text
+//! .csarr:  i32 size  |  i32 id  |  i32[size] indices  |  i64 lastModified  |  i32 formatId
+//! .cnlcp:  i32 size  |  i32 id  |  byte[size] nlcps   |  i64 lastModified  |  i32 formatId
+//! ```
+//!
+//! `formatId` = 8294 (`COMPACT_SUFFIX_ARRAY_FILE_FORMAT_ID` in Java).
+//! All multibyte integers are big-endian (Java `DataOutputStream`).
+//! The `id` and `lastModified` fields are used by Java for cache validation;
+//! Rust writes zeros for these fields (round-trip fidelity, not cache linking).
+
+use std::io::{Read, Write};
 
 use crate::compact_fasta::CompactFastaSequence;
 
@@ -78,6 +94,120 @@ fn compute_lcp(text: &[u8], indices: &[i32]) -> Vec<i32> {
     lcp
 }
 
+/// Java `COMPACT_SUFFIX_ARRAY_FILE_FORMAT_ID`.
+const FORMAT_ID: i32 = 8294;
+
+impl SuffixArray {
+    /// Serialize to `.csarr` and `.cnlcp` streams in Java-compatible wire format.
+    ///
+    /// Writes placeholder zeros for the `id` and `lastModified` header/footer
+    /// fields (Java uses these for cache linking; Rust does not need them for
+    /// round-trip or search purposes).
+    pub fn write_to<W1: Write, W2: Write>(
+        &self,
+        csarr: &mut W1,
+        cnlcp: &mut W2,
+    ) -> Result<(), SuffixArrayError> {
+        write_csarr(csarr, &self.indices)?;
+        write_cnlcp(cnlcp, &self.nlcps)?;
+        Ok(())
+    }
+
+    /// Deserialize from `.csarr` and `.cnlcp` streams in Java-compatible wire format.
+    pub fn read_from<R1: Read, R2: Read>(
+        csarr: &mut R1,
+        cnlcp: &mut R2,
+    ) -> Result<Self, SuffixArrayError> {
+        let indices = read_csarr(csarr)?;
+        let nlcps = read_cnlcp(cnlcp)?;
+        if indices.len() != nlcps.len() {
+            return Err(SuffixArrayError::LengthMismatch {
+                indices: indices.len(),
+                nlcps: nlcps.len(),
+            });
+        }
+        Ok(Self { indices, nlcps })
+    }
+}
+
+/// Write `.csarr`: `i32 size | i32 id=0 | i32[size] indices | i64 lastModified=0 | i32 formatId`.
+fn write_csarr<W: Write>(w: &mut W, indices: &[i32]) -> Result<(), SuffixArrayError> {
+    let size = indices.len() as i32;
+    w.write_all(&size.to_be_bytes())?;
+    w.write_all(&0_i32.to_be_bytes())?; // id placeholder
+    for &v in indices {
+        w.write_all(&v.to_be_bytes())?;
+    }
+    w.write_all(&0_i64.to_be_bytes())?; // lastModified placeholder
+    w.write_all(&FORMAT_ID.to_be_bytes())?;
+    Ok(())
+}
+
+/// Write `.cnlcp`: `i32 size | i32 id=0 | byte[size] nlcps | i64 lastModified=0 | i32 formatId`.
+///
+/// Java's LCP values are written as single bytes (via `writeByte`), capped at
+/// [`i8::MAX`] (127). Values that exceed 127 are clamped before writing.
+fn write_cnlcp<W: Write>(w: &mut W, nlcps: &[i32]) -> Result<(), SuffixArrayError> {
+    let size = nlcps.len() as i32;
+    w.write_all(&size.to_be_bytes())?;
+    w.write_all(&0_i32.to_be_bytes())?; // id placeholder
+    for &v in nlcps {
+        let b = v.clamp(0, i8::MAX as i32) as u8;
+        w.write_all(&[b])?;
+    }
+    w.write_all(&0_i64.to_be_bytes())?; // lastModified placeholder
+    w.write_all(&FORMAT_ID.to_be_bytes())?;
+    Ok(())
+}
+
+/// Read `.csarr`: parse size, skip id, read `size` i32 values, skip footer.
+fn read_csarr<R: Read>(r: &mut R) -> Result<Vec<i32>, SuffixArrayError> {
+    let mut buf4 = [0u8; 4];
+
+    r.read_exact(&mut buf4)?;
+    let size = i32::from_be_bytes(buf4) as usize;
+
+    // skip id (4 bytes)
+    r.read_exact(&mut buf4)?;
+
+    let mut out = Vec::with_capacity(size);
+    for _ in 0..size {
+        r.read_exact(&mut buf4)?;
+        out.push(i32::from_be_bytes(buf4));
+    }
+
+    // skip footer: i64 lastModified (8 bytes) + i32 formatId (4 bytes) = 12 bytes
+    let mut footer = [0u8; 12];
+    r.read_exact(&mut footer)?;
+
+    Ok(out)
+}
+
+/// Read `.cnlcp`: parse size, skip id, read `size` bytes as i32 (sign-extended), skip footer.
+fn read_cnlcp<R: Read>(r: &mut R) -> Result<Vec<i32>, SuffixArrayError> {
+    let mut buf4 = [0u8; 4];
+
+    r.read_exact(&mut buf4)?;
+    let size = i32::from_be_bytes(buf4) as usize;
+
+    // skip id (4 bytes)
+    r.read_exact(&mut buf4)?;
+
+    let mut out = Vec::with_capacity(size);
+    let mut byte_buf = [0u8; 1];
+    for _ in 0..size {
+        r.read_exact(&mut byte_buf)?;
+        // Java writeByte / readByte is signed; extend to i32 matching Java semantics.
+        out.push(byte_buf[0] as i8 as i32);
+    }
+
+    // skip footer: i64 lastModified (8 bytes) + i32 formatId (4 bytes) = 12 bytes
+    let mut footer = [0u8; 12];
+    r.read_exact(&mut footer)?;
+
+    Ok(out)
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SuffixArrayError {
     #[error("I/O error: {source}")]
@@ -85,8 +215,8 @@ pub enum SuffixArrayError {
         #[from]
         source: std::io::Error,
     },
-    #[error("file I/O not yet implemented (Phase 4c/Task 5 stub)")]
-    NotYetImplemented,
+    #[error(".csarr length {indices} != .cnlcp length {nlcps}")]
+    LengthMismatch { indices: usize, nlcps: usize },
 }
 
 #[cfg(test)]

@@ -9,3 +9,4 @@ pub mod tolerance;
 pub mod enzyme;
 pub mod modification;
 pub mod amino_acid;
+pub mod peptide;

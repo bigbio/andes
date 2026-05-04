@@ -115,3 +115,62 @@ fn nonspecific_enzyme_emits_every_length_valid_span() {
     // length 3: 4 starts; length 4: 3; length 5: 2; length 6: 1; total 10.
     assert_eq!(target_candidates.len(), 10);
 }
+
+#[test]
+fn missed_cleavages_increase_candidate_count() {
+    // Sequence "AKMKCKDK" — Trypsin cleaves after K at positions 2, 4, 6, 8.
+    // Cleavage positions: [0, 2, 4, 6, 8].
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"AKMKCKDK".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set());
+    p.min_length = 2;
+    p.max_length = 8;
+    p.max_variable_mods_per_peptide = 0;
+
+    p.max_missed_cleavages = 0;
+    let c0_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+
+    p.max_missed_cleavages = 1;
+    let c1_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+
+    p.max_missed_cleavages = 2;
+    let c2_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+
+    assert!(c0_count < c1_count, "missed=0 ({c0_count}) should be less than missed=1 ({c1_count})");
+    assert!(c1_count < c2_count, "missed=1 ({c1_count}) should be less than missed=2 ({c2_count})");
+}
+
+#[test]
+fn missed_cleavages_zero_emits_only_perfectly_cleaved() {
+    // "AKMKLR" — Trypsin cleaves after positions 1 (K), 3 (K), 5 (R).
+    // Cleavage positions: [0, 2, 4, 6].
+    // missed=0, length 2-6: spans (0,2)="AK", (2,4)="MK", (4,6)="LR" — 3 spans.
+    // (Note: 'B' is not standard so we use 'L' which IS standard.)
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"AKMKLR".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set());
+    p.min_length = 2;
+    p.max_length = 6;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 0;
+    let target_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    assert_eq!(target_count, 3, "expected 3 perfectly-cleaved peptides, got {target_count}");
+}

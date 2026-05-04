@@ -3,7 +3,7 @@
 
 use std::io::BufRead;
 
-use crate::spectrum::Spectrum;
+use engine::Spectrum;
 
 pub struct MgfReader<R: BufRead> {
     reader: R,

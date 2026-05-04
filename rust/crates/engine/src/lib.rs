@@ -14,6 +14,7 @@ pub mod modification;
 pub mod param_model;
 pub mod peptide;
 pub mod protocol;
+pub mod spectrum;
 pub mod tolerance;
 
 // Convenience re-exports for the most-used types. Downstream crates
@@ -31,4 +32,5 @@ pub use param_model::{
 };
 pub use peptide::{Peptide, PeptideParseError};
 pub use protocol::Protocol;
+pub use spectrum::Spectrum;
 pub use tolerance::{PrecursorTolerance, Tolerance};

@@ -7,6 +7,7 @@
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
+pub mod compact_fasta;
 pub mod decoy;
 pub mod enzyme;
 pub mod instrument;
@@ -25,6 +26,7 @@ pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};
 pub use activation::ActivationMethod;
 pub use instrument::InstrumentType;
 pub use amino_acid::AminoAcid;
+pub use compact_fasta::{CompactFastaError, CompactFastaSequence, ProteinAnnotation};
 pub use enzyme::Enzyme;
 pub use mass::{nominal_from, C, H, H2O, N, O, PROTON, S, INTEGER_MASS_SCALER};
 pub use modification::{ModLocation, ModParseError, Modification, ResidueSpec};

@@ -616,4 +616,95 @@ mod tests {
             assert_eq!(freqs.len(), 3);
         }
     }
+
+    #[test]
+    fn reader_error_distributions() {
+        let mut b = buf_sections_1_to_4();
+        // 1 partition
+        b.extend(&1_i32.to_be_bytes()); b.extend(&1_i32.to_be_bytes());
+        b.extend(&2_i32.to_be_bytes());
+        b.extend(&1000.0_f32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        // 0 precursor OFF
+        b.extend(&0_i32.to_be_bytes());
+        // Fragment OFF: 1 prefix entry
+        b.extend(&1_i32.to_be_bytes());
+        b.push(1);
+        b.extend(&1_i32.to_be_bytes());
+        b.extend(&1.0_f32.to_be_bytes());
+        b.extend(&0.5_f32.to_be_bytes());
+        // Rank dist max_rank=0; 2 ion types (prefix + NOISE) × 1 float each
+        b.extend(&0_i32.to_be_bytes());
+        b.extend(&0.5_f32.to_be_bytes());
+        b.extend(&0.1_f32.to_be_bytes());
+        // Error distributions: error_scaling_factor=2 → 2*2+1 = 5 floats per dist
+        b.extend(&2_i32.to_be_bytes());
+        // ionErr: 5 floats
+        for v in [0.1_f32, 0.2, 0.4, 0.2, 0.1] { b.extend(&v.to_be_bytes()); }
+        // noiseErr: 5 floats
+        for v in [0.05_f32, 0.10, 0.70, 0.10, 0.05] { b.extend(&v.to_be_bytes()); }
+        // ionExistence: 4 floats
+        for v in [0.9_f32, 0.8, 0.7, 0.6] { b.extend(&v.to_be_bytes()); }
+        // Validation
+        b.extend(&i32::MAX.to_be_bytes());
+
+        let p = Param::load_from_bytes(&b).unwrap();
+        assert_eq!(p.error_scaling_factor, 2);
+        let part = p.partitions[0];
+        assert_eq!(p.ion_err_dist_table.get(&part).unwrap().len(), 5);
+        assert_eq!(p.noise_err_dist_table.get(&part).unwrap().len(), 5);
+        assert_eq!(p.ion_existence_table.get(&part).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn reader_rejects_bad_validation_marker() {
+        let mut b = buf_sections_1_to_4();
+        b.extend(&0_i32.to_be_bytes()); b.extend(&1_i32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        // BAD validation marker
+        b.extend(&0_i32.to_be_bytes());
+
+        let err = Param::load_from_bytes(&b).unwrap_err();
+        match err {
+            ParamParseError::ValidationMarker { got } => assert_eq!(got, 0),
+            other => panic!("expected ValidationMarker, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reader_rejects_trailing_bytes() {
+        let mut b = buf_sections_1_to_4();
+        b.extend(&0_i32.to_be_bytes()); b.extend(&1_i32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        b.extend(&0_i32.to_be_bytes());
+        b.extend(&i32::MAX.to_be_bytes());
+        // Trailing junk
+        b.extend(&[1u8, 2, 3, 4]);
+
+        let err = Param::load_from_bytes(&b).unwrap_err();
+        match err {
+            ParamParseError::TrailingBytes { unread } => assert_eq!(unread, 4),
+            other => panic!("expected TrailingBytes, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reader_rejects_unknown_activation() {
+        let mut b = Vec::new();
+        b.extend(&10001_i32.to_be_bytes());
+        // activation: "GARBAGE"
+        b.push(7);
+        for c in b"GARBAGE" { b.push(0); b.push(*c); }
+        let err = Param::load_from_bytes(&b).unwrap_err();
+        match err {
+            ParamParseError::BadEnum { kind, value } => {
+                assert_eq!(kind, "ActivationMethod");
+                assert_eq!(value, "GARBAGE");
+            }
+            other => panic!("expected BadEnum, got {:?}", other),
+        }
+    }
 }

@@ -1,7 +1,6 @@
-//! Placeholder for the `input` crate. Implementation lands in a later phase.
+//! Input-side readers for MS-GF+ Rust port: spectrum file formats
+//! (MGF in Phase 3a; mzML in Phase 3b) and `.fasta` (Phase 4).
 
-/// Returns the crate name. Used only to keep `cargo build` from emitting an
-/// empty-crate warning.
-pub fn placeholder() -> &'static str {
-    "input"
-}
+pub mod spectrum;
+
+pub use spectrum::Spectrum;

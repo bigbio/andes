@@ -51,7 +51,7 @@ pub use protocol::Protocol;
 pub use match_engine::match_spectra;
 pub use psm::{PsmMatch, TopNQueue};
 pub use search_index::{SearchIndex, SearchIndexError};
-pub use scoring::ScoredSpectrum;
+pub use scoring::{score_psm, RankScorer, ScoredSpectrum};
 pub use search_params::SearchParams;
 pub use spectrum::Spectrum;
 pub use suffix_array::{SuffixArray, SuffixArrayError};

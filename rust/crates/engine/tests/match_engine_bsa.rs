@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use engine::{
     match_spectra, AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec,
-    SearchIndex, SearchParams,
+    Param, RankScorer, SearchIndex, SearchParams,
 };
 use input::{FastaReader, MgfReader};
 
@@ -44,6 +44,17 @@ fn aa_set() -> engine::AminoAcidSet {
         .unwrap()
 }
 
+fn rank_scorer() -> RankScorer {
+    let param_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("src/main/resources/ionstat/HCD_QExactive_Tryp.param")
+        .canonicalize()
+        .unwrap_or_else(|e| panic!("canonicalize HCD_QExactive_Tryp.param: {e}"));
+    let param = Param::load_from_file(&param_path)
+        .unwrap_or_else(|e| panic!("load HCD_QExactive_Tryp.param: {e}"));
+    RankScorer::new(&param)
+}
+
 #[test]
 fn bsa_test_mgf_produces_some_matches() {
     let target = FastaReader::load_all(BufReader::new(File::open(fixture("BSA.fasta")).unwrap())).unwrap();
@@ -56,7 +67,7 @@ fn bsa_test_mgf_produces_some_matches() {
         .collect();
     assert!(!spectra.is_empty(), "test.mgf must contain at least one spectrum");
 
-    let queues = match_spectra(&spectra, &idx, &params, "XXX");
+    let queues = match_spectra(&spectra, &idx, &params, &rank_scorer(), 0.05, "XXX");
     assert_eq!(queues.len(), spectra.len());
 
     // At least one spectrum should have a match (BSA is a known target).

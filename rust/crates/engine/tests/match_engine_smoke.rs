@@ -1,8 +1,12 @@
 //! match_engine smoke tests.
 
+use std::collections::HashMap;
+
 use engine::{
     match_spectra, AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb,
     SearchIndex, SearchParams, Spectrum, PROTON,
+    ActivationMethod, InstrumentType, IonType, Param, Partition, Protocol,
+    RankScorer, SpecDataType, Tolerance,
 };
 
 fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
@@ -15,6 +19,53 @@ fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
         scan: None,
         peaks: vec![],
     }
+}
+
+/// Minimal RankScorer for smoke tests (no real peaks, just need valid scorer).
+fn tiny_scorer() -> RankScorer {
+    let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let noise = IonType::Noise;
+
+    let mut ion_table = HashMap::new();
+    ion_table.insert(prefix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
+    ion_table.insert(suffix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
+    ion_table.insert(noise, vec![0.05_f32, 0.05, 0.05, 0.05]);
+
+    let mut rank_dist_table = HashMap::new();
+    rank_dist_table.insert(part, ion_table);
+
+    let mut frag_off_table = HashMap::new();
+    frag_off_table.insert(part, vec![]);
+
+    let param = Param {
+        version: 10001,
+        data_type: SpecDataType {
+            activation: ActivationMethod::HCD,
+            instrument: InstrumentType::QExactive,
+            enzyme: None,
+            protocol: Protocol::Automatic,
+        },
+        mme: Tolerance::Ppm(20.0),
+        apply_deconvolution: false,
+        deconvolution_error_tolerance: 0.0,
+        charge_hist: vec![(2, 100)],
+        min_charge: 2,
+        max_charge: 2,
+        num_segments: 1,
+        partitions: vec![part],
+        num_precursor_off: 0,
+        precursor_off_map: HashMap::new(),
+        frag_off_table,
+        max_rank: 3,
+        rank_dist_table,
+        error_scaling_factor: 0,
+        ion_err_dist_table: HashMap::new(),
+        noise_err_dist_table: HashMap::new(),
+        ion_existence_table: HashMap::new(),
+    };
+    RankScorer::new(&param)
 }
 
 #[test]
@@ -39,7 +90,7 @@ fn known_peptide_appears_in_top_n() {
     let mz = (target_mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, Some(charge as i32));
-    let queues = match_spectra(&[spec], &idx, &params, "XXX");
+    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
 
     assert_eq!(queues.len(), 1);
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
@@ -74,7 +125,7 @@ fn top_n_capacity_respected() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, Some(charge as i32));
-    let queues = match_spectra(&[spec], &idx, &params, "XXX");
+    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     assert!(queues[0].len() <= 1);
 }
 
@@ -98,7 +149,7 @@ fn spectrum_without_charge_tries_charge_range() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, None);  // no charge!
-    let queues = match_spectra(&[spec], &idx, &params, "XXX");
+    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected charge_range to find a match");
     assert_eq!(top[0].charge_used, 2);

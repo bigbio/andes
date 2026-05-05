@@ -50,6 +50,18 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
         "unexpected PIN header: {pin_header}"
     );
 
+    // Assert that at least one data row carries a real BSA accession (P02769)
+    // in the Proteins column — confirms real accessions are threaded through.
+    let pin_has_bsa_accession = pin_content
+        .lines()
+        .skip(1) // skip header
+        .any(|line| line.contains("P02769"));
+    assert!(
+        pin_has_bsa_accession,
+        "PIN should contain at least one row with BSA accession 'P02769' \
+         in the Proteins column (got PROT_N placeholder instead?)"
+    );
+
     // Validate TSV header and content.
     let tsv_content = std::fs::read_to_string(&tsv_path).unwrap();
     assert!(
@@ -60,5 +72,16 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     assert!(
         tsv_header.starts_with("#SpecFile\tSpecID\tScanNum"),
         "unexpected TSV header: {tsv_header}"
+    );
+
+    // Assert TSV also has a real BSA accession.
+    let tsv_has_bsa_accession = tsv_content
+        .lines()
+        .skip(1)
+        .any(|line| line.contains("P02769"));
+    assert!(
+        tsv_has_bsa_accession,
+        "TSV should contain at least one row with BSA accession 'P02769' \
+         in the Protein column (got PROT_N placeholder instead?)"
     );
 }

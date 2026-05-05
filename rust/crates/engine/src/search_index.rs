@@ -22,6 +22,17 @@ impl SearchIndex {
         let sa = SuffixArray::build(&compact);
         Self { db, compact, sa }
     }
+
+    /// Look up the `Protein` at the given index in the combined target+decoy
+    /// database.
+    ///
+    /// Target proteins occupy `[0, target_count)` and their accessions are the
+    /// raw FASTA accessions.  Decoy proteins occupy `[target_count, 2 *
+    /// target_count)` and their accessions already carry the decoy prefix (set
+    /// by [`target_plus_decoy`]).  Returns `None` when `idx` is out of range.
+    pub fn protein_at(&self, idx: usize) -> Option<&crate::protein::Protein> {
+        self.db.proteins.get(idx)
+    }
 }
 
 #[derive(thiserror::Error, Debug)]

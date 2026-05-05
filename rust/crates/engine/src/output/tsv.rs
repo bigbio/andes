@@ -21,6 +21,7 @@
 use std::io::{self, BufWriter, Write};
 
 use crate::psm::{PsmMatch, TopNQueue};
+use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use crate::spectrum::Spectrum;
 use crate::tolerance::Tolerance;
@@ -32,6 +33,10 @@ use crate::tolerance::Tolerance;
 /// `spectra` and `queues` must be parallel slices (same length): `queues[i]`
 /// holds the top-N PSMs for `spectra[i]`.
 ///
+/// `search_index` is used to resolve protein accessions from
+/// `psm.candidate.protein_index`.  Decoy accessions already carry the prefix
+/// (set by `target_plus_decoy`) — no prefix arithmetic is needed here.
+///
 /// `spec_file_name` is the bare filename (e.g. `"test.mgf"`) written in the
 /// `#SpecFile` column.
 ///
@@ -42,12 +47,13 @@ pub fn write_tsv(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     params: &SearchParams,
+    search_index: &SearchIndex,
     spec_file_name: &str,
     is_mgf: bool,
 ) -> io::Result<()> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
-    write_tsv_to(&mut writer, spectra, queues, params, spec_file_name, is_mgf)
+    write_tsv_to(&mut writer, spectra, queues, params, search_index, spec_file_name, is_mgf)
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp
@@ -59,6 +65,7 @@ pub fn write_tsv_to<W: Write>(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     params: &SearchParams,
+    search_index: &SearchIndex,
     spec_file_name: &str,
     is_mgf: bool,
 ) -> io::Result<()> {
@@ -68,7 +75,7 @@ pub fn write_tsv_to<W: Write>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        write_spectrum_rows(writer, spec, queue, params, spec_file_name, is_mgf)?;
+        write_spectrum_rows(writer, spec, queue, params, spec_file_name, is_mgf, search_index)?;
     }
     Ok(())
 }
@@ -120,6 +127,7 @@ fn write_spectrum_rows<W: Write>(
     params: &SearchParams,
     spec_file_name: &str,
     is_mgf: bool,
+    search_index: &SearchIndex,
 ) -> io::Result<()> {
     // Sort best-first (lowest spec_e_value first).
     let psms = queue.clone().into_sorted_vec();
@@ -137,7 +145,7 @@ fn write_spectrum_rows<W: Write>(
         if psm.spec_e_value != last_e_value {
             last_e_value = psm.spec_e_value;
         }
-        write_psm_row(writer, spec, psm, &ctx)?;
+        write_psm_row(writer, spec, psm, &ctx, search_index)?;
     }
     Ok(())
 }
@@ -147,6 +155,7 @@ fn write_psm_row<W: Write>(
     spec: &Spectrum,
     psm: &PsmMatch,
     ctx: &RowCtx<'_>,
+    search_index: &SearchIndex,
 ) -> io::Result<()> {
     let is_mgf = ctx.is_mgf;
     let ppm_mode = ctx.ppm_mode;
@@ -187,11 +196,9 @@ fn write_psm_row<W: Write>(
     // Peptide: uses the existing Display impl → "pre.SEQ_WITH_MODS.post"
     let peptide = format!("{}", psm.candidate.peptide);
 
-    // Protein: use protein_index as a fallback label; full accession lookup
-    // requires a reference to the ProteinDb, which is not passed here for MVP.
-    // The protein_index field on Candidate corresponds to the ProteinDb index.
-    // For MVP, emit "PROT_{index}" as documented in the plan.
-    let protein = format_protein(psm);
+    // Protein: resolved from SearchIndex. Decoy accessions already carry the
+    // prefix (set by target_plus_decoy). Multi-protein emit is a future followup.
+    let protein = format_protein(psm, search_index);
 
     // DeNovoScore
     let de_novo_score = psm.de_novo_score;
@@ -250,17 +257,18 @@ fn write_psm_row<W: Write>(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Format a protein identifier from the PSM.
+/// Resolve a protein accession from the SearchIndex for a given PSM.
 ///
-/// The TSV writer does not receive a `ProteinDb` reference in the MVP API
-/// (keeping the signature minimal). Protein accession lookup requires the
-/// full DB; for now we emit `"PROT_{index}"` as a placeholder.
-///
-/// **Known divergence from Java**: Java emits the full accession string.
-/// Thread a `&ProteinDb` into this function (and `write_tsv`) in a follow-up
-/// commit once the CLI wiring (Task 4) passes the index through.
-fn format_protein(psm: &PsmMatch) -> String {
-    format!("PROT_{}", psm.candidate.protein_index)
+/// `SearchIndex::db` is the combined target+decoy `ProteinDb` where decoy
+/// accessions already carry the decoy prefix (set by `target_plus_decoy`).
+/// We look up `psm.candidate.protein_index` directly — no prefix arithmetic
+/// needed.  Falls back to `"PROT_{idx}"` if the index is out of range.
+fn format_protein(psm: &PsmMatch, search_index: &SearchIndex) -> String {
+    let idx = psm.candidate.protein_index;
+    match search_index.protein_at(idx) {
+        Some(prot) => prot.accession.clone(),
+        None => format!("PROT_{idx}"),
+    }
 }
 
 /// Format a SpecEValue / EValue in scientific notation.
@@ -279,9 +287,29 @@ mod tests {
     use crate::candidate_gen::Candidate;
     use crate::modification::Modification;
     use crate::peptide::Peptide;
+    use crate::protein::{Protein, ProteinDb};
+    use crate::search_index::SearchIndex;
     use crate::tolerance::PrecursorTolerance;
 
     // ── fixture helpers ─────────────────────────────────────────────────────
+
+    /// Build a minimal `SearchIndex` with one target protein.
+    fn make_search_index(accession: &str) -> SearchIndex {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: accession.to_string(),
+                description: String::new(),
+                sequence: b"MKWVTFISLL".to_vec(),
+            }],
+        };
+        SearchIndex::from_target_db(&target, "XXX_")
+    }
+
+    /// Build an empty `SearchIndex` for tests that don't inspect protein values.
+    fn make_empty_search_index() -> SearchIndex {
+        let target = ProteinDb { proteins: vec![] };
+        SearchIndex::from_target_db(&target, "XXX_")
+    }
 
     fn make_spectrum(title: &str, scan: i32, precursor_mz: f64) -> Spectrum {
         Spectrum {
@@ -355,9 +383,10 @@ mod tests {
         let params = make_params_ppm();
         let spectra: Vec<Spectrum> = vec![];
         let queues: Vec<TopNQueue> = vec![];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, "test.mgf", true).unwrap();
+        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
 
         let cols = parse_header(&buf);
         assert_eq!(
@@ -390,9 +419,10 @@ mod tests {
         let params = make_params_ppm();
         let spectra: Vec<Spectrum> = vec![];
         let queues: Vec<TopNQueue> = vec![];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, "test.mzML", false).unwrap();
+        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mzML", false).unwrap();
 
         let cols = parse_header(&buf);
         assert!(!cols.contains(&"Title".to_string()), "Title column must be absent when is_mgf=false");
@@ -407,9 +437,10 @@ mod tests {
         let params = make_params_ppm();
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
         let queues = vec![TopNQueue::new(10)]; // empty queue
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, "test.mgf", true).unwrap();
+        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
 
         let rows = parse_rows(&buf);
         assert!(rows.is_empty(), "empty queue should produce no data rows");
@@ -428,9 +459,10 @@ mod tests {
         queue.push(make_psm(0, 8.0,  1e-8));  // middle (rank 2)
         queue.push(make_psm(0, 6.0,  1e-6));  // worst (rank 3)
         let queues = vec![queue];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, "test.mgf", true).unwrap();
+        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 3, "should have 3 data rows");
@@ -499,9 +531,10 @@ mod tests {
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
         let queues = vec![queue];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, "test.mgf", true).unwrap();
+        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
@@ -513,6 +546,70 @@ mod tests {
             peptide_col.contains("+15.99"),
             "peptide column should contain oxidation mod delta (+15.99...), got: {}",
             peptide_col
+        );
+    }
+
+    // ── Test 6: real accession emitted for target PSM ─────────────────────────
+
+    #[test]
+    fn tsv_writes_real_accession_when_search_index_provided() {
+        let accession = "sp|P02769|ALBU_BOVIN";
+        let idx = make_search_index(accession);
+
+        let params = make_params_ppm();
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        // protein_index = 0 → first target protein
+        let psm = make_psm(0, 10.0, 1e-5); // protein_index defaults to 0
+        let mut queue = TopNQueue::new(10);
+        queue.push(psm);
+        let queues = vec![queue];
+
+        let mut buf = Vec::<u8>::new();
+        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1);
+
+        let prot_col = cols.iter().position(|c| c == "Protein").expect("Protein column missing");
+        assert_eq!(
+            rows[0][prot_col], accession,
+            "Protein column should contain the real accession, not a PROT_N placeholder"
+        );
+    }
+
+    // ── Test 7: decoy accession carries decoy prefix ──────────────────────────
+
+    #[test]
+    fn tsv_writes_decoy_prefix_for_decoy_protein() {
+        let accession = "sp|P02769|ALBU_BOVIN";
+        let idx = make_search_index(accession);
+
+        let params = make_params_ppm();
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        // SearchIndex: 1 target (idx 0) + 1 decoy (idx 1, accession = "XXX_<base>")
+        let mut psm = make_psm(0, 10.0, 1e-5);
+        psm.candidate.protein_index = 1;
+        psm.candidate.is_decoy = true;
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(psm);
+        let queues = vec![queue];
+
+        let mut buf = Vec::<u8>::new();
+        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1);
+
+        let prot_col = cols.iter().position(|c| c == "Protein").expect("Protein column missing");
+        let expected_decoy = format!("XXX_{}", accession);
+        assert_eq!(
+            rows[0][prot_col], expected_decoy,
+            "Protein column should carry decoy prefix for decoy PSM"
         );
     }
 }

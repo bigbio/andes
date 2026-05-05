@@ -40,10 +40,13 @@ fn rust_pin_header_matches_java_pin_fixture_header_exactly() {
     params.enzyme = Enzyme::Trypsin;
     params.charge_range = 2..=3;
 
-    // Empty PIN — header-only.
+    // Empty PIN — header-only. We need a SearchIndex for the API, but the
+    // header writer doesn't use protein accessions, so an empty index suffices.
+    let empty_target = engine::ProteinDb::default();
+    let empty_idx = SearchIndex::from_target_db(&empty_target, "XXX_");
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("empty.pin");
-    output::write_pin(&rust_pin_path, &[], &[], &params, "XXX_").expect("write_pin");
+    output::write_pin(&rust_pin_path, &[], &[], &params, &empty_idx, "XXX_").expect("write_pin");
 
     let rust_header = first_line(&rust_pin_path);
 
@@ -109,7 +112,7 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
     // 2. Write Rust PIN.
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("bsa.pin");
-    output::write_pin(&rust_pin_path, &spectra, &queues, &params, "XXX_").expect("write_pin");
+    output::write_pin(&rust_pin_path, &spectra, &queues, &params, &idx, "XXX_").expect("write_pin");
 
     // 3. Read Java + Rust PIN files and check column counts on first 5 data rows.
     let java_pin_path = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");

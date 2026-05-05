@@ -21,7 +21,7 @@
 //!   Will be added in Task 6 or a later phase.
 
 pub mod tsv;
-pub use tsv::write_tsv;
+pub use tsv::{write_tsv, write_tsv_to};
 
 pub mod pin;
-pub use pin::write_pin;
+pub use pin::{write_pin, write_pin_to};

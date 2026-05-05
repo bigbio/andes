@@ -199,7 +199,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Search complete: {non_empty} / {} spectra have PSMs", spectra.len());
 
     // ── 8. Write PIN ─────────────────────────────────────────────────────────
-    output::write_pin(&cli.output_pin, &spectra, &queues, &params, &cli.decoy_prefix)?;
+    output::write_pin(&cli.output_pin, &spectra, &queues, &params, &idx, &cli.decoy_prefix)?;
     eprintln!("Wrote PIN: {}", cli.output_pin.display());
 
     // ── 9. Write TSV (optional) ───────────────────────────────────────────────
@@ -209,7 +209,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cli.spectrum.display().to_string());
-        output::write_tsv(tsv_path, &spectra, &queues, &params, &spec_file_name, true)?;
+        output::write_tsv(tsv_path, &spectra, &queues, &params, &idx, &spec_file_name, true)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 

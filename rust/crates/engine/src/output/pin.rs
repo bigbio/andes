@@ -39,10 +39,11 @@
 //!   zero-stubbed. Phase 7/Task 6 (stretch) fills these from Phase 5's scored
 //!   spectrum. Percolator runs but with reduced discrimination power until Task 6.
 //!
-//! * **Proteins**: single column with `"PROT_{protein_index}"`. Java emits full
-//!   accession strings; multi-protein PSMs get additional tab-separated columns.
-//!   Rust MVP uses the index as a placeholder — Task 4 (CLI wiring) threads in
-//!   a real `&ProteinDb` for full accession lookup.
+//! * **Proteins**: single column with the real protein accession resolved from
+//!   `SearchIndex::protein_at(psm.candidate.protein_index)`.  Decoy accessions
+//!   already carry the decoy prefix (set by [`target_plus_decoy`]).  Java emits
+//!   full accession strings; multi-protein PSMs get additional tab-separated
+//!   columns — multi-protein support is a future followup.
 //!
 //! * **peplen**: Java uses `match.getLength()` which is the sequence length
 //!   *including* flanking residues (`length - 2` when emitting). Rust's
@@ -61,6 +62,7 @@ use std::io::{self, BufWriter, Write};
 
 use crate::mass::{ISOTOPE, PROTON};
 use crate::psm::{PsmMatch, TopNQueue};
+use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use crate::spectrum::Spectrum;
 
@@ -71,17 +73,23 @@ use crate::spectrum::Spectrum;
 /// `spectra` and `queues` must be parallel slices (same length): `queues[i]`
 /// holds the top-N PSMs for `spectra[i]`.
 ///
+/// `search_index` is used to resolve protein accessions from
+/// `psm.candidate.protein_index`.  The combined target+decoy `ProteinDb`
+/// inside `search_index` already carries decoy prefixes in the decoy
+/// accessions, so no separate prefix string is needed for accession lookup.
+///
 /// `decoy_prefix` is used to derive the `Label` column (target = 1, decoy = -1).
 pub fn write_pin(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     params: &SearchParams,
+    search_index: &SearchIndex,
     decoy_prefix: &str,
 ) -> io::Result<()> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
-    write_pin_to(&mut writer, spectra, queues, params, decoy_prefix)
+    write_pin_to(&mut writer, spectra, queues, params, search_index, decoy_prefix)
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp files.
@@ -92,6 +100,7 @@ pub fn write_pin_to<W: Write>(
     spectra: &[Spectrum],
     queues: &[TopNQueue],
     params: &SearchParams,
+    search_index: &SearchIndex,
     decoy_prefix: &str,
 ) -> io::Result<()> {
     let _ = decoy_prefix; // used indirectly via psm.candidate.is_decoy
@@ -105,7 +114,7 @@ pub fn write_pin_to<W: Write>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        write_spectrum_rows(writer, spec, queue, min_charge, max_charge)?;
+        write_spectrum_rows(writer, spec, queue, min_charge, max_charge, search_index)?;
     }
     Ok(())
 }
@@ -171,6 +180,7 @@ fn write_spectrum_rows<W: Write>(
     queue: &TopNQueue,
     min_charge: u8,
     max_charge: u8,
+    search_index: &SearchIndex,
 ) -> io::Result<()> {
     // Sort best-first (lowest spec_e_value first, then highest score).
     let psms = queue.clone().into_sorted_vec();
@@ -205,6 +215,7 @@ fn write_spectrum_rows<W: Write>(
             rank2_spec_e_value,
             min_charge,
             max_charge,
+            search_index,
         )?;
     }
     Ok(())
@@ -221,6 +232,7 @@ fn write_psm_row<W: Write>(
     rank2_spec_e_value: f64,
     min_charge: u8,
     max_charge: u8,
+    search_index: &SearchIndex,
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
@@ -293,9 +305,9 @@ fn write_psm_row<W: Write>(
     // Peptide: pre.SEQ_WITH_MODS.post  (uses existing Display impl)
     let peptide_str = format!("{}", psm.candidate.peptide);
 
-    // Proteins: MVP uses protein_index as placeholder
-    // Divergence: Java uses full accession; multi-protein PSMs get extra tab-separated columns.
-    let proteins_str = format_protein(psm);
+    // Proteins: resolved from SearchIndex. Decoy accessions already carry the
+    // prefix (set by target_plus_decoy). Multi-protein emit is a future followup.
+    let proteins_str = format_protein(psm, search_index);
 
     // Build row — tab-separated
     // Fixed prefix
@@ -449,13 +461,22 @@ fn trim_scientific(s: &str) -> String {
     }
 }
 
-/// Format a protein identifier from the PSM (MVP placeholder).
+/// Resolve a protein accession from the SearchIndex for a given PSM.
+///
+/// `SearchIndex::db` is a combined target+decoy `ProteinDb` where decoy
+/// accessions already carry the decoy prefix (set by `target_plus_decoy`).
+/// We look up `psm.candidate.protein_index` directly — no prefix arithmetic
+/// needed.  Falls back to `"PROT_{idx}"` if the index is out of range.
 ///
 /// Java emits full accession strings; multi-protein PSMs get additional
-/// tab-separated `Proteins` columns. For MVP, emit `"PROT_{index}"`.
-/// Task 4 (CLI wiring) threads in a `&ProteinDb` for full accession lookup.
-fn format_protein(psm: &PsmMatch) -> String {
-    format!("PROT_{}", psm.candidate.protein_index)
+/// tab-separated `Proteins` columns — multi-protein support is a future
+/// followup.
+fn format_protein(psm: &PsmMatch, search_index: &SearchIndex) -> String {
+    let idx = psm.candidate.protein_index;
+    match search_index.protein_at(idx) {
+        Some(prot) => prot.accession.clone(),
+        None => format!("PROT_{idx}"),
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -466,10 +487,31 @@ mod tests {
     use crate::amino_acid::AminoAcid;
     use crate::candidate_gen::Candidate;
     use crate::peptide::Peptide;
+    use crate::protein::{Protein, ProteinDb};
+    use crate::search_index::SearchIndex;
     use crate::tolerance::PrecursorTolerance;
     use crate::tolerance::Tolerance;
 
     // ── fixture helpers ─────────────────────────────────────────────────────
+
+    /// Build a minimal `SearchIndex` with one target protein.
+    fn make_search_index(accession: &str) -> SearchIndex {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: accession.to_string(),
+                description: String::new(),
+                sequence: b"MKWVTFISLL".to_vec(),
+            }],
+        };
+        SearchIndex::from_target_db(&target, "XXX_")
+    }
+
+    /// Build an empty `SearchIndex` for tests that don't care about protein
+    /// accessions (header / label / charge tests).
+    fn make_empty_search_index() -> SearchIndex {
+        let target = ProteinDb { proteins: vec![] };
+        SearchIndex::from_target_db(&target, "XXX_")
+    }
 
     fn make_spectrum(title: &str, scan: i32, precursor_mz: f64) -> Spectrum {
         Spectrum {
@@ -575,9 +617,10 @@ mod tests {
         let params = make_params(2..=3);
         let spectra: Vec<Spectrum> = vec![];
         let queues: Vec<TopNQueue> = vec![];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         assert_eq!(
@@ -596,9 +639,10 @@ mod tests {
         let mut queue = TopNQueue::new(10);
         queue.push(make_psm(0, 10.0, 1e-5, true, 2)); // decoy
         let queues = vec![queue];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1, "should have 1 data row");
@@ -617,9 +661,10 @@ mod tests {
         let mut queue = TopNQueue::new(10);
         queue.push(make_psm(0, 10.0, 1e-5, false, 2)); // charge 2
         let queues = vec![queue];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -640,9 +685,10 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
         let queues = vec![TopNQueue::new(10)]; // empty
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
 
         let rows = parse_rows(&buf);
         assert!(rows.is_empty(), "empty queue should produce no data rows");
@@ -658,9 +704,10 @@ mod tests {
         let mut queue = TopNQueue::new(10);
         queue.push(make_psm(0, 10.0, 1e-10, false, 2)); // single PSM → no rank-2
         let queues = vec![queue];
+        let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -678,6 +725,72 @@ mod tests {
             val.abs() < 1e-9,
             "lnDeltaSpecEValue should be 0 when no rank-2 exists, got: {}",
             val
+        );
+    }
+
+    // ── Test 6: real accession emitted for target PSM ─────────────────────────
+
+    #[test]
+    fn pin_writes_real_accession_when_search_index_provided() {
+        let accession = "sp|P02769|ALBU_BOVIN";
+        let idx = make_search_index(accession);
+
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        // protein_index = 0 → first target protein
+        let mut psm = make_psm(0, 10.0, 1e-5, false, 2);
+        psm.candidate.protein_index = 0;
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(psm);
+        let queues = vec![queue];
+
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1);
+
+        let prot_idx = cols.iter().position(|c| c == "Proteins").expect("Proteins column missing");
+        assert_eq!(
+            rows[0][prot_idx], accession,
+            "Proteins column should contain the real accession, not a PROT_N placeholder"
+        );
+    }
+
+    // ── Test 7: decoy accession carries decoy prefix ──────────────────────────
+
+    #[test]
+    fn pin_writes_decoy_prefix_for_decoy_protein() {
+        let accession = "sp|P02769|ALBU_BOVIN";
+        let idx = make_search_index(accession);
+
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        // SearchIndex has 1 target (idx 0) + 1 decoy (idx 1). Decoy accession
+        // is set to "XXX_sp|P02769|ALBU_BOVIN" by target_plus_decoy.
+        let mut psm = make_psm(0, 10.0, 1e-5, true, 2);
+        psm.candidate.protein_index = 1; // decoy slot
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(psm);
+        let queues = vec![queue];
+
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1);
+
+        let prot_idx = cols.iter().position(|c| c == "Proteins").expect("Proteins column missing");
+        let expected_decoy = format!("XXX_{}", accession);
+        assert_eq!(
+            rows[0][prot_idx], expected_decoy,
+            "Proteins column should carry decoy prefix for decoy PSM"
         );
     }
 }

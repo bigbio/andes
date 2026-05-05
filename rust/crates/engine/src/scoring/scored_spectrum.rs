@@ -123,9 +123,13 @@ impl<'a> ScoredSpectrum<'a> {
         // Compute prob_peak. Java: spec.getPeptideMass() = (precursor_mz - PROTON) * charge.
         // approxNumBins = parentMass / (mme.getValue() * 2).
         // probPeak = (size if size>0 else 1) / max(approxNumBins, 1).
+        //
+        // Mirrors Java's mme.getValue() (raw, not Da-converted) for Java SpecEValue parity.
+        // For Ppm(20), Java's getValue() returns 20.0 — NOT the Da-equivalent — so
+        // approxNumBins is computed with the literal stored value.
         let parent_mass = neutral_mass; // = (precursor_mz - PROTON) * charge
-        let mme_da = param.mme.as_da(parent_mass);
-        let approx_num_bins = if mme_da > 0.0 { parent_mass / (mme_da * 2.0) } else { 1.0 };
+        let mme_raw = param.mme.raw_value();
+        let approx_num_bins = if mme_raw > 0.0 { parent_mass / (mme_raw * 2.0) } else { 1.0 };
         let peak_count = if kept_count == 0 { 1 } else { kept_count } as f64;
         let prob_peak = (peak_count / approx_num_bins.max(1.0)) as f32;
 
@@ -375,6 +379,12 @@ impl<'a> ScoredSpectrum<'a> {
 /// Java: per-partition main ion = highest-frequency-at-rank-1 prefix ion.
 /// We pick the Prefix ion with the highest freq at rank-1 index (index 0).
 /// Falls back to `Prefix { charge: 1, offset_bits: 0 }` if table is empty.
+///
+/// TODO(Phase 6 followup): main_ion selection currently uses per-partition
+/// rank-1 prefix-ion frequency from rank_dist_table. Java's
+/// NewRankScorer.determineIonTypes (lines 611-640) aggregates fragOFFTable
+/// across segments and considers all ion types. For HCD these agree; for
+/// ETD/ECD they may diverge. Revisit if Task 9/10 parity tests fail.
 fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) -> IonType {
     let fallback = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
     let table = match param.rank_dist_table.get(&partition) {
@@ -474,6 +484,89 @@ mod tests {
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
         }
+    }
+
+    // --- Phase 6 / Task 4 spec-review fix: prob_peak uses raw mme value ---
+
+    /// Verify that `prob_peak` is computed using the raw stored mme value (Java
+    /// parity), not the Da-converted form. For `Tolerance::Ppm(20.0)`:
+    ///   Java formula: approxNumBins = parentMass / (mme.getValue() * 2)
+    ///                               = parentMass / (20.0 * 2)
+    ///   NOT:          parentMass / (as_da(parentMass) * 2)
+    ///                               = parentMass / (parentMass * 20e-6 * 2)
+    #[test]
+    fn prob_peak_uses_raw_mme_value_not_da_converted() {
+        use crate::activation::ActivationMethod;
+        use crate::instrument::InstrumentType;
+        use crate::param_model::SpecDataType;
+        use crate::protocol::Protocol;
+        use crate::tolerance::Tolerance;
+        use std::collections::HashMap;
+
+        // Spectrum: precursor_mz=501.00727649 → neutral_mass≈(501.007-PROTON)*2≈1000.0 Da,
+        // charge=2.
+        let precursor_mz = 501.007_276_49_f64; // ≈ (1000/2) + PROTON
+        let s = Spectrum {
+            title: "parity_test".into(),
+            precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks: vec![(100.0, 1.0), (200.0, 2.0), (300.0, 3.0)],
+        };
+
+        let param = Param {
+            version: 10001,
+            data_type: SpecDataType {
+                activation: ActivationMethod::HCD,
+                instrument: InstrumentType::QExactive,
+                enzyme: None,
+                protocol: Protocol::Automatic,
+            },
+            mme: Tolerance::Ppm(20.0),
+            apply_deconvolution: false,
+            deconvolution_error_tolerance: 0.0,
+            charge_hist: vec![(2, 100)],
+            min_charge: 2,
+            max_charge: 2,
+            num_segments: 1,
+            partitions: vec![],
+            num_precursor_off: 0,
+            precursor_off_map: HashMap::new(),
+            frag_off_table: HashMap::new(),
+            max_rank: 3,
+            rank_dist_table: HashMap::new(),
+            error_scaling_factor: 0,
+            ion_err_dist_table: HashMap::new(),
+            noise_err_dist_table: HashMap::new(),
+            ion_existence_table: HashMap::new(),
+        };
+
+        let ss = ScoredSpectrum::new(&s, &param, 2);
+
+        // Expected: raw_value = 20.0, parent_mass ≈ (501.007276 - PROTON) * 2.
+        let parent_mass = (precursor_mz - PROTON) * 2.0;
+        let raw_mme = 20.0_f64;
+        let approx_num_bins = parent_mass / (raw_mme * 2.0);
+        let expected_prob_peak = (3.0_f64 / approx_num_bins.max(1.0)) as f32;
+
+        // The Da-converted form would be: parent_mass / (parent_mass * 20e-6 * 2) ≈ 25_000.0,
+        // giving prob_peak ≈ 3/25000 = 0.00012, not the raw-value result ≈ 3/100 = 0.06.
+        let wrong_approx_num_bins = parent_mass / (parent_mass * 20e-6 * 2.0);
+        let wrong_prob_peak = (3.0_f64 / wrong_approx_num_bins.max(1.0)) as f32;
+
+        // Sanity: raw and Da results must differ significantly for this to be a meaningful test.
+        assert!(
+            (expected_prob_peak - wrong_prob_peak).abs() > 0.001,
+            "test precondition failed: Ppm raw vs Da-converted did not produce different prob_peak values"
+        );
+
+        assert!(
+            (ss.prob_peak - expected_prob_peak).abs() < 1e-5,
+            "prob_peak={} but expected={} (Java raw formula). Wrong Da-converted value would be {}",
+            ss.prob_peak, expected_prob_peak, wrong_prob_peak
+        );
     }
 
     // --- Phase 6 / Task 4 tests: node_score and edge_score ---

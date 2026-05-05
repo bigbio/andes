@@ -15,6 +15,17 @@ impl Tolerance {
             Tolerance::Da(da)   => *da,
         }
     }
+
+    /// Return the raw numeric value stored in the tolerance — NOT converted to Da.
+    ///
+    /// For `Ppm(20.0)` this returns `20.0`; for `Da(0.5)` it returns `0.5`.
+    /// Mirrors Java's `Tolerance.getValue()` which returns the stored primitive.
+    pub fn raw_value(&self) -> f64 {
+        match self {
+            Tolerance::Ppm(v) => *v,
+            Tolerance::Da(v)  => *v,
+        }
+    }
 }
 
 /// Asymmetric precursor mass tolerance. Phase B's calibrator produces

@@ -1,49 +1,104 @@
 //! Generating-function DP: computes the score distribution
 //! `P(score | random peptide of given nominal mass)`.
 //!
-//! Phase 6 Task 2: bounded DP machinery taking a generic increment-score
-//! callback. Phase 6 Task 3+ will bind the callback to RankScorer.
+//! # Phase 6 Task 2 — uniform-prior DP
 //!
-//! Algorithm (simplified vs Java's GeneratingFunction.java):
+//! `compute_uniform` (formerly `compute`) takes a generic increment-score
+//! callback and uses a uniform AA prior (`1/N`). Kept for tests and
+//! reference; not used in the production search path.
 //!
-//! For each nominal_mass M in 0..=max_mass:
-//!   if M == 0:
-//!     score_dist[0].add_prob(0, 1.0)
-//!   else:
-//!     For each amino-acid index aa_idx with nominal_mass aa_mass:
-//!       if M - aa_mass < 0: continue
-//!       inc = increment_score(M, aa_idx)
-//!       For each score s in score_dist[M - aa_mass]:
-//!         p = score_dist[M - aa_mass].get_probability(s)
-//!         score_dist[M].add_prob(s + inc, p / num_aas)
+//! # Phase 6 Task 6 — graph-based DP
 //!
-//! Java reference: edu.ucsd.msjava.msgf.GeneratingFunction.
+//! `compute` (and `with_score_threshold`) mirror Java's
+//! `PrimitiveGeneratingFunction.computeGeneratingFunction()` and
+//! `setUpScoreThreshold()`. They operate on a pre-built `PrimitiveAaGraph`
+//! and produce a single final `ScoreDist` (plus enzyme adjustment).
 
+use crate::aa_set::AminoAcidSet;
+use crate::gf::primitive_graph::PrimitiveAaGraph;
 use crate::gf::score_dist::{ScoreBound, ScoreDist};
 
+/// Errors returned by the graph-based GF DP.
 #[derive(thiserror::Error, Debug)]
 pub enum GfError {
     #[error("score range is empty: min_score {min} >= max_score {max}")]
     EmptyScoreRange { min: i32, max: i32 },
     #[error("aa_masses is empty")]
     NoAminoAcids,
+    #[error("sink node has no reachable distribution")]
+    SinkUnreachable,
 }
 
+/// Result of the generating-function DP. Stores the final per-peptide score
+/// distribution and allows querying the spectral probability.
 #[derive(Debug, Clone)]
 pub struct GeneratingFunction {
-    /// One ScoreDist per nominal mass in 0..=max_mass.
+    /// One ScoreDist per nominal mass in 0..=max_mass (for `compute_uniform`),
+    /// or exactly one element (the final adjusted dist) for `compute`.
     score_dists: Vec<ScoreDist>,
     score_bound: ScoreBound,
 }
 
 impl GeneratingFunction {
+    // -----------------------------------------------------------------------
+    // Graph-based public API (Phase 6 Task 6)
+    // -----------------------------------------------------------------------
+
+    /// Compute the GF over a precomputed primitive graph. Mirrors Java
+    /// `PrimitiveGeneratingFunction.computeGeneratingFunction()`.
+    pub fn compute(graph: &PrimitiveAaGraph, aa_set: &AminoAcidSet) -> Result<Self, GfError> {
+        compute_inner(graph, aa_set, None)
+    }
+
+    /// Pre-pass: prune nodes whose maximum possible final score is below
+    /// `score_threshold`. Mirrors Java `setUpScoreThreshold`; computes
+    /// `min_score_by_node` and uses it to skip irrelevant DP work.
+    pub fn with_score_threshold(
+        graph: &PrimitiveAaGraph,
+        score_threshold: i32,
+        aa_set: &AminoAcidSet,
+    ) -> Result<Self, GfError> {
+        let min_score_by_node = setup_score_threshold(graph, aa_set, score_threshold);
+        compute_inner(graph, aa_set, Some(min_score_by_node))
+    }
+
+    /// The final (enzyme-adjusted) score distribution.
+    pub fn score_dist(&self) -> &ScoreDist {
+        // For the graph-based path this is always index 0.
+        &self.score_dists[0]
+    }
+
+    /// Minimum score (inclusive) of the final distribution.
+    pub fn min_score(&self) -> i32 {
+        self.score_bound.min_score()
+    }
+
+    /// Maximum score (exclusive) of the final distribution.
+    pub fn max_score(&self) -> i32 {
+        self.score_bound.max_score()
+    }
+
+    /// Cumulative tail probability `P(random_score >= score)`. Mirrors Java
+    /// `PrimitiveGeneratingFunction.getSpectralProbability(score)`.
+    pub fn spectral_probability(&self, score: i32) -> f64 {
+        let dist = &self.score_dists[0];
+        if !dist.is_prob_set() {
+            return 1.0;
+        }
+        dist.get_spectral_probability(score)
+    }
+
+    // -----------------------------------------------------------------------
+    // Uniform-prior DP (Phase 6 Task 2; renamed from `compute`)
+    // -----------------------------------------------------------------------
+
     /// Compute the generating function up to `max_mass`. The
     /// `increment_score` callback returns the score added when the
     /// peptide is extended by amino acid `aa_idx` (an index into
     /// `aa_masses`) at mass position `mass`.
     ///
     /// Probability prior over amino acids: uniform `1 / aa_masses.len()`.
-    pub fn compute<F>(
+    pub fn compute_uniform<F>(
         max_mass: i32,
         score_bound: ScoreBound,
         aa_masses: &[i32],
@@ -116,10 +171,233 @@ impl GeneratingFunction {
     }
 
     /// Total spectral probability at the given mass and score: P(X >= score).
-    pub fn spectral_probability(&self, mass: i32, score: i32) -> Option<f64> {
+    /// Used by the uniform-prior path.
+    pub fn spectral_probability_at(&self, mass: i32, score: i32) -> Option<f64> {
         self.score_dist_at(mass).map(|d| d.get_spectral_probability(score))
     }
 }
+
+// -----------------------------------------------------------------------
+// Phase 6 Task 6 — private implementation
+// -----------------------------------------------------------------------
+
+/// Translate Java `setUpScoreThreshold` (lines 36-87).
+///
+/// Returns a `min_score_by_node` array of length `graph.node_count` where
+/// `min_score_by_node[ni]` is the minimum score needed at node `ni` for a
+/// path from `ni` to the sink to reach >= `score_threshold`.
+/// Nodes that cannot reach `score_threshold` keep `i32::MAX`.
+fn setup_score_threshold(
+    graph: &PrimitiveAaGraph,
+    aa_set: &AminoAcidSet,
+    score_threshold: i32,
+) -> Vec<i32> {
+    let node_count = graph.node_count;
+    let source_idx = graph.source_node_idx;
+    let sink_idx = graph.sink_node_idx;
+
+    // Adjust threshold for enzyme neighboring-AA credit (Java line 48-50).
+    let adjusted_score = if graph.enzyme.is_some() {
+        score_threshold - aa_set.neighboring_aa_cleavage_credit()
+    } else {
+        score_threshold
+    };
+
+    let mut min_score_by_node = vec![i32::MAX; node_count];
+    min_score_by_node[sink_idx] = adjusted_score;
+
+    // Propagate from sink backward through sink's own incoming edges
+    // (Java lines 58-66).
+    for e in graph.edge_offset[sink_idx]..graph.edge_offset[sink_idx + 1] {
+        let prev_mass = graph.edge_prev_node[e];
+        if let Some(prev_idx) = graph.node_index_for_mass(prev_mass) {
+            let new_min = adjusted_score.saturating_sub(graph.edge_score[e]);
+            if new_min < min_score_by_node[prev_idx] {
+                min_score_by_node[prev_idx] = new_min;
+            }
+        }
+    }
+
+    // Walk nodes in reverse order (Java line 68: `for (int ni = nodeCount-1; ni >= 0; ni--)`).
+    for ni in (0..node_count).rev() {
+        if ni == source_idx || ni == sink_idx {
+            continue;
+        }
+        if min_score_by_node[ni] == i32::MAX {
+            continue;
+        }
+        let cur_mass = graph.active_nodes[ni];
+        if cur_mass == graph.peptide_mass {
+            continue;
+        }
+        let cur_node_score = graph.node_scores[ni];
+
+        for e in graph.edge_offset[ni]..graph.edge_offset[ni + 1] {
+            let prev_mass = graph.edge_prev_node[e];
+            if let Some(prev_idx) = graph.node_index_for_mass(prev_mass) {
+                let new_min = min_score_by_node[ni]
+                    .saturating_sub(cur_node_score)
+                    .saturating_sub(graph.edge_score[e]);
+                if new_min < min_score_by_node[prev_idx] {
+                    min_score_by_node[prev_idx] = new_min;
+                }
+            }
+        }
+    }
+
+    min_score_by_node
+}
+
+/// Core DP. Translates Java `computeGeneratingFunction` (lines 89-205).
+fn compute_inner(
+    graph: &PrimitiveAaGraph,
+    aa_set: &AminoAcidSet,
+    min_score_by_node: Option<Vec<i32>>,
+) -> Result<GeneratingFunction, GfError> {
+    let node_count = graph.node_count;
+    let source_idx = graph.source_node_idx;
+    let sink_idx = graph.sink_node_idx;
+
+    // dist_by_node[ni] = Some(dist) once computed; None = not yet reachable.
+    let mut dist_by_node: Vec<Option<ScoreDist>> = vec![None; node_count];
+
+    // Source has full probability at score 0 (Java lines 101-103).
+    let mut source_dist = ScoreDist::new(0, 1, false, true);
+    source_dist.set_prob(0, 1.0);
+    dist_by_node[source_idx] = Some(source_dist);
+
+    // Scratch buffer for valid edge indices (Java lines 106-111).
+    let max_edges_per_node = (0..node_count)
+        .map(|ni| graph.edge_offset[ni + 1] - graph.edge_offset[ni])
+        .max()
+        .unwrap_or(0);
+    let mut valid_edges: Vec<usize> = Vec::with_capacity(max_edges_per_node);
+
+    // Forward DP over nodes in index order (Java lines 114-176).
+    for ni in 0..node_count {
+        if ni == source_idx {
+            continue;
+        }
+
+        let cur_node_score = graph.node_scores[ni];
+
+        // Skip if this node is pruned by the threshold pre-pass.
+        if let Some(ref msbn) = min_score_by_node {
+            if msbn[ni] == i32::MAX {
+                continue;
+            }
+        }
+
+        // Determine initial curMinScore (Java lines 124-129).
+        let mut cur_min_score: i32 = match min_score_by_node {
+            Some(ref msbn) => msbn[ni],
+            None => i32::MAX,
+        };
+        let mut cur_max_score: i32 = i32::MIN;
+
+        valid_edges.clear();
+
+        // Scan incoming edges (Java lines 132-149).
+        for e in graph.edge_offset[ni]..graph.edge_offset[ni + 1] {
+            let prev_mass = graph.edge_prev_node[e];
+            let prev_idx = match graph.node_index_for_mass(prev_mass) {
+                Some(idx) => idx,
+                None => continue,
+            };
+            let prev_dist = match dist_by_node[prev_idx].as_ref() {
+                Some(d) => d,
+                None => continue,
+            };
+
+            let combined_score = cur_node_score + graph.edge_score[e];
+            let possible_max = prev_dist.max_score() + combined_score;
+            if possible_max > cur_max_score {
+                cur_max_score = possible_max;
+            }
+
+            // Only update min from predecessor when NOT using threshold pre-pass.
+            if min_score_by_node.is_none() {
+                let possible_min = prev_dist.min_score() + combined_score;
+                if possible_min < cur_min_score {
+                    cur_min_score = possible_min;
+                }
+            }
+
+            valid_edges.push(e);
+        }
+
+        // Skip degenerate or out-of-bound ranges (Java lines 152-158).
+        let valid_count = valid_edges.len();
+        if cur_min_score >= cur_max_score || valid_count == 0 {
+            continue;
+        }
+        if cur_min_score < -10000 || cur_max_score > 10000 {
+            continue;
+        }
+
+        // Allocate and fill cur_dist (Java lines 160-169).
+        let mut cur_dist = ScoreDist::new(cur_min_score, cur_max_score, false, true);
+
+        for &e in &valid_edges {
+            let prev_mass = graph.edge_prev_node[e];
+            // Safety: we already verified these are valid above.
+            let prev_idx = graph.node_index_for_mass(prev_mass).unwrap();
+            let prev_dist = dist_by_node[prev_idx].as_ref().unwrap();
+            let combined_score = cur_node_score + graph.edge_score[e];
+            cur_dist.add_prob_dist(prev_dist, combined_score, graph.edge_prob[e] as f64);
+        }
+
+        // Underflow guard at max_score - 1 (Java lines 171-173).
+        let guard_score = cur_max_score - 1;
+        if cur_dist.get_probability(guard_score) == 0.0 {
+            cur_dist.set_prob(guard_score, f32::MIN_POSITIVE as f64);
+        }
+
+        dist_by_node[ni] = Some(cur_dist);
+    }
+
+    // Extract sink distribution (Java lines 179-185).
+    let sink_dist = dist_by_node[sink_idx]
+        .take()
+        .ok_or(GfError::SinkUnreachable)?;
+
+    let min_score = sink_dist.min_score();
+    let max_score = sink_dist.max_score();
+
+    if max_score <= min_score {
+        return Err(GfError::EmptyScoreRange { min: min_score, max: max_score });
+    }
+
+    // Enzyme neighboring-AA adjustment (Java lines 188-200).
+    let final_dist: ScoreDist = if let Some(enzyme) = graph.enzyme {
+        if !enzyme.residues().is_empty() {
+            let credit  = aa_set.neighboring_aa_cleavage_credit();
+            let penalty = aa_set.neighboring_aa_cleavage_penalty();
+            let prob_clv = aa_set.prob_cleavage_sites(enzyme) as f64;
+
+            let mut fd = ScoreDist::new(min_score + penalty, max_score + credit, false, true);
+            fd.add_prob_dist(&sink_dist, credit, prob_clv);
+            fd.add_prob_dist(&sink_dist, penalty, 1.0 - prob_clv);
+            fd
+        } else {
+            sink_dist
+        }
+    } else {
+        sink_dist
+    };
+
+    let final_min = final_dist.min_score();
+    let final_max = final_dist.max_score();
+
+    Ok(GeneratingFunction {
+        score_dists: vec![final_dist],
+        score_bound: ScoreBound::new(final_min, final_max),
+    })
+}
+
+// -----------------------------------------------------------------------
+// Tests (uniform-prior DP — renamed from compute to compute_uniform)
+// -----------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -138,7 +416,7 @@ mod tests {
     #[test]
     fn empty_peptide_at_mass_zero() {
         let aa_masses = aa_masses_uniform_one();
-        let gf = GeneratingFunction::compute(
+        let gf = GeneratingFunction::compute_uniform(
             10,                    // max_mass
             ScoreBound::new(0, 5), // score range [0, 5)
             &aa_masses,
@@ -152,7 +430,7 @@ mod tests {
     #[test]
     fn dist_at_mass_one_with_zero_increment() {
         let aa_masses = aa_masses_uniform_one();
-        let gf = GeneratingFunction::compute(
+        let gf = GeneratingFunction::compute_uniform(
             5,
             ScoreBound::new(0, 5),
             &aa_masses,
@@ -169,7 +447,7 @@ mod tests {
         // Increment = 1 always. At mass 1: prob mass moves from score 0 (mass 0)
         // to score 1 (mass 1).
         let aa_masses = aa_masses_uniform_one();
-        let gf = GeneratingFunction::compute(
+        let gf = GeneratingFunction::compute_uniform(
             5,
             ScoreBound::new(0, 5),
             &aa_masses,
@@ -186,7 +464,7 @@ mod tests {
     #[test]
     fn unreachable_mass_has_zero_prob() {
         // AA masses 2 and 3; mass 1 is unreachable.
-        let gf = GeneratingFunction::compute(
+        let gf = GeneratingFunction::compute_uniform(
             5,
             ScoreBound::new(0, 5),
             &[2, 3],
@@ -202,7 +480,7 @@ mod tests {
         // AAs of mass 1 each. AA[0] gives +0 score, AA[1] gives +1 score.
         // At mass 1: prob 0.5 at score 0 (from AA[0]), prob 0.5 at score 1 (from AA[1]).
         let inc = |_m: i32, aa: u8| if aa == 0 { 0 } else { 1 };
-        let gf = GeneratingFunction::compute(
+        let gf = GeneratingFunction::compute_uniform(
             3,
             ScoreBound::new(0, 5),
             &[1, 1],
@@ -218,7 +496,7 @@ mod tests {
         // AA[0] = +1 always, AA[1] = -1 always. At mass 5, distribution
         // is binomial-like over scores -5..+5.
         let inc = |_m: i32, aa: u8| if aa == 0 { 1 } else { -1 };
-        let gf = GeneratingFunction::compute(
+        let gf = GeneratingFunction::compute_uniform(
             5,
             ScoreBound::new(-10, 10),
             &[1, 1],
@@ -232,4 +510,5 @@ mod tests {
         }
         assert!((total - 1.0).abs() < 1e-9, "total prob = {}", total);
     }
+
 }

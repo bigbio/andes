@@ -39,6 +39,10 @@ pub struct PrimitiveAaGraph {
     /// `true` = prefix-ion direction (b-ions dominate); derived from
     /// `scored_spec.main_ion_direction()`. Governs which end is the source.
     pub direction: bool,
+    /// Optional enzyme used during graph construction. Stored so that the
+    /// GF DP can apply the neighboring-AA cleavage adjustment (Java
+    /// `computeGeneratingFunction` lines 188-200).
+    pub enzyme: Option<Enzyme>,
     /// The smallest nominal mass that can appear as a node (may be negative
     /// for very light residues or N-terminal mods).
     pub min_node_mass: i32,
@@ -375,6 +379,7 @@ impl PrimitiveAaGraph {
         Self {
             peptide_mass,
             direction,
+            enzyme,
             min_node_mass,
             mass_offset,
             node_count,

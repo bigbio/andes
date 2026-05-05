@@ -196,8 +196,10 @@ impl<'a> ScoredSpectrum<'a> {
 
     /// For tests only: mutate the main_ion to a different ion type.
     /// Allows test code to exercise both prefix and suffix direction paths.
-    #[cfg(test)]
-    pub(crate) fn set_main_ion_for_test(&mut self, ion: IonType) {
+    /// Not gated by `#[cfg(test)]` so that integration tests in `tests/`
+    /// can call it (integration test binaries compile the crate without
+    /// the test cfg).
+    pub fn set_main_ion_for_test(&mut self, ion: IonType) {
         self.main_ion = ion;
     }
 

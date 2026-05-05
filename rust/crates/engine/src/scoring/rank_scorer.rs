@@ -19,7 +19,7 @@ pub struct RankScorer {
     /// Cached log scores: `(partition, non-noise ion_type) → Vec<f32>` where
     /// the Vec has length `max_rank + 1` (indices 0..max_rank-1 for ranks
     /// 1..max_rank, index max_rank for the missing-ion slot).
-    log_table: HashMap<(Partition, IonType), Vec<f32>>,
+    pub(crate) log_table: HashMap<(Partition, IonType), Vec<f32>>,
     /// Cached `min(rank - 1, max_rank - 1)` clamp constant.
     max_rank: u32,
 }

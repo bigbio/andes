@@ -27,15 +27,15 @@ pub fn score_psm(
     if charge == 0 {
         return 0.0;
     }
-    let partition = pick_partition(peptide, charge, scorer);
 
-    // Predict b/y ions at charges 1..=max(1, charge-1).
     let max_ion_charge = charge.saturating_sub(1).max(1);
     let predicted = predict_by_ions(peptide, 1..=max_ion_charge);
 
     let mut total = 0.0_f32;
     for p in &predicted {
         let ion_type = ion_kind_to_param_ion_type(p.kind, p.charge);
+        // Per-ion partition based on the predicted ion's m/z segment.
+        let partition = partition_for_ion(peptide, charge, p.mz, scorer);
         match scored_spec.nearest_peak_rank(p.mz, tolerance_da) {
             Some(rank) => total += scorer.node_score(partition, ion_type, rank),
             None => total += scorer.missing_ion_score(partition, ion_type),
@@ -53,28 +53,25 @@ fn ion_kind_to_param_ion_type(kind: IonKind, charge: u8) -> IonType {
     }
 }
 
-/// Pick the partition for this (peptide, charge). Scans the scorer's
-/// log_table for partitions matching the requested charge, picking the
-/// one whose `parent_mass` is closest to the peptide mass. Falls back to
-/// a synthesised partition if nothing matches.
-fn pick_partition(peptide: &Peptide, charge: u8, scorer: &RankScorer) -> Partition {
-    let target_mass = peptide.mass() as f32;
-    let z = charge as i32;
-    let mut best: Option<(Partition, f32)> = None;
-    for ((part, _ion), _) in scorer.log_table.iter() {
-        if part.charge != z {
-            continue;
-        }
-        let dist = (part.parent_mass - target_mass).abs();
-        if best.as_ref().map_or(true, |(_, d)| dist < *d) {
-            best = Some((*part, dist));
-        }
-    }
-    best.map(|(p, _)| p).unwrap_or(Partition {
-        charge: z,
-        parent_mass: target_mass,
-        seg_num: 0,
-    })
+/// Look up the partition for a single predicted ion at `ion_mz`, using
+/// the ion's position within the parent mass range to select the segment.
+/// Mirrors Java's `getPartition(charge, parentMass, getSegmentNum(peakMz, parentMass))`.
+fn partition_for_ion(
+    peptide: &Peptide,
+    charge: u8,
+    ion_mz: f64,
+    scorer: &RankScorer,
+) -> Partition {
+    let parent_mass = peptide.mass();
+    let param = scorer.param();
+    let seg_num = param.segment_num_for(ion_mz, parent_mass);
+    param
+        .find_partition(charge as i32, parent_mass as f32, seg_num)
+        .unwrap_or(Partition {
+            charge: charge as i32,
+            parent_mass: parent_mass as f32,
+            seg_num,
+        })
 }
 
 #[cfg(test)]

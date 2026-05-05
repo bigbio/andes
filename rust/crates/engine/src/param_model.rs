@@ -41,6 +41,71 @@ pub struct Param {
 }
 
 impl Param {
+    /// Find the partition matching `(charge, parent_mass, seg_num)` via
+    /// the same lookup Java uses (`partitionSet.floor(target)`):
+    /// returns the largest partition ≤ target by lex order on
+    /// (charge, parent_mass.to_bits(), seg_num).
+    ///
+    /// Falls back gracefully:
+    /// - If no partition matches the requested charge: use the smallest
+    ///   charge available with the requested mass + segment.
+    /// - If charge > all available: use the largest available charge.
+    pub fn find_partition(&self, charge: i32, parent_mass: f32, seg_num: i32) -> Option<Partition> {
+        if self.partitions.is_empty() {
+            return None;
+        }
+
+        // Build the target partition for the floor lookup.
+        let target = Partition { charge, parent_mass, seg_num };
+
+        // partitions is already sorted (Phase 2 guarantee). Find the largest
+        // partition <= target.
+        // Use binary search via partition_point.
+        let pos = self.partitions.partition_point(|p| p <= &target);
+        if pos > 0 {
+            // partitions[pos - 1] is the largest <= target.
+            let candidate = self.partitions[pos - 1];
+            if candidate.charge == charge {
+                return Some(candidate);
+            }
+            // Floor returned a partition with smaller charge; Java's logic
+            // says: if no exact-charge match, find smallest available charge,
+            // then floor on (smallest_charge, parent_mass, seg_num).
+        }
+
+        // Fall back: find smallest charge in partitions, retry.
+        let min_charge = self.partitions.iter().map(|p| p.charge).min()?;
+        let max_charge = self.partitions.iter().map(|p| p.charge).max()?;
+        let fallback_charge = if charge < min_charge {
+            min_charge
+        } else if charge > max_charge {
+            max_charge
+        } else {
+            // charge is in range but had no exact match — already handled above.
+            return self.partitions.last().copied();
+        };
+        let fallback_target = Partition { charge: fallback_charge, parent_mass, seg_num };
+        let fallback_pos = self.partitions.partition_point(|p| p <= &fallback_target);
+        if fallback_pos > 0 {
+            let candidate = self.partitions[fallback_pos - 1];
+            if candidate.charge == fallback_charge {
+                return Some(candidate);
+            }
+        }
+        // Last resort: just return any partition with the fallback charge.
+        self.partitions.iter().find(|p| p.charge == fallback_charge).copied()
+    }
+
+    /// Compute the segment number for a peak m/z relative to the peptide's
+    /// parent mass. Mirrors Java's `getSegmentNum`.
+    pub fn segment_num_for(&self, peak_mz: f64, parent_mass: f64) -> i32 {
+        if parent_mass <= 0.0 || self.num_segments <= 0 {
+            return 0;
+        }
+        let seg = (peak_mz / parent_mass * self.num_segments as f64) as i32;
+        seg.min(self.num_segments - 1).max(0)
+    }
+
     /// Parse a complete `.param` byte stream produced by Java's
     /// `DataOutputStream`. Errors on buffer underruns, unknown enum
     /// names, missing validation marker, or trailing bytes.
@@ -706,5 +771,101 @@ mod tests {
             }
             other => panic!("expected BadEnum, got {:?}", other),
         }
+    }
+
+    fn make_param() -> Param {
+        use crate::activation::ActivationMethod;
+        use crate::instrument::InstrumentType;
+        use crate::protocol::Protocol;
+        use crate::tolerance::Tolerance;
+        use std::collections::HashMap;
+
+        Param {
+            version: 10001,
+            data_type: SpecDataType {
+                activation: ActivationMethod::HCD,
+                instrument: InstrumentType::QExactive,
+                enzyme: None,
+                protocol: Protocol::Automatic,
+            },
+            mme: Tolerance::Ppm(20.0),
+            apply_deconvolution: false,
+            deconvolution_error_tolerance: 0.0,
+            charge_hist: vec![],
+            min_charge: 2,
+            max_charge: 3,
+            num_segments: 1,
+            partitions: vec![],
+            num_precursor_off: 0,
+            precursor_off_map: HashMap::new(),
+            frag_off_table: HashMap::new(),
+            max_rank: 3,
+            rank_dist_table: HashMap::new(),
+            error_scaling_factor: 0,
+            ion_err_dist_table: HashMap::new(),
+            noise_err_dist_table: HashMap::new(),
+            ion_existence_table: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn find_partition_exact_charge_match() {
+        let mut param = make_param();
+        param.partitions = vec![
+            Partition { charge: 2, parent_mass: 500.0, seg_num: 0 },
+            Partition { charge: 2, parent_mass: 500.0, seg_num: 1 },
+            Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 },
+            Partition { charge: 3, parent_mass: 500.0, seg_num: 0 },
+        ];
+        // Sort matches the Phase 2 invariant.
+        param.partitions.sort();
+
+        // Target (2, 800.0, 0) → lex floor:
+        // Sorted charge-2 partitions: (2,500.0,0), (2,500.0,1), (2,1000.0,0).
+        // Largest ≤ (2,800.0,0): (2,500.0,1) because 500.0 < 800.0 and seg_num
+        // doesn't matter once parent_mass is strictly less.
+        let p = param.find_partition(2, 800.0, 0).expect("find");
+        assert_eq!(p.charge, 2);
+        assert_eq!(p.parent_mass, 500.0);
+        assert_eq!(p.seg_num, 1);
+    }
+
+    #[test]
+    fn find_partition_low_charge_fallback() {
+        let mut param = make_param();
+        param.partitions = vec![
+            Partition { charge: 2, parent_mass: 500.0, seg_num: 0 },
+            Partition { charge: 3, parent_mass: 500.0, seg_num: 0 },
+        ];
+        param.partitions.sort();
+
+        // Target charge 1 (below all): falls back to smallest charge = 2.
+        let p = param.find_partition(1, 500.0, 0).expect("find with fallback");
+        assert_eq!(p.charge, 2);
+    }
+
+    #[test]
+    fn find_partition_high_charge_fallback() {
+        let mut param = make_param();
+        param.partitions = vec![
+            Partition { charge: 2, parent_mass: 500.0, seg_num: 0 },
+            Partition { charge: 3, parent_mass: 500.0, seg_num: 0 },
+        ];
+        param.partitions.sort();
+
+        // Target charge 5 (above all): falls back to largest = 3.
+        let p = param.find_partition(5, 500.0, 0).expect("find with fallback");
+        assert_eq!(p.charge, 3);
+    }
+
+    #[test]
+    fn segment_num_clamps_to_max() {
+        let mut param = make_param();
+        param.num_segments = 3;
+        // peak_mz / parent_mass × num_segments = floor calculation
+        assert_eq!(param.segment_num_for(50.0, 100.0), 1);
+        assert_eq!(param.segment_num_for(99.0, 100.0), 2);
+        assert_eq!(param.segment_num_for(100.0, 100.0), 2);  // clamped
+        assert_eq!(param.segment_num_for(120.0, 100.0), 2);  // clamped
     }
 }

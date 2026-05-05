@@ -29,7 +29,7 @@ fn exact_mass_match() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
     let spec = make_spectrum(mz, Some(charge as i32));
     let tol = PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
-    let err = matches_precursor(&spec, &peptide, charge, &tol).expect("should match");
+    let err = matches_precursor(&spec, &peptide, charge, 0, &tol).expect("should match");
     assert!(err.mass_error_ppm.abs() < 0.001, "error too large: {}", err.mass_error_ppm);
 }
 
@@ -42,7 +42,7 @@ fn within_tolerance() {
     let mz_drifted = (mass + drift + charge as f64 * PROTON) / charge as f64;
     let spec = make_spectrum(mz_drifted, Some(charge as i32));
     let tol = PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
-    assert!(matches_precursor(&spec, &peptide, charge, &tol).is_some());
+    assert!(matches_precursor(&spec, &peptide, charge, 0, &tol).is_some());
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn outside_tolerance() {
     let mz_drifted = (mass + drift + charge as f64 * PROTON) / charge as f64;
     let spec = make_spectrum(mz_drifted, Some(charge as i32));
     let tol = PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
-    assert!(matches_precursor(&spec, &peptide, charge, &tol).is_none());
+    assert!(matches_precursor(&spec, &peptide, charge, 0, &tol).is_none());
 }
 
 #[test]
@@ -65,9 +65,9 @@ fn da_tolerance() {
     let mz_drifted = (mass + 0.005 + charge as f64 * PROTON) / charge as f64;
     let spec = make_spectrum(mz_drifted, Some(charge as i32));
     let tol = PrecursorTolerance::symmetric(Tolerance::Da(0.01));
-    assert!(matches_precursor(&spec, &peptide, charge, &tol).is_some());
+    assert!(matches_precursor(&spec, &peptide, charge, 0, &tol).is_some());
     let tol_tight = PrecursorTolerance::symmetric(Tolerance::Da(0.001));
-    assert!(matches_precursor(&spec, &peptide, charge, &tol_tight).is_none());
+    assert!(matches_precursor(&spec, &peptide, charge, 0, &tol_tight).is_none());
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn asymmetric_tolerance_rejects_excessive_negative_drift() {
     let spec = make_spectrum(mz_drifted, Some(charge as i32));
     // Asymmetric: 5 ppm left (negative), 20 ppm right (positive). 15 ppm > 5 → reject.
     let tol = PrecursorTolerance::asymmetric(Tolerance::Ppm(5.0), Tolerance::Ppm(20.0));
-    let result = matches_precursor(&spec, &peptide, charge, &tol);
+    let result = matches_precursor(&spec, &peptide, charge, 0, &tol);
     assert!(result.is_none(), "expected no match (15 ppm > 5 ppm left tolerance)");
 }
 
@@ -92,5 +92,5 @@ fn charge_zero_returns_none() {
     let peptide = make_peptide(b"AR");
     let spec = make_spectrum(100.0, Some(2));
     let tol = PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
-    assert!(matches_precursor(&spec, &peptide, 0, &tol).is_none());
+    assert!(matches_precursor(&spec, &peptide, 0, 0, &tol).is_none());
 }

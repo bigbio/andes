@@ -18,6 +18,11 @@ pub struct SearchParams {
     pub precursor_tolerance: PrecursorTolerance,
     /// Charges to try for spectra without explicit charge (default 2..=3).
     pub charge_range: RangeInclusive<u8>,
+    /// Isotope offsets to try when matching the precursor mass (default
+    /// -1..=2, matching Java MS-GF+'s `-ti -1,2` flag). Each offset is
+    /// a unit of `ISOTOPE` (~1.00335 Da) subtracted from the spectrum's
+    /// observed neutral mass before comparison.
+    pub isotope_error_range: RangeInclusive<i8>,
     /// Top-N PSMs to keep per spectrum (default 10).
     pub top_n_psms_per_spectrum: u32,
 }
@@ -30,6 +35,7 @@ impl SearchParams {
     /// - variable mods per peptide: 3
     /// - precursor tolerance: 20 ppm symmetric
     /// - charge range: 2..=3
+    /// - isotope error range: -1..=2 (matches Java's `-ti -1,2` default)
     /// - top-N PSMs: 10
     pub fn default_tryptic(aa_set: AminoAcidSet) -> Self {
         Self {
@@ -41,6 +47,7 @@ impl SearchParams {
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
             charge_range: 2..=3,
+            isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
         }
     }
@@ -62,6 +69,8 @@ mod tests {
         assert_eq!(params.max_variable_mods_per_peptide, 3);
         assert_eq!(*params.charge_range.start(), 2);
         assert_eq!(*params.charge_range.end(), 3);
+        assert_eq!(*params.isotope_error_range.start(), -1);
+        assert_eq!(*params.isotope_error_range.end(), 2);
         assert_eq!(params.top_n_psms_per_spectrum, 10);
         match params.precursor_tolerance.left {
             Tolerance::Ppm(v) => assert_eq!(v, 20.0),

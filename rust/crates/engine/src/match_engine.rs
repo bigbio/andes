@@ -1,7 +1,7 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
 use crate::candidate_gen::{enumerate_candidates, Candidate};
-use crate::precursor_matching::matches_precursor;
+use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmMatch, TopNQueue};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
@@ -32,8 +32,16 @@ pub fn match_spectra(
 
         for cand in &candidates {
             for &z in &charges_to_try {
-                if let Some(err) = matches_precursor(spec, &cand.peptide, z, &params.precursor_tolerance) {
-                    let score = -(err.mass_error_ppm.abs() as f32);
+                let mut best_for_charge: Option<(MassError, f32)> = None;
+                for offset in params.isotope_error_range.clone() {
+                    if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
+                        let score = -(err.mass_error_ppm.abs() as f32);
+                        if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
+                            best_for_charge = Some((err, score));
+                        }
+                    }
+                }
+                if let Some((err, score)) = best_for_charge {
                     queues[spec_idx].push(PsmMatch {
                         spectrum_idx: spec_idx,
                         candidate: cand.clone(),

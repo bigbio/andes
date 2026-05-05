@@ -7,22 +7,14 @@
 //!   cleavage, Carbamidomethyl-C fixed + Oxidation-M variable: Java reports
 //!   217 unique target spectra (and 222 decoy entries).
 //! - Rust's Phase 4e pipeline produces top-N=10 PSMs per spectrum AFTER
-//!   precursor-mass filtering only (no scoring yet). Currently Rust catches
-//!   ~98 of Java's 217 target spectra (~45%).
+//!   precursor-mass filtering only (no scoring yet).
+//! - With isotope-error tolerance (`-ti -1..=2` matching Java's default),
+//!   Rust catches ALL 217 of Java's target spectra (100% coverage). Rust's
+//!   total of 308 target spectra exceeds Java's 217 because Rust hasn't
+//!   yet applied scoring/Q-value filtering (Phase 5+ work).
 //!
-//! Known feature gaps that explain the missed matches:
-//! - **Isotope-error tolerance** (Java's `-ti -1,2` flag): Java tries to
-//!   match each spectrum's precursor at offsets of -1, 0, +1, +2 Da (one
-//!   carbon-13 isotope). Rust currently only checks the 0-isotope match.
-//!   This is the dominant gap; addressing it should close most of the
-//!   missing 119 spectra. Phase 4f optimization or Phase 5 prep work.
-//! - **Multi-rank PSMs**: Java emits multiple PSMs per spectrum from the
-//!   same scan when several candidates score similarly. Rust's top-N=10
-//!   should already cover this; not the main gap.
-//!
-//! True per-spectrum candidate-count parity awaits a Java instrumentation
-//! pass that emits pre-GF candidate counts. Phase 5 scoring + isotope
-//! handling will tighten this gate.
+//! When Phase 5 scoring lands, this gate evolves to per-spectrum top-1
+//! peptide-identity parity (Rust's top-1 should equal Java's top-1).
 //!
 //! Reference fixture:
 //!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
@@ -182,18 +174,13 @@ fn rust_matches_superset_java_target_psms() {
         coverage * 100.0
     );
 
-    // Regression gate: Rust must catch at least 30% of Java's target spectra.
-    // Current baseline: ~34% intersection. The 30% floor catches accidental
-    // regressions while leaving headroom for the existing isotope-error gap.
-    // When isotope handling lands (Phase 4f or Phase 5 prep), this gate
-    // tightens to >= 95%.
-    //
-    // Note on the gap: Rust catches 98 spectra total; Java catches 217;
-    // intersection is 74. So 24 spectra are matched ONLY by Rust (likely
-    // because Rust's pre-scoring path is less selective) and 143 are
-    // matched ONLY by Java (likely isotope-error tolerance + scoring
-    // resolving ambiguous cases that Rust hasn't yet seen).
-    const MIN_COVERAGE: f64 = 0.30;
+    // Regression gate: Rust must catch at least 95% of Java's target spectra.
+    // Current baseline: 100% (217/217). The 95% floor catches accidental
+    // regressions while leaving a tiny buffer for spectrum-level edge cases.
+    // When Phase 5 scoring lands, this gate evolves to per-spectrum top-1
+    // peptide-identity match (Rust's top-1 == Java's top-1) at the same 95%
+    // threshold.
+    const MIN_COVERAGE: f64 = 0.95;
     assert!(
         coverage >= MIN_COVERAGE,
         "Rust caught only {:.1}% of Java's target spectra; minimum gate is {:.0}%. \

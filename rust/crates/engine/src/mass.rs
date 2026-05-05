@@ -26,6 +26,13 @@ pub const H2O: f64 = H * 2.0 + O;
 /// `Composition.PROTON = 1.00727649`.
 pub const PROTON: f64 = 1.00727649;
 
+/// Monoisotopic mass of carbon-13. Java: `Composition.C13 = 13.00335483`.
+pub const C13: f64 = 13.00335483;
+
+/// Mass difference between carbon-13 and carbon-12, used as the unit
+/// step for isotope-error tolerance. Java: `Composition.ISOTOPE = C13 - C`.
+pub const ISOTOPE: f64 = C13 - C;
+
 /// Single-precision integer-mass scaler. Java:
 /// `Constants.INTEGER_MASS_SCALER = 0.999497f`. Used in `nominal_from`
 /// via float-domain arithmetic to mirror Java's

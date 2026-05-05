@@ -864,10 +864,53 @@ mod tests {
         // We should observe at least one credit (K or R ending peptide) and
         // at least one penalty if the peptide has a non-KR residue at C-term.
         // Both K (128) and R (156) lead to edges if 781-128 and 781-156 are reachable.
-        let _ = (saw_credit, saw_penalty); // At least one of them must be present.
+        assert!(saw_credit, "expected at least one sink edge with cleavage credit (cleavable residue like K or R)");
+        assert!(saw_penalty, "expected at least one sink edge with cleavage penalty (non-cleavable residue)");
         // Verify at least some edge has a non-zero score at the sink.
         let has_nonzero = (g.edge_offset[sink_ni]..g.edge_offset[sink_ni + 1])
             .any(|e| g.edge_score[e] != 0);
         assert!(has_nonzero, "Trypsin cleavage scoring should produce non-zero scores at sink edges");
+    }
+
+    #[test]
+    fn graph_with_suffix_main_ion_swaps_node_score_arg_order() {
+        // Exercise the suffix direction code path (direction = false).
+        // When direction = false:
+        //   - source = C-term, sink = N-term (swapped from prefix direction)
+        //   - compute_node_scores swaps prefix/suffix args: (comp_mass, mass) instead of (mass, comp_mass)
+        //
+        // Build a ScoredSpectrum with the default prefix main ion, then mutate it to Suffix.
+        let spec = empty_spectrum();
+        let param = tiny_param();
+        let scorer = RankScorer::new(&param);
+        let mut ss = ScoredSpectrum::new_without_filtering(&spec);
+        // Mutate to a Suffix ion to exercise direction = false.
+        ss.set_main_ion_for_test(IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() });
+
+        // Verify main_ion_direction returns false for suffix.
+        assert!(!ss.main_ion_direction(), "Suffix ion should return direction = false");
+
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let g = PrimitiveAaGraph::new(
+            &aa_set,
+            200,
+            None,
+            &ss,
+            &scorer,
+            2,
+            1000.0,
+            0.5,
+            false,
+            false,
+        );
+
+        // With direction = false:
+        // - source at mass 0 becomes the C-term end (sink in prefix direction)
+        // - sink at mass peptide_mass becomes the N-term end (source in prefix direction)
+        assert!(!g.direction, "direction should be false for suffix ion");
+        assert_eq!(g.source_node_idx, 0, "source node is always index 0");
+        assert_eq!(g.active_nodes[g.source_node_idx], 0, "source node mass is always 0");
+        assert_eq!(g.active_nodes[g.sink_node_idx], 200, "sink node mass is peptide_mass");
+        assert!(g.node_count > 1, "graph must be non-empty (source != sink)");
     }
 }

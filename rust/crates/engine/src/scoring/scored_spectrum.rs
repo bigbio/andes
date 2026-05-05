@@ -194,6 +194,13 @@ impl<'a> ScoredSpectrum<'a> {
         self.main_ion.is_prefix()
     }
 
+    /// For tests only: mutate the main_ion to a different ion type.
+    /// Allows test code to exercise both prefix and suffix direction paths.
+    #[cfg(test)]
+    pub(crate) fn set_main_ion_for_test(&mut self, ion: IonType) {
+        self.main_ion = ion;
+    }
+
     /// Total number of peaks in the original spectrum (before any filtering).
     pub fn peak_count(&self) -> usize {
         self.spec.peaks.len()

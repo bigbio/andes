@@ -350,7 +350,11 @@ fn compute_inner(
         // Underflow guard at max_score - 1 (Java lines 171-173).
         let guard_score = cur_max_score - 1;
         if cur_dist.get_probability(guard_score) == 0.0 {
-            cur_dist.set_prob(guard_score, f32::MIN_POSITIVE as f64);
+            // Mirrors Java's `Float.MIN_VALUE` (smallest positive denormal f32 ~1.4e-45),
+            // NOT `f32::MIN_POSITIVE` (smallest positive normal ~1.18e-38). The Java GF
+            // uses denormal min as the underflow floor; using normal min instead biases
+            // SpecEValues low by ~7 OOM for short peptides (Phase 6/Task 10 finding).
+            cur_dist.set_prob(guard_score, f32::from_bits(1) as f64);
         }
 
         dist_by_node[ni] = Some(cur_dist);

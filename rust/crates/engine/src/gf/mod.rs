@@ -7,5 +7,7 @@
 //! Tasks 2+: GF DP itself, spectral-probability computation, etc.
 
 pub mod score_dist;
+pub mod generating_function;
 
 pub use score_dist::{ScoreBound, ScoreDist};
+pub use generating_function::{GeneratingFunction, GfError};

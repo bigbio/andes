@@ -19,6 +19,17 @@ pub struct PsmMatch {
     /// / "no signal". Set by `compute_spec_e_values_for_spectrum` after the
     /// per-candidate scoring loop.
     pub spec_e_value: f64,
+    /// Java's `getDeNovoScore()` — `gf_group.max_score() - 1` for the GF that
+    /// scored this peptide. Set during `compute_spec_e_values_for_spectrum`.
+    /// Sentinel: `i32::MIN` if not yet computed.
+    pub de_novo_score: i32,
+    /// Activation method captured from `param.data_type.activation` at scoring
+    /// time. `None` if unknown or not yet set.
+    pub activation_method: Option<crate::activation::ActivationMethod>,
+    /// `spec_e_value * num_distinct_peptides_at_length`. Sentinel: `1.0`.
+    /// Approximate: uses the candidate-set size filtered by the same length as
+    /// a proxy for `num_distinct_peptides` when no suffix-array helper exists.
+    pub e_value: f64,
 }
 
 impl PartialEq for PsmMatch {
@@ -113,6 +124,21 @@ impl TopNQueue {
         }
     }
 
+    /// Apply `f` to each PSM in-place (mutable borrow), then rebuild the heap.
+    ///
+    /// Used by Phase 7 enrichment to set `de_novo_score`, `e_value`, and other
+    /// fields that don't affect ordering. The heap is rebuilt after all mutations
+    /// (O(N) heapify) to maintain the invariant.
+    pub fn update_psm_enrichment<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        for psm in &mut psms {
+            f(psm);
+        }
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
     /// Drain into a Vec sorted best-first (smallest spec_e_value, then largest score).
     pub fn into_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
@@ -142,6 +168,9 @@ mod tests {
             mass_error_ppm: 0.0,
             score,
             spec_e_value: 1.0,  // default sentinel: "not yet computed"
+            de_novo_score: i32::MIN,  // sentinel: not yet computed
+            activation_method: None,
+            e_value: 1.0,  // sentinel: not yet computed
         }
     }
 
@@ -266,5 +295,23 @@ mod tests {
             v
         };
         assert_eq!(scores, vec![3.0, 2.0, 1.0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7 / Task 1: enrichment field sentinel defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn psm_match_default_de_novo_score_is_min() {
+        let m = make_match(0, 1.0);
+        assert_eq!(m.de_novo_score, i32::MIN,
+            "de_novo_score sentinel should be i32::MIN before enrichment");
+    }
+
+    #[test]
+    fn psm_match_default_e_value_is_one() {
+        let m = make_match(0, 1.0);
+        assert_eq!(m.e_value, 1.0,
+            "e_value sentinel should be 1.0 before enrichment");
     }
 }

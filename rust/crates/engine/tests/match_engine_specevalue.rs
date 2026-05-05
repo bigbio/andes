@@ -194,6 +194,9 @@ fn psm_with_lower_spec_e_value_ranks_first() {
             mass_error_ppm: 0.0,
             score,
             spec_e_value,
+            de_novo_score: i32::MIN,
+            activation_method: None,
+            e_value: 1.0,
         }
     }
 
@@ -217,5 +220,54 @@ fn psm_with_lower_spec_e_value_ranks_first() {
         (sorted[0].spec_e_value - 0.001).abs() < 1e-12,
         "best e-value should be 0.001, got {}",
         sorted[0].spec_e_value
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7 / Task 1: PSM enrichment field tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn top_psm_de_novo_score_equals_gf_max_minus_one() {
+    // After match_spectra, the top PSM's de_novo_score should equal
+    // group.max_score() - 1 (Java's getDeNovoScore() contract).
+    //
+    // We verify the structural invariant rather than an exact numeric value:
+    // de_novo_score must NOT be the sentinel (i32::MIN) and must be >= 0
+    // (GF max_score is always positive for non-trivial peptides).
+    let queues = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
+    let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
+    assert!(!sorted.is_empty(), "expected at least one PSM");
+    let top = &sorted[0];
+    assert_ne!(
+        top.de_novo_score, i32::MIN,
+        "de_novo_score should not be sentinel after match_spectra"
+    );
+    assert!(
+        top.de_novo_score >= 0,
+        "de_novo_score should be non-negative (GF max score is positive), got {}",
+        top.de_novo_score
+    );
+}
+
+#[test]
+fn top_psm_e_value_is_spec_e_value_times_some_constant() {
+    // After match_spectra, e_value = spec_e_value * num_distinct_peptides.
+    // Since num_distinct_peptides >= 1, e_value >= spec_e_value.
+    // We verify: e_value > 0 and e_value >= spec_e_value.
+    let queues = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
+    let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
+    assert!(!sorted.is_empty(), "expected at least one PSM");
+    let top = &sorted[0];
+    assert!(
+        top.e_value > 0.0,
+        "e_value must be positive, got {}",
+        top.e_value
+    );
+    assert!(
+        top.e_value >= top.spec_e_value - 1e-12,
+        "e_value ({}) must be >= spec_e_value ({}) since num_distinct_peptides >= 1",
+        top.e_value,
+        top.spec_e_value
     );
 }

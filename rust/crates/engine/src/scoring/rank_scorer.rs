@@ -106,15 +106,83 @@ impl RankScorer {
             0.0
         }
     }
+
+    /// Mirror Java `NewRankScorer.getIonExistenceScore(part, index, probPeak)`.
+    ///
+    /// Computes `log(ionExistenceProb[index] / noiseExistenceProb)` where:
+    /// - `index == 0` (nn): `noiseProb = (1 - probPeak)^2`
+    /// - `index == 3` (yy): `noiseProb = probPeak^2`
+    /// - otherwise: `noiseProb = probPeak * (1 - probPeak)`
+    ///
+    /// Returns 0.0 if the `ion_existence_table` has no entry for `part`.
+    pub fn ion_existence_score(&self, partition: Partition, index: usize, prob_peak: f32) -> f32 {
+        let table = match self.param.ion_existence_table.get(&partition) {
+            Some(t) => t,
+            None => return 0.0,
+        };
+        if index >= table.len() {
+            return 0.0;
+        }
+        let noise_existence_prob = match index {
+            0 => (1.0 - prob_peak) * (1.0 - prob_peak),
+            3 => prob_peak * prob_peak,
+            _ => prob_peak * (1.0 - prob_peak),
+        };
+        let mut ion_prob = table[index];
+        // Java: if (ionExistenceProb[index] == 0) ionExistenceProb[index] = 0.01f;
+        if ion_prob == 0.0 {
+            ion_prob = 0.01;
+        }
+        let denom = noise_existence_prob.max(f32::MIN_POSITIVE);
+        (ion_prob / denom).ln()
+    }
+
+    /// Mirror Java `NewRankScorer.getErrorScore(part, error)`.
+    ///
+    /// Converts `error` (in Da) to an index using `error_scaling_factor`,
+    /// clamps to `[-esf, esf]`, then returns
+    /// `log(ionErrHist[idx] / noiseErrHist[idx])`.
+    ///
+    /// Returns 0.0 if `error_scaling_factor == 0` or tables are missing.
+    pub fn error_score(&self, partition: Partition, error: f32) -> f32 {
+        let esf = self.param.error_scaling_factor;
+        if esf == 0 {
+            return 0.0;
+        }
+        let mut err_index = (error * esf as f32).round() as i32;
+        if err_index > esf { err_index = esf; }
+        else if err_index < -esf { err_index = -esf; }
+        err_index += esf;
+        let idx = err_index as usize;
+
+        let ion_err = match self.param.ion_err_dist_table.get(&partition) {
+            Some(v) => v,
+            None => return 0.0,
+        };
+        let noise_err = match self.param.noise_err_dist_table.get(&partition) {
+            Some(v) => v,
+            None => return 0.0,
+        };
+        if idx >= ion_err.len() || idx >= noise_err.len() {
+            return 0.0;
+        }
+        let ion_f = ion_err[idx];
+        let noise_f = noise_err[idx];
+        if ion_f <= 0.0 || noise_f <= 0.0 {
+            return 0.0;
+        }
+        (ion_f / noise_f).ln()
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Build a minimal Param for testing: 1 partition, 1 ion type
     /// (Prefix charge=1) + Noise, with hand-picked rank distributions.
-    fn tiny_param() -> Param {
+    /// Exposed as `pub(crate)` so `scored_spectrum` tests can reuse it.
+    pub(crate) fn tiny_param() -> Param {
         // Construct a Param skeleton manually. The fields we need:
         // - num_segments (used in chargeOrSeg formula)
         // - max_rank (number of rank slots)

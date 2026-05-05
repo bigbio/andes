@@ -106,6 +106,48 @@ impl Param {
         seg.min(self.num_segments - 1).max(0)
     }
 
+    /// Alias for `segment_num_for` matching the name used by the GF DP code
+    /// (`param.segment_num(theo_mz, parent_mass)`).
+    #[inline]
+    pub fn segment_num(&self, peak_mz: f64, parent_mass: f64) -> usize {
+        self.segment_num_for(peak_mz, parent_mass) as usize
+    }
+
+    /// Collect the unique ion types (Prefix and Suffix, not Noise) whose
+    /// partition has `seg_num == seg`. Derived from `rank_dist_table` keys.
+    ///
+    /// Returned in stable insertion order; duplicates suppressed.
+    pub fn ion_types_for_segment(&self, seg: usize) -> Vec<IonType> {
+        let mut seen: std::collections::HashSet<IonType> = std::collections::HashSet::new();
+        let mut out: Vec<IonType> = Vec::new();
+        for (partition, ion_table) in &self.rank_dist_table {
+            if partition.seg_num as usize != seg {
+                continue;
+            }
+            for ion in ion_table.keys() {
+                if matches!(ion, IonType::Noise) {
+                    continue;
+                }
+                if seen.insert(*ion) {
+                    out.push(*ion);
+                }
+            }
+        }
+        out
+    }
+
+    /// Find the partition for `(charge, parent_mass, seg_num)` using the
+    /// floor-lookup semantics of `find_partition`. Returns a synthetic
+    /// partition if none is found (so callers don't need to unwrap).
+    pub fn partition_for(&self, charge: u8, parent_mass: f64, seg_num: usize) -> Partition {
+        self.find_partition(charge as i32, parent_mass as f32, seg_num as i32)
+            .unwrap_or(Partition {
+                charge: charge as i32,
+                parent_mass: parent_mass as f32,
+                seg_num: seg_num as i32,
+            })
+    }
+
     /// Parse a complete `.param` byte stream produced by Java's
     /// `DataOutputStream`. Errors on buffer underruns, unknown enum
     /// names, missing validation marker, or trailing bytes.
@@ -386,6 +428,44 @@ impl IonType {
     pub fn is_prefix(&self) -> bool { matches!(self, IonType::Prefix { .. }) }
     pub fn is_suffix(&self) -> bool { matches!(self, IonType::Suffix { .. }) }
     pub fn is_noise(&self) -> bool { matches!(self, IonType::Noise) }
+
+    /// Compute the predicted m/z for this ion type given a node mass (in Da).
+    ///
+    /// For both `Prefix` and `Suffix`, the formula mirrors Java's
+    /// `IonType.PrefixIon.getMz(mass)` and `IonType.SuffixIon.getMz(mass)`:
+    ///   `mz = (node_mass + offset + charge * PROTON) / charge`
+    ///
+    /// For `Noise`, returns 0.0.
+    ///
+    /// Note: for suffix ions, `node_mass` is the suffix mass already in
+    /// MS-GF+ convention; callers are responsible for supplying the correct
+    /// directional mass.
+    pub fn mz(&self, node_mass: f64) -> f64 {
+        match self {
+            IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
+                let offset = f32::from_bits(*offset_bits) as f64;
+                let c = *charge as f64;
+                (node_mass + offset + c * crate::mass::PROTON) / c
+            }
+            IonType::Noise => 0.0,
+        }
+    }
+
+    /// Inverse of `mz`: given an observed peak m/z, recover the node mass.
+    ///
+    /// For `Prefix { charge, offset }`: `mass = mz * charge - charge * PROTON - offset`.
+    /// For `Suffix`: same formula.
+    /// For `Noise`: returns 0.0.
+    pub fn mass_from_mz(&self, mz: f64) -> f64 {
+        match self {
+            IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
+                let offset = f32::from_bits(*offset_bits) as f64;
+                let c = *charge as f64;
+                mz * c - c * crate::mass::PROTON - offset
+            }
+            IonType::Noise => 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -867,5 +947,107 @@ mod tests {
         assert_eq!(param.segment_num_for(99.0, 100.0), 2);
         assert_eq!(param.segment_num_for(100.0, 100.0), 2);  // clamped
         assert_eq!(param.segment_num_for(120.0, 100.0), 2);  // clamped
+    }
+
+    #[test]
+    fn ion_type_mz_prefix_charge1_offset0() {
+        use crate::mass::PROTON;
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let node_mass = 100.0_f64;
+        let expected = (node_mass + 0.0 + PROTON) / 1.0;
+        assert!((ion.mz(node_mass) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ion_type_mz_prefix_charge2() {
+        use crate::mass::PROTON;
+        let ion = IonType::Prefix { charge: 2, offset_bits: 0.0_f32.to_bits() };
+        let node_mass = 200.0_f64;
+        let expected = (node_mass + 0.0 + 2.0 * PROTON) / 2.0;
+        assert!((ion.mz(node_mass) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ion_type_mz_suffix_same_formula_as_prefix() {
+        // Java's SuffixIon.getMz uses the same formula as PrefixIon.getMz.
+        let offset = 18.01_f32;
+        let prefix = IonType::Prefix { charge: 1, offset_bits: offset.to_bits() };
+        let suffix = IonType::Suffix { charge: 1, offset_bits: offset.to_bits() };
+        let node_mass = 150.0_f64;
+        assert!((prefix.mz(node_mass) - suffix.mz(node_mass)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ion_type_mz_noise_returns_zero() {
+        assert_eq!(IonType::Noise.mz(100.0), 0.0);
+    }
+
+    #[test]
+    fn ion_type_mass_from_mz_round_trips() {
+        use crate::mass::PROTON;
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let node_mass = 100.0_f64;
+        let mz = ion.mz(node_mass);
+        let recovered = ion.mass_from_mz(mz);
+        assert!((recovered - node_mass).abs() < 1e-9,
+            "round-trip failed: original {node_mass}, recovered {recovered}, mz={mz}, PROTON={PROTON}");
+    }
+
+    #[test]
+    fn ion_types_for_segment_returns_unique() {
+        use crate::activation::ActivationMethod;
+        use crate::instrument::InstrumentType;
+        use crate::protocol::Protocol;
+        use crate::tolerance::Tolerance;
+        use std::collections::HashMap;
+
+        let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+        let prefix = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let suffix = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let noise = IonType::Noise;
+
+        let mut ion_table: HashMap<IonType, Vec<f32>> = HashMap::new();
+        ion_table.insert(prefix, vec![0.5, 0.1]);
+        ion_table.insert(suffix, vec![0.4, 0.1]);
+        ion_table.insert(noise, vec![0.05, 0.05]);
+
+        let mut rank_dist_table = HashMap::new();
+        rank_dist_table.insert(part, ion_table);
+
+        let param = Param {
+            version: 10001,
+            data_type: SpecDataType {
+                activation: ActivationMethod::HCD,
+                instrument: InstrumentType::QExactive,
+                enzyme: None,
+                protocol: Protocol::Automatic,
+            },
+            mme: Tolerance::Da(0.5),
+            apply_deconvolution: false,
+            deconvolution_error_tolerance: 0.0,
+            charge_hist: vec![],
+            min_charge: 2,
+            max_charge: 2,
+            num_segments: 1,
+            partitions: vec![part],
+            num_precursor_off: 0,
+            precursor_off_map: HashMap::new(),
+            frag_off_table: HashMap::new(),
+            max_rank: 2,
+            rank_dist_table,
+            error_scaling_factor: 0,
+            ion_err_dist_table: HashMap::new(),
+            noise_err_dist_table: HashMap::new(),
+            ion_existence_table: HashMap::new(),
+        };
+
+        let seg0 = param.ion_types_for_segment(0);
+        // Should return prefix and suffix (not noise), no duplicates.
+        assert_eq!(seg0.len(), 2);
+        assert!(seg0.iter().all(|i| !i.is_noise()));
+
+        // Segment 1 has no partitions → empty.
+        let seg1 = param.ion_types_for_segment(1);
+        assert!(seg1.is_empty());
     }
 }

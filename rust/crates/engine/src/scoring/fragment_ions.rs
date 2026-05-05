@@ -2,12 +2,51 @@
 //!
 //! Phase 5 Task 2: canonical b/y ions only, no neutral losses. Produces
 //! `(PredictedIon, m/z)` pairs at every requested charge.
+//!
+//! Phase 6 Task 4: adds `ions_for_node` for per-nominal-mass GF DP scoring.
 
 use std::ops::RangeInclusive;
 
 use crate::amino_acid::AminoAcid;
 use crate::mass::{H2O, PROTON};
+use crate::param_model::{IonType, Param};
 use crate::peptide::Peptide;
+
+/// For a single prefix or suffix node at `nominal_mass`, enumerate the
+/// `(ion_type, theo_mz)` pairs that contribute to its node score under
+/// `param`. Java reference: `NewScoredSpectrum.getNodeScore(nodeMass, isPrefix)`.
+///
+/// `is_prefix = true` → walk prefix ions (b-ions etc.); `false` → suffix (y-ions etc.).
+/// `parent_mass` / `charge` select the segment+partition used downstream.
+///
+/// Returns only the `(IonType, theo_mz)` pairs whose segment, when re-derived
+/// from `theo_mz`, matches the segment from which the ion was collected.
+pub fn ions_for_node(
+    nominal_mass: f64,
+    is_prefix: bool,
+    param: &Param,
+    parent_mass: f64,
+    charge: u8,
+) -> Vec<(IonType, f64)> {
+    let _ = charge; // kept for API parity; not needed in formula
+    let mut out = Vec::new();
+    let num_segs = param.num_segments as usize;
+    for seg in 0..num_segs {
+        for ion in param.ion_types_for_segment(seg) {
+            let theo_mz = match (is_prefix, ion) {
+                (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
+                (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                _ => continue,
+            };
+            // Mirror Java: verify the ion's computed mz actually falls in this segment.
+            if param.segment_num(theo_mz, parent_mass) != seg {
+                continue;
+            }
+            out.push((ion, theo_mz));
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IonKind {

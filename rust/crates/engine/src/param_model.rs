@@ -113,23 +113,26 @@ impl Param {
         self.segment_num_for(peak_mz, parent_mass) as usize
     }
 
+    /// Mirrors Java NewRankScorer.getIonTypes(charge, parentMass, seg) — ion-type membership comes from frag_off_table, not rank_dist_table.
+    ///
     /// Collect the unique ion types (Prefix and Suffix, not Noise) whose
-    /// partition has `seg_num == seg`. Derived from `rank_dist_table` keys.
+    /// partition has `seg_num == seg`. Derived from `frag_off_table` keys.
     ///
     /// Returned in stable insertion order; duplicates suppressed.
     pub fn ion_types_for_segment(&self, seg: usize) -> Vec<IonType> {
         let mut seen: std::collections::HashSet<IonType> = std::collections::HashSet::new();
         let mut out: Vec<IonType> = Vec::new();
-        for (partition, ion_table) in &self.rank_dist_table {
+        for (partition, frag_list) in &self.frag_off_table {
             if partition.seg_num as usize != seg {
                 continue;
             }
-            for ion in ion_table.keys() {
+            for fof in frag_list {
+                let ion = fof.ion_type;
                 if matches!(ion, IonType::Noise) {
                     continue;
                 }
-                if seen.insert(*ion) {
-                    out.push(*ion);
+                if seen.insert(ion) {
+                    out.push(ion);
                 }
             }
         }
@@ -1004,15 +1007,14 @@ mod tests {
         let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
         let prefix = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
         let suffix = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let noise = IonType::Noise;
 
-        let mut ion_table: HashMap<IonType, Vec<f32>> = HashMap::new();
-        ion_table.insert(prefix, vec![0.5, 0.1]);
-        ion_table.insert(suffix, vec![0.4, 0.1]);
-        ion_table.insert(noise, vec![0.05, 0.05]);
-
-        let mut rank_dist_table = HashMap::new();
-        rank_dist_table.insert(part, ion_table);
+        // Populate frag_off_table (the source of truth for ion_types_for_segment,
+        // mirroring Java NewRankScorer.getIonTypes which reads from fragOFFTable).
+        let mut frag_off_table: HashMap<Partition, Vec<FragmentOffsetFrequency>> = HashMap::new();
+        frag_off_table.insert(part, vec![
+            FragmentOffsetFrequency { ion_type: prefix, frequency: 0.7 },
+            FragmentOffsetFrequency { ion_type: suffix, frequency: 0.6 },
+        ]);
 
         let param = Param {
             version: 10001,
@@ -1032,9 +1034,9 @@ mod tests {
             partitions: vec![part],
             num_precursor_off: 0,
             precursor_off_map: HashMap::new(),
-            frag_off_table: HashMap::new(),
+            frag_off_table,
             max_rank: 2,
-            rank_dist_table,
+            rank_dist_table: HashMap::new(),
             error_scaling_factor: 0,
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
@@ -1045,6 +1047,8 @@ mod tests {
         // Should return prefix and suffix (not noise), no duplicates.
         assert_eq!(seg0.len(), 2);
         assert!(seg0.iter().all(|i| !i.is_noise()));
+        assert!(seg0.iter().any(|i| i.is_prefix()));
+        assert!(seg0.iter().any(|i| i.is_suffix()));
 
         // Segment 1 has no partitions → empty.
         let seg1 = param.ion_types_for_segment(1);

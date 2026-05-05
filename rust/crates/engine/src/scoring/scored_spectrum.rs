@@ -57,13 +57,13 @@ pub struct ScoredSpectrum<'a> {
     /// For `new_without_filtering` (tests / unit use) this is set to a
     /// sentinel value of `1.0` — callers relying on `edge_score` accuracy
     /// should use the `new` constructor with a full `Param`.
-    pub prob_peak: f32,
+    pub(crate) prob_peak: f32,
     /// The "main ion" for this spectrum's precursor partition. Used by
     /// `observed_node_mass` to look up the observed peak closest to a
     /// theoretical node mass. Set to a Prefix(charge=1, offset=0) fallback
     /// when `new_without_filtering` is used, or derived from the scorer's
     /// table when `new` is used.
-    pub main_ion: IonType,
+    pub(crate) main_ion: IonType,
 }
 
 impl<'a> ScoredSpectrum<'a> {
@@ -278,45 +278,45 @@ impl<'a> ScoredSpectrum<'a> {
     /// peak is near the theoretical m/z of the main ion.
     ///
     /// Java: `NewScoredSpectrum.getNodeMass(node)` — computes
-    /// `theo_mz = main_ion.getMz(node.getMass())`, looks up nearest peak,
-    /// returns `main_ion.getMass(peak_mz)` if found, else `-1` (we use `None`).
+    /// `theo_mz = main_ion.getMz(node.getMass())`, calls
+    /// `spec.getPeakByMass(theoMass, scorer.getMME())` which returns the
+    /// **highest-intensity** peak within the MME window (via
+    /// `Collections.max(matchList, new IntensityComparator())`), then returns
+    /// `main_ion.getMass(peak_mz)` if found, else `-1` (we use `None`).
     ///
-    /// `fragment_tolerance_da` here uses the scorer's MME tolerance to match
-    /// Java's `spec.getPeakByMass(theoMass, scorer.getMME())`.
+    /// Single-pass: uses `scorer.param().mme.as_da(theo_mz)` as the window,
+    /// selects the highest-intensity non-filtered peak in that window.
     pub fn observed_node_mass(
         &self,
         node_nominal: i32,
         scorer: &RankScorer,
         charge: u8,
         _parent_mass: f64,
-        fragment_tolerance_da: f64,
     ) -> Option<f64> {
+        let _ = charge; // not needed in formula; kept for API symmetry
         if node_nominal == 0 {
             // Source node mass is exactly 0 by convention (Java returns 0 when
             // `node.getNominalMass() == 0`).
             return Some(0.0);
         }
         let theo_mz = self.main_ion.mz(node_nominal as f64);
-        // Find the nearest peak in the mz window.
-        let mut best: Option<(f64, f64)> = None; // (peak_mz, delta)
-        for &(mz, _) in &self.spec.peaks {
-            let delta = (mz - theo_mz).abs();
-            if delta <= fragment_tolerance_da && best.as_ref().map_or(true, |(_, d)| delta < *d) {
-                best = Some((mz, delta));
+        let tol_da = scorer.param().mme.as_da(theo_mz);
+        // Select the highest-intensity peak within [theo_mz - tol_da, theo_mz + tol_da].
+        // Mirrors Java's Collections.max(matchList, new IntensityComparator()).
+        // Skip filtered peaks (ranks[i] == u32::MAX).
+        let mut best_peak_mz: Option<(f64, f32)> = None; // (mz, intensity)
+        for (i, &(mz, intensity)) in self.spec.peaks.iter().enumerate() {
+            if self.ranks[i] == u32::MAX {
+                continue;
+            }
+            if (mz - theo_mz).abs() > tol_da {
+                continue;
+            }
+            if best_peak_mz.as_ref().map_or(true, |&(_, best_int)| intensity > best_int) {
+                best_peak_mz = Some((mz, intensity));
             }
         }
-        // Also try the scorer's MME tolerance as Java does.
-        let mme_tol = scorer.param().mme.as_da(theo_mz);
-        if best.is_none() {
-            for &(mz, _) in &self.spec.peaks {
-                let delta = (mz - theo_mz).abs();
-                if delta <= mme_tol && best.as_ref().map_or(true, |(_, d)| delta < *d) {
-                    best = Some((mz, delta));
-                }
-            }
-        }
-        let _ = charge; // not needed in formula; kept for API symmetry
-        best.map(|(peak_mz, _)| self.main_ion.mass_from_mz(peak_mz))
+        best_peak_mz.map(|(peak_mz, _)| self.main_ion.mass_from_mz(peak_mz))
     }
 
     /// Mirror Java `NewScoredSpectrum.getEdgeScore(curNode, prevNode, theoMass)`.
@@ -328,7 +328,6 @@ impl<'a> ScoredSpectrum<'a> {
     ///   3. `score = ion_existence_score(part, idx, prob_peak)`.
     ///   4. If `idx == 3` (both observed), also add `error_score(cur_mass - prev_mass - theo_aa_mass)`.
     ///   5. Return `round(score) as i32`.
-    #[allow(clippy::too_many_arguments)]
     pub fn edge_score(
         &self,
         cur_nominal: i32,
@@ -337,7 +336,6 @@ impl<'a> ScoredSpectrum<'a> {
         scorer: &RankScorer,
         charge: u8,
         parent_mass: f64,
-        fragment_tolerance_da: f64,
     ) -> i32 {
         // Java: if (!scorer.supportEdgeScores()) return 0;
         // supportEdgeScores() ↔ errorScalingFactor != 0.
@@ -349,8 +347,8 @@ impl<'a> ScoredSpectrum<'a> {
         }
 
         // 1. Observed masses for cur and prev nodes.
-        let cur_mass = self.observed_node_mass(cur_nominal, scorer, charge, parent_mass, fragment_tolerance_da);
-        let prev_mass = self.observed_node_mass(prev_nominal, scorer, charge, parent_mass, fragment_tolerance_da);
+        let cur_mass = self.observed_node_mass(cur_nominal, scorer, charge, parent_mass);
+        let prev_mass = self.observed_node_mass(prev_nominal, scorer, charge, parent_mass);
 
         // 2. ion_existence_index: 1 if cur observed, +2 if prev observed.
         let mut idx = 0usize;
@@ -569,15 +567,49 @@ mod tests {
         );
     }
 
+    // --- Phase 6 / Task 4 followup: observed_node_mass picks highest-intensity ---
+
+    #[test]
+    fn observed_node_mass_picks_highest_intensity_peak_in_window() {
+        // Two peaks within the MME window of theo_mz; the higher-intensity one wins.
+        // tiny_param_with_ions uses Tolerance::Da(0.5) → window ±0.5 Da.
+        // main_ion = Prefix { charge: 1, offset_bits: 0 }
+        // theo_mz = (node_nominal + PROTON) / 1 = node_nominal + PROTON ≈ node_nominal + 1.00728.
+        // We use node_nominal = 100 → theo_mz ≈ 101.00728.
+        // Place two peaks both within ±0.5:
+        //   peak A at 101.1 (delta ≈ 0.093, low intensity 1.0) — CLOSER
+        //   peak B at 101.4 (delta ≈ 0.393, high intensity 100.0) — FARTHER but HIGHER intensity
+        // Java picks highest-intensity → peak B must win.
+        use crate::mass::PROTON;
+        let node_nominal = 100_i32;
+        let theo_mz = node_nominal as f64 + PROTON;
+        let closer_mz = theo_mz + 0.093; // delta 0.093 < 0.393
+        let farther_mz = theo_mz + 0.393; // still within ±0.5
+        let s = spec(&[(closer_mz, 1.0), (farther_mz, 100.0)]);
+        let param = tiny_param_with_ions(); // mme = Da(0.5)
+        let scorer = RankScorer::new(&param);
+        let ss = ScoredSpectrum::new_without_filtering(&s);
+        let result = ss.observed_node_mass(node_nominal, &scorer, 2, 1000.0);
+        let result_mass = result.expect("should find a peak in the window");
+        // main_ion.mass_from_mz(peak_mz): farther_mz * 1 - PROTON - 0 = farther_mz - PROTON
+        let expected_mass = farther_mz - PROTON;
+        let wrong_mass = closer_mz - PROTON;
+        assert!(
+            (result_mass - expected_mass).abs() < 1e-6,
+            "expected highest-intensity (farther) peak mass {expected_mass:.6}, \
+             got {result_mass:.6} (closest/wrong would be {wrong_mass:.6})"
+        );
+    }
+
     // --- Phase 6 / Task 4 tests: node_score and edge_score ---
 
     #[test]
-    fn node_score_zero_when_no_peaks_present() {
+    fn node_score_does_not_panic_on_empty_spectrum() {
         // Spectrum with no peaks; every ion is missing → all contributions
         // come from missing_ion_score. With no matching peaks the missing
         // score for Prefix(charge=1) is log(0.001/0.4) < 0, but we also
         // include the suffix side which has no ions. Sum rounds to a small
-        // negative; test only checks it doesn't panic.
+        // negative.
         let s = spec(&[]);
         let param = tiny_param_with_ions();
         let scorer = RankScorer::new(&param);
@@ -586,8 +618,7 @@ mod tests {
         // With empty ion_types_for_segment the suffix side contributes 0,
         // and no suffix ions are in the table → suffix score is 0.
         // The prefix missing-ion score is negative → total rounds negative or 0.
-        // Key assertion: call completes without panic.
-        let _ = n;
+        assert!(n <= 0, "missing-ion score on empty spectrum should be non-positive, got {n}");
     }
 
     #[test]
@@ -639,14 +670,19 @@ mod tests {
 
     #[test]
     fn node_score_nominal_mass_zero_prefix_returns_zero() {
-        // nominal_mass = 0 is the source node; theo_mz = PROTON (for charge=1, offset=0).
-        // Even if no peak at that m/z, the call should complete without panic.
+        // nominal_mass = 0 is the source node. Java's getNodeScore treats source
+        // and sink nodes specially, but our Rust impl evaluates ions_for_node(0.0, …).
+        // With prefix_nominal=0 and suffix_nominal=1000 (parent mass), and no peaks
+        // in the spectrum, the missing-ion score for the Prefix ion governs.
+        // The suffix nominal = 1000 > parent_mass → ions_for_node produces no suffix
+        // ions for that degenerate case. Net result: non-positive score.
         let s = spec(&[]);
         let param = tiny_param_with_ions();
         let scorer = RankScorer::new(&param);
         let ss = ScoredSpectrum::new_without_filtering(&s);
         let n = ss.node_score(0.0, 1000.0, &scorer, 2, 1000.0, 0.5);
-        let _ = n; // no panic
+        // Score is non-positive (missing-ion penalty applies).
+        assert!(n <= 0, "source-node score with empty spectrum should be non-positive, got {n}");
     }
 
     #[test]
@@ -657,7 +693,7 @@ mod tests {
         param.ion_existence_table.clear();
         let scorer = RankScorer::new(&param);
         let ss = ScoredSpectrum::new_without_filtering(&s);
-        let e = ss.edge_score(150, 100, 50.0, &scorer, 2, 1000.0, 0.5);
+        let e = ss.edge_score(150, 100, 50.0, &scorer, 2, 1000.0);
         assert_eq!(e, 0);
     }
 
@@ -669,7 +705,7 @@ mod tests {
         assert_eq!(param.error_scaling_factor, 0);
         let scorer = RankScorer::new(&param);
         let ss = ScoredSpectrum::new_without_filtering(&s);
-        let e = ss.edge_score(150, 100, 50.0, &scorer, 2, 1000.0, 0.5);
+        let e = ss.edge_score(150, 100, 50.0, &scorer, 2, 1000.0);
         assert_eq!(e, 0);
     }
 
@@ -751,12 +787,12 @@ mod tests {
         let s = spec(&[]);
         let scorer = RankScorer::new(&param);
         let ss = ScoredSpectrum::new_without_filtering(&s);
-        let e = ss.edge_score(150, 100, 50.0, &scorer, 2, 1000.0, 0.5);
+        let e = ss.edge_score(150, 100, 50.0, &scorer, 2, 1000.0);
         // ion_existence_score(part, 0, prob_peak): ionExistenceProb[0]=0.1,
         // noiseExistenceProb = (1-p)^2. With many bins prob_peak ≈ 0.
         // log(0.1 / ~1.0) = ~log(0.1) ≈ -2.3 → rounds to -2.
-        // We just check it's non-zero (confirmed the table is used).
-        let _ = e; // value is implementation-defined; main check: no panic.
+        // Confirm the table is used (non-zero result).
+        assert_ne!(e, 0, "edge_score should be nonzero with populated existence table");
     }
 
     #[test]

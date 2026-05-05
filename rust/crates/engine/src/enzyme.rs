@@ -99,6 +99,69 @@ impl Enzyme {
     pub fn allows_internal(self, _residue: u8) -> bool {
         true
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 6 / Task 5 GF helpers — mirroring Java Enzyme.isNTerm(),
+    // isCTerm(), isCleavable(char), and getResidues().
+    // -----------------------------------------------------------------------
+
+    /// Returns `true` for N-terminal enzymes (cleavage before the target
+    /// residue: LysN, AspN). `false` for C-terminal enzymes (Trypsin, LysC,
+    /// ArgC, Chymotrypsin, GluC) and for AlphaLP / NoCleavage /
+    /// NonSpecific.
+    ///
+    /// Java: `Enzyme.isNTerm()` — the flag is set at construction time and
+    /// hard-coded per variant. LysN and AspN are the only two builtins
+    /// with `isNTerm = true`.
+    pub fn is_n_term(self) -> bool {
+        matches!(self, Enzyme::LysN | Enzyme::AspN)
+    }
+
+    /// `true` for C-terminal enzymes. Mirrors Java `Enzyme.isCTerm() = !isNTerm`.
+    pub fn is_c_term(self) -> bool {
+        !self.is_n_term()
+    }
+
+    /// Direction-agnostic cleavability: returns `true` if `residue` is a
+    /// cleavage-target for this enzyme.
+    ///
+    /// For C-terminal enzymes (`after` list) this is equivalent to
+    /// `is_cleavable_after`. For N-terminal enzymes (`before` list) this is
+    /// equivalent to `is_cleavable_before`. For NoCleavage always `false`; for
+    /// AlphaLP / NonSpecific always `true`. Mirrors Java `Enzyme.isCleavable(char)`.
+    pub fn is_cleavable(self, residue: u8) -> bool {
+        match self.rules().universal {
+            Some(b) => b,
+            None => {
+                if self.is_n_term() {
+                    self.rules().before.contains(&residue)
+                } else {
+                    self.rules().after.contains(&residue)
+                }
+            }
+        }
+    }
+
+    /// The residues targeted by this enzyme's primary cleavage rule.
+    ///
+    /// For C-terminal enzymes: the `after` residues (e.g. `[b'K', b'R']` for
+    /// Trypsin). For N-terminal enzymes: the `before` residues (e.g. `[b'K']`
+    /// for LysN). For NoCleavage / NonSpecific / AlphaLP: `&[]` (the
+    /// `universal` flag handles cleavability; there are no specific residues).
+    ///
+    /// Java: `Enzyme.getResidues()` returns a `char[]` that is `null` for
+    /// universal enzymes and the target residues otherwise. We return `&[]`
+    /// in place of `null`.
+    pub fn residues(self) -> &'static [u8] {
+        if self.rules().universal.is_some() {
+            return &[];
+        }
+        if self.is_n_term() {
+            self.rules().before
+        } else {
+            self.rules().after
+        }
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +248,62 @@ mod tests {
         assert_eq!(Enzyme::from_name("Arg-C"), Some(Enzyme::ArgC));
         assert_eq!(Enzyme::from_name("aLP"), Some(Enzyme::AlphaLP));
         assert_eq!(Enzyme::from_name("AlphaLP"), Some(Enzyme::AlphaLP));
+    }
+
+    // Phase 6 / Task 5a: GF helper tests
+    #[test]
+    fn trypsin_is_c_term_and_cleaves_after_kr() {
+        assert!(!Enzyme::Trypsin.is_n_term());
+        assert!(Enzyme::Trypsin.is_c_term());
+        assert!(Enzyme::Trypsin.is_cleavable(b'K'));
+        assert!(Enzyme::Trypsin.is_cleavable(b'R'));
+        assert!(!Enzyme::Trypsin.is_cleavable(b'A'));
+        let res = Enzyme::Trypsin.residues();
+        assert!(res.contains(&b'K'));
+        assert!(res.contains(&b'R'));
+    }
+
+    #[test]
+    fn lysc_is_c_term_and_cleaves_after_k_only() {
+        assert!(!Enzyme::LysC.is_n_term());
+        assert!(Enzyme::LysC.is_c_term());
+        assert!(Enzyme::LysC.is_cleavable(b'K'));
+        assert!(!Enzyme::LysC.is_cleavable(b'R'));
+        assert_eq!(Enzyme::LysC.residues(), b"K");
+    }
+
+    #[test]
+    fn nocleavage_residues_is_empty() {
+        assert_eq!(Enzyme::NoCleavage.residues(), &[] as &[u8]);
+        // NoCleavage.isCleavable should return false for all residues.
+        assert!(!Enzyme::NoCleavage.is_cleavable(b'K'));
+        assert!(!Enzyme::NoCleavage.is_cleavable(b'R'));
+        assert!(!Enzyme::NoCleavage.is_cleavable(b'A'));
+    }
+
+    #[test]
+    fn lysn_is_n_term_cleaves_before_k() {
+        assert!(Enzyme::LysN.is_n_term());
+        assert!(!Enzyme::LysN.is_c_term());
+        assert!(Enzyme::LysN.is_cleavable(b'K'));
+        assert!(!Enzyme::LysN.is_cleavable(b'R'));
+        assert_eq!(Enzyme::LysN.residues(), b"K");
+    }
+
+    #[test]
+    fn aspn_is_n_term_cleaves_before_d() {
+        assert!(Enzyme::AspN.is_n_term());
+        assert!(!Enzyme::AspN.is_c_term());
+        assert!(Enzyme::AspN.is_cleavable(b'D'));
+        assert!(!Enzyme::AspN.is_cleavable(b'K'));
+        assert_eq!(Enzyme::AspN.residues(), b"D");
+    }
+
+    #[test]
+    fn nonspecific_residues_is_empty_but_always_cleavable() {
+        assert_eq!(Enzyme::NonSpecific.residues(), &[] as &[u8]);
+        assert!(Enzyme::NonSpecific.is_cleavable(b'K'));
+        assert!(Enzyme::NonSpecific.is_cleavable(b'A'));
     }
 
     #[test]

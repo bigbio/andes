@@ -22,3 +22,6 @@
 
 pub mod tsv;
 pub use tsv::write_tsv;
+
+pub mod pin;
+pub use pin::write_pin;

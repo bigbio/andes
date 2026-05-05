@@ -19,6 +19,7 @@ path = "src/lib.rs"
 
 [dependencies]
 engine = { path = "../engine" }
+input = { path = "../input" }
 clap = { workspace = true }
 thiserror = { workspace = true }
 

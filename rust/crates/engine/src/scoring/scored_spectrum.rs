@@ -184,6 +184,16 @@ impl<'a> ScoredSpectrum<'a> {
         Self { spec, ranks, kept_count, prob_peak, main_ion }
     }
 
+    /// Returns `true` if the main ion is a prefix ion (b-ion direction),
+    /// `false` if it is a suffix ion (y-ion direction).
+    ///
+    /// Mirrors Java `ScoredSpectrum.getMainIonDirection()` which returns
+    /// `mainIon.isPrefixIon()`. Used by `PrimitiveAaGraph` to decide which
+    /// end is the graph source.
+    pub fn main_ion_direction(&self) -> bool {
+        self.main_ion.is_prefix()
+    }
+
     /// Total number of peaks in the original spectrum (before any filtering).
     pub fn peak_count(&self) -> usize {
         self.spec.peaks.len()

@@ -8,6 +8,8 @@
 
 pub mod score_dist;
 pub mod generating_function;
+pub mod primitive_graph;
 
 pub use score_dist::{ScoreBound, ScoreDist};
 pub use generating_function::{GeneratingFunction, GfError};
+pub use primitive_graph::PrimitiveAaGraph;

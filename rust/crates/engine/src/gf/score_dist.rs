@@ -113,6 +113,55 @@ impl ScoreDist {
         let sum: f64 = p[min_index..].iter().sum();
         sum.min(1.0)
     }
+
+    /// Mirror Java's `ScoreDist.addProbDist(other, scoreDiff, aaProb)`:
+    /// for each `t` in `other`'s score range, accumulate
+    /// `other.prob[t] * aa_prob` into `self.prob[t + score_diff]`,
+    /// clipping the destination to `self`'s range.
+    pub fn add_prob_dist(&mut self, other: &ScoreDist, score_diff: i32, aa_prob: f64) {
+        let other_p = match other.prob_distribution.as_ref() {
+            Some(p) => p,
+            None => return,
+        };
+        let self_p = match self.prob_distribution.as_mut() {
+            Some(p) => p,
+            None => return,
+        };
+        let other_min = other.bound.min_score;
+        let other_max = other.bound.max_score;
+        let self_min = self.bound.min_score;
+        let self_max = self.bound.max_score;
+        let t_start = other_min.max(self_min - score_diff);
+        let t_end = other_max.min(self_max - score_diff);
+        for t in t_start..t_end {
+            let src_idx = (t - other_min) as usize;
+            let dst_idx = (t + score_diff - self_min) as usize;
+            self_p[dst_idx] += other_p[src_idx] * aa_prob;
+        }
+    }
+
+    /// Mirror Java's `ScoreDist.addNumDist(other, scoreDiff, coeff)`.
+    pub fn add_num_dist(&mut self, other: &ScoreDist, score_diff: i32, coeff: f64) {
+        let other_n = match other.num_distribution.as_ref() {
+            Some(n) => n,
+            None => return,
+        };
+        let self_n = match self.num_distribution.as_mut() {
+            Some(n) => n,
+            None => return,
+        };
+        let other_min = other.bound.min_score;
+        let other_max = other.bound.max_score;
+        let self_min = self.bound.min_score;
+        let self_max = self.bound.max_score;
+        let t_start = other_min.max(self_min - score_diff);
+        let t_end = other_max.min(self_max - score_diff);
+        for t in t_start..t_end {
+            let src_idx = (t - other_min) as usize;
+            let dst_idx = (t + score_diff - self_min) as usize;
+            self_n[dst_idx] += other_n[src_idx] * coeff;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -208,5 +257,72 @@ mod tests {
         d.set_prob(4, 0.3);
         // score < minScore: minIndex = 0, sum from there = 0.1 + 0.2 + 0.3 = 0.6
         assert!((d.get_spectral_probability(-100) - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn add_prob_dist_offset_zero_scalar_one() {
+        // self range [0, 5), other range [0, 5). After add_prob_dist(other, 0, 1.0)
+        // each self[s] += other[s].
+        let mut a = ScoreDist::new(0, 5, false, true);
+        let mut b = ScoreDist::new(0, 5, false, true);
+        for s in 0..5 { b.set_prob(s, 0.1 * (s + 1) as f64); }
+        a.add_prob_dist(&b, 0, 1.0);
+        for s in 0..5 {
+            assert!((a.get_probability(s) - 0.1 * (s + 1) as f64).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn add_prob_dist_with_score_offset() {
+        // self [0, 10), other [0, 5). add(other, +3, 1.0) shifts other's scores
+        // by +3: self[3..8] += other[0..5].
+        let mut a = ScoreDist::new(0, 10, false, true);
+        let mut b = ScoreDist::new(0, 5, false, true);
+        for s in 0..5 { b.set_prob(s, 0.2); }
+        a.add_prob_dist(&b, 3, 1.0);
+        for s in 0..3 { assert_eq!(a.get_probability(s), 0.0); }
+        for s in 3..8 { assert!((a.get_probability(s) - 0.2).abs() < 1e-12); }
+        for s in 8..10 { assert_eq!(a.get_probability(s), 0.0); }
+    }
+
+    #[test]
+    fn add_prob_dist_with_negative_offset() {
+        // self [-3, 5), other [0, 5). add(other, -2, 1.0) shifts down by 2.
+        let mut a = ScoreDist::new(-3, 5, false, true);
+        let mut b = ScoreDist::new(0, 5, false, true);
+        for s in 0..5 { b.set_prob(s, 0.1); }
+        a.add_prob_dist(&b, -2, 1.0);
+        // other[0]→self[-2], other[4]→self[2]; self[-3] and self[3..5) untouched.
+        assert_eq!(a.get_probability(-3), 0.0);
+        for s in -2..3 { assert!((a.get_probability(s) - 0.1).abs() < 1e-12); }
+        for s in 3..5 { assert_eq!(a.get_probability(s), 0.0); }
+    }
+
+    #[test]
+    fn add_prob_dist_clips_to_self_range() {
+        // self [0, 3), other [0, 5). add(other, 0, 1.0) only fills self[0..3].
+        let mut a = ScoreDist::new(0, 3, false, true);
+        let mut b = ScoreDist::new(0, 5, false, true);
+        for s in 0..5 { b.set_prob(s, 0.2); }
+        a.add_prob_dist(&b, 0, 1.0);
+        for s in 0..3 { assert!((a.get_probability(s) - 0.2).abs() < 1e-12); }
+    }
+
+    #[test]
+    fn add_prob_dist_scales_by_aa_prob() {
+        let mut a = ScoreDist::new(0, 5, false, true);
+        let mut b = ScoreDist::new(0, 5, false, true);
+        for s in 0..5 { b.set_prob(s, 0.1); }
+        a.add_prob_dist(&b, 0, 0.5);
+        for s in 0..5 { assert!((a.get_probability(s) - 0.05).abs() < 1e-12); }
+    }
+
+    #[test]
+    fn add_num_dist_with_coefficient() {
+        let mut a = ScoreDist::new(0, 5, true, false);
+        let mut b = ScoreDist::new(0, 5, true, false);
+        for s in 0..5 { b.set_number(s, 2.0); }
+        a.add_num_dist(&b, 0, 3.0);
+        for s in 0..5 { assert!((a.get_number_recs(s) - 6.0).abs() < 1e-12); }
     }
 }

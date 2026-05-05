@@ -16,6 +16,7 @@ pub mod instrument;
 pub mod mass;
 pub mod match_engine;
 pub mod modification;
+pub mod output;
 pub mod param_model;
 pub mod peptide;
 pub mod precursor_matching;

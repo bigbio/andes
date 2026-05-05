@@ -31,7 +31,11 @@ pub fn match_spectra(
 
     for (spec_idx, spec) in spectra.iter().enumerate() {
         // Build ScoredSpectrum once per spectrum; reuse across all candidates.
-        let scored_spec = ScoredSpectrum::new(spec);
+        // Phase 5b Task 1: pass the scorer's param and the precursor charge so
+        // that precursor peaks (and their charge-reduced / neutral-loss neighbours)
+        // are filtered out before peak ranking.
+        let precursor_z = spec.precursor_charge.unwrap_or(2) as u8;
+        let scored_spec = ScoredSpectrum::new(spec, scorer.param(), precursor_z);
 
         let charges_to_try: Vec<u8> = match spec.precursor_charge {
             Some(z) if z > 0 => vec![z as u8],

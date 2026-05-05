@@ -16,6 +16,10 @@ use crate::param_model::{IonType, Param, Partition};
 
 #[derive(Debug, Clone)]
 pub struct RankScorer {
+    /// The `Param` this scorer was built from. Cloned at construction so
+    /// that `match_engine` can forward precursor-filter information to
+    /// `ScoredSpectrum::new` without a separate `Param` argument.
+    param: Param,
     /// Cached log scores: `(partition, non-noise ion_type) → Vec<f32>` where
     /// the Vec has length `max_rank + 1` (indices 0..max_rank-1 for ranks
     /// 1..max_rank, index max_rank for the missing-ion slot).
@@ -58,9 +62,15 @@ impl RankScorer {
         }
 
         Self {
+            param: param.clone(),
             log_table,
             max_rank: param.max_rank as u32,
         }
+    }
+
+    /// Return the `Param` this scorer was built from.
+    pub fn param(&self) -> &Param {
+        &self.param
     }
 
     /// Score a peak-matched ion at rank `rank` (1-based, 1 = highest intensity).

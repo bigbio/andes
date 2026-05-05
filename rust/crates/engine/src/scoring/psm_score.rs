@@ -169,7 +169,7 @@ mod tests {
             scan: None,
             peaks: vec![],
         };
-        let scored = ScoredSpectrum::new(&spec);
+        let scored = ScoredSpectrum::new_without_filtering(&spec);
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let s = score_psm(&scored, &peptide, &scorer, 2, 0.1);
@@ -200,7 +200,7 @@ mod tests {
             scan: None,
             peaks,
         };
-        let scored = ScoredSpectrum::new(&spec);
+        let scored = ScoredSpectrum::new_without_filtering(&spec);
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let s = score_psm(&scored, &peptide, &scorer, 2, 0.1);
@@ -238,8 +238,8 @@ mod tests {
 
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
-        let s_match = score_psm(&ScoredSpectrum::new(&match_spec), &peptide, &scorer, 2, 0.1);
-        let s_empty = score_psm(&ScoredSpectrum::new(&empty_spec), &peptide, &scorer, 2, 0.1);
+        let s_match = score_psm(&ScoredSpectrum::new_without_filtering(&match_spec), &peptide, &scorer, 2, 0.1);
+        let s_empty = score_psm(&ScoredSpectrum::new_without_filtering(&empty_spec), &peptide, &scorer, 2, 0.1);
         assert!(s_match > s_empty);
     }
 }

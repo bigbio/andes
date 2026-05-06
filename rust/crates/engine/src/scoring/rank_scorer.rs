@@ -176,76 +176,9 @@ impl RankScorer {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-
-    /// Build a minimal Param for testing: 1 partition, 1 ion type
-    /// (Prefix charge=1) + Noise, with hand-picked rank distributions.
-    /// Exposed as `pub(crate)` so `scored_spectrum` tests can reuse it.
-    pub(crate) fn tiny_param() -> Param {
-        // Construct a Param skeleton manually. The fields we need:
-        // - num_segments (used in chargeOrSeg formula)
-        // - max_rank (number of rank slots)
-        // - rank_dist_table: per-partition, per-ion-type, Vec<f32>
-        // Other fields can be defaulted/empty.
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
-        use crate::param_model::SpecDataType;
-        use crate::protocol::Protocol;
-        use crate::tolerance::Tolerance;
-
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let prefix_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let noise_ion = IonType::Noise;
-
-        // max_rank = 3 means each rank-distribution array has length 4
-        // (indices 0..2 for ranks 1..3, index 3 for "missing ion" slot).
-        let max_rank = 3;
-        // ion_freqs[i] / noise_freqs[i] computed manually:
-        //   index 0: 0.6 / 0.1 = 6.0
-        //   index 1: 0.3 / 0.2 = 1.5
-        //   index 2: 0.05 / 0.3 = 0.166...
-        //   index 3 (missing): 0.001 / 0.4 = 0.0025
-        let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
-        let noise_freqs = vec![0.1_f32, 0.2, 0.3, 0.4];
-
-        let mut ion_table_inner: HashMap<IonType, Vec<f32>> = HashMap::new();
-        ion_table_inner.insert(prefix_ion, ion_freqs);
-        ion_table_inner.insert(noise_ion, noise_freqs);
-
-        let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
-        rank_dist_table.insert(part, ion_table_inner);
-
-        let mut frag_off_table = HashMap::new();
-        frag_off_table.insert(part, vec![]);
-
-        Param {
-            version: 10001,
-            data_type: SpecDataType {
-                activation: ActivationMethod::HCD,
-                instrument: InstrumentType::QExactive,
-                enzyme: None,
-                protocol: Protocol::Automatic,
-            },
-            mme: Tolerance::Ppm(20.0),
-            apply_deconvolution: false,
-            deconvolution_error_tolerance: 0.0,
-            charge_hist: vec![(2, 100)],
-            min_charge: 2,
-            max_charge: 2,
-            num_segments: 1,
-            partitions: vec![part],
-            num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
-            frag_off_table,
-            max_rank,
-            rank_dist_table,
-            error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-        }
-    }
+    use crate::testutil::tiny_param;
 
     #[test]
     fn node_score_log_formula() {

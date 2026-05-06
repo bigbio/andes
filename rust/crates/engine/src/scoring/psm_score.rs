@@ -78,72 +78,12 @@ fn partition_for_ion(
 mod tests {
     use super::*;
     use crate::amino_acid::AminoAcid;
-    use crate::param_model::{IonType, Param, Partition};
     use crate::peptide::Peptide;
     use crate::scoring::fragment_ions::predict_by_ions;
     use crate::scoring::rank_scorer::RankScorer;
     use crate::scoring::scored_spectrum::ScoredSpectrum;
     use crate::spectrum::Spectrum;
-    use std::collections::HashMap;
-
-    /// Construct a minimal Param with one partition + Prefix(1) + Suffix(1) + Noise.
-    /// Noise has uniform low frequency, ions have higher frequency at rank 1
-    /// so a perfect match scores positively.
-    fn tiny_param() -> Param {
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
-        use crate::param_model::SpecDataType;
-        use crate::protocol::Protocol;
-        use crate::tolerance::Tolerance;
-
-        let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let noise = IonType::Noise;
-
-        // max_rank=3 → arrays of length 4. ion freqs high at rank 1, low at missing.
-        let prefix_freqs = vec![0.5_f32, 0.1, 0.05, 0.01];
-        let suffix_freqs = vec![0.5_f32, 0.1, 0.05, 0.01];
-        let noise_freqs = vec![0.05_f32, 0.05, 0.05, 0.05];
-
-        let mut ion_table = HashMap::new();
-        ion_table.insert(prefix1, prefix_freqs);
-        ion_table.insert(suffix1, suffix_freqs);
-        ion_table.insert(noise, noise_freqs);
-
-        let mut rank_dist_table = HashMap::new();
-        rank_dist_table.insert(part, ion_table);
-
-        let mut frag_off_table = HashMap::new();
-        frag_off_table.insert(part, vec![]);
-
-        Param {
-            version: 10001,
-            data_type: SpecDataType {
-                activation: ActivationMethod::HCD,
-                instrument: InstrumentType::QExactive,
-                enzyme: None,
-                protocol: Protocol::Automatic,
-            },
-            mme: Tolerance::Ppm(20.0),
-            apply_deconvolution: false,
-            deconvolution_error_tolerance: 0.0,
-            charge_hist: vec![(2, 100)],
-            min_charge: 2,
-            max_charge: 2,
-            num_segments: 1,
-            partitions: vec![part],
-            num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
-            frag_off_table,
-            max_rank: 3,
-            rank_dist_table,
-            error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-        }
-    }
+    use crate::testutil::tiny_param;
 
     fn pep(seq: &[u8]) -> Peptide {
         let residues: Vec<AminoAcid> = seq

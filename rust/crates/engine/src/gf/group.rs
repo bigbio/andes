@@ -81,7 +81,7 @@ mod tests {
     use crate::gf::primitive_graph::PrimitiveAaGraph;
     use crate::scoring::{RankScorer, ScoredSpectrum};
     use crate::spectrum::Spectrum;
-    use std::collections::HashMap;
+    use crate::testutil::tiny_param_with_ions;
 
     fn aa() -> AminoAcidSet {
         AminoAcidSetBuilder::new_standard().build().unwrap()
@@ -99,76 +99,10 @@ mod tests {
         }
     }
 
-    fn tiny_param() -> crate::Param {
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
-        use crate::param_model::SpecDataType;
-        use crate::protocol::Protocol;
-        use crate::IonType;
-        use crate::Param;
-        use crate::Partition;
-        use crate::tolerance::Tolerance;
-        use crate::FragmentOffsetFrequency;
-
-        let part = Partition {
-            charge: 2,
-            parent_mass: 1000.0,
-            seg_num: 0,
-        };
-        let prefix1 = IonType::Prefix {
-            charge: 1,
-            offset_bits: 0.0_f32.to_bits(),
-        };
-        let noise = IonType::Noise;
-
-        let mut ion_table: HashMap<IonType, Vec<f32>> = HashMap::new();
-        ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
-        ion_table.insert(noise, vec![0.1_f32, 0.2, 0.3, 0.4]);
-
-        let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
-        rank_dist_table.insert(part, ion_table);
-
-        let mut frag_off_table = HashMap::new();
-        frag_off_table.insert(
-            part,
-            vec![FragmentOffsetFrequency {
-                ion_type: prefix1,
-                frequency: 0.7,
-            }],
-        );
-
-        Param {
-            version: 10001,
-            data_type: SpecDataType {
-                activation: ActivationMethod::HCD,
-                instrument: InstrumentType::QExactive,
-                enzyme: None,
-                protocol: Protocol::Automatic,
-            },
-            mme: Tolerance::Da(0.5),
-            apply_deconvolution: false,
-            deconvolution_error_tolerance: 0.0,
-            charge_hist: vec![(2, 100)],
-            min_charge: 2,
-            max_charge: 2,
-            num_segments: 1,
-            partitions: vec![part],
-            num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
-            frag_off_table,
-            max_rank: 3,
-            rank_dist_table,
-            error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-        }
-    }
-
     fn build_gf(peptide_mass: i32) -> GeneratingFunction {
         let aa = aa();
         let s = empty_spec();
-        let param = tiny_param();
+        let param = tiny_param_with_ions();
         let scorer = RankScorer::new(&param);
         let ss = ScoredSpectrum::new_without_filtering(&s);
         let g = PrimitiveAaGraph::new(&aa, peptide_mass, None, &ss, &scorer, 2, 1000.0, 0.5, false, false);

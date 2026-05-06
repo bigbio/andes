@@ -428,6 +428,7 @@ mod tests {
     use super::*;
     use crate::param_model::{IonType, Partition};
     use crate::scoring::rank_scorer::RankScorer;
+    use crate::testutil::tiny_param_with_ions;
 
     fn spec(peaks: &[(f64, f32)]) -> Spectrum {
         Spectrum {
@@ -438,68 +439,6 @@ mod tests {
             rt_seconds: None,
             scan: None,
             peaks: peaks.to_vec(),
-        }
-    }
-
-    /// A richer `tiny_param` that has a Prefix(charge=1, offset=0) ion in the
-    /// rank_dist_table under partition (charge=2, parent_mass=1000.0, seg_num=0),
-    /// so that `ion_types_for_segment(0)` returns a non-empty list and
-    /// `node_score` / `edge_score` can exercise the scoring paths.
-    fn tiny_param_with_ions() -> Param {
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
-        use crate::param_model::{FragmentOffsetFrequency, SpecDataType};
-        use crate::protocol::Protocol;
-        use crate::tolerance::Tolerance;
-        use std::collections::HashMap;
-
-        let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let noise = IonType::Noise;
-
-        // max_rank=3 → 4 slots. Ion has higher freq at rank 1.
-        let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
-        let noise_freqs = vec![0.1_f32, 0.2, 0.3, 0.4];
-
-        let mut ion_table: HashMap<IonType, Vec<f32>> = HashMap::new();
-        ion_table.insert(prefix1, ion_freqs);
-        ion_table.insert(noise, noise_freqs);
-
-        let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
-        rank_dist_table.insert(part, ion_table);
-
-        // frag_off_table: one prefix ion entry so ion_types_for_segment returns it.
-        let mut frag_off_table = HashMap::new();
-        frag_off_table.insert(part, vec![FragmentOffsetFrequency {
-            ion_type: prefix1,
-            frequency: 0.7,
-        }]);
-
-        Param {
-            version: 10001,
-            data_type: SpecDataType {
-                activation: ActivationMethod::HCD,
-                instrument: InstrumentType::QExactive,
-                enzyme: None,
-                protocol: Protocol::Automatic,
-            },
-            mme: Tolerance::Da(0.5),
-            apply_deconvolution: false,
-            deconvolution_error_tolerance: 0.0,
-            charge_hist: vec![(2, 100)],
-            min_charge: 2,
-            max_charge: 2,
-            num_segments: 1,
-            partitions: vec![part],
-            num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
-            frag_off_table,
-            max_rank: 3,
-            rank_dist_table,
-            error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
         }
     }
 

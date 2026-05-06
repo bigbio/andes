@@ -30,6 +30,9 @@ pub mod spectrum;
 pub mod suffix_array;
 pub mod tolerance;
 
+#[cfg(test)]
+pub(crate) mod testutil;
+
 // Convenience re-exports for the most-used types. Downstream crates
 // (input/output/cli) prefer `use engine::Peptide` over the qualified path.
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};

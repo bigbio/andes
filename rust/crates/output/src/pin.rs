@@ -80,12 +80,12 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::mass::{ISOTOPE, PROTON};
-use crate::output::row_context::{iter_ranked, RowContext};
-use crate::psm::{PsmMatch, TopNQueue};
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
-use crate::spectrum::Spectrum;
+use model::mass::{ISOTOPE, PROTON};
+use crate::row_context::{iter_ranked, RowContext};
+use search::psm::{PsmMatch, TopNQueue};
+use search::search_index::SearchIndex;
+use search::search_params::SearchParams;
+use model::spectrum::Spectrum;
 
 // ── public API ───────────────────────────────────────────────────────────────
 
@@ -469,13 +469,13 @@ fn trim_scientific(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amino_acid::AminoAcid;
-    use crate::candidate_gen::Candidate;
-    use crate::peptide::Peptide;
-    use crate::protein::{Protein, ProteinDb};
-    use crate::search_index::SearchIndex;
-    use crate::tolerance::PrecursorTolerance;
-    use crate::tolerance::Tolerance;
+    use model::amino_acid::AminoAcid;
+    use search::candidate_gen::Candidate;
+    use model::peptide::Peptide;
+    use model::protein::{Protein, ProteinDb};
+    use search::search_index::SearchIndex;
+    use model::tolerance::PrecursorTolerance;
+    use model::tolerance::Tolerance;
 
     // ── fixture helpers ─────────────────────────────────────────────────────
 
@@ -526,18 +526,18 @@ mod tests {
             score,
             spec_e_value,
             de_novo_score: 42,
-            activation_method: Some(crate::activation::ActivationMethod::HCD),
+            activation_method: Some(model::activation::ActivationMethod::HCD),
             e_value: spec_e_value * 100.0,
-            features: crate::psm::PsmFeatures::default(),
+            features: search::psm::PsmFeatures::default(),
         }
     }
 
     fn make_params(charge_range: std::ops::RangeInclusive<u8>) -> SearchParams {
-        use crate::aa_set::AminoAcidSetBuilder;
+        use model::aa_set::AminoAcidSetBuilder;
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         SearchParams {
             aa_set,
-            enzyme: crate::enzyme::Enzyme::Trypsin,
+            enzyme: model::enzyme::Enzyme::Trypsin,
             min_length: 6,
             max_length: 40,
             max_missed_cleavages: 1,

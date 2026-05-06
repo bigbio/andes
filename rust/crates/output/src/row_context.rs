@@ -4,9 +4,9 @@
 //! accession string, scan number, spec_id) once per PSM, so each format
 //! only has to format columns from a stable struct.
 
-use crate::psm::PsmMatch;
-use crate::search_index::SearchIndex;
-use crate::spectrum::Spectrum;
+use search::psm::PsmMatch;
+use search::search_index::SearchIndex;
+use model::spectrum::Spectrum;
 
 /// Fields derived once per PSM that are used by both PIN and TSV writers.
 ///

@@ -20,12 +20,12 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::output::row_context::{iter_ranked, RowContext};
-use crate::psm::{PsmMatch, TopNQueue};
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
-use crate::spectrum::Spectrum;
-use crate::tolerance::Tolerance;
+use crate::row_context::{iter_ranked, RowContext};
+use search::psm::{PsmMatch, TopNQueue};
+use search::search_index::SearchIndex;
+use search::search_params::SearchParams;
+use model::spectrum::Spectrum;
+use model::tolerance::Tolerance;
 
 // ── public API ──────────────────────────────────────────────────────────────
 
@@ -263,13 +263,13 @@ fn format_e_value(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amino_acid::AminoAcid;
-    use crate::candidate_gen::Candidate;
-    use crate::modification::Modification;
-    use crate::peptide::Peptide;
-    use crate::protein::{Protein, ProteinDb};
-    use crate::search_index::SearchIndex;
-    use crate::tolerance::PrecursorTolerance;
+    use model::amino_acid::AminoAcid;
+    use search::candidate_gen::Candidate;
+    use model::modification::Modification;
+    use model::peptide::Peptide;
+    use model::protein::{Protein, ProteinDb};
+    use search::search_index::SearchIndex;
+    use model::tolerance::PrecursorTolerance;
 
     // ── fixture helpers ─────────────────────────────────────────────────────
 
@@ -319,18 +319,18 @@ mod tests {
             score,
             spec_e_value,
             de_novo_score: 42,
-            activation_method: Some(crate::activation::ActivationMethod::HCD),
+            activation_method: Some(model::activation::ActivationMethod::HCD),
             e_value: spec_e_value * 100.0,
-            features: crate::psm::PsmFeatures::default(),
+            features: search::psm::PsmFeatures::default(),
         }
     }
 
     fn make_params_ppm() -> SearchParams {
-        use crate::aa_set::AminoAcidSetBuilder;
+        use model::aa_set::AminoAcidSetBuilder;
         let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
         SearchParams {
             aa_set,
-            enzyme: crate::enzyme::Enzyme::Trypsin,
+            enzyme: model::enzyme::Enzyme::Trypsin,
             min_length: 6,
             max_length: 40,
             max_missed_cleavages: 1,
@@ -478,8 +478,8 @@ mod tests {
         let ox_mod = Modification {
             name: "Oxidation".to_string(),
             mass_delta: 15.99491,
-            residue: crate::modification::ResidueSpec::Specific(b'M'),
-            location: crate::modification::ModLocation::Anywhere,
+            residue: model::modification::ResidueSpec::Specific(b'M'),
+            location: model::modification::ModLocation::Anywhere,
             fixed: false,
             accession: None,
         };
@@ -507,7 +507,7 @@ mod tests {
             de_novo_score: 0,
             activation_method: None,
             e_value: 1e-3,
-            features: crate::psm::PsmFeatures::default(),
+            features: search::psm::PsmFeatures::default(),
         };
 
         let mut queue = TopNQueue::new(10);

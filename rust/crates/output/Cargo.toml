@@ -1,5 +1,5 @@
 [package]
-name = "engine"
+name = "output"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,4 @@ license.workspace = true
 model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }
 search = { path = "../search" }
-output = { path = "../output" }
-suffix = { workspace = true }
 thiserror = { workspace = true }
-byteorder = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3.10"
-input = { path = "../input" }

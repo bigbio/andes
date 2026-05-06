@@ -3,7 +3,7 @@
 //! Model types → `model` crate
 //! Scoring / GF / Param types → `scoring` crate
 //! Search types → `search` crate
-//! Output → still here (moves in Phase 4)
+//! Output writers → `output` crate
 
 // Model modules re-exported from the `model` crate.
 pub use model::aa_set;
@@ -35,7 +35,8 @@ pub use search::search_index;
 pub use search::search_params;
 pub use search::suffix_array;
 
-pub mod output;
+// Output re-exported from the `output` crate.
+pub use output;
 
 #[cfg(test)]
 pub(crate) mod testutil;

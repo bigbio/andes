@@ -139,6 +139,7 @@ pub fn match_spectra(
                 scored_spec_for_gf,
                 top_charge,
                 fragment_tolerance_da,
+                idx,
             );
         }
     }
@@ -165,6 +166,8 @@ pub fn match_spectra(
 ///   For charge-missing spectra, using the top PSM's charge ensures the GF
 ///   reflects the dominant scoring context.
 /// * `fragment_tolerance_da` — fragment mass tolerance in Da.
+/// * `search_index` — database (target+decoy); used to look up protein sequences
+///   for protein-terminal flag derivation (Track B4).
 #[allow(clippy::too_many_arguments)]
 fn compute_spec_e_values_for_spectrum(
     spec: &Spectrum,
@@ -176,6 +179,7 @@ fn compute_spec_e_values_for_spectrum(
     scored_spec: &ScoredSpectrum<'_>,
     top_charge: u8,
     fragment_tolerance_da: f64,
+    search_index: &SearchIndex,
 ) {
     // 1. Determine the peptide neutral mass and its tolerance window.
     // For charge-explicit spectra, `top_charge` == spec.precursor_charge.unwrap().
@@ -223,7 +227,32 @@ fn compute_spec_e_values_for_spectrum(
     // parent_mass = (mz - H) * charge  (precursor peak mass, with H added back in Java).
     let parent_mass = (spec.precursor_mz - PROTON) * (charge as f64);
 
-    // 3. Build the GF group across the nominal mass range.
+    // 3. Derive protein-terminal flags from the top PSM (Track B4).
+    //
+    // Java reference: DBScanner.java:592 aggregates these flags across all
+    // candidates before GF construction. Our MVP approximation: derive from
+    // the single best-scoring (top) PSM currently in the queue — the most
+    // likely promotion candidate. This is exact for the common case where the
+    // top PSM is unambiguously best; edge cases (ties near a protein boundary)
+    // are addressed in Phase 7+ when per-candidate GFs become feasible.
+    let (use_protein_n_term, use_protein_c_term) = {
+        let top_psm = queue.iter_psms().max_by(|a, b| a.cmp(b));
+        match top_psm {
+            Some(top) => {
+                let start = top.candidate.start_offset_in_protein;
+                let pep_len = top.candidate.peptide.length();
+                let is_n = start == 0;
+                let is_c = match search_index.protein_at(top.candidate.protein_index) {
+                    Some(prot) => start + pep_len >= prot.sequence.len(),
+                    None => false,
+                };
+                (is_n, is_c)
+            }
+            None => (false, false),
+        }
+    };
+
+    // 3b. Build the GF group across the nominal mass range.
     let mut group = GeneratingFunctionGroup::new();
 
     for nominal_mass_idx in min_peptide_mass_idx..=max_peptide_mass_idx {
@@ -239,8 +268,8 @@ fn compute_spec_e_values_for_spectrum(
             charge,
             parent_mass,
             fragment_tolerance_da,
-            false, // use_protein_n_term — defer per-candidate protein-term flags to future work
-            false, // use_protein_c_term
+            use_protein_n_term,
+            use_protein_c_term,
         );
         match GeneratingFunction::with_score_threshold(&graph, min_score, aa_set) {
             Ok(gf) => group.accept(gf),

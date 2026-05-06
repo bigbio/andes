@@ -77,7 +77,10 @@ fn enumerate_protein(
             let pre = if start == 0 { b'_' } else { seq[start as usize - 1] };
             let post = if end as usize == seq.len() { b'-' } else { seq[end as usize] };
 
-            let mod_combinations = expand_mod_combinations(span, params);
+            let is_protein_n_term = start == 0;
+            let is_protein_c_term = end as usize == seq.len();
+            let mod_combinations =
+                expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
             for residues in mod_combinations {
                 let peptide = Peptide::new(residues, pre, post);
                 out.push(Candidate {
@@ -95,12 +98,62 @@ fn enumerate_protein(
 
 /// Generate every combination of variable-mod applications for `span`,
 /// up to `params.max_variable_mods_per_peptide` mods total.
-fn expand_mod_combinations(span: &[u8], params: &SearchParams) -> Vec<Vec<AminoAcid>> {
+///
+/// `is_protein_n_term`: the span begins at position 0 of the protein sequence.
+/// `is_protein_c_term`: the span ends at the last residue of the protein sequence.
+///
+/// These flags control which terminal-location mod variants are consulted:
+/// - Position 0: Protein_N_Term (if is_protein_n_term) or N_Term variants are
+///   merged in addition to Anywhere variants.
+/// - Position n-1: Protein_C_Term (if is_protein_c_term) or C_Term variants are
+///   merged in addition to Anywhere variants.
+/// - All other positions: Anywhere only (unchanged).
+///
+/// Mirrors Java `CandidatePeptideGrid.java:43` which maintains separate cached
+/// AA-set arrays per terminal context (aaSetN, aaSetC, aaSetProtN, aaSetProtC).
+fn expand_mod_combinations(
+    span: &[u8],
+    params: &SearchParams,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> Vec<Vec<AminoAcid>> {
     use crate::modification::ModLocation;
 
+    let n = span.len();
     // For each position, the list of variants at that residue.
-    let position_variants: Vec<Vec<AminoAcid>> = span.iter().map(|&r| {
-        params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec()
+    let position_variants: Vec<Vec<AminoAcid>> = span.iter().enumerate().map(|(i, &r)| {
+        let mut variants = params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec();
+
+        // Position 0: add N-Term or Protein_N_Term variants.
+        if i == 0 {
+            let term_loc = if is_protein_n_term {
+                ModLocation::ProtNTerm
+            } else {
+                ModLocation::NTerm
+            };
+            for v in params.aa_set.variants_for(r, term_loc) {
+                if !variants.contains(v) {
+                    variants.push(v.clone());
+                }
+            }
+        }
+
+        // Position n-1: add C-Term or Protein_C_Term variants.
+        // (A single-residue span has i==0 and i==n-1 simultaneously — both sets apply.)
+        if i == n - 1 {
+            let term_loc = if is_protein_c_term {
+                ModLocation::ProtCTerm
+            } else {
+                ModLocation::CTerm
+            };
+            for v in params.aa_set.variants_for(r, term_loc) {
+                if !variants.contains(v) {
+                    variants.push(v.clone());
+                }
+            }
+        }
+
+        variants
     }).collect();
 
     let mut out = Vec::new();

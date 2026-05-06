@@ -256,3 +256,253 @@ fn max_variable_mods_caps_combinations() {
         .count();
     assert_eq!(target_count, 4);
 }
+
+// ─── Track B2: terminal-mod expansion tests ───────────────────────────────────
+//
+// Terminal-location semantics in expand_mod_combinations:
+//   - Peptide at protein start (start_offset == 0): position 0 gets ProtNTerm variants.
+//   - Peptide NOT at protein start: position 0 gets NTerm variants.
+//   - Peptide at protein end (end == protein_len): last position gets ProtCTerm variants.
+//   - Peptide NOT at protein end: last position gets CTerm variants.
+//
+// This mirrors Java CandidatePeptideGrid.java:43 which routes the first residue to
+// addProtNTermResidue (protein start) or addNTermResidue (non-protein start), and the
+// last residue to addProtCTermResidue (protein end) or addCTermResidue (non-protein end).
+
+/// Build an AminoAcidSet with a Protein_N_Term-only variable mod (+42.0106 Acetyl on *).
+fn aa_set_with_protein_nterm_acetyl() -> AminoAcidSet {
+    let acetyl = Modification {
+        name: "ProtNTermAcetyl".into(),
+        mass_delta: 42.010565,
+        residue: ResidueSpec::Wildcard,
+        location: ModLocation::ProtNTerm,
+        fixed: false,
+        accession: None,
+    };
+    AminoAcidSetBuilder::new_standard()
+        .add_variable_mod(acetyl)
+        .build()
+        .unwrap()
+}
+
+/// Build an AminoAcidSet with an N-Term-only variable mod (+42.0106 Acetyl on *).
+fn aa_set_with_nterm_acetyl() -> AminoAcidSet {
+    let acetyl = Modification {
+        name: "NTermAcetyl".into(),
+        mass_delta: 42.010565,
+        residue: ResidueSpec::Wildcard,
+        location: ModLocation::NTerm,
+        fixed: false,
+        accession: None,
+    };
+    AminoAcidSetBuilder::new_standard()
+        .add_variable_mod(acetyl)
+        .build()
+        .unwrap()
+}
+
+/// Build an AminoAcidSet with both a C-Term and a Protein_C_Term variable mod.
+fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
+    let cterm = Modification {
+        name: "Amide_CT".into(),
+        mass_delta: -0.984016,
+        residue: ResidueSpec::Wildcard,
+        location: ModLocation::CTerm,
+        fixed: false,
+        accession: None,
+    };
+    let prot_cterm = Modification {
+        name: "GlyGly_PCT".into(),
+        mass_delta: 114.042927,
+        residue: ResidueSpec::Wildcard,
+        location: ModLocation::ProtCTerm,
+        fixed: false,
+        accession: None,
+    };
+    AminoAcidSetBuilder::new_standard()
+        .add_variable_mod(cterm)
+        .add_variable_mod(prot_cterm)
+        .build()
+        .unwrap()
+}
+
+/// Protein_N_Term mod appears on the peptide starting at protein index 0.
+///
+/// Protein: "MAAAAKMAAAAAK" (length 13).
+/// Trypsin + missed=0 → (0..6)="MAAAAK" (protein N-term start) + (6..13)="MAAAAAK" (not at start).
+/// With ProtNTerm Acetyl variable mod and max_mods=1:
+/// - "MAAAAK" (protein start): gets Anywhere (unmod M) + ProtNTerm (Acetyl-M) → 2 candidates.
+/// - "MAAAAAK" (offset 6, not protein start): gets only Anywhere (unmod M) → 1 candidate.
+///
+/// Total: 3. This proves B2's fix: without the terminal-loc expansion, we'd get 2 (both unmod).
+#[test]
+fn protein_n_term_mod_only_at_protein_start() {
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"MAAAAKMAAAAAK".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set_with_protein_nterm_acetyl());
+    p.min_length = 6;
+    p.max_length = 40;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 1;
+
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .collect();
+
+    // Peptide at offset 0: 2 (unmod + Protein_N_Term Acetyl).
+    // Peptide at offset 6: 1 (unmod only — ProtNTerm does NOT apply here; this position gets NTerm).
+    assert_eq!(
+        candidates.len(), 3,
+        "expected 3 candidates (2 for protein-start peptide, 1 for offset-6 peptide), got {}",
+        candidates.len()
+    );
+
+    // Only candidates starting at protein offset 0 may have the ProtNTerm mod.
+    for cand in &candidates {
+        let has_mod = cand.peptide.residues[0].is_modified();
+        if has_mod {
+            assert_eq!(
+                cand.start_offset_in_protein, 0,
+                "ProtNTerm mod appeared on peptide starting at offset {} (should only be at 0)",
+                cand.start_offset_in_protein
+            );
+        }
+    }
+
+    // Exactly 1 candidate has the Protein_N_Term mod.
+    let mod_count = candidates.iter()
+        .filter(|c| c.peptide.residues[0].is_modified())
+        .count();
+    assert_eq!(mod_count, 1, "exactly 1 candidate should have the ProtNTerm mod");
+}
+
+/// N-Term mod applies to peptides NOT at the protein N-terminus.
+///
+/// Protein: "AAAAAAKMAAAAAK" (length 14).
+/// Trypsin + missed=0 → (0..7)="AAAAAAK" (protein N-term) + (7..14)="MAAAAAK" (not at start).
+/// With NTerm Acetyl variable mod and max_mods=1:
+/// - "AAAAAAK" (protein start, offset=0): ProtNTerm lookup → NTerm mod does NOT apply → 1 unmod.
+/// - "MAAAAAK" (offset=7): NTerm lookup → NTerm Acetyl applies to position 0 → 2 variants.
+///
+/// Total: 3.
+#[test]
+fn nterm_mod_applies_to_non_protein_start_peptides() {
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"AAAAAAKMAAAAAK".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set_with_nterm_acetyl());
+    p.min_length = 7;
+    p.max_length = 40;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 1;
+
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .collect();
+
+    // "AAAAAAK" (protein start): no NTerm mod (gets ProtNTerm which is empty) → 1.
+    // "MAAAAAK" (offset 7): NTerm Acetyl applies → 2.
+    // Total: 3.
+    assert_eq!(
+        candidates.len(), 3,
+        "expected 3 candidates (1 for protein-start, 2 for offset-7 with NTerm mod), got {}",
+        candidates.len()
+    );
+
+    // The modified candidate must be at offset 7 (non-protein-start).
+    let modified: Vec<_> = candidates.iter()
+        .filter(|c| c.peptide.residues[0].is_modified())
+        .collect();
+    assert_eq!(modified.len(), 1, "exactly 1 candidate should have the NTerm mod");
+    assert_eq!(
+        modified[0].start_offset_in_protein, 7,
+        "NTerm mod should appear on the offset-7 peptide, not at offset 0"
+    );
+
+    // The NTerm mod must NOT appear at any internal position.
+    for cand in &candidates {
+        let residues = &cand.peptide.residues;
+        for (i, aa) in residues.iter().enumerate().skip(1) {
+            assert!(
+                !aa.is_modified(),
+                "NTerm acetyl leaked to internal position {i} in peptide at offset {}",
+                cand.start_offset_in_protein
+            );
+        }
+    }
+}
+
+/// C-Term and Protein_C_Term mods are routed to the correct peptide.
+///
+/// Protein: "MAAAAKR" (length 7).
+/// Trypsin cleaves after K(5): spans (0..6)="MAAAAK" (not protein C-term) and (6..7)="R" (protein C-term).
+/// With both CTerm Amide (-0.984) and ProtCTerm GlyGly (+114.04) variable mods:
+/// - "MAAAAK" (end < protein_len): CTerm Amide applies to last position → 2 variants.
+/// - "R" (end == protein_len): ProtCTerm GlyGly applies to last position → 2 variants.
+///
+/// Total: 4.
+///
+/// This also verifies the C-Term mod does NOT bleed into the protein-C-term peptide, and vice versa.
+#[test]
+fn c_term_and_protein_c_term_distinguished() {
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"MAAAAKR".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set_with_both_cterm_mods());
+    p.min_length = 1;
+    p.max_length = 40;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 1;
+
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .collect();
+
+    // "MAAAAK" → 2 (unmod + CTerm Amide on last residue K).
+    // "R"      → 2 (unmod + ProtCTerm GlyGly on last residue R).
+    assert_eq!(
+        candidates.len(), 4,
+        "expected 4 candidates, got {}",
+        candidates.len()
+    );
+
+    // Verify the right mod appears on the right peptide.
+    let protein_len = 7usize;
+    for cand in &candidates {
+        let span_end = cand.start_offset_in_protein + cand.peptide.length();
+        let is_prot_c_term = span_end == protein_len;
+        let residues = &cand.peptide.residues;
+        if let Some(last) = residues.last() {
+            if let Some(m) = &last.mod_ {
+                if is_prot_c_term {
+                    // Protein-C-term peptide "R": should get ProtCTerm GlyGly (+114.04).
+                    assert!(
+                        m.mass_delta > 0.0,
+                        "protein C-term peptide 'R' got a negative delta mod ({}); expected ProtCTerm GlyGly",
+                        m.mass_delta
+                    );
+                } else {
+                    // Non-protein-C-term peptide "MAAAAK": should get CTerm Amide (-0.984).
+                    assert!(
+                        m.mass_delta < 0.0,
+                        "non-protein-C-term peptide 'MAAAAK' got a positive delta mod ({}); expected CTerm Amide",
+                        m.mass_delta
+                    );
+                }
+            }
+        }
+    }
+}

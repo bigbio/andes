@@ -77,10 +77,10 @@ impl GeneratingFunctionGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aa_set::{AminoAcidSet, AminoAcidSetBuilder};
+    use model::aa_set::{AminoAcidSet, AminoAcidSetBuilder};
     use crate::gf::primitive_graph::PrimitiveAaGraph;
     use crate::scoring::{RankScorer, ScoredSpectrum};
-    use crate::spectrum::Spectrum;
+    use model::spectrum::Spectrum;
     use crate::testutil::tiny_param_with_ions;
 
     fn aa() -> AminoAcidSet {

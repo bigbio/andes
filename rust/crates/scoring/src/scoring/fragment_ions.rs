@@ -7,10 +7,10 @@
 
 use std::ops::RangeInclusive;
 
-use crate::amino_acid::AminoAcid;
-use crate::mass::{H2O, PROTON};
+use model::amino_acid::AminoAcid;
+use model::mass::{H2O, PROTON};
 use crate::param_model::{IonType, Param};
-use crate::peptide::Peptide;
+use model::peptide::Peptide;
 
 /// For a single prefix or suffix node at `nominal_mass`, enumerate the
 /// `(ion_type, theo_mz)` pairs that contribute to its node score under

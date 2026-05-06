@@ -11,11 +11,11 @@ use std::path::Path;
 
 use byteorder::{BigEndian, ReadBytesExt};
 
-use crate::activation::ActivationMethod;
-use crate::enzyme::Enzyme;
-use crate::instrument::InstrumentType;
-use crate::protocol::Protocol;
-use crate::tolerance::Tolerance;
+use model::activation::ActivationMethod;
+use model::enzyme::Enzyme;
+use model::instrument::InstrumentType;
+use model::protocol::Protocol;
+use model::tolerance::Tolerance;
 
 #[derive(Debug, Clone)]
 pub struct Param {
@@ -448,7 +448,7 @@ impl IonType {
             IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                (node_mass + offset + c * crate::mass::PROTON) / c
+                (node_mass + offset + c * model::mass::PROTON) / c
             }
             IonType::Noise => 0.0,
         }
@@ -464,7 +464,7 @@ impl IonType {
             IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                mz * c - c * crate::mass::PROTON - offset
+                mz * c - c * model::mass::PROTON - offset
             }
             IonType::Noise => 0.0,
         }
@@ -857,10 +857,10 @@ mod tests {
     }
 
     fn make_param() -> Param {
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
-        use crate::protocol::Protocol;
-        use crate::tolerance::Tolerance;
+        use model::activation::ActivationMethod;
+        use model::instrument::InstrumentType;
+        use model::protocol::Protocol;
+        use model::tolerance::Tolerance;
         use std::collections::HashMap;
 
         Param {
@@ -954,7 +954,7 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge1_offset0() {
-        use crate::mass::PROTON;
+        use model::mass::PROTON;
         let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
         let node_mass = 100.0_f64;
         let expected = (node_mass + 0.0 + PROTON) / 1.0;
@@ -963,7 +963,7 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge2() {
-        use crate::mass::PROTON;
+        use model::mass::PROTON;
         let ion = IonType::Prefix { charge: 2, offset_bits: 0.0_f32.to_bits() };
         let node_mass = 200.0_f64;
         let expected = (node_mass + 0.0 + 2.0 * PROTON) / 2.0;
@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn ion_type_mass_from_mz_round_trips() {
-        use crate::mass::PROTON;
+        use model::mass::PROTON;
         let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
         let node_mass = 100.0_f64;
         let mz = ion.mz(node_mass);
@@ -998,10 +998,10 @@ mod tests {
 
     #[test]
     fn ion_types_for_segment_returns_unique() {
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
-        use crate::protocol::Protocol;
-        use crate::tolerance::Tolerance;
+        use model::activation::ActivationMethod;
+        use model::instrument::InstrumentType;
+        use model::protocol::Protocol;
+        use model::tolerance::Tolerance;
         use std::collections::HashMap;
 
         let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };

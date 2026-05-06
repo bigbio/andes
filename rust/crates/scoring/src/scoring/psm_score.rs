@@ -14,8 +14,8 @@
 //! - `NewScoredSpectrum.java:74-78`: `getNodeScore(prm, srm)` =
 //!   `round(getNodeScore(prm, true) + getNodeScore(srm, false))`.
 
-use crate::mass::{nominal_from, H2O};
-use crate::peptide::Peptide;
+use model::mass::{nominal_from, H2O};
+use model::peptide::Peptide;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
@@ -87,12 +87,12 @@ pub fn score_psm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amino_acid::AminoAcid;
+    use model::amino_acid::AminoAcid;
     use crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
-    use crate::peptide::Peptide;
+    use model::peptide::Peptide;
     use crate::scoring::rank_scorer::RankScorer;
     use crate::scoring::scored_spectrum::ScoredSpectrum;
-    use crate::spectrum::Spectrum;
+    use model::spectrum::Spectrum;
     use crate::testutil::tiny_param;
     use std::collections::HashMap;
 
@@ -120,9 +120,9 @@ mod tests {
     /// matching in `find_partition` returns it for *any* peptide mass.
     /// The prefix-ion frequencies are tuned so that rank-1 hits score positive.
     fn any_mass_param() -> Param {
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
-        use crate::protocol::Protocol;
+        use model::activation::ActivationMethod;
+        use model::instrument::InstrumentType;
+        use model::protocol::Protocol;
 
         let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
         let prefix_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
@@ -149,7 +149,7 @@ mod tests {
                 enzyme: None,
                 protocol: Protocol::Automatic,
             },
-            mme: crate::tolerance::Tolerance::Da(0.2),
+            mme: model::tolerance::Tolerance::Da(0.2),
             apply_deconvolution: false,
             deconvolution_error_tolerance: 0.0,
             charge_hist: vec![(2, 100)],
@@ -198,7 +198,7 @@ mod tests {
         for s in 1..peptide.length() {
             let aa = &peptide.residues[s - 1];
             prefix_acc += aa.mass;
-            let nom = crate::mass::nominal_from(prefix_acc) as f64;
+            let nom = model::mass::nominal_from(prefix_acc) as f64;
             let mz = b_ion.mz(nom);
             peaks.push((mz, 1000.0_f32 / s as f32));  // rank-1 intensity
         }
@@ -231,7 +231,7 @@ mod tests {
         for s in 1..peptide.length() {
             let aa = &peptide.residues[s - 1];
             prefix_acc += aa.mass;
-            let nom = crate::mass::nominal_from(prefix_acc) as f64;
+            let nom = model::mass::nominal_from(prefix_acc) as f64;
             let mz = b_ion.mz(nom);
             match_peaks.push((mz, 1000.0_f32));
         }
@@ -260,8 +260,8 @@ mod tests {
     /// across each split position (this is the definition of the new formula).
     #[test]
     fn score_psm_matches_sum_of_node_scores_across_splits() {
-        use crate::amino_acid::AminoAcid;
-        use crate::mass::nominal_from;
+        use model::amino_acid::AminoAcid;
+        use model::mass::nominal_from;
 
         let peptide = pep(b"AGR");
         let param = tiny_param();

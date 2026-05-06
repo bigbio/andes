@@ -35,7 +35,7 @@
 
 use crate::param_model::{IonType, Param, PrecursorOffsetFrequency};
 use crate::scoring::rank_scorer::RankScorer;
-use crate::spectrum::Spectrum;
+use model::spectrum::Spectrum;
 
 const PROTON: f64 = 1.007_276_49;
 
@@ -452,11 +452,11 @@ mod tests {
     ///                               = parentMass / (parentMass * 20e-6 * 2)
     #[test]
     fn prob_peak_uses_raw_mme_value_not_da_converted() {
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
+        use model::activation::ActivationMethod;
+        use model::instrument::InstrumentType;
         use crate::param_model::SpecDataType;
-        use crate::protocol::Protocol;
-        use crate::tolerance::Tolerance;
+        use model::protocol::Protocol;
+        use model::tolerance::Tolerance;
         use std::collections::HashMap;
 
         // Spectrum: precursor_mz=501.00727649 → neutral_mass≈(501.007-PROTON)*2≈1000.0 Da,
@@ -538,7 +538,7 @@ mod tests {
         //   peak A at 101.1 (delta ≈ 0.093, low intensity 1.0) — CLOSER
         //   peak B at 101.4 (delta ≈ 0.393, high intensity 100.0) — FARTHER but HIGHER intensity
         // Java picks highest-intensity → peak B must win.
-        use crate::mass::PROTON;
+        use model::mass::PROTON;
         let node_nominal = 100_i32;
         let theo_mz = node_nominal as f64 + PROTON;
         let closer_mz = theo_mz + 0.093; // delta 0.093 < 0.393
@@ -584,7 +584,7 @@ mod tests {
         // Place a high-intensity peak at the predicted b1 m/z for a node of
         // nominal mass = 100. Prefix ion: Prefix(charge=1, offset=0).
         // theo_mz = (100.0 + 0 + PROTON) / 1 = 100 + 1.00727649
-        use crate::mass::PROTON;
+        use model::mass::PROTON;
         let nominal = 100.0_f64;
         let b1_mz = nominal + PROTON; // charge=1, offset=0
         let s = spec(&[(50.0, 1.0), (b1_mz, 100.0), (200.0, 2.0)]);
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn node_score_prefix_only_match() {
         // Only prefix ions in table; suffix side always contributes 0.
-        use crate::mass::PROTON;
+        use model::mass::PROTON;
         let nominal = 57.0_f64; // roughly glycine residue mass
         let mz = (nominal + PROTON) / 1.0;
         let s = spec(&[(mz, 50.0), (300.0, 1.0)]);
@@ -671,11 +671,11 @@ mod tests {
     fn edge_score_nonzero_with_existence_table() {
         // Build a param with error_scaling_factor > 0 and a populated
         // ion_existence_table. Check that edge_score is computed (non-zero).
-        use crate::activation::ActivationMethod;
-        use crate::instrument::InstrumentType;
+        use model::activation::ActivationMethod;
+        use model::instrument::InstrumentType;
         use crate::param_model::{FragmentOffsetFrequency, SpecDataType};
-        use crate::protocol::Protocol;
-        use crate::tolerance::Tolerance;
+        use model::protocol::Protocol;
+        use model::tolerance::Tolerance;
         use std::collections::HashMap;
 
         let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
@@ -817,11 +817,11 @@ mod tests {
 #[cfg(test)]
 mod precursor_filter_tests {
     use super::*;
-    use crate::activation::ActivationMethod;
-    use crate::instrument::InstrumentType;
+    use model::activation::ActivationMethod;
+    use model::instrument::InstrumentType;
     use crate::param_model::{Param, PrecursorOffsetFrequency, SpecDataType};
-    use crate::protocol::Protocol;
-    use crate::tolerance::Tolerance;
+    use model::protocol::Protocol;
+    use model::tolerance::Tolerance;
     use std::collections::HashMap;
 
     /// Build a Param with a single precursor offset entry: charge 2,

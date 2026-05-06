@@ -14,7 +14,7 @@
 //! `setUpScoreThreshold()`. They operate on a pre-built `PrimitiveAaGraph`
 //! and produce a single final `ScoreDist` (plus enzyme adjustment).
 
-use crate::aa_set::AminoAcidSet;
+use model::aa_set::AminoAcidSet;
 use crate::gf::primitive_graph::PrimitiveAaGraph;
 use crate::gf::score_dist::{ScoreBound, ScoreDist};
 

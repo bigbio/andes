@@ -20,10 +20,10 @@
 //! 6. Compute edge error scores via `scored_spec.edge_score`.
 //! 7. Compute node scores via `scored_spec.node_score`.
 
-use crate::aa_set::AminoAcidSet;
-use crate::amino_acid::AminoAcid;
-use crate::enzyme::Enzyme;
-use crate::modification::ModLocation;
+use model::aa_set::AminoAcidSet;
+use model::amino_acid::AminoAcid;
+use model::enzyme::Enzyme;
+use model::modification::ModLocation;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
@@ -546,13 +546,13 @@ fn compute_node_scores(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aa_set::AminoAcidSetBuilder;
-    use crate::amino_acid::AminoAcid;
-    use crate::enzyme::Enzyme;
+    use model::aa_set::AminoAcidSetBuilder;
+    use model::amino_acid::AminoAcid;
+    use model::enzyme::Enzyme;
     use crate::param_model::IonType;
     use crate::scoring::rank_scorer::RankScorer;
     use crate::scoring::scored_spectrum::ScoredSpectrum;
-    use crate::spectrum::Spectrum;
+    use model::spectrum::Spectrum;
     use crate::testutil::tiny_param_with_ions;
 
     // -----------------------------------------------------------------------

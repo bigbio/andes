@@ -1,5 +1,5 @@
 [package]
-name = "cli"
+name = "msgf-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ name = "msgf-diff"
 path = "src/bin/msgf-diff.rs"
 
 [lib]
-name = "msgf_diff"
+name = "msgf_cli"
 path = "src/lib.rs"
 
 [dependencies]

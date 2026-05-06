@@ -1,7 +1,7 @@
 //! msgf-diff: parity comparison tool for MS-GF+ output files.
 
 use clap::{Parser, Subcommand};
-use msgf_diff::{compare_schemas, compare_with_tolerance, PinFile, Tolerance};
+use msgf_cli::{compare_schemas, compare_with_tolerance, PinFile, Tolerance};
 use std::path::PathBuf;
 use std::process::ExitCode;
 

@@ -341,6 +341,7 @@ mod tests {
             de_novo_score: 42,
             activation_method: Some(crate::activation::ActivationMethod::HCD),
             e_value: spec_e_value * 100.0,
+            features: crate::psm::PsmFeatures::default(),
         }
     }
 
@@ -526,6 +527,7 @@ mod tests {
             de_novo_score: 0,
             activation_method: None,
             e_value: 1e-3,
+            features: crate::psm::PsmFeatures::default(),
         };
 
         let mut queue = TopNQueue::new(10);

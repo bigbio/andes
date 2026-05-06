@@ -58,6 +58,26 @@
 //!   sums residue masses + H2O). Java's `theoMz * charge` involves charge-carrier
 //!   mass; Rust computes the neutral mass directly from the peptide.
 
+//! ## Feature column status (Phase 7 followup)
+//!
+//! **4 columns now filled** from `psm.features` (computed by
+//! `match_engine::compute_psm_features` at scoring time):
+//! - `NumMatchedMainIons` — count of matched charge-1 b/y fragment positions.
+//! - `longest_b` — longest contiguous run of matched b-ions.
+//! - `longest_y` — longest contiguous run of matched y-ions.
+//! - `longest_y_pct` — `longest_y / peptide.length()`.
+//! - `matchedIonRatio` — `NumMatchedMainIons / peptide.length()`.
+//!
+//! **9 columns remain zero-stubbed** pending richer data plumbing:
+//! - `ExplainedIonCurrentRatio`, `NTermIonCurrentRatio`, `CTermIonCurrentRatio`:
+//!   require summing matched-peak intensities vs total MS2 ion current.
+//! - `MS2IonCurrent`, `IsolationWindowEfficiency`:
+//!   require isolation-window intensity data not currently in `PsmMatch`.
+//! - `MeanErrorTop7`, `StdevErrorTop7`, `MeanRelErrorTop7`, `StdevRelErrorTop7`:
+//!   require mass-error statistics over the top-7 matched ions.
+//!   These will be filled in a future phase once the scored spectrum is
+//!   archived alongside the PSM.
+
 use std::io::{self, BufWriter, Write};
 
 use crate::mass::{ISOTOPE, PROTON};
@@ -299,8 +319,8 @@ fn write_psm_row<W: Write>(
     // lnDeltaSpecEValue
     let ln_delta_spec_e_value = compute_ln_delta_spec_e_value(rank, psm.spec_e_value, rank2_spec_e_value);
 
-    // matchedIonRatio: 0 since NumMatchedMainIons is zero-stubbed
-    let matched_ion_ratio = 0.0_f64;
+    // matchedIonRatio: from psm.features (Phase 7 followup)
+    let matched_ion_ratio = psm.features.matched_ion_ratio as f64;
 
     // Peptide: pre.SEQ_WITH_MODS.post  (uses existing Display impl)
     let peptide_str = format!("{}", psm.candidate.peptide);
@@ -339,12 +359,21 @@ fn write_psm_row<W: Write>(
     // enzN, enzC, enzInt (zero-stubbed)
     write!(writer, "\t0\t0\t0")?;
 
-    // 13 feature columns (zero-stubbed)
-    // NumMatchedMainIons, longest_b, longest_y, longest_y_pct,
+    // 4 filled feature columns (Phase 7 followup):
+    // NumMatchedMainIons, longest_b, longest_y, longest_y_pct
+    write!(
+        writer,
+        "\t{}\t{}\t{}\t{:.6}",
+        psm.features.num_matched_main_ions,
+        psm.features.longest_b,
+        psm.features.longest_y,
+        psm.features.longest_y_pct,
+    )?;
+    // 9 feature columns (zero-stubbed — see module doc for deferred rationale):
     // ExplainedIonCurrentRatio, NTermIonCurrentRatio, CTermIonCurrentRatio,
     // MS2IonCurrent, IsolationWindowEfficiency,
     // MeanErrorTop7, StdevErrorTop7, MeanRelErrorTop7, StdevRelErrorTop7
-    write!(writer, "\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0")?;
+    write!(writer, "\t0\t0\t0\t0\t0\t0\t0\t0\t0")?;
 
     // lnDeltaSpecEValue, matchedIonRatio
     write!(
@@ -543,6 +572,7 @@ mod tests {
             de_novo_score: 42,
             activation_method: Some(crate::activation::ActivationMethod::HCD),
             e_value: spec_e_value * 100.0,
+            features: crate::psm::PsmFeatures::default(),
         }
     }
 
@@ -791,6 +821,72 @@ mod tests {
         assert_eq!(
             rows[0][prot_idx], expected_decoy,
             "Proteins column should carry decoy prefix for decoy PSM"
+        );
+    }
+
+    // ── Phase 7 followup: PIN emits real feature values ──────────────────────
+
+    /// Verify that `NumMatchedMainIons` is emitted from `psm.features`
+    /// rather than always being zero-stubbed.
+    #[test]
+    fn pin_emits_real_num_matched_main_ions_when_features_populated() {
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        let mut psm = make_psm(0, 10.0, 1e-5, false, 2);
+        psm.features.num_matched_main_ions = 5;
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(psm);
+        let queues = vec![queue];
+        let idx = make_empty_search_index();
+
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1);
+
+        let col_idx = cols
+            .iter()
+            .position(|c| c == "NumMatchedMainIons")
+            .expect("NumMatchedMainIons column missing");
+        assert_eq!(
+            rows[0][col_idx], "5",
+            "NumMatchedMainIons should be 5, not zero-stubbed"
+        );
+    }
+
+    /// Verify that `longest_y_pct` is formatted with 6 decimal places.
+    #[test]
+    fn pin_emits_longest_y_pct_with_six_decimals() {
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        let mut psm = make_psm(0, 10.0, 1e-5, false, 2);
+        psm.features.longest_y = 1;
+        psm.features.longest_y_pct = 0.5;
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(psm);
+        let queues = vec![queue];
+        let idx = make_empty_search_index();
+
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1);
+
+        let col_idx = cols
+            .iter()
+            .position(|c| c == "longest_y_pct")
+            .expect("longest_y_pct column missing");
+        assert_eq!(
+            rows[0][col_idx], "0.500000",
+            "longest_y_pct should be formatted with 6 decimal places"
         );
     }
 }

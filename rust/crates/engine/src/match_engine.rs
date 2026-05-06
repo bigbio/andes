@@ -7,8 +7,10 @@ use crate::gf::generating_function::GeneratingFunction;
 use crate::gf::group::GeneratingFunctionGroup;
 use crate::gf::primitive_graph::PrimitiveAaGraph;
 use crate::mass::{H2O, PROTON};
+use crate::peptide::Peptide;
 use crate::precursor_matching::{matches_precursor, MassError};
-use crate::psm::{PsmMatch, TopNQueue};
+use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
+use crate::scoring::fragment_ions::{IonKind, predict_by_ions};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use crate::scoring::{score_psm, RankScorer, ScoredSpectrum};
@@ -74,6 +76,7 @@ pub fn match_spectra(
                     }
                 }
                 if let Some((err, score)) = best_for_charge {
+                    let features = compute_psm_features(&scored_spec, &cand.peptide, fragment_tolerance_da);
                     queues[spec_idx].push(PsmMatch {
                         spectrum_idx: spec_idx,
                         candidate: cand.clone(),
@@ -84,6 +87,7 @@ pub fn match_spectra(
                         de_novo_score: i32::MIN,  // set by Phase 7 compute_spec_e_values_for_spectrum
                         activation_method: Some(scorer.param().data_type.activation),
                         e_value: 1.0,  // set by Phase 7 compute_spec_e_values_for_spectrum
+                        features,
                     });
                 }
             }
@@ -258,4 +262,89 @@ fn compute_spec_e_values_for_spectrum(
         let num_distinct = *length_counts.get(&psm.candidate.peptide.length()).unwrap_or(&1);
         psm.e_value = psm.spec_e_value * num_distinct as f64;
     });
+}
+
+/// Compute fragment-ion feature columns for a single PSM.
+///
+/// Uses charge-1 b/y ions only (matching Java's `NumMatchedMainIons`
+/// convention).  A peptide position counts at most once per ion series;
+/// a position can contribute 1 from b AND 1 from y (so the maximum
+/// `num_matched_main_ions` is `2 * (n - 1)` for a peptide of length n).
+///
+/// Returns `PsmFeatures::default()` for peptides shorter than 2 residues
+/// (no cleavable fragment ions exist).
+///
+/// # Deferred features
+/// The following columns remain zero-stubbed in the PIN writer and are
+/// intentionally NOT computed here:
+/// - `ExplainedIonCurrentRatio`, `NTermIonCurrentRatio`, `CTermIonCurrentRatio`:
+///   require summing matched peak intensities vs total MS2 ion current.
+/// - `MS2IonCurrent`, `IsolationWindowEfficiency`:
+///   require raw precursor isolation window intensity data not yet threaded
+///   into `PsmMatch`.
+/// - `MeanErrorTop7`, `StdevErrorTop7`, `MeanRelErrorTop7`, `StdevRelErrorTop7`:
+///   require mass error statistics over the top-7 matched ions.
+pub(crate) fn compute_psm_features(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    fragment_tolerance_da: f64,
+) -> PsmFeatures {
+    let n = peptide.length();
+    if n < 2 {
+        return PsmFeatures::default();
+    }
+
+    // Predict charge-1 b/y ions; one bool per fragment position.
+    let predicted = predict_by_ions(peptide, 1..=1);
+    let mut b_matched = vec![false; n - 1];
+    let mut y_matched = vec![false; n - 1];
+
+    for p in &predicted {
+        if scored_spec.nearest_peak_rank(p.mz, fragment_tolerance_da).is_some() {
+            // position is 1-based (b1/y1 = index 0 in the matched arrays)
+            let pos = (p.position - 1) as usize;
+            match p.kind {
+                IonKind::B => {
+                    if pos < b_matched.len() {
+                        b_matched[pos] = true;
+                    }
+                }
+                IonKind::Y => {
+                    if pos < y_matched.len() {
+                        y_matched[pos] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let num_matched: u32 = (b_matched.iter().filter(|&&m| m).count()
+        + y_matched.iter().filter(|&&m| m).count()) as u32;
+
+    fn longest_run(matched: &[bool]) -> u32 {
+        let mut best = 0u32;
+        let mut cur = 0u32;
+        for &m in matched {
+            if m {
+                cur += 1;
+                if cur > best {
+                    best = cur;
+                }
+            } else {
+                cur = 0;
+            }
+        }
+        best
+    }
+
+    let longest_b = longest_run(&b_matched);
+    let longest_y = longest_run(&y_matched);
+
+    PsmFeatures {
+        num_matched_main_ions: num_matched,
+        longest_b,
+        longest_y,
+        longest_y_pct: longest_y as f32 / n as f32,
+        matched_ion_ratio: num_matched as f32 / n as f32,
+    }
 }

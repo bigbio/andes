@@ -197,6 +197,7 @@ fn psm_with_lower_spec_e_value_ranks_first() {
             de_novo_score: i32::MIN,
             activation_method: None,
             e_value: 1.0,
+            features: engine::psm::PsmFeatures::default(),
         }
     }
 

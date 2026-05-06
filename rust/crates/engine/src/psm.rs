@@ -5,6 +5,30 @@ use std::collections::BinaryHeap;
 
 use crate::candidate_gen::Candidate;
 
+/// Per-PSM fragment-ion feature columns computed from Phase 5 scoring
+/// machinery and emitted into the Percolator `.pin` file.
+///
+/// Filled by `compute_psm_features` in `match_engine.rs` after `score_psm`.
+/// Fields use `Default` (all zero) as the safe sentinel before computation.
+#[derive(Debug, Clone, Default)]
+pub struct PsmFeatures {
+    /// Number of unique fragment positions where a b- or y-ion at charge 1
+    /// matched a peak within the fragment tolerance.  Each position counts
+    /// at most once per ion series, but can contribute 1 from b AND 1 from y.
+    /// Mirrors Java `NumMatchedMainIons`.
+    pub num_matched_main_ions: u32,
+    /// Length of the longest contiguous run of matched b-ions
+    /// (b1, b2, … must all match to form the run).
+    pub longest_b: u32,
+    /// Length of the longest contiguous run of matched y-ions.
+    pub longest_y: u32,
+    /// `longest_y as f32 / peptide.length() as f32` — fraction in 0.0..=1.0.
+    pub longest_y_pct: f32,
+    /// `num_matched_main_ions as f32 / peptide.length() as f32` — fraction
+    /// of peptide positions covered by matched b/y ions.
+    pub matched_ion_ratio: f32,
+}
+
 #[derive(Debug, Clone)]
 pub struct PsmMatch {
     pub spectrum_idx: usize,
@@ -30,6 +54,9 @@ pub struct PsmMatch {
     /// Approximate: uses the candidate-set size filtered by the same length as
     /// a proxy for `num_distinct_peptides` when no suffix-array helper exists.
     pub e_value: f64,
+    /// Fragment-ion feature columns computed after `score_psm`.
+    /// Defaults to all-zero until `compute_psm_features` runs.
+    pub features: PsmFeatures,
 }
 
 impl PartialEq for PsmMatch {
@@ -171,6 +198,7 @@ mod tests {
             de_novo_score: i32::MIN,  // sentinel: not yet computed
             activation_method: None,
             e_value: 1.0,  // sentinel: not yet computed
+            features: PsmFeatures::default(),
         }
     }
 
@@ -313,5 +341,34 @@ mod tests {
         let m = make_match(0, 1.0);
         assert_eq!(m.e_value, 1.0,
             "e_value sentinel should be 1.0 before enrichment");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7 followup: PsmFeatures struct and default initialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn psm_features_default_is_zero() {
+        let f = PsmFeatures::default();
+        assert_eq!(f.num_matched_main_ions, 0);
+        assert_eq!(f.longest_b, 0);
+        assert_eq!(f.longest_y, 0);
+        assert_eq!(f.longest_y_pct, 0.0);
+        assert_eq!(f.matched_ion_ratio, 0.0);
+    }
+
+    #[test]
+    fn psm_match_default_features_is_zeroed() {
+        let m = make_match(0, 1.0);
+        assert_eq!(m.features.num_matched_main_ions, 0,
+            "features.num_matched_main_ions should default to 0");
+        assert_eq!(m.features.longest_b, 0,
+            "features.longest_b should default to 0");
+        assert_eq!(m.features.longest_y, 0,
+            "features.longest_y should default to 0");
+        assert_eq!(m.features.longest_y_pct, 0.0,
+            "features.longest_y_pct should default to 0.0");
+        assert_eq!(m.features.matched_ion_ratio, 0.0,
+            "features.matched_ion_ratio should default to 0.0");
     }
 }

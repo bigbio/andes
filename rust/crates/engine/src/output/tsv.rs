@@ -20,6 +20,7 @@
 
 use std::io::{self, BufWriter, Write};
 
+use crate::output::row_context::{iter_ranked, RowContext};
 use crate::psm::{PsmMatch, TopNQueue};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
@@ -132,20 +133,15 @@ fn write_spectrum_rows<W: Write>(
     // Sort best-first (lowest spec_e_value first).
     let psms = queue.clone().into_sorted_vec();
 
-    let ctx = RowCtx {
+    let row_ctx = RowCtx {
         spec_file_name,
         is_mgf,
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
     };
 
-    // Rank tracking: rank increments when spec_e_value changes.
-    let mut last_e_value: f64 = f64::NAN;
-
-    for psm in &psms {
-        if psm.spec_e_value != last_e_value {
-            last_e_value = psm.spec_e_value;
-        }
-        write_psm_row(writer, spec, psm, &ctx, search_index)?;
+    for (_rank, psm) in iter_ranked(&psms) {
+        let ctx = RowContext::new(spec, psm, search_index);
+        write_psm_row(writer, spec, psm, &ctx, &row_ctx)?;
     }
     Ok(())
 }
@@ -154,20 +150,17 @@ fn write_psm_row<W: Write>(
     writer: &mut W,
     spec: &Spectrum,
     psm: &PsmMatch,
-    ctx: &RowCtx<'_>,
-    search_index: &SearchIndex,
+    ctx: &RowContext,
+    row_ctx: &RowCtx<'_>,
 ) -> io::Result<()> {
-    let is_mgf = ctx.is_mgf;
-    let ppm_mode = ctx.ppm_mode;
-    let spec_file_name = ctx.spec_file_name;
-    // SpecID: title for MGF, scan=N for mzML
-    let spec_id = if is_mgf {
-        spec.title.clone()
-    } else {
-        format!("scan={}", spec.scan.unwrap_or(0))
-    };
+    let is_mgf = row_ctx.is_mgf;
+    let ppm_mode = row_ctx.ppm_mode;
+    let spec_file_name = row_ctx.spec_file_name;
 
-    let scan_num = spec.scan.unwrap_or(0);
+    // SpecID: derived from RowContext (title if non-empty, else "scan=N")
+    let spec_id = ctx.spec_id.clone();
+
+    let scan_num = ctx.scan;
 
     // FragMethod: use ActivationMethod::name() for known variants, "UNKNOWN" for None
     let frag_method = psm
@@ -196,9 +189,9 @@ fn write_psm_row<W: Write>(
     // Peptide: uses the existing Display impl → "pre.SEQ_WITH_MODS.post"
     let peptide = format!("{}", psm.candidate.peptide);
 
-    // Protein: resolved from SearchIndex. Decoy accessions already carry the
-    // prefix (set by target_plus_decoy). Multi-protein emit is a future followup.
-    let protein = format_protein(psm, search_index);
+    // Protein: resolved via RowContext (accession already carries decoy prefix).
+    // Multi-protein emit is a future followup.
+    let protein = ctx.accession.clone();
 
     // DeNovoScore
     let de_novo_score = psm.de_novo_score;
@@ -257,19 +250,6 @@ fn write_psm_row<W: Write>(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Resolve a protein accession from the SearchIndex for a given PSM.
-///
-/// `SearchIndex::db` is the combined target+decoy `ProteinDb` where decoy
-/// accessions already carry the decoy prefix (set by `target_plus_decoy`).
-/// We look up `psm.candidate.protein_index` directly — no prefix arithmetic
-/// needed.  Falls back to `"PROT_{idx}"` if the index is out of range.
-fn format_protein(psm: &PsmMatch, search_index: &SearchIndex) -> String {
-    let idx = psm.candidate.protein_index;
-    match search_index.protein_at(idx) {
-        Some(prot) => prot.accession.clone(),
-        None => format!("PROT_{idx}"),
-    }
-}
 
 /// Format a SpecEValue / EValue in scientific notation.
 ///

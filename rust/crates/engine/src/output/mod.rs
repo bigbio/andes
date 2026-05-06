@@ -25,3 +25,5 @@ pub use tsv::{write_tsv, write_tsv_to};
 
 pub mod pin;
 pub use pin::{write_pin, write_pin_to};
+
+pub(crate) mod row_context;

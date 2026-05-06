@@ -21,7 +21,7 @@
 
 use std::io::{Read, Write};
 
-use crate::compact_fasta::CompactFastaSequence;
+use model::compact_fasta::CompactFastaSequence;
 
 #[derive(Debug, Clone)]
 pub struct SuffixArray {
@@ -222,7 +222,7 @@ pub enum SuffixArrayError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protein::{Protein, ProteinDb};
+    use model::protein::{Protein, ProteinDb};
 
     fn make_db(proteins: &[(&str, &[u8])]) -> ProteinDb {
         ProteinDb {

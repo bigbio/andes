@@ -49,7 +49,7 @@ pub struct PsmMatch {
     pub de_novo_score: i32,
     /// Activation method captured from `param.data_type.activation` at scoring
     /// time. `None` if unknown or not yet set.
-    pub activation_method: Option<crate::activation::ActivationMethod>,
+    pub activation_method: Option<model::activation::ActivationMethod>,
     /// `spec_e_value * num_distinct_peptides_at_length`. Sentinel: `1.0`.
     /// Approximate: uses the candidate-set size filtered by the same length as
     /// a proxy for `num_distinct_peptides` when no suffix-array helper exists.
@@ -137,6 +137,17 @@ impl TopNQueue {
         self.heap.iter().map(|Reverse(m)| m)
     }
 
+    /// Return the best PSM (smallest `spec_e_value`, then largest `score`)
+    /// without removing it. Returns `None` if the queue is empty.
+    ///
+    /// The heap is a min-heap on `Reverse<PsmMatch>` so the *worst* entry sits
+    /// at the top (for cheap eviction). To find the *best* entry we iterate
+    /// all elements and take the max in natural `PsmMatch` ordering.
+    /// Cost is O(N) — acceptable for the small top-N queues used in practice.
+    pub fn peek_top(&self) -> Option<&PsmMatch> {
+        self.heap.iter().map(|Reverse(m)| m).max_by(|a, b| a.cmp(b))
+    }
+
     /// Apply `f` to each PSM to compute its `spec_e_value`, then rebuild
     /// the heap so the ordering invariant holds.
     ///
@@ -177,8 +188,8 @@ impl TopNQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amino_acid::AminoAcid;
-    use crate::peptide::Peptide;
+    use model::amino_acid::AminoAcid;
+    use model::peptide::Peptide;
 
     fn make_match(spectrum_idx: usize, score: f32) -> PsmMatch {
         let aa = AminoAcid::standard(b'A').unwrap();

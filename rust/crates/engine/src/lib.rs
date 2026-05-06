@@ -2,7 +2,8 @@
 //!
 //! Model types → `model` crate
 //! Scoring / GF / Param types → `scoring` crate
-//! Remaining: candidate_gen, search_index, match_engine, output, etc.
+//! Search types → `search` crate
+//! Output → still here (moves in Phase 4)
 
 // Model modules re-exported from the `model` crate.
 pub use model::aa_set;
@@ -20,21 +21,21 @@ pub use model::spectrum;
 pub use model::tolerance;
 
 // Scoring modules re-exported from the `scoring` crate.
-// Note: the `scoring` sub-module is re-exported as `scoring` here;
-// the `gf` and `param_model` sub-modules come from the scoring crate root.
 pub use scoring_crate::gf;
 pub use scoring_crate::param_model;
 pub use scoring_crate::scoring;
 
-pub mod candidate_gen;
-pub mod decoy;
-pub mod match_engine;
+// Search modules re-exported from the `search` crate.
+pub use search::candidate_gen;
+pub use search::decoy;
+pub use search::match_engine;
+pub use search::precursor_matching;
+pub use search::psm;
+pub use search::search_index;
+pub use search::search_params;
+pub use search::suffix_array;
+
 pub mod output;
-pub mod precursor_matching;
-pub mod psm;
-pub mod search_index;
-pub mod search_params;
-pub mod suffix_array;
 
 #[cfg(test)]
 pub(crate) mod testutil;
@@ -56,11 +57,9 @@ pub use model::{
     PrecursorTolerance, Tolerance,
 };
 pub use scoring_crate::{Param, ParamParseError, RankScorer, ScoredSpectrum};
-pub use candidate_gen::enumerate_candidates;
-pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
-pub use match_engine::match_spectra;
-pub use precursor_matching::{matches_precursor, MassError};
-pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
-pub use search_index::SearchIndex;
-pub use search_params::SearchParams;
-pub use suffix_array::SuffixArray;
+pub use search::{
+    enumerate_candidates, reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX,
+    match_spectra, matches_precursor, MassError,
+    PsmFeatures, PsmMatch, TopNQueue,
+    SearchIndex, SearchParams, SuffixArray,
+};

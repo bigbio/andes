@@ -1,7 +1,7 @@
 //! Decoy database generation. Mirrors Java
 //! `edu.ucsd.msjava.msdbsearch.ReverseDB`.
 
-use crate::protein::{Protein, ProteinDb};
+use model::protein::{Protein, ProteinDb};
 
 /// Default decoy prefix matching Java MSGFPlus.DEFAULT_DECOY_PROTEIN_PREFIX.
 pub const DEFAULT_DECOY_PREFIX: &str = "XXX";

@@ -2,9 +2,9 @@
 
 use std::ops::RangeInclusive;
 
-use crate::aa_set::AminoAcidSet;
-use crate::enzyme::Enzyme;
-use crate::tolerance::{PrecursorTolerance, Tolerance};
+use model::aa_set::AminoAcidSet;
+use model::enzyme::Enzyme;
+use model::tolerance::{PrecursorTolerance, Tolerance};
 
 #[derive(Debug, Clone)]
 pub struct SearchParams {
@@ -56,7 +56,7 @@ impl SearchParams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aa_set::AminoAcidSetBuilder;
+    use model::aa_set::AminoAcidSetBuilder;
 
     #[test]
     fn default_tryptic_has_expected_values() {

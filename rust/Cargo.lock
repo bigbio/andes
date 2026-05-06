@@ -130,6 +130,7 @@ dependencies = [
  "input",
  "model",
  "scoring",
+ "search",
  "suffix",
  "tempfile",
  "thiserror",
@@ -349,6 +350,18 @@ version = "0.1.0"
 dependencies = [
  "byteorder",
  "model",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "search"
+version = "0.1.0"
+dependencies = [
+ "input",
+ "model",
+ "scoring",
+ "suffix",
  "tempfile",
  "thiserror",
 ]

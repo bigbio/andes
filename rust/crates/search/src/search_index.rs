@@ -1,9 +1,9 @@
 //! Bundled search database: target+decoy ProteinDb, CompactFastaSequence,
 //! and SuffixArray. Output of Phase 4b+4c, input of Phase 4d.
 
-use crate::compact_fasta::{CompactFastaError, CompactFastaSequence};
+use model::compact_fasta::{CompactFastaError, CompactFastaSequence};
 use crate::decoy::target_plus_decoy;
-use crate::protein::ProteinDb;
+use model::protein::ProteinDb;
 use crate::suffix_array::{SuffixArray, SuffixArrayError};
 
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ impl SearchIndex {
     /// raw FASTA accessions.  Decoy proteins occupy `[target_count, 2 *
     /// target_count)` and their accessions already carry the decoy prefix (set
     /// by [`target_plus_decoy`]).  Returns `None` when `idx` is out of range.
-    pub fn protein_at(&self, idx: usize) -> Option<&crate::protein::Protein> {
+    pub fn protein_at(&self, idx: usize) -> Option<&model::protein::Protein> {
         self.db.proteins.get(idx)
     }
 }
@@ -46,7 +46,7 @@ pub enum SearchIndexError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protein::Protein;
+    use model::protein::Protein;
 
     #[test]
     fn from_target_db_doubles_protein_count() {

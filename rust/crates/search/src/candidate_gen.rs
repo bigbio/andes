@@ -17,10 +17,10 @@
 //! NOT deduplicated — they have a distinct search space (protein-N-term
 //! mod variants apply) matching Java's behaviour.
 
-use crate::amino_acid::AminoAcid;
-use crate::enzyme::Enzyme;
-use crate::peptide::Peptide;
-use crate::protein::Protein;
+use model::amino_acid::AminoAcid;
+use model::enzyme::Enzyme;
+use model::peptide::Peptide;
+use model::protein::Protein;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 
@@ -173,7 +173,7 @@ fn expand_mod_combinations(
     is_protein_n_term: bool,
     is_protein_c_term: bool,
 ) -> Vec<Vec<AminoAcid>> {
-    use crate::modification::ModLocation;
+    use model::modification::ModLocation;
 
     let n = span.len();
     // For each position, the list of variants at that residue.

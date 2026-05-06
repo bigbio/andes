@@ -2,21 +2,21 @@
 
 use std::collections::HashMap;
 
-use crate::aa_set::AminoAcidSet;
+use model::aa_set::AminoAcidSet;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
-use crate::enzyme::Enzyme;
-use crate::gf::generating_function::GeneratingFunction;
-use crate::gf::group::GeneratingFunctionGroup;
-use crate::gf::primitive_graph::PrimitiveAaGraph;
-use crate::mass::{H2O, PROTON};
-use crate::peptide::Peptide;
+use model::enzyme::Enzyme;
+use scoring_crate::gf::generating_function::GeneratingFunction;
+use scoring_crate::gf::group::GeneratingFunctionGroup;
+use scoring_crate::gf::primitive_graph::PrimitiveAaGraph;
+use model::mass::{H2O, PROTON};
+use model::peptide::Peptide;
 use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
-use crate::scoring::fragment_ions::{IonKind, predict_by_ions};
+use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
-use crate::scoring::{score_psm, RankScorer, ScoredSpectrum};
-use crate::spectrum::Spectrum;
+use scoring_crate::scoring::{score_psm, RankScorer, ScoredSpectrum};
+use model::spectrum::Spectrum;
 
 /// Match every spectrum against every candidate from the SearchIndex.
 /// Returns one top-N PSM queue per spectrum, in input order.

@@ -1,9 +1,9 @@
 //! Precursor-mass tolerance window check.
 
-use crate::mass::{ISOTOPE, PROTON};
-use crate::peptide::Peptide;
-use crate::spectrum::Spectrum;
-use crate::tolerance::PrecursorTolerance;
+use model::mass::{ISOTOPE, PROTON};
+use model::peptide::Peptide;
+use model::spectrum::Spectrum;
+use model::tolerance::PrecursorTolerance;
 
 #[derive(Debug, Clone, Copy)]
 pub struct MassError {

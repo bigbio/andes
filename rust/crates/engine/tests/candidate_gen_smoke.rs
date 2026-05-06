@@ -32,14 +32,21 @@ fn params(min: u32, max: u32, missed: u32) -> SearchParams {
 
 #[test]
 fn single_tryptic_peptide_no_missed() {
+    // Protein "MKWVTFISLLR": trypsin cleaves after K (pos 1) → spans "MK" (too short) + "WVTFISLLR".
+    // Standard pass: 1 candidate "WVTFISLLR" at offset 2.
+    // Track B5 Met-cleavage pass (sub_seq="KWVTFISLLR"): trypsin cleaves after K (sub_pos 0) →
+    //   sub-spans "K" (too short) + "WVTFISLLR" at abs_offset=2. Adds 1 more candidate.
+    // Total target candidates: 2.
     let idx = make_index(b"MKWVTFISLLR");
     let p = params(6, 40, 0);
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
     let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
-    assert_eq!(target_candidates.len(), 1, "expected 1 target candidate, got {}", target_candidates.len());
-    let cand = target_candidates[0];
-    assert_eq!(cand.peptide.length(), 9);
-    assert_eq!(cand.start_offset_in_protein, 2);
+    assert_eq!(target_candidates.len(), 2, "expected 2 target candidates (standard + Met-cleaved), got {}", target_candidates.len());
+    // Both candidates are "WVTFISLLR" at offset 2 — one from each enumeration pass.
+    for cand in &target_candidates {
+        assert_eq!(cand.peptide.length(), 9);
+        assert_eq!(cand.start_offset_in_protein, 2);
+    }
 }
 
 #[test]
@@ -76,10 +83,20 @@ fn no_cleavage_enzyme_emits_full_protein_only() {
     p.max_missed_cleavages = 0;
     p.max_variable_mods_per_peptide = 0;
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
-    // 2 candidates: target whole + decoy whole
-    assert_eq!(candidates.len(), 2);
-    assert_eq!(candidates[0].peptide.length(), 11);
-    assert_eq!(candidates[0].start_offset_in_protein, 0);
+    // Track B5: protein starts with M, so Met-cleaved pass also runs.
+    // Standard pass: target "MKWVTFISLLR" (len=11, offset=0) + decoy "RLLSIFTFVKM" (len=11, offset=0).
+    // Met-cleaved pass (target only, since decoy "RLLSIFTFVKM" starts with R):
+    //   sub_seq "KWVTFISLLR" (len=10) → 1 candidate at offset=1.
+    // Total: 3 (2 standard + 1 met-cleaved target).
+    assert_eq!(candidates.len(), 3);
+    let target_candidates: Vec<_> = candidates.iter().filter(|c| !c.is_decoy).collect();
+    assert_eq!(target_candidates.len(), 2);
+    // Standard target: full protein at offset 0, length 11.
+    let full = target_candidates.iter().find(|c| c.start_offset_in_protein == 0).unwrap();
+    assert_eq!(full.peptide.length(), 11);
+    // Met-cleaved target: sequence[1..] at offset 1, length 10.
+    let met_cleaved = target_candidates.iter().find(|c| c.start_offset_in_protein == 1).unwrap();
+    assert_eq!(met_cleaved.peptide.length(), 10);
 }
 
 #[test]
@@ -194,8 +211,10 @@ fn aa_set_with_oxidation() -> engine::AminoAcidSet {
 #[test]
 fn one_variable_mod_site_doubles_candidates() {
     // "MKAR" — Trypsin spans (0,2)="MK" + (2,4)="AR".
-    // With Oxidation-M variable: "MK" → 2 versions (unmod + Mox); "AR" → 1.
-    // Total target = 3.
+    // Standard pass: "MK" → 2 (unmod + Mox); "AR" → 1. Total = 3.
+    // Track B5 Met-cleavage pass (sub_seq="KAR"): spans "K" (too short) + "AR" at abs_offset=2.
+    //   "AR" has no M residue → 1 extra candidate.
+    // Total target = 4.
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(), description: "".into(),
@@ -211,13 +230,16 @@ fn one_variable_mod_site_doubles_candidates() {
     let target_count = enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .count();
-    assert_eq!(target_count, 3, "expected 3 target candidates (MK + MKox + AR)");
+    assert_eq!(target_count, 4, "expected 4 target candidates (MK + MKox + AR + AR[met-cleaved])");
 }
 
 #[test]
 fn two_variable_mod_sites_quadruple_candidates() {
-    // "MMK" — single span (0,3) with 2 M positions.
-    // Combos: {none, M0_ox, M1_ox, both_ox} = 4.
+    // "MMK" — standard pass: single span (0,3) "MMK" with 2 M positions.
+    // Standard combos: {none, M0_ox, M1_ox, both_ox} = 4.
+    // Track B5 Met-cleavage pass (sub_seq="MK"): single span "MK" (abs_offset=1) with 1 M position.
+    // Met-cleaved combos: {none, Mox} = 2.
+    // Total target = 4 + 2 = 6.
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(), description: "".into(),
@@ -233,12 +255,14 @@ fn two_variable_mod_sites_quadruple_candidates() {
     let target_count = enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .count();
-    assert_eq!(target_count, 4);
+    assert_eq!(target_count, 6, "expected 6 (MMK×4 standard + MK×2 met-cleaved)");
 }
 
 #[test]
 fn max_variable_mods_caps_combinations() {
-    // "MMMK" — 3 M sites. With max_mods=1: {none, M0_ox, M1_ox, M2_ox} = 4.
+    // "MMMK" — 3 M sites. Standard pass with max_mods=1: {none, M0_ox, M1_ox, M2_ox} = 4.
+    // Track B5 Met-cleavage pass (sub_seq="MMK"): 2 M sites, max_mods=1: {none, M0_ox, M1_ox} = 3.
+    // Total target = 4 + 3 = 7.
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(), description: "".into(),
@@ -254,7 +278,7 @@ fn max_variable_mods_caps_combinations() {
     let target_count = enumerate_candidates(&idx, &p, "XXX")
         .filter(|c| !c.is_decoy)
         .count();
-    assert_eq!(target_count, 4);
+    assert_eq!(target_count, 7, "expected 7 (MMMK×4 standard + MMK×3 met-cleaved)");
 }
 
 // ─── Track B2: terminal-mod expansion tests ───────────────────────────────────
@@ -334,7 +358,11 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
 /// - "MAAAAK" (protein start): gets Anywhere (unmod M) + ProtNTerm (Acetyl-M) → 2 candidates.
 /// - "MAAAAAK" (offset 6, not protein start): gets only Anywhere (unmod M) → 1 candidate.
 ///
-/// Total: 3. This proves B2's fix: without the terminal-loc expansion, we'd get 2 (both unmod).
+/// Track B5 Met-cleavage pass (sub_seq="AAAAKMAAAAAK"):
+/// - "AAAAK" (sub_seq 0..5): length=5 < min=6, skipped.
+/// - "MAAAAAK" (sub_seq 5..12, abs_offset=6): is_protein_n_term=false, NTerm lookup empty → 1 candidate.
+///
+/// Total target: 3 + 1 = 4. The ProtNTerm mod still appears exactly once (on offset-0 peptide).
 #[test]
 fn protein_n_term_mod_only_at_protein_start() {
     let target = ProteinDb {
@@ -354,11 +382,12 @@ fn protein_n_term_mod_only_at_protein_start() {
         .filter(|c| !c.is_decoy)
         .collect();
 
-    // Peptide at offset 0: 2 (unmod + Protein_N_Term Acetyl).
-    // Peptide at offset 6: 1 (unmod only — ProtNTerm does NOT apply here; this position gets NTerm).
+    // Standard pass: 2 (offset-0 "MAAAAK": unmod + ProtNTerm Acetyl) + 1 (offset-6 "MAAAAAK": unmod).
+    // B5 Met-cleavage pass: 1 extra "MAAAAAK" at offset-6 (no ProtNTerm mod, NTerm lookup empty).
+    // Total: 4.
     assert_eq!(
-        candidates.len(), 3,
-        "expected 3 candidates (2 for protein-start peptide, 1 for offset-6 peptide), got {}",
+        candidates.len(), 4,
+        "expected 4 candidates (2 for protein-start peptide, 1+1 for offset-6 peptide), got {}",
         candidates.len()
     );
 
@@ -445,11 +474,15 @@ fn nterm_mod_applies_to_non_protein_start_peptides() {
 ///
 /// Protein: "MAAAAKR" (length 7).
 /// Trypsin cleaves after K(5): spans (0..6)="MAAAAK" (not protein C-term) and (6..7)="R" (protein C-term).
-/// With both CTerm Amide (-0.984) and ProtCTerm GlyGly (+114.04) variable mods:
-/// - "MAAAAK" (end < protein_len): CTerm Amide applies to last position → 2 variants.
-/// - "R" (end == protein_len): ProtCTerm GlyGly applies to last position → 2 variants.
+/// Standard pass:
+/// - "MAAAAK" (end < protein_len): CTerm Amide applies → 2 variants.
+/// - "R" (end == protein_len): ProtCTerm GlyGly applies → 2 variants.
 ///
-/// Total: 4.
+/// Track B5 Met-cleavage pass (sub_seq="AAAAKR"):
+/// - "AAAA" (abs_end=5, not protein C-term): CTerm Amide → 2 variants.
+/// - "KR" (abs_end=7, protein C-term): ProtCTerm GlyGly → 2 variants.
+///
+/// Total: 4 + 4 = 8.
 ///
 /// This also verifies the C-Term mod does NOT bleed into the protein-C-term peptide, and vice versa.
 #[test]
@@ -471,11 +504,12 @@ fn c_term_and_protein_c_term_distinguished() {
         .filter(|c| !c.is_decoy)
         .collect();
 
-    // "MAAAAK" → 2 (unmod + CTerm Amide on last residue K).
-    // "R"      → 2 (unmod + ProtCTerm GlyGly on last residue R).
+    // Standard pass: "MAAAAK"×2 + "R"×2 = 4.
+    // B5 Met-cleavage pass (sub_seq="AAAAKR"): "AAAA"×2 + "KR"×2 = 4.
+    // Total: 8.
     assert_eq!(
-        candidates.len(), 4,
-        "expected 4 candidates, got {}",
+        candidates.len(), 8,
+        "expected 8 candidates, got {}",
         candidates.len()
     );
 
@@ -488,21 +522,113 @@ fn c_term_and_protein_c_term_distinguished() {
         if let Some(last) = residues.last() {
             if let Some(m) = &last.mod_ {
                 if is_prot_c_term {
-                    // Protein-C-term peptide "R": should get ProtCTerm GlyGly (+114.04).
+                    // Protein-C-term peptide "R" or Met-cleaved "KR": should get ProtCTerm GlyGly (+114.04).
                     assert!(
                         m.mass_delta > 0.0,
-                        "protein C-term peptide 'R' got a negative delta mod ({}); expected ProtCTerm GlyGly",
+                        "protein C-term peptide got a negative delta mod ({}); expected ProtCTerm GlyGly",
                         m.mass_delta
                     );
                 } else {
-                    // Non-protein-C-term peptide "MAAAAK": should get CTerm Amide (-0.984).
+                    // Non-protein-C-term peptide "MAAAAK" or Met-cleaved "AAAA": should get CTerm Amide (-0.984).
                     assert!(
                         m.mass_delta < 0.0,
-                        "non-protein-C-term peptide 'MAAAAK' got a positive delta mod ({}); expected CTerm Amide",
+                        "non-protein-C-term peptide got a positive delta mod ({}); expected CTerm Amide",
                         m.mass_delta
                     );
                 }
             }
         }
     }
+}
+
+// ─── Track B5: N-terminal Met cleavage tests ─────────────────────────────────
+
+/// Met-cleavage generates alternative protein-N-term candidates for M-leading proteins.
+///
+/// Protein: "MAGER" (5 residues). With NoCleavage + min=1, the standard pass
+/// emits the full protein as a single peptide at offset 0 (is_protein_n_term=true).
+/// The Met-cleavage pass emits sub_seq="AGER" at offset 1 (is_protein_n_term=true,
+/// since it starts at sub_seq index 0).
+/// Both must be present in the candidate set.
+#[test]
+fn met_cleavage_generates_alternative_candidates() {
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"MAGER".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set());
+    p.enzyme = Enzyme::NoCleavage;
+    p.min_length = 1;
+    p.max_length = 40;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 0;
+
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .collect();
+
+    // Standard: "MAGER" at offset 0, length 5.
+    // Met-cleaved: "AGER" at offset 1, length 4.
+    assert_eq!(candidates.len(), 2, "expected 2 target candidates (standard + Met-cleaved), got {}", candidates.len());
+
+    let has_full = candidates.iter().any(|c| c.start_offset_in_protein == 0 && c.peptide.length() == 5);
+    let has_met_cleaved = candidates.iter().any(|c| c.start_offset_in_protein == 1 && c.peptide.length() == 4);
+
+    assert!(has_full, "missing standard candidate at offset 0 (MAGER)");
+    assert!(has_met_cleaved, "missing Met-cleaved candidate at offset 1 (AGER)");
+}
+
+/// Non-M first residue does not trigger Met-cleavage enumeration.
+///
+/// Protein: "KAGER". Standard pass emits tryptic peptides. No second pass.
+#[test]
+fn non_met_first_residue_does_not_trigger_cleavage() {
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"KAGER".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set());
+    p.enzyme = Enzyme::NoCleavage;
+    p.min_length = 1;
+    p.max_length = 40;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 0;
+
+    let target_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+
+    // Only 1 candidate: full sequence "KAGER". No Met-cleaved pass since first residue != M.
+    assert_eq!(target_count, 1, "expected 1 candidate for non-M protein, got {}", target_count);
+}
+
+/// A single-residue M-only protein does not trigger Met-cleavage (sequence.len() == 1).
+#[test]
+fn met_alone_does_not_trigger_cleavage() {
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"M".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let mut p = SearchParams::default_tryptic(aa_set());
+    p.enzyme = Enzyme::NoCleavage;
+    p.min_length = 1;
+    p.max_length = 40;
+    p.max_missed_cleavages = 0;
+    p.max_variable_mods_per_peptide = 0;
+
+    let target_count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+
+    // Only 1 candidate: "M" at offset 0. Met-cleavage guard `len > 1` prevents empty sub_seq.
+    assert_eq!(target_count, 1, "expected 1 candidate for M-only protein, got {}", target_count);
 }

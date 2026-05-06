@@ -7,6 +7,15 @@
 //! within length range. NO variable-mod expansion (Task 4).
 //! Missed-cleavage handling already works correctly via the
 //! `missed_count` check; Task 3 adds tests for it.
+//!
+//! Track B5: N-terminal Met cleavage support.
+//! Mirrors Java `CandidatePeptideGridConsideringMetCleavage.java:16`.
+//! When a protein starts with M, a parallel enumeration treats
+//! `sequence[1..]` as the effective protein sequence (initial Met loss).
+//! Both enumerations run concurrently; Met-cleaved candidates differ by
+//! `is_protein_n_term=true` at offset 1 of the original sequence and are
+//! NOT deduplicated — they have a distinct search space (protein-N-term
+//! mod variants apply) matching Java's behaviour.
 
 use crate::amino_acid::AminoAcid;
 use crate::enzyme::Enzyme;
@@ -44,12 +53,46 @@ fn enumerate_protein(
     params: &SearchParams,
 ) -> Vec<Candidate> {
     let seq = &protein.sequence;
-    let n = seq.len() as u32;
+
+    // Standard enumeration: full sequence from offset 0.
+    let mut out = enumerate_protein_from_offset(seq, 0, protein_index, is_decoy, params);
+
+    // N-terminal Met cleavage: mirrors Java CandidatePeptideGridConsideringMetCleavage.java:16.
+    // When the protein starts with M (and has >1 residue), also enumerate candidates
+    // treating sequence[1..] as the effective start. The Met-cleaved peptides still carry
+    // is_protein_n_term=true (the post-Met residue is the new biological N-terminus) and
+    // are NOT deduplicated — they differ by terminal-mod search space.
+    if seq.first() == Some(&b'M') && seq.len() > 1 {
+        out.extend(enumerate_protein_from_offset(seq, 1, protein_index, is_decoy, params));
+    }
+
+    out
+}
+
+/// Enumerate candidates starting from `seq_offset` into `seq`.
+///
+/// `seq_offset = 0` → normal full-protein walk.
+/// `seq_offset = 1` → Met-cleaved walk: `seq[1..]` is the effective protein
+///   sequence. Cleavage positions, lengths, and missed-cleavage counts are
+///   computed over the sub-sequence. The `start_offset_in_protein` stored on
+///   each `Candidate` is adjusted back to the original protein coordinates
+///   (i.e. `sub_start + seq_offset`). When `sub_start == 0`, `is_protein_n_term`
+///   is set to `true` — the post-Met residue is the effective protein N-terminus.
+///   The `pre` context residue for sub_start == 0 is `b'M'` (the cleaved Met).
+fn enumerate_protein_from_offset(
+    seq: &[u8],
+    seq_offset: usize,
+    protein_index: usize,
+    is_decoy: bool,
+    params: &SearchParams,
+) -> Vec<Candidate> {
+    let sub_seq = &seq[seq_offset..];
+    let n = sub_seq.len() as u32;
     if n < params.min_length {
         return Vec::new();
     }
 
-    let cleavage_positions = compute_cleavage_positions(seq, params.enzyme);
+    let cleavage_positions = compute_cleavage_positions(sub_seq, params.enzyme);
 
     let mut out = Vec::new();
     for (i, &start) in cleavage_positions.iter().enumerate() {
@@ -68,17 +111,30 @@ fn enumerate_protein(
                 continue;
             }
 
-            let span = &seq[start as usize..end as usize];
+            let span = &sub_seq[start as usize..end as usize];
             // Skip spans containing non-standard residues.
             if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
                 continue;
             }
 
-            let pre = if start == 0 { b'_' } else { seq[start as usize - 1] };
-            let post = if end as usize == seq.len() { b'-' } else { seq[end as usize] };
+            // Context residues in original sequence coordinates.
+            // For the Met-cleaved pass (seq_offset == 1) and sub_start == 0, the
+            // context residue to the left is the cleaved M (seq[0]).
+            let abs_start = start as usize + seq_offset;
+            let abs_end = end as usize + seq_offset;
+            let pre = if abs_start == 0 {
+                b'_'
+            } else {
+                seq[abs_start - 1]
+            };
+            let post = if abs_end == seq.len() { b'-' } else { seq[abs_end] };
 
+            // is_protein_n_term: true when the span begins at the effective protein start.
+            // For seq_offset == 0: start == 0 (same as before).
+            // For seq_offset == 1 (Met-cleaved): start == 0 in sub_seq means the
+            //   post-Met residue is at the biological N-terminus — still protein-N-term.
             let is_protein_n_term = start == 0;
-            let is_protein_c_term = end as usize == seq.len();
+            let is_protein_c_term = abs_end == seq.len();
             let mod_combinations =
                 expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
             for residues in mod_combinations {
@@ -86,7 +142,7 @@ fn enumerate_protein(
                 out.push(Candidate {
                     peptide,
                     protein_index,
-                    start_offset_in_protein: start as usize,
+                    start_offset_in_protein: abs_start,
                     is_decoy,
                 });
             }

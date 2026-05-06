@@ -1,5 +1,7 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
+use std::collections::HashMap;
+
 use crate::aa_set::AminoAcidSet;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
 use crate::enzyme::Enzyme;
@@ -51,32 +53,45 @@ pub fn match_spectra(
     }
 
     for (spec_idx, spec) in spectra.iter().enumerate() {
-        // Build ScoredSpectrum once per spectrum; reuse across all candidates.
-        // Phase 5b Task 1: pass the scorer's param and the precursor charge so
-        // that precursor peaks (and their charge-reduced / neutral-loss neighbours)
-        // are filtered out before peak ranking.
-        let precursor_z = spec.precursor_charge.unwrap_or(2) as u8;
-        let scored_spec = ScoredSpectrum::new(spec, scorer.param(), precursor_z);
-
+        // Determine which charge states to try for this spectrum.
+        // For charge-explicit spectra this is a single entry; for charge-missing,
+        // typically 2-3 entries (small overhead, correct behavior).
         let charges_to_try: Vec<u8> = match spec.precursor_charge {
             Some(z) if z > 0 => vec![z as u8],
             _ => params.charge_range.clone().collect(),
         };
 
+        // Build (and cache) a ScoredSpectrum per charge to evaluate.
+        //
+        // Fix (Track B3): previously a single ScoredSpectrum was built with
+        // `precursor_z = spec.precursor_charge.unwrap_or(2)`, so charge-missing
+        // spectra always used z=2 even when evaluating z=3 candidates — wrong
+        // precursor filtering, wrong partition, wrong main_ion.
+        //
+        // For charge-explicit spectra the cache has exactly 1 entry (no overhead).
+        // For charge-missing spectra, typically 2-3 entries per spectrum.
+        // The HashMap lifetime aligns with `spec`'s borrow (same loop scope).
+        let mut scored_per_charge: HashMap<u8, ScoredSpectrum<'_>> = HashMap::new();
+        for &z in &charges_to_try {
+            scored_per_charge.entry(z)
+                .or_insert_with(|| ScoredSpectrum::new(spec, scorer.param(), z));
+        }
+
         for cand in &candidates {
             for &z in &charges_to_try {
+                let scored_spec = &scored_per_charge[&z];
                 let mut best_for_charge: Option<(MassError, f32)> = None;
                 for offset in params.isotope_error_range.clone() {
                     if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
                         // Phase 5: use real score_psm instead of -|mass_error_ppm| placeholder.
-                        let score = score_psm(&scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da);
+                        let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da);
                         if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
                             best_for_charge = Some((err, score));
                         }
                     }
                 }
                 if let Some((err, score)) = best_for_charge {
-                    let features = compute_psm_features(&scored_spec, &cand.peptide, fragment_tolerance_da);
+                    let features = compute_psm_features(scored_spec, &cand.peptide, fragment_tolerance_da);
                     queues[spec_idx].push(PsmMatch {
                         spectrum_idx: spec_idx,
                         candidate: cand.clone(),
@@ -102,6 +117,18 @@ pub fn match_spectra(
             } else {
                 None
             };
+            // Pick the ScoredSpectrum for the top PSM's charge.
+            // For charge-explicit spectra there is only 1 entry in the cache.
+            // For charge-missing spectra, use the top PSM's charge so the GF
+            // reflects the dominant scoring context (option (a) per B3 plan).
+            let top_charge = queues[spec_idx]
+                .iter_psms()
+                .max_by(|a, b| a.cmp(b))
+                .map(|p| p.charge_used)
+                .unwrap_or(charges_to_try[0]);
+            // Unwrap is safe: the cache was built for every charge in charges_to_try,
+            // and top_charge comes from a PSM that was scored at one of those charges.
+            let scored_spec_for_gf = &scored_per_charge[&top_charge];
             compute_spec_e_values_for_spectrum(
                 spec,
                 params,
@@ -109,7 +136,8 @@ pub fn match_spectra(
                 &aa_set_for_gf,
                 enzyme_opt,
                 scorer,
-                &scored_spec,
+                scored_spec_for_gf,
+                top_charge,
                 fragment_tolerance_da,
             );
         }
@@ -125,13 +153,17 @@ pub fn match_spectra(
 /// Mirrors Java DBScanner.java:597-650.
 ///
 /// # Arguments
-/// * `spec` — the spectrum (used for precursor m/z and charge).
+/// * `spec` — the spectrum (used for precursor m/z).
 /// * `params` — search params (precursor_tolerance, isotope_error_range).
 /// * `queue` — the PSM queue for this spectrum (mutated in place).
 /// * `aa_set` — amino acid set with enzyme already registered via `register_enzyme`.
 /// * `enzyme` — the search enzyme (passed to PrimitiveAaGraph; may be None).
 /// * `scorer` — Phase 5 RankScorer.
-/// * `scored_spec` — Phase 5 ScoredSpectrum for this spectrum.
+/// * `scored_spec` — ScoredSpectrum built with `top_charge` (B3: per-charge cache).
+/// * `top_charge` — charge of the top PSM in the queue; used for GF mass window.
+///   For charge-explicit spectra this equals `spec.precursor_charge.unwrap()`.
+///   For charge-missing spectra, using the top PSM's charge ensures the GF
+///   reflects the dominant scoring context.
 /// * `fragment_tolerance_da` — fragment mass tolerance in Da.
 #[allow(clippy::too_many_arguments)]
 fn compute_spec_e_values_for_spectrum(
@@ -142,10 +174,13 @@ fn compute_spec_e_values_for_spectrum(
     enzyme: Option<Enzyme>,
     scorer: &RankScorer,
     scored_spec: &ScoredSpectrum<'_>,
+    top_charge: u8,
     fragment_tolerance_da: f64,
 ) {
     // 1. Determine the peptide neutral mass and its tolerance window.
-    let charge = spec.precursor_charge.unwrap_or(2) as u8;
+    // For charge-explicit spectra, `top_charge` == spec.precursor_charge.unwrap().
+    // For charge-missing spectra, `top_charge` is the top PSM's charge (B3 fix).
+    let charge = top_charge;
     if charge == 0 {
         return;
     }

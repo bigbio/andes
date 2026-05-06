@@ -157,3 +157,49 @@ fn spectrum_without_charge_tries_charge_range() {
     assert!(!top.is_empty(), "expected charge_range to find a match");
     assert_eq!(top[0].charge_used, 2);
 }
+
+/// B3 correctness: for charge-missing spectra, each candidate is scored
+/// against a ScoredSpectrum built with its own charge (not a fixed z=2).
+///
+/// We set up a peptide whose precursor m/z at z=3 matches the spectrum
+/// but at z=2 does not.  With the pre-B3 code (single scored_spec at z=2)
+/// the candidate would still be found but with a mismatched charge.
+/// With the B3 fix (per-charge cache), each charge sees its own ScoredSpectrum
+/// and the PSM's charge_used matches the charge that actually satisfied the
+/// precursor-mass check.
+#[test]
+fn charge_missing_spectrum_uses_per_charge_scored_spec() {
+    // Peptide "WVTFISLLR", a tryptic fragment from BSA-related sequences.
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(), description: "".into(),
+            sequence: b"MKWVTFISLLR".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    // charge_range 2..=3; spectrum has no charge.
+    params.charge_range = 2..=3;
+
+    let target_residues: Vec<AminoAcid> = b"WVTFISLLR".iter()
+        .map(|&r| AminoAcid::standard(r).unwrap()).collect();
+    let target_peptide = Peptide::new(target_residues, b'K', b'-');
+    let mass = target_peptide.mass();
+
+    // Set the precursor m/z at z=3 so only z=3 satisfies precursor matching.
+    let charge = 3u8;
+    let mz = (mass + charge as f64 * PROTON) / charge as f64;
+
+    let spec = make_spectrum(mz, None);  // charge-missing
+    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let top = queues.into_iter().next().unwrap().into_sorted_vec();
+
+    // The only match must be at charge 3 (the precursor m/z is z=3-exact).
+    assert!(!top.is_empty(), "expected a charge-3 match for charge-missing spectrum");
+    assert!(
+        top.iter().all(|p| p.charge_used == 3),
+        "all PSMs should be at z=3; found charges: {:?}",
+        top.iter().map(|p| p.charge_used).collect::<Vec<_>>()
+    );
+}

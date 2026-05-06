@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use engine::{
     match_spectra, AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb,
     SearchIndex, SearchParams, Spectrum, PROTON,
-    ActivationMethod, InstrumentType, IonType, Param, Partition, Protocol,
-    RankScorer, SpecDataType, Tolerance,
+    Param, RankScorer, Tolerance,
 };
+use engine::activation::ActivationMethod;
+use engine::instrument::InstrumentType;
+use engine::param_model::{IonType, Partition, SpecDataType};
+use engine::protocol::Protocol;
 
 fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
     Spectrum {

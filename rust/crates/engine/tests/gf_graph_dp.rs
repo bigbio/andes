@@ -11,12 +11,12 @@
 
 use std::collections::HashMap;
 
-use engine::{
-    AminoAcidSetBuilder, Enzyme, GeneratingFunction, IonType, Param, Partition,
-    PrimitiveAaGraph, RankScorer, ScoredSpectrum, Spectrum,
-    ActivationMethod, InstrumentType, Protocol, SpecDataType, Tolerance,
-    FragmentOffsetFrequency,
-};
+use engine::{AminoAcidSetBuilder, Enzyme, Param, RankScorer, ScoredSpectrum, Spectrum, Tolerance};
+use engine::gf::{GeneratingFunction, PrimitiveAaGraph};
+use engine::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+use engine::activation::ActivationMethod;
+use engine::instrument::InstrumentType;
+use engine::protocol::Protocol;
 
 // -----------------------------------------------------------------------
 // Shared helpers

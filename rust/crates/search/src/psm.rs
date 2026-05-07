@@ -27,6 +27,44 @@ pub struct PsmFeatures {
     /// `num_matched_main_ions as f32 / peptide.length() as f32` — fraction
     /// of peptide positions covered by matched b/y ions.
     pub matched_ion_ratio: f32,
+
+    // ── Phase 4 alignment: ion-current ratios ───────────────────────────────
+
+    /// Sum of matched b+y ion intensities divided by total MS2 ion current.
+    /// Mirrors Java `PSMFeatureFinder.getExplainedIonCurrent()` =
+    /// `nTermIonCurrent / ms2IonCurrent + cTermIonCurrent / ms2IonCurrent`.
+    pub explained_ion_current_ratio: f32,
+    /// Sum of matched b-ion intensities divided by total MS2 ion current.
+    /// Mirrors Java `PSMFeatureFinder.getNTermExplainedIonCurrent()`.
+    pub n_term_ion_current_ratio: f32,
+    /// Sum of matched y-ion intensities divided by total MS2 ion current.
+    /// Mirrors Java `PSMFeatureFinder.getCTermExplainedIonCurrent()`.
+    pub c_term_ion_current_ratio: f32,
+    /// Raw sum of all peak intensities in the MS2 spectrum.
+    /// Mirrors Java `PSMFeatureFinder.getMS2IonCurrent()` — the Java code
+    /// stores and emits the raw sum (NOT log10). Note: the PIN column is
+    /// labelled `MS2IonCurrent` and Java emits it directly without log
+    /// transformation.
+    pub ms2_ion_current: f32,
+    /// Isolation-window efficiency. Java always returns `null` for this field
+    /// (no precursor isolation data is stored in the spectrum object), so we
+    /// emit `0.0` as a documented divergence.
+    pub isolation_window_efficiency: f32,
+
+    // ── Phase 4 alignment: top-7 mass-error statistics ──────────────────────
+
+    /// Mean of absolute Da errors for the top-7 most-intense matched ions.
+    /// Mirrors Java `MassErrorStat.getMean7()` (uses absolute |error|).
+    pub mean_error_top7: f32,
+    /// Population standard deviation of absolute Da errors for top-7 ions.
+    /// Mirrors Java `MassErrorStat.getSd7()` (population stdev: sqrt(E[x²]-mean²)).
+    pub stdev_error_top7: f32,
+    /// Mean of signed relative errors (ppm) for the top-7 most-intense matched ions.
+    /// Mirrors Java `MassErrorStat.getRMean7()` (uses signed error, not absolute).
+    pub mean_rel_error_top7: f32,
+    /// Population standard deviation of signed relative errors (ppm) for top-7 ions.
+    /// Mirrors Java `MassErrorStat.getRSd7()`.
+    pub stdev_rel_error_top7: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -387,6 +425,16 @@ mod tests {
         assert_eq!(f.longest_y, 0);
         assert_eq!(f.longest_y_pct, 0.0);
         assert_eq!(f.matched_ion_ratio, 0.0);
+        // Phase 4 alignment: 9 new fields
+        assert_eq!(f.explained_ion_current_ratio, 0.0);
+        assert_eq!(f.n_term_ion_current_ratio, 0.0);
+        assert_eq!(f.c_term_ion_current_ratio, 0.0);
+        assert_eq!(f.ms2_ion_current, 0.0);
+        assert_eq!(f.isolation_window_efficiency, 0.0);
+        assert_eq!(f.mean_error_top7, 0.0);
+        assert_eq!(f.stdev_error_top7, 0.0);
+        assert_eq!(f.mean_rel_error_top7, 0.0);
+        assert_eq!(f.stdev_rel_error_top7, 0.0);
     }
 
     #[test]
@@ -402,6 +450,25 @@ mod tests {
             "features.longest_y_pct should default to 0.0");
         assert_eq!(m.features.matched_ion_ratio, 0.0,
             "features.matched_ion_ratio should default to 0.0");
+        // Phase 4 alignment: 9 new fields
+        assert_eq!(m.features.explained_ion_current_ratio, 0.0,
+            "explained_ion_current_ratio should default to 0.0");
+        assert_eq!(m.features.n_term_ion_current_ratio, 0.0,
+            "n_term_ion_current_ratio should default to 0.0");
+        assert_eq!(m.features.c_term_ion_current_ratio, 0.0,
+            "c_term_ion_current_ratio should default to 0.0");
+        assert_eq!(m.features.ms2_ion_current, 0.0,
+            "ms2_ion_current should default to 0.0");
+        assert_eq!(m.features.isolation_window_efficiency, 0.0,
+            "isolation_window_efficiency should default to 0.0");
+        assert_eq!(m.features.mean_error_top7, 0.0,
+            "mean_error_top7 should default to 0.0");
+        assert_eq!(m.features.stdev_error_top7, 0.0,
+            "stdev_error_top7 should default to 0.0");
+        assert_eq!(m.features.mean_rel_error_top7, 0.0,
+            "mean_rel_error_top7 should default to 0.0");
+        assert_eq!(m.features.stdev_rel_error_top7, 0.0,
+            "stdev_rel_error_top7 should default to 0.0");
     }
 
     // -----------------------------------------------------------------------

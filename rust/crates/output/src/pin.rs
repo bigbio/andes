@@ -58,25 +58,24 @@
 //!   sums residue masses + H2O). Java's `theoMz * charge` involves charge-carrier
 //!   mass; Rust computes the neutral mass directly from the peptide.
 
-//! ## Feature column status (Phase 7 followup)
+//! ## Feature column status (Phase 4 alignment complete)
 //!
-//! **4 columns now filled** from `psm.features` (computed by
+//! **All 14 feature columns now filled** from `psm.features` (computed by
 //! `match_engine::compute_psm_features` at scoring time):
 //! - `NumMatchedMainIons` — count of matched charge-1 b/y fragment positions.
 //! - `longest_b` — longest contiguous run of matched b-ions.
 //! - `longest_y` — longest contiguous run of matched y-ions.
 //! - `longest_y_pct` — `longest_y / peptide.length()`.
+//! - `ExplainedIonCurrentRatio` — matched b+y intensity / total MS2 intensity.
+//! - `NTermIonCurrentRatio` — matched b intensity / total MS2 intensity.
+//! - `CTermIonCurrentRatio` — matched y intensity / total MS2 intensity.
+//! - `MS2IonCurrent` — raw sum of all MS2 peak intensities (NOT log10).
+//! - `IsolationWindowEfficiency` — always 0.0 (Java returns null; documented divergence).
+//! - `MeanErrorTop7` — mean |Da| error of top-7 most-intense matched ions.
+//! - `StdevErrorTop7` — population stdev of |Da| errors for top-7 ions.
+//! - `MeanRelErrorTop7` — mean signed ppm error of top-7 ions.
+//! - `StdevRelErrorTop7` — population stdev of signed ppm errors for top-7.
 //! - `matchedIonRatio` — `NumMatchedMainIons / peptide.length()`.
-//!
-//! **9 columns remain zero-stubbed** pending richer data plumbing:
-//! - `ExplainedIonCurrentRatio`, `NTermIonCurrentRatio`, `CTermIonCurrentRatio`:
-//!   require summing matched-peak intensities vs total MS2 ion current.
-//! - `MS2IonCurrent`, `IsolationWindowEfficiency`:
-//!   require isolation-window intensity data not currently in `PsmMatch`.
-//! - `MeanErrorTop7`, `StdevErrorTop7`, `MeanRelErrorTop7`, `StdevRelErrorTop7`:
-//!   require mass-error statistics over the top-7 matched ions.
-//!   These will be filled in a future phase once the scored spectrum is
-//!   archived alongside the PSM.
 
 use std::io::{self, BufWriter, Write};
 
@@ -346,11 +345,25 @@ fn write_psm_row<W: Write>(
         psm.features.longest_y,
         psm.features.longest_y_pct,
     )?;
-    // 9 feature columns (zero-stubbed — see module doc for deferred rationale):
+    // 9 feature columns (Phase 4 alignment — filled from psm.features):
     // ExplainedIonCurrentRatio, NTermIonCurrentRatio, CTermIonCurrentRatio,
     // MS2IonCurrent, IsolationWindowEfficiency,
     // MeanErrorTop7, StdevErrorTop7, MeanRelErrorTop7, StdevRelErrorTop7
-    write!(writer, "\t0\t0\t0\t0\t0\t0\t0\t0\t0")?;
+    //
+    // IsolationWindowEfficiency is always 0.0 (Java returns null; documented divergence).
+    write!(
+        writer,
+        "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        format_double(psm.features.explained_ion_current_ratio as f64),
+        format_double(psm.features.n_term_ion_current_ratio as f64),
+        format_double(psm.features.c_term_ion_current_ratio as f64),
+        format_double(psm.features.ms2_ion_current as f64),
+        format_double(psm.features.isolation_window_efficiency as f64),
+        format_double(psm.features.mean_error_top7 as f64),
+        format_double(psm.features.stdev_error_top7 as f64),
+        format_double(psm.features.mean_rel_error_top7 as f64),
+        format_double(psm.features.stdev_rel_error_top7 as f64),
+    )?;
 
     // lnDeltaSpecEValue, matchedIonRatio
     write!(

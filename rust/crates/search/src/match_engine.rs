@@ -383,16 +383,19 @@ fn compute_spec_e_values_for_spectrum(
 /// Returns `PsmFeatures::default()` for peptides shorter than 2 residues
 /// (no cleavable fragment ions exist).
 ///
-/// # Deferred features
-/// The following columns remain zero-stubbed in the PIN writer and are
-/// intentionally NOT computed here:
-/// - `ExplainedIonCurrentRatio`, `NTermIonCurrentRatio`, `CTermIonCurrentRatio`:
-///   require summing matched peak intensities vs total MS2 ion current.
-/// - `MS2IonCurrent`, `IsolationWindowEfficiency`:
-///   require raw precursor isolation window intensity data not yet threaded
-///   into `PsmMatch`.
-/// - `MeanErrorTop7`, `StdevErrorTop7`, `MeanRelErrorTop7`, `StdevRelErrorTop7`:
-///   require mass error statistics over the top-7 matched ions.
+/// # Phase 4 alignment: 9 new ion-current + error-stat features
+///
+/// All 9 previously zero-stubbed PIN columns are now filled:
+/// - Ion-current ratios use raw peak intensities vs total MS2 ion current.
+///   Mirrors Java `PSMFeatureFinder.computeExplainedIonCurrent()`.
+/// - `MS2IonCurrent` is the raw sum (NOT log10).  Java `getMS2IonCurrent()`
+///   returns the raw sum; the PIN emitter emits it as-is.
+/// - `IsolationWindowEfficiency` is always 0.0; Java returns `null` here
+///   (no isolation-window data in the Spectrum object).
+/// - Top-7 error stats mirror Java `MassErrorStat`: errors are collected for
+///   all matched b+y ions, sorted descending by intensity, top-7 taken;
+///   absolute Da error for mean/stdev, signed ppm for rel-mean/rel-stdev.
+///   Population stdev formula: `sqrt(E[x²] - mean²)` — matches Java.
 pub(crate) fn compute_psm_features(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
@@ -408,8 +411,17 @@ pub(crate) fn compute_psm_features(
     let mut b_matched = vec![false; n - 1];
     let mut y_matched = vec![false; n - 1];
 
+    // Collect matched-ion details for ion-current ratio and error-stat features.
+    // Each entry: (intensity, observed_mz, predicted_mz, is_b_ion)
+    let mut matched_ions: Vec<(f32, f64, f64, bool)> = Vec::new();
+
     for p in &predicted {
-        if scored_spec.nearest_peak_rank(p.mz, fragment_tolerance_da).is_some() {
+        if let Some((_rank, intensity, peak_mz)) =
+            scored_spec.nearest_peak_full(p.mz, fragment_tolerance_da)
+        {
+            let is_b = matches!(p.kind, IonKind::B);
+            matched_ions.push((intensity, peak_mz, p.mz, is_b));
+
             // position is 1-based (b1/y1 = index 0 in the matched arrays)
             let pos = (p.position - 1) as usize;
             match p.kind {
@@ -449,11 +461,252 @@ pub(crate) fn compute_psm_features(
     let longest_b = longest_run(&b_matched);
     let longest_y = longest_run(&y_matched);
 
+    // ── Ion-current ratio features ────────────────────────────────────────────
+
+    let total_intensity = scored_spec.total_intensity(); // raw sum, all peaks
+
+    let matched_b_intensity: f64 = matched_ions.iter()
+        .filter(|&&(_, _, _, is_b)| is_b)
+        .map(|&(int, _, _, _)| int as f64)
+        .sum();
+    let matched_y_intensity: f64 = matched_ions.iter()
+        .filter(|&&(_, _, _, is_b)| !is_b)
+        .map(|&(int, _, _, _)| int as f64)
+        .sum();
+    let matched_total = matched_b_intensity + matched_y_intensity;
+
+    let safe_div = |num: f64, denom: f64| -> f32 {
+        if denom > 0.0 { (num / denom) as f32 } else { 0.0 }
+    };
+
+    let explained_ion_current_ratio = safe_div(matched_total, total_intensity);
+    let n_term_ion_current_ratio    = safe_div(matched_b_intensity, total_intensity);
+    let c_term_ion_current_ratio    = safe_div(matched_y_intensity, total_intensity);
+    // Java `getMS2IonCurrent()` returns the raw sum (no log10 transform).
+    let ms2_ion_current = if total_intensity > 0.0 { total_intensity as f32 } else { 0.0 };
+    // Java `getIsolationWindowEfficiency()` always returns null → emit 0.0.
+    let isolation_window_efficiency = 0.0_f32;
+
+    // ── Top-7 mass-error statistics ───────────────────────────────────────────
+
+    // Sort matched ions descending by intensity (mirrors Java MassErrorStat
+    // which sorts errorList by intensity via PairReverseComparator).
+    let mut by_intensity = matched_ions.clone();
+    by_intensity.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let top7: Vec<(f32, f64, f64, bool)> = by_intensity.into_iter().take(7).collect();
+
+    // Java MassErrorStat: absolute Da errors for mean7/sd7;
+    //                     signed errors (no abs) for rMean7/rSd7 (ppm).
+    // Population stdev formula (Java): sqrt(sumSq/n - mean²).
+    let abs_da_errors: Vec<f64> = top7.iter()
+        .map(|&(_, obs, pred, _)| (obs - pred).abs())
+        .collect();
+    let rel_ppm_errors: Vec<f64> = top7.iter()
+        .filter(|&&(_, _, pred, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _)| (obs - pred) / pred * 1e6)
+        .collect();
+
+    fn mean_and_pop_stdev(values: &[f64]) -> (f32, f32) {
+        if values.is_empty() { return (0.0, 0.0); }
+        let n = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / n;
+        let sum_sq: f64 = values.iter().map(|v| v * v).sum();
+        let var = (sum_sq / n - mean * mean).max(0.0); // clamp negative rounding noise
+        (mean as f32, var.sqrt() as f32)
+    }
+
+    let (mean_error_top7, stdev_error_top7)         = mean_and_pop_stdev(&abs_da_errors);
+    let (mean_rel_error_top7, stdev_rel_error_top7) = mean_and_pop_stdev(&rel_ppm_errors);
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
         longest_y,
         longest_y_pct: longest_y as f32 / n as f32,
         matched_ion_ratio: num_matched as f32 / n as f32,
+        explained_ion_current_ratio,
+        n_term_ion_current_ratio,
+        c_term_ion_current_ratio,
+        ms2_ion_current,
+        isolation_window_efficiency,
+        mean_error_top7,
+        stdev_error_top7,
+        mean_rel_error_top7,
+        stdev_rel_error_top7,
+    }
+}
+
+// ── Unit tests for Phase 4 alignment feature columns ─────────────────────────
+
+#[cfg(test)]
+mod feature_tests {
+    use super::*;
+    use model::amino_acid::AminoAcid;
+    use model::mass::PROTON;
+    use model::peptide::Peptide;
+    use model::spectrum::Spectrum;
+    use scoring_crate::scoring::fragment_ions::predict_by_ions;
+    use scoring_crate::scoring::ScoredSpectrum;
+
+    /// Build a minimal peptide of `len` alanine residues with flanks `_-`.
+    fn ala_peptide(len: usize) -> Peptide {
+        let aa = AminoAcid::standard(b'A').unwrap();
+        Peptide::new(vec![aa; len], b'_', b'-')
+    }
+
+    fn make_spectrum(peaks: Vec<(f64, f32)>) -> Spectrum {
+        Spectrum {
+            title: "test".into(),
+            precursor_mz: 500.0,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks,
+        }
+    }
+
+    // ── Test: empty spectrum → all new features are 0 ───────────────────────
+
+    #[test]
+    fn compute_psm_features_top7_error_stats_zero_when_no_matches() {
+        let pep = ala_peptide(4);
+        let spec = make_spectrum(vec![]); // no peaks
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        let f = compute_psm_features(&ss, &pep, 0.5);
+        assert_eq!(f.mean_error_top7,     0.0, "mean_error_top7 should be 0 with no matches");
+        assert_eq!(f.stdev_error_top7,    0.0, "stdev_error_top7 should be 0 with no matches");
+        assert_eq!(f.mean_rel_error_top7,  0.0, "mean_rel_error_top7 should be 0 with no matches");
+        assert_eq!(f.stdev_rel_error_top7, 0.0, "stdev_rel_error_top7 should be 0 with no matches");
+        assert_eq!(f.explained_ion_current_ratio, 0.0, "ratio should be 0 with no peaks");
+        assert_eq!(f.ms2_ion_current, 0.0, "ms2_ion_current should be 0 with no peaks");
+    }
+
+    // ── Test: ion-current ratios populate and satisfy arithmetic invariant ───
+
+    #[test]
+    fn compute_psm_features_populates_ion_current_ratios() {
+        // Use a 3-residue peptide (ALA-ALA-ALA). predict_by_ions(charge=1) gives:
+        //   b1, y1, b2, y2 at definite m/z values.
+        // We place spectrum peaks at exactly those m/z values so all ions match,
+        // then verify explained_ratio > 0 and n + c == explained.
+        let pep = ala_peptide(3);
+        let predicted = predict_by_ions(&pep, 1..=1);
+
+        // Place peaks exactly at every predicted m/z with increasing intensities.
+        let mut peaks: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        // Add some unmatched background intensity so total_intensity > matched.
+        peaks.push((1500.0, 5.0)); // far from any ion
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let spec = make_spectrum(peaks);
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        let f = compute_psm_features(&ss, &pep, 0.01); // tight tolerance
+
+        // All ratios should be positive since all predicted ions match.
+        assert!(f.explained_ion_current_ratio > 0.0,
+            "explained_ion_current_ratio should be > 0 when ions match, got {}",
+            f.explained_ion_current_ratio);
+        assert!(f.n_term_ion_current_ratio > 0.0,
+            "n_term_ion_current_ratio should be > 0 when b-ions match");
+        assert!(f.c_term_ion_current_ratio > 0.0,
+            "c_term_ion_current_ratio should be > 0 when y-ions match");
+
+        // Invariant: n_term + c_term == explained (within float precision)
+        let sum = f.n_term_ion_current_ratio + f.c_term_ion_current_ratio;
+        assert!(
+            (sum - f.explained_ion_current_ratio).abs() < 1e-5,
+            "n_term + c_term should == explained ({} + {} != {})",
+            f.n_term_ion_current_ratio, f.c_term_ion_current_ratio, f.explained_ion_current_ratio
+        );
+
+        // ms2_ion_current should equal total peak intensity sum.
+        let total: f32 = ss.total_intensity() as f32;
+        assert!((f.ms2_ion_current - total).abs() < 1.0,
+            "ms2_ion_current {} should match total spectrum intensity {}",
+            f.ms2_ion_current, total);
+
+        // isolation_window_efficiency always 0.0.
+        assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: top-7 error stats are nonzero when ions match ─────────────────
+
+    #[test]
+    fn compute_psm_features_error_stats_nonzero_when_ions_match_with_offset() {
+        // Build a peptide and shift every peak by a fixed offset so errors are known.
+        let pep = ala_peptide(5);
+        let predicted = predict_by_ions(&pep, 1..=1);
+
+        let offset_da = 0.01_f64;  // 10 mDa error on every peak
+        let mut peaks: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz + offset_da, (i + 1) as f32 * 10.0))
+            .collect();
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let spec = make_spectrum(peaks);
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        // tolerance = 0.05 Da so all offset peaks are still within window.
+        let f = compute_psm_features(&ss, &pep, 0.05);
+
+        // All absolute Da errors should be ~offset_da.
+        assert!(
+            f.mean_error_top7 > 0.0,
+            "mean_error_top7 should be > 0 when peaks are systematically offset, got {}",
+            f.mean_error_top7
+        );
+        // With identical errors, stdev should be near 0.
+        assert!(
+            f.stdev_error_top7 < 1e-4,
+            "stdev_error_top7 should be ~0 for identical errors, got {}",
+            f.stdev_error_top7
+        );
+        // Relative error should also be nonzero.
+        assert!(
+            f.mean_rel_error_top7 != 0.0,
+            "mean_rel_error_top7 should be nonzero when peaks are offset"
+        );
+    }
+
+    // ── Test: ms2_ion_current mirrors total_intensity exactly ───────────────
+
+    #[test]
+    fn ms2_ion_current_equals_total_intensity() {
+        let pep = ala_peptide(3);
+        let peaks = vec![(100.0, 50.0_f32), (200.0, 30.0), (300.0, 20.0)];
+        let spec = make_spectrum(peaks.clone());
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        let f = compute_psm_features(&ss, &pep, 0.5);
+
+        let expected: f32 = peaks.iter().map(|&(_, i)| i).sum();
+        assert_eq!(f.ms2_ion_current, expected,
+            "ms2_ion_current {} should equal sum of peak intensities {}",
+            f.ms2_ion_current, expected);
+    }
+
+    // ── Test: PROTON mass sanity — b1 ion for alanine at charge 1 ───────────
+    // This verifies the predict_by_ions formula aligns with our test setup.
+    #[test]
+    fn b1_mz_for_alanine_is_proton_plus_residue_mass() {
+        use model::amino_acid::AminoAcid;
+        let aa = AminoAcid::standard(b'A').unwrap();
+        let residue_mass = aa.mass; // monoisotopic residue mass
+        let expected_b1_mz = residue_mass + PROTON; // charge 1
+        let pep = ala_peptide(2);
+        let predicted = predict_by_ions(&pep, 1..=1);
+        let b1 = predicted.iter().find(|p| matches!(p.kind, IonKind::B) && p.position == 1)
+            .expect("b1 ion should exist");
+        assert!(
+            (b1.mz - expected_b1_mz).abs() < 1e-6,
+            "b1 mz {} expected {}", b1.mz, expected_b1_mz
+        );
     }
 }

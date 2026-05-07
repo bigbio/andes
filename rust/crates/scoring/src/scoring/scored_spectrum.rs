@@ -213,6 +213,48 @@ impl<'a> ScoredSpectrum<'a> {
         self.kept_count
     }
 
+    /// Total intensity of all peaks in the original spectrum (before any
+    /// filtering). This is the raw MS2 ion current used by the Java
+    /// `PSMFeatureFinder.computeSumIonCurrent()` method.
+    ///
+    /// Returns 0.0 for an empty spectrum.
+    pub fn total_intensity(&self) -> f64 {
+        self.spec.peaks.iter().map(|&(_, i)| i as f64).sum()
+    }
+
+    /// Find the peak closest to `target_mz` within `tolerance_da`. Returns
+    /// `(rank, intensity, peak_mz)`, or `None` if no peak falls within the
+    /// window. Filtered-out peaks (rank == `u32::MAX`) are never returned.
+    ///
+    /// This is the intensity-aware sibling of `nearest_peak_rank`, used by
+    /// `compute_psm_features` for ion-current ratio and error-stat columns.
+    pub fn nearest_peak_full(&self, target_mz: f64, tolerance_da: f64) -> Option<(u32, f32, f64)> {
+        if self.spec.peaks.is_empty() {
+            return None;
+        }
+        let lo_mz = target_mz - tolerance_da;
+        let hi_mz = target_mz + tolerance_da;
+        let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
+        let mut best: Option<(usize, f64)> = None; // (peak_index, delta)
+        for i in start..self.spec.peaks.len() {
+            let (mz, _) = self.spec.peaks[i];
+            if mz > hi_mz {
+                break;
+            }
+            if self.ranks[i] == u32::MAX {
+                continue;
+            }
+            let delta = (mz - target_mz).abs();
+            if best.as_ref().map_or(true, |(_, d)| delta < *d) {
+                best = Some((i, delta));
+            }
+        }
+        best.map(|(i, _)| {
+            let (peak_mz, intensity) = self.spec.peaks[i];
+            (self.ranks[i], intensity, peak_mz)
+        })
+    }
+
     /// Find the peak closest to `target_mz` within `tolerance_da`. Returns
     /// the peak's rank, or `None` if no peak falls within the window.
     ///

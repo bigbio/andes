@@ -59,3 +59,77 @@ pub fn rank_scorer() -> RankScorer {
         .unwrap_or_else(|e| panic!("load HCD_QExactive_Tryp.param: {e}"));
     RankScorer::new(&param)
 }
+
+/// Strip Percolator flanking (`X.PEPTIDE.Y`) and mod-mass tokens like
+/// `+57.021` / `-18.0` from a `.pin`-format peptide string. Returns the
+/// residue-only sequence in uppercase.
+///
+/// Implementation note: a naive `split('.').nth(1)` is WRONG for any peptide
+/// containing a mod-mass (e.g. `K.GAC+57.021LLPK.E` → buggy parser yields
+/// `"GAC+57"` → `"GAC"`). The flanking dots are at fixed byte positions
+/// (1 and len-2) when the flanking residue is a single character (always
+/// the case in `.pin` output). Mod-mass dots lie strictly inside that
+/// middle range. We extract the middle and strip mod-mass tokens
+/// (`[+-]\d+(\.\d+)?`) explicitly.
+pub fn strip_flanking_and_mods(pin_pep: &str) -> String {
+    let bytes = pin_pep.as_bytes();
+    if bytes.len() < 5 {
+        return String::new();
+    }
+    if bytes[1] != b'.' || bytes[bytes.len() - 2] != b'.' {
+        return String::new();
+    }
+    let middle = &pin_pep[2..pin_pep.len() - 2];
+    let mut out = String::with_capacity(middle.len());
+    let mut chars = middle.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '+' || c == '-' {
+            // Consume mod-mass tail: digits, optional dot, optional digits.
+            while let Some(&nc) = chars.peek() {
+                if nc.is_ascii_digit() || nc == '.' {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        } else if c.is_ascii_uppercase() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::strip_flanking_and_mods;
+
+    #[test]
+    fn strips_flanking_only() {
+        assert_eq!(strip_flanking_and_mods("R.PEPTIDE.K"), "PEPTIDE");
+    }
+
+    #[test]
+    fn strips_one_mod_mass() {
+        assert_eq!(strip_flanking_and_mods("K.PEPTM+15.995DE.R"), "PEPTMDE");
+    }
+
+    #[test]
+    fn strips_multiple_mod_masses() {
+        // Regression: the case that broke the prior naive parser.
+        assert_eq!(
+            strip_flanking_and_mods("K.GAC+57.021LLPKIETM+15.995R.E"),
+            "GACLLPKIETMR"
+        );
+    }
+
+    #[test]
+    fn strips_negative_mod_mass() {
+        assert_eq!(strip_flanking_and_mods("K.PEPM-18.0R.E"), "PEPMR");
+    }
+
+    #[test]
+    fn handles_protein_terminal_dash_flanking() {
+        assert_eq!(strip_flanking_and_mods("-.PEPTIDE.R"), "PEPTIDE");
+        assert_eq!(strip_flanking_and_mods("R.PEPTIDE.-"), "PEPTIDE");
+    }
+}

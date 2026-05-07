@@ -25,17 +25,9 @@ use search::{enumerate_candidates, match_spectra, SearchIndex, SearchParams};
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-/// Strip flanking residues `X.PEPTIDE.Y` → `PEPTIDE`, then remove any
-/// modification annotations (e.g. `+57.021`, `C+57.021`) — keeps only
-/// ASCII uppercase letters.
-fn strip_flanking_and_mods(pin_pep: &str) -> String {
-    let core = if let Some(mid) = pin_pep.split('.').nth(1) {
-        mid
-    } else {
-        pin_pep
-    };
-    core.chars().filter(|c| c.is_ascii_uppercase()).collect()
-}
+// `strip_flanking_and_mods` is now in `common/mod.rs` with regression tests.
+// (Earlier local copy had a parsing bug where `split('.').nth(1)` returned
+// only the substring before the first mod-mass dot — see common/mod.rs docs.)
 
 /// Extract a scan number from a TITLE string of the form `... scan=N`.
 fn extract_scan_from_title(title: &str) -> Option<i32> {
@@ -203,7 +195,7 @@ fn diagnose_peptide_mismatches() {
 
         let classification = if !in_enumerator {
             enumerator_gap_count += 1;
-            format!("RUST_NOT_GENERATED (enumerator gap)")
+            "RUST_NOT_GENERATED (enumerator gap)".to_string()
         } else {
             scoring_gap_count += 1;
             match rank_in_queue {

@@ -90,10 +90,11 @@ fn load_java_reference() -> Vec<JavaRef> {
         };
         let spec_evalue = lnsev.exp();
 
-        // Strip flanking residues "X.PEPTIDE.Y" → "PEPTIDE", keep only uppercase letters.
-        let pep_full = fields[pep_idx];
-        let core = pep_full.split('.').nth(1).unwrap_or(pep_full);
-        let peptide: String = core.chars().filter(|c| c.is_ascii_uppercase()).collect();
+        // Strip flanking + mod-mass tokens via the shared correct parser.
+        // Earlier inline `split('.').nth(1)` was buggy for peptides with mods
+        // (e.g. `K.GAC+57.021LLPK.E` parsed to `"GAC"`), wildly understating
+        // the population of comparable PSMs.
+        let peptide = strip_flanking_and_mods(fields[pep_idx]);
 
         let charge = if fields[charge2_idx] == "1" {
             2

@@ -121,18 +121,10 @@ fn java_target_peptides(pin_path: &PathBuf) -> HashMap<i32, String> {
     map
 }
 
-/// Strip flanking residues `X.PEPTIDE.Y` → `PEPTIDE`, then remove any
-/// modification annotations (e.g. `+57.021`, `C+57.021`).
-fn strip_flanking_and_mods(pin_pep: &str) -> String {
-    // Extract the middle segment between the two dots.
-    let core = if let Some(mid) = pin_pep.split('.').nth(1) {
-        mid
-    } else {
-        pin_pep
-    };
-    // Keep only ASCII uppercase letters (amino acid single-letter codes).
-    core.chars().filter(|c| c.is_ascii_uppercase()).collect()
-}
+// `strip_flanking_and_mods` is shared from `common/mod.rs`. The previous
+// local copy used `split('.').nth(1)` which silently truncated peptides
+// containing mod masses (e.g. `K.GAC+57.021LLPK.E` → `"GAC"`), wildly
+// understating peptide-identity matches in this parity test.
 
 /// Extract plain residue string from a Rust Peptide (no flanking, no mods).
 fn peptide_residue_string(p: &model::Peptide) -> String {
@@ -284,11 +276,13 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
         top1_rate * 100.0
     );
 
-    // Gate: >= 45% top-1 identity match. Observed baseline on first real
-    // scoring run: 48.4% (105/217). Floor set at 45% as a regression
-    // guard (~3 pp below observed) — tighten in later phases once
-    // scoring is more fully calibrated.
-    const MIN_TOP1_RATE: f64 = 0.45;
+    // Gate: >= 95% top-1 identity match. Observed (post-parser-fix): 98.6%
+    // (214/217). Earlier the gate was 45% based on a buggy peptide-string
+    // comparator (see common::strip_flanking_and_mods regression tests) which
+    // wildly understated parity. The 95% floor is a regression guard ~3 pp
+    // below observed — tighten further once any further parity improvements
+    // land.
+    const MIN_TOP1_RATE: f64 = 0.95;
     assert!(
         top1_rate >= MIN_TOP1_RATE,
         "top-1 identity match rate {:.1}% < {:.0}% gate ({} / {} matched)",

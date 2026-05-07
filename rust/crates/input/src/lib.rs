@@ -3,7 +3,9 @@
 
 pub mod fasta;
 pub mod mgf;
+pub mod mzml;
 
 pub use model::{Protein, ProteinDb, Spectrum};
 pub use fasta::{FastaParseError, FastaReader};
 pub use mgf::{MgfParseError, MgfReader};
+pub use mzml::{MzMLParseError, MzMLReader};

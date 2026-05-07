@@ -1,6 +1,6 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use model::aa_set::AminoAcidSet;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
@@ -43,6 +43,17 @@ pub fn match_spectra(
 
     let candidates: Vec<Candidate> = enumerate_candidates(idx, params, decoy_prefix).collect();
 
+    // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
+    //
+    // Uses the same nominal_from convention as the GF mass-bin loop so that
+    // bucket keys align with the GF's mass-bin lookup (commit b89779a fix).
+    // Stores only indices into `candidates` — no cloning, tiny memory overhead.
+    let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (cand_idx, cand) in candidates.iter().enumerate() {
+        let nominal = nominal_from(cand.peptide.mass() - H2O);
+        bucket_index.entry(nominal).or_default().push(cand_idx);
+    }
+
     // Build an aa_set clone with enzyme registered (for GF cleavage scoring).
     // We use Java MS-GF+ defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
     // Cloning is cheap (AminoAcidSet is a HashMap of ~20 entries).
@@ -77,7 +88,39 @@ pub fn match_spectra(
                 .or_insert_with(|| ScoredSpectrum::new(spec, scorer.param(), z));
         }
 
-        for cand in &candidates {
+        // Compute per-charge candidate windows and union them into a deduplicated
+        // set of candidate indices. This avoids O(all_candidates) iteration —
+        // only candidates whose nominal mass falls within the precursor-tolerance
+        // window for at least one of the tried charges are visited.
+        //
+        // Window derivation mirrors compute_spec_e_values_for_spectrum's logic so
+        // that any candidate admitted by matches_precursor is guaranteed to be in
+        // at least one charge's window, preserving parity with the brute-force path.
+        let mut window_cand_indices: HashSet<usize> = HashSet::new();
+        for &z in &charges_to_try {
+            let charge_f = z as f64;
+            let neutral_mass = (spec.precursor_mz - PROTON) * charge_f - H2O;
+            let nominal_center = nominal_from(neutral_mass);
+            let iso_min = *params.isotope_error_range.start() as i32;
+            let iso_max = *params.isotope_error_range.end() as i32;
+            let tol_da_left  = params.precursor_tolerance.left.as_da(neutral_mass);
+            let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
+            let widen_left  = (tol_da_left  - 0.4999_f64).round() as i32;
+            let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
+            // Java convention (same as GF window in compute_spec_e_values):
+            //   max includes widen_left (tolDaLeft widens the upper bound)
+            //   min includes widen_right (tolDaRight widens the lower bound)
+            let min_nominal = nominal_center - iso_max - widen_right;
+            let max_nominal = nominal_center - iso_min + widen_left;
+            for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
+                for &ci in idxs {
+                    window_cand_indices.insert(ci);
+                }
+            }
+        }
+
+        for &cand_idx in &window_cand_indices {
+            let cand = &candidates[cand_idx];
             for &z in &charges_to_try {
                 let scored_spec = &scored_per_charge[&z];
                 let mut best_for_charge: Option<(MassError, f32)> = None;

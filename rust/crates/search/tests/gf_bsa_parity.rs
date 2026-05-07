@@ -9,57 +9,14 @@
 //! Reference fixture:
 //!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
 
+mod common;
+use common::*;
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
 
-use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
-use scoring_crate::{Param, RankScorer};
 use search::{match_spectra, SearchIndex, SearchParams};
 use input::{FastaReader, MgfReader};
-
-fn fixture(path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join(path)
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("canonicalize {path}: {e}"))
-}
-
-fn aa_set() -> model::AminoAcidSet {
-    let cam = Modification {
-        name: "Carbamidomethyl".into(),
-        mass_delta: 57.02146,
-        residue: ResidueSpec::Specific(b'C'),
-        location: ModLocation::Anywhere,
-        fixed: true,
-        accession: None,
-    };
-    let ox = Modification {
-        name: "Oxidation".into(),
-        mass_delta: 15.99491,
-        residue: ResidueSpec::Specific(b'M'),
-        location: ModLocation::Anywhere,
-        fixed: false,
-        accession: None,
-    };
-    AminoAcidSetBuilder::new_standard()
-        .add_fixed_mod(cam)
-        .add_variable_mod(ox)
-        .build()
-        .unwrap()
-}
-
-fn rank_scorer() -> RankScorer {
-    let param_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join("src/main/resources/ionstat/HCD_QExactive_Tryp.param")
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("canonicalize HCD_QExactive_Tryp.param: {e}"));
-    let param = Param::load_from_file(&param_path)
-        .unwrap_or_else(|e| panic!("load HCD_QExactive_Tryp.param: {e}"));
-    RankScorer::new(&param)
-}
 
 /// Extract a scan number from a TITLE string of the form `... scan=N`.
 fn extract_scan_from_title(title: &str) -> Option<i32> {

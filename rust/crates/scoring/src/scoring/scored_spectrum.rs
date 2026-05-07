@@ -219,25 +219,45 @@ impl<'a> ScoredSpectrum<'a> {
     /// Filtered-out peaks (rank == `u32::MAX`) are never returned.
     ///
     /// `spec.peaks` is sorted ascending by m/z (Phase 3a MGF reader
-    /// guarantees this), so a binary search would be optimal; for
-    /// Task 1 MVP we use a linear scan since spectrum sizes are small
-    /// (typically < 2000 peaks).
+    /// guarantees this). Binary search (`partition_point`) locates the first
+    /// peak with `mz >= target_mz - tolerance_da`; the forward scan then
+    /// stops as soon as `mz > target_mz + tolerance_da`, so only the O(k)
+    /// peaks in the window are visited (k ≈ 1-3 for typical fragment tolerance).
     pub fn nearest_peak_rank(&self, target_mz: f64, tolerance_da: f64) -> Option<u32> {
+        if self.spec.peaks.is_empty() {
+            return None;
+        }
+        let lo_mz = target_mz - tolerance_da;
+        let hi_mz = target_mz + tolerance_da;
+        // Find first peak with mz >= lo_mz via binary search.
+        let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
         let mut best: Option<(usize, f64)> = None;
-        for (i, &(mz, _intensity)) in self.spec.peaks.iter().enumerate() {
+        for i in start..self.spec.peaks.len() {
+            let (mz, _intensity) = self.spec.peaks[i];
+            if mz > hi_mz {
+                break;
+            }
             // Skip filtered-out peaks.
             if self.ranks[i] == u32::MAX {
                 continue;
             }
             let delta = (mz - target_mz).abs();
-            if delta > tolerance_da {
-                continue;
-            }
             if best.as_ref().map_or(true, |(_, d)| delta < *d) {
                 best = Some((i, delta));
             }
         }
         best.map(|(i, _)| self.ranks[i])
+    }
+
+    /// Return the rank of the peak at index `idx`, or `None` if the peak has
+    /// been filtered out (rank == `u32::MAX`) or `idx` is out of bounds.
+    ///
+    /// Primarily used by tests to compare binary-search results against
+    /// brute-force linear scans.
+    #[cfg(test)]
+    pub(crate) fn peak_rank_at(&self, idx: usize) -> Option<u32> {
+        let r = *self.ranks.get(idx)?;
+        if r == u32::MAX { None } else { Some(r) }
     }
 
     // -----------------------------------------------------------------------
@@ -812,6 +832,48 @@ mod tests {
         // Target 100.1 with tol 0.6: all three are within. Closest is 100.0 → rank 1.
         assert_eq!(ss.nearest_peak_rank(100.1, 0.6), Some(1));
     }
+
+    #[test]
+    fn nearest_peak_rank_matches_linear_scan_on_many_peaks() {
+        // Build a spectrum with 100 peaks across 0.0 - 1000.0 m/z, varying intensities.
+        let mut peaks: Vec<(f64, f32)> = (0..100)
+            .map(|i| (i as f64 * 10.0 + 0.5, (100 - i) as f32))
+            .collect();
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let s = Spectrum {
+            title: "many".into(),
+            precursor_mz: 500.0,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks,
+        };
+        let ss = ScoredSpectrum::new_without_filtering(&s);
+
+        // For several target m/z values, the binary-search result must match
+        // what a brute-force linear scan produces.
+        for target in [50.5, 100.0, 250.0, 333.7, 500.5, 750.5, 999.5] {
+            let tol = 5.0_f64; // wide window
+            let bs_result = ss.nearest_peak_rank(target, tol);
+            // Brute force: scan all peaks, pick closest within tolerance.
+            let bf_result = {
+                let mut best: Option<(usize, f64)> = None;
+                for (i, &(mz, _)) in s.peaks.iter().enumerate() {
+                    if (mz - target).abs() <= tol
+                        && best.as_ref().map_or(true, |(_, d)| (mz - target).abs() < *d)
+                    {
+                        best = Some((i, (mz - target).abs()));
+                    }
+                }
+                best.map(|(i, _)| ss.peak_rank_at(i).unwrap_or(u32::MAX))
+            };
+            assert_eq!(
+                bs_result, bf_result,
+                "binary search and linear scan differ at target {target}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -936,7 +998,8 @@ mod precursor_filter_tests {
         // filter_mz = (997.9855 + 2 * PROTON) / 2 + 0.0 = 500.0 (the precursor m/z)
         //
         // A peak AT 500.0 (the precursor m/z itself, very high intensity) should be filtered.
-        let s = make_spec(500.0, &[(100.0, 1.0), (500.0, 100.0), (300.0, 5.0)]);
+        // Peaks must be sorted ascending by m/z (Phase 3a MGF reader invariant).
+        let s = make_spec(500.0, &[(100.0, 1.0), (300.0, 5.0), (500.0, 100.0)]);
         let param = param_with_precursor_filter_rc0();
         let ss = ScoredSpectrum::new(&s, &param, 2);
 

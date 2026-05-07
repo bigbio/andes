@@ -8,7 +8,7 @@ use model::enzyme::Enzyme;
 use scoring_crate::gf::generating_function::GeneratingFunction;
 use scoring_crate::gf::group::GeneratingFunctionGroup;
 use scoring_crate::gf::primitive_graph::PrimitiveAaGraph;
-use model::mass::{H2O, PROTON};
+use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
 use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
@@ -193,7 +193,7 @@ fn compute_spec_e_values_for_spectrum(
     // This matches Java: scoredSpec.getPrecursorPeak().getMass() - H2O
     // where getPrecursorPeak().getMass() = (mz - H) * charge.
     let peptide_neutral_mass = (spec.precursor_mz - PROTON) * (charge as f64) - H2O;
-    let nominal_peptide_mass = peptide_neutral_mass.round() as i32;
+    let nominal_peptide_mass = nominal_from(peptide_neutral_mass);
 
     // Java isotope error convention: range [min_iso, max_iso] is applied as
     //   minNominalPeptideMass = nominalPeptideMass - maxIsotopeError
@@ -286,14 +286,19 @@ fn compute_spec_e_values_for_spectrum(
 
     queue.update_spec_e_values(|psm| {
         // Nominal peptide mass: residue masses sum + no water (Java convention for mass index).
-        let psm_nominal_mass = (psm.candidate.peptide.mass() - H2O).round() as i32;
+        // Use nominal_from() (INTEGER_MASS_SCALER-aware) to match how graph nodes are indexed.
+        let psm_nominal_mass = nominal_from(psm.candidate.peptide.mass() - H2O);
         if psm_nominal_mass < min_peptide_mass_idx || psm_nominal_mass > max_peptide_mass_idx {
             return 1.0;
         }
         let score_int = psm.score.round() as i32;
         if score_int >= max_score {
-            // Score exceeds GF range: approximate as 1/max_score.
-            return if max_score > 0 { 1.0 / max_score as f64 } else { 1.0 };
+            // Score exceeds GF range — return the probability at max_score - 1
+            // (which already has the underflow guard applied by the GF DP).
+            // Mirrors Java behavior; avoids returning a grossly inflated value
+            // (1/max_score ≈ 0.01) that would invert ranking of the best PSMs.
+            return group.spectral_probability(max_score - 1)
+                .unwrap_or(f32::from_bits(1) as f64);
         }
         group.spectral_probability(score_int).unwrap_or(1.0)
     });

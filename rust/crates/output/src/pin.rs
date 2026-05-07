@@ -240,14 +240,12 @@ fn write_psm_row<W: Write>(
     let exp_mass = spec.precursor_mz * charge - charge * PROTON;
 
     // CalcMass: theoretical neutral mass. peptide.mass() already includes H2O.
-    // Java: theoMass = theoMz * charge where theoMz = (peptideMass + H2O) / charge + PROTON
-    //   → theoMass = peptideMass + H2O + PROTON * charge
-    // But for a neutral mass we want peptideMass + H2O (same as peptide.mass() here).
-    // We match Java's CalcMass column (theoMass = theoMz * charge) which is the
-    // protonated mass — so: peptide.mass() + charge * PROTON
-    // However the fixture shows CalcMass ≈ ExpMass (neutral masses), so:
-    let peptide_mass = psm.candidate.peptide.mass(); // includes H2O
-    let calc_mass = peptide_mass + charge * PROTON;
+    // ExpMass = mz * charge - charge * PROTON is also a neutral mass.
+    // Both columns must be neutral masses so that dm = ExpMass - CalcMass is a
+    // true mass error (not a charge-induced offset). Java fixture confirms:
+    // ExpMass=1641.96, CalcMass=1641.95 — both neutral.
+    let peptide_mass = psm.candidate.peptide.mass(); // includes H2O — neutral mass
+    let calc_mass = peptide_mass; // neutral mass; matches ExpMass convention
 
     // mass: duplicate of ExpMass (per Java line 212: "mass — duplicate of ExpMass")
     let mass = exp_mass;

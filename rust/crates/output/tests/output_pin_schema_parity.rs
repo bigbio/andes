@@ -12,7 +12,6 @@ use model::{AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ProteinDb, R
 use model::tolerance::PrecursorTolerance;
 use scoring_crate::{Param, RankScorer};
 use search::{match_spectra, SearchIndex, SearchParams};
-use output;
 use input::{FastaReader, MgfReader};
 
 fn fixture(rel: &str) -> PathBuf {

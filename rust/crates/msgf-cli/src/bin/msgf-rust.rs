@@ -13,7 +13,6 @@ use clap::Parser;
 use model::{AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance, ResidueSpec, Tolerance};
 use scoring_crate::{Param, RankScorer};
 use search::{match_spectra, SearchIndex, SearchParams};
-use output;
 use input::{FastaReader, MgfReader};
 
 #[derive(Parser, Debug)]

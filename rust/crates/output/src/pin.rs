@@ -21,10 +21,10 @@
 //!
 //! # Java divergences (Phase 7 MVP)
 //!
-//! * **Label**: Java inspects all protein accessions to detect "all-decoy" PSMs.
-//!   Rust uses `psm.candidate.is_decoy` directly: `1` for target, `-1` for decoy.
-//!   Documented intentional simplification — Percolator only needs target/decoy
-//!   disambiguation, which this provides.
+//! * **Label**: follows Java's `DirectPinWriter.java:188-191` all-decoy rule.
+//!   `Label = 1` unless the peptide sequence cannot be found in ANY target protein
+//!   (i.e. all explaining proteins are decoy). Implemented via
+//!   `SearchIndex::peptide_has_target_match`.
 //!
 //! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, which is set
 //!   by `match_engine.rs` from `MassError::isotope_offset` (precursor_matching.rs).
@@ -211,7 +211,7 @@ fn write_spectrum_rows<W: Write>(
 
     for (rank, psm) in iter_ranked(&psms) {
         let ctx = RowContext::new(spec, psm, search_index);
-        write_psm_row(writer, spec, psm, &ctx, rank, rank2_spec_e_value, min_charge, max_charge)?;
+        write_psm_row(writer, spec, psm, &ctx, rank, rank2_spec_e_value, min_charge, max_charge, search_index)?;
     }
     Ok(())
 }
@@ -226,15 +226,20 @@ fn write_psm_row<W: Write>(
     rank2_spec_e_value: f64,
     min_charge: u8,
     max_charge: u8,
+    search_index: &SearchIndex,
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
     // SpecId: Java pattern is specID + "_" + scanNum + "_" + rank
     let psm_id = format!("{}_{}_{}", ctx.spec_id, ctx.scan, rank);
 
-    // Label: target = 1, decoy = -1
-    // MVP divergence: uses is_decoy flag directly (Java inspects all protein accessions)
-    let label: i32 = if psm.candidate.is_decoy { -1 } else { 1 };
+    // Label: Java's DirectPinWriter.writeRow:188-191 — Label=1 unless ALL
+    // explaining proteins are decoy. We check whether the peptide sequence
+    // appears in ANY target protein; if so, Label=1 even when the candidate's
+    // primary protein_index is a decoy.
+    let residues: Vec<u8> = psm.candidate.peptide.residues
+        .iter().map(|aa| aa.residue).collect();
+    let label: i32 = if search_index.peptide_has_target_match(&residues) { 1 } else { -1 };
 
     // ExpMass: neutral precursor mass = mz * charge - charge * PROTON
     let exp_mass = spec.precursor_mz * charge - charge * PROTON;

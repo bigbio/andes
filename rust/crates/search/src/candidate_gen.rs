@@ -80,6 +80,11 @@ fn enumerate_protein(
 ///   (i.e. `sub_start + seq_offset`). When `sub_start == 0`, `is_protein_n_term`
 ///   is set to `true` — the post-Met residue is the effective protein N-terminus.
 ///   The `pre` context residue for sub_start == 0 is `b'M'` (the cleaved Met).
+///
+/// The `params.num_tolerable_termini` field controls cleavage enforcement:
+/// - `2`: both ends must be enzyme-cleavage sites (strict / fully specific, default).
+/// - `1`: at least one end must be an enzyme-cleavage site (semi-specific).
+/// - `0`: neither end needs to be a cleavage site (non-specific).
 fn enumerate_protein_from_offset(
     seq: &[u8],
     seq_offset: usize,
@@ -93,63 +98,156 @@ fn enumerate_protein_from_offset(
         return Vec::new();
     }
 
+    let ntt = params.num_tolerable_termini;
+
+    // For ntt=0 (non-specific) with a non-NonSpecific enzyme, enumerate all
+    // valid-length spans without any cleavage constraint. This produces the
+    // same set as Enzyme::NonSpecific with ntt=2 (modulo missed-cleavage
+    // filtering — for ntt=0 we skip that since there are no "cleavage sites"
+    // to count between arbitrary span endpoints).
+    //
+    // Note: Enzyme::NonSpecific itself falls through to the normal cleavage-
+    // position loop below (which returns all positions 0..=n), preserving the
+    // existing missed-cleavage semantics that the NonSpecific tests exercise.
+    if ntt == 0 && !matches!(params.enzyme, Enzyme::NonSpecific) {
+        let ctx = EmitCtx { sub_seq, seq, seq_offset, protein_index, is_decoy, params };
+        return enumerate_all_spans(&ctx, n);
+    }
+
     let cleavage_positions = compute_cleavage_positions(sub_seq, params.enzyme);
 
+    // ntt=2: strict — only spans where both start and end are cleavage positions.
+    // ntt=1: semi-specific — spans where at least one end is a cleavage position.
+    //
+    // Strategy for ntt=1:
+    //   (a) Strict spans (same as ntt=2) — already both ends tryptic.
+    //   (b) Free C-terminus: for each tryptic start, slide the end across
+    //       all positions in [start+min_len, start+max_len]. Skip ends that
+    //       ARE cleavage positions (already covered by the strict case).
+    //   (c) Free N-terminus: for each tryptic end, slide the start across
+    //       all positions in [end-max_len, end-min_len]. Skip starts that
+    //       ARE cleavage positions (already covered by the strict case).
+    //
+    // Using a HashSet of (start, end) pairs to prevent duplicates when both
+    // ends happen to be tryptic.
+
     let mut out = Vec::new();
+
+    // Build a fast lookup for cleavage positions.
+    let cleavage_set: std::collections::HashSet<u32> = cleavage_positions.iter().copied().collect();
+
+    let ctx = EmitCtx { sub_seq, seq, seq_offset, protein_index, is_decoy, params };
+
+    // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
+    // Also included in ntt=1, since a strict span satisfies "at least one end".
     for (i, &start) in cleavage_positions.iter().enumerate() {
         for (offset, &end) in cleavage_positions[i + 1..].iter().enumerate() {
             let len = end - start;
             if len > params.max_length {
-                break;  // future values give larger lengths only
+                break;
             }
             if len < params.min_length {
                 continue;
             }
-            // Missed cleavages = number of cleavage positions strictly between start and end.
-            // offset 0 means adjacent positions → 0 missed; offset k → k missed.
             let missed = offset as u32;
             if missed > params.max_missed_cleavages {
                 continue;
             }
+            emit_span(&ctx, start, end, &mut out);
+        }
+    }
 
-            let span = &sub_seq[start as usize..end as usize];
-            // Skip spans containing non-standard residues.
-            if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
+    // ── Semi-specific spans (ntt=1 only) ─────────────────────────────────────
+    if ntt == 1 {
+        // (b) Tryptic N-terminus, free C-terminus.
+        for &start in &cleavage_positions {
+            let c_min = start + params.min_length;
+            let c_max = (start + params.max_length).min(n);
+            for end in c_min..=c_max {
+                // Skip ends that are cleavage positions — already emitted above.
+                if cleavage_set.contains(&end) {
+                    continue;
+                }
+                // No missed-cleavage filter here: the "missed cleavages between
+                // start and end" concept applies to strictly tryptic spans. For
+                // semi-tryptic peptides with a free terminus, Java MS-GF+ does
+                // not count internal cleavage sites as missed cleavages — the
+                // semi-tryptic span is treated as a single candidate regardless
+                // of internal K/R residues.
+                emit_span(&ctx, start, end, &mut out);
+            }
+        }
+
+        // (c) Free N-terminus, tryptic C-terminus.
+        for &end in &cleavage_positions {
+            if end < params.min_length {
                 continue;
             }
-
-            // Context residues in original sequence coordinates.
-            // For the Met-cleaved pass (seq_offset == 1) and sub_start == 0, the
-            // context residue to the left is the cleaved M (seq[0]).
-            let abs_start = start as usize + seq_offset;
-            let abs_end = end as usize + seq_offset;
-            let pre = if abs_start == 0 {
-                b'_'
-            } else {
-                seq[abs_start - 1]
-            };
-            let post = if abs_end == seq.len() { b'-' } else { seq[abs_end] };
-
-            // is_protein_n_term: true when the span begins at the effective protein start.
-            // For seq_offset == 0: start == 0 (same as before).
-            // For seq_offset == 1 (Met-cleaved): start == 0 in sub_seq means the
-            //   post-Met residue is at the biological N-terminus — still protein-N-term.
-            let is_protein_n_term = start == 0;
-            let is_protein_c_term = abs_end == seq.len();
-            let mod_combinations =
-                expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
-            for residues in mod_combinations {
-                let peptide = Peptide::new(residues, pre, post);
-                out.push(Candidate {
-                    peptide,
-                    protein_index,
-                    start_offset_in_protein: abs_start,
-                    is_decoy,
-                });
+            let s_min = end.saturating_sub(params.max_length);
+            let s_max = end - params.min_length;
+            for start in s_min..=s_max {
+                // Skip starts that are cleavage positions — already emitted above.
+                if cleavage_set.contains(&start) {
+                    continue;
+                }
+                emit_span(&ctx, start, end, &mut out);
             }
         }
     }
 
+    out
+}
+
+/// Shared context passed to `emit_span` to avoid exceeding argument limits.
+struct EmitCtx<'a> {
+    sub_seq: &'a [u8],
+    seq: &'a [u8],
+    seq_offset: usize,
+    protein_index: usize,
+    is_decoy: bool,
+    params: &'a SearchParams,
+}
+
+/// Emit a single (start, end) span as candidates, if the span passes residue
+/// validity checks. Appends to `out`.
+#[inline]
+fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) {
+    let span = &ctx.sub_seq[start as usize..end as usize];
+    // Skip spans containing non-standard residues.
+    if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
+        return;
+    }
+
+    let abs_start = start as usize + ctx.seq_offset;
+    let abs_end = end as usize + ctx.seq_offset;
+    let pre = if abs_start == 0 { b'_' } else { ctx.seq[abs_start - 1] };
+    let post = if abs_end == ctx.seq.len() { b'-' } else { ctx.seq[abs_end] };
+
+    let is_protein_n_term = start == 0;
+    let is_protein_c_term = abs_end == ctx.seq.len();
+    let mod_combinations =
+        expand_mod_combinations(span, ctx.params, is_protein_n_term, is_protein_c_term);
+    for residues in mod_combinations {
+        let peptide = Peptide::new(residues, pre, post);
+        out.push(Candidate {
+            peptide,
+            protein_index: ctx.protein_index,
+            start_offset_in_protein: abs_start,
+            is_decoy: ctx.is_decoy,
+        });
+    }
+}
+
+/// Enumerate all valid-length spans without cleavage constraints (ntt=0 path).
+/// Invoked when `num_tolerable_termini = 0` with a non-NonSpecific enzyme.
+fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for start in 0..n {
+        let end_max = (start + ctx.params.max_length).min(n);
+        for end in (start + ctx.params.min_length)..=end_max {
+            emit_span(ctx, start, end, &mut out);
+        }
+    }
     out
 }
 

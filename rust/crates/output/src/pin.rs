@@ -564,6 +564,7 @@ mod tests {
             charge_range,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
+            num_tolerable_termini: 2,
         }
     }
 

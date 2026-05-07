@@ -65,6 +65,15 @@ struct Cli {
     #[arg(long, default_value = "10")]
     top_n: u32,
 
+    /// Number of Tolerable Termini — mirrors Java MS-GF+'s `-ntt N` flag.
+    ///
+    /// Controls enzymatic-cleavage enforcement at span boundaries:
+    ///   2 (default): both termini must be cleavage sites (strict / fully specific).
+    ///   1: at least one terminus must be a cleavage site (semi-specific).
+    ///   0: neither terminus needs to be a cleavage site (non-specific).
+    #[arg(long, default_value = "2")]
+    ntt: u8,
+
     /// Path to the .param scoring model file.
     ///
     /// If not supplied, the bundled `HCD_QExactive_Tryp.param` file from the
@@ -160,6 +169,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.charge_range = cli.charge_min..=cli.charge_max;
     params.isotope_error_range = cli.isotope_error_min..=cli.isotope_error_max;
     params.top_n_psms_per_spectrum = cli.top_n;
+    params.num_tolerable_termini = cli.ntt;
 
     // ── 6. Load MGF spectra ───────────────────────────────────────────────────
     let mgf_file = File::open(&cli.spectrum)?;

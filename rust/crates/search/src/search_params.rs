@@ -25,6 +25,18 @@ pub struct SearchParams {
     pub isotope_error_range: RangeInclusive<i8>,
     /// Top-N PSMs to keep per spectrum (default 10).
     pub top_n_psms_per_spectrum: u32,
+    /// Number of Tolerable Termini — mirrors Java's `-ntt N` flag.
+    ///
+    /// Controls how strictly enzymatic cleavage is enforced at the span boundaries:
+    /// - `2` (default): both termini must be enzyme-cleavage sites (strict / fully tryptic).
+    /// - `1`: at least one terminus must be a cleavage site (semi-specific). Generates
+    ///   semi-tryptic peptides arising from non-canonical proteolysis (e.g., chymotrypsin
+    ///   contamination, in-source fragmentation, signal-peptide cleavage).
+    /// - `0`: neither terminus needs to be a cleavage site (non-specific). Equivalent to
+    ///   using `Enzyme::NonSpecific` — all subsequences within length bounds are emitted.
+    ///
+    /// Values > 2 are treated identically to 2. Supported values: 0, 1, 2.
+    pub num_tolerable_termini: u8,
 }
 
 impl SearchParams {
@@ -37,6 +49,7 @@ impl SearchParams {
     /// - charge range: 2..=3
     /// - isotope error range: -1..=2 (matches Java's `-ti -1,2` default)
     /// - top-N PSMs: 10
+    /// - num_tolerable_termini: 2 (strict tryptic)
     pub fn default_tryptic(aa_set: AminoAcidSet) -> Self {
         Self {
             aa_set,
@@ -49,6 +62,7 @@ impl SearchParams {
             charge_range: 2..=3,
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
+            num_tolerable_termini: 2,
         }
     }
 }
@@ -76,5 +90,6 @@ mod tests {
             Tolerance::Ppm(v) => assert_eq!(v, 20.0),
             _ => panic!("expected Ppm(20.0)"),
         }
+        assert_eq!(params.num_tolerable_termini, 2);
     }
 }

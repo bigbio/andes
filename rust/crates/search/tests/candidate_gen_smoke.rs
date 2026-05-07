@@ -605,6 +605,217 @@ fn non_met_first_residue_does_not_trigger_cleavage() {
     assert_eq!(target_count, 1, "expected 1 candidate for non-M protein, got {}", target_count);
 }
 
+// ─── Phase 5: num_tolerable_termini (NTT) tests ──────────────────────────────
+//
+// Test protein: "AAAKBBBBBBR" (length 11)
+//   - Trypsin cleaves after K(pos 3) and R(pos 10).
+//   - Cleavage positions: [0, 4, 11].
+//   - Strict spans (ntt=2, missed=0): (0,4)="AAAK" (too short at min=6), (4,11)="BBBBBBR" → 1 span.
+//     With min=4: (0,4) and (4,11) → 2 spans.
+//   - Semi-specific additional spans (ntt=1) with free-C from start=0:
+//       end in [4,11] not at cleavage position → ends 5,6,7,8,9,10 → "AAAAK.." lengths 5-10.
+//       With min=4: ends 4..=11, non-cleavage → 4,5,6,7,8,9,10 → 7 spans. But end=4 IS cleavage → skip. end=11 IS cleavage → skip. → ends 5,6,7,8,9,10 → 6 spans.
+//       Actually let's use a simpler protein for clarity.
+//
+// Simpler test protein: "AAAAAKAAAAR" (length 11)
+//   - Trypsin cleaves after K(4) and R(10).
+//   - Cleavage positions: [0, 5, 11].
+//   - Strict spans (ntt=2): (0,5)="AAAAK"(5), (5,11)="AAAAR"(6) → lengths 5 and 6.
+//     With min=5, max=11: both qualify → 2 spans.
+//   - Semi (ntt=1): free C from start=0: ends 5..=11 not cleavage → 6,7,8,9,10 → 5 spans.
+//                   free C from start=5: ends 10..=11 not cleavage → 10 → 1 span.
+//                   free N for end=5: starts 0..=0 not cleavage → (none, since 0 is cleavage pos) → 0.
+//                   free N for end=11: starts 0..=6 not cleavage → 1,2,3,4,6 → 5 spans.
+//   Total new semi spans = 5 + 1 + 0 + 5 = 11. Total ntt=1 = 2 (strict) + 11 = 13.
+//
+// Use "AAAAAKAAAAR" with min=5, max=11, missed=0, no mods.
+
+const NTT_PROTEIN: &[u8] = b"AAAAAKAAAAR";
+//   Trypsin cleavage positions: [0, 6, 11] (cleavage AFTER K at idx 5 → next pos = 6;
+//   cleavage AFTER R at idx 10 → next pos = 11).
+//   Let me recompute: for C-term enzyme, position i is in cleavage_positions if
+//   enzyme.is_cleavable_after(seq[i-1]). K is at index 5 → position 6 (since i=6, seq[5]=K).
+//   R is at index 10 → position 11. Plus 0 and 11.
+//   Cleavage positions: [0, 6, 11].
+//   Strict (ntt=2, min=5, max=11, missed=0): spans (0,6)=len6, (6,11)=len5 → 2.
+//   Free-C from tryptic starts:
+//     start=0: ends in [5,11] not in {0,6,11} → 5,7,8,9,10 → 5 spans.
+//     start=6: ends in [11,11] not in {0,6,11} → none (11 is cleavage) → 0 spans.
+//   Free-N for tryptic ends:
+//     end=6: starts in [0,1] not in {0,6,11} → 1 → 1 span.
+//     end=11: starts in [0,6] not in {0,6,11} → 1,2,3,4,5 → 5 spans. But start=6 is cleavage → {0} at start: 1,2,3,4,5 → 5 spans.
+//   New semi spans = 5 + 0 + 1 + 5 = 11. Total ntt=1 = 2 + 11 = 13.
+
+fn ntt_protein_index() -> SearchIndex {
+    make_index(NTT_PROTEIN)
+}
+
+fn ntt_params(ntt: u8) -> SearchParams {
+    let mut p = params(5, 11, 0);
+    p.num_tolerable_termini = ntt;
+    p
+}
+
+/// ntt=2 emits only strict tryptic spans (baseline).
+#[test]
+fn ntt_2_emits_only_strict_tryptic_spans() {
+    let idx = ntt_protein_index();
+    let p = ntt_params(2);
+    let count = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    // Cleavage positions [0,6,11], min=5, max=11, missed=0:
+    // Spans: (0,6)=len6 ✓, (6,11)=len5 ✓ → 2 strict spans.
+    // NTT_PROTEIN does not start with M, so no Met-cleavage pass.
+    assert_eq!(count, 2, "ntt=2 should emit exactly 2 strict tryptic spans, got {count}");
+}
+
+/// ntt=1 emits strictly more candidates than ntt=2.
+#[test]
+fn ntt_1_emits_strict_plus_semi_spans() {
+    let idx = ntt_protein_index();
+    let ntt2_count = enumerate_candidates(&idx, &ntt_params(2), "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    let ntt1_count = enumerate_candidates(&idx, &ntt_params(1), "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    assert!(
+        ntt1_count > ntt2_count,
+        "ntt=1 ({ntt1_count}) should generate more candidates than ntt=2 ({ntt2_count})"
+    );
+    // Expected: 2 strict + 11 semi = 13.
+    assert_eq!(ntt1_count, 13, "expected 13 ntt=1 candidates, got {ntt1_count}");
+}
+
+/// ntt=1 includes spans with a tryptic N-term but non-tryptic C-term.
+#[test]
+fn ntt_1_includes_free_c_term_span() {
+    let idx = ntt_protein_index();
+    let p = ntt_params(1);
+    // A span starting at a tryptic position (0 or 6) with a non-tryptic end.
+    // Example: start=0, end=5 (length 5) — start IS cleavage, end 5 is NOT cleavage.
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .collect();
+    let has_free_c = candidates.iter().any(|c| {
+        // start at protein offset 0 (tryptic N-term), end at non-cleavage position.
+        // end = start_offset + peptide.length() = 0 + 5 = 5 (not in {0,6,11}).
+        c.start_offset_in_protein == 0 && c.peptide.length() == 5
+    });
+    assert!(has_free_c, "ntt=1 should include (start=0, end=5): tryptic N-term, free C-term");
+}
+
+/// ntt=1 includes spans with a non-tryptic N-term but tryptic C-term.
+#[test]
+fn ntt_1_includes_free_n_term_span() {
+    let idx = ntt_protein_index();
+    let p = ntt_params(1);
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .collect();
+    // span with start=1 (non-cleavage), end=6 (tryptic C-term): length=5.
+    let has_free_n = candidates.iter().any(|c| {
+        c.start_offset_in_protein == 1 && c.peptide.length() == 5
+    });
+    assert!(has_free_n, "ntt=1 should include (start=1, end=6): free N-term, tryptic C-term");
+}
+
+/// A span where BOTH ends are tryptic should appear exactly once under ntt=1
+/// (not twice from the strict + semi union).
+#[test]
+fn ntt_1_no_dedup_for_strict_spans() {
+    let idx = ntt_protein_index();
+    let p = ntt_params(1);
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX")
+        .filter(|c| !c.is_decoy)
+        .collect();
+    // Count candidates with start=0, length=6 (span (0,6), both ends tryptic).
+    let count_strict = candidates.iter()
+        .filter(|c| c.start_offset_in_protein == 0 && c.peptide.length() == 6)
+        .count();
+    assert_eq!(
+        count_strict, 1,
+        "strict span (0,6) should appear exactly once under ntt=1, got {count_strict}"
+    );
+}
+
+/// ntt=0 emits all valid-length spans regardless of cleavage sites,
+/// and produces strictly more candidates than ntt=1.
+#[test]
+fn ntt_0_emits_all_spans() {
+    let idx = ntt_protein_index();
+    let ntt1_count = enumerate_candidates(&idx, &ntt_params(1), "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    let ntt0_count = enumerate_candidates(&idx, &ntt_params(0), "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    assert!(
+        ntt0_count > ntt1_count,
+        "ntt=0 ({ntt0_count}) should generate more candidates than ntt=1 ({ntt1_count})"
+    );
+    // For "AAAAAKAAAAR" (length 11), min=5, max=11:
+    // All (start, end) pairs: start in 0..=6, end in (start+5)..=(start+11).min(11).
+    // start=0: ends 5,6,7,8,9,10,11 → 7
+    // start=1: ends 6,7,8,9,10,11 → 6
+    // start=2: ends 7,8,9,10,11 → 5
+    // start=3: ends 8,9,10,11 → 4
+    // start=4: ends 9,10,11 → 3
+    // start=5: ends 10,11 → 2
+    // start=6: ends 11 → 1
+    // Total = 7+6+5+4+3+2+1 = 28
+    assert_eq!(ntt0_count, 28, "ntt=0 should emit all 28 valid-length spans, got {ntt0_count}");
+}
+
+/// ntt=0 with Trypsin should produce the same candidates as Enzyme::NonSpecific
+/// with ntt=2 — WHEN missed_cleavages is set high enough to allow all spans.
+///
+/// Note: NonSpecific with ntt=2 routes through the cleavage-position loop where
+/// every position is a cleavage site, so missed_cleavages acts as a filter.
+/// For the spans to match, set missed_cleavages >= max_length so all spans pass.
+#[test]
+fn ntt_0_trypsin_matches_nonspecific_high_missed() {
+    // Use a protein with no K/R (so trypsin has only [0, n] as cleavage positions).
+    // With ntt=0 + Trypsin, we emit all (start, end) pairs — no missed-cleavage filter.
+    // With NonSpecific + ntt=2 + high missed_cleavages, we also emit all pairs.
+    let seq = b"AAAAAAAAAAAA"; // 12 residues, no K/R
+    let idx = make_index(seq);
+
+    let mut p_ntt0 = params(3, 8, 10); // high missed
+    p_ntt0.enzyme = Enzyme::Trypsin;
+    p_ntt0.num_tolerable_termini = 0;
+
+    let mut p_ns = params(3, 8, 10); // same missed budget
+    p_ns.enzyme = Enzyme::NonSpecific;
+    p_ns.num_tolerable_termini = 2;
+
+    let ntt0_count = enumerate_candidates(&idx, &p_ntt0, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+    let ns_count = enumerate_candidates(&idx, &p_ns, "XXX")
+        .filter(|c| !c.is_decoy)
+        .count();
+
+    // Both should emit all valid-length spans (start in 0..=9, lengths 3..=8).
+    // The NonSpecific path counts internal cleavage positions as missed, but with
+    // high missed budget all pass. The ntt=0 path has no cleavage constraint at all.
+    // For a protein with no K/R, Trypsin has cleavage positions [0, 12].
+    // ntt=0 + Trypsin: all (start, end) pairs, no filter.
+    // NonSpecific: every position is cleavage, missed = end - start - 1.
+    //   With missed_cleavages=10 and max_length=8: max missed = 7 → all length-8 spans pass.
+    // Both should yield: sum of (n - len + 1) for len in 3..=8 = 10+9+8+7+6+5 = 45.
+    assert_eq!(ntt0_count, 45, "ntt=0 + Trypsin should emit 45 spans for AAAAAAAAAAAA min=3 max=8, got {ntt0_count}");
+    assert_eq!(ns_count, 45, "NonSpecific + ntt=2 high missed should also emit 45 spans, got {ns_count}");
+}
+
+/// ntt field in SearchParams defaults to 2 for default_tryptic.
+#[test]
+fn default_ntt_is_2() {
+    let p = SearchParams::default_tryptic(aa_set());
+    assert_eq!(p.num_tolerable_termini, 2, "default ntt should be 2");
+}
+
 /// A single-residue M-only protein does not trigger Met-cleavage (sequence.len() == 1).
 #[test]
 fn met_alone_does_not_trigger_cleavage() {

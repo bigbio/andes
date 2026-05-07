@@ -57,6 +57,12 @@ pub struct PsmMatch {
     /// Fragment-ion feature columns computed after `score_psm`.
     /// Defaults to all-zero until `compute_psm_features` runs.
     pub features: PsmFeatures,
+    /// The isotope offset that produced the precursor match: 0 = monoisotopic,
+    /// +N = spectrum precursor was N C13 peaks above the true monoisotopic.
+    /// Mirrors Java MS-GF+ default range −1..=2.  Threaded from
+    /// `MassError::isotope_offset` (precursor_matching.rs) via match_engine.rs.
+    /// Written as the PIN `isotope_error` column (DirectPinWriter.java:195).
+    pub isotope_offset: i8,
 }
 
 impl PartialEq for PsmMatch {
@@ -213,6 +219,7 @@ mod tests {
             activation_method: None,
             e_value: 1.0,  // sentinel: not yet computed
             features: PsmFeatures::default(),
+            isotope_offset: 0,
         }
     }
 
@@ -337,6 +344,17 @@ mod tests {
             v
         };
         assert_eq!(scores, vec![3.0, 2.0, 1.0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 1 alignment fix: isotope_offset field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn psm_match_default_isotope_offset_is_zero() {
+        let m = make_match(0, 1.0);
+        assert_eq!(m.isotope_offset, 0,
+            "isotope_offset sentinel should be 0 before match_engine populates it");
     }
 
     // -----------------------------------------------------------------------

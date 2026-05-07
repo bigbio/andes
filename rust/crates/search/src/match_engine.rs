@@ -146,6 +146,7 @@ pub fn match_spectra(
                         activation_method: Some(scorer.param().data_type.activation),
                         e_value: 1.0,  // set by Phase 7 compute_spec_e_values_for_spectrum
                         features,
+                        isotope_offset: err.isotope_offset,
                     });
                 }
             }

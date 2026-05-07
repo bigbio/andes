@@ -322,6 +322,7 @@ mod tests {
             activation_method: Some(model::activation::ActivationMethod::HCD),
             e_value: spec_e_value * 100.0,
             features: search::psm::PsmFeatures::default(),
+            isotope_offset: 0,
         }
     }
 
@@ -508,6 +509,7 @@ mod tests {
             activation_method: None,
             e_value: 1e-3,
             features: search::psm::PsmFeatures::default(),
+            isotope_offset: 0,
         };
 
         let mut queue = TopNQueue::new(10);

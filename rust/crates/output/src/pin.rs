@@ -26,9 +26,9 @@
 //!   Documented intentional simplification — Percolator only needs target/decoy
 //!   disambiguation, which this provides.
 //!
-//! * **isotope_error**: always `0`. Phase 4e's precursor-matching loop tries
-//!   multiple isotope offsets but does not record which offset produced the match.
-//!   Fix in a later phase once the winning offset is threaded into `PsmMatch`.
+//! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, which is set
+//!   by `match_engine.rs` from `MassError::isotope_offset` (precursor_matching.rs).
+//!   Mirrors Java `DirectPinWriter.java:195`.
 //!
 //! * **enzN / enzC / enzInt**: zero-stubbed. Java computes enzymatic-boundary
 //!   indicators from the pre/post flanking residues + enzyme rules (OpenMS
@@ -270,8 +270,9 @@ fn write_psm_row<W: Write>(
         -f64::MAX
     };
 
-    // isotope_error: always 0 (MVP divergence)
-    let isotope_error: i32 = 0;
+    // isotope_error: from PsmMatch::isotope_offset (threaded from MassError::isotope_offset
+    // in match_engine.rs). Mirrors Java DirectPinWriter.java:195.
+    let isotope_error: i32 = psm.isotope_offset as i32;
 
     // peplen: number of residues (no flanking)
     let peplen = psm.candidate.peptide.length();
@@ -527,6 +528,7 @@ mod tests {
             activation_method: Some(model::activation::ActivationMethod::HCD),
             e_value: spec_e_value * 100.0,
             features: search::psm::PsmFeatures::default(),
+            isotope_offset: 0,
         }
     }
 

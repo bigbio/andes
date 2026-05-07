@@ -64,6 +64,11 @@ pub fn match_spectra(
     }
 
     for (spec_idx, spec) in spectra.iter().enumerate() {
+        // Skip spectra with too few peaks (mirrors Java's `-minNumPeaks` filter).
+        if spec.peaks.len() < params.min_peaks as usize {
+            continue;
+        }
+
         // Determine which charge states to try for this spectrum.
         // For charge-explicit spectra this is a single entry; for charge-missing,
         // typically 2-3 entries (small overhead, correct behavior).

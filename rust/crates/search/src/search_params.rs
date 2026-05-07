@@ -37,6 +37,11 @@ pub struct SearchParams {
     ///
     /// Values > 2 are treated identically to 2. Supported values: 0, 1, 2.
     pub num_tolerable_termini: u8,
+    /// Minimum number of peaks required in an MS2 spectrum to attempt scoring.
+    ///
+    /// Spectra with fewer peaks than this threshold are skipped entirely.
+    /// Mirrors Java MS-GF+'s `-minNumPeaks N` flag (default 10).
+    pub min_peaks: u32,
 }
 
 impl SearchParams {
@@ -50,6 +55,7 @@ impl SearchParams {
     /// - isotope error range: -1..=2 (matches Java's `-ti -1,2` default)
     /// - top-N PSMs: 10
     /// - num_tolerable_termini: 2 (strict tryptic)
+    /// - min_peaks: 10 (matches Java's `-minNumPeaks 10` default)
     pub fn default_tryptic(aa_set: AminoAcidSet) -> Self {
         Self {
             aa_set,
@@ -63,6 +69,7 @@ impl SearchParams {
             isotope_error_range: -1..=2,
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
+            min_peaks: 10,
         }
     }
 }

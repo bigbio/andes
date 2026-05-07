@@ -1,4 +1,4 @@
-//! End-to-end smoke test: invoke msgf-rust on BSA + test.mgf and verify
+//! End-to-end smoke tests: invoke msgf-rust on various fixtures and verify
 //! the PIN and TSV outputs exist with sensible content.
 
 use std::path::PathBuf;
@@ -14,25 +14,37 @@ fn fixture(rel: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
 }
 
+/// Build a base Command with the mandatory arguments that every test requires.
+fn base_cmd(spectrum: &str, database: &str, pin: &std::path::Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_msgf-rust"));
+    cmd.arg("--spectrum")
+        .arg(fixture(spectrum))
+        .arg("--database")
+        .arg(fixture(database))
+        .arg("--output-pin")
+        .arg(pin);
+    cmd
+}
+
+// ── BSA / MGF end-to-end test (original smoke test) ─────────────────────────
+
 #[test]
 fn cli_runs_end_to_end_on_bsa_test_mgf() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("rust.pin");
     let tsv_path = dir.path().join("rust.tsv");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_msgf-rust"))
-        .arg("--spectrum")
-        .arg(fixture("src/test/resources/test.mgf"))
-        .arg("--database")
-        .arg(fixture("src/test/resources/BSA.fasta"))
-        .arg("--output-pin")
-        .arg(&pin_path)
-        .arg("--output-tsv")
-        .arg(&tsv_path)
-        .arg("--decoy-prefix")
-        .arg("XXX_")
-        .status()
-        .expect("run msgf-rust");
+    let status = base_cmd(
+        "src/test/resources/test.mgf",
+        "src/test/resources/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--output-tsv")
+    .arg(&tsv_path)
+    .arg("--decoy-prefix")
+    .arg("XXX_")
+    .status()
+    .expect("run msgf-rust");
 
     assert!(status.success(), "msgf-rust exit code: {status}");
     assert!(pin_path.exists(), "PIN output not written");
@@ -83,5 +95,104 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
         tsv_has_bsa_accession,
         "TSV should contain at least one row with BSA accession 'P02769' \
          in the Protein column (got PROT_N placeholder instead?)"
+    );
+}
+
+// ── New flag smoke tests: verify the flags parse and the binary exits 0 ──────
+
+#[test]
+fn cli_accepts_max_missed_cleavages_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let status = base_cmd(
+        "src/test/resources/test.mgf",
+        "src/test/resources/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--max-missed-cleavages")
+    .arg("2")
+    .status()
+    .expect("run msgf-rust");
+
+    assert!(status.success(), "--max-missed-cleavages 2 should exit 0, got: {status}");
+}
+
+#[test]
+fn cli_accepts_min_peaks_flag() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let status = base_cmd(
+        "src/test/resources/test.mgf",
+        "src/test/resources/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--min-peaks")
+    .arg("5")
+    .status()
+    .expect("run msgf-rust");
+
+    assert!(status.success(), "--min-peaks 5 should exit 0, got: {status}");
+}
+
+#[test]
+fn cli_accepts_min_length_max_length_flags() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let status = base_cmd(
+        "src/test/resources/test.mgf",
+        "src/test/resources/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--min-length")
+    .arg("7")
+    .arg("--max-length")
+    .arg("35")
+    .status()
+    .expect("run msgf-rust");
+
+    assert!(status.success(), "--min-length 7 --max-length 35 should exit 0, got: {status}");
+}
+
+// ── mzML integration smoke test: format dispatch + non-empty PIN ─────────────
+
+#[test]
+fn cli_runs_end_to_end_on_tiny_mzml() {
+    // tiny.pwiz.mzML is the standard fixture used by the mzML reader unit tests.
+    // It is a real mzML file with MS2 spectra.  Because there is no matched FASTA,
+    // we expect few or zero PSMs — but the binary must exit 0 and the PIN must be
+    // written (even if it contains only the header row).
+    //
+    // We use BSA.fasta as the target database: it is the only fixture available.
+    // The point of this test is NOT PSM recall but that the mzML code path runs
+    // end-to-end without a crash or panic.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("mzml_out.pin");
+
+    let status = base_cmd(
+        "src/test/resources/tiny.pwiz.mzML",
+        "src/test/resources/BSA.fasta",
+        &pin_path,
+    )
+    // Lower min-peaks so we don't filter out the tiny fixture's sparse spectra.
+    .arg("--min-peaks")
+    .arg("1")
+    .status()
+    .expect("run msgf-rust on mzML");
+
+    assert!(
+        status.success(),
+        "msgf-rust should exit 0 on mzML input, got: {status}"
+    );
+    assert!(pin_path.exists(), "PIN output should be written for mzML input");
+
+    // The PIN must at least contain a header row.
+    let pin_content = std::fs::read_to_string(&pin_path).unwrap();
+    let first_line = pin_content.lines().next().unwrap_or("");
+    assert!(
+        first_line.starts_with("SpecId\tLabel\tScanNr"),
+        "PIN header should be present for mzML output; got: {first_line}"
     );
 }

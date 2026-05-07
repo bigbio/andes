@@ -1,8 +1,11 @@
 //! msgf-rust: end-to-end MS-GF+ search.
 //!
-//! Loads an MGF spectrum file and a FASTA target database, runs a tryptic
-//! database search with default MS-GF+ parameters, and writes output in
-//! Percolator `.pin` format (and optionally `.tsv` format).
+//! Loads an MGF or mzML spectrum file and a FASTA target database, runs a
+//! tryptic database search with default MS-GF+ parameters, and writes output
+//! in Percolator `.pin` format (and optionally `.tsv` format).
+//!
+//! Format dispatch: if `--spectrum` ends in `.mzML` or `.mzml`, `MzMLReader`
+//! is used; otherwise `MgfReader` is used (default / backwards-compatible).
 
 use std::fs::File;
 use std::io::BufReader;
@@ -13,15 +16,16 @@ use clap::Parser;
 use model::{AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance, ResidueSpec, Tolerance};
 use scoring_crate::{Param, RankScorer};
 use search::{match_spectra, SearchIndex, SearchParams};
-use input::{FastaReader, MgfReader};
+use input::{FastaReader, MgfReader, MzMLReader};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "msgf-rust",
-    about = "MS-GF+ Rust port: database search of MGF spectra against FASTA"
+    about = "MS-GF+ Rust port: database search of MGF/mzML spectra against FASTA"
 )]
 struct Cli {
-    /// Input MGF spectrum file.
+    /// Input spectrum file (MGF or mzML). Format is auto-detected by extension:
+    /// `.mzML`/`.mzml` → MzMLReader; anything else → MgfReader.
     #[arg(long)]
     spectrum: PathBuf,
 
@@ -73,6 +77,31 @@ struct Cli {
     ///   0: neither terminus needs to be a cleavage site (non-specific).
     #[arg(long, default_value = "2")]
     ntt: u8,
+
+    /// Maximum number of missed cleavages per peptide.
+    ///
+    /// Mirrors Java MS-GF+'s `-maxMissedCleavages N` flag (default 1).
+    #[arg(long, default_value = "1")]
+    max_missed_cleavages: u32,
+
+    /// Minimum number of peaks required in an MS2 spectrum to attempt scoring.
+    ///
+    /// Spectra with fewer peaks are skipped. Mirrors Java's `-minNumPeaks N`
+    /// flag (default 10).
+    #[arg(long, default_value = "10")]
+    min_peaks: u32,
+
+    /// Minimum peptide length (in residues) to consider during the search.
+    ///
+    /// Mirrors Java MS-GF+'s `-minLength N` flag (default 6).
+    #[arg(long, default_value = "6")]
+    min_length: u32,
+
+    /// Maximum peptide length (in residues) to consider during the search.
+    ///
+    /// Mirrors Java MS-GF+'s `-maxLength N` flag (default 40).
+    #[arg(long, default_value = "40")]
+    max_length: u32,
 
     /// Path to the .param scoring model file.
     ///
@@ -170,33 +199,71 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.isotope_error_range = cli.isotope_error_min..=cli.isotope_error_max;
     params.top_n_psms_per_spectrum = cli.top_n;
     params.num_tolerable_termini = cli.ntt;
+    params.max_missed_cleavages = cli.max_missed_cleavages;
+    params.min_peaks = cli.min_peaks;
+    params.min_length = cli.min_length;
+    params.max_length = cli.max_length;
 
-    // ── 6. Load MGF spectra ───────────────────────────────────────────────────
-    let mgf_file = File::open(&cli.spectrum)?;
-    let mut spectra: Vec<_> = Vec::new();
-    let mut error_count = 0usize;
-    let mut first_errors: Vec<String> = Vec::with_capacity(3);
-    for result in MgfReader::new(BufReader::new(mgf_file)) {
-        match result {
-            Ok(s) => spectra.push(s),
-            Err(e) => {
-                error_count += 1;
-                if first_errors.len() < 3 {
-                    first_errors.push(format!("{e}"));
+    // ── 6. Load spectra (auto-detect format by file extension) ───────────────
+    let ext = cli.spectrum
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+
+    let spectra = match ext.as_deref() {
+        Some("mzml") => {
+            let f = File::open(&cli.spectrum)?;
+            let mut ok: Vec<_> = Vec::new();
+            let mut error_count = 0usize;
+            for result in MzMLReader::new(BufReader::new(f)) {
+                match result {
+                    Ok(s) => ok.push(s),
+                    Err(e) => {
+                        error_count += 1;
+                        if error_count <= 3 {
+                            eprintln!("WARN: mzML parse: {e}");
+                        }
+                    }
                 }
             }
+            if error_count > 0 {
+                eprintln!(
+                    "WARN: {} mzML spectra failed to parse",
+                    error_count
+                );
+            }
+            ok
         }
-    }
-    if error_count > 0 {
-        eprintln!(
-            "WARN: {} MGF spectra failed to parse (first {} errors):",
-            error_count,
-            first_errors.len()
-        );
-        for e in &first_errors {
-            eprintln!("  - {e}");
+        _ => {
+            // MGF (default / backwards-compatible)
+            let f = File::open(&cli.spectrum)?;
+            let mut ok: Vec<_> = Vec::new();
+            let mut error_count = 0usize;
+            let mut first_errors: Vec<String> = Vec::with_capacity(3);
+            for result in MgfReader::new(BufReader::new(f)) {
+                match result {
+                    Ok(s) => ok.push(s),
+                    Err(e) => {
+                        error_count += 1;
+                        if first_errors.len() < 3 {
+                            first_errors.push(format!("{e}"));
+                        }
+                    }
+                }
+            }
+            if error_count > 0 {
+                eprintln!(
+                    "WARN: {} MGF spectra failed to parse (first {} errors):",
+                    error_count,
+                    first_errors.len()
+                );
+                for e in &first_errors {
+                    eprintln!("  - {e}");
+                }
+            }
+            ok
         }
-    }
+    };
 
     if spectra.is_empty() {
         return Err(format!(

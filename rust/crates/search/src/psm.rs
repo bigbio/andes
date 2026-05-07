@@ -81,17 +81,20 @@ impl PartialOrd for PsmMatch {
 /// (worst), so `push` evicts it when over capacity.
 impl Ord for PsmMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // spec_e_value ascending: `other` compared to `self` gives ascending sort
-        // when embedded in the `Reverse` wrapper of `BinaryHeap`.
-        // But here we define natural order "better = greater" so that the heap
-        // min sits at the top for easy eviction.
-        // "Better" = smaller spec_e_value; then larger score.
-        match other.spec_e_value.partial_cmp(&self.spec_e_value) {
-            Some(std::cmp::Ordering::Equal) | None => {
-                // Secondary: score descending (larger score = better)
-                self.score.partial_cmp(&other.score).unwrap_or(std::cmp::Ordering::Equal)
+        use std::cmp::Ordering;
+        // "Better" PSM = smaller spec_e_value, then larger score.
+        // NaN spec_e_value or score is treated as worst (sorts last / loses to finite).
+        // Map NaN spec_e_value → +infinity (worst, since smaller is better).
+        // Map NaN score        → -infinity (worst, since larger is better).
+        let self_sev  = if self.spec_e_value.is_nan()  { f64::INFINITY }      else { self.spec_e_value };
+        let other_sev = if other.spec_e_value.is_nan() { f64::INFINITY }      else { other.spec_e_value };
+        match other_sev.partial_cmp(&self_sev).unwrap_or(Ordering::Equal) {
+            Ordering::Equal => {
+                let self_score  = if self.score.is_nan()  { f32::NEG_INFINITY } else { self.score };
+                let other_score = if other.score.is_nan() { f32::NEG_INFINITY } else { other.score };
+                self_score.partial_cmp(&other_score).unwrap_or(Ordering::Equal)
             }
-            Some(ord) => ord,
+            ord => ord,
         }
     }
 }
@@ -381,5 +384,46 @@ mod tests {
             "features.longest_y_pct should default to 0.0");
         assert_eq!(m.features.matched_ion_ratio, 0.0,
             "features.matched_ion_ratio should default to 0.0");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue 8: NaN-safe Ord impl
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn psm_match_with_nan_spec_evalue_orders_as_worst() {
+        // NaN spec_e_value should sort as WORSE than any finite value.
+        // "Better" = greater in natural Ord (used by the min-heap via Reverse).
+        let nan_sev = make_match_with_evalue(0, 5.0, f64::NAN);
+        let finite  = make_match_with_evalue(0, 0.0, 1.0);
+        assert_eq!(
+            nan_sev.cmp(&finite),
+            std::cmp::Ordering::Less,
+            "NaN spec_e_value should sort as worse (Less) than a finite value"
+        );
+    }
+
+    #[test]
+    fn psm_match_with_nan_score_orders_as_worst() {
+        // When spec_e_value ties, NaN score should sort as worse than any finite score.
+        let nan_score     = make_match_with_evalue(0, f32::NAN, 0.01);
+        let finite_score  = make_match_with_evalue(0, 0.0,      0.01);
+        assert_eq!(
+            nan_score.cmp(&finite_score),
+            std::cmp::Ordering::Less,
+            "NaN score should sort as worse (Less) than a finite score at equal spec_e_value"
+        );
+    }
+
+    #[test]
+    fn psm_match_two_nan_spec_evalues_compare_equal() {
+        // Two PSMs both with NaN spec_e_value and same score → Equal.
+        let a = make_match_with_evalue(0, 5.0, f64::NAN);
+        let b = make_match_with_evalue(0, 5.0, f64::NAN);
+        assert_eq!(
+            a.cmp(&b),
+            std::cmp::Ordering::Equal,
+            "Two PSMs with NaN spec_e_value and equal score should compare Equal"
+        );
     }
 }

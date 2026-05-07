@@ -261,6 +261,12 @@ fn compute_inner(
     // dist_by_node[ni] = Some(dist) once computed; None = not yet reachable.
     let mut dist_by_node: Vec<Option<ScoreDist>> = vec![None; node_count];
 
+    // Debug-only counter: tracks how many nodes were skipped due to the
+    // score-range guard (|score| > 10000). Fires only in debug builds;
+    // release builds compile this out entirely (no perf regression).
+    #[cfg(debug_assertions)]
+    let mut score_range_overflow_count: u32 = 0;
+
     // Source has full probability at score 0 (Java lines 101-103).
     let mut source_dist = ScoreDist::new(0, 1, false, true);
     source_dist.set_prob(0, 1.0);
@@ -332,6 +338,10 @@ fn compute_inner(
             continue;
         }
         if cur_min_score < -10000 || cur_max_score > 10000 {
+            #[cfg(debug_assertions)]
+            {
+                score_range_overflow_count += 1;
+            }
             continue;
         }
 
@@ -358,6 +368,16 @@ fn compute_inner(
         }
 
         dist_by_node[ni] = Some(cur_dist);
+    }
+
+    // Debug-only: surface score-range overflow count before returning.
+    #[cfg(debug_assertions)]
+    if score_range_overflow_count > 0 {
+        eprintln!(
+            "[GF DP debug] score-range cutoff fired for {} node(s); \
+             some nodes may not be reachable",
+            score_range_overflow_count
+        );
     }
 
     // Extract sink distribution (Java lines 179-185).

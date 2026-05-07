@@ -163,9 +163,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 6. Load MGF spectra ───────────────────────────────────────────────────
     let mgf_file = File::open(&cli.spectrum)?;
-    let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
-        .filter_map(|r| r.ok())
-        .collect();
+    let mut spectra: Vec<_> = Vec::new();
+    let mut error_count = 0usize;
+    let mut first_errors: Vec<String> = Vec::with_capacity(3);
+    for result in MgfReader::new(BufReader::new(mgf_file)) {
+        match result {
+            Ok(s) => spectra.push(s),
+            Err(e) => {
+                error_count += 1;
+                if first_errors.len() < 3 {
+                    first_errors.push(format!("{e}"));
+                }
+            }
+        }
+    }
+    if error_count > 0 {
+        eprintln!(
+            "WARN: {} MGF spectra failed to parse (first {} errors):",
+            error_count,
+            first_errors.len()
+        );
+        for e in &first_errors {
+            eprintln!("  - {e}");
+        }
+    }
 
     if spectra.is_empty() {
         return Err(format!(

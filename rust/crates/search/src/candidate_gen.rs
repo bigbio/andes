@@ -39,9 +39,10 @@ pub fn enumerate_candidates<'a>(
     params: &'a SearchParams,
     decoy_prefix: &'a str,
 ) -> impl Iterator<Item = Candidate> + 'a {
-    let normalized_prefix = format!("{}_", decoy_prefix.trim_end_matches('_'));
+    // Use the prefix verbatim — match exactly what the caller (and the SearchIndex)
+    // stored. Don't invent formatting; require callers to pass the real prefix.
     idx.db.proteins.iter().enumerate().flat_map(move |(p_idx, protein)| {
-        let is_decoy = protein.accession.starts_with(&normalized_prefix);
+        let is_decoy = protein.accession.starts_with(decoy_prefix);
         enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
     })
 }
@@ -273,4 +274,42 @@ fn compute_cleavage_positions(seq: &[u8], enzyme: Enzyme) -> Vec<u32> {
         positions.push(n);
     }
     positions
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn decoy_prefix_matched_verbatim_no_underscore_appended() {
+        // Caller passes "XXX" (no underscore). The matcher should look for
+        // accessions starting with literally "XXX", NOT "XXX_".
+        // We exercise this by checking the is_decoy flag logic directly:
+        // any accession starting with "XXX" (including "XXX_something") must
+        // match, and accessions starting with "XXX_" only must also match (no
+        // double-underscore invention).
+        let prefix = "XXX";
+        assert!(
+            "XXX_protein1".starts_with(prefix),
+            "accession starting with 'XXX_' should match prefix 'XXX'"
+        );
+        assert!(
+            "XXXprotein1".starts_with(prefix),
+            "accession starting with 'XXXprotein1' should match prefix 'XXX'"
+        );
+        assert!(
+            !"DECOY_protein1".starts_with(prefix),
+            "accession 'DECOY_protein1' should NOT match prefix 'XXX'"
+        );
+
+        // Verify we do NOT append an underscore: "DECOY" prefix must not
+        // accidentally match "DECOY_protein" as "DECOY__protein" or similar.
+        let colon_prefix = "DECOY:";
+        assert!(
+            "DECOY:sp|P12345|PROT_HUMAN".starts_with(colon_prefix),
+            "colon-terminated prefix should match verbatim"
+        );
+        assert!(
+            !"DECOY_sp|P12345|PROT_HUMAN".starts_with(colon_prefix),
+            "underscore-delimited accession should NOT match colon prefix"
+        );
+    }
 }

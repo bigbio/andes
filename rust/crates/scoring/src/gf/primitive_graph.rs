@@ -469,6 +469,7 @@ fn compute_edge_error_scores(
     parent_mass: f64,
 ) {
     let node_count = active_nodes.len();
+    let mut clamp_count: u32 = 0;
     for ni in 0..node_count {
         let cur_mass = active_nodes[ni];
         if cur_mass == 0 || cur_mass == peptide_mass {
@@ -480,14 +481,19 @@ fn compute_edge_error_scores(
             let mut error_score =
                 scored_spec.edge_score(cur_mass, prev_mass, theo_aa_mass, scorer, charge, parent_mass);
             if !(-100..=100).contains(&error_score) {
-                eprintln!(
-                    "WARN PrimitiveAaGraph: edge_score {error_score} out of range \
-                     [cur={cur_mass}, prev={prev_mass}]; using -4"
-                );
+                clamp_count += 1;
                 error_score = -4;
             }
             edge_score[e] += error_score;
         }
+    }
+    // Emit a single aggregated warning rather than one line per offending edge
+    // (this loop is hot — per-edge stderr output can spam millions of lines).
+    if clamp_count > 0 {
+        eprintln!(
+            "WARN: PrimitiveAaGraph: {} edge score(s) clamped (out of [-100, 100] range)",
+            clamp_count
+        );
     }
 }
 

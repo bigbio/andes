@@ -9,14 +9,6 @@ license.workspace = true
 name = "msgf-rust"
 path = "src/bin/msgf-rust.rs"
 
-[[bin]]
-name = "msgf-diff"
-path = "src/bin/msgf-diff.rs"
-
-[lib]
-name = "msgf_cli"
-path = "src/lib.rs"
-
 [dependencies]
 model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }

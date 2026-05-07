@@ -10,11 +10,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use engine::{
-    match_spectra, output, AminoAcidSetBuilder, ModLocation, Modification,
-    Param, RankScorer, ResidueSpec, SearchIndex, SearchParams, Tolerance,
-    PrecursorTolerance,
-};
+use model::{AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance, ResidueSpec, Tolerance};
+use scoring_crate::{Param, RankScorer};
+use search::{match_spectra, SearchIndex, SearchParams};
+use output;
 use input::{FastaReader, MgfReader};
 
 #[derive(Parser, Debug)]

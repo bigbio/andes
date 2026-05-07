@@ -4,6 +4,6 @@
 pub mod fasta;
 pub mod mgf;
 
-pub use engine::{Protein, ProteinDb, Spectrum};
+pub use model::{Protein, ProteinDb, Spectrum};
 pub use fasta::{FastaParseError, FastaReader};
 pub use mgf::{MgfParseError, MgfReader};

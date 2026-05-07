@@ -1,9 +1,9 @@
-//! Value-table test pinning `engine::mass` constants to Java's
+//! Value-table test pinning `model::mass` constants to Java's
 //! `edu.ucsd.msjava.msutil.Composition` and `Constants`. References are
 //! the actual IEEE 754 bit patterns Java produces — verified against
 //! the Java source, not against the same Rust literals.
 
-use engine::mass::{nominal_from, C, H, H2O, INTEGER_MASS_SCALER, N, O, PROTON, S};
+use model::mass::{nominal_from, C, H, H2O, INTEGER_MASS_SCALER, N, O, PROTON, S};
 
 /// Bit-equality on f64 — masses must match Java to the full mantissa.
 fn bit_eq(a: f64, b: f64) -> bool {

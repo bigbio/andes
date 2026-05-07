@@ -4,7 +4,7 @@
 
 use std::io::BufRead;
 
-use engine::{Protein, ProteinDb};
+use model::{Protein, ProteinDb};
 
 pub struct FastaReader<R: BufRead> {
     reader: R,

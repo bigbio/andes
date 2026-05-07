@@ -5,10 +5,9 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use engine::{
-    match_spectra, AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec,
-    Param, RankScorer, SearchIndex, SearchParams,
-};
+use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
+use scoring_crate::{Param, RankScorer};
+use search::{match_spectra, SearchIndex, SearchParams};
 use input::{FastaReader, MgfReader};
 
 fn fixture(name: &str) -> PathBuf {
@@ -20,7 +19,7 @@ fn fixture(name: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {name}: {e}"))
 }
 
-fn aa_set() -> engine::AminoAcidSet {
+fn aa_set() -> model::AminoAcidSet {
     let cam = Modification {
         name: "Carbamidomethyl".into(),
         mass_delta: 57.02146,

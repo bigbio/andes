@@ -1,10 +1,7 @@
 //! Handcrafted candidate-enumeration tests.
 
-use engine::{
-    enumerate_candidates, AminoAcidSet, AminoAcidSetBuilder, Enzyme,
-    ModLocation, Modification, Protein, ProteinDb, ResidueSpec,
-    SearchIndex, SearchParams,
-};
+use model::{AminoAcidSet, AminoAcidSetBuilder, Enzyme, ModLocation, Modification, Protein, ProteinDb, ResidueSpec};
+use search::{enumerate_candidates, SearchIndex, SearchParams};
 
 fn aa_set() -> AminoAcidSet {
     AminoAcidSetBuilder::new_standard().build().unwrap()
@@ -193,7 +190,7 @@ fn missed_cleavages_zero_emits_only_perfectly_cleaved() {
     assert_eq!(target_count, 3, "expected 3 perfectly-cleaved peptides, got {target_count}");
 }
 
-fn aa_set_with_oxidation() -> engine::AminoAcidSet {
+fn aa_set_with_oxidation() -> model::AminoAcidSet {
     let ox = Modification {
         name: "Oxidation".into(),
         mass_delta: 15.99491,
@@ -202,7 +199,7 @@ fn aa_set_with_oxidation() -> engine::AminoAcidSet {
         fixed: false,
         accession: None,
     };
-    engine::AminoAcidSetBuilder::new_standard()
+    model::AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox)
         .build()
         .unwrap()

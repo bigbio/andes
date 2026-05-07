@@ -4,7 +4,7 @@
 //! from those files. Each value is verifiable against UniMod
 //! (https://www.unimod.org).
 
-use engine::modification::{Modification, ModLocation, ResidueSpec};
+use model::modification::{Modification, ModLocation, ResidueSpec};
 
 fn bit_eq(a: f64, b: f64) -> bool { a.to_bits() == b.to_bits() }
 

@@ -1,8 +1,7 @@
 //! Precursor-mass tolerance tests.
 
-use engine::{
-    matches_precursor, AminoAcid, Peptide, PrecursorTolerance, Spectrum, Tolerance, PROTON,
-};
+use model::{AminoAcid, Peptide, PrecursorTolerance, Spectrum, Tolerance, PROTON};
+use search::{matches_precursor};
 
 fn make_peptide(seq: &[u8]) -> Peptide {
     let residues: Vec<AminoAcid> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();

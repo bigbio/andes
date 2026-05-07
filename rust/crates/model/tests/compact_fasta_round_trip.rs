@@ -3,7 +3,7 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use engine::{CompactFastaSequence, Protein, ProteinDb};
+use model::{CompactFastaSequence, Protein, ProteinDb};
 
 fn small_db() -> ProteinDb {
     ProteinDb {

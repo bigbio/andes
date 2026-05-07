@@ -2,11 +2,11 @@
 //! `edu.ucsd.msjava.msutil.AminoAcid.STANDARD_AA[]`. Source-of-truth:
 //! the (C, H, N, O, S) integer composition tuples copied from
 //! `AminoAcid.java:163-181`. Each mass is computed in-test from those
-//! tuples using the chemistry constants in `engine::mass`, then
+//! tuples using the chemistry constants in `model::mass`, then
 //! compared to the Rust-built `AminoAcid::standard(residue).mass`.
 
-use engine::amino_acid::AminoAcid;
-use engine::mass::{C, H, N, O, S};
+use model::amino_acid::AminoAcid;
+use model::mass::{C, H, N, O, S};
 
 fn java_composition_mass(c: u32, h: u32, n: u32, o: u32, s: u32) -> f64 {
     c as f64 * C + h as f64 * H + n as f64 * N + o as f64 * O + s as f64 * S

@@ -3,7 +3,8 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use engine::{CompactFastaSequence, Protein, ProteinDb, SuffixArray};
+use model::{CompactFastaSequence, Protein, ProteinDb};
+use search::SuffixArray;
 
 #[test]
 fn sa_round_trip_preserves_arrays() {

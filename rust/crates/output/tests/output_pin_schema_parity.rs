@@ -8,10 +8,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use engine::{
-    match_spectra, output, AminoAcidSetBuilder, Enzyme, ModLocation, Modification,
-    Param, RankScorer, ResidueSpec, SearchIndex, SearchParams, Tolerance,
-};
+use model::{AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ProteinDb, ResidueSpec, Tolerance};
+use model::tolerance::PrecursorTolerance;
+use scoring_crate::{Param, RankScorer};
+use search::{match_spectra, SearchIndex, SearchParams};
+use output;
 use input::{FastaReader, MgfReader};
 
 fn fixture(rel: &str) -> PathBuf {
@@ -42,7 +43,7 @@ fn rust_pin_header_matches_java_pin_fixture_header_exactly() {
 
     // Empty PIN — header-only. We need a SearchIndex for the API, but the
     // header writer doesn't use protein accessions, so an empty index suffices.
-    let empty_target = engine::ProteinDb::default();
+    let empty_target = ProteinDb::default();
     let empty_idx = SearchIndex::from_target_db(&empty_target, "XXX_");
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("empty.pin");
@@ -98,7 +99,7 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
 
     let mut params = SearchParams::default_tryptic(aa.clone());
     params.enzyme = Enzyme::Trypsin;
-    params.precursor_tolerance = engine::tolerance::PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
+    params.precursor_tolerance = PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
     params.charge_range = 2..=3;
     params.isotope_error_range = -1..=2;
 

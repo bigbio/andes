@@ -2,7 +2,7 @@
 //! `edu.ucsd.msjava.msutil.ActivationMethod` (lines 125-131).
 //! Source-of-truth strings copied by hand.
 
-use engine::ActivationMethod;
+use model::ActivationMethod;
 
 #[test]
 fn java_canonical_names_resolve() {

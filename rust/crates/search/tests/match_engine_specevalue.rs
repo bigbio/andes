@@ -7,16 +7,14 @@
 
 use std::collections::HashMap;
 
-use engine::{
-    match_spectra, AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb,
-    SearchIndex, SearchParams, Spectrum, PROTON,
-    Param, RankScorer, Tolerance,
-};
-use engine::activation::ActivationMethod;
-use engine::instrument::InstrumentType;
-use engine::param_model::{IonType, Partition, SpecDataType};
-use engine::protocol::Protocol;
-use engine::psm::PsmMatch;
+use model::{AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb, Spectrum, PROTON, Tolerance};
+use scoring_crate::{Param, RankScorer};
+use search::{match_spectra, SearchIndex, SearchParams};
+use model::activation::ActivationMethod;
+use model::instrument::InstrumentType;
+use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+use model::protocol::Protocol;
+use search::psm::PsmMatch;
 
 fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
     Spectrum {
@@ -82,7 +80,7 @@ fn run_single_peptide_search(
     sequence: &[u8],
     peptide_sequence: &[u8],
     charge: u8,
-) -> Vec<engine::psm::TopNQueue> {
+) -> Vec<search::psm::TopNQueue> {
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(),
@@ -179,8 +177,8 @@ fn sorted_vec_spec_e_value_is_non_decreasing() {
 fn psm_with_lower_spec_e_value_ranks_first() {
     // Directly construct two PsmMaches with different spec_e_values and verify
     // that the one with the lower e-value sorts first in the sorted_vec.
-    use engine::psm::TopNQueue;
-    use engine::candidate_gen::Candidate;
+    use search::psm::TopNQueue;
+    use search::candidate_gen::Candidate;
 
     fn make_psm(score: f32, spec_e_value: f64) -> PsmMatch {
         let aa = AminoAcid::standard(b'A').unwrap();
@@ -200,7 +198,7 @@ fn psm_with_lower_spec_e_value_ranks_first() {
             de_novo_score: i32::MIN,
             activation_method: None,
             e_value: 1.0,
-            features: engine::psm::PsmFeatures::default(),
+            features: search::psm::PsmFeatures::default(),
         }
     }
 
@@ -273,5 +271,88 @@ fn top_psm_e_value_is_spec_e_value_times_some_constant() {
         "e_value ({}) must be >= spec_e_value ({}) since num_distinct_peptides >= 1",
         top.e_value,
         top.spec_e_value
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Track B4: protein-terminal flag derivation into GF construction.
+// ---------------------------------------------------------------------------
+
+/// Helper: run a single-peptide search and return the top PSM's spec_e_value.
+///
+/// `protein_seq` — the protein sequence that `peptide_seq` is embedded in.
+/// `peptide_seq` — the peptide residues (must be a contiguous sub-sequence).
+/// `charge`      — precursor charge to use.
+fn top_spec_e_value_for(protein_seq: &[u8], peptide_seq: &[u8], charge: u8) -> f64 {
+    let queues = run_single_peptide_search(protein_seq, peptide_seq, charge);
+    let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
+    assert!(!sorted.is_empty(), "expected at least one PSM");
+    sorted[0].spec_e_value
+}
+
+/// Track B4 smoke test: the GF should use protein-terminal flags derived from
+/// the top PSM rather than always hard-coding `false, false`.
+///
+/// We verify this *indirectly* by comparing spec_e_values for two scenarios:
+///   (a) `WVTFISLLR` at the N-terminus of the protein  →  use_protein_n_term=true
+///   (b) `WVTFISLLR` embedded after a K residue        →  use_protein_n_term=false
+///
+/// If the fix is working, the GF is built with different flags and the resulting
+/// spec_e_values may differ (because the cleavage edge at the source node
+/// changes with the N-terminal flag).  We do NOT assert a specific numeric
+/// difference — we assert that the two paths produce *valid* spec_e_values
+/// (i.e. the fix did not break anything) and document the observed values.
+///
+/// Note: in some degenerate fixtures (very short peptides, flat score landscape)
+/// the two values can coincide.  The test therefore uses `assert!` on validity
+/// rather than asserting strict inequality, and prints the observed pair for
+/// inspection in CI logs.
+#[test]
+fn gf_protein_n_term_flag_derived_from_top_psm() {
+    // (a) peptide at protein N-terminus: start_offset_in_protein = 0
+    //     protein = WVTFISLLRK, peptide = WVTFISLLR (tryptic; K is the post-residue)
+    let ev_n_term = top_spec_e_value_for(b"WVTFISLLRK", b"WVTFISLLR", 2);
+
+    // (b) same peptide embedded internally: protein = MKWVTFISLLRK
+    //     start_offset_in_protein = 2  →  use_protein_n_term=false
+    let ev_internal = top_spec_e_value_for(b"MKWVTFISLLRK", b"WVTFISLLR", 2);
+
+    // Both values must be valid probabilities.
+    assert!(ev_n_term > 0.0 && ev_n_term <= 1.0 + 1e-9,
+        "N-terminal spec_e_value out of range: {ev_n_term}");
+    assert!(ev_internal > 0.0 && ev_internal <= 1.0 + 1e-9,
+        "internal spec_e_value out of range: {ev_internal}");
+
+    // Print for inspection — helpful when the values differ or coincide.
+    println!(
+        "B4: N-terminal spec_e_value={ev_n_term:.6e}  internal={ev_internal:.6e}  \
+         differ={}",
+        (ev_n_term - ev_internal).abs() > 1e-15
+    );
+}
+
+/// Track B4 smoke test: protein C-terminal flag.
+///
+/// When the top PSM ends at the last residue of the protein, `use_protein_c_term`
+/// should be `true`.  Same indirect-validity approach as the N-terminal test.
+#[test]
+fn gf_protein_c_term_flag_derived_from_top_psm() {
+    // (a) peptide ends at C-terminus: protein = KWVTFISLLR
+    //     tryptic peptide WVTFISLLR → post-residue is '-' (end-of-protein)
+    let ev_c_term = top_spec_e_value_for(b"KWVTFISLLR", b"WVTFISLLR", 2);
+
+    // (b) same peptide with a downstream residue: protein = KWVTFISLLRK
+    //     peptide ends at position 9 of 10, i.e. NOT at C-terminus
+    let ev_not_c_term = top_spec_e_value_for(b"KWVTFISLLRK", b"WVTFISLLR", 2);
+
+    assert!(ev_c_term > 0.0 && ev_c_term <= 1.0 + 1e-9,
+        "C-terminal spec_e_value out of range: {ev_c_term}");
+    assert!(ev_not_c_term > 0.0 && ev_not_c_term <= 1.0 + 1e-9,
+        "non-C-terminal spec_e_value out of range: {ev_not_c_term}");
+
+    println!(
+        "B4: C-terminal spec_e_value={ev_c_term:.6e}  non-C-term={ev_not_c_term:.6e}  \
+         differ={}",
+        (ev_c_term - ev_not_c_term).abs() > 1e-15
     );
 }

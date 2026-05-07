@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use engine::{reverse_db, target_plus_decoy};
+use search::{reverse_db, target_plus_decoy};
 use input::FastaReader;
 
 fn fixture_path() -> PathBuf {

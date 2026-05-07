@@ -18,7 +18,10 @@ name = "msgf_cli"
 path = "src/lib.rs"
 
 [dependencies]
-engine = { path = "../engine" }
+model = { path = "../model" }
+scoring_crate = { path = "../scoring", package = "scoring" }
+search = { path = "../search" }
+output = { path = "../output" }
 input = { path = "../input" }
 clap = { workspace = true }
 thiserror = { workspace = true }

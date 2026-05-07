@@ -4,7 +4,8 @@
 use std::io::Cursor;
 use std::path::PathBuf;
 
-use engine::{CompactFastaSequence, SuffixArray};
+use model::CompactFastaSequence;
+use search::SuffixArray;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

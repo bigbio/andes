@@ -1,7 +1,7 @@
 //! Pin `Protocol` variants to Java `edu.ucsd.msjava.msutil.Protocol`
 //! (lines 56-61).
 
-use engine::Protocol;
+use model::Protocol;
 
 #[test]
 fn java_canonical_names_resolve() {

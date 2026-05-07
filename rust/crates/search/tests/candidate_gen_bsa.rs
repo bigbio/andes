@@ -4,10 +4,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use engine::{
-    enumerate_candidates, AminoAcidSetBuilder, ModLocation, Modification,
-    ResidueSpec, SearchIndex, SearchParams,
-};
+use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
+use search::{enumerate_candidates, SearchIndex, SearchParams};
 use input::FastaReader;
 
 fn fasta(name: &str) -> PathBuf {
@@ -19,7 +17,7 @@ fn fasta(name: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {name}: {e}"))
 }
 
-fn aa_set_with_carbamidomethyl_oxidation() -> engine::AminoAcidSet {
+fn aa_set_with_carbamidomethyl_oxidation() -> model::AminoAcidSet {
     let cam = Modification {
         name: "Carbamidomethyl".into(),
         mass_delta: 57.02146,

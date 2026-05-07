@@ -4,19 +4,20 @@
 //! from an empty spectrum + minimal `RankScorer`, then runs the graph-based
 //! `GeneratingFunction::compute` (and friends) and checks invariants.
 //!
-//! NOTE: `tiny_param()` is copied from `engine::scoring::rank_scorer::tests`
+//! NOTE: `tiny_param()` is copied from `scoring::scoring::rank_scorer::tests`
 //! because that module is `pub(crate)` and is therefore not accessible from
 //! integration tests. If the crate-internal version changes, this copy must be
 //! kept in sync.
 
 use std::collections::HashMap;
 
-use engine::{AminoAcidSetBuilder, Enzyme, Param, RankScorer, ScoredSpectrum, Spectrum, Tolerance};
-use engine::gf::{GeneratingFunction, PrimitiveAaGraph};
-use engine::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
-use engine::activation::ActivationMethod;
-use engine::instrument::InstrumentType;
-use engine::protocol::Protocol;
+use model::{AminoAcidSetBuilder, Enzyme, Spectrum, Tolerance};
+use scoring::{Param, RankScorer, ScoredSpectrum};
+use scoring::gf::{GeneratingFunction, PrimitiveAaGraph};
+use scoring::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+use model::activation::ActivationMethod;
+use model::instrument::InstrumentType;
+use model::protocol::Protocol;
 
 // -----------------------------------------------------------------------
 // Shared helpers

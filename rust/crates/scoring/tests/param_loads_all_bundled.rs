@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use engine::Param;
+use scoring::Param;
 
 fn ionstat_dir() -> PathBuf {
     // CARGO_MANIFEST_DIR = astral-speed/rust/crates/engine

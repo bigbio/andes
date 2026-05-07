@@ -6,7 +6,7 @@
 //! uses a different format (3-decimal, fixed mods invisible, no
 //! flanking). Phase 7's output crate owns PIN/TSV byte parity.
 
-use engine::{
+use model::{
     AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Modification,
     Peptide, ResidueSpec,
 };

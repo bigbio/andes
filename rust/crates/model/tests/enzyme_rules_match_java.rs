@@ -2,7 +2,7 @@
 //! `edu.ucsd.msjava.msutil.Enzyme` (lines 299-321). Source-of-truth
 //! values copied by hand from the Java source.
 
-use engine::enzyme::Enzyme;
+use model::enzyme::Enzyme;
 
 /// (variant, residues_cleaved_after, residues_cleaved_before)
 fn java_rules() -> Vec<(Enzyme, &'static [u8], &'static [u8])> {

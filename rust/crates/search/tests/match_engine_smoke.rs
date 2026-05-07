@@ -2,15 +2,13 @@
 
 use std::collections::HashMap;
 
-use engine::{
-    match_spectra, AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb,
-    SearchIndex, SearchParams, Spectrum, PROTON,
-    Param, RankScorer, Tolerance,
-};
-use engine::activation::ActivationMethod;
-use engine::instrument::InstrumentType;
-use engine::param_model::{IonType, Partition, SpecDataType};
-use engine::protocol::Protocol;
+use model::{AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb, Spectrum, PROTON, Tolerance};
+use scoring_crate::{Param, RankScorer};
+use search::{match_spectra, SearchIndex, SearchParams};
+use model::activation::ActivationMethod;
+use model::instrument::InstrumentType;
+use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+use model::protocol::Protocol;
 
 fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
     Spectrum {
@@ -116,7 +114,7 @@ fn top_n_capacity_respected() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa_set);
-    params.enzyme = engine::Enzyme::NoCleavage;
+    params.enzyme = model::Enzyme::NoCleavage;
     params.top_n_psms_per_spectrum = 1;
     params.max_variable_mods_per_peptide = 0;
 

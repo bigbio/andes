@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use engine::SearchIndex;
+use search::SearchIndex;
 use input::FastaReader;
 
 fn fasta(name: &str) -> PathBuf {

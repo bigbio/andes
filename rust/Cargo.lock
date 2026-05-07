@@ -123,21 +123,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
-name = "engine"
-version = "0.1.0"
-dependencies = [
- "byteorder",
- "input",
- "model",
- "output",
- "scoring",
- "search",
- "suffix",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -221,7 +206,7 @@ dependencies = [
 name = "input"
 version = "0.1.0"
 dependencies = [
- "engine",
+ "model",
  "thiserror",
 ]
 
@@ -280,8 +265,11 @@ name = "msgf-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
- "engine",
  "input",
+ "model",
+ "output",
+ "scoring",
+ "search",
  "tempfile",
  "thiserror",
 ]
@@ -302,9 +290,11 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "output"
 version = "0.1.0"
 dependencies = [
+ "input",
  "model",
  "scoring",
  "search",
+ "tempfile",
  "thiserror",
 ]
 
@@ -360,6 +350,7 @@ name = "scoring"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "input",
  "model",
  "tempfile",
  "thiserror",

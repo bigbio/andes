@@ -2,7 +2,7 @@
 //! compiles and passes, downstream crates can import the same types
 //! without touching submodule paths.
 
-use engine::{
+use model::{
     AminoAcid, AminoAcidSetBuilder, Enzyme, ModLocation, Modification,
     Peptide, PrecursorTolerance, ResidueSpec, Tolerance, H2O, PROTON,
 };

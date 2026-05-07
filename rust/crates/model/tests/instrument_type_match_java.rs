@@ -1,7 +1,7 @@
 //! Pin `InstrumentType` variants to Java
 //! `edu.ucsd.msjava.msutil.InstrumentType` (lines 73-76).
 
-use engine::InstrumentType;
+use model::InstrumentType;
 
 #[test]
 fn java_canonical_names_resolve() {

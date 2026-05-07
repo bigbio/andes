@@ -13,10 +13,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use engine::{
-    match_spectra, AminoAcidSetBuilder, ModLocation, Modification, Param,
-    RankScorer, ResidueSpec, SearchIndex, SearchParams,
-};
+use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
+use scoring_crate::{Param, RankScorer};
+use search::{match_spectra, SearchIndex, SearchParams};
 use input::{FastaReader, MgfReader};
 
 fn fixture(path: &str) -> PathBuf {
@@ -27,7 +26,7 @@ fn fixture(path: &str) -> PathBuf {
         .unwrap_or_else(|e| panic!("canonicalize {path}: {e}"))
 }
 
-fn aa_set() -> engine::AminoAcidSet {
+fn aa_set() -> model::AminoAcidSet {
     let cam = Modification {
         name: "Carbamidomethyl".into(),
         mass_delta: 57.02146,
@@ -70,7 +69,7 @@ fn extract_scan_from_title(title: &str) -> Option<i32> {
 }
 
 /// Extract plain residue string from a Rust Peptide (no flanking, no mods).
-fn peptide_residue_string(p: &engine::Peptide) -> String {
+fn peptide_residue_string(p: &model::Peptide) -> String {
     p.residues.iter().map(|aa| aa.residue as char).collect()
 }
 

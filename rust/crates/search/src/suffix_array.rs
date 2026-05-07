@@ -107,7 +107,7 @@ impl SuffixArray {
         &self,
         csarr: &mut W1,
         cnlcp: &mut W2,
-    ) -> Result<(), SuffixArrayError> {
+    ) -> Result<()> {
         write_csarr(csarr, &self.indices)?;
         write_cnlcp(cnlcp, &self.nlcps)?;
         Ok(())
@@ -117,7 +117,7 @@ impl SuffixArray {
     pub fn read_from<R1: Read, R2: Read>(
         csarr: &mut R1,
         cnlcp: &mut R2,
-    ) -> Result<Self, SuffixArrayError> {
+    ) -> Result<Self> {
         let indices = read_csarr(csarr)?;
         let nlcps = read_cnlcp(cnlcp)?;
         if indices.len() != nlcps.len() {
@@ -131,7 +131,7 @@ impl SuffixArray {
 }
 
 /// Write `.csarr`: `i32 size | i32 id=0 | i32[size] indices | i64 lastModified=0 | i32 formatId`.
-fn write_csarr<W: Write>(w: &mut W, indices: &[i32]) -> Result<(), SuffixArrayError> {
+fn write_csarr<W: Write>(w: &mut W, indices: &[i32]) -> Result<()> {
     let size = indices.len() as i32;
     w.write_all(&size.to_be_bytes())?;
     w.write_all(&0_i32.to_be_bytes())?; // id placeholder
@@ -147,7 +147,7 @@ fn write_csarr<W: Write>(w: &mut W, indices: &[i32]) -> Result<(), SuffixArrayEr
 ///
 /// Java's LCP values are written as single bytes (via `writeByte`), capped at
 /// [`i8::MAX`] (127). Values that exceed 127 are clamped before writing.
-fn write_cnlcp<W: Write>(w: &mut W, nlcps: &[i32]) -> Result<(), SuffixArrayError> {
+fn write_cnlcp<W: Write>(w: &mut W, nlcps: &[i32]) -> Result<()> {
     let size = nlcps.len() as i32;
     w.write_all(&size.to_be_bytes())?;
     w.write_all(&0_i32.to_be_bytes())?; // id placeholder
@@ -161,7 +161,7 @@ fn write_cnlcp<W: Write>(w: &mut W, nlcps: &[i32]) -> Result<(), SuffixArrayErro
 }
 
 /// Read `.csarr`: parse size, skip id, read `size` i32 values, skip footer.
-fn read_csarr<R: Read>(r: &mut R) -> Result<Vec<i32>, SuffixArrayError> {
+fn read_csarr<R: Read>(r: &mut R) -> Result<Vec<i32>> {
     let mut buf4 = [0u8; 4];
 
     r.read_exact(&mut buf4)?;
@@ -184,7 +184,7 @@ fn read_csarr<R: Read>(r: &mut R) -> Result<Vec<i32>, SuffixArrayError> {
 }
 
 /// Read `.cnlcp`: parse size, skip id, read `size` bytes as i32 (sign-extended), skip footer.
-fn read_cnlcp<R: Read>(r: &mut R) -> Result<Vec<i32>, SuffixArrayError> {
+fn read_cnlcp<R: Read>(r: &mut R) -> Result<Vec<i32>> {
     let mut buf4 = [0u8; 4];
 
     r.read_exact(&mut buf4)?;
@@ -218,6 +218,9 @@ pub enum SuffixArrayError {
     #[error(".csarr length {indices} != .cnlcp length {nlcps}")]
     LengthMismatch { indices: usize, nlcps: usize },
 }
+
+/// Module-local Result alias.
+pub type Result<T> = std::result::Result<T, SuffixArrayError>;
 
 #[cfg(test)]
 mod tests {

@@ -154,7 +154,7 @@ impl Param {
     /// Parse a complete `.param` byte stream produced by Java's
     /// `DataOutputStream`. Errors on buffer underruns, unknown enum
     /// names, missing validation marker, or trailing bytes.
-    pub fn load_from_bytes(bytes: &[u8]) -> Result<Self, ParamParseError> {
+    pub fn load_from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(bytes);
         let param = read_param(&mut cursor)?;
 
@@ -172,13 +172,13 @@ impl Param {
         Ok(param)
     }
 
-    pub fn load_from_file(path: &Path) -> Result<Self, ParamParseError> {
+    pub fn load_from_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         Self::load_from_bytes(&bytes)
     }
 }
 
-fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param, ParamParseError> {
+fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
     // -- Section 1: header --
     let version = read_i32(cursor)?;
 
@@ -503,9 +503,12 @@ pub enum ParamParseError {
     Unimplemented,
 }
 
+/// Module-local Result alias to reduce signature noise.
+pub type Result<T> = std::result::Result<T, ParamParseError>;
+
 /// Read a UTF-16BE string of the given length (in 2-byte code units).
 /// Length 0 → empty string. Non-ASCII code units are rejected.
-fn read_utf16be_string(cursor: &mut Cursor<&[u8]>, len: u8) -> Result<String, ParamParseError> {
+fn read_utf16be_string(cursor: &mut Cursor<&[u8]>, len: u8) -> Result<String> {
     let mut buf = String::with_capacity(len as usize);
     for _ in 0..len {
         let pos = cursor.position() as usize;
@@ -527,19 +530,19 @@ fn read_utf16be_string(cursor: &mut Cursor<&[u8]>, len: u8) -> Result<String, Pa
 
 // --- low-level read helpers ---
 
-fn read_i32(cursor: &mut Cursor<&[u8]>) -> Result<i32, ParamParseError> {
+fn read_i32(cursor: &mut Cursor<&[u8]>) -> Result<i32> {
     let pos = cursor.position() as usize;
     cursor.read_i32::<BigEndian>()
         .map_err(|_| ParamParseError::UnexpectedEof { offset: pos, needed: 4 })
 }
 
-fn read_f32(cursor: &mut Cursor<&[u8]>) -> Result<f32, ParamParseError> {
+fn read_f32(cursor: &mut Cursor<&[u8]>) -> Result<f32> {
     let pos = cursor.position() as usize;
     cursor.read_f32::<BigEndian>()
         .map_err(|_| ParamParseError::UnexpectedEof { offset: pos, needed: 4 })
 }
 
-fn read_bool(cursor: &mut Cursor<&[u8]>) -> Result<bool, ParamParseError> {
+fn read_bool(cursor: &mut Cursor<&[u8]>) -> Result<bool> {
     let pos = cursor.position() as usize;
     let b = cursor.read_u8()
         .map_err(|_| ParamParseError::UnexpectedEof { offset: pos, needed: 1 })?;
@@ -548,7 +551,7 @@ fn read_bool(cursor: &mut Cursor<&[u8]>) -> Result<bool, ParamParseError> {
 
 /// Read a single signed byte as the length prefix for a UTF-16BE string.
 /// Java's `readByte` returns `i8`; values < 0 are illegal here.
-fn read_i8_as_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8, ParamParseError> {
+fn read_i8_as_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8> {
     let pos = cursor.position() as usize;
     let b = cursor.read_i8()
         .map_err(|_| ParamParseError::UnexpectedEof { offset: pos, needed: 1 })?;

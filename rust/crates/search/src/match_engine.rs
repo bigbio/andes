@@ -271,29 +271,25 @@ fn compute_spec_e_values_for_spectrum(
     // parent_mass = (mz - H) * charge  (precursor peak mass, with H added back in Java).
     let parent_mass = (spec.precursor_mz - PROTON) * (charge as f64);
 
-    // 3. Derive protein-terminal flags from the top PSM (Track B4).
+    // 3. Derive protein-terminal flags by OR-ing across ALL PSMs in the queue.
     //
-    // Java reference: DBScanner.java:592 aggregates these flags across all
-    // candidates before GF construction. Our MVP approximation: derive from
-    // the single best-scoring (top) PSM currently in the queue — the most
-    // likely promotion candidate. This is exact for the common case where the
-    // top PSM is unambiguously best; edge cases (ties near a protein boundary)
-    // are addressed in Phase 7+ when per-candidate GFs become feasible.
+    // Java reference: DBScanner.java:592-602 aggregates useProteinNTerm /
+    // useProteinCTerm across all candidates before GF construction. We mirror
+    // this by iterating the full queue and setting either flag the moment any
+    // PSM is at a protein N- or C-terminus, short-circuiting once both are set.
     let (use_protein_n_term, use_protein_c_term) = {
-        let top_psm = queue.iter_psms().max_by(|a, b| a.cmp(b));
-        match top_psm {
-            Some(top) => {
-                let start = top.candidate.start_offset_in_protein;
-                let pep_len = top.candidate.peptide.length();
-                let is_n = start == 0;
-                let is_c = match search_index.protein_at(top.candidate.protein_index) {
-                    Some(prot) => start + pep_len >= prot.sequence.len(),
-                    None => false,
-                };
-                (is_n, is_c)
+        let mut any_n = false;
+        let mut any_c = false;
+        for psm in queue.iter_psms() {
+            if let Some(prot) = search_index.protein_at(psm.candidate.protein_index) {
+                let start = psm.candidate.start_offset_in_protein;
+                let pep_len = psm.candidate.peptide.length();
+                if start == 0 { any_n = true; }
+                if start + pep_len >= prot.sequence.len() { any_c = true; }
+                if any_n && any_c { break; }
             }
-            None => (false, false),
         }
+        (any_n, any_c)
     };
 
     // 3b. Build the GF group across the nominal mass range.

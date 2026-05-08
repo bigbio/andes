@@ -16,6 +16,8 @@ search = { path = "../search" }
 output = { path = "../output" }
 input = { path = "../input" }
 clap = { workspace = true }
+num_cpus = "1.16"
+rayon = "1.10"
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -112,6 +112,10 @@ struct Cli {
     /// case.
     #[arg(long)]
     param_file: Option<PathBuf>,
+
+    /// Number of worker threads for the search loop. Defaults to logical CPU count.
+    #[arg(long, default_value_t = num_cpus::get())]
+    threads: usize,
 }
 
 fn main() -> ExitCode {
@@ -279,6 +283,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ── 7. Run match_spectra ──────────────────────────────────────────────────
+    // Configure the global Rayon worker pool. Mirrors Java MS-GF+'s -thread N flag.
+    // build_global() panics if called twice; guard with OnceLock so repeated CLI
+    // invocations within a single test process don't blow up.
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(cli.threads)
+            .build_global()
+            .expect("build_global");
+    });
+    eprintln!("Using {} worker threads", cli.threads);
+
     // Fragment tolerance of 0.5 Da matches the gf_bsa_parity integration test
     // and the Java MS-GF+ default for HCD data.
     let fragment_tol_da = 0.5_f64;

@@ -1,6 +1,7 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
@@ -61,6 +62,14 @@ pub fn match_spectra(
         aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
     }
 
+    // Yield-accounting counters (Phase 1.2 diagnostic).
+    // Aggregated across all worker threads via Relaxed atomics — exact counts
+    // don't require ordering with other memory ops.
+    let skipped_min_peaks = AtomicU64::new(0);
+    let candidates_visited = AtomicU64::new(0);
+    let psms_pushed = AtomicU64::new(0);
+    let spectra_with_psms = AtomicU64::new(0);
+
     // Parallel per-spectrum search.
     //
     // Mirrors Java DBScanner.computeSpecEValues which runs per-spectrum work on
@@ -74,6 +83,7 @@ pub fn match_spectra(
 
             // Skip spectra with too few peaks (mirrors Java's `-minNumPeaks` filter).
             if spec.peaks.len() < params.min_peaks as usize {
+                skipped_min_peaks.fetch_add(1, Ordering::Relaxed);
                 return queue;
             }
 
@@ -154,12 +164,15 @@ pub fn match_spectra(
                             features,
                             isotope_offset: err.isotope_offset,
                         });
+                        psms_pushed.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
+            candidates_visited.fetch_add(window_cand_indices.len() as u64, Ordering::Relaxed);
 
             // Phase 6: compute SpecEValue for the PSMs in this queue.
             if !queue.is_empty() {
+                spectra_with_psms.fetch_add(1, Ordering::Relaxed);
                 let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
                     && params.enzyme != Enzyme::NonSpecific
                 {
@@ -191,6 +204,22 @@ pub fn match_spectra(
             queue
         })
         .collect();
+
+    // Yield-accounting summary (Phase 1.2 diagnostic).
+    // Helps disambiguate whether a PSM-yield gap vs Java is from:
+    //   - filtering (skipped_min_peaks)
+    //   - enumeration (candidates_visited)
+    //   - scoring (psms_pushed)
+    //   - top-N retention (spectra_with_psms)
+    eprintln!(
+        "Yield: {} spectra in, {} skipped by min_peaks, {} candidates visited, \
+         {} PSMs pushed, {} spectra with non-empty queue",
+        spectra.len(),
+        skipped_min_peaks.load(Ordering::Relaxed),
+        candidates_visited.load(Ordering::Relaxed),
+        psms_pushed.load(Ordering::Relaxed),
+        spectra_with_psms.load(Ordering::Relaxed),
+    );
 
     queues
 }

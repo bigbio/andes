@@ -45,10 +45,8 @@
 //!   full accession strings; multi-protein PSMs get additional tab-separated
 //!   columns — multi-protein support is a future followup.
 //!
-//! * **peplen**: Java uses `match.getLength()` which is the sequence length
-//!   *including* flanking residues (`length - 2` when emitting). Rust's
-//!   `Peptide::length()` returns only the residue count (no flanking), so we
-//!   use it directly — the values are equivalent.
+//! * **peplen**: Java uses `match.getLength()` which is residue count + 2
+//!   (includes both flanking residues). Rust mirrors this convention.
 //!
 //! * **dm / absdm**: computed from precursor m/z using isotope_error = 0.
 //!   Java adjusts `adjustedExpMz = precursorMz - ISOTOPE * isotopeError / charge`.
@@ -278,8 +276,11 @@ fn write_psm_row<W: Write>(
     // in match_engine.rs). Mirrors Java DirectPinWriter.java:195.
     let isotope_error: i32 = psm.isotope_offset as i32;
 
-    // peplen: number of residues (no flanking)
-    let peplen = psm.candidate.peptide.length();
+    // peplen: Java's convention is `residue_count + 2` (counts both flanking residues
+    // — the `pre` and `post` characters in the `Peptide` struct). Java's
+    // DirectPinWriter calls match.getLength() which returns this value. Without
+    // the +2, compare_pin.py reports row-count mismatch and per-row diff is broken.
+    let peplen = psm.candidate.peptide.length() + 2;
 
     // dm / absdm: precursor mass error in Da
     // Java: adjustedExpMz = precursorMz - ISOTOPE * isotopeError / charge

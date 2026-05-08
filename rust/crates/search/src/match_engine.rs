@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use rayon::prelude::*;
+
 use model::aa_set::AminoAcidSet;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
 use model::enzyme::Enzyme;
@@ -37,10 +39,6 @@ pub fn match_spectra(
     fragment_tolerance_da: f64,
     decoy_prefix: &str,
 ) -> Vec<TopNQueue> {
-    let mut queues: Vec<TopNQueue> = (0..spectra.len())
-        .map(|_| TopNQueue::new(params.top_n_psms_per_spectrum))
-        .collect();
-
     let candidates: Vec<Candidate> = enumerate_candidates(idx, params, decoy_prefix).collect();
 
     // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
@@ -63,135 +61,136 @@ pub fn match_spectra(
         aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
     }
 
-    for (spec_idx, spec) in spectra.iter().enumerate() {
-        // Skip spectra with too few peaks (mirrors Java's `-minNumPeaks` filter).
-        if spec.peaks.len() < params.min_peaks as usize {
-            continue;
-        }
+    // Parallel per-spectrum search.
+    //
+    // Mirrors Java DBScanner.computeSpecEValues which runs per-spectrum work on
+    // `-thread N` workers. All inputs above are `&` immutable; the closure owns
+    // its TopNQueue, scored_per_charge cache, and per-bin GF state.
+    let queues: Vec<TopNQueue> = spectra
+        .par_iter()
+        .enumerate()
+        .map(|(spec_idx, spec)| {
+            let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
 
-        // Determine which charge states to try for this spectrum.
-        // For charge-explicit spectra this is a single entry; for charge-missing,
-        // typically 2-3 entries (small overhead, correct behavior).
-        let charges_to_try: Vec<u8> = match spec.precursor_charge {
-            Some(z) if z > 0 => vec![z as u8],
-            _ => params.charge_range.clone().collect(),
-        };
-
-        // Build (and cache) a ScoredSpectrum per charge to evaluate.
-        //
-        // Fix (Track B3): previously a single ScoredSpectrum was built with
-        // `precursor_z = spec.precursor_charge.unwrap_or(2)`, so charge-missing
-        // spectra always used z=2 even when evaluating z=3 candidates — wrong
-        // precursor filtering, wrong partition, wrong main_ion.
-        //
-        // For charge-explicit spectra the cache has exactly 1 entry (no overhead).
-        // For charge-missing spectra, typically 2-3 entries per spectrum.
-        // The HashMap lifetime aligns with `spec`'s borrow (same loop scope).
-        let mut scored_per_charge: HashMap<u8, ScoredSpectrum<'_>> = HashMap::new();
-        for &z in &charges_to_try {
-            scored_per_charge.entry(z)
-                .or_insert_with(|| ScoredSpectrum::new(spec, scorer.param(), z));
-        }
-
-        // Compute per-charge candidate windows and union them into a deduplicated
-        // set of candidate indices. This avoids O(all_candidates) iteration —
-        // only candidates whose nominal mass falls within the precursor-tolerance
-        // window for at least one of the tried charges are visited.
-        //
-        // Window derivation mirrors compute_spec_e_values_for_spectrum's logic so
-        // that any candidate admitted by matches_precursor is guaranteed to be in
-        // at least one charge's window, preserving parity with the brute-force path.
-        let mut window_cand_indices: HashSet<usize> = HashSet::new();
-        for &z in &charges_to_try {
-            let charge_f = z as f64;
-            let neutral_mass = (spec.precursor_mz - PROTON) * charge_f - H2O;
-            let nominal_center = nominal_from(neutral_mass);
-            let iso_min = *params.isotope_error_range.start() as i32;
-            let iso_max = *params.isotope_error_range.end() as i32;
-            let tol_da_left  = params.precursor_tolerance.left.as_da(neutral_mass);
-            let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
-            let widen_left  = (tol_da_left  - 0.4999_f64).round() as i32;
-            let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
-            // Java convention (same as GF window in compute_spec_e_values):
-            //   max includes widen_left (tolDaLeft widens the upper bound)
-            //   min includes widen_right (tolDaRight widens the lower bound)
-            let min_nominal = nominal_center - iso_max - widen_right;
-            let max_nominal = nominal_center - iso_min + widen_left;
-            for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
-                for &ci in idxs {
-                    window_cand_indices.insert(ci);
-                }
+            // Skip spectra with too few peaks (mirrors Java's `-minNumPeaks` filter).
+            if spec.peaks.len() < params.min_peaks as usize {
+                return queue;
             }
-        }
 
-        for &cand_idx in &window_cand_indices {
-            let cand = &candidates[cand_idx];
+            // Determine which charge states to try for this spectrum.
+            // For charge-explicit spectra this is a single entry; for charge-missing,
+            // typically 2-3 entries (small overhead, correct behavior).
+            let charges_to_try: Vec<u8> = match spec.precursor_charge {
+                Some(z) if z > 0 => vec![z as u8],
+                _ => params.charge_range.clone().collect(),
+            };
+
+            // Build (and cache) a ScoredSpectrum per charge to evaluate.
+            //
+            // Fix (Track B3): previously a single ScoredSpectrum was built with
+            // `precursor_z = spec.precursor_charge.unwrap_or(2)`, so charge-missing
+            // spectra always used z=2 even when evaluating z=3 candidates — wrong
+            // precursor filtering, wrong partition, wrong main_ion.
+            //
+            // For charge-explicit spectra the cache has exactly 1 entry (no overhead).
+            // For charge-missing spectra, typically 2-3 entries per spectrum.
+            let mut scored_per_charge: HashMap<u8, ScoredSpectrum<'_>> = HashMap::new();
             for &z in &charges_to_try {
-                let scored_spec = &scored_per_charge[&z];
-                let mut best_for_charge: Option<(MassError, f32)> = None;
-                for offset in params.isotope_error_range.clone() {
-                    if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
-                        // Phase 5: use real score_psm instead of -|mass_error_ppm| placeholder.
-                        let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da);
-                        if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
-                            best_for_charge = Some((err, score));
-                        }
+                scored_per_charge.entry(z)
+                    .or_insert_with(|| ScoredSpectrum::new(spec, scorer.param(), z));
+            }
+
+            // Compute per-charge candidate windows and union them into a deduplicated
+            // set of candidate indices. Window derivation mirrors
+            // compute_spec_e_values_for_spectrum's logic so any candidate admitted by
+            // matches_precursor is guaranteed to be in at least one charge's window.
+            let mut window_cand_indices: HashSet<usize> = HashSet::new();
+            for &z in &charges_to_try {
+                let charge_f = z as f64;
+                let neutral_mass = (spec.precursor_mz - PROTON) * charge_f - H2O;
+                let nominal_center = nominal_from(neutral_mass);
+                let iso_min = *params.isotope_error_range.start() as i32;
+                let iso_max = *params.isotope_error_range.end() as i32;
+                let tol_da_left  = params.precursor_tolerance.left.as_da(neutral_mass);
+                let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
+                let widen_left  = (tol_da_left  - 0.4999_f64).round() as i32;
+                let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
+                // Java convention: max widens by tol_da_left, min widens by tol_da_right.
+                let min_nominal = nominal_center - iso_max - widen_right;
+                let max_nominal = nominal_center - iso_min + widen_left;
+                for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
+                    for &ci in idxs {
+                        window_cand_indices.insert(ci);
                     }
                 }
-                if let Some((err, score)) = best_for_charge {
-                    let features = compute_psm_features(scored_spec, &cand.peptide, fragment_tolerance_da);
-                    queues[spec_idx].push(PsmMatch {
-                        spectrum_idx: spec_idx,
-                        candidate: cand.clone(),
-                        charge_used: z,
-                        mass_error_ppm: err.mass_error_ppm,
-                        score,
-                        spec_e_value: 1.0,  // set by Phase 6 compute_spec_e_values_for_spectrum
-                        de_novo_score: i32::MIN,  // set by Phase 7 compute_spec_e_values_for_spectrum
-                        activation_method: Some(scorer.param().data_type.activation),
-                        e_value: 1.0,  // set by Phase 7 compute_spec_e_values_for_spectrum
-                        features,
-                        isotope_offset: err.isotope_offset,
-                    });
+            }
+
+            for &cand_idx in &window_cand_indices {
+                let cand = &candidates[cand_idx];
+                for &z in &charges_to_try {
+                    let scored_spec = &scored_per_charge[&z];
+                    let mut best_for_charge: Option<(MassError, f32)> = None;
+                    for offset in params.isotope_error_range.clone() {
+                        if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
+                            // Phase 5: use real score_psm instead of -|mass_error_ppm| placeholder.
+                            let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da);
+                            if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
+                                best_for_charge = Some((err, score));
+                            }
+                        }
+                    }
+                    if let Some((err, score)) = best_for_charge {
+                        let features = compute_psm_features(scored_spec, &cand.peptide, fragment_tolerance_da);
+                        queue.push(PsmMatch {
+                            spectrum_idx: spec_idx,
+                            candidate: cand.clone(),
+                            charge_used: z,
+                            mass_error_ppm: err.mass_error_ppm,
+                            score,
+                            spec_e_value: 1.0,  // set by Phase 6 compute_spec_e_values_for_spectrum
+                            de_novo_score: i32::MIN,  // set by Phase 7 compute_spec_e_values_for_spectrum
+                            activation_method: Some(scorer.param().data_type.activation),
+                            e_value: 1.0,  // set by Phase 7 compute_spec_e_values_for_spectrum
+                            features,
+                            isotope_offset: err.isotope_offset,
+                        });
+                    }
                 }
             }
-        }
 
-        // Phase 6: compute SpecEValue for the PSMs in this queue.
-        if !queues[spec_idx].is_empty() {
-            let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
-                && params.enzyme != Enzyme::NonSpecific
-            {
-                Some(params.enzyme)
-            } else {
-                None
-            };
-            // Pick the ScoredSpectrum for the top PSM's charge.
-            // For charge-explicit spectra there is only 1 entry in the cache.
-            // For charge-missing spectra, use the top PSM's charge so the GF
-            // reflects the dominant scoring context (option (a) per B3 plan).
-            let top_charge = queues[spec_idx]
-                .iter_psms()
-                .max_by(|a, b| a.cmp(b))
-                .map(|p| p.charge_used)
-                .unwrap_or(charges_to_try[0]);
-            // Unwrap is safe: the cache was built for every charge in charges_to_try,
-            // and top_charge comes from a PSM that was scored at one of those charges.
-            let scored_spec_for_gf = &scored_per_charge[&top_charge];
-            compute_spec_e_values_for_spectrum(
-                spec,
-                params,
-                &mut queues[spec_idx],
-                &aa_set_for_gf,
-                enzyme_opt,
-                scorer,
-                scored_spec_for_gf,
-                top_charge,
-                fragment_tolerance_da,
-                idx,
-            );
-        }
-    }
+            // Phase 6: compute SpecEValue for the PSMs in this queue.
+            if !queue.is_empty() {
+                let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
+                    && params.enzyme != Enzyme::NonSpecific
+                {
+                    Some(params.enzyme)
+                } else {
+                    None
+                };
+                // Pick the ScoredSpectrum for the top PSM's charge.
+                let top_charge = queue
+                    .iter_psms()
+                    .max_by(|a, b| a.cmp(b))
+                    .map(|p| p.charge_used)
+                    .unwrap_or(charges_to_try[0]);
+                let scored_spec_for_gf = &scored_per_charge[&top_charge];
+                compute_spec_e_values_for_spectrum(
+                    spec,
+                    params,
+                    &mut queue,
+                    &aa_set_for_gf,
+                    enzyme_opt,
+                    scorer,
+                    scored_spec_for_gf,
+                    top_charge,
+                    fragment_tolerance_da,
+                    idx,
+                );
+            }
+
+            queue
+        })
+        .collect();
 
     queues
 }

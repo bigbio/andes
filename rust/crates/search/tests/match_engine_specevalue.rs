@@ -71,7 +71,6 @@ fn tiny_scorer() -> RankScorer {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
-        partition_ion_types_cache: HashMap::new(),
     };
     RankScorer::new(&param)
 }

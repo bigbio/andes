@@ -3,56 +3,6 @@
 //!
 //! `ScoreDist` stores per-score arrays of probabilities and/or counts
 //! over an integer score range `[min_score, max_score)`. Index = score - min_score.
-//!
-//! ## Buffer pooling
-//!
-//! `ScoreDist::new` pulls its `Vec<f64>` storage from a thread-local pool
-//! and `Drop` returns the buffer to the pool. This eliminates ~19M Vec
-//! allocations per PXD001819 search (~50 active nodes × 10 mass bins ×
-//! 38k spectra). The pool is per-thread (no contention) and capped at
-//! `MAX_POOL_SIZE` buffers to bound memory.
-
-use std::cell::RefCell;
-
-const MAX_POOL_SIZE: usize = 256;
-
-thread_local! {
-    /// Free list of `Vec<f64>` buffers reusable by `ScoreDist`. Borrowed
-    /// only briefly during `new` / `Drop` — no long-lived borrows.
-    static F64_POOL: RefCell<Vec<Vec<f64>>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Take a buffer from the pool, or allocate a fresh one. Returned Vec
-/// is empty (length 0) but has at least `min_capacity` capacity.
-fn pool_take(min_capacity: usize) -> Vec<f64> {
-    F64_POOL.with(|p| {
-        let mut p = p.borrow_mut();
-        // Walk the pool from the back (most-recently-returned first, hot in
-        // L1/L2 cache) for a buffer with sufficient capacity.
-        if let Some(idx) = p.iter().rposition(|v| v.capacity() >= min_capacity) {
-            let mut v = p.swap_remove(idx);
-            v.clear();
-            v
-        } else {
-            Vec::with_capacity(min_capacity)
-        }
-    })
-}
-
-/// Return a buffer to the pool. Pool is capped at `MAX_POOL_SIZE` to bound
-/// per-thread memory; surplus buffers are dropped.
-fn pool_return(mut v: Vec<f64>) {
-    if v.capacity() == 0 {
-        return;
-    }
-    v.clear();
-    F64_POOL.with(|p| {
-        let mut p = p.borrow_mut();
-        if p.len() < MAX_POOL_SIZE {
-            p.push(v);
-        }
-    });
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScoreBound {
@@ -75,50 +25,20 @@ impl ScoreBound {
     pub fn set_max_score(&mut self, v: i32) { self.max_score = v; }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScoreDist {
     bound: ScoreBound,
     num_distribution: Option<Vec<f64>>,
     prob_distribution: Option<Vec<f64>>,
 }
 
-/// Manual `Clone` (replaces the derive that came with the original struct).
-/// We can't pool through a clone because both copies would race on `Drop`;
-/// cloned buffers are always freshly allocated and freshly zeroed via the
-/// underlying `Vec::clone` (no pool involvement).
-impl Clone for ScoreDist {
-    fn clone(&self) -> Self {
-        Self {
-            bound: self.bound,
-            num_distribution: self.num_distribution.clone(),
-            prob_distribution: self.prob_distribution.clone(),
-        }
-    }
-}
-
-impl Drop for ScoreDist {
-    fn drop(&mut self) {
-        if let Some(v) = self.num_distribution.take() {
-            pool_return(v);
-        }
-        if let Some(v) = self.prob_distribution.take() {
-            pool_return(v);
-        }
-    }
-}
-
 impl ScoreDist {
     pub fn new(min_score: i32, max_score: i32, calc_number: bool, calc_prob: bool) -> Self {
         let range = (max_score - min_score) as usize;
-        let make = || {
-            let mut v = pool_take(range);
-            v.resize(range, 0.0);
-            v
-        };
         Self {
             bound: ScoreBound::new(min_score, max_score),
-            num_distribution: if calc_number { Some(make()) } else { None },
-            prob_distribution: if calc_prob { Some(make()) } else { None },
+            num_distribution: if calc_number { Some(vec![0.0; range]) } else { None },
+            prob_distribution: if calc_prob { Some(vec![0.0; range]) } else { None },
         }
     }
 

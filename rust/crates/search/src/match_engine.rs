@@ -636,79 +636,12 @@ pub(crate) fn compute_psm_features(
 #[cfg(test)]
 mod feature_tests {
     use super::*;
-    use model::activation::ActivationMethod;
     use model::amino_acid::AminoAcid;
-    use model::instrument::InstrumentType;
     use model::mass::PROTON;
     use model::peptide::Peptide;
-    use model::protocol::Protocol;
     use model::spectrum::Spectrum;
-    use model::tolerance::Tolerance;
-    use scoring_crate::param_model::{
-        FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType,
-    };
-    use scoring_crate::scoring::fragment_ions::{predict_by_ions, IonKind};
+    use scoring_crate::scoring::fragment_ions::predict_by_ions;
     use scoring_crate::scoring::ScoredSpectrum;
-    use scoring_crate::RankScorer;
-    use std::collections::HashMap;
-
-    /// RankScorer with `mme = Da(0.5)` for PIN features (`as_da` per predicted m/z).
-    fn scorer_for_features() -> RankScorer {
-        let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let noise = IonType::Noise;
-
-        let mut ion_table: HashMap<IonType, Vec<f32>> = HashMap::new();
-        ion_table.insert(
-            prefix1,
-            vec![0.6_f32, 0.3, 0.05, 0.001],
-        );
-        ion_table.insert(noise, vec![0.1_f32, 0.2, 0.3, 0.4]);
-
-        let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
-        rank_dist_table.insert(part, ion_table);
-
-        let mut frag_off_table = HashMap::new();
-        frag_off_table.insert(
-            part,
-            vec![FragmentOffsetFrequency {
-                ion_type: prefix1,
-                frequency: 0.7,
-            }],
-        );
-
-        let mut partition_ion_types_cache = HashMap::new();
-        partition_ion_types_cache.insert(part, vec![prefix1]);
-
-        let param = Param {
-            version: 10001,
-            data_type: SpecDataType {
-                activation: ActivationMethod::HCD,
-                instrument: InstrumentType::QExactive,
-                enzyme: None,
-                protocol: Protocol::Automatic,
-            },
-            mme: Tolerance::Da(0.5),
-            apply_deconvolution: false,
-            deconvolution_error_tolerance: 0.0,
-            charge_hist: vec![(2, 100)],
-            min_charge: 2,
-            max_charge: 2,
-            num_segments: 1,
-            partitions: vec![part],
-            num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
-            frag_off_table,
-            max_rank: 3,
-            rank_dist_table,
-            error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-            partition_ion_types_cache,
-        };
-        RankScorer::new(&param)
-    }
 
     /// Build a minimal peptide of `len` alanine residues with flanks `_-`.
     fn ala_peptide(len: usize) -> Peptide {
@@ -735,8 +668,7 @@ mod feature_tests {
         let pep = ala_peptide(4);
         let spec = make_spectrum(vec![]); // no peaks
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let scorer = scorer_for_features();
-        let f = compute_psm_features(&ss, &pep, &scorer);
+        let f = compute_psm_features(&ss, &pep, 0.5);
         assert_eq!(f.mean_error_top7,     0.0, "mean_error_top7 should be 0 with no matches");
         assert_eq!(f.stdev_error_top7,    0.0, "stdev_error_top7 should be 0 with no matches");
         assert_eq!(f.mean_rel_error_top7,  0.0, "mean_rel_error_top7 should be 0 with no matches");
@@ -768,8 +700,7 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let scorer = scorer_for_features();
-        let f = compute_psm_features(&ss, &pep, &scorer);
+        let f = compute_psm_features(&ss, &pep, 0.01); // tight tolerance
 
         // All ratios should be positive since all predicted ions match.
         assert!(f.explained_ion_current_ratio > 0.0,
@@ -816,9 +747,8 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let scorer = scorer_for_features();
-        // mme Da(0.5) ⇒ offset peaks (10 mDa) remain inside window.
-        let f = compute_psm_features(&ss, &pep, &scorer);
+        // tolerance = 0.05 Da so all offset peaks are still within window.
+        let f = compute_psm_features(&ss, &pep, 0.05);
 
         // All absolute Da errors should be ~offset_da.
         assert!(
@@ -847,8 +777,7 @@ mod feature_tests {
         let peaks = vec![(100.0, 50.0_f32), (200.0, 30.0), (300.0, 20.0)];
         let spec = make_spectrum(peaks.clone());
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let scorer = scorer_for_features();
-        let f = compute_psm_features(&ss, &pep, &scorer);
+        let f = compute_psm_features(&ss, &pep, 0.5);
 
         let expected: f32 = peaks.iter().map(|&(_, i)| i).sum();
         assert_eq!(f.ms2_ion_current, expected,

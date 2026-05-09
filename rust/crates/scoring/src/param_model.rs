@@ -142,7 +142,7 @@ impl Param {
     /// Find the partition for `(charge, parent_mass, seg_num)` using the
     /// floor-lookup semantics of `find_partition`. Returns a synthetic
     /// partition if none is found (so callers don't need to unwrap).
-    pub(crate) fn partition_for(&self, charge: u8, parent_mass: f64, seg_num: usize) -> Partition {
+    pub fn partition_for(&self, charge: u8, parent_mass: f64, seg_num: usize) -> Partition {
         self.find_partition(charge as i32, parent_mass as f32, seg_num as i32)
             .unwrap_or(Partition {
                 charge: charge as i32,

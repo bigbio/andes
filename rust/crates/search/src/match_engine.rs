@@ -204,7 +204,7 @@ pub fn match_spectra(
                         }
                     }
                     if let Some((err, score)) = best_for_charge {
-                        let features = compute_psm_features(scored_spec, &cand.peptide, fragment_tolerance_da);
+                        let features = compute_psm_features(scored_spec, &cand.peptide, scorer);
                         queue.push(PsmMatch {
                             spectrum_idx: spec_idx,
                             candidate: cand.clone(),
@@ -486,7 +486,7 @@ fn compute_spec_e_values_for_spectrum(
 pub(crate) fn compute_psm_features(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
-    fragment_tolerance_da: f64,
+    scorer: &RankScorer,
 ) -> PsmFeatures {
     let n = peptide.length();
     if n < 2 {
@@ -503,8 +503,9 @@ pub(crate) fn compute_psm_features(
     let mut matched_ions: Vec<(f32, f64, f64, bool)> = Vec::new();
 
     for p in &predicted {
+        let tol_da = scorer.param().mme.as_da(p.mz);
         if let Some((_rank, intensity, peak_mz)) =
-            scored_spec.nearest_peak_full(p.mz, fragment_tolerance_da)
+            scored_spec.nearest_peak_full(p.mz, tol_da)
         {
             let is_b = matches!(p.kind, IonKind::B);
             matched_ions.push((intensity, peak_mz, p.mz, is_b));

@@ -207,6 +207,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         spec.precursor_charge,
         spec.peaks.len()
     );
+    // Per-spectrum partition diagnostic: which partition (and ion list)
+    // does THIS spectrum hit for each segment?
+    if let Some(z_raw) = spec.precursor_charge {
+        let z = z_raw.max(1) as u8;
+        let pm = (spec.precursor_mz - PROTON) * z as f64;
+        for s in 0..param.num_segments as usize {
+            let ion_list = param.ion_types_for_partition(z, pm, s);
+            println!(
+                "  spectrum partition (charge={} pm={:.2} seg={}): {} ion types — {:?}",
+                z, pm, s, ion_list.len(),
+                ion_list.iter().map(|i| match i {
+                    scoring_crate::param_model::IonType::Prefix { charge, offset_bits } => format!("P(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
+                    scoring_crate::param_model::IonType::Suffix { charge, offset_bits } => format!("S(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
+                    scoring_crate::param_model::IonType::Noise => "Noise".to_string(),
+                }).collect::<Vec<_>>()
+            );
+        }
+    }
 
     // Build search params (same as production harness).
     let mut params = SearchParams::default_tryptic(aa);
@@ -374,41 +392,72 @@ fn print_split_breakdown(
 ) {
     let n = peptide.length();
     if n < 2 { return; }
-    let parent_mass = peptide.mass();
-    let peptide_nominal = nominal_from(parent_mass - H2O);
+    // Use SPECTRUM's parent mass for partition lookup (matching score_psm fix).
+    let spectrum_parent_mass = scored.parent_mass();
+    let peptide_mass = peptide.mass();
+    let peptide_nominal = nominal_from(peptide_mass - H2O);
     let mut prefix_acc = 0.0_f64;
     let mut total: i32 = 0;
-    let frag_tol_da = 0.5_f64;
+    let mme = &scorer.param().mme;
 
-    println!("    parent_mass={:.4}, peptide_nominal={}", parent_mass, peptide_nominal);
+    println!("    spectrum_parent_mass={:.4}, peptide_mass={:.4}, peptide_nominal={}",
+        spectrum_parent_mass, peptide_mass, peptide_nominal);
     for s in 1..n {
         let aa = &peptide.residues[s - 1];
         let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
         prefix_acc += residue_mass;
         let prefix_nominal = nominal_from(prefix_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
-        let split_score = scored.node_score(
-            prefix_nominal as f64, suffix_nominal as f64,
-            scorer, charge, parent_mass, frag_tol_da
-        );
-        total += split_score;
 
-        // Show what peaks matched for this split (prefix + suffix sides).
-        let mut matched_ions = BTreeSet::new();
+        // Collect detailed per-ion contributions to compare against Java.
+        let mut ion_details: Vec<String> = Vec::new();
+        let mut matched_sum: f32 = 0.0;
+        let mut missing_sum: f32 = 0.0;
+        let mut n_matched = 0;
+        let mut n_missing = 0;
         for is_prefix in [true, false] {
             let nom = if is_prefix { prefix_nominal as f64 } else { suffix_nominal as f64 };
-            for (ion, theo_mz) in ions_for_node(nom, is_prefix, scorer.param(), parent_mass, charge) {
-                if let Some(rank) = scored.nearest_peak_rank(theo_mz, frag_tol_da) {
-                    matched_ions.insert(format!("{:?}@{:.2}(rk{})", ion, theo_mz, rank));
-                }
+            for (ion, theo_mz) in ions_for_node(nom, is_prefix, scorer.param(), spectrum_parent_mass, charge) {
+                let seg = scorer.param().segment_num(theo_mz, spectrum_parent_mass);
+                let part = scorer.param().partition_for(charge, spectrum_parent_mass, seg);
+                let tol_da = mme.as_da(theo_mz);
+                let (score_str, contribution) = match scored.nearest_peak_rank(theo_mz, tol_da) {
+                    Some(rank) => {
+                        let s = scorer.node_score(part, ion, rank);
+                        n_matched += 1;
+                        matched_sum += s;
+                        (format!("rk{}={:.2}", rank, s), s)
+                    }
+                    None => {
+                        let s = scorer.missing_ion_score(part, ion);
+                        n_missing += 1;
+                        missing_sum += s;
+                        (format!("MISS={:.2}", s), s)
+                    }
+                };
+                let _ = contribution;
+                let kind = if is_prefix { "P" } else { "S" };
+                let off = match ion {
+                    scoring_crate::param_model::IonType::Prefix { offset_bits, .. } |
+                    scoring_crate::param_model::IonType::Suffix { offset_bits, .. } => f32::from_bits(offset_bits),
+                    _ => 0.0,
+                };
+                ion_details.push(format!("{}{:.1}@{:.1}={}", kind, off, theo_mz, score_str));
             }
         }
+        let split_score = (matched_sum + missing_sum).round() as i32;
+        total += split_score;
+
         let resi_char = aa.residue as char;
         println!(
-            "    split={} aa[{}]={} pref_nom={} suf_nom={} score={} matched=[{}]",
+            "    split={} aa[{}]={} pref_nom={} suf_nom={} score={} (matched={} sum={:.2}, missing={} sum={:.2})",
             s, s - 1, resi_char, prefix_nominal, suffix_nominal, split_score,
-            matched_ions.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+            n_matched, matched_sum, n_missing, missing_sum
         );
+        if s == 4 || s == 1 {
+            // Show full per-ion breakdown for selected splits.
+            println!("      ions: {}", ion_details.join(" | "));
+        }
     }
     println!("    breakdown_total = {}", total);
 }

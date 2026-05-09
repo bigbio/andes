@@ -150,6 +150,9 @@ mod tests {
         let mut frag_off_table = HashMap::new();
         frag_off_table.insert(part, vec![FragmentOffsetFrequency { ion_type: prefix_ion, frequency: 0.7 }]);
 
+        let mut partition_ion_types_cache = HashMap::new();
+        partition_ion_types_cache.insert(part, vec![prefix_ion]);
+
         Param {
             version: 10001,
             data_type: SpecDataType {
@@ -175,6 +178,7 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache,
         }
     }
 

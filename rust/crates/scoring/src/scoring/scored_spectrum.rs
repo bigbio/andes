@@ -643,6 +643,7 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         };
 
         let ss = ScoredSpectrum::new(&s, &param, 2);
@@ -858,6 +859,9 @@ mod tests {
         // [nn, ?, ?, yy] = [0.1, 0.3, 0.3, 0.5]
         ion_existence_table.insert(part, vec![0.1_f32, 0.3, 0.3, 0.5]);
 
+        let mut partition_ion_types_cache = HashMap::new();
+        partition_ion_types_cache.insert(part, vec![prefix1]);
+
         let _ = dist_len; // used for documentation
 
         let param = Param {
@@ -885,6 +889,7 @@ mod tests {
             ion_err_dist_table,
             noise_err_dist_table,
             ion_existence_table,
+            partition_ion_types_cache,
         };
 
         // No peaks in spectrum → cur_mass = None, prev_mass = None → idx = 0 (nn).
@@ -1051,6 +1056,7 @@ mod precursor_filter_tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         }
     }
 
@@ -1113,6 +1119,7 @@ mod precursor_filter_tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         }
     }
 

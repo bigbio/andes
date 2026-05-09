@@ -41,14 +41,14 @@ pub struct Param {
     /// Pre-filtered ion-type list per partition (Noise excluded), populated
     /// at load time. Used by `ion_types_for_partition_slice` to avoid
     /// per-call Vec allocation in the GF DP hot path.
-    pub(crate) partition_ion_types_cache: HashMap<Partition, Vec<IonType>>,
+    pub partition_ion_types_cache: HashMap<Partition, Vec<IonType>>,
 }
 
 impl Param {
     /// Find the partition matching `(charge, parent_mass, seg_num)` via
     /// the same lookup Java uses (`partitionSet.floor(target)`):
-    /// returns the largest partition ≤ target by lex order on
-    /// (charge, parent_mass.to_bits(), seg_num).
+    /// returns the largest partition ≤ target by Java `Partition.compareTo`
+    /// order: `(charge → seg_num → parent_mass)` (see `Ord for Partition`).
     ///
     /// Falls back gracefully:
     /// - If no partition matches the requested charge: use the smallest
@@ -937,6 +937,7 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         }
     }
 
@@ -952,14 +953,15 @@ mod tests {
         // Sort matches the Phase 2 invariant.
         param.partitions.sort();
 
-        // Target (2, 800.0, 0) → lex floor:
-        // Sorted charge-2 partitions: (2,500.0,0), (2,500.0,1), (2,1000.0,0).
-        // Largest ≤ (2,800.0,0): (2,500.0,1) because 500.0 < 800.0 and seg_num
-        // doesn't matter once parent_mass is strictly less.
+        // Target (2, 800.0, 0) → floor with Java `Partition.compareTo` order:
+        // charge → seg_index → parent_mass.
+        // Sorted charge-2: (2,500,0), (2,1000,0), (2,500,1) — seg 0 entries
+        // precede seg 1 regardless of parent_mass within the same segment slot.
+        // Largest ≤ (2,800,0): (2,500,0); (2,1000,0) exceeds parent_mass 800.
         let p = param.find_partition(2, 800.0, 0).expect("find");
         assert_eq!(p.charge, 2);
         assert_eq!(p.parent_mass, 500.0);
-        assert_eq!(p.seg_num, 1);
+        assert_eq!(p.seg_num, 0);
     }
 
     #[test]
@@ -1090,6 +1092,7 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         };
 
         let seg0 = param.ion_types_for_segment(0);

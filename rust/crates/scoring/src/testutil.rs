@@ -43,6 +43,9 @@ pub fn tiny_param() -> Param {
     let mut frag_off_table = HashMap::new();
     frag_off_table.insert(part, vec![]);
 
+    let mut partition_ion_types_cache = HashMap::new();
+    partition_ion_types_cache.insert(part, Vec::new());
+
     Param {
         version: 10001,
         data_type: SpecDataType {
@@ -68,6 +71,7 @@ pub fn tiny_param() -> Param {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
+        partition_ion_types_cache,
     }
 }
 
@@ -105,6 +109,9 @@ pub fn tiny_param_with_ions() -> Param {
         frequency: 0.7,
     }]);
 
+    let mut partition_ion_types_cache = HashMap::new();
+    partition_ion_types_cache.insert(part, vec![prefix1]);
+
     Param {
         version: 10001,
         data_type: SpecDataType {
@@ -130,5 +137,6 @@ pub fn tiny_param_with_ions() -> Param {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
+        partition_ion_types_cache,
     }
 }

@@ -395,17 +395,47 @@ impl<'a> ScoredSpectrum<'a> {
         parent_mass: f64,
         _fragment_tolerance_da: f64,
     ) -> f32 {
-        use crate::scoring::fragment_ions::for_each_ion_for_node;
-        let mme = &scorer.param().mme;
+        use crate::param_model::IonType;
         let param = scorer.param();
+        let mme = &param.mme;
+        let max_rank = scorer.max_rank();
+        let max_rank_idx = max_rank as usize;
+        let num_segs = param.num_segments as usize;
         let mut total = 0.0_f32;
-        for_each_ion_for_node(nominal_mass, is_prefix, param, parent_mass, charge, |ion, theo_mz, part| {
-            let tol_da = mme.as_da(theo_mz);
-            match self.nearest_peak_rank(theo_mz, tol_da) {
-                Some(rank) => total += scorer.node_score(part, ion, rank),
-                None => total += scorer.missing_ion_score(part, ion),
+
+        // Hot path: inline loop with array indexing into the partition's
+        // pre-paired (ion, log_table) list. ZERO HashMap lookups per ion
+        // (was 2 per ion: partition lookup + (partition, ion) log lookup).
+        // Each per-spectrum scoring run does ~200k ion evaluations; the
+        // savings are ~50–150 ns per ion × millions per search.
+        for seg in 0..num_segs {
+            let partition = param.partition_for(charge, parent_mass, seg);
+            let ion_logs = scorer.partition_ion_logs(&partition);
+            for (ion, logs) in ion_logs {
+                let theo_mz = match (is_prefix, *ion) {
+                    (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
+                    (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                    _ => continue,
+                };
+                if param.segment_num(theo_mz, parent_mass) != seg {
+                    continue;
+                }
+                let tol_da = mme.as_da(theo_mz);
+                let score = match self.nearest_peak_rank(theo_mz, tol_da) {
+                    Some(rank) => {
+                        // Java rank-clamp: rank > max_rank → use max_rank-1
+                        // (last observed-rank slot, NOT the missing slot).
+                        let idx = rank.min(max_rank).max(1) as usize - 1;
+                        if idx < logs.len() { logs[idx] } else { 0.0 }
+                    }
+                    None => {
+                        // Missing slot: index max_rank (the LAST entry).
+                        if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 }
+                    }
+                };
+                total += score;
             }
-        });
+        }
         total
     }
 

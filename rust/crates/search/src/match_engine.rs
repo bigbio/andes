@@ -1,6 +1,6 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
@@ -114,7 +114,12 @@ pub fn match_spectra(
             // set of candidate indices. Window derivation mirrors
             // compute_spec_e_values_for_spectrum's logic so any candidate admitted by
             // matches_precursor is guaranteed to be in at least one charge's window.
-            let mut window_cand_indices: BTreeSet<usize> = BTreeSet::new();
+            //
+            // Vec + sort_unstable + dedup is faster than BTreeSet for the typical
+            // 1k-3k indices per spectrum: better cache locality, no tree pointer
+            // chasing, single sort pass at end. Iteration order matches BTreeSet
+            // (ascending), preserving downstream parity / determinism.
+            let mut window_cand_indices: Vec<usize> = Vec::with_capacity(2048);
             for &z in &charges_to_try {
                 let charge_f = z as f64;
                 let neutral_mass = (spec.precursor_mz - PROTON) * charge_f - H2O;
@@ -129,11 +134,11 @@ pub fn match_spectra(
                 let min_nominal = nominal_center - iso_max - widen_right;
                 let max_nominal = nominal_center - iso_min + widen_left;
                 for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
-                    for &ci in idxs {
-                        window_cand_indices.insert(ci);
-                    }
+                    window_cand_indices.extend_from_slice(idxs);
                 }
             }
+            window_cand_indices.sort_unstable();
+            window_cand_indices.dedup();
 
             // Per-candidate cleavage credit. Mirrors Java DBScanner.java:441
             //   `cleavageScore = nTermCleavageScore + cTermCleavageScore`

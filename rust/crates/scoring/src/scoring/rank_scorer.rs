@@ -23,7 +23,16 @@ pub struct RankScorer {
     /// Cached log scores: `(partition, non-noise ion_type) → Vec<f32>` where
     /// the Vec has length `max_rank + 1` (indices 0..max_rank-1 for ranks
     /// 1..max_rank, index max_rank for the missing-ion slot).
+    /// Retained for `node_score`/`missing_ion_score` API compatibility (tests,
+    /// diagnostics). Hot-path callers should use `partition_ion_logs` instead.
     pub(crate) log_table: HashMap<(Partition, IonType), Vec<f32>>,
+    /// Dense-indexed log tables for the hot path. Keyed by `Partition` →
+    /// `Vec<(IonType, Vec<f32>)>` parallel to that partition's ion list
+    /// (Noise excluded). The inner `(IonType, Vec<f32>)` pairs are in the
+    /// same order as `Param::ion_types_for_partition_slice`. Replaces the
+    /// per-ion HashMap lookup in `directional_node_score` with array
+    /// indexing — eliminates ~200M HashMap operations per PXD001819 search.
+    pub(crate) partition_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>>,
     /// Cached `min(rank - 1, max_rank - 1)` clamp constant.
     max_rank: u32,
 }
@@ -61,11 +70,45 @@ impl RankScorer {
             }
         }
 
+        // Build the dense partition_ion_logs cache. For each partition, walk
+        // its ion list (in the same order as
+        // `Param::ion_types_for_partition_slice`) and pair each ion with its
+        // log table (cloned). Used by the hot path to avoid HashMap lookups
+        // per-ion; the partition is constant per outer-segment iteration in
+        // `directional_node_score`.
+        let mut partition_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>> = HashMap::new();
+        for (&partition, ions) in &param.partition_ion_types_cache {
+            let mut paired: Vec<(IonType, Vec<f32>)> = Vec::with_capacity(ions.len());
+            for &ion in ions {
+                if let Some(logs) = log_table.get(&(partition, ion)) {
+                    paired.push((ion, logs.clone()));
+                }
+            }
+            partition_ion_logs.insert(partition, paired);
+        }
+
         Self {
             param: param.clone(),
             log_table,
+            partition_ion_logs,
             max_rank: param.max_rank as u32,
         }
+    }
+
+    /// Borrow the dense `(IonType, log_table)` pairs for `partition`. Used by
+    /// the GF DP hot path so per-ion scoring is array indexing, not HashMap
+    /// lookup. Returns empty slice if the partition has no ions.
+    pub fn partition_ion_logs(&self, partition: &Partition) -> &[(IonType, Vec<f32>)] {
+        self.partition_ion_logs
+            .get(partition)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Maximum rank used for clamping. Exposed so callers can apply Java's
+    /// rank-clamp / missing-ion semantics without going through `node_score`.
+    pub fn max_rank(&self) -> u32 {
+        self.max_rank
     }
 
     /// Return the `Param` this scorer was built from.

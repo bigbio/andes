@@ -136,6 +136,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         param.error_scaling_factor,
         param.max_rank
     );
+    // Dump rank_dist values for the FIRST partition's first non-noise ion +
+    // Noise frequencies, so we can compare against expected Java output.
+    if let Some((part, ion_table)) = param.rank_dist_table.iter().next() {
+        println!("\n  --- Sample rank_dist (partition {:?}) ---", part);
+        let noise = ion_table.get(&scoring_crate::param_model::IonType::Noise);
+        if let Some(noise) = noise {
+            println!("    Noise freqs (first 5 ranks): {:?}", &noise[..5.min(noise.len())]);
+            println!("    Noise freq at max_rank ({}): {}", param.max_rank, noise[param.max_rank as usize]);
+        }
+        for (ion, freqs) in ion_table.iter().take(3) {
+            if matches!(ion, scoring_crate::param_model::IonType::Noise) { continue; }
+            println!("    Ion {:?}: first 5 freqs = {:?}", ion, &freqs[..5.min(freqs.len())]);
+            println!("                missing slot ({}): {}", param.max_rank, freqs[param.max_rank as usize]);
+        }
+        // Sanity: dump scorer.node_score for a known (partition, ion, rank).
+        if let Some((ion, _)) = ion_table.iter().find(|(i, _)| !matches!(i, scoring_crate::param_model::IonType::Noise)) {
+            for rank in [1, 5, 20, 100, 150] {
+                let s = scorer.node_score(*part, *ion, rank);
+                println!("    scorer.node_score({:?}, rank={}) = {:.4}", ion, rank, s);
+            }
+            let miss = scorer.missing_ion_score(*part, *ion);
+            println!("    scorer.missing_ion_score = {:.4}", miss);
+        }
+    }
     // Diagnostic: ion type counts per (segment, all-partitions-union) vs per-partition-only.
     // Rust's `ions_for_node` iterates the union; Java's NewScoredSpectrum iterates per-partition.
     for seg in 0..param.num_segments as usize {

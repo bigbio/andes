@@ -121,33 +121,26 @@ impl PrimitiveAaGraph {
             (src, snk)
         };
 
-        let source_aas: Vec<AminoAcid> = aa_set
-            .aa_list_for(source_location)
-            .into_iter()
-            .cloned()
-            .collect();
-        let anywhere_aas: Vec<AminoAcid> = aa_set
-            .aa_list_for(ModLocation::Anywhere)
-            .into_iter()
-            .cloned()
-            .collect();
-        let sink_aas: Vec<AminoAcid> = aa_set
-            .aa_list_for(sink_location)
-            .into_iter()
-            .cloned()
-            .collect();
+        // Borrow precomputed AA lists from the AminoAcidSet cache (populated
+        // in `AminoAcidSetBuilder::build`). Avoids per-call Vec + per-AA
+        // String clones; this matters because PrimitiveAaGraph::new is called
+        // once per mass-bin × per spectrum (~10 × 38k = 380k calls on
+        // PXD001819).
+        let source_aas: &[AminoAcid] = aa_set.cached_aa_list(source_location);
+        let anywhere_aas: &[AminoAcid] = aa_set.cached_aa_list(ModLocation::Anywhere);
+        let sink_aas: &[AminoAcid] = aa_set.cached_aa_list(sink_location);
 
         // ---------------------------------------------------------------
         // Phase 2: Compute min_node_mass and mass_offset.
         // ---------------------------------------------------------------
         let mut min_mass: i32 = 0;
-        for aa in &source_aas {
+        for aa in source_aas {
             min_mass = min_mass.min(aa.nominal_mass());
         }
-        for aa in &anywhere_aas {
+        for aa in anywhere_aas {
             min_mass = min_mass.min(1 + aa.nominal_mass());
         }
-        for aa in &sink_aas {
+        for aa in sink_aas {
             min_mass = min_mass.min(peptide_mass - aa.nominal_mass());
         }
         let min_node_mass = min_mass;
@@ -173,7 +166,7 @@ impl PrimitiveAaGraph {
         let add_cleavage_to_sink     = enzyme.is_some_and(|e| direction != e.is_n_term());
 
         // Forward edges from source (mass 0).
-        for aa in &source_aas {
+        for aa in source_aas {
             let next_mass = aa.nominal_mass();
             if next_mass >= peptide_mass || !is_representable(next_mass) {
                 continue;
@@ -187,7 +180,7 @@ impl PrimitiveAaGraph {
             if !reachable[to_dense(cur_mass)] {
                 continue;
             }
-            for aa in &anywhere_aas {
+            for aa in anywhere_aas {
                 let next_mass = cur_mass + aa.nominal_mass();
                 if next_mass >= peptide_mass || !is_representable(next_mass) {
                     continue;
@@ -198,7 +191,7 @@ impl PrimitiveAaGraph {
         }
 
         // Backward edges to sink (peptide_mass): counted in sink's in_edge_count.
-        for aa in &sink_aas {
+        for aa in sink_aas {
             let prev_mass = peptide_mass - aa.nominal_mass();
             if !is_representable(prev_mass) || !reachable[to_dense(prev_mass)] {
                 continue;
@@ -259,7 +252,7 @@ impl PrimitiveAaGraph {
         };
 
         // Source → intermediate edges.
-        for aa in &source_aas {
+        for aa in source_aas {
             let next_mass = aa.nominal_mass();
             if next_mass >= peptide_mass || !is_representable(next_mass) {
                 continue;
@@ -295,7 +288,7 @@ impl PrimitiveAaGraph {
             if !reachable[to_dense(cur_mass)] {
                 continue;
             }
-            for aa in &anywhere_aas {
+            for aa in anywhere_aas {
                 let next_mass = cur_mass + aa.nominal_mass();
                 if next_mass >= peptide_mass || !is_representable(next_mass) {
                     continue;
@@ -315,7 +308,7 @@ impl PrimitiveAaGraph {
         }
 
         // Backward sink edges.
-        for aa in &sink_aas {
+        for aa in sink_aas {
             let prev_mass = peptide_mass - aa.nominal_mass();
             if !is_representable(prev_mass) || !reachable[to_dense(prev_mass)] {
                 continue;

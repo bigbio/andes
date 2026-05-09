@@ -28,11 +28,21 @@ pub fn ions_for_node(
     parent_mass: f64,
     charge: u8,
 ) -> Vec<(IonType, f64)> {
-    let _ = charge; // kept for API parity; not needed in formula
+    // Java parity: per-segment iteration uses the SPECIFIC partition's ion
+    // type list (mirrors `NewScoredSpectrum`'s
+    // `ionTypes[seg] = scorer.getIonTypes(charge, parentMass, seg)`). The
+    // earlier `param.ion_types_for_segment(seg)` returned the union across
+    // all partitions in the segment, enumerating extra ion types that Java
+    // doesn't score for this spectrum. Each extra ion contributed a
+    // missing-ion penalty (negative score), pulling Rust's PSM scores
+    // systematically below Java's.
+    // (Bug fix 2026-05-09: dominant cause of the per-PSM RawScore gap on
+    // PXD001819 — Java HAEHIK = 80, Rust HAEHIK was 19; expected to close
+    // most of that 60-point delta.)
     let mut out = Vec::new();
     let num_segs = param.num_segments as usize;
     for seg in 0..num_segs {
-        for ion in param.ion_types_for_segment(seg) {
+        for ion in param.ion_types_for_partition(charge, parent_mass, seg) {
             let theo_mz = match (is_prefix, ion) {
                 (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
                 (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),

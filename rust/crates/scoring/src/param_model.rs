@@ -151,6 +151,28 @@ impl Param {
             })
     }
 
+    /// Ion types for the SPECIFIC partition `(charge, parent_mass, seg)`.
+    /// Mirrors Java `NewRankScorer.getIonTypes(charge, parentMass, segNum)`,
+    /// which selects the partition's ion list from `fragOFFTable` rather
+    /// than the segment-wide union returned by `ion_types_for_segment`.
+    /// Used in the per-node scoring path so that Rust enumerates the
+    /// same ion set as Java for a given spectrum.
+    pub fn ion_types_for_partition(&self, charge: u8, parent_mass: f64, seg: usize) -> Vec<IonType> {
+        let part = self.partition_for(charge, parent_mass, seg);
+        let frag_list = match self.frag_off_table.get(&part) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let mut out: Vec<IonType> = Vec::with_capacity(frag_list.len());
+        for fof in frag_list {
+            if matches!(fof.ion_type, IonType::Noise) {
+                continue;
+            }
+            out.push(fof.ion_type);
+        }
+        out
+    }
+
     /// Parse a complete `.param` byte stream produced by Java's
     /// `DataOutputStream`. Errors on buffer underruns, unknown enum
     /// names, missing validation marker, or trailing bytes.
@@ -390,9 +412,14 @@ impl Hash for Partition {
 
 impl Ord for Partition {
     fn cmp(&self, other: &Self) -> Ordering {
+        // Mirror Java `Partition.compareTo`: charge → segIndex → parentMass.
+        // (Bug fix 2026-05-09: previously charge → parent_mass → seg_num,
+        // which produced different floor-lookup results — `find_partition`
+        // for seg=0 queries returned a seg=1 partition with the same
+        // parent_mass tier, looking up the WRONG rank distribution table.)
         self.charge.cmp(&other.charge)
-            .then_with(|| self.parent_mass.to_bits().cmp(&other.parent_mass.to_bits()))
             .then_with(|| self.seg_num.cmp(&other.seg_num))
+            .then_with(|| self.parent_mass.to_bits().cmp(&other.parent_mass.to_bits()))
     }
 }
 

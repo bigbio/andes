@@ -17,6 +17,10 @@ const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 1000.0;
 pub struct AminoAcidSet {
     /// (residue, location) → all variants (unmodified + modified) at that position.
     table: HashMap<(u8, ModLocation), Vec<AminoAcid>>,
+    /// Per-location flattened AA lists, precomputed at build time. Mirrors
+    /// what `aa_list_for(loc)` returned dynamically. Avoids per-call rebuild
+    /// in the GF DP hot path (PrimitiveAaGraph::new).
+    aa_lists_cache: HashMap<ModLocation, Vec<AminoAcid>>,
     has_cterm_mods: bool,
     min_aa_mass: f64,
     max_aa_mass: f64,
@@ -70,29 +74,23 @@ impl AminoAcidSet {
     ///   for that terminal location. This mirrors Java's `locMap` expansion
     ///   where `Anywhere` AAs are inserted into all terminal lists at build time.
     pub fn aa_list_for(&self, location: ModLocation) -> Vec<&AminoAcid> {
-        let anywhere: Vec<&AminoAcid> = STANDARD_RESIDUES
-            .iter()
-            .flat_map(|&r| {
-                self.table
-                    .get(&(r, ModLocation::Anywhere))
-                    .map(|v| v.iter())
-                    .into_iter()
-                    .flatten()
-            })
-            .collect();
+        // Borrow from the precomputed cache (built once in
+        // `AminoAcidSetBuilder::build`). Empty Vec when the location is
+        // missing — should not happen for the 5 standard locations.
+        self.aa_lists_cache
+            .get(&location)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default()
+    }
 
-        if location == ModLocation::Anywhere {
-            return anywhere;
-        }
-
-        // Terminal location: Anywhere AAs + terminal-specific variants.
-        let mut result = anywhere;
-        for &r in STANDARD_RESIDUES {
-            if let Some(variants) = self.table.get(&(r, location)) {
-                result.extend(variants.iter());
-            }
-        }
-        result
+    /// Borrow the precomputed AA list for `location` as a slice. Avoids
+    /// the per-call Vec allocation that `aa_list_for` performs. Used in the
+    /// GF DP hot path (`PrimitiveAaGraph::new`).
+    pub fn cached_aa_list(&self, location: ModLocation) -> &[AminoAcid] {
+        self.aa_lists_cache
+            .get(&location)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Score credit added to a peptide edge when the adjacent residue IS a
@@ -343,8 +341,37 @@ impl AminoAcidSetBuilder {
         let has_cterm_mods = self.fixed_mods.iter().chain(self.variable_mods.iter())
             .any(|m| matches!(m.location, ModLocation::CTerm | ModLocation::ProtCTerm));
 
+        // 5. Precompute the per-location AA lists used by `aa_list_for` and
+        // `cached_aa_list`. Mirrors the original `aa_list_for` logic but runs
+        // once at build time so the GF DP hot path can borrow a slice.
+        let mut aa_lists_cache: HashMap<ModLocation, Vec<AminoAcid>> = HashMap::new();
+        let anywhere_list: Vec<AminoAcid> = STANDARD_RESIDUES
+            .iter()
+            .flat_map(|&r| {
+                table
+                    .get(&(r, ModLocation::Anywhere))
+                    .map(|v| v.iter().cloned())
+                    .into_iter()
+                    .flatten()
+            })
+            .collect();
+        aa_lists_cache.insert(ModLocation::Anywhere, anywhere_list.clone());
+        for &loc in &[
+            ModLocation::NTerm, ModLocation::CTerm,
+            ModLocation::ProtNTerm, ModLocation::ProtCTerm,
+        ] {
+            let mut list = anywhere_list.clone();
+            for &r in STANDARD_RESIDUES {
+                if let Some(variants) = table.get(&(r, loc)) {
+                    list.extend(variants.iter().cloned());
+                }
+            }
+            aa_lists_cache.insert(loc, list);
+        }
+
         Ok(AminoAcidSet {
             table,
+            aa_lists_cache,
             has_cterm_mods,
             min_aa_mass,
             max_aa_mass,

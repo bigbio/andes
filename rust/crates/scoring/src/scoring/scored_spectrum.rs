@@ -64,6 +64,16 @@ pub struct ScoredSpectrum<'a> {
     /// when `new_without_filtering` is used, or derived from the scorer's
     /// table when `new` is used.
     pub(crate) main_ion: IonType,
+    /// Spectrum-level parent mass (= `(precursor_mz - PROTON) * charge`),
+    /// the OBSERVED neutral mass. Mirrors Java's
+    /// `scoredSpec.getPrecursorPeak().getMass()`. Used by `score_psm` /
+    /// `node_score` for partition + segment selection so that all
+    /// candidates at this spectrum see the same partition (matching Java's
+    /// FastScorer which uses a per-spectrum parent_mass regardless of
+    /// candidate's nominal/iso-offset mass).
+    pub(crate) parent_mass: f64,
+    /// The charge state used to construct this ScoredSpectrum.
+    pub(crate) charge: u8,
 }
 
 impl<'a> ScoredSpectrum<'a> {
@@ -138,7 +148,7 @@ impl<'a> ScoredSpectrum<'a> {
         let part = param.partition_for(charge, parent_mass, last_seg);
         let main_ion = main_ion_from_param(param, part);
 
-        Self::rank_kept(spec, kept, kept_count, ranks, prob_peak, main_ion)
+        Self::rank_kept(spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge)
     }
 
     /// Constructor that skips precursor-peak filtering. Convenient for
@@ -158,7 +168,12 @@ impl<'a> ScoredSpectrum<'a> {
         let ranks = vec![u32::MAX; n];
         let prob_peak = 1.0_f32;
         let main_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        Self::rank_kept(spec, kept, kept_count, ranks, prob_peak, main_ion)
+        // Sentinel: derive parent_mass from spec.precursor_mz with charge defaulted to
+        // spec.precursor_charge or 2. Tests using this constructor are typically
+        // not sensitive to partition selection.
+        let charge = spec.precursor_charge.map(|z| z.max(1) as u8).unwrap_or(2);
+        let parent_mass = (spec.precursor_mz - PROTON) * (charge as f64);
+        Self::rank_kept(spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge)
     }
 
     /// Shared ranking logic: sort `kept` by intensity DESC / mz ASC and
@@ -171,6 +186,8 @@ impl<'a> ScoredSpectrum<'a> {
         mut ranks: Vec<u32>,
         prob_peak: f32,
         main_ion: IonType,
+        parent_mass: f64,
+        charge: u8,
     ) -> Self {
         kept.sort_by(|a, b| {
             // Higher intensity first; if equal, lower m/z first.
@@ -181,7 +198,7 @@ impl<'a> ScoredSpectrum<'a> {
         for (rank_minus_one, &(orig_idx, _, _)) in kept.iter().enumerate() {
             ranks[orig_idx] = (rank_minus_one + 1) as u32;
         }
-        Self { spec, ranks, kept_count, prob_peak, main_ion }
+        Self { spec, ranks, kept_count, prob_peak, main_ion, parent_mass, charge }
     }
 
     /// Returns `true` if the main ion is a prefix ion (b-ion direction),
@@ -192,6 +209,19 @@ impl<'a> ScoredSpectrum<'a> {
     /// end is the graph source.
     pub fn main_ion_direction(&self) -> bool {
         self.main_ion.is_prefix()
+    }
+
+    /// Spectrum-level parent mass (= `(precursor_mz - PROTON) * charge`).
+    /// This is the OBSERVED neutral mass of the spectrum at the charge
+    /// state used to construct this `ScoredSpectrum`, NOT the candidate
+    /// peptide's mass. Mirrors Java `scoredSpec.getPrecursorPeak().getMass()`.
+    pub fn parent_mass(&self) -> f64 {
+        self.parent_mass
+    }
+
+    /// Charge state used when this `ScoredSpectrum` was constructed.
+    pub fn charge(&self) -> u8 {
+        self.charge
     }
 
     /// For tests only: mutate the main_ion to a different ion type.
@@ -222,12 +252,17 @@ impl<'a> ScoredSpectrum<'a> {
         self.spec.peaks.iter().map(|&(_, i)| i as f64).sum()
     }
 
-    /// Find the peak closest to `target_mz` within `tolerance_da`. Returns
-    /// `(rank, intensity, peak_mz)`, or `None` if no peak falls within the
-    /// window. Filtered-out peaks (rank == `u32::MAX`) are never returned.
+    /// Find the **highest-intensity** peak within `tolerance_da` of
+    /// `target_mz` and return `(rank, intensity, peak_mz)`, or `None` if
+    /// no peak falls within the window. Filtered-out peaks
+    /// (rank == `u32::MAX`) are never returned.
     ///
-    /// This is the intensity-aware sibling of `nearest_peak_rank`, used by
+    /// Mirrors Java `Spectrum.getPeakByMass` (intensity-max selection),
+    /// matching the same semantics as `nearest_peak_rank`. Used by
     /// `compute_psm_features` for ion-current ratio and error-stat columns.
+    /// (Bug fix 2026-05-09: previously selected closest by m/z, which
+    /// disagreed with Java's intensity-comparator selection — affected
+    /// PIN feature columns even when the rank lookup matched.)
     pub fn nearest_peak_full(&self, target_mz: f64, tolerance_da: f64) -> Option<(u32, f32, f64)> {
         if self.spec.peaks.is_empty() {
             return None;
@@ -235,18 +270,17 @@ impl<'a> ScoredSpectrum<'a> {
         let lo_mz = target_mz - tolerance_da;
         let hi_mz = target_mz + tolerance_da;
         let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
-        let mut best: Option<(usize, f64)> = None; // (peak_index, delta)
+        let mut best: Option<(usize, f32)> = None; // (peak_index, intensity)
         for i in start..self.spec.peaks.len() {
-            let (mz, _) = self.spec.peaks[i];
+            let (mz, intensity) = self.spec.peaks[i];
             if mz > hi_mz {
                 break;
             }
             if self.ranks[i] == u32::MAX {
                 continue;
             }
-            let delta = (mz - target_mz).abs();
-            if best.as_ref().map_or(true, |(_, d)| delta < *d) {
-                best = Some((i, delta));
+            if best.as_ref().map_or(true, |(_, best_int)| intensity > *best_int) {
+                best = Some((i, intensity));
             }
         }
         best.map(|(i, _)| {
@@ -255,8 +289,18 @@ impl<'a> ScoredSpectrum<'a> {
         })
     }
 
-    /// Find the peak closest to `target_mz` within `tolerance_da`. Returns
-    /// the peak's rank, or `None` if no peak falls within the window.
+    /// Find the **highest-intensity** peak within `tolerance_da` of `target_mz`,
+    /// and return its rank. Returns `None` if no peak falls within the window.
+    ///
+    /// Mirrors Java `Spectrum.getPeakByMass(targetMass, tolerance)` which
+    /// returns `Collections.max(matchList, IntensityComparator)` — the
+    /// most-intense peak in the window — and the caller then reads
+    /// `peak.getRank()`. For LowRes CID with mme = 0.5 Da, windows
+    /// frequently contain multiple peaks; selecting the most-intense
+    /// matches Java's rank-based scoring exactly.
+    /// (Bug fix 2026-05-08: previously selected the peak closest by m/z,
+    /// which yielded systematically higher (worse) rank numbers and was
+    /// the dominant cause of top-1 flips on PXD001819.)
     ///
     /// Filtered-out peaks (rank == `u32::MAX`) are never returned.
     ///
@@ -264,7 +308,7 @@ impl<'a> ScoredSpectrum<'a> {
     /// guarantees this). Binary search (`partition_point`) locates the first
     /// peak with `mz >= target_mz - tolerance_da`; the forward scan then
     /// stops as soon as `mz > target_mz + tolerance_da`, so only the O(k)
-    /// peaks in the window are visited (k ≈ 1-3 for typical fragment tolerance).
+    /// peaks in the window are visited.
     pub fn nearest_peak_rank(&self, target_mz: f64, tolerance_da: f64) -> Option<u32> {
         if self.spec.peaks.is_empty() {
             return None;
@@ -273,9 +317,10 @@ impl<'a> ScoredSpectrum<'a> {
         let hi_mz = target_mz + tolerance_da;
         // Find first peak with mz >= lo_mz via binary search.
         let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
-        let mut best: Option<(usize, f64)> = None;
+        // Track (peak_index, intensity); pick max intensity (Java IntensityComparator).
+        let mut best: Option<(usize, f32)> = None;
         for i in start..self.spec.peaks.len() {
-            let (mz, _intensity) = self.spec.peaks[i];
+            let (mz, intensity) = self.spec.peaks[i];
             if mz > hi_mz {
                 break;
             }
@@ -283,9 +328,8 @@ impl<'a> ScoredSpectrum<'a> {
             if self.ranks[i] == u32::MAX {
                 continue;
             }
-            let delta = (mz - target_mz).abs();
-            if best.as_ref().map_or(true, |(_, d)| delta < *d) {
-                best = Some((i, delta));
+            if best.as_ref().map_or(true, |(_, best_int)| intensity > *best_int) {
+                best = Some((i, intensity));
             }
         }
         best.map(|(i, _)| self.ranks[i])
@@ -333,6 +377,15 @@ impl<'a> ScoredSpectrum<'a> {
     /// Score for a single directional (prefix or suffix) node at `nominal_mass`.
     /// Mirrors the inner loop of Java's
     /// `NewScoredSpectrum.getNodeScore(nodeMass, isPrefix)`.
+    ///
+    /// **Fragment tolerance:** the per-ion peak-lookup window comes from
+    /// `scorer.param().mme.as_da(theo_mz)`, mirroring Java's
+    /// `spec.getPeakByMass(theoMass, mme)`. The `fragment_tolerance_da`
+    /// argument is retained for backward compat but **ignored** for ion
+    /// matching — Java uses the param's `mme` here, not a global
+    /// search-level fragment tolerance. (Bug fix 2026-05-09: previously a
+    /// hardcoded 0.5 Da was passed, which happened to match LowRes CID's
+    /// mme but was wrong for any other instrument/protocol.)
     fn directional_node_score(
         &self,
         nominal_mass: f64,
@@ -340,14 +393,16 @@ impl<'a> ScoredSpectrum<'a> {
         scorer: &RankScorer,
         charge: u8,
         parent_mass: f64,
-        fragment_tolerance_da: f64,
+        _fragment_tolerance_da: f64,
     ) -> f32 {
         use crate::scoring::fragment_ions::ions_for_node;
+        let mme = &scorer.param().mme;
         let mut total = 0.0_f32;
         for (ion, theo_mz) in ions_for_node(nominal_mass, is_prefix, scorer.param(), parent_mass, charge) {
             let seg = scorer.param().segment_num(theo_mz, parent_mass);
             let part = scorer.param().partition_for(charge, parent_mass, seg);
-            match self.nearest_peak_rank(theo_mz, fragment_tolerance_da) {
+            let tol_da = mme.as_da(theo_mz);
+            match self.nearest_peak_rank(theo_mz, tol_da) {
                 Some(rank) => total += scorer.node_score(part, ion, rank),
                 None => total += scorer.missing_ion_score(part, ion),
             }

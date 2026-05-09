@@ -48,16 +48,25 @@ pub fn score_psm(
         return 0.0;
     }
 
-    // parent_mass = neutral peptide mass = residue_sum + H2O.
-    // Peptide::mass() already includes H2O (see peptide.rs:37-44).
-    // This matches the `parent_mass` convention in match_engine.rs:189:
-    //   parent_mass = (precursor_mz - PROTON) * charge = M_neutral.
-    let parent_mass = peptide.mass();
+    // Two distinct masses with different roles:
+    //  - `peptide_mass`: candidate peptide's neutral mass (residue_sum + H2O).
+    //    Drives `peptide_nominal` for suffix lookup, mirroring Java's
+    //    `nominalPrefixMassArr[i]` which is built from the candidate's
+    //    residues.
+    //  - `spectrum_parent_mass`: spectrum's OBSERVED neutral mass
+    //    (scoredSpec.parentMass in Java). Drives partition + segment
+    //    selection across all candidates, regardless of iso_off.
+    //
+    // (Bug fix 2026-05-08: previously a single `parent_mass = peptide.mass()`
+    // drove both, which mismatched Java's FastScorer for iso_off≥1
+    // candidates and caused systematic top-1 flips on PXD001819.)
+    let peptide_mass = peptide.mass();
+    let spectrum_parent_mass = scored_spec.parent_mass();
 
     // Total nominal peptide mass = nominal(residue_sum) = nominal(mass - H2O).
     // Used to compute suffix_nominal = peptide_nominal - prefix_nominal,
     // mirroring Java's `suffixMass = peptideMass - prefixMass`.
-    let peptide_nominal = nominal_from(parent_mass - H2O);
+    let peptide_nominal = nominal_from(peptide_mass - H2O);
 
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
@@ -77,7 +86,7 @@ pub fn score_psm(
             suffix_nominal,
             scorer,
             charge,
-            parent_mass,
+            spectrum_parent_mass,
             fragment_tolerance_da,
         );
     }

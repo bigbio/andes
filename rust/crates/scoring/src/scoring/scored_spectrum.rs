@@ -395,18 +395,17 @@ impl<'a> ScoredSpectrum<'a> {
         parent_mass: f64,
         _fragment_tolerance_da: f64,
     ) -> f32 {
-        use crate::scoring::fragment_ions::ions_for_node;
+        use crate::scoring::fragment_ions::for_each_ion_for_node;
         let mme = &scorer.param().mme;
+        let param = scorer.param();
         let mut total = 0.0_f32;
-        for (ion, theo_mz) in ions_for_node(nominal_mass, is_prefix, scorer.param(), parent_mass, charge) {
-            let seg = scorer.param().segment_num(theo_mz, parent_mass);
-            let part = scorer.param().partition_for(charge, parent_mass, seg);
+        for_each_ion_for_node(nominal_mass, is_prefix, param, parent_mass, charge, |ion, theo_mz, part| {
             let tol_da = mme.as_da(theo_mz);
             match self.nearest_peak_rank(theo_mz, tol_da) {
                 Some(rank) => total += scorer.node_score(part, ion, rank),
                 None => total += scorer.missing_ion_score(part, ion),
             }
-        }
+        });
         total
     }
 

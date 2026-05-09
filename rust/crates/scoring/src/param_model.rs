@@ -38,6 +38,10 @@ pub struct Param {
     pub ion_err_dist_table: HashMap<Partition, Vec<f32>>,
     pub noise_err_dist_table: HashMap<Partition, Vec<f32>>,
     pub ion_existence_table: HashMap<Partition, Vec<f32>>,
+    /// Pre-filtered ion-type list per partition (Noise excluded), populated
+    /// at load time. Used by `ion_types_for_partition_slice` to avoid
+    /// per-call Vec allocation in the GF DP hot path.
+    pub(crate) partition_ion_types_cache: HashMap<Partition, Vec<IonType>>,
 }
 
 impl Param {
@@ -158,19 +162,20 @@ impl Param {
     /// Used in the per-node scoring path so that Rust enumerates the
     /// same ion set as Java for a given spectrum.
     pub fn ion_types_for_partition(&self, charge: u8, parent_mass: f64, seg: usize) -> Vec<IonType> {
+        // Compat shim — callers in hot paths should use
+        // `ion_types_for_partition_slice` to avoid the allocation.
+        self.ion_types_for_partition_slice(charge, parent_mass, seg).to_vec()
+    }
+
+    /// Slice-borrowing version of `ion_types_for_partition`. Reads from the
+    /// pre-filtered `partition_ion_types_cache` populated at param-load time.
+    /// Zero allocations per call. Used by the GF DP hot path.
+    pub fn ion_types_for_partition_slice(&self, charge: u8, parent_mass: f64, seg: usize) -> &[IonType] {
         let part = self.partition_for(charge, parent_mass, seg);
-        let frag_list = match self.frag_off_table.get(&part) {
-            Some(v) => v,
-            None => return Vec::new(),
-        };
-        let mut out: Vec<IonType> = Vec::with_capacity(frag_list.len());
-        for fof in frag_list {
-            if matches!(fof.ion_type, IonType::Noise) {
-                continue;
-            }
-            out.push(fof.ion_type);
-        }
-        out
+        self.partition_ion_types_cache
+            .get(&part)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Parse a complete `.param` byte stream produced by Java's
@@ -354,6 +359,19 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         }
     }
 
+    // Pre-build per-partition ion-type cache (Noise excluded), so the GF
+    // DP hot path can borrow a slice instead of allocating a Vec per call.
+    let mut partition_ion_types_cache: HashMap<Partition, Vec<IonType>> = HashMap::new();
+    for (&part, frag_list) in &frag_off_table {
+        let mut ions: Vec<IonType> = Vec::with_capacity(frag_list.len());
+        for fof in frag_list {
+            if !matches!(fof.ion_type, IonType::Noise) {
+                ions.push(fof.ion_type);
+            }
+        }
+        partition_ion_types_cache.insert(part, ions);
+    }
+
     Ok(Param {
         version,
         data_type,
@@ -374,6 +392,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         ion_err_dist_table,
         noise_err_dist_table,
         ion_existence_table,
+        partition_ion_types_cache,
     })
 }
 

@@ -28,21 +28,41 @@ pub fn ions_for_node(
     parent_mass: f64,
     charge: u8,
 ) -> Vec<(IonType, f64)> {
-    // Java parity: per-segment iteration uses the SPECIFIC partition's ion
-    // type list (mirrors `NewScoredSpectrum`'s
-    // `ionTypes[seg] = scorer.getIonTypes(charge, parentMass, seg)`). The
-    // earlier `param.ion_types_for_segment(seg)` returned the union across
-    // all partitions in the segment, enumerating extra ion types that Java
-    // doesn't score for this spectrum. Each extra ion contributed a
-    // missing-ion penalty (negative score), pulling Rust's PSM scores
-    // systematically below Java's.
-    // (Bug fix 2026-05-09: dominant cause of the per-PSM RawScore gap on
-    // PXD001819 — Java HAEHIK = 80, Rust HAEHIK was 19; expected to close
-    // most of that 60-point delta.)
+    // Compat shim — callers in hot paths should use `for_each_ion_for_node`
+    // to avoid the per-call Vec allocation.
     let mut out = Vec::new();
+    for_each_ion_for_node(nominal_mass, is_prefix, param, parent_mass, charge, |ion, theo_mz, _part| {
+        out.push((ion, theo_mz));
+    });
+    out
+}
+
+/// Callback variant of `ions_for_node`. Calls `f(ion, theo_mz, partition)`
+/// once per (ion, theo_mz) pair without allocating an intermediate Vec.
+/// Used by `directional_node_score` in the GF DP hot path (~5 splits ×
+/// 2 directions × ~38k spectra ÷ 12 threads = millions of calls per search).
+///
+/// `partition` is precomputed per outer-segment iteration (constant for
+/// all ions in that segment). Saves a `partition_for` binary search per
+/// ion (was ~30 ns × millions of calls).
+///
+/// See `ions_for_node` for the per-segment / per-partition iteration
+/// semantics. (Java parity is maintained — same set of (ion, theo_mz) pairs
+/// in the same order.)
+#[inline]
+pub fn for_each_ion_for_node<F: FnMut(IonType, f64, crate::param_model::Partition)>(
+    nominal_mass: f64,
+    is_prefix: bool,
+    param: &Param,
+    parent_mass: f64,
+    charge: u8,
+    mut f: F,
+) {
     let num_segs = param.num_segments as usize;
     for seg in 0..num_segs {
-        for ion in param.ion_types_for_partition(charge, parent_mass, seg) {
+        // Partition is constant for all ions in this segment.
+        let partition = param.partition_for(charge, parent_mass, seg);
+        for &ion in param.ion_types_for_partition_slice(charge, parent_mass, seg) {
             let theo_mz = match (is_prefix, ion) {
                 (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
                 (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
@@ -52,10 +72,9 @@ pub fn ions_for_node(
             if param.segment_num(theo_mz, parent_mass) != seg {
                 continue;
             }
-            out.push((ion, theo_mz));
+            f(ion, theo_mz, partition);
         }
     }
-    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

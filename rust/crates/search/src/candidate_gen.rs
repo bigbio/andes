@@ -30,6 +30,13 @@ pub struct Candidate {
     pub protein_index: usize,
     pub start_offset_in_protein: usize,
     pub is_decoy: bool,
+    /// True when this peptide spans the protein's biological N-terminus.
+    /// For Met-cleaved peptides, this is true even though `start_offset_in_protein > 0`.
+    /// Mirrors Java's `isProteinNTerm` flag in DBScanner cleavage-score logic.
+    pub is_protein_n_term: bool,
+    /// True when this peptide spans the protein's C-terminus
+    /// (`abs_end == sequence_length`). Mirrors Java's `isProteinCTerm`.
+    pub is_protein_c_term: bool,
 }
 
 /// Enumerate every candidate peptide from `idx` matching `params`.
@@ -234,6 +241,8 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
             protein_index: ctx.protein_index,
             start_offset_in_protein: abs_start,
             is_decoy: ctx.is_decoy,
+            is_protein_n_term,
+            is_protein_c_term,
         });
     }
 }

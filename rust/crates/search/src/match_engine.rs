@@ -135,15 +135,69 @@ pub fn match_spectra(
                 }
             }
 
+            // Per-candidate cleavage credit. Mirrors Java DBScanner.java:441
+            //   `cleavageScore = nTermCleavageScore + cTermCleavageScore`
+            // added to `scorer.getScore(...)` before queue insertion.
+            // For C-term enzymes (Trypsin, default):
+            //   - N-term: credit if isProteinNTerm OR enzyme.isCleavable(prevAA),
+            //     else penalty
+            //   - C-term: credit if enzyme.isCleavable(lastResidue), else penalty
+            // Bug fix 2026-05-09: Rust previously omitted this entirely, so
+            // every Rust PSM score was offset by ≈ -(credit + credit) = -4
+            // vs Java for fully tryptic ntt=2 candidates.
+            //
+            // Use the ENZYME-REGISTERED aa_set (cleavage credit/penalty are
+            // populated by register_enzyme — params.aa_set is unregistered).
+            let compute_cleavage_credit = |cand: &Candidate| -> i32 {
+                let aa_set = &aa_set_for_gf;
+                let enz = params.enzyme;
+                let mut score: i32 = 0;
+                let pre = cand.peptide.pre;
+                let last = cand.peptide.residues.last().map(|aa| aa.residue).unwrap_or(0);
+                let post = cand.peptide.post;
+                if enz.is_c_term() {
+                    // N-term cleavage
+                    score += if cand.is_protein_n_term || enz.is_cleavable(pre) {
+                        aa_set.neighboring_aa_cleavage_credit()
+                    } else {
+                        aa_set.neighboring_aa_cleavage_penalty()
+                    };
+                    // C-term cleavage
+                    score += if enz.is_cleavable(last) {
+                        aa_set.peptide_cleavage_credit()
+                    } else {
+                        aa_set.peptide_cleavage_penalty()
+                    };
+                } else if enz.is_n_term() {
+                    // N-term cleavage (peptide N-term)
+                    score += if enz.is_cleavable(pre) {
+                        aa_set.peptide_cleavage_credit()
+                    } else {
+                        aa_set.peptide_cleavage_penalty()
+                    };
+                    // C-term cleavage (neighbor)
+                    score += if cand.is_protein_c_term || enz.is_cleavable(post) {
+                        aa_set.neighboring_aa_cleavage_credit()
+                    } else {
+                        aa_set.neighboring_aa_cleavage_penalty()
+                    };
+                }
+                score
+            };
+
             for &cand_idx in &window_cand_indices {
                 let cand = &candidates[cand_idx];
+                let cleavage_credit = compute_cleavage_credit(cand) as f32;
                 for &z in &charges_to_try {
                     let scored_spec = &scored_per_charge[&z];
                     let mut best_for_charge: Option<(MassError, f32)> = None;
                     for offset in params.isotope_error_range.clone() {
                         if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
                             // Phase 5: use real score_psm instead of -|mass_error_ppm| placeholder.
-                            let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da);
+                            // Add cleavage credit (Java DBScanner.java:513:
+                            // `score = cleavageScore + scorer.getScore(...)`).
+                            let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
+                                + cleavage_credit;
                             if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
                                 best_for_charge = Some((err, score));
                             }

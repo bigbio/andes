@@ -538,6 +538,8 @@ mod tests {
                 protein_index: 0,
                 start_offset_in_protein: 0,
                 is_decoy,
+                is_protein_n_term: false,
+                is_protein_c_term: false,
             },
             charge_used: charge,
             mass_error_ppm: 1.5,

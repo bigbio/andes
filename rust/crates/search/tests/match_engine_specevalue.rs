@@ -190,6 +190,8 @@ fn psm_with_lower_spec_e_value_ranks_first() {
                 protein_index: 0,
                 start_offset_in_protein: 0,
                 is_decoy: false,
+                is_protein_n_term: false,
+                is_protein_c_term: false,
             },
             charge_used: 2,
             mass_error_ppm: 0.0,

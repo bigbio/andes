@@ -116,6 +116,12 @@ struct Cli {
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
     threads: usize,
+
+    /// Bench mode: process only the first N MS2 spectra and skip writing
+    /// PIN/TSV. Use for fast Fix B iteration (1k-2k spectra ≈ <1 min vs
+    /// 70 min on full PXD001819). When 0 (default) the full input is used.
+    #[arg(long, default_value = "0")]
+    max_spectra: usize,
 }
 
 fn main() -> ExitCode {
@@ -282,6 +288,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.spectrum.display()
     );
 
+    // Bench-mode slice: keep only the first N spectra to enable rapid
+    // iteration on Fix B. Skips PIN/TSV write at the end of `run`.
+    let bench_mode = cli.max_spectra > 0;
+    let mut spectra = spectra;
+    if bench_mode && spectra.len() > cli.max_spectra {
+        spectra.truncate(cli.max_spectra);
+        eprintln!(
+            "Bench mode: truncated to first {} spectra",
+            cli.max_spectra
+        );
+    }
+
     // ── 7. Run match_spectra ──────────────────────────────────────────────────
     // Configure the global Rayon worker pool. Mirrors Java MS-GF+'s -thread N flag.
     // build_global() panics if called twice; guard with OnceLock so repeated CLI
@@ -298,6 +316,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Fragment tolerance of 0.5 Da matches the gf_bsa_parity integration test
     // and the Java MS-GF+ default for HCD data.
     let fragment_tol_da = 0.5_f64;
+    let t_search_start = std::time::Instant::now();
     let queues = match_spectra(
         &spectra,
         &idx,
@@ -306,13 +325,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         fragment_tol_da,
         &cli.decoy_prefix,
     );
+    let search_elapsed = t_search_start.elapsed();
 
     let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
-    eprintln!("Search complete: {non_empty} / {} spectra have PSMs", spectra.len());
+    eprintln!(
+        "Search complete: {non_empty} / {} spectra have PSMs (match_spectra wall: {:.2}s)",
+        spectra.len(),
+        search_elapsed.as_secs_f64()
+    );
 
     // ── 8. Write PIN ─────────────────────────────────────────────────────────
+    // Bench mode still writes PIN (so we can diff against Java) but skips TSV.
     output::write_pin(&cli.output_pin, &spectra, &queues, &params, &idx, &cli.decoy_prefix)?;
     eprintln!("Wrote PIN: {}", cli.output_pin.display());
+
+    if bench_mode {
+        eprintln!("Bench mode: skipping TSV write.");
+        return Ok(());
+    }
 
     // ── 9. Write TSV (optional) ───────────────────────────────────────────────
     if let Some(ref tsv_path) = cli.output_tsv {

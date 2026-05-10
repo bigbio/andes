@@ -134,6 +134,107 @@ def parse_pin(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _eta_squared(stratification: dict[object, dict[str, float]], grand_mean: float) -> float:
+    """η² = between-group sum-of-squares / total sum-of-squares.
+
+    A rough effect-size measure: 0 = no group differences, 1 = all variance
+    explained by group membership. Used as a quick sanity check on whether
+    a feature has a systematic Δ effect or is just noise.
+    """
+    between_ss = 0.0
+    total_n = 0
+    for stats in stratification.values():
+        n = int(stats["count"])
+        between_ss += n * (stats["mean"] - grand_mean) ** 2
+        total_n += n
+    # Total SS would require per-row data; we approximate with bucket variances.
+    # Approx total SS = between_ss + within_ss where within_ss = Σ n_i * stdev_i²
+    within_ss = sum(int(s["count"]) * s["stdev"] ** 2 for s in stratification.values())
+    total_ss = between_ss + within_ss
+    return between_ss / total_ss if total_ss > 0 else 0.0
+
+
+def format_section2_delta_decomposition(matches: list[dict]) -> str:
+    """Section 2 — ΔRawScore decomposition on full-match PSMs.
+
+    Δ = Java RawScore − Rust RawScore (positive means Java higher).
+    Stratifies Δ by peptide features and computes η² to flag features
+    that systematically explain Δ.
+    """
+    full = [m for m in matches if m["mode"] == "agree"]
+    if not full:
+        return "## Section 2 — ΔRawScore decomposition\n\n_No full-match scans._\n\n"
+
+    deltas = [int(m["java"]["RawScore"]) - int(m["rust"]["RawScore"]) for m in full]
+    grand_mean = mean(deltas)
+    grand_median = median(deltas)
+    grand_stdev = pstdev(deltas) if len(deltas) > 1 else 0.0
+    tail = sum(1 for d in deltas if abs(d) > 100)
+
+    lines = [
+        "## Section 2 — ΔRawScore decomposition (full-match PSMs only)",
+        "",
+        f"- N: {len(full)}",
+        f"- Median Δ: {grand_median}",
+        f"- Mean Δ: {grand_mean:.1f}",
+        f"- Stdev Δ: {grand_stdev:.1f}",
+        f"- Tail (|Δ| > 100): {tail} ({100 * tail / len(full):.1f}%)",
+        "",
+        "### Stratified by feature",
+        "",
+        "| Feature | Bucket | N | Mean Δ | Median Δ | Stdev |",
+        "|---|---|---|---|---|---|",
+    ]
+
+    feature_names = ["length", "charge", "n_oxidation", "n_carbamidomethyl",
+                     "iso_off", "last_aa", "pre_aa", "is_decoy", "score_bucket"]
+    eta_summary: list[tuple[str, float]] = []
+    for fname in feature_names:
+        # Build paired (row, delta) list keyed by feature value.
+        per_row = []
+        for m in full:
+            feats = peptide_features(m["java"])
+            d = int(m["java"]["RawScore"]) - int(m["rust"]["RawScore"])
+            per_row.append({"bucket": feats[fname], "delta": d})
+        strat = stratify(per_row, lambda r: r["bucket"], lambda r: r["delta"])
+        eta = _eta_squared(strat, grand_mean)
+        eta_summary.append((fname, eta))
+        # Render top buckets (sorted by count descending, max 5 rows)
+        sorted_buckets = sorted(strat.items(), key=lambda kv: -kv[1]["count"])[:5]
+        for bucket, stats in sorted_buckets:
+            lines.append(f"| {fname} | {bucket} | {int(stats['count'])} | "
+                         f"{stats['mean']:.1f} | {stats['median']:.0f} | {stats['stdev']:.1f} |")
+
+    lines += [
+        "",
+        "### Variance contribution (η²) per feature",
+        "",
+        "| Feature | η² |",
+        "|---|---|",
+    ]
+    for fname, eta in sorted(eta_summary, key=lambda x: -x[1]):
+        lines.append(f"| {fname} | {eta:.3f} |")
+    lines.append("")
+
+    # Decision rule
+    top_feature, top_eta = max(eta_summary, key=lambda x: x[1])
+    if top_eta > 0.40:
+        verdict = (f"**Decision:** η² for `{top_feature}` is {top_eta:.2f} > 0.40 → "
+                   "property-conditioned bias. Next: narrow code audit on the path that "
+                   f"consumes `{top_feature}`.")
+    elif top_eta < 0.20:
+        verdict = (f"**Decision:** max η² is {top_eta:.2f} (`{top_feature}`) < 0.20 → "
+                   "Δ is mostly per-scan noise; no single feature explains it. The 67% "
+                   "disagreement is many small divergences, not one missing global term.")
+    else:
+        verdict = (f"**Decision:** top η² is {top_eta:.2f} (`{top_feature}`) — mixed "
+                   "systematic effect plus noise. Worth a narrow audit on the feature's "
+                   "code path but expect partial coverage.")
+    lines.append(verdict)
+    lines.append("")
+    return "\n".join(lines)
+
+
 def format_section1_overview(matches: list[dict]) -> str:
     """Section 1 — population overview: counts by class, baseline rates."""
     n = len(matches)
@@ -266,6 +367,33 @@ def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) ->
     if not raw_says_java_wins and spec_e_says_java_wins:
         return "spec_e_swap_only"
     return "both_swap"
+
+
+# ── Tests for Section 2 / ΔRawScore decomposition ───────────────────────
+
+def _test_section2_delta_decomposition():
+    # Build 4 full-match scans; Δ varies by feature so we can see stratification.
+    matches = []
+    base_rust = {"charge2": "1", "charge3": "0", "charge4": "0", "isotope_error": "0", "Label": "1"}
+    for i, (charge_col, raw_j, raw_r, pep) in enumerate([
+        ("charge2", 50, 10, "K.AAAAAA.B"),  # length 6
+        ("charge2", 60, 20, "K.BBBBBB.B"),  # length 6
+        ("charge3", 100, 80, "K.CCCCCCCCC.D"),  # length 9
+        ("charge3", 110, 90, "K.DDDDDDDDD.D"),  # length 9
+    ]):
+        j = {"Peptide": pep, "RawScore": str(raw_j), "lnSpecEValue": "-5", "Label": "1",
+             "isotope_error": "0", "peplen": str(len(pep) - 4 + 2),
+             "charge2": "1" if charge_col == "charge2" else "0",
+             "charge3": "1" if charge_col == "charge3" else "0",
+             "charge4": "0"}
+        r = {**j, "RawScore": str(raw_r)}
+        matches.append({"scan": i, "java": j, "rust": r, "mode": "agree"})
+    section = format_section2_delta_decomposition(matches)
+    assert "Section 2" in section
+    assert "median" in section.lower() or "Median" in section
+    # Δ for charge=2 is 40, 40 (mean 40); for charge=3 is 20, 20 (mean 20)
+    assert "40" in section, f"expected charge=2 Δ around 40 to appear in:\n{section}"
+    assert "20" in section
 
 
 # ── Tests for Section 1 / population overview ───────────────────────────
@@ -471,6 +599,7 @@ def _test_parse_pin_skips_blank():
 
 def run_self_tests() -> int:
     tests = [
+        ("section2 Δ decomposition", _test_section2_delta_decomposition),
         ("section1 counts", _test_section1_counts_and_distributions),
         ("match_pins pairs by scan", _test_match_pins_pairs_by_scan),
         ("stratify per bucket", _test_stratify_aggregates_per_bucket),

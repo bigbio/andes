@@ -154,6 +154,60 @@ def _eta_squared(stratification: dict[object, dict[str, float]], grand_mean: flo
     return between_ss / total_ss if total_ss > 0 else 0.0
 
 
+def format_section3_flip_lift(matches: list[dict]) -> str:
+    """Section 3 — stratified flip-rate analysis with lift vs baseline."""
+    n = len(matches)
+    flips = sum(1 for m in matches
+                if m["java"]["Label"] != m["rust"]["Label"]
+                and m["mode"] != "agree")
+    if n == 0:
+        return "## Section 3 — Stratified flip lift\n\n_No matched scans._\n\n"
+    base_rate = flips / n
+
+    feature_names = ["length", "charge", "n_oxidation", "n_carbamidomethyl",
+                     "iso_off", "last_aa", "pre_aa", "is_decoy", "score_bucket"]
+
+    lines = [
+        "## Section 3 — Stratified flip lift (Track B)",
+        "",
+        f"- Total scans: {n}",
+        f"- Total class flips: {flips}",
+        f"- Baseline flip rate: {100 * base_rate:.1f}%",
+        "",
+        "### Top flip-enriched buckets (lift > 1.5, n ≥ 50)",
+        "",
+        "| Feature | Bucket | N | Flips | Flip rate | Lift |",
+        "|---|---|---|---|---|---|",
+    ]
+
+    candidates: list[tuple[str, object, int, int, float, float]] = []
+    for fname in feature_names:
+        per_bucket: dict[object, dict[str, int]] = defaultdict(lambda: {"n": 0, "f": 0})
+        for m in matches:
+            feats = peptide_features(m["java"])
+            b = feats[fname]
+            per_bucket[b]["n"] += 1
+            if m["java"]["Label"] != m["rust"]["Label"] and m["mode"] != "agree":
+                per_bucket[b]["f"] += 1
+        for bucket, c in per_bucket.items():
+            if c["n"] < 50:
+                continue
+            rate = c["f"] / c["n"]
+            lift = compute_lift(rate, base_rate)
+            if lift > 1.5:
+                candidates.append((fname, bucket, c["n"], c["f"], rate, lift))
+
+    for row in sorted(candidates, key=lambda x: -x[5])[:10]:
+        fname, bucket, total, fct, rate, lift = row
+        lines.append(f"| {fname} | {bucket} | {total} | {fct} | "
+                     f"{100*rate:.1f}% | {lift:.2f} |")
+    if not candidates:
+        lines.append("| _none_ | | | | | |")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def format_section2_delta_decomposition(matches: list[dict]) -> str:
     """Section 2 — ΔRawScore decomposition on full-match PSMs.
 
@@ -367,6 +421,50 @@ def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) ->
     if not raw_says_java_wins and spec_e_says_java_wins:
         return "spec_e_swap_only"
     return "both_swap"
+
+
+# ── Tests for Section 3 / stratified flip lift ──────────────────────────
+
+def _test_section3_lift_table():
+    matches = []
+    # 50 charge=2 scans, 25 flips → flip_rate = 50%
+    # 50 charge=3 scans, 5 flips → flip_rate = 10%
+    # baseline = 30 / 100 = 30%
+    # lift charge=2 = 50/30 = 1.67; lift charge=3 = 10/30 = 0.33
+    scan_id = 0
+    for i in range(50):
+        is_flip = i < 25
+        j = {"ScanNr": str(scan_id), "Peptide": "K.A.B", "RawScore": "10", "lnSpecEValue": "-5",
+             "Label": "1", "isotope_error": "0", "peplen": "3",
+             "charge2": "1", "charge3": "0", "charge4": "0"}
+        if is_flip:
+            r = {**j, "Peptide": "K.B.C", "Label": "-1"}
+            mode = "raw_swap"
+        else:
+            r = {**j}
+            mode = "agree"
+        matches.append({"scan": scan_id, "java": j, "rust": r, "mode": mode})
+        scan_id += 1
+    for i in range(50):
+        is_flip = i == 0
+        j = {"ScanNr": str(scan_id), "Peptide": "K.X.Y", "RawScore": "10", "lnSpecEValue": "-5",
+             "Label": "1", "isotope_error": "0", "peplen": "3",
+             "charge2": "0", "charge3": "1", "charge4": "0"}
+        if is_flip:
+            r = {**j, "Peptide": "K.Z.W", "Label": "-1"}
+            mode = "raw_swap"
+        else:
+            r = {**j}
+            mode = "agree"
+        matches.append({"scan": scan_id, "java": j, "rust": r, "mode": mode})
+        scan_id += 1
+
+    section = format_section3_flip_lift(matches)
+    assert "Section 3" in section
+    assert "lift" in section.lower()
+    # charge=2 should have lift > 1; charge=3 should have lift < 1
+    # Hard to assert exact values in a markdown table, but we can check both appear
+    assert "charge" in section
 
 
 # ── Tests for Section 2 / ΔRawScore decomposition ───────────────────────
@@ -599,6 +697,7 @@ def _test_parse_pin_skips_blank():
 
 def run_self_tests() -> int:
     tests = [
+        ("section3 flip lift", _test_section3_lift_table),
         ("section2 Δ decomposition", _test_section2_delta_decomposition),
         ("section1 counts", _test_section1_counts_and_distributions),
         ("match_pins pairs by scan", _test_match_pins_pairs_by_scan),

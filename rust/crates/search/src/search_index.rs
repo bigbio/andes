@@ -1,9 +1,13 @@
 //! Bundled search database: target+decoy ProteinDb, CompactFastaSequence,
-//! and SuffixArray. Output of Phase 4b+4c, input of Phase 4d.
+//! and SuffixArray. Consumed by candidate generation.
+
+use std::collections::{HashMap, HashSet};
 
 use model::compact_fasta::{CompactFastaError, CompactFastaSequence};
+use crate::candidate_gen::enumerate_candidates;
 use crate::decoy::target_plus_decoy;
 use model::protein::ProteinDb;
+use crate::search_params::SearchParams;
 use crate::suffix_array::{SuffixArray, SuffixArrayError};
 
 #[derive(Debug, Clone)]
@@ -11,16 +15,82 @@ pub struct SearchIndex {
     pub db: ProteinDb,
     pub compact: CompactFastaSequence,
     pub sa: SuffixArray,
+    /// Number of distinct residue sequences enumerated per length.
+    /// Populated by [`SearchIndex::with_distinct_peptide_counts`]; mirrors Java's
+    /// `CompactSuffixArray.getNumDistinctPeptides(int length)`. Consumed by the
+    /// `e_value` computation in `match_engine` to replace the queue-derived
+    /// proxy with a per-length distinct-peptide count over the full target+decoy
+    /// candidate set.
+    distinct_peptide_counts: HashMap<usize, usize>,
 }
 
 impl SearchIndex {
     /// Pipeline: target ProteinDb → reverse for decoys → concat target+decoy
     /// → CompactFastaSequence → SA + LCP.
+    ///
+    /// `distinct_peptide_counts` is left empty; call
+    /// [`SearchIndex::with_distinct_peptide_counts`] to populate it once
+    /// `SearchParams` are known.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
         let db = target_plus_decoy(target, decoy_prefix);
         let compact = CompactFastaSequence::from_protein_db(&db);
         let sa = SuffixArray::build(&compact);
-        Self { db, compact, sa }
+        Self {
+            db,
+            compact,
+            sa,
+            distinct_peptide_counts: HashMap::new(),
+        }
+    }
+
+    /// Walk every candidate emitted by [`enumerate_candidates`] for `params`
+    /// and `decoy_prefix`, then store the count of distinct residue sequences
+    /// per peptide length. Returns the index with the populated map.
+    ///
+    /// Mirrors Java `CompactSuffixArray.computeNumDistinctPeptides`
+    /// (`src/main/java/edu/ucsd/msjava/msdbsearch/CompactSuffixArray.java:198`):
+    /// counts distinct prefixes of length `l` across the entire suffix array
+    /// (target + decoy combined, modulo the still-open mod-context divergence
+    /// tracked in `docs/parity-analysis/known-divergences.md`).
+    ///
+    /// Distinct identity is the residue byte sequence with no mods and no
+    /// flanking residues — matching Java's prefix comparison over residue bytes.
+    /// Two candidates with identical residues but different mod variants count
+    /// as one (residues only); two candidates that differ in flanking context
+    /// also count as one.
+    ///
+    /// Cost is bounded by the candidate-set walk (a HashSet of residue
+    /// `Vec<u8>` per length); the HashSets are dropped after the count is
+    /// frozen. See `docs/superpowers/specs/2026-05-10-evalue-search-index-design.md`
+    /// for the memory analysis at PXD001819 scale.
+    pub fn with_distinct_peptide_counts(
+        mut self,
+        params: &SearchParams,
+        decoy_prefix: &str,
+    ) -> Self {
+        let mut seen_per_length: HashMap<usize, HashSet<Vec<u8>>> = HashMap::new();
+        for cand in enumerate_candidates(&self, params, decoy_prefix) {
+            let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+            seen_per_length
+                .entry(residues.len())
+                .or_default()
+                .insert(residues);
+        }
+        self.distinct_peptide_counts = seen_per_length
+            .into_iter()
+            .map(|(len, set)| (len, set.len()))
+            .collect();
+        self
+    }
+
+    /// Number of distinct residue sequences (no mods, no flanking) of length
+    /// `len` enumerated during candidate generation. Returns `0` for unseen
+    /// lengths (including any length never populated because
+    /// [`SearchIndex::with_distinct_peptide_counts`] was not called).
+    ///
+    /// Mirrors Java `CompactSuffixArray.getNumDistinctPeptides(int length)`.
+    pub fn num_distinct_peptides_at_length(&self, len: usize) -> usize {
+        self.distinct_peptide_counts.get(&len).copied().unwrap_or(0)
     }
 
     /// Look up the `Protein` at the given index in the combined target+decoy
@@ -106,7 +176,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3 alignment fix: peptide_has_target_match (all-decoy Label rule)
+    // peptide_has_target_match (all-decoy Label rule)
     // -----------------------------------------------------------------------
 
     #[test]

@@ -154,6 +154,46 @@ def _eta_squared(stratification: dict[object, dict[str, float]], grand_mean: flo
     return between_ss / total_ss if total_ss > 0 else 0.0
 
 
+def format_section4_ranking_modes(matches: list[dict]) -> str:
+    """Section 4 — distinguish RawScore-swap from SpecE-swap among flips."""
+    flips = [m for m in matches if m["mode"] != "agree"]
+    if not flips:
+        return "## Section 4 — Ranking-mode breakdown\n\n_No flips._\n\n"
+
+    counts = Counter(m["mode"] for m in flips)
+    n = len(flips)
+    lines = [
+        "## Section 4 — Ranking-mode breakdown (flips only)",
+        "",
+        f"- Total flips: {n}",
+        "",
+        "| Mode | Count | % |",
+        "|---|---|---|",
+    ]
+    for mode in ("raw_swap", "spec_e_swap_only", "both_swap"):
+        c = counts.get(mode, 0)
+        lines.append(f"| {mode} | {c} | {100 * c / n:.1f}% |")
+    lines.append("")
+
+    # Decision
+    top_mode = counts.most_common(1)[0][0]
+    if top_mode == "raw_swap":
+        verdict = ("**Decision:** RawScore swaps dominate → per-PSM scoring (`score_psm` / "
+                   "`directional_node_score`) is the prime suspect. Trace a high-lift bucket "
+                   "from Section 3.")
+    elif top_mode == "spec_e_swap_only":
+        verdict = ("**Decision:** SpecE swaps without RawScore agreement dominate → GF DP / "
+                   "`compute_inner` / `add_prob_dist` is the prime suspect. RawScore math is "
+                   "fine; the spec_e_value lookup or distribution differs.")
+    else:
+        verdict = ("**Decision:** `both_swap` dominates → both per-PSM scoring AND GF DP "
+                   "diverge. Likely a shared upstream cause (e.g. wrong partition lookup, "
+                   "ion enumeration, or peak ranking).")
+    lines.append(verdict)
+    lines.append("")
+    return "\n".join(lines)
+
+
 def format_section3_flip_lift(matches: list[dict]) -> str:
     """Section 3 — stratified flip-rate analysis with lift vs baseline."""
     n = len(matches)
@@ -421,6 +461,27 @@ def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) ->
     if not raw_says_java_wins and spec_e_says_java_wins:
         return "spec_e_swap_only"
     return "both_swap"
+
+
+# ── Tests for Section 4 / ranking-mode breakdown ────────────────────────
+
+def _test_section4_ranking_modes():
+    matches = [
+        {"mode": "agree", "java": {"RawScore": "10", "lnSpecEValue": "-5"},
+                          "rust": {"RawScore": "8",  "lnSpecEValue": "-4"}},
+        {"mode": "raw_swap", "java": {"RawScore": "20", "lnSpecEValue": "-7"},
+                              "rust": {"RawScore": "15", "lnSpecEValue": "-5"}},
+        {"mode": "raw_swap", "java": {"RawScore": "30", "lnSpecEValue": "-9"},
+                              "rust": {"RawScore": "25", "lnSpecEValue": "-7"}},
+        {"mode": "spec_e_swap_only", "java": {"RawScore": "10", "lnSpecEValue": "-9"},
+                                      "rust": {"RawScore": "15", "lnSpecEValue": "-6"}},
+    ]
+    section = format_section4_ranking_modes(matches)
+    assert "Section 4" in section
+    assert "raw_swap" in section
+    assert "spec_e_swap_only" in section
+    # 2 of 3 flips are raw_swap → 66.7%
+    assert "66.7" in section or "67" in section
 
 
 # ── Tests for Section 3 / stratified flip lift ──────────────────────────
@@ -697,6 +758,7 @@ def _test_parse_pin_skips_blank():
 
 def run_self_tests() -> int:
     tests = [
+        ("section4 ranking modes", _test_section4_ranking_modes),
         ("section3 flip lift", _test_section3_lift_table),
         ("section2 Δ decomposition", _test_section2_delta_decomposition),
         ("section1 counts", _test_section1_counts_and_distributions),

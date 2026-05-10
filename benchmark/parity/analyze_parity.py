@@ -134,10 +134,58 @@ def parse_pin(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def run_self_tests() -> int:
-    """Stub for now; tests get appended as components are implemented."""
-    print("Self-tests: 0 ran, 0 failed")
-    return 0
+def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) -> str:
+    """Classify how Java's top-1 PSM and Rust's top-1 PSM disagree.
+
+    Returns one of:
+      "agree"             — same peptide picked by both engines
+      "raw_swap"          — Java's pick has higher RawScore in Java's view AND
+                            higher (better, more negative) lnSpecEValue
+      "spec_e_swap_only"  — RawScore values would put Rust's pick first
+                            (higher RawScore in absolute value), but SpecE
+                            inverts and makes Java's pick the better one
+      "both_swap"         — fully inverted on both metrics (rare)
+    """
+    if java_row["Peptide"] == rust_row["Peptide"]:
+        return "agree"
+
+    j_raw = float(java_row["RawScore"])
+    r_raw = float(rust_row["RawScore"])
+    j_lse = float(java_row["lnSpecEValue"])
+    r_lse = float(rust_row["lnSpecEValue"])
+
+    # Lower (more negative) lnSpecEValue is better.
+    raw_says_java_wins = j_raw > r_raw
+    spec_e_says_java_wins = j_lse < r_lse
+
+    if raw_says_java_wins and spec_e_says_java_wins:
+        return "raw_swap"
+    if not raw_says_java_wins and spec_e_says_java_wins:
+        return "spec_e_swap_only"
+    return "both_swap"
+
+
+# ── Tests for classify_ranking_mode ─────────────────────────────────────
+
+def _test_classify_ranking_mode_agree():
+    java_row = {"Peptide": "K.AAA.B", "RawScore": "10", "lnSpecEValue": "-5.0", "Label": "1"}
+    rust_row = {"Peptide": "K.AAA.B", "RawScore": "8",  "lnSpecEValue": "-4.5", "Label": "1"}
+    assert classify_ranking_mode(java_row, rust_row) == "agree"
+
+def _test_classify_ranking_mode_raw_swap():
+    java_row = {"Peptide": "K.AAA.B", "RawScore": "20", "lnSpecEValue": "-8.0", "Label": "1"}
+    rust_row = {"Peptide": "K.BBB.C", "RawScore": "15", "lnSpecEValue": "-6.0", "Label": "1"}
+    assert classify_ranking_mode(java_row, rust_row) == "raw_swap"
+
+def _test_classify_ranking_mode_spec_e_swap_only():
+    java_row = {"Peptide": "K.AAA.B", "RawScore": "10", "lnSpecEValue": "-9.0", "Label": "1"}
+    rust_row = {"Peptide": "K.BBB.C", "RawScore": "15", "lnSpecEValue": "-6.0", "Label": "1"}
+    assert classify_ranking_mode(java_row, rust_row) == "spec_e_swap_only"
+
+def _test_classify_ranking_mode_both_swap():
+    java_row = {"Peptide": "K.AAA.B", "RawScore": "10", "lnSpecEValue": "-5.0", "Label": "1"}
+    rust_row = {"Peptide": "K.BBB.C", "RawScore": "20", "lnSpecEValue": "-8.0", "Label": "1"}
+    assert classify_ranking_mode(java_row, rust_row) == "both_swap"
 
 
 # ── Tests for peptide_features ──────────────────────────────────────────
@@ -243,6 +291,10 @@ def _test_parse_pin_skips_blank():
 
 def run_self_tests() -> int:
     tests = [
+        ("classify agree", _test_classify_ranking_mode_agree),
+        ("classify raw swap", _test_classify_ranking_mode_raw_swap),
+        ("classify spec_e swap only", _test_classify_ranking_mode_spec_e_swap_only),
+        ("classify both swap", _test_classify_ranking_mode_both_swap),
         ("peptide_features basic tryptic", _test_peptide_features_basic_tryptic),
         ("peptide_features with mods", _test_peptide_features_with_mods),
         ("peptide_features protein N-term", _test_peptide_features_protein_n_term),

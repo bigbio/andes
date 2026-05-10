@@ -126,3 +126,46 @@ To localize further requires either:
 
 Both options were ruled out for this iteration (Rust-side-only
 investigation per the design doc).
+
+## Section 6 — Hypothesis tests (Rust-side only)
+
+### Hypothesis #1: excessive filtering — REJECTED
+
+`msgf-trace` filtering diagnostic on scan=39466 shows:
+
+- 548 total peaks
+- 4 peaks filtered (0.7%)
+- Max filtered intensity = 13,525 (far below top-50 intensity range
+  40k–230k)
+- 9 filter m/z values, all clustered around the precursor (1154–1190 m/z)
+
+Filtering is minimal and removes only low-intensity peaks. Cannot
+explain the 192-point per-PSM gap.
+
+### Hypothesis #2: different highest-intensity peak in window — UNTESTABLE FROM RUST
+
+Both engines pick max-intensity peak in window (verified via Java's
+`Collections.max(matchList, IntensityComparator)` and Rust's
+`nearest_peak_rank` post-fix). Confirming Java picks a *different*
+peak per call requires running Java.
+
+### Hypothesis #3: mzML peak set differs — REJECTED via code inspection
+
+- Java `StaxMzMLParser` line 753: `spec.add(new Peak(mzValues[i], intensityValues[i], 1))`
+  for every (mz, intensity) pair, no filtering, no count limit.
+- Rust `MzMLReader` line 203: sorts ascending by m/z; no filter, no
+  count limit.
+
+Both readers load every peak. Counts should match (cannot verify
+absolute count without Java run).
+
+### Status
+
+The 192-point per-PSM gap on long target peptides is real, reproducible,
+and structurally connected to peak rank assignment, but the precise
+mechanism cannot be localized with Rust-side-only inspection alone.
+Next investigation step (whenever Java instrumentation is available):
+add a `System.err.println` to Java's `NewScoredSpectrum.getNodeScore`
+for one matched ion on scan=39466 and compare the rank Java assigns
+vs the rank Rust's `nearest_peak_rank` returns for the same theoretical
+m/z and tolerance window.

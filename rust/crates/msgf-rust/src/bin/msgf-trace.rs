@@ -248,6 +248,56 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }).collect::<Vec<_>>()
             );
         }
+
+        // Hypothesis #1 diagnostic: how many peaks does Rust filter for this
+        // spectrum, and what filter m/z values does it use? Java filters by
+        // SETTING INTENSITY=0 (peak survives ranking but ranks last), Rust
+        // EXCLUDES filtered peaks from ranking entirely. If Rust filters more
+        // peaks, ranks shift downward more for the survivors, lowering the
+        // log_score lookups for matched ions on long peptides.
+        let filter_entries = param.precursor_off_map.get(&(z as i32))
+            .map(Vec::as_slice).unwrap_or(&[]);
+        let neutral_mass = (spec.precursor_mz - PROTON) * z as f64;
+        let mut filter_mzs: Vec<(f64, f64)> = Vec::new();
+        for pof in filter_entries {
+            let c = (z as i32 - pof.reduced_charge) as f64;
+            if c <= 0.0 { continue; }
+            let filter_mz = (neutral_mass + c * PROTON) / c + (pof.offset as f64);
+            let tol_da = pof.tolerance.as_da(filter_mz);
+            filter_mzs.push((filter_mz, tol_da));
+        }
+        // Determine which peaks would be filtered by Rust's logic.
+        let mut n_filtered = 0;
+        let mut max_filtered_intensity: f32 = 0.0;
+        let mut filtered_examples: Vec<(f64, f32)> = Vec::new();
+        for &(mz, intensity) in &spec.peaks {
+            let filtered = filter_mzs.iter().any(|&(fmz, tol)| (mz - fmz).abs() <= tol);
+            if filtered {
+                n_filtered += 1;
+                if intensity > max_filtered_intensity {
+                    max_filtered_intensity = intensity;
+                }
+                if filtered_examples.len() < 5 {
+                    filtered_examples.push((mz, intensity));
+                }
+            }
+        }
+        println!(
+            "  Rust filtering: {} of {} peaks filtered ({:.1}%); max filtered intensity={:.1}",
+            n_filtered, spec.peaks.len(),
+            100.0 * n_filtered as f64 / spec.peaks.len() as f64,
+            max_filtered_intensity
+        );
+        println!("  Filter m/z values (count={}):", filter_mzs.len());
+        for (fmz, tol) in &filter_mzs {
+            println!("    {:.4} ± {:.4}", fmz, tol);
+        }
+        if !filtered_examples.is_empty() {
+            println!("  First 5 filtered peaks:");
+            for (mz, intensity) in &filtered_examples {
+                println!("    mz={:.4} intensity={:.1}", mz, intensity);
+            }
+        }
     }
 
     // Build search params (same as production harness).

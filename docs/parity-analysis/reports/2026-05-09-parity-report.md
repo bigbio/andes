@@ -91,3 +91,38 @@ _Rust pin: `benchmark/results/PXD001819-parity/rust.pin`_
 | both_swap | 3420 | 13.9% |
 
 **Decision:** RawScore swaps dominate → per-PSM scoring (`score_psm` / `directional_node_score`) is the prime suspect. Trace a high-lift bucket from Section 3.
+
+## Section 5 — Manual investigation follow-up
+
+`msgf-trace` runs on two representative scans confirm the asymmetry:
+
+| Scan | Peptide | Length | Class | Rust RawScore | Java RawScore | Δ |
+|---|---|---|---|---|---|---|
+| 18601 | K.KNKVPK.N | 6 | decoy | 53 | 55 | 2 |
+| 39466 | K.GVLGYTEDAVVSSDFLGDSHSSIFDASAGIQLSPK.F | 35 | target | 27 | 219 | 192 |
+
+Per-split average score: Rust 0.7 vs Java 6.3 for the 35-mer. Δ
+grows with peptide length, not just with score quality.
+
+Rust's matched ions on the long peptide frequently land at HIGH peak
+ranks (rk248+), each contributing slightly negative log-scores (~-0.5).
+Java appears to assign LOWER (better) ranks to the same theoretical
+ions, producing larger positive contributions. Hypotheses (in
+likelihood order, untested without Java-side instrumentation):
+
+1. Rust's `ScoredSpectrum::new` filters more peaks than Java's
+   `setRanksOfPeaks` for high-charge spectra (charge 3 has more
+   `precursor_off_map` entries → more filter m/z values → wider
+   filtering).
+2. Rust's `nearest_peak_rank` picks a different highest-intensity peak
+   when multiple ions' windows overlap the same dense region.
+3. mzML peak set itself differs between Java's `StaxMzMLParser` and
+   Rust's `MzMLReader` (e.g., different precision threshold).
+
+To localize further requires either:
+- A Java-side debug print of `Spectrum.getPeakByMass(theoMass, mme)`
+  for one specific (scan, ion) pair, OR
+- A side-by-side dump of the loaded peak sets from both readers.
+
+Both options were ruled out for this iteration (Rust-side-only
+investigation per the design doc).

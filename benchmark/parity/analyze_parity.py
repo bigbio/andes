@@ -134,6 +134,43 @@ def parse_pin(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def stratify(
+    rows: list[dict],
+    bucket_fn: Callable[[dict], object],
+    value_fn: Callable[[dict], float],
+) -> dict[object, dict[str, float]]:
+    """Group rows by bucket_fn(row) and aggregate value_fn(row) per bucket.
+
+    Returns dict mapping bucket → {"count", "mean", "median", "stdev"}.
+    Single-sample buckets get stdev = 0.0 (population stdev convention).
+    """
+    grouped: dict[object, list[float]] = defaultdict(list)
+    for row in rows:
+        grouped[bucket_fn(row)].append(float(value_fn(row)))
+
+    out: dict[object, dict[str, float]] = {}
+    for bucket, values in grouped.items():
+        out[bucket] = {
+            "count": len(values),
+            "mean": mean(values),
+            "median": median(values),
+            "stdev": pstdev(values) if len(values) > 1 else 0.0,
+        }
+    return out
+
+
+def compute_lift(group_rate: float, base_rate: float) -> float:
+    """lift = group_rate / base_rate.
+
+    Edge cases:
+      - base_rate == 0 and group_rate > 0 → infinity (rare bucket)
+      - base_rate == 0 and group_rate == 0 → 0 (degenerate)
+    """
+    if base_rate == 0:
+        return float("inf") if group_rate > 0 else 0.0
+    return group_rate / base_rate
+
+
 def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) -> str:
     """Classify how Java's top-1 PSM and Rust's top-1 PSM disagree.
 
@@ -163,6 +200,39 @@ def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) ->
     if not raw_says_java_wins and spec_e_says_java_wins:
         return "spec_e_swap_only"
     return "both_swap"
+
+
+# ── Tests for stratify and compute_lift ─────────────────────────────────
+
+def _test_stratify_aggregates_per_bucket():
+    rows = [
+        {"bucket": "a", "delta": 5},
+        {"bucket": "a", "delta": 7},
+        {"bucket": "b", "delta": -1},
+        {"bucket": "b", "delta": 0},
+        {"bucket": "b", "delta": 1},
+    ]
+    out = stratify(rows, lambda r: r["bucket"], lambda r: r["delta"])
+    assert set(out.keys()) == {"a", "b"}
+    assert out["a"]["count"] == 2
+    assert out["a"]["mean"] == 6.0
+    assert out["b"]["count"] == 3
+    assert out["b"]["mean"] == 0.0
+    assert out["b"]["median"] == 0
+    assert out["a"]["stdev"] > 0
+
+def _test_stratify_handles_singletons():
+    rows = [{"bucket": "x", "delta": 42}]
+    out = stratify(rows, lambda r: r["bucket"], lambda r: r["delta"])
+    assert out["x"]["count"] == 1
+    assert out["x"]["mean"] == 42
+    assert out["x"]["stdev"] == 0.0
+
+def _test_compute_lift_basic():
+    assert compute_lift(group_rate=0.50, base_rate=0.25) == 2.0
+    assert compute_lift(0.10, 0.25) == 0.4
+    assert compute_lift(0.5, 0.0) == float("inf")
+    assert compute_lift(0.0, 0.0) == 0.0
 
 
 # ── Tests for classify_ranking_mode ─────────────────────────────────────
@@ -291,6 +361,9 @@ def _test_parse_pin_skips_blank():
 
 def run_self_tests() -> int:
     tests = [
+        ("stratify per bucket", _test_stratify_aggregates_per_bucket),
+        ("stratify singletons", _test_stratify_handles_singletons),
+        ("compute_lift basic", _test_compute_lift_basic),
         ("classify agree", _test_classify_ranking_mode_agree),
         ("classify raw swap", _test_classify_ranking_mode_raw_swap),
         ("classify spec_e swap only", _test_classify_ranking_mode_spec_e_swap_only),

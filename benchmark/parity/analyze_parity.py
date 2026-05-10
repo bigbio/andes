@@ -134,6 +134,34 @@ def parse_pin(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def format_section1_overview(matches: list[dict]) -> str:
+    """Section 1 — population overview: counts by class, baseline rates."""
+    n = len(matches)
+    full_match = sum(1 for m in matches if m["mode"] == "agree")
+    same_label_diff_pep = sum(
+        1 for m in matches
+        if m["mode"] != "agree" and m["java"]["Label"] == m["rust"]["Label"]
+    )
+    class_flip = sum(
+        1 for m in matches
+        if m["mode"] != "agree" and m["java"]["Label"] != m["rust"]["Label"]
+    )
+
+    def pct(c: int) -> str:
+        return f"{c} ({100 * c / n:.1f}%)" if n else f"{c} (-)"
+
+    lines = [
+        "## Section 1 — Population overview",
+        "",
+        f"- Total matched scans: {n}",
+        f"- Full match (same peptide): {pct(full_match)}",
+        f"- Same-label different-peptide: {pct(same_label_diff_pep)}",
+        f"- Class flips (target↔decoy): {pct(class_flip)}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def match_pins(
     java_rows: list[dict[str, str]],
     rust_rows: list[dict[str, str]],
@@ -238,6 +266,28 @@ def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) ->
     if not raw_says_java_wins and spec_e_says_java_wins:
         return "spec_e_swap_only"
     return "both_swap"
+
+
+# ── Tests for Section 1 / population overview ───────────────────────────
+
+def _test_section1_counts_and_distributions():
+    matches = [
+        {"scan": 1, "java": {"Peptide": "X.A.X", "RawScore": "10", "lnSpecEValue": "-5", "Label": "1"},
+                   "rust": {"Peptide": "X.A.X", "RawScore": "8",  "lnSpecEValue": "-4", "Label": "1"},
+                   "mode": "agree"},
+        {"scan": 2, "java": {"Peptide": "X.A.X", "RawScore": "20", "lnSpecEValue": "-7", "Label": "1"},
+                   "rust": {"Peptide": "X.B.X", "RawScore": "15", "lnSpecEValue": "-5", "Label": "-1"},
+                   "mode": "raw_swap"},
+        {"scan": 3, "java": {"Peptide": "X.A.X", "RawScore": "30", "lnSpecEValue": "-9", "Label": "1"},
+                   "rust": {"Peptide": "X.B.X", "RawScore": "25", "lnSpecEValue": "-7", "Label": "1"},
+                   "mode": "raw_swap"},
+    ]
+    section = format_section1_overview(matches)
+    assert "Full match" in section
+    assert "1 (33.3%)" in section, f"expected '1 (33.3%)' for full match in:\n{section}"
+    assert "Class flips" in section
+    # 1 flip (scan 2: target -> decoy)
+    assert "1 (33.3%)" in section
 
 
 # ── Tests for match_pins ────────────────────────────────────────────────
@@ -421,6 +471,7 @@ def _test_parse_pin_skips_blank():
 
 def run_self_tests() -> int:
     tests = [
+        ("section1 counts", _test_section1_counts_and_distributions),
         ("match_pins pairs by scan", _test_match_pins_pairs_by_scan),
         ("stratify per bucket", _test_stratify_aggregates_per_bucket),
         ("stratify singletons", _test_stratify_handles_singletons),

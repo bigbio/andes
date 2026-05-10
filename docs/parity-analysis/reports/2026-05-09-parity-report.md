@@ -127,7 +127,25 @@ To localize further requires either:
 Both options were ruled out for this iteration (Rust-side-only
 investigation per the design doc).
 
-## Section 6 — Hypothesis tests (Rust-side only)
+## Section 6 — Percolator-level comparison (the metric users actually care about)
+
+Both pin files pushed through Percolator 3.07.1 (biocontainers Docker
+image). Q-values from Percolator's mix-max procedure, target PSMs at
+1% FDR (q ≤ 0.01) and 5% FDR (q ≤ 0.05).
+
+| Metric | Java | Rust | Δ |
+|---|---|---|---|
+| Targets total | 27,596 | 24,414 | -3,182 (-12%) |
+| **Targets @ 1% FDR** | **14,798** | **8,919** | **-5,879 (-40%)** |
+| Targets @ 5% FDR | 16,426 | 10,071 | -6,355 (-39%) |
+| Decoys total | 11,352 | 12,698 | +1,346 (+12%) |
+
+The 67% top-1 disagreement is NOT cosmetic. It translates directly to
+**40% fewer high-confidence IDs** at 1% FDR, AND a 12% increase in
+decoys. The "maybe Rust scoring is just different but not wrong"
+hypothesis (option A from the iteration plan) is REJECTED.
+
+## Section 7 — Hypothesis tests (Rust-side only)
 
 ### Hypothesis #1: excessive filtering — REJECTED
 

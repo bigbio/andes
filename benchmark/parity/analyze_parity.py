@@ -21,7 +21,6 @@ import argparse
 import re
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Callable
@@ -106,6 +105,7 @@ def peptide_features(row: dict[str, str]) -> dict[str, object]:
             break
 
     raw_score = int(row.get("RawScore", "0"))
+    # Score-bucket thresholds match the agreement-stratification used in earlier sessions.
     if raw_score <= -10:
         score_bucket = "very_weak"
     elif raw_score <= 0:

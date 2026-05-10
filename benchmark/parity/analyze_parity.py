@@ -134,6 +134,44 @@ def parse_pin(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def match_pins(
+    java_rows: list[dict[str, str]],
+    rust_rows: list[dict[str, str]],
+) -> list[dict]:
+    """Pair Java and Rust pin rows by scan (first-row-only convention).
+
+    Returns a list of matched pairs, each with keys:
+      "scan" (int), "java" (row), "rust" (row), "mode" (from
+      classify_ranking_mode).
+
+    Scans missing on either side are skipped. Multi-row Java scans use the
+    first row for backward-compat with flip_count.py's baseline numbers.
+    """
+    java_by_scan: dict[int, dict[str, str]] = {}
+    for r in java_rows:
+        scan = int(r["ScanNr"])
+        if scan not in java_by_scan:
+            java_by_scan[scan] = r
+
+    rust_by_scan: dict[int, dict[str, str]] = {}
+    for r in rust_rows:
+        scan = int(r["ScanNr"])
+        if scan not in rust_by_scan:
+            rust_by_scan[scan] = r
+
+    pairs: list[dict] = []
+    for scan in sorted(set(java_by_scan) & set(rust_by_scan)):
+        j = java_by_scan[scan]
+        r = rust_by_scan[scan]
+        pairs.append({
+            "scan": scan,
+            "java": j,
+            "rust": r,
+            "mode": classify_ranking_mode(j, r),
+        })
+    return pairs
+
+
 def stratify(
     rows: list[dict],
     bucket_fn: Callable[[dict], object],
@@ -200,6 +238,28 @@ def classify_ranking_mode(java_row: dict[str, str], rust_row: dict[str, str]) ->
     if not raw_says_java_wins and spec_e_says_java_wins:
         return "spec_e_swap_only"
     return "both_swap"
+
+
+# ── Tests for match_pins ────────────────────────────────────────────────
+
+def _test_match_pins_pairs_by_scan():
+    java = [
+        {"ScanNr": "5", "Label": "-1", "Peptide": "K.AAA.B", "RawScore": "-34", "lnSpecEValue": "-8.7"},
+        {"ScanNr": "5", "Label": "-1", "Peptide": "K.BBB.C", "RawScore": "-34", "lnSpecEValue": "-8.7"},
+        {"ScanNr": "10", "Label": "1", "Peptide": "K.CCC.D", "RawScore": "50", "lnSpecEValue": "-12"},
+    ]
+    rust = [
+        {"ScanNr": "5", "Label": "1", "Peptide": "K.DEN.R", "RawScore": "-5", "lnSpecEValue": "-8.8"},
+        {"ScanNr": "10", "Label": "1", "Peptide": "K.CCC.D", "RawScore": "48", "lnSpecEValue": "-11.5"},
+    ]
+    matches = match_pins(java, rust)
+    assert len(matches) == 2
+    pair5 = [m for m in matches if m["scan"] == 5][0]
+    assert pair5["java"]["Peptide"] == "K.AAA.B"
+    assert pair5["rust"]["Peptide"] == "K.DEN.R"
+    assert pair5["mode"] in ("raw_swap", "spec_e_swap_only", "both_swap")
+    pair10 = [m for m in matches if m["scan"] == 10][0]
+    assert pair10["mode"] == "agree"
 
 
 # ── Tests for stratify and compute_lift ─────────────────────────────────
@@ -361,6 +421,7 @@ def _test_parse_pin_skips_blank():
 
 def run_self_tests() -> int:
     tests = [
+        ("match_pins pairs by scan", _test_match_pins_pairs_by_scan),
         ("stratify per bucket", _test_stratify_aggregates_per_bucket),
         ("stratify singletons", _test_stratify_handles_singletons),
         ("compute_lift basic", _test_compute_lift_basic),

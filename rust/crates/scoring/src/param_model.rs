@@ -272,8 +272,29 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         let seg_num = read_i32(cursor)?;
         partitions.push(Partition { charge, parent_mass, seg_num });
     }
-    // Java uses TreeSet for partition ordering — sort to match.
+    // Java writes Section 7 (frag_off) and Section 8 (rank_dist) in
+    // partitionSet iteration order (TreeSet sorted by Java compareTo:
+    // charge → seg → parent_mass). The wire order in Section 5 should
+    // already match this. Sort here as a defensive no-op IF Rust's `Ord`
+    // matches Java's `compareTo`. PANIC if the wire order disagrees with
+    // the sorted order — that would mean Sections 7/8 below get assigned
+    // to the wrong partition keys (silent rank_dist corruption), which
+    // would explain the mysterious per-PSM scoring divergence.
+    let wire_order = partitions.clone();
     partitions.sort();
+    if wire_order != partitions {
+        // Find the first divergence to point at the bug.
+        let first_diff = wire_order.iter().zip(&partitions)
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
+        eprintln!(
+            "WARNING: param wire order != sorted order (first diff at idx {}: wire={:?} sorted={:?}). \
+             Sections 7-8 will be misassigned to partition keys.",
+            first_diff,
+            wire_order.get(first_diff),
+            partitions.get(first_diff),
+        );
+    }
 
     // -- Section 6: precursor offset frequency --
     let num_precursor_off = read_i32(cursor)?;

@@ -24,14 +24,11 @@ use model::spectrum::Spectrum;
 /// Match every spectrum against every candidate from the SearchIndex.
 /// Returns one top-N PSM queue per spectrum, in input order.
 ///
-/// Phase 5 Task 5: score_psm replaces Phase 4e's -|mass_error_ppm| placeholder.
-/// A `ScoredSpectrum` is built once per spectrum and reused across all candidates.
-///
-/// Phase 4f optimization: bucket candidates by mass for sub-linear lookup.
-///
-/// Phase 6 Task 8: after per-candidate scoring, compute SpecEValue via the
+/// A `ScoredSpectrum` is built once per spectrum and reused across all
+/// candidates; candidates are bucketed by mass for sub-linear precursor
+/// lookup. After per-candidate scoring, SpecEValue is computed via the
 /// generating-function DP across the precursor tolerance window in nominal
-/// mass space and assign it to every PSM in the queue.
+/// mass space and assigned to every PSM in the queue.
 pub fn match_spectra(
     spectra: &[Spectrum],
     idx: &SearchIndex,
@@ -69,7 +66,7 @@ pub fn match_spectra(
         aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
     }
 
-    // Yield-accounting counters (Phase 1.2 diagnostic).
+    // Yield-accounting counters.
     // Aggregated across all worker threads via Relaxed atomics — exact counts
     // don't require ordering with other memory ops.
     let skipped_min_peaks = AtomicU64::new(0);
@@ -104,10 +101,10 @@ pub fn match_spectra(
 
             // Build (and cache) a ScoredSpectrum per charge to evaluate.
             //
-            // Fix (Track B3): previously a single ScoredSpectrum was built with
-            // `precursor_z = spec.precursor_charge.unwrap_or(2)`, so charge-missing
-            // spectra always used z=2 even when evaluating z=3 candidates — wrong
-            // precursor filtering, wrong partition, wrong main_ion.
+            // A single ScoredSpectrum keyed off `spec.precursor_charge.unwrap_or(2)`
+            // would force charge-missing spectra to use z=2 even when evaluating
+            // z=3 candidates — wrong precursor filtering, wrong partition, wrong
+            // main_ion.
             //
             // For charge-explicit spectra the cache has exactly 1 entry (no overhead).
             // For charge-missing spectra, typically 2-3 entries per spectrum.
@@ -154,8 +151,7 @@ pub fn match_spectra(
             //   - N-term: credit if isProteinNTerm OR enzyme.isCleavable(prevAA),
             //     else penalty
             //   - C-term: credit if enzyme.isCleavable(lastResidue), else penalty
-            // Bug fix 2026-05-09: Rust previously omitted this entirely, so
-            // every Rust PSM score was offset by ≈ -(credit + credit) = -4
+            // Omitting this offsets every PSM score by ≈ -(credit + credit) = -4
             // vs Java for fully tryptic ntt=2 candidates.
             //
             // Use the ENZYME-REGISTERED aa_set (cleavage credit/penalty are
@@ -205,7 +201,6 @@ pub fn match_spectra(
                     let mut best_for_charge: Option<(MassError, f32)> = None;
                     for offset in params.isotope_error_range.clone() {
                         if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
-                            // Phase 5: use real score_psm instead of -|mass_error_ppm| placeholder.
                             // Add cleavage credit (Java DBScanner.java:513:
                             // `score = cleavageScore + scorer.getScore(...)`).
                             let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
@@ -223,10 +218,10 @@ pub fn match_spectra(
                             charge_used: z,
                             mass_error_ppm: err.mass_error_ppm,
                             score,
-                            spec_e_value: 1.0,  // set by Phase 6 compute_spec_e_values_for_spectrum
-                            de_novo_score: i32::MIN,  // set by Phase 7 compute_spec_e_values_for_spectrum
+                            spec_e_value: 1.0,  // set by compute_spec_e_values_for_spectrum
+                            de_novo_score: i32::MIN,  // set by compute_spec_e_values_for_spectrum
                             activation_method: Some(scorer.param().data_type.activation),
-                            e_value: 1.0,  // set by Phase 7 compute_spec_e_values_for_spectrum
+                            e_value: 1.0,  // set by compute_spec_e_values_for_spectrum
                             features,
                             isotope_offset: err.isotope_offset,
                         });
@@ -236,7 +231,7 @@ pub fn match_spectra(
             }
             candidates_visited.fetch_add(window_cand_indices.len() as u64, Ordering::Relaxed);
 
-            // Phase 6: compute SpecEValue for the PSMs in this queue.
+            // Compute SpecEValue for the PSMs in this queue.
             if !queue.is_empty() {
                 spectra_with_psms.fetch_add(1, Ordering::Relaxed);
                 let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
@@ -271,7 +266,7 @@ pub fn match_spectra(
         })
         .collect();
 
-    // Yield-accounting summary (Phase 1.2 diagnostic).
+    // Yield-accounting summary.
     // Helps disambiguate whether a PSM-yield gap vs Java is from:
     //   - filtering (skipped_min_peaks)
     //   - enumeration (candidates_visited)
@@ -302,15 +297,15 @@ pub fn match_spectra(
 /// * `queue` — the PSM queue for this spectrum (mutated in place).
 /// * `aa_set` — amino acid set with enzyme already registered via `register_enzyme`.
 /// * `enzyme` — the search enzyme (passed to PrimitiveAaGraph; may be None).
-/// * `scorer` — Phase 5 RankScorer.
-/// * `scored_spec` — ScoredSpectrum built with `top_charge` (B3: per-charge cache).
+/// * `scorer` — RankScorer.
+/// * `scored_spec` — ScoredSpectrum built with `top_charge` (per-charge cache).
 /// * `top_charge` — charge of the top PSM in the queue; used for GF mass window.
 ///   For charge-explicit spectra this equals `spec.precursor_charge.unwrap()`.
 ///   For charge-missing spectra, using the top PSM's charge ensures the GF
 ///   reflects the dominant scoring context.
 /// * `fragment_tolerance_da` — fragment mass tolerance in Da.
 /// * `search_index` — database (target+decoy); used to look up protein sequences
-///   for protein-terminal flag derivation (Track B4).
+///   for protein-terminal flag derivation.
 #[allow(clippy::too_many_arguments)]
 fn compute_spec_e_values_for_spectrum(
     spec: &Spectrum,
@@ -442,32 +437,19 @@ fn compute_spec_e_values_for_spectrum(
         group.spectral_probability(score_int).unwrap_or(1.0)
     });
 
-    // 5. Phase 7 enrichment: set de_novo_score and e_value for output writers.
+    // 5. Enrichment: set de_novo_score and e_value for output writers.
     //
     // de_novo_score = group.max_score() - 1  (mirrors Java's getDeNovoScore()).
     //
     // e_value = spec_e_value * num_distinct_peptides_at_length.
-    // Approximate: count how many PSMs in the queue share the same peptide
-    // length as this PSM and use queue.len() as the peptide-space proxy.
-    // This matches Java's `spec_e_value * sa.getNumDistinctPeptides(length)`
-    // intent (Java reads distinct peptides of given length from the suffix
-    // array; our proxy uses the candidate-set count which is approximate and
-    // typically within the same order of magnitude). Documented as
-    // intentional MVP approximation — Phase 7+ wires in the real suffix-array
-    // helper.
+    // num_distinct sourced from SearchIndex (mirrors Java
+    // PeptideEnumerator.getNumDistinctPeptides), replacing the prior
+    // top-N-queue-derived proxy.
     let de_novo_score = max_score - 1;
-    // Collect peptide lengths once (cheap; queue is ≤ top_n, usually ≤ 10).
-    let length_counts: std::collections::HashMap<usize, usize> = {
-        let mut map = std::collections::HashMap::new();
-        for psm in queue.iter_psms() {
-            let len = psm.candidate.peptide.length();
-            *map.entry(len).or_insert(0) += 1;
-        }
-        map
-    };
     queue.update_psm_enrichment(|psm| {
         psm.de_novo_score = de_novo_score;
-        let num_distinct = *length_counts.get(&psm.candidate.peptide.length()).unwrap_or(&1);
+        let len = psm.candidate.peptide.length();
+        let num_distinct = search_index.num_distinct_peptides_at_length(len).max(1);
         psm.e_value = psm.spec_e_value * num_distinct as f64;
     });
 }
@@ -482,7 +464,7 @@ fn compute_spec_e_values_for_spectrum(
 /// Returns `PsmFeatures::default()` for peptides shorter than 2 residues
 /// (no cleavable fragment ions exist).
 ///
-/// # Phase 4 alignment: 9 new ion-current + error-stat features
+/// # Ion-current + error-stat features
 ///
 /// All 9 previously zero-stubbed PIN columns are now filled:
 /// - Ion-current ratios use raw peak intensities vs total MS2 ion current.
@@ -638,7 +620,7 @@ pub(crate) fn compute_psm_features(
     }
 }
 
-// ── Unit tests for Phase 4 alignment feature columns ─────────────────────────
+// ── Unit tests for feature columns ───────────────────────────────────────────
 
 #[cfg(test)]
 mod feature_tests {
@@ -649,6 +631,55 @@ mod feature_tests {
     use model::spectrum::Spectrum;
     use scoring_crate::scoring::fragment_ions::predict_by_ions;
     use scoring_crate::scoring::ScoredSpectrum;
+    use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
+    use model::activation::ActivationMethod;
+    use model::instrument::InstrumentType;
+    use model::protocol::Protocol;
+    use model::tolerance::Tolerance;
+    use std::collections::HashMap;
+
+    /// Minimal RankScorer for feature tests, with mme = Da(tol_da).
+    fn make_scorer(tol_da: f64) -> RankScorer {
+        let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let noise = IonType::Noise;
+        let mut ion_table = HashMap::new();
+        ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
+        ion_table.insert(noise, vec![0.1_f32, 0.2, 0.3, 0.4]);
+        let mut rank_dist_table = HashMap::new();
+        rank_dist_table.insert(part, ion_table);
+        let mut frag_off_table = HashMap::new();
+        frag_off_table.insert(part, vec![FragmentOffsetFrequency { ion_type: prefix1, frequency: 0.7 }]);
+        let mut param = scoring_crate::Param {
+            version: 10001,
+            data_type: SpecDataType {
+                activation: ActivationMethod::HCD,
+                instrument: InstrumentType::QExactive,
+                enzyme: None,
+                protocol: Protocol::Automatic,
+            },
+            mme: Tolerance::Da(tol_da),
+            apply_deconvolution: false,
+            deconvolution_error_tolerance: 0.0,
+            charge_hist: vec![(2, 100)],
+            min_charge: 2,
+            max_charge: 2,
+            num_segments: 1,
+            partitions: vec![part],
+            num_precursor_off: 0,
+            precursor_off_map: HashMap::new(),
+            frag_off_table,
+            max_rank: 3,
+            rank_dist_table,
+            error_scaling_factor: 0,
+            ion_err_dist_table: HashMap::new(),
+            noise_err_dist_table: HashMap::new(),
+            ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
+        };
+        param.rebuild_cache();
+        RankScorer::new(&param)
+    }
 
     /// Build a minimal peptide of `len` alanine residues with flanks `_-`.
     fn ala_peptide(len: usize) -> Peptide {
@@ -675,7 +706,7 @@ mod feature_tests {
         let pep = ala_peptide(4);
         let spec = make_spectrum(vec![]); // no peaks
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, 0.5);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5));
         assert_eq!(f.mean_error_top7,     0.0, "mean_error_top7 should be 0 with no matches");
         assert_eq!(f.stdev_error_top7,    0.0, "stdev_error_top7 should be 0 with no matches");
         assert_eq!(f.mean_rel_error_top7,  0.0, "mean_rel_error_top7 should be 0 with no matches");
@@ -707,7 +738,7 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, 0.01); // tight tolerance
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.01)); // tight tolerance
 
         // All ratios should be positive since all predicted ions match.
         assert!(f.explained_ion_current_ratio > 0.0,
@@ -755,7 +786,7 @@ mod feature_tests {
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         // tolerance = 0.05 Da so all offset peaks are still within window.
-        let f = compute_psm_features(&ss, &pep, 0.05);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.05));
 
         // All absolute Da errors should be ~offset_da.
         assert!(
@@ -784,7 +815,7 @@ mod feature_tests {
         let peaks = vec![(100.0, 50.0_f32), (200.0, 30.0), (300.0, 20.0)];
         let spec = make_spectrum(peaks.clone());
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, 0.5);
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5));
 
         let expected: f32 = peaks.iter().map(|&(_, i)| i).sum();
         assert_eq!(f.ms2_ion_current, expected,

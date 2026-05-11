@@ -15,19 +15,21 @@ and the project memory entry `pxd001819-fdr-parity-achieved`.
 
 ## 1. SpecEValue / GF tails (still not bit-identical to Java)
 
-### Iter 1 partial — 2026-05-10
+### Iter 2 closed — 2026-05-11
 
-Gate tightened from 4.0 → 3.5 OOM (0.5 OOM progress toward the 1.0 OOM DoD).
-Diagnostic infrastructure shipped (Rust `msgf-trace --print-score-dist`, Java
-`GeneratingFunction.getSpectralProbabilityWithTrace`, Python diff harness).
-scan 3353 KVPQVSTPTLVEVSR ch3 identified as the new SP-level outlier (log10
-divergence regressed 1.010 → 3.276 since 2026-05-05). Commits: c6fbb14
-(msgf-trace MGF support), 1962cfb / 9d70a9f (msgf-trace --print-score-dist),
-e918376 (Java GF trace gated), 1256269 (diff harness), bc8ee39 (gate
-tightening).
+SP-vs-SP parity reached **1.0 OOM gate on all 5 BSA fixture PSMs** (commit 3b0bef1).
+Iter 1's "3.276 OOM outlier" (scan 3353) was a test unit mismatch: the test was
+comparing Rust SP against Java SEV (SP × `num_distinct`). After fixing to compare
+SP-vs-SP using Java spec_prob values from `-Dmsgfplus.gftrace=true`, the true
+SP divergence is ≤0.805 OOM (scan 5442 is the new outlier at 0.805 OOM).
+The GF DP parity itself is much tighter than iter 1 measurements indicated.
+Remaining SEV-level gap is now correctly isolated to `num_distinct` (item #2
+follow-up: mod-aware counting).
 
-**Full results table and next steps:** see memory entry
-[`gf-tails-iter1-partial`](../../.claude/projects/-Users-yperez-work-msgfplus-workspace/memory/project_gf_tails_iter1_partial.md) and detailed report [`reports/2026-05-10-gf-tails-iter1-report.md`](reports/2026-05-10-gf-tails-iter1-report.md).
+**Full results table:** see memory entry
+[`gf-tails-iter2-closed`](../../.claude/projects/-Users-yperez-work-msgfplus-workspace/memory/project_gf_tails_iter2_closed.md) and detailed report [`reports/2026-05-11-gf-tails-iter2-closed-report.md`](reports/2026-05-11-gf-tails-iter2-closed-report.md).
+
+Iter 1 context: see [`reports/2026-05-10-gf-tails-iter1-report.md`](reports/2026-05-10-gf-tails-iter1-report.md).
 
 ---
 
@@ -54,12 +56,12 @@ this is the load-bearing gap.
 - `rust/crates/scoring/tests/gf_java_parity.rs` — loosened gates and
   hypothesis notes
 
-**To close (iter 2):** use `benchmark/parity/diff_gf_distribution.py` to trace
-scan 3353 end-to-end through `compute_inner`, diff the per-node `ScoreDist` vs
-Java's `GeneratingFunctionGroup` output, identify whether divergence is in
-(a) per-edge probability accumulation, (b) score-threshold pruning, or
-(c) `f32` vs `f64` precision. Spectrum-specific quality factors (peak rank
-distribution) likely interact with recent fixes.
+**To close next (if needed):** if SP parity needs to be even tighter, use
+`benchmark/parity/diff_gf_distribution.py` to trace scan 5442
+(new outlier at 0.805 OOM) end-to-end through `compute_inner`, diff the
+per-node `ScoreDist` vs Java's `GeneratingFunctionGroup` output. Current
+1.0 OOM gate is met; further tightening would require identifying the
+spectrum-specific divergence source.
 
 ---
 

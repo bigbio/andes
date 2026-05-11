@@ -1,9 +1,7 @@
-//! Per-spectrum precomputed state for Phase 5 scoring.
+//! Per-spectrum precomputed state for scoring.
 //!
-//! Phase 5 Task 1 scope: peak ranking by intensity + nearest-peak-by-mz
-//! lookup.
-//!
-//! Phase 5b Task 1: precursor-peak filtering before ranking. Mirrors Java's
+//! Provides peak ranking by intensity + nearest-peak-by-mz lookup, plus
+//! precursor-peak filtering before ranking. Mirrors Java's
 //! `Spectrum.filterPrecursorPeaks(tolerance, reducedCharge, offset)`:
 //!
 //! ```text
@@ -30,10 +28,10 @@
 //! For each entry, any peak whose m/z is within `tolerance` Da of `filter_mz`
 //! is excluded from ranking.
 //!
-//! Phase 6 Task 4: adds `prob_peak`, `main_ion`, `node_score`, `edge_score`,
+//! Also exposes `prob_peak`, `main_ion`, `node_score`, `edge_score`,
 //! and `observed_node_mass` for the GF DP graph traversal.
 
-use crate::param_model::{IonType, Param, PrecursorOffsetFrequency};
+use crate::param_model::{IonType, Param, Partition, PrecursorOffsetFrequency};
 use crate::scoring::rank_scorer::RankScorer;
 use model::spectrum::Spectrum;
 
@@ -74,6 +72,17 @@ pub struct ScoredSpectrum<'a> {
     pub(crate) parent_mass: f64,
     /// The charge state used to construct this ScoredSpectrum.
     pub(crate) charge: u8,
+    /// Per-segment (partition, paired (ion, log_table)) cache. Precomputed at
+    /// ScoredSpectrum construction (constant for this spectrum's
+    /// (charge, parent_mass)). Replaces per-call `partition_for` binary
+    /// search + `partition_ion_logs` HashMap lookup in
+    /// `directional_node_score`.
+    ///
+    /// Indexed by segment number `[0..num_segments)`. For the test-fixture
+    /// constructor `new_without_filtering` (no Param / RankScorer in scope)
+    /// the cache is empty; the hot path tolerates length 0 by simply
+    /// iterating no segments and returning 0.0.
+    segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)>,
 }
 
 impl<'a> ScoredSpectrum<'a> {
@@ -87,7 +96,8 @@ impl<'a> ScoredSpectrum<'a> {
     ///
     /// Any peak whose m/z is within the tolerance of a precursor filter m/z
     /// gets rank `u32::MAX` and is effectively invisible to `nearest_peak_rank`.
-    pub fn new(spec: &'a Spectrum, param: &Param, charge: u8) -> Self {
+    pub fn new(spec: &'a Spectrum, scorer: &RankScorer, charge: u8) -> Self {
+        let param = scorer.param();
         let n = spec.peaks.len();
 
         // Collect filter m/z values from param.precursor_off_map for this charge.
@@ -148,11 +158,30 @@ impl<'a> ScoredSpectrum<'a> {
         let part = param.partition_for(charge, parent_mass, last_seg);
         let main_ion = main_ion_from_param(param, part);
 
-        Self::rank_kept(spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge)
+        // Precompute the (partition, paired (ion, log_table)) for every
+        // segment. This is constant for this spectrum's (charge,
+        // parent_mass), so caching here removes a `partition_for` binary
+        // search + `partition_ion_logs` HashMap lookup from every call to
+        // `directional_node_score`. `partition_ion_logs` returns a
+        // borrowed slice; `.to_vec()` clones it to owned so the cache can
+        // outlive the borrow on `scorer`.
+        let num_segs = param.num_segments.max(0) as usize;
+        let segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)> = (0..num_segs)
+            .map(|seg| {
+                let p = param.partition_for(charge, parent_mass, seg);
+                let logs = scorer.partition_ion_logs(&p).to_vec();
+                (p, logs)
+            })
+            .collect();
+
+        Self::rank_kept(
+            spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge,
+            segment_partition_cache,
+        )
     }
 
     /// Constructor that skips precursor-peak filtering. Convenient for
-    /// tests; preserves the simpler Phase 5 Task 1 API.
+    /// tests; preserves the simpler unfiltered API.
     ///
     /// Sets `prob_peak = 1.0` and `main_ion = Prefix(charge=1, offset=0)`
     /// as sentinels. For accurate `edge_score` computations, use `new`.
@@ -173,7 +202,15 @@ impl<'a> ScoredSpectrum<'a> {
         // not sensitive to partition selection.
         let charge = spec.precursor_charge.map(|z| z.max(1) as u8).unwrap_or(2);
         let parent_mass = (spec.precursor_mz - PROTON) * (charge as f64);
-        Self::rank_kept(spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge)
+        // No Param / RankScorer in scope; segment_partition_cache is left
+        // empty. `directional_node_score` tolerates an empty cache: the
+        // outer loop iterates zero times and the function returns 0.0.
+        // The test-fixture path doesn't need the per-segment optimization.
+        let segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)> = Vec::new();
+        Self::rank_kept(
+            spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge,
+            segment_partition_cache,
+        )
     }
 
     /// Shared ranking logic: sort `kept` by intensity DESC / mz ASC and
@@ -188,6 +225,7 @@ impl<'a> ScoredSpectrum<'a> {
         main_ion: IonType,
         parent_mass: f64,
         charge: u8,
+        segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)>,
     ) -> Self {
         kept.sort_by(|a, b| {
             // Higher intensity first; if equal, lower m/z first.
@@ -198,7 +236,10 @@ impl<'a> ScoredSpectrum<'a> {
         for (rank_minus_one, &(orig_idx, _, _)) in kept.iter().enumerate() {
             ranks[orig_idx] = (rank_minus_one + 1) as u32;
         }
-        Self { spec, ranks, kept_count, prob_peak, main_ion, parent_mass, charge }
+        Self {
+            spec, ranks, kept_count, prob_peak, main_ion, parent_mass, charge,
+            segment_partition_cache,
+        }
     }
 
     /// Returns `true` if the main ion is a prefix ion (b-ion direction),
@@ -260,9 +301,9 @@ impl<'a> ScoredSpectrum<'a> {
     /// Mirrors Java `Spectrum.getPeakByMass` (intensity-max selection),
     /// matching the same semantics as `nearest_peak_rank`. Used by
     /// `compute_psm_features` for ion-current ratio and error-stat columns.
-    /// (Bug fix 2026-05-09: previously selected closest by m/z, which
-    /// disagreed with Java's intensity-comparator selection — affected
-    /// PIN feature columns even when the rank lookup matched.)
+    /// Closest-by-m/z selection disagrees with Java's intensity-comparator
+    /// selection and affects PIN feature columns even when the rank lookup
+    /// matches.
     pub fn nearest_peak_full(&self, target_mz: f64, tolerance_da: f64) -> Option<(u32, f32, f64)> {
         if self.spec.peaks.is_empty() {
             return None;
@@ -297,15 +338,14 @@ impl<'a> ScoredSpectrum<'a> {
     /// most-intense peak in the window — and the caller then reads
     /// `peak.getRank()`. For LowRes CID with mme = 0.5 Da, windows
     /// frequently contain multiple peaks; selecting the most-intense
-    /// matches Java's rank-based scoring exactly.
-    /// (Bug fix 2026-05-08: previously selected the peak closest by m/z,
-    /// which yielded systematically higher (worse) rank numbers and was
-    /// the dominant cause of top-1 flips on PXD001819.)
+    /// matches Java's rank-based scoring exactly. Closest-by-m/z selection
+    /// yields systematically higher (worse) rank numbers and is a dominant
+    /// cause of top-1 flips.
     ///
     /// Filtered-out peaks (rank == `u32::MAX`) are never returned.
     ///
-    /// `spec.peaks` is sorted ascending by m/z (Phase 3a MGF reader
-    /// guarantees this). Binary search (`partition_point`) locates the first
+    /// `spec.peaks` is sorted ascending by m/z (the MGF reader guarantees
+    /// this). Binary search (`partition_point`) locates the first
     /// peak with `mz >= target_mz - tolerance_da`; the forward scan then
     /// stops as soon as `mz > target_mz + tolerance_da`, so only the O(k)
     /// peaks in the window are visited.
@@ -347,7 +387,7 @@ impl<'a> ScoredSpectrum<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 6 / Task 4: GF DP scoring methods
+    // GF DP scoring methods
     // -----------------------------------------------------------------------
 
     /// Mirror Java `NewScoredSpectrum.getNodeScore(prm, srm)`:
@@ -383,9 +423,8 @@ impl<'a> ScoredSpectrum<'a> {
     /// `spec.getPeakByMass(theoMass, mme)`. The `fragment_tolerance_da`
     /// argument is retained for backward compat but **ignored** for ion
     /// matching — Java uses the param's `mme` here, not a global
-    /// search-level fragment tolerance. (Bug fix 2026-05-09: previously a
-    /// hardcoded 0.5 Da was passed, which happened to match LowRes CID's
-    /// mme but was wrong for any other instrument/protocol.)
+    /// search-level fragment tolerance. A hardcoded 0.5 Da happens to match
+    /// LowRes CID's mme but is wrong for any other instrument/protocol.
     fn directional_node_score(
         &self,
         nominal_mass: f64,
@@ -408,10 +447,31 @@ impl<'a> ScoredSpectrum<'a> {
         // (was 2 per ion: partition lookup + (partition, ion) log lookup).
         // Each per-spectrum scoring run does ~200k ion evaluations; the
         // savings are ~50–150 ns per ion × millions per search.
+        //
+        // The (Partition, ion_logs) pair for every segment is precomputed
+        // once at ScoredSpectrum construction (see
+        // `segment_partition_cache`), so this loop does ONE array index
+        // per segment instead of `partition_for` binary search +
+        // `partition_ion_logs` HashMap lookup per (segment, call).
+        //
+        // Fallback: the test-fixture constructor `new_without_filtering`
+        // has no Param / RankScorer in scope and therefore leaves the
+        // cache empty. In that (test-only) case we fall back to the
+        // unoptimized lookup path so existing tests still see real scores.
+        // The production path (`ScoredSpectrum::new`) always populates the
+        // cache, so the fallback is never taken in real searches.
+        let use_cache = !self.segment_partition_cache.is_empty();
         for seg in 0..num_segs {
-            let partition = param.partition_for(charge, parent_mass, seg);
-            let ion_logs = scorer.partition_ion_logs(&partition);
-            for (ion, logs) in ion_logs {
+            // Resolve ion_logs (cached vs computed) without storing the
+            // partition reference past the loop body — segment_num below
+            // re-derives the segment from theo_mz directly.
+            let ion_logs_slice: &[(IonType, Vec<f32>)] = if use_cache {
+                self.segment_partition_cache[seg].1.as_slice()
+            } else {
+                let p = param.partition_for(charge, parent_mass, seg);
+                scorer.partition_ion_logs(&p)
+            };
+            for (ion, logs) in ion_logs_slice {
                 let theo_mz = match (is_prefix, *ion) {
                     (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
                     (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
@@ -543,11 +603,10 @@ impl<'a> ScoredSpectrum<'a> {
 /// We pick the Prefix ion with the highest freq at rank-1 index (index 0).
 /// Falls back to `Prefix { charge: 1, offset_bits: 0 }` if table is empty.
 ///
-/// TODO(Phase 6 followup): main_ion selection currently uses per-partition
-/// rank-1 prefix-ion frequency from rank_dist_table. Java's
-/// NewRankScorer.determineIonTypes (lines 611-640) aggregates fragOFFTable
-/// across segments and considers all ion types. For HCD these agree; for
-/// ETD/ECD they may diverge. Revisit if Task 9/10 parity tests fail.
+/// Note: main_ion selection currently uses per-partition rank-1 prefix-ion
+/// frequency from rank_dist_table. Java's `NewRankScorer.determineIonTypes`
+/// (lines 611-640) aggregates `fragOFFTable` across segments and considers
+/// all ion types. For HCD these agree; for ETD/ECD they may diverge.
 fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) -> IonType {
     let fallback = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
     let table = match param.rank_dist_table.get(&partition) {
@@ -588,7 +647,7 @@ mod tests {
         }
     }
 
-    // --- Phase 6 / Task 4 spec-review fix: prob_peak uses raw mme value ---
+    // --- prob_peak uses raw mme value (Java parity) ---
 
     /// Verify that `prob_peak` is computed using the raw stored mme value (Java
     /// parity), not the Da-converted form. For `Tolerance::Ppm(20.0)`:
@@ -643,9 +702,11 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         };
 
-        let ss = ScoredSpectrum::new(&s, &param, 2);
+        let scorer = RankScorer::new(&param);
+        let ss = ScoredSpectrum::new(&s, &scorer, 2);
 
         // Expected: raw_value = 20.0, parent_mass ≈ (501.007276 - PROTON) * 2.
         let parent_mass = (precursor_mz - PROTON) * 2.0;
@@ -671,33 +732,37 @@ mod tests {
         );
     }
 
-    // --- Phase 6 / Task 4 followup: observed_node_mass picks highest-intensity ---
+    // --- observed_node_mass picks highest-intensity ---
 
     #[test]
     fn observed_node_mass_picks_highest_intensity_peak_in_window() {
         // Two peaks within the MME window of theo_mz; the higher-intensity one wins.
         // tiny_param_with_ions uses Tolerance::Da(0.5) → window ±0.5 Da.
         // main_ion = Prefix { charge: 1, offset_bits: 0 }
-        // theo_mz = (node_nominal + PROTON) / 1 = node_nominal + PROTON ≈ node_nominal + 1.00728.
-        // We use node_nominal = 100 → theo_mz ≈ 101.00728.
-        // Place two peaks both within ±0.5:
-        //   peak A at 101.1 (delta ≈ 0.093, low intensity 1.0) — CLOSER
-        //   peak B at 101.4 (delta ≈ 0.393, high intensity 100.0) — FARTHER but HIGHER intensity
+        //
+        // New formula (matching Java):
+        //   theo_mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
+        //           = (100 / 0.999497) / 1 + 0.0 ≈ 100.05028
+        //
+        // Place two peaks both within ±0.5 of theo_mz ≈ 100.050:
+        //   peak A at 100.14 (delta ≈ 0.09, low intensity 1.0) — CLOSER
+        //   peak B at 100.44 (delta ≈ 0.39, high intensity 100.0) — FARTHER but HIGHER intensity
         // Java picks highest-intensity → peak B must win.
-        use model::mass::PROTON;
+        use model::mass::INTEGER_MASS_SCALER;
         let node_nominal = 100_i32;
-        let theo_mz = node_nominal as f64 + PROTON;
-        let closer_mz = theo_mz + 0.093; // delta 0.093 < 0.393
-        let farther_mz = theo_mz + 0.393; // still within ±0.5
+        // theo_mz with offset=0: real_mass / 1 + 0 = nominal / INTEGER_MASS_SCALER
+        let theo_mz = node_nominal as f64 / INTEGER_MASS_SCALER as f64;
+        let closer_mz = theo_mz + 0.09; // delta 0.09 < 0.39
+        let farther_mz = theo_mz + 0.39; // still within ±0.5
         let s = spec(&[(closer_mz, 1.0), (farther_mz, 100.0)]);
         let param = tiny_param_with_ions(); // mme = Da(0.5)
         let scorer = RankScorer::new(&param);
         let ss = ScoredSpectrum::new_without_filtering(&s);
         let result = ss.observed_node_mass(node_nominal, &scorer, 2, 1000.0);
         let result_mass = result.expect("should find a peak in the window");
-        // main_ion.mass_from_mz(peak_mz): farther_mz * 1 - PROTON - 0 = farther_mz - PROTON
-        let expected_mass = farther_mz - PROTON;
-        let wrong_mass = closer_mz - PROTON;
+        // main_ion.mass_from_mz(peak_mz) with offset=0, charge=1: (mz - 0) * 1 = mz
+        let expected_mass = farther_mz;
+        let wrong_mass = closer_mz;
         assert!(
             (result_mass - expected_mass).abs() < 1e-6,
             "expected highest-intensity (farther) peak mass {expected_mass:.6}, \
@@ -705,7 +770,7 @@ mod tests {
         );
     }
 
-    // --- Phase 6 / Task 4 tests: node_score and edge_score ---
+    // --- node_score and edge_score ---
 
     #[test]
     fn node_score_does_not_panic_on_empty_spectrum() {
@@ -729,10 +794,11 @@ mod tests {
     fn node_score_nonzero_when_peak_matches_prefix_ion() {
         // Place a high-intensity peak at the predicted b1 m/z for a node of
         // nominal mass = 100. Prefix ion: Prefix(charge=1, offset=0).
-        // theo_mz = (100.0 + 0 + PROTON) / 1 = 100 + 1.00727649
-        use model::mass::PROTON;
+        // New formula (matching Java): theo_mz = (nominal / INTEGER_MASS_SCALER) / 1 + 0
+        //                                      = 100 / 0.999497 ≈ 100.0503
+        use model::mass::INTEGER_MASS_SCALER;
         let nominal = 100.0_f64;
-        let b1_mz = nominal + PROTON; // charge=1, offset=0
+        let b1_mz = nominal / INTEGER_MASS_SCALER as f64; // charge=1, offset=0
         let s = spec(&[(50.0, 1.0), (b1_mz, 100.0), (200.0, 2.0)]);
         let param = tiny_param_with_ions();
         let scorer = RankScorer::new(&param);
@@ -748,9 +814,10 @@ mod tests {
     #[test]
     fn node_score_prefix_only_match() {
         // Only prefix ions in table; suffix side always contributes 0.
-        use model::mass::PROTON;
+        // New formula (matching Java): theo_mz = (nominal / INTEGER_MASS_SCALER) / 1 + 0
+        use model::mass::INTEGER_MASS_SCALER;
         let nominal = 57.0_f64; // roughly glycine residue mass
-        let mz = (nominal + PROTON) / 1.0;
+        let mz = nominal / INTEGER_MASS_SCALER as f64; // charge=1, offset=0
         let s = spec(&[(mz, 50.0), (300.0, 1.0)]);
         let param = tiny_param_with_ions();
         let scorer = RankScorer::new(&param);
@@ -860,7 +927,7 @@ mod tests {
 
         let _ = dist_len; // used for documentation
 
-        let param = Param {
+        let mut param = Param {
             version: 10001,
             data_type: SpecDataType {
                 activation: ActivationMethod::HCD,
@@ -885,7 +952,9 @@ mod tests {
             ion_err_dist_table,
             noise_err_dist_table,
             ion_existence_table,
+            partition_ion_types_cache: HashMap::new(),
         };
+        param.rebuild_cache();
 
         // No peaks in spectrum → cur_mass = None, prev_mass = None → idx = 0 (nn).
         let s = spec(&[]);
@@ -900,6 +969,33 @@ mod tests {
     }
 
     #[test]
+    fn directional_node_score_segment_cache_sanity() {
+        use crate::param_model::Param;
+        use std::path::PathBuf;
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("../../../src/main/resources/ionstat/CID_LowRes_Tryp.param");
+        let param = Param::load_from_file(&path).expect("param loads");
+        let scorer = RankScorer::new(&param);
+        let peaks: Vec<(f64, f32)> = (0..100).map(|i| (50.0 + i as f64 * 19.5, 100.0 - i as f32)).collect();
+        let spec = Spectrum {
+            title: "parity".into(), precursor_mz: 800.0, precursor_intensity: None,
+            precursor_charge: Some(2), rt_seconds: None, scan: None, peaks,
+        };
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        let mut state: u64 = 0xCAFEBABEDEADBEEF;
+        let mut next = || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+        for _ in 0..200 {
+            let nominal_mass = 100.0 + (next() % 2400) as f64;
+            let is_prefix = (next() & 1) == 0;
+            let charge = 2 + (next() % 3) as u8;
+            let parent_mass = 600.0 + (next() % 2400) as f64;
+            let val = ss.directional_node_score(nominal_mass, is_prefix, &scorer, charge, parent_mass, 0.0);
+            assert!(val.is_finite() || val == 0.0,
+                "non-finite directional_node_score at nominal={nominal_mass} prefix={is_prefix} charge={charge} parent_mass={parent_mass}: {val}");
+        }
+    }
+
+    #[test]
     fn empty_spectrum_yields_no_ranks() {
         let s = spec(&[]);
         let ss = ScoredSpectrum::new_without_filtering(&s);
@@ -909,7 +1005,7 @@ mod tests {
 
     #[test]
     fn highest_intensity_gets_rank_1() {
-        // Peaks sorted ascending by m/z (Phase 3a MGF reader does this).
+        // Peaks sorted ascending by m/z (the MGF reader guarantees this).
         let s = spec(&[(100.0, 1.0), (200.0, 5.0), (300.0, 3.0)]);
         let ss = ScoredSpectrum::new_without_filtering(&s);
         assert_eq!(ss.peak_count(), 3);
@@ -1051,6 +1147,7 @@ mod precursor_filter_tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         }
     }
 
@@ -1113,6 +1210,7 @@ mod precursor_filter_tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         }
     }
 
@@ -1124,10 +1222,11 @@ mod precursor_filter_tests {
         // filter_mz = (997.9855 + 2 * PROTON) / 2 + 0.0 = 500.0 (the precursor m/z)
         //
         // A peak AT 500.0 (the precursor m/z itself, very high intensity) should be filtered.
-        // Peaks must be sorted ascending by m/z (Phase 3a MGF reader invariant).
+        // Peaks must be sorted ascending by m/z (MGF reader invariant).
         let s = make_spec(500.0, &[(100.0, 1.0), (300.0, 5.0), (500.0, 100.0)]);
         let param = param_with_precursor_filter_rc0();
-        let ss = ScoredSpectrum::new(&s, &param, 2);
+        let scorer = RankScorer::new(&param);
+        let ss = ScoredSpectrum::new(&s, &scorer, 2);
 
         // The precursor peak (500.0) should be filtered out (rank u32::MAX, not returned).
         assert!(
@@ -1148,7 +1247,8 @@ mod precursor_filter_tests {
         // The filter is at precursor m/z = 500.0 ± 0.5, no peak in this set is there.
         let s = make_spec(500.0, &[(100.0, 1.0), (200.0, 50.0), (300.0, 5.0)]);
         let param = param_with_precursor_filter_rc0();
-        let ss = ScoredSpectrum::new(&s, &param, 2);
+        let scorer = RankScorer::new(&param);
+        let ss = ScoredSpectrum::new(&s, &scorer, 2);
 
         assert_eq!(ss.peak_count_after_filtering(), 3);
         assert_eq!(ss.nearest_peak_rank(200.0, 0.1), Some(1));
@@ -1161,7 +1261,8 @@ mod precursor_filter_tests {
         let mut param = param_with_precursor_filter_rc0();
         param.precursor_off_map.clear();
         let s = make_spec(500.0, &[(100.0, 1.0), (500.0, 100.0)]);
-        let ss = ScoredSpectrum::new(&s, &param, 2);
+        let scorer = RankScorer::new(&param);
+        let ss = ScoredSpectrum::new(&s, &scorer, 2);
         assert_eq!(ss.peak_count_after_filtering(), 2);
     }
 
@@ -1171,7 +1272,8 @@ mod precursor_filter_tests {
         // Using param_with_precursor_filter which has reduced_charge=2, charge=2.
         let param = param_with_precursor_filter();
         let s = make_spec(500.0, &[(100.0, 1.0), (500.0, 100.0)]);
-        let ss = ScoredSpectrum::new(&s, &param, 2);
+        let scorer = RankScorer::new(&param);
+        let ss = ScoredSpectrum::new(&s, &scorer, 2);
         // No filtering occurred (c <= 0 was skipped) → both peaks kept.
         assert_eq!(ss.peak_count_after_filtering(), 2);
     }

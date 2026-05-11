@@ -111,7 +111,7 @@ pub fn match_spectra(
             let mut scored_per_charge: HashMap<u8, ScoredSpectrum<'_>> = HashMap::new();
             for &z in &charges_to_try {
                 scored_per_charge.entry(z)
-                    .or_insert_with(|| ScoredSpectrum::new(spec, scorer.param(), z));
+                    .or_insert_with(|| ScoredSpectrum::new(spec, scorer, z));
             }
 
             // Compute per-charge candidate windows and union them into a deduplicated

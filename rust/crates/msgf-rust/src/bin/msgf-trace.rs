@@ -446,7 +446,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let java_cand_pep = &cands[found_indices[0]].peptide;
             for &z in &charges_to_try {
                 println!("\n  Per-split node_score breakdown — Java pep ({}+{}) ---", java_str, z);
-                let scored = ScoredSpectrum::new(spec, scorer.param(), z);
+                let scored = ScoredSpectrum::new(spec, &scorer, z);
                 print_split_breakdown(&scored, java_cand_pep, &scorer, z);
                 let total = score_psm(&scored, java_cand_pep, &scorer, z, 0.5);
                 println!("    score_psm total = {}", total);
@@ -459,7 +459,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let rust_top1_pep = &top1.candidate.peptide;
         let pep_str: String = rust_top1_pep.residues.iter().map(|aa| aa.residue as char).collect();
         println!("\n  Per-split node_score breakdown — Rust top-1 ({} +{}) ---", pep_str, top1.charge_used);
-        let scored = ScoredSpectrum::new(spec, scorer.param(), top1.charge_used);
+        let scored = ScoredSpectrum::new(spec, &scorer, top1.charge_used);
         print_split_breakdown(&scored, rust_top1_pep, &scorer, top1.charge_used);
         println!("    PSM.score (from queue) = {}", top1.score);
     }
@@ -522,7 +522,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         aa_set_for_gf.register_enzyme(enzyme, 0.95, 0.95);
 
         let parent_mass = (spec.precursor_mz - PROTON) * charge_used as f64;
-        let scored = ScoredSpectrum::new(spec, scorer.param(), charge_used);
+        let scored = ScoredSpectrum::new(spec, &scorer, charge_used);
         let fragment_tolerance_da = 0.5_f64;
 
         // Protein-terminal flags — for trace simplicity, OFF (matches the

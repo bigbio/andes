@@ -6,9 +6,11 @@
 
 pub mod candidate_gen;
 pub mod decoy;
+pub mod distinct_peptide;
 pub mod match_engine;
 pub mod precursor_matching;
 pub mod psm;
+pub mod sa_walk;
 pub mod search_index;
 pub mod search_params;
 pub mod suffix_array;

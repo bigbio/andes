@@ -1,8 +1,11 @@
 //! Java SpecEValue parity for hand-picked traced PSMs.
 //!
-//! Phase 6 Task 9: 5 PSMs from BSA + test.mgf, target Rust SpecEValue
-//! within 1 OOM of Java's lnSpecEValue. This is the loose gate; Task 10
-//! tightens to 95% of all 217 PSMs.
+//! Phase 6 Task 9 baseline: 5 PSMs from BSA + test.mgf, asserting Rust
+//! SpecEValue stays within `TOLERANCE_LOG10` OOM of Java's lnSpecEValue.
+//! Tightened from 4.0 to 3.5 on 2026-05-11 after the 2026-05-10 cumulative
+//! fixes (theo_mz formula, cleavage credit, partition Ord, per-partition
+//! ions). 4/5 PSMs now pass at 1.0 OOM; scan 3353 is the bottleneck at
+//! 3.276 OOM (see the per-PSM table on `TOLERANCE_LOG10` below).
 //!
 //! Reference fixture:
 //!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
@@ -44,61 +47,63 @@ const FIVE_TRACED_PSMS: &[(i32, &str, u8, f64)] = &[
     (2693, "SLGKVGTR", 2, 4.9898e-3),
 ];
 
-/// Within 4 OOM tolerance (loosened from 1.0; Task 10 tightens).
+/// Within 3.5 OOM tolerance (tightened from 4.0 after 2026-05-10 fixes).
 ///
-/// PHASE 6 followup: 4/5 PSMs diverge more than 1 OOM from Java, and 3/5
-/// diverge more than 2 OOM. The divergence is bi-directional (not a systematic
-/// offset), indicating multiple independent root causes in the GF scoring model.
-/// Gate loosened to 4.0 so the test passes as a measurement baseline; Task 10
-/// must tighten to 1.0 OOM after diagnosing each root cause.
+/// The 2026-05-10 cumulative fixes (theo_mz formula, cleavage credit,
+/// partition Ord, per-partition ion enumeration, allocation-free
+/// `ions_for_node`) closed most of the SEV-level gap that motivated the
+/// previous 4.0 OOM tolerance. 4/5 PSMs now pass at 1.0 OOM; only scan 3353
+/// remains as a bottleneck at 3.276 OOM (Rust MORE confident than Java).
+/// Tightening below 3.5 would require diagnosing the remaining SP-level
+/// drift (the SEV gate masks part of it via num_distinct_peptides
+/// multiplication).
 ///
-/// Per-PSM table (measured 2026-05-05):
+/// Per-PSM table (measured 2026-05-11, post-2026-05-10 fixes):
 ///
 ///   scan 3416 'KVPQVSTPTLVEVSR' ch3:
-///     Java 1.510e-8 vs Rust 1.182e-8 (log10 diff 0.106) — PASS at 1.0 OOM
-///     Rust is very close. This is the reference calibration point.
+///     Java 1.510e-8 vs Rust 5.220e-9 (log10 diff 0.461) — PASS at 1.0 OOM
+///     Rust is ~3x MORE confident than Java. Previous measurement: 0.106.
+///     Drift increased slightly after the cumulative fixes, but still well
+///     within 1.0 OOM. Reference calibration point.
 ///
 ///   scan 3353 'KVPQVSTPTLVEVSR' ch3:
-///     Java 6.559e-7 vs Rust 6.408e-8 (log10 diff 1.010) — FAIL at 1.0, PASS at 2.0
-///     Rust is ~10x MORE confident than Java. Suspected: GF score-range boundary
-///     or bin-group merging mis-alignment. Same peptide as scan 3416 (which
-///     passes), so the divergence is spectrum-specific, not peptide-specific.
-///     Likely cause: different per-spectrum node/edge scores lead to a different
-///     score distribution width, and the GF tail falls off at a different rate.
+///     Java 6.559e-7 vs Rust 3.473e-10 (log10 diff 3.276) — FAIL at 1.0/2.0/3.0
+///     Rust is ~1900x MORE confident than Java. Previous measurement: 1.010.
+///     Same peptide as scan 3416 (which passes), so the divergence is
+///     spectrum-specific, not peptide-specific. The 2026-05-10 fixes
+///     amplified the divergence for this scan — the score distribution
+///     width is now significantly different from Java's, and the GF tail
+///     falls off too fast. THIS IS THE TOLERANCE BOTTLENECK.
 ///
 ///   scan 5442 'LGEYGFQNALIVR' ch2:
-///     Java 2.957e-5 vs Rust 7.363e-3 (log10 diff 2.396) — FAIL at 1.0 and 2.0
-///     Rust is ~250x LESS confident than Java. This is the only case where Rust
-///     is WORSE. Suspected: main-ion direction selection (`getMainIonDirection`)
-///     picks a different dominant ion series for this spectrum, or the
-///     edge-score AA probability calibration differs for this peptide's
-///     composition (L, G, Y, F, Q, N, A, I, V, R).
+///     Java 2.957e-5 vs Rust 2.752e-6 (log10 diff 1.031) — borderline at 1.0 OOM
+///     Rust is ~10x MORE confident than Java. Previous measurement: 2.396
+///     (and Rust was LESS confident). Direction flipped after the fixes —
+///     this is now consistent with the general "Rust more confident" pattern.
 ///
 ///   scan 1507 'YLYEIAR' ch2:
-///     Java 1.873e-4 vs Rust 2.573e-7 (log10 diff 2.862) — FAIL at 1.0 and 2.0
-///     Rust is ~700x MORE confident than Java. Short peptide (7 aa). Suspected:
-///     underflow guard activation — Java uses Float.MIN_VALUE (~1.4e-45) as the
-///     floor; if Rust's guard activates later (or not at all for a narrow score
-///     range), the GF distribution accumulates more probability near score 0,
-///     pushing the tail much lower. Alternatively, enzyme cleavage credit/penalty
-///     mismatch for a peptide ending in R at position 2 from C-terminus.
+///     Java 1.873e-4 vs Rust 2.914e-4 (log10 diff 0.192) — PASS at 1.0 OOM
+///     Rust and Java agree to within a factor of 2. Previous measurement:
+///     2.862 (Rust 700x more confident). The 2026-05-10 fixes essentially
+///     resolved this case.
 ///
 ///   scan 2693 'SLGKVGTR' ch2:
-///     Java 4.990e-3 vs Rust 1.055e-6 (log10 diff 3.675) — FAIL at 1.0, 2.0, and 3.0
-///     Rust is ~4700x MORE confident than Java. Short peptide (8 aa) with an
-///     internal K (missed cleavage). Suspected: same underflow-guard issue as
-///     scan 1507, amplified because the score range is narrow (few ions, low
-///     scores), making the tail extremely sensitive to per-node score rounding
-///     and the underflow floor. Internal missed cleavage (K at position 4)
-///     may also interact with enzyme cleavage credit differently in Rust vs Java.
+///     Java 4.990e-3 vs Rust 1.652e-3 (log10 diff 0.480) — PASS at 1.0 OOM
+///     Rust is ~3x MORE confident than Java. Previous measurement: 3.675
+///     (Rust 4700x more confident). The 2026-05-10 fixes (especially the
+///     theo_mz formula correction and per-partition ion enumeration)
+///     resolved most of the divergence on this short, low-confidence PSM.
 ///
-/// Root causes to investigate in Task 10:
-///   1. Underflow guard: verify Rust's floor matches Java's Float.MIN_VALUE.
-///   2. Main-ion direction: compare Java's getMainIonDirection logic vs Rust.
-///   3. Enzyme cleavage credit for internal K/R and peptide-terminal cleavage.
-///   4. Mass-bin window rounding (minPeptideMassIndex / maxPeptideMassIndex).
-///   5. Score-range calibration: Rust score may differ from Java's RawScore.
-const TOLERANCE_LOG10: f64 = 4.0;
+/// Remaining drift is at the SP level — the SEV gate compares
+/// SP * num_distinct_peptides, which masks part of the underlying
+/// per-spectrum score-distribution mismatch. Future tightening below
+/// 3.5 OOM requires reconciling SP itself for scan 3353.
+///
+/// Root causes still pending (post-2026-05-10):
+///   1. GF score distribution width on scan 3353 (spectrum-specific).
+///   2. Underflow guard alignment with Java's Float.MIN_VALUE.
+///   3. Score-range calibration: Rust score may differ from Java's RawScore.
+const TOLERANCE_LOG10: f64 = 3.5;
 
 /// Extract a scan number from a TITLE string of the form
 /// `... scan=N` (e.g. mzML controllerType/controllerNumber/scan triplets).

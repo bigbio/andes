@@ -38,6 +38,25 @@
 //! differing in C-term flank) but is conservative and never silently
 //! merges peptides the enzyme would consider distinct. The next subtask
 //! will port Java's full enzyme branch (`DBScanner.java:286-308`).
+//!
+//! ## N-terminal Met-cleavage merge
+//!
+//! Mirrors Java `CandidatePeptideGridConsideringMetCleavage.java:16`. For
+//! each protein whose first residue is `M`, we run a separate enumeration
+//! pass over `sequence[1..]` (the "initial-Met loss" virtual sequence) and
+//! emit any peptides that pass the enzyme/length filters with
+//! `is_protein_n_term = true` (the post-Met residue is the biological
+//! N-terminus). These Met-cleaved variants are always emitted as
+//! **separate** `DistinctPeptide`s from the main SA walk: dedup key is
+//! `(residues, is_protein_n_term)`. The Met-cleaved pass dedupes among
+//! itself by residue bytes (all entries share `is_protein_n_term = true`),
+//! so two M-prefixed proteins yielding the same Met-cleaved residue
+//! sequence aggregate into one `DistinctPeptide` with two positions —
+//! while the same residue sequence appearing elsewhere (non-N-terminal,
+//! or non-Met-prefixed N-term) remains a distinct entry from the main
+//! pass. See `tests/sa_walk_met_cleavage.rs`.
+
+use std::collections::HashMap;
 
 use model::amino_acid::AminoAcid;
 use model::compact_fasta::{byte_to_residue, INVALID_CHAR_CODE, TERMINATOR};
@@ -70,6 +89,10 @@ pub struct SaPeptideStream<'a> {
     /// Cached per-protein decoy classification (indexed by protein_index).
     /// Avoids a string-prefix check on every emission.
     is_decoy: Vec<bool>,
+    /// Set once the main SA-walk is exhausted and the Met-cleavage
+    /// finalization pass has been queued into `pending`. Prevents double
+    /// emission across repeated `next()` calls after the iterator drains.
+    met_cleavage_emitted: bool,
 }
 
 impl<'a> SaPeptideStream<'a> {
@@ -92,6 +115,7 @@ impl<'a> SaPeptideStream<'a> {
             min_length,
             max_length,
             is_decoy,
+            met_cleavage_emitted: false,
         }
     }
 
@@ -239,6 +263,85 @@ impl<'a> SaPeptideStream<'a> {
             prev.add_position(p);
         }
     }
+
+    /// Enumerate Met-cleaved peptide variants and append them to
+    /// `self.pending`. For each M-prefixed protein, treat `sequence[1..]`
+    /// as a virtual protein (post-initial-Met cleavage), enumerate spans
+    /// that pass the same residue + enzyme + length filters used by the
+    /// main SA pass, and emit them with `is_protein_n_term = true`. The
+    /// pre-flank for spans starting at offset 1 of the original protein
+    /// is the cleaved `M` itself, so the NTT check uses `pre = Some(b'M')`.
+    ///
+    /// Multiple M-prefixed proteins producing the same Met-cleaved residue
+    /// sequence are aggregated into a single `DistinctPeptide` (positions
+    /// vector lists each `(protein, offset=1+..)` site). This matches the
+    /// dedup contract for the main SA pass — residue-only identity within
+    /// the Met-cleaved sub-pass — while keeping Met-cleaved peptides as
+    /// separate `DistinctPeptide`s from non-Met-cleaved peptides with the
+    /// same residues (the `is_protein_n_term` axis differs).
+    fn enumerate_met_cleaved(&mut self) {
+        // Aggregate by residue bytes. All entries here share is_protein_n_term=true.
+        let mut by_residues: HashMap<Vec<u8>, DistinctPeptide> = HashMap::new();
+
+        for (p_idx, protein) in self.idx.db.proteins.iter().enumerate() {
+            let seq = &protein.sequence;
+            if seq.first() != Some(&b'M') || seq.len() <= 1 {
+                continue;
+            }
+            // Met-cleavage's unique contribution: peptides starting at
+            // offset 1 of the original protein (the post-Met biological
+            // N-terminus). Spans with start > 1 are already enumerated by
+            // the main SA walk with is_protein_n_term=false at their
+            // native location, so we don't repeat them here.
+            let seq_len = seq.len();
+            let min_l = self.min_length;
+            let max_l = self.max_length;
+            if seq_len < 1 + min_l {
+                continue;
+            }
+            let start = 1usize;
+            let max_end = seq_len.min(start + max_l);
+            for end in (start + min_l)..=max_end {
+                let span = &seq[start..end];
+                // Residue validity: standard AAs only.
+                let mut residues = Vec::with_capacity(span.len());
+                let mut ok = true;
+                for &b in span {
+                    if AminoAcid::standard(b).is_none() {
+                        ok = false;
+                        break;
+                    }
+                    residues.push(b);
+                }
+                if !ok {
+                    continue;
+                }
+                // NTT pre-flank for offset=1 is the cleaved M itself.
+                let pre = Some(b'M');
+                let post = if end == seq_len { None } else { Some(seq[end]) };
+                if !self.passes_ntt(&residues, pre, post) {
+                    continue;
+                }
+                let is_protein_c_term = end == seq_len;
+                let position = Position {
+                    protein_index: p_idx as u32,
+                    offset: start as u32,
+                    is_decoy: self.is_decoy.get(p_idx).copied().unwrap_or(false),
+                    is_protein_n_term: true, // post-Met biological N-terminus
+                    is_protein_c_term,
+                };
+                let nominal_mass = compute_nominal_mass(&residues);
+                let entry = by_residues
+                    .entry(residues.clone())
+                    .or_insert_with(|| DistinctPeptide::new(residues, nominal_mass));
+                entry.add_position(position);
+            }
+        }
+
+        // Drain into pending. Order is unspecified but deterministic-ish
+        // (HashMap iteration); downstream consumers must not rely on order.
+        self.pending.extend(by_residues.into_values());
+    }
 }
 
 impl<'a> Iterator for SaPeptideStream<'a> {
@@ -288,6 +391,13 @@ impl<'a> Iterator for SaPeptideStream<'a> {
             if let Some(dp) = self.prev_match[length].take() {
                 self.pending.push(dp);
             }
+        }
+        // Met-cleavage finalization: enumerate Met-cleaved peptides for
+        // every M-prefixed protein and queue them as separate
+        // DistinctPeptides distinguished by (residues, is_protein_n_term=true).
+        if !self.met_cleavage_emitted {
+            self.met_cleavage_emitted = true;
+            self.enumerate_met_cleaved();
         }
         self.pending.pop()
     }

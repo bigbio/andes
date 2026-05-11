@@ -65,31 +65,36 @@ spectrum-specific divergence source.
 
 ---
 
-## 2. E-value (Rust uses an MVP proxy, not Java's suffix-array count) — ITER 1 LANDED 2026-05-10
+## 2. E-value (Rust uses an MVP proxy, not Java's suffix-array count) — ITER 1 + ITER 3 LANDED 2026-05-11
 
 The queue-derived proxy was replaced by
 `SearchIndex.num_distinct_peptides_at_length` (commits `f5f6884`, `a547c39`,
 `95fa9bc`, `3e416a3`; report:
 [`reports/2026-05-10-evalue-iter1-report.md`](reports/2026-05-10-evalue-iter1-report.md)).
+Iter 3 (commit `47893d7`) replaced `HashSet<Vec<u8>>` with `FxHashSet<u64>`
+to recover wall regression; report:
+[`reports/2026-05-11-evalue-iter3-report.md`](reports/2026-05-11-evalue-iter3-report.md).
 
-**Status:** Percolator @ 1% FDR rose from 14,798 → 14,850 (+52). EValue
-column is now strictly better than the proxy (finite-EValue PSM count
-15,929 → 27,779; median value is more conservative).
+**Status:** Percolator @ 1% FDR at 14,850 vs Java 14,798 (+52, unchanged from iter 1).
+Wall regression partially recovered: T2-5 9m17s → iter 3 7m53s (~15% improvement,
+still 3× pre-T2 baseline). EValue ratio median (0.0368) **UNCHANGED** despite
+the seen-set optimization.
 
-**Residual gap:** median ratio Rust/Java = **0.0368**, 0% of full-match
-PSMs within ±5%. Two open follow-ups:
+**Residual gap is STRUCTURAL:** median ratio Rust/Java = **0.0368**, 0% of
+full-match PSMs within ±5%. The mod-aware hypothesis is **REJECTED**: Java's
+`CompactSuffixArray.computeNumDistinctPeptides` (Java source) is also
+bare-residue-only, same as Rust. The ratio gap must be caused by a different
+EValue denominator formula. One open follow-up:
 
-1. **Mod-aware distinct counting.** Java's `PeptideEnumerator.getNumDistinctPeptides`
-   likely counts `PEPTIDE` and `PEPTID+15.99M` as different distinct
-   peptides. Rust currently dedupes by bare residue bytes. Fix: extend the
-   seen-set key to include the modified peptide form. To investigate:
-   `grep -n "getNumDistinctPeptides" src/main/java/edu/ucsd/msjava/msdbsearch/PeptideEnumerator.java`.
-
-2. **Wall regression: 5-6m → 9m17s.** Suspect HashSet<Vec<u8>> allocator
-   pressure (~5-10M Vec<u8> per enumerate_candidates pass). Mitigation:
-   hash residue bytes to `u64` (FxHash / xxHash) and dedupe by `u64`
-   instead of `Vec<u8>`. Saves ~360 MB transient allocation + reduces
-   ~10M heap allocations.
+1. **EValue denominator divergence.** Java's SpecEValue formula uses
+   `num_distinct_peptides` as the divisor; Rust uses
+   `num_distinct_peptides_at_length`. To investigate: read Java's exact EValue
+   computation in `DBScanner.scan` or `MSGFPlusMatch.computeEValue` and compare
+   to `rust/crates/scoring/src/psm.rs` line where `e_value = spec_e_value *
+   num_distinct_peptides_at_length`. If Java uses a different peptide-count
+   factor (e.g., total DB peptides at all charges, not per-length), the ratio
+   gap closes with a formula fix. If not, the structural difference is in the
+   spec_e_value scaling itself.
 
 ---
 

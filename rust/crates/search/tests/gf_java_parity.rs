@@ -1,25 +1,33 @@
-//! Java SpecEValue parity for hand-picked traced PSMs.
+//! Java SpecProbability (SP) parity for hand-picked traced PSMs.
 //!
-//! Phase 6 Task 9 baseline: 5 PSMs from BSA + test.mgf, asserting Rust
-//! SpecEValue stays within `TOLERANCE_LOG10` OOM of Java's lnSpecEValue.
-//! Tightened from 4.0 to 3.5 on 2026-05-11 after the 2026-05-10 cumulative
-//! fixes (theo_mz formula, cleavage credit, partition Ord, per-partition
-//! ions). 4/5 PSMs now pass at 1.0 OOM; scan 3353 is the bottleneck at
-//! 3.276 OOM (see the per-PSM table on `TOLERANCE_LOG10` below).
+//! Phase 6 Task 9 baseline: 5 PSMs from BSA + test.mgf, asserting Rust raw
+//! GF tail SP stays within `TOLERANCE_LOG10` OOM of Java's raw GF tail SP.
 //!
-//! Reference fixture:
+//! Refixtured 2026-05-11: previously this test compared Rust SP
+//! (`psm.spec_e_value`, which is `gf.spectral_probability(score)`, i.e.
+//! the raw GF tail) against the `SpecEValue` column from
+//! `bsa_test_mgf_java.pin`, which is `SP * num_distinct_peptides`. The unit
+//! mismatch was masked by a loose `TOLERANCE_LOG10` (4.0, then 3.5).
+//! Java SP values are now captured directly via
+//! `-Dmsgfplus.gftrace=true` against `target/MSGFPlus.jar` (commit e918376)
+//! so the test compares SP-vs-SP. The remaining `num_distinct`-level
+//! discrepancy is tracked separately as known-divergences item #2
+//! (e_value proxy follow-up).
+//!
+//! Reference fixture (for context, not used for the assertion):
 //!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
 //!
 //! The 5 PSMs were hand-picked from Label=1 (target) rows spanning the
-//! SpecEValue range:
+//! SpecEValue range. Java SP values come from `GF_TAIL: ... spec_prob=`
+//! gf-trace output on `src/test/resources/{test.mgf,BSA.fasta}`:
 //!
-//! | scan | peptide            | ch | Java lnSEV | Java SEV      |
-//! |------|--------------------|----|------------|---------------|
-//! | 3416 | KVPQVSTPTLVEVSR   |  3 | -18.0089   | 1.5095e-08    |
-//! | 3353 | KVPQVSTPTLVEVSR   |  3 | -14.2373   | 6.5587e-07    |
-//! | 5442 | LGEYGFQNALIVR     |  2 | -10.4288   | 2.9569e-05    |
-//! | 1507 | YLYEIAR           |  2 | -8.5826    | 1.8734e-04    |
-//! | 2693 | SLGKVGTR          |  2 | -5.3004    | 4.9898e-03    |
+//! | scan | peptide          | ch | Java SP (raw GF tail) |
+//! |------|------------------|----|-----------------------|
+//! | 3416 | KVPQVSTPTLVEVSR  |  3 | 3.005e-09             |
+//! | 3353 | KVPQVSTPTLVEVSR  |  3 | 4.658e-10             |
+//! | 5442 | LGEYGFQNALIVR    |  2 | 4.315e-07             |
+//! | 1507 | YLYEIAR          |  2 | 5.246e-04             |
+//! | 2693 | SLGKVGTR         |  2 | 1.392e-03             |
 
 mod common;
 use common::*;
@@ -30,80 +38,63 @@ use std::io::BufReader;
 use search::{match_spectra, SearchIndex, SearchParams};
 use input::{FastaReader, MgfReader};
 
-/// (scan_nr, peptide, charge, java_spec_evalue)
+/// (scan_nr, peptide, charge, java_spec_probability)
 ///
-/// java_spec_evalue = exp(lnSpecEValue) from column 9 of bsa_test_mgf_java.pin.
+/// java_spec_probability = raw GF tail probability from
+/// `PrimitiveGeneratingFunction.getSpectralProbability(score)`, captured via
+/// `-Dmsgfplus.gftrace=true` on the BSA + test.mgf fixture (commit e918376).
+/// NOT the SpecEValue column from .pin (which is SP * num_distinct).
 /// Values are literals (not runtime computations) so the gate is reproducible.
 const FIVE_TRACED_PSMS: &[(i32, &str, u8, f64)] = &[
-    // Very confident: lnSEV = -18.0089
-    (3416, "KVPQVSTPTLVEVSR", 3, 1.5095e-8),
-    // Confident: lnSEV = -14.2373
-    (3353, "KVPQVSTPTLVEVSR", 3, 6.5587e-7),
-    // Moderate: lnSEV = -10.4288
-    (5442, "LGEYGFQNALIVR", 2, 2.9569e-5),
-    // Middling: lnSEV = -8.5826
-    (1507, "YLYEIAR", 2, 1.8734e-4),
-    // Weak: lnSEV = -5.3004
-    (2693, "SLGKVGTR", 2, 4.9898e-3),
+    // Very confident
+    (3416, "KVPQVSTPTLVEVSR", 3, 3.005e-9),
+    // Confident
+    (3353, "KVPQVSTPTLVEVSR", 3, 4.658e-10),
+    // Moderate
+    (5442, "LGEYGFQNALIVR", 2, 4.314714e-7),
+    // Middling
+    (1507, "YLYEIAR", 2, 5.245919e-4),
+    // Weak
+    (2693, "SLGKVGTR", 2, 1.392160e-3),
 ];
 
-/// Within 3.5 OOM tolerance (tightened from 4.0 after 2026-05-10 fixes).
+/// Within 1.0 OOM tolerance after refixturing to SP-vs-SP comparison.
 ///
-/// The 2026-05-10 cumulative fixes (theo_mz formula, cleavage credit,
-/// partition Ord, per-partition ion enumeration, allocation-free
-/// `ions_for_node`) closed most of the SEV-level gap that motivated the
-/// previous 4.0 OOM tolerance. 4/5 PSMs now pass at 1.0 OOM; only scan 3353
-/// remains as a bottleneck at 3.276 OOM (Rust MORE confident than Java).
-/// Tightening below 3.5 would require diagnosing the remaining SP-level
-/// drift (the SEV gate masks part of it via num_distinct_peptides
-/// multiplication).
+/// Refixtured 2026-05-11: the prior 3.5 OOM tolerance was inflated by a
+/// unit mismatch — the test compared Rust SP against Java SEV
+/// (`SP * num_distinct_peptides`). With Java SP values now captured
+/// directly via `-Dmsgfplus.gftrace=true`, the true SP-level divergence
+/// is small (≤ 0.7 OOM on the worst PSM in the table below).
 ///
-/// Per-PSM table (measured 2026-05-11, post-2026-05-10 fixes):
+/// Per-PSM table (measured 2026-05-11, SP-vs-SP, all PASS at 1.0 OOM):
 ///
 ///   scan 3416 'KVPQVSTPTLVEVSR' ch3:
-///     Java 1.510e-8 vs Rust 5.220e-9 (log10 diff 0.461) — PASS at 1.0 OOM
-///     Rust is ~3x MORE confident than Java. Previous measurement: 0.106.
-///     Drift increased slightly after the cumulative fixes, but still well
-///     within 1.0 OOM. Reference calibration point.
+///     Java SP 3.005e-9 vs Rust SP 5.220e-9 (log10 diff 0.240)
+///     Rust ~1.7x more confident than Java at the SP level.
 ///
 ///   scan 3353 'KVPQVSTPTLVEVSR' ch3:
-///     Java 6.559e-7 vs Rust 3.473e-10 (log10 diff 3.276) — FAIL at 1.0/2.0/3.0
-///     Rust is ~1900x MORE confident than Java. Previous measurement: 1.010.
-///     Same peptide as scan 3416 (which passes), so the divergence is
-///     spectrum-specific, not peptide-specific. The 2026-05-10 fixes
-///     amplified the divergence for this scan — the score distribution
-///     width is now significantly different from Java's, and the GF tail
-///     falls off too fast. THIS IS THE TOLERANCE BOTTLENECK.
+///     Java SP 4.658e-10 vs Rust SP 3.473e-10 (log10 diff 0.127)
+///     Rust slightly LESS confident than Java. Previously the apparent
+///     bottleneck (3.276 OOM under SEV-vs-SP); the gap collapses to
+///     0.127 OOM once units are aligned.
 ///
 ///   scan 5442 'LGEYGFQNALIVR' ch2:
-///     Java 2.957e-5 vs Rust 2.752e-6 (log10 diff 1.031) — borderline at 1.0 OOM
-///     Rust is ~10x MORE confident than Java. Previous measurement: 2.396
-///     (and Rust was LESS confident). Direction flipped after the fixes —
-///     this is now consistent with the general "Rust more confident" pattern.
+///     Java SP 4.315e-7 vs Rust SP 2.752e-6 (log10 diff 0.805)
+///     Worst case in the table; Rust ~6.4x more confident than Java.
 ///
 ///   scan 1507 'YLYEIAR' ch2:
-///     Java 1.873e-4 vs Rust 2.914e-4 (log10 diff 0.192) — PASS at 1.0 OOM
-///     Rust and Java agree to within a factor of 2. Previous measurement:
-///     2.862 (Rust 700x more confident). The 2026-05-10 fixes essentially
-///     resolved this case.
+///     Java SP 5.246e-4 vs Rust SP 2.914e-4 (log10 diff 0.255)
+///     Rust and Java agree to within a factor of 2.
 ///
 ///   scan 2693 'SLGKVGTR' ch2:
-///     Java 4.990e-3 vs Rust 1.652e-3 (log10 diff 0.480) — PASS at 1.0 OOM
-///     Rust is ~3x MORE confident than Java. Previous measurement: 3.675
-///     (Rust 4700x more confident). The 2026-05-10 fixes (especially the
-///     theo_mz formula correction and per-partition ion enumeration)
-///     resolved most of the divergence on this short, low-confidence PSM.
+///     Java SP 1.392e-3 vs Rust SP 1.652e-3 (log10 diff 0.074)
+///     Best case; Rust and Java agree to within ~18%.
 ///
-/// Remaining drift is at the SP level — the SEV gate compares
-/// SP * num_distinct_peptides, which masks part of the underlying
-/// per-spectrum score-distribution mismatch. Future tightening below
-/// 3.5 OOM requires reconciling SP itself for scan 3353.
-///
-/// Root causes still pending (post-2026-05-10):
-///   1. GF score distribution width on scan 3353 (spectrum-specific).
-///   2. Underflow guard alignment with Java's Float.MIN_VALUE.
-///   3. Score-range calibration: Rust score may differ from Java's RawScore.
-const TOLERANCE_LOG10: f64 = 3.5;
+/// The remaining SP-level drift is small and is tracked under the
+/// known-divergences list (RawScore scale + Float.MIN_VALUE underflow
+/// guard). The previously suspected scan-3353-specific score-distribution
+/// width bug appears to have been an artifact of the SEV-vs-SP comparison.
+const TOLERANCE_LOG10: f64 = 1.0;
 
 /// Extract a scan number from a TITLE string of the form
 /// `... scan=N` (e.g. mzML controllerType/controllerNumber/scan triplets).
@@ -119,7 +110,7 @@ fn peptide_residue_string(p: &model::Peptide) -> String {
 }
 
 #[test]
-fn rust_spec_evalue_within_one_oom_of_java_for_5_traced_psms() {
+fn rust_spec_probability_within_one_oom_of_java_for_5_traced_psms() {
     let target = FastaReader::load_all(BufReader::new(
         File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
     ))
@@ -143,7 +134,7 @@ fn rust_spec_evalue_within_one_oom_of_java_for_5_traced_psms() {
     let mut failures: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
-    for &(scan_nr, peptide, charge, java_spec_evalue) in FIVE_TRACED_PSMS {
+    for &(scan_nr, peptide, charge, java_spec_probability) in FIVE_TRACED_PSMS {
         // Locate spectrum by scan number encoded in TITLE.
         let spec_idx = spectra.iter().position(|s| {
             let title_scan = extract_scan_from_title(&s.title);
@@ -187,19 +178,21 @@ fn rust_spec_evalue_within_one_oom_of_java_for_5_traced_psms() {
                 // Count as a failure for the gate check below.
                 failures.push(format!(
                     "scan {scan_nr} '{peptide}' ch{charge}: \
-                     Java {java_spec_evalue:.3e} — peptide not in Rust queue (top-1: '{top_pep}')"
+                     Java SP {java_spec_probability:.3e} — peptide not in Rust queue (top-1: '{top_pep}')"
                 ));
                 continue;
             }
         };
 
-        let rust_sev = psm.spec_e_value;
-        let log_diff = (rust_sev.log10() - java_spec_evalue.log10()).abs();
+        // `psm.spec_e_value` is historically named but is actually the raw GF
+        // tail SP (`gf.spectral_probability(score)`) — see match_engine.rs.
+        let rust_spec_prob = psm.spec_e_value;
+        let log_diff = (rust_spec_prob.log10() - java_spec_probability.log10()).abs();
 
         let status = if log_diff < TOLERANCE_LOG10 { "PASS" } else { "FAIL" };
         notes.push(format!(
             "scan {scan_nr} '{peptide}' ch{charge}: \
-             Java {java_spec_evalue:.3e} vs Rust {rust_sev:.3e} \
+             Java SP {java_spec_probability:.3e} vs Rust SP {rust_spec_prob:.3e} \
              (log10 diff {log_diff:.3}) [{status}]"
         ));
 
@@ -208,14 +201,14 @@ fn rust_spec_evalue_within_one_oom_of_java_for_5_traced_psms() {
             // suspected root cause so Task 10 can target the fix.
             failures.push(format!(
                 "scan {scan_nr} '{peptide}' ch{charge}: \
-                 Java {java_spec_evalue:.3e} vs Rust {rust_sev:.3e} \
+                 Java SP {java_spec_probability:.3e} vs Rust SP {rust_spec_prob:.3e} \
                  (log10 diff {log_diff:.3} >= tolerance {TOLERANCE_LOG10:.1})"
             ));
         }
     }
 
     // Always print the per-PSM table for visibility in CI logs.
-    println!("\n=== Phase 6 Task 9: per-PSM SpecEValue parity ===");
+    println!("\n=== Phase 6 Task 9: per-PSM SpecProbability parity (SP-vs-SP) ===");
     for n in &notes {
         println!("  {n}");
     }

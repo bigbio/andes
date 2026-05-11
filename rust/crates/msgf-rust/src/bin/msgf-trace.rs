@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use input::{FastaReader, MzMLReader};
+use input::{FastaReader, MgfReader, MzMLReader};
 use model::{
     AminoAcid, AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance,
     ResidueSpec, Tolerance,
@@ -26,7 +26,7 @@ use search::{enumerate_candidates, match_spectra, SearchIndex, SearchParams};
 #[derive(Parser, Debug)]
 #[command(name = "msgf-trace", about = "Single-scan parity diagnostic for msgf-rust")]
 struct Cli {
-    /// mzML spectrum file.
+    /// Spectrum file (MGF or mzML — format auto-detected by extension).
     #[arg(long)]
     spectrum: PathBuf,
     /// Target FASTA database.
@@ -210,14 +210,42 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Load just the requested scan.
-    let reader = MzMLReader::new(BufReader::new(File::open(&cli.spectrum)?));
+    // Load just the requested scan. Auto-detect format by file extension:
+    // `.mzML`/`.mzml` → MzMLReader; anything else (e.g. `.mgf`) → MgfReader.
+    // For MGF specifically, fall back to extracting `scan=N` from the TITLE
+    // line when the reader did not populate `Spectrum::scan` (the BSA parity
+    // fixture `test.mgf` has no `SCANS=` field — scan is only encoded in
+    // TITLE, matching what `gf_java_parity.rs` does).
+    let ext = cli
+        .spectrum
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
     let mut spectra = Vec::new();
-    for r in reader {
-        let s = r?;
-        if s.scan == Some(cli.scan) {
-            spectra.push(s);
-            break;
+    match ext.as_deref() {
+        Some("mzml") => {
+            let reader = MzMLReader::new(BufReader::new(File::open(&cli.spectrum)?));
+            for r in reader {
+                let s = r?;
+                if s.scan == Some(cli.scan) {
+                    spectra.push(s);
+                    break;
+                }
+            }
+        }
+        _ => {
+            // MGF (default / backwards-compatible)
+            let reader = MgfReader::new(BufReader::new(File::open(&cli.spectrum)?));
+            for r in reader {
+                let s = r?;
+                let resolved_scan = s
+                    .scan
+                    .or_else(|| extract_scan_from_title(&s.title));
+                if resolved_scan == Some(cli.scan) {
+                    spectra.push(s);
+                    break;
+                }
+            }
         }
     }
     if spectra.is_empty() {
@@ -433,6 +461,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Extract `scan=N` from an MGF TITLE string (e.g. mzML
+/// `controllerType=0 controllerNumber=1 scan=3416`). Mirrors the helper in
+/// `crates/search/tests/gf_java_parity.rs` — required because the BSA parity
+/// fixture `test.mgf` has no `SCANS=` line, so `Spectrum::scan` is `None`.
+fn extract_scan_from_title(title: &str) -> Option<i32> {
+    title
+        .split_ascii_whitespace()
+        .find_map(|tok| tok.strip_prefix("scan=")?.parse::<i32>().ok())
 }
 
 /// Parse a peptide string in `K.PEPTIDE.D` form.

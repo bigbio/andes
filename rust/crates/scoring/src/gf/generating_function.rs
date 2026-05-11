@@ -1,13 +1,13 @@
 //! Generating-function DP: computes the score distribution
 //! `P(score | random peptide of given nominal mass)`.
 //!
-//! # Phase 6 Task 2 — uniform-prior DP
+//! # Uniform-prior DP
 //!
-//! `compute_uniform` (formerly `compute`) takes a generic increment-score
-//! callback and uses a uniform AA prior (`1/N`). Kept for tests and
-//! reference; not used in the production search path.
+//! `compute_uniform` takes a generic increment-score callback and uses a
+//! uniform AA prior (`1/N`). Kept for tests and reference; not used in the
+//! production search path.
 //!
-//! # Phase 6 Task 6 — graph-based DP
+//! # Graph-based DP
 //!
 //! `compute` (and `with_score_threshold`) mirror Java's
 //! `PrimitiveGeneratingFunction.computeGeneratingFunction()` and
@@ -37,17 +37,25 @@ pub struct GeneratingFunction {
     /// or exactly one element (the final adjusted dist) for `compute`.
     score_dists: Vec<ScoreDist>,
     score_bound: ScoreBound,
+    /// Diagnostic-only — exposes internal DP state for tracing.
+    ///
+    /// Populated only when the GF is built via
+    /// [`GeneratingFunction::with_score_threshold_retain_node_dists`] (the
+    /// production `compute` / `with_score_threshold` paths leave this `None`
+    /// so the per-node DP buffer is freed at the end of `compute_inner`).
+    /// Tuples are `(node_idx, node_mass, dist)`, in node-index order.
+    node_dists: Option<Vec<(usize, i32, ScoreDist)>>,
 }
 
 impl GeneratingFunction {
     // -----------------------------------------------------------------------
-    // Graph-based public API (Phase 6 Task 6)
+    // Graph-based public API
     // -----------------------------------------------------------------------
 
     /// Compute the GF over a precomputed primitive graph. Mirrors Java
     /// `PrimitiveGeneratingFunction.computeGeneratingFunction()`.
     pub fn compute(graph: &PrimitiveAaGraph, aa_set: &AminoAcidSet) -> Result<Self, GfError> {
-        compute_inner(graph, aa_set, None)
+        compute_inner(graph, aa_set, None, false)
     }
 
     /// Pre-pass: prune nodes whose maximum possible final score is below
@@ -59,7 +67,21 @@ impl GeneratingFunction {
         aa_set: &AminoAcidSet,
     ) -> Result<Self, GfError> {
         let min_score_by_node = setup_score_threshold(graph, aa_set, score_threshold);
-        compute_inner(graph, aa_set, Some(min_score_by_node))
+        compute_inner(graph, aa_set, Some(min_score_by_node), false)
+    }
+
+    /// Diagnostic-only — same DP as [`with_score_threshold`] but additionally
+    /// retains the per-node `ScoreDist` buffer so `iter_node_dists` can dump
+    /// it for tracing. Do NOT use on the production search path: it disables
+    /// the per-node `.take()` cleanup, increasing peak memory by the size of
+    /// the DP table.
+    pub fn with_score_threshold_retain_node_dists(
+        graph: &PrimitiveAaGraph,
+        score_threshold: i32,
+        aa_set: &AminoAcidSet,
+    ) -> Result<Self, GfError> {
+        let min_score_by_node = setup_score_threshold(graph, aa_set, score_threshold);
+        compute_inner(graph, aa_set, Some(min_score_by_node), true)
     }
 
     /// The final (enzyme-adjusted) score distribution.
@@ -88,8 +110,19 @@ impl GeneratingFunction {
         dist.get_spectral_probability(score)
     }
 
+    /// Diagnostic-only — exposes internal DP state for tracing.
+    ///
+    /// Yields `(node_idx, node_mass, &ScoreDist)` for every node retained by
+    /// the DP. Returns an empty iterator unless the GF was built via
+    /// [`Self::with_score_threshold_retain_node_dists`].
+    pub fn iter_node_dists(&self) -> impl Iterator<Item = (usize, i32, &ScoreDist)> {
+        self.node_dists
+            .iter()
+            .flat_map(|v| v.iter().map(|(ni, m, d)| (*ni, *m, d)))
+    }
+
     // -----------------------------------------------------------------------
-    // Uniform-prior DP (Phase 6 Task 2; renamed from `compute`)
+    // Uniform-prior DP
     // -----------------------------------------------------------------------
 
     /// Compute the generating function up to `max_mass`. The
@@ -112,6 +145,7 @@ impl GeneratingFunction {
             return Self {
                 score_dists: Vec::new(),
                 score_bound,
+                node_dists: None,
             };
         }
         let num_aas = aa_masses.len();
@@ -156,6 +190,7 @@ impl GeneratingFunction {
         Self {
             score_dists,
             score_bound,
+            node_dists: None,
         }
     }
 
@@ -178,7 +213,7 @@ impl GeneratingFunction {
 }
 
 // -----------------------------------------------------------------------
-// Phase 6 Task 6 — private implementation
+// Graph-based DP — private implementation
 // -----------------------------------------------------------------------
 
 /// Translate Java `setUpScoreThreshold` (lines 36-87).
@@ -249,10 +284,16 @@ fn setup_score_threshold(
 }
 
 /// Core DP. Translates Java `computeGeneratingFunction` (lines 89-205).
+///
+/// `retain_node_dists` is a diagnostic-only flag: when `true`, the per-node
+/// `ScoreDist` buffer is cloned into `GeneratingFunction.node_dists` so the
+/// caller can inspect intermediate distributions via `iter_node_dists`. When
+/// `false` (the production path) the DP behavior is unchanged.
 fn compute_inner(
     graph: &PrimitiveAaGraph,
     aa_set: &AminoAcidSet,
     min_score_by_node: Option<Vec<i32>>,
+    retain_node_dists: bool,
 ) -> Result<GeneratingFunction, GfError> {
     let node_count = graph.node_count;
     let source_idx = graph.source_node_idx;
@@ -363,7 +404,7 @@ fn compute_inner(
             // Mirrors Java's `Float.MIN_VALUE` (smallest positive denormal f32 ~1.4e-45),
             // NOT `f32::MIN_POSITIVE` (smallest positive normal ~1.18e-38). The Java GF
             // uses denormal min as the underflow floor; using normal min instead biases
-            // SpecEValues low by ~7 OOM for short peptides (Phase 6/Task 10 finding).
+            // SpecEValues low by ~7 OOM for short peptides.
             cur_dist.set_prob(guard_score, f32::from_bits(1) as f64);
         }
 
@@ -379,6 +420,21 @@ fn compute_inner(
             score_range_overflow_count
         );
     }
+
+    // Diagnostic-only: if requested, snapshot per-node dists before the
+    // `.take()` below would consume the sink. Production path leaves this as
+    // `None`, identical to prior behavior.
+    let node_dists_snapshot: Option<Vec<(usize, i32, ScoreDist)>> = if retain_node_dists {
+        let mut snap: Vec<(usize, i32, ScoreDist)> = Vec::new();
+        for ni in 0..node_count {
+            if let Some(d) = dist_by_node[ni].as_ref() {
+                snap.push((ni, graph.node_mass(ni), d.clone()));
+            }
+        }
+        Some(snap)
+    } else {
+        None
+    };
 
     // Extract sink distribution (Java lines 179-185).
     let sink_dist = dist_by_node[sink_idx]
@@ -416,6 +472,7 @@ fn compute_inner(
     Ok(GeneratingFunction {
         score_dists: vec![final_dist],
         score_bound: ScoreBound::new(final_min, final_max),
+        node_dists: node_dists_snapshot,
     })
 }
 

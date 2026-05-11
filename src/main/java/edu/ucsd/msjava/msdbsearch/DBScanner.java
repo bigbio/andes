@@ -2,6 +2,7 @@ package edu.ucsd.msjava.msdbsearch;
 
 import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.msgf.*;
+import edu.ucsd.msjava.msscorer.FastScorer;
 import edu.ucsd.msjava.msscorer.NewRankScorer;
 import edu.ucsd.msjava.msscorer.SimpleDBSearchScorer;
 import edu.ucsd.msjava.msutil.*;
@@ -14,6 +15,11 @@ import java.util.*;
 import java.util.Map.Entry;
 
 public class DBScanner {
+
+    // ---- score-traceability instrumentation (gated by system properties) ----
+    private static final boolean TRACE = "true".equals(System.getProperty("msgfplus.trace"));
+    private static final int TRACE_SCAN = Integer.parseInt(System.getProperty("msgfplus.trace.scan", "-1"));
+    private static final String TRACE_PEP = System.getProperty("msgfplus.trace.pep", "");
 
     protected int minPeptideLength;
     protected int maxPeptideLength;
@@ -510,7 +516,21 @@ public class DBScanner {
                                 SimpleDBSearchScorer<NominalMass> scorer = specScanner.getSpecKeyScorerMap().get(specKey);
 //								if(sequence.getSubsequence(index, index+i+1).equalsIgnoreCase("SRDTAIKT"))
 //									System.out.println("Debug");
-                                int score = cleavageScore + scorer.getScore(candidatePepGrid.getPRMGrid(j), candidatePepGrid.getNominalPRMGrid(j), 1, pepLength + 1, candidatePepGrid.getNumMods(j));
+                                int rawScore = scorer.getScore(candidatePepGrid.getPRMGrid(j), candidatePepGrid.getNominalPRMGrid(j), 1, pepLength + 1, candidatePepGrid.getNumMods(j));
+                                // per-split trace: fires only when TRACE=true, scan matches, and peptide matches
+                                if (TRACE && scorer instanceof FastScorer) {
+                                    int thisScan = scorer.getScanNumArr() != null && scorer.getScanNumArr().length > 0 ? scorer.getScanNumArr()[0] : -1;
+                                    String pepSeq = candidatePepGrid.getPeptideSeq(j);
+                                    if (thisScan == TRACE_SCAN && pepSeq != null && !TRACE_PEP.isEmpty() && pepSeq.contains(TRACE_PEP)) {
+                                        ((FastScorer) scorer).getScoreWithTrace(
+                                                candidatePepGrid.getPRMGrid(j),
+                                                candidatePepGrid.getNominalPRMGrid(j),
+                                                1, pepLength + 1,
+                                                candidatePepGrid.getNumMods(j),
+                                                pepSeq);
+                                    }
+                                }
+                                int score = cleavageScore + rawScore;
                                 PriorityQueue<DatabaseMatch> prevMatchQueue = curSpecKeyDBMatchMap.get(specKey);
                                 if (prevMatchQueue == null) {
                                     prevMatchQueue = new PriorityQueue<DatabaseMatch>();
@@ -616,6 +636,35 @@ public class DBScanner {
 
             PrimitiveGeneratingFunctionGroup gf = new PrimitiveGeneratingFunctionGroup();
 
+            // Pre-compute trace metadata once per scan: if score-dist tracing is
+            // enabled (-Dmsgfplus.gftrace=true) and this scan matches the trace scan
+            // filter, find the (nominalMass, pepSeq, matchedScore) of the matched
+            // peptide so we can dump per-node GF state for only that mass index.
+            // No-op unless GFTRACE && scan match.
+            boolean gfTraceActive = false;
+            int gfTraceScan = -1;
+            int gfTraceNominalMass = Integer.MIN_VALUE;
+            String gfTracePepSeq = null;
+            int gfTraceMatchedScore = Integer.MIN_VALUE;
+            if (PrimitiveGeneratingFunction.GFTRACE
+                    && scoredSpec.getScanNumArr() != null && scoredSpec.getScanNumArr().length > 0) {
+                int thisScan = scoredSpec.getScanNumArr()[0];
+                if (thisScan == PrimitiveGeneratingFunction.GFTRACE_SCAN
+                        && !PrimitiveGeneratingFunction.GFTRACE_PEP.isEmpty()) {
+                    for (DatabaseMatch m : matchQueue) {
+                        String pep = m.getPepSeq();
+                        if (pep != null && pep.contains(PrimitiveGeneratingFunction.GFTRACE_PEP)) {
+                            gfTraceActive = true;
+                            gfTraceScan = thisScan;
+                            gfTraceNominalMass = m.getNominalPeptideMass();
+                            gfTracePepSeq = pep;
+                            gfTraceMatchedScore = m.getScore();
+                            break;
+                        }
+                    }
+                }
+            }
+
             for (int peptideMassIndex = minPeptideMassIndex; peptideMassIndex <= maxPeptideMassIndex; peptideMassIndex++) {
                 PrimitiveAminoAcidGraph graph = new PrimitiveAminoAcidGraph(
                         aaSet,
@@ -628,6 +677,12 @@ public class DBScanner {
                 PrimitiveGeneratingFunction gfi = new PrimitiveGeneratingFunction(graph);
                 gfi.setUpScoreThreshold(minScore);
                 gf.accept(gfi);
+                if (gfTraceActive && peptideMassIndex == gfTraceNominalMass) {
+                    // Dump per-node GF score distributions for the matched peptide's
+                    // nominal-mass GF. Mirrors Rust msgf-trace --print-score-dist
+                    // format (GF_NODE / GF_PROB / GF_TAIL).
+                    gfi.dumpScoreDistTrace(gfTraceScan, gfTracePepSeq, gfTraceMatchedScore);
+                }
                 // graph, gfi leave scope → eligible for GC before next mass index.
             }
 

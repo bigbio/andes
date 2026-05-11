@@ -11,12 +11,27 @@ import edu.ucsd.msjava.msutil.Enzyme;
  * The inner DP loop operates on contiguous memory with zero object allocation.
  */
 public class PrimitiveGeneratingFunction {
+    // ---- GF score-distribution trace instrumentation (gated by system properties) ----
+    // Mirrors the per-ion trace pattern in NewScoredSpectrum / DBScanner. JIT folds
+    // these static-final booleans to a no-op when GFTRACE is false, so this is free
+    // in production.
+    public static final boolean GFTRACE = "true".equals(System.getProperty("msgfplus.gftrace"));
+    public static final int GFTRACE_SCAN = Integer.parseInt(System.getProperty("msgfplus.trace.scan", "-1"));
+    public static final String GFTRACE_PEP = System.getProperty("msgfplus.trace.pep", "");
+
     private final PrimitiveAminoAcidGraph graph;
 
     private ScoreDist distribution = null;
     private boolean isGFComputed = false;
 
     private int[] minScoreByNode;
+
+    /**
+     * Per-node score distributions retained only while {@link #GFTRACE} is enabled.
+     * In production this stays null and the local {@code distByNode} inside
+     * {@link #computeGeneratingFunction()} is GC'd as soon as that method returns.
+     */
+    private ScoreDist[] traceDistByNode = null;
 
     public PrimitiveGeneratingFunction(PrimitiveAminoAcidGraph graph) {
         this.graph = graph;
@@ -31,6 +46,52 @@ public class PrimitiveGeneratingFunction {
     public double getSpectralProbability(int score) {
         if (distribution == null || !distribution.isProbSet()) return 1.0;
         return distribution.getSpectralProbability(score);
+    }
+
+    /** Graph accessor for trace consumers; package-private alternatives are awkward across packages. */
+    public PrimitiveAminoAcidGraph getGraph() { return graph; }
+
+    /** Retained only when {@link #GFTRACE} is true; null otherwise. */
+    public ScoreDist[] getTraceDistByNode() { return traceDistByNode; }
+
+    /**
+     * Dump GF_NODE / GF_PROB / GF_TAIL lines for this single GF to {@code System.err},
+     * matching the format emitted by Rust {@code msgf-trace --print-score-dist}.
+     * No-op unless {@link #GFTRACE} is true and {@code traceDistByNode} was retained
+     * during {@link #computeGeneratingFunction()}.
+     *
+     * @param scan         scan number label (for filtering downstream)
+     * @param pepSeq       peptide label (for filtering downstream)
+     * @param matchedScore matched PSM score used for the tail-sum / spec_prob line
+     */
+    public void dumpScoreDistTrace(int scan, String pepSeq, int matchedScore) {
+        if (!GFTRACE || traceDistByNode == null || distribution == null) return;
+        int[] activeNodes = graph.getActiveNodes();
+        for (int ni = 0; ni < traceDistByNode.length; ni++) {
+            ScoreDist d = traceDistByNode[ni];
+            if (d == null) continue;
+            int nodeMass = activeNodes[ni];
+            System.err.printf("GF_NODE: scan=%d pep=%s node_idx=%d mass=%d min_score=%d max_score=%d%n",
+                    scan, pepSeq, ni, nodeMass, d.getMinScore(), d.getMaxScore());
+            // ScoreDist max-score is exclusive (probDistribution.length == maxScore - minScore).
+            for (int s = d.getMinScore(); s < d.getMaxScore(); s++) {
+                double p = d.getProbability(s);
+                if (p == 0.0) continue;
+                System.err.printf("GF_PROB: scan=%d pep=%s node_idx=%d score=%d prob=%.6e%n",
+                        scan, pepSeq, ni, s, p);
+            }
+        }
+        // Tail sum on this single GF's final distribution. Rust dumps over [matched_score, final_max).
+        double tail = 0.0;
+        int finalMin = distribution.getMinScore();
+        int finalMax = distribution.getMaxScore();
+        for (int s = Math.max(matchedScore, finalMin); s < finalMax; s++) {
+            tail += distribution.getProbability(s);
+        }
+        double sp = distribution.getSpectralProbability(matchedScore);
+        System.err.printf(
+                "GF_TAIL: scan=%d pep=%s matched_score=%d spec_prob=%.6e tail_sum=%.6e final_min=%d final_max=%d%n",
+                scan, pepSeq, matchedScore, sp, tail, finalMin, finalMax);
     }
 
     public void setUpScoreThreshold(int score) {
@@ -201,6 +262,12 @@ public class PrimitiveGeneratingFunction {
 
         this.distribution = finalDist;
         this.isGFComputed = true;
+        // Retain per-node distributions only when score-distribution trace is enabled
+        // (system property -Dmsgfplus.gftrace=true). In production GFTRACE is false,
+        // distByNode falls out of scope, and memory behavior matches pre-trace baseline.
+        if (GFTRACE) {
+            this.traceDistByNode = distByNode;
+        }
         return true;
     }
 }

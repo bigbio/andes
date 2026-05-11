@@ -1,8 +1,11 @@
 //! Bundled search database: target+decoy ProteinDb, CompactFastaSequence,
 //! and SuffixArray. Consumed by candidate generation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::Hasher;
 use std::sync::OnceLock;
+
+use rustc_hash::{FxHashSet, FxHasher};
 
 use model::compact_fasta::{CompactFastaError, CompactFastaSequence};
 use crate::candidate_gen::enumerate_candidates;
@@ -65,15 +68,20 @@ impl SearchIndex {
     /// tracked in `docs/parity-analysis/known-divergences.md`).
     ///
     /// Distinct identity is the residue byte sequence with no mods and no
-    /// flanking residues — matching Java's prefix comparison over residue bytes.
-    /// Two candidates with identical residues but different mod variants count
-    /// as one (residues only); two candidates that differ in flanking context
-    /// also count as one.
+    /// flanking residues — matching Java's prefix comparison over residue bytes
+    /// (`CompactSuffixArray.computeNumDistinctPeptides` walks the SA's residue
+    /// bytes only; modifications are not part of Java's count). Two candidates
+    /// with identical residues but different mod variants count as one;
+    /// candidates that differ only in flanking context also count as one.
     ///
-    /// Cost is bounded by the candidate-set walk (a HashSet of residue
-    /// `Vec<u8>` per length); the HashSets are dropped after the count is
-    /// frozen. See `docs/superpowers/specs/2026-05-10-evalue-search-index-design.md`
-    /// for the memory analysis at PXD001819 scale.
+    /// Implementation: each candidate is reduced to a `u64` FxHash fingerprint
+    /// of its bare residue bytes; the per-length seen-set holds those u64s,
+    /// not `Vec<u8>` — eliminating ~5-10M small allocations per
+    /// `enumerate_candidates` pass at PXD001819 scale. Hash-collision
+    /// probability at N=10M is ~3e-7, and a collision merely undercounts by 1
+    /// (well below the precision the distinct count is used at).
+    /// See `docs/superpowers/specs/2026-05-10-evalue-search-index-design.md`
+    /// for the memory analysis.
     pub fn with_distinct_peptide_counts(
         self,
         params: &SearchParams,
@@ -97,13 +105,23 @@ impl SearchIndex {
         if self.distinct_peptide_counts.get().is_some() {
             return;
         }
-        let mut seen_per_length: HashMap<usize, HashSet<Vec<u8>>> = HashMap::new();
+        // Per-length seen-set holds 8-byte FxHash fingerprints, not
+        // `Vec<u8>`. At PXD001819 scale that avoids ~5-10M Vec<u8>
+        // allocations per pass (root cause of the T2-5 wall regression
+        // 5-6 min → 9 min) while preserving bare-residue dedup semantics
+        // that mirror Java's `CompactSuffixArray.computeNumDistinctPeptides`.
+        let mut seen_per_length: HashMap<usize, FxHashSet<u64>> = HashMap::new();
         for cand in enumerate_candidates(self, params, decoy_prefix) {
-            let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+            let residues = &cand.peptide.residues;
+            let mut h = FxHasher::default();
+            for aa in residues {
+                h.write_u8(aa.residue);
+            }
+            let fp = h.finish();
             seen_per_length
                 .entry(residues.len())
                 .or_default()
-                .insert(residues);
+                .insert(fp);
         }
         let counts: HashMap<usize, usize> = seen_per_length
             .into_iter()

@@ -118,6 +118,12 @@ impl ScoreDist {
     /// for each `t` in `other`'s score range, accumulate
     /// `other.prob[t] * aa_prob` into `self.prob[t + score_diff]`,
     /// clipping the destination to `self`'s range.
+    ///
+    /// Inner loop is split into 4-wide chunks so LLVM can auto-vectorize on
+    /// AVX2 (x86_64) / NEON (arm64). Each lane writes to a DISTINCT index —
+    /// `dst_idx = src_idx + (score_diff + other_min - self_min)` is a constant
+    /// offset, so chunking is bit-identical to the scalar loop (verified by
+    /// `tests/add_prob_dist_chunked_parity.rs`).
     pub fn add_prob_dist(&mut self, other: &ScoreDist, score_diff: i32, aa_prob: f64) {
         let other_p = match other.prob_distribution.as_ref() {
             Some(p) => p,
@@ -133,10 +139,27 @@ impl ScoreDist {
         let self_max = self.bound.max_score;
         let t_start = other_min.max(self_min - score_diff);
         let t_end = other_max.min(self_max - score_diff);
-        for t in t_start..t_end {
-            let src_idx = (t - other_min) as usize;
-            let dst_idx = (t + score_diff - self_min) as usize;
-            self_p[dst_idx] += other_p[src_idx] * aa_prob;
+        if t_end <= t_start {
+            return;
+        }
+        let len = (t_end - t_start) as usize;
+        let src_base = (t_start - other_min) as usize;
+        let dst_base = (t_start + score_diff - self_min) as usize;
+        // Split into 4-wide chunks (AVX2 / NEON natural width for f64).
+        // Each iteration's 4 writes hit distinct indices, so reordering
+        // (or vectorizing) is bit-identical to the scalar loop.
+        let chunks = len / 4;
+        for c in 0..chunks {
+            let s = src_base + c * 4;
+            let d = dst_base + c * 4;
+            self_p[d    ] += other_p[s    ] * aa_prob;
+            self_p[d + 1] += other_p[s + 1] * aa_prob;
+            self_p[d + 2] += other_p[s + 2] * aa_prob;
+            self_p[d + 3] += other_p[s + 3] * aa_prob;
+        }
+        let tail_start = chunks * 4;
+        for r in tail_start..len {
+            self_p[dst_base + r] += other_p[src_base + r] * aa_prob;
         }
     }
 

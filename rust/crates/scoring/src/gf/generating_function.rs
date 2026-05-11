@@ -535,16 +535,37 @@ fn compute_inner(
             //   for t in max(other_min, self_min - score_diff)
             //          .. min(other_max, self_max - score_diff):
             //     self[t + score_diff - self_min] += other[t - other_min] * aa_prob
+            //
+            // Inner loop is split into 4-wide chunks so LLVM can auto-vectorize
+            // on AVX2 / NEON. `dst_idx - src_idx = combined_score + other_min -
+            // self_min` is a constant offset, so each chunk's 4 writes hit
+            // distinct indices and the chunked form is bit-identical to the
+            // scalar loop. Parity is gated by
+            // `tests/add_prob_dist_chunked_parity.rs` (covers the standalone
+            // `ScoreDist::add_prob_dist` method, which has the same structure).
             let other_min = prev_hdr.min_score;
             let other_max = prev_hdr.min_score + prev_hdr.len as i32;
             let self_min = cur_min_score;
             let self_max = cur_max_score;
             let t_start = other_min.max(self_min - combined_score);
             let t_end = other_max.min(self_max - combined_score);
-            for t in t_start..t_end {
-                let src_idx = (t - other_min) as usize;
-                let dst_idx = (t + combined_score - self_min) as usize;
-                cur_slice[dst_idx] += prev_slice[src_idx] * aa_prob;
+            if t_end > t_start {
+                let len = (t_end - t_start) as usize;
+                let src_base = (t_start - other_min) as usize;
+                let dst_base = (t_start + combined_score - self_min) as usize;
+                let chunks = len / 4;
+                for c in 0..chunks {
+                    let s = src_base + c * 4;
+                    let d = dst_base + c * 4;
+                    cur_slice[d    ] += prev_slice[s    ] * aa_prob;
+                    cur_slice[d + 1] += prev_slice[s + 1] * aa_prob;
+                    cur_slice[d + 2] += prev_slice[s + 2] * aa_prob;
+                    cur_slice[d + 3] += prev_slice[s + 3] * aa_prob;
+                }
+                let tail_start = chunks * 4;
+                for r in tail_start..len {
+                    cur_slice[dst_base + r] += prev_slice[src_base + r] * aa_prob;
+                }
             }
         }
 

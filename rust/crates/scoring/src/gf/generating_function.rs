@@ -283,12 +283,128 @@ fn setup_score_threshold(
     min_score_by_node
 }
 
+/// Per-node header into the flat `ScoreDistArena` storage.
+///
+/// `start..start+len` is the half-open f64 slice for this node's
+/// `prob_distribution`. `min_score` is the lowest score covered; the
+/// score at storage index `start + k` is `min_score + k`. `is_set` flips
+/// `false → true` the first time the node is populated by the DP, taking
+/// the role of the `Option::None` sentinel in the legacy DP.
+#[derive(Debug, Clone, Copy)]
+struct NodeSlice {
+    start: u32,
+    len: u32,
+    min_score: i32,
+    is_set: bool,
+}
+
+impl NodeSlice {
+    const UNSET: NodeSlice = NodeSlice {
+        start: 0,
+        len: 0,
+        min_score: 0,
+        is_set: false,
+    };
+
+    #[inline]
+    fn range(&self) -> std::ops::Range<usize> {
+        let s = self.start as usize;
+        s..s + self.len as usize
+    }
+}
+
+/// Flat-arena replacement for `Vec<Option<ScoreDist>>`. A single contiguous
+/// `Vec<f64>` backs the probability arrays of every node; per-node headers
+/// describe slice ranges. Replaces ~node_count tiny `Vec<f64>` allocations
+/// (one per node, summed to ~55M per PXD001819 run) with one moderately
+/// sized allocation per graph (~96 KB typical).
+struct ScoreDistArena {
+    storage: Vec<f64>,
+    headers: Vec<NodeSlice>,
+    /// Length of the next free region in `storage`; `storage[..fill]` is
+    /// the populated prefix. Used by `reserve_slot` to bump-allocate
+    /// per-node slices as nodes are visited.
+    fill: usize,
+}
+
+impl ScoreDistArena {
+    fn new(node_count: usize, initial_capacity: usize) -> Self {
+        Self {
+            storage: Vec::with_capacity(initial_capacity),
+            headers: vec![NodeSlice::UNSET; node_count],
+            fill: 0,
+        }
+    }
+
+    /// Reserve a slot for node `ni` spanning scores `[min_score, max_score)`.
+    /// Returns the offset of the freshly zeroed slice within `storage`.
+    ///
+    /// Grows `storage` if necessary. Callers must NOT hold any borrows into
+    /// `storage` across a `reserve_slot` call (growth may relocate the
+    /// backing buffer). The DP body honors this: it only calls
+    /// `reserve_slot` once per outer-loop iteration, before any
+    /// `split_at_mut` borrows are taken.
+    fn reserve_slot(&mut self, ni: usize, min_score: i32, max_score: i32) -> usize {
+        let len = (max_score - min_score) as usize;
+        let start = self.fill;
+        let needed = start + len;
+        if needed > self.storage.len() {
+            // Grow with zero-fill so the slice we hand out is initialized.
+            self.storage.resize(needed, 0.0);
+        } else {
+            // Reusing existing capacity (unlikely on first pass, but the
+            // resize() above might over-allocate on subsequent growth
+            // cycles; either way zero the slice).
+            for slot in &mut self.storage[start..start + len] {
+                *slot = 0.0;
+            }
+        }
+        self.headers[ni] = NodeSlice {
+            start: start as u32,
+            len: len as u32,
+            min_score,
+            is_set: true,
+        };
+        self.fill += len;
+        start
+    }
+
+    /// Materialize the slice for node `ni` as an owned `ScoreDist` (used
+    /// for the sink and for `retain_node_dists` snapshots).
+    fn to_score_dist(&self, ni: usize) -> Option<ScoreDist> {
+        let hdr = self.headers[ni];
+        if !hdr.is_set {
+            return None;
+        }
+        let mut d = ScoreDist::new(
+            hdr.min_score,
+            hdr.min_score + hdr.len as i32,
+            false,
+            true,
+        );
+        let slice = &self.storage[hdr.range()];
+        for (i, &v) in slice.iter().enumerate() {
+            // get_probability/set_prob both index from min_score, so
+            // index k corresponds to score (min_score + k).
+            d.set_prob(hdr.min_score + i as i32, v);
+        }
+        Some(d)
+    }
+}
+
 /// Core DP. Translates Java `computeGeneratingFunction` (lines 89-205).
 ///
-/// `retain_node_dists` is a diagnostic-only flag: when `true`, the per-node
-/// `ScoreDist` buffer is cloned into `GeneratingFunction.node_dists` so the
-/// caller can inspect intermediate distributions via `iter_node_dists`. When
-/// `false` (the production path) the DP behavior is unchanged.
+/// Uses a flat-arena `ScoreDistArena` for per-node probability buffers: one
+/// `Vec<f64>` allocation per graph instead of `node_count` tiny allocations
+/// (one per `Option<ScoreDist>::Some(_)`). Semantics are bit-identical to
+/// the previous `Vec<Option<ScoreDist>>` implementation; the equivalence
+/// was verified across five peptide-mass fixtures during the Task 2 arena
+/// refactor.
+///
+/// `retain_node_dists` is a diagnostic-only flag: when `true`, each visited
+/// node's probability slice is materialized into a `ScoreDist` and stashed
+/// on `GeneratingFunction.node_dists` so the caller can dump it via
+/// `iter_node_dists`. The production path passes `false`.
 fn compute_inner(
     graph: &PrimitiveAaGraph,
     aa_set: &AminoAcidSet,
@@ -299,8 +415,14 @@ fn compute_inner(
     let source_idx = graph.source_node_idx;
     let sink_idx = graph.sink_node_idx;
 
-    // dist_by_node[ni] = Some(dist) once computed; None = not yet reachable.
-    let mut dist_by_node: Vec<Option<ScoreDist>> = vec![None; node_count];
+    // Estimate initial arena capacity: typical per-node score range is ~80;
+    // we pick 256 to absorb deeper, higher-mass graphs without reallocating
+    // mid-DP. The arena grows via `Vec::resize` if a node exceeds the
+    // estimate — growth happens BEFORE any in-flight slice borrows are
+    // taken, so it cannot invalidate a `split_at_mut` view.
+    let initial_capacity = 1 // source slot
+        + node_count.saturating_mul(256);
+    let mut arena = ScoreDistArena::new(node_count, initial_capacity);
 
     // Debug-only counter: tracks how many nodes were skipped due to the
     // score-range guard (|score| > 10000). Fires only in debug builds;
@@ -309,9 +431,10 @@ fn compute_inner(
     let mut score_range_overflow_count: u32 = 0;
 
     // Source has full probability at score 0 (Java lines 101-103).
-    let mut source_dist = ScoreDist::new(0, 1, false, true);
-    source_dist.set_prob(0, 1.0);
-    dist_by_node[source_idx] = Some(source_dist);
+    {
+        let start = arena.reserve_slot(source_idx, 0, 1);
+        arena.storage[start] = 1.0;
+    }
 
     // Scratch buffer for valid edge indices (Java lines 106-111).
     let max_edges_per_node = (0..node_count)
@@ -351,20 +474,21 @@ fn compute_inner(
                 Some(idx) => idx,
                 None => continue,
             };
-            let prev_dist = match dist_by_node[prev_idx].as_ref() {
-                Some(d) => d,
-                None => continue,
-            };
+            let prev_hdr = arena.headers[prev_idx];
+            if !prev_hdr.is_set {
+                continue;
+            }
 
             let combined_score = cur_node_score + graph.edge_score[e];
-            let possible_max = prev_dist.max_score() + combined_score;
+            let prev_max = prev_hdr.min_score + prev_hdr.len as i32;
+            let possible_max = prev_max + combined_score;
             if possible_max > cur_max_score {
                 cur_max_score = possible_max;
             }
 
             // Only update min from predecessor when NOT using threshold pre-pass.
             if min_score_by_node.is_none() {
-                let possible_min = prev_dist.min_score() + combined_score;
+                let possible_min = prev_hdr.min_score + combined_score;
                 if possible_min < cur_min_score {
                     cur_min_score = possible_min;
                 }
@@ -386,29 +510,52 @@ fn compute_inner(
             continue;
         }
 
-        // Allocate and fill cur_dist (Java lines 160-169).
-        let mut cur_dist = ScoreDist::new(cur_min_score, cur_max_score, false, true);
+        // Reserve cur_dist slice in the arena (Java lines 160).
+        let cur_start = arena.reserve_slot(ni, cur_min_score, cur_max_score);
+        let cur_len = (cur_max_score - cur_min_score) as usize;
+
+        // Fill cur_dist by accumulating from each predecessor (Java lines 161-169).
+        // `split_at_mut` is required to borrow `storage` immutably (predecessor
+        // slice) and mutably (cur_dist slice) simultaneously. The cur_dist
+        // slice was just appended to the end of `storage`, so all predecessor
+        // slices live in `storage[..cur_start]`.
+        let (prev_region, cur_region) = arena.storage.split_at_mut(cur_start);
+        let cur_slice = &mut cur_region[..cur_len];
 
         for &e in &valid_edges {
             let prev_mass = graph.edge_prev_node[e];
             // Safety: we already verified these are valid above.
             let prev_idx = graph.node_index_for_mass(prev_mass).unwrap();
-            let prev_dist = dist_by_node[prev_idx].as_ref().unwrap();
+            let prev_hdr = arena.headers[prev_idx];
+            let prev_slice = &prev_region[prev_hdr.range()];
             let combined_score = cur_node_score + graph.edge_score[e];
-            cur_dist.add_prob_dist(prev_dist, combined_score, graph.edge_prob[e] as f64);
+            let aa_prob = graph.edge_prob[e] as f64;
+
+            // Mirror ScoreDist::add_prob_dist:
+            //   for t in max(other_min, self_min - score_diff)
+            //          .. min(other_max, self_max - score_diff):
+            //     self[t + score_diff - self_min] += other[t - other_min] * aa_prob
+            let other_min = prev_hdr.min_score;
+            let other_max = prev_hdr.min_score + prev_hdr.len as i32;
+            let self_min = cur_min_score;
+            let self_max = cur_max_score;
+            let t_start = other_min.max(self_min - combined_score);
+            let t_end = other_max.min(self_max - combined_score);
+            for t in t_start..t_end {
+                let src_idx = (t - other_min) as usize;
+                let dst_idx = (t + combined_score - self_min) as usize;
+                cur_slice[dst_idx] += prev_slice[src_idx] * aa_prob;
+            }
         }
 
         // Underflow guard at max_score - 1 (Java lines 171-173).
-        let guard_score = cur_max_score - 1;
-        if cur_dist.get_probability(guard_score) == 0.0 {
+        // Read-then-write on the same slice; `cur_slice` is already &mut.
+        let guard_idx = (cur_max_score - 1 - cur_min_score) as usize;
+        if cur_slice[guard_idx] == 0.0 {
             // Mirrors Java's `Float.MIN_VALUE` (smallest positive denormal f32 ~1.4e-45),
-            // NOT `f32::MIN_POSITIVE` (smallest positive normal ~1.18e-38). The Java GF
-            // uses denormal min as the underflow floor; using normal min instead biases
-            // SpecEValues low by ~7 OOM for short peptides.
-            cur_dist.set_prob(guard_score, f32::from_bits(1) as f64);
+            // NOT `f32::MIN_POSITIVE` (smallest positive normal ~1.18e-38).
+            cur_slice[guard_idx] = f32::from_bits(1) as f64;
         }
-
-        dist_by_node[ni] = Some(cur_dist);
     }
 
     // Debug-only: surface score-range overflow count before returning.
@@ -421,14 +568,13 @@ fn compute_inner(
         );
     }
 
-    // Diagnostic-only: if requested, snapshot per-node dists before the
-    // `.take()` below would consume the sink. Production path leaves this as
-    // `None`, identical to prior behavior.
+    // Diagnostic-only: snapshot per-node dists. Production path leaves this
+    // as `None`, identical to prior behavior.
     let node_dists_snapshot: Option<Vec<(usize, i32, ScoreDist)>> = if retain_node_dists {
         let mut snap: Vec<(usize, i32, ScoreDist)> = Vec::new();
         for ni in 0..node_count {
-            if let Some(d) = dist_by_node[ni].as_ref() {
-                snap.push((ni, graph.node_mass(ni), d.clone()));
+            if let Some(d) = arena.to_score_dist(ni) {
+                snap.push((ni, graph.node_mass(ni), d));
             }
         }
         Some(snap)
@@ -437,8 +583,8 @@ fn compute_inner(
     };
 
     // Extract sink distribution (Java lines 179-185).
-    let sink_dist = dist_by_node[sink_idx]
-        .take()
+    let sink_dist = arena
+        .to_score_dist(sink_idx)
         .ok_or(GfError::SinkUnreachable)?;
 
     let min_score = sink_dist.min_score();

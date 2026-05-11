@@ -15,6 +15,24 @@ and the project memory entry `pxd001819-fdr-parity-achieved`.
 
 ## 1. SpecEValue / GF tails (still not bit-identical to Java)
 
+### Iter 1 partial — 2026-05-10
+
+Gate tightened from 4.0 → 3.5 OOM (0.5 OOM progress toward the 1.0 OOM DoD).
+Diagnostic infrastructure shipped (Rust `msgf-trace --print-score-dist`, Java
+`GeneratingFunction.getSpectralProbabilityWithTrace`, Python diff harness).
+scan 3353 KVPQVSTPTLVEVSR ch3 identified as the new SP-level outlier (log10
+divergence regressed 1.010 → 3.276 since 2026-05-05). Commits: c6fbb14
+(msgf-trace MGF support), 1962cfb / 9d70a9f (msgf-trace --print-score-dist),
+e918376 (Java GF trace gated), 1256269 (diff harness), bc8ee39 (gate
+tightening).
+
+**Full results table and next steps:** see memory entry
+[`gf-tails-iter1-partial`](../../.claude/projects/-Users-yperez-work-msgfplus-workspace/memory/project_gf_tails_iter1_partial.md) and detailed report [`reports/2026-05-10-gf-tails-iter1-report.md`](reports/2026-05-10-gf-tails-iter1-report.md).
+
+---
+
+### Background
+
 `gf_java_parity.rs` documents that gates were loosened by ~4 orders of
 magnitude because several traced PSMs disagree with Java in **both**
 directions — consistent with cumulative differences in the GF DP (node/edge
@@ -36,10 +54,12 @@ this is the load-bearing gap.
 - `rust/crates/scoring/tests/gf_java_parity.rs` — loosened gates and
   hypothesis notes
 
-**To close:** trace one flipping scan end-to-end through `compute_inner`,
-diff the per-node `ScoreDist` vs Java's `GeneratingFunctionGroup` output,
-identify whether divergence is in (a) per-edge probability accumulation,
-(b) score-threshold pruning, or (c) `f32` vs `f64` precision.
+**To close (iter 2):** use `benchmark/parity/diff_gf_distribution.py` to trace
+scan 3353 end-to-end through `compute_inner`, diff the per-node `ScoreDist` vs
+Java's `GeneratingFunctionGroup` output, identify whether divergence is in
+(a) per-edge probability accumulation, (b) score-threshold pruning, or
+(c) `f32` vs `f64` precision. Spectrum-specific quality factors (peak rank
+distribution) likely interact with recent fixes.
 
 ---
 

@@ -4,7 +4,6 @@
 //! user-supplied "Java top-1" peptide. Use to localize Java/Rust scoring
 //! divergences without rebuilding the full PXD001819 run.
 
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;

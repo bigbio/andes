@@ -40,6 +40,13 @@ pub fn match_spectra(
     fragment_tolerance_da: f64,
     decoy_prefix: &str,
 ) -> Vec<TopNQueue> {
+    // Populate the per-length distinct-peptide counts on the SearchIndex.
+    // Idempotent + lock-free (OnceLock); tests that pre-populate via
+    // `with_distinct_peptide_counts` keep their populated map. Required so
+    // `idx.num_distinct_peptides_at_length(...)` returns real values during
+    // production search (the future Phase 7 e_value swap consumes it).
+    idx.ensure_distinct_peptide_counts(params, decoy_prefix);
+
     let candidates: Vec<Candidate> = enumerate_candidates(idx, params, decoy_prefix).collect();
 
     // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.

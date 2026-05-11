@@ -2,6 +2,7 @@
 //! and SuffixArray. Consumed by candidate generation.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use model::compact_fasta::{CompactFastaError, CompactFastaSequence};
 use crate::candidate_gen::enumerate_candidates;
@@ -10,27 +11,37 @@ use model::protein::ProteinDb;
 use crate::search_params::SearchParams;
 use crate::suffix_array::{SuffixArray, SuffixArrayError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SearchIndex {
     pub db: ProteinDb,
     pub compact: CompactFastaSequence,
     pub sa: SuffixArray,
-    /// Number of distinct residue sequences enumerated per length.
-    /// Populated by [`SearchIndex::with_distinct_peptide_counts`]; mirrors Java's
-    /// `CompactSuffixArray.getNumDistinctPeptides(int length)`. Consumed by the
-    /// `e_value` computation in `match_engine` to replace the queue-derived
-    /// proxy with a per-length distinct-peptide count over the full target+decoy
-    /// candidate set.
-    distinct_peptide_counts: HashMap<usize, usize>,
+    distinct_peptide_counts: OnceLock<HashMap<usize, usize>>,
+}
+
+impl Clone for SearchIndex {
+    fn clone(&self) -> Self {
+        let counts = OnceLock::new();
+        if let Some(populated) = self.distinct_peptide_counts.get() {
+            let _ = counts.set(populated.clone());
+        }
+        Self {
+            db: self.db.clone(),
+            compact: self.compact.clone(),
+            sa: self.sa.clone(),
+            distinct_peptide_counts: counts,
+        }
+    }
 }
 
 impl SearchIndex {
     /// Pipeline: target ProteinDb → reverse for decoys → concat target+decoy
     /// → CompactFastaSequence → SA + LCP.
     ///
-    /// `distinct_peptide_counts` is left empty; call
-    /// [`SearchIndex::with_distinct_peptide_counts`] to populate it once
-    /// `SearchParams` are known.
+    /// `distinct_peptide_counts` is left unpopulated; the production code path
+    /// populates it on first access via [`SearchIndex::ensure_distinct_peptide_counts`]
+    /// (called from `match_spectra`) which mirrors Java's lazy
+    /// `CompactSuffixArray.getNumDistinctPeptides`.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
         let db = target_plus_decoy(target, decoy_prefix);
         let compact = CompactFastaSequence::from_protein_db(&db);
@@ -39,7 +50,7 @@ impl SearchIndex {
             db,
             compact,
             sa,
-            distinct_peptide_counts: HashMap::new(),
+            distinct_peptide_counts: OnceLock::new(),
         }
     }
 
@@ -64,33 +75,54 @@ impl SearchIndex {
     /// frozen. See `docs/superpowers/specs/2026-05-10-evalue-search-index-design.md`
     /// for the memory analysis at PXD001819 scale.
     pub fn with_distinct_peptide_counts(
-        mut self,
+        self,
         params: &SearchParams,
         decoy_prefix: &str,
     ) -> Self {
+        self.ensure_distinct_peptide_counts(params, decoy_prefix);
+        self
+    }
+
+    /// Idempotent population of the per-length distinct-peptide count map.
+    ///
+    /// First caller does the candidate-set walk; subsequent calls (and
+    /// concurrent racers) are no-ops. Invoked by `match_spectra` so the
+    /// production path always populates the map without requiring callers to
+    /// thread `&mut SearchIndex` through the binary.
+    pub(crate) fn ensure_distinct_peptide_counts(
+        &self,
+        params: &SearchParams,
+        decoy_prefix: &str,
+    ) {
+        if self.distinct_peptide_counts.get().is_some() {
+            return;
+        }
         let mut seen_per_length: HashMap<usize, HashSet<Vec<u8>>> = HashMap::new();
-        for cand in enumerate_candidates(&self, params, decoy_prefix) {
+        for cand in enumerate_candidates(self, params, decoy_prefix) {
             let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
             seen_per_length
                 .entry(residues.len())
                 .or_default()
                 .insert(residues);
         }
-        self.distinct_peptide_counts = seen_per_length
+        let counts: HashMap<usize, usize> = seen_per_length
             .into_iter()
             .map(|(len, set)| (len, set.len()))
             .collect();
-        self
+        // Race-tolerant: if another thread populated first, drop ours.
+        let _ = self.distinct_peptide_counts.set(counts);
     }
 
     /// Number of distinct residue sequences (no mods, no flanking) of length
     /// `len` enumerated during candidate generation. Returns `0` for unseen
-    /// lengths (including any length never populated because
-    /// [`SearchIndex::with_distinct_peptide_counts`] was not called).
+    /// lengths (including any length queried before population).
     ///
     /// Mirrors Java `CompactSuffixArray.getNumDistinctPeptides(int length)`.
     pub fn num_distinct_peptides_at_length(&self, len: usize) -> usize {
-        self.distinct_peptide_counts.get(&len).copied().unwrap_or(0)
+        self.distinct_peptide_counts
+            .get()
+            .and_then(|m| m.get(&len).copied())
+            .unwrap_or(0)
     }
 
     /// Look up the `Protein` at the given index in the combined target+decoy

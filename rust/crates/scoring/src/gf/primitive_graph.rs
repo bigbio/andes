@@ -20,6 +20,9 @@
 //! 6. Compute edge error scores via `scored_spec.edge_score`.
 //! 7. Compute node scores via `scored_spec.node_score`.
 
+use std::cell::RefCell;
+use std::mem;
+
 use model::aa_set::AminoAcidSet;
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
@@ -27,11 +30,72 @@ use model::modification::ModLocation;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
+// -----------------------------------------------------------------------
+// Thread-local arena pool
+// -----------------------------------------------------------------------
+//
+// `PrimitiveAaGraph::new` allocates 11 `Vec`s per call (4 scratch +
+// 7 graph-owned). On PXD001819 the graph is built ~380k times per pass,
+// so we re-use the buffers across calls via a thread-local arena.
+//
+// Mechanism (Option B from the plan):
+//   - `new_pooled` lifts the buffers out of the arena with `mem::take`
+//     and `clear()`s them (length 0, capacity preserved).
+//   - The buffers are populated and length-reshaped in place (`resize` /
+//     `fill` / `push`) without (re)allocating provided peak capacity is
+//     already sufficient — after a few hundred calls it always is.
+//   - The 7 graph-owned buffers move into the returned `PrimitiveAaGraph`.
+//     When the graph is dropped, `Drop` returns them to the arena
+//     (`pooled = true`).
+//   - The 4 scratch buffers are returned to the arena at end of
+//     `new_pooled` directly.
+//
+// Graphs built via the legacy `new` keep `pooled = false` and skip the
+// `Drop`-side roundtrip — they allocate and free as before, so existing
+// callers (including tests that build many graphs without an arena) are
+// unaffected.
+
+/// Per-thread buffer pool for `PrimitiveAaGraph::new_pooled`.
+///
+/// Holds the 7 graph-owned buffers AND the 4 scratch buffers needed during
+/// construction. When the pool is empty (first call on a thread) each Vec
+/// is heap-default (no allocation); after the first build all buffers carry
+/// their accumulated capacity.
+#[derive(Default)]
+struct PrimitiveGraphArena {
+    // Graph-owned (lifted into the returned graph, returned by Drop):
+    active_nodes: Vec<i32>,
+    mass_to_node_idx: Vec<i32>,
+    edge_offset: Vec<usize>,
+    edge_prev_node: Vec<i32>,
+    edge_prob: Vec<f32>,
+    edge_score: Vec<i32>,
+    node_scores: Vec<i32>,
+    // Scratch (returned at end of new_pooled):
+    reachable: Vec<bool>,
+    in_edge_count_by_mass: Vec<i32>,
+    edge_mass_scratch: Vec<f64>,
+    write_cursor: Vec<usize>,
+}
+
+thread_local! {
+    static GRAPH_ARENA: RefCell<PrimitiveGraphArena> =
+        RefCell::new(PrimitiveGraphArena::default());
+}
+
+/// Take a `Vec<T>` out of the arena (length 0, capacity preserved).
+#[inline]
+fn take_clear<T>(slot: &mut Vec<T>) -> Vec<T> {
+    let mut v = mem::take(slot);
+    v.clear();
+    v
+}
+
 /// Primitive CSR amino-acid graph used by the generating-function DP.
 ///
-/// All fields are `pub` so that Task 6's GF DP can read them without
-/// accessor overhead. The graph is built once per (spectrum, peptide-mass)
-/// pair and is never mutated after construction.
+/// All fields are `pub` so that the GF DP can read them without accessor
+/// overhead. The graph is built once per (spectrum, peptide-mass) pair and
+/// is never mutated after construction.
 #[derive(Debug, Clone)]
 pub struct PrimitiveAaGraph {
     /// Nominal peptide mass (sum of residue nominal masses).
@@ -72,6 +136,10 @@ pub struct PrimitiveAaGraph {
     /// Per-node score from the spectrum. Indexed by node index.
     /// Source (ni=0) and sink always have score 0.
     pub node_scores: Vec<i32>,
+    /// When `true`, the graph borrows its buffers from the thread-local
+    /// arena and returns them on `Drop`. Set by `new_pooled`; legacy `new`
+    /// keeps it `false` so existing callers behave identically.
+    pooled: bool,
 }
 
 impl PrimitiveAaGraph {
@@ -104,8 +172,230 @@ impl PrimitiveAaGraph {
         use_protein_n_term: bool,
         use_protein_c_term: bool,
     ) -> Self {
+        // Use fresh, unpooled buffers; allocates on every call. Kept for
+        // tests + non-hot-path callers.
+        let mut active_nodes: Vec<i32> = Vec::new();
+        let mut mass_to_node_idx: Vec<i32> = Vec::new();
+        let mut edge_offset: Vec<usize> = Vec::new();
+        let mut edge_prev_node: Vec<i32> = Vec::new();
+        let mut edge_prob: Vec<f32> = Vec::new();
+        let mut edge_score: Vec<i32> = Vec::new();
+        let mut node_scores: Vec<i32> = Vec::new();
+        let mut reachable: Vec<bool> = Vec::new();
+        let mut in_edge_count_by_mass: Vec<i32> = Vec::new();
+        let mut edge_mass_scratch: Vec<f64> = Vec::new();
+        let mut write_cursor: Vec<usize> = Vec::new();
+
+        let (
+            direction,
+            min_node_mass,
+            mass_offset,
+            node_count,
+            source_node_idx,
+            sink_node_idx,
+        ) = Self::build_in_place(
+            aa_set,
+            peptide_mass,
+            enzyme,
+            scored_spec,
+            scorer,
+            charge,
+            parent_mass,
+            fragment_tolerance_da,
+            use_protein_n_term,
+            use_protein_c_term,
+            &mut active_nodes,
+            &mut mass_to_node_idx,
+            &mut edge_offset,
+            &mut edge_prev_node,
+            &mut edge_prob,
+            &mut edge_score,
+            &mut node_scores,
+            &mut reachable,
+            &mut in_edge_count_by_mass,
+            &mut edge_mass_scratch,
+            &mut write_cursor,
+        );
+
+        Self {
+            peptide_mass,
+            direction,
+            enzyme,
+            min_node_mass,
+            mass_offset,
+            node_count,
+            source_node_idx,
+            sink_node_idx,
+            active_nodes,
+            mass_to_node_idx,
+            edge_offset,
+            edge_prev_node,
+            edge_prob,
+            edge_score,
+            node_scores,
+            pooled: false,
+        }
+    }
+
+    /// Same algorithm as `new`, but draws its 11 buffers from a thread-local
+    /// arena instead of allocating fresh. The graph keeps its `pooled` flag
+    /// set so `Drop` returns the 7 graph-owned buffers back to the arena.
+    ///
+    /// First call on a thread allocates (arena is empty); subsequent calls
+    /// re-use the buffers at their accumulated peak capacity. Eliminates
+    /// 11 per-call Vec allocations (~4.4M allocs per PXD001819 run).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_pooled(
+        aa_set: &AminoAcidSet,
+        peptide_mass: i32,
+        enzyme: Option<Enzyme>,
+        scored_spec: &ScoredSpectrum<'_>,
+        scorer: &RankScorer,
+        charge: u8,
+        parent_mass: f64,
+        fragment_tolerance_da: f64,
+        use_protein_n_term: bool,
+        use_protein_c_term: bool,
+    ) -> Self {
+        // Lift all 11 buffers out of the arena (length 0, capacity preserved).
+        let (
+            mut active_nodes,
+            mut mass_to_node_idx,
+            mut edge_offset,
+            mut edge_prev_node,
+            mut edge_prob,
+            mut edge_score,
+            mut node_scores,
+            mut reachable,
+            mut in_edge_count_by_mass,
+            mut edge_mass_scratch,
+            mut write_cursor,
+        ) = GRAPH_ARENA.with(|cell| {
+            let mut a = cell.borrow_mut();
+            (
+                take_clear(&mut a.active_nodes),
+                take_clear(&mut a.mass_to_node_idx),
+                take_clear(&mut a.edge_offset),
+                take_clear(&mut a.edge_prev_node),
+                take_clear(&mut a.edge_prob),
+                take_clear(&mut a.edge_score),
+                take_clear(&mut a.node_scores),
+                take_clear(&mut a.reachable),
+                take_clear(&mut a.in_edge_count_by_mass),
+                take_clear(&mut a.edge_mass_scratch),
+                take_clear(&mut a.write_cursor),
+            )
+        });
+
+        let (
+            direction,
+            min_node_mass,
+            mass_offset,
+            node_count,
+            source_node_idx,
+            sink_node_idx,
+        ) = Self::build_in_place(
+            aa_set,
+            peptide_mass,
+            enzyme,
+            scored_spec,
+            scorer,
+            charge,
+            parent_mass,
+            fragment_tolerance_da,
+            use_protein_n_term,
+            use_protein_c_term,
+            &mut active_nodes,
+            &mut mass_to_node_idx,
+            &mut edge_offset,
+            &mut edge_prev_node,
+            &mut edge_prob,
+            &mut edge_score,
+            &mut node_scores,
+            &mut reachable,
+            &mut in_edge_count_by_mass,
+            &mut edge_mass_scratch,
+            &mut write_cursor,
+        );
+
+        // Return scratch buffers to the arena immediately (they outlive
+        // construction but not the graph). The 7 graph-owned buffers go
+        // back via Drop.
+        GRAPH_ARENA.with(|cell| {
+            let mut a = cell.borrow_mut();
+            a.reachable = reachable;
+            a.in_edge_count_by_mass = in_edge_count_by_mass;
+            a.edge_mass_scratch = edge_mass_scratch;
+            a.write_cursor = write_cursor;
+        });
+
+        Self {
+            peptide_mass,
+            direction,
+            enzyme,
+            min_node_mass,
+            mass_offset,
+            node_count,
+            source_node_idx,
+            sink_node_idx,
+            active_nodes,
+            mass_to_node_idx,
+            edge_offset,
+            edge_prev_node,
+            edge_prob,
+            edge_score,
+            node_scores,
+            pooled: true,
+        }
+    }
+
+    /// Core construction algorithm. Operates in place on the 11 buffer
+    /// Vecs; clears, resizes, and fills them. Returns the scalar fields
+    /// that `new` / `new_pooled` need to assemble the struct.
+    ///
+    /// Pre-condition: all 11 buffers may be in any state (length, capacity).
+    /// They will be `clear()`-ed and then resized to the lengths used by
+    /// this build.
+    #[allow(clippy::too_many_arguments)]
+    fn build_in_place(
+        aa_set: &AminoAcidSet,
+        peptide_mass: i32,
+        enzyme: Option<Enzyme>,
+        scored_spec: &ScoredSpectrum<'_>,
+        scorer: &RankScorer,
+        charge: u8,
+        parent_mass: f64,
+        fragment_tolerance_da: f64,
+        use_protein_n_term: bool,
+        use_protein_c_term: bool,
+        active_nodes: &mut Vec<i32>,
+        mass_to_node_idx: &mut Vec<i32>,
+        edge_offset: &mut Vec<usize>,
+        edge_prev_node: &mut Vec<i32>,
+        edge_prob: &mut Vec<f32>,
+        edge_score: &mut Vec<i32>,
+        node_scores: &mut Vec<i32>,
+        reachable: &mut Vec<bool>,
+        in_edge_count_by_mass: &mut Vec<i32>,
+        edge_mass_scratch: &mut Vec<f64>,
+        write_cursor: &mut Vec<usize>,
+    ) -> (bool, i32, i32, usize, usize, usize) {
+        // Defensive: ensure buffers start empty (no-op when called from
+        // new/new_pooled which always pass freshly-cleared Vecs).
+        active_nodes.clear();
+        mass_to_node_idx.clear();
+        edge_offset.clear();
+        edge_prev_node.clear();
+        edge_prob.clear();
+        edge_score.clear();
+        node_scores.clear();
+        reachable.clear();
+        in_edge_count_by_mass.clear();
+        edge_mass_scratch.clear();
+        write_cursor.clear();
+
         // ---------------------------------------------------------------
-        // Phase 1: Resolve source / sink AA lists.
+        // Step 1: Resolve source / sink AA lists.
         // ---------------------------------------------------------------
         let direction = scored_spec.main_ion_direction();
 
@@ -131,7 +421,7 @@ impl PrimitiveAaGraph {
         let sink_aas: &[AminoAcid] = aa_set.cached_aa_list(sink_location);
 
         // ---------------------------------------------------------------
-        // Phase 2: Compute min_node_mass and mass_offset.
+        // Step 2: Compute min_node_mass and mass_offset.
         // ---------------------------------------------------------------
         let mut min_mass: i32 = 0;
         for aa in source_aas {
@@ -147,11 +437,11 @@ impl PrimitiveAaGraph {
         let mass_offset = -min_node_mass;
 
         // ---------------------------------------------------------------
-        // Phase 3: Reachability sweep + per-mass incoming edge counts.
+        // Step 3: Reachability sweep + per-mass incoming edge counts.
         // ---------------------------------------------------------------
         let dense_len = (peptide_mass - min_node_mass + 1) as usize;
-        let mut reachable = vec![false; dense_len];
-        let mut in_edge_count_by_mass = vec![0_i32; dense_len];
+        reachable.resize(dense_len, false);
+        in_edge_count_by_mass.resize(dense_len, 0_i32);
 
         let to_dense = |mass: i32| -> usize { (mass + mass_offset) as usize };
         let is_representable = |mass: i32| -> bool {
@@ -201,12 +491,12 @@ impl PrimitiveAaGraph {
         reachable[to_dense(peptide_mass)] = true;
 
         // ---------------------------------------------------------------
-        // Phase 4: Build active_nodes and mass_to_node_idx.
+        // Step 4: Build active_nodes and mass_to_node_idx.
         // ---------------------------------------------------------------
         let count = reachable.iter().filter(|&&r| r).count();
         let node_count = count;
-        let mut active_nodes = Vec::with_capacity(node_count);
-        let mut mass_to_node_idx = vec![-1_i32; dense_len];
+        active_nodes.reserve(node_count);
+        mass_to_node_idx.resize(dense_len, -1_i32);
 
         // Source node (mass = 0) is always index 0.
         active_nodes.push(0_i32);
@@ -225,9 +515,11 @@ impl PrimitiveAaGraph {
         let sink_node_idx = mass_to_node_idx[to_dense(peptide_mass)] as usize;
 
         // ---------------------------------------------------------------
-        // Phase 5: Build CSR edge_offset and fill edges.
+        // Step 5: Build CSR edge_offset and fill edges.
         // ---------------------------------------------------------------
-        let mut edge_offset = vec![0_usize; node_count + 1];
+        edge_offset.resize(node_count + 1, 0_usize);
+        // edge_offset[0] must be 0 after the resize from len=0; the loop fills
+        // the rest. (resize from 0 -> node_count+1 appends node_count+1 zeros.)
         for ni in 0..node_count {
             let mass = active_nodes[ni];
             let in_count = in_edge_count_by_mass[to_dense(mass)] as usize;
@@ -235,13 +527,13 @@ impl PrimitiveAaGraph {
         }
         let total_edges = edge_offset[node_count];
 
-        let mut edge_prev_node = vec![0_i32; total_edges];
-        let mut edge_prob = vec![0.0_f32; total_edges];
-        let mut edge_mass_scratch = vec![0.0_f64; total_edges]; // AA accurate mass, for error score
-        let mut edge_score_arr = vec![0_i32; total_edges];
+        edge_prev_node.resize(total_edges, 0_i32);
+        edge_prob.resize(total_edges, 0.0_f32);
+        edge_mass_scratch.resize(total_edges, 0.0_f64); // AA accurate mass, for error score
+        edge_score.resize(total_edges, 0_i32);
 
         // Write cursor per node (starts at edge_offset[ni], advances as edges are written).
-        let mut write_cursor = edge_offset[..node_count].to_vec();
+        write_cursor.extend_from_slice(&edge_offset[..node_count]);
 
         // Helper: write one edge into the CSR arrays.
         let get_node_idx = |mass: i32| -> i32 {
@@ -280,7 +572,7 @@ impl PrimitiveAaGraph {
             edge_prev_node[e_idx] = 0; // prev is source (mass 0)
             edge_prob[e_idx] = aa_total_probability(aa);
             edge_mass_scratch[e_idx] = aa_total_mass(aa);
-            edge_score_arr[e_idx] = cleavage_score;
+            edge_score[e_idx] = cleavage_score;
         }
 
         // Intermediate → intermediate edges.
@@ -303,7 +595,7 @@ impl PrimitiveAaGraph {
                 edge_prev_node[e_idx] = cur_mass;
                 edge_prob[e_idx] = aa_total_probability(aa);
                 edge_mass_scratch[e_idx] = aa_total_mass(aa);
-                edge_score_arr[e_idx] = 0;
+                edge_score[e_idx] = 0;
             }
         }
 
@@ -336,18 +628,18 @@ impl PrimitiveAaGraph {
             edge_prev_node[e_idx] = prev_mass;
             edge_prob[e_idx] = aa_total_probability(aa);
             edge_mass_scratch[e_idx] = aa_total_mass(aa);
-            edge_score_arr[e_idx] = cleavage_score;
+            edge_score[e_idx] = cleavage_score;
         }
 
         // ---------------------------------------------------------------
-        // Phase 6: Compute edge error scores.
+        // Step 6: Compute edge error scores.
         // ---------------------------------------------------------------
         compute_edge_error_scores(
-            &active_nodes,
-            &edge_offset,
-            &edge_prev_node,
-            &edge_mass_scratch,
-            &mut edge_score_arr,
+            active_nodes,
+            edge_offset,
+            edge_prev_node,
+            edge_mass_scratch,
+            edge_score,
             peptide_mass,
             scored_spec,
             scorer,
@@ -356,10 +648,10 @@ impl PrimitiveAaGraph {
         );
 
         // ---------------------------------------------------------------
-        // Phase 7: Compute node scores.
+        // Step 7: Compute node scores.
         // ---------------------------------------------------------------
-        let node_scores = compute_node_scores(
-            &active_nodes,
+        compute_node_scores_in_place(
+            active_nodes,
             peptide_mass,
             direction,
             scored_spec,
@@ -367,25 +659,10 @@ impl PrimitiveAaGraph {
             charge,
             parent_mass,
             fragment_tolerance_da,
+            node_scores,
         );
 
-        Self {
-            peptide_mass,
-            direction,
-            enzyme,
-            min_node_mass,
-            mass_offset,
-            node_count,
-            source_node_idx,
-            sink_node_idx,
-            active_nodes,
-            mass_to_node_idx,
-            edge_offset,
-            edge_prev_node,
-            edge_prob,
-            edge_score: edge_score_arr,
-            node_scores,
-        }
+        (direction, min_node_mass, mass_offset, node_count, source_node_idx, sink_node_idx)
     }
 
     // -----------------------------------------------------------------------
@@ -418,6 +695,33 @@ impl PrimitiveAaGraph {
     }
 }
 
+impl Drop for PrimitiveAaGraph {
+    fn drop(&mut self) {
+        if !self.pooled {
+            return;
+        }
+        // Return the 7 graph-owned buffers to the thread-local arena.
+        // Each `mem::take` swaps in an empty Vec (capacity 0) — but that
+        // empty Vec gets dropped immediately, while the populated buffer
+        // (with grown capacity) goes back into the arena slot.
+        //
+        // If a borrow on the arena is already held (e.g. panic during
+        // arena callback), we silently leak the capacity rather than
+        // double-borrow-panic; the buffers themselves get freed normally.
+        let _ = GRAPH_ARENA.try_with(|cell| {
+            if let Ok(mut a) = cell.try_borrow_mut() {
+                a.active_nodes = mem::take(&mut self.active_nodes);
+                a.mass_to_node_idx = mem::take(&mut self.mass_to_node_idx);
+                a.edge_offset = mem::take(&mut self.edge_offset);
+                a.edge_prev_node = mem::take(&mut self.edge_prev_node);
+                a.edge_prob = mem::take(&mut self.edge_prob);
+                a.edge_score = mem::take(&mut self.edge_score);
+                a.node_scores = mem::take(&mut self.node_scores);
+            }
+        });
+    }
+}
+
 // -----------------------------------------------------------------------
 // Private helpers
 // -----------------------------------------------------------------------
@@ -441,7 +745,7 @@ fn aa_total_mass(aa: &AminoAcid) -> f64 {
     aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta)
 }
 
-/// Phase 6 (Java `computeEdgeErrorScores`): for each intermediate node's
+/// Mirrors Java `computeEdgeErrorScores`: for each intermediate node's
 /// incoming edges, accumulate `scored_spec.edge_score(cur, prev, theo_aa_mass)`.
 ///
 /// Source (mass = 0) and sink (mass = peptide_mass) nodes are skipped,
@@ -490,7 +794,7 @@ fn compute_edge_error_scores(
     }
 }
 
-/// Phase 7 (Java `computeNodeScores`): for each intermediate node, compute
+/// Mirrors Java `computeNodeScores`: for each intermediate node, compute
 /// `scored_spec.node_score(prefix_nominal, suffix_nominal, scorer, charge,
 /// parent_mass, fragment_tolerance_da)`.
 ///
@@ -498,8 +802,11 @@ fn compute_edge_error_scores(
 /// - Else: `prefix = complement`, `suffix = nominal_mass`.
 ///
 /// Source (ni = 0) and sink get score 0.
+///
+/// Writes results into `node_scores` (pre-condition: empty Vec, gets resized
+/// to `active_nodes.len()`).
 #[allow(clippy::too_many_arguments)]
-fn compute_node_scores(
+fn compute_node_scores_in_place(
     active_nodes: &[i32],
     peptide_mass: i32,
     direction: bool,
@@ -508,9 +815,10 @@ fn compute_node_scores(
     charge: u8,
     parent_mass: f64,
     fragment_tolerance_da: f64,
-) -> Vec<i32> {
+    node_scores: &mut Vec<i32>,
+) {
     let node_count = active_nodes.len();
-    let mut node_scores = vec![0_i32; node_count];
+    node_scores.resize(node_count, 0_i32);
 
     // ni = 0 is source; skip. Also skip sink.
     for ni in 1..node_count {
@@ -534,8 +842,6 @@ fn compute_node_scores(
             fragment_tolerance_da,
         );
     }
-
-    node_scores
 }
 
 // -----------------------------------------------------------------------

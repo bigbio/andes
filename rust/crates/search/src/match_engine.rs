@@ -393,7 +393,11 @@ fn compute_spec_e_values_for_spectrum(
         if nominal_mass_idx <= 0 {
             continue;
         }
-        let graph = PrimitiveAaGraph::new(
+        // Use the thread-local arena-pooled constructor: eliminates 11
+        // Vec allocations per call (~4.4M allocs per PXD001819 run) by
+        // recycling the buffers between graph builds. Output is bit-
+        // identical to `new` (gated by primitive_graph_arena_parity tests).
+        let graph = PrimitiveAaGraph::new_pooled(
             aa_set,
             nominal_mass_idx,
             enzyme,

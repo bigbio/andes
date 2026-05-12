@@ -18,7 +18,7 @@ pub mod suffix_array;
 // Convenience re-exports.
 pub use candidate_gen::enumerate_candidates;
 pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
-pub use match_engine::match_spectra;
+pub use match_engine::{match_spectra, PreparedSearch};
 pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
 pub use search_index::SearchIndex;

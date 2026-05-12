@@ -13,9 +13,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use model::{AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance, ResidueSpec, Tolerance};
+use model::{AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance, ResidueSpec, Spectrum, Tolerance};
 use scoring_crate::{Param, RankScorer};
-use search::{match_spectra, SearchIndex, SearchParams};
+use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
 use input::{FastaReader, MgfReader, MzMLReader};
 
 #[derive(Parser, Debug)]
@@ -117,6 +117,13 @@ struct Cli {
     /// 70 min on full PXD001819). When 0 (default) the full input is used.
     #[arg(long, default_value = "0")]
     max_spectra: usize,
+
+    /// MS level to search. Default 2 (MS2). MS1 spectra (and any other levels)
+    /// in the input file are filtered out at load time so they never enter
+    /// the search loop or consume RAM. Only meaningful for mzML inputs — MGF
+    /// files do not encode MS level and are treated as MS2 regardless.
+    #[arg(long, default_value = "2")]
+    ms_level: u8,
 }
 
 fn main() -> ExitCode {
@@ -216,98 +223,25 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;
 
-    // ── 6. Load spectra (auto-detect format by file extension) ───────────────
+    // ── 6+7. Stream-load + chunked search ─────────────────────────────────
+    //
+    // Spectra are parsed and scored in chunks of CHUNK_SIZE. Each chunk's
+    // peak data lives in RAM only for the time it takes to score the chunk,
+    // then is dropped before the next chunk is read. The Vec<Spectrum> that
+    // survives into the PIN/TSV writers retains scan/title/precursor_mz/scan
+    // (the only fields the writers read) but has empty peaks.
+    //
+    // This bounds peak-data memory to ~CHUNK_SIZE × per-spectrum peak size
+    // regardless of dataset size — fixes the Astral-scale OOM where loading
+    // all 123k spectra at once pushed RSS to 28 GB on a 31 GB VM.
+    const CHUNK_SIZE: usize = 5000;
+
     let t_phase = std::time::Instant::now();
-    let ext = cli.spectrum
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase());
 
-    let spectra = match ext.as_deref() {
-        Some("mzml") => {
-            let f = File::open(&cli.spectrum)?;
-            let mut ok: Vec<_> = Vec::new();
-            let mut error_count = 0usize;
-            for result in MzMLReader::new(BufReader::new(f)) {
-                match result {
-                    Ok(s) => ok.push(s),
-                    Err(e) => {
-                        error_count += 1;
-                        if error_count <= 3 {
-                            eprintln!("WARN: mzML parse: {e}");
-                        }
-                    }
-                }
-            }
-            if error_count > 0 {
-                eprintln!(
-                    "WARN: {} mzML spectra failed to parse",
-                    error_count
-                );
-            }
-            ok
-        }
-        _ => {
-            // MGF (default / backwards-compatible)
-            let f = File::open(&cli.spectrum)?;
-            let mut ok: Vec<_> = Vec::new();
-            let mut error_count = 0usize;
-            let mut first_errors: Vec<String> = Vec::with_capacity(3);
-            for result in MgfReader::new(BufReader::new(f)) {
-                match result {
-                    Ok(s) => ok.push(s),
-                    Err(e) => {
-                        error_count += 1;
-                        if first_errors.len() < 3 {
-                            first_errors.push(format!("{e}"));
-                        }
-                    }
-                }
-            }
-            if error_count > 0 {
-                eprintln!(
-                    "WARN: {} MGF spectra failed to parse (first {} errors):",
-                    error_count,
-                    first_errors.len()
-                );
-                for e in &first_errors {
-                    eprintln!("  - {e}");
-                }
-            }
-            ok
-        }
-    };
-
-    if spectra.is_empty() {
-        return Err(format!(
-            "no spectra parsed from {}",
-            cli.spectrum.display()
-        )
-        .into());
-    }
-    eprintln!(
-        "Loaded {} spectra from {} [PHASE spectra_load: {:.2}s]",
-        spectra.len(),
-        cli.spectrum.display(),
-        t_phase.elapsed().as_secs_f64()
-    );
-
-    // Bench-mode slice: keep only the first N spectra to enable rapid
-    // iteration on Fix B. Skips PIN/TSV write at the end of `run`.
-    let bench_mode = cli.max_spectra > 0;
-    let mut spectra = spectra;
-    if bench_mode && spectra.len() > cli.max_spectra {
-        spectra.truncate(cli.max_spectra);
-        eprintln!(
-            "Bench mode: truncated to first {} spectra",
-            cli.max_spectra
-        );
-    }
-
-    // ── 7. Run match_spectra ──────────────────────────────────────────────────
-    // Configure the global Rayon worker pool. `build_global()` panics if called
-    // twice; guard with `OnceLock` so repeated CLI invocations within a single
-    // test process don't blow up.
+    // Configure the global Rayon worker pool BEFORE we build PreparedSearch
+    // or run any chunks. `build_global()` panics if called twice; guard with
+    // `OnceLock` so repeated CLI invocations within a single test process
+    // don't blow up.
     static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -320,16 +254,158 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Fragment tolerance of 0.5 Da matches the gf_bsa_parity integration test
     // (and the canonical HCD default).
     let fragment_tol_da = 0.5_f64;
-    let t_search_start = std::time::Instant::now();
-    let queues = match_spectra(
-        &spectra,
+    let prepared = PreparedSearch::prepare(
         &idx,
         &params,
         &scorer,
         fragment_tol_da,
         &cli.decoy_prefix,
     );
+
+    let ext = cli.spectrum
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    let ms_level_u32 = cli.ms_level as u32;
+    let bench_mode = cli.max_spectra > 0;
+    let bench_cap = if bench_mode { cli.max_spectra } else { usize::MAX };
+
+    let mut all_spectra: Vec<Spectrum> = Vec::new();
+    let mut all_queues: Vec<TopNQueue> = Vec::new();
+    let mut chunk: Vec<Spectrum> = Vec::with_capacity(CHUNK_SIZE);
+    let mut error_count = 0usize;
+    let mut first_errors: Vec<String> = Vec::with_capacity(3);
+
+    let flush_chunk = |chunk: &mut Vec<Spectrum>,
+                           all_spectra: &mut Vec<Spectrum>,
+                           all_queues: &mut Vec<TopNQueue>| {
+        if chunk.is_empty() {
+            return;
+        }
+        let offset = all_spectra.len();
+        let queues = prepared.run_chunk(chunk, offset);
+        all_queues.extend(queues);
+        for mut spec in chunk.drain(..) {
+            spec.peaks = Vec::new();
+            all_spectra.push(spec);
+        }
+    };
+
+    let t_search_start = std::time::Instant::now();
+
+    match ext.as_deref() {
+        Some("mzml") => {
+            let f = File::open(&cli.spectrum)?;
+            let reader = MzMLReader::new(BufReader::new(f))
+                .with_ms_level_range(ms_level_u32, ms_level_u32);
+            for result in reader {
+                if all_spectra.len() + chunk.len() >= bench_cap {
+                    break;
+                }
+                match result {
+                    Ok(s) => {
+                        chunk.push(s);
+                        if chunk.len() >= CHUNK_SIZE {
+                            flush_chunk(&mut chunk, &mut all_spectra, &mut all_queues);
+                        }
+                    }
+                    Err(e) => {
+                        error_count += 1;
+                        if error_count <= 3 {
+                            eprintln!("WARN: mzML parse: {e}");
+                        }
+                    }
+                }
+            }
+            if bench_mode && all_spectra.len() + chunk.len() > bench_cap {
+                let keep = bench_cap.saturating_sub(all_spectra.len());
+                chunk.truncate(keep);
+            }
+            flush_chunk(&mut chunk, &mut all_spectra, &mut all_queues);
+            if error_count > 0 {
+                eprintln!(
+                    "WARN: {} mzML spectra failed to parse",
+                    error_count
+                );
+            }
+            eprintln!(
+                "MS-level filter: {} (only MS{} spectra entered the search)",
+                cli.ms_level, cli.ms_level
+            );
+        }
+        _ => {
+            // MGF (default / backwards-compatible). MGF files do not encode
+            // MS level — they are treated as MS2 by convention. Warn if the
+            // user requested a non-default level so the mismatch is visible.
+            if cli.ms_level != 2 {
+                eprintln!(
+                    "WARN: --ms-level={} requested for an MGF input; MGF files \
+                     do not record MS level (treated as MS2). The flag has \
+                     no effect on this input.",
+                    cli.ms_level
+                );
+            }
+            let f = File::open(&cli.spectrum)?;
+            for result in MgfReader::new(BufReader::new(f)) {
+                if all_spectra.len() + chunk.len() >= bench_cap {
+                    break;
+                }
+                match result {
+                    Ok(s) => {
+                        chunk.push(s);
+                        if chunk.len() >= CHUNK_SIZE {
+                            flush_chunk(&mut chunk, &mut all_spectra, &mut all_queues);
+                        }
+                    }
+                    Err(e) => {
+                        error_count += 1;
+                        if first_errors.len() < 3 {
+                            first_errors.push(format!("{e}"));
+                        }
+                    }
+                }
+            }
+            if bench_mode && all_spectra.len() + chunk.len() > bench_cap {
+                let keep = bench_cap.saturating_sub(all_spectra.len());
+                chunk.truncate(keep);
+            }
+            flush_chunk(&mut chunk, &mut all_spectra, &mut all_queues);
+            if error_count > 0 {
+                eprintln!(
+                    "WARN: {} MGF spectra failed to parse (first {} errors):",
+                    error_count,
+                    first_errors.len()
+                );
+                for e in &first_errors {
+                    eprintln!("  - {e}");
+                }
+            }
+        }
+    }
+
+    if all_spectra.is_empty() {
+        return Err(format!(
+            "no spectra parsed from {}",
+            cli.spectrum.display()
+        )
+        .into());
+    }
+
     let search_elapsed = t_search_start.elapsed();
+    eprintln!(
+        "Loaded+scored {} spectra from {} in chunks of {} [PHASE stream_search: {:.2}s]",
+        all_spectra.len(),
+        cli.spectrum.display(),
+        CHUNK_SIZE,
+        t_phase.elapsed().as_secs_f64()
+    );
+    if bench_mode {
+        eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
+    }
+
+    // Downstream code uses these names.
+    let spectra = all_spectra;
+    let queues = all_queues;
 
     let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
     eprintln!(

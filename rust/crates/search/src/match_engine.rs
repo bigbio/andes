@@ -24,81 +24,136 @@ use crate::search_params::SearchParams;
 use scoring_crate::scoring::{score_psm, RankScorer, ScoredSpectrum};
 use model::spectrum::Spectrum;
 
-/// Match every spectrum against every candidate from the SearchIndex.
-/// Returns one top-N PSM queue per spectrum, in input order.
+/// One-time-built state shared across every chunk of a streamed search.
 ///
-/// A `ScoredSpectrum` is built once per spectrum and reused across all
-/// candidates; candidates are bucketed by mass for sub-linear precursor
-/// lookup. After per-candidate scoring, SpecEValue is computed via the
-/// generating-function DP across the precursor tolerance window in nominal
-/// mass space and assigned to every PSM in the queue.
-pub fn match_spectra(
-    spectra: &[Spectrum],
-    idx: &SearchIndex,
-    params: &SearchParams,
-    scorer: &RankScorer,
-    fragment_tolerance_da: f64,
-    decoy_prefix: &str,
-) -> Vec<TopNQueue> {
-    // Collect the production candidate list AND seed the per-length
-    // distinct-peptide counts in a single pass. This avoids a second full
-    // `enumerate_candidates(...)` walk just to populate the E-value
-    // denominator map.
-    let mut candidates: Vec<Candidate> = Vec::new();
-    let mut seen_per_length: HashMap<usize, FxHashSet<u64>> = HashMap::new();
-    for cand in enumerate_candidates(idx, params, decoy_prefix) {
-        let residues = &cand.peptide.residues;
-        let mut h = FxHasher::default();
-        for aa in residues {
-            h.write_u8(aa.residue);
+/// `match_spectra` materializes its full set of candidates, bucket index,
+/// distinct-peptide counts, and enzyme-registered aa_set in a single pass at
+/// startup. For chunked / streaming spectrum loading we want to reuse that
+/// state instead of rebuilding it per chunk. `PreparedSearch::prepare` does
+/// the setup once; `PreparedSearch::run_chunk` runs the per-spectrum scoring
+/// loop on any slice of `Spectrum`s using that prepared state.
+///
+/// The two-pass split mirrors the original `match_spectra` body — there is
+/// no algorithmic change. Pre-existing single-call callers can still use
+/// `match_spectra(...)` which is now a thin wrapper around
+/// `prepare` + a single `run_chunk` call.
+pub struct PreparedSearch<'a> {
+    pub idx: &'a SearchIndex,
+    pub params: &'a SearchParams,
+    pub scorer: &'a RankScorer,
+    pub fragment_tolerance_da: f64,
+    /// Final, deduplicated candidate list (target + decoy).
+    pub candidates: Vec<Candidate>,
+    /// `nominal(peptide.mass() - H2O)` → indices into `candidates`.
+    pub bucket_index: BTreeMap<i32, Vec<usize>>,
+    /// `params.aa_set` with the search enzyme registered for GF cleavage
+    /// scoring. Cheap to clone, but we keep one shared copy here.
+    pub aa_set_for_gf: AminoAcidSet,
+}
+
+impl<'a> PreparedSearch<'a> {
+    /// Build the per-search state once. Enumerates candidates, builds the
+    /// mass-bucket index, seeds the `SearchIndex` distinct-peptide counts,
+    /// and clones+registers the aa_set for GF cleavage scoring.
+    pub fn prepare(
+        idx: &'a SearchIndex,
+        params: &'a SearchParams,
+        scorer: &'a RankScorer,
+        fragment_tolerance_da: f64,
+        decoy_prefix: &str,
+    ) -> Self {
+        // Collect the production candidate list AND seed the per-length
+        // distinct-peptide counts in a single pass. This avoids a second full
+        // `enumerate_candidates(...)` walk just to populate the E-value
+        // denominator map.
+        let mut candidates: Vec<Candidate> = Vec::new();
+        let mut seen_per_length: HashMap<usize, FxHashSet<u64>> = HashMap::new();
+        for cand in enumerate_candidates(idx, params, decoy_prefix) {
+            let residues = &cand.peptide.residues;
+            let mut h = FxHasher::default();
+            for aa in residues {
+                h.write_u8(aa.residue);
+            }
+            seen_per_length
+                .entry(residues.len())
+                .or_default()
+                .insert(h.finish());
+            candidates.push(cand);
         }
-        seen_per_length
-            .entry(residues.len())
-            .or_default()
-            .insert(h.finish());
-        candidates.push(cand);
+        let distinct_counts: HashMap<usize, usize> = seen_per_length
+            .into_iter()
+            .map(|(len, set)| (len, set.len()))
+            .collect();
+        idx.set_distinct_peptide_counts_if_absent(distinct_counts);
+
+        // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
+        //
+        // Uses the same nominal_from convention as the GF mass-bin loop so that
+        // bucket keys align with the GF's mass-bin lookup (commit b89779a fix).
+        // Stores only indices into `candidates` — no cloning, tiny memory overhead.
+        let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+        for (cand_idx, cand) in candidates.iter().enumerate() {
+            let nominal = cand.peptide.nominal_residue_mass();
+            bucket_index.entry(nominal).or_default().push(cand_idx);
+        }
+
+        // Build an aa_set clone with enzyme registered (for GF cleavage scoring).
+        // Defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
+        // Cloning is cheap (AminoAcidSet is a HashMap of ~20 entries).
+        // This avoids mutating the shared SearchParams.aa_set borrow.
+        let mut aa_set_for_gf: AminoAcidSet = params.aa_set.clone();
+        if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
+            aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
+        }
+
+        PreparedSearch {
+            idx,
+            params,
+            scorer,
+            fragment_tolerance_da,
+            candidates,
+            bucket_index,
+            aa_set_for_gf,
+        }
     }
-    let distinct_counts: HashMap<usize, usize> = seen_per_length
-        .into_iter()
-        .map(|(len, set)| (len, set.len()))
-        .collect();
-    idx.set_distinct_peptide_counts_if_absent(distinct_counts);
 
-    // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
-    //
-    // Uses the same nominal_from convention as the GF mass-bin loop so that
-    // bucket keys align with the GF's mass-bin lookup (commit b89779a fix).
-    // Stores only indices into `candidates` — no cloning, tiny memory overhead.
-    let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-    for (cand_idx, cand) in candidates.iter().enumerate() {
-        let nominal = cand.peptide.nominal_residue_mass();
-        bucket_index.entry(nominal).or_default().push(cand_idx);
-    }
+    /// Score one chunk of spectra in parallel using the prepared candidate
+    /// state. Returns one `TopNQueue` per input spectrum, in input order.
+    ///
+    /// The `spectrum_idx_offset` is the index of `spectra[0]` in the overall
+    /// stream of spectra being searched. It is written into every emitted
+    /// `PsmMatch::spectrum_idx` so the downstream PIN/TSV writers can still
+    /// look up the right spectrum metadata in the concatenated metadata
+    /// vector.
+    pub fn run_chunk(
+        &self,
+        spectra: &[Spectrum],
+        spectrum_idx_offset: usize,
+    ) -> Vec<TopNQueue> {
+        let params = self.params;
+        let scorer = self.scorer;
+        let idx = self.idx;
+        let fragment_tolerance_da = self.fragment_tolerance_da;
+        let candidates = &self.candidates;
+        let bucket_index = &self.bucket_index;
+        let aa_set_for_gf = &self.aa_set_for_gf;
 
-    // Build an aa_set clone with enzyme registered (for GF cleavage scoring).
-    // Defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
-    // Cloning is cheap (AminoAcidSet is a HashMap of ~20 entries).
-    // This avoids mutating the shared SearchParams.aa_set borrow.
-    let mut aa_set_for_gf: AminoAcidSet = params.aa_set.clone();
-    if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
-        aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
-    }
+        // Yield-accounting counters.
+        // Aggregated across all worker threads via Relaxed atomics — exact counts
+        // don't require ordering with other memory ops.
+        let skipped_min_peaks = AtomicU64::new(0);
+        let candidates_visited = AtomicU64::new(0);
+        let psms_pushed = AtomicU64::new(0);
+        let spectra_with_psms = AtomicU64::new(0);
 
-    // Yield-accounting counters.
-    // Aggregated across all worker threads via Relaxed atomics — exact counts
-    // don't require ordering with other memory ops.
-    let skipped_min_peaks = AtomicU64::new(0);
-    let candidates_visited = AtomicU64::new(0);
-    let psms_pushed = AtomicU64::new(0);
-    let spectra_with_psms = AtomicU64::new(0);
-
-    // Parallel per-spectrum search. All inputs above are `&` immutable; the
-    // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
-    let queues: Vec<TopNQueue> = spectra
-        .par_iter()
-        .enumerate()
-        .map(|(spec_idx, spec)| {
-            let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
+        // Parallel per-spectrum search. All inputs above are `&` immutable; the
+        // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
+        let queues: Vec<TopNQueue> = spectra
+            .par_iter()
+            .enumerate()
+            .map(|(local_idx, spec)| {
+                let spec_idx = local_idx + spectrum_idx_offset;
+                let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
 
             // Skip spectra with too few peaks.
             if spec.peaks.len() < params.min_peaks as usize {
@@ -180,7 +235,7 @@ pub fn match_spectra(
             // Use the ENZYME-REGISTERED aa_set (cleavage credit/penalty are
             // populated by register_enzyme — params.aa_set is unregistered).
             let compute_cleavage_credit = |cand: &Candidate| -> i32 {
-                let aa_set = &aa_set_for_gf;
+                let aa_set = aa_set_for_gf;
                 let enz = params.enzyme;
                 let mut score: i32 = 0;
                 let pre = cand.peptide.pre;
@@ -278,7 +333,7 @@ pub fn match_spectra(
                     spec,
                     params,
                     &mut queue,
-                    &aa_set_for_gf,
+                    aa_set_for_gf,
                     enzyme_opt,
                     scorer,
                     scored_spec_for_gf,
@@ -301,27 +356,58 @@ pub fn match_spectra(
                 psm.features = compute_psm_features(ss, &psm.candidate.peptide, scorer);
             });
 
-            queue
-        })
-        .collect();
+                queue
+            })
+            .collect();
 
-    // Yield-accounting summary.
-    // Helps disambiguate whether a PSM-yield gap comes from:
-    //   - filtering (skipped_min_peaks)
-    //   - enumeration (candidates_visited)
-    //   - scoring (psms_pushed)
-    //   - top-N retention (spectra_with_psms)
-    eprintln!(
-        "Yield: {} spectra in, {} skipped by min_peaks, {} candidates visited, \
-         {} PSMs pushed, {} spectra with non-empty queue",
-        spectra.len(),
-        skipped_min_peaks.load(Ordering::Relaxed),
-        candidates_visited.load(Ordering::Relaxed),
-        psms_pushed.load(Ordering::Relaxed),
-        spectra_with_psms.load(Ordering::Relaxed),
+        // Yield-accounting summary.
+        // Helps disambiguate whether a PSM-yield gap comes from:
+        //   - filtering (skipped_min_peaks)
+        //   - enumeration (candidates_visited)
+        //   - scoring (psms_pushed)
+        //   - top-N retention (spectra_with_psms)
+        eprintln!(
+            "Yield (chunk): {} spectra in, {} skipped by min_peaks, {} candidates visited, \
+             {} PSMs pushed, {} spectra with non-empty queue",
+            spectra.len(),
+            skipped_min_peaks.load(Ordering::Relaxed),
+            candidates_visited.load(Ordering::Relaxed),
+            psms_pushed.load(Ordering::Relaxed),
+            spectra_with_psms.load(Ordering::Relaxed),
+        );
+
+        queues
+    }
+}
+
+/// Match every spectrum against every candidate from the SearchIndex.
+/// Returns one top-N PSM queue per spectrum, in input order.
+///
+/// A `ScoredSpectrum` is built once per spectrum and reused across all
+/// candidates; candidates are bucketed by mass for sub-linear precursor
+/// lookup. After per-candidate scoring, SpecEValue is computed via the
+/// generating-function DP across the precursor tolerance window in nominal
+/// mass space and assigned to every PSM in the queue.
+///
+/// This is a thin wrapper around [`PreparedSearch::prepare`] +
+/// [`PreparedSearch::run_chunk`] preserved for single-shot callers (tests
+/// and the historic single-pass binary path).
+pub fn match_spectra(
+    spectra: &[Spectrum],
+    idx: &SearchIndex,
+    params: &SearchParams,
+    scorer: &RankScorer,
+    fragment_tolerance_da: f64,
+    decoy_prefix: &str,
+) -> Vec<TopNQueue> {
+    let prepared = PreparedSearch::prepare(
+        idx,
+        params,
+        scorer,
+        fragment_tolerance_da,
+        decoy_prefix,
     );
-
-    queues
+    prepared.run_chunk(spectra, 0)
 }
 
 /// For a single spectrum, compute the GF across the precursor tolerance

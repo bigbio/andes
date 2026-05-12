@@ -1,6 +1,6 @@
-//! Phase 7 Task 5: Java .pin schema parity gate.
+//! `.pin` schema parity gate against the Java reference fixture.
 //!
-//! The Rust .pin writer's header must match the Java reference fixture exactly,
+//! The Rust `.pin` writer's header must match the reference fixture exactly,
 //! so Percolator (and any downstream tool that uses regex column-name matching)
 //! consumes Rust output without modification.
 
@@ -63,8 +63,8 @@ fn rust_pin_header_matches_java_pin_fixture_header_exactly() {
 fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
     // Run a real search, then for at least 5 of Java's reference scans assert
     // Rust's row has the same number of tab-separated columns as Java's row.
-    // We don't compare values (Phase 6 parity gap means SpecEValue / lnSpecEValue
-    // will differ); only schema.
+    // We don't compare values (SpecEValue / lnSpecEValue may differ during
+    // the parity build-out); only schema.
 
     // 1. Run Rust search end-to-end.
     let target_db = FastaReader::load_all(BufReader::new(File::open(fixture("src/test/resources/BSA.fasta")).unwrap())).unwrap();
@@ -139,9 +139,9 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
     let mut row_count = 0;
     for (i, rust_line) in rust_lines.iter().enumerate().skip(1).take(rust_lines.len().min(java_lines.len()).min(6) - 1) {
         let rust_row_cols = rust_line.split('\t').count();
-        // Java may have variable trailing Proteins columns; allow Rust to differ
-        // ONLY in the trailing columns (after position == header_cols - 1).
-        // For Phase 7 MVP, just assert column count >= header_cols.
+        // The fixture may have variable trailing Proteins columns; allow Rust
+        // to differ ONLY in the trailing columns (after position ==
+        // header_cols - 1). For now, just assert column count >= header_cols.
         assert!(
             rust_row_cols >= rust_header_cols,
             "Rust row {i} has {rust_row_cols} cols, expected >= {rust_header_cols}"

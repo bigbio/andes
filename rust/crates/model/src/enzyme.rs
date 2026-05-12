@@ -1,7 +1,5 @@
-//! Enzymatic cleavage rules. Mirrors Java
-//! `edu.ucsd.msjava.msutil.Enzyme`. The 8 canonical variants are pinned by
-//! `tests/enzyme_rules_match_java.rs`. Custom enzymes are deferred (see
-//! Phase 1 spec § Open decisions deferred to implementation).
+//! Enzymatic cleavage rules. The 8 canonical variants are pinned by
+//! `tests/enzyme_rules_match_java.rs`. Custom enzymes are deferred.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Enzyme {
@@ -59,8 +57,8 @@ impl Enzyme {
         }
     }
 
-    /// Case-insensitive name lookup. Aliases mirror Java's
-    /// `Enzyme.getEnzymeByName()` (e.g. "Tryp"→Trypsin, "Asp-N"→AspN).
+    /// Case-insensitive name lookup. Common aliases ("Tryp"→Trypsin,
+    /// "Asp-N"→AspN, etc.) are accepted.
     pub fn from_name(s: &str) -> Option<Self> {
         let n = s.trim().to_ascii_lowercase();
         match n.as_str() {
@@ -92,32 +90,28 @@ impl Enzyme {
         }
     }
 
-    /// Required by Phase 4's candidate-generation walk. For builtin
-    /// enzymes this is always `true`: any residue is allowed *inside* a
-    /// peptide. The hook exists for future custom-enzyme support that
-    /// might forbid certain residues internally.
+    /// Required by the candidate-generation walk. For builtin enzymes this
+    /// is always `true`: any residue is allowed *inside* a peptide. The hook
+    /// exists for future custom-enzyme support that might forbid certain
+    /// residues internally.
     pub fn allows_internal(self, _residue: u8) -> bool {
         true
     }
 
     // -----------------------------------------------------------------------
-    // Phase 6 / Task 5 GF helpers — mirroring Java Enzyme.isNTerm(),
-    // isCTerm(), isCleavable(char), and getResidues().
+    // GF helpers
     // -----------------------------------------------------------------------
 
     /// Returns `true` for N-terminal enzymes (cleavage before the target
     /// residue: LysN, AspN). `false` for C-terminal enzymes (Trypsin, LysC,
     /// ArgC, Chymotrypsin, GluC) and for AlphaLP / NoCleavage /
-    /// NonSpecific.
-    ///
-    /// Java: `Enzyme.isNTerm()` — the flag is set at construction time and
-    /// hard-coded per variant. LysN and AspN are the only two builtins
-    /// with `isNTerm = true`.
+    /// NonSpecific. LysN and AspN are the only two builtins with
+    /// `is_n_term = true`.
     pub fn is_n_term(self) -> bool {
         matches!(self, Enzyme::LysN | Enzyme::AspN)
     }
 
-    /// `true` for C-terminal enzymes. Mirrors Java `Enzyme.isCTerm() = !isNTerm`.
+    /// `true` for C-terminal enzymes (the negation of `is_n_term`).
     pub fn is_c_term(self) -> bool {
         !self.is_n_term()
     }
@@ -128,7 +122,7 @@ impl Enzyme {
     /// For C-terminal enzymes (`after` list) this is equivalent to
     /// `is_cleavable_after`. For N-terminal enzymes (`before` list) this is
     /// equivalent to `is_cleavable_before`. For NoCleavage always `false`; for
-    /// AlphaLP / NonSpecific always `true`. Mirrors Java `Enzyme.isCleavable(char)`.
+    /// AlphaLP / NonSpecific always `true`.
     pub fn is_cleavable(self, residue: u8) -> bool {
         match self.rules().universal {
             Some(b) => b,
@@ -148,10 +142,6 @@ impl Enzyme {
     /// Trypsin). For N-terminal enzymes: the `before` residues (e.g. `[b'K']`
     /// for LysN). For NoCleavage / NonSpecific / AlphaLP: `&[]` (the
     /// `universal` flag handles cleavability; there are no specific residues).
-    ///
-    /// Java: `Enzyme.getResidues()` returns a `char[]` that is `null` for
-    /// universal enzymes and the target residues otherwise. We return `&[]`
-    /// in place of `null`.
     pub fn residues(self) -> &'static [u8] {
         if self.rules().universal.is_some() {
             return &[];
@@ -250,7 +240,7 @@ mod tests {
         assert_eq!(Enzyme::from_name("AlphaLP"), Some(Enzyme::AlphaLP));
     }
 
-    // Phase 6 / Task 5a: GF helper tests
+    // GF helper tests
     #[test]
     fn trypsin_is_c_term_and_cleaves_after_kr() {
         assert!(!Enzyme::Trypsin.is_n_term());

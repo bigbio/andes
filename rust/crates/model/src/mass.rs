@@ -1,50 +1,47 @@
-//! Chemistry constants and mass utilities. Values pinned to Java
-//! `edu.ucsd.msjava.msutil.Composition` and `Constants` — see
+//! Chemistry constants and mass utilities. See
 //! `tests/chemistry_constants_match_java.rs` for the parity gate.
 
-/// Monoisotopic mass of hydrogen. Java: `Composition.H = 1.007825035`.
+/// Monoisotopic mass of hydrogen.
 pub const H: f64 = 1.007825035;
 
-/// Monoisotopic mass of oxygen. Java: `Composition.O = 15.99491463`.
+/// Monoisotopic mass of oxygen.
 pub const O: f64 = 15.99491463;
 
-/// Monoisotopic mass of carbon-12. Java: `Composition.C = 12.0`.
+/// Monoisotopic mass of carbon-12.
 pub const C: f64 = 12.0;
 
-/// Monoisotopic mass of nitrogen-14. Java: `Composition.N = 14.003074`.
+/// Monoisotopic mass of nitrogen-14.
 pub const N: f64 = 14.003074;
 
-/// Monoisotopic mass of sulfur-32. Java: `Composition.S = 31.9720707`.
+/// Monoisotopic mass of sulfur-32.
 pub const S: f64 = 31.9720707;
 
 /// Monoisotopic mass of H2O, computed as `H * 2 + O` so the IEEE 754
-/// rounding matches Java's `Composition.H2O` to the bit. The literal
-/// `18.010565` is *not* bit-equal (mantissa drifts by 0x05).
+/// rounding matches the canonical bit pattern. The literal `18.010565`
+/// is *not* bit-equal (mantissa drifts by 0x05).
 pub const H2O: f64 = H * 2.0 + O;
 
-/// Proton mass used as the default charge carrier. Java:
-/// `Composition.PROTON = 1.00727649`.
+/// Proton mass used as the default charge carrier.
 pub const PROTON: f64 = 1.00727649;
 
-/// Monoisotopic mass of carbon-13. Java: `Composition.C13 = 13.00335483`.
+/// Monoisotopic mass of carbon-13.
 pub const C13: f64 = 13.00335483;
 
 /// Mass difference between carbon-13 and carbon-12, used as the unit
-/// step for isotope-error tolerance. Java: `Composition.ISOTOPE = C13 - C`.
+/// step for isotope-error tolerance.
 pub const ISOTOPE: f64 = C13 - C;
 
-/// Single-precision integer-mass scaler. Java:
-/// `Constants.INTEGER_MASS_SCALER = 0.999497f`. Used in `nominal_from`
-/// via float-domain arithmetic to mirror Java's
-/// `AminoAcid.java:33: Math.round(INTEGER_MASS_SCALER * (float) mass)`.
+/// Single-precision integer-mass scaler. Used in `nominal_from` via
+/// float-domain arithmetic; the multiply must happen in f32 (single
+/// precision) before rounding to preserve the rounding boundary.
 pub const INTEGER_MASS_SCALER: f32 = 0.999497;
 
 /// Convert a monoisotopic mass to the integer "nominal" mass that
-/// indexes MS-GF+'s scoring DP table. Mirrors Java
-/// `AminoAcid.java:33`: `Math.round(INTEGER_MASS_SCALER * (float) mass)`
-/// — the multiply happens in f32 (single precision) before rounding.
-/// Java's `Math.round(float)` is `floor(x + 0.5)`; for non-negative
-/// inputs this matches Rust's `f32::round()`.
+/// indexes MS-GF+'s scoring DP table.
+///
+/// The multiply happens in f32 (single precision) before rounding —
+/// this is the rounding boundary the DP table is built against.
+/// For non-negative inputs this matches `f32::round()` (round half-up).
 pub fn nominal_from(mass: f64) -> i32 {
     (INTEGER_MASS_SCALER * mass as f32).round() as i32
 }

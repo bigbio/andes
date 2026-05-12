@@ -9,9 +9,9 @@ use model::modification::{Modification, ModLocation, ResidueSpec};
 fn bit_eq(a: f64, b: f64) -> bool { a.to_bits() == b.to_bits() }
 
 /// (mods_txt_line, expected_name, expected_mass_delta).
-/// Lines are mass-based (not composition-based) since the Phase 1
-/// parser only accepts numeric mass deltas. Multi-residue mods like
-/// Phospho are tested with a single-residue substitute.
+/// Lines are mass-based (not composition-based) since the parser only
+/// accepts numeric mass deltas. Multi-residue mods like Phospho are
+/// tested with a single-residue substitute.
 fn java_common_mods() -> Vec<(&'static str, &'static str, f64)> {
     vec![
         ("57.021464,C,fix,any,Carbamidomethyl",      "Carbamidomethyl",  57.021464),

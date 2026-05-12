@@ -45,11 +45,11 @@ struct Cli {
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
 
-    /// Minimum isotope error offset to try (default -1, matching Java `-ti -1,2`).
+    /// Minimum isotope error offset to try (default -1).
     #[arg(long, default_value = "-1")]
     isotope_error_min: i8,
 
-    /// Maximum isotope error offset to try (default 2, matching Java `-ti -1,2`).
+    /// Maximum isotope error offset to try (default 2).
     #[arg(long, default_value = "2")]
     isotope_error_max: i8,
 
@@ -69,7 +69,7 @@ struct Cli {
     #[arg(long, default_value = "10")]
     top_n: u32,
 
-    /// Number of Tolerable Termini — mirrors Java MS-GF+'s `-ntt N` flag.
+    /// Number of Tolerable Termini.
     ///
     /// Controls enzymatic-cleavage enforcement at span boundaries:
     ///   2 (default): both termini must be cleavage sites (strict / fully specific).
@@ -78,28 +78,23 @@ struct Cli {
     #[arg(long, default_value = "2")]
     ntt: u8,
 
-    /// Maximum number of missed cleavages per peptide.
-    ///
-    /// Mirrors Java MS-GF+'s `-maxMissedCleavages N` flag (default 1).
+    /// Maximum number of missed cleavages per peptide (default 1).
     #[arg(long, default_value = "1")]
     max_missed_cleavages: u32,
 
     /// Minimum number of peaks required in an MS2 spectrum to attempt scoring.
     ///
-    /// Spectra with fewer peaks are skipped. Mirrors Java's `-minNumPeaks N`
-    /// flag (default 10).
+    /// Spectra with fewer peaks are skipped (default 10).
     #[arg(long, default_value = "10")]
     min_peaks: u32,
 
     /// Minimum peptide length (in residues) to consider during the search.
-    ///
-    /// Mirrors Java MS-GF+'s `-minLength N` flag (default 6).
+    /// Default 6.
     #[arg(long, default_value = "6")]
     min_length: u32,
 
     /// Maximum peptide length (in residues) to consider during the search.
-    ///
-    /// Mirrors Java MS-GF+'s `-maxLength N` flag (default 40).
+    /// Default 40.
     #[arg(long, default_value = "40")]
     max_length: u32,
 
@@ -310,9 +305,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ── 7. Run match_spectra ──────────────────────────────────────────────────
-    // Configure the global Rayon worker pool. Mirrors Java MS-GF+'s -thread N flag.
-    // build_global() panics if called twice; guard with OnceLock so repeated CLI
-    // invocations within a single test process don't blow up.
+    // Configure the global Rayon worker pool. `build_global()` panics if called
+    // twice; guard with `OnceLock` so repeated CLI invocations within a single
+    // test process don't blow up.
     static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     POOL_INIT.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -323,7 +318,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Using {} worker threads", cli.threads);
 
     // Fragment tolerance of 0.5 Da matches the gf_bsa_parity integration test
-    // and the Java MS-GF+ default for HCD data.
+    // (and the canonical HCD default).
     let fragment_tol_da = 0.5_f64;
     let t_search_start = std::time::Instant::now();
     let queues = match_spectra(
@@ -344,7 +339,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ── 8. Write PIN ─────────────────────────────────────────────────────────
-    // Bench mode still writes PIN (so we can diff against Java) but skips TSV.
+    // Bench mode still writes PIN (so we can diff against the reference
+    // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
     output::write_pin(&cli.output_pin, &spectra, &queues, &params, &idx, &cli.decoy_prefix)?;
     eprintln!(

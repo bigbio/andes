@@ -1,10 +1,9 @@
-//! Phase 1 Display ↔ from_str round-trip stress test. Validates that for
-//! every constructible `Peptide` in our representative corpus,
+//! Display ↔ from_str round-trip stress test. Validates that for every
+//! constructible `Peptide` in our representative corpus,
 //! `Peptide::from_str(&p.to_string(), &aa_set) == Ok(p)` (structural).
 //!
-//! This is NOT a Java byte-parity gate — Java's `Peptide.toString()`
-//! uses a different format (3-decimal, fixed mods invisible, no
-//! flanking). Phase 7's output crate owns PIN/TSV byte parity.
+//! This is a structural-equality round trip, not a byte-parity gate.
+//! Byte-parity for the PIN/TSV peptide formats lives in the `output` crate.
 
 use model::{
     AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Modification,

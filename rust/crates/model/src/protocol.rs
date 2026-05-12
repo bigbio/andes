@@ -1,5 +1,4 @@
-//! Search protocol categories. Mirrors Java
-//! `edu.ucsd.msjava.msutil.Protocol`.
+//! Search protocol categories.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Protocol {
@@ -23,7 +22,7 @@ impl Protocol {
         }
     }
 
-    /// Case-sensitive lookup — matches Java's `Protocol.get(name)`.
+    /// Case-sensitive lookup.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "Automatic"       => Some(Protocol::Automatic),

@@ -425,7 +425,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "    cand_idx={} prot_idx={} prot={} is_decoy={} pep_mass={:.4} nominal={}",
                 i, c.protein_index, prot_acc, c.is_decoy, c.peptide.mass(),
-                nominal_from(c.peptide.mass() - H2O)
+                c.peptide.nominal_residue_mass()
             );
         }
         if found_indices.is_empty() {
@@ -493,7 +493,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         let charge_used = matched_psm.charge_used;
         let matched_score = matched_psm.score.round() as i32;
-        let pep_nominal = nominal_from(matched_psm.candidate.peptide.mass() - H2O);
+        let pep_nominal = matched_psm.candidate.peptide.nominal_residue_mass();
 
         // Build aa_set with enzyme registered (mirrors match_engine.rs:60-67).
         // Rebuild the same aa_set we constructed at the top (cam + ox) and register
@@ -648,7 +648,7 @@ fn print_split_breakdown(
     // Use SPECTRUM's parent mass for partition lookup (matching score_psm fix).
     let spectrum_parent_mass = scored.parent_mass();
     let peptide_mass = peptide.mass();
-    let peptide_nominal = nominal_from(peptide_mass - H2O);
+    let peptide_nominal = peptide.nominal_residue_mass();
     let mut prefix_acc = 0.0_f64;
     let mut total: i32 = 0;
     let mme = &scorer.param().mme;

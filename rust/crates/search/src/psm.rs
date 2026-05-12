@@ -5,17 +5,16 @@ use std::collections::BinaryHeap;
 
 use crate::candidate_gen::Candidate;
 
-/// Per-PSM fragment-ion feature columns computed from Phase 5 scoring
-/// machinery and emitted into the Percolator `.pin` file.
+/// Per-PSM fragment-ion feature columns computed from the scoring machinery
+/// and emitted into the Percolator `.pin` file.
 ///
 /// Filled by `compute_psm_features` in `match_engine.rs` after `score_psm`.
 /// Fields use `Default` (all zero) as the safe sentinel before computation.
 #[derive(Debug, Clone, Default)]
 pub struct PsmFeatures {
     /// Number of unique fragment positions where a b- or y-ion at charge 1
-    /// matched a peak within the fragment tolerance.  Each position counts
+    /// matched a peak within the fragment tolerance. Each position counts
     /// at most once per ion series, but can contribute 1 from b AND 1 from y.
-    /// Mirrors Java `NumMatchedMainIons`.
     pub num_matched_main_ions: u32,
     /// Length of the longest contiguous run of matched b-ions
     /// (b1, b2, … must all match to form the run).
@@ -28,42 +27,30 @@ pub struct PsmFeatures {
     /// of peptide positions covered by matched b/y ions.
     pub matched_ion_ratio: f32,
 
-    // ── Phase 4 alignment: ion-current ratios ───────────────────────────────
+    // ── Ion-current ratios ─────────────────────────────────────────────────
 
-    /// Sum of matched b+y ion intensities divided by total MS2 ion current.
-    /// Mirrors Java `PSMFeatureFinder.getExplainedIonCurrent()` =
-    /// `nTermIonCurrent / ms2IonCurrent + cTermIonCurrent / ms2IonCurrent`.
+    /// `n_term_ion_current_ratio + c_term_ion_current_ratio`.
     pub explained_ion_current_ratio: f32,
     /// Sum of matched b-ion intensities divided by total MS2 ion current.
-    /// Mirrors Java `PSMFeatureFinder.getNTermExplainedIonCurrent()`.
     pub n_term_ion_current_ratio: f32,
     /// Sum of matched y-ion intensities divided by total MS2 ion current.
-    /// Mirrors Java `PSMFeatureFinder.getCTermExplainedIonCurrent()`.
     pub c_term_ion_current_ratio: f32,
-    /// Raw sum of all peak intensities in the MS2 spectrum.
-    /// Mirrors Java `PSMFeatureFinder.getMS2IonCurrent()` — the Java code
-    /// stores and emits the raw sum (NOT log10). Note: the PIN column is
-    /// labelled `MS2IonCurrent` and Java emits it directly without log
-    /// transformation.
+    /// Raw sum of all peak intensities in the MS2 spectrum (no log10).
     pub ms2_ion_current: f32,
-    /// Isolation-window efficiency. Java always returns `null` for this field
-    /// (no precursor isolation data is stored in the spectrum object), so we
-    /// emit `0.0` as a documented divergence.
+    /// Isolation-window efficiency. Not available from the Spectrum object;
+    /// always emitted as 0.0.
     pub isolation_window_efficiency: f32,
 
-    // ── Phase 4 alignment: top-7 mass-error statistics ──────────────────────
+    // ── Top-7 mass-error statistics ────────────────────────────────────────
 
     /// Mean of absolute Da errors for the top-7 most-intense matched ions.
-    /// Mirrors Java `MassErrorStat.getMean7()` (uses absolute |error|).
     pub mean_error_top7: f32,
-    /// Population standard deviation of absolute Da errors for top-7 ions.
-    /// Mirrors Java `MassErrorStat.getSd7()` (population stdev: sqrt(E[x²]-mean²)).
+    /// Population standard deviation of absolute Da errors for top-7 ions
+    /// (formula: `sqrt(E[x²] - mean²)`).
     pub stdev_error_top7: f32,
     /// Mean of signed relative errors (ppm) for the top-7 most-intense matched ions.
-    /// Mirrors Java `MassErrorStat.getRMean7()` (uses signed error, not absolute).
     pub mean_rel_error_top7: f32,
     /// Population standard deviation of signed relative errors (ppm) for top-7 ions.
-    /// Mirrors Java `MassErrorStat.getRSd7()`.
     pub stdev_rel_error_top7: f32,
 }
 
@@ -74,15 +61,14 @@ pub struct PsmMatch {
     pub charge_used: u8,
     /// Signed: positive when peptide mass exceeds spectrum's implied mass.
     pub mass_error_ppm: f64,
-    /// Higher is better. Phase 5 fills with real spectral-similarity score.
-    /// Phase 4e MVP uses negative |mass_error_ppm| as a placeholder.
+    /// Higher is better. Real spectral-similarity score.
     pub score: f32,
-    /// Phase 6 SpecEValue: lower is better. Default 1.0 = "not yet computed"
+    /// SpecEValue: lower is better. Default 1.0 = "not yet computed"
     /// / "no signal". Set by `compute_spec_e_values_for_spectrum` after the
     /// per-candidate scoring loop.
     pub spec_e_value: f64,
-    /// Java's `getDeNovoScore()` — `gf_group.max_score() - 1` for the GF that
-    /// scored this peptide. Set during `compute_spec_e_values_for_spectrum`.
+    /// De-novo score: `gf_group.max_score() - 1` for the GF that scored
+    /// this peptide. Set during `compute_spec_e_values_for_spectrum`.
     /// Sentinel: `i32::MIN` if not yet computed.
     pub de_novo_score: i32,
     /// Activation method captured from `param.data_type.activation` at scoring
@@ -97,9 +83,9 @@ pub struct PsmMatch {
     pub features: PsmFeatures,
     /// The isotope offset that produced the precursor match: 0 = monoisotopic,
     /// +N = spectrum precursor was N C13 peaks above the true monoisotopic.
-    /// Mirrors Java MS-GF+ default range −1..=2.  Threaded from
-    /// `MassError::isotope_offset` (precursor_matching.rs) via match_engine.rs.
-    /// Written as the PIN `isotope_error` column (DirectPinWriter.java:195).
+    /// Default range −1..=2. Threaded from `MassError::isotope_offset`
+    /// (precursor_matching.rs) via match_engine.rs. Written as the PIN
+    /// `isotope_error` column.
     pub isotope_offset: i8,
 }
 
@@ -162,8 +148,8 @@ impl TopNQueue {
     /// The min-heap (via `Reverse<PsmMatch>`) puts the *worst* PSM at the top
     /// so it can be evicted when over capacity.
     ///
-    /// Before Phase 6 computes spec_e_value, all PSMs have `spec_e_value = 1.0`
-    /// and the secondary `score` key governs eviction — same behaviour as before.
+    /// Before `compute_spec_e_values_for_spectrum` runs, all PSMs have
+    /// `spec_e_value = 1.0` and the secondary `score` key governs eviction.
     pub fn push(&mut self, m: PsmMatch) {
         if self.heap.len() < self.capacity as usize {
             self.heap.push(Reverse(m));
@@ -235,7 +221,7 @@ impl TopNQueue {
 
     /// Apply `f` to each PSM in-place (mutable borrow), then rebuild the heap.
     ///
-    /// Used by Phase 7 enrichment to set `de_novo_score`, `e_value`, and other
+    /// Used by enrichment to set `de_novo_score`, `e_value`, and other
     /// fields that don't affect ordering. The heap is rebuilt after all mutations
     /// (O(N) heapify) to maintain the invariant.
     pub fn update_psm_enrichment<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
@@ -344,7 +330,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 6 / Task 8: SpecEValue ordering tests
+    // SpecEValue ordering tests
     // -----------------------------------------------------------------------
 
     #[test]
@@ -411,7 +397,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 1 alignment fix: isotope_offset field
+    // isotope_offset field
     // -----------------------------------------------------------------------
 
     #[test]
@@ -422,7 +408,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 7 / Task 1: enrichment field sentinel defaults
+    // Enrichment field sentinel defaults
     // -----------------------------------------------------------------------
 
     #[test]
@@ -440,7 +426,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 7 followup: PsmFeatures struct and default initialization
+    // PsmFeatures struct and default initialization
     // -----------------------------------------------------------------------
 
     #[test]
@@ -451,7 +437,7 @@ mod tests {
         assert_eq!(f.longest_y, 0);
         assert_eq!(f.longest_y_pct, 0.0);
         assert_eq!(f.matched_ion_ratio, 0.0);
-        // Phase 4 alignment: 9 new fields
+        // Ion-current + error-stat columns (9 fields)
         assert_eq!(f.explained_ion_current_ratio, 0.0);
         assert_eq!(f.n_term_ion_current_ratio, 0.0);
         assert_eq!(f.c_term_ion_current_ratio, 0.0);
@@ -476,7 +462,7 @@ mod tests {
             "features.longest_y_pct should default to 0.0");
         assert_eq!(m.features.matched_ion_ratio, 0.0,
             "features.matched_ion_ratio should default to 0.0");
-        // Phase 4 alignment: 9 new fields
+        // Ion-current + error-stat columns (9 fields)
         assert_eq!(m.features.explained_ion_current_ratio, 0.0,
             "explained_ion_current_ratio should default to 0.0");
         assert_eq!(m.features.n_term_ion_current_ratio, 0.0,

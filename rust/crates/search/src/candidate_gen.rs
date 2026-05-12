@@ -1,21 +1,16 @@
-//! Candidate peptide enumeration via protein-walk. Mirrors Java
-//! `CandidatePeptideGrid` but operates per-protein rather than over
-//! the suffix array. The candidate set produced is equivalent (only
-//! iteration order differs).
+//! Candidate peptide enumeration via per-protein walk.
 //!
-//! Phase 4d Task 2 ships the basic enumerator: enzyme-cleaved spans
-//! within length range. NO variable-mod expansion (Task 4).
-//! Missed-cleavage handling already works correctly via the
-//! `missed_count` check; Task 3 adds tests for it.
+//! Enumerates enzyme-cleaved spans within the configured length range,
+//! including missed-cleavage spans (governed by the `missed_count` check).
 //!
-//! Track B5: N-terminal Met cleavage support.
-//! Mirrors Java `CandidatePeptideGridConsideringMetCleavage.java:16`.
+//! ## N-terminal Met cleavage
+//!
 //! When a protein starts with M, a parallel enumeration treats
 //! `sequence[1..]` as the effective protein sequence (initial Met loss).
 //! Both enumerations run concurrently; Met-cleaved candidates differ by
 //! `is_protein_n_term=true` at offset 1 of the original sequence and are
 //! NOT deduplicated — they have a distinct search space (protein-N-term
-//! mod variants apply) matching Java's behaviour.
+//! mod variants apply).
 
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
@@ -32,10 +27,9 @@ pub struct Candidate {
     pub is_decoy: bool,
     /// True when this peptide spans the protein's biological N-terminus.
     /// For Met-cleaved peptides, this is true even though `start_offset_in_protein > 0`.
-    /// Mirrors Java's `isProteinNTerm` flag in DBScanner cleavage-score logic.
     pub is_protein_n_term: bool,
     /// True when this peptide spans the protein's C-terminus
-    /// (`abs_end == sequence_length`). Mirrors Java's `isProteinCTerm`.
+    /// (`abs_end == sequence_length`).
     pub is_protein_c_term: bool,
 }
 
@@ -65,11 +59,12 @@ fn enumerate_protein(
     // Standard enumeration: full sequence from offset 0.
     let mut out = enumerate_protein_from_offset(seq, 0, protein_index, is_decoy, params);
 
-    // N-terminal Met cleavage: mirrors Java CandidatePeptideGridConsideringMetCleavage.java:16.
-    // When the protein starts with M (and has >1 residue), also enumerate candidates
-    // treating sequence[1..] as the effective start. The Met-cleaved peptides still carry
-    // is_protein_n_term=true (the post-Met residue is the new biological N-terminus) and
-    // are NOT deduplicated — they differ by terminal-mod search space.
+    // N-terminal Met cleavage: when the protein starts with M (and has >1
+    // residue), also enumerate candidates treating sequence[1..] as the
+    // effective start. The Met-cleaved peptides still carry
+    // is_protein_n_term=true (the post-Met residue is the new biological
+    // N-terminus) and are NOT deduplicated — they differ by terminal-mod
+    // search space.
     if seq.first() == Some(&b'M') && seq.len() > 1 {
         out.extend(enumerate_protein_from_offset(seq, 1, protein_index, is_decoy, params));
     }
@@ -176,9 +171,8 @@ fn enumerate_protein_from_offset(
                     continue;
                 }
                 // No missed-cleavage filter here: the "missed cleavages between
-                // start and end" concept applies to strictly tryptic spans. For
-                // semi-tryptic peptides with a free terminus, Java MS-GF+ does
-                // not count internal cleavage sites as missed cleavages — the
+                // start and end" concept applies to strictly tryptic spans.
+                // For semi-tryptic peptides with a free terminus, the
                 // semi-tryptic span is treated as a single candidate regardless
                 // of internal K/R residues.
                 emit_span(&ctx, start, end, &mut out);
@@ -272,9 +266,6 @@ fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
 /// - Position n-1: Protein_C_Term (if is_protein_c_term) or C_Term variants are
 ///   merged in addition to Anywhere variants.
 /// - All other positions: Anywhere only (unchanged).
-///
-/// Mirrors Java `CandidatePeptideGrid.java:43` which maintains separate cached
-/// AA-set arrays per terminal context (aaSetN, aaSetC, aaSetProtN, aaSetProtC).
 fn expand_mod_combinations(
     span: &[u8],
     params: &SearchParams,

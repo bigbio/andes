@@ -1,4 +1,4 @@
-//! Generating-function (GF) DP for SpecEValue computation. Mirrors Java
+//! Generating-function (GF) DP for SpecEValue computation. Provides
 //! `ScoreBound`, `ScoreDist`, `GeneratingFunction`, and `PrimitiveAaGraph`.
 
 pub mod score_dist;

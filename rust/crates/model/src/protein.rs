@@ -1,11 +1,9 @@
-//! Protein records loaded from a FASTA database. Foundation data
-//! consumed by Phase 4b-e search code.
+//! Protein records loaded from a FASTA database.
 
 #[derive(Debug, Clone)]
 pub struct Protein {
     /// First whitespace-delimited token after the leading `>` on the
-    /// header line. Java equivalent: the first column of
-    /// `FastaSequence.getAnnotation()`.
+    /// header line.
     pub accession: String,
     /// Remainder of the header line (after the first whitespace),
     /// trimmed. Empty string if absent.

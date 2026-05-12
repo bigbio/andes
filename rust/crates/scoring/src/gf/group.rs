@@ -1,6 +1,5 @@
 //! Streaming merger for `GeneratingFunction` distributions across
-//! precursor-mass bins. Mirrors Java
-//! `edu.ucsd.msjava.msgf.PrimitiveGeneratingFunctionGroup`.
+//! precursor-mass bins.
 //!
 //! Math identity: `ScoreDist::add_prob_dist(other, 0, 1.0)` is a linear sum
 //! over the probability arrays, so register-all-then-merge and
@@ -194,8 +193,8 @@ mod tests {
 
     #[test]
     fn spectral_probability_after_merge_clamped_to_one() {
-        // After merging multiple GFs, get_spectral_probability is clamped to 1.0
-        // (Java behavior). Verify the API returns at most 1.0.
+        // After merging multiple GFs, get_spectral_probability is clamped to 1.0.
+        // Verify the API returns at most 1.0.
         let mut group = GeneratingFunctionGroup::new();
         for mass in [200, 210, 220, 230, 240] {
             group.accept(build_gf(mass));

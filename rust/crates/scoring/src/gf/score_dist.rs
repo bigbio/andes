@@ -1,5 +1,4 @@
 //! `ScoreBound` + `ScoreDist` data structures for the GF DP.
-//! Mirrors Java `edu.ucsd.msjava.msgf.{ScoreBound, ScoreDist}`.
 //!
 //! `ScoreDist` stores per-score arrays of probabilities and/or counts
 //! over an integer score range `[min_score, max_score)`. Index = score - min_score.
@@ -77,11 +76,9 @@ impl ScoreDist {
         }
     }
 
-    /// Java: `getProbability` returns `probDistribution[max(0, score - minScore)]`.
-    /// A score below minScore returns the entry at index 0; above maxScore is
-    /// undefined behavior in Java (would index out of bounds). We mirror Java
-    /// for in-range and clamp-to-zero for below-range; above-range is caller's
-    /// responsibility (panics if out of bounds).
+    /// Returns `prob_distribution[max(0, score - min_score)]`.
+    /// A score below `min_score` returns the entry at index 0; above
+    /// `max_score` is caller's responsibility (panics if out of bounds).
     pub fn get_probability(&self, score: i32) -> f64 {
         let p = self.prob_distribution.as_ref().expect("prob distribution not allocated");
         let idx = if score >= self.bound.min_score {
@@ -114,8 +111,7 @@ impl ScoreDist {
         sum.min(1.0)
     }
 
-    /// Mirror Java's `ScoreDist.addProbDist(other, scoreDiff, aaProb)`:
-    /// for each `t` in `other`'s score range, accumulate
+    /// For each `t` in `other`'s score range, accumulate
     /// `other.prob[t] * aa_prob` into `self.prob[t + score_diff]`,
     /// clipping the destination to `self`'s range.
     ///
@@ -163,7 +159,7 @@ impl ScoreDist {
         }
     }
 
-    /// Mirror Java's `ScoreDist.addNumDist(other, scoreDiff, coeff)`.
+    /// Like `add_prob_dist` but operates on the `num_distribution` arrays.
     pub fn add_num_dist(&mut self, other: &ScoreDist, score_diff: i32, coeff: f64) {
         let other_n = match other.num_distribution.as_ref() {
             Some(n) => n,

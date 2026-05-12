@@ -1,7 +1,7 @@
 //! Java SpecProbability (SP) parity for hand-picked traced PSMs.
 //!
-//! Phase 6 Task 9 baseline: 5 PSMs from BSA + test.mgf, asserting Rust raw
-//! GF tail SP stays within `TOLERANCE_LOG10` OOM of Java's raw GF tail SP.
+//! Baseline: 5 PSMs from BSA + test.mgf, asserting Rust raw GF tail SP stays
+//! within `TOLERANCE_LOG10` OOM of Java's raw GF tail SP.
 //!
 //! Refixtured 2026-05-11: previously this test compared Rust SP
 //! (`psm.spec_e_value`, which is `gf.spectral_probability(score)`, i.e.
@@ -208,7 +208,7 @@ fn rust_spec_probability_within_one_oom_of_java_for_5_traced_psms() {
     }
 
     // Always print the per-PSM table for visibility in CI logs.
-    println!("\n=== Phase 6 Task 9: per-PSM SpecProbability parity (SP-vs-SP) ===");
+    println!("\n=== per-PSM SpecProbability parity (SP-vs-SP) ===");
     for n in &notes {
         println!("  {n}");
     }
@@ -216,7 +216,7 @@ fn rust_spec_probability_within_one_oom_of_java_for_5_traced_psms() {
 
     assert!(
         failures.is_empty(),
-        "Phase 6 Task 9: {}/{} traced PSMs failed parity (tolerance = {TOLERANCE_LOG10:.1} OOM):\n{}",
+        "{}/{} traced PSMs failed parity (tolerance = {TOLERANCE_LOG10:.1} OOM):\n{}",
         failures.len(),
         FIVE_TRACED_PSMS.len(),
         failures.join("\n")

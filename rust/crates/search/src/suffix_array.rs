@@ -1,23 +1,19 @@
-//! Suffix array + LCP over a CompactFastaSequence. Built via the
-//! `suffix` crate (SA-IS algorithm). LCP via Kasai's algorithm.
-//! Mirrors Java `edu.ucsd.msjava.msdbsearch.CompactSuffixArray` for
-//! shape (`indices`, `nlcps`); algorithm differs (Java has its own
-//! implementation), so byte-bit parity with Java's `.csarr` is NOT
-//! required by Phase 4c (only candidate-set parity downstream in 4d).
+//! Suffix array + LCP over a CompactFastaSequence. Built via the `suffix`
+//! crate (SA-IS algorithm); LCP via Kasai's algorithm. Byte-bit parity with
+//! the canonical `.csarr` is NOT required — only candidate-set parity
+//! downstream.
 //!
 //! ## Wire format (`.csarr` / `.cnlcp`)
-//!
-//! Determined by reading `CompactSuffixArray.createSuffixArrayFiles()` in Java:
 //!
 //! ```text
 //! .csarr:  i32 size  |  i32 id  |  i32[size] indices  |  i64 lastModified  |  i32 formatId
 //! .cnlcp:  i32 size  |  i32 id  |  byte[size] nlcps   |  i64 lastModified  |  i32 formatId
 //! ```
 //!
-//! `formatId` = 8294 (`COMPACT_SUFFIX_ARRAY_FILE_FORMAT_ID` in Java).
-//! All multibyte integers are big-endian (Java `DataOutputStream`).
-//! The `id` and `lastModified` fields are used by Java for cache validation;
-//! Rust writes zeros for these fields (round-trip fidelity, not cache linking).
+//! `formatId` = 8294. All multibyte integers are big-endian.
+//! The `id` and `lastModified` fields are used by external consumers for
+//! cache validation; this writer emits zeros (round-trip fidelity, not
+//! cache linking).
 
 use std::io::{Read, Write};
 
@@ -94,15 +90,15 @@ fn compute_lcp(text: &[u8], indices: &[i32]) -> Vec<i32> {
     lcp
 }
 
-/// Java `COMPACT_SUFFIX_ARRAY_FILE_FORMAT_ID`.
+/// CompactSuffixArray file format identifier.
 const FORMAT_ID: i32 = 8294;
 
 impl SuffixArray {
-    /// Serialize to `.csarr` and `.cnlcp` streams in Java-compatible wire format.
+    /// Serialize to `.csarr` and `.cnlcp` streams in the canonical wire format.
     ///
     /// Writes placeholder zeros for the `id` and `lastModified` header/footer
-    /// fields (Java uses these for cache linking; Rust does not need them for
-    /// round-trip or search purposes).
+    /// fields (used for cache linking by external consumers; not needed for
+    /// round-trip or search purposes here).
     pub fn write_to<W1: Write, W2: Write>(
         &self,
         csarr: &mut W1,
@@ -113,7 +109,7 @@ impl SuffixArray {
         Ok(())
     }
 
-    /// Deserialize from `.csarr` and `.cnlcp` streams in Java-compatible wire format.
+    /// Deserialize from `.csarr` and `.cnlcp` streams in the canonical wire format.
     pub fn read_from<R1: Read, R2: Read>(
         csarr: &mut R1,
         cnlcp: &mut R2,
@@ -145,7 +141,7 @@ fn write_csarr<W: Write>(w: &mut W, indices: &[i32]) -> Result<()> {
 
 /// Write `.cnlcp`: `i32 size | i32 id=0 | byte[size] nlcps | i64 lastModified=0 | i32 formatId`.
 ///
-/// Java's LCP values are written as single bytes (via `writeByte`), capped at
+/// LCP values are stored as single signed bytes capped at
 /// [`i8::MAX`] (127). Values that exceed 127 are clamped before writing.
 fn write_cnlcp<W: Write>(w: &mut W, nlcps: &[i32]) -> Result<()> {
     let size = nlcps.len() as i32;
@@ -197,7 +193,7 @@ fn read_cnlcp<R: Read>(r: &mut R) -> Result<Vec<i32>> {
     let mut byte_buf = [0u8; 1];
     for _ in 0..size {
         r.read_exact(&mut byte_buf)?;
-        // Java writeByte / readByte is signed; extend to i32 matching Java semantics.
+        // Signed byte → sign-extended i32.
         out.push(byte_buf[0] as i8 as i32);
     }
 

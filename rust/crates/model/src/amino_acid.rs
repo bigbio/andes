@@ -1,7 +1,6 @@
-//! Amino acid residue with optional modification. Mirrors Java
-//! `edu.ucsd.msjava.msutil.AminoAcid`. Standard residue masses are
-//! computed from atomic composition (C/H/N/O/S counts) so they are
-//! bit-equal to Java's `Composition.getAccurateMass()`. Pinned by
+//! Amino acid residue with optional modification. Standard residue masses
+//! are computed from atomic composition (C/H/N/O/S counts) so they are
+//! bit-equal to the canonical composition-based mass. Pinned by
 //! `tests/standard_aa_masses_match_java.rs`.
 
 use std::hash::{Hash, Hasher};
@@ -44,9 +43,9 @@ impl AminoAcid {
     }
 }
 
-// Custom Eq/Hash via to_bits() — matches Java's Double.equals/hashCode
-// semantics (NOT IEEE 754; bit-exact). Needed because AminoAcid contains
-// f64, which doesn't implement Eq/Hash directly.
+// Custom Eq/Hash via to_bits() — bit-exact comparison (NOT IEEE 754).
+// Needed because AminoAcid contains f64, which doesn't implement Eq/Hash
+// directly.
 impl PartialEq for AminoAcid {
     fn eq(&self, other: &Self) -> bool {
         self.residue == other.residue
@@ -82,10 +81,9 @@ fn mods_eq(a: &Option<Modification>, b: &Option<Modification>) -> bool {
     }
 }
 
-/// 20 standard AA atomic compositions (C, H, N, O, S) — the exact
-/// integer counts used by Java `AminoAcid.STANDARD_AA[]` (see
-/// AminoAcid.java:163-181). Computing mass from these counts at runtime
-/// guarantees bit-equal parity with Java's `Composition.getAccurateMass()`.
+/// 20 standard AA atomic compositions (C, H, N, O, S). Computing mass
+/// from these integer counts at runtime guarantees bit-equal parity with
+/// a canonical composition-based mass.
 fn standard_composition(residue: u8) -> Option<(u32, u32, u32, u32, u32)> {
     Some(match residue {
         b'G' => (2,  3, 1, 1, 0),

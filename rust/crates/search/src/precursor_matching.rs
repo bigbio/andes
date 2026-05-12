@@ -13,7 +13,7 @@ pub struct MassError {
     pub mass_error_ppm: f64,
     /// Isotope offset that produced this match: 0 = monoisotopic match,
     /// `+N` = spectrum's reported precursor was `N` isotope peaks above
-    /// the true monoisotopic. Java MS-GF+ default range is `-1..=2`.
+    /// the true monoisotopic. Default range `-1..=2`.
     pub isotope_offset: i8,
 }
 

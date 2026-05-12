@@ -1,4 +1,4 @@
-//! Phase 6 Task 10: bulk SpecEValue Java parity histogram.
+//! Bulk SpecEValue Java parity histogram.
 //!
 //! For all 217 Java-identified PSMs from BSA + test.mgf:
 //!   - Compute abs(log10(rust_spec_evalue) - log10(java_spec_evalue))
@@ -251,7 +251,7 @@ fn phase6_task10_bsa_specevalue_parity_histogram() {
 
     // Print the full histogram to stderr (visible with --nocapture or in CI logs).
     eprintln!();
-    eprintln!("Phase 6 Task 10 — BSA SpecEValue parity histogram");
+    eprintln!("BSA SpecEValue parity histogram");
     eprintln!("  Java reference PSMs:  {}", java_refs.len());
     eprintln!("  Spectra not found:    {}", spec_not_found);
     eprintln!("  Empty Rust queues:    {}", empty_queues);
@@ -314,13 +314,13 @@ fn phase6_task10_bsa_specevalue_parity_histogram() {
     let pct_within_4 = cumulative_pct(3);
     assert!(
         total > 0,
-        "Phase 6 Task 10: no PSMs were measured (all spectra missing or queues empty)"
+        "no PSMs were measured (all spectra missing or queues empty)"
     );
     assert!(
         pct_within_4 >= 50.0,
-        "Phase 6 Task 10 SOFT GATE FAILED: only {:.1}% of {} measured PSMs within 4 OOM \
-         (gate is 50%). This indicates a structural scoring bug worth investigating \
-         before shipping Phase 6.",
+        "SOFT GATE FAILED: only {:.1}% of {} measured PSMs within 4 OOM \
+         (gate is 50%). This indicates a structural scoring bug worth \
+         investigating.",
         pct_within_4,
         total
     );

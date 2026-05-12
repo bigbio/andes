@@ -1,18 +1,16 @@
 //! Suffix-array walk that produces `DistinctPeptide`s with LCP-based dedup.
 //!
-//! Mirrors Java `edu.ucsd.msjava.msdbsearch.DBScanner.scan` (the inner SA
-//! cursor loop at `DBScanner.java:220-380`). The Java code walks
-//! `(indices[i], nlcps[i])` in lockstep and, for each peptide length L in
-//! `[min, max]`, uses the LCP to decide whether the current suffix shares
+//! Walks `(indices[i], nlcps[i])` in lockstep and, for each peptide length L
+//! in `[min, max]`, uses the LCP to decide whether the current suffix shares
 //! the same residues (and possibly the same flanks) as the previous suffix:
 //!
 //! - `lcp >= L + 2`: residues + N-term flank + C-term flank are all shared
 //!   with the previous suffix. The previous match's position list gets
 //!   another `(protein, offset)` entry; no new distinct peptide is emitted.
 //! - `lcp == L + 1`: residues + N-term flank are shared, but the C-term
-//!   flank differs. Java consults the enzyme to decide whether the new
-//!   C-term flank still produces a cleavable peptide; if so, it appends to
-//!   the previous match, otherwise it starts a fresh distinct peptide.
+//!   flank differs. The enzyme decides whether the new C-term flank still
+//!   produces a cleavable peptide; if so, append to the previous match;
+//!   otherwise start a fresh distinct peptide.
 //! - `lcp < L + 1`: residues differ at or before position L. The previous
 //!   match (if any) is emitted as a completed `DistinctPeptide`, and a new
 //!   match is started at this cursor.
@@ -29,20 +27,19 @@
 //! `byte_to_residue`), so downstream consumers can treat them as ordinary
 //! AA bytes.
 //!
-//! ## Simplification (this subtask)
+//! ## Simplification
 //!
 //! The `lcp == L + 1` enzyme-decision branch is currently treated the same
 //! as the `lcp < L + 1` "new peptide" branch — i.e., we always start a
 //! fresh DistinctPeptide. This costs a small amount of extra emission (the
 //! same residue sequence may appear as two adjacent DistinctPeptides
 //! differing in C-term flank) but is conservative and never silently
-//! merges peptides the enzyme would consider distinct. The next subtask
-//! will port Java's full enzyme branch (`DBScanner.java:286-308`).
+//! merges peptides the enzyme would consider distinct. Porting the full
+//! enzyme branch is a follow-up.
 //!
 //! ## N-terminal Met-cleavage merge
 //!
-//! Mirrors Java `CandidatePeptideGridConsideringMetCleavage.java:16`. For
-//! each protein whose first residue is `M`, we run a separate enumeration
+//! For each protein whose first residue is `M`, we run a separate enumeration
 //! pass over `sequence[1..]` (the "initial-Met loss" virtual sequence) and
 //! emit any peptides that pass the enzyme/length filters with
 //! `is_protein_n_term = true` (the post-Met residue is the biological
@@ -200,7 +197,7 @@ impl<'a> SaPeptideStream<'a> {
         Some(dp)
     }
 
-    /// Number-of-tolerable-termini check. Mirrors Java's NTT semantics:
+    /// Number-of-tolerable-termini check:
     /// - NTT=2 (strict): both ends must be enzyme-cleavable.
     /// - NTT=1 (semi):   at least one end must be cleavable.
     /// - NTT=0 (none):   no constraint.
@@ -369,9 +366,8 @@ impl<'a> Iterator for SaPeptideStream<'a> {
                 } else if lcp == l + 1 {
                     // Shared peptide, possibly different C-term flank.
                     // SIMPLIFICATION (see module docs): treat as a new
-                    // peptide. The next subtask will port Java's enzyme
-                    // decision from DBScanner.java:286-308. Conservative —
-                    // never silently merges across a C-term flank change.
+                    // peptide. Conservative — never silently merges across
+                    // a C-term flank change.
                     self.start_new(index, length);
                 } else {
                     // Residues differ at or before this length: start a

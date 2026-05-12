@@ -1,32 +1,21 @@
 //! Per-spectrum precomputed state for scoring.
 //!
 //! Provides peak ranking by intensity + nearest-peak-by-mz lookup, plus
-//! precursor-peak filtering before ranking. Mirrors Java's
-//! `Spectrum.filterPrecursorPeaks(tolerance, reducedCharge, offset)`:
+//! precursor-peak filtering before ranking.
+//!
+//! ## Precursor-peak filtering formula
+//!
+//! For each `(reduced_charge, offset, tolerance)` entry in
+//! `precursor_off_map[charge]`:
 //!
 //! ```text
-//! // Java: edu.ucsd.msjava.msutil.Spectrum.filterPrecursorPeaks
-//! public void filterPrecursorPeaks(Tolerance tolerance, int reducedCharge, float offset) {
-//!     int c = this.getCharge() - reducedCharge;   // effective charge for the ion
-//!     float mass = (this.getPrecursorMass() + c * ChargeCarrierMass()) / c + offset;
-//!     for (Peak p : getPeakListByMass(mass, tolerance))
-//!         p.setIntensity(0);
-//! }
+//! neutral_mass = (precursor_mz - PROTON) * charge
+//! c            = charge - reduced_charge
+//! filter_mz    = (neutral_mass + c * PROTON) / c + offset
 //! ```
 //!
-//! Where:
-//! - `this.getPrecursorMass()` = `(precursor_mz - PROTON) * charge`  (neutral mass)
-//! - `ChargeCarrierMass()` = `PROTON` = 1.00727649 Da
-//! - `c = charge - reduced_charge`
-//! - `filter_mz = (neutral_mass + c * PROTON) / c + offset`
-//!   (offset is in m/z space, added after dividing by c)
-//! - `getPeakListByMass` compares against each peak's m/z (not mass),
-//!   so `filter_mz` is the m/z to match against
-//!
-//! The `precursor_off_map` (from `Param`) maps precursor charge → list of
-//! `PrecursorOffsetFrequency { reduced_charge, offset, tolerance, frequency }`.
-//! For each entry, any peak whose m/z is within `tolerance` Da of `filter_mz`
-//! is excluded from ranking.
+//! Any peak whose m/z is within `tolerance` Da of `filter_mz` is excluded
+//! from ranking. `offset` is in m/z space, added after dividing by `c`.
 //!
 //! Also exposes `prob_peak`, `main_ion`, `node_score`, `edge_score`,
 //! and `observed_node_mass` for the GF DP graph traversal.
@@ -51,8 +40,8 @@ pub struct ScoredSpectrum<'a> {
     kept_count: usize,
     /// Raw sum of all peak intensities in the original spectrum.
     total_intensity: f64,
-    /// Probability that a random m/z bin contains a peak. Java:
-    /// `probPeak = spec.size() / max(approxNumBins, 1)` where
+    /// Probability that a random m/z bin contains a peak.
+    /// `prob_peak = peak_count / max(approxNumBins, 1)` where
     /// `approxNumBins = parentMass / (mme.getValue() * 2)`.
     ///
     /// For `new_without_filtering` (tests / unit use) this is set to a
@@ -66,12 +55,10 @@ pub struct ScoredSpectrum<'a> {
     /// table when `new` is used.
     pub(crate) main_ion: IonType,
     /// Spectrum-level parent mass (= `(precursor_mz - PROTON) * charge`),
-    /// the OBSERVED neutral mass. Mirrors Java's
-    /// `scoredSpec.getPrecursorPeak().getMass()`. Used by `score_psm` /
-    /// `node_score` for partition + segment selection so that all
-    /// candidates at this spectrum see the same partition (matching Java's
-    /// FastScorer which uses a per-spectrum parent_mass regardless of
-    /// candidate's nominal/iso-offset mass).
+    /// the OBSERVED neutral mass. Used by `score_psm` / `node_score` for
+    /// partition + segment selection so that all candidates at this
+    /// spectrum see the same partition (a per-spectrum parent_mass,
+    /// regardless of any candidate's nominal/iso-offset mass).
     pub(crate) parent_mass: f64,
     /// The charge state used to construct this ScoredSpectrum.
     pub(crate) charge: u8,
@@ -117,7 +104,7 @@ impl<'a> ScoredSpectrum<'a> {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
 
-        // Compute each filter m/z: mirror Java's filterPrecursorPeaks formula.
+        // Compute each filter m/z:
         // neutral_mass = (precursor_mz - PROTON) * charge
         // c = charge - reduced_charge
         // filter_mz = (neutral_mass + c * PROTON) / c + offset
@@ -150,12 +137,12 @@ impl<'a> ScoredSpectrum<'a> {
 
         let kept_count = kept.len();
 
-        // BUGFIX: compute ranks NOW, before the FastScorer cache reads them.
-        // The cache below calls `directional_node_score_inner(&ranks, ...)`,
-        // which feeds into `nearest_peak_rank_in` to determine which rank-slot's
-        // log score to use. Previously this happened after rank_kept ran, so
-        // ranks were all u32::MAX → every matched ion picked the LAST rank slot
-        // → systematically wrong scores (negative RawScores, Percolator @ 1% FDR = 0).
+        // Ranks must be computed BEFORE the FastScorer cache below reads them.
+        // The cache calls `directional_node_score_inner(&ranks, ...)` which
+        // feeds into `nearest_peak_rank_in` to determine which rank-slot's
+        // log score to use. If ranks were all u32::MAX at that point every
+        // matched ion would pick the LAST rank slot, producing systematically
+        // wrong scores (negative RawScores, near-zero Percolator @ 1% FDR).
         kept.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -165,13 +152,14 @@ impl<'a> ScoredSpectrum<'a> {
             ranks[orig_idx] = (rank_minus_one + 1) as u32;
         }
 
-        // Compute prob_peak. Java: spec.getPeptideMass() = (precursor_mz - PROTON) * charge.
-        // approxNumBins = parentMass / (mme.getValue() * 2).
-        // probPeak = (size if size>0 else 1) / max(approxNumBins, 1).
+        // Compute prob_peak.
+        // parent_mass    = (precursor_mz - PROTON) * charge
+        // approxNumBins  = parent_mass / (mme.raw_value() * 2)
+        // prob_peak      = max(peak_count, 1) / max(approxNumBins, 1)
         //
-        // Mirrors Java's mme.getValue() (raw, not Da-converted) for Java SpecEValue parity.
-        // For Ppm(20), Java's getValue() returns 20.0 — NOT the Da-equivalent — so
-        // approxNumBins is computed with the literal stored value.
+        // Uses `mme.raw_value()` (the stored numeric value, NOT Da-converted)
+        // for SpecEValue parity. For Ppm(20), `raw_value()` returns 20.0, so
+        // approxNumBins is computed against the literal stored value.
         let parent_mass = neutral_mass; // = (precursor_mz - PROTON) * charge
         let mme_raw = param.mme.raw_value();
         let approx_num_bins = if mme_raw > 0.0 { parent_mass / (mme_raw * 2.0) } else { 1.0 };
@@ -311,11 +299,8 @@ impl<'a> ScoredSpectrum<'a> {
     }
 
     /// Returns `true` if the main ion is a prefix ion (b-ion direction),
-    /// `false` if it is a suffix ion (y-ion direction).
-    ///
-    /// Mirrors Java `ScoredSpectrum.getMainIonDirection()` which returns
-    /// `mainIon.isPrefixIon()`. Used by `PrimitiveAaGraph` to decide which
-    /// end is the graph source.
+    /// `false` if it is a suffix ion (y-ion direction). Used by
+    /// `PrimitiveAaGraph` to decide which end is the graph source.
     pub fn main_ion_direction(&self) -> bool {
         self.main_ion.is_prefix()
     }
@@ -323,7 +308,7 @@ impl<'a> ScoredSpectrum<'a> {
     /// Spectrum-level parent mass (= `(precursor_mz - PROTON) * charge`).
     /// This is the OBSERVED neutral mass of the spectrum at the charge
     /// state used to construct this `ScoredSpectrum`, NOT the candidate
-    /// peptide's mass. Mirrors Java `scoredSpec.getPrecursorPeak().getMass()`.
+    /// peptide's mass.
     pub fn parent_mass(&self) -> f64 {
         self.parent_mass
     }
@@ -379,12 +364,11 @@ impl<'a> ScoredSpectrum<'a> {
     /// no peak falls within the window. Filtered-out peaks
     /// (rank == `u32::MAX`) are never returned.
     ///
-    /// Mirrors Java `Spectrum.getPeakByMass` (intensity-max selection),
-    /// matching the same semantics as `nearest_peak_rank`. Used by
-    /// `compute_psm_features` for ion-current ratio and error-stat columns.
-    /// Closest-by-m/z selection disagrees with Java's intensity-comparator
-    /// selection and affects PIN feature columns even when the rank lookup
-    /// matches.
+    /// Intensity-max selection (same semantics as `nearest_peak_rank`).
+    /// Used by `compute_psm_features` for ion-current ratio and
+    /// error-stat columns. Closest-by-m/z selection would disagree with
+    /// the intensity-comparator selection and affect PIN feature columns
+    /// even when the rank lookup matches.
     pub fn nearest_peak_full(&self, target_mz: f64, tolerance_da: f64) -> Option<(u32, f32, f64)> {
         if self.spec.peaks.is_empty() {
             return None;
@@ -414,14 +398,12 @@ impl<'a> ScoredSpectrum<'a> {
     /// Find the **highest-intensity** peak within `tolerance_da` of `target_mz`,
     /// and return its rank. Returns `None` if no peak falls within the window.
     ///
-    /// Mirrors Java `Spectrum.getPeakByMass(targetMass, tolerance)` which
-    /// returns `Collections.max(matchList, IntensityComparator)` — the
-    /// most-intense peak in the window — and the caller then reads
-    /// `peak.getRank()`. For LowRes CID with mme = 0.5 Da, windows
-    /// frequently contain multiple peaks; selecting the most-intense
-    /// matches Java's rank-based scoring exactly. Closest-by-m/z selection
-    /// yields systematically higher (worse) rank numbers and is a dominant
-    /// cause of top-1 flips.
+    /// Returns the most-intense peak in the window (intensity-max
+    /// selection); the caller then reads the peak's rank. For LowRes CID
+    /// with mme = 0.5 Da, windows frequently contain multiple peaks;
+    /// selecting the most-intense matches rank-based scoring exactly.
+    /// Closest-by-m/z selection yields systematically higher (worse) rank
+    /// numbers and is a dominant cause of top-1 flips.
     ///
     /// Filtered-out peaks (rank == `u32::MAX`) are never returned.
     ///
@@ -438,7 +420,7 @@ impl<'a> ScoredSpectrum<'a> {
         let hi_mz = target_mz + tolerance_da;
         // Find first peak with mz >= lo_mz via binary search.
         let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
-        // Track (peak_index, intensity); pick max intensity (Java IntensityComparator).
+        // Track (peak_index, intensity); pick max intensity (intensity-comparator selection).
         let mut best: Option<(usize, f32)> = None;
         for i in start..self.spec.peaks.len() {
             let (mz, intensity) = self.spec.peaks[i];
@@ -471,7 +453,7 @@ impl<'a> ScoredSpectrum<'a> {
     // GF DP scoring methods
     // -----------------------------------------------------------------------
 
-    /// Mirror Java `NewScoredSpectrum.getNodeScore(prm, srm)`:
+    /// Combined node score for a peptide split position:
     /// `round(prefix_score(prefix_nominal) + suffix_score(suffix_nominal))`.
     ///
     /// `prefix_nominal` and `suffix_nominal` are the float node masses in Da
@@ -496,16 +478,14 @@ impl<'a> ScoredSpectrum<'a> {
     }
 
     /// Score for a single directional (prefix or suffix) node at `nominal_mass`.
-    /// Mirrors the inner loop of Java's
-    /// `NewScoredSpectrum.getNodeScore(nodeMass, isPrefix)`.
     ///
     /// **Fragment tolerance:** the per-ion peak-lookup window comes from
-    /// `scorer.param().mme.as_da(theo_mz)`, mirroring Java's
-    /// `spec.getPeakByMass(theoMass, mme)`. The `fragment_tolerance_da`
+    /// `scorer.param().mme.as_da(theo_mz)`. The `fragment_tolerance_da`
     /// argument is retained for backward compat but **ignored** for ion
-    /// matching — Java uses the param's `mme` here, not a global
-    /// search-level fragment tolerance. A hardcoded 0.5 Da happens to match
-    /// LowRes CID's mme but is wrong for any other instrument/protocol.
+    /// matching — the param's `mme` is the source of truth here, not a
+    /// global search-level fragment tolerance. A hardcoded 0.5 Da happens
+    /// to match LowRes CID's mme but is wrong for any other
+    /// instrument/protocol.
     fn directional_node_score(
         &self,
         nominal_mass: f64,
@@ -580,15 +560,10 @@ impl<'a> ScoredSpectrum<'a> {
     /// Return the observed node mass for `node_nominal`, or `None` if no
     /// peak is near the theoretical m/z of the main ion.
     ///
-    /// Java: `NewScoredSpectrum.getNodeMass(node)` — computes
-    /// `theo_mz = main_ion.getMz(node.getMass())`, calls
-    /// `spec.getPeakByMass(theoMass, scorer.getMME())` which returns the
-    /// **highest-intensity** peak within the MME window (via
-    /// `Collections.max(matchList, new IntensityComparator())`), then returns
-    /// `main_ion.getMass(peak_mz)` if found, else `-1` (we use `None`).
-    ///
-    /// Single-pass: uses `scorer.param().mme.as_da(theo_mz)` as the window,
-    /// selects the highest-intensity non-filtered peak in that window.
+    /// Computes `theo_mz = main_ion.mz(node_mass)`, then returns
+    /// `main_ion.mass_from_mz(peak_mz)` for the highest-intensity peak
+    /// within `mme.as_da(theo_mz)` of `theo_mz`. Returns `Some(0.0)`
+    /// at the source node by convention.
     pub fn observed_node_mass(
         &self,
         node_nominal: i32,
@@ -598,14 +573,13 @@ impl<'a> ScoredSpectrum<'a> {
     ) -> Option<f64> {
         let _ = charge; // not needed in formula; kept for API symmetry
         if node_nominal == 0 {
-            // Source node mass is exactly 0 by convention (Java returns 0 when
-            // `node.getNominalMass() == 0`).
+            // Source node mass is exactly 0 by convention.
             return Some(0.0);
         }
         let theo_mz = self.main_ion.mz(node_nominal as f64);
         let tol_da = scorer.param().mme.as_da(theo_mz);
         // Select the highest-intensity peak within [theo_mz - tol_da, theo_mz + tol_da].
-        // Mirrors Java's Collections.max(matchList, new IntensityComparator()).
+        // Intensity-comparator selection: pick the maximum-intensity peak in the window.
         // Skip filtered peaks (ranks[i] == u32::MAX).
         let lo_mz = theo_mz - tol_da;
         let hi_mz = theo_mz + tol_da;
@@ -626,9 +600,9 @@ impl<'a> ScoredSpectrum<'a> {
         best_peak_mz.map(|(peak_mz, _)| self.main_ion.mass_from_mz(peak_mz))
     }
 
-    /// Mirror Java `NewScoredSpectrum.getEdgeScore(curNode, prevNode, theoMass)`.
+    /// Edge score for the GF DP.
     ///
-    /// If `param.ion_existence_table` is empty (Java's `!scorer.supportEdgeScores()`),
+    /// If `param.ion_existence_table` is empty (edge scoring not supported),
     /// returns 0. Otherwise:
     ///   1. Look up observed node masses for `cur_nominal` and `prev_nominal`.
     ///   2. `ion_existence_index` = (cur observed?) + 2*(prev observed?).
@@ -644,7 +618,6 @@ impl<'a> ScoredSpectrum<'a> {
         charge: u8,
         parent_mass: f64,
     ) -> i32 {
-        // Java: if (!scorer.supportEdgeScores()) return 0;
         // supportEdgeScores() ↔ errorScalingFactor != 0.
         if scorer.param().error_scaling_factor == 0 {
             return 0;
@@ -704,14 +677,14 @@ fn nearest_peak_rank_in(spec: &Spectrum, ranks: &[u32], target_mz: f64, toleranc
 }
 
 /// Select the main ion for `partition` from `param.rank_dist_table`.
-/// Java: per-partition main ion = highest-frequency-at-rank-1 prefix ion.
-/// We pick the Prefix ion with the highest freq at rank-1 index (index 0).
-/// Falls back to `Prefix { charge: 1, offset_bits: 0 }` if table is empty.
 ///
-/// Note: main_ion selection currently uses per-partition rank-1 prefix-ion
-/// frequency from rank_dist_table. Java's `NewRankScorer.determineIonTypes`
-/// (lines 611-640) aggregates `fragOFFTable` across segments and considers
-/// all ion types. For HCD these agree; for ETD/ECD they may diverge.
+/// Picks the Prefix ion with the highest freq at rank-1 index (index 0).
+/// Falls back to `Prefix { charge: 1, offset_bits: 0 }` if the table is empty.
+///
+/// Note: selection currently uses per-partition rank-1 prefix-ion frequency
+/// from `rank_dist_table`. A fuller selection would aggregate `frag_off_table`
+/// across segments and consider all ion types; for HCD these agree, for
+/// ETD/ECD they may diverge.
 fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) -> IonType {
     let fallback = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
     let table = match param.rank_dist_table.get(&partition) {
@@ -752,14 +725,14 @@ mod tests {
         }
     }
 
-    // --- prob_peak uses raw mme value (Java parity) ---
+    // --- prob_peak uses raw mme value ---
 
-    /// Verify that `prob_peak` is computed using the raw stored mme value (Java
-    /// parity), not the Da-converted form. For `Tolerance::Ppm(20.0)`:
-    ///   Java formula: approxNumBins = parentMass / (mme.getValue() * 2)
-    ///                               = parentMass / (20.0 * 2)
-    ///   NOT:          parentMass / (as_da(parentMass) * 2)
-    ///                               = parentMass / (parentMass * 20e-6 * 2)
+    /// Verify that `prob_peak` is computed using the raw stored mme value,
+    /// not the Da-converted form. For `Tolerance::Ppm(20.0)`:
+    ///   Expected: approxNumBins = parent_mass / (mme.raw_value() * 2)
+    ///                           = parent_mass / (20.0 * 2)
+    ///   NOT:      parent_mass / (as_da(parent_mass) * 2)
+    ///                           = parent_mass / (parent_mass * 20e-6 * 2)
     #[test]
     fn prob_peak_uses_raw_mme_value_not_da_converted() {
         use model::activation::ActivationMethod;
@@ -832,7 +805,7 @@ mod tests {
 
         assert!(
             (ss.prob_peak - expected_prob_peak).abs() < 1e-5,
-            "prob_peak={} but expected={} (Java raw formula). Wrong Da-converted value would be {}",
+            "prob_peak={} but expected={} (raw-mme formula). Wrong Da-converted value would be {}",
             ss.prob_peak, expected_prob_peak, wrong_prob_peak
         );
     }
@@ -845,14 +818,13 @@ mod tests {
         // tiny_param_with_ions uses Tolerance::Da(0.5) → window ±0.5 Da.
         // main_ion = Prefix { charge: 1, offset_bits: 0 }
         //
-        // New formula (matching Java):
-        //   theo_mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
-        //           = (100 / 0.999497) / 1 + 0.0 ≈ 100.05028
+        // theo_mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
+        //         = (100 / 0.999497) / 1 + 0.0 ≈ 100.05028
         //
         // Place two peaks both within ±0.5 of theo_mz ≈ 100.050:
         //   peak A at 100.14 (delta ≈ 0.09, low intensity 1.0) — CLOSER
         //   peak B at 100.44 (delta ≈ 0.39, high intensity 100.0) — FARTHER but HIGHER intensity
-        // Java picks highest-intensity → peak B must win.
+        // Highest-intensity wins → peak B.
         use model::mass::INTEGER_MASS_SCALER;
         let node_nominal = 100_i32;
         // theo_mz with offset=0: real_mass / 1 + 0 = nominal / INTEGER_MASS_SCALER
@@ -899,8 +871,8 @@ mod tests {
     fn node_score_nonzero_when_peak_matches_prefix_ion() {
         // Place a high-intensity peak at the predicted b1 m/z for a node of
         // nominal mass = 100. Prefix ion: Prefix(charge=1, offset=0).
-        // New formula (matching Java): theo_mz = (nominal / INTEGER_MASS_SCALER) / 1 + 0
-        //                                      = 100 / 0.999497 ≈ 100.0503
+        // theo_mz = (nominal / INTEGER_MASS_SCALER) / 1 + 0
+        //         = 100 / 0.999497 ≈ 100.0503
         use model::mass::INTEGER_MASS_SCALER;
         let nominal = 100.0_f64;
         let b1_mz = nominal / INTEGER_MASS_SCALER as f64; // charge=1, offset=0
@@ -919,7 +891,7 @@ mod tests {
     #[test]
     fn node_score_prefix_only_match() {
         // Only prefix ions in table; suffix side always contributes 0.
-        // New formula (matching Java): theo_mz = (nominal / INTEGER_MASS_SCALER) / 1 + 0
+        // theo_mz = (nominal / INTEGER_MASS_SCALER) / 1 + 0
         use model::mass::INTEGER_MASS_SCALER;
         let nominal = 57.0_f64; // roughly glycine residue mass
         let mz = nominal / INTEGER_MASS_SCALER as f64; // charge=1, offset=0
@@ -946,11 +918,11 @@ mod tests {
 
     #[test]
     fn node_score_nominal_mass_zero_prefix_returns_zero() {
-        // nominal_mass = 0 is the source node. Java's getNodeScore treats source
-        // and sink nodes specially, but our Rust impl evaluates ions_for_node(0.0, …).
-        // With prefix_nominal=0 and suffix_nominal=1000 (parent mass), and no peaks
-        // in the spectrum, the missing-ion score for the Prefix ion governs.
-        // The suffix nominal = 1000 > parent_mass → ions_for_node produces no suffix
+        // nominal_mass = 0 is the source node. This impl evaluates
+        // ions_for_node(0.0, …) directly. With prefix_nominal=0 and
+        // suffix_nominal=1000 (parent mass), and no peaks in the spectrum,
+        // the missing-ion score for the Prefix ion governs. The suffix
+        // nominal = 1000 > parent_mass → ions_for_node produces no suffix
         // ions for that degenerate case. Net result: non-positive score.
         let s = spec(&[]);
         let param = tiny_param_with_ions();
@@ -963,7 +935,7 @@ mod tests {
 
     #[test]
     fn edge_score_returns_zero_when_table_empty() {
-        // No ion_existence_table → Java path returns 0.
+        // No ion_existence_table → edge_score returns 0.
         let s = spec(&[(100.0, 1.0)]);
         let mut param = tiny_param_with_ions();
         param.ion_existence_table.clear();

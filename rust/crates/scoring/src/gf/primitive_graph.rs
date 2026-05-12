@@ -1,16 +1,14 @@
 //! Primitive-array–based amino acid graph for the generating function.
 //!
-//! Ports Java `edu.ucsd.msjava.msgf.PrimitiveAminoAcidGraph` (~290 LOC).
-//! Replaces FlexAminoAcidGraph in the DB search hot path to eliminate
-//! HashMap/ArrayList/NominalMass object overhead.
-//!
-//! Graph topology is stored in CSR (Compressed Sparse Row) format:
+//! A flat CSR replacement for the HashMap/ArrayList/NominalMass-object graph,
+//! used in the DB search hot path. Graph topology is stored in CSR
+//! (Compressed Sparse Row) format:
 //!   `edge_offset[node+1] - edge_offset[node]` = number of incoming edges for node
 //!   `edge_prev_node[e]`, `edge_prob[e]`, `edge_score[e]` = edge data
 //!
 //! Node scores are stored in a flat `Vec<i32>` indexed by node index.
 //!
-//! # Construction phases (Java-faithful)
+//! # Construction phases
 //!
 //! 1. Resolve source/sink AA lists from `direction` and protein-term flags.
 //! 2. Compute `min_node_mass` and `mass_offset` from minimum nominal masses.
@@ -104,8 +102,7 @@ pub struct PrimitiveAaGraph {
     /// `scored_spec.main_ion_direction()`. Governs which end is the source.
     pub direction: bool,
     /// Optional enzyme used during graph construction. Stored so that the
-    /// GF DP can apply the neighboring-AA cleavage adjustment (Java
-    /// `computeGeneratingFunction` lines 188-200).
+    /// GF DP can apply the neighboring-AA cleavage adjustment.
     pub enzyme: Option<Enzyme>,
     /// The smallest nominal mass that can appear as a node (may be negative
     /// for very light residues or N-terminal mods).
@@ -143,8 +140,7 @@ pub struct PrimitiveAaGraph {
 }
 
 impl PrimitiveAaGraph {
-    /// Build the graph. Mirrors Java `PrimitiveAminoAcidGraph` constructor
-    /// phases 1-5 exactly.
+    /// Build the graph by running construction phases 1-5.
     ///
     /// # Parameters
     ///
@@ -670,7 +666,7 @@ impl PrimitiveAaGraph {
     // -----------------------------------------------------------------------
 
     /// Look up the node index for a nominal mass, or `None` if the mass is
-    /// not an active node. Mirrors Java `getNodeIndexForMass`.
+    /// not an active node.
     pub fn node_index_for_mass(&self, mass: i32) -> Option<usize> {
         if mass < self.min_node_mass || mass > self.peptide_mass {
             return None;
@@ -726,32 +722,27 @@ impl Drop for PrimitiveAaGraph {
 // Private helpers
 // -----------------------------------------------------------------------
 
-/// Standard amino acid prior probability: `1 / 20 = 0.05`.
-/// Java: `AminoAcid.getProbability()`. For standard AAs the default uniform
-/// prior is used. Modified AAs share the same probability as their parent.
+/// Standard amino acid prior probability: `1 / 20 = 0.05`. Modified AAs
+/// share the same probability as their parent.
 #[inline]
 fn aa_total_probability(aa: &AminoAcid) -> f32 {
-    // Standard uniform prior: 1/20. Java: aa.getProbability() defaults to
-    // uniform 0.05 unless a frequency model is loaded.
+    // Uniform prior 1/20 unless a frequency model is loaded.
     const UNIFORM_PRIOR: f32 = 1.0 / 20.0;
     let _ = aa; // no per-AA prior stored yet; future: aa.probability field
     UNIFORM_PRIOR
 }
 
 /// Accurate (float) mass of the amino acid including any modification delta.
-/// Java: `aa.getMass()` (which is accurate mass, not nominal).
 #[inline]
 fn aa_total_mass(aa: &AminoAcid) -> f64 {
     aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta)
 }
 
-/// Mirrors Java `computeEdgeErrorScores`: for each intermediate node's
-/// incoming edges, accumulate `scored_spec.edge_score(cur, prev, theo_aa_mass)`.
+/// For each intermediate node's incoming edges, accumulate
+/// `scored_spec.edge_score(cur, prev, theo_aa_mass)`.
 ///
-/// Source (mass = 0) and sink (mass = peptide_mass) nodes are skipped,
-/// matching Java's `if (curMass == 0 || curMass == peptideMass) continue`.
-///
-/// Scores outside `[-100, 100]` are replaced with `-4` (Java behavior).
+/// Source (mass = 0) and sink (mass = peptide_mass) nodes are skipped.
+/// Scores outside `[-100, 100]` are replaced with `-4`.
 #[allow(clippy::too_many_arguments)]
 fn compute_edge_error_scores(
     active_nodes: &[i32],
@@ -794,7 +785,7 @@ fn compute_edge_error_scores(
     }
 }
 
-/// Mirrors Java `computeNodeScores`: for each intermediate node, compute
+/// For each intermediate node, compute
 /// `scored_spec.node_score(prefix_nominal, suffix_nominal, scorer, charge,
 /// parent_mass, fragment_tolerance_da)`.
 ///

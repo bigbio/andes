@@ -19,13 +19,12 @@ pub struct SearchParams {
     /// Charges to try for spectra without explicit charge (default 2..=3).
     pub charge_range: RangeInclusive<u8>,
     /// Isotope offsets to try when matching the precursor mass (default
-    /// -1..=2, matching Java MS-GF+'s `-ti -1,2` flag). Each offset is
-    /// a unit of `ISOTOPE` (~1.00335 Da) subtracted from the spectrum's
-    /// observed neutral mass before comparison.
+    /// -1..=2). Each offset is a unit of `ISOTOPE` (~1.00335 Da) subtracted
+    /// from the spectrum's observed neutral mass before comparison.
     pub isotope_error_range: RangeInclusive<i8>,
     /// Top-N PSMs to keep per spectrum (default 10).
     pub top_n_psms_per_spectrum: u32,
-    /// Number of Tolerable Termini — mirrors Java's `-ntt N` flag.
+    /// Number of Tolerable Termini.
     ///
     /// Controls how strictly enzymatic cleavage is enforced at the span boundaries:
     /// - `2` (default): both termini must be enzyme-cleavage sites (strict / fully tryptic).
@@ -40,7 +39,7 @@ pub struct SearchParams {
     /// Minimum number of peaks required in an MS2 spectrum to attempt scoring.
     ///
     /// Spectra with fewer peaks than this threshold are skipped entirely.
-    /// Mirrors Java MS-GF+'s `-minNumPeaks N` flag (default 10).
+    /// Default 10.
     pub min_peaks: u32,
 }
 

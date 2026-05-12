@@ -1,16 +1,12 @@
 //! PSM scoring integration.
 //!
-//! `score_psm` uses `ScoredSpectrum::node_score` per peptide split position,
-//! matching Java's `FastScorer.getScore` (sum of
-//! `prefixScore[prm] + suffixScore[srm]` for each split) and the score scale
-//! used by the GF DP.
+//! `score_psm` sums `ScoredSpectrum::node_score(prefix, suffix)` across each
+//! peptide split position. The result is on the same score scale used by the
+//! GF DP, so `GeneratingFunctionGroup::spectral_probability(psm.score)` is
+//! calibrated.
 //!
-//! Java reference:
-//! - `FastScorer.java:58-66`: iterates `fromIndex..toIndex-1`, computes
-//!   `prefixMass = nominalPrefixMassArr[i]`, `suffixMass = peptideMass - prefixMass`,
-//!   accumulates `round(prefixScore[prefixMass] + suffixScore[suffixMass])`.
-//! - `NewScoredSpectrum.java:74-78`: `getNodeScore(prm, srm)` =
-//!   `round(getNodeScore(prm, true) + getNodeScore(srm, false))`.
+//! Per-split node score: `round(getNodeScore(prm, true) + getNodeScore(srm, false))`
+//! where `prm` is the nominal prefix mass and `srm = peptideMass - prm`.
 
 use model::mass::nominal_from;
 use model::peptide::Peptide;
@@ -22,11 +18,10 @@ use crate::scoring::scored_spectrum::ScoredSpectrum;
 /// same scale as the GF distribution so that `GeneratingFunctionGroup::
 /// spectral_probability(psm.score.round() as i32)` is calibrated.
 ///
-/// Mirrors Java `FastScorer.getScore(prefixMassArr, nominalPrefixMassArr,
-/// fromIndex=1, toIndex=n, numMods=0)` where:
-/// - `nominalPrefixMassArr[i]` = `nominal_from(sum of residues 0..i)`
-/// - `peptideMass = nominalPrefixMassArr[n-1]` = nominal AA-only sum
-/// - per split: `score += round(prefixScore[prm] + suffixScore[srm])`
+/// For each split `i` in `1..n`:
+/// - `nominal_prefix_mass[i] = nominal_from(sum of residues 0..i)`
+/// - `peptide_mass = nominal_prefix_mass[n-1]` = nominal AA-only sum
+/// - `score += round(prefix_score[prm] + suffix_score[srm])`
 ///
 /// `fragment_tolerance_da` is forwarded to `ScoredSpectrum::node_score` for
 /// peak-lookup.  The `charge` selects the partition; `parent_mass` is the
@@ -48,18 +43,15 @@ pub fn score_psm(
 
     // Two distinct masses with different roles:
     //  - `peptide_nominal`: candidate peptide's total nominal residue mass.
-    //    Drives suffix lookup, mirroring Java's `nominalPrefixMassArr[i]`
-    //    which is built from the candidate's residues.
-    //  - `spectrum_parent_mass`: spectrum's OBSERVED neutral mass
-    //    (scoredSpec.parentMass in Java). Drives partition + segment
-    //    selection across all candidates, regardless of iso_off. Using
-    //    `peptide.mass()` here would mismatch Java's FastScorer for iso_off≥1
-    //    candidates and cause systematic top-1 flips.
+    //    Drives suffix lookup, built from the candidate's residues.
+    //  - `spectrum_parent_mass`: spectrum's OBSERVED neutral mass.
+    //    Drives partition + segment selection across all candidates,
+    //    regardless of iso_off. Using `peptide.mass()` here would mismatch
+    //    iso_off≥1 candidates and cause systematic top-1 flips.
     let spectrum_parent_mass = scored_spec.parent_mass();
 
     // Total nominal peptide mass = nominal(residue_sum) = nominal(mass - H2O).
-    // Used to compute suffix_nominal = peptide_nominal - prefix_nominal,
-    // mirroring Java's `suffixMass = peptideMass - prefixMass`.
+    // Used to compute suffix_nominal = peptide_nominal - prefix_nominal.
     let peptide_nominal = peptide.nominal_residue_mass();
 
     let mut total: i32 = 0;
@@ -71,7 +63,7 @@ pub fn score_psm(
         let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
         prefix_mass_acc += residue_mass;
 
-        // Nominal masses — same formula as Java's nominalPrefixMassArr[i].
+        // Nominal masses at the split position.
         let prefix_nominal = nominal_from(prefix_mass_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
 

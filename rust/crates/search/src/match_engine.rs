@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
 use rustc_hash::{FxHashSet, FxHasher};
+use smallvec::{smallvec, SmallVec};
 
 use model::aa_set::AminoAcidSet;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
@@ -70,12 +71,12 @@ pub fn match_spectra(
     // Stores only indices into `candidates` — no cloning, tiny memory overhead.
     let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
     for (cand_idx, cand) in candidates.iter().enumerate() {
-        let nominal = nominal_from(cand.peptide.mass() - H2O);
+        let nominal = cand.peptide.nominal_residue_mass();
         bucket_index.entry(nominal).or_default().push(cand_idx);
     }
 
     // Build an aa_set clone with enzyme registered (for GF cleavage scoring).
-    // We use Java MS-GF+ defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
+    // Defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
     // Cloning is cheap (AminoAcidSet is a HashMap of ~20 entries).
     // This avoids mutating the shared SearchParams.aa_set borrow.
     let mut aa_set_for_gf: AminoAcidSet = params.aa_set.clone();
@@ -91,18 +92,15 @@ pub fn match_spectra(
     let psms_pushed = AtomicU64::new(0);
     let spectra_with_psms = AtomicU64::new(0);
 
-    // Parallel per-spectrum search.
-    //
-    // Mirrors Java DBScanner.computeSpecEValues which runs per-spectrum work on
-    // `-thread N` workers. All inputs above are `&` immutable; the closure owns
-    // its TopNQueue, scored_per_charge cache, and per-bin GF state.
+    // Parallel per-spectrum search. All inputs above are `&` immutable; the
+    // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
     let queues: Vec<TopNQueue> = spectra
         .par_iter()
         .enumerate()
         .map(|(spec_idx, spec)| {
             let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
 
-            // Skip spectra with too few peaks (mirrors Java's `-minNumPeaks` filter).
+            // Skip spectra with too few peaks.
             if spec.peaks.len() < params.min_peaks as usize {
                 skipped_min_peaks.fetch_add(1, Ordering::Relaxed);
                 return queue;
@@ -111,8 +109,8 @@ pub fn match_spectra(
             // Determine which charge states to try for this spectrum.
             // For charge-explicit spectra this is a single entry; for charge-missing,
             // typically 2-3 entries (small overhead, correct behavior).
-            let charges_to_try: Vec<u8> = match spec.precursor_charge {
-                Some(z) if z > 0 => vec![z as u8],
+            let charges_to_try: SmallVec<[u8; 4]> = match spec.precursor_charge {
+                Some(z) if z > 0 => smallvec![z as u8],
                 _ => params.charge_range.clone().collect(),
             };
 
@@ -125,11 +123,19 @@ pub fn match_spectra(
             //
             // For charge-explicit spectra the cache has exactly 1 entry (no overhead).
             // For charge-missing spectra, typically 2-3 entries per spectrum.
-            let mut scored_per_charge: HashMap<u8, ScoredSpectrum<'_>> = HashMap::new();
+            let mut scored_per_charge: SmallVec<[(u8, ScoredSpectrum<'_>); 4]> = SmallVec::new();
             for &z in &charges_to_try {
-                scored_per_charge.entry(z)
-                    .or_insert_with(|| ScoredSpectrum::new(spec, scorer, z));
+                if scored_per_charge.iter().all(|(charge, _)| *charge != z) {
+                    scored_per_charge.push((z, ScoredSpectrum::new(spec, scorer, z)));
+                }
             }
+            let scored_spec_for_charge = |z: u8| {
+                scored_per_charge
+                    .iter()
+                    .find(|(charge, _)| *charge == z)
+                    .map(|(_, spec)| spec)
+                    .expect("scored spectrum exists for candidate charge")
+            };
 
             // Compute per-charge candidate windows and union them into a deduplicated
             // set of candidate indices. Window derivation mirrors
@@ -151,7 +157,7 @@ pub fn match_spectra(
                 let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
                 let widen_left  = (tol_da_left  - 0.4999_f64).round() as i32;
                 let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
-                // Java convention: max widens by tol_da_left, min widens by tol_da_right.
+                // Convention: max widens by tol_da_left, min widens by tol_da_right.
                 let min_nominal = nominal_center - iso_max - widen_right;
                 let max_nominal = nominal_center - iso_min + widen_left;
                 for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
@@ -161,15 +167,15 @@ pub fn match_spectra(
             window_cand_indices.sort_unstable();
             window_cand_indices.dedup();
 
-            // Per-candidate cleavage credit. Mirrors Java DBScanner.java:441
-            //   `cleavageScore = nTermCleavageScore + cTermCleavageScore`
-            // added to `scorer.getScore(...)` before queue insertion.
+            // Per-candidate cleavage credit:
+            //   `cleavage_score = n_term_cleavage_score + c_term_cleavage_score`
+            // added to the raw PSM score before queue insertion.
             // For C-term enzymes (Trypsin, default):
-            //   - N-term: credit if isProteinNTerm OR enzyme.isCleavable(prevAA),
+            //   - N-term: credit if isProteinNTerm OR enzyme.is_cleavable(prevAA),
             //     else penalty
-            //   - C-term: credit if enzyme.isCleavable(lastResidue), else penalty
+            //   - C-term: credit if enzyme.is_cleavable(lastResidue), else penalty
             // Omitting this offsets every PSM score by ≈ -(credit + credit) = -4
-            // vs Java for fully tryptic ntt=2 candidates.
+            // for fully tryptic ntt=2 candidates.
             //
             // Use the ENZYME-REGISTERED aa_set (cleavage credit/penalty are
             // populated by register_enzyme — params.aa_set is unregistered).
@@ -214,12 +220,11 @@ pub fn match_spectra(
                 let cand = &candidates[cand_idx];
                 let cleavage_credit = compute_cleavage_credit(cand) as f32;
                 for &z in &charges_to_try {
-                    let scored_spec = &scored_per_charge[&z];
+                    let scored_spec = scored_spec_for_charge(z);
                     let mut best_for_charge: Option<(MassError, f32)> = None;
                     for offset in params.isotope_error_range.clone() {
                         if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
-                            // Add cleavage credit (Java DBScanner.java:513:
-                            // `score = cleavageScore + scorer.getScore(...)`).
+                            // Add cleavage credit: score = cleavage_credit + raw_score.
                             let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
                                 + cleavage_credit;
                             if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
@@ -228,7 +233,7 @@ pub fn match_spectra(
                         }
                     }
                     if let Some((err, score)) = best_for_charge {
-                        // Track B: feature extraction hoisted to post-top-N
+                        // Feature extraction is hoisted to post-top-N
                         // finalization. Push with a default sentinel; the
                         // post-spec_e_value pass below fills features only for
                         // PSMs that survive top-N retention.
@@ -268,7 +273,7 @@ pub fn match_spectra(
                     .max_by(|a, b| a.cmp(b))
                     .map(|p| p.charge_used)
                     .unwrap_or(charges_to_try[0]);
-                let scored_spec_for_gf = &scored_per_charge[&top_charge];
+                let scored_spec_for_gf = scored_spec_for_charge(top_charge);
                 compute_spec_e_values_for_spectrum(
                     spec,
                     params,
@@ -283,11 +288,11 @@ pub fn match_spectra(
                 );
             }
 
-            // Track B: feature extraction hoisted post-top-N. After
-            // spec_e_value computation, the queue contains only the final
-            // retained PSMs (top_n_psms_per_spectrum). Fill in the
-            // heavyweight per-PSM features here so we pay this cost once per
-            // retained PSM instead of once per candidate scored.
+            // Feature extraction hoisted post-top-N: after spec_e_value
+            // computation, the queue contains only the final retained PSMs
+            // (top_n_psms_per_spectrum). Fill in the heavyweight per-PSM
+            // features here so we pay this cost once per retained PSM
+            // instead of once per candidate scored.
             //
             // Bit-identity: `features` is NOT part of `PsmMatch::cmp`, so
             // mutating it does not perturb heap ordering or top-N retention.
@@ -301,7 +306,7 @@ pub fn match_spectra(
         .collect();
 
     // Yield-accounting summary.
-    // Helps disambiguate whether a PSM-yield gap vs Java is from:
+    // Helps disambiguate whether a PSM-yield gap comes from:
     //   - filtering (skipped_min_peaks)
     //   - enumeration (candidates_visited)
     //   - scoring (psms_pushed)
@@ -322,8 +327,6 @@ pub fn match_spectra(
 /// For a single spectrum, compute the GF across the precursor tolerance
 /// window in nominal mass space, then assign `spec_e_value` to every PSM
 /// in `queue` whose nominal_peptide_mass falls within the window.
-///
-/// Mirrors Java DBScanner.java:597-650.
 ///
 /// # Arguments
 /// * `spec` — the spectrum (used for precursor m/z).
@@ -367,7 +370,7 @@ fn compute_spec_e_values_for_spectrum(
     let peptide_neutral_mass = (spec.precursor_mz - PROTON) * (charge as f64) - H2O;
     let nominal_peptide_mass = nominal_from(peptide_neutral_mass);
 
-    // Java isotope error convention: range [min_iso, max_iso] is applied as
+    // Isotope error convention: range [min_iso, max_iso] is applied as
     //   minNominalPeptideMass = nominalPeptideMass - maxIsotopeError
     //   maxNominalPeptideMass = nominalPeptideMass - minIsotopeError
     let iso_min = *params.isotope_error_range.start() as i32;
@@ -375,8 +378,8 @@ fn compute_spec_e_values_for_spectrum(
     let min_iso_nominal = nominal_peptide_mass - iso_max;
     let max_iso_nominal = nominal_peptide_mass - iso_min;
 
-    // Tolerance widening: Java uses Math.round(tol_da - 0.4999f).
-    // tolDaLeft governs the upper bound; tolDaRight governs the lower bound.
+    // Tolerance widening: round(tol_da - 0.4999).
+    // tol_da_left governs the upper bound; tol_da_right governs the lower bound.
     let tol_da_left = params.precursor_tolerance.left.as_da(peptide_neutral_mass);
     let tol_da_right = params.precursor_tolerance.right.as_da(peptide_neutral_mass);
     let widen_left = (tol_da_left - 0.4999_f64).round() as i32;
@@ -396,15 +399,15 @@ fn compute_spec_e_values_for_spectrum(
         .min()
         .unwrap_or(i32::MIN);
 
-    // parent_mass = (mz - H) * charge  (precursor peak mass, with H added back in Java).
+    // parent_mass = (mz - PROTON) * charge  (precursor peak mass + proton, as in NewScoredSpectrum).
     let parent_mass = (spec.precursor_mz - PROTON) * (charge as f64);
 
     // 3. Derive protein-terminal flags by OR-ing across ALL PSMs in the queue.
     //
-    // Java reference: DBScanner.java:592-602 aggregates useProteinNTerm /
-    // useProteinCTerm across all candidates before GF construction. We mirror
-    // this by iterating the full queue and setting either flag the moment any
-    // PSM is at a protein N- or C-terminus, short-circuiting once both are set.
+    // Aggregates `use_protein_n_term` / `use_protein_c_term` across all
+    // candidates before GF construction. Iterates the full queue and sets
+    // either flag the moment any PSM is at a protein N- or C-terminus,
+    // short-circuiting once both are set.
     let (use_protein_n_term, use_protein_c_term) = {
         let mut any_n = false;
         let mut any_c = false;
@@ -457,9 +460,9 @@ fn compute_spec_e_values_for_spectrum(
     let max_score = group.max_score();
 
     queue.update_spec_e_values(|psm| {
-        // Nominal peptide mass: residue masses sum + no water (Java convention for mass index).
+        // Nominal peptide mass: residue masses sum + no water (mass-index convention).
         // Use nominal_from() (INTEGER_MASS_SCALER-aware) to match how graph nodes are indexed.
-        let psm_nominal_mass = nominal_from(psm.candidate.peptide.mass() - H2O);
+        let psm_nominal_mass = psm.candidate.peptide.nominal_residue_mass();
         if psm_nominal_mass < min_peptide_mass_idx || psm_nominal_mass > max_peptide_mass_idx {
             return 1.0;
         }
@@ -467,8 +470,8 @@ fn compute_spec_e_values_for_spectrum(
         if score_int >= max_score {
             // Score exceeds GF range — return the probability at max_score - 1
             // (which already has the underflow guard applied by the GF DP).
-            // Mirrors Java behavior; avoids returning a grossly inflated value
-            // (1/max_score ≈ 0.01) that would invert ranking of the best PSMs.
+            // Avoids returning a grossly inflated value (1/max_score ≈ 0.01)
+            // that would invert ranking of the best PSMs.
             return group.spectral_probability(max_score - 1)
                 .unwrap_or(f32::from_bits(1) as f64);
         }
@@ -477,11 +480,10 @@ fn compute_spec_e_values_for_spectrum(
 
     // 5. Enrichment: set de_novo_score and e_value for output writers.
     //
-    // de_novo_score = group.max_score() - 1  (mirrors Java's getDeNovoScore()).
+    // de_novo_score = group.max_score() - 1.
     //
     // e_value = spec_e_value * num_distinct_peptides_at_length.
-    // num_distinct sourced from SearchIndex (mirrors Java
-    // PeptideEnumerator.getNumDistinctPeptides), replacing the prior
+    // `num_distinct` is sourced from `SearchIndex`, replacing the prior
     // top-N-queue-derived proxy.
     let de_novo_score = max_score - 1;
     queue.update_psm_enrichment(|psm| {
@@ -494,8 +496,8 @@ fn compute_spec_e_values_for_spectrum(
 
 /// Compute fragment-ion feature columns for a single PSM.
 ///
-/// Uses charge-1 b/y ions only (matching Java's `NumMatchedMainIons`
-/// convention).  A peptide position counts at most once per ion series;
+/// Uses charge-1 b/y ions only (the `NumMatchedMainIons` convention).
+/// A peptide position counts at most once per ion series;
 /// a position can contribute 1 from b AND 1 from y (so the maximum
 /// `num_matched_main_ions` is `2 * (n - 1)` for a peptide of length n).
 ///
@@ -506,15 +508,13 @@ fn compute_spec_e_values_for_spectrum(
 ///
 /// All 9 previously zero-stubbed PIN columns are now filled:
 /// - Ion-current ratios use raw peak intensities vs total MS2 ion current.
-///   Mirrors Java `PSMFeatureFinder.computeExplainedIonCurrent()`.
-/// - `MS2IonCurrent` is the raw sum (NOT log10).  Java `getMS2IonCurrent()`
-///   returns the raw sum; the PIN emitter emits it as-is.
-/// - `IsolationWindowEfficiency` is always 0.0; Java returns `null` here
-///   (no isolation-window data in the Spectrum object).
-/// - Top-7 error stats mirror Java `MassErrorStat`: errors are collected for
-///   all matched b+y ions, sorted descending by intensity, top-7 taken;
-///   absolute Da error for mean/stdev, signed ppm for rel-mean/rel-stdev.
-///   Population stdev formula: `sqrt(E[x²] - mean²)` — matches Java.
+/// - `MS2IonCurrent` is the raw sum (NOT log10); the PIN emitter emits it as-is.
+/// - `IsolationWindowEfficiency` is always 0.0 (no isolation-window data
+///   in the Spectrum object).
+/// - Top-7 error stats: errors are collected for all matched b+y ions,
+///   sorted descending by intensity, top-7 taken; absolute Da error for
+///   mean/stdev, signed ppm for rel-mean/rel-stdev. Population stdev
+///   formula: `sqrt(E[x²] - mean²)`.
 pub(crate) fn compute_psm_features(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
@@ -602,24 +602,22 @@ pub(crate) fn compute_psm_features(
     let explained_ion_current_ratio = safe_div(matched_total, total_intensity);
     let n_term_ion_current_ratio    = safe_div(matched_b_intensity, total_intensity);
     let c_term_ion_current_ratio    = safe_div(matched_y_intensity, total_intensity);
-    // Java `getMS2IonCurrent()` returns the raw sum (no log10 transform).
+    // MS2 ion current is the raw sum (no log10 transform).
     let ms2_ion_current = if total_intensity > 0.0 { total_intensity as f32 } else { 0.0 };
-    // Java `getIsolationWindowEfficiency()` always returns null → emit 0.0.
+    // Isolation-window efficiency is not available → emit 0.0.
     let isolation_window_efficiency = 0.0_f32;
 
     // ── Top-7 mass-error statistics ───────────────────────────────────────────
 
-    // Sort matched ions descending by intensity (mirrors Java MassErrorStat
-    // which sorts errorList by intensity via PairReverseComparator).
-    let mut by_intensity = matched_ions.clone();
-    by_intensity.sort_by(|a, b| {
+    // Sort matched ions descending by intensity.
+    matched_ions.sort_by(|a, b| {
         b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let top7: Vec<(f32, f64, f64, bool)> = by_intensity.into_iter().take(7).collect();
+    let top7 = &matched_ions[..matched_ions.len().min(7)];
 
-    // Java MassErrorStat: absolute Da errors for mean7/sd7;
-    //                     signed errors (no abs) for rMean7/rSd7 (ppm).
-    // Population stdev formula (Java): sqrt(sumSq/n - mean²).
+    // Absolute Da errors for mean7/sd7;
+    // signed errors (no abs) for r_mean7/r_sd7 (ppm).
+    // Population stdev formula: sqrt(sum_sq/n - mean²).
     let abs_da_errors: Vec<f64> = top7.iter()
         .map(|&(_, obs, pred, _)| (obs - pred).abs())
         .collect();

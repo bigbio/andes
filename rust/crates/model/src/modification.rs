@@ -1,6 +1,4 @@
-//! Modifications. Mirrors Java
-//! `edu.ucsd.msjava.msutil.Modification` and the Mods.txt parser in
-//! `edu.ucsd.msjava.params.ParamObject`.
+//! Modifications and the Mods.txt parser.
 
 /// Where a modification can attach within (or at the ends of) a peptide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -1,21 +1,18 @@
 //! Output writers for MS-GF+ search results.
 //!
-//! # Java divergences
+//! # Known column behaviors
 //!
-//! * **FragMethod**: Java emits the string from `ActivationMethod`'s static
-//!   table (e.g. `"HCD"`, `"CID"`). Rust uses `ActivationMethod::name()` which
-//!   produces the same strings for the five canonical variants. Unknown
-//!   activation is written as `"UNKNOWN"` (Java writes `"Unknown"`).
+//! * **FragMethod**: emitted via `ActivationMethod::name()` (e.g. `"HCD"`,
+//!   `"CID"`). Unknown activation is written as `"UNKNOWN"`.
 //!
-//! * **IsotopeError**: the precursor-matching loop tries multiple
-//!   isotope offsets but does not record *which* offset produced the match.
-//!   The TSV column is always written as `0`. Will be fixed once the
-//!   winning isotope offset is threaded into `PsmMatch`.
+//! * **IsotopeError**: the precursor-matching loop tries multiple isotope
+//!   offsets but does not record *which* offset produced the match. The TSV
+//!   column is always written as `0`. Will be fixed once the winning
+//!   isotope offset is threaded into `PsmMatch`.
 //!
-//! * **Decoy filtering**: Java skips PSMs where the protein string is empty
-//!   (all-decoy with no target alternates). This writer emits decoy PSMs with
-//!   the decoy prefix preserved in the Protein column; downstream Percolator
-//!   handles decoy labelling. Intentional simplification.
+//! * **Decoy filtering**: this writer emits decoy PSMs with the decoy
+//!   prefix preserved in the Protein column; downstream Percolator handles
+//!   decoy labelling.
 //!
 //! * **QValue / PepQValue**: Not emitted; TDA columns are not currently
 //!   produced.

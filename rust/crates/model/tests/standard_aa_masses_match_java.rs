@@ -43,8 +43,8 @@ fn all_20_match_java() {
 
 #[test]
 fn exotic_residues_absent() {
-    // U, O, B, Z, J, X are NOT in the standard table — Phase 1 spec
-    // explicitly excludes them.
+    // U, O, B, Z, J, X are NOT in the standard table — explicitly excluded
+    // from the standard 20-residue spec.
     for r in [b'U', b'O', b'B', b'Z', b'J', b'X'] {
         assert!(
             AminoAcid::standard(r).is_none(),
@@ -56,7 +56,7 @@ fn exotic_residues_absent() {
 #[test]
 fn nominal_masses_match_java() {
     // Java AminoAcid stores nominalMass via Composition.getNominalMass()
-    // = C*12 + H*1 + N*14 + O*16 + S*32. For Phase 1 we compute it via
+    // = C*12 + H*1 + N*14 + O*16 + S*32. We compute it via
     // `nominal_from(mass)` (the mass-based path); these happen to agree
     // for all 20 standard AAs (verified by inspection — see Composition
     // integer formulae). This test pins that agreement.

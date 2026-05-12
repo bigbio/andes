@@ -12,8 +12,7 @@ use crate::param_model::{IonType, Param};
 use model::peptide::Peptide;
 
 /// For a single prefix or suffix node at `nominal_mass`, enumerate the
-/// `(ion_type, theo_mz)` pairs that contribute to its node score under
-/// `param`. Java reference: `NewScoredSpectrum.getNodeScore(nodeMass, isPrefix)`.
+/// `(ion_type, theo_mz)` pairs that contribute to its node score under `param`.
 ///
 /// `is_prefix = true` → walk prefix ions (b-ions etc.); `false` → suffix (y-ions etc.).
 /// `parent_mass` / `charge` select the segment+partition used downstream.
@@ -46,8 +45,7 @@ pub fn ions_for_node(
 /// ion (was ~30 ns × millions of calls).
 ///
 /// See `ions_for_node` for the per-segment / per-partition iteration
-/// semantics. (Java parity is maintained — same set of (ion, theo_mz) pairs
-/// in the same order.)
+/// semantics. Produces the same set of (ion, theo_mz) pairs in the same order.
 #[inline]
 pub fn for_each_ion_for_node<F: FnMut(IonType, f64, crate::param_model::Partition)>(
     nominal_mass: f64,
@@ -67,7 +65,7 @@ pub fn for_each_ion_for_node<F: FnMut(IonType, f64, crate::param_model::Partitio
                 (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
                 _ => continue,
             };
-            // Mirror Java: verify the ion's computed mz actually falls in this segment.
+            // Verify the ion's computed mz actually falls in this segment.
             if param.segment_num(theo_mz, parent_mass) != seg {
                 continue;
             }

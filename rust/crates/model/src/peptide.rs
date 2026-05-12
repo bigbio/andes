@@ -1,6 +1,5 @@
-//! Peptide. Mirrors Java `edu.ucsd.msjava.msutil.Peptide`. The
-//! `Display` impl (Task 9) is byte-parity-gated by
-//! `tests/peptide_display_parity.rs` (Task 12).
+//! Peptide. The `Display` impl is byte-parity-gated by
+//! `tests/peptide_display_parity.rs`.
 
 use std::hash::{Hash, Hasher};
 
@@ -12,15 +11,31 @@ pub struct Peptide {
     pub residues: Vec<AminoAcid>,
     /// Flanking residue at the N-terminus (the AA *before* this peptide
     /// in its source protein). `_` for protein N-term, `-` for protein
-    /// C-term. Matches Java's `Constants.PROTEIN_N_TERM` / `_C_TERM`.
+    /// C-term.
     pub pre:  u8,
     pub post: u8,
     pub charge: Option<u8>,
+    neutral_mass: f64,
+    nominal_mass: i32,
+    nominal_residue_mass: i32,
 }
 
 impl Peptide {
     pub fn new(residues: Vec<AminoAcid>, pre: u8, post: u8) -> Self {
-        Self { residues, pre, post, charge: None }
+        let residue_mass: f64 = residues
+            .iter()
+            .map(|aa| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
+            .sum();
+        let neutral_mass = residue_mass + H2O;
+        Self {
+            residues,
+            pre,
+            post,
+            charge: None,
+            neutral_mass,
+            nominal_mass: nominal_from(neutral_mass),
+            nominal_residue_mass: nominal_from(residue_mass),
+        }
     }
 
     pub fn with_charge(mut self, charge: u8) -> Self {
@@ -33,18 +48,21 @@ impl Peptide {
     }
 
     /// Total monoisotopic mass: sum of residue masses + sum of mod deltas
-    /// + `H2O`. Matches Java's `Peptide.getMass()`.
+    /// + `H2O`.
     pub fn mass(&self) -> f64 {
-        let residue_sum: f64 = self.residues.iter().map(|aa| aa.mass).sum();
-        let mod_sum: f64 = self.residues
-            .iter()
-            .filter_map(|aa| aa.mod_.as_ref().map(|m| m.mass_delta))
-            .sum();
-        residue_sum + mod_sum + H2O
+        self.neutral_mass
     }
 
     pub fn nominal_mass(&self) -> i32 {
-        nominal_from(self.mass())
+        self.nominal_mass
+    }
+
+    /// Total nominal residue mass excluding `H2O`.
+    ///
+    /// This matches the search/GF bucket key convention
+    /// `nominal_from(peptide.mass() - H2O)` but avoids re-walking residues.
+    pub fn nominal_residue_mass(&self) -> i32 {
+        self.nominal_residue_mass
     }
 }
 
@@ -71,12 +89,11 @@ impl Hash for Peptide {
 }
 
 impl std::fmt::Display for Peptide {
-    /// Phase 1 canonical text form: `pre.SEQ_WITH_MODS.post`.
+    /// Canonical text form: `pre.SEQ_WITH_MODS.post`.
     /// Mod deltas render as `{:+.5}` (signed, 5 decimals) after each
     /// modified residue. Charge is not rendered. This format is the
-    /// inverse of `Peptide::from_str` (Task 10) and is NOT a byte-parity
-    /// match against Java's `Peptide.toString()` — the PIN/TSV output
-    /// formats live in the Phase 7 output crate.
+    /// inverse of `Peptide::from_str`; the byte-parity PIN/TSV output
+    /// formats live in the `output` crate.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.", self.pre as char)?;
         for aa in &self.residues {

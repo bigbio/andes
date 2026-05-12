@@ -1,9 +1,8 @@
-//! Decoy database generation. Mirrors Java
-//! `edu.ucsd.msjava.msdbsearch.ReverseDB`.
+//! Decoy database generation via sequence reversal.
 
 use model::protein::{Protein, ProteinDb};
 
-/// Default decoy prefix matching Java MSGFPlus.DEFAULT_DECOY_PROTEIN_PREFIX.
+/// Default decoy accession prefix.
 pub const DEFAULT_DECOY_PREFIX: &str = "XXX";
 
 /// Reverse each protein's sequence and prepend `<prefix>_` to its
@@ -19,7 +18,7 @@ pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
     ProteinDb { proteins }
 }
 
-/// Concatenate target + decoy. Equivalent to Java's `concat=true` mode.
+/// Concatenate target + decoy.
 pub fn target_plus_decoy(target: &ProteinDb, prefix: &str) -> ProteinDb {
     let decoy = reverse_db(target, prefix);
     let mut proteins = target.proteins.clone();

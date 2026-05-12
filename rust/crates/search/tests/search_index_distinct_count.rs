@@ -2,11 +2,6 @@
 //! of distinct residue sequences (no mods, no flanking, target+decoy combined)
 //! enumerated by `enumerate_candidates` for each peptide length.
 //!
-//! Mirrors Java `CompactSuffixArray.getNumDistinctPeptides(int length)` which
-//! counts distinct prefixes of length `l` over the entire suffix array (built
-//! over target+decoy concatenation). See
-//! `src/main/java/edu/ucsd/msjava/msdbsearch/CompactSuffixArray.java:147`.
-//!
 //! Test fixture: 3 synthetic proteins with controlled overlap to exercise
 //! per-length deduplication across both target and decoy proteomes.
 //!

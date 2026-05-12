@@ -1,6 +1,6 @@
-//! TSV output writer — mirrors Java `DirectTSVWriter` (Phase 7/Task 2).
+//! TSV output writer.
 //!
-//! # Column order (Phase 7 MVP — no QValue, no additional features)
+//! # Column order
 //!
 //! ```text
 //! #SpecFile  SpecID  ScanNum  [Title — only when is_mgf]  FragMethod
@@ -8,15 +8,14 @@
 //! Peptide  Protein  DeNovoScore  MSGFScore  SpecEValue  EValue
 //! ```
 //!
-//! # Java divergences
+//! # Column semantics
 //!
-//! * **FragMethod**: uses `ActivationMethod::name()` (same strings for the
-//!   five canonical variants). Unknown activation is `"UNKNOWN"` vs Java's
-//!   `"Unknown"`.
-//! * **IsotopeError**: always `0`; Phase 4e does not track the winning offset.
+//! * **FragMethod**: `ActivationMethod::name()` for the five canonical variants;
+//!   `"UNKNOWN"` for unknown / unset activation.
+//! * **IsotopeError**: always `0`; the winning isotope offset is not currently
+//!   threaded into the TSV writer.
 //! * **Decoy filtering**: decoys are emitted; downstream Percolator labels them.
-//! * **SpecID for non-MGF**: Java uses a spectrum-set-specific ID; Rust uses
-//!   `"scan=N"` which matches the common mzML convention.
+//! * **SpecID for non-MGF**: `"scan=N"` (mzML convention).
 
 use std::io::{self, BufWriter, Write};
 
@@ -158,7 +157,7 @@ fn write_psm_row<W: Write>(
     let spec_file_name = row_ctx.spec_file_name;
 
     // SpecID: derived from RowContext (title if non-empty, else "scan=N")
-    let spec_id = ctx.spec_id.clone();
+    let spec_id = &ctx.spec_id;
 
     let scan_num = ctx.scan;
 
@@ -171,7 +170,7 @@ fn write_psm_row<W: Write>(
     // Precursor m/z formatted to 4 decimal places
     let precursor = format!("{:.4}", spec.precursor_mz);
 
-    // IsotopeError: always 0 (Phase 4e doesn't track winning isotope offset)
+    // IsotopeError: always 0 (winning isotope offset not threaded here yet)
     let isotope_error: i32 = 0;
 
     // PrecursorError: mass_error_ppm stored on psm; convert to Da if needed
@@ -187,16 +186,13 @@ fn write_psm_row<W: Write>(
     let charge = psm.charge_used;
 
     // Peptide: uses the existing Display impl → "pre.SEQ_WITH_MODS.post"
-    let peptide = format!("{}", psm.candidate.peptide);
-
-    // Protein: resolved via RowContext (accession already carries decoy prefix).
-    // Multi-protein emit is a future followup.
-    let protein = ctx.accession.clone();
+    let peptide = &psm.candidate.peptide;
+    let protein = &ctx.accession;
 
     // DeNovoScore
     let de_novo_score = psm.de_novo_score;
 
-    // MSGFScore: integer-rounded raw score (matches Java's MSGFScore column)
+    // MSGFScore: integer-rounded raw score
     let msgf_score = psm.score.round() as i32;
 
     // SpecEValue: format as scientific notation with 6 decimal places

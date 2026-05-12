@@ -61,18 +61,14 @@ impl SearchIndex {
     /// and `decoy_prefix`, then store the count of distinct residue sequences
     /// per peptide length. Returns the index with the populated map.
     ///
-    /// Mirrors Java `CompactSuffixArray.computeNumDistinctPeptides`
-    /// (`src/main/java/edu/ucsd/msjava/msdbsearch/CompactSuffixArray.java:198`):
-    /// counts distinct prefixes of length `l` across the entire suffix array
+    /// Counts distinct prefixes of length `l` across the entire suffix array
     /// (target + decoy combined, modulo the still-open mod-context divergence
     /// tracked in `docs/parity-analysis/known-divergences.md`).
     ///
     /// Distinct identity is the residue byte sequence with no mods and no
-    /// flanking residues — matching Java's prefix comparison over residue bytes
-    /// (`CompactSuffixArray.computeNumDistinctPeptides` walks the SA's residue
-    /// bytes only; modifications are not part of Java's count). Two candidates
-    /// with identical residues but different mod variants count as one;
-    /// candidates that differ only in flanking context also count as one.
+    /// flanking residues. Two candidates with identical residues but different
+    /// mod variants count as one; candidates that differ only in flanking
+    /// context also count as one.
     ///
     /// Implementation: each candidate is reduced to a `u64` FxHash fingerprint
     /// of its bare residue bytes; the per-length seen-set holds those u64s,
@@ -108,8 +104,7 @@ impl SearchIndex {
         // Per-length seen-set holds 8-byte FxHash fingerprints, not
         // `Vec<u8>`. At PXD001819 scale that avoids ~5-10M Vec<u8>
         // allocations per pass (root cause of the T2-5 wall regression
-        // 5-6 min → 9 min) while preserving bare-residue dedup semantics
-        // that mirror Java's `CompactSuffixArray.computeNumDistinctPeptides`.
+        // 5-6 min → 9 min) while preserving bare-residue dedup semantics.
         let mut seen_per_length: HashMap<usize, FxHashSet<u64>> = HashMap::new();
         for cand in enumerate_candidates(self, params, decoy_prefix) {
             let residues = &cand.peptide.residues;
@@ -144,8 +139,6 @@ impl SearchIndex {
     /// Number of distinct residue sequences (no mods, no flanking) of length
     /// `len` enumerated during candidate generation. Returns `0` for unseen
     /// lengths (including any length queried before population).
-    ///
-    /// Mirrors Java `CompactSuffixArray.getNumDistinctPeptides(int length)`.
     pub fn num_distinct_peptides_at_length(&self, len: usize) -> usize {
         self.distinct_peptide_counts
             .get()
@@ -175,8 +168,7 @@ impl SearchIndex {
 
     /// Returns `true` iff `residues` (peptide sequence, no flanking) appears as
     /// a substring in ANY target protein. Used by the PIN writer to compute
-    /// Java-faithful Label semantics (Java: DirectPinWriter.java:188-191 —
-    /// Label=-1 only when ALL explaining proteins are decoy).
+    /// Label semantics: Label=-1 only when ALL explaining proteins are decoy.
     ///
     /// Naive scan: O(target_count × len). Acceptable at BSA scale; for real
     /// databases the suffix array could accelerate — deferred to a perf pass.

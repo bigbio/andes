@@ -1,5 +1,4 @@
-//! Loader for Java MS-GF+'s `.param` binary format. Java reference:
-//! `src/main/java/edu/ucsd/msjava/msscorer/NewRankScorer.java` lines 197-425.
+//! Loader for the MS-GF+ `.param` binary format.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -64,10 +63,9 @@ fn build_partition_ion_types_cache(
 }
 
 impl Param {
-    /// Find the partition matching `(charge, parent_mass, seg_num)` via
-    /// the same lookup Java uses (`partitionSet.floor(target)`):
-    /// returns the largest partition ≤ target by lex order on
-    /// (charge, parent_mass.to_bits(), seg_num).
+    /// Find the partition matching `(charge, parent_mass, seg_num)` via a
+    /// floor lookup (the largest partition ≤ target by lex order on
+    /// `(charge, parent_mass.to_bits(), seg_num)`).
     ///
     /// Falls back gracefully:
     /// - If no partition matches the requested charge: use the smallest
@@ -90,9 +88,9 @@ impl Param {
             if candidate.charge == charge {
                 return Some(candidate);
             }
-            // Floor returned a partition with smaller charge; Java's logic
-            // says: if no exact-charge match, find smallest available charge,
-            // then floor on (smallest_charge, parent_mass, seg_num).
+            // Floor returned a partition with smaller charge: if no
+            // exact-charge match, find smallest available charge, then floor
+            // on (smallest_charge, parent_mass, seg_num).
         }
 
         // Fall back: find smallest charge in partitions, retry.
@@ -119,7 +117,7 @@ impl Param {
     }
 
     /// Compute the segment number for a peak m/z relative to the peptide's
-    /// parent mass. Mirrors Java's `getSegmentNum`.
+    /// parent mass.
     pub fn segment_num_for(&self, peak_mz: f64, parent_mass: f64) -> i32 {
         if parent_mass <= 0.0 || self.num_segments <= 0 {
             return 0;
@@ -135,10 +133,9 @@ impl Param {
         self.segment_num_for(peak_mz, parent_mass) as usize
     }
 
-    /// Mirrors Java NewRankScorer.getIonTypes(charge, parentMass, seg) — ion-type membership comes from frag_off_table, not rank_dist_table.
-    ///
     /// Collect the unique ion types (Prefix and Suffix, not Noise) whose
-    /// partition has `seg_num == seg`. Derived from `frag_off_table` keys.
+    /// partition has `seg_num == seg`. Derived from `frag_off_table` keys
+    /// (ion-type membership lives in `frag_off_table`, not `rank_dist_table`).
     ///
     /// Returned in stable insertion order; duplicates suppressed.
     pub fn ion_types_for_segment(&self, seg: usize) -> Vec<IonType> {
@@ -174,11 +171,10 @@ impl Param {
     }
 
     /// Ion types for the SPECIFIC partition `(charge, parent_mass, seg)`.
-    /// Mirrors Java `NewRankScorer.getIonTypes(charge, parentMass, segNum)`,
-    /// which selects the partition's ion list from `fragOFFTable` rather
-    /// than the segment-wide union returned by `ion_types_for_segment`.
-    /// Used in the per-node scoring path so that Rust enumerates the
-    /// same ion set as Java for a given spectrum.
+    ///
+    /// Selects the partition's ion list from `frag_off_table` rather than
+    /// the segment-wide union returned by `ion_types_for_segment`. Used
+    /// in the per-node scoring path.
     pub fn ion_types_for_partition(&self, charge: u8, parent_mass: f64, seg: usize) -> Vec<IonType> {
         // Compat shim — callers in hot paths should use
         // `ion_types_for_partition_slice` to avoid the allocation.
@@ -299,14 +295,11 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         let seg_num = read_i32(cursor)?;
         partitions.push(Partition { charge, parent_mass, seg_num });
     }
-    // Java writes Section 7 (frag_off) and Section 8 (rank_dist) in
-    // partitionSet iteration order (TreeSet sorted by Java compareTo:
-    // charge → seg → parent_mass). The wire order in Section 5 should
-    // already match this. Sort here as a defensive no-op IF Rust's `Ord`
-    // matches Java's `compareTo`. PANIC if the wire order disagrees with
-    // the sorted order — that would mean Sections 7/8 below get assigned
-    // to the wrong partition keys (silent rank_dist corruption), which
-    // would explain the mysterious per-PSM scoring divergence.
+    // Sections 7 (frag_off) and 8 (rank_dist) are written in the partitions'
+    // sorted order (charge → seg → parent_mass). The wire order in Section 5
+    // should already match this; the sort here is a defensive no-op. If the
+    // wire order disagrees with the sorted order, Sections 7/8 below would
+    // be assigned to the wrong partition keys (silent rank_dist corruption).
     let wire_order = partitions.clone();
     partitions.sort();
     if wire_order != partitions {
@@ -343,7 +336,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         });
     }
 
-    // -- Section 7: fragment offset frequency (per partition, in TreeSet order) --
+    // -- Section 7: fragment offset frequency (per partition, in sorted order) --
     let mut frag_off_table: HashMap<Partition, Vec<FragmentOffsetFrequency>> = HashMap::new();
     for &partition in &partitions {
         let size = read_i32(cursor)?;
@@ -368,7 +361,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
     let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
     for &partition in &partitions {
         let frag_list = frag_off_table.get(&partition);
-        // Java skips partitions with no ion types; mirror that.
+        // Skip partitions with no ion types.
         if frag_list.map_or(true, |v| v.is_empty()) {
             continue;
         }
@@ -470,11 +463,11 @@ impl Hash for Partition {
 
 impl Ord for Partition {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Mirror Java `Partition.compareTo`: charge → segIndex → parentMass.
+        // Lex order: charge → seg_num → parent_mass.
         // The order is load-bearing: a charge → parent_mass → seg_num order
         // produces wrong floor-lookup results for `find_partition` (seg=0
-        // queries return a seg=1 partition with the same parent_mass tier,
-        // resolving to the wrong rank distribution table).
+        // queries would return a seg=1 partition with the same parent_mass
+        // tier, resolving to the wrong rank distribution table).
         self.charge.cmp(&other.charge)
             .then_with(|| self.seg_num.cmp(&other.seg_num))
             .then_with(|| self.parent_mass.to_bits().cmp(&other.parent_mass.to_bits()))
@@ -489,8 +482,8 @@ impl PartialOrd for Partition {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IonType {
-    /// Java: `IonType.PrefixIon`. `offset_bits` is `f32::to_bits` so the
-    /// type can derive Eq/Hash; recover the float via `offset()`.
+    /// `offset_bits` is `f32::to_bits` so the type can derive Eq/Hash;
+    /// recover the float via `offset()`.
     Prefix { charge: i32, offset_bits: u32 },
     Suffix { charge: i32, offset_bits: u32 },
     Noise,
@@ -519,20 +512,11 @@ impl IonType {
 
     /// Compute the predicted m/z for this ion type given a **nominal** node mass.
     ///
-    /// Mirrors Java's `IonType.getMz(float mass)` exactly:
+    /// Formula:
+    ///   `real_mass = node_nominal / INTEGER_MASS_SCALER`
+    ///   `mz = real_mass / charge + offset`
     ///
-    /// ```text
-    /// // Java (IonType.java):
-    /// public float getMz(float mass) { return mass / charge + offset; }
-    ///
-    /// // Caller (NewScoredSpectrum.java) passes:
-    /// float mass = new NominalMass(nominalMass).getMass();  // = nominalMass / 0.999497f
-    /// ```
-    ///
-    /// So the full formula is:
-    ///   `mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset`
-    ///
-    /// **Key**: the `offset` field already includes the proton mass contribution
+    /// The `offset` field already includes the proton mass contribution
     /// (for b-ions: `offset = PROTON ≈ 1.00728`; for y-ions: `offset = H2O + PROTON ≈ 19.018`).
     /// The `INTEGER_MASS_SCALER` division converts integer nominal mass back to real
     /// monoisotopic mass before dividing by charge.
@@ -543,8 +527,8 @@ impl IonType {
             IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                // Java: getMz(mass) = mass / charge + offset
-                // where mass = nominalMass / INTEGER_MASS_SCALER
+                // real_mass = node_nominal / INTEGER_MASS_SCALER
+                // mz        = real_mass / charge + offset
                 let real_mass = node_nominal / model::mass::INTEGER_MASS_SCALER as f64;
                 real_mass / c + offset
             }
@@ -554,10 +538,7 @@ impl IonType {
 
     /// Inverse of `mz`: given an observed peak m/z, recover the real node mass (in Da).
     ///
-    /// Mirrors Java's `IonType.getMass(float mz)`:
-    /// ```text
-    /// public float getMass(float mz) { return (mz - offset) * charge; }
-    /// ```
+    /// Formula: `real_mass = (mz - offset) * charge`
     ///
     /// Returns the real monoisotopic node mass (Da), NOT nominal mass.
     /// For `Noise`: returns 0.0.
@@ -566,7 +547,6 @@ impl IonType {
             IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                // Java: getMass(mz) = (mz - offset) * charge
                 (mz - offset) * c
             }
             IonType::Noise => 0.0,
@@ -594,7 +574,7 @@ pub enum ParamParseError {
     Io { #[from] source: std::io::Error },
     #[error("buffer underrun at offset {offset}: needed {needed} more bytes")]
     UnexpectedEof { offset: usize, needed: usize },
-    #[error("unknown {kind} {value:?} (Java enum failed to resolve)")]
+    #[error("unknown {kind} {value:?} (enum lookup failed)")]
     BadEnum { kind: &'static str, value: String },
     #[error("validation marker mismatch: got {got}, expected i32::MAX")]
     ValidationMarker { got: i32 },
@@ -1010,7 +990,7 @@ mod tests {
         // Sort matches the loader invariant.
         param.partitions.sort();
 
-        // Java Partition.compareTo: charge → segIndex → parentMass.
+        // Partition Ord: charge → seg_num → parent_mass.
         // Sorted order: (2,seg0,500), (2,seg0,1000), (2,seg1,500), (3,seg0,500).
         // Target (2, 800.0, seg0): floor is (2,seg0,500) — same charge, same seg,
         // and 500.0 < 800.0. The next candidate (2,seg0,1000) is above 800.0.
@@ -1062,8 +1042,7 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge1_offset0() {
-        // Java formula: getMz(mass) = mass / charge + offset
-        // where mass = nominalMass / INTEGER_MASS_SCALER
+        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
         // For Prefix(charge=1, offset=0): mz = (node_nominal / 0.999497) / 1 + 0
         use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
@@ -1074,7 +1053,7 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge2() {
-        // Java formula: mz = (nominalMass / INTEGER_MASS_SCALER) / charge + offset
+        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
         // For Prefix(charge=2, offset=0): mz = (node_nominal / 0.999497) / 2
         use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix { charge: 2, offset_bits: 0.0_f32.to_bits() };
@@ -1085,9 +1064,8 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_with_b_ion_offset() {
-        // Verify Java b-ion formula: b-ion offset = PROTON (≈1.00728)
-        // mz = (nominalMass / INTEGER_MASS_SCALER) / charge + PROTON
-        // This is the realistic production case for b-ions.
+        // Realistic b-ion case: offset = PROTON (≈1.00728).
+        // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + PROTON
         use model::mass::{PROTON, INTEGER_MASS_SCALER};
         let b_ion = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits() };
         let node_nominal = 100.0_f64;
@@ -1097,7 +1075,7 @@ mod tests {
 
     #[test]
     fn ion_type_mz_suffix_same_formula_as_prefix() {
-        // Java's SuffixIon.getMz uses the same formula as PrefixIon.getMz.
+        // Suffix uses the same mz formula as prefix.
         let offset = 18.01_f32;
         let prefix = IonType::Prefix { charge: 1, offset_bits: offset.to_bits() };
         let suffix = IonType::Suffix { charge: 1, offset_bits: offset.to_bits() };
@@ -1112,8 +1090,8 @@ mod tests {
 
     #[test]
     fn ion_type_mass_from_mz_matches_java() {
-        // Java getMass(mz) = (mz - offset) * charge
-        // mass_from_mz returns the REAL monoisotopic mass (Da), not nominal mass.
+        // mass_from_mz(mz) = (mz - offset) * charge
+        // Returns the REAL monoisotopic mass (Da), not nominal mass.
         // Round-trip: mz(nominal) → mass_from_mz(mz) = (nominal/scaler/c+offset - offset)*c
         //           = (nominal / scaler) = real_mass  (NOT the original nominal input).
         use model::mass::INTEGER_MASS_SCALER;
@@ -1140,8 +1118,7 @@ mod tests {
         let prefix = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
         let suffix = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
 
-        // Populate frag_off_table (the source of truth for ion_types_for_segment,
-        // mirroring Java NewRankScorer.getIonTypes which reads from fragOFFTable).
+        // Populate frag_off_table (the source of truth for ion_types_for_segment).
         let mut frag_off_table: HashMap<Partition, Vec<FragmentOffsetFrequency>> = HashMap::new();
         frag_off_table.insert(part, vec![
             FragmentOffsetFrequency { ion_type: prefix, frequency: 0.7 },

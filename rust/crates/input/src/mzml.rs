@@ -4,8 +4,6 @@
 //! decodes base64 peak arrays (32-bit or 64-bit float, little-endian)
 //! with optional zlib compression and zips (m/z, intensity) pairs into
 //! `Vec<(f64, f32)>` sorted ascending by m/z.
-//!
-//! Java reference: `edu.ucsd.msjava.mzml.StaxMzMLParser`.
 
 use std::io::BufRead;
 
@@ -198,7 +196,7 @@ impl<R: BufRead> MzMLReader<R> {
             .map(|(mz, inten)| (mz, inten as f32))
             .collect();
 
-        // Enforce ascending-by-m/z invariant (Phase 3a).
+        // Enforce ascending-by-m/z invariant required by downstream consumers.
         if !peaks.windows(2).all(|w| w[0].0 <= w[1].0) {
             peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }

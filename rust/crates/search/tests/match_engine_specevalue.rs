@@ -282,7 +282,7 @@ fn top_psm_e_value_is_spec_e_value_times_some_constant() {
 }
 
 // ---------------------------------------------------------------------------
-// Track B4: protein-terminal flag derivation into GF construction.
+// Protein-terminal flag derivation into GF construction.
 // ---------------------------------------------------------------------------
 
 /// Helper: run a single-peptide search and return the top PSM's spec_e_value.
@@ -297,7 +297,7 @@ fn top_spec_e_value_for(protein_seq: &[u8], peptide_seq: &[u8], charge: u8) -> f
     sorted[0].spec_e_value
 }
 
-/// Track B4 smoke test: the GF should use protein-terminal flags derived from
+/// Smoke test: the GF should use protein-terminal flags derived from
 /// the top PSM rather than always hard-coding `false, false`.
 ///
 /// We verify this *indirectly* by comparing spec_e_values for two scenarios:
@@ -332,13 +332,13 @@ fn gf_protein_n_term_flag_derived_from_top_psm() {
 
     // Print for inspection — helpful when the values differ or coincide.
     println!(
-        "B4: N-terminal spec_e_value={ev_n_term:.6e}  internal={ev_internal:.6e}  \
+        "N-terminal spec_e_value={ev_n_term:.6e}  internal={ev_internal:.6e}  \
          differ={}",
         (ev_n_term - ev_internal).abs() > 1e-15
     );
 }
 
-/// Track B4 smoke test: protein C-terminal flag.
+/// Smoke test: protein C-terminal flag.
 ///
 /// When the top PSM ends at the last residue of the protein, `use_protein_c_term`
 /// should be `true`.  Same indirect-validity approach as the N-terminal test.

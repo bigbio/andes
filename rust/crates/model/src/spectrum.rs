@@ -1,9 +1,8 @@
-//! Spectrum — a single tandem MS scan. Lives in `input` for Phase 3a;
-//! relocates to `engine` when Phase 4 search lands and needs to consume it.
+//! Spectrum — a single tandem MS scan.
 
 #[derive(Debug, Clone)]
 pub struct Spectrum {
-    /// MGF `TITLE=` value (or `<spectrumRef>` for mzML in Phase 3b).
+    /// MGF `TITLE=` value (or `<spectrumRef>` for mzML).
     /// Used as the PSM `SpecID` column in `.pin` output.
     pub title: String,
     /// `PEPMASS=` first value: precursor m/z.

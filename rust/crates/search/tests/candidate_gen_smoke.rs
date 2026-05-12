@@ -31,7 +31,7 @@ fn params(min: u32, max: u32, missed: u32) -> SearchParams {
 fn single_tryptic_peptide_no_missed() {
     // Protein "MKWVTFISLLR": trypsin cleaves after K (pos 1) → spans "MK" (too short) + "WVTFISLLR".
     // Standard pass: 1 candidate "WVTFISLLR" at offset 2.
-    // Track B5 Met-cleavage pass (sub_seq="KWVTFISLLR"): trypsin cleaves after K (sub_pos 0) →
+    // Met-cleavage pass (sub_seq="KWVTFISLLR"): trypsin cleaves after K (sub_pos 0) →
     //   sub-spans "K" (too short) + "WVTFISLLR" at abs_offset=2. Adds 1 more candidate.
     // Total target candidates: 2.
     let idx = make_index(b"MKWVTFISLLR");
@@ -80,7 +80,7 @@ fn no_cleavage_enzyme_emits_full_protein_only() {
     p.max_missed_cleavages = 0;
     p.max_variable_mods_per_peptide = 0;
     let candidates: Vec<_> = enumerate_candidates(&idx, &p, "XXX").collect();
-    // Track B5: protein starts with M, so Met-cleaved pass also runs.
+    // Protein starts with M, so Met-cleaved pass also runs.
     // Standard pass: target "MKWVTFISLLR" (len=11, offset=0) + decoy "RLLSIFTFVKM" (len=11, offset=0).
     // Met-cleaved pass (target only, since decoy "RLLSIFTFVKM" starts with R):
     //   sub_seq "KWVTFISLLR" (len=10) → 1 candidate at offset=1.
@@ -209,7 +209,7 @@ fn aa_set_with_oxidation() -> model::AminoAcidSet {
 fn one_variable_mod_site_doubles_candidates() {
     // "MKAR" — Trypsin spans (0,2)="MK" + (2,4)="AR".
     // Standard pass: "MK" → 2 (unmod + Mox); "AR" → 1. Total = 3.
-    // Track B5 Met-cleavage pass (sub_seq="KAR"): spans "K" (too short) + "AR" at abs_offset=2.
+    // Met-cleavage pass (sub_seq="KAR"): spans "K" (too short) + "AR" at abs_offset=2.
     //   "AR" has no M residue → 1 extra candidate.
     // Total target = 4.
     let target = ProteinDb {
@@ -234,7 +234,7 @@ fn one_variable_mod_site_doubles_candidates() {
 fn two_variable_mod_sites_quadruple_candidates() {
     // "MMK" — standard pass: single span (0,3) "MMK" with 2 M positions.
     // Standard combos: {none, M0_ox, M1_ox, both_ox} = 4.
-    // Track B5 Met-cleavage pass (sub_seq="MK"): single span "MK" (abs_offset=1) with 1 M position.
+    // Met-cleavage pass (sub_seq="MK"): single span "MK" (abs_offset=1) with 1 M position.
     // Met-cleaved combos: {none, Mox} = 2.
     // Total target = 4 + 2 = 6.
     let target = ProteinDb {
@@ -258,7 +258,7 @@ fn two_variable_mod_sites_quadruple_candidates() {
 #[test]
 fn max_variable_mods_caps_combinations() {
     // "MMMK" — 3 M sites. Standard pass with max_mods=1: {none, M0_ox, M1_ox, M2_ox} = 4.
-    // Track B5 Met-cleavage pass (sub_seq="MMK"): 2 M sites, max_mods=1: {none, M0_ox, M1_ox} = 3.
+    // Met-cleavage pass (sub_seq="MMK"): 2 M sites, max_mods=1: {none, M0_ox, M1_ox} = 3.
     // Total target = 4 + 3 = 7.
     let target = ProteinDb {
         proteins: vec![Protein {
@@ -278,17 +278,13 @@ fn max_variable_mods_caps_combinations() {
     assert_eq!(target_count, 7, "expected 7 (MMMK×4 standard + MMK×3 met-cleaved)");
 }
 
-// ─── Track B2: terminal-mod expansion tests ───────────────────────────────────
+// ─── Terminal-mod expansion tests ────────────────────────────────────────────
 //
 // Terminal-location semantics in expand_mod_combinations:
 //   - Peptide at protein start (start_offset == 0): position 0 gets ProtNTerm variants.
 //   - Peptide NOT at protein start: position 0 gets NTerm variants.
 //   - Peptide at protein end (end == protein_len): last position gets ProtCTerm variants.
 //   - Peptide NOT at protein end: last position gets CTerm variants.
-//
-// This mirrors Java CandidatePeptideGrid.java:43 which routes the first residue to
-// addProtNTermResidue (protein start) or addNTermResidue (non-protein start), and the
-// last residue to addProtCTermResidue (protein end) or addCTermResidue (non-protein end).
 
 /// Build an AminoAcidSet with a Protein_N_Term-only variable mod (+42.0106 Acetyl on *).
 fn aa_set_with_protein_nterm_acetyl() -> AminoAcidSet {
@@ -355,7 +351,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
 /// - "MAAAAK" (protein start): gets Anywhere (unmod M) + ProtNTerm (Acetyl-M) → 2 candidates.
 /// - "MAAAAAK" (offset 6, not protein start): gets only Anywhere (unmod M) → 1 candidate.
 ///
-/// Track B5 Met-cleavage pass (sub_seq="AAAAKMAAAAAK"):
+/// Met-cleavage pass (sub_seq="AAAAKMAAAAAK"):
 /// - "AAAAK" (sub_seq 0..5): length=5 < min=6, skipped.
 /// - "MAAAAAK" (sub_seq 5..12, abs_offset=6): is_protein_n_term=false, NTerm lookup empty → 1 candidate.
 ///
@@ -475,7 +471,7 @@ fn nterm_mod_applies_to_non_protein_start_peptides() {
 /// - "MAAAAK" (end < protein_len): CTerm Amide applies → 2 variants.
 /// - "R" (end == protein_len): ProtCTerm GlyGly applies → 2 variants.
 ///
-/// Track B5 Met-cleavage pass (sub_seq="AAAAKR"):
+/// Met-cleavage pass (sub_seq="AAAAKR"):
 /// - "AAAA" (abs_end=5, not protein C-term): CTerm Amide → 2 variants.
 /// - "KR" (abs_end=7, protein C-term): ProtCTerm GlyGly → 2 variants.
 ///
@@ -538,7 +534,7 @@ fn c_term_and_protein_c_term_distinguished() {
     }
 }
 
-// ─── Track B5: N-terminal Met cleavage tests ─────────────────────────────────
+// ─── N-terminal Met cleavage tests ───────────────────────────────────────────
 
 /// Met-cleavage generates alternative protein-N-term candidates for M-leading proteins.
 ///

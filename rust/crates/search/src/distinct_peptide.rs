@@ -8,12 +8,10 @@
 //! into a single entry whose `positions` accumulate the per-protein
 //! occurrences.
 //!
-//! Mirrors Java `DBScanner.MatchList` / `DatabaseMatch.addIndex` machinery:
-//! Java keeps one `DatabaseMatch` per length per shared-residue-prefix and
-//! calls `addIndex` for each later SA cursor whose LCP says "same residues +
-//! same flanks". We mirror that with `positions: SmallVec<[Position; 4]>` —
-//! most peptides occur in 1-3 proteins so the inline 4-slot smallvec avoids
-//! a heap allocation on the common path.
+//! Each `DistinctPeptide` keeps a single occurrence list keyed by residue
+//! identity, with `positions: SmallVec<[Position; 4]>` — most peptides occur
+//! in 1-3 proteins so the inline 4-slot smallvec avoids a heap allocation
+//! on the common path.
 
 use smallvec::SmallVec;
 
@@ -35,8 +33,7 @@ pub struct Position {
 /// A unique residue sequence and every place it occurs.
 ///
 /// `residues` is the bare residue byte sequence (ASCII uppercase), with no
-/// modifications and no flanking context — matching Java's
-/// `CompactSuffixArray.computeNumDistinctPeptides` residue-only identity.
+/// modifications and no flanking context — residue-only identity.
 /// `nominal_mass` is the unmodified peptide nominal mass (residue masses +
 /// `H2O`); variable-mod expansion happens in a later subtask layered on top
 /// of this stream.

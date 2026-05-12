@@ -1,8 +1,8 @@
 //! GF DP smoke tests on hand-built graphs.
 //!
-//! Phase 6 Task 6 integration tests. Each test builds a `PrimitiveAaGraph`
-//! from an empty spectrum + minimal `RankScorer`, then runs the graph-based
-//! `GeneratingFunction::compute` (and friends) and checks invariants.
+//! Each test builds a `PrimitiveAaGraph` from an empty spectrum + minimal
+//! `RankScorer`, then runs the graph-based `GeneratingFunction::compute`
+//! (and friends) and checks invariants.
 //!
 //! NOTE: `tiny_param()` is copied from `scoring::scoring::rank_scorer::tests`
 //! because that module is `pub(crate)` and is therefore not accessible from
@@ -310,7 +310,7 @@ fn gf_underflow_guard_uses_denormal_min_not_normal_min() {
     // populated by the guard (no incoming probability mass), then assert the
     // value is BELOW f32::MIN_POSITIVE (which would indicate denormal).
 
-    // Note: This is a regression test for the Phase 6 Task 10 finding.
+    // Regression test for the underflow-guard denormal-value contract.
     // Construct a small graph (peptide_mass = 200, no enzyme) and compute the GF.
     // For each non-empty score dist in the trajectory, assert any "guarded"
     // probability slot is < f32::MIN_POSITIVE as f64 (i.e., denormal range).

@@ -11,9 +11,9 @@
 //! - With isotope-error tolerance (`-ti -1..=2` matching Java's default),
 //!   Rust catches ALL 217 of Java's target spectra (100% coverage).
 //!
-//! Phase 5 Task 6: tighten gate to per-spectrum top-1 peptide identity.
-//! For each Java-identified scan, Rust's top-1 PSM (by score) must agree
-//! with Java's top-1 peptide. Gate: >= 50% top-1 identity match.
+//! Gate: per-spectrum top-1 peptide identity. For each Java-identified scan,
+//! Rust's top-1 PSM (by score) must agree with Java's top-1 peptide.
+//! Threshold: >= 50% top-1 identity match.
 //!
 //! Reference fixture:
 //!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`

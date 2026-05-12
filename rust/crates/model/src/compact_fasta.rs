@@ -1,14 +1,13 @@
-//! Concatenated-byte representation of a ProteinDb.
-//! Mirrors Java `edu.ucsd.msjava.msdbsearch.CompactFastaSequence`.
-//! Used as input to suffix-array construction.
+//! Concatenated-byte representation of a ProteinDb. Used as input to
+//! suffix-array construction.
 //!
-//! # Wire format details (verified against Java CompactFastaSequence + BSA fixtures)
+//! # Wire format
 //!
 //! ## `.cseq` binary layout (big-endian)
 //! ```text
 //! i32   size          — number of body bytes (= total sequence length)
-//! i32   formatId      — always 9873 (COMPACT_FASTA_SEQUENCE_FILE_FORMAT_ID)
-//! i32   id            — UUID.randomUUID().hashCode() written at creation time
+//! i32   formatId      — always 9873
+//! i32   id            — UUID hash written at creation time
 //! i64   lastModified  — milliseconds since epoch of source FASTA
 //! u8[size]            — encoded residue body
 //! ```
@@ -23,53 +22,49 @@
 //! Line 5+: <endOffset>:<annotation>   one per protein
 //! ```
 //! `endOffset` is the position of the TERMINATOR byte that follows the protein
-//! (i.e., one past the last residue byte, same as Java's `offset` var after the terminator is written).
+//! (i.e., one past the last residue byte).
 //! Verified: BSA.canno has "609:sp|P02769|ALBU_BOVIN ..." and BSA.cseq body[609-1] == TERMINATOR.
 //!
 //! ## Residue encoding (alphabet-indexed)
-//! Java's `initializeAlphabet` assigns:
 //! - byte 0  → TERMINATOR ('_')
 //! - byte 1  → INVALID_CHAR_CODE ('?')
-//! - byte 2  → first group in alphabet (= 'A' for CAPITAL_LETTERS_26)
-//! - byte 3  → 'B', ..., byte 27 → 'Z'
+//! - byte 2  → 'A', byte 3 → 'B', ..., byte 27 → 'Z'
 //!
 //! So `residue_to_byte('M') = ord('M') - ord('A') + 2 = 14`. Verified: BSA.cseq body[1] = 0x0e = 14,
 //! and BSA starts with 'M' (Methionine).
 //!
 //! ## Sequence layout
 //! `[TERM] <protein0 residues> [TERM] <protein1 residues> [TERM]`
-//! The leading TERMINATOR is written before the first protein (Java writes a TERMINATOR each time
-//! it sees a `>` header line, including the first one). The trailing TERMINATOR closes the last protein.
+//! The leading TERMINATOR is written before the first protein (a TERMINATOR is emitted at every
+//! `>` header line, including the first one). The trailing TERMINATOR closes the last protein.
 //! Each annotation's `endOffset` points to the TERMINATOR at the end of that protein (exclusive of residues).
 //!
-//! ## Rust representation difference from Java
-//! Java's annotation TreeMap is keyed by `endOffset` (terminator position).
-//! In this Rust struct, `ProteinAnnotation.start` stores the offset of the FIRST residue
-//! (= Java endOffset of previous protein, which is the position after the leading terminator of this protein).
-//! On write, we compute `end_offset = start + sequence_len + 1` (+ 1 for the trailing terminator).
+//! ## Rust representation
+//! `ProteinAnnotation.start` stores the offset of the FIRST residue byte of the protein
+//! (= the position immediately after the leading terminator of this protein). On write,
+//! we compute `end_offset = start + sequence_len + 1` (+ 1 for the trailing terminator).
 
 use std::io::{Read, Write};
 
 use crate::protein::ProteinDb;
 
-/// Java's `COMPACT_FASTA_SEQUENCE_FILE_FORMAT_ID`.
+/// CompactFastaSequence file format identifier.
 pub const FORMAT_ID: i32 = 9873;
 
-/// End-of-sequence / protein-delimiter terminator byte. Java Constants.TERMINATOR = 0.
+/// End-of-sequence / protein-delimiter terminator byte.
 pub const TERMINATOR: u8 = 0;
 
-/// Invalid character code (byte 1). Java Constants.INVALID_CHAR_CODE = 1.
+/// Invalid character code (byte 1) for non-alphabet residues.
 pub const INVALID_CHAR_CODE: u8 = 1;
 
-/// Fixed alphabet matching Java's default `Constants.CAPITAL_LETTERS_26`.
+/// Fixed CAPITAL_LETTERS_26 alphabet.
 /// Index 0 = TERMINATOR placeholder ('_'); indices 1+ are unused in this table.
 /// Encoding: byte 0 = TERMINATOR, byte 1 = INVALID, byte 2 = 'A', ..., byte 27 = 'Z'.
 /// Verified against BSA.cseq + BSA.canno fixtures.
 pub const ALPHABET: &[u8] = b"_ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 /// Encode an ASCII uppercase residue to its storage byte.
-/// Non-uppercase or unknown residues encode to INVALID_CHAR_CODE (1), matching Java's fallback
-/// (Java uses `INVALID_CHAR_CODE` when `alpha2byte.get(c)` returns null).
+/// Non-uppercase or unknown residues encode to INVALID_CHAR_CODE (1).
 #[inline]
 pub fn residue_to_byte(residue: u8) -> u8 {
     if residue.is_ascii_uppercase() {
@@ -128,7 +123,7 @@ impl CompactFastaSequence {
         );
         let mut annotations = Vec::with_capacity(db.proteins.len());
 
-        // Lead with TERMINATOR (matches Java: writeByte(TERMINATOR) on each '>' line).
+        // Lead with TERMINATOR (a TERMINATOR is emitted at every '>' header line).
         sequence.push(TERMINATOR);
         for p in &db.proteins {
             let start = sequence.len() as u64;
@@ -168,10 +163,10 @@ impl CompactFastaSequence {
         }
     }
 
-    /// Write `(.cseq, .canno)` byte streams in Java-compatible format.
+    /// Write `(.cseq, .canno)` byte streams in the canonical wire format.
     ///
     /// The `formatId` is written as 9873. `id` and `lastModified` are written as 0
-    /// (placeholder values; Java regenerates the index on mismatch anyway).
+    /// (placeholder values; the consumer regenerates the index on mismatch anyway).
     pub fn write_to<W1: Write, W2: Write>(
         &self,
         cseq: &mut W1,
@@ -198,13 +193,12 @@ impl CompactFastaSequence {
 
         // Annotation lines: <endOffset>:<accession> <description>
         //
-        // Java emits the offset with an inconsistency between non-last and last proteins:
+        // endOffset is emitted inconsistently between non-last and last proteins:
         // - Non-last protein: endOffset = position of the inter-protein TERMINATOR byte (0-indexed).
-        //   Emitted BEFORE offset++ in Java's loop, so offset = TERM position.
-        // - Last protein: endOffset = size (= TERM position + 1), emitted AFTER offset++.
+        // - Last protein: endOffset = size (= TERM position + 1).
         //
         // This means: on read, start_of_protein_N = canno_offset_of_(N-1) + 1.
-        // We replicate this exactly so files are Java-compatible.
+        // We replicate this exactly so files are wire-compatible with existing fixtures.
         let n = self.annotations.len();
         for (i, ann) in self.annotations.iter().enumerate() {
             let protein_len = self
@@ -232,7 +226,7 @@ impl CompactFastaSequence {
         Ok(())
     }
 
-    /// Read `(.cseq, .canno)` byte streams written in Java format.
+    /// Read `(.cseq, .canno)` byte streams in the canonical wire format.
     pub fn read_from<R1: Read, R2: Read>(
         cseq: &mut R1,
         canno: &mut R2,

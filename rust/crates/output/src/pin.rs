@@ -1,4 +1,4 @@
-//! PIN output writer — mirrors Java `DirectPinWriter` (Phase 7/Task 3).
+//! PIN output writer.
 //!
 //! Produces a Percolator-consumable `.pin` file with the column layout used
 //! by MS-GF+ and OpenMS PercolatorAdapter so that downstream tools (Percolator,
@@ -19,47 +19,37 @@
 //! Peptide  Proteins
 //! ```
 //!
-//! # Java divergences (Phase 7 MVP)
+//! # Column semantics
 //!
-//! * **Label**: follows Java's `DirectPinWriter.java:188-191` all-decoy rule.
-//!   `Label = 1` unless the peptide sequence cannot be found in ANY target protein
-//!   (i.e. all explaining proteins are decoy). Implemented via
-//!   `SearchIndex::peptide_has_target_match`, cached per distinct peptide
-//!   sequence during writing so repeated PSMs do not re-scan the database.
+//! * **Label**: all-decoy rule. `Label = 1` unless the peptide sequence cannot
+//!   be found in ANY target protein (i.e. all explaining proteins are decoy).
+//!   Implemented via `SearchIndex::peptide_has_target_match`, cached per
+//!   distinct peptide sequence during writing so repeated PSMs do not re-scan
+//!   the database.
 //!
-//! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, which is set
-//!   by `match_engine.rs` from `MassError::isotope_offset` (precursor_matching.rs).
-//!   Mirrors Java `DirectPinWriter.java:195`.
+//! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, set by
+//!   `match_engine.rs` from `MassError::isotope_offset`.
 //!
-//! * **enzN / enzC / enzInt**: zero-stubbed. Java computes enzymatic-boundary
-//!   indicators from the pre/post flanking residues + enzyme rules (OpenMS
-//!   PercolatorInfile convention). Rust would need `Enzyme::is_cleavage_site`
-//!   wiring; deferred to a later task.
-//!
-//! * **13 feature columns** (NumMatchedMainIons through StdevRelErrorTop7):
-//!   zero-stubbed. Phase 7/Task 6 (stretch) fills these from Phase 5's scored
-//!   spectrum. Percolator runs but with reduced discrimination power until Task 6.
+//! * **enzN / enzC / enzInt**: zero-stubbed. Would require
+//!   `Enzyme::is_cleavage_site` wiring; deferred.
 //!
 //! * **Proteins**: single column with the real protein accession resolved from
-//!   `SearchIndex::protein_at(psm.candidate.protein_index)`.  Decoy accessions
-//!   already carry the decoy prefix (set by [`target_plus_decoy`]).  Java emits
-//!   full accession strings; multi-protein PSMs get additional tab-separated
-//!   columns — multi-protein support is a future followup.
+//!   `SearchIndex::protein_at(psm.candidate.protein_index)`. Decoy accessions
+//!   already carry the decoy prefix. Multi-protein support is a future followup.
 //!
-//! * **peplen**: Java uses `match.getLength()` which is residue count + 2
-//!   (includes both flanking residues). Rust mirrors this convention.
+//! * **peplen**: residue count + 2 (includes both flanking residues).
 //!
-//! * **dm / absdm**: computed from precursor m/z using isotope_error = 0.
-//!   Java adjusts `adjustedExpMz = precursorMz - ISOTOPE * isotopeError / charge`.
-//!   Since isotope_error is stubbed at 0, adjustedExpMz == precursorMz here.
+//! * **dm / absdm**: computed from precursor m/z. The intended formula is
+//!   `adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge`;
+//!   since `isotope_error` is currently stubbed at 0, `adjusted_exp_mz ==
+//!   precursor_mz` here.
 //!
-//! * **CalcMass**: `peptide.mass()` already includes H2O (Rust `Peptide::mass()`
-//!   sums residue masses + H2O). Java's `theoMz * charge` involves charge-carrier
-//!   mass; Rust computes the neutral mass directly from the peptide.
+//! * **CalcMass**: `peptide.mass()` already includes H2O — neutral mass is
+//!   computed directly from the peptide.
 
-//! ## Feature column status (Phase 4 alignment complete)
+//! ## Feature columns
 //!
-//! **All 14 feature columns now filled** from `psm.features` (computed by
+//! All 14 feature columns are filled from `psm.features` (computed by
 //! `match_engine::compute_psm_features` at scoring time):
 //! - `NumMatchedMainIons` — count of matched charge-1 b/y fragment positions.
 //! - `longest_b` — longest contiguous run of matched b-ions.
@@ -69,7 +59,7 @@
 //! - `NTermIonCurrentRatio` — matched b intensity / total MS2 intensity.
 //! - `CTermIonCurrentRatio` — matched y intensity / total MS2 intensity.
 //! - `MS2IonCurrent` — raw sum of all MS2 peak intensities (NOT log10).
-//! - `IsolationWindowEfficiency` — always 0.0 (Java returns null; documented divergence).
+//! - `IsolationWindowEfficiency` — always 0.0 (not available from the Spectrum object).
 //! - `MeanErrorTop7` — mean |Da| error of top-7 most-intense matched ions.
 //! - `StdevErrorTop7` — population stdev of |Da| errors for top-7 ions.
 //! - `MeanRelErrorTop7` — mean signed ppm error of top-7 ions.
@@ -225,7 +215,7 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         "enzN".to_string(),
         "enzC".to_string(),
         "enzInt".to_string(),
-        // PIN_FEATURES (zero-stubbed in Phase 7 MVP)
+        // Fragment-coverage + ion-current + error-stat features
         "NumMatchedMainIons".to_string(),
         "longest_b".to_string(),
         "longest_y".to_string(),
@@ -301,11 +291,11 @@ fn write_psm_row<W: Write>(
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
-    // Label: Java's DirectPinWriter.writeRow:188-191 — Label=1 unless ALL
-    // explaining proteins are decoy. We check whether the peptide sequence
-    // appears in ANY target protein; if so, Label=1 even when the candidate's
-    // primary protein_index is a decoy. Cache by residue sequence so repeated
-    // peptides do not re-scan the full target database.
+    // Label = 1 unless ALL explaining proteins are decoy. Checks whether
+    // the peptide sequence appears in ANY target protein; if so, Label=1
+    // even when the candidate's primary protein_index is a decoy. Cache by
+    // residue sequence so repeated peptides do not re-scan the full target
+    // database.
     //
     // The substring lookup uses the precomputed concatenated `target_haystack`
     // + `memchr::memmem` (Two-Way / SIMD), reducing the cache-miss path from
@@ -337,11 +327,11 @@ fn write_psm_row<W: Write>(
     // CalcMass: theoretical neutral mass. peptide.mass() already includes H2O.
     // ExpMass = mz * charge - charge * PROTON is also a neutral mass.
     // Both columns must be neutral masses so that dm = ExpMass - CalcMass is a
-    // true mass error (not a charge-induced offset). Java fixture confirms:
+    // true mass error (not a charge-induced offset). Fixture reference:
     // ExpMass=1641.96, CalcMass=1641.95 — both neutral.
     let calc_mass = psm.candidate.peptide.mass(); // includes H2O — neutral mass
 
-    // mass: duplicate of ExpMass (per Java line 212: "mass — duplicate of ExpMass")
+    // mass: duplicate of ExpMass (column convention).
     let mass = exp_mass;
 
     // RawScore: integer-rounded score
@@ -364,22 +354,19 @@ fn write_psm_row<W: Write>(
         -f64::MAX
     };
 
-    // isotope_error: from PsmMatch::isotope_offset (threaded from MassError::isotope_offset
-    // in match_engine.rs). Mirrors Java DirectPinWriter.java:195.
+    // isotope_error: from PsmMatch::isotope_offset (threaded from
+    // MassError::isotope_offset in match_engine.rs).
     let isotope_error: i32 = psm.isotope_offset as i32;
 
-    // peplen: Java's convention is `residue_count + 2` (counts both flanking residues
-    // — the `pre` and `post` characters in the `Peptide` struct). Java's
-    // DirectPinWriter calls match.getLength() which returns this value. Without
-    // the +2, compare_pin.py reports row-count mismatch and per-row diff is broken.
+    // peplen: `residue_count + 2` (counts both flanking residues — the `pre`
+    // and `post` characters in the `Peptide` struct). Without the +2, the
+    // PIN row count and per-row diff disagree with the reference fixture.
     let peplen = psm.candidate.peptide.length() + 2;
 
-    // dm / absdm: precursor mass error in Da
-    // Java: adjustedExpMz = precursorMz - ISOTOPE * isotopeError / charge
-    // Since isotopeError = 0: adjustedExpMz = precursorMz
-    // theoMz = (peptideMass + H2O) / charge + PROTON
-    //        = peptide.mass() / charge + PROTON  (since peptide.mass() includes H2O)
-    // dm = adjustedExpMz - theoMz
+    // dm / absdm: precursor mass error in Da.
+    //   adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge
+    //   theo_mz         = peptide.mass() / charge + PROTON  (peptide.mass() includes H2O)
+    //   dm              = adjusted_exp_mz - theo_mz
     let theo_mz = calc_mass / charge + PROTON;
     let adjusted_exp_mz = spec.precursor_mz - ISOTOPE * (isotope_error as f64) / charge;
     let dm = adjusted_exp_mz - theo_mz;
@@ -388,16 +375,15 @@ fn write_psm_row<W: Write>(
     // lnDeltaSpecEValue
     let ln_delta_spec_e_value = compute_ln_delta_spec_e_value(rank, psm.spec_e_value, rank2_spec_e_value);
 
-    // matchedIonRatio: from psm.features (Phase 7 followup)
+    // matchedIonRatio: from psm.features.
     let matched_ion_ratio = psm.features.matched_ion_ratio as f64;
 
     // Build row — tab-separated. We write directly into the BufWriter to
     // avoid heap-allocating each formatted column (the old implementation
     // built ~30 intermediate Strings per row × 37k rows = ~1.1M allocs).
     //
-    // SpecId: Java pattern is specID + "_" + scanNum + "_" + rank — emitted
-    // inline via three `write!` calls so we don't materialise a temporary
-    // String.
+    // SpecId: `specID + "_" + scanNum + "_" + rank` — emitted inline via
+    // three `write!` calls so we don't materialise a temporary String.
     write!(writer, "{}_{}_{}", ctx.spec_id, ctx.scan, rank)?;
     write!(writer, "\t{}\t{}\t", label, ctx.scan)?;
     write_double(writer, exp_mass)?;
@@ -423,7 +409,7 @@ fn write_psm_row<W: Write>(
     // enzN, enzC, enzInt (zero-stubbed)
     writer.write_all(b"\t0\t0\t0")?;
 
-    // 4 filled feature columns (Phase 7 followup):
+    // 4 fragment-coverage feature columns:
     // NumMatchedMainIons, longest_b, longest_y, longest_y_pct
     write!(
         writer,
@@ -433,12 +419,12 @@ fn write_psm_row<W: Write>(
         psm.features.longest_y,
         psm.features.longest_y_pct,
     )?;
-    // 9 feature columns (Phase 4 alignment — filled from psm.features):
+    // 9 feature columns from psm.features:
     // ExplainedIonCurrentRatio, NTermIonCurrentRatio, CTermIonCurrentRatio,
     // MS2IonCurrent, IsolationWindowEfficiency,
     // MeanErrorTop7, StdevErrorTop7, MeanRelErrorTop7, StdevRelErrorTop7
     //
-    // IsolationWindowEfficiency is always 0.0 (Java returns null; documented divergence).
+    // IsolationWindowEfficiency is always 0.0 (not available from the Spectrum object).
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.explained_ion_current_ratio as f64)?;
     writer.write_all(b"\t")?;
@@ -473,7 +459,6 @@ fn write_psm_row<W: Write>(
 /// Find the rank-2 SpecEValue: the first distinct spec_e_value encountered after
 /// the rank-1 value (skipping ties). Returns `f64::NAN` if no rank-2 exists.
 ///
-/// Mirrors Java `DirectPinWriter.findRank2SpecEValue` (line 262).
 /// PSMs must be sorted best-first (lowest spec_e_value first).
 fn find_rank2_spec_e_value(psms: &[PsmMatch]) -> f64 {
     let mut rank1 = f64::NAN;
@@ -490,8 +475,6 @@ fn find_rank2_spec_e_value(psms: &[PsmMatch]) -> f64 {
 
 /// `log(rank1 SpecEValue / rank2 SpecEValue)` for rank-1 PSMs; `0.0` otherwise
 /// or when either SpecEValue is non-positive / NaN.
-///
-/// Mirrors Java `DirectPinWriter.computeLnDeltaSpecEValue` (line 283).
 fn compute_ln_delta_spec_e_value(rank: u32, rank1_spec_e_value: f64, rank2_spec_e_value: f64) -> f64 {
     if rank != 1 {
         return 0.0;
@@ -568,7 +551,7 @@ fn write_trim_fixed<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
 /// Write a scientific-notation byte slice to `writer`, normalised to match
 /// Java's `%g`-style output.
 ///
-/// Rust formats `1.23456e7`; Java formats `1.23456e+07`. We trim trailing
+/// Rust formats `1.23456e7`; the reference fixture uses `1.23456e+07`. Trim trailing
 /// zeros (and a dangling `.`) from the mantissa, then re-emit the exponent
 /// with explicit sign and a minimum width of 2 digits (`e{:+03}` style).
 fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
@@ -708,18 +691,16 @@ mod tests {
             .collect()
     }
 
-    // ── Test 1: header columns match Java fixture ────────────────────────────
+    // ── Test 1: header columns match the reference fixture ──────────────────
 
-    /// The expected column list is copied verbatim from the Java fixture's first
-    /// line (`benchmark/parity-fixtures/bsa_test_mgf_java.pin`), which uses
+    /// The expected column list is copied verbatim from the reference fixture's
+    /// first line (`benchmark/parity-fixtures/bsa_test_mgf_java.pin`), which uses
     /// charge2..=charge3 (BSA test uses charge_range 2..=3).
     ///
     /// Byte-parity note: the fixture header is compared column-by-column below.
-    /// The fixture uses charge2..=charge3 because the BSA test was run with
-    /// that range.
     #[test]
     fn pin_header_columns_match_java_fixture_without_features() {
-        // Java fixture first line (charge2..=charge3):
+        // Reference fixture first line (charge2..=charge3):
         // SpecId Label ScanNr ExpMass CalcMass mass RawScore DeNovoScore
         // lnSpecEValue lnEValue isotope_error peplen dm absdm
         // charge2 charge3
@@ -755,7 +736,7 @@ mod tests {
         let cols = parse_header(&buf);
         assert_eq!(
             cols, expected,
-            "PIN header columns must match Java fixture column order exactly"
+            "PIN header columns must match the reference fixture column order exactly"
         );
     }
 

@@ -1,8 +1,6 @@
-//! Per-ion rank score lookup. Mirrors Java
-//! `NewRankScorer.precomputeLogScoreTables()` + `getNodeScore` +
-//! `getMissingIonScore`.
+//! Per-ion rank score lookup.
 //!
-//! Java's formula:
+//! Score formula:
 //!   chargeOrSeg = min(ionType.charge, numSegments)
 //!   log_score[i] = log(ion_freq[i] / (noise_freq[i] * chargeOrSeg))
 //!
@@ -42,8 +40,8 @@ impl RankScorer {
         let mut log_table: HashMap<(Partition, IonType), Vec<f32>> = HashMap::new();
 
         for (partition, ion_table) in &param.rank_dist_table {
-            // Java: noise comes from the IonType::NOISE entry in the same
-            // partition's rank-dist table. Skip if absent.
+            // Noise frequencies come from the IonType::Noise entry in the
+            // same partition's rank-dist table. Skip if absent.
             let noise_freqs = match ion_table.get(&IonType::Noise) {
                 Some(v) => v,
                 None => continue,
@@ -57,7 +55,7 @@ impl RankScorer {
                     IonType::Prefix { charge, .. } | IonType::Suffix { charge, .. } => *charge,
                     IonType::Noise => unreachable!(),
                 };
-                // chargeOrSeg = min(ion.charge, num_segments) — matches Java.
+                // chargeOrSeg = min(ion.charge, num_segments).
                 let charge_or_seg = (charge as u32).min(param.num_segments as u32) as f32;
                 let n = ion_freqs.len().min(noise_freqs.len());
                 let mut logs = Vec::with_capacity(n);
@@ -105,7 +103,7 @@ impl RankScorer {
             .unwrap_or(&[])
     }
 
-    /// Maximum rank used for clamping. Exposed so callers can apply Java's
+    /// Maximum rank used for clamping. Exposed so callers can apply
     /// rank-clamp / missing-ion semantics without going through `node_score`.
     pub fn max_rank(&self) -> u32 {
         self.max_rank
@@ -117,8 +115,8 @@ impl RankScorer {
     }
 
     /// Score a peak-matched ion at rank `rank` (1-based, 1 = highest intensity).
-    /// Java semantics: clamp `rank > max_rank` to `rank = max_rank` (so rank
-    /// index becomes `max_rank - 1`, the LAST observed-rank entry, NOT the
+    /// `rank > max_rank` clamps to `rank = max_rank` (so the rank index
+    /// becomes `max_rank - 1`, the LAST observed-rank entry, NOT the
     /// missing-ion sentinel).
     pub fn node_score(&self, partition: Partition, ion_type: IonType, rank: u32) -> f32 {
         let logs = match self.log_table.get(&(partition, ion_type)) {
@@ -134,9 +132,8 @@ impl RankScorer {
         }
     }
 
-    /// Score for an ion that isn't observed in the spectrum. Java semantics:
-    /// uses the slot at index `max_rank` (the LAST entry in the
-    /// `max_rank + 1`-length array).
+    /// Score for an ion that isn't observed in the spectrum. Uses the slot
+    /// at index `max_rank` (the LAST entry in the `max_rank + 1`-length array).
     pub fn missing_ion_score(&self, partition: Partition, ion_type: IonType) -> f32 {
         let logs = match self.log_table.get(&(partition, ion_type)) {
             Some(v) => v,
@@ -150,7 +147,7 @@ impl RankScorer {
         }
     }
 
-    /// Mirror Java `NewRankScorer.getIonExistenceScore(part, index, probPeak)`.
+    /// Ion-existence score.
     ///
     /// Computes `log(ionExistenceProb[index] / noiseExistenceProb)` where:
     /// - `index == 0` (nn): `noiseProb = (1 - probPeak)^2`
@@ -172,7 +169,7 @@ impl RankScorer {
             _ => prob_peak * (1.0 - prob_peak),
         };
         let mut ion_prob = table[index];
-        // Java: if (ionExistenceProb[index] == 0) ionExistenceProb[index] = 0.01f;
+        // Zero-probability slots are clamped to 0.01 to avoid log(0).
         if ion_prob == 0.0 {
             ion_prob = 0.01;
         }
@@ -180,7 +177,7 @@ impl RankScorer {
         (ion_prob / denom).ln()
     }
 
-    /// Mirror Java `NewRankScorer.getErrorScore(part, error)`.
+    /// Mass-error score.
     ///
     /// Converts `error` (in Da) to an index using `error_scaling_factor`,
     /// clamps to `[-esf, esf]`, then returns
@@ -246,8 +243,8 @@ mod tests {
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
         let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
 
-        // Java: rank > maxRank clamps to rank_index = maxRank - 1.
-        // maxRank = 3 → rank_index = 2 → log(0.05 / 0.3).
+        // rank > max_rank clamps to rank_index = max_rank - 1.
+        // max_rank = 3 → rank_index = 2 → log(0.05 / 0.3).
         let s5 = scorer.node_score(part, ion, 5);
         let expected = (0.05_f32 / 0.3_f32).ln();
         assert!((s5 - expected).abs() < 1e-5);
@@ -270,7 +267,7 @@ mod tests {
     #[test]
     fn chargeorseg_uses_min_of_ion_charge_and_num_segments() {
         // Build a param with num_segments=1 but an ion with charge 3.
-        // chargeOrSeg = min(3, 1) = 1.
+        // charge_or_seg = min(3, 1) = 1.
         // Verify the log score uses 1 (not 3).
         let mut param = tiny_param();
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
@@ -280,7 +277,7 @@ mod tests {
 
         let scorer = RankScorer::new(&param);
         let s1 = scorer.node_score(part, ion3, 1);
-        // chargeOrSeg = min(3, 1) = 1. log(0.6 / (0.1 * 1)) = log(6).
+        // charge_or_seg = min(3, 1) = 1. log(0.6 / (0.1 * 1)) = log(6).
         assert!((s1 - 6.0_f32.ln()).abs() < 1e-5);
     }
 

@@ -1,6 +1,5 @@
-//! Activation methods used by tandem MS spectrum acquisition. Mirrors
-//! Java `edu.ucsd.msjava.msutil.ActivationMethod`. The five canonical
-//! variants (CID/ETD/HCD/PQD/UVPD) are pinned by
+//! Activation methods used by tandem MS spectrum acquisition. The five
+//! canonical variants (CID/ETD/HCD/PQD/UVPD) are pinned by
 //! `tests/activation_method_match_java.rs`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,8 +22,7 @@ impl ActivationMethod {
         }
     }
 
-    /// Case-sensitive lookup — matches Java's `ActivationMethod.get(name)`
-    /// HashMap behavior. Returns `None` for unknown names, including the
+    /// Case-sensitive lookup. Returns `None` for unknown names, including the
     /// runtime sentinels `ASWRITTEN` and `FUSION` which never appear in
     /// stored `.param` files.
     pub fn from_name(s: &str) -> Option<Self> {
@@ -65,7 +63,6 @@ mod tests {
 
     #[test]
     fn from_name_case_sensitive() {
-        // Java's `get(name)` is a HashMap lookup — case-sensitive.
         assert_eq!(ActivationMethod::from_name("cid"), None);
         assert_eq!(ActivationMethod::from_name("hcd"), None);
     }

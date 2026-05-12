@@ -1,5 +1,4 @@
-//! Mass spectrometer instrument categories. Mirrors Java
-//! `edu.ucsd.msjava.msutil.InstrumentType`.
+//! Mass spectrometer instrument categories.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InstrumentType {
@@ -19,7 +18,7 @@ impl InstrumentType {
         }
     }
 
-    /// Case-sensitive lookup — matches Java's `InstrumentType.get(name)`.
+    /// Case-sensitive lookup.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "LowRes"    => Some(InstrumentType::LowRes),

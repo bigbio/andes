@@ -131,6 +131,16 @@ impl SearchIndex {
         let _ = self.distinct_peptide_counts.set(counts);
     }
 
+    /// Seed the per-length distinct-peptide count map from an already-computed
+    /// count table. Used by `match_spectra` to avoid a second full candidate
+    /// enumeration pass when it is already collecting all candidates.
+    pub(crate) fn set_distinct_peptide_counts_if_absent(
+        &self,
+        counts: HashMap<usize, usize>,
+    ) {
+        let _ = self.distinct_peptide_counts.set(counts);
+    }
+
     /// Number of distinct residue sequences (no mods, no flanking) of length
     /// `len` enumerated during candidate generation. Returns `0` for unseen
     /// lengths (including any length queried before population).

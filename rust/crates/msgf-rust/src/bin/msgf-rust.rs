@@ -136,17 +136,22 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let t_total = std::time::Instant::now();
+    let t_phase = std::time::Instant::now();
     // ── 1. Load FASTA target database ────────────────────────────────────────
     let target_db =
         FastaReader::load_all(BufReader::new(File::open(&cli.database)?))?;
     eprintln!(
-        "Loaded {} target proteins from {}",
+        "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
-        cli.database.display()
+        cli.database.display(),
+        t_phase.elapsed().as_secs_f64()
     );
 
     // ── 2. Build SearchIndex (target + reversed decoys) ───────────────────────
+    let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db(&target_db, &cli.decoy_prefix);
+    eprintln!("[PHASE search_index_build: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
     // ── 3. Build AminoAcidSet (default mods: CAM fixed, Oxidation M variable) ─
     let cam = Modification {
@@ -197,9 +202,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let t_phase = std::time::Instant::now();
     let param = Param::load_from_file(&param_path)
         .map_err(|e| format!("loading param file {}: {e}", param_path.display()))?;
     let scorer = RankScorer::new(&param);
+    eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
@@ -215,6 +222,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.max_length = cli.max_length;
 
     // ── 6. Load spectra (auto-detect format by file extension) ───────────────
+    let t_phase = std::time::Instant::now();
     let ext = cli.spectrum
         .extension()
         .and_then(|e| e.to_str())
@@ -283,9 +291,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     eprintln!(
-        "Loaded {} spectra from {}",
+        "Loaded {} spectra from {} [PHASE spectra_load: {:.2}s]",
         spectra.len(),
-        cli.spectrum.display()
+        cli.spectrum.display(),
+        t_phase.elapsed().as_secs_f64()
     );
 
     // Bench-mode slice: keep only the first N spectra to enable rapid
@@ -336,8 +345,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 8. Write PIN ─────────────────────────────────────────────────────────
     // Bench mode still writes PIN (so we can diff against Java) but skips TSV.
+    let t_phase = std::time::Instant::now();
     output::write_pin(&cli.output_pin, &spectra, &queues, &params, &idx, &cli.decoy_prefix)?;
-    eprintln!("Wrote PIN: {}", cli.output_pin.display());
+    eprintln!(
+        "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
+        cli.output_pin.display(),
+        t_phase.elapsed().as_secs_f64(),
+        t_total.elapsed().as_secs_f64()
+    );
 
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");

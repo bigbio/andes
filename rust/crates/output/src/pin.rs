@@ -24,7 +24,8 @@
 //! * **Label**: follows Java's `DirectPinWriter.java:188-191` all-decoy rule.
 //!   `Label = 1` unless the peptide sequence cannot be found in ANY target protein
 //!   (i.e. all explaining proteins are decoy). Implemented via
-//!   `SearchIndex::peptide_has_target_match`.
+//!   `SearchIndex::peptide_has_target_match`, cached per distinct peptide
+//!   sequence during writing so repeated PSMs do not re-scan the database.
 //!
 //! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, which is set
 //!   by `match_engine.rs` from `MassError::isotope_offset` (precursor_matching.rs).
@@ -75,6 +76,7 @@
 //! - `StdevRelErrorTop7` — population stdev of signed ppm errors for top-7.
 //! - `matchedIonRatio` — `NumMatchedMainIons / peptide.length()`.
 
+use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
@@ -124,6 +126,7 @@ pub fn write_pin_to<W: Write>(
     let _ = decoy_prefix; // used indirectly via psm.candidate.is_decoy
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
+    let mut label_cache: HashMap<Vec<u8>, i32> = HashMap::new();
 
     write_header(writer, min_charge, max_charge)?;
 
@@ -132,7 +135,15 @@ pub fn write_pin_to<W: Write>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        write_spectrum_rows(writer, spec, queue, min_charge, max_charge, search_index)?;
+        write_spectrum_rows(
+            writer,
+            spec,
+            queue,
+            min_charge,
+            max_charge,
+            search_index,
+            &mut label_cache,
+        )?;
     }
     Ok(())
 }
@@ -199,6 +210,7 @@ fn write_spectrum_rows<W: Write>(
     min_charge: u8,
     max_charge: u8,
     search_index: &SearchIndex,
+    label_cache: &mut HashMap<Vec<u8>, i32>,
 ) -> io::Result<()> {
     // Sort best-first (lowest spec_e_value first, then highest score).
     let psms = queue.clone().into_sorted_vec();
@@ -208,7 +220,18 @@ fn write_spectrum_rows<W: Write>(
 
     for (rank, psm) in iter_ranked(&psms) {
         let ctx = RowContext::new(spec, psm, search_index);
-        write_psm_row(writer, spec, psm, &ctx, rank, rank2_spec_e_value, min_charge, max_charge, search_index)?;
+        write_psm_row(
+            writer,
+            spec,
+            psm,
+            &ctx,
+            rank,
+            rank2_spec_e_value,
+            min_charge,
+            max_charge,
+            search_index,
+            label_cache,
+        )?;
     }
     Ok(())
 }
@@ -224,6 +247,7 @@ fn write_psm_row<W: Write>(
     min_charge: u8,
     max_charge: u8,
     search_index: &SearchIndex,
+    label_cache: &mut HashMap<Vec<u8>, i32>,
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
@@ -233,10 +257,27 @@ fn write_psm_row<W: Write>(
     // Label: Java's DirectPinWriter.writeRow:188-191 — Label=1 unless ALL
     // explaining proteins are decoy. We check whether the peptide sequence
     // appears in ANY target protein; if so, Label=1 even when the candidate's
-    // primary protein_index is a decoy.
-    let residues: Vec<u8> = psm.candidate.peptide.residues
-        .iter().map(|aa| aa.residue).collect();
-    let label: i32 = if search_index.peptide_has_target_match(&residues) { 1 } else { -1 };
+    // primary protein_index is a decoy. Cache by residue sequence so repeated
+    // peptides do not re-scan the full target database.
+    let residues: Vec<u8> = psm
+        .candidate
+        .peptide
+        .residues
+        .iter()
+        .map(|aa| aa.residue)
+        .collect();
+    let label: i32 = match label_cache.get(&residues) {
+        Some(&cached) => cached,
+        None => {
+            let computed = if search_index.peptide_has_target_match(&residues) {
+                1
+            } else {
+                -1
+            };
+            label_cache.insert(residues, computed);
+            computed
+        }
+    };
 
     // ExpMass: neutral precursor mass = mz * charge - charge * PROTON
     let exp_mass = spec.precursor_mz * charge - charge * PROTON;

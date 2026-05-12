@@ -1,9 +1,11 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
 use std::collections::{BTreeMap, HashMap};
+use std::hash::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
+use rustc_hash::{FxHashSet, FxHasher};
 
 use model::aa_set::AminoAcidSet;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
@@ -37,14 +39,29 @@ pub fn match_spectra(
     fragment_tolerance_da: f64,
     decoy_prefix: &str,
 ) -> Vec<TopNQueue> {
-    // Populate the per-length distinct-peptide counts on the SearchIndex.
-    // Idempotent + lock-free (OnceLock); tests that pre-populate via
-    // `with_distinct_peptide_counts` keep their populated map. Required so
-    // `idx.num_distinct_peptides_at_length(...)` returns real values during
-    // production search (the future Phase 7 e_value swap consumes it).
-    idx.ensure_distinct_peptide_counts(params, decoy_prefix);
-
-    let candidates: Vec<Candidate> = enumerate_candidates(idx, params, decoy_prefix).collect();
+    // Collect the production candidate list AND seed the per-length
+    // distinct-peptide counts in a single pass. This avoids a second full
+    // `enumerate_candidates(...)` walk just to populate the E-value
+    // denominator map.
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut seen_per_length: HashMap<usize, FxHashSet<u64>> = HashMap::new();
+    for cand in enumerate_candidates(idx, params, decoy_prefix) {
+        let residues = &cand.peptide.residues;
+        let mut h = FxHasher::default();
+        for aa in residues {
+            h.write_u8(aa.residue);
+        }
+        seen_per_length
+            .entry(residues.len())
+            .or_default()
+            .insert(h.finish());
+        candidates.push(cand);
+    }
+    let distinct_counts: HashMap<usize, usize> = seen_per_length
+        .into_iter()
+        .map(|(len, set)| (len, set.len()))
+        .collect();
+    idx.set_distinct_peptide_counts_if_absent(distinct_counts);
 
     // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
     //

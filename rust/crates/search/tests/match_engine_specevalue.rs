@@ -46,7 +46,7 @@ fn tiny_scorer() -> RankScorer {
     let mut frag_off_table = HashMap::new();
     frag_off_table.insert(part, vec![]);
 
-    let param = Param {
+    let mut param = Param {
         version: 10001,
         data_type: SpecDataType {
             activation: ActivationMethod::HCD,
@@ -71,7 +71,9 @@ fn tiny_scorer() -> RankScorer {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
+        partition_ion_types_cache: HashMap::new(),
     };
+    param.rebuild_cache();
     RankScorer::new(&param)
 }
 
@@ -90,7 +92,9 @@ fn run_single_peptide_search(
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-    let params = SearchParams::default_tryptic(aa_set);
+    let mut params = SearchParams::default_tryptic(aa_set);
+    // make_spectrum produces 0 peaks; default min_peaks=10 would skip everything.
+    params.min_peaks = 0;
 
     let residues: Vec<AminoAcid> = peptide_sequence
         .iter()

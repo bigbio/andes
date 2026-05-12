@@ -1,15 +1,15 @@
 //! Output writers for MS-GF+ search results.
 //!
-//! # Java divergences (Phase 7 MVP)
+//! # Java divergences
 //!
 //! * **FragMethod**: Java emits the string from `ActivationMethod`'s static
 //!   table (e.g. `"HCD"`, `"CID"`). Rust uses `ActivationMethod::name()` which
 //!   produces the same strings for the five canonical variants. Unknown
 //!   activation is written as `"UNKNOWN"` (Java writes `"Unknown"`).
 //!
-//! * **IsotopeError**: Phase 4e's precursor-matching loop tries multiple
+//! * **IsotopeError**: the precursor-matching loop tries multiple
 //!   isotope offsets but does not record *which* offset produced the match.
-//!   The TSV column is always written as `0`. Fix in a later phase once the
+//!   The TSV column is always written as `0`. Will be fixed once the
 //!   winning isotope offset is threaded into `PsmMatch`.
 //!
 //! * **Decoy filtering**: Java skips PSMs where the protein string is empty
@@ -17,8 +17,8 @@
 //!   the decoy prefix preserved in the Protein column; downstream Percolator
 //!   handles decoy labelling. Intentional simplification.
 //!
-//! * **QValue / PepQValue**: Not emitted. Phase 7 MVP omits TDA columns.
-//!   Will be added in Task 6 or a later phase.
+//! * **QValue / PepQValue**: Not emitted; TDA columns are not currently
+//!   produced.
 
 pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};

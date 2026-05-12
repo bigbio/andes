@@ -215,8 +215,20 @@ impl AminoAcidSetBuilder {
     pub fn add_mods_from_file(mut self, path: &Path) -> Result<Self, AaSetError> {
         let text = fs::read_to_string(path)?;
         for (line_no, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
+            // Strip an inline `#` comment (matches Java's `MSGFPlusOptions.stripComment`).
+            let no_comment = match raw.find('#') {
+                Some(i) => &raw[..i],
+                None    => raw,
+            };
+            let line = no_comment.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // `NumMods=N` header line — recognized for Java mods.txt compatibility
+            // but not stored on the builder. The CLI parses it separately via
+            // `parse_num_mods_from_file` and routes it to
+            // `SearchParams.max_variable_mods_per_peptide`.
+            if line.to_ascii_lowercase().starts_with("nummods=") {
                 continue;
             }
             let m = Modification::from_mods_txt_line(line)
@@ -228,6 +240,38 @@ impl AminoAcidSetBuilder {
             }
         }
         Ok(self)
+    }
+
+    /// Read just the `NumMods=N` header from a Java-format mods.txt file.
+    ///
+    /// Returns:
+    /// - `Ok(Some(n))` when the file contains a single `NumMods=N` line with a valid integer.
+    /// - `Ok(None)` when no `NumMods=` line is present.
+    /// - `Err(...)` if the file cannot be read or the value cannot be parsed.
+    ///
+    /// Java's `getAminoAcidSetFromModFile` uses this value to override
+    /// `MSGFPlusOptions.effectiveMaxNumMods()`. This sibling function lets the
+    /// CLI binary perform the same override on `SearchParams.max_variable_mods_per_peptide`
+    /// without changing the public API of `add_mods_from_file`.
+    pub fn parse_num_mods_from_file(path: &Path) -> Result<Option<u32>, AaSetError> {
+        let text = fs::read_to_string(path)?;
+        for raw in text.lines() {
+            let no_comment = match raw.find('#') {
+                Some(i) => &raw[..i],
+                None    => raw,
+            };
+            let line = no_comment.trim();
+            if !line.to_ascii_lowercase().starts_with("nummods=") {
+                continue;
+            }
+            // Take everything after the first `=`. Java accepts whitespace around the value.
+            let value = line.splitn(2, '=').nth(1).unwrap_or("").trim();
+            let n: u32 = value.parse().map_err(|_| AaSetError::BadNumMods {
+                value: value.to_string(),
+            })?;
+            return Ok(Some(n));
+        }
+        Ok(None)
     }
 
     pub fn build(self) -> Result<AminoAcidSet, AaSetError> {
@@ -378,18 +422,20 @@ impl AminoAcidSetBuilder {
     }
 }
 
-/// Two mods target the same slot iff residue and location overlap after
-/// wildcard expansion.
+/// Two mods target the same slot iff they have exactly the same `(residue,
+/// location)` specifier — fixed-vs-variable ambiguity is only a true
+/// conflict when both mods would compete for the identical declaration
+/// slot (e.g. fixed `CAM C Anywhere` + variable `CAM C Anywhere`).
+///
+/// Overlapping-but-distinct slots are NOT conflicts. For example, a TMT
+/// labelling config carries both fixed `* N-term` and a variable `M
+/// Anywhere`: their slots overlap at "M at N-term" but the two mods
+/// stack cleanly (fixed always applied, variable optionally added on
+/// top) and the candidate-peptide expansion enumerates the right
+/// combinations. Flagging these as conflicts would block every standard
+/// TMT/iTRAQ/phospho parameter sheet.
 fn mods_target_same_slot(a: &Modification, b: &Modification) -> bool {
-    let residue_overlap = match (a.residue, b.residue) {
-        (ResidueSpec::Specific(x), ResidueSpec::Specific(y)) => x == y,
-        (ResidueSpec::Wildcard, _) | (_, ResidueSpec::Wildcard) => true,
-    };
-    let location_overlap = match (a.location, b.location) {
-        (ModLocation::Anywhere, _) | (_, ModLocation::Anywhere) => true,
-        (x, y) => x == y,
-    };
-    residue_overlap && location_overlap
+    a.residue == b.residue && a.location == b.location
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -400,6 +446,8 @@ pub enum AaSetError {
     ImplausibleMassDelta { name: String, delta: f64 },
     #[error("malformed Mods.txt line {line_no}: {source}")]
     ModsTxtParse { line_no: usize, #[source] source: ModParseError },
+    #[error("invalid NumMods value {value:?} (expected non-negative integer)")]
+    BadNumMods { value: String },
     #[error("Mods.txt I/O error: {source}")]
     Io { #[from] source: std::io::Error },
 }
@@ -678,5 +726,89 @@ mod tests {
             AaSetError::ModsTxtParse { line_no, .. } => assert_eq!(line_no, 2),
             other => panic!("expected ModsTxtParse, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn tmt_style_mods_file_parses() {
+        // Real-world TMT 6-plex mods file: TMT6plex fixed on K + peptide
+        // N-term, CAM fixed on C, Oxidation variable on M, NumMods=3.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "# TMT 6-plex labelling, tryptic + CAM + Met-oxidation\n\
+             NumMods=3\n\
+             229.162932,K,fix,any,TMT6plex\n\
+             229.162932,*,fix,N-term,TMT6plex\n\
+             57.021464,C,fix,any,Carbamidomethyl\n\
+             15.994915,M,opt,any,Oxidation\n").unwrap();
+
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // K must have a fixed TMT label folded into its Anywhere variant
+        // (1 variant, modified).
+        let k_variants = set.variants_for(b'K', ModLocation::Anywhere);
+        assert_eq!(k_variants.len(), 1, "K should have exactly one variant (TMT-modified)");
+        assert!(k_variants[0].is_modified(), "K's Anywhere variant must carry the TMT mod");
+
+        // Wildcard N-term TMT applies to every residue at NTerm location.
+        // Pick A (no other mod competing) and assert there is an NTerm variant.
+        let a_nterm = set.variants_for(b'A', ModLocation::NTerm);
+        assert!(
+            a_nterm.iter().any(|aa| aa.is_modified()),
+            "A at N-term should have a TMT variant"
+        );
+
+        // C fixed CAM — single modified variant.
+        let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
+        assert_eq!(c_variants.len(), 1);
+        assert!(c_variants[0].is_modified());
+
+        // M variable Oxidation — 2 variants (unmod + ox).
+        let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
+        assert_eq!(m_variants.len(), 2);
+        assert!(m_variants.iter().any(|aa|  aa.is_modified()));
+        assert!(m_variants.iter().any(|aa| !aa.is_modified()));
+
+        // NumMods=3 is parsed via the sibling helper.
+        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
+        assert_eq!(n, Some(3));
+    }
+
+    #[test]
+    fn parse_num_mods_returns_none_when_absent() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "57.021464,C,fix,any,Carbamidomethyl\n").unwrap();
+        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
+        assert_eq!(n, None);
+    }
+
+    #[test]
+    fn parse_num_mods_rejects_bad_value() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "NumMods=garbage\n").unwrap();
+        let err = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap_err();
+        match err {
+            AaSetError::BadNumMods { value } => assert_eq!(value, "garbage"),
+            other => panic!("expected BadNumMods, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn add_mods_from_file_strips_inline_comments() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "57.021464,C,fix,any,Carbamidomethyl  # alkylation\n\
+             NumMods=3 # max variable mods per peptide\n").unwrap();
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path()).unwrap()
+            .build().unwrap();
+        assert_eq!(set.variants_for(b'C', ModLocation::Anywhere).len(), 1);
+        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
+        assert_eq!(n, Some(3));
     }
 }

@@ -1,9 +1,8 @@
 //! Fragment-ion prediction for a Peptide.
 //!
-//! Phase 5 Task 2: canonical b/y ions only, no neutral losses. Produces
-//! `(PredictedIon, m/z)` pairs at every requested charge.
-//!
-//! Phase 6 Task 4: adds `ions_for_node` for per-nominal-mass GF DP scoring.
+//! Canonical b/y ions only, no neutral losses. Produces
+//! `(PredictedIon, m/z)` pairs at every requested charge. Also exposes
+//! `ions_for_node` for per-nominal-mass GF DP scoring.
 
 use std::ops::RangeInclusive;
 

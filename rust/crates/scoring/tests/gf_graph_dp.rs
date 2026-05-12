@@ -43,7 +43,7 @@ fn tiny_param() -> Param {
         frequency: 0.7,
     }]);
 
-    Param {
+    let mut p = Param {
         version: 10001,
         data_type: SpecDataType {
             activation: ActivationMethod::HCD,
@@ -68,7 +68,10 @@ fn tiny_param() -> Param {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
-    }
+        partition_ion_types_cache: HashMap::new(),
+    };
+    p.rebuild_cache();
+    p
 }
 
 fn empty_spec() -> Spectrum {

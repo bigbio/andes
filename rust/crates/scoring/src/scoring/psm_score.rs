@@ -1,11 +1,9 @@
 //! PSM scoring integration.
 //!
-//! Phase 6 Task B1 (parity fix): `score_psm` now uses
-//! `ScoredSpectrum::node_score` per peptide split position, matching Java's
-//! `FastScorer.getScore` (sum of `prefixScore[prm] + suffixScore[srm]` for
-//! each split, lines 58-66 of FastScorer.java) and the score scale used by
-//! the GF DP.  Phase 5's b/y-only charge-iterating implementation is
-//! replaced.
+//! `score_psm` uses `ScoredSpectrum::node_score` per peptide split position,
+//! matching Java's `FastScorer.getScore` (sum of
+//! `prefixScore[prm] + suffixScore[srm]` for each split) and the score scale
+//! used by the GF DP.
 //!
 //! Java reference:
 //! - `FastScorer.java:58-66`: iterates `fromIndex..toIndex-1`, computes
@@ -14,7 +12,7 @@
 //! - `NewScoredSpectrum.java:74-78`: `getNodeScore(prm, srm)` =
 //!   `round(getNodeScore(prm, true) + getNodeScore(srm, false))`.
 
-use model::mass::{nominal_from, H2O};
+use model::mass::nominal_from;
 use model::peptide::Peptide;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
@@ -49,24 +47,20 @@ pub fn score_psm(
     }
 
     // Two distinct masses with different roles:
-    //  - `peptide_mass`: candidate peptide's neutral mass (residue_sum + H2O).
-    //    Drives `peptide_nominal` for suffix lookup, mirroring Java's
-    //    `nominalPrefixMassArr[i]` which is built from the candidate's
-    //    residues.
+    //  - `peptide_nominal`: candidate peptide's total nominal residue mass.
+    //    Drives suffix lookup, mirroring Java's `nominalPrefixMassArr[i]`
+    //    which is built from the candidate's residues.
     //  - `spectrum_parent_mass`: spectrum's OBSERVED neutral mass
     //    (scoredSpec.parentMass in Java). Drives partition + segment
-    //    selection across all candidates, regardless of iso_off.
-    //
-    // (Bug fix 2026-05-08: previously a single `parent_mass = peptide.mass()`
-    // drove both, which mismatched Java's FastScorer for iso_off≥1
-    // candidates and caused systematic top-1 flips on PXD001819.)
-    let peptide_mass = peptide.mass();
+    //    selection across all candidates, regardless of iso_off. Using
+    //    `peptide.mass()` here would mismatch Java's FastScorer for iso_off≥1
+    //    candidates and cause systematic top-1 flips.
     let spectrum_parent_mass = scored_spec.parent_mass();
 
     // Total nominal peptide mass = nominal(residue_sum) = nominal(mass - H2O).
     // Used to compute suffix_nominal = peptide_nominal - prefix_nominal,
     // mirroring Java's `suffixMass = peptideMass - prefixMass`.
-    let peptide_nominal = nominal_from(peptide_mass - H2O);
+    let peptide_nominal = peptide.nominal_residue_mass();
 
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
@@ -78,17 +72,21 @@ pub fn score_psm(
         prefix_mass_acc += residue_mass;
 
         // Nominal masses — same formula as Java's nominalPrefixMassArr[i].
-        let prefix_nominal = nominal_from(prefix_mass_acc) as f64;
-        let suffix_nominal = (peptide_nominal - prefix_nominal as i32) as f64;
+        let prefix_nominal = nominal_from(prefix_mass_acc);
+        let suffix_nominal = peptide_nominal - prefix_nominal;
 
-        total += scored_spec.node_score(
-            prefix_nominal,
-            suffix_nominal,
-            scorer,
-            charge,
-            spectrum_parent_mass,
-            fragment_tolerance_da,
-        );
+        total += scored_spec
+            .cached_split_score(prefix_nominal, suffix_nominal)
+            .unwrap_or_else(|| {
+                scored_spec.node_score(
+                    prefix_nominal as f64,
+                    suffix_nominal as f64,
+                    scorer,
+                    charge,
+                    spectrum_parent_mass,
+                    fragment_tolerance_da,
+                )
+            });
     }
     total as f32
 }
@@ -150,7 +148,7 @@ mod tests {
         let mut frag_off_table = HashMap::new();
         frag_off_table.insert(part, vec![FragmentOffsetFrequency { ion_type: prefix_ion, frequency: 0.7 }]);
 
-        Param {
+        let mut p = Param {
             version: 10001,
             data_type: SpecDataType {
                 activation: ActivationMethod::HCD,
@@ -175,7 +173,10 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
-        }
+            partition_ion_types_cache: HashMap::new(),
+        };
+        p.rebuild_cache();
+        p
     }
 
     #[test]
@@ -281,7 +282,7 @@ mod tests {
         let scored = ScoredSpectrum::new_without_filtering(&empty_spec);
 
         let parent_mass = peptide.mass();
-        let peptide_nominal = nominal_from(parent_mass - H2O);
+        let peptide_nominal = peptide.nominal_residue_mass();
         let charge = 2u8;
         let tolerance_da = 0.05;
 
@@ -290,9 +291,9 @@ mod tests {
         for s in 1..peptide.length() {
             let aa: &AminoAcid = &peptide.residues[s - 1];
             prefix_acc += aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-            let pref = nominal_from(prefix_acc) as f64;
-            let suf = (peptide_nominal - pref as i32) as f64;
-            manual_total += scored.node_score(pref, suf, &scorer, charge, parent_mass, tolerance_da);
+            let pref = nominal_from(prefix_acc);
+            let suf = peptide_nominal - pref;
+            manual_total += scored.node_score(pref as f64, suf as f64, &scorer, charge, parent_mass, tolerance_da);
         }
 
         let computed = score_psm(&scored, &peptide, &scorer, charge, tolerance_da);

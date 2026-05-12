@@ -43,7 +43,7 @@ pub fn tiny_param() -> Param {
     let mut frag_off_table = HashMap::new();
     frag_off_table.insert(part, vec![]);
 
-    Param {
+    let mut p = Param {
         version: 10001,
         data_type: SpecDataType {
             activation: ActivationMethod::HCD,
@@ -68,7 +68,10 @@ pub fn tiny_param() -> Param {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
-    }
+        partition_ion_types_cache: HashMap::new(),
+    };
+    p.rebuild_cache();
+    p
 }
 
 /// Richer `Param` for testing the GF / ScoredSpectrum scoring paths.
@@ -105,7 +108,7 @@ pub fn tiny_param_with_ions() -> Param {
         frequency: 0.7,
     }]);
 
-    Param {
+    let mut p = Param {
         version: 10001,
         data_type: SpecDataType {
             activation: ActivationMethod::HCD,
@@ -130,5 +133,8 @@ pub fn tiny_param_with_ions() -> Param {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
-    }
+        partition_ion_types_cache: HashMap::new(),
+    };
+    p.rebuild_cache();
+    p
 }

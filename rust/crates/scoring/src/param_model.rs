@@ -1,7 +1,5 @@
-//! Loader for Java MS-GF+'s `.param` binary format. See
-//! `docs/superpowers/2026-05-03-phase2-param-loader-design.md` and the
-//! Java reference at `src/main/java/edu/ucsd/msjava/msscorer/NewRankScorer.java`
-//! lines 197-425.
+//! Loader for Java MS-GF+'s `.param` binary format. Java reference:
+//! `src/main/java/edu/ucsd/msjava/msscorer/NewRankScorer.java` lines 197-425.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -41,7 +39,28 @@ pub struct Param {
     /// Pre-filtered ion-type list per partition (Noise excluded), populated
     /// at load time. Used by `ion_types_for_partition_slice` to avoid
     /// per-call Vec allocation in the GF DP hot path.
-    pub(crate) partition_ion_types_cache: HashMap<Partition, Vec<IonType>>,
+    /// Call `rebuild_cache()` after manually constructing a `Param` in tests
+    /// or any context where the cache was not populated during `load_from_bytes`.
+    pub partition_ion_types_cache: HashMap<Partition, Vec<IonType>>,
+}
+
+/// Build the per-partition ion-type cache (Noise excluded). Single source of
+/// truth for both the parser (`load_from_bytes`) and the test helper
+/// (`Param::rebuild_cache`).
+fn build_partition_ion_types_cache(
+    frag_off_table: &HashMap<Partition, Vec<FragmentOffsetFrequency>>,
+) -> HashMap<Partition, Vec<IonType>> {
+    let mut cache: HashMap<Partition, Vec<IonType>> = HashMap::with_capacity(frag_off_table.len());
+    for (&part, frag_list) in frag_off_table {
+        let mut ions: Vec<IonType> = Vec::with_capacity(frag_list.len());
+        for fof in frag_list {
+            if !matches!(fof.ion_type, IonType::Noise) {
+                ions.push(fof.ion_type);
+            }
+        }
+        cache.insert(part, ions);
+    }
+    cache
 }
 
 impl Param {
@@ -62,9 +81,8 @@ impl Param {
         // Build the target partition for the floor lookup.
         let target = Partition { charge, parent_mass, seg_num };
 
-        // partitions is already sorted (Phase 2 guarantee). Find the largest
-        // partition <= target.
-        // Use binary search via partition_point.
+        // partitions is already sorted (loader invariant). Find the largest
+        // partition <= target via binary search.
         let pos = self.partitions.partition_point(|p| p <= &target);
         if pos > 0 {
             // partitions[pos - 1] is the largest <= target.
@@ -202,6 +220,15 @@ impl Param {
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         Self::load_from_bytes(&bytes)
+    }
+
+    /// Rebuild the `partition_ion_types_cache` from `frag_off_table`.
+    /// Call this after manually constructing a `Param` in tests or any
+    /// context where the cache was not populated during `load_from_bytes`.
+    /// Production code should use `load_from_bytes` / `load_from_file`
+    /// which build the cache automatically.
+    pub fn rebuild_cache(&mut self) {
+        self.partition_ion_types_cache = build_partition_ion_types_cache(&self.frag_off_table);
     }
 }
 
@@ -382,16 +409,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
 
     // Pre-build per-partition ion-type cache (Noise excluded), so the GF
     // DP hot path can borrow a slice instead of allocating a Vec per call.
-    let mut partition_ion_types_cache: HashMap<Partition, Vec<IonType>> = HashMap::new();
-    for (&part, frag_list) in &frag_off_table {
-        let mut ions: Vec<IonType> = Vec::with_capacity(frag_list.len());
-        for fof in frag_list {
-            if !matches!(fof.ion_type, IonType::Noise) {
-                ions.push(fof.ion_type);
-            }
-        }
-        partition_ion_types_cache.insert(part, ions);
-    }
+    let partition_ion_types_cache = build_partition_ion_types_cache(&frag_off_table);
 
     Ok(Param {
         version,
@@ -453,10 +471,10 @@ impl Hash for Partition {
 impl Ord for Partition {
     fn cmp(&self, other: &Self) -> Ordering {
         // Mirror Java `Partition.compareTo`: charge → segIndex → parentMass.
-        // (Bug fix 2026-05-09: previously charge → parent_mass → seg_num,
-        // which produced different floor-lookup results — `find_partition`
-        // for seg=0 queries returned a seg=1 partition with the same
-        // parent_mass tier, looking up the WRONG rank distribution table.)
+        // The order is load-bearing: a charge → parent_mass → seg_num order
+        // produces wrong floor-lookup results for `find_partition` (seg=0
+        // queries return a seg=1 partition with the same parent_mass tier,
+        // resolving to the wrong rank distribution table).
         self.charge.cmp(&other.charge)
             .then_with(|| self.seg_num.cmp(&other.seg_num))
             .then_with(|| self.parent_mass.to_bits().cmp(&other.parent_mass.to_bits()))
@@ -499,39 +517,57 @@ impl IonType {
     pub fn is_suffix(&self) -> bool { matches!(self, IonType::Suffix { .. }) }
     pub fn is_noise(&self) -> bool { matches!(self, IonType::Noise) }
 
-    /// Compute the predicted m/z for this ion type given a node mass (in Da).
+    /// Compute the predicted m/z for this ion type given a **nominal** node mass.
     ///
-    /// For both `Prefix` and `Suffix`, the formula mirrors Java's
-    /// `IonType.PrefixIon.getMz(mass)` and `IonType.SuffixIon.getMz(mass)`:
-    ///   `mz = (node_mass + offset + charge * PROTON) / charge`
+    /// Mirrors Java's `IonType.getMz(float mass)` exactly:
+    ///
+    /// ```text
+    /// // Java (IonType.java):
+    /// public float getMz(float mass) { return mass / charge + offset; }
+    ///
+    /// // Caller (NewScoredSpectrum.java) passes:
+    /// float mass = new NominalMass(nominalMass).getMass();  // = nominalMass / 0.999497f
+    /// ```
+    ///
+    /// So the full formula is:
+    ///   `mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset`
+    ///
+    /// **Key**: the `offset` field already includes the proton mass contribution
+    /// (for b-ions: `offset = PROTON ≈ 1.00728`; for y-ions: `offset = H2O + PROTON ≈ 19.018`).
+    /// The `INTEGER_MASS_SCALER` division converts integer nominal mass back to real
+    /// monoisotopic mass before dividing by charge.
     ///
     /// For `Noise`, returns 0.0.
-    ///
-    /// Note: for suffix ions, `node_mass` is the suffix mass already in
-    /// MS-GF+ convention; callers are responsible for supplying the correct
-    /// directional mass.
-    pub fn mz(&self, node_mass: f64) -> f64 {
+    pub fn mz(&self, node_nominal: f64) -> f64 {
         match self {
             IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                (node_mass + offset + c * model::mass::PROTON) / c
+                // Java: getMz(mass) = mass / charge + offset
+                // where mass = nominalMass / INTEGER_MASS_SCALER
+                let real_mass = node_nominal / model::mass::INTEGER_MASS_SCALER as f64;
+                real_mass / c + offset
             }
             IonType::Noise => 0.0,
         }
     }
 
-    /// Inverse of `mz`: given an observed peak m/z, recover the node mass.
+    /// Inverse of `mz`: given an observed peak m/z, recover the real node mass (in Da).
     ///
-    /// For `Prefix { charge, offset }`: `mass = mz * charge - charge * PROTON - offset`.
-    /// For `Suffix`: same formula.
+    /// Mirrors Java's `IonType.getMass(float mz)`:
+    /// ```text
+    /// public float getMass(float mz) { return (mz - offset) * charge; }
+    /// ```
+    ///
+    /// Returns the real monoisotopic node mass (Da), NOT nominal mass.
     /// For `Noise`: returns 0.0.
     pub fn mass_from_mz(&self, mz: f64) -> f64 {
         match self {
             IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
-                mz * c - c * model::mass::PROTON - offset
+                // Java: getMass(mz) = (mz - offset) * charge
+                (mz - offset) * c
             }
             IonType::Noise => 0.0,
         }
@@ -566,7 +602,7 @@ pub enum ParamParseError {
     TrailingBytes { unread: usize },
     #[error("bad string length {got} (negative)")]
     BadStringLength { got: i8 },
-    #[error("param reader path not yet implemented (Phase 2 stub)")]
+    #[error("param reader path not yet implemented")]
     Unimplemented,
 }
 
@@ -958,6 +994,7 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         }
     }
 
@@ -970,17 +1007,18 @@ mod tests {
             Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 },
             Partition { charge: 3, parent_mass: 500.0, seg_num: 0 },
         ];
-        // Sort matches the Phase 2 invariant.
+        // Sort matches the loader invariant.
         param.partitions.sort();
 
-        // Target (2, 800.0, 0) → lex floor:
-        // Sorted charge-2 partitions: (2,500.0,0), (2,500.0,1), (2,1000.0,0).
-        // Largest ≤ (2,800.0,0): (2,500.0,1) because 500.0 < 800.0 and seg_num
-        // doesn't matter once parent_mass is strictly less.
+        // Java Partition.compareTo: charge → segIndex → parentMass.
+        // Sorted order: (2,seg0,500), (2,seg0,1000), (2,seg1,500), (3,seg0,500).
+        // Target (2, 800.0, seg0): floor is (2,seg0,500) — same charge, same seg,
+        // and 500.0 < 800.0. The next candidate (2,seg0,1000) is above 800.0.
+        // seg1 partitions are NOT considered because seg_num 1 > 0 = target seg.
         let p = param.find_partition(2, 800.0, 0).expect("find");
         assert_eq!(p.charge, 2);
         assert_eq!(p.parent_mass, 500.0);
-        assert_eq!(p.seg_num, 1);
+        assert_eq!(p.seg_num, 0);
     }
 
     #[test]
@@ -1024,20 +1062,37 @@ mod tests {
 
     #[test]
     fn ion_type_mz_prefix_charge1_offset0() {
-        use model::mass::PROTON;
+        // Java formula: getMz(mass) = mass / charge + offset
+        // where mass = nominalMass / INTEGER_MASS_SCALER
+        // For Prefix(charge=1, offset=0): mz = (node_nominal / 0.999497) / 1 + 0
+        use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let node_mass = 100.0_f64;
-        let expected = (node_mass + 0.0 + PROTON) / 1.0;
-        assert!((ion.mz(node_mass) - expected).abs() < 1e-9);
+        let node_nominal = 100.0_f64;
+        let expected = (node_nominal / INTEGER_MASS_SCALER as f64) / 1.0;
+        assert!((ion.mz(node_nominal) - expected).abs() < 1e-9);
     }
 
     #[test]
     fn ion_type_mz_prefix_charge2() {
-        use model::mass::PROTON;
+        // Java formula: mz = (nominalMass / INTEGER_MASS_SCALER) / charge + offset
+        // For Prefix(charge=2, offset=0): mz = (node_nominal / 0.999497) / 2
+        use model::mass::INTEGER_MASS_SCALER;
         let ion = IonType::Prefix { charge: 2, offset_bits: 0.0_f32.to_bits() };
-        let node_mass = 200.0_f64;
-        let expected = (node_mass + 0.0 + 2.0 * PROTON) / 2.0;
-        assert!((ion.mz(node_mass) - expected).abs() < 1e-9);
+        let node_nominal = 200.0_f64;
+        let expected = (node_nominal / INTEGER_MASS_SCALER as f64) / 2.0;
+        assert!((ion.mz(node_nominal) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ion_type_mz_prefix_with_b_ion_offset() {
+        // Verify Java b-ion formula: b-ion offset = PROTON (≈1.00728)
+        // mz = (nominalMass / INTEGER_MASS_SCALER) / charge + PROTON
+        // This is the realistic production case for b-ions.
+        use model::mass::{PROTON, INTEGER_MASS_SCALER};
+        let b_ion = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits() };
+        let node_nominal = 100.0_f64;
+        let expected = (node_nominal / INTEGER_MASS_SCALER as f64) / 1.0 + PROTON;
+        assert!((b_ion.mz(node_nominal) - expected).abs() < 1e-4);
     }
 
     #[test]
@@ -1046,8 +1101,8 @@ mod tests {
         let offset = 18.01_f32;
         let prefix = IonType::Prefix { charge: 1, offset_bits: offset.to_bits() };
         let suffix = IonType::Suffix { charge: 1, offset_bits: offset.to_bits() };
-        let node_mass = 150.0_f64;
-        assert!((prefix.mz(node_mass) - suffix.mz(node_mass)).abs() < 1e-9);
+        let node_nominal = 150.0_f64;
+        assert!((prefix.mz(node_nominal) - suffix.mz(node_nominal)).abs() < 1e-9);
     }
 
     #[test]
@@ -1056,14 +1111,21 @@ mod tests {
     }
 
     #[test]
-    fn ion_type_mass_from_mz_round_trips() {
-        use model::mass::PROTON;
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let node_mass = 100.0_f64;
-        let mz = ion.mz(node_mass);
-        let recovered = ion.mass_from_mz(mz);
-        assert!((recovered - node_mass).abs() < 1e-9,
-            "round-trip failed: original {node_mass}, recovered {recovered}, mz={mz}, PROTON={PROTON}");
+    fn ion_type_mass_from_mz_matches_java() {
+        // Java getMass(mz) = (mz - offset) * charge
+        // mass_from_mz returns the REAL monoisotopic mass (Da), not nominal mass.
+        // Round-trip: mz(nominal) → mass_from_mz(mz) = (nominal/scaler/c+offset - offset)*c
+        //           = (nominal / scaler) = real_mass  (NOT the original nominal input).
+        use model::mass::INTEGER_MASS_SCALER;
+        let offset = 1.00782_f32; // realistic b-ion offset
+        let ion = IonType::Prefix { charge: 1, offset_bits: offset.to_bits() };
+        let node_nominal = 100.0_f64;
+        let mz = ion.mz(node_nominal);
+        let recovered_real_mass = ion.mass_from_mz(mz);
+        // Recovered mass should equal node_nominal / INTEGER_MASS_SCALER (real mass)
+        let expected_real_mass = node_nominal / INTEGER_MASS_SCALER as f64;
+        assert!((recovered_real_mass - expected_real_mass).abs() < 1e-4,
+            "mass_from_mz returned {recovered_real_mass}, expected real mass {expected_real_mass}");
     }
 
     #[test]
@@ -1086,7 +1148,7 @@ mod tests {
             FragmentOffsetFrequency { ion_type: suffix, frequency: 0.6 },
         ]);
 
-        let param = Param {
+        let mut param = Param {
             version: 10001,
             data_type: SpecDataType {
                 activation: ActivationMethod::HCD,
@@ -1111,7 +1173,9 @@ mod tests {
             ion_err_dist_table: HashMap::new(),
             noise_err_dist_table: HashMap::new(),
             ion_existence_table: HashMap::new(),
+            partition_ion_types_cache: HashMap::new(),
         };
+        param.rebuild_cache();
 
         let seg0 = param.ion_types_for_segment(0);
         // Should return prefix and suffix (not noise), no duplicates.

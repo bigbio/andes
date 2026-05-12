@@ -1,5 +1,4 @@
-//! Phase 5 scoring: replaces Phase 4e's mass-error placeholder with
-//! rank-based PSM scoring using the Param model loaded in Phase 2.
+//! Rank-based PSM scoring using the loaded Param model.
 
 pub mod fragment_ions;
 pub mod psm_score;

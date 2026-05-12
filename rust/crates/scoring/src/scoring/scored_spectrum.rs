@@ -33,6 +33,7 @@
 
 use crate::param_model::{IonType, Param, Partition, PrecursorOffsetFrequency};
 use crate::scoring::rank_scorer::RankScorer;
+use model::mass::nominal_from;
 use model::spectrum::Spectrum;
 
 const PROTON: f64 = 1.007_276_49;
@@ -48,6 +49,8 @@ pub struct ScoredSpectrum<'a> {
     /// Number of peaks that survived precursor-peak filtering (used for
     /// `peak_count_after_filtering`).
     kept_count: usize,
+    /// Raw sum of all peak intensities in the original spectrum.
+    total_intensity: f64,
     /// Probability that a random m/z bin contains a peak. Java:
     /// `probPeak = spec.size() / max(approxNumBins, 1)` where
     /// `approxNumBins = parentMass / (mme.getValue() * 2)`.
@@ -83,6 +86,13 @@ pub struct ScoredSpectrum<'a> {
     /// the cache is empty; the hot path tolerates length 0 by simply
     /// iterating no segments and returning 0.0.
     segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)>,
+    /// FastScorer-style directional node-score tables indexed by nominal
+    /// residue mass. Populated for production `new()` so candidate scoring
+    /// can do array lookups instead of recomputing per-split node scores.
+    /// Left empty in `new_without_filtering`, where callers fall back to the
+    /// exact uncached path.
+    prefix_score_cache: Vec<f32>,
+    suffix_score_cache: Vec<f32>,
 }
 
 impl<'a> ScoredSpectrum<'a> {
@@ -127,7 +137,7 @@ impl<'a> ScoredSpectrum<'a> {
             .collect();
 
         // Determine which peaks survive filtering.
-        let ranks = vec![u32::MAX; n];
+        let mut ranks = vec![u32::MAX; n];
         let mut kept: Vec<(usize, f32, f64)> = Vec::with_capacity(n);
         for (i, &(mz, intensity)) in spec.peaks.iter().enumerate() {
             let filtered = filter_mzs
@@ -139,6 +149,21 @@ impl<'a> ScoredSpectrum<'a> {
         }
 
         let kept_count = kept.len();
+
+        // BUGFIX: compute ranks NOW, before the FastScorer cache reads them.
+        // The cache below calls `directional_node_score_inner(&ranks, ...)`,
+        // which feeds into `nearest_peak_rank_in` to determine which rank-slot's
+        // log score to use. Previously this happened after rank_kept ran, so
+        // ranks were all u32::MAX → every matched ion picked the LAST rank slot
+        // → systematically wrong scores (negative RawScores, Percolator @ 1% FDR = 0).
+        kept.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        for (rank_minus_one, &(orig_idx, _, _)) in kept.iter().enumerate() {
+            ranks[orig_idx] = (rank_minus_one + 1) as u32;
+        }
 
         // Compute prob_peak. Java: spec.getPeptideMass() = (precursor_mz - PROTON) * charge.
         // approxNumBins = parentMass / (mme.getValue() * 2).
@@ -173,10 +198,38 @@ impl<'a> ScoredSpectrum<'a> {
                 (p, logs)
             })
             .collect();
+        let cache_len = (nominal_from(parent_mass).max(0) as usize) + 1;
+        let mut prefix_score_cache = vec![0.0; cache_len];
+        let mut suffix_score_cache = vec![0.0; cache_len];
+        for nominal_mass in 1..cache_len {
+            let node_nominal = nominal_mass as f64;
+            prefix_score_cache[nominal_mass] = Self::directional_node_score_inner(
+                spec,
+                &ranks,
+                &segment_partition_cache,
+                scorer,
+                node_nominal,
+                true,
+                charge,
+                parent_mass,
+            );
+            suffix_score_cache[nominal_mass] = Self::directional_node_score_inner(
+                spec,
+                &ranks,
+                &segment_partition_cache,
+                scorer,
+                node_nominal,
+                false,
+                charge,
+                parent_mass,
+            );
+        }
 
         Self::rank_kept(
             spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge,
             segment_partition_cache,
+            prefix_score_cache,
+            suffix_score_cache,
         )
     }
 
@@ -207,9 +260,13 @@ impl<'a> ScoredSpectrum<'a> {
         // outer loop iterates zero times and the function returns 0.0.
         // The test-fixture path doesn't need the per-segment optimization.
         let segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)> = Vec::new();
+        let prefix_score_cache: Vec<f32> = Vec::new();
+        let suffix_score_cache: Vec<f32> = Vec::new();
         Self::rank_kept(
             spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge,
             segment_partition_cache,
+            prefix_score_cache,
+            suffix_score_cache,
         )
     }
 
@@ -226,6 +283,8 @@ impl<'a> ScoredSpectrum<'a> {
         parent_mass: f64,
         charge: u8,
         segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)>,
+        prefix_score_cache: Vec<f32>,
+        suffix_score_cache: Vec<f32>,
     ) -> Self {
         kept.sort_by(|a, b| {
             // Higher intensity first; if equal, lower m/z first.
@@ -237,8 +296,17 @@ impl<'a> ScoredSpectrum<'a> {
             ranks[orig_idx] = (rank_minus_one + 1) as u32;
         }
         Self {
-            spec, ranks, kept_count, prob_peak, main_ion, parent_mass, charge,
+            spec,
+            ranks,
+            kept_count,
+            total_intensity: spec.peaks.iter().map(|&(_, i)| i as f64).sum(),
+            prob_peak,
+            main_ion,
+            parent_mass,
+            charge,
             segment_partition_cache,
+            prefix_score_cache,
+            suffix_score_cache,
         }
     }
 
@@ -258,6 +326,19 @@ impl<'a> ScoredSpectrum<'a> {
     /// peptide's mass. Mirrors Java `scoredSpec.getPrecursorPeak().getMass()`.
     pub fn parent_mass(&self) -> f64 {
         self.parent_mass
+    }
+
+    /// Return a cached `round(prefix_score + suffix_score)` split score when
+    /// both nominal masses are in-bounds for this spectrum's FastScorer-style
+    /// tables. Returns `None` when the cache is unavailable or either index is
+    /// out of range, allowing callers to fall back to the exact node-score path.
+    pub fn cached_split_score(&self, prefix_nominal: i32, suffix_nominal: i32) -> Option<i32> {
+        if prefix_nominal < 0 || suffix_nominal < 0 {
+            return None;
+        }
+        let pref = *self.prefix_score_cache.get(prefix_nominal as usize)?;
+        let suff = *self.suffix_score_cache.get(suffix_nominal as usize)?;
+        Some((pref + suff).round() as i32)
     }
 
     /// Charge state used when this `ScoredSpectrum` was constructed.
@@ -290,7 +371,7 @@ impl<'a> ScoredSpectrum<'a> {
     ///
     /// Returns 0.0 for an empty spectrum.
     pub fn total_intensity(&self) -> f64 {
-        self.spec.peaks.iter().map(|&(_, i)| i as f64).sum()
+        self.total_intensity
     }
 
     /// Find the **highest-intensity** peak within `tolerance_da` of
@@ -434,6 +515,28 @@ impl<'a> ScoredSpectrum<'a> {
         parent_mass: f64,
         _fragment_tolerance_da: f64,
     ) -> f32 {
+        Self::directional_node_score_inner(
+            self.spec,
+            &self.ranks,
+            &self.segment_partition_cache,
+            scorer,
+            nominal_mass,
+            is_prefix,
+            charge,
+            parent_mass,
+        )
+    }
+
+    fn directional_node_score_inner(
+        spec: &Spectrum,
+        ranks: &[u32],
+        segment_partition_cache: &[(Partition, Vec<(IonType, Vec<f32>)>)],
+        scorer: &RankScorer,
+        nominal_mass: f64,
+        is_prefix: bool,
+        charge: u8,
+        parent_mass: f64,
+    ) -> f32 {
         use crate::param_model::IonType;
         let param = scorer.param();
         let mme = &param.mme;
@@ -441,32 +544,10 @@ impl<'a> ScoredSpectrum<'a> {
         let max_rank_idx = max_rank as usize;
         let num_segs = param.num_segments as usize;
         let mut total = 0.0_f32;
-
-        // Hot path: inline loop with array indexing into the partition's
-        // pre-paired (ion, log_table) list. ZERO HashMap lookups per ion
-        // (was 2 per ion: partition lookup + (partition, ion) log lookup).
-        // Each per-spectrum scoring run does ~200k ion evaluations; the
-        // savings are ~50–150 ns per ion × millions per search.
-        //
-        // The (Partition, ion_logs) pair for every segment is precomputed
-        // once at ScoredSpectrum construction (see
-        // `segment_partition_cache`), so this loop does ONE array index
-        // per segment instead of `partition_for` binary search +
-        // `partition_ion_logs` HashMap lookup per (segment, call).
-        //
-        // Fallback: the test-fixture constructor `new_without_filtering`
-        // has no Param / RankScorer in scope and therefore leaves the
-        // cache empty. In that (test-only) case we fall back to the
-        // unoptimized lookup path so existing tests still see real scores.
-        // The production path (`ScoredSpectrum::new`) always populates the
-        // cache, so the fallback is never taken in real searches.
-        let use_cache = !self.segment_partition_cache.is_empty();
+        let use_cache = !segment_partition_cache.is_empty();
         for seg in 0..num_segs {
-            // Resolve ion_logs (cached vs computed) without storing the
-            // partition reference past the loop body — segment_num below
-            // re-derives the segment from theo_mz directly.
             let ion_logs_slice: &[(IonType, Vec<f32>)] = if use_cache {
-                self.segment_partition_cache[seg].1.as_slice()
+                segment_partition_cache[seg].1.as_slice()
             } else {
                 let p = param.partition_for(charge, parent_mass, seg);
                 scorer.partition_ion_logs(&p)
@@ -481,15 +562,12 @@ impl<'a> ScoredSpectrum<'a> {
                     continue;
                 }
                 let tol_da = mme.as_da(theo_mz);
-                let score = match self.nearest_peak_rank(theo_mz, tol_da) {
+                let score = match nearest_peak_rank_in(spec, ranks, theo_mz, tol_da) {
                     Some(rank) => {
-                        // Java rank-clamp: rank > max_rank → use max_rank-1
-                        // (last observed-rank slot, NOT the missing slot).
                         let idx = rank.min(max_rank).max(1) as usize - 1;
                         if idx < logs.len() { logs[idx] } else { 0.0 }
                     }
                     None => {
-                        // Missing slot: index max_rank (the LAST entry).
                         if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 }
                     }
                 };
@@ -529,12 +607,16 @@ impl<'a> ScoredSpectrum<'a> {
         // Select the highest-intensity peak within [theo_mz - tol_da, theo_mz + tol_da].
         // Mirrors Java's Collections.max(matchList, new IntensityComparator()).
         // Skip filtered peaks (ranks[i] == u32::MAX).
+        let lo_mz = theo_mz - tol_da;
+        let hi_mz = theo_mz + tol_da;
+        let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
         let mut best_peak_mz: Option<(f64, f32)> = None; // (mz, intensity)
-        for (i, &(mz, intensity)) in self.spec.peaks.iter().enumerate() {
-            if self.ranks[i] == u32::MAX {
-                continue;
+        for i in start..self.spec.peaks.len() {
+            let (mz, intensity) = self.spec.peaks[i];
+            if mz > hi_mz {
+                break;
             }
-            if (mz - theo_mz).abs() > tol_da {
+            if self.ranks[i] == u32::MAX {
                 continue;
             }
             if best_peak_mz.as_ref().map_or(true, |&(_, best_int)| intensity > best_int) {
@@ -596,6 +678,29 @@ impl<'a> ScoredSpectrum<'a> {
 
         s.round() as i32
     }
+}
+
+fn nearest_peak_rank_in(spec: &Spectrum, ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<u32> {
+    if spec.peaks.is_empty() {
+        return None;
+    }
+    let lo_mz = target_mz - tolerance_da;
+    let hi_mz = target_mz + tolerance_da;
+    let start = spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
+    let mut best: Option<(usize, f32)> = None;
+    for i in start..spec.peaks.len() {
+        let (mz, intensity) = spec.peaks[i];
+        if mz > hi_mz {
+            break;
+        }
+        if ranks[i] == u32::MAX {
+            continue;
+        }
+        if best.as_ref().map_or(true, |(_, best_int)| intensity > *best_int) {
+            best = Some((i, intensity));
+        }
+    }
+    best.map(|(i, _)| ranks[i])
 }
 
 /// Select the main ion for `partition` from `param.rank_dist_table`.

@@ -391,6 +391,7 @@ name = "output"
 version = "0.1.0"
 dependencies = [
  "input",
+ "memchr",
  "model",
  "scoring",
  "search",

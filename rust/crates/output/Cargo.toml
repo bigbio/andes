@@ -10,6 +10,7 @@ model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }
 search = { path = "../search" }
 thiserror = { workspace = true }
+memchr = "2"
 
 [dev-dependencies]
 tempfile = "3.10"

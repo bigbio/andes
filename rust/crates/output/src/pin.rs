@@ -128,6 +128,21 @@ pub fn write_pin_to<W: Write>(
     let max_charge = *params.charge_range.end();
     let mut label_cache: HashMap<Vec<u8>, i32> = HashMap::new();
 
+    // Pre-concatenate all target protein sequences into a single haystack
+    // separated by `b'\x01'` (an ASCII byte that never occurs in a residue
+    // sequence — residues are uppercase letters 'A'..='Z'). Substring matches
+    // that would otherwise straddle two proteins are blocked by the
+    // separator, exactly mirroring the naive per-protein scan in
+    // `SearchIndex::peptide_has_target_match` but with a single
+    // memmem-accelerated search over the concatenation.
+    //
+    // Before this optimization, `peptide_has_target_match` did an O(N·M)
+    // naive `slice::windows().any(...)` per unique peptide (~156s on
+    // PXD001819 for 17,960 cache misses across 6,775 target proteins). With
+    // a single haystack and `memchr::memmem::Finder` (Two-Way / SIMD), the
+    // entire label-resolution phase drops to sub-second.
+    let target_haystack = build_target_haystack(search_index);
+
     write_header(writer, min_charge, max_charge)?;
 
     for (spec_idx, queue) in queues.iter().enumerate() {
@@ -142,10 +157,44 @@ pub fn write_pin_to<W: Write>(
             min_charge,
             max_charge,
             search_index,
+            &target_haystack,
             &mut label_cache,
         )?;
     }
     Ok(())
+}
+
+/// Concatenate all target-protein sequences from `search_index` into a single
+/// byte buffer, separated by a byte that cannot appear inside a residue run
+/// (`b'\x01'`). Used by `peptide_has_target_match_fast` so the per-peptide
+/// substring check is a single memmem scan instead of a per-protein
+/// naive loop.
+fn build_target_haystack(search_index: &SearchIndex) -> Vec<u8> {
+    // Pre-size: total target residues + one separator per protein.
+    let total: usize = search_index
+        .iter_target_proteins()
+        .map(|p| p.sequence.len() + 1)
+        .sum();
+    let mut hay = Vec::with_capacity(total);
+    for prot in search_index.iter_target_proteins() {
+        hay.extend_from_slice(&prot.sequence);
+        hay.push(b'\x01');
+    }
+    hay
+}
+
+/// Returns `true` iff `needle` (peptide residues, no flanking) appears as a
+/// substring of any target protein. Drop-in replacement for
+/// `SearchIndex::peptide_has_target_match` that uses the precomputed
+/// concatenated target haystack and `memchr::memmem::find` for an
+/// O(n+m) Two-Way substring search instead of an O(n·m) naive scan.
+fn peptide_has_target_match_fast(target_haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        // Match the original `contains_subsequence` semantics: empty needle
+        // matches any non-empty target.
+        return !target_haystack.is_empty();
+    }
+    memchr::memmem::find(target_haystack, needle).is_some()
 }
 
 // ── header ────────────────────────────────────────────────────────────────────
@@ -210,6 +259,7 @@ fn write_spectrum_rows<W: Write>(
     min_charge: u8,
     max_charge: u8,
     search_index: &SearchIndex,
+    target_haystack: &[u8],
     label_cache: &mut HashMap<Vec<u8>, i32>,
 ) -> io::Result<()> {
     // Sort best-first (lowest spec_e_value first, then highest score).
@@ -229,7 +279,7 @@ fn write_spectrum_rows<W: Write>(
             rank2_spec_e_value,
             min_charge,
             max_charge,
-            search_index,
+            target_haystack,
             label_cache,
         )?;
     }
@@ -246,19 +296,21 @@ fn write_psm_row<W: Write>(
     rank2_spec_e_value: f64,
     min_charge: u8,
     max_charge: u8,
-    search_index: &SearchIndex,
+    target_haystack: &[u8],
     label_cache: &mut HashMap<Vec<u8>, i32>,
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
-
-    // SpecId: Java pattern is specID + "_" + scanNum + "_" + rank
-    let psm_id = format!("{}_{}_{}", ctx.spec_id, ctx.scan, rank);
 
     // Label: Java's DirectPinWriter.writeRow:188-191 — Label=1 unless ALL
     // explaining proteins are decoy. We check whether the peptide sequence
     // appears in ANY target protein; if so, Label=1 even when the candidate's
     // primary protein_index is a decoy. Cache by residue sequence so repeated
     // peptides do not re-scan the full target database.
+    //
+    // The substring lookup uses the precomputed concatenated `target_haystack`
+    // + `memchr::memmem` (Two-Way / SIMD), reducing the cache-miss path from
+    // O(target_count × peptide_len × protein_len) to O(haystack_len + peptide_len).
+    // This was the dominant cost of `pin_write` on PXD001819 (~156s of 159s).
     let residues: Vec<u8> = psm
         .candidate
         .peptide
@@ -269,7 +321,7 @@ fn write_psm_row<W: Write>(
     let label: i32 = match label_cache.get(&residues) {
         Some(&cached) => cached,
         None => {
-            let computed = if search_index.peptide_has_target_match(&residues) {
+            let computed = if peptide_has_target_match_fast(target_haystack, &residues) {
                 1
             } else {
                 -1
@@ -287,8 +339,7 @@ fn write_psm_row<W: Write>(
     // Both columns must be neutral masses so that dm = ExpMass - CalcMass is a
     // true mass error (not a charge-induced offset). Java fixture confirms:
     // ExpMass=1641.96, CalcMass=1641.95 — both neutral.
-    let peptide_mass = psm.candidate.peptide.mass(); // includes H2O — neutral mass
-    let calc_mass = peptide_mass; // neutral mass; matches ExpMass convention
+    let calc_mass = psm.candidate.peptide.mass(); // includes H2O — neutral mass
 
     // mass: duplicate of ExpMass (per Java line 212: "mass — duplicate of ExpMass")
     let mass = exp_mass;
@@ -329,7 +380,7 @@ fn write_psm_row<W: Write>(
     // theoMz = (peptideMass + H2O) / charge + PROTON
     //        = peptide.mass() / charge + PROTON  (since peptide.mass() includes H2O)
     // dm = adjustedExpMz - theoMz
-    let theo_mz = peptide_mass / charge + PROTON;
+    let theo_mz = calc_mass / charge + PROTON;
     let adjusted_exp_mz = spec.precursor_mz - ISOTOPE * (isotope_error as f64) / charge;
     let dm = adjusted_exp_mz - theo_mz;
     let absdm = dm.abs();
@@ -340,42 +391,37 @@ fn write_psm_row<W: Write>(
     // matchedIonRatio: from psm.features (Phase 7 followup)
     let matched_ion_ratio = psm.features.matched_ion_ratio as f64;
 
-    // Peptide: pre.SEQ_WITH_MODS.post  (uses existing Display impl)
-    let peptide_str = format!("{}", psm.candidate.peptide);
-
-    // Proteins: resolved via RowContext (accession already carries decoy prefix).
-    // Multi-protein emit is a future followup.
-    let proteins_str = ctx.accession.clone();
-
-    // Build row — tab-separated
-    // Fixed prefix
-    write!(
-        writer,
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        psm_id,
-        label,
-        ctx.scan,
-        format_double(exp_mass),
-        format_double(calc_mass),
-        format_double(mass),
-        raw_score,
-        de_novo_score,
-        format_double(ln_spec_e_value),
-        format_double(ln_e_value),
-        isotope_error,
-        peplen,
-        format_double(dm),
-        format_double(absdm),
-    )?;
+    // Build row — tab-separated. We write directly into the BufWriter to
+    // avoid heap-allocating each formatted column (the old implementation
+    // built ~30 intermediate Strings per row × 37k rows = ~1.1M allocs).
+    //
+    // SpecId: Java pattern is specID + "_" + scanNum + "_" + rank — emitted
+    // inline via three `write!` calls so we don't materialise a temporary
+    // String.
+    write!(writer, "{}_{}_{}", ctx.spec_id, ctx.scan, rank)?;
+    write!(writer, "\t{}\t{}\t", label, ctx.scan)?;
+    write_double(writer, exp_mass)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, calc_mass)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, mass)?;
+    write!(writer, "\t{}\t{}\t", raw_score, de_novo_score)?;
+    write_double(writer, ln_spec_e_value)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, ln_e_value)?;
+    write!(writer, "\t{}\t{}\t", isotope_error, peplen)?;
+    write_double(writer, dm)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, absdm)?;
 
     // Charge one-hot
     for c in min_charge..=max_charge {
-        let flag: i32 = if c == psm.charge_used { 1 } else { 0 };
-        write!(writer, "\t{}", flag)?;
+        let flag: u8 = if c == psm.charge_used { b'1' } else { b'0' };
+        writer.write_all(&[b'\t', flag])?;
     }
 
     // enzN, enzC, enzInt (zero-stubbed)
-    write!(writer, "\t0\t0\t0")?;
+    writer.write_all(b"\t0\t0\t0")?;
 
     // 4 filled feature columns (Phase 7 followup):
     // NumMatchedMainIons, longest_b, longest_y, longest_y_pct
@@ -393,30 +439,33 @@ fn write_psm_row<W: Write>(
     // MeanErrorTop7, StdevErrorTop7, MeanRelErrorTop7, StdevRelErrorTop7
     //
     // IsolationWindowEfficiency is always 0.0 (Java returns null; documented divergence).
-    write!(
-        writer,
-        "\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        format_double(psm.features.explained_ion_current_ratio as f64),
-        format_double(psm.features.n_term_ion_current_ratio as f64),
-        format_double(psm.features.c_term_ion_current_ratio as f64),
-        format_double(psm.features.ms2_ion_current as f64),
-        format_double(psm.features.isolation_window_efficiency as f64),
-        format_double(psm.features.mean_error_top7 as f64),
-        format_double(psm.features.stdev_error_top7 as f64),
-        format_double(psm.features.mean_rel_error_top7 as f64),
-        format_double(psm.features.stdev_rel_error_top7 as f64),
-    )?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.explained_ion_current_ratio as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.n_term_ion_current_ratio as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.c_term_ion_current_ratio as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.ms2_ion_current as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.isolation_window_efficiency as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mean_error_top7 as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.stdev_error_top7 as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mean_rel_error_top7 as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.stdev_rel_error_top7 as f64)?;
 
     // lnDeltaSpecEValue, matchedIonRatio
-    write!(
-        writer,
-        "\t{}\t{}",
-        format_double(ln_delta_spec_e_value),
-        format_double(matched_ion_ratio),
-    )?;
+    writer.write_all(b"\t")?;
+    write_double(writer, ln_delta_spec_e_value)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, matched_ion_ratio)?;
 
     // Peptide, Proteins
-    writeln!(writer, "\t{}\t{}", peptide_str, proteins_str)
+    writeln!(writer, "\t{}\t{}", psm.candidate.peptide, ctx.accession)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -456,70 +505,101 @@ fn compute_ln_delta_spec_e_value(rank: u32, rank1_spec_e_value: f64, rank2_spec_
     (rank1_spec_e_value / rank2_spec_e_value).ln()
 }
 
-/// Format a `f64` in `%.6g` style (6 significant figures), matching Java's
-/// `String.format(Locale.ROOT, "%.6g", v)` used in `formatDouble`.
+/// Write a `f64` in `%.6g` style (6 significant figures) directly into
+/// `writer`, matching Java's `String.format(Locale.ROOT, "%.6g", v)` used in
+/// `formatDouble`.
 ///
-/// NaN or infinite values are formatted as `"0"` matching Java's behaviour:
-/// `if (Double.isNaN(v) || Double.isInfinite(v)) return "0";`
-fn format_double(v: f64) -> String {
-    if v.is_nan() || v.is_infinite() {
-        return "0".to_string();
+/// NaN, infinite, or zero values are emitted as the single byte `'0'`
+/// (matching Java's `if (Double.isNaN(v) || Double.isInfinite(v)) return "0";`).
+///
+/// This formats into a stack-allocated 32-byte buffer (sufficient for any
+/// `%.5e`-style f64) and writes only the trimmed slice — avoiding the
+/// per-call `String` allocation that the previous `format_double` returned.
+fn write_double<W: Write>(writer: &mut W, v: f64) -> io::Result<()> {
+    if v.is_nan() || v.is_infinite() || v == 0.0 {
+        return writer.write_all(b"0");
     }
-    // %.6g: 6 significant figures, removes trailing zeros after decimal point.
-    // Rust doesn't have a %g format natively, so we mimic it:
-    // use scientific notation when |v| < 1e-4 or |v| >= 1e6; else fixed.
-    if v == 0.0 {
-        return "0".to_string();
-    }
+
+    // Stack buffer — 32 bytes is more than enough for any "%.5e" or
+    // "%.prec$" formatting of an f64 (sign + 7 mantissa digits + 'e' +
+    // signed 3-digit exponent ≈ 14 bytes worst case).
+    let mut buf = [0u8; 32];
     let abs = v.abs();
     if !(1e-4..1e6).contains(&abs) {
-        // Scientific notation, 5 decimal places after dot = 6 significant digits
-        let s = format!("{:.5e}", v);
-        trim_scientific(&s)
+        // Scientific notation, 5 decimal places after dot = 6 significant
+        // digits. Format into stack buffer, then trim trailing zeros from
+        // mantissa and reformat the exponent inline (no heap String).
+        let len = {
+            let mut cursor = &mut buf[..];
+            write!(cursor, "{:.5e}", v)?;
+            32 - cursor.len()
+        };
+        write_trim_scientific(writer, &buf[..len])
     } else {
         // Fixed notation. Determine decimal places for 6 sig figs.
         let digits_before_decimal = abs.log10().floor() as i32 + 1;
         let decimal_places = (6 - digits_before_decimal).max(0) as usize;
-        let s = format!("{:.prec$}", v, prec = decimal_places);
-        trim_fixed(&s)
-    }
-}
-
-/// Trim trailing zeros from a fixed-point string (e.g. "1.50000" → "1.5").
-fn trim_fixed(s: &str) -> String {
-    if s.contains('.') {
-        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
-        trimmed.to_string()
-    } else {
-        s.to_string()
-    }
-}
-
-/// Normalise a Rust scientific notation string to match Java's `%g` output.
-///
-/// Rust produces `1.23456e7`; Java produces `1.23456e+07`. We want to match
-/// the Percolator-readable convention (either works for Percolator, but for
-/// the byte-parity test we normalise to remove leading zeros in exponent and
-/// strip trailing zeros in the significand).
-fn trim_scientific(s: &str) -> String {
-    // Split at 'e'
-    if let Some(pos) = s.find('e') {
-        let mantissa = s[..pos].to_string();
-        let exp_part = &s[pos + 1..];
-
-        // Trim trailing zeros from mantissa (after decimal point)
-        let mantissa = if mantissa.contains('.') {
-            mantissa.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            mantissa
+        let len = {
+            let mut cursor = &mut buf[..];
+            write!(cursor, "{:.prec$}", v, prec = decimal_places)?;
+            32 - cursor.len()
         };
-
-        // Parse and reformat exponent (remove leading zeros, keep sign)
-        let exp_val: i32 = exp_part.parse().unwrap_or(0);
-        format!("{}e{:+03}", mantissa, exp_val)
-    } else {
-        s.to_string()
+        write_trim_fixed(writer, &buf[..len])
     }
+}
+
+/// Write the bytes in `s` to `writer`, trimming any trailing `'0'` (and a
+/// dangling `'.'`) from a fixed-point representation. e.g. `"1.50000"` →
+/// `"1.5"`. If `s` has no `'.'`, it is written verbatim.
+fn write_trim_fixed<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
+    if !s.contains(&b'.') {
+        return writer.write_all(s);
+    }
+    let mut end = s.len();
+    while end > 0 && s[end - 1] == b'0' {
+        end -= 1;
+    }
+    if end > 0 && s[end - 1] == b'.' {
+        end -= 1;
+    }
+    writer.write_all(&s[..end])
+}
+
+/// Write a scientific-notation byte slice to `writer`, normalised to match
+/// Java's `%g`-style output.
+///
+/// Rust formats `1.23456e7`; Java formats `1.23456e+07`. We trim trailing
+/// zeros (and a dangling `.`) from the mantissa, then re-emit the exponent
+/// with explicit sign and a minimum width of 2 digits (`e{:+03}` style).
+fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
+    let pos = match s.iter().position(|&b| b == b'e') {
+        Some(p) => p,
+        None => return writer.write_all(s),
+    };
+    let mantissa = &s[..pos];
+    let exp_part = &s[pos + 1..];
+
+    // Trim trailing zeros (and a dangling '.') from the mantissa if it has
+    // a decimal point.
+    let mantissa_end = if mantissa.contains(&b'.') {
+        let mut end = mantissa.len();
+        while end > 0 && mantissa[end - 1] == b'0' {
+            end -= 1;
+        }
+        if end > 0 && mantissa[end - 1] == b'.' {
+            end -= 1;
+        }
+        end
+    } else {
+        mantissa.len()
+    };
+    writer.write_all(&mantissa[..mantissa_end])?;
+
+    // Parse exponent and re-emit with explicit sign + min width 2. We
+    // accept the same `unwrap_or(0)` semantics as the original code.
+    let exp_str = std::str::from_utf8(exp_part).unwrap_or("0");
+    let exp_val: i32 = exp_str.parse().unwrap_or(0);
+    write!(writer, "e{:+03}", exp_val)
 }
 
 

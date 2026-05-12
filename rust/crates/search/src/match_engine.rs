@@ -228,7 +228,11 @@ pub fn match_spectra(
                         }
                     }
                     if let Some((err, score)) = best_for_charge {
-                        let features = compute_psm_features(scored_spec, &cand.peptide, scorer);
+                        // Track B: feature extraction hoisted to post-top-N
+                        // finalization. Push with a default sentinel; the
+                        // post-spec_e_value pass below fills features only for
+                        // PSMs that survive top-N retention.
+                        let features = PsmFeatures::default();
                         queue.push(PsmMatch {
                             spectrum_idx: spec_idx,
                             candidate: cand.clone(),
@@ -278,6 +282,19 @@ pub fn match_spectra(
                     idx,
                 );
             }
+
+            // Track B: feature extraction hoisted post-top-N. After
+            // spec_e_value computation, the queue contains only the final
+            // retained PSMs (top_n_psms_per_spectrum). Fill in the
+            // heavyweight per-PSM features here so we pay this cost once per
+            // retained PSM instead of once per candidate scored.
+            //
+            // Bit-identity: `features` is NOT part of `PsmMatch::cmp`, so
+            // mutating it does not perturb heap ordering or top-N retention.
+            queue.fill_post_topn(|psm| {
+                let ss = scored_spec_for_charge(psm.charge_used);
+                psm.features = compute_psm_features(ss, &psm.candidate.peptide, scorer);
+            });
 
             queue
         })

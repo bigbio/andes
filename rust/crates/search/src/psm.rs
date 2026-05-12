@@ -184,6 +184,30 @@ impl TopNQueue {
         self.heap.iter().map(|Reverse(m)| m)
     }
 
+    /// Apply `f` to each retained PSM in-place. Used for filling in
+    /// post-finalization fields (e.g. `features`) that are NOT part of
+    /// `PsmMatch::cmp` and therefore do not affect heap ordering.
+    ///
+    /// Implementation drains the heap, applies `f`, and re-pushes — this is
+    /// O(N log N) on a small `N` (top-N, typically 1-10) and avoids the
+    /// std-library restriction that `BinaryHeap::iter_mut()` is not exposed
+    /// (it would let callers break the heap invariant). Since features do
+    /// not participate in ordering, the re-push is logically a no-op for
+    /// retention.
+    ///
+    /// This is distinct from `update_psm_enrichment` only in intent
+    /// (post-top-N feature fill vs Phase-7 score/e-value enrichment) — the
+    /// mechanism is identical.
+    pub fn fill_post_topn<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        for psm in &mut psms {
+            f(psm);
+        }
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
     /// Return the best PSM (smallest `spec_e_value`, then largest `score`)
     /// without removing it. Returns `None` if the queue is empty.
     ///

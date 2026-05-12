@@ -100,13 +100,47 @@ struct Cli {
 
     /// Path to the .param scoring model file.
     ///
-    /// If not supplied, the bundled `HCD_QExactive_Tryp.param` file from the
-    /// MS-GF+ source tree is used (resolved relative to the Cargo manifest
-    /// directory at compile time). When running the binary outside the source
+    /// If not supplied, a bundled file under
+    /// `src/main/resources/ionstat/` is selected from
+    /// `(--fragmentation, --instrument, --protocol)` (default
+    /// `HCD_QExactive_Tryp.param`). When running the binary outside the source
     /// tree this path may not exist; supply --param-file explicitly in that
     /// case.
     #[arg(long)]
     param_file: Option<PathBuf>,
+
+    /// Path to a Java-format mods.txt file describing fixed and variable
+    /// modifications. Format: each non-comment line is
+    /// `<mass>,<aa>,<fix|opt>,<location>,<name>`, where:
+    ///   - `<mass>` is a numeric monoisotopic mass delta (Da). Composition
+    ///     strings (e.g. `C2H3N1O1`) are **not** yet supported.
+    ///   - `<aa>` is a single uppercase letter or `*` (wildcard).
+    ///   - `<location>` is one of `any|N-term|C-term|Prot-N-term|Prot-C-term`.
+    /// A single `NumMods=N` line sets the max variable mods per peptide.
+    /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
+    /// are ignored. When omitted, the binary uses its built-in defaults
+    /// (Carbamidomethyl-C fixed, Oxidation-M variable).
+    #[arg(long = "mod", value_name = "MODFILE")]
+    mod_file: Option<PathBuf>,
+
+    /// Fragmentation method index (Java's `-m`):
+    ///   0=Auto/CID (default), 1=CID, 2=ETD, 3=HCD, 4=UVPD.
+    /// Used to choose the bundled .param file when --param-file is not given.
+    #[arg(long, value_name = "ID")]
+    fragmentation: Option<u8>,
+
+    /// Instrument type index (Java's `-inst`):
+    ///   0=LowRes (default), 1=HighRes, 2=TOF, 3=QExactive.
+    /// Used to choose the bundled .param file when --param-file is not given.
+    #[arg(long, value_name = "ID")]
+    instrument: Option<u8>,
+
+    /// Protocol index (Java's `-protocol`):
+    ///   0=Automatic (default), 1=Phosphorylation, 2=iTRAQ,
+    ///   3=iTRAQPhospho, 4=TMT, 5=Standard.
+    /// Used to choose the bundled .param file when --param-file is not given.
+    #[arg(long, value_name = "ID")]
+    protocol: Option<u8>,
 
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
@@ -155,54 +189,62 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let idx = SearchIndex::from_target_db(&target_db, &cli.decoy_prefix);
     eprintln!("[PHASE search_index_build: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
-    // ── 3. Build AminoAcidSet (default mods: CAM fixed, Oxidation M variable) ─
-    let cam = Modification {
-        name: "Carbamidomethyl".into(),
-        mass_delta: 57.02146,
-        residue: ResidueSpec::Specific(b'C'),
-        location: ModLocation::Anywhere,
-        fixed: true,
-        accession: None,
-    };
-    let ox = Modification {
-        name: "Oxidation".into(),
-        mass_delta: 15.99491,
-        residue: ResidueSpec::Specific(b'M'),
-        location: ModLocation::Anywhere,
-        fixed: false,
-        accession: None,
-    };
-    let aa = AminoAcidSetBuilder::new_standard()
-        .add_fixed_mod(cam)
-        .add_variable_mod(ox)
-        .build()?;
-
-    // ── 4. Load Param scoring model ───────────────────────────────────────────
-    let param_path = match cli.param_file {
-        Some(p) => p,
+    // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
+    //
+    // If --mod is given, parse the Java-format mods.txt file. Otherwise
+    // fall back to msgf-rust's historical defaults (CAM fixed on C,
+    // Oxidation variable on M) so existing tests keep their behaviour.
+    //
+    // `num_mods_from_file` is populated only when --mod is given and the
+    // file contains a `NumMods=N` line; it overrides the default
+    // `max_variable_mods_per_peptide` (3) below.
+    let (aa, num_mods_from_file) = match &cli.mod_file {
+        Some(path) => {
+            let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
+                .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
+            let set = AminoAcidSetBuilder::new_standard()
+                .add_mods_from_file(path)
+                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
+                .build()
+                .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
+            eprintln!(
+                "Loaded modifications from {} (NumMods={})",
+                path.display(),
+                n.map(|v| v.to_string()).unwrap_or_else(|| "default".into()),
+            );
+            (set, n)
+        }
         None => {
-            // Resolve bundled param relative to the source tree.  This works
-            // when the binary is run from the workspace (e.g., `cargo run`
-            // or `cargo test --release`).  The path is embedded at compile
-            // time, so it is stable across platforms as long as the directory
-            // structure is unchanged.
-            let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../..")
-                .join("src/main/resources/ionstat/HCD_QExactive_Tryp.param");
-            match candidate.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    return Err(format!(
-                        "bundled param file not found at `{}`: {e}\n\
-                         Hint: supply --param-file <PATH> to specify the \
-                         scoring model explicitly.",
-                        candidate.display()
-                    )
-                    .into());
-                }
-            }
+            let cam = Modification {
+                name: "Carbamidomethyl".into(),
+                mass_delta: 57.02146,
+                residue: ResidueSpec::Specific(b'C'),
+                location: ModLocation::Anywhere,
+                fixed: true,
+                accession: None,
+            };
+            let ox = Modification {
+                name: "Oxidation".into(),
+                mass_delta: 15.99491,
+                residue: ResidueSpec::Specific(b'M'),
+                location: ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+            };
+            let set = AminoAcidSetBuilder::new_standard()
+                .add_fixed_mod(cam)
+                .add_variable_mod(ox)
+                .build()?;
+            (set, None)
         }
     };
+
+    // ── 4. Load Param scoring model ───────────────────────────────────────────
+    let param_path = match cli.param_file.clone() {
+        Some(p) => p,
+        None    => resolve_bundled_param(cli.fragmentation, cli.instrument, cli.protocol)?,
+    };
+    eprintln!("Param file: {}", param_path.display());
 
     let t_phase = std::time::Instant::now();
     let param = Param::load_from_file(&param_path)
@@ -222,6 +264,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.min_peaks = cli.min_peaks;
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;
+    if let Some(n) = num_mods_from_file {
+        params.max_variable_mods_per_peptide = n;
+    }
 
     // ── 6+7. Stream-load + chunked search ─────────────────────────────────
     //
@@ -443,4 +488,158 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Translate `(--fragmentation, --instrument, --protocol)` into a bundled
+/// `.param` filename and resolve it under
+/// `src/main/resources/ionstat/` relative to the cargo manifest dir.
+///
+/// CLI indices match Java's:
+/// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
+/// - instrument:    0=LowRes,   1=HighRes, 2=TOF, 3=QExactive
+/// - protocol:      0=Automatic,1=Phosphorylation, 2=iTRAQ,
+///                  3=iTRAQPhospho, 4=TMT, 5=Standard
+///
+/// When all three are `None`, the historical default
+/// `HCD_QExactive_Tryp.param` is returned (preserving existing tests'
+/// behaviour). Only Tryp is supported as the enzyme component for now;
+/// other enzymes require the user to pass `--param-file` directly.
+///
+/// Returns an error if the resolved filename does not exist on disk.
+fn resolve_bundled_param(
+    fragmentation: Option<u8>,
+    instrument:    Option<u8>,
+    protocol:      Option<u8>,
+) -> Result<PathBuf, String> {
+    // Default file when no flags are given — preserves the previous
+    // hard-coded behaviour.
+    if fragmentation.is_none() && instrument.is_none() && protocol.is_none() {
+        return canonicalize_bundled("HCD_QExactive_Tryp.param");
+    }
+
+    let frag = match fragmentation.unwrap_or(0) {
+        // 0 is "Auto/CID" in Java's `-m` semantics. We don't yet implement
+        // activation-method inference per spectrum, so we map 0 → CID for
+        // the .param-file picker.
+        0 | 1 => "CID",
+        2     => "ETD",
+        3     => "HCD",
+        4     => "UVPD",
+        n     => return Err(format!(
+            "invalid --fragmentation {n}: valid range is 0..=4 \
+             (0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD)"
+        )),
+    };
+    let inst = match instrument.unwrap_or(0) {
+        0 => "LowRes",
+        1 => "HighRes",
+        2 => "TOF",
+        3 => "QExactive",
+        n => return Err(format!(
+            "invalid --instrument {n}: valid range is 0..=3 \
+             (0=LowRes, 1=HighRes, 2=TOF, 3=QExactive)"
+        )),
+    };
+    let prot_suffix: &str = match protocol.unwrap_or(0) {
+        // Automatic/Standard: no suffix.
+        0 | 5 => "",
+        1     => "_Phosphorylation",
+        2     => "_iTRAQ",
+        3     => "_iTRAQPhospho",
+        4     => "_TMT",
+        n     => return Err(format!(
+            "invalid --protocol {n}: valid range is 0..=5 \
+             (0=Automatic, 1=Phosphorylation, 2=iTRAQ, \
+              3=iTRAQPhospho, 4=TMT, 5=Standard)"
+        )),
+    };
+
+    let filename = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
+    canonicalize_bundled(&filename)
+}
+
+/// Resolve a bundled `.param` filename under
+/// `src/main/resources/ionstat/` relative to the crate's cargo manifest
+/// dir (set at compile time). Returns a helpful error if the file does
+/// not exist.
+fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("src/main/resources/ionstat")
+        .join(filename);
+    candidate.canonicalize().map_err(|e| format!(
+        "bundled param file not found at `{}`: {e}\n\
+         Hint: not every (fragmentation, instrument, protocol) combination \
+         has a bundled .param file. Supply --param-file <PATH> to specify \
+         the scoring model explicitly, or list available files under \
+         `src/main/resources/ionstat/`.",
+        candidate.display()
+    ))
+}
+
+#[cfg(test)]
+mod param_resolver_tests {
+    use super::*;
+
+    #[test]
+    fn default_resolves_to_hcd_qexactive_tryp() {
+        // No flags → existing default.
+        let p = resolve_bundled_param(None, None, None).unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("HCD_QExactive_Tryp.param"),
+            "expected HCD_QExactive_Tryp.param, got {s}"
+        );
+    }
+
+    #[test]
+    fn hcd_qexactive_tmt_combo_resolves() {
+        // (HCD, QExactive, TMT) → bundled HCD_QExactive_Tryp_TMT.param.
+        let p = resolve_bundled_param(Some(3), Some(3), Some(4)).unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("HCD_QExactive_Tryp_TMT.param"),
+            "expected HCD_QExactive_Tryp_TMT.param, got {s}"
+        );
+    }
+
+    #[test]
+    fn cid_lowres_tryp_resolves() {
+        // (CID, LowRes, Standard) → CID_LowRes_Tryp.param.
+        let p = resolve_bundled_param(Some(1), Some(0), Some(5)).unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("CID_LowRes_Tryp.param"),
+            "expected CID_LowRes_Tryp.param, got {s}"
+        );
+    }
+
+    #[test]
+    fn missing_combo_errors_with_helpful_hint() {
+        // (CID, HighRes, TMT) — not in the bundle. Must surface a
+        // helpful "supply --param-file" hint.
+        let err = resolve_bundled_param(Some(1), Some(1), Some(4)).unwrap_err();
+        assert!(
+            err.contains("supply --param-file") || err.contains("--param-file"),
+            "expected hint about --param-file, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_fragmentation() {
+        let err = resolve_bundled_param(Some(99), None, None).unwrap_err();
+        assert!(err.contains("--fragmentation"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_instrument() {
+        let err = resolve_bundled_param(None, Some(99), None).unwrap_err();
+        assert!(err.contains("--instrument"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_protocol() {
+        let err = resolve_bundled_param(None, None, Some(99)).unwrap_err();
+        assert!(err.contains("--protocol"));
+    }
 }

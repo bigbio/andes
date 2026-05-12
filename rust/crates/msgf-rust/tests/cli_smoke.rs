@@ -158,6 +158,69 @@ fn cli_accepts_min_length_max_length_flags() {
 
 // ── mzML integration smoke test: format dispatch + non-empty PIN ─────────────
 
+// ── New flag smoke tests: --mod, --fragmentation, --instrument, --protocol ────
+
+#[test]
+fn cli_accepts_mod_fragmentation_instrument_protocol_flags() {
+    // Verify the new TMT-CLI flags parse and the param resolver picks up a
+    // real bundled .param file. We use the existing BSA fixture (no actual
+    // TMT spectra) and pass a tiny TMT-style mods file — the binary should
+    // exit 0 because all flags are valid and the resolver finds
+    // HCD_QExactive_Tryp_TMT.param.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+    let mods_path = dir.path().join("mods.txt");
+    std::fs::write(
+        &mods_path,
+        "NumMods=2\n\
+         229.162932,K,fix,any,TMT6plex\n\
+         229.162932,*,fix,N-term,TMT6plex\n\
+         57.021464,C,fix,any,Carbamidomethyl\n\
+         15.994915,M,opt,any,Oxidation\n",
+    ).unwrap();
+
+    let status = base_cmd(
+        "src/test/resources/test.mgf",
+        "src/test/resources/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--mod").arg(&mods_path)
+    .arg("--fragmentation").arg("3")
+    .arg("--instrument").arg("3")
+    .arg("--protocol").arg("4")
+    // Allow a wider tolerance — the TMT-labelled candidates differ in mass
+    // and we just want to confirm the binary exits cleanly, not assert
+    // recall on a non-TMT fixture.
+    .arg("--precursor-tol-ppm").arg("100")
+    .status()
+    .expect("run msgf-rust with TMT flags");
+
+    assert!(
+        status.success(),
+        "msgf-rust should exit 0 with --mod + TMT flags, got: {status}"
+    );
+    assert!(pin_path.exists(), "PIN output should still be written");
+}
+
+#[test]
+fn cli_rejects_invalid_protocol_index() {
+    // Out-of-range --protocol must produce a non-zero exit with the
+    // helpful error message from `resolve_bundled_param`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let status = base_cmd(
+        "src/test/resources/test.mgf",
+        "src/test/resources/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--protocol").arg("42")
+    .status()
+    .expect("run msgf-rust with bad protocol");
+
+    assert!(!status.success(), "out-of-range --protocol must fail");
+}
+
 #[test]
 fn cli_runs_end_to_end_on_tiny_mzml() {
     // tiny.pwiz.mzML is the standard fixture used by the mzML reader unit tests.

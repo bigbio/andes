@@ -102,6 +102,14 @@ struct SpectrumBuilder {
     ms_level: Option<u32>,
     rt_seconds: Option<f64>,
     precursor_mz: Option<f64>,
+    /// Thermo-specific monoisotopic-corrected precursor m/z, when the mzML
+    /// file is produced from a Thermo .raw and the instrument firmware ran
+    /// its on-board deisotoping. Lives under `<scan>` as a userParam:
+    ///   `<userParam name="[Thermo Trailer Extra]Monoisotopic M/Z:" value="..."/>`
+    /// When present, this is preferred over `selectedIon.MS:1000744` because
+    /// the raw isolation m/z may be off-by-one-or-more C13 isotopes for
+    /// Orbitrap-style data — matching Java MS-GF+'s precursor handling.
+    monoisotopic_mz_override: Option<f64>,
     precursor_charge: Option<i32>,
     precursor_intensity: Option<f32>,
     mz_array: Option<Vec<f64>>,
@@ -174,10 +182,16 @@ impl<R: BufRead> MzMLReader<R> {
             return Ok(None);
         }
 
-        let precursor_mz = match sb.precursor_mz {
-            Some(v) => v,
-            // MS2 without a precursor m/z: skip rather than error.
-            None => return Ok(None),
+        // Prefer the Thermo Trailer Extra monoisotopic m/z when available —
+        // the instrument firmware's deisotoping is more accurate than the
+        // raw isolation m/z (selectedIon.MS:1000744) for Orbitrap-class
+        // data. Falls back to the selected ion when the trailer is absent.
+        // Matches Java MS-GF+'s behavior.
+        let precursor_mz = match (sb.monoisotopic_mz_override, sb.precursor_mz) {
+            (Some(m), _) => m,
+            (None, Some(v)) => v,
+            // MS2 without any precursor m/z: skip rather than error.
+            (None, None) => return Ok(None),
         };
 
         let mz_vals = sb.mz_array.unwrap_or_default();
@@ -345,13 +359,48 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
 
-                // Self-closing elements — mostly cvParam.
+                // Self-closing elements — mostly cvParam and userParam.
                 Event::Empty(ref e) => {
                     let tag = e.local_name().as_ref().to_owned();
                     if tag == b"cvParam" {
                         // Extract info before any &mut self call.
                         if let Some(cv) = CvParamInfo::from_bytes_start(e) {
                             self.apply_cv_param(cv);
+                        }
+                    } else if tag == b"userParam"
+                        && matches!(self.state, State::Scan | State::Spectrum)
+                    {
+                        // The only userParam we care about is the Thermo
+                        // monoisotopic-correction recorded by the instrument
+                        // firmware. It lives under <scan> and is preferred
+                        // over selectedIon.MS:1000744 (raw isolation m/z) when
+                        // present. See Java MS-GF+'s mzML reader for the same
+                        // behavior — Orbitrap precursors are routinely
+                        // mis-isotoped by the isolation logic, and the
+                        // Trailer Extra value carries the deisotoped C0 peak.
+                        if let (Some(name), Some(val)) =
+                            (attr_str(e, b"name"), attr_str(e, b"value"))
+                        {
+                            // Match either the canonical Thermo string or a
+                            // few near-equivalent forms seen in older
+                            // proteomics workflows (case-insensitive on the
+                            // "Monoisotopic" word). Strict accept-list — no
+                            // unrelated userParams sneak through.
+                            let normalized = name.to_lowercase();
+                            if normalized.contains("monoisotopic m/z")
+                                || normalized.contains("monoisotopic mz")
+                            {
+                                if let Ok(mz) = val.parse::<f64>() {
+                                    // mzML files sometimes emit "0" or
+                                    // negative sentinels when the firmware
+                                    // couldn't decide. Treat as absent.
+                                    if mz > 0.0 {
+                                        if let Some(sb) = self.current.as_mut() {
+                                            sb.monoisotopic_mz_override = Some(mz);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -834,6 +883,119 @@ mod tests {
         assert_eq!(
             extract_scan_from_id("controllerType=0 controllerNumber=1 scan=42"),
             Some(42)
+        );
+    }
+
+    /// Thermo Trailer Extra `Monoisotopic M/Z` userParam under `<scan>`
+    /// overrides the raw isolation m/z (`selectedIon.MS:1000744`). This
+    /// matches Java MS-GF+'s precursor-mass handling for Thermo data and is
+    /// load-bearing for TMT / Orbitrap recall (without it, Rust reads
+    /// off-by-isotope precursor masses and misses real peptide matches).
+    #[test]
+    fn thermo_trailer_monoisotopic_overrides_selected_ion_mz() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        // Same shape as ms2_spectrum_xml but with a Thermo trailer under
+        // <scan>. selectedIon m/z = 625.338 (raw isolation), trailer
+        // monoisotopic m/z = 625.004 (firmware deisotoping, off by 1 C13/3).
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1">
+                <scan>
+                  <cvParam accession="MS:1000016" name="scan start time"
+                           value="1.5" unitAccession="UO:0000031"
+                           unitName="minute"/>
+                  <userParam name="[Thermo Trailer Extra]Monoisotopic M/Z:"
+                             type="xsd:float" value="625.0037"/>
+                </scan>
+              </scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z"
+                               value="625.338134765625"/>
+                      <cvParam accession="MS:1000041" name="charge state" value="3"/>
+                    </selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {}
+                {}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            bda_plain("MS:1000514", &mz_b64),
+            bda_plain("MS:1000515", &int_b64),
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra.len(), 1);
+        assert!(
+            (spectra[0].precursor_mz - 625.0037).abs() < 1e-6,
+            "expected Thermo trailer monoisotopic m/z (625.0037), got {}",
+            spectra[0].precursor_mz
+        );
+    }
+
+    /// When the Thermo trailer is absent, the reader still falls back to
+    /// `selectedIon.MS:1000744`. Regression test for the existing path.
+    #[test]
+    fn precursor_mz_falls_back_to_selected_ion_without_trailer() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=42",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            500.5,
+            Some(2),
+        );
+        let spectra = collect_ok(&wrap_spectra(&spec));
+        assert_eq!(spectra.len(), 1);
+        assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
+    }
+
+    /// A zero or negative trailer value (firmware "no decision" sentinel)
+    /// must not override a real selectedIon m/z — otherwise we'd plant a
+    /// nonsense precursor mass.
+    #[test]
+    fn zero_thermo_trailer_does_not_override() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1">
+                <scan>
+                  <userParam name="[Thermo Trailer Extra]Monoisotopic M/Z:"
+                             type="xsd:float" value="0"/>
+                </scan>
+              </scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z"
+                               value="700.25"/>
+                    </selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {}
+                {}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            bda_plain("MS:1000514", &mz_b64),
+            bda_plain("MS:1000515", &int_b64),
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra.len(), 1);
+        assert!(
+            (spectra[0].precursor_mz - 700.25).abs() < 1e-6,
+            "zero-trailer must fall back to selectedIon m/z; got {}",
+            spectra[0].precursor_mz
         );
     }
 

@@ -22,7 +22,7 @@ fn bsa_test_mgf_produces_some_matches() {
         .collect();
     assert!(!spectra.is_empty(), "test.mgf must contain at least one spectrum");
 
-    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &rank_scorer(), 0.05, "XXX");
+    let (queues, _candidates) = match_spectra(&spectra, &idx, &params, &rank_scorer(), 0.05, "XXX");
     assert_eq!(queues.len(), spectra.len());
 
     // At least one spectrum should have a match (BSA is a known target).

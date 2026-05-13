@@ -463,7 +463,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    output::write_pin(&cli.output_pin, &spectra, &queues, &prepared.candidates, &params, &idx, &cli.decoy_prefix)?;
+    output::write_pin(&cli.output_pin, &spectra, &queues, &prepared.candidates, &params, &idx)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
         cli.output_pin.display(),
@@ -505,7 +505,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// behaviour). Only Tryp is supported as the enzyme component for now;
 /// other enzymes require the user to pass `--param-file` directly.
 ///
-/// Returns an error if the resolved filename does not exist on disk.
+/// Walks Java's `NewScorerFactory.get(...)` fallback ladder: try the exact
+/// `{frag}_{inst}_Tryp{protocol}.param` first; if that doesn't resolve, drop
+/// the protocol suffix; if that also doesn't resolve, use the final
+/// `(frag, inst)`-keyed ladder. Returns an error only if even the
+/// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
+/// resources (a packaging defect, not a CLI input error).
 fn resolve_bundled_param(
     fragmentation: Option<u8>,
     instrument:    Option<u8>,
@@ -517,10 +522,19 @@ fn resolve_bundled_param(
         return canonicalize_bundled("HCD_QExactive_Tryp.param");
     }
 
+    // Step 0: Validate + normalize inputs (mirrors Java NewScorerFactory.get).
+    //
+    // Java's normalization rules:
+    //   - PQD or null method → CID
+    //   - null enzyme → Trypsin (we hardcode Tryp; n-term enzymes need
+    //     --param-file directly)
+    //   - null instType → LowRes
+    //   - HCD with instType not in {HighRes, QExactive} → upgrade to QExactive
+    //
+    // Our CLI uses 0=Auto/CID for `--fragmentation`, so 0→CID matches Java's
+    // "null→CID" path. PQD is not exposed in our CLI, so `frag` is never
+    // rewritten — only `inst` gets the HCD-upgrade mutation below.
     let frag = match fragmentation.unwrap_or(0) {
-        // 0 is "Auto/CID" in Java's `-m` semantics. We don't yet implement
-        // activation-method inference per spectrum, so we map 0 → CID for
-        // the .param-file picker.
         0 | 1 => "CID",
         2     => "ETD",
         3     => "HCD",
@@ -530,7 +544,7 @@ fn resolve_bundled_param(
              (0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD)"
         )),
     };
-    let inst = match instrument.unwrap_or(0) {
+    let mut inst = match instrument.unwrap_or(0) {
         0 => "LowRes",
         1 => "HighRes",
         2 => "TOF",
@@ -554,8 +568,55 @@ fn resolve_bundled_param(
         )),
     };
 
-    let filename = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
-    canonicalize_bundled(&filename)
+    // HCD with non-(HighRes|QExactive) inst → upgrade to QExactive (Java rule).
+    if frag == "HCD" && inst != "HighRes" && inst != "QExactive" {
+        inst = "QExactive";
+    }
+
+    // Step 1: Try the exact requested combination first.
+    //   `{frag}_{inst}_Tryp{prot_suffix}.param`
+    let exact = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
+    if let Ok(path) = canonicalize_bundled(&exact) {
+        return Ok(path);
+    }
+
+    // Step 2: Drop protocol — try `{frag}_{inst}_Tryp.param`.
+    // This mirrors Java's `return get(method, instType, enzyme)` fallback
+    // (NewScorerFactory.java line ~120). For (CID, HighRes, Tryp, TMT) this
+    // lands on `CID_HighRes_Tryp.param`, which IS what Java would pick when
+    // the protocol-specific file is missing.
+    if !prot_suffix.is_empty() {
+        let no_protocol = format!("{frag}_{inst}_Tryp.param");
+        if let Ok(path) = canonicalize_bundled(&no_protocol) {
+            eprintln!(
+                "Param resolver: `{exact}` not bundled; falling back to `{no_protocol}` \
+                 (Java NewScorerFactory drops protocol suffix when exact match missing)",
+            );
+            return Ok(path);
+        }
+    }
+
+    // Step 3: Alternate enzyme — Java tries Trypsin (for C-term enzymes) or
+    // LysN (for N-term enzymes). We always use Tryp here, so this step is
+    // a no-op for now. If/when N-term enzyme support lands, replicate this.
+
+    // Step 4: Final fallback ladder (Java NewScorerFactory.java lines ~136-160).
+    //   - HCD + (TOF|HighRes) + C-term → CID_TOF_Tryp
+    //   - ETD + C-term                  → ETD_LowRes_Tryp
+    //   - Non-electron + N-term         → CID_LowRes_LysN  (skipped; N-term TBD)
+    //   - default                        → CID_LowRes_Tryp
+    //
+    // For our currently-supported (frag, inst) combos:
+    let final_fallback = match (frag, inst) {
+        ("HCD", "TOF") | ("HCD", "HighRes") => "CID_TOF_Tryp.param",
+        ("ETD", _) => "ETD_LowRes_Tryp.param",
+        _ => "CID_LowRes_Tryp.param",
+    };
+    eprintln!(
+        "Param resolver: `{exact}` not bundled and protocol-less drop also missing; \
+         using final fallback `{final_fallback}` (Java NewScorerFactory final ladder)",
+    );
+    canonicalize_bundled(final_fallback)
 }
 
 /// Resolve a bundled `.param` filename under
@@ -615,13 +676,43 @@ mod param_resolver_tests {
     }
 
     #[test]
-    fn missing_combo_errors_with_helpful_hint() {
-        // (CID, HighRes, TMT) — not in the bundle. Must surface a
-        // helpful "supply --param-file" hint.
-        let err = resolve_bundled_param(Some(1), Some(1), Some(4)).unwrap_err();
+    fn cid_highres_tmt_falls_back_to_cid_highres_tryp() {
+        // (CID, HighRes, TMT) — `CID_HighRes_Tryp_TMT.param` is not bundled.
+        // Java's NewScorerFactory drops the protocol suffix when the exact
+        // file is missing (see NewScorerFactory.java line ~120), landing on
+        // the protocol-less file. We mirror that behavior: this combination
+        // resolves to `CID_HighRes_Tryp.param` rather than erroring out.
+        let p = resolve_bundled_param(Some(1), Some(1), Some(4)).unwrap();
+        let s = p.to_string_lossy();
         assert!(
-            err.contains("supply --param-file") || err.contains("--param-file"),
-            "expected hint about --param-file, got: {err}"
+            s.ends_with("CID_HighRes_Tryp.param"),
+            "expected CID_HighRes_Tryp.param (protocol-suffix drop fallback), got {s}"
+        );
+    }
+
+    #[test]
+    fn hcd_lowres_tmt_normalizes_to_qexactive() {
+        // HCD with LowRes is invalid (Java upgrades inst to QExactive in
+        // step 0). So (HCD, LowRes, TMT) should land on
+        // `HCD_QExactive_Tryp_TMT.param` after normalization.
+        let p = resolve_bundled_param(Some(3), Some(0), Some(4)).unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("HCD_QExactive_Tryp_TMT.param"),
+            "expected HCD_QExactive_Tryp_TMT.param after HCD-LowRes normalization, got {s}"
+        );
+    }
+
+    #[test]
+    fn etd_highres_unknown_falls_back_to_etd_lowres_tryp() {
+        // (ETD, HighRes, Phospho) — `ETD_HighRes_Tryp_Phosphorylation.param`
+        // is not bundled, and the protocol-less `ETD_HighRes_Tryp.param` IS
+        // bundled, so the protocol-drop fallback lands on it. Test that.
+        let p = resolve_bundled_param(Some(2), Some(1), Some(1)).unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("ETD_HighRes_Tryp.param"),
+            "expected ETD_HighRes_Tryp.param (protocol-suffix drop fallback), got {s}"
         );
     }
 

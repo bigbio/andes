@@ -34,8 +34,9 @@
 //!   `Enzyme::is_cleavage_site` wiring; deferred.
 //!
 //! * **Proteins**: single column with the real protein accession resolved from
-//!   `SearchIndex::protein_at(psm.candidate.protein_index)`. Decoy accessions
-//!   already carry the decoy prefix. Multi-protein support is a future followup.
+//!   `SearchIndex::protein_at(candidates[psm.candidate_idx as usize].protein_index)`.
+//!   Decoy accessions already carry the decoy prefix. Multi-protein support
+//!   is a future followup.
 //!
 //! * **peplen**: residue count + 2 (includes both flanking residues).
 //!
@@ -46,7 +47,7 @@
 //!
 //! * **CalcMass**: `peptide.mass()` already includes H2O — neutral mass is
 //!   computed directly from the peptide.
-
+//!
 //! ## Feature columns
 //!
 //! All 14 feature columns are filled from `psm.features` (computed by
@@ -84,12 +85,16 @@ use model::spectrum::Spectrum;
 /// `spectra` and `queues` must be parallel slices (same length): `queues[i]`
 /// holds the top-N PSMs for `spectra[i]`.
 ///
-/// `search_index` is used to resolve protein accessions from
-/// `psm.candidate.protein_index`.  The combined target+decoy `ProteinDb`
-/// inside `search_index` already carries decoy prefixes in the decoy
-/// accessions, so no separate prefix string is needed for accession lookup.
+/// `candidates` is the per-search candidate pool owned by `PreparedSearch`.
+/// PSM-to-candidate resolution goes through `candidates[psm.candidate_idx as usize]`.
 ///
-/// `decoy_prefix` is used to derive the `Label` column (target = 1, decoy = -1).
+/// `search_index` is used to resolve protein accessions from
+/// `candidates[psm.candidate_idx as usize].protein_index`. The combined
+/// target+decoy `ProteinDb` inside `search_index` already carries decoy
+/// prefixes in the decoy accessions, so no separate prefix string is needed
+/// for accession lookup. The `Label` column is similarly derived without
+/// the prefix string — see the target-haystack memmem path in
+/// `write_psm_row`.
 pub fn write_pin(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
@@ -97,11 +102,10 @@ pub fn write_pin(
     candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
-    decoy_prefix: &str,
 ) -> io::Result<()> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
-    write_pin_to(&mut writer, spectra, queues, candidates, params, search_index, decoy_prefix)
+    write_pin_to(&mut writer, spectra, queues, candidates, params, search_index)
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp files.
@@ -114,9 +118,7 @@ pub fn write_pin_to<W: Write>(
     candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
-    decoy_prefix: &str,
 ) -> io::Result<()> {
-    let _ = decoy_prefix; // decoy status is read from candidates[psm.candidate_idx].is_decoy
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
     let mut label_cache: HashMap<Vec<u8>, i32> = HashMap::new();
@@ -746,7 +748,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands: Vec<Candidate> = vec![];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
         assert_eq!(
@@ -769,7 +771,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, true)];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1, "should have 1 data row");
@@ -792,7 +794,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, false)];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -817,7 +819,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands: Vec<Candidate> = vec![];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let rows = parse_rows(&buf);
         assert!(rows.is_empty(), "empty queue should produce no data rows");
@@ -837,7 +839,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, false)];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -877,7 +879,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, false)];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -910,7 +912,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(1, true)]; // protein_index=1 (decoy slot), is_decoy=true
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -943,7 +945,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, false)];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -976,7 +978,7 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, false)];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);

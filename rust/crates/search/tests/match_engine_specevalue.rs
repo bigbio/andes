@@ -116,7 +116,7 @@ fn run_single_peptide_search(
 fn spec_e_value_is_at_most_one_for_all_psms() {
     // After compute_spec_e_values_for_spectrum, no PSM should have
     // spec_e_value > 1.0 (spectral probability is always in (0, 1]).
-    let (queues, candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
+    let (queues, _candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
     assert_eq!(queues.len(), 1);
     let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!sorted.is_empty(), "expected at least one PSM");
@@ -136,7 +136,7 @@ fn top_psm_has_spec_e_value_set() {
     // something meaningful (not left at the sentinel 1.0 in most cases, but
     // this is not guaranteed for minimal fixtures — so we just verify it's
     // a valid probability in (0, 1]).
-    let (queues, candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
+    let (queues, _candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
     let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
     let top = &sorted[0];
     assert!(
@@ -155,7 +155,7 @@ fn sorted_vec_spec_e_value_is_non_decreasing() {
     // spec_e_value; values should be non-decreasing from index 0 onward.
     //
     // Use a larger protein so there are multiple candidate PSMs in the queue.
-    let (queues, candidates) = run_single_peptide_search(
+    let (queues, _candidates) = run_single_peptide_search(
         b"MKWVTFISLLLKWVTFISLLLER",
         b"WVTFISLLL",
         2,
@@ -182,14 +182,11 @@ fn psm_with_lower_spec_e_value_ranks_first() {
     // Directly construct two PsmMaches with different spec_e_values and verify
     // that the one with the lower e-value sorts first in the sorted_vec.
     use search::psm::TopNQueue;
-    use search::candidate_gen::Candidate;
 
     fn make_psm(score: f32, spec_e_value: f64) -> PsmMatch {
-        // Test-only: candidate_idx = 0 is a sentinel for queue-ordering tests
-        // that don't resolve the candidate back. The unused Candidate import is
-        // intentionally kept for tests that build a candidates Vec explicitly.
-        let _ = (AminoAcid::standard(b'A'), Peptide::new(vec![AminoAcid::standard(b'A').unwrap()], b'_', b'-'));
-        let _ = std::mem::size_of::<Candidate>();
+        // candidate_idx = 0 is a placeholder for queue-ordering tests that
+        // never resolve the candidate back. Safe because this test never
+        // touches a `candidates` slice.
         PsmMatch {
             spectrum_idx: 0,
             candidate_idx: 0,
@@ -240,7 +237,7 @@ fn top_psm_de_novo_score_equals_gf_max_minus_one() {
     // We verify the structural invariant rather than an exact numeric value:
     // de_novo_score must NOT be the sentinel (i32::MIN) and must be >= 0
     // (GF max_score is always positive for non-trivial peptides).
-    let (queues, candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
+    let (queues, _candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
     let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!sorted.is_empty(), "expected at least one PSM");
     let top = &sorted[0];
@@ -260,7 +257,7 @@ fn top_psm_e_value_is_spec_e_value_times_some_constant() {
     // After match_spectra, e_value = spec_e_value * num_distinct_peptides.
     // Since num_distinct_peptides >= 1, e_value >= spec_e_value.
     // We verify: e_value > 0 and e_value >= spec_e_value.
-    let (queues, candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
+    let (queues, _candidates) = run_single_peptide_search(b"MKWVTFISLLR", b"WVTFISLLR", 2);
     let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!sorted.is_empty(), "expected at least one PSM");
     let top = &sorted[0];
@@ -287,7 +284,7 @@ fn top_psm_e_value_is_spec_e_value_times_some_constant() {
 /// `peptide_seq` — the peptide residues (must be a contiguous sub-sequence).
 /// `charge`      — precursor charge to use.
 fn top_spec_e_value_for(protein_seq: &[u8], peptide_seq: &[u8], charge: u8) -> f64 {
-    let (queues, candidates) = run_single_peptide_search(protein_seq, peptide_seq, charge);
+    let (queues, _candidates) = run_single_peptide_search(protein_seq, peptide_seq, charge);
     let sorted = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!sorted.is_empty(), "expected at least one PSM");
     sorted[0].spec_e_value

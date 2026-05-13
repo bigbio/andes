@@ -61,8 +61,12 @@ pub struct PsmMatch {
     /// cloned the full `Candidate` (including its `Peptide.residues: Vec<...>`),
     /// allocating millions of times per large-fasta search. Now the queue stores
     /// only a 4-byte index and consumers (writers, feature extraction, GF) look
-    /// up the `Candidate` by index when needed. Sentinel `u32::MAX` means
-    /// "synthetic / no backing Candidate" (only used by a few tests).
+    /// up the `Candidate` by index when needed.
+    ///
+    /// Every real PSM points at a valid index into `PreparedSearch.candidates`.
+    /// There is no "synthetic / no backing Candidate" sentinel — test fixtures
+    /// that don't need to resolve back use `0` as a placeholder and avoid
+    /// touching the candidates slice from inside the test.
     pub candidate_idx: u32,
     pub charge_used: u8,
     /// Signed: positive when peptide mass exceeds spectrum's implied mass.

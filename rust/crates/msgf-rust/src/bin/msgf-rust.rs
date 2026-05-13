@@ -463,7 +463,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    output::write_pin(&cli.output_pin, &spectra, &queues, &prepared.candidates, &params, &idx, &cli.decoy_prefix)?;
+    output::write_pin(&cli.output_pin, &spectra, &queues, &prepared.candidates, &params, &idx)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
         cli.output_pin.display(),
@@ -505,7 +505,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// behaviour). Only Tryp is supported as the enzyme component for now;
 /// other enzymes require the user to pass `--param-file` directly.
 ///
-/// Returns an error if the resolved filename does not exist on disk.
+/// Walks Java's `NewScorerFactory.get(...)` fallback ladder: try the exact
+/// `{frag}_{inst}_Tryp{protocol}.param` first; if that doesn't resolve, drop
+/// the protocol suffix; if that also doesn't resolve, use the final
+/// `(frag, inst)`-keyed ladder. Returns an error only if even the
+/// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
+/// resources (a packaging defect, not a CLI input error).
 fn resolve_bundled_param(
     fragmentation: Option<u8>,
     instrument:    Option<u8>,
@@ -527,8 +532,9 @@ fn resolve_bundled_param(
     //   - HCD with instType not in {HighRes, QExactive} → upgrade to QExactive
     //
     // Our CLI uses 0=Auto/CID for `--fragmentation`, so 0→CID matches Java's
-    // "null→CID" path.
-    let mut frag = match fragmentation.unwrap_or(0) {
+    // "null→CID" path. PQD is not exposed in our CLI, so `frag` is never
+    // rewritten — only `inst` gets the HCD-upgrade mutation below.
+    let frag = match fragmentation.unwrap_or(0) {
         0 | 1 => "CID",
         2     => "ETD",
         3     => "HCD",

@@ -277,34 +277,71 @@ fn expand_mod_combinations(
     let n = span.len();
     // For each position, the list of variants at that residue.
     let position_variants: Vec<Vec<AminoAcid>> = span.iter().enumerate().map(|(i, &r)| {
-        let mut variants = params.aa_set.variants_for(r, ModLocation::Anywhere).to_vec();
+        let anywhere_variants = params.aa_set.variants_for(r, ModLocation::Anywhere);
 
-        // Position 0: add N-Term or Protein_N_Term variants.
-        if i == 0 {
-            let term_loc = if is_protein_n_term {
+        // Helper: returns true if `term_variants` contains a FIXED mod variant
+        // for this residue. When a fixed terminal mod applies, the residue
+        // MUST carry it — the unmodified Anywhere variant is not a valid
+        // candidate. (Matches Java MS-GF+: fixed mods are mandatory.)
+        let has_fixed_in = |term_variants: &[AminoAcid]| -> bool {
+            term_variants.iter().any(|aa| {
+                aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false)
+            })
+        };
+
+        // Collect the relevant terminal variant sets for this position.
+        let n_term_variants: &[AminoAcid] = if i == 0 {
+            let loc = if is_protein_n_term {
                 ModLocation::ProtNTerm
             } else {
                 ModLocation::NTerm
             };
-            for v in params.aa_set.variants_for(r, term_loc) {
-                if !variants.contains(v) {
-                    variants.push(v.clone());
-                }
-            }
-        }
-
-        // Position n-1: add C-Term or Protein_C_Term variants.
-        // (A single-residue span has i==0 and i==n-1 simultaneously — both sets apply.)
-        if i == n - 1 {
-            let term_loc = if is_protein_c_term {
+            params.aa_set.variants_for(r, loc)
+        } else {
+            &[]
+        };
+        let c_term_variants: &[AminoAcid] = if i == n - 1 {
+            let loc = if is_protein_c_term {
                 ModLocation::ProtCTerm
             } else {
                 ModLocation::CTerm
             };
-            for v in params.aa_set.variants_for(r, term_loc) {
-                if !variants.contains(v) {
-                    variants.push(v.clone());
-                }
+            params.aa_set.variants_for(r, loc)
+        } else {
+            &[]
+        };
+
+        let has_fixed_n = has_fixed_in(n_term_variants);
+        let has_fixed_c = has_fixed_in(c_term_variants);
+
+        // If a fixed terminal mod is mandatory at this position, the
+        // unmodified Anywhere variant is not a legal candidate. Drop the
+        // Anywhere variants in that case; otherwise include them. This
+        // prevents the candidate explosion that wildcard fixed N-term TMT
+        // would otherwise cause (every peptide would be enumerated twice
+        // at position 0: once unmodded, once TMT-modded).
+        //
+        // Note: Anywhere variants always include the residue's own fixed
+        // mods folded in (e.g. K-anywhere already carries K-TMT), so this
+        // rule applies only to terminal mods.
+        let mut variants: Vec<AminoAcid> = if has_fixed_n || has_fixed_c {
+            Vec::new()
+        } else {
+            anywhere_variants.to_vec()
+        };
+
+        // Append all terminal variants (fixed + variable). When a fixed
+        // mod is present, the modded variant is the only legal one for
+        // that mod's residue/location slot; variable mods stack on top
+        // by adding additional explored variants.
+        for v in n_term_variants {
+            if !variants.contains(v) {
+                variants.push(v.clone());
+            }
+        }
+        for v in c_term_variants {
+            if !variants.contains(v) {
+                variants.push(v.clone());
             }
         }
 

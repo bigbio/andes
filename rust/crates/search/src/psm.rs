@@ -3,7 +3,6 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::candidate_gen::Candidate;
 
 /// Per-PSM fragment-ion feature columns computed from the scoring machinery
 /// and emitted into the Percolator `.pin` file.
@@ -57,7 +56,14 @@ pub struct PsmFeatures {
 #[derive(Debug, Clone)]
 pub struct PsmMatch {
     pub spectrum_idx: usize,
-    pub candidate: Candidate,
+    /// Index into the `&[Candidate]` slice owned by `PreparedSearch.candidates`.
+    /// Replaces the inlined `Candidate` clone: previously each push to the queue
+    /// cloned the full `Candidate` (including its `Peptide.residues: Vec<...>`),
+    /// allocating millions of times per large-fasta search. Now the queue stores
+    /// only a 4-byte index and consumers (writers, feature extraction, GF) look
+    /// up the `Candidate` by index when needed. Sentinel `u32::MAX` means
+    /// "synthetic / no backing Candidate" (only used by a few tests).
+    pub candidate_idx: u32,
     pub charge_used: u8,
     /// Signed: positive when peptide mass exceeds spectrum's implied mass.
     pub mass_error_ppm: f64,
@@ -245,22 +251,14 @@ impl TopNQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::amino_acid::AminoAcid;
-    use model::peptide::Peptide;
 
     fn make_match(spectrum_idx: usize, score: f32) -> PsmMatch {
-        let aa = AminoAcid::standard(b'A').unwrap();
-        let peptide = Peptide::new(vec![aa], b'_', b'-');
+        // Test-only PSM: candidate_idx = 0 is a sentinel for queue-ordering tests
+        // that never resolve back to a real Candidate. Tests that need to read
+        // peptide / protein metadata must build their own &[Candidate] alongside.
         PsmMatch {
             spectrum_idx,
-            candidate: Candidate {
-                peptide,
-                protein_index: 0,
-                start_offset_in_protein: 0,
-                is_decoy: false,
-                is_protein_n_term: false,
-                is_protein_c_term: false,
-            },
+            candidate_idx: 0,
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,

@@ -15,7 +15,7 @@ use model::{Enzyme, Tolerance};
 use model::tolerance::PrecursorTolerance;
 use search::{match_spectra, SearchIndex, SearchParams, TopNQueue};
 
-fn run_search(thread_count: usize) -> Vec<TopNQueue> {
+fn run_search(thread_count: usize) -> (Vec<TopNQueue>, Vec<search::candidate_gen::Candidate>) {
     // Use a scoped pool via `install` (NOT `build_global`) so the test does
     // not conflict with any global pool initialization done elsewhere.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -47,8 +47,8 @@ fn run_search(thread_count: usize) -> Vec<TopNQueue> {
 
 #[test]
 fn match_spectra_output_invariant_across_thread_counts() {
-    let q1 = run_search(1);
-    let q4 = run_search(4);
+    let (q1, cands_a) = run_search(1);
+    let (q4, cands_b) = run_search(4);
 
     assert_eq!(q1.len(), q4.len(), "queue count differs");
 
@@ -67,15 +67,13 @@ fn match_spectra_output_invariant_across_thread_counts() {
         if !psms_a.is_empty() {
             spectra_with_psms += 1;
             for (j, (a, b)) in psms_a.iter().zip(psms_b.iter()).enumerate() {
-                let pep_a: String = a
-                    .candidate
+                let pep_a: String = cands_a[a.candidate_idx as usize]
                     .peptide
                     .residues
                     .iter()
                     .map(|aa| aa.residue as char)
                     .collect();
-                let pep_b: String = b
-                    .candidate
+                let pep_b: String = cands_b[b.candidate_idx as usize]
                     .peptide
                     .residues
                     .iter()

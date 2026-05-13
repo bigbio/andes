@@ -463,7 +463,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    output::write_pin(&cli.output_pin, &spectra, &queues, &params, &idx, &cli.decoy_prefix)?;
+    output::write_pin(&cli.output_pin, &spectra, &queues, &prepared.candidates, &params, &idx, &cli.decoy_prefix)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
         cli.output_pin.display(),
@@ -483,7 +483,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cli.spectrum.display().to_string());
-        output::write_tsv(tsv_path, &spectra, &queues, &params, &idx, &spec_file_name, true)?;
+        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, true)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 

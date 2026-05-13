@@ -4,6 +4,7 @@
 //! accession string, scan number, spec_id) once per PSM, so each format
 //! only has to format columns from a stable struct.
 
+use search::candidate_gen::Candidate;
 use search::psm::PsmMatch;
 use search::search_index::SearchIndex;
 use model::spectrum::Spectrum;
@@ -22,27 +23,29 @@ pub(crate) struct RowContext {
 }
 
 impl RowContext {
-    /// Build a `RowContext` for one PSM.
-    pub(crate) fn new(spec: &Spectrum, psm: &PsmMatch, search_index: &SearchIndex) -> Self {
+    /// Build a `RowContext` for one PSM. Caller passes the resolved
+    /// `Candidate` (looked up via `psm.candidate_idx`) so this layer doesn't
+    /// need its own `candidates` slice reference.
+    pub(crate) fn new(spec: &Spectrum, cand: &Candidate, search_index: &SearchIndex) -> Self {
         let scan = spec.scan.unwrap_or(0);
         let spec_id = if spec.title.is_empty() {
             format!("scan={scan}")
         } else {
             spec.title.clone()
         };
-        let accession = resolve_accession(psm, search_index);
+        let accession = resolve_accession(cand, search_index);
         Self { scan, spec_id, accession }
     }
 }
 
-/// Resolve a protein accession from the `SearchIndex` for a given PSM.
+/// Resolve a protein accession from the `SearchIndex` for a given `Candidate`.
 ///
 /// The combined target+decoy `ProteinDb` inside `search_index` already carries
 /// decoy prefixes on decoy accessions (set by `target_plus_decoy`), so no
 /// prefix arithmetic is needed here. Falls back to `"PROT_{idx}"` if the
 /// index is out of range.
-pub(crate) fn resolve_accession(psm: &PsmMatch, search_index: &SearchIndex) -> String {
-    let idx = psm.candidate.protein_index;
+pub(crate) fn resolve_accession(cand: &Candidate, search_index: &SearchIndex) -> String {
+    let idx = cand.protein_index;
     match search_index.protein_at(idx) {
         Some(prot) => prot.accession.clone(),
         None => format!("PROT_{idx}"),

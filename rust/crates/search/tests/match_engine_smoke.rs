@@ -40,7 +40,7 @@ fn tiny_scorer() -> RankScorer {
     let mut frag_off_table = HashMap::new();
     frag_off_table.insert(part, vec![]);
 
-    let param = Param {
+    let mut param = Param {
         version: 10001,
         data_type: SpecDataType {
             activation: ActivationMethod::HCD,
@@ -65,7 +65,9 @@ fn tiny_scorer() -> RankScorer {
         ion_err_dist_table: HashMap::new(),
         noise_err_dist_table: HashMap::new(),
         ion_existence_table: HashMap::new(),
+        partition_ion_types_cache: HashMap::new(),
     };
+    param.rebuild_cache();
     RankScorer::new(&param)
 }
 
@@ -91,14 +93,14 @@ fn known_peptide_appears_in_top_n() {
     let mz = (target_mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, Some(charge as i32));
-    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
 
     assert_eq!(queues.len(), 1);
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected at least one match");
     let best = &top[0];
-    assert_eq!(best.candidate.peptide.length(), 9);
-    assert!(!best.candidate.is_decoy);
+    assert_eq!(candidates[best.candidate_idx as usize].peptide.length(), 9);
+    assert!(!candidates[best.candidate_idx as usize].is_decoy);
     assert!(best.mass_error_ppm.abs() < 1.0);
 }
 
@@ -126,7 +128,7 @@ fn top_n_capacity_respected() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, Some(charge as i32));
-    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     assert!(queues[0].len() <= 1);
 }
 
@@ -150,7 +152,7 @@ fn spectrum_without_charge_tries_charge_range() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, None);  // no charge!
-    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected charge_range to find a match");
     assert_eq!(top[0].charge_used, 2);
@@ -190,7 +192,7 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
     let spec = make_spectrum(mz, None);  // charge-missing
-    let queues = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
+    let (queues, candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
 
     // The only match must be at charge 3 (the precursor m/z is z=3-exact).

@@ -637,6 +637,7 @@ impl PrimitiveAaGraph {
             edge_mass_scratch,
             edge_score,
             peptide_mass,
+            mass_offset,
             scored_spec,
             scorer,
             charge,
@@ -751,23 +752,91 @@ fn compute_edge_error_scores(
     edge_mass_scratch: &[f64],
     edge_score: &mut [i32],
     peptide_mass: i32,
+    mass_offset: i32,
     scored_spec: &ScoredSpectrum<'_>,
     scorer: &RankScorer,
     charge: u8,
     parent_mass: f64,
 ) {
     let node_count = active_nodes.len();
+
+    // Spectrum-constant short-circuit: if either fast-out condition is true,
+    // every edge gets score 0. Done once for the whole graph instead of
+    // per-edge inside ScoredSpectrum::edge_score (~24k calls saved per graph
+    // on PXD001819).
+    if scorer.param().error_scaling_factor == 0
+        || scorer.param().ion_existence_table.is_empty()
+    {
+        return;
+    }
+
+    // Spectrum-constant: partition for this (charge, parent_mass, last_seg).
+    // Hoisted out of the per-edge inner loop — was the per-call partition_for
+    // binary search inside edge_score, now done once per graph build.
+    let last_seg = (scorer.param().num_segments - 1).max(0) as usize;
+    let part = scorer.param().partition_for(charge, parent_mass, last_seg);
+    let prob_peak = scored_spec.prob_peak;
+
+    // Spectrum-constant: ion_existence_score for each of the 4 possible
+    // ion_existence_index values (0..=3). Replaces the per-edge table lookup
+    // in scorer.ion_existence_score.
+    let ies = [
+        scorer.ion_existence_score(part, 0, prob_peak),
+        scorer.ion_existence_score(part, 1, prob_peak),
+        scorer.ion_existence_score(part, 2, prob_peak),
+        scorer.ion_existence_score(part, 3, prob_peak),
+    ];
+
+    // Graph-constant: observed peak mass for each node, keyed by dense mass
+    // index `(mass + mass_offset)`. Each unique node mass is observed at most
+    // once instead of once per outgoing edge. With ~18 edges per node on
+    // PXD001819 that's an ~18× reduction in the dominant inner cost of
+    // edge_score. `None` entries mark masses with no qualifying peak in
+    // the tolerance window.
+    let dense_len = (peptide_mass + mass_offset + 1) as usize;
+    // Pre-fill with None so unreachable masses don't need explicit insertion.
+    // Allocates once per graph (~1.3k entries on PXD001819); cheaper than
+    // re-observing 18× per node.
+    let mut observed_by_mass: Vec<Option<f64>> = vec![None; dense_len];
+    for &m in active_nodes {
+        let idx = (m + mass_offset) as usize;
+        observed_by_mass[idx] = scored_spec.observed_node_mass(m, scorer, charge, parent_mass);
+    }
+
     let mut clamp_count: u32 = 0;
     for ni in 0..node_count {
         let cur_mass = active_nodes[ni];
         if cur_mass == 0 || cur_mass == peptide_mass {
             continue;
         }
+        let cur_obs = observed_by_mass[(cur_mass + mass_offset) as usize];
         for e in edge_offset[ni]..edge_offset[ni + 1] {
             let prev_mass = edge_prev_node[e];
-            let theo_aa_mass = edge_mass_scratch[e];
-            let mut error_score =
-                scored_spec.edge_score(cur_mass, prev_mass, theo_aa_mass, scorer, charge, parent_mass);
+            // prev_mass should always be a valid representable mass for an
+            // edge written by build_in_place — fall through to None for
+            // safety if it somehow isn't.
+            let prev_obs = if prev_mass + mass_offset >= 0
+                && (prev_mass + mass_offset) as usize <= peptide_mass as usize + mass_offset as usize
+            {
+                observed_by_mass
+                    .get((prev_mass + mass_offset) as usize)
+                    .copied()
+                    .flatten()
+            } else {
+                None
+            };
+
+            // ion_existence_index: 1 if cur observed, +2 if prev observed.
+            let mut idx = 0usize;
+            if cur_obs.is_some() { idx += 1; }
+            if prev_obs.is_some() { idx += 2; }
+
+            let mut s = ies[idx];
+            if idx == 3 {
+                let delta = cur_obs.unwrap() - prev_obs.unwrap() - edge_mass_scratch[e];
+                s += scorer.error_score(part, delta as f32);
+            }
+            let mut error_score = s.round() as i32;
             if !(-100..=100).contains(&error_score) {
                 clamp_count += 1;
                 error_score = -4;

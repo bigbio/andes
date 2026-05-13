@@ -333,7 +333,22 @@ fn expand_recursive(
         return;
     }
     for variant in &position_variants[pos] {
-        let new_mods = mods_used + if variant.is_modified() { 1 } else { 0 };
+        // Only VARIABLE mods consume slots against the per-peptide cap.
+        // Fixed mods are unconditionally applied by the AminoAcidSet (e.g.
+        // CAM-on-C, TMT-on-K, TMT-on-N-term-wildcard) and must not count
+        // against max_variable_mods_per_peptide — otherwise a peptide with
+        // two fixed mods (e.g. TQAHTQQNMVEK + N-term-TMT + K-TMT) is pruned
+        // when NumMods=1, which is exactly the bug that caused 86% of TMT
+        // top-1 PSMs to diverge from Java.
+        //
+        // Matches Java MS-GF+'s `CandidatePeptideGrid.processCandidate`
+        // logic where `numMods` counts only optional/variable mods.
+        let consumes_slot = variant
+            .mod_
+            .as_ref()
+            .map(|m| !m.fixed)
+            .unwrap_or(false);
+        let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
         if new_mods > max_mods {
             continue;
         }

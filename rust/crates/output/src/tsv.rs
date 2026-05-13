@@ -20,6 +20,7 @@
 use std::io::{self, BufWriter, Write};
 
 use crate::row_context::{iter_ranked, RowContext};
+use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
@@ -46,6 +47,7 @@ pub fn write_tsv(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
     queues: &[TopNQueue],
+    candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
     spec_file_name: &str,
@@ -53,7 +55,7 @@ pub fn write_tsv(
 ) -> io::Result<()> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
-    write_tsv_to(&mut writer, spectra, queues, params, search_index, spec_file_name, is_mgf)
+    write_tsv_to(&mut writer, spectra, queues, candidates, params, search_index, spec_file_name, is_mgf)
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp
@@ -64,6 +66,7 @@ pub fn write_tsv_to<W: Write>(
     writer: &mut W,
     spectra: &[Spectrum],
     queues: &[TopNQueue],
+    candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
     spec_file_name: &str,
@@ -75,7 +78,7 @@ pub fn write_tsv_to<W: Write>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        write_spectrum_rows(writer, spec, queue, params, spec_file_name, is_mgf, search_index)?;
+        write_spectrum_rows(writer, spec, queue, candidates, params, spec_file_name, is_mgf, search_index)?;
     }
     Ok(())
 }
@@ -124,6 +127,7 @@ fn write_spectrum_rows<W: Write>(
     writer: &mut W,
     spec: &Spectrum,
     queue: &TopNQueue,
+    candidates: &[Candidate],
     params: &SearchParams,
     spec_file_name: &str,
     is_mgf: bool,
@@ -139,8 +143,9 @@ fn write_spectrum_rows<W: Write>(
     };
 
     for (_rank, psm) in iter_ranked(&psms) {
-        let ctx = RowContext::new(spec, psm, search_index);
-        write_psm_row(writer, spec, psm, &ctx, &row_ctx)?;
+        let cand = &candidates[psm.candidate_idx as usize];
+        let ctx = RowContext::new(spec, cand, search_index);
+        write_psm_row(writer, spec, psm, cand, &ctx, &row_ctx)?;
     }
     Ok(())
 }
@@ -149,6 +154,7 @@ fn write_psm_row<W: Write>(
     writer: &mut W,
     spec: &Spectrum,
     psm: &PsmMatch,
+    cand: &Candidate,
     ctx: &RowContext,
     row_ctx: &RowCtx<'_>,
 ) -> io::Result<()> {
@@ -186,7 +192,7 @@ fn write_psm_row<W: Write>(
     let charge = psm.charge_used;
 
     // Peptide: uses the existing Display impl → "pre.SEQ_WITH_MODS.post"
-    let peptide = &psm.candidate.peptide;
+    let peptide = &cand.peptide;
     let protein = &ctx.accession;
 
     // DeNovoScore
@@ -299,19 +305,24 @@ mod tests {
         }
     }
 
-    fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64) -> PsmMatch {
+    /// Build a single Candidate fixture. Mirrors the make_candidate in pin.rs.
+    fn make_candidate(protein_index: usize, is_decoy: bool) -> Candidate {
         let aa = AminoAcid::standard(b'A').unwrap();
         let peptide = Peptide::new(vec![aa], b'K', b'S');
+        Candidate {
+            peptide,
+            protein_index,
+            start_offset_in_protein: 0,
+            is_decoy,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate: Candidate {
-                peptide,
-                protein_index: 0,
-                start_offset_in_protein: 0,
-                is_decoy: false,
-                is_protein_n_term: false,
-                is_protein_c_term: false,
-            },
+            candidate_idx: 0,
             charge_used: 2,
             mass_error_ppm: 1.5,
             score,
@@ -368,7 +379,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+        let cands: Vec<search::candidate_gen::Candidate> = vec![];
+        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
 
         let cols = parse_header(&buf);
         assert_eq!(
@@ -404,7 +416,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mzML", false).unwrap();
+        let cands: Vec<search::candidate_gen::Candidate> = vec![];
+        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mzML", false).unwrap();
 
         let cols = parse_header(&buf);
         assert!(!cols.contains(&"Title".to_string()), "Title column must be absent when is_mgf=false");
@@ -422,7 +435,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+        let cands: Vec<search::candidate_gen::Candidate> = vec![];
+        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
 
         let rows = parse_rows(&buf);
         assert!(rows.is_empty(), "empty queue should produce no data rows");
@@ -444,7 +458,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+        let cands = vec![make_candidate(0, false)];
+        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 3, "should have 3 data rows");
@@ -495,14 +510,7 @@ mod tests {
 
         let psm = PsmMatch {
             spectrum_idx: 0,
-            candidate: Candidate {
-                peptide,
-                protein_index: 0,
-                start_offset_in_protein: 0,
-                is_decoy: false,
-                is_protein_n_term: false,
-                is_protein_c_term: false,
-            },
+            candidate_idx: 0,
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: 10.0,
@@ -520,7 +528,16 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+        let cand = Candidate {
+            peptide,
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        };
+        let cands = vec![cand];
+        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
@@ -546,13 +563,14 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         // protein_index = 0 → first target protein
-        let psm = make_psm(0, 10.0, 1e-5); // protein_index defaults to 0
+        let psm = make_psm(0, 10.0, 1e-5);
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
         let queues = vec![queue];
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+        let cands = vec![make_candidate(0, false)];
+        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -576,16 +594,15 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         // SearchIndex: 1 target (idx 0) + 1 decoy (idx 1, accession = "XXX_<base>")
-        let mut psm = make_psm(0, 10.0, 1e-5);
-        psm.candidate.protein_index = 1;
-        psm.candidate.is_decoy = true;
+        let psm = make_psm(0, 10.0, 1e-5);
 
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
         let queues = vec![queue];
+        let cands = vec![make_candidate(1, true)]; // decoy candidate at protein_index 1
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);

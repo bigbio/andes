@@ -137,7 +137,7 @@ fn phase6_task10_bsa_specevalue_parity_histogram() {
 
     // Use a broad decoy fraction (0.5) so we get a large top-N queue to search
     // for matching peptides, consistent with gf_java_parity.rs.
-    let queues = match_spectra(&spectra, &idx, &params, &scorer, 0.5, "XXX");
+    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.5, "XXX");
 
     // Track per-PSM outcomes.
     #[derive(Debug)]
@@ -179,7 +179,7 @@ fn phase6_task10_bsa_specevalue_parity_histogram() {
         // Search all PSMs in the queue for one whose plain residues match Java's reference.
         let top_psms = queue.clone().into_sorted_vec();
         let matched = top_psms.iter().find(|p| {
-            peptide_residue_string(&p.candidate.peptide)
+            peptide_residue_string(&candidates[p.candidate_idx as usize].peptide)
                 .eq_ignore_ascii_case(&jref.peptide)
         });
 

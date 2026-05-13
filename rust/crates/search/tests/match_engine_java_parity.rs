@@ -161,7 +161,7 @@ fn rust_matches_superset_java_target_psms() {
         .collect();
 
     let scorer = rank_scorer();
-    let queues = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
+    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
     assert_eq!(queues.len(), spectra.len());
 
     // Collect scan numbers of Rust spectra that have ≥1 target PSM.
@@ -174,7 +174,7 @@ fn rust_matches_superset_java_target_psms() {
         let has_target = queue_clone
             .into_sorted_vec()
             .iter()
-            .any(|m| !m.candidate.is_decoy);
+            .any(|m| !candidates[m.candidate_idx as usize].is_decoy);
         if !has_target {
             continue;
         }
@@ -234,7 +234,7 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
         .collect();
 
     let scorer = rank_scorer();
-    let queues = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
+    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
     assert_eq!(queues.len(), spectra.len());
 
     let mut top1_match = 0usize;
@@ -255,9 +255,9 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
 
         let sorted = queue.clone().into_sorted_vec();
         // Take the top-1 target PSM (skip decoys for the comparison).
-        let top_target = sorted.iter().find(|m| !m.candidate.is_decoy);
+        let top_target = sorted.iter().find(|m| !candidates[m.candidate_idx as usize].is_decoy);
         if let Some(top) = top_target {
-            let rust_pep = peptide_residue_string(&top.candidate.peptide);
+            let rust_pep = peptide_residue_string(&candidates[top.candidate_idx as usize].peptide);
             if rust_pep == *java_pep {
                 top1_match += 1;
             }

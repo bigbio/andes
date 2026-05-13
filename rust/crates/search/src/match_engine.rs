@@ -295,7 +295,7 @@ impl<'a> PreparedSearch<'a> {
                         let features = PsmFeatures::default();
                         queue.push(PsmMatch {
                             spectrum_idx: spec_idx,
-                            candidate: cand.clone(),
+                            candidate_idx: cand_idx as u32,
                             charge_used: z,
                             mass_error_ppm: err.mass_error_ppm,
                             score,
@@ -340,6 +340,7 @@ impl<'a> PreparedSearch<'a> {
                     top_charge,
                     fragment_tolerance_da,
                     idx,
+                    candidates,
                 );
             }
 
@@ -353,7 +354,8 @@ impl<'a> PreparedSearch<'a> {
             // mutating it does not perturb heap ordering or top-N retention.
             queue.fill_post_topn(|psm| {
                 let ss = scored_spec_for_charge(psm.charge_used);
-                psm.features = compute_psm_features(ss, &psm.candidate.peptide, scorer);
+                let cand = &candidates[psm.candidate_idx as usize];
+                psm.features = compute_psm_features(ss, &cand.peptide, scorer);
             });
 
                 queue
@@ -381,7 +383,15 @@ impl<'a> PreparedSearch<'a> {
 }
 
 /// Match every spectrum against every candidate from the SearchIndex.
-/// Returns one top-N PSM queue per spectrum, in input order.
+/// Returns one top-N PSM queue per spectrum (in input order) PLUS the
+/// enumerated `Vec<Candidate>` that backs the `PsmMatch::candidate_idx`
+/// handles inside each queue.
+///
+/// Callers that need to resolve a PSM's peptide / protein info must hold
+/// on to the returned candidates vector and look up by
+/// `psm.candidate_idx as usize`. The previous API embedded a cloned
+/// `Candidate` directly in every PsmMatch; that allocation cost is now
+/// gone but the resolution responsibility shifts to the caller.
 ///
 /// A `ScoredSpectrum` is built once per spectrum and reused across all
 /// candidates; candidates are bucketed by mass for sub-linear precursor
@@ -399,7 +409,7 @@ pub fn match_spectra(
     scorer: &RankScorer,
     fragment_tolerance_da: f64,
     decoy_prefix: &str,
-) -> Vec<TopNQueue> {
+) -> (Vec<TopNQueue>, Vec<Candidate>) {
     let prepared = PreparedSearch::prepare(
         idx,
         params,
@@ -407,7 +417,8 @@ pub fn match_spectra(
         fragment_tolerance_da,
         decoy_prefix,
     );
-    prepared.run_chunk(spectra, 0)
+    let queues = prepared.run_chunk(spectra, 0);
+    (queues, prepared.candidates)
 }
 
 /// For a single spectrum, compute the GF across the precursor tolerance
@@ -441,6 +452,7 @@ fn compute_spec_e_values_for_spectrum(
     top_charge: u8,
     fragment_tolerance_da: f64,
     search_index: &SearchIndex,
+    candidates: &[Candidate],
 ) {
     // 1. Determine the peptide neutral mass and its tolerance window.
     // For charge-explicit spectra, `top_charge` == spec.precursor_charge.unwrap().
@@ -498,9 +510,10 @@ fn compute_spec_e_values_for_spectrum(
         let mut any_n = false;
         let mut any_c = false;
         for psm in queue.iter_psms() {
-            if let Some(prot) = search_index.protein_at(psm.candidate.protein_index) {
-                let start = psm.candidate.start_offset_in_protein;
-                let pep_len = psm.candidate.peptide.length();
+            let cand = &candidates[psm.candidate_idx as usize];
+            if let Some(prot) = search_index.protein_at(cand.protein_index) {
+                let start = cand.start_offset_in_protein;
+                let pep_len = cand.peptide.length();
                 if start == 0 { any_n = true; }
                 if start + pep_len >= prot.sequence.len() { any_c = true; }
                 if any_n && any_c { break; }
@@ -548,7 +561,8 @@ fn compute_spec_e_values_for_spectrum(
     queue.update_spec_e_values(|psm| {
         // Nominal peptide mass: residue masses sum + no water (mass-index convention).
         // Use nominal_from() (INTEGER_MASS_SCALER-aware) to match how graph nodes are indexed.
-        let psm_nominal_mass = psm.candidate.peptide.nominal_residue_mass();
+        let cand = &candidates[psm.candidate_idx as usize];
+        let psm_nominal_mass = cand.peptide.nominal_residue_mass();
         if psm_nominal_mass < min_peptide_mass_idx || psm_nominal_mass > max_peptide_mass_idx {
             return 1.0;
         }
@@ -574,7 +588,7 @@ fn compute_spec_e_values_for_spectrum(
     let de_novo_score = max_score - 1;
     queue.update_psm_enrichment(|psm| {
         psm.de_novo_score = de_novo_score;
-        let len = psm.candidate.peptide.length();
+        let len = candidates[psm.candidate_idx as usize].peptide.length();
         let num_distinct = search_index.num_distinct_peptides_at_length(len).max(1);
         psm.e_value = psm.spec_e_value * num_distinct as f64;
     });

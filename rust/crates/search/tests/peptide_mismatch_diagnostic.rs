@@ -129,7 +129,7 @@ fn diagnose_peptide_mismatches() {
     eprintln!("Loaded {} spectra from test.mgf", spectra.len());
 
     // ── 4. Run full search ───────────────────────────────────────────────────
-    let queues = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
+    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
 
     // ── 5. Build global enumerator peptide set ───────────────────────────────
     // Collect every residue-only string that Rust's enumerator can generate
@@ -173,11 +173,11 @@ fn diagnose_peptide_mismatches() {
         let sorted = queue.clone().into_sorted_vec();
 
         // Top-1 TARGET PSM (skip decoys to match the parity test convention).
-        let top_target = match sorted.iter().find(|m| !m.candidate.is_decoy) {
+        let top_target = match sorted.iter().find(|m| !candidates[m.candidate_idx as usize].is_decoy) {
             Some(t) => t,
             None => continue,
         };
-        let rust_top_pep = peptide_residue_string(&top_target.candidate.peptide);
+        let rust_top_pep = peptide_residue_string(&candidates[top_target.candidate_idx as usize].peptide);
 
         if rust_top_pep == jref.peptide {
             continue; // top-1 match — not a mismatch
@@ -191,7 +191,7 @@ fn diagnose_peptide_mismatches() {
         // Find Java's peptide's rank in this spectrum's top-N queue (if present).
         let rank_in_queue: Option<usize> = sorted
             .iter()
-            .position(|m| !m.candidate.is_decoy && peptide_residue_string(&m.candidate.peptide) == jref.peptide);
+            .position(|m| !candidates[m.candidate_idx as usize].is_decoy && peptide_residue_string(&candidates[m.candidate_idx as usize].peptide) == jref.peptide);
 
         let classification = if !in_enumerator {
             enumerator_gap_count += 1;

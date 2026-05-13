@@ -71,6 +71,7 @@ use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
 use crate::row_context::{iter_ranked, RowContext};
+use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
@@ -93,13 +94,14 @@ pub fn write_pin(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
     queues: &[TopNQueue],
+    candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
     decoy_prefix: &str,
 ) -> io::Result<()> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
-    write_pin_to(&mut writer, spectra, queues, params, search_index, decoy_prefix)
+    write_pin_to(&mut writer, spectra, queues, candidates, params, search_index, decoy_prefix)
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp files.
@@ -109,11 +111,12 @@ pub fn write_pin_to<W: Write>(
     writer: &mut W,
     spectra: &[Spectrum],
     queues: &[TopNQueue],
+    candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
     decoy_prefix: &str,
 ) -> io::Result<()> {
-    let _ = decoy_prefix; // used indirectly via psm.candidate.is_decoy
+    let _ = decoy_prefix; // decoy status is read from candidates[psm.candidate_idx].is_decoy
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
     let mut label_cache: HashMap<Vec<u8>, i32> = HashMap::new();
@@ -144,6 +147,7 @@ pub fn write_pin_to<W: Write>(
             writer,
             spec,
             queue,
+            candidates,
             min_charge,
             max_charge,
             search_index,
@@ -246,6 +250,7 @@ fn write_spectrum_rows<W: Write>(
     writer: &mut W,
     spec: &Spectrum,
     queue: &TopNQueue,
+    candidates: &[Candidate],
     min_charge: u8,
     max_charge: u8,
     search_index: &SearchIndex,
@@ -259,11 +264,13 @@ fn write_spectrum_rows<W: Write>(
     let rank2_spec_e_value = find_rank2_spec_e_value(&psms);
 
     for (rank, psm) in iter_ranked(&psms) {
-        let ctx = RowContext::new(spec, psm, search_index);
+        let cand = &candidates[psm.candidate_idx as usize];
+        let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(
             writer,
             spec,
             psm,
+            cand,
             &ctx,
             rank,
             rank2_spec_e_value,
@@ -281,6 +288,7 @@ fn write_psm_row<W: Write>(
     writer: &mut W,
     spec: &Spectrum,
     psm: &PsmMatch,
+    cand: &Candidate,
     ctx: &RowContext,
     rank: u32,
     rank2_spec_e_value: f64,
@@ -301,8 +309,7 @@ fn write_psm_row<W: Write>(
     // + `memchr::memmem` (Two-Way / SIMD), reducing the cache-miss path from
     // O(target_count × peptide_len × protein_len) to O(haystack_len + peptide_len).
     // This was the dominant cost of `pin_write` on PXD001819 (~156s of 159s).
-    let residues: Vec<u8> = psm
-        .candidate
+    let residues: Vec<u8> = cand
         .peptide
         .residues
         .iter()
@@ -329,7 +336,7 @@ fn write_psm_row<W: Write>(
     // Both columns must be neutral masses so that dm = ExpMass - CalcMass is a
     // true mass error (not a charge-induced offset). Fixture reference:
     // ExpMass=1641.96, CalcMass=1641.95 — both neutral.
-    let calc_mass = psm.candidate.peptide.mass(); // includes H2O — neutral mass
+    let calc_mass = cand.peptide.mass(); // includes H2O — neutral mass
 
     // mass: duplicate of ExpMass (column convention).
     let mass = exp_mass;
@@ -361,7 +368,7 @@ fn write_psm_row<W: Write>(
     // peplen: `residue_count + 2` (counts both flanking residues — the `pre`
     // and `post` characters in the `Peptide` struct). Without the +2, the
     // PIN row count and per-row diff disagree with the reference fixture.
-    let peplen = psm.candidate.peptide.length() + 2;
+    let peplen = cand.peptide.length() + 2;
 
     // dm / absdm: precursor mass error in Da.
     //   adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge
@@ -451,7 +458,7 @@ fn write_psm_row<W: Write>(
     write_double(writer, matched_ion_ratio)?;
 
     // Peptide, Proteins
-    writeln!(writer, "\t{}\t{}", psm.candidate.peptide, ctx.accession)
+    writeln!(writer, "\t{}\t{}", cand.peptide, ctx.accession)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -632,19 +639,26 @@ mod tests {
         }
     }
 
-    fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64, is_decoy: bool, charge: u8) -> PsmMatch {
+    /// Build a single Candidate for fixture tests. Mirrors the shape that the
+    /// real candidate enumerator produces. Tests build a `Vec<Candidate>` from
+    /// these and pass it to `write_pin_to`.
+    fn make_candidate(protein_index: usize, is_decoy: bool) -> Candidate {
         let aa = AminoAcid::standard(b'A').unwrap();
         let peptide = Peptide::new(vec![aa], b'K', b'S');
+        Candidate {
+            peptide,
+            protein_index,
+            start_offset_in_protein: 0,
+            is_decoy,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64, candidate_idx: u32, charge: u8) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate: Candidate {
-                peptide,
-                protein_index: 0,
-                start_offset_in_protein: 0,
-                is_decoy,
-                is_protein_n_term: false,
-                is_protein_c_term: false,
-            },
+            candidate_idx,
             charge_used: charge,
             mass_error_ppm: 1.5,
             score,
@@ -731,7 +745,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands: Vec<Candidate> = vec![];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         assert_eq!(
@@ -748,12 +763,13 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 1e-5, true, 2)); // decoy
+        queue.push(make_psm(0, 10.0, 1e-5, 0, 2)); // decoy
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands = vec![make_candidate(0, true)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1, "should have 1 data row");
@@ -770,12 +786,13 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 1e-5, false, 2)); // charge 2
+        queue.push(make_psm(0, 10.0, 1e-5, 0, 2)); // charge 2
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -799,7 +816,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands: Vec<Candidate> = vec![];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let rows = parse_rows(&buf);
         assert!(rows.is_empty(), "empty queue should produce no data rows");
@@ -813,12 +831,13 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 1e-10, false, 2)); // single PSM → no rank-2
+        queue.push(make_psm(0, 10.0, 1e-10, 0, 2)); // single PSM → no rank-2
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -850,15 +869,15 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         // protein_index = 0 → first target protein
-        let mut psm = make_psm(0, 10.0, 1e-5, false, 2);
-        psm.candidate.protein_index = 0;
+        let psm = make_psm(0, 10.0, 1e-5, 0, 2);
 
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
         let queues = vec![queue];
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -883,15 +902,15 @@ mod tests {
 
         // SearchIndex has 1 target (idx 0) + 1 decoy (idx 1). Decoy accession
         // is set to "XXX_sp|P02769|ALBU_BOVIN" by target_plus_decoy.
-        let mut psm = make_psm(0, 10.0, 1e-5, true, 2);
-        psm.candidate.protein_index = 1; // decoy slot
+        let psm = make_psm(0, 10.0, 1e-5, 0, 2);
 
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
         let queues = vec![queue];
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands = vec![make_candidate(1, true)]; // protein_index=1 (decoy slot), is_decoy=true
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -914,7 +933,7 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        let mut psm = make_psm(0, 10.0, 1e-5, false, 2);
+        let mut psm = make_psm(0, 10.0, 1e-5, 0, 2);
         psm.features.num_matched_main_ions = 5;
 
         let mut queue = TopNQueue::new(10);
@@ -923,7 +942,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
@@ -945,7 +965,7 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        let mut psm = make_psm(0, 10.0, 1e-5, false, 2);
+        let mut psm = make_psm(0, 10.0, 1e-5, 0, 2);
         psm.features.longest_y = 1;
         psm.features.longest_y_pct = 0.5;
 
@@ -955,7 +975,8 @@ mod tests {
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
-        write_pin_to(&mut buf, &spectra, &queues, &params, &idx, "XXX_").unwrap();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "XXX_").unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);

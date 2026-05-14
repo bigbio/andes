@@ -13,7 +13,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use model::{AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance, ResidueSpec, Spectrum, Tolerance};
+use model::{
+    activation::ActivationMethod, AminoAcidSetBuilder, ModLocation, Modification,
+    PrecursorTolerance, ResidueSpec, Spectrum, Tolerance,
+};
 use scoring_crate::{Param, RankScorer};
 use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
 use input::{FastaReader, MgfReader, MzMLReader};
@@ -240,9 +243,45 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
+    //
+    // When the user provided `--param-file`, that wins outright. Otherwise:
+    //   * If `--fragmentation`/`--instrument` are set, honour them (existing
+    //     behaviour — preserves the bench harness's explicit-flag path).
+    //   * If none of those are set, peek the input file for its dominant
+    //     activation method and route to the matching bundled .param file.
+    //     This mirrors Java MS-GF+'s ASWRITTEN per-spectrum dispatch at the
+    //     file-wide granularity (good enough when an mzML carries a single
+    //     activation method, which is the common case).
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
-        None    => resolve_bundled_param(cli.fragmentation, cli.instrument, cli.protocol)?,
+        None    => {
+            let auto_route_eligible = cli.fragmentation.is_none()
+                && cli.instrument.is_none();
+            if auto_route_eligible {
+                match detect_dominant_activation(&cli.spectrum) {
+                    Some(method) => {
+                        eprintln!(
+                            "Param resolver: auto-detected dominant activation \
+                             method = {} from {}",
+                            method.name(),
+                            cli.spectrum.display()
+                        );
+                        resolve_bundled_param_for_activation(method, cli.protocol)?
+                    }
+                    None => {
+                        // No detectable activation in the input — fall back to
+                        // the historical hard-coded default. This keeps MGF
+                        // files (no activation header) and older mzML files
+                        // (no `<activation>` block) working as before.
+                        resolve_bundled_param(
+                            cli.fragmentation, cli.instrument, cli.protocol
+                        )?
+                    }
+                }
+            } else {
+                resolve_bundled_param(cli.fragmentation, cli.instrument, cli.protocol)?
+            }
+        }
     };
     eprintln!("Param file: {}", param_path.display());
 
@@ -617,6 +656,146 @@ fn resolve_bundled_param(
          using final fallback `{final_fallback}` (Java NewScorerFactory final ladder)",
     );
     canonicalize_bundled(final_fallback)
+}
+
+/// Peek the spectrum file and return the dominant
+/// `ActivationMethod` across the first several MS2 spectra.
+///
+/// Reads up to `MAX_PEEK` spectra (early-exit) and tallies a histogram of
+/// activation methods. Returns the most-common method, or `None` when no
+/// spectra carry an activation cvParam (older mzMLs, MGF, etc.).
+///
+/// Currently only mzML files (`.mzml` / `.mzML` extension) carry an
+/// `<activation>` block. For anything else (MGF, unknown extension) we
+/// return `None` and the caller falls back to the historical default.
+///
+/// When multiple activation methods are present, prints a single
+/// `eprintln!` warning naming the runner-up and its count.
+fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<ActivationMethod> {
+    // Only mzML carries `<activation>`. Other formats: caller falls back.
+    let ext_lower = spectrum_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if ext_lower.as_deref() != Some("mzml") {
+        return None;
+    }
+
+    const MAX_PEEK: usize = 64;
+
+    let file = File::open(spectrum_path).ok()?;
+    let reader = MzMLReader::new(BufReader::new(file));
+
+    // Tally counts keyed by ActivationMethod variant.
+    let mut counts: std::collections::HashMap<ActivationMethod, usize> =
+        std::collections::HashMap::new();
+    let mut seen = 0usize;
+    for item in reader {
+        if seen >= MAX_PEEK {
+            break;
+        }
+        seen += 1;
+        if let Ok(spec) = item {
+            if let Some(m) = spec.activation_method {
+                *counts.entry(m).or_insert(0) += 1;
+            }
+        }
+    }
+
+    if counts.is_empty() {
+        return None;
+    }
+
+    // Find the dominant method. Ties are broken by ActivationMethod's
+    // declaration order via match below, which is stable.
+    let dominant = counts
+        .iter()
+        .max_by_key(|(_, &n)| n)
+        .map(|(&m, _)| m)?;
+
+    // Warn on mixed activation. The dominant method still wins; this is
+    // purely informational so the user can spot heterogeneous mzMLs.
+    if counts.len() > 1 {
+        let mut other_pairs: Vec<(ActivationMethod, usize)> = counts
+            .iter()
+            .filter(|(&m, _)| m != dominant)
+            .map(|(&m, &n)| (m, n))
+            .collect();
+        other_pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        let total: usize = counts.values().sum();
+        let dominant_count = counts[&dominant];
+        eprintln!(
+            "Param resolver: mixed activation methods in input ({} different methods \
+             across {} peeked MS2 spectra). Using dominant = {} ({}/{}); other methods \
+             present: {}",
+            counts.len(),
+            total,
+            dominant.name(),
+            dominant_count,
+            total,
+            other_pairs
+                .iter()
+                .map(|(m, n)| format!("{}={}", m.name(), n))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+
+    Some(dominant)
+}
+
+/// Resolve a bundled `.param` file for the given activation method.
+///
+/// This is the auto-detect path: we already know the activation, and we
+/// pick the "best available" bundled instrument+enzyme pair. Mirrors the
+/// per-spectrum dispatch Java's MS-GF+ does in `ScoredSpectraMap.java:262-263`
+/// when the user passes `-m 0` (ASWRITTEN), but applied at file-wide
+/// granularity here.
+///
+/// Mapping (Tryp / no-protocol unless protocol overrides):
+///   - CID  → CID_HighRes_Tryp.param  (HighRes matches Java's
+///            per-spectrum-trace observation for PXD001819; see
+///            `docs/parity-analysis/notes/2026-05-14-param-lookup-root-cause.md`).
+///   - HCD  → HCD_QExactive_Tryp.param  (Java upgrades HCD to QExactive
+///            unconditionally in `NewScorerFactory.get`).
+///   - ETD  → ETD_HighRes_Tryp.param   (bundled; mirrors Java's
+///            ETD-HighRes path for modern instruments).
+///   - PQD  → CID_HighRes_Tryp.param   (Java collapses PQD → CID).
+///   - UVPD → UVPD_QExactive_Tryp.param.
+///
+/// When a protocol is supplied, the resolver appends the protocol suffix
+/// and walks the same fallback ladder as `resolve_bundled_param`. This is
+/// implemented by translating activation → (frag_id, inst_id) and
+/// delegating to `resolve_bundled_param`, so we get the
+/// drop-protocol / final-ladder fallback semantics for free.
+fn resolve_bundled_param_for_activation(
+    method:   ActivationMethod,
+    protocol: Option<u8>,
+) -> Result<PathBuf, String> {
+    // Translate the activation method to the (fragmentation, instrument) pair
+    // that `resolve_bundled_param` expects. We pick the bundled instrument
+    // most likely to match the dataset (mirroring the diagnostic-verified
+    // path for PXD001819 and the existing Java NewScorerFactory rules).
+    let (frag_id, inst_id): (u8, u8) = match method {
+        // CID → CID_HighRes. Diagnostic verified this matches Java's
+        // per-spectrum trace on PXD001819 (scan=28787 RawScore: Rust 235
+        // vs Java 225) when forced via `--fragmentation 1 --instrument 1`.
+        ActivationMethod::CID  => (1, 1),
+        // HCD → HCD_QExactive. Java upgrades HCD to QExactive in
+        // NewScorerFactory.get when instType is not HighRes/QExactive.
+        ActivationMethod::HCD  => (3, 3),
+        // ETD → ETD_HighRes_Tryp.param. ETD_LowRes_Tryp is the historical
+        // fallback inside resolve_bundled_param; we go straight to HighRes
+        // here since that's what's typically present in modern mzMLs.
+        ActivationMethod::ETD  => (2, 1),
+        // PQD → CID (Java's NewScorerFactory rule: "PQD or null → CID").
+        ActivationMethod::PQD  => (1, 1),
+        // UVPD → UVPD_QExactive_Tryp.param (only QExactive variant exists
+        // bundled). resolve_bundled_param walks the ladder if missing.
+        ActivationMethod::UVPD => (4, 3),
+    };
+
+    resolve_bundled_param(Some(frag_id), Some(inst_id), protocol)
 }
 
 /// Resolve a bundled `.param` filename under

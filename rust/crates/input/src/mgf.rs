@@ -134,6 +134,10 @@ impl<R: BufRead> Iterator for MgfReader<R> {
             rt_seconds,
             scan,
             peaks,
+            // MGF doesn't carry an activation method in the standard
+            // header set; could be extended via a custom `ACTIVATION=`
+            // field if needed. For now: leave it absent.
+            activation_method: None,
         }))
     }
 }

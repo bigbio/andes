@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::amino_acid::AminoAcid;
 use crate::enzyme::Enzyme;
@@ -302,6 +303,30 @@ impl AminoAcidSetBuilder {
         }
 
         // 3. Build the table.
+        //
+        // Wrap every distinct `Modification` declaration in a single shared
+        // `Arc<Modification>` up front. All `AminoAcid` variants that carry
+        // a given mod will reference the same allocation. At Astral scale
+        // this is the difference between cloning a 24-byte struct (Arc
+        // refcount bump) and cloning a 96-byte struct plus the
+        // `Modification`'s `String name` heap allocation per cloned
+        // residue — the latter blew up `PreparedSearch::prepare` to ~27 GB
+        // RSS. The intermediate fixed/variable match `Vec<Modification>`
+        // copies below are gone; we hand out `Arc::clone(...)` calls
+        // instead.
+        let fixed_mods_arc: Vec<Arc<Modification>> = self
+            .fixed_mods
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect();
+        let variable_mods_arc: Vec<Arc<Modification>> = self
+            .variable_mods
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect();
+
         let mut table: HashMap<(u8, ModLocation), Vec<AminoAcid>> = HashMap::new();
         let locations = [
             ModLocation::Anywhere, ModLocation::NTerm, ModLocation::CTerm,
@@ -312,36 +337,34 @@ impl AminoAcidSetBuilder {
             let std_aa = AminoAcid::standard(r).expect("STANDARD_RESIDUES has only valid residues");
 
             for &loc in &locations {
-                let fixed_match = self.fixed_mods
+                let fixed_match: Option<&Arc<Modification>> = fixed_mods_arc
                     .iter()
-                    .find(|m| m.applies_to(r, loc))
-                    .cloned();
+                    .find(|m| m.applies_to(r, loc));
 
-                let variable_matches: Vec<_> = self.variable_mods
+                let variable_matches: Vec<&Arc<Modification>> = variable_mods_arc
                     .iter()
                     .filter(|m| m.applies_to(r, loc))
-                    .cloned()
                     .collect();
 
                 let mut variants = Vec::new();
                 if loc == ModLocation::Anywhere {
-                    if let Some(fm) = &fixed_match {
-                        variants.push(std_aa.clone().with_mod(fm.clone()));
+                    if let Some(fm) = fixed_match {
+                        variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
                     } else {
                         variants.push(std_aa.clone());
                     }
                     for vm in &variable_matches {
-                        variants.push(std_aa.clone().with_mod(vm.clone()));
+                        variants.push(std_aa.clone().with_mod(Arc::clone(vm)));
                     }
                 } else {
-                    if let Some(fm) = &fixed_match {
+                    if let Some(fm) = fixed_match {
                         if fm.location == loc {
-                            variants.push(std_aa.clone().with_mod(fm.clone()));
+                            variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
                         }
                     }
                     for vm in &variable_matches {
                         if vm.location == loc {
-                            variants.push(std_aa.clone().with_mod(vm.clone()));
+                            variants.push(std_aa.clone().with_mod(Arc::clone(vm)));
                         }
                     }
                 }

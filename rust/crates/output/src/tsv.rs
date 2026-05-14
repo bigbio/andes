@@ -503,7 +503,7 @@ mod tests {
         let m_ox = AminoAcid {
             residue: b'M',
             mass: m_unmod.mass,
-            mod_: Some(ox_mod),
+            mod_: Some(std::sync::Arc::new(ox_mod)),
         };
         let a = AminoAcid::standard(b'A').unwrap();
         // Peptide: K.AM(ox)A.S

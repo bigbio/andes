@@ -2,8 +2,20 @@
 //! are computed from atomic composition (C/H/N/O/S counts) so they are
 //! bit-equal to the canonical composition-based mass. Pinned by
 //! `tests/standard_aa_masses_match_java.rs`.
+//!
+//! The `mod_` field stores an `Option<Arc<Modification>>` rather than an
+//! inline `Option<Modification>`. Candidate enumeration clones an
+//! `AminoAcid` for every position × variant during the
+//! `expand_recursive` walk; with the inline layout each clone also
+//! cloned the `Modification`'s `String` `name` (and optional accession),
+//! producing one heap allocation per modified residue per candidate. At
+//! Astral scale that drives `PreparedSearch::prepare` to ~27 GB RSS on a
+//! 31 GB VM (verified by the `MSGFRUST_RSS_PROBE=1` probe in
+//! `msgf-rust.rs`). Wrapping `Modification` in `Arc` makes clones a
+//! refcount bump and shrinks `AminoAcid` from ~96 B to 24 B.
 
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use crate::mass::{nominal_from, C, H, N, O, S};
 use crate::modification::Modification;
@@ -12,7 +24,11 @@ use crate::modification::Modification;
 pub struct AminoAcid {
     pub residue: u8,
     pub mass:    f64,
-    pub mod_:    Option<Modification>,
+    /// `None` for unmodified residues; otherwise a shared handle to one of
+    /// the per-search `Modification` records owned by `AminoAcidSet`. The
+    /// `Arc` makes per-candidate `AminoAcid` clones a refcount bump — see
+    /// the module-level note for why this matters at Astral scale.
+    pub mod_:    Option<Arc<Modification>>,
 }
 
 impl AminoAcid {
@@ -28,8 +44,13 @@ impl AminoAcid {
     /// Attach a modification, returning the modified residue. The `mass`
     /// field is unchanged; consumers compute total mass as `aa.mass +
     /// mod_.mass_delta` separately (see `Peptide::mass`).
-    pub fn with_mod(mut self, m: Modification) -> Self {
-        self.mod_ = Some(m);
+    ///
+    /// Accepts either an owned `Modification` (legacy callers, test code)
+    /// or an `Arc<Modification>` (the hot path inside the candidate
+    /// enumerator). `Into<Arc<Modification>>` is implemented for both
+    /// shapes by `std`, so callers don't need to wrap manually.
+    pub fn with_mod<M: Into<Arc<Modification>>>(mut self, m: M) -> Self {
+        self.mod_ = Some(m.into());
         self
     }
 
@@ -71,10 +92,16 @@ impl Hash for AminoAcid {
     }
 }
 
-fn mods_eq(a: &Option<Modification>, b: &Option<Modification>) -> bool {
+fn mods_eq(a: &Option<Arc<Modification>>, b: &Option<Arc<Modification>>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(x), Some(y)) => {
+            // Fast path: same Arc allocation ⇒ trivially equal. This is the
+            // common case after the AminoAcidSet hot path started handing out
+            // shared `Arc<Modification>` handles to every variant.
+            if Arc::ptr_eq(x, y) {
+                return true;
+            }
             x.name == y.name && x.mass_delta.to_bits() == y.mass_delta.to_bits()
         }
         _ => false,

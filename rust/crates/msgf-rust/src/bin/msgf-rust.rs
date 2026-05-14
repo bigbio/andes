@@ -174,7 +174,37 @@ fn main() -> ExitCode {
     }
 }
 
+/// Print VmRSS for the current process under MSGFRUST_RSS_PROBE=1. No-op
+/// otherwise and a no-op on non-Linux platforms regardless of the env var.
+///
+/// We gate behind an env var so production runs stay quiet; flip the var on
+/// when debugging memory regressions.
+fn log_rss(tag: &str) {
+    if std::env::var_os("MSGFRUST_RSS_PROBE").is_none() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if line.starts_with("VmRSS:") {
+                    eprintln!(
+                        "[RSS {tag}] {}",
+                        line.trim_start_matches("VmRSS:").trim()
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = tag;
+    }
+}
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    log_rss("startup");
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
     // ── 1. Load FASTA target database ────────────────────────────────────────
@@ -186,11 +216,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.database.display(),
         t_phase.elapsed().as_secs_f64()
     );
+    log_rss("after_fasta_load");
 
     // ── 2. Build SearchIndex (target + reversed decoys) ───────────────────────
     let t_phase = std::time::Instant::now();
     let idx = SearchIndex::from_target_db(&target_db, &cli.decoy_prefix);
     eprintln!("[PHASE search_index_build: {:.2}s]", t_phase.elapsed().as_secs_f64());
+    log_rss("after_search_index_build");
 
     // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
     //
@@ -350,6 +382,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         fragment_tol_da,
         &cli.decoy_prefix,
     );
+    log_rss("after_prepared_search");
+    eprintln!(
+        "PreparedSearch: {} candidates, {} mass buckets",
+        prepared.candidates.len(),
+        prepared.bucket_index.len(),
+    );
 
     let ext = cli.spectrum
         .extension()
@@ -378,6 +416,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             spec.peaks = Vec::new();
             all_spectra.push(spec);
         }
+        log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
     };
 
     let t_search_start = std::time::Instant::now();
@@ -387,6 +426,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let f = File::open(&cli.spectrum)?;
             let reader = MzMLReader::new(BufReader::new(f))
                 .with_ms_level_range(ms_level_u32, ms_level_u32);
+            log_rss("after_mzml_reader_open");
             for result in reader {
                 if all_spectra.len() + chunk.len() >= bench_cap {
                     break;
@@ -480,6 +520,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    log_rss("after_all_spectra");
     let search_elapsed = t_search_start.elapsed();
     eprintln!(
         "Loaded+scored {} spectra from {} in chunks of {} [PHASE stream_search: {:.2}s]",
@@ -514,6 +555,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_phase.elapsed().as_secs_f64(),
         t_total.elapsed().as_secs_f64()
     );
+    log_rss("after_pin_write");
 
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");

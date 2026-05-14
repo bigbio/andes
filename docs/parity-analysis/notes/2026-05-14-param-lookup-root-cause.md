@@ -181,3 +181,71 @@ Bench run on pride-linux-vm with merged rust-implement (commit `bc8cff6`),
   on Astral, isolating the residual scoring divergence
 - Sister-scan regression tests (28825, 33606, 32395) deferred until
   new Java baselines are captured under the correct param config
+
+## 2026-05-14 — Final VM Percolator results (post-instrument-detection)
+
+Bench run with full Java-equivalent CLI (mods on all datasets + explicit
+TMT flags). Activation + instrument detection both wired in
+(commits a5b105e, a3b324a, 58e4d93).
+
+### CLI alignment
+
+Java per-dataset commands captured from the bench wrapper:
+
+| Dataset | Java | Rust equivalent |
+|---|---|---|
+| PXD001819 | -m 0 -inst 0 -mod mods.txt | auto-detect (CID+LowRes) + --mod mods-numeric.txt |
+| Astral    | -m 3 -inst 3 -mod astral/mods.txt | auto-detect (HCD+QExactive) + --mod astral/mods-numeric.txt |
+| TMT       | -m 1 -inst 1 -protocol 4 -mod tmt/mods.txt | --fragmentation 1 --instrument 1 --protocol 4 --mod tmt/mods-numeric.txt |
+
+Note: Rust's mod parser does not yet support chemical-formula mass
+deltas (e.g. C2H3N1O1). Numeric mods-numeric.txt files were created
+on the VM to mirror Java's mods.txt.
+
+### Final Percolator @ 1% FDR
+
+| Dataset | Pre-fix | Iter 1 (act-only) | Final | Java baseline | Gate | Status |
+|---|---:|---:|---:|---:|---:|---|
+| PXD001819 | 11,623 | 12,235 | **15,003** | 14,989 | >=14,800 | PASS (+203) |
+| Astral    | 24,828 | 24,828 | 22,460* | 35,818 | >=33,000 | FAIL |
+| TMT       | 10,548 | 10,563 | 10,548 | 10,194 | >=10,500 | PASS (+48) |
+
+* Astral final number is from the no-mods run; the with-mods run OOM-killed
+  at 28 GB on a 31 GB VM with --threads 4 (and 24 GB with --threads 8).
+
+### Astral OOM
+
+The Astral mzML + ProteoBenchFASTA (31,889 proteins) with NumMods=3
+(Carb-C fix + Ox-M opt + Acetyl-Prot-Nterm opt) triggers OOM in Rust:
+
+  --threads 8:  max RSS 24 GB,  signal 9 (OOM-kill)  at ~57s
+  --threads 4:  max RSS 28 GB,  signal 9 (OOM-kill)  at ~233s
+
+Java handles this workload on the same VM. The Rust memory issue is
+isolated to the mod-expanded candidate-gen + index path — independent
+of param routing, scoring, or the fixes landed in this iteration.
+
+### Conclusions
+
+1. Activation routing (commits 88051f2, 3678255, e7f2b0d) + instrument
+   detection (a5b105e, a3b324a, 58e4d93) closed the PXD001819 gap
+   completely. Rust now exceeds Java's own baseline (15,003 vs 14,989).
+
+2. TMT continues to pass via explicit CLI flags. Auto-detect on TMT's
+   SPS-MS3 mzML misroutes to LowRes (MS2 ion-trap component); explicit
+   override is the right path for protocol-specific datasets.
+
+3. Astral is blocked on a separate Rust memory-efficiency issue with
+   variable mods on a large fasta. The activation/instrument fix is
+   correct for Astral (auto-detect lands on HCD+QExactive, matching
+   Java) but cannot be validated end-to-end until the memory issue is
+   addressed.
+
+### Recommended follow-ups (separate iterations)
+
+- Astral memory: profile Rust candidate-gen + index memory with mods
+  on the ProteoBenchFASTA; aim to halve peak RSS.
+- Chemical-formula mass deltas in Rust mod parser (so we don't need
+  numeric-only mods files on the VM).
+- Sister-scan regression tests (28825, 33606, 32395) with refreshed
+  Java baselines under CID_LowRes_Tryp.param.

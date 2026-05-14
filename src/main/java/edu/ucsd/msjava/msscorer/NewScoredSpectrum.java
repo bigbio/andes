@@ -40,6 +40,33 @@ public class NewScoredSpectrum<T extends Matter> implements ScoredSpectrum<T> {
         for (int seg = 0; seg < numSegments; seg++)
             ionTypes[seg] = scorer.getIonTypes(charge, parentMass, seg);
 
+        // Diagnostic: dump partition triple per seg index for the trace target.
+        if ("true".equals(System.getProperty("msgfplus.trace.getnode"))
+                && matchesTargetTraceScan(scanNumArr)) {
+            for (int seg = 0; seg < numSegments; seg++) {
+                Partition pp = scorer.getPartition(charge, parentMass, seg);
+                java.util.ArrayList<FragmentOffsetFrequency> fofs = scorer.getFragmentOFF(pp);
+                int pfx = 0, sfx = 0;
+                if (fofs != null) {
+                    for (FragmentOffsetFrequency f : fofs) {
+                        if (f.getIonType() instanceof IonType.PrefixIon) pfx++;
+                        else if (f.getIonType() instanceof IonType.SuffixIon) sfx++;
+                    }
+                }
+                System.err.println("TRACE_JAVA_GN_PART"
+                        + "\tsegIndex=" + seg
+                        + "\tpartition_charge=" + pp.getCharge()
+                        + "\tpartition_pm=" + pp.getParentMass()
+                        + "\tpartition_seg=" + pp.getSegNum()
+                        + "\tionCount=" + ionTypes[seg].length
+                        + "\tfofCount=" + (fofs == null ? -1 : fofs.size())
+                        + "\tprefixFOF=" + pfx
+                        + "\tsuffixFOF=" + sfx
+                        + "\tquery_charge=" + charge
+                        + "\tquery_pm=" + parentMass);
+            }
+        }
+
         // filter precursor peaks
         for (PrecursorOffsetFrequency off : scorer.getPrecursorOFF(spec.getCharge()))
             spec.filterPrecursorPeaks(mme, off.getReducedCharge(), off.getOffset());

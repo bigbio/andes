@@ -326,6 +326,28 @@ impl<'a> ScoredSpectrum<'a> {
         Some((pref + suff).round() as i32)
     }
 
+    /// Trace-only accessor: raw `prefix_score_cache[prefix_nominal]` if in
+    /// range, mirroring Java's `FastScorer.prefixScore[prefixMass]`. Returns
+    /// `None` for an out-of-range index or an empty cache (the
+    /// `new_without_filtering` test path leaves the cache empty). This is
+    /// consumed by `score_psm`'s trace branch only; the hot scoring path
+    /// continues to read through `cached_split_score`.
+    pub fn cached_prefix_score(&self, prefix_nominal: i32) -> Option<f32> {
+        if prefix_nominal < 0 {
+            return None;
+        }
+        self.prefix_score_cache.get(prefix_nominal as usize).copied()
+    }
+
+    /// Trace-only accessor companion to [`cached_prefix_score`]. Mirrors
+    /// Java's `FastScorer.suffixScore[suffixMass]`.
+    pub fn cached_suffix_score(&self, suffix_nominal: i32) -> Option<f32> {
+        if suffix_nominal < 0 {
+            return None;
+        }
+        self.suffix_score_cache.get(suffix_nominal as usize).copied()
+    }
+
     /// Charge state used when this `ScoredSpectrum` was constructed.
     pub fn charge(&self) -> u8 {
         self.charge
@@ -525,6 +547,11 @@ impl<'a> ScoredSpectrum<'a> {
         let num_segs = param.num_segments as usize;
         let mut total = 0.0_f32;
         let use_cache = !segment_partition_cache.is_empty();
+        // Trace gating: only fire when explicitly enabled AND a peptide-trace
+        // env var is set (matches `score_psm`'s gating). Avoid stringifying the
+        // env var on every call — short-circuit on the cheap presence check.
+        let trace_ions = std::env::var_os("MSGF_TRACE_IONS").is_some()
+            && std::env::var_os("MSGF_TRACE_PEP").is_some();
         for seg in 0..num_segs {
             let ion_logs_slice: &[(IonType, Vec<f32>)] = if use_cache {
                 segment_partition_cache[seg].1.as_slice()
@@ -532,6 +559,12 @@ impl<'a> ScoredSpectrum<'a> {
                 let p = param.partition_for(charge, parent_mass, seg);
                 scorer.partition_ion_logs(&p)
             };
+            if trace_ions {
+                eprintln!(
+                    "TRACE_RUST_IONS\tnominal={:.3}\tis_prefix={}\tseg={}\tnum_ions={}",
+                    nominal_mass, is_prefix, seg, ion_logs_slice.len()
+                );
+            }
             for (ion, logs) in ion_logs_slice {
                 let theo_mz = match (is_prefix, *ion) {
                     (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),

@@ -54,6 +54,24 @@ pub fn score_psm(
     // Used to compute suffix_nominal = peptide_nominal - prefix_nominal.
     let peptide_nominal = peptide.nominal_residue_mass();
 
+    // ── Score-traceability instrumentation ─────────────────────────────────
+    // Gated by the `MSGF_TRACE_PEP` env var: if the peptide's unmodified
+    // residue sequence contains the filter string, emit per-split trace
+    // lines on stderr. Mirrors `FastScorer.getScoreWithTrace`, so the two
+    // dumps line up split-by-split.
+    let trace_pep = std::env::var("MSGF_TRACE_PEP").ok();
+    let pep_seq_string: String = peptide.residues.iter().map(|aa| aa.residue as char).collect();
+    let trace = trace_pep
+        .as_ref()
+        .map(|p| !p.is_empty() && pep_seq_string.contains(p.as_str()))
+        .unwrap_or(false);
+    if trace {
+        eprintln!(
+            "TRACE_RUST_HEADER\tpep={}\tcharge={}\tparent_mass={:.4}\tpeptide_nominal={}\tn={}\tfragment_tol_da={}",
+            pep_seq_string, charge, spectrum_parent_mass, peptide_nominal, n, fragment_tolerance_da
+        );
+    }
+
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
     // Split positions 1..n: after split s, prefix = residues[0..s], suffix = residues[s..n].
@@ -67,7 +85,13 @@ pub fn score_psm(
         let prefix_nominal = nominal_from(prefix_mass_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
 
-        total += scored_spec
+        // Sample cached prefix/suffix scores for trace diagnostics (no
+        // change to the hot-path semantics): the cache exposes the same
+        // FastScorer-style per-index tables Java prints from.
+        let cached_pref = scored_spec.cached_prefix_score(prefix_nominal);
+        let cached_suff = scored_spec.cached_suffix_score(suffix_nominal);
+
+        let contribution = scored_spec
             .cached_split_score(prefix_nominal, suffix_nominal)
             .unwrap_or_else(|| {
                 scored_spec.node_score(
@@ -79,6 +103,27 @@ pub fn score_psm(
                     fragment_tolerance_da,
                 )
             });
+        total += contribution;
+
+        if trace {
+            let pref_str = cached_pref
+                .map(|v| format!("{v}"))
+                .unwrap_or_else(|| "NA".to_string());
+            let suff_str = cached_suff
+                .map(|v| format!("{v}"))
+                .unwrap_or_else(|| "NA".to_string());
+            eprintln!(
+                "TRACE_RUST\tpep={}\tsplit={}\tprefMass={}\tsuffMass={}\tprefScore={}\tsuffScore={}\tcontribution={}\tcumulative={}\tprefAccF64={:.6}",
+                pep_seq_string, s, prefix_nominal, suffix_nominal,
+                pref_str, suff_str, contribution, total, prefix_mass_acc
+            );
+        }
+    }
+    if trace {
+        eprintln!(
+            "TRACE_RUST_FINAL\tpep={}\trawScore={}",
+            pep_seq_string, total
+        );
     }
     total as f32
 }

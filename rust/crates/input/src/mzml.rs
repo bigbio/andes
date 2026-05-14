@@ -12,7 +12,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use quick_xml::{events::Event, Reader};
 
-use model::Spectrum;
+use model::{ActivationMethod, Spectrum};
 
 // ── CV accessions we care about ─────────────────────────────────────────────
 
@@ -28,6 +28,22 @@ const CV_INTENSITY_ARRAY: &str = "MS:1000515";
 const CV_64BIT: &str = "MS:1000523";
 const CV_32BIT: &str = "MS:1000521";
 const CV_ZLIB: &str = "MS:1000574";
+
+// Activation-method CV accessions (inside <precursor><activation>).
+// These mirror Java MS-GF+'s `ActivationMethod.cvTable` in
+// `msutil/ActivationMethod.java` — we map each to one of our five
+// canonical ActivationMethod variants. Unknown / unhandled child terms
+// fall through and the spectrum's activation_method stays None.
+const CV_CID: &str  = "MS:1000133"; // collision-induced dissociation
+const CV_HCD: &str  = "MS:1000422"; // beam-type CID = HCD
+const CV_ETD: &str  = "MS:1000598"; // electron transfer dissociation
+const CV_PQD: &str  = "MS:1000599"; // pulsed Q dissociation
+const CV_UVPD: &str = "MS:1000435"; // photodissociation (Java uses this for UVPD)
+// ECD is MS:1000250; we don't have a dedicated variant for it — callers
+// that need ECD usually look up either ETD or treat as electron-based.
+// We map ECD → ETD to mirror Java's electron-based grouping when ECD is
+// the only signal (Java only registers ETD/CID/HCD/PQD/UVPD in cvTable).
+const CV_ECD: &str  = "MS:1000250"; // electron capture dissociation
 
 /// Unit: minutes → multiply by 60 to get seconds.
 const CV_UNIT_MINUTE: &str = "UO:0000031";
@@ -70,6 +86,9 @@ enum State {
     Spectrum,
     Scan,
     SelectedIon,
+    /// Inside `<precursor><activation>` — we read activation-method
+    /// cvParams here and set `SpectrumBuilder::activation_method`.
+    Activation,
     BinaryDataArray,
     Binary,
 }
@@ -112,6 +131,11 @@ struct SpectrumBuilder {
     monoisotopic_mz_override: Option<f64>,
     precursor_charge: Option<i32>,
     precursor_intensity: Option<f32>,
+    /// Activation method recorded under `<precursor><activation>` — set
+    /// when we see a known cvParam (CID/HCD/ETD/PQD/UVPD/ECD). Stays
+    /// `None` when no `<activation>` block is present or the term is
+    /// unknown.
+    activation_method: Option<ActivationMethod>,
     mz_array: Option<Vec<f64>>,
     intensity_array: Option<Vec<f64>>,
 }
@@ -225,6 +249,7 @@ impl<R: BufRead> MzMLReader<R> {
             rt_seconds: sb.rt_seconds,
             scan,
             peaks,
+            activation_method: sb.activation_method,
         }))
     }
 
@@ -283,6 +308,67 @@ impl<R: BufRead> MzMLReader<R> {
                 if let Ok(inten) = cv.value.parse::<f32>() {
                     if let Some(sb) = self.current.as_mut() {
                         sb.precursor_intensity = Some(inten);
+                    }
+                }
+            }
+
+            // Activation-method cvParams under <precursor><activation>.
+            // Java's `ActivationMethod.cvTable` maps the same five
+            // accessions. ECD (MS:1000250) is not in Java's table; we
+            // mirror Java's electron-based grouping by mapping ECD → ETD
+            // here, so downstream param routing picks an ETD-trained
+            // model when ECD is the only signal.
+            //
+            // Selection rule (mirrors `StaxMzMLParser.java:595-605`):
+            //   - ETD always wins (set unconditionally; matches Java's
+            //     `isETD` short-circuit).
+            //   - Other methods: first-wins. A spectrum with multiple
+            //     `<precursor><activation>` blocks (MS3 SPS, supplementary
+            //     activation) records the first activation we see.
+            //
+            // Why first-wins matters: TMT SPS-MS3 mzMLs chain CID (MS2
+            // isolation) → HCD (MS3 fragmentation). Java's first-wins
+            // routes those to a CID-trained model, which is the
+            // historical behaviour we must mirror.
+            CV_CID  if self.state == State::Activation => {
+                if let Some(sb) = self.current.as_mut() {
+                    if sb.activation_method.is_none() {
+                        sb.activation_method = Some(ActivationMethod::CID);
+                    }
+                }
+            }
+            CV_HCD  if self.state == State::Activation => {
+                if let Some(sb) = self.current.as_mut() {
+                    if sb.activation_method.is_none() {
+                        sb.activation_method = Some(ActivationMethod::HCD);
+                    }
+                }
+            }
+            CV_ETD  if self.state == State::Activation => {
+                // ETD wins unconditionally to mirror Java's `isETD` flag.
+                if let Some(sb) = self.current.as_mut() {
+                    sb.activation_method = Some(ActivationMethod::ETD);
+                }
+            }
+            CV_ECD  if self.state == State::Activation => {
+                // ECD is electron-based — group with ETD for param routing.
+                if let Some(sb) = self.current.as_mut() {
+                    if sb.activation_method.is_none() {
+                        sb.activation_method = Some(ActivationMethod::ETD);
+                    }
+                }
+            }
+            CV_PQD  if self.state == State::Activation => {
+                if let Some(sb) = self.current.as_mut() {
+                    if sb.activation_method.is_none() {
+                        sb.activation_method = Some(ActivationMethod::PQD);
+                    }
+                }
+            }
+            CV_UVPD if self.state == State::Activation => {
+                if let Some(sb) = self.current.as_mut() {
+                    if sb.activation_method.is_none() {
+                        sb.activation_method = Some(ActivationMethod::UVPD);
                     }
                 }
             }
@@ -347,6 +433,15 @@ impl<R: BufRead> MzMLReader<R> {
                         }
                         b"selectedIon" if self.state == State::Spectrum => {
                             self.state = State::SelectedIon;
+                        }
+                        b"activation" if self.state == State::Spectrum => {
+                            // `<activation>` lives under
+                            // `<precursorList><precursor>…</precursor></precursorList>`.
+                            // We don't track the intermediate `<precursor>` /
+                            // `<precursorList>` elements, so we transition
+                            // from Spectrum here. The closing tag pops us
+                            // back to Spectrum.
+                            self.state = State::Activation;
                         }
                         b"binaryDataArray" if self.state == State::Spectrum => {
                             self.binary_ctx = Some(BinaryArrayCtx::new());
@@ -428,6 +523,9 @@ impl<R: BufRead> MzMLReader<R> {
                             self.state = State::Spectrum;
                         }
                         b"selectedIon" if self.state == State::SelectedIon => {
+                            self.state = State::Spectrum;
+                        }
+                        b"activation" if self.state == State::Activation => {
                             self.state = State::Spectrum;
                         }
                         b"binary" if self.state == State::Binary => {
@@ -1002,5 +1100,189 @@ mod tests {
     #[test]
     fn extract_scan_missing() {
         assert_eq!(extract_scan_from_id("spectrum=1"), None);
+    }
+
+    // ── Activation-method parsing ────────────────────────────────────────────
+
+    fn spectrum_xml_with_activation(activation_cv: Option<&str>) -> String {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let act_block = match activation_cv {
+            Some(cv) => format!(
+                r#"<activation>
+                     <cvParam accession="{cv}" name="" value=""/>
+                   </activation>"#
+            ),
+            None => String::new(),
+        };
+        format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z"
+                               value="500.5"/>
+                      <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                    </selectedIon>
+                  </selectedIonList>
+                  {act_block}
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        )
+    }
+
+    #[test]
+    fn parses_cid_activation() {
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(
+            "MS:1000133",
+        ))));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::CID));
+    }
+
+    #[test]
+    fn parses_hcd_activation() {
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(
+            "MS:1000422",
+        ))));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+    }
+
+    #[test]
+    fn parses_etd_activation() {
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(
+            "MS:1000598",
+        ))));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
+    }
+
+    #[test]
+    fn parses_ecd_as_etd() {
+        // ECD is electron-based; we collapse to ETD for param routing.
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(Some(
+            "MS:1000250",
+        ))));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
+    }
+
+    #[test]
+    fn missing_activation_block_yields_none() {
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_activation(None)));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, None);
+    }
+
+    /// SPS-MS3 mzMLs chain `<precursor><activation>` blocks (CID then HCD).
+    /// Java's `StaxMzMLParser` uses first-wins (modulo ETD precedence).
+    /// We mirror that so TMT SPS data routes to a CID-trained model the
+    /// same way Java does.
+    #[test]
+    fn multiple_activations_first_wins() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        // Two `<precursor>` blocks: first CID (MS:1000133), second HCD
+        // (MS:1000422). First-wins → CID.
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="3"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="2">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    </selectedIon>
+                  </selectedIonList>
+                  <activation>
+                    <cvParam accession="MS:1000133" name="CID" value=""/>
+                  </activation>
+                </precursor>
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="350.0"/>
+                    </selectedIon>
+                  </selectedIonList>
+                  <activation>
+                    <cvParam accession="MS:1000422" name="HCD" value=""/>
+                  </activation>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+
+        // Wrap and widen to MS3 so the spectrum isn't filtered out.
+        let wrapped = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <run>
+    <spectrumList count="1" defaultDataProcessingRef="dp">
+      {xml}
+    </spectrumList>
+  </run>
+</mzML>"#
+        );
+        let spectra: Vec<Spectrum> = MzMLReader::new(Cursor::new(wrapped))
+            .with_ms_level_range(2, 3)
+            .map(|r| r.expect("parse error"))
+            .collect();
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::CID));
+    }
+
+    /// ETD has unconditional precedence over CID/HCD within a single
+    /// `<activation>` block (mirrors Java's `isETD` short-circuit).
+    #[test]
+    fn etd_precedence_over_other_methods() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        // Activation has CID first, then ETD. ETD must win.
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    </selectedIon>
+                  </selectedIonList>
+                  <activation>
+                    <cvParam accession="MS:1000133" name="CID" value=""/>
+                    <cvParam accession="MS:1000598" name="ETD" value=""/>
+                  </activation>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
     }
 }

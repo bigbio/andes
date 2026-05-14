@@ -127,3 +127,57 @@ Java's NewScorerFactory picks for the spectrum's activation method.
     `PARAM_PATH` from `HCD_QExactive_Tryp.param` to
     `CID_HighRes_Tryp.param` to reflect what Java actually picks. The
     diagnostic now matches Java exactly (see TL;DR).
+
+## 2026-05-14 — VM Percolator validation (post-merge)
+
+Bench run on pride-linux-vm with merged rust-implement (commit `bc8cff6`),
+3-dataset config, NO explicit `--fragmentation`/`--instrument` flags
+(auto-routing exercised on every dataset).
+
+### Auto-routing decisions
+
+| Dataset | Rust auto-routed | Java picks | Match? |
+|---|---|---|---|
+| PXD001819 | CID -> `CID_HighRes_Tryp.param` | `CID_LowRes_Tryp.param` | NO — Rust missing low-res vs high-res distinction |
+| Astral    | HCD -> `HCD_QExactive_Tryp.param` | `HCD_QExactive_Tryp.param` | yes |
+| TMT       | CID -> `CID_HighRes_Tryp.param` | (HCD path likely) | unclear |
+
+### Percolator @ 1% FDR (after merge)
+
+| Dataset | Pre-fix | Post-fix | Java baseline | Gate | Status |
+|---|---:|---:|---:|---:|---|
+| PXD001819 | 11,623 | 12,235 | 14,989 | >=14,800 | FAIL (-2,565) |
+| Astral    | 24,828 | 24,828 | 35,818 | >=33,000 | FAIL (-8,172) |
+| TMT       | 10,548 | 10,563 | 10,194 | >=10,500 | PASS |
+
+### Conclusions
+
+1. The activation-routing fix IS necessary and correct in principle — Rust
+   now picks CID for CID spectra. But routing alone is not sufficient.
+
+2. PXD001819 gap remaining: ~80% unclosed. The CID_HighRes vs
+   CID_LowRes choice almost certainly accounts for most of this — LTQ
+   Velos data has wider-tolerance fragment ions, and HighRes scoring
+   tables expect tighter peak matches than the data actually provides.
+   Next iteration: extend auto-routing to factor in instrument type
+   (low-res vs high-res via fragment-mass-accuracy detection or mzML
+   instrumentConfiguration cvParams).
+
+3. Astral gap remaining: essentially unchanged (24,828 -> 24,828).
+   Same param both before and after, so a separate scoring divergence
+   accounts for this gap. Candidates: Divergence A (sum-of-rounds vs
+   round-of-sums for nominal mass accumulation), partition lookup
+   semantics for the HCD path, or peak-rank/precision drift on Astral's
+   high-resolution data.
+
+4. TMT gap closed: Rust matches/exceeds Java. Auto-routing's CID
+   choice (vs Java's likely HCD) doesn't hurt because both produce good
+   scoring for the SPS-MS3 chained dissociation case.
+
+### Recommended follow-ups
+
+- Iteration 2 (PXD001819): low-res vs high-res CID auto-routing
+- Iteration 3 (Astral): per-scan instrumentation diff on a top-gap PSM
+  on Astral, isolating the residual scoring divergence
+- Sister-scan regression tests (28825, 33606, 32395) deferred until
+  new Java baselines are captured under the correct param config

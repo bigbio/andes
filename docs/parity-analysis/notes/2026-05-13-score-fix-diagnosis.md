@@ -36,13 +36,54 @@ The two sources are written by the same author but the Rust port is incomplete: 
 3. **Charge-state ladder.** Java may sum scores across multiple charge states of the precursor or across multiple isotope offsets per split; Rust may take a single value.
 4. **Per-segment vs per-split aggregation.** Java's RawScore may aggregate over all segments of the PrimitiveAaGraph, Rust may aggregate only over the path used by GF.
 
-## Phase 3: Surface of the fix (filled in after Phase 2)
+## Phase 2.5: Static-comparison findings (code-explorer pass)
 
-[To be populated by the code-comparison investigation. Likely files:
-`rust/crates/scoring/src/scoring/scored_spectrum.rs`,
-`rust/crates/scoring/src/scoring/psm_score.rs`,
-or both.]
+Side-by-side reading of Java and Rust score chains identified three concrete divergences. None of them on its own conclusively explains the 3× gap, but Divergence B is the strongest single-cause candidate.
 
-## Phase 4: Validation (filled in after Phase 3)
+### Rust function chain (pin column 7)
+- `match_engine.rs:277-284` → `score_psm(scored_spec, peptide, scorer, z, tol) + compute_cleavage_credit(...)`
+- `psm_score.rs:29-84` `score_psm` — split loop, accumulates `prefix_mass_acc` in f64, computes `prefix_nominal = nominal_from(prefix_mass_acc)` (round of sum)
+- `scored_spectrum.rs:96-222` `ScoredSpectrum::new` — builds `prefix_score_cache`/`suffix_score_cache`
+- `scored_spectrum.rs:510-558` `directional_node_score_inner` — per segment, per ion-type, lookup nearest-peak rank
+- `pin.rs:347` `let raw_score = psm.score.round() as i32;`
 
-Regression-test scan=28787 must hit 297 ± tolerance. Then PXD001819 + Astral + TMT Percolator @ 1% FDR must hit the gates from the original spec.
+### Java function chain (pin column 7)
+- `DirectPinWriter.java:213` → `match.getScore()`
+- `DBScanner.java:519-541` → `rawScore = scorer.getScore(...)` then `score = cleavageScore + rawScore`
+- `FastScorer.java:59-76` `getScore` — split loop, reads `nominalPrefixMassArr[i]` (sum of rounds), accumulates `Math.round(prefixScore[m] + suffixScore[m])`
+- `FastScorer.java:20-35` constructor — builds `prefixScore[m]`/`suffixScore[m]` via `scoredSpec.getNodeScore(NominalMass(m), isPrefix)`
+- `NewScoredSpectrum.java:134-166` `getNodeScore` — per ion-type, computes theoMass in **f32**, finds `spec.getPeakByMass(theoMass, mme)`, gets rank
+- `NewScoredSpectrum.java:43-56` constructor — `filterPrecursorPeaks()` sets intensity=0 but keeps the peak; `setRanksOfPeaks()` ranks **all** peaks including zero-intensity
+
+### Divergence A — Nominal mass accumulation
+- Java: `nominalPRM[i] = nominalPRM[i-1] + round(exactMass_k * SCALER)` — **sum of rounds**, one round per residue
+- Rust `psm_score.rs:47-52`: `prefix_nominal = nominal_from(prefix_mass_acc)` — **round of sum**, accumulated in f64 before a single round
+- Effect: ±1 Da index shift on some split positions → wrong cache bucket. Drift, not 3× gap.
+
+### Divergence B — Precursor peak filtering (likely root cause)
+- Java `NewScoredSpectrum.java:43-56`: precursor-window peaks get intensity=0 but **retain valid ranks**; fragment ions landing near precursor get an **observed-rank score**.
+- Rust `scored_spectrum.rs:264-299, 656-677`: precursor-window peaks are tagged `ranks[i] = u32::MAX`; `nearest_peak_rank_in` skips them → fragment ions near precursor get **missing-ion log score** (typically much lower).
+- Effect: every fragment ion m/z overlapping the precursor isolation window in the Rust path scores as missing where Java scores as observed. For a charge=2 precursor at m/z ~1027 + 17-residue peptide, several mid- and high-mass fragment ions (especially y2+/b2+ near precursor) will be affected. Each missed ion costs 5–20 log units. Across all ion types × splits, this could easily account for 100+ score units, consistent with a 297→108 gap.
+
+### Divergence C — `IonType.mz()` float precision
+- Java f32, Rust f64. Sub-Da differences in theoMass. Rarely changes which peak is selected. Negligible.
+
+## Phase 3: Confirm root cause with per-split instrumentation (NEXT)
+
+Static analysis is not conclusive on magnitude. Before changing code, instrument both implementations and diff per-split contributions on scan=28787 IVNEEFDQLEEDTPVYK charge=2.
+
+### Java instrumentation
+Project memory and the parity-analysis history indicate Java already has `msgf-trace` wiring via `-Dmsgfplus.trace=true -Dmsgfplus.trace.scan=N -Dmsgfplus.trace.pep=SEQUENCE`. Confirm what gets emitted; if per-split `(split, prefixMass, suffixMass, prefixScore, suffixScore, contribution)` is not already in the trace, add it temporarily.
+
+### Rust instrumentation
+The msgf-rust workspace has a `msgf-trace` binary at `rust/crates/cli/`. Add a feature-gated `eprintln!` block in `psm_score.rs::score_psm`'s split loop emitting the same fields. Run on scan=28787 + IVNEEFDQLEEDTPVYK + charge=2.
+
+### Expected output of the diff
+First divergent split position identifies the root cause:
+- If both sides have the same `prefix_nominal` and `suffix_nominal` but different `prefix_score`/`suffix_score` → Divergence B (the rank-vs-missing path).
+- If the `nominal`s diverge first → Divergence A.
+- If both agree on split contribution but a charge/segment-level multiplier differs → a fourth divergence not in the static review.
+
+## Phase 4: Validation (after Phase 3 fix)
+
+Regression test scan=28787 must hit 297 ± 10 tolerance. Then PXD001819 + Astral + TMT Percolator @ 1% FDR must hit the gates from the original spec (≥14,800 / ≥33,000 / ≥10,500).

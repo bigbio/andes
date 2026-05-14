@@ -68,9 +68,38 @@ Side-by-side reading of Java and Rust score chains identified three concrete div
 ### Divergence C — `IonType.mz()` float precision
 - Java f32, Rust f64. Sub-Da differences in theoMass. Rarely changes which peak is selected. Negligible.
 
-## Phase 3: Confirm root cause with per-split instrumentation (NEXT)
+## Phase 2.6: Divergence-B hypothesis test — no-op
 
-Static analysis is not conclusive on magnitude. Before changing code, instrument both implementations and diff per-split contributions on scan=28787 IVNEEFDQLEEDTPVYK charge=2.
+Modified Rust to rank ALL peaks (including precursor-filtered) so filtered peaks land at worst-tier rank instead of `u32::MAX` skip → score-as-missing. Re-ran the oracle on scan=28787.
+
+Result: RawScore=**108 unchanged** (oracle exit 1).
+
+Cause: `HCD_QExactive_Tryp.param` (the param used for PXD001819) contains **only `reduced_charge=0` entries** for charge=2: offsets {-1.0005, 0.0, +1.0005} with tol=Da(0.5). The filter formula `filter_mz = (neutral_mass + c·PROTON)/c + offset` collapses with `c = charge - reduced_charge = 2`. For a charge=2 precursor this puts filter zones at the precursor m/z (~1027) ± 1 Da only — **no charge-reduced zones in mid-mass fragment territory**. So almost no fragment ions of K.IVNEEFDQLEEDTPVYK.L land in those zones, and the rank-vs-missing distinction never fires for this PSM.
+
+Divergence B remains a real Java↔Rust semantics gap that should be fixed eventually (it would matter for ETD/ECD param files with `reduced_charge=1` entries), but it is NOT the cause of the PXD001819 RawScore gap. Change was reverted; lib tests + `gf_java_parity` were green throughout.
+
+## Phase 3: Confirm root cause with per-split / per-ion instrumentation (NEXT)
+
+Static analysis identified candidates A and B; B is now ruled out for this PSM. Divergence A (sum-of-rounds vs round-of-sums for nominal accumulation) is plausible but cannot account for a systematic 3× gap — it only causes ±1 Da index jitter per split.
+
+The remaining hypotheses are at the ion-iteration / scoring-table level:
+- Ion-type set mismatch: Rust's `partition_ion_logs(part)` may return fewer ion types than Java's `scorer.getIonTypes(charge, parentMass, seg)`.
+- Log-table value mismatch: Same (ion, rank) keys may have different log values in Rust vs Java because of param-parsing drift.
+- Per-segment partition mismatch: `Partition` keys may differ between Java and Rust for the same (charge, parentMass, seg).
+- Edge-score double-count or omission: pin RawScore in Java may include both node and edge contributions; Rust may include only one.
+
+Before changing code, instrument both implementations and dump per-ion-match tuples for scan=28787 + K.IVNEEFDQLEEDTPVYK.L + charge=2. The first divergence in the dump identifies the root cause.
+
+### Instrumentation strategy
+
+Rust: add a feature-gated `eprintln!` in `directional_node_score_inner` printing `(seg_idx, ion, theo_mz, observed_rank_or_none, log_score_added)`.
+Java: project memory mentions `-Dmsgfplus.trace=true -Dmsgfplus.trace.scan=N -Dmsgfplus.trace.pep=SEQUENCE` infrastructure is already wired. If per-ion contributions are not in the existing trace output, extend `NewScoredSpectrum.getNodeScore` to emit them when the trace flags are set.
+
+Compare the two dumps for the same PSM. Outcomes:
+- Same ions iterated, different ranks → rank-assignment divergence (Divergence A and/or peak-lookup bug).
+- Same ions iterated, same ranks, different log scores → param-table parse divergence.
+- Different ions iterated → ion-type set / partition divergence (most likely if scale is ~3×).
+- Same ions, same ranks, same scores, but Java has additional contributions outside this loop → edge-score or out-of-graph contribution.
 
 ### Java instrumentation
 Project memory and the parity-analysis history indicate Java already has `msgf-trace` wiring via `-Dmsgfplus.trace=true -Dmsgfplus.trace.scan=N -Dmsgfplus.trace.pep=SEQUENCE`. Confirm what gets emitted; if per-split `(split, prefixMass, suffixMass, prefixScore, suffixScore, contribution)` is not already in the trace, add it temporarily.

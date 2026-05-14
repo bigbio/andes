@@ -1,19 +1,29 @@
 //! Regression guard for the per-spectrum activation-routing fix
-//! (merge commit `bc8cff6` on `rust-implement`).
+//! (merge commit `bc8cff6` on `rust-implement`) and the follow-up
+//! instrument-type auto-detection (this commit, 2026-05-14).
 //!
 //! Asserts that scoring scan=28787 of PXD001819's `UPS1_5000amol_R1.mzML`
-//! with the **auto-detected** `CID_HighRes_Tryp.param` produces a
-//! `RawScore` within tolerance of the Java baseline. Without the fix —
-//! when the search defaulted to `HCD_HighRes_Tryp_TMT.param` for every
-//! spectrum — the same PSM scored ≈ 108 instead of ≈ 235, dropping a
-//! valid identification and inflating the Rust↔Java SpecEValue gap.
+//! with `CID_LowRes_Tryp.param` produces a stable `RawScore` value.
+//!
+//! Why `CID_LowRes_Tryp.param`, not `CID_HighRes_Tryp.param`: PXD001819
+//! is LTQ Velos data, where MS1 lives in the orbitrap but MS2 lives in
+//! the linear ion trap (IC2 in the mzML's
+//! `<instrumentConfigurationList>`). Java's `NewScorerFactory.get`
+//! defaults `instType` to `LOW_RESOLUTION_LTQ` when no `-inst` flag is
+//! given, so Java picks `CID_LowRes_Tryp.param` for this dataset. The
+//! Rust port's new `detect_instrument_type` helper reads the MS2-
+//! referenced `<analyzer>` cvParam and arrives at the same answer.
 //!
 //! The two load-bearing assertions are:
 //!   1. The mzML parser sets `spec.activation_method == ActivationMethod::CID`
 //!      from the `<activation>` cvParam `MS:1000133`. This is what triggers
 //!      auto-routing in `bin/msgf-rust` — losing the cvParam in extraction
 //!      or in the parser breaks the fix silently.
-//!   2. The resulting score is within ±15 of Java's 225 baseline.
+//!   2. The resulting score is stable around the locked Rust value (no
+//!      Java baseline exists for scan=28787 under CID_LowRes — diagnostic
+//!      runs were captured with `-inst 1`). We treat this as a "score
+//!      stability" test: changes in the scoring path must not silently
+//!      drift this value.
 //!
 //! **Scope**: only scan=28787 is locked in here. Sister scans (28825, 33606,
 //! 32395) referenced in the original fix plan need fresh Java baselines —
@@ -31,14 +41,20 @@ use model::peptide::Peptide;
 use scoring::scoring::score_psm;
 use scoring::{Param, RankScorer, ScoredSpectrum};
 
-/// Java MS-GF+ reports RawScore=225 for this PSM when run with the
-/// canonical CID/HighRes/Tryp parameters on the unmodified mzML.
-const EXPECTED_JAVA_BASELINE_RAWSCORE: i32 = 225;
+/// Rust-side score for this PSM under `CID_LowRes_Tryp.param` (the
+/// param that auto-detection picks for PXD001819 LTQ-Velos MS2 data and
+/// the param Java's `NewScorerFactory` defaults to). Locked at 293 on
+/// `rust-implement` after the instrument-detection landing (2026-05-14).
+///
+/// This is a Rust-vs-Rust stability test, not a Java parity test —
+/// scan=28787's Java baseline was captured with `-inst 1` (HighRes),
+/// so it can't be reused here. If you change the scoring path and this
+/// drifts, investigate the divergence before adjusting the constant.
+const EXPECTED_RAWSCORE: i32 = 293;
 
-/// Tolerance covers float-precision and prefix-mass rounding drift
-/// between Java and Rust. The verified Rust value at the fix's merge
-/// (`bc8cff6`) was 235. Do **not** widen this to make a regressed test
-/// pass — investigate the divergence first.
+/// Tolerance covers float-precision and prefix-mass rounding drift.
+/// Do **not** widen this to make a regressed test pass — investigate
+/// the divergence first.
 const TOLERANCE: i32 = 15;
 
 /// Fragment tolerance Da used by the production CID search path (see
@@ -58,7 +74,7 @@ fn fixture_path() -> PathBuf {
 }
 
 fn param_path() -> PathBuf {
-    workspace_root().join("src/main/resources/ionstat/CID_HighRes_Tryp.param")
+    workspace_root().join("src/main/resources/ionstat/CID_LowRes_Tryp.param")
 }
 
 fn build_peptide_ivneefdqleedtpvyk() -> Peptide {
@@ -117,13 +133,13 @@ fn score_psm_scan_28787_ivneefdqleedtpvyk_matches_java_baseline() {
     let raw_score = score_psm(&scored_spec, &peptide, &scorer, charge, FRAGMENT_TOLERANCE_DA);
     let raw_score_i32 = raw_score as i32;
 
-    let lo = EXPECTED_JAVA_BASELINE_RAWSCORE - TOLERANCE;
-    let hi = EXPECTED_JAVA_BASELINE_RAWSCORE + TOLERANCE;
+    let lo = EXPECTED_RAWSCORE - TOLERANCE;
+    let hi = EXPECTED_RAWSCORE + TOLERANCE;
     assert!(
         (lo..=hi).contains(&raw_score_i32),
-        "RawScore={raw_score_i32} outside Java baseline window {lo}..={hi}. \
-         Verified Rust value at fix merge bc8cff6 was 235. If this assertion \
-         fires, investigate the score divergence — DO NOT widen TOLERANCE \
-         without root-causing the change."
+        "RawScore={raw_score_i32} outside Rust stability window {lo}..={hi}. \
+         Locked value on `rust-implement` after instrument-detection landing \
+         was 293 (CID_LowRes_Tryp.param). If this assertion fires, investigate \
+         the score divergence — DO NOT widen TOLERANCE without root-causing it."
     );
 }

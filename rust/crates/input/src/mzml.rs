@@ -5,6 +5,7 @@
 //! with optional zlib compression and zips (m/z, intensity) pairs into
 //! `Vec<(f64, f32)>` sorted ascending by m/z.
 
+use std::collections::HashMap;
 use std::io::BufRead;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -12,9 +13,37 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use flate2::read::ZlibDecoder;
 use quick_xml::{events::Event, Reader};
 
-use model::{ActivationMethod, Spectrum};
+use model::{ActivationMethod, InstrumentType, Spectrum};
 
 // ── CV accessions we care about ─────────────────────────────────────────────
+
+// Mass-analyzer cvParams used by `detect_instrument_type`. Sourced from the
+// PSI-MS ontology. Java MS-GF+ doesn't auto-detect these — it just defaults
+// to LOW_RESOLUTION_LTQ when no `-inst` flag is given — but for the Rust
+// port's per-file auto-routing we read them to pick a sensible bundled
+// `.param` file (LTQ Velos data → CID_LowRes; Orbitrap CID → CID_HighRes).
+//
+// Ion-trap family → InstrumentType::LowRes.
+const CV_ANALYZER_ION_TRAP:           &str = "MS:1000264"; // ion trap (generic)
+const CV_ANALYZER_QUAD_ION_TRAP:      &str = "MS:1000082"; // quadrupole ion trap
+const CV_ANALYZER_RADIAL_LIT:         &str = "MS:1000083"; // radial ejection linear ion trap
+const CV_ANALYZER_LINEAR_ION_TRAP:    &str = "MS:1000291"; // linear ion trap
+// Orbitrap / FT family → InstrumentType::QExactive / HighRes.
+const CV_ANALYZER_ORBITRAP:           &str = "MS:1000484"; // orbitrap
+const CV_ANALYZER_FTICR:              &str = "MS:1000079"; // Fourier transform ion cyclotron resonance
+// TOF.
+const CV_ANALYZER_TOF:                &str = "MS:1000084"; // time-of-flight
+
+// Instrument-model cvParams in `<instrument>` / `<referenceableParamGroup>`
+// that explicitly identify a QExactive-family box. We don't enumerate every
+// Orbitrap model — falling back to "MS:1000484 orbitrap analyzer ⇒ QExactive"
+// covers the typical case. These exist for cases where the analyzer cvParam
+// is absent but the instrument model is recorded.
+const CV_MODEL_Q_EXACTIVE:            &str = "MS:1001911";
+const CV_MODEL_Q_EXACTIVE_HF:         &str = "MS:1002523";
+const CV_MODEL_Q_EXACTIVE_HF_X:       &str = "MS:1002634";
+const CV_MODEL_Q_EXACTIVE_PLUS:       &str = "MS:1002877";
+const CV_MODEL_ORBITRAP_FUSION:       &str = "MS:1002416";
 
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_SCAN_TIME: &str = "MS:1000016";
@@ -570,6 +599,254 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
             }
         }
     }
+}
+
+// ── Instrument-type detection (separate, lightweight pass) ──────────────────
+
+/// Quick mzML scan that returns the dominant
+/// [`InstrumentType`] of MS2 spectra in the file.
+///
+/// Strategy:
+/// 1. Parse `<instrumentConfigurationList>` and build a map from
+///    `id` → analyzer [`InstrumentType`] using the analyzer / instrument-model
+///    cvParams listed at the top of this module.
+/// 2. As `<spectrum>` elements stream by, inspect their `<scan>`'s
+///    `instrumentConfigurationRef=` attribute. Tally analyzer types for MS2
+///    spectra only, stop after `MAX_PEEK` MS2 scans (early exit).
+/// 3. Return the most-common analyzer mapped through `InstrumentType`. If no
+///    MS2 scan referenced a known IC, fall back to the run-level
+///    `defaultInstrumentConfigurationRef`. If nothing resolves, return `None`.
+///
+/// This intentionally does *not* mutate `MzMLReader`. We keep the
+/// instrument-detection path as a separate, one-shot pre-pass so the main
+/// streaming reader stays focused on per-spectrum data and remains
+/// peak-memory-friendly.
+pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
+    let mut xml = Reader::from_reader(reader);
+    xml.trim_text(true);
+
+    /// Internal scan state. Mirrors the structure of the streaming reader
+    /// without sharing it, since the instrument-type detection cares about
+    /// a different subset of the mzML schema.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum S {
+        Outside,
+        InstrumentConfigurationList,
+        InstrumentConfiguration, // inside <instrumentConfiguration id="X">
+        ComponentListAnalyzer,   // inside <componentList><analyzer>
+        Run,
+        Spectrum,
+        Scan,
+    }
+
+    let mut state = S::Outside;
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+
+    // IC id → detected InstrumentType.
+    let mut ic_map: HashMap<String, InstrumentType> = HashMap::new();
+    // Stored under the IC currently being parsed.
+    let mut current_ic_id: Option<String> = None;
+    let mut current_ic_type: Option<InstrumentType> = None;
+
+    // run-level defaultInstrumentConfigurationRef.
+    let mut default_ic_ref: Option<String> = None;
+
+    // Tally of InstrumentType for MS2 spectra (via per-scan ref).
+    let mut ms2_counts: HashMap<InstrumentType, usize> = HashMap::new();
+    let mut current_spec_is_ms2: Option<bool> = None;
+    let mut current_spec_ic_ref: Option<String> = None;
+    let mut ms2_seen: usize = 0;
+
+    const MAX_PEEK: usize = 64;
+
+    loop {
+        buf.clear();
+        let event = match xml.read_event_into(&mut buf) {
+            Ok(e) => e,
+            // On parse error we just return whatever we've found so far —
+            // detection is best-effort, never load-bearing for correctness.
+            Err(_) => break,
+        };
+        match event {
+            Event::Eof => break,
+
+            Event::Start(ref e) => {
+                let tag = e.local_name().as_ref().to_owned();
+                match tag.as_slice() {
+                    b"instrumentConfigurationList" if state == S::Outside => {
+                        state = S::InstrumentConfigurationList;
+                    }
+                    b"instrumentConfiguration" if state == S::InstrumentConfigurationList => {
+                        current_ic_id = attr_str(e, b"id");
+                        current_ic_type = None;
+                        state = S::InstrumentConfiguration;
+                    }
+                    b"analyzer" if state == S::InstrumentConfiguration => {
+                        state = S::ComponentListAnalyzer;
+                    }
+                    b"run" if state == S::Outside => {
+                        default_ic_ref = attr_str(e, b"defaultInstrumentConfigurationRef");
+                        state = S::Run;
+                    }
+                    b"spectrum" if state == S::Run => {
+                        current_spec_is_ms2 = None;
+                        current_spec_ic_ref = None;
+                        state = S::Spectrum;
+                    }
+                    b"scan" if state == S::Spectrum => {
+                        if let Some(r) = attr_str(e, b"instrumentConfigurationRef") {
+                            current_spec_ic_ref = Some(r);
+                        }
+                        state = S::Scan;
+                    }
+                    _ => {}
+                }
+            }
+
+            Event::Empty(ref e) => {
+                let tag = e.local_name().as_ref().to_owned();
+                // A self-closing `<scan instrumentConfigurationRef="..."/>`
+                // doesn't fire a Start event. Capture the IC ref attribute
+                // here so files that emit empty `<scan/>` elements still
+                // route correctly. Common in trimmed test fixtures.
+                if tag == b"scan" && state == S::Spectrum {
+                    if let Some(r) = attr_str(e, b"instrumentConfigurationRef") {
+                        current_spec_ic_ref = Some(r);
+                    }
+                    // Don't transition state — the spectrum tag is still
+                    // open; the End handler for `<spectrum>` consumes it.
+                }
+                if tag == b"cvParam" {
+                    let acc = attr_str(e, b"accession").unwrap_or_default();
+                    match state {
+                        // Within <analyzer>: pick up the mass-analyzer cvParam.
+                        S::ComponentListAnalyzer => {
+                            let typ = match acc.as_str() {
+                                CV_ANALYZER_ORBITRAP        => Some(InstrumentType::QExactive),
+                                CV_ANALYZER_FTICR           => Some(InstrumentType::HighRes),
+                                CV_ANALYZER_TOF             => Some(InstrumentType::TOF),
+                                CV_ANALYZER_ION_TRAP
+                                | CV_ANALYZER_QUAD_ION_TRAP
+                                | CV_ANALYZER_RADIAL_LIT
+                                | CV_ANALYZER_LINEAR_ION_TRAP => Some(InstrumentType::LowRes),
+                                _ => None,
+                            };
+                            if let Some(t) = typ {
+                                // First analyzer wins for a given IC (matches
+                                // Java's "first mass analyzer" assumption when
+                                // mzMLs declare more than one).
+                                if current_ic_type.is_none() {
+                                    current_ic_type = Some(t);
+                                }
+                            }
+                        }
+                        // Within <instrumentConfiguration> at the top level
+                        // (not inside <analyzer>): an instrument-model cvParam
+                        // may be present and gives us a stronger signal for
+                        // Orbitrap-class boxes than analyzer alone.
+                        S::InstrumentConfiguration => {
+                            let model = match acc.as_str() {
+                                CV_MODEL_Q_EXACTIVE
+                                | CV_MODEL_Q_EXACTIVE_HF
+                                | CV_MODEL_Q_EXACTIVE_HF_X
+                                | CV_MODEL_Q_EXACTIVE_PLUS
+                                | CV_MODEL_ORBITRAP_FUSION => Some(InstrumentType::QExactive),
+                                _ => None,
+                            };
+                            if let Some(t) = model {
+                                // Model wins outright if seen.
+                                current_ic_type = Some(t);
+                            }
+                        }
+                        // Within <spectrum>: pick up ms-level.
+                        S::Spectrum => {
+                            if acc == CV_MS_LEVEL {
+                                let val = attr_str(e, b"value").unwrap_or_default();
+                                if val == "2" {
+                                    current_spec_is_ms2 = Some(true);
+                                } else {
+                                    current_spec_is_ms2 = Some(false);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            Event::End(ref e) => {
+                let tag = e.local_name().as_ref().to_owned();
+                match tag.as_slice() {
+                    b"analyzer" if state == S::ComponentListAnalyzer => {
+                        state = S::InstrumentConfiguration;
+                    }
+                    b"instrumentConfiguration" if state == S::InstrumentConfiguration => {
+                        if let (Some(id), Some(t)) = (current_ic_id.take(), current_ic_type.take()) {
+                            ic_map.insert(id, t);
+                        }
+                        state = S::InstrumentConfigurationList;
+                    }
+                    b"instrumentConfigurationList" if state == S::InstrumentConfigurationList => {
+                        state = S::Outside;
+                    }
+                    b"scan" if state == S::Scan => {
+                        state = S::Spectrum;
+                    }
+                    b"spectrum" if state == S::Spectrum => {
+                        // Tally if this was MS2 and we know its IC ref (or the
+                        // file-wide default IC).
+                        let is_ms2 = current_spec_is_ms2.unwrap_or(false);
+                        if is_ms2 {
+                            let ic_ref = current_spec_ic_ref
+                                .clone()
+                                .or_else(|| default_ic_ref.clone());
+                            if let Some(r) = ic_ref {
+                                if let Some(&t) = ic_map.get(&r) {
+                                    *ms2_counts.entry(t).or_insert(0) += 1;
+                                }
+                            }
+                            ms2_seen += 1;
+                            if ms2_seen >= MAX_PEEK {
+                                break;
+                            }
+                        }
+                        current_spec_is_ms2 = None;
+                        current_spec_ic_ref = None;
+                        state = S::Run;
+                    }
+                    b"run" if state == S::Run => {
+                        state = S::Outside;
+                    }
+                    _ => {}
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    // Prefer the dominant analyzer across MS2 scans.
+    if !ms2_counts.is_empty() {
+        return ms2_counts
+            .iter()
+            .max_by_key(|(_, &n)| n)
+            .map(|(&t, _)| t);
+    }
+
+    // No MS2-referenced IC info — fall back to default IC if it's known.
+    if let Some(r) = default_ic_ref.as_ref() {
+        if let Some(&t) = ic_map.get(r) {
+            return Some(t);
+        }
+    }
+
+    // No default-IC info either — use the first IC we found (some mzMLs only
+    // declare one IC and don't reference it from each scan).
+    if ic_map.len() == 1 {
+        return ic_map.into_values().next();
+    }
+
+    None
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1284,5 +1561,214 @@ mod tests {
         let spectra = collect_ok(&wrap_spectra(&xml));
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
+    }
+
+    // ── Instrument-type detection ────────────────────────────────────────────
+
+    /// Build an mzML wrapper with one or more `<instrumentConfiguration>`
+    /// blocks and `<run>`-level `defaultInstrumentConfigurationRef`.
+    fn wrap_with_instrument_configs(
+        instrument_configs: &str,
+        default_ic_ref: &str,
+        spectra_xml: &str,
+    ) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <instrumentConfigurationList count="1">
+    {instrument_configs}
+  </instrumentConfigurationList>
+  <run id="r" defaultInstrumentConfigurationRef="{default_ic_ref}">
+    <spectrumList count="1" defaultDataProcessingRef="dp">
+      {spectra_xml}
+    </spectrumList>
+  </run>
+</mzML>"#
+        )
+    }
+
+    fn ic_block(id: &str, analyzer_cv: &str) -> String {
+        format!(
+            r#"<instrumentConfiguration id="{id}">
+              <componentList count="3">
+                <source order="1">
+                  <cvParam accession="MS:1000398" name="nanoelectrospray" value=""/>
+                </source>
+                <analyzer order="2">
+                  <cvParam accession="{analyzer_cv}" name="" value=""/>
+                </analyzer>
+                <detector order="3">
+                  <cvParam accession="MS:1000624" name="inductive detector" value=""/>
+                </detector>
+              </componentList>
+            </instrumentConfiguration>"#
+        )
+    }
+
+    fn ms2_spectrum_with_ic_ref(ic_ref: &str) -> String {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1">
+                <scan instrumentConfigurationRef="{ic_ref}"/>
+              </scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    </selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        )
+    }
+
+    #[test]
+    fn detect_instrument_orbitrap_analyzer_to_qexactive() {
+        let xml = wrap_with_instrument_configs(
+            &ic_block("IC1", "MS:1000484"),
+            "IC1",
+            &ms2_spectrum_with_ic_ref("IC1"),
+        );
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::QExactive));
+    }
+
+    #[test]
+    fn detect_instrument_ion_trap_analyzer_to_lowres() {
+        // Linear ion trap (MS:1000291) — LTQ Velos and similar.
+        let xml = wrap_with_instrument_configs(
+            &ic_block("IC1", "MS:1000291"),
+            "IC1",
+            &ms2_spectrum_with_ic_ref("IC1"),
+        );
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::LowRes));
+    }
+
+    #[test]
+    fn detect_instrument_quad_ion_trap_to_lowres() {
+        let xml = wrap_with_instrument_configs(
+            &ic_block("IC1", "MS:1000082"),
+            "IC1",
+            &ms2_spectrum_with_ic_ref("IC1"),
+        );
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::LowRes));
+    }
+
+    #[test]
+    fn detect_instrument_fticr_to_highres() {
+        let xml = wrap_with_instrument_configs(
+            &ic_block("IC1", "MS:1000079"),
+            "IC1",
+            &ms2_spectrum_with_ic_ref("IC1"),
+        );
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::HighRes));
+    }
+
+    #[test]
+    fn detect_instrument_tof_analyzer() {
+        let xml = wrap_with_instrument_configs(
+            &ic_block("IC1", "MS:1000084"),
+            "IC1",
+            &ms2_spectrum_with_ic_ref("IC1"),
+        );
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::TOF));
+    }
+
+    #[test]
+    fn detect_instrument_ms2_referenced_ic_wins_pxd001819_pattern() {
+        // Mimics PXD001819: MS1 uses IC1 (orbitrap) but MS2 uses IC2 (ion trap).
+        // The MS2-referenced IC must win → LowRes.
+        let ics = format!(
+            "{}\n{}",
+            ic_block("IC1", "MS:1000484"), // orbitrap
+            ic_block("IC2", "MS:1000264"), // ion trap
+        );
+        // MS2 references IC2.
+        let xml = wrap_with_instrument_configs(&ics, "IC1", &ms2_spectrum_with_ic_ref("IC2"));
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::LowRes));
+    }
+
+    #[test]
+    fn detect_instrument_falls_back_to_default_ic_when_scan_lacks_ref() {
+        // Spectrum's <scan> has no instrumentConfigurationRef — falls back to
+        // run-level defaultInstrumentConfigurationRef.
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let spec = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                    </selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+        let xml = wrap_with_instrument_configs(&ic_block("IC1", "MS:1000484"), "IC1", &spec);
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::QExactive));
+    }
+
+    #[test]
+    fn detect_instrument_returns_none_when_no_ic_info() {
+        // No instrumentConfigurationList block at all.
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            500.5,
+            None,
+        );
+        let xml = wrap_spectra(&spec);
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn detect_instrument_qexactive_model_cv_param() {
+        // No analyzer cvParam, but a Q Exactive instrument-model cvParam
+        // appears at the top of the IC block.
+        let ic = r#"<instrumentConfiguration id="IC1">
+            <cvParam accession="MS:1001911" name="Q Exactive" value=""/>
+            <componentList count="3">
+              <source order="1">
+                <cvParam accession="MS:1000398" name="nanoelectrospray" value=""/>
+              </source>
+              <analyzer order="2"/>
+              <detector order="3"/>
+            </componentList>
+          </instrumentConfiguration>"#;
+        let xml = wrap_with_instrument_configs(ic, "IC1", &ms2_spectrum_with_ic_ref("IC1"));
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::QExactive));
     }
 }

@@ -1,0 +1,3 @@
+commit_sha,raw_score_scan_28787,note
+ab28821,108,fix/score-psm-undercount HEAD (post plan commit)
+5d912fc,61,"2026-05-11 ""GF tails iter 2 closed"" — DeNovoScore=97 (theoretical max for this PSM); bug predates this commit. Bisect strategy invalidated."

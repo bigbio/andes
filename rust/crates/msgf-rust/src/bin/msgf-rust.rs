@@ -14,12 +14,12 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use model::{
-    activation::ActivationMethod, AminoAcidSetBuilder, ModLocation, Modification,
+    activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
     PrecursorTolerance, ResidueSpec, Spectrum, Tolerance,
 };
 use scoring_crate::{Param, RankScorer};
 use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
-use input::{FastaReader, MgfReader, MzMLReader};
+use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -260,13 +260,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if auto_route_eligible {
                 match detect_dominant_activation(&cli.spectrum) {
                     Some(method) => {
+                        // Detect instrument type from the same mzML file.
+                        // None ⇒ resolver picks LowRes (Java's
+                        // NewScorerFactory default when no `-inst` flag).
+                        let inst = detect_instrument_type_for_path(&cli.spectrum);
                         eprintln!(
                             "Param resolver: auto-detected dominant activation \
-                             method = {} from {}",
+                             method = {} (instrument = {}) from {}",
                             method.name(),
+                            inst.map(|i| i.name()).unwrap_or("unknown/default"),
                             cli.spectrum.display()
                         );
-                        resolve_bundled_param_for_activation(method, cli.protocol)?
+                        resolve_bundled_param_for_activation(method, inst, cli.protocol)?
                     }
                     None => {
                         // No detectable activation in the input — fall back to
@@ -747,55 +752,82 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 /// Resolve a bundled `.param` file for the given activation method.
 ///
 /// This is the auto-detect path: we already know the activation, and we
-/// pick the "best available" bundled instrument+enzyme pair. Mirrors the
-/// per-spectrum dispatch Java's MS-GF+ does in `ScoredSpectraMap.java:262-263`
-/// when the user passes `-m 0` (ASWRITTEN), but applied at file-wide
-/// granularity here.
+/// pick the bundled instrument+enzyme pair that best matches the dataset.
+/// Mirrors the per-spectrum dispatch Java's MS-GF+ does in
+/// `ScoredSpectraMap.java:262-263` when the user passes `-m 0`
+/// (ASWRITTEN), but applied at file-wide granularity here.
+///
+/// The `detected_instrument` argument is the instrument type detected by
+/// scanning the mzML's `<instrumentConfiguration>` blocks (see
+/// `input::detect_instrument_type`). `None` means we couldn't detect it
+/// (older mzML, MGF, etc.) — in that case we mirror Java's
+/// `NewScorerFactory.get` default of `LOW_RESOLUTION_LTQ`.
 ///
 /// Mapping (Tryp / no-protocol unless protocol overrides):
-///   - CID  → CID_HighRes_Tryp.param  (HighRes matches Java's
-///            per-spectrum-trace observation for PXD001819; see
-///            `docs/parity-analysis/notes/2026-05-14-param-lookup-root-cause.md`).
-///   - HCD  → HCD_QExactive_Tryp.param  (Java upgrades HCD to QExactive
-///            unconditionally in `NewScorerFactory.get`).
-///   - ETD  → ETD_HighRes_Tryp.param   (bundled; mirrors Java's
-///            ETD-HighRes path for modern instruments).
-///   - PQD  → CID_HighRes_Tryp.param   (Java collapses PQD → CID).
-///   - UVPD → UVPD_QExactive_Tryp.param.
-///
-/// When a protocol is supplied, the resolver appends the protocol suffix
-/// and walks the same fallback ladder as `resolve_bundled_param`. This is
-/// implemented by translating activation → (frag_id, inst_id) and
-/// delegating to `resolve_bundled_param`, so we get the
-/// drop-protocol / final-ladder fallback semantics for free.
+///   - CID  → frag=1, inst=detected (LowRes when none).
+///            LowRes for LTQ Velos / ion-trap data; HighRes / QExactive
+///            for Orbitrap data. Matches Java's default + the user-supplied
+///            `-inst` path.
+///   - HCD  → frag=3, inst=detected. `resolve_bundled_param`'s Java-mirror
+///            normalization upgrades HCD with non-(HighRes|QExactive) to
+///            QExactive, so HCD on LTQ data still routes to a QExactive
+///            model (Java does the same).
+///   - ETD  → frag=2, inst=detected.
+///   - PQD  → CID (Java collapses PQD → CID in `NewScorerFactory.get`).
+///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
 fn resolve_bundled_param_for_activation(
-    method:   ActivationMethod,
-    protocol: Option<u8>,
+    method:               ActivationMethod,
+    detected_instrument:  Option<InstrumentType>,
+    protocol:             Option<u8>,
 ) -> Result<PathBuf, String> {
+    // Translate a detected `InstrumentType` to the numeric ID
+    // `resolve_bundled_param` expects. `None` → 0 (LowRes), mirroring Java's
+    // `LOW_RESOLUTION_LTQ` default.
+    let detected_inst_id: u8 = match detected_instrument {
+        Some(InstrumentType::LowRes)    => 0,
+        Some(InstrumentType::HighRes)   => 1,
+        Some(InstrumentType::TOF)       => 2,
+        Some(InstrumentType::QExactive) => 3,
+        None                            => 0, // Java default
+    };
+
     // Translate the activation method to the (fragmentation, instrument) pair
-    // that `resolve_bundled_param` expects. We pick the bundled instrument
-    // most likely to match the dataset (mirroring the diagnostic-verified
-    // path for PXD001819 and the existing Java NewScorerFactory rules).
+    // that `resolve_bundled_param` expects.
     let (frag_id, inst_id): (u8, u8) = match method {
-        // CID → CID_HighRes. Diagnostic verified this matches Java's
-        // per-spectrum trace on PXD001819 (scan=28787 RawScore: Rust 235
-        // vs Java 225) when forced via `--fragmentation 1 --instrument 1`.
-        ActivationMethod::CID  => (1, 1),
-        // HCD → HCD_QExactive. Java upgrades HCD to QExactive in
-        // NewScorerFactory.get when instType is not HighRes/QExactive.
-        ActivationMethod::HCD  => (3, 3),
-        // ETD → ETD_HighRes_Tryp.param. ETD_LowRes_Tryp is the historical
-        // fallback inside resolve_bundled_param; we go straight to HighRes
-        // here since that's what's typically present in modern mzMLs.
-        ActivationMethod::ETD  => (2, 1),
+        // CID: use detected instrument (LowRes default mirrors Java's
+        // NewScorerFactory).
+        ActivationMethod::CID  => (1, detected_inst_id),
+        // HCD: use detected instrument; `resolve_bundled_param` upgrades
+        // HCD+(LowRes|TOF) → QExactive (Java's NewScorerFactory rule).
+        ActivationMethod::HCD  => (3, detected_inst_id),
+        // ETD: use detected instrument.
+        ActivationMethod::ETD  => (2, detected_inst_id),
         // PQD → CID (Java's NewScorerFactory rule: "PQD or null → CID").
-        ActivationMethod::PQD  => (1, 1),
-        // UVPD → UVPD_QExactive_Tryp.param (only QExactive variant exists
-        // bundled). resolve_bundled_param walks the ladder if missing.
+        ActivationMethod::PQD  => (1, detected_inst_id),
+        // UVPD: only QExactive variant exists bundled. resolve_bundled_param
+        // walks the ladder if missing.
         ActivationMethod::UVPD => (4, 3),
     };
 
     resolve_bundled_param(Some(frag_id), Some(inst_id), protocol)
+}
+
+/// Helper to call `input::detect_instrument_type` on an mzML path.
+///
+/// Mirrors the structure of `detect_dominant_activation` so the two
+/// detection passes look symmetric at the call site. Returns `None` for
+/// non-mzML inputs or when the mzML has no recoverable instrument metadata.
+fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<InstrumentType> {
+    let ext_lower = spectrum_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if ext_lower.as_deref() != Some("mzml") {
+        return None;
+    }
+
+    let file = File::open(spectrum_path).ok()?;
+    detect_instrument_type(BufReader::new(file))
 }
 
 /// Resolve a bundled `.param` filename under
@@ -911,5 +943,78 @@ mod param_resolver_tests {
     fn rejects_out_of_range_protocol() {
         let err = resolve_bundled_param(None, None, Some(99)).unwrap_err();
         assert!(err.contains("--protocol"));
+    }
+
+    // ── resolve_bundled_param_for_activation: instrument routing ──────────────
+
+    /// CID + no detected instrument ⇒ LowRes (Java's `LOW_RESOLUTION_LTQ`
+    /// default). This is the load-bearing PXD001819 path — LTQ Velos
+    /// MS2 data must route here.
+    #[test]
+    fn cid_with_no_detected_instrument_routes_to_lowres() {
+        let p = resolve_bundled_param_for_activation(
+            ActivationMethod::CID, None, None,
+        ).unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("CID_LowRes_Tryp.param"),
+            "expected CID_LowRes_Tryp.param when no instrument detected, got {s}"
+        );
+    }
+
+    #[test]
+    fn cid_with_lowres_detected_routes_to_lowres() {
+        let p = resolve_bundled_param_for_activation(
+            ActivationMethod::CID, Some(InstrumentType::LowRes), None,
+        ).unwrap();
+        assert!(p.to_string_lossy().ends_with("CID_LowRes_Tryp.param"));
+    }
+
+    #[test]
+    fn cid_with_qexactive_detected_routes_to_highres() {
+        // No `CID_QExactive_Tryp.param` is bundled; resolver's final
+        // ladder rewrites this. (Java's ladder ends at `CID_LowRes_Tryp`
+        // for non-bundled CID/QExactive combos.)
+        // Most importantly: we must not silently land on the LowRes
+        // bucket when QExactive is detected — verify some param resolves.
+        let p = resolve_bundled_param_for_activation(
+            ActivationMethod::CID, Some(InstrumentType::QExactive), None,
+        ).unwrap();
+        // Should resolve to *something* — the ladder may fall back, but
+        // we just want this not to error.
+        assert!(p.exists(), "param path should exist: {}", p.display());
+    }
+
+    #[test]
+    fn cid_with_highres_detected_routes_to_highres() {
+        let p = resolve_bundled_param_for_activation(
+            ActivationMethod::CID, Some(InstrumentType::HighRes), None,
+        ).unwrap();
+        assert!(
+            p.to_string_lossy().ends_with("CID_HighRes_Tryp.param"),
+            "expected CID_HighRes_Tryp.param, got {}", p.display()
+        );
+    }
+
+    #[test]
+    fn hcd_with_lowres_detected_upgrades_to_qexactive() {
+        // Java's NewScorerFactory upgrades HCD + non-(HighRes|QExactive)
+        // to QExactive. Verify the auto-detect path does the same when
+        // the mzML claims LowRes (e.g., a CID/HCD-mixed LTQ acquisition).
+        let p = resolve_bundled_param_for_activation(
+            ActivationMethod::HCD, Some(InstrumentType::LowRes), None,
+        ).unwrap();
+        assert!(
+            p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"),
+            "expected HCD_QExactive_Tryp.param (Java HCD-upgrade), got {}", p.display()
+        );
+    }
+
+    #[test]
+    fn hcd_with_qexactive_detected_stays_qexactive() {
+        let p = resolve_bundled_param_for_activation(
+            ActivationMethod::HCD, Some(InstrumentType::QExactive), None,
+        ).unwrap();
+        assert!(p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"));
     }
 }

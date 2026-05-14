@@ -832,6 +832,7 @@ mod feature_tests {
             rt_seconds: None,
             scan: None,
             peaks,
+            activation_method: None,
         }
     }
 

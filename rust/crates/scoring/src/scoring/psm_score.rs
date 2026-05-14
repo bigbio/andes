@@ -157,6 +157,7 @@ mod tests {
             rt_seconds: None,
             scan: None,
             peaks: vec![],
+            activation_method: None,
         }
     }
 
@@ -259,6 +260,7 @@ mod tests {
             rt_seconds: None,
             scan: None,
             peaks,
+            activation_method: None,
         };
         let scored = ScoredSpectrum::new_without_filtering(&spec);
         let scorer = RankScorer::new(&param);
@@ -292,6 +294,7 @@ mod tests {
             rt_seconds: None,
             scan: None,
             peaks: match_peaks,
+            activation_method: None,
         };
 
         let scorer = RankScorer::new(&param);

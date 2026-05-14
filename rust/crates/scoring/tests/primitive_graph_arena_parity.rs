@@ -76,6 +76,7 @@ fn empty_spec() -> Spectrum {
         rt_seconds: None,
         scan: None,
         peaks: vec![],
+        activation_method: None,
     }
 }
 

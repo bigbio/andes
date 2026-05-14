@@ -302,6 +302,7 @@ mod tests {
             rt_seconds: None,
             scan: Some(scan),
             peaks: vec![],
+            activation_method: None,
         }
     }
 

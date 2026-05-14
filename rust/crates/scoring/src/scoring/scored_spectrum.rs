@@ -755,6 +755,7 @@ mod tests {
             rt_seconds: None,
             scan: None,
             peaks: peaks.to_vec(),
+            activation_method: None,
         }
     }
 
@@ -786,6 +787,7 @@ mod tests {
             rt_seconds: None,
             scan: None,
             peaks: vec![(100.0, 1.0), (200.0, 2.0), (300.0, 3.0)],
+            activation_method: None,
         };
 
         let param = Param {
@@ -1090,6 +1092,7 @@ mod tests {
         let spec = Spectrum {
             title: "parity".into(), precursor_mz: 800.0, precursor_intensity: None,
             precursor_charge: Some(2), rt_seconds: None, scan: None, peaks,
+            activation_method: None,
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         let mut state: u64 = 0xCAFEBABEDEADBEEF;
@@ -1180,6 +1183,7 @@ mod tests {
             rt_seconds: None,
             scan: None,
             peaks,
+            activation_method: None,
         };
         let ss = ScoredSpectrum::new_without_filtering(&s);
 
@@ -1270,6 +1274,7 @@ mod precursor_filter_tests {
             rt_seconds: None,
             scan: None,
             peaks: peaks.to_vec(),
+            activation_method: None,
         }
     }
 

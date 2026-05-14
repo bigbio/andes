@@ -83,6 +83,7 @@ fn empty_spec() -> Spectrum {
         rt_seconds: None,
         scan: None,
         peaks: vec![],
+        activation_method: None,
     }
 }
 
@@ -319,6 +320,7 @@ fn gf_underflow_guard_uses_denormal_min_not_normal_min() {
     let s = Spectrum {
         title: "t".into(), precursor_mz: 500.0, precursor_intensity: None,
         precursor_charge: Some(2), rt_seconds: None, scan: None, peaks: vec![],
+        activation_method: None,
     };
     let param = tiny_param();
     let scorer = RankScorer::new(&param);

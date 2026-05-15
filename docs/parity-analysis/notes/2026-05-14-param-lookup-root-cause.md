@@ -292,3 +292,67 @@ original code-explorer report:
 
 Next iteration: per-PSM trace on a top-gap Astral PSM, isolate the
 divergence, fix.
+
+---
+
+## 2026-05-15: Astral residual root cause = missing deconvolution
+
+Per-PSM trace on the Astral canary (scan=82298, EAQADAAAEIAEDAAEAEDAGKPK,
+charge=3, Java RawScore=215, Rust=103) isolated the dominant divergence:
+
+**Rust did not implement isotope-cluster deconvolution.** Java's
+`NewScoredSpectrum` constructor honors `param.apply_deconvolution`
+(true for HCD_QExactive, CID_HighRes, ETD_HighRes, and all TMT
+params) by calling `spec.getDeconvolutedSpectrum(...)` after
+peak-ranking and before scoring. The deconvolution charge-reduces
+2+/3+ isotope clusters to charge-1 mass:
+  `new_mz = ionCharge * mz - (ionCharge - 1) * PROTON`
+The original Peak objects' `mz` fields are mutated, but their ranks
+(set by `setRanksOfPeaks` before deconvolution) are preserved.
+
+Rust's `Param::apply_deconvolution` was parsed but never consumed.
+For Astral spectra with 1598 peaks in [145..1445] mz, Java's
+deconvoluted spectrum extends to ~2200 mz (charge-2+ fragments
+mapped to charge-1), revealing dozens of additional matchable b/y
+ions per peptide. Without deconvolution, every high-mass node-score
+lookup returns the missing-ion slot — explaining the per-split
+trace where suffScore=-0.7416 (constant sum of missing-ion log
+scores for the 3 ions in segment 1) for the entire upper half of
+the peptide.
+
+**Local canary repro (cargo run --release -p scoring --example
+score_canary, since removed):**
+  - Before fix: Rust score = 99 (node-only), edge-contribution +10 → 109
+  - After fix:  Rust score = 176 (deconvoluted node sum)
+  - Java RawScore = 215 (39-point residual gap, may close in production
+    where precursorCal also runs)
+
+**Fix:** new `deconvolute_spectrum` helper in
+`rust/crates/scoring/src/scoring/scored_spectrum.rs` mirroring Java's
+algorithm line-for-line, with results stored as `deconv_peaks` and
+`deconv_ranks` on `ScoredSpectrum`. The hot-path `directional_node_score_inner`
+and `observed_node_mass` switch to the deconvoluted peak list via
+`active_peaks_and_ranks()`. Gated on `param.apply_deconvolution &&
+charge > 2` (Java's inner loop is `for ionCharge in 2..charge`, empty
+for charge ≤ 2). When the gate is false, behavior is bit-identical to
+the pre-fix path (no allocation, no peak rewrite).
+
+**Verification:**
+  - All 565 lib tests pass
+  - GF Java parity (5 BSA PSMs at 1 OOM tolerance) PASS
+  - PXD001819 score_psm scan=28787 regression PASS (293, stable)
+
+**Not fixed in this commit:** the residual 39-point gap on the canary
+(176 vs 215). Initial investigation suggests edge scoring is missing
+from `score_psm` — Java's `DBScanScorer.getScore` adds edge contributions
+on top of the FastScorer node total. Adding edges to score_psm was
+attempted but regressed BSA GF Java parity (5/5 PSMs failed by 1-3
+OOMs), suggesting a mismatch between score_psm's per-edge query and
+the GF DP's edge graph. Left as a follow-up; the deconv fix is shipped
+as a milestone improvement.
+
+**3-dataset bench:** not yet run (SSH socket to pride-linux-vm dropped
+during diagnostics). Local regression tests all pass; expected effect:
+- PXD001819: no change (param.apply_deconvolution=false)
+- TMT: deconv applied, score change TBD
+- Astral: score increases, Percolator @ 1% FDR should rise from 25,224

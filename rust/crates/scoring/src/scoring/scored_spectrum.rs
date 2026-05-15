@@ -34,7 +34,26 @@ pub struct ScoredSpectrum<'a> {
     /// indices. `ranks[i]` is the rank of the peak at index `i` in the
     /// original `spec.peaks` array. Ties broken by ascending m/z.
     /// Peaks filtered out by precursor-peak filtering receive rank `u32::MAX`.
+    ///
+    /// When deconvolution is applied (see `deconv_peaks`), the active
+    /// rank list is `deconv_ranks`, NOT this field. This field is
+    /// retained for `nearest_peak_full` / `nearest_peak_rank` which by
+    /// design operate on the original spectrum peaks.
     ranks: Vec<u32>,
+    /// Deconvoluted peak list when `param.apply_deconvolution = true`.
+    /// Each entry is `(mz, intensity)` after charge-reducing multi-charge
+    /// isotope clusters to charge-1 mass (`new_mz = ionCharge * mz - (ionCharge - 1) * PROTON`).
+    /// Sorted ascending by m/z so binary search lookups stay O(log n).
+    /// Mirrors Java's `Spectrum.getDeconvolutedSpectrum` and is consumed
+    /// by `directional_node_score_inner` and `observed_node_mass`.
+    /// `None` when deconvolution is not applied — callers fall back to
+    /// `spec.peaks` / `ranks` (the original spectrum).
+    deconv_peaks: Option<Vec<(f64, f32)>>,
+    /// Ranks aligned with `deconv_peaks`. Each original peak's rank is
+    /// preserved on the deconvoluted peak (Java's
+    /// `setRanksOfPeaks` runs BEFORE `getDeconvolutedSpectrum`).
+    /// `None` exactly when `deconv_peaks` is `None`.
+    deconv_ranks: Option<Vec<u32>>,
     /// Number of peaks that survived precursor-peak filtering (used for
     /// `peak_count_after_filtering`).
     kept_count: usize,
@@ -186,14 +205,39 @@ impl<'a> ScoredSpectrum<'a> {
                 (p, logs)
             })
             .collect();
+
+        // Optionally apply Java-parity isotope-cluster deconvolution. Many
+        // bundled params (HCD_QExactive, CID_HighRes, ETD_HighRes, *_TMT)
+        // store `apply_deconvolution = true`; Java's `NewScoredSpectrum`
+        // honors this by replacing `this.spec` with the deconvoluted
+        // spectrum before scoring. Without it, charge-2+ fragment ions
+        // are invisible to high-mass node-score lookups (top cause of
+        // the Astral Percolator gap at 1% FDR).
+        let (deconv_peaks, deconv_ranks): (Option<Vec<(f64, f32)>>, Option<Vec<u32>>) =
+            if param.apply_deconvolution && charge > 2 {
+                let tol = param.deconvolution_error_tolerance as f64;
+                let (dp, dr) = deconvolute_spectrum(&spec.peaks, &ranks, charge, tol);
+                (Some(dp), Some(dr))
+            } else {
+                (None, None)
+            };
+
         let cache_len = (nominal_from(parent_mass).max(0) as usize) + 1;
         let mut prefix_score_cache = vec![0.0; cache_len];
         let mut suffix_score_cache = vec![0.0; cache_len];
+        // Choose the active peak list / rank list ONCE, then reuse for the
+        // whole cache fill. When deconvolution was applied, the cache is
+        // built against the charge-reduced spectrum (matching Java).
+        let (cache_peaks, cache_ranks): (&[(f64, f32)], &[u32]) =
+            match (&deconv_peaks, &deconv_ranks) {
+                (Some(dp), Some(dr)) => (dp.as_slice(), dr.as_slice()),
+                _ => (spec.peaks.as_slice(), ranks.as_slice()),
+            };
         for nominal_mass in 1..cache_len {
             let node_nominal = nominal_mass as f64;
             prefix_score_cache[nominal_mass] = Self::directional_node_score_inner(
-                spec,
-                &ranks,
+                cache_peaks,
+                cache_ranks,
                 &segment_partition_cache,
                 scorer,
                 node_nominal,
@@ -202,8 +246,8 @@ impl<'a> ScoredSpectrum<'a> {
                 parent_mass,
             );
             suffix_score_cache[nominal_mass] = Self::directional_node_score_inner(
-                spec,
-                &ranks,
+                cache_peaks,
+                cache_ranks,
                 &segment_partition_cache,
                 scorer,
                 node_nominal,
@@ -213,12 +257,21 @@ impl<'a> ScoredSpectrum<'a> {
             );
         }
 
-        Self::rank_kept(
-            spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge,
+        Self {
+            spec,
+            ranks,
+            kept_count,
+            total_intensity: spec.peaks.iter().map(|&(_, i)| i as f64).sum(),
+            prob_peak,
+            main_ion,
+            parent_mass,
+            charge,
             segment_partition_cache,
             prefix_score_cache,
             suffix_score_cache,
-        )
+            deconv_peaks,
+            deconv_ranks,
+        }
     }
 
     /// Constructor that skips precursor-peak filtering. Convenient for
@@ -295,6 +348,8 @@ impl<'a> ScoredSpectrum<'a> {
             segment_partition_cache,
             prefix_score_cache,
             suffix_score_cache,
+            deconv_peaks: None,
+            deconv_ranks: None,
         }
     }
 
@@ -303,6 +358,19 @@ impl<'a> ScoredSpectrum<'a> {
     /// `PrimitiveAaGraph` to decide which end is the graph source.
     pub fn main_ion_direction(&self) -> bool {
         self.main_ion.is_prefix()
+    }
+
+    /// Return the active peak list and aligned rank vector for the per-node
+    /// scoring path. When deconvolution is applied (HCD/CID-HighRes/ETD/QExactive
+    /// params with `apply_deconvolution=true`), this returns the
+    /// charge-reduced peak list. Otherwise it returns the original spectrum's
+    /// peaks and their ranks.
+    #[inline]
+    fn active_peaks_and_ranks(&self) -> (&[(f64, f32)], &[u32]) {
+        match (&self.deconv_peaks, &self.deconv_ranks) {
+            (Some(peaks), Some(ranks)) => (peaks.as_slice(), ranks.as_slice()),
+            _ => (self.spec.peaks.as_slice(), self.ranks.as_slice()),
+        }
     }
 
     /// Spectrum-level parent mass (= `(precursor_mz - PROTON) * charge`).
@@ -517,9 +585,10 @@ impl<'a> ScoredSpectrum<'a> {
         parent_mass: f64,
         _fragment_tolerance_da: f64,
     ) -> f32 {
+        let (peaks, ranks) = self.active_peaks_and_ranks();
         Self::directional_node_score_inner(
-            self.spec,
-            &self.ranks,
+            peaks,
+            ranks,
             &self.segment_partition_cache,
             scorer,
             nominal_mass,
@@ -530,7 +599,7 @@ impl<'a> ScoredSpectrum<'a> {
     }
 
     fn directional_node_score_inner(
-        spec: &Spectrum,
+        peaks: &[(f64, f32)],
         ranks: &[u32],
         segment_partition_cache: &[(Partition, Vec<(IonType, Vec<f32>)>)],
         scorer: &RankScorer,
@@ -575,7 +644,7 @@ impl<'a> ScoredSpectrum<'a> {
                     continue;
                 }
                 let tol_da = mme.as_da(theo_mz);
-                let score = match nearest_peak_rank_in(spec, ranks, theo_mz, tol_da) {
+                let score = match nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da) {
                     Some(rank) => {
                         let idx = rank.min(max_rank).max(1) as usize - 1;
                         if idx < logs.len() { logs[idx] } else { 0.0 }
@@ -614,16 +683,19 @@ impl<'a> ScoredSpectrum<'a> {
         // Select the highest-intensity peak within [theo_mz - tol_da, theo_mz + tol_da].
         // Intensity-comparator selection: pick the maximum-intensity peak in the window.
         // Skip filtered peaks (ranks[i] == u32::MAX).
+        // Uses the deconvoluted peak list when `param.apply_deconvolution = true` —
+        // edge scoring lives downstream of node scoring and must see the same peaks.
+        let (peaks, ranks) = self.active_peaks_and_ranks();
         let lo_mz = theo_mz - tol_da;
         let hi_mz = theo_mz + tol_da;
-        let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
+        let start = peaks.partition_point(|&(mz, _)| mz < lo_mz);
         let mut best_peak_mz: Option<(f64, f32)> = None; // (mz, intensity)
-        for i in start..self.spec.peaks.len() {
-            let (mz, intensity) = self.spec.peaks[i];
+        for i in start..peaks.len() {
+            let (mz, intensity) = peaks[i];
             if mz > hi_mz {
                 break;
             }
-            if self.ranks[i] == u32::MAX {
+            if ranks[i] == u32::MAX {
                 continue;
             }
             if best_peak_mz.as_ref().map_or(true, |&(_, best_int)| intensity > best_int) {
@@ -686,16 +758,16 @@ impl<'a> ScoredSpectrum<'a> {
     }
 }
 
-fn nearest_peak_rank_in(spec: &Spectrum, ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<u32> {
-    if spec.peaks.is_empty() {
+fn nearest_peak_rank_in(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<u32> {
+    if peaks.is_empty() {
         return None;
     }
     let lo_mz = target_mz - tolerance_da;
     let hi_mz = target_mz + tolerance_da;
-    let start = spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
+    let start = peaks.partition_point(|&(mz, _)| mz < lo_mz);
     let mut best: Option<(usize, f32)> = None;
-    for i in start..spec.peaks.len() {
-        let (mz, intensity) = spec.peaks[i];
+    for i in start..peaks.len() {
+        let (mz, intensity) = peaks[i];
         if mz > hi_mz {
             break;
         }
@@ -707,6 +779,115 @@ fn nearest_peak_rank_in(spec: &Spectrum, ranks: &[u32], target_mz: f64, toleranc
         }
     }
     best.map(|(i, _)| ranks[i])
+}
+
+/// Java-parity isotope-cluster deconvolution.
+///
+/// Mirrors `Spectrum.getDeconvolutedSpectrum(toleranceBetweenIsotopes)` in
+/// `astral-speed/src/main/java/edu/ucsd/msjava/msutil/Spectrum.java`.
+///
+/// Input is the spectrum's peak list (sorted ascending by m/z) plus the
+/// rank vector aligned with it (rank 1 = highest intensity; `u32::MAX`
+/// for filtered peaks). Returns `(peaks, ranks)` of the deconvoluted
+/// spectrum, sorted ascending by m/z.
+///
+/// Algorithm: for each peak `p[i]` (not already consumed), look for a
+/// matching +1/ionCharge isotope `p[j]`. If found at `ionCharge ∈ {2, 3}`
+/// (and `ionCharge < precursor_charge`), charge-reduce all clustered
+/// peaks (`new_mz = ionCharge * mz - (ionCharge - 1) * PROTON`) and look
+/// forward for a +2/ionCharge third isotope. Ranks are preserved
+/// per-peak because Java's `setRanksOfPeaks` runs BEFORE deconvolution.
+///
+/// `precursor_charge` is the spectrum's precursor charge (matches Java's
+/// `this.getCharge()`). For `precursor_charge <= 2`, no charge-reduction
+/// candidates exist (loop `2 < charge` is empty), so the output equals
+/// the input modulo a mass-sort.
+fn deconvolute_spectrum(
+    peaks: &[(f64, f32)],
+    ranks: &[u32],
+    precursor_charge: u8,
+    tol: f64,
+) -> (Vec<(f64, f32)>, Vec<u32>) {
+    // Java: Composition.ISOTOPE = C13 - C ≈ 1.00335483.
+    const ISOTOPE: f64 = 1.003_354_83;
+    // Java: (Composition.C14 - Composition.C13) ≈ 0.999_886_17.
+    const C14_MINUS_C13: f64 = 0.999_886_17;
+
+    let n = peaks.len();
+    if n == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let mut ignore = vec![false; n];
+    let mut out: Vec<(f64, f32, u32)> = Vec::with_capacity(n);
+    let charge_i32 = precursor_charge as i32;
+
+    for i in 0..n {
+        if ignore[i] {
+            continue;
+        }
+        let (mut p_mz, p_int) = peaks[i];
+        let p_rank = ranks[i];
+
+        // Java's inner loop: `for (ionCharge = 2; ionCharge < charge && ionCharge < 4; ionCharge++)`
+        for ion_charge_i in 2..charge_i32.min(4) {
+            let ion_charge = ion_charge_i as f64;
+            let expected_diff = ISOTOPE / ion_charge;
+            let mut is_deconvoluted = false;
+            // Look forward for p2 = p1's +1 isotope.
+            for j in (i + 1)..n {
+                let (p2_mz, p2_int) = peaks[j];
+                let diff = p2_mz - p_mz - expected_diff;
+                if diff > -tol && diff < tol {
+                    // Match: charge-reduce p1 (mutate locally for output) and p2.
+                    ignore[j] = true;
+                    let p_new_mz = ion_charge * p_mz - (ion_charge - 1.0) * PROTON;
+                    let p2_new_mz = ion_charge * p2_mz - (ion_charge - 1.0) * PROTON;
+                    // Save p1's new mass; we'll push it after the inner loop
+                    // (Java does `deconvSpec.add(p)` at the end of the outer loop).
+                    p_mz = p_new_mz;
+                    is_deconvoluted = true;
+
+                    // Look for p3 = p2's +1 isotope (uses C14_MINUS_C13 / ion_charge).
+                    let p3_diff_expected = C14_MINUS_C13 / ion_charge;
+                    for k in (j + 1)..n {
+                        let (p3_mz, p3_int) = peaks[k];
+                        let diff2 = p3_mz - p2_mz - p3_diff_expected;
+                        if diff2 > -tol && diff2 < tol {
+                            ignore[k] = true;
+                            let p3_new_mz =
+                                ion_charge * p3_mz - (ion_charge - 1.0) * PROTON;
+                            out.push((p3_new_mz, p3_int, ranks[k]));
+                            break;
+                        } else if diff2 > tol {
+                            break;
+                        }
+                    }
+                    out.push((p2_new_mz, p2_int, ranks[j]));
+                    break;
+                } else if diff > tol {
+                    break;
+                }
+            }
+            if is_deconvoluted {
+                break;
+            }
+        }
+        // Add p1 (possibly mutated) to output.
+        out.push((p_mz, p_int, p_rank));
+    }
+
+    // Sort by m/z ascending, ties broken by rank (stable on ties is fine).
+    out.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut out_peaks: Vec<(f64, f32)> = Vec::with_capacity(out.len());
+    let mut out_ranks: Vec<u32> = Vec::with_capacity(out.len());
+    for (mz, intensity, rank) in out {
+        out_peaks.push((mz, intensity));
+        out_ranks.push(rank);
+    }
+    (out_peaks, out_ranks)
 }
 
 /// Select the main ion for `partition` from `param.rank_dist_table`.

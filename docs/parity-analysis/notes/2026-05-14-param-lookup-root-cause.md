@@ -249,3 +249,46 @@ of param routing, scoring, or the fixes landed in this iteration.
   numeric-only mods files on the VM).
 - Sister-scan regression tests (28825, 33606, 32395) with refreshed
   Java baselines under CID_LowRes_Tryp.param.
+
+## 2026-05-15 — Astral memory fix (Arc<Modification>)
+
+Memory probe via `MSGFRUST_RSS_PROBE` env-gated VmRSS checkpoints
+(commit 49ae084) identified `Modification` cloning in candidate
+enumeration as the source of the 24-28 GB OOM. Each `AminoAcid` carried
+an inline `Option<Modification>` whose `String` fields (name,
+accession) were cloned for every mod-variant of every candidate.
+
+Fix (commit 82a9dc3): replaced `Option<Modification>` with
+`Option<Arc<Modification>>` so all candidates of a given
+modification-class share the same heap allocation. The change is
+PSM-identical: `Modification` is read-only after construction; Arc
+sharing is observationally equivalent to cloning.
+
+### Astral re-bench (full dataset, with mods, --threads 4)
+
+  Targets (raw):     82,111   (up from 72,374 no-mods baseline)
+  Decoys (raw):      39,566
+  Peak RSS:          ~10 GB   (down from 28 GB OOM-kill)
+  Wall:              ~45 min  (completes cleanly)
+
+Percolator @ 1% FDR: **25,224 targets** (gate >=33,000 — FAIL, -7,776)
+
+### Status update
+
+  PXD001819:  15,003 / 14,989 Java / >=14,800 gate    PASS
+  Astral:     25,224 / 35,818 Java / >=33,000 gate    FAIL  (-7,776)
+  TMT:        10,548 / 10,194 Java / >=10,500 gate    PASS
+
+Astral memory bug: SOLVED. Astral now runs cleanly with mods.
+
+Astral residual gap (~10K PSMs below Java): a separate scoring-engine
+divergence, NOT param routing, NOT memory. Candidates from the
+original code-explorer report:
+  - Divergence A (sum-of-rounds vs round-of-sums in nominal mass
+    accumulation; ±1 Da drift per split — see psm_score.rs:47-52
+    vs Java's CandidatePeptideGrid.nominalPRM)
+  - HCD ion-type set mismatch specific to QE Orbitrap data
+  - Top-N or charge ladder differences
+
+Next iteration: per-PSM trace on a top-gap Astral PSM, isolate the
+divergence, fix.

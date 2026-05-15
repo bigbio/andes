@@ -356,3 +356,56 @@ during diagnostics). Local regression tests all pass; expected effect:
 - PXD001819: no change (param.apply_deconvolution=false)
 - TMT: deconv applied, score change TBD
 - Astral: score increases, Percolator @ 1% FDR should rise from 25,224
+
+## 2026-05-15 — Deconvolution fix verified on VM bench
+
+3-dataset bench with deconvolution fix (commit 601b45f) on rust-implement.
+
+### Auto-routing decisions (unchanged from prior bench)
+
+  PXD001819:  CID + LowRes  -> CID_LowRes_Tryp.param   (decon=false)
+  Astral:     HCD + QExact  -> HCD_QExactive_Tryp.param (decon=true)
+  TMT:        explicit flags -> CID_HighRes_Tryp.param  (decon=true)
+
+### Percolator @ 1% FDR (before vs after decon fix)
+
+| Dataset | Pre-decon | Post-decon | Java | Gate | Status |
+|---|---:|---:|---:|---:|---|
+| PXD001819 | 15,003 | 15,003 | 14,989 | >=14,800 | PASS (identical — decon=false param) |
+| Astral    | 25,224 | 26,063 | 35,818 | >=33,000 | FAIL (-6,937; +839 vs pre-decon) |
+| TMT       | 10,548 | 10,572 | 10,194 | >=10,500 | PASS (+24) |
+
+### Memory
+
+  PXD001819:  2.0 GB peak (no change)
+  Astral:     9.9 GB peak (was 28 GB OOM pre-Arc; now well under VM limit)
+  TMT:        7.7 GB peak
+
+### Guardrails
+
+The user's constraint was "fix Astral without breaking the others". Held:
+PXD001819 identical (decon=false param), TMT improved (+24), Astral
+improved (+839). No regression on any gate.
+
+### Residual Astral gap (-6,937)
+
+The subagent's per-PSM trace identified Java's `DBScanScorer.getScore`
+extending `FastScorer.getScore` with per-edge contributions
+(`getEdgeScoreInt`). They implemented this in `psm_score.rs` and
+verified it adds the missing component, but it regressed BSA
+gf_java_parity by 1-3 OOMs. The edge addition was REVERTED to keep
+gf_java_parity passing.
+
+Hypothesis for the regression: subtle mismatch between the per-PSM
+edge query and the GF DP's edge graph (possibly `prefix_nominals`
+index alignment in the reverse-direction path, or partition lookup
+for edge scoring). Needs deeper investigation.
+
+### Recommended follow-ups
+
+- Edge-score divergence: align the per-PSM edge query with the GF
+  DP's edge graph semantics so both `score_psm` and SpecEValue use
+  the same edge contributions. Closing Astral's residual ~7K gap is
+  the goal.
+- Chemical-formula mass deltas in Rust mod parser.
+- Sister-scan regression tests with refreshed CID_LowRes baselines.

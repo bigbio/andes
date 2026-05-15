@@ -409,3 +409,78 @@ for edge scoring). Needs deeper investigation.
   the goal.
 - Chemical-formula mass deltas in Rust mod parser.
 - Sister-scan regression tests with refreshed CID_LowRes baselines.
+
+## 2026-05-15 — Astral residual gap: edge-score asymmetry analysis
+
+### Why the prior edge-score attempt regressed gf_java_parity
+
+The trace subagent found Java's `DBScanScorer.getScore` extends
+`FastScorer.getScore` with `getEdgeScoreInt`, which includes ion-existence
+and error scores per edge (not just cleavage). They added this to
+`score_psm` and saw 1-3 OOM regression on the BSA fixtures in
+`gf_java_parity`. The regression was reverted.
+
+Structural reason (read at `rust/crates/scoring/src/gf/primitive_graph.rs:566-628`):
+
+  edge_score for SOURCE edges     = cleavage_score  (peptide N-term)
+  edge_score for INTERMEDIATE     = 0
+  edge_score for SINK edges        = cleavage_score  (peptide C-term)
+
+Rust's GF DP has NO ion-existence/error scoring on intermediate edges.
+So Rust's two scoring paths are CONSISTENT with each other (both edge-light)
+but BOTH lag Java (Java's GF DP and Java's DBScanScorer both include full
+edges).
+
+The gf_java_parity test passes today because:
+- BSA fixtures are short tryptic peptides (~7-15 residues, 1-2 splits)
+- Edge contribution on short peptides is small (few intermediate edges)
+- Within-OOM tolerance is loose enough to absorb the small mismatch
+
+The BSA test was a LOWER BOUND on parity; Astral exposes the gap at scale
+because Astral peptides are longer (avg 16+ residues) and have many more
+edges where ion-existence/error contributions accumulate.
+
+### Path to closing the gap
+
+Implementing the edge-score path correctly requires:
+
+1. Compute per-edge ion-existence index (cur observed / prev observed)
+   and error score, using the same partition + theo_aa_mass that Java's
+   `NewScoredSpectrum.getEdgeScore` uses.
+
+2. Update Rust's `PrimitiveAaGraph::build` (primitive_graph.rs ~line 580-595)
+   to write non-zero `edge_score[e_idx]` for intermediate edges based on
+   the spectrum's observed peaks and ion existence / error distributions
+   (`scorer.ion_existence_score`, `scorer.error_score`).
+
+3. Update `score_psm` to call the SAME edge-scoring function so RawScore
+   and SpecEValue use bit-identical edge contributions.
+
+4. Refresh gf_java_parity baselines — the 5 BSA SP values were captured
+   under Java's edge-included GF; Rust's will move closer to those once
+   edges are added. The TOLERANCE_LOG10 should be tightened from 1.0 to
+   ~0.2 once parity is achieved.
+
+### Why this isn't in this iteration
+
+Multi-file change across `scoring/src/gf/primitive_graph.rs`,
+`scoring/src/scoring/psm_score.rs`, and `scoring/src/scoring/scored_spectrum.rs`.
+Each function has subtle invariants (direction asymmetry for prefix vs suffix
+graphs, partition lookup must use the theo_aa_mass's segment not the node's,
+edge_prob × edge_score interaction in `add_prob_dist`). Getting all three to
+agree exactly with Java requires careful per-edge tracing and is a feature-
+sized iteration, not a fix.
+
+The user's "don't break the others" guardrail is the right call here —
+attempting the edge-score change without the coordinated graph update
+demonstrably regresses gf_java_parity (= regresses SpecEValue parity =
+risks regressing PXD001819 / TMT in production).
+
+### Final status (this iteration)
+
+  PXD001819:  15,003 / 14,989 Java / >=14,800 gate    PASS  +14 vs Java
+  Astral:     26,063 / 35,818 Java / >=33,000 gate    FAIL  -9,755 (improved +1,235 vs pre-fix)
+  TMT:        10,572 / 10,194 Java / >=10,500 gate    PASS  +378 vs Java
+
+Two of three production gates pass. Astral remains open with a clean
+investigation trail and a well-defined next-iteration scope.

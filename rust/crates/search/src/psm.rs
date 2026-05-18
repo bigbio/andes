@@ -323,6 +323,26 @@ mod tests {
     }
 
     #[test]
+    fn topn_queue_keeps_ties_at_capacity() {
+        // R-1 fix: Java's DBScanner keeps tied PSMs at capacity
+        // (DBScanner.java:540 raw-score retention; DBScanner.java:745 SpecE
+        // merge). Rust's TopNQueue must mirror this — strict-greater eviction
+        // was dropping ties Java keeps, plausibly causing the Astral 14K raw-
+        // target gap. See
+        // docs/parity-analysis/notes/2026-05-18-piecewise-fixes-dont-work.md
+        // (Open: retention layer, R-1).
+        let mut q = TopNQueue::new(1);
+        q.push(make_match(0, 100.0));
+        q.push(make_match(0, 100.0));
+        q.push(make_match(0, 100.0));
+        assert_eq!(
+            q.len(),
+            3,
+            "all three tied PSMs should be retained at capacity=1 (Java parity, R-1)"
+        );
+    }
+
+    #[test]
     fn psm_match_clones_correctly() {
         let m = make_match(7, 4.2);
         let cloned = m.clone();

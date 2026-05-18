@@ -389,7 +389,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut sorted: Vec<&_> = psms.iter().collect();
     sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     for (i, psm) in sorted.iter().enumerate() {
-        let cand = &run_candidates[psm.candidate_idx as usize];
+        let cand = &run_candidates[psm.primary_candidate_idx() as usize];
         let prot = idx.protein_at(cand.protein_index);
         let prot_acc = prot.map(|p| p.accession.as_str()).unwrap_or("?");
         let is_decoy = cand.is_decoy;
@@ -435,7 +435,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         // Check if any of these enumerated candidates are in Rust's top-N queue.
         let in_queue: usize = psms.iter().filter(|psm| {
-            let cand = &run_candidates[psm.candidate_idx as usize];
+            let cand = &run_candidates[psm.primary_candidate_idx() as usize];
             let pep_residues: Vec<u8> = cand.peptide.residues.iter()
                 .map(|aa| aa.residue).collect();
             pep_residues == java_residues
@@ -458,7 +458,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Per-split node_score breakdown for Rust's top-1.
     if let Some(top1) = sorted.first() {
-        let rust_top1_pep = &run_candidates[top1.candidate_idx as usize].peptide;
+        let rust_top1_pep = &run_candidates[top1.primary_candidate_idx() as usize].peptide;
         let pep_str: String = rust_top1_pep.residues.iter().map(|aa| aa.residue as char).collect();
         println!("\n  Per-split node_score breakdown — Rust top-1 ({} +{}) ---", pep_str, top1.charge_used);
         let scored = ScoredSpectrum::new(spec, &scorer, top1.charge_used);
@@ -478,7 +478,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         // Locate a PSM whose residue sequence matches --peptide.
         let matched_psm = psms.iter().find(|psm| {
-            let cand = &run_candidates[psm.candidate_idx as usize];
+            let cand = &run_candidates[psm.primary_candidate_idx() as usize];
             let r: Vec<u8> = cand.peptide.residues.iter().map(|a| a.residue).collect();
             r == target_residues
         });
@@ -496,7 +496,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         let charge_used = matched_psm.charge_used;
         let matched_score = matched_psm.score.round() as i32;
-        let matched_cand = &run_candidates[matched_psm.candidate_idx as usize];
+        let matched_cand = &run_candidates[matched_psm.primary_candidate_idx() as usize];
         let pep_nominal = matched_cand.peptide.nominal_residue_mass();
 
         // Build aa_set with enzyme registered (mirrors match_engine.rs:60-67).

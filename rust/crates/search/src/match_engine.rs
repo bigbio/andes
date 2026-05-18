@@ -295,7 +295,7 @@ impl<'a> PreparedSearch<'a> {
                         let features = PsmFeatures::default();
                         queue.push(PsmMatch {
                             spectrum_idx: spec_idx,
-                            candidate_idx: cand_idx as u32,
+                            candidate_idxs: vec![cand_idx as u32],
                             charge_used: z,
                             mass_error_ppm: err.mass_error_ppm,
                             score,
@@ -354,7 +354,7 @@ impl<'a> PreparedSearch<'a> {
             // mutating it does not perturb heap ordering or top-N retention.
             queue.fill_post_topn(|psm| {
                 let ss = scored_spec_for_charge(psm.charge_used);
-                let cand = &candidates[psm.candidate_idx as usize];
+                let cand = &candidates[psm.primary_candidate_idx() as usize];
                 psm.features = compute_psm_features(ss, &cand.peptide, scorer);
             });
 
@@ -384,12 +384,12 @@ impl<'a> PreparedSearch<'a> {
 
 /// Match every spectrum against every candidate from the SearchIndex.
 /// Returns one top-N PSM queue per spectrum (in input order) PLUS the
-/// enumerated `Vec<Candidate>` that backs the `PsmMatch::candidate_idx`
+/// enumerated `Vec<Candidate>` that backs the `PsmMatch::candidate_idxs`
 /// handles inside each queue.
 ///
 /// Callers that need to resolve a PSM's peptide / protein info must hold
 /// on to the returned candidates vector and look up by
-/// `psm.candidate_idx as usize`. The previous API embedded a cloned
+/// `psm.primary_candidate_idx() as usize`. The previous API embedded a cloned
 /// `Candidate` directly in every PsmMatch; that allocation cost is now
 /// gone but the resolution responsibility shifts to the caller.
 ///
@@ -510,7 +510,7 @@ fn compute_spec_e_values_for_spectrum(
         let mut any_n = false;
         let mut any_c = false;
         for psm in queue.iter_psms() {
-            let cand = &candidates[psm.candidate_idx as usize];
+            let cand = &candidates[psm.primary_candidate_idx() as usize];
             if let Some(prot) = search_index.protein_at(cand.protein_index) {
                 let start = cand.start_offset_in_protein;
                 let pep_len = cand.peptide.length();
@@ -561,7 +561,7 @@ fn compute_spec_e_values_for_spectrum(
     queue.update_spec_e_values(|psm| {
         // Nominal peptide mass: residue masses sum + no water (mass-index convention).
         // Use nominal_from() (INTEGER_MASS_SCALER-aware) to match how graph nodes are indexed.
-        let cand = &candidates[psm.candidate_idx as usize];
+        let cand = &candidates[psm.primary_candidate_idx() as usize];
         let psm_nominal_mass = cand.peptide.nominal_residue_mass();
         if psm_nominal_mass < min_peptide_mass_idx || psm_nominal_mass > max_peptide_mass_idx {
             return 1.0;
@@ -588,7 +588,7 @@ fn compute_spec_e_values_for_spectrum(
     let de_novo_score = max_score - 1;
     queue.update_psm_enrichment(|psm| {
         psm.de_novo_score = de_novo_score;
-        let len = candidates[psm.candidate_idx as usize].peptide.length();
+        let len = candidates[psm.primary_candidate_idx() as usize].peptide.length();
         let num_distinct = search_index.num_distinct_peptides_at_length(len).max(1);
         psm.e_value = psm.spec_e_value * num_distinct as f64;
     });

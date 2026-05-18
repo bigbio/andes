@@ -179,7 +179,7 @@ fn phase6_task10_bsa_specevalue_parity_histogram() {
         // Search all PSMs in the queue for one whose plain residues match Java's reference.
         let top_psms = queue.clone().into_sorted_vec();
         let matched = top_psms.iter().find(|p| {
-            peptide_residue_string(&candidates[p.candidate_idx as usize].peptide)
+            peptide_residue_string(&candidates[p.primary_candidate_idx() as usize].peptide)
                 .eq_ignore_ascii_case(&jref.peptide)
         });
 

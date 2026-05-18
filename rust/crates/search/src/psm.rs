@@ -56,18 +56,22 @@ pub struct PsmFeatures {
 #[derive(Debug, Clone)]
 pub struct PsmMatch {
     pub spectrum_idx: usize,
-    /// Index into the `&[Candidate]` slice owned by `PreparedSearch.candidates`.
-    /// Replaces the inlined `Candidate` clone: previously each push to the queue
-    /// cloned the full `Candidate` (including its `Peptide.residues: Vec<...>`),
-    /// allocating millions of times per large-fasta search. Now the queue stores
-    /// only a 4-byte index and consumers (writers, feature extraction, GF) look
-    /// up the `Candidate` by index when needed.
+    /// Indices into the `&[Candidate]` slice owned by `PreparedSearch.candidates`.
+    /// Length is always ≥ 1. The first index (`candidate_idxs[0]`) is the
+    /// "primary" candidate — used by callers that need a single Candidate
+    /// (most do; see `primary_candidate_idx()`). Multiple indices accumulate
+    /// when the R-2 pepSeq+score dedup pass merges multiple Candidates that
+    /// share the same peptide sequence and rounded score (typically the same
+    /// peptide matched against multiple proteins, e.g. shared tryptic
+    /// peptides in target+decoy concat). The PIN writer iterates this Vec to
+    /// emit one tab-separated `Proteins` column per row, matching Java's
+    /// `DirectPinWriter.java:237`.
     ///
-    /// Every real PSM points at a valid index into `PreparedSearch.candidates`.
-    /// There is no "synthetic / no backing Candidate" sentinel — test fixtures
-    /// that don't need to resolve back use `0` as a placeholder and avoid
-    /// touching the candidates slice from inside the test.
-    pub candidate_idx: u32,
+    /// Every real PSM has length ≥ 1 with valid indices into
+    /// `PreparedSearch.candidates`. Test fixtures that don't need to resolve
+    /// back use `vec![0]` as a placeholder and avoid touching the candidates
+    /// slice from inside the test.
+    pub candidate_idxs: Vec<u32>,
     pub charge_used: u8,
     /// Signed: positive when peptide mass exceeds spectrum's implied mass.
     pub mass_error_ppm: f64,
@@ -84,9 +88,11 @@ pub struct PsmMatch {
     /// Activation method captured from `param.data_type.activation` at scoring
     /// time. `None` if unknown or not yet set.
     pub activation_method: Option<model::activation::ActivationMethod>,
-    /// `spec_e_value * num_distinct_peptides_at_length`. Sentinel: `1.0`.
-    /// Approximate: uses the candidate-set size filtered by the same length as
-    /// a proxy for `num_distinct_peptides` when no suffix-array helper exists.
+    /// `spec_e_value * num_distinct_peptides_at_length`. Set in
+    /// `compute_spec_e_values_for_spectrum` using
+    /// `SearchIndex::num_distinct_peptides_at_length` (counts distinct bare
+    /// residue sequences at that length over the enumerated candidate set).
+    /// Sentinel before enrichment: `1.0`.
     pub e_value: f64,
     /// Fragment-ion feature columns computed after `score_psm`.
     /// Defaults to all-zero until `compute_psm_features` runs.
@@ -97,6 +103,15 @@ pub struct PsmMatch {
     /// (precursor_matching.rs) via match_engine.rs. Written as the PIN
     /// `isotope_error` column.
     pub isotope_offset: i8,
+}
+
+impl PsmMatch {
+    /// Returns the first (primary) candidate index. Callers that need to
+    /// resolve back to a single Candidate use this; PIN writer iterates
+    /// `candidate_idxs` directly to emit the multi-protein `Proteins` column.
+    pub fn primary_candidate_idx(&self) -> u32 {
+        self.candidate_idxs[0]
+    }
 }
 
 impl PartialEq for PsmMatch {
@@ -281,12 +296,12 @@ mod tests {
     use super::*;
 
     fn make_match(spectrum_idx: usize, score: f32) -> PsmMatch {
-        // Test-only PSM: candidate_idx = 0 is a sentinel for queue-ordering tests
+        // Test-only PSM: candidate_idxs[0] = 0 is a sentinel for queue-ordering tests
         // that never resolve back to a real Candidate. Tests that need to read
         // peptide / protein metadata must build their own &[Candidate] alongside.
         PsmMatch {
             spectrum_idx,
-            candidate_idx: 0,
+            candidate_idxs: vec![0],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,

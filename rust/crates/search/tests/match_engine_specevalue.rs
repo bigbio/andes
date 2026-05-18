@@ -185,12 +185,12 @@ fn psm_with_lower_spec_e_value_ranks_first() {
     use search::psm::TopNQueue;
 
     fn make_psm(score: f32, spec_e_value: f64) -> PsmMatch {
-        // candidate_idx = 0 is a placeholder for queue-ordering tests that
+        // candidate_idxs[0] = 0 is a placeholder for queue-ordering tests that
         // never resolve the candidate back. Safe because this test never
         // touches a `candidates` slice.
         PsmMatch {
             spectrum_idx: 0,
-            candidate_idx: 0,
+            candidate_idxs: vec![0],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,

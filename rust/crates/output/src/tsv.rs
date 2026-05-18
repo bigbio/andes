@@ -143,7 +143,7 @@ fn write_spectrum_rows<W: Write>(
     };
 
     for (_rank, psm) in iter_ranked(&psms) {
-        let cand = &candidates[psm.candidate_idx as usize];
+        let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(writer, spec, psm, cand, &ctx, &row_ctx)?;
     }
@@ -323,7 +323,7 @@ mod tests {
     fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idx: 0,
+            candidate_idxs: vec![0],
             charge_used: 2,
             mass_error_ppm: 1.5,
             score,
@@ -511,7 +511,7 @@ mod tests {
 
         let psm = PsmMatch {
             spectrum_idx: 0,
-            candidate_idx: 0,
+            candidate_idxs: vec![0],
             charge_used: 2,
             mass_error_ppm: 0.0,
             score: 10.0,

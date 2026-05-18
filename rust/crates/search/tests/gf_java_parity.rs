@@ -162,14 +162,14 @@ fn rust_spec_probability_within_one_oom_of_java_for_5_traced_psms() {
 
         // Find a PSM with the matching peptide (any mod variant).
         let pep_match = top_psms.iter().find(|p| {
-            peptide_residue_string(&candidates[p.candidate_idx as usize].peptide)
+            peptide_residue_string(&candidates[p.primary_candidate_idx() as usize].peptide)
                 .eq_ignore_ascii_case(peptide)
         });
 
         let psm = match pep_match {
             Some(p) => p,
             None => {
-                let top_pep = peptide_residue_string(&candidates[top_psms[0].candidate_idx as usize].peptide);
+                let top_pep = peptide_residue_string(&candidates[top_psms[0].primary_candidate_idx() as usize].peptide);
                 notes.push(format!(
                     "scan {scan_nr} '{peptide}' ch{charge}: \
                      peptide not in Rust top-{} queue; top-1 is '{top_pep}'",

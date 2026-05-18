@@ -67,13 +67,13 @@ fn match_spectra_output_invariant_across_thread_counts() {
         if !psms_a.is_empty() {
             spectra_with_psms += 1;
             for (j, (a, b)) in psms_a.iter().zip(psms_b.iter()).enumerate() {
-                let pep_a: String = cands_a[a.candidate_idx as usize]
+                let pep_a: String = cands_a[a.primary_candidate_idx() as usize]
                     .peptide
                     .residues
                     .iter()
                     .map(|aa| aa.residue as char)
                     .collect();
-                let pep_b: String = cands_b[b.candidate_idx as usize]
+                let pep_b: String = cands_b[b.primary_candidate_idx() as usize]
                     .peptide
                     .residues
                     .iter()

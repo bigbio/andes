@@ -173,11 +173,11 @@ fn diagnose_peptide_mismatches() {
         let sorted = queue.clone().into_sorted_vec();
 
         // Top-1 TARGET PSM (skip decoys to match the parity test convention).
-        let top_target = match sorted.iter().find(|m| !candidates[m.candidate_idx as usize].is_decoy) {
+        let top_target = match sorted.iter().find(|m| !candidates[m.primary_candidate_idx() as usize].is_decoy) {
             Some(t) => t,
             None => continue,
         };
-        let rust_top_pep = peptide_residue_string(&candidates[top_target.candidate_idx as usize].peptide);
+        let rust_top_pep = peptide_residue_string(&candidates[top_target.primary_candidate_idx() as usize].peptide);
 
         if rust_top_pep == jref.peptide {
             continue; // top-1 match — not a mismatch
@@ -191,7 +191,7 @@ fn diagnose_peptide_mismatches() {
         // Find Java's peptide's rank in this spectrum's top-N queue (if present).
         let rank_in_queue: Option<usize> = sorted
             .iter()
-            .position(|m| !candidates[m.candidate_idx as usize].is_decoy && peptide_residue_string(&candidates[m.candidate_idx as usize].peptide) == jref.peptide);
+            .position(|m| !candidates[m.primary_candidate_idx() as usize].is_decoy && peptide_residue_string(&candidates[m.primary_candidate_idx() as usize].peptide) == jref.peptide);
 
         let classification = if !in_enumerator {
             enumerator_gap_count += 1;

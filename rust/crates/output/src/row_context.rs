@@ -24,7 +24,7 @@ pub(crate) struct RowContext {
 
 impl RowContext {
     /// Build a `RowContext` for one PSM. Caller passes the resolved
-    /// `Candidate` (looked up via `psm.candidate_idx`) so this layer doesn't
+    /// `Candidate` (looked up via `psm.primary_candidate_idx()`) so this layer doesn't
     /// need its own `candidates` slice reference.
     pub(crate) fn new(spec: &Spectrum, cand: &Candidate, search_index: &SearchIndex) -> Self {
         let scan = spec.scan.unwrap_or(0);

@@ -100,8 +100,8 @@ fn known_peptide_appears_in_top_n() {
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected at least one match");
     let best = &top[0];
-    assert_eq!(candidates[best.candidate_idx as usize].peptide.length(), 9);
-    assert!(!candidates[best.candidate_idx as usize].is_decoy);
+    assert_eq!(candidates[best.primary_candidate_idx() as usize].peptide.length(), 9);
+    assert!(!candidates[best.primary_candidate_idx() as usize].is_decoy);
     assert!(best.mass_error_ppm.abs() < 1.0);
 }
 

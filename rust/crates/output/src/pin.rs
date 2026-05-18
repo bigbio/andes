@@ -34,16 +34,17 @@
 //!   `Enzyme::is_cleavage_site` wiring; deferred.
 //!
 //! * **Proteins**: single column with the real protein accession resolved from
-//!   `SearchIndex::protein_at(candidates[psm.candidate_idx as usize].protein_index)`.
+//!   `SearchIndex::protein_at(candidates[psm.primary_candidate_idx() as usize].protein_index)`.
 //!   Decoy accessions already carry the decoy prefix. Multi-protein support
-//!   is a future followup.
+//!   (merging Candidates that share pepSeq + score) comes in Task 4 of the R-2 refactor.
 //!
 //! * **peplen**: residue count + 2 (includes both flanking residues).
 //!
-//! * **dm / absdm**: computed from precursor m/z. The intended formula is
-//!   `adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge`;
-//!   since `isotope_error` is currently stubbed at 0, `adjusted_exp_mz ==
-//!   precursor_mz` here.
+//! * **dm / absdm**: mass error in Da using the matched isotope offset.
+//!   `adjusted_exp_mz = precursor_mz - ISOTOPE * isotope_error / charge`
+//!   (see `write_psm_row`), then `dm = adjusted_exp_mz - theo_mz` and
+//!   `absdm = |dm|`. `isotope_error` is the PIN column from
+//!   `PsmMatch::isotope_offset`.
 //!
 //! * **CalcMass**: `peptide.mass()` already includes H2O — neutral mass is
 //!   computed directly from the peptide.
@@ -86,10 +87,10 @@ use model::spectrum::Spectrum;
 /// holds the top-N PSMs for `spectra[i]`.
 ///
 /// `candidates` is the per-search candidate pool owned by `PreparedSearch`.
-/// PSM-to-candidate resolution goes through `candidates[psm.candidate_idx as usize]`.
+/// PSM-to-candidate resolution goes through `candidates[psm.primary_candidate_idx() as usize]`.
 ///
 /// `search_index` is used to resolve protein accessions from
-/// `candidates[psm.candidate_idx as usize].protein_index`. The combined
+/// `candidates[psm.primary_candidate_idx() as usize].protein_index`. The combined
 /// target+decoy `ProteinDb` inside `search_index` already carries decoy
 /// prefixes in the decoy accessions, so no separate prefix string is needed
 /// for accession lookup. The `Label` column is similarly derived without
@@ -266,7 +267,7 @@ fn write_spectrum_rows<W: Write>(
     let rank2_spec_e_value = find_rank2_spec_e_value(&psms);
 
     for (rank, psm) in iter_ranked(&psms) {
-        let cand = &candidates[psm.candidate_idx as usize];
+        let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(
             writer,
@@ -661,7 +662,7 @@ mod tests {
     fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64, candidate_idx: u32, charge: u8) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
-            candidate_idx,
+            candidate_idxs: vec![candidate_idx],
             charge_used: charge,
             mass_error_ppm: 1.5,
             score,

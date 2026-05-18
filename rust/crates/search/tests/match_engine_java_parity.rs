@@ -25,6 +25,28 @@
 //!     -o /tmp/bsa.pin -tda 1 -t 20ppm -ti -1,2 -m 3 -inst 0 -e 1 -ntt 2 \
 //!     -minLength 6 -maxLength 40 -minCharge 2 -maxCharge 3 \
 //!     -maxMissedCleavages 1 -n 1 -addFeatures 1 -msLevel 2
+//!
+//! ## Known parity gaps NOT caught by this test file
+//!
+//! The integration tests below verify *spectrum coverage* and *top-1 identity*
+//! but do NOT validate several algorithmic divergences between Rust and Java:
+//!
+//! - **R-2.1:** Per-SpecKey raw-score retention vs Rust's per-spectrum queue
+//!   (Java keeps N PSMs per charge; Rust keeps N PSMs shared across charges)
+//! - **R-2.2:** Pre-merge pepSeq + score dedup (Java collapses identical
+//!   peptides at the same score before spectrum merge; Rust preserves them)
+//! - **R-2.3:** Per-charge GF / SpecEValue compute (Java calibrates per SpecKey;
+//!   Rust picks one top_charge for the whole spectrum)
+//! - **R-2.4:** Spectrum-level merge with SpecE tie keep (Java's post-merge
+//!   layer; Rust has no per-spectrum merge because the queue is already per-spectrum)
+//! - **R-2.5:** Protein-index aggregation (Java emits 1 row per PSM listing all
+//!   matching proteins; Rust emits N rows, one protein per row)
+//! - **R-3:** PIN row count / minDeNovoScore filter (difference in output filtering)
+//! - **C-4, C-5, C-5b, F-1:** Feature-denominator parity (score-distribution
+//!   compression, audit-tier divergences in feature computation)
+//!
+//! Reference: `docs/parity-analysis/notes/2026-05-18-r1-bench-results.md`
+//! for the full divergence catalog and recommended next-iteration scope.
 
 mod common;
 use common::*;
@@ -290,5 +312,69 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
         MIN_TOP1_RATE * 100.0,
         top1_match,
         top1_total,
+    );
+}
+
+/// Regression test for R-1 (commit fc16407): tied PSM retention in TopNQueue.
+///
+/// Why this test exists:
+/// - Commit R-1 fixed TopNQueue::push to retain tied PSMs at capacity, matching
+///   Java's DBScanner.java:540 behavior: `size < n OR score == worst → add`.
+/// - The existing two integration tests (rust_matches_superset_java_target_psms,
+///   rust_top1_matches_java_top1_for_majority_of_spectra) check spectrum coverage
+///   and top-1 identity, but neither validates that multiple PSMs are *retained*
+///   when they tie at the worst score in a queue.
+/// - If someone "fixes" TopNQueue::push back to strict-greater eviction (reverting
+///   the `Ordering::Equal` branch), the existing tests will still pass: both only
+///   care about whether the top-1 PSM identity matches Java, not whether the queue
+///   contains ties.
+///
+/// What it verifies:
+/// - Runs match_spectra on the BSA + test.mgf fixture (same setup as the other tests).
+/// - Iterates over the resulting TopNQueues and counts how many contain ≥2 PSMs.
+/// - Asserts at least 1 such queue exists.
+/// - With capacity=10 and integer-rounded scores producing ties, the BSA fixture
+///   reliably produces ≥1 queue with tied PSMs (most queues will have 1, but at
+///   least one will have 2+ due to ties).
+///
+/// Regression guard:
+/// - If R-1 is reverted, all queues will be at capacity with no multi-PSM ties,
+///   and the assertion will fail.
+#[test]
+fn r1_tie_retention_active_in_production_pipeline() {
+    let target = FastaReader::load_all(BufReader::new(
+        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+    ))
+    .unwrap();
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let params = SearchParams::default_tryptic(aa_set());
+
+    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let scorer = rank_scorer();
+    let (queues, _candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
+
+    // Count how many queues have ≥2 PSMs (only possible if ties exist and R-1
+    // is active to retain them).
+    let queues_with_ties: usize = queues
+        .iter()
+        .filter(|queue| queue.len() >= 2)
+        .count();
+
+    println!(
+        "Queues with ≥2 PSMs (tied retention): {}/{}",
+        queues_with_ties,
+        queues.len()
+    );
+
+    // Regression gate: at least 1 queue must have ties. If R-1 is reverted,
+    // this assertion will fail.
+    assert!(
+        queues_with_ties >= 1,
+        "No queues with ≥2 PSMs found (count={}). R-1 tie retention may be broken.",
+        queues_with_ties
     );
 }

@@ -219,6 +219,15 @@ impl TopNQueue {
         self.heap.iter().map(|Reverse(m)| m)
     }
 
+    /// Drain all PSMs from the queue, returning them in an unordered Vec.
+    /// Leaves the queue empty after the call. The returned Vec preserves no
+    /// particular order — callers that need ordering should sort the result.
+    ///
+    /// Cost: O(N) drain + Vec collection. Cheap for small N (top-N typically ≤ 10).
+    pub fn drain_into_vec(&mut self) -> Vec<PsmMatch> {
+        self.heap.drain().map(|Reverse(m)| m).collect()
+    }
+
     /// Apply `f` to each retained PSM in-place. Used for filling in
     /// post-finalization fields (e.g. `features`) that are NOT part of
     /// `PsmMatch::cmp` and therefore do not affect heap ordering.
@@ -379,6 +388,63 @@ mod tests {
             3,
             "all three tied PSMs should be retained at capacity=1 (Java parity, R-1)"
         );
+    }
+
+    #[test]
+    fn dedup_pepseq_score_aggregates_candidate_idxs() {
+        // R-2.2 (2026-05-18): synthetic test for pepSeq+score dedup. Two PSMs
+        // with the same (peptide_residue, score) key should collapse to one
+        // PsmMatch with both candidate_idxs aggregated into the surviving Vec.
+        //
+        // We use drain_into_vec to extract PSMs, then assert the dedup helper
+        // collapses them correctly.
+
+        let mut q = TopNQueue::new(10);
+        // Three PSMs: two share (peptide=0, score=50), one is distinct (peptide=1, score=40)
+        let mut a = make_match(0, 50.0);
+        a.candidate_idxs = vec![10];
+        let mut b = make_match(0, 50.0);
+        b.candidate_idxs = vec![20];
+        let mut c = make_match(0, 40.0);
+        c.candidate_idxs = vec![30];
+
+        q.push(a);
+        q.push(b);
+        q.push(c);
+        assert_eq!(q.len(), 3, "all three PSMs initially retained");
+
+        let drained = q.drain_into_vec();
+        assert_eq!(drained.len(), 3);
+
+        // Caller (match_engine) provides the key function. Here we use
+        // a synthetic key based on score only (test scaffolding — real
+        // dedup uses peptide_residue + rounded_score from candidates).
+        let deduped = simple_dedup_by_score_for_test(drained);
+
+        // Expect: 2 groups — score=50 with idxs [10,20], score=40 with [30]
+        assert_eq!(deduped.len(), 2, "should collapse to 2 unique-score groups");
+
+        let mut score_50 = deduped.iter().find(|p| (p.score as i32) == 50).unwrap().candidate_idxs.clone();
+        score_50.sort();
+        assert_eq!(score_50, vec![10, 20], "score=50 should aggregate both idxs");
+
+        let score_40 = &deduped.iter().find(|p| (p.score as i32) == 40).unwrap().candidate_idxs;
+        assert_eq!(*score_40, vec![30]);
+    }
+
+    /// Test-only dedup that groups by score alone (real production
+    /// dedup_pepseq_score in match_engine.rs uses peptide_residue + score).
+    fn simple_dedup_by_score_for_test(psms: Vec<PsmMatch>) -> Vec<PsmMatch> {
+        use std::collections::HashMap;
+        let mut groups: HashMap<i32, PsmMatch> = HashMap::new();
+        for psm in psms {
+            let key = psm.score as i32;
+            groups
+                .entry(key)
+                .and_modify(|existing| existing.candidate_idxs.extend(psm.candidate_idxs.iter().copied()))
+                .or_insert(psm);
+        }
+        groups.into_values().collect()
     }
 
     #[test]

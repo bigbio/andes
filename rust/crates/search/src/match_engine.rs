@@ -978,3 +978,55 @@ mod feature_tests {
         );
     }
 }
+
+/// Pre-merge dedup pass (R-2.2): collapse PSMs that share the same
+/// (peptide_residue, rounded_score) key into a single entry, aggregating
+/// their `candidate_idxs` into a unified Vec. Mirrors Java's
+/// `DBScanner.java:719-733` `pepSeqMap` dedup.
+///
+/// Called by the per-spectrum loop after the per-candidate scoring loop,
+/// before per-charge GF compute (so SpecE is computed on the deduped set).
+///
+/// Inputs:
+/// - `psms`: drained from a per-charge `TopNQueue` via `drain_into_vec`
+/// - `candidates`: the search's enumerated candidate slice; used to resolve
+///   each PSM's peptide residue sequence for the dedup key
+///
+/// Returns: deduped `Vec<PsmMatch>`. The caller re-pushes these into the
+/// per-charge queue via `queue.push()` for each entry.
+///
+/// Not yet called (Task 3); suppressing dead_code warning until integration.
+#[allow(dead_code)]
+pub(crate) fn dedup_pepseq_score(
+    psms: Vec<PsmMatch>,
+    candidates: &[Candidate],
+) -> Vec<PsmMatch> {
+    use std::collections::HashMap;
+
+    // Key: (peptide_residue_bytes, rounded_score_i32)
+    // The residue sequence is the unmodified bare AA string, matching Java's
+    // `m.getPepSeq()` used as the dedup key (DBScanner.java:721).
+    let mut groups: HashMap<(Vec<u8>, i32), PsmMatch> = HashMap::new();
+
+    for psm in psms {
+        let cand = &candidates[psm.primary_candidate_idx() as usize];
+        let pep_residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+        let score_rounded = psm.score.round() as i32;
+        let key = (pep_residues, score_rounded);
+
+        groups
+            .entry(key)
+            .and_modify(|existing| {
+                // Aggregate this PSM's indices into the surviving entry.
+                // Avoid duplicates if the same idx somehow appears twice.
+                for &idx in &psm.candidate_idxs {
+                    if !existing.candidate_idxs.contains(&idx) {
+                        existing.candidate_idxs.push(idx);
+                    }
+                }
+            })
+            .or_insert(psm);
+    }
+
+    groups.into_values().collect()
+}

@@ -281,6 +281,8 @@ fn write_spectrum_rows<W: Write>(
             max_charge,
             target_haystack,
             label_cache,
+            candidates,
+            search_index,
         )?;
     }
     Ok(())
@@ -299,6 +301,8 @@ fn write_psm_row<W: Write>(
     max_charge: u8,
     target_haystack: &[u8],
     label_cache: &mut HashMap<Vec<u8>, i32>,
+    candidates: &[Candidate],
+    search_index: &SearchIndex,
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
@@ -460,8 +464,20 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, matched_ion_ratio)?;
 
-    // Peptide, Proteins
-    writeln!(writer, "\t{}\t{}", cand.peptide, ctx.accession)
+    // Peptide column (always one).
+    // Proteins column(s): one tab-separated accession per candidate_idx.
+    // After R-2.2 dedup, a PSM that matches the same peptide across multiple
+    // proteins keeps all protein indices in candidate_idxs, and the PIN row
+    // emits one accession per index — matching Java DirectPinWriter.java:237.
+    // For PSMs with a single candidate_idx (typical), output is identical to
+    // the pre-R-2.5 single-accession emit (ctx.accession still used by TSV).
+    write!(writer, "\t{}", cand.peptide)?;
+    for &cidx in &psm.candidate_idxs {
+        let cand_for_acc = &candidates[cidx as usize];
+        let accession = crate::row_context::resolve_accession(cand_for_acc, search_index);
+        write!(writer, "\t{}", accession)?;
+    }
+    writeln!(writer)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

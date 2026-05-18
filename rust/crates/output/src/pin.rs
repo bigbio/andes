@@ -72,7 +72,7 @@ use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
-use crate::row_context::{iter_ranked, RowContext};
+use crate::row_context::RowContext;
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
@@ -156,6 +156,7 @@ pub fn write_pin_to<W: Write>(
             search_index,
             &target_haystack,
             &mut label_cache,
+            params.min_de_novo_score,
         )?;
     }
     Ok(())
@@ -259,14 +260,16 @@ fn write_spectrum_rows<W: Write>(
     search_index: &SearchIndex,
     target_haystack: &[u8],
     label_cache: &mut HashMap<Vec<u8>, i32>,
+    min_de_novo_score: i32,
 ) -> io::Result<()> {
     // Sort best-first (lowest spec_e_value first, then highest score).
     let psms = queue.clone().into_sorted_vec();
 
-    // find rank-2 SpecEValue: first distinct spec_e_value after rank-1
-    let rank2_spec_e_value = find_rank2_spec_e_value(&psms);
+    // R-3: rank-2 SpecEValue must skip PSMs filtered by minDeNovoScore so the
+    // ln-delta feature lines up with Java DirectPinWriter.java:126,266.
+    let rank2_spec_e_value = find_rank2_spec_e_value(&psms, min_de_novo_score);
 
-    for (rank, psm) in iter_ranked(&psms) {
+    for (rank, psm) in iter_ranked_filtered(&psms, min_de_novo_score) {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(
@@ -286,6 +289,27 @@ fn write_spectrum_rows<W: Write>(
         )?;
     }
     Ok(())
+}
+
+/// Iterate PSMs in rank order, skipping ones below `min_de_novo_score`.
+/// Mirrors Java's `DirectPinWriter.java:132` `if (match.getDeNovoScore() <
+/// minDeNovoScore) continue;` followed by rank assignment on the survivors.
+/// Rank advances only when `spec_e_value` changes (ties share a rank).
+fn iter_ranked_filtered(
+    psms: &[PsmMatch],
+    min_de_novo_score: i32,
+) -> impl Iterator<Item = (u32, &PsmMatch)> {
+    let mut rank = 0u32;
+    let mut prev_sev = f64::NAN;
+    psms.iter()
+        .filter(move |psm| psm.de_novo_score >= min_de_novo_score)
+        .map(move |psm| {
+            if psm.spec_e_value != prev_sev {
+                rank += 1;
+                prev_sev = psm.spec_e_value;
+            }
+            (rank, psm)
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -485,10 +509,15 @@ fn write_psm_row<W: Write>(
 /// Find the rank-2 SpecEValue: the first distinct spec_e_value encountered after
 /// the rank-1 value (skipping ties). Returns `f64::NAN` if no rank-2 exists.
 ///
-/// PSMs must be sorted best-first (lowest spec_e_value first).
-fn find_rank2_spec_e_value(psms: &[PsmMatch]) -> f64 {
+/// PSMs must be sorted best-first (lowest spec_e_value first). PSMs with
+/// `de_novo_score < min_de_novo_score` are skipped (R-3, mirroring Java
+/// `DirectPinWriter.java:266`).
+fn find_rank2_spec_e_value(psms: &[PsmMatch], min_de_novo_score: i32) -> f64 {
     let mut rank1 = f64::NAN;
     for psm in psms {
+        if psm.de_novo_score < min_de_novo_score {
+            continue;
+        }
         let se = psm.spec_e_value;
         if rank1.is_nan() {
             rank1 = se;
@@ -707,6 +736,7 @@ mod tests {
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
+            min_de_novo_score: 0,
         }
     }
 
@@ -876,6 +906,69 @@ mod tests {
             "lnDeltaSpecEValue should be 0 when no rank-2 exists, got: {}",
             val
         );
+    }
+
+    // ── R-3: minDeNovoScore filter ────────────────────────────────────────────
+
+    #[test]
+    fn pin_drops_psm_below_min_de_novo_score() {
+        // Java DirectPinWriter.java:132 skips matches whose de_novo_score
+        // is below `params.getMinDeNovoScore()`. Rust must mirror this.
+        let mut params = make_params(2..=3);
+        params.min_de_novo_score = 5;
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        let mut good = make_psm(0, 10.0, 1e-10, 0, 2);
+        good.de_novo_score = 7; // >= threshold, survives
+        let mut bad = make_psm(0, 9.0, 1e-9, 0, 2);
+        bad.de_novo_score = 3; // < threshold, dropped
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(good);
+        queue.push(bad);
+        let queues = vec![queue];
+        let idx = make_empty_search_index();
+
+        let mut buf = Vec::<u8>::new();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1, "only the de_novo>=5 PSM should survive");
+    }
+
+    #[test]
+    fn pin_rank2_skips_psm_below_min_de_novo_score() {
+        // Java DirectPinWriter.java:266 ALSO skips below-threshold PSMs when
+        // computing the rank-2 SpecEValue used for lnDeltaSpecEValue. So if
+        // rank-1 (de_novo=7) and the candidate rank-2 (de_novo=3) are at
+        // different SpecEValues, the filtered rank-2 should be NaN -> ln-delta
+        // emits 0.
+        let mut params = make_params(2..=3);
+        params.min_de_novo_score = 5;
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        let mut rank1 = make_psm(0, 10.0, 1e-10, 0, 2);
+        rank1.de_novo_score = 7;
+        let mut would_be_rank2 = make_psm(0, 9.0, 1e-8, 0, 2);
+        would_be_rank2.de_novo_score = 3;
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(rank1);
+        queue.push(would_be_rank2);
+        let queues = vec![queue];
+        let idx = make_empty_search_index();
+
+        let mut buf = Vec::<u8>::new();
+        let cands = vec![make_candidate(0, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 1);
+        let ln_delta_idx = cols.iter().position(|c| c == "lnDeltaSpecEValue").unwrap();
+        let val: f64 = rows[0][ln_delta_idx].parse().unwrap();
+        assert!(val.abs() < 1e-9, "ln-delta should fall back to 0 when filtered rank-2 doesn't exist; got {}", val);
     }
 
     // ── Test 6: real accession emitted for target PSM ─────────────────────────

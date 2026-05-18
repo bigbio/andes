@@ -142,7 +142,11 @@ fn write_spectrum_rows<W: Write>(
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
     };
 
-    for (_rank, psm) in iter_ranked(&psms) {
+    // R-3: skip PSMs below `params.min_de_novo_score`, mirroring Java's
+    // `DirectTSVWriter.java:130-131`.
+    for (_rank, psm) in iter_ranked(&psms)
+        .filter(|(_, p)| p.de_novo_score >= params.min_de_novo_score)
+    {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(writer, spec, psm, cand, &ctx, &row_ctx)?;
@@ -352,6 +356,7 @@ mod tests {
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
+            min_de_novo_score: 0,
         }
     }
 

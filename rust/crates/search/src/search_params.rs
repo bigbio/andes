@@ -41,6 +41,13 @@ pub struct SearchParams {
     /// Spectra with fewer peaks than this threshold are skipped entirely.
     /// Default 10.
     pub min_peaks: u32,
+    /// Minimum de-novo score required to emit a PSM to the PIN/TSV output.
+    ///
+    /// Mirrors Java's `params.getMinDeNovoScore()` applied at
+    /// `DirectPinWriter.java:132` and `:266`. PSMs whose `de_novo_score` is
+    /// below this threshold are dropped at output time (R-3). Default `0`
+    /// matches `Constants.MIN_DE_NOVO_SCORE` in Java.
+    pub min_de_novo_score: i32,
 }
 
 impl SearchParams {
@@ -69,6 +76,7 @@ impl SearchParams {
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
+            min_de_novo_score: 0,
         }
     }
 }

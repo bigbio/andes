@@ -200,8 +200,6 @@ impl TopNQueue {
                     // ties on the per-spectrum merge). Rust now matches.
                     // The queue may exceed `capacity` when ties exist —
                     // `capacity` becomes a *minimum* top-N, not a hard cap.
-                    // Spec:
-                    // docs/parity-analysis/specs/2026-05-18-r1-tie-retention-test-design.md
                     self.heap.push(Reverse(m));
                 }
                 std::cmp::Ordering::Less => {
@@ -376,9 +374,7 @@ mod tests {
         // (DBScanner.java:540 raw-score retention; DBScanner.java:745 SpecE
         // merge). Rust's TopNQueue must mirror this — strict-greater eviction
         // was dropping ties Java keeps, plausibly causing the Astral 14K raw-
-        // target gap. See
-        // docs/parity-analysis/notes/2026-05-18-piecewise-fixes-dont-work.md
-        // (Open: retention layer, R-1).
+        // target gap that R-1 + R-2 closed.
         let mut q = TopNQueue::new(1);
         q.push(make_match(0, 100.0));
         q.push(make_match(0, 100.0));

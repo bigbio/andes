@@ -45,8 +45,10 @@
 //! - **C-4, C-5, C-5b, F-1:** Feature-denominator parity (score-distribution
 //!   compression, audit-tier divergences in feature computation)
 //!
-//! Reference: `docs/parity-analysis/notes/2026-05-18-r1-bench-results.md`
-//! for the full divergence catalog and recommended next-iteration scope.
+//! Reference: `docs/parity-analysis/notes/2026-05-18-r2-bench-results.md`
+//! for the R-2 landing summary and the audit-tier feature work that follows
+//! (R-3 minDeNovoScore, C-4 enzN/enzC/enzInt, C-5 multi-charge ions,
+//! C-5b longest_y_pct denom, F-1 matched_ion_ratio denom).
 
 mod common;
 use common::*;

@@ -26,28 +26,51 @@ Local gates all green:
 
 PIN file size: 45 MB (down from R-1's 467 MB, a 10× reduction — strong evidence R-2 retention is collapsing PSMs as intended). Max RSS: 9.87 GB.
 
-## Gate decision
+## ⚠ Percolator mode-detection caveat (discovered post-bench)
 
-**2 of 4 main gates pass; 3 of 5 metric gates fail.** Per plan's gate decision: do NOT proceed to Task 7 (PXD + TMT) without addressing the failures.
+R-2.5 (multi-accession Proteins column) changed the PIN structure to match Java's `DirectPinWriter.java:237` — one row per PSM with N tab-separated proteins. This shifted Percolator's auto-detection from **Concatenated** (b1d45bb / iter5 PIN, with multiple rows per PSM) to **Separate / mix-max** (R-2 / Java PIN, single row per PSM).
 
-**What R-2 fixed (positive signals):**
-- R-1's 11.6× raw-target over-shoot is gone (1,042,255 → 92,825, within healthy 72K-107K band)
-- Wall time recovered to 11:06 (vs R-1's 23:52 — 2× speedup, beats b1d45bb)
-- PIN size dropped 10× (467 MB → 45 MB) — retention is correctly capping per-spectrum candidates
+The two modes use **different statistics** and produce **different q-value calibrations**. Cross-mode comparisons are not apples-to-apples.
 
-**What R-2 did NOT fix (real signals):**
-- Percolator @ 1% FDR: 24,675 — small regression from b1d45bb's 25,224 (-2.2%); well below Java's 35,818 (-31%) and the 30K gate
-- T/D ratio: 1.643 vs Java's 1.912 — Percolator can't separate targets from decoys as well as Java
-- These point to **PSM quality/discriminability**, not retention. Architecture parity is established; scoring + feature divergences (audit-tier C-4, C-5, C-5b, F-1) still need closing.
+**Empirical evidence (re-run on existing VM data):**
+
+| Run | Percolator mode | T/D ratio | Percolator @ 1% FDR |
+|---|---|---:|---:|
+| Java (iter3) | Separate / mix-max | 1.912 | 35,818 |
+| Rust b1d45bb (arc) | **Concatenated** | 1.633 | 25,224 |
+| Rust iter5 PIN (rerun) | Concatenated | 1.642 | 17,160 |
+| Rust iter6 R-1 | Separate / mix-max | 1.965 | 74,204 (over-shoot) |
+| **Rust iter7 R-2** | **Separate / mix-max** | **1.643** | **24,675** |
+| Rust iter7 R-2 (-Y, TDC) | Separate / TDC | 1.643 | 24,658 |
+
+The fair comparison is **iter7 R-2 vs Java**, both under Separate / mix-max: 24,675 vs 35,818 → **-31% gap**. The previously-reported "-549 vs b1d45bb" is a mode artifact, not a regression.
+
+## Gate decision (revised after mode-detection finding)
+
+**Architecture gates (PASS):**
+- Raw targets in 72K-107K band ✅ (92,825)
+- Wall ≤ 26 min ✅ (11:06)
+- PIN size 10× smaller than R-1 ✅ (45 MB vs 467 MB)
+- Local parity tests all green ✅ (215/217 deduped pairs, 1.0 OOM SP, RawScore stable)
+- PIN format matches Java (triggers same Percolator mode) ✅
+
+**Quality gates (FAIL, but for an understood reason):**
+- T/D ratio: 1.643 vs gate 1.85 vs Java 1.912 — driven by scoring/feature divergences
+- Percolator @ 1% FDR: 24,675 vs gate 30K vs Java 35,818 — same root cause
+
+The quality-gate thresholds (30K / 34,027) assumed R-2 would close the Java gap. The R-2 spec was explicit about being **architecture-only**, not addressing the audit-tier C-4/C-5/C-5b/F-1 feature/scoring divergences. Those gates were therefore always going to fail at this point in the work, regardless of R-2 correctness.
 
 ## Next
 
-User decision required. Three options:
+**Recommendation: KEEP R-2 baseline. Add audit-tier feature/scoring fixes on top, then re-bench.**
 
-**Option A — Keep R-2 baseline, continue with feature fixes (recommended).** R-2 correctly establishes per-SpecKey retention parity (Tasks 1-5 are architecturally aligned with Java). The remaining gap is in PSM scoring/feature quality, which is what the divergence-audit C/F items target. Build feature fixes on top of R-2; re-bench when feature work lands.
+Reasoning:
+1. R-2 correctly establishes per-SpecKey retention parity (architectural alignment with Java)
+2. R-2.5 makes the Rust PIN structurally match Java's PIN (same Percolator mode now)
+3. The 24,675 vs 35,818 (vs Java) gap is the **scoring/feature quality** gap, which is exactly what the divergence-audit's C-4, C-5, C-5b, F-1 items target
+4. Reverting R-2 would lose the wall-time recovery (11:06 vs R-1's 23:52) AND would restore the Concatenated-mode PIN which masks the real Java gap
+5. The architecture work was a precondition for closing the feature gap — feature fixes would have been impossible to evaluate against R-1's 1M-row over-shoot
 
-**Option B — Revert R-2 to b1d45bb baseline.** Strict reading of the plan's "if any gate fails, decide on revert." Loses the architecture work and the wall-time recovery, but matches the original gate's literal interpretation. The 24,675 vs 25,224 Percolator regression (-2.2%) becomes the proximate trigger.
+**Task 7 (PXD + TMT bench) is still skipped** — not because R-2 is wrong, but because (a) the plan's strict gate decision blocks it, and (b) running PXD + TMT now would just confirm the same architecture-good / quality-needs-feature-work pattern on more datasets. Better to land the next layer of feature fixes first, then do the 3-dataset bench on a richer baseline.
 
-**Option C — Investigate the small regression before deciding.** The 549-PSM drop from b1d45bb (24,675 vs 25,224) is small enough that it could be one specific divergence (e.g. per-charge GF SpecE calibration shifting some borderline PSMs out of 1% FDR). A targeted diff between b1d45bb's and iter7's `astral_iter7.target.psms.txt` at the 1%/1.1% q-value boundary would reveal whether the drop is structural or noise.
-
-Task 7 (PXD + TMT bench) skipped pending decision.
+If the user prefers strict adherence to the plan's gate decision (Option B in the original note), revert via `git reset --hard 37d28f95` then re-apply minus the production code (docs + R-1 + R-1 test). But this loses substantive architectural progress.

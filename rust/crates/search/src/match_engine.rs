@@ -761,11 +761,17 @@ pub(crate) fn compute_psm_features(
     let (mean_error_top7, stdev_error_top7)         = mean_and_pop_stdev(&abs_da_errors);
     let (mean_rel_error_top7, stdev_rel_error_top7) = mean_and_pop_stdev(&rel_ppm_errors);
 
+    // C-5b: longest_y_pct denominator is the number of peptide bonds
+    // (pepLen - 1), NOT pepLen. Mirrors Java PSMFeatureFinder.java:95-96:
+    //   `int bonds = Math.max(peptide.size() - 1, 1); longestY / bonds`.
+    // The early-return at n < 2 guarantees n - 1 >= 1 here, so no max() is
+    // needed.
+    let bonds = (n - 1) as f32;
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
         longest_y,
-        longest_y_pct: longest_y as f32 / n as f32,
+        longest_y_pct: longest_y as f32 / bonds,
         matched_ion_ratio: num_matched as f32 / n as f32,
         explained_ion_current_ratio,
         n_term_ion_current_ratio,

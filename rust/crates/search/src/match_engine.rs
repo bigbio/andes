@@ -271,6 +271,10 @@ impl<'a> PreparedSearch<'a> {
                 score
             };
 
+            // R-2.1: per-charge queue keyed by charge state. Mirrors Java's
+            // per-SpecKey raw-score retention (DBScanner.java:534).
+            let mut per_charge_queues: HashMap<u8, TopNQueue> = HashMap::new();
+
             for &cand_idx in &window_cand_indices {
                 let cand = &candidates[cand_idx];
                 let cleavage_credit = compute_cleavage_credit(cand) as f32;
@@ -279,7 +283,6 @@ impl<'a> PreparedSearch<'a> {
                     let mut best_for_charge: Option<(MassError, f32)> = None;
                     for offset in params.isotope_error_range.clone() {
                         if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
-                            // Add cleavage credit: score = cleavage_credit + raw_score.
                             let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
                                 + cleavage_credit;
                             if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
@@ -288,70 +291,90 @@ impl<'a> PreparedSearch<'a> {
                         }
                     }
                     if let Some((err, score)) = best_for_charge {
-                        // Feature extraction is hoisted to post-top-N
-                        // finalization. Push with a default sentinel; the
-                        // post-spec_e_value pass below fills features only for
-                        // PSMs that survive top-N retention.
                         let features = PsmFeatures::default();
-                        queue.push(PsmMatch {
+                        let psm = PsmMatch {
                             spectrum_idx: spec_idx,
                             candidate_idxs: vec![cand_idx as u32],
                             charge_used: z,
                             mass_error_ppm: err.mass_error_ppm,
                             score,
-                            spec_e_value: 1.0,  // set by compute_spec_e_values_for_spectrum
-                            de_novo_score: i32::MIN,  // set by compute_spec_e_values_for_spectrum
+                            spec_e_value: 1.0,
+                            de_novo_score: i32::MIN,
                             activation_method: Some(scorer.param().data_type.activation),
-                            e_value: 1.0,  // set by compute_spec_e_values_for_spectrum
+                            e_value: 1.0,
                             features,
                             isotope_offset: err.isotope_offset,
-                        });
+                        };
+                        per_charge_queues
+                            .entry(z)
+                            .or_insert_with(|| TopNQueue::new(params.top_n_psms_per_spectrum))
+                            .push(psm);
                         psms_pushed.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
             candidates_visited.fetch_add(window_cand_indices.len() as u64, Ordering::Relaxed);
 
-            // Compute SpecEValue for the PSMs in this queue.
-            if !queue.is_empty() {
-                spectra_with_psms.fetch_add(1, Ordering::Relaxed);
-                let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
-                    && params.enzyme != Enzyme::NonSpecific
-                {
-                    Some(params.enzyme)
-                } else {
-                    None
-                };
-                // Pick the ScoredSpectrum for the top PSM's charge.
-                let top_charge = queue
-                    .iter_psms()
-                    .max_by(|a, b| a.cmp(b))
-                    .map(|p| p.charge_used)
-                    .unwrap_or(charges_to_try[0]);
-                let scored_spec_for_gf = scored_spec_for_charge(top_charge);
+            // R-2.2: pepSeq + score dedup per-charge BEFORE GF compute.
+            // Same peptide matched against multiple proteins collapses to one
+            // PsmMatch with aggregated candidate_idxs (Java DBScanner.java:719-733).
+            for queue in per_charge_queues.values_mut() {
+                if queue.len() > 1 {
+                    let drained = queue.drain_into_vec();
+                    let deduped = dedup_pepseq_score(drained, candidates);
+                    for psm in deduped {
+                        queue.push(psm);
+                    }
+                }
+            }
+
+            // R-2.3: per-charge GF / SpecEValue compute. Each per-charge queue
+            // gets SpecE calibrated against its OWN charge's GF distribution
+            // (Java DBScanner.java:606,779 — getRankScorer per SpecKey).
+            let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
+                && params.enzyme != Enzyme::NonSpecific
+            {
+                Some(params.enzyme)
+            } else {
+                None
+            };
+            let mut any_queue_nonempty = false;
+            for (&charge, queue) in per_charge_queues.iter_mut() {
+                if queue.is_empty() {
+                    continue;
+                }
+                any_queue_nonempty = true;
+                let scored_spec_charge = scored_spec_for_charge(charge);
                 compute_spec_e_values_for_spectrum(
                     spec,
                     params,
-                    &mut queue,
+                    queue,
                     aa_set_for_gf,
                     enzyme_opt,
                     scorer,
-                    scored_spec_for_gf,
-                    top_charge,
+                    scored_spec_charge,
+                    charge,
                     fragment_tolerance_da,
                     idx,
                     candidates,
                 );
             }
+            if any_queue_nonempty {
+                spectra_with_psms.fetch_add(1, Ordering::Relaxed);
+            }
 
-            // Feature extraction hoisted post-top-N: after spec_e_value
-            // computation, the queue contains only the final retained PSMs
-            // (top_n_psms_per_spectrum). Fill in the heavyweight per-PSM
-            // features here so we pay this cost once per retained PSM
-            // instead of once per candidate scored.
-            //
-            // Bit-identity: `features` is NOT part of `PsmMatch::cmp`, so
-            // mutating it does not perturb heap ordering or top-N retention.
+            // R-2.4: spectrum-level merge with SpecE tie keep. R-1's
+            // TopNQueue::push (Ordering::Equal arm) keeps SpecE ties at
+            // capacity because PsmMatch::cmp orders by spec_e_value first.
+            // Matches Java DBScanner.java:745.
+            for (_charge, mut per_charge) in per_charge_queues.drain() {
+                for psm in per_charge.drain_into_vec() {
+                    queue.push(psm);
+                }
+            }
+
+            // Feature extraction (unchanged from baseline): post-merge, after
+            // the per-spectrum queue is final.
             queue.fill_post_topn(|psm| {
                 let ss = scored_spec_for_charge(psm.charge_used);
                 let cand = &candidates[psm.primary_candidate_idx() as usize];

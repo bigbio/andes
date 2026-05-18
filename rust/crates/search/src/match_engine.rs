@@ -606,13 +606,29 @@ fn compute_spec_e_values_for_spectrum(
     // de_novo_score = group.max_score() - 1.
     //
     // e_value = spec_e_value * num_distinct_peptides_at_length.
-    // `num_distinct` is sourced from `SearchIndex`, replacing the prior
-    // top-N-queue-derived proxy.
+    //
+    // HIGH-2 (2026-05-18): align lookup index with Java. Java's
+    // `DirectPinWriter.java:165` does
+    //     `sa.getNumDistinctPeptides(enzyme == null ? length - 2 : length - 1)`
+    // where `match.getLength() = pepLength + 2` (DBScanner.java:521 includes the
+    // two flanking residues in the stored length). So Java effectively queries
+    //   - with enzyme: `numDistinctPeptides[pepLength + 1]`
+    //   - without enzyme: `numDistinctPeptides[pepLength]`
+    //
+    // Rust previously queried `num_distinct(pepLength)` for both cases, which
+    // was the right semantics for the "without enzyme" branch and an
+    // off-by-one for the typical tryptic case.
     let de_novo_score = max_score - 1;
+    let lookup_offset = match params.enzyme {
+        Enzyme::NoCleavage | Enzyme::NonSpecific => 0,
+        _ => 1,
+    };
     queue.update_psm_enrichment(|psm| {
         psm.de_novo_score = de_novo_score;
         let len = candidates[psm.primary_candidate_idx() as usize].peptide.length();
-        let num_distinct = search_index.num_distinct_peptides_at_length(len).max(1);
+        let num_distinct = search_index
+            .num_distinct_peptides_at_length(len + lookup_offset)
+            .max(1);
         psm.e_value = psm.spec_e_value * num_distinct as f64;
     });
 }

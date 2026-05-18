@@ -378,3 +378,114 @@ fn r1_tie_retention_active_in_production_pipeline() {
         queues_with_ties
     );
 }
+
+/// Parse the Java pin file and return a Set of distinct (scan, peptide_residue)
+/// pairs for target rows (Label=1). Uses the shared `strip_flanking_and_mods`
+/// to correctly handle mod-mass tokens that contain dots.
+fn java_target_scan_peptide_pairs(pin_path: &PathBuf) -> HashSet<(i32, String)> {
+    let f = File::open(pin_path).unwrap_or_else(|e| panic!("open {pin_path:?}: {e}"));
+    let r = BufReader::new(f);
+    let mut lines = r.lines();
+    let header = lines.next().unwrap().unwrap();
+    let cols: Vec<&str> = header.split('\t').collect();
+    let scan_idx = cols.iter().position(|c| *c == "ScanNr").expect("ScanNr");
+    let label_idx = cols.iter().position(|c| *c == "Label").expect("Label");
+    let pep_idx = cols.iter().position(|c| *c == "Peptide").expect("Peptide");
+
+    let mut pairs: HashSet<(i32, String)> = HashSet::new();
+    for line_result in lines {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() <= label_idx.max(scan_idx).max(pep_idx) {
+            continue;
+        }
+        if fields[label_idx] != "1" {
+            continue;
+        }
+        let scan: i32 = match fields[scan_idx].parse() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let pep_stripped = strip_flanking_and_mods(fields[pep_idx]);
+        if pep_stripped.is_empty() {
+            continue;
+        }
+        pairs.insert((scan, pep_stripped));
+    }
+    pairs
+}
+
+/// R-2 (2026-05-18): after per-charge queues + dedup + per-charge GF +
+/// spectrum merge, Rust's distinct (scan, peptide) PSM count on the BSA
+/// fixture should approach Java's. This catches:
+///   - dedup collapsing PSMs it shouldn't (would reduce distinct count)
+///   - missed cross-charge merge (would inflate count)
+///   - protein-aggregation breaking peptide identity
+///
+/// Java reference: bsa_test_mgf_java.pin has 217 unique (scan, peptide)
+/// target PSMs. Rust should fall within +/-5% — i.e. 207-227.
+///
+/// If this test fails after a future change, FIRST check what changed
+/// in retention before assuming the test is wrong.
+#[test]
+fn r2_deduped_psm_count_matches_java_on_bsa_fixture() {
+    let java_pin = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let java_target_pairs = java_target_scan_peptide_pairs(&java_pin);
+    let java_count = java_target_pairs.len();
+    println!("Java distinct (scan, peptide) target PSMs: {}", java_count);
+
+    let target = FastaReader::load_all(BufReader::new(
+        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+    ))
+    .unwrap();
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+    let params = SearchParams::default_tryptic(aa_set());
+
+    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let scorer = rank_scorer();
+    let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
+
+    // Mirror Java's -n 1 semantics: take the literal top-1 PSM (the queue's
+    // best by SpecE/score, target OR decoy). Only count the pair if the
+    // top-1 is a target. Java's pin file has one Label=1 row per spectrum
+    // whose best PSM is a target — matching this logic exactly. (Using
+    // `find !is_decoy` instead would over-count because it would surface
+    // a target PSM even when Rust ranked a decoy higher; that compares
+    // Rust top-N to Java top-1.)
+    let mut rust_target_pairs: HashSet<(i32, String)> = HashSet::new();
+    for (spec, queue) in spectra.iter().zip(queues.iter()) {
+        let scan = match spec.scan.or_else(|| extract_scan_from_title(&spec.title)) {
+            Some(s) => s,
+            None => continue,
+        };
+        let sorted = queue.clone().into_sorted_vec();
+        if let Some(top1) = sorted.first() {
+            let cand = &candidates[top1.primary_candidate_idx() as usize];
+            if cand.is_decoy {
+                continue;
+            }
+            let pep = peptide_residue_string(&cand.peptide);
+            rust_target_pairs.insert((scan, pep));
+        }
+    }
+    let rust_count = rust_target_pairs.len();
+    println!("Rust distinct (scan, peptide) target PSMs: {}", rust_count);
+
+    let ratio = rust_count as f64 / java_count as f64;
+    println!("Rust/Java ratio: {:.3}", ratio);
+
+    assert!(
+        (0.95..=1.05).contains(&ratio),
+        "Rust distinct PSM count {} is {:.1}% of Java's {} (gate: 95%-105%)",
+        rust_count,
+        ratio * 100.0,
+        java_count
+    );
+}

@@ -152,22 +152,46 @@ impl TopNQueue {
         Self { capacity, heap: BinaryHeap::with_capacity(capacity as usize) }
     }
 
-    /// Insert a PSM. The queue keeps the `capacity` *best* PSMs.
+    /// Insert a PSM. The queue keeps **at least** `capacity` of the *best*
+    /// PSMs, plus any additional PSMs tied with the current worst.
     ///
     /// "Best" = smallest `spec_e_value` first (then largest `score` for ties).
     /// The min-heap (via `Reverse<PsmMatch>`) puts the *worst* PSM at the top
-    /// so it can be evicted when over capacity.
+    /// so it can be evicted when a strictly-better PSM arrives.
     ///
     /// Before `compute_spec_e_values_for_spectrum` runs, all PSMs have
     /// `spec_e_value = 1.0` and the secondary `score` key governs eviction.
+    ///
+    /// **Tie handling (R-1, 2026-05-18):** when the queue is at capacity and
+    /// a new PSM is `Equal` (in `Ord` terms) to the worst retained PSM, the
+    /// new PSM is inserted WITHOUT evicting the tied one. This matches
+    /// Java's `DBScanner.java:540` (`size < n OR score == worst → add`).
+    /// As a result, the queue can grow beyond `capacity` when ties exist;
+    /// `capacity` becomes a *minimum* top-N, not a hard cap.
     pub fn push(&mut self, m: PsmMatch) {
         if self.heap.len() < self.capacity as usize {
             self.heap.push(Reverse(m));
         } else if let Some(Reverse(top)) = self.heap.peek() {
-            // `m > top` in natural ordering means m is better.
-            if m.cmp(top) == std::cmp::Ordering::Greater {
-                self.heap.pop();
-                self.heap.push(Reverse(m));
+            match m.cmp(top) {
+                std::cmp::Ordering::Greater => {
+                    // m is strictly better than the worst retained PSM: evict
+                    // the worst, insert m.
+                    self.heap.pop();
+                    self.heap.push(Reverse(m));
+                }
+                std::cmp::Ordering::Equal => {
+                    // R-1 (2026-05-18): Java's DBScanner.java:540 keeps tied
+                    // PSMs at capacity (and DBScanner.java:745 keeps SpecE
+                    // ties on the per-spectrum merge). Rust now matches.
+                    // The queue may exceed `capacity` when ties exist —
+                    // `capacity` becomes a *minimum* top-N, not a hard cap.
+                    // Spec:
+                    // docs/parity-analysis/specs/2026-05-18-r1-tie-retention-test-design.md
+                    self.heap.push(Reverse(m));
+                }
+                std::cmp::Ordering::Less => {
+                    // m is strictly worse than the worst retained PSM: drop.
+                }
             }
         }
     }

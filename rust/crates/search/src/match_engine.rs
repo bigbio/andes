@@ -4,6 +4,22 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// GF failure-mode diagnostics (2026-05-19). Module-level atomics
+// incremented per-bin from compute_spec_e_values_for_spectrum and
+// reported in the yield-accounting summary. Used to characterise the
+// ~4.7% of Astral PSMs where GF compute fails (docs/parity-analysis/
+// notes/2026-05-19-gf-compute-failures.md). Module-level rather than
+// per-PreparedSearch because we want cumulative counts across all
+// chunks and the per-call wiring would be invasive.
+//
+// These are diagnostics-only; behavior is unchanged. They are reset at
+// the start of each run_chunk invocation so per-bench numbers don't
+// accumulate across calls.
+static GF_EMPTY_SCORE_RANGE: AtomicU64 = AtomicU64::new(0);
+static GF_SINK_UNREACHABLE: AtomicU64 = AtomicU64::new(0);
+static GF_BIN_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static GF_SPECTRA_NO_GROUP: AtomicU64 = AtomicU64::new(0);
+
 use rayon::prelude::*;
 use rustc_hash::{FxHashSet, FxHasher};
 use smallvec::{smallvec, SmallVec};
@@ -400,6 +416,20 @@ impl<'a> PreparedSearch<'a> {
             psms_pushed.load(Ordering::Relaxed),
             spectra_with_psms.load(Ordering::Relaxed),
         );
+        // GF DP failure-mode diagnostics (2026-05-19; see
+        // docs/parity-analysis/notes/2026-05-19-gf-compute-failures.md).
+        // Cumulative across all chunks in this run; not reset between
+        // chunks. Helps localize the ~4.7% Astral PSMs with sentinel
+        // DeNovoScore / lnSpecEValue=0 (GF failed for that spectrum's
+        // entire precursor-mass window).
+        eprintln!(
+            "GF diagnostics (cumulative): {} bin attempts, {} EmptyScoreRange, \
+             {} SinkUnreachable, {} spectra with no successful bin",
+            GF_BIN_ATTEMPTS.load(Ordering::Relaxed),
+            GF_EMPTY_SCORE_RANGE.load(Ordering::Relaxed),
+            GF_SINK_UNREACHABLE.load(Ordering::Relaxed),
+            GF_SPECTRA_NO_GROUP.load(Ordering::Relaxed),
+        );
 
         queues
     }
@@ -568,13 +598,23 @@ fn compute_spec_e_values_for_spectrum(
             use_protein_n_term,
             use_protein_c_term,
         );
+        GF_BIN_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         match GeneratingFunction::with_score_threshold(&graph, min_score, aa_set) {
             Ok(gf) => group.accept(gf),
-            Err(_) => continue, // skip degenerate / unreachable bins
+            Err(scoring_crate::gf::generating_function::GfError::EmptyScoreRange { .. }) => {
+                GF_EMPTY_SCORE_RANGE.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            Err(scoring_crate::gf::generating_function::GfError::SinkUnreachable) => {
+                GF_SINK_UNREACHABLE.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            Err(_) => continue,
         }
     }
 
     if !group.is_computed() {
+        GF_SPECTRA_NO_GROUP.fetch_add(1, Ordering::Relaxed);
         return;
     }
 

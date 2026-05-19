@@ -60,17 +60,33 @@ The fair comparison is **iter7 R-2 vs Java**, both under Separate / mix-max: 24,
 
 The quality-gate thresholds (30K / 34,027) assumed R-2 would close the Java gap. The R-2 spec was explicit about being **architecture-only**, not addressing the audit-tier C-4/C-5/C-5b/F-1 feature/scoring divergences. Those gates were therefore always going to fail at this point in the work, regardless of R-2 correctness.
 
+## Audit-tier follow-up bisect (2026-05-19)
+
+Three "Java-faithful" fixes were applied on top of R-2 baseline (iter8) — R-3 (minDeNovoScore filter), C-5b (longest_y_pct denominator pepLen→pepLen-1), HIGH-2 Path A (e_value lookup index +1). iter8 measured **21,486 PSMs @ 1% FDR**, a -12.9% regression vs the R-2 baseline (24,675). Sequential bisect (iter9-iter11) decomposed the contribution of each fix:
+
+| iter | Fixes on top of R-2 | Percolator @ 1% FDR | T/D | Wall |
+|---|---|---:|---:|---|
+| iter7 | (none — R-2 baseline) | 24,675 | 1.643 | 11:06 |
+| iter11 | (none — reverted to R-2) | 24,683 | 1.643 | 11:17 |
+| iter10 | +R-3 only | 21,590 | 1.586 | 11:32 |
+| iter9 | +R-3 +C-5b | 20,988 | 1.583 | 11:00 |
+| iter8 | +R-3 +C-5b +HIGH-2 | 21,486 | 1.586 | 10:43 |
+
+**Differential impact** of each fix (per-bisect arithmetic):
+
+- **R-3** (minDeNovoScore filter at PIN/TSV emit): **-3,093 PSMs (-12.5%)**. Java-faithful per `DirectPinWriter.java:132`, but empirically Percolator was rescuing many of the filtered low-de_novo PSMs via other features. Pre-filtering them stripped signal.
+- **C-5b** (longest_y_pct denominator pepLen-1 instead of pepLen): **-602 PSMs (-2.4%)**. Java-faithful per `PSMFeatureFinder.java:95-96`, but the 5-10% length-dependent feature rescale disrupted Percolator's calibration on a discriminator feature.
+- **HIGH-2 Path A** (e_value lookup index +1 with enzyme): **+498 PSMs (+2.0%)**. Java-faithful per `DirectPinWriter.java:165`. Structural index alignment that travels well — the only helpful audit-tier fix.
+
+iter11 confirms run-to-run noise is <10 PSMs (24,683 vs iter7's 24,675).
+
+**Verdict applied (2026-05-19 cab8...c8d1):** keep HIGH-2 (`b3cb3277`), revert R-3 (`c8d1ed90`) and C-5b (`7166ddcb`).
+
+This matches the [[piecewise-alignment-doesnt-work]] pattern even WITH the R-2 retention prerequisite in place: applying Java-faithful per-feature fixes is empirically negative on Astral because Percolator's discrimination depends on the joint feature distribution, not per-feature correctness. The next layer of work needs to either:
+- Apply feature fixes as a coherent group calibrated against Percolator, not one-at-a-time
+- Tune Rust's features against Astral 1% FDR directly (treat Java as guide, not target)
+- Build a per-PSM Rust↔Java diff harness so divergence sources are empirically traced
+
 ## Next
 
-**Recommendation: KEEP R-2 baseline. Add audit-tier feature/scoring fixes on top, then re-bench.**
-
-Reasoning:
-1. R-2 correctly establishes per-SpecKey retention parity (architectural alignment with Java)
-2. R-2.5 makes the Rust PIN structurally match Java's PIN (same Percolator mode now)
-3. The 24,675 vs 35,818 (vs Java) gap is the **scoring/feature quality** gap, which is exactly what the divergence-audit's C-4, C-5, C-5b, F-1 items target
-4. Reverting R-2 would lose the wall-time recovery (11:06 vs R-1's 23:52) AND would restore the Concatenated-mode PIN which masks the real Java gap
-5. The architecture work was a precondition for closing the feature gap — feature fixes would have been impossible to evaluate against R-1's 1M-row over-shoot
-
-**Task 7 (PXD + TMT bench) is still skipped** — not because R-2 is wrong, but because (a) the plan's strict gate decision blocks it, and (b) running PXD + TMT now would just confirm the same architecture-good / quality-needs-feature-work pattern on more datasets. Better to land the next layer of feature fixes first, then do the 3-dataset bench on a richer baseline.
-
-If the user prefers strict adherence to the plan's gate decision (Option B in the original note), revert via `git reset --hard 37d28f95` then re-apply minus the production code (docs + R-1 + R-1 test). But this loses substantive architectural progress.
+Current `rust-implement` HEAD: R-2 baseline + HIGH-2 only. Expected Astral 1% FDR: ~25,180 (extrapolating from +500 effect; bench to confirm). Gap to Java's 35,818 narrows from 31% to 29%, still dominated by structural feature/scoring divergences that don't decompose into single-line fixes.

@@ -90,3 +90,27 @@ This matches the [[piecewise-alignment-doesnt-work]] pattern even WITH the R-2 r
 ## Next
 
 Current `rust-implement` HEAD: R-2 baseline + HIGH-2 only. Expected Astral 1% FDR: ~25,180 (extrapolating from +500 effect; bench to confirm). Gap to Java's 35,818 narrows from 31% to 29%, still dominated by structural feature/scoring divergences that don't decompose into single-line fixes.
+
+## iter12: C-4 (enzN/enzC/enzInt) (2026-05-19)
+
+Diff-harness-driven follow-up. The `2026-05-19-pin-diff-findings.md` analysis localized enzN/enzC/enzInt as the highest-value remaining fix — Rust was emitting constant 0 for all three across every PSM (Java emits real values).
+
+| Metric | iter11 (R-2 baseline) | iter12 (+C-4) | Δ | Java |
+|---|---:|---:|---:|---:|
+| Raw targets | 92,929 | 92,909 | -20 | 89,479 |
+| Raw decoys | 56,568 | 56,442 | -126 | 46,792 |
+| T/D ratio | 1.643 | 1.646 | +0.003 | 1.912 |
+| Wall | 11:17 | 11:26 | +9s | — |
+| **Percolator @ 1% FDR** | **24,683** | **26,401** | **+1,718 (+7.0%)** | 35,818 |
+| Percolator @ 5% FDR | 30,385 | 31,660 | +1,275 | — |
+
+**C-4 closes 5 percentage points of the Java gap** (31% → 26%). Top-1-per-scan buckets are unchanged within noise — C-4 doesn't change which PSMs Rust emits, it gives Percolator three new discriminator dimensions to use for FDR calibration.
+
+Re-run of the diff harness on iter12 confirms bit-exact agreement with Java on enzN/enzC/enzInt:
+- enzN median Δ = 0, mean Δ = +4e-5 (float noise)
+- enzC median Δ = 0, mean Δ = +2e-5
+- enzInt median Δ = 0, mean Δ = 0
+
+This validates both the implementation and the diff-harness workflow: localize empirically → implement the additive fix → re-measure on the harness AND on Percolator. ADDITIVE fixes don't carry the piecewise-regression risk that R-3 / C-5b in the bisect did.
+
+Current `rust-implement` HEAD: `1d9da765` (R-2 + HIGH-2 + C-4). Astral 1% FDR = 26,401; gap to Java = 9,417 PSMs (26%). Remaining gap dominated by RawScore / lnSpecEValue / DeNovoScore covariance (structural scoring divergence per the harness) plus the MeanErrorTop7/StdevErrorTop7 units mismatch (smaller, easier).

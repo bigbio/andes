@@ -156,6 +156,18 @@ impl<'a> ScoredSpectrum<'a> {
 
         let kept_count = kept.len();
 
+        // MS2IonCurrent / ion-current-ratio denominator: Java zeroes precursor
+        // peak intensities via `Spectrum.filterPrecursorPeaks` BEFORE
+        // PSMFeatureFinder.computeSumIonCurrent iterates the spec
+        // (NewScoredSpectrum.java:44-45). Those zeroed peaks then contribute
+        // 0 to MS2IonCurrent. Rust filters precursor peaks for rank
+        // assignment but the original `spec.peaks` is unmodified, so summing
+        // it directly OVER-COUNTS by the precursor-peak intensity. Use the
+        // kept set (post-precursor-filter) for the running sum, matching
+        // Java's effective denominator. (2026-05-19 PIN diff harness flagged
+        // MS2IonCurrent as ~1.6x over Java; this is the source.)
+        let total_intensity: f64 = kept.iter().map(|&(_, intensity, _)| intensity as f64).sum();
+
         // Ranks must be computed BEFORE the FastScorer cache below reads them.
         // The cache calls `directional_node_score_inner(&ranks, ...)` which
         // feeds into `nearest_peak_rank_in` to determine which rank-slot's
@@ -261,7 +273,7 @@ impl<'a> ScoredSpectrum<'a> {
             spec,
             ranks,
             kept_count,
-            total_intensity: spec.peaks.iter().map(|&(_, i)| i as f64).sum(),
+            total_intensity,
             prob_peak,
             main_ion,
             parent_mass,
@@ -327,6 +339,7 @@ impl<'a> ScoredSpectrum<'a> {
         prefix_score_cache: Vec<f32>,
         suffix_score_cache: Vec<f32>,
     ) -> Self {
+        let total_intensity: f64 = kept.iter().map(|&(_, intensity, _)| intensity as f64).sum();
         kept.sort_by(|a, b| {
             // Higher intensity first; if equal, lower m/z first.
             b.1.partial_cmp(&a.1)
@@ -340,7 +353,7 @@ impl<'a> ScoredSpectrum<'a> {
             spec,
             ranks,
             kept_count,
-            total_intensity: spec.peaks.iter().map(|&(_, i)| i as f64).sum(),
+            total_intensity,
             prob_peak,
             main_ion,
             parent_mass,

@@ -30,8 +30,9 @@
 //! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, set by
 //!   `match_engine.rs` from `MassError::isotope_offset`.
 //!
-//! * **enzN / enzC / enzInt**: zero-stubbed. Would require
-//!   `Enzyme::is_cleavage_site` wiring; deferred.
+//! * **enzN / enzC / enzInt**: computed via `crate::percolator_enz`,
+//!   mirroring Java's `DirectPinWriter::isEnzymaticBoundary` +
+//!   `countInternalEnzymatic` (OpenMS PercolatorInfile rules).
 //!
 //! * **Proteins**: single column with the real protein accession resolved from
 //!   `SearchIndex::protein_at(candidates[psm.primary_candidate_idx() as usize].protein_index)`.
@@ -72,6 +73,7 @@ use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
+use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
 use crate::row_context::{iter_ranked, RowContext};
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
@@ -156,6 +158,7 @@ pub fn write_pin_to<W: Write>(
             search_index,
             &target_haystack,
             &mut label_cache,
+            params,
         )?;
     }
     Ok(())
@@ -249,6 +252,7 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
 
 // ── per-spectrum rows ──────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn write_spectrum_rows<W: Write>(
     writer: &mut W,
     spec: &Spectrum,
@@ -259,6 +263,7 @@ fn write_spectrum_rows<W: Write>(
     search_index: &SearchIndex,
     target_haystack: &[u8],
     label_cache: &mut HashMap<Vec<u8>, i32>,
+    params: &SearchParams,
 ) -> io::Result<()> {
     // Sort best-first (lowest spec_e_value first, then highest score).
     let psms = queue.clone().into_sorted_vec();
@@ -283,6 +288,7 @@ fn write_spectrum_rows<W: Write>(
             label_cache,
             candidates,
             search_index,
+            params,
         )?;
     }
     Ok(())
@@ -303,6 +309,7 @@ fn write_psm_row<W: Write>(
     label_cache: &mut HashMap<Vec<u8>, i32>,
     candidates: &[Candidate],
     search_index: &SearchIndex,
+    params: &SearchParams,
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
@@ -420,8 +427,19 @@ fn write_psm_row<W: Write>(
         writer.write_all(&[b'\t', flag])?;
     }
 
-    // enzN, enzC, enzInt (zero-stubbed)
-    writer.write_all(b"\t0\t0\t0")?;
+    // enzN, enzC, enzInt — C-4 (2026-05-19): Java DirectPinWriter.java:199-203
+    // emits enzymatic-boundary consistency features. enzN = boundary between
+    // protein-pre and peptide[0]; enzC = boundary between peptide[last] and
+    // protein-post; enzInt = count of internal positions consistent with the
+    // enzyme. Per-rule semantics in crate::percolator_enz, mirroring Java's
+    // isEnzymaticBoundary + countInternalEnzymatic (OpenMS PercolatorInfile).
+    let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+    let first = residues.first().copied().unwrap_or(b'-');
+    let last  = residues.last().copied().unwrap_or(b'-');
+    let enz_n: u8 = is_enzymatic_boundary(cand.peptide.pre, first, params.enzyme) as u8;
+    let enz_c: u8 = is_enzymatic_boundary(last, cand.peptide.post, params.enzyme) as u8;
+    let enz_int = count_internal_enzymatic(&residues, params.enzyme);
+    write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
     // 4 fragment-coverage feature columns:
     // NumMatchedMainIons, longest_b, longest_y, longest_y_pct

@@ -24,3 +24,4 @@ pub mod pin;
 pub use pin::{write_pin, write_pin_to};
 
 pub(crate) mod row_context;
+pub(crate) mod percolator_enz;

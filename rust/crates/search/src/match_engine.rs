@@ -754,11 +754,20 @@ pub(crate) fn compute_psm_features(
     });
     let top7 = &matched_ions[..matched_ions.len().min(7)];
 
-    // Absolute Da errors for mean7/sd7;
-    // signed errors (no abs) for r_mean7/r_sd7 (ppm).
+    // All four *ErrorTop7 columns are in PPM (matching Java
+    // `NewScoredSpectrum.getMassErrorWithIntensity`, which always returns
+    // `(p.getMz() - theoMass) / theoMass * 1e6f`). The Java column naming
+    // is misleading: `MeanErrorTop7` = mean of |ppm error| (absolute),
+    // `MeanRelErrorTop7` = mean of signed ppm error. Both are ppm; the
+    // "Rel" suffix in Java distinguishes signed vs absolute, NOT
+    // Da-vs-ppm. Rust previously emitted MeanErrorTop7/StdevErrorTop7 in
+    // Da, which produced a 100% feature-divergence rate vs Java per the
+    // 2026-05-19 PIN diff harness. Switching to abs-ppm aligns the units.
+    //
     // Population stdev formula: sqrt(sum_sq/n - mean²).
-    let abs_da_errors: Vec<f64> = top7.iter()
-        .map(|&(_, obs, pred, _)| (obs - pred).abs())
+    let abs_ppm_errors: Vec<f64> = top7.iter()
+        .filter(|&&(_, _, pred, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _)| ((obs - pred) / pred * 1e6).abs())
         .collect();
     let rel_ppm_errors: Vec<f64> = top7.iter()
         .filter(|&&(_, _, pred, _)| pred > 0.0)
@@ -774,7 +783,7 @@ pub(crate) fn compute_psm_features(
         (mean as f32, var.sqrt() as f32)
     }
 
-    let (mean_error_top7, stdev_error_top7)         = mean_and_pop_stdev(&abs_da_errors);
+    let (mean_error_top7, stdev_error_top7)         = mean_and_pop_stdev(&abs_ppm_errors);
     let (mean_rel_error_top7, stdev_rel_error_top7) = mean_and_pop_stdev(&rel_ppm_errors);
 
     PsmFeatures {

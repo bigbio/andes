@@ -133,3 +133,37 @@ The harness data also showed that after the unit conversion, Rust's MeanErrorTop
 **Reverted at 5007d8d1.** General principle confirmed: only ADDITIVE fixes (like C-4) can be applied piecewise. DISTRIBUTION-MODIFYING fixes need to be batched with Percolator re-training OR avoided until the underlying selection logic also matches Java.
 
 Current `rust-implement` HEAD: `5007d8d1`. Best stable Astral 1% FDR result: **26,401** (iter12, R-2 + HIGH-2 + C-4). Gap to Java's 35,818 holds at 26%.
+
+## iter14: MS2IonCurrent denominator fix (kept-peaks sum)
+
+Diff-harness-driven structural fix. The 2026-05-19 PIN diff showed Rust's MS2IonCurrent was 1.6× Java's (median Δ +78,570) because Rust's `total_intensity` summed the original `spec.peaks` while Java's effective sum is over precursor-filtered peaks (Java zeroes precursor-peak intensities via `Spectrum.filterPrecursorPeaks` at `NewScoredSpectrum.java:44-45` before `PSMFeatureFinder.computeSumIonCurrent` iterates). Rust ALREADY applies the same precursor filter for rank assignment but the `total_intensity` field used the unfiltered list. Single-line fix: compute total_intensity from the `kept` Vec.
+
+| Metric | iter12 (+C-4) | iter14 (+MS2 denom) | Δ |
+|---|---:|---:|---:|
+| Percolator @ 1% FDR | 26,401 | **26,461** | +60 (neutral, within noise) |
+| MS2IonCurrent agreement (diff harness) | mean +78,570 / 98.6% diff | **mean +254 / 0.2% diff** | bit-exact |
+| ExplainedIonCurrentRatio | median -0.023 | median -0.017 | partial closure |
+| CTermIonCurrentRatio | median -0.019 | median -0.015 | partial closure |
+| NTermIonCurrentRatio | median -0.003 | median -0.001 | partial closure |
+
+**Outcome:**
+- MS2IonCurrent fully aligned with Java (bit-exact agreement).
+- The 3 ion-current ratios partially closed but still diverge because their NUMERATOR (matched-ion intensity sum) is different between engines — Rust matches more ions overall (`NumMatchedMainIons` median +3), so `matched_b_intensity + matched_y_intensity` is larger. The denominator fix concentrated the residual divergence into the matched-ion-set divergence, which is a separate, upstream structural issue.
+- Net Percolator effect: +60 PSMs (within run-to-run noise). Not regressive, not strongly positive — the 4 features were apparently not heavily weighted by Percolator for this dataset, so even fully aligning MS2IonCurrent didn't translate to meaningful FDR movement.
+
+Pattern data extended (n=6):
+
+| Fix | Type | Astral Δ |
+|---|---|---:|
+| R-3 | distribution-modifying (one column) | -3,093 |
+| C-5b | distribution-modifying (one column) | -602 |
+| Units fix | distribution-modifying (one column) | -479 |
+| HIGH-2 | distribution-modifying (one column, small) | +498 |
+| **C-4** | **ADDITIVE (3 new columns)** | **+1,718** |
+| MS2 denom (iter14) | coherent multi-feature at source | +60 |
+
+Refinement: **coherent multi-feature fixes at the source are SAFE but not necessarily POWERFUL.** The fix matters in proportion to how much Percolator was relying on the affected feature for FDR. C-4 was both safe AND high-impact because it added 3 NEW dimensions; the MS2 denom fix was safe but low-impact because Percolator already worked around the 1.6× distortion via other features.
+
+Current `rust-implement` HEAD: `6ed6e724` (R-2 + HIGH-2 + C-4 + MS2 denom). Astral 1% FDR: **26,461**. Gap to Java: 26.1%.
+
+The remaining gap dominated by upstream structural divergences (RawScore -2 median, NumMatchedMainIons +3 median, lnSpecEValue +0.74 median, DeNovoScore -9 median, longest_b +2). These all derive from the scoring/ion-matching pipeline before PIN feature emission. Closing them likely requires the per-PSM scoring trace harness (option A from the 2026-05-19 brainstorm) — instrument both engines to dump intermediate scoring values for a small fixture and identify the first divergence point.

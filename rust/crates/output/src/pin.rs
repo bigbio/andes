@@ -56,8 +56,7 @@
 //! - `NumMatchedMainIons` — count of matched charge-1 b/y fragment positions.
 //! - `longest_b` — longest contiguous run of matched b-ions.
 //! - `longest_y` — longest contiguous run of matched y-ions.
-//! - `longest_y_pct` — `longest_y / (peptide.length() - 1)` (number of
-//!   peptide bonds; mirrors Java `PSMFeatureFinder.java:95-96`).
+//! - `longest_y_pct` — `longest_y / peptide.length()`.
 //! - `ExplainedIonCurrentRatio` — matched b+y intensity / total MS2 intensity.
 //! - `NTermIonCurrentRatio` — matched b intensity / total MS2 intensity.
 //! - `CTermIonCurrentRatio` — matched y intensity / total MS2 intensity.

@@ -114,3 +114,22 @@ Re-run of the diff harness on iter12 confirms bit-exact agreement with Java on e
 This validates both the implementation and the diff-harness workflow: localize empirically → implement the additive fix → re-measure on the harness AND on Percolator. ADDITIVE fixes don't carry the piecewise-regression risk that R-3 / C-5b in the bisect did.
 
 Current `rust-implement` HEAD: `1d9da765` (R-2 + HIGH-2 + C-4). Astral 1% FDR = 26,401; gap to Java = 9,417 PSMs (26%). Remaining gap dominated by RawScore / lnSpecEValue / DeNovoScore covariance (structural scoring divergence per the harness) plus the MeanErrorTop7/StdevErrorTop7 units mismatch (smaller, easier).
+
+## iter13: MeanErrorTop7/StdevErrorTop7 units fix (Da → ppm) — reverted
+
+The diff harness flagged these two columns as Da-vs-ppm units mismatch (Java emits ppm via `NewScoredSpectrum.getMassErrorWithIntensity:229`, Rust was emitting `|obs-pred|` in Da). The fix changed Rust to emit `|(obs-pred)/pred*1e6|` (abs ppm) to match Java.
+
+iter13 Astral bench:
+
+| Metric | iter12 (+C-4) | iter13 (+units fix) | Δ |
+|---|---:|---:|---:|
+| Percolator @ 1% FDR | 26,401 | **25,922** | **-479 (-1.8%)** |
+| Percolator @ 5% FDR | 31,660 | 31,047 | -613 |
+
+The fix was theoretically correct — diff harness re-run confirms Rust now reports in PPM. But Percolator regressed by -479 PSMs. This is the same pattern as R-3 / C-5b in the bisect: **modifying an existing column's distribution scale disrupts Percolator's learned weights even when the modification is Java-faithful**.
+
+The harness data also showed that after the unit conversion, Rust's MeanErrorTop7 still diverges from Java's by ~24 ppm median — i.e. the underlying top-7 ion selection differs between engines, so the units fix alone doesn't produce bit-exact agreement. This is consistent with the harness's earlier finding that `NumMatchedMainIons` median Δ = +3 (Rust matches more ions).
+
+**Reverted at 5007d8d1.** General principle confirmed: only ADDITIVE fixes (like C-4) can be applied piecewise. DISTRIBUTION-MODIFYING fixes need to be batched with Percolator re-training OR avoided until the underlying selection logic also matches Java.
+
+Current `rust-implement` HEAD: `5007d8d1`. Best stable Astral 1% FDR result: **26,401** (iter12, R-2 + HIGH-2 + C-4). Gap to Java's 35,818 holds at 26%.

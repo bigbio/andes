@@ -72,15 +72,7 @@ pub fn score_psm(
         );
     }
 
-    // Build per-position prefix mass arrays. Length n+1 so that index 0
-    // holds the source (mass=0) and index s holds the cumulative mass after
-    // residue s-1. The final entry (index n) equals the full residue sum.
-    let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
-    let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
-    prefix_mass_arr.push(0.0);
-    prefix_nominal_arr.push(0);
-
-    let mut node_total: i32 = 0;
+    let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
     // Split positions 1..n: after split s, prefix = residues[0..s], suffix = residues[s..n].
     for s in 1..n {
@@ -92,9 +84,6 @@ pub fn score_psm(
         // Nominal masses at the split position.
         let prefix_nominal = nominal_from(prefix_mass_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
-
-        prefix_mass_arr.push(prefix_mass_acc);
-        prefix_nominal_arr.push(prefix_nominal);
 
         // Sample cached prefix/suffix scores for trace diagnostics (no
         // change to the hot-path semantics): the cache exposes the same
@@ -114,7 +103,7 @@ pub fn score_psm(
                     fragment_tolerance_da,
                 )
             });
-        node_total += contribution;
+        total += contribution;
 
         if trace {
             let pref_str = cached_pref
@@ -126,75 +115,14 @@ pub fn score_psm(
             eprintln!(
                 "TRACE_RUST\tpep={}\tsplit={}\tprefMass={}\tsuffMass={}\tprefScore={}\tsuffScore={}\tcontribution={}\tcumulative={}\tprefAccF64={:.6}",
                 pep_seq_string, s, prefix_nominal, suffix_nominal,
-                pref_str, suff_str, contribution, node_total, prefix_mass_acc
+                pref_str, suff_str, contribution, total, prefix_mass_acc
             );
         }
     }
-    // Append the final residue (residue n-1) so prefix_mass_arr[n] = full
-    // residue sum. This mirrors Java's DBScanScorer.getScore which iterates
-    // `i in [fromIndex, toIndex-2]` (here: 0..n-1), reading from
-    // `nominalPrefixMassArr[toIndex-1]` (= our prefix_nominal_arr[n]).
-    {
-        let aa_last = &peptide.residues[n - 1];
-        let residue_mass = aa_last.mass + aa_last.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
-        prefix_mass_acc += residue_mass;
-        prefix_mass_arr.push(prefix_mass_acc);
-        prefix_nominal_arr.push(peptide_nominal);
-    }
-
-    // Edge scoring (Java DBScanScorer.getScore): suffix-main (HCD/Trypsin)
-    // uses the reverse-direction loop; prefix-main uses the forward loop.
-    // Mirrors `DBScanScorer.getScore` exactly.
-    let is_prefix_main = scored_spec.main_ion_direction();
-    let mut edge_total: i32 = 0;
-    if !is_prefix_main {
-        // Reverse direction: suffix masses computed via
-        // `nominalPeptideMass - nominalPrefixMassArr[i]`.
-        let nominal_peptide_mass = prefix_nominal_arr[n];
-        // Java: `for (int i = toIndex - 2; i >= fromIndex; i--)` where
-        // fromIndex=0, toIndex=n+1 → i ranges n-1 down to 0.
-        for i in (0..n).rev() {
-            let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
-            let prev_nominal = nominal_peptide_mass - prefix_nominal_arr[i + 1];
-            let theo_mass = prefix_mass_arr[i + 1] - prefix_mass_arr[i];
-            edge_total += scored_spec.edge_score(
-                cur_nominal,
-                prev_nominal,
-                theo_mass,
-                scorer,
-                charge,
-                spectrum_parent_mass,
-            );
-        }
-    } else {
-        // Forward direction: Java's loop is `for (i = fromIndex; i <= toIndex - 2; i++)`
-        // → i ranges 0 to n-1. Within the loop Java reads
-        // `prefixMassArr[i] - prefixMassArr[i - 1]`, so when i=0 this is a
-        // negative index. We mirror Java by starting at i=1 (Java's loop body
-        // dereferences `nominalPrefixMassArr[i - 1]` and crashes at i=0 in
-        // practice; in MS-GF+ the prefix-main path is rare — N-term enzymes
-        // like LysN — and Java's fromIndex is always >= 1 there). Use a
-        // matching `1..n` range so the behaviour mirrors observed Java runs.
-        for i in 1..n {
-            let cur_nominal = prefix_nominal_arr[i];
-            let prev_nominal = prefix_nominal_arr[i - 1];
-            let theo_mass = prefix_mass_arr[i] - prefix_mass_arr[i - 1];
-            edge_total += scored_spec.edge_score(
-                cur_nominal,
-                prev_nominal,
-                theo_mass,
-                scorer,
-                charge,
-                spectrum_parent_mass,
-            );
-        }
-    }
-
-    let total = node_total + edge_total;
     if trace {
         eprintln!(
-            "TRACE_RUST_FINAL\tpep={}\tnodeScore={}\tedgeScore={}\trawScore={}",
-            pep_seq_string, node_total, edge_total, total
+            "TRACE_RUST_FINAL\tpep={}\trawScore={}",
+            pep_seq_string, total
         );
     }
     total as f32

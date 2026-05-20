@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // accumulate across calls.
 static GF_EMPTY_SCORE_RANGE: AtomicU64 = AtomicU64::new(0);
 static GF_SINK_UNREACHABLE: AtomicU64 = AtomicU64::new(0);
+static GF_SINK_RETRY_OK: AtomicU64 = AtomicU64::new(0);
 static GF_BIN_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static GF_SPECTRA_NO_GROUP: AtomicU64 = AtomicU64::new(0);
 
@@ -424,10 +425,12 @@ impl<'a> PreparedSearch<'a> {
         // entire precursor-mass window).
         eprintln!(
             "GF diagnostics (cumulative): {} bin attempts, {} EmptyScoreRange, \
-             {} SinkUnreachable, {} spectra with no successful bin",
+             {} SinkUnreachable, {} of those recovered by unthresholded retry, \
+             {} spectra with no successful bin",
             GF_BIN_ATTEMPTS.load(Ordering::Relaxed),
             GF_EMPTY_SCORE_RANGE.load(Ordering::Relaxed),
             GF_SINK_UNREACHABLE.load(Ordering::Relaxed),
+            GF_SINK_RETRY_OK.load(Ordering::Relaxed),
             GF_SPECTRA_NO_GROUP.load(Ordering::Relaxed),
         );
 
@@ -606,7 +609,22 @@ fn compute_spec_e_values_for_spectrum(
                 continue;
             }
             Err(scoring_crate::gf::generating_function::GfError::SinkUnreachable) => {
+                // 2026-05-20: SinkUnreachable from the thresholded DP means the
+                // score-threshold pre-pass (`setup_score_threshold`) pruned
+                // every path from source to sink because no AA-path could
+                // theoretically reach the queue's `min_score`. This is a
+                // pruning artifact, not a real reachability problem: the
+                // unthresholded DP (`GeneratingFunction::compute`) still has
+                // valid paths to compute a complete distribution from. Retry
+                // without the threshold to recover ~10% of bin attempts that
+                // would otherwise emit sentinel DeNovoScore / lnSpecEValue=0
+                // and leave Percolator with broken features on ~5K Astral PSMs.
+                // See docs/parity-analysis/notes/2026-05-19-gf-compute-failures.md.
                 GF_SINK_UNREACHABLE.fetch_add(1, Ordering::Relaxed);
+                if let Ok(gf) = GeneratingFunction::compute(&graph, aa_set) {
+                    GF_SINK_RETRY_OK.fetch_add(1, Ordering::Relaxed);
+                    group.accept(gf);
+                }
                 continue;
             }
             Err(_) => continue,

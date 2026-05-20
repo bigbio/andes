@@ -192,6 +192,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     for ((c, s), n) in &partition_counts {
         println!("    charge={} seg={}: {} partitions", c, s, n);
     }
+    if std::env::var_os("MSGF_TRACE_DUMP_PARTITIONS").is_some() {
+        println!("  ALL partitions (idx, c, pm, seg):");
+        for (i, part) in param.partitions.iter().enumerate() {
+            println!("    [{}] c={} pm={} seg={}", i, part.charge, part.parent_mass, part.seg_num);
+        }
+    }
     // Show distinct ion-type-list sizes across all partitions in (charge=2, seg=0).
     use std::collections::HashSet;
     for (c, s) in [(2_i32, 0_i32), (2, 1)] {
@@ -278,9 +284,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let pm = (spec.precursor_mz - PROTON) * z as f64;
         for s in 0..param.num_segments as usize {
             let ion_list = param.ion_types_for_partition(z, pm, s);
+            let selected = param.partition_for(z, pm, s);
             println!(
-                "  spectrum partition (charge={} pm={:.2} seg={}): {} ion types — {:?}",
-                z, pm, s, ion_list.len(),
+                "  spectrum partition target=(c={} pm={:.2} seg={}) selected=(c={} pm={:.2} seg={}): {} ion types — {:?}",
+                z, pm, s,
+                selected.charge, selected.parent_mass, selected.seg_num,
+                ion_list.len(),
                 ion_list.iter().map(|i| match i {
                     scoring_crate::param_model::IonType::Prefix { charge, offset_bits } => format!("P(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
                     scoring_crate::param_model::IonType::Suffix { charge, offset_bits } => format!("S(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),

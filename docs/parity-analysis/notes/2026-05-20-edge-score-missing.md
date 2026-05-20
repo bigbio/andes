@@ -116,6 +116,35 @@ Across the 49,538 agreement-bucket PSMs (diff harness), the per-PSM RawScore div
 
 This is conceptually an ADDITIVE fix at the SCORE level — Rust currently doesn't compute edge scoring at all. Unlike R-3 or C-5b (which modified an existing feature distribution), this ADDS a missing per-PSM scoring component. By the n=6 audit pattern, additive fixes don't trigger Percolator-recalibration regressions; they introduce new (correct) signal.
 
+## First-attempt result: regresses gf_java_parity (REVERTED, 2026-05-20)
+
+A first implementation port of `DBScanScorer.getScore`'s reverse-direction edge loop into `score_psm` (via a new `edge_score_for_bond` helper, ~50 LOC) compiled and passed all unit tests but **regressed the `gf_java_parity` integration test**:
+
+| BSA PSM | Java SP | Rust SP pre-fix | Rust SP post-fix | log10 Δ |
+|---|---:|---:|---:|---:|
+| scan 3416 KVPQVSTPTLVEVSR ch3 | 3.005e-9 | within 1 OOM of Java | 1.190e-6 | +2.6 |
+| scan 3353 KVPQVSTPTLVEVSR ch3 | 4.658e-10 | within 1 OOM | 2.071e-7 | +2.6 |
+| scan 5442 LGEYGFQNALIVR ch2 | 4.315e-7 | within 1 OOM | 3.313e-4 | +2.9 |
+| scan 1507 YLYEIAR ch2 | 5.246e-4 | within 1 OOM | 5.958e-3 | +1.1 |
+| scan 2693 SLGKVGTR ch2 | 1.392e-3 | within 1 OOM | 1.764e-2 | +1.1 |
+
+5/5 BSA PSMs flipped from "within 1.0 OOM" to "1-3 OOM HIGHER than Java" — opposite direction from what the fix was intended to do.
+
+**Diagnosis (incomplete):** Rust's existing GF DP (`PrimitiveAaGraph::new` → `compute_edge_error_scores` at `primitive_graph.rs:633`) already adds `ion_existence_score + error_score` per edge to `edge_score[e]`, which the GF DP uses in the cumulative distribution. So Rust's GF distribution is ALREADY computed with edge scoring included.
+
+Pre-fix:
+- `score_psm` returns node-only (let's say `S_node`).
+- GF distribution is computed with node + edge (max_score is higher).
+- `spectral_probability(S_node + cleavage_credit)` happens to match Java's `spectral_probability(S_node + S_edge + cleavage_credit)` within 1 OOM.
+
+This match was coincidental, not structurally correct. Adding edges to `score_psm` (so it queries the GF at a higher score) made the SP go **UP**, not down — implying Rust's GF distribution's `spectral_probability` returns LARGER values at higher score for these PSMs. Either the GF tail near max_score is mis-shaped, or Rust's edge contributions in the GF DP are NEGATIVE in net (penalty-dominated), pulling the distribution's mass to lower scores.
+
+This is a non-trivial interaction. The pre-fix state was "compensating mistakes": PSM and GF both wrong in canceling directions. Closing the gap requires either:
+1. Verifying Rust's GF DP edge scoring matches Java's edge contribution per AA-graph edge (each AA-edge gets ies + error, summed over all paths to the sink).
+2. Or removing edge scoring from BOTH the GF DP and `score_psm` (back to pure node-only on both sides) and re-comparing Java SP — if Java's edges contribute similarly to the GF, the SP scale should still match.
+
+For now, the edge-scoring fix is **REVERTED**. The localization stands (Rust's `score_psm` doesn't include edges, and that contributes the 20-point RawScore gap on scan 21), but the fix requires deeper investigation into Rust↔Java GF DP edge semantics. Filed as future work; doc preserved as the empirical guide.
+
 ## Reproducibility
 
 Trace re-run on scan 21 with correct `-inst 3`:

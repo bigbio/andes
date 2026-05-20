@@ -70,3 +70,28 @@ If the dominant failure is `SinkUnreachable`, the AA graph construction itself i
 5,656 target Astral PSMs would get valid `lnSpecEValue` + `DeNovoScore` instead of broken sentinel values. Percolator could then use these for FDR discrimination instead of treating them as outliers. Estimated upper bound: closing ~5K of the 9,400 PSM gap to Java would put Rust at ~31,500 PSMs (within ~12% of Java's 35,818). Lower bound depends on how Percolator currently weights the broken rows — could be smaller if the sentinel rows are already being effectively ignored.
 
 This is the single highest-leverage remaining lead per the diff harness data.
+
+## Resolution (2026-05-20)
+
+iter15 diagnostic confirmed dominant failure mode: **100% SinkUnreachable, 0 EmptyScoreRange** (49,597 of 486,660 bin attempts = 10.2%).
+
+Root cause: `setup_score_threshold` pre-prunes nodes whose theoretical best-path-to-sink can't reach `min_score` (the queue's lowest PSM score). With top-N=1, `min_score == top_PSM_score`. For some peptide-mass bins, no AA-graph path can theoretically reach that score → all nodes pruned → sink_idx never set → `SinkUnreachable`.
+
+Fix at `a85817e3`: on `SinkUnreachable` from the thresholded DP, retry with `GeneratingFunction::compute` (no threshold). The unthresholded DP computes the full distribution from actual reachable paths.
+
+iter16 verified:
+- **49,685 of 49,685 SinkUnreachable recovered** (100% retry success)
+- **0 spectra with no successful bin** (was 6,228)
+- **0 sentinel rows in PIN** (was 6,954)
+- Wall: +45s (~7% slower for the unthresholded retry on 10% of bins)
+- Diff harness: lnSpecEValue agreement-bucket median Δ shifted +0.74 → -0.72 (closer to Java)
+
+**Percolator @ 1% FDR: 26,432 (vs iter12's 26,401, within run-to-run noise)**.
+
+The fix is semantically correct (recovers ~5,656 target rows from broken sentinel features to valid GF values) but **does not translate to Percolator gain** because:
+
+1. The recovered PSMs are predominantly NOT in the agreement bucket. They appear in the label-flip buckets (Java labels target/Rust labels decoy or vice versa) where the divergence is in candidate RANKING, not feature quality. Feature-level fixes can't move ranking-flip PSMs into agreement.
+
+2. Where recovered PSMs ARE in the agreement bucket, Percolator was already ranking them well via RawScore + NumMatchedMainIons + other features. The previously-broken lnSpecEValue was already being effectively ignored by Percolator's learned weights.
+
+The fix is kept (correctness + zero regression). The remaining 26% gap to Java is dominated by upstream candidate ranking divergences (16,927 Java-target/Rust-decoy + 13,895 Rust-target/Java-decoy = 30,822 scans with label flips, ~25% of total). These are not addressable by feature-level fixes — they require the full per-PSM scoring trace harness to identify the divergence in score_psm / GF compute that causes Rust to pick a different top-1 peptide for the same scan.

@@ -239,9 +239,13 @@ pub fn score_psm(
         // Reverse direction: suffix masses computed via
         // `nominalPeptideMass - nominalPrefixMassArr[i]`.
         let nominal_peptide_mass = prefix_nominal_arr[n];
-        // Java: `for (int i = toIndex - 2; i >= fromIndex; i--)` where
-        // fromIndex=0, toIndex=n+1 → i ranges n-1 down to 0.
-        for i in (0..n).rev() {
+        // Java (DBScanner.java:513): `scorer.getScore(..., 1, pepLength + 1, ...)`
+        // — fromIndex=1, toIndex=pepLength+1=n+1. The reverse loop is
+        // `for (int i = toIndex - 2; i >= fromIndex; i--)` → i from n-1
+        // down to 1. The sink edge (i=0) is intentionally skipped:
+        // including it adds a spurious -4-ish penalty per PSM since
+        // `cur=peptide_mass` rarely has an observed main-ion peak.
+        for i in (1..n).rev() {
             let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
             let prev_nominal = nominal_peptide_mass - prefix_nominal_arr[i + 1];
             let theo_mass = prefix_mass_arr[i + 1] - prefix_mass_arr[i];

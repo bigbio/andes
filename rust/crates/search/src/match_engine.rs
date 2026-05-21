@@ -784,6 +784,12 @@ pub(crate) fn compute_psm_features(
         }
     }
 
+    // NumMatchedMainIons mirrors Java's PSMFeatureFinder count: each (bond, direction)
+    // tuple contributes 1 if at least one charge-1 prefix/suffix ion matched.
+    // Rust's b/y-charge-1 path above is a faithful subset of Java's
+    // `getMassErrorWithIntensity`-driven count (which iterates the partition
+    // ion list filtered to charge 1; for HCD_QExactive_Tryp the dominant
+    // charge-1 prefix/suffix ions ARE b/y plus a few low-impact variants).
     let num_matched: u32 = (b_matched.iter().filter(|&&m| m).count()
         + y_matched.iter().filter(|&&m| m).count()) as u32;
 
@@ -803,21 +809,80 @@ pub(crate) fn compute_psm_features(
         best
     }
 
-    let longest_b = longest_run(&b_matched);
-    let longest_y = longest_run(&y_matched);
+    // ── Ion-current ratio features (iter22 partition-ion-list fix) ─────────────
+    //
+    // Java's `NewScoredSpectrum.getExplainedIonCurrent` (NewScoredSpectrum.java:253)
+    // iterates the FULL partition ion list across all segments (b, y, plus
+    // partition-specific variants like a-ion, b-H2O, etc.) and sums matched
+    // peak intensities. The current Rust matched-ion buffer above only
+    // contains b/y at charge 1, so it systematically UNDER-counts the
+    // intensity sum. iter20-vs-Java pin-diff confirms: ExplainedIonCurrentRatio
+    // median -0.026, NTerm -0.005, CTerm -0.018 — all compressed.
+    //
+    // iter22 replaces the b/y-only sum with a partition-wide sum AND uses
+    // partition-wide matches to drive longest_b/y (matches Java's "bIC > 0"
+    // test). NumMatchedMainIons continues to count charge-1 b/y matches.
+    let parent_mass = scored_spec.parent_mass();
+    let num_segments = scorer.param().num_segments.max(1) as usize;
 
-    // ── Ion-current ratio features ────────────────────────────────────────────
+    let mut b_any_matched = vec![false; n - 1];
+    let mut y_any_matched = vec![false; n - 1];
+    let mut sum_prefix_intensity: f64 = 0.0;
+    let mut sum_suffix_intensity: f64 = 0.0;
+
+    let mut prm_nominal: i32 = 0;
+    let mut srm_nominal: i32 = 0;
+    for i in 0..(n - 1) {
+        prm_nominal += peptide.residues[i].nominal_mass();
+        srm_nominal += peptide.residues[n - 1 - i].nominal_mass();
+
+        let mut b_any_this = false;
+        let mut y_any_this = false;
+
+        // Java iterates each segment's ion list separately and checks that
+        // the computed theoMass falls into that segment (line 271-273). We
+        // mirror that exactly so per-bond ion sums match Java's bIC / yIC.
+        for seg in 0..num_segments {
+            let ions = scorer.param().ion_types_for_partition_slice(charge, parent_mass, seg);
+            for &ion in ions {
+                let (is_prefix, residue_nominal) = match ion {
+                    scoring_crate::param_model::IonType::Prefix { .. } => (true, prm_nominal),
+                    scoring_crate::param_model::IonType::Suffix { .. } => (false, srm_nominal),
+                    scoring_crate::param_model::IonType::Noise => continue,
+                };
+                let theo_mz = ion.mz(residue_nominal as f64);
+                if scorer.param().segment_num(theo_mz, parent_mass) != seg {
+                    continue;
+                }
+                let tol_da = if feature_tol_is_ppm {
+                    theo_mz * feature_tol / 1e6
+                } else {
+                    feature_tol
+                };
+                if let Some((_rank, intensity, _peak_mz)) =
+                    scored_spec.nearest_peak_full(theo_mz, tol_da)
+                {
+                    if is_prefix {
+                        sum_prefix_intensity += intensity as f64;
+                        b_any_this = true;
+                    } else {
+                        sum_suffix_intensity += intensity as f64;
+                        y_any_this = true;
+                    }
+                }
+            }
+        }
+
+        b_any_matched[i] = b_any_this;
+        y_any_matched[i] = y_any_this;
+    }
+
+    let longest_b = longest_run(&b_any_matched);
+    let longest_y = longest_run(&y_any_matched);
 
     let total_intensity = scored_spec.total_intensity(); // raw sum, all peaks
-
-    let matched_b_intensity: f64 = matched_ions.iter()
-        .filter(|&&(_, _, _, is_b)| is_b)
-        .map(|&(int, _, _, _)| int as f64)
-        .sum();
-    let matched_y_intensity: f64 = matched_ions.iter()
-        .filter(|&&(_, _, _, is_b)| !is_b)
-        .map(|&(int, _, _, _)| int as f64)
-        .sum();
+    let matched_b_intensity: f64 = sum_prefix_intensity;
+    let matched_y_intensity: f64 = sum_suffix_intensity;
     let matched_total = matched_b_intensity + matched_y_intensity;
 
     let safe_div = |num: f64, denom: f64| -> f32 {
@@ -910,17 +975,31 @@ mod feature_tests {
     use std::collections::HashMap;
 
     /// Minimal RankScorer for feature tests, with mme = Da(tol_da).
+    ///
+    /// Uses realistic prefix/suffix offsets so iter22's partition-ion-list
+    /// intensity-ratio path matches peaks placed at `predict_by_ions`'s
+    /// standard b/y m/z values (b_neutral + PROTON; y_neutral = suffix +
+    /// H2O + PROTON). Pre-iter22, the test fixture used offset=0.0 for the
+    /// prefix ion and didn't define a suffix ion — that worked when ratios
+    /// were computed from `predict_by_ions` matches, but iter22 reads the
+    /// partition ion list directly so the offsets matter.
     fn make_scorer(tol_da: f64) -> RankScorer {
+        use model::mass::{H2O, PROTON};
         let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits() };
+        let suffix1 = IonType::Suffix { charge: 1, offset_bits: ((H2O + PROTON) as f32).to_bits() };
         let noise = IonType::Noise;
         let mut ion_table = HashMap::new();
         ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
+        ion_table.insert(suffix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
         ion_table.insert(noise, vec![0.1_f32, 0.2, 0.3, 0.4]);
         let mut rank_dist_table = HashMap::new();
         rank_dist_table.insert(part, ion_table);
         let mut frag_off_table = HashMap::new();
-        frag_off_table.insert(part, vec![FragmentOffsetFrequency { ion_type: prefix1, frequency: 0.7 }]);
+        frag_off_table.insert(part, vec![
+            FragmentOffsetFrequency { ion_type: prefix1, frequency: 0.7 },
+            FragmentOffsetFrequency { ion_type: suffix1, frequency: 0.7 },
+        ]);
         let mut param = scoring_crate::Param {
             version: 10001,
             data_type: SpecDataType {
@@ -1067,16 +1146,22 @@ mod feature_tests {
         // compute_psm_features uses the instrument-based hardcoded tolerance.
         let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2);
 
-        // All absolute Da errors should be ~offset_da.
+        // Mean error should be nonzero when peaks are systematically offset.
+        // Post-iter21 units fix, MeanErrorTop7 is in PPM, not Da. PPM error =
+        // (Δm / mz) × 1e6 varies per-ion because mz differs across b1, y1,
+        // b2, y2, … of the test peptide, so stdev is no longer ~0 (it's a
+        // small but non-zero spread). Just verify mean is positive.
         assert!(
             f.mean_error_top7 > 0.0,
             "mean_error_top7 should be > 0 when peaks are systematically offset, got {}",
             f.mean_error_top7
         );
-        // With identical errors, stdev should be near 0.
+        // Stdev varies with m/z when offset is constant in Da and reported in
+        // ppm. Just bound to "small" (PPM at typical fragment m/z 100-500 is
+        // ~1-5 ppm for 0.0005 Da offset).
         assert!(
-            f.stdev_error_top7 < 1e-4,
-            "stdev_error_top7 should be ~0 for identical errors, got {}",
+            f.stdev_error_top7 < 20.0,
+            "stdev_error_top7 should be small (single-digit ppm) for identical-Da offset, got {}",
             f.stdev_error_top7
         );
         // Relative error should also be nonzero.

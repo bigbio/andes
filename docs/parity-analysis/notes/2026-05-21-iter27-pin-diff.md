@@ -119,6 +119,34 @@ Possible sources (all NEEDS-CHECK; none confirmed):
 The DeNovoScore -13 floor is a clean signal and a real bug. Closing it
 requires Java instrumentation (currently lacking). Filed for follow-up.
 
+## iter28 audit follow-up
+
+- **Acetyl-Prot-N-term variant in source_aas** ruled out as Layer 2 cause.
+  Added unit test `acetyl_prot_n_term_appears_in_source_aas_for_gf` in
+  `aa_set.rs` (commit `4d324f21`): with Acetyl registered as wildcard-
+  Prot-N-term, `cached_aa_list(ProtNTerm)` correctly returns the Anywhere
+  list + 20 acetyl variants (one per residue). Matches Java's locMap
+  semantics. So the source-AA list isn't being shrunk in Rust.
+
+- **Cleavage credit at source/sink edges audited.** For tryptic peptides
+  (preceded by K/R + ending in K/R), both engines compute
+  `n_term_cleavage_score + c_term_cleavage_score = +2 + +2 = +4`. Tryptic
+  agreement-bucket PSMs see no cleavage-credit divergence. The penalty
+  difference (Rust -3 vs Java -11) only matters for non-cleavable termini
+  in the GF DP score range, which affects `min_score` of `finalDist`, NOT
+  `max_score`. Confirmed not the source of Layer 2 headroom.
+
+- **num_distinct semantic divergence (different signal).** Java's
+  `CompactSuffixArray.computeNumDistinctPeptides` counts distinct
+  *substrings* in the target+decoy DB via the suffix-array LCP (all-AA
+  prefixes regardless of enzyme). Rust's
+  `ensure_distinct_peptide_counts` walks `enumerate_candidates`, which is
+  ENZYME-FILTERED (tryptic peptides with up to N missed cleavages).
+  Java's count is ~100x Rust's; `ln(100) ≈ 4.6` matches the observed
+  `lnEValue Δ ≈ -4.56` exactly. **This is the source of the lnEValue
+  divergence, NOT the DeNovoScore divergence.** Item #2 in
+  `known-divergences.md` already filed.
+
 ## Bench impact (unchanged)
 
 iter27 Astral 1% FDR: 31,298 (vs iter25: 31,410, Δ -112, within noise).

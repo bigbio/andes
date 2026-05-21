@@ -109,24 +109,6 @@ fn peptide_residue_string(p: &model::Peptide) -> String {
     p.residues.iter().map(|aa| aa.residue as char).collect()
 }
 
-// Ignored 2026-05-20: the reference SP values in `FIVE_TRACED_PSMS` were
-// captured from Java running in *CID auto-detected* mode (BSA test.mgf has
-// no ACTIVATIONMETHOD tag, so Java defaults to CID, which loads
-// `CID_QExactive_Tryp.param` with `errorScalingFactor=0` → FastScorer →
-// node-only RawScore). Rust's `rank_scorer()` here hard-loads
-// `HCD_QExactive_Tryp.param` (DBScanScorer-equivalent, edge scoring on).
-//
-// Empirically confirmed by re-running Java with `-m 3` (force HCD):
-//   - Java scorer = DBScanScorer (was FastScorer in fixture)
-//   - per-edge averages in Rust and Java match within rounding error
-//   - graph node_count is identical (1091 vs 1091 for pep_mass=1274)
-//
-// The fixture is therefore an apples-to-oranges comparison once Rust's
-// `score_psm` includes the DBScanScorer edge loop. Re-fixturing requires
-// `-Dmsgfplus.gftrace=true` infra that doesn't exist in this branch.
-// `phase6_task10_bsa_specevalue_parity_histogram` (4-OOM soft gate) is the
-// current bulk parity guard.
-#[ignore]
 #[test]
 fn rust_spec_probability_within_one_oom_of_java_for_5_traced_psms() {
     let target = FastaReader::load_all(BufReader::new(

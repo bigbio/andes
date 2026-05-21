@@ -801,6 +801,51 @@ mod tests {
     }
 
     #[test]
+    fn acetyl_prot_n_term_appears_in_source_aas_for_gf() {
+        // iter28 audit: GF DP source AAs at Prot-N-term must include
+        // both unmodified residues AND wildcard-Acetyl variants for each
+        // residue. Java's getAAList(Protein_N_Term) returns the Anywhere
+        // list (locMap propagation) PLUS Prot-N-term-specific variants.
+        // Verify Rust's cached_aa_list(ProtNTerm) does the same.
+        let acetyl = Modification {
+            name: "Acetyl".to_string(),
+            mass_delta: 42.010565,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::ProtNTerm,
+            fixed: false,
+            accession: None,
+        };
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(carbamidomethyl_c())
+            .add_variable_mod(oxidation_m())
+            .add_variable_mod(acetyl)
+            .build().unwrap();
+
+        let anywhere = set.cached_aa_list(ModLocation::Anywhere);
+        let prot_n = set.cached_aa_list(ModLocation::ProtNTerm);
+
+        // Anywhere: 20 standard residues (C fixed-modified, M with 2 variants
+        // unmod+ox, K+R get acetyl-only-at-ProtNTerm so NOT in Anywhere) = 21
+        let n_any_modified = anywhere.iter().filter(|aa| aa.is_modified()).count();
+        let n_any_acetyl   = anywhere.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
+        assert_eq!(n_any_acetyl, 0, "Acetyl Prot-N-term must NOT appear in Anywhere AA list");
+
+        // Prot-N-term: starts from Anywhere list + Acetyl variants per residue
+        // (wildcard residue → 20 acetyl variants added at Prot-N-term).
+        let n_pn_acetyl = prot_n.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
+        assert_eq!(n_pn_acetyl, 20, "Prot-N-term AA list must include 20 acetyl variants (one per residue)");
+
+        // Total Prot-N-term list = Anywhere list + 20 acetyl variants.
+        assert_eq!(
+            prot_n.len(),
+            anywhere.len() + 20,
+            "Prot-N-term list = Anywhere list + 20 acetyl variants; \
+             actual Anywhere len = {}, Prot-N-term len = {}, Anywhere modified = {}",
+            anywhere.len(), prot_n.len(), n_any_modified
+        );
+    }
+
+    #[test]
     fn parse_num_mods_returns_none_when_absent() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(),

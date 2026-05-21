@@ -784,15 +784,12 @@ pub(crate) fn compute_psm_features(
         }
     }
 
-    // NumMatchedMainIons mirrors Java's PSMFeatureFinder count: each (bond, direction)
-    // tuple contributes 1 if at least one charge-1 prefix/suffix ion matched.
-    // Rust's b/y-charge-1 path above is a faithful subset of Java's
-    // `getMassErrorWithIntensity`-driven count (which iterates the partition
-    // ion list filtered to charge 1; for HCD_QExactive_Tryp the dominant
-    // charge-1 prefix/suffix ions ARE b/y plus a few low-impact variants).
-    let num_matched: u32 = (b_matched.iter().filter(|&&m| m).count()
-        + y_matched.iter().filter(|&&m| m).count()) as u32;
-
+    // Note: the `b_matched`/`y_matched` flags populated above (from
+    // predict_by_ions standard b/y at charge 1) are SUPERSEDED below by
+    // partition-driven flags `b_charge1_matched`/`y_charge1_matched`. The
+    // predict_by_ions pass remains to compute `matched_ions` for the
+    // initial buffer allocation only; we clear+repopulate it from the
+    // partition loop below.
     fn longest_run(matched: &[bool]) -> u32 {
         let mut best = 0u32;
         let mut cur = 0u32;
@@ -827,6 +824,12 @@ pub(crate) fn compute_psm_features(
 
     let mut b_any_matched = vec![false; n - 1];
     let mut y_any_matched = vec![false; n - 1];
+    // Charge-1 match flags drive Java's NumMatchedMainIons + error stats.
+    // Java's getMassErrorWithIntensity picks the MAX-intensity charge-1 ion
+    // per (bond, direction); we follow the same logic and emit one entry
+    // per matched (bond, direction) into the error-stat collector below.
+    let mut b_charge1_matched = vec![false; n - 1];
+    let mut y_charge1_matched = vec![false; n - 1];
     let mut sum_prefix_intensity: f64 = 0.0;
     let mut sum_suffix_intensity: f64 = 0.0;
 
@@ -841,6 +844,13 @@ pub(crate) fn compute_psm_features(
     // from accurate residue mass + ion offset.
     let mut prm_accurate: f64 = 0.0;
     let mut srm_accurate: f64 = 0.0;
+    // Replace `matched_ions` (b/y-charge-1 from predict_by_ions above) with
+    // a partition-driven max-intensity-per-bond pick. Java's
+    // getMassErrorWithIntensity returns exactly one entry per (bond,
+    // direction) — the highest-intensity match across all charge-1 ion
+    // types in the partition. This matches Java's NumMatchedMainIons count
+    // and seeds top-7 error stats from the same selection.
+    matched_ions.clear();
     for i in 0..(n - 1) {
         let aa_n = &peptide.residues[i];
         let aa_c = &peptide.residues[n - 1 - i];
@@ -849,6 +859,10 @@ pub(crate) fn compute_psm_features(
 
         let mut b_any_this = false;
         let mut y_any_this = false;
+        // Per-bond max-intensity charge-1 picks (mirrors Java
+        // getMassErrorWithIntensity per (bond, direction)).
+        let mut best_b_charge1: Option<(f32, f64, f64)> = None; // (intensity, peak_mz, theo_mz)
+        let mut best_y_charge1: Option<(f32, f64, f64)> = None;
 
         // Java iterates each segment's ion list separately and checks that
         // the computed theoMass falls into that segment (line 271-273). We
@@ -856,20 +870,19 @@ pub(crate) fn compute_psm_features(
         for seg in 0..num_segments {
             let ions = scorer.param().ion_types_for_partition_slice(charge, parent_mass, seg);
             for &ion in ions {
-                let (is_prefix, residue_mass) = match ion {
+                let (is_prefix, ion_charge, theo_mz) = match ion {
                     scoring_crate::param_model::IonType::Prefix { charge: ic, offset_bits } => {
                         let offset = f32::from_bits(offset_bits) as f64;
                         let z = ic as f64;
-                        (true, (prm_accurate / z + offset, ion))
+                        (true, ic, prm_accurate / z + offset)
                     }
                     scoring_crate::param_model::IonType::Suffix { charge: ic, offset_bits } => {
                         let offset = f32::from_bits(offset_bits) as f64;
                         let z = ic as f64;
-                        (false, (srm_accurate / z + offset, ion))
+                        (false, ic, srm_accurate / z + offset)
                     }
                     scoring_crate::param_model::IonType::Noise => continue,
                 };
-                let theo_mz = residue_mass.0;
                 if scorer.param().segment_num(theo_mz, parent_mass) != seg {
                     continue;
                 }
@@ -878,15 +891,25 @@ pub(crate) fn compute_psm_features(
                 } else {
                     feature_tol
                 };
-                if let Some((_rank, intensity, _peak_mz)) =
+                if let Some((_rank, intensity, peak_mz)) =
                     scored_spec.nearest_peak_full(theo_mz, tol_da)
                 {
                     if is_prefix {
                         sum_prefix_intensity += intensity as f64;
                         b_any_this = true;
+                        if ion_charge == 1 {
+                            if best_b_charge1.as_ref().map_or(true, |&(best_i, _, _)| intensity > best_i) {
+                                best_b_charge1 = Some((intensity, peak_mz, theo_mz));
+                            }
+                        }
                     } else {
                         sum_suffix_intensity += intensity as f64;
                         y_any_this = true;
+                        if ion_charge == 1 {
+                            if best_y_charge1.as_ref().map_or(true, |&(best_i, _, _)| intensity > best_i) {
+                                best_y_charge1 = Some((intensity, peak_mz, theo_mz));
+                            }
+                        }
                     }
                 }
             }
@@ -894,7 +917,24 @@ pub(crate) fn compute_psm_features(
 
         b_any_matched[i] = b_any_this;
         y_any_matched[i] = y_any_this;
+        if let Some((intensity, peak_mz, theo_mz)) = best_b_charge1 {
+            b_charge1_matched[i] = true;
+            matched_ions.push((intensity, peak_mz, theo_mz, true));
+        }
+        if let Some((intensity, peak_mz, theo_mz)) = best_y_charge1 {
+            y_charge1_matched[i] = true;
+            matched_ions.push((intensity, peak_mz, theo_mz, false));
+        }
     }
+
+    // Override NumMatchedMainIons + b_matched/y_matched with the
+    // partition-driven charge-1 counts. The earlier b/y-from-predict_by_ions
+    // pass populated `matched_ions` for the pre-iter22b code path; we
+    // replace that buffer above and use the partition-driven flags here.
+    let _ = b_matched;
+    let _ = y_matched;
+    let num_matched: u32 = (b_charge1_matched.iter().filter(|&&m| m).count()
+        + y_charge1_matched.iter().filter(|&&m| m).count()) as u32;
 
     let longest_b = longest_run(&b_any_matched);
     let longest_y = longest_run(&y_any_matched);

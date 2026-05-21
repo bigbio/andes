@@ -737,8 +737,30 @@ pub(crate) fn compute_psm_features(
     // Each entry: (intensity, observed_mz, predicted_mz, is_b_ion)
     let mut matched_ions: Vec<(f32, f64, f64, bool)> = Vec::new();
 
+    // Java parity (PSMFeatureFinder.java:51-54): feature-counting uses a
+    // HARDCODED fragment tolerance, NOT param.mme. High-res instruments
+    // (HighRes / TOF / QExactive) get 20 ppm; low-res LTQ gets 0.5 Da.
+    // The param.mme value (0.5 Da for HCD_QExactive_Tryp.param) is the
+    // coarser binning tolerance used by the rank-distribution tables —
+    // appropriate for node-score lookup but ~50× too wide for feature
+    // counting at m/z 500. Pre-fix Rust used param.mme for both, which
+    // inflated NumMatchedMainIons by ~+3, longest_b by ~+2 vs Java, and
+    // compressed all intensity ratios (more low-intensity noise matched
+    // into the matched-ion sum). Confirmed by iter16-vs-Java pin-diff
+    // harness (docs/parity-analysis/notes/2026-05-19-pin-diff-findings.md).
+    let feature_tol = if scorer.param().data_type.instrument.is_high_resolution() {
+        20.0_f64 // ppm
+    } else {
+        0.5_f64 // Da
+    };
+    let feature_tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
+
     for p in &predicted {
-        let tol_da = scorer.param().mme.as_da(p.mz);
+        let tol_da = if feature_tol_is_ppm {
+            p.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
         if let Some((_rank, intensity, peak_mz)) =
             scored_spec.nearest_peak_full(p.mz, tol_da)
         {
@@ -1016,7 +1038,13 @@ mod feature_tests {
         let pep = ala_peptide(5);
         let predicted = predict_by_ions(&pep, 1..=1);
 
-        let offset_da = 0.01_f64;  // 10 mDa error on every peak
+        // 0.0005 Da offset = ~6 ppm at m/z 89 (Ala b1) — within the
+        // hardcoded 20 ppm window that compute_psm_features now uses for
+        // high-resolution instruments (Java parity, PSMFeatureFinder.java:51-54).
+        // The previous 0.01 Da offset assumed Rust used param.mme (~0.05 Da
+        // in this fixture's make_scorer), but the iter20 fix makes feature
+        // counting use 20 ppm regardless of param.mme.
+        let offset_da = 0.0005_f64;
         let mut peaks: Vec<(f64, f32)> = predicted
             .iter()
             .enumerate()
@@ -1026,7 +1054,8 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        // tolerance = 0.05 Da so all offset peaks are still within window.
+        // make_scorer still accepts a tol arg for legacy compatibility, but
+        // compute_psm_features uses the instrument-based hardcoded tolerance.
         let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2);
 
         // All absolute Da errors should be ~offset_da.

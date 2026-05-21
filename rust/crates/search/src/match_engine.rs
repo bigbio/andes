@@ -830,11 +830,22 @@ pub(crate) fn compute_psm_features(
     let mut sum_prefix_intensity: f64 = 0.0;
     let mut sum_suffix_intensity: f64 = 0.0;
 
-    let mut prm_nominal: i32 = 0;
-    let mut srm_nominal: i32 = 0;
+    // Use ACCURATE residue mass for theo m/z computation (matches Java's
+    // PSMFeatureFinder which passes `peptide.get(i).getAccurateMass()`).
+    // IonType::mz internally divides nominal mass by INTEGER_MASS_SCALER
+    // (0.999497) to recover an approximate accurate mass — that
+    // approximation can drift ~0.014 Da from the true accurate mass per
+    // residue (NEEQSR's N: nominal 114 → 114.057 vs accurate 114.043),
+    // which is way outside the 20 ppm feature-matching window for high-res
+    // instruments. We bypass that conversion by computing theo_mz directly
+    // from accurate residue mass + ion offset.
+    let mut prm_accurate: f64 = 0.0;
+    let mut srm_accurate: f64 = 0.0;
     for i in 0..(n - 1) {
-        prm_nominal += peptide.residues[i].nominal_mass();
-        srm_nominal += peptide.residues[n - 1 - i].nominal_mass();
+        let aa_n = &peptide.residues[i];
+        let aa_c = &peptide.residues[n - 1 - i];
+        prm_accurate += aa_n.mass + aa_n.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        srm_accurate += aa_c.mass + aa_c.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
 
         let mut b_any_this = false;
         let mut y_any_this = false;
@@ -845,12 +856,20 @@ pub(crate) fn compute_psm_features(
         for seg in 0..num_segments {
             let ions = scorer.param().ion_types_for_partition_slice(charge, parent_mass, seg);
             for &ion in ions {
-                let (is_prefix, residue_nominal) = match ion {
-                    scoring_crate::param_model::IonType::Prefix { .. } => (true, prm_nominal),
-                    scoring_crate::param_model::IonType::Suffix { .. } => (false, srm_nominal),
+                let (is_prefix, residue_mass) = match ion {
+                    scoring_crate::param_model::IonType::Prefix { charge: ic, offset_bits } => {
+                        let offset = f32::from_bits(offset_bits) as f64;
+                        let z = ic as f64;
+                        (true, (prm_accurate / z + offset, ion))
+                    }
+                    scoring_crate::param_model::IonType::Suffix { charge: ic, offset_bits } => {
+                        let offset = f32::from_bits(offset_bits) as f64;
+                        let z = ic as f64;
+                        (false, (srm_accurate / z + offset, ion))
+                    }
                     scoring_crate::param_model::IonType::Noise => continue,
                 };
-                let theo_mz = ion.mz(residue_nominal as f64);
+                let theo_mz = residue_mass.0;
                 if scorer.param().segment_num(theo_mz, parent_mass) != seg {
                     continue;
                 }

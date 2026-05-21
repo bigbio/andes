@@ -242,6 +242,11 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         // PIN_EXTRA_FEATURES
         "lnDeltaSpecEValue".to_string(),
         "matchedIonRatio".to_string(),
+        // ADDITIVE Java-parity feature (2026-05-21 iter19): per-bond
+        // DBScanScorer edge sum (IES + error_score), emitted as a NEW
+        // column so Percolator can learn weights without disrupting the
+        // existing RawScore distribution.
+        "EdgeScore".to_string(),
         // Peptide / Proteins
         "Peptide".to_string(),
         "Proteins".to_string(),
@@ -481,6 +486,10 @@ fn write_psm_row<W: Write>(
     write_double(writer, ln_delta_spec_e_value)?;
     writer.write_all(b"\t")?;
     write_double(writer, matched_ion_ratio)?;
+
+    // EdgeScore: additive Java-parity feature (iter19).
+    writer.write_all(b"\t")?;
+    write!(writer, "{}", psm.features.edge_score)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -763,6 +772,12 @@ mod tests {
         // MeanErrorTop7 StdevErrorTop7 MeanRelErrorTop7 StdevRelErrorTop7
         // lnDeltaSpecEValue matchedIonRatio
         // Peptide Proteins
+        // Java-fixture columns followed by Rust-only additive features.
+        // `EdgeScore` is an iter19 ADDITIVE Java-parity feature emitted by
+        // Rust only (Java doesn't compute it standalone — it's blended into
+        // RawScore by DBScanScorer). Lives between matchedIonRatio and
+        // Peptide so legacy Percolator readers using column order still
+        // parse Peptide/Proteins at the tail.
         let expected: Vec<&str> = vec![
             "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "mass",
             "RawScore", "DeNovoScore", "lnSpecEValue", "lnEValue", "isotope_error",
@@ -774,6 +789,7 @@ mod tests {
             "MS2IonCurrent", "IsolationWindowEfficiency",
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
             "lnDeltaSpecEValue", "matchedIonRatio",
+            "EdgeScore",
             "Peptide", "Proteins",
         ];
 

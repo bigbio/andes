@@ -51,6 +51,15 @@ pub struct PsmFeatures {
     pub mean_rel_error_top7: f32,
     /// Population standard deviation of signed relative errors (ppm) for top-7 ions.
     pub stdev_rel_error_top7: f32,
+
+    // ── Additive Java-parity features ──────────────────────────────────────
+    /// Per-bond edge score sum, mirroring Java's `DBScanScorer.getScore`
+    /// edge loop (IES + error_score per bond). Emitted as a NEW `EdgeScore`
+    /// PIN column alongside the unchanged `RawScore`, so Percolator can
+    /// learn weights without disrupting the existing RawScore distribution
+    /// (which destroyed discrimination in iter17/iter18 when blended into
+    /// RawScore directly). Computed via `psm_edge_score` in `score_psm.rs`.
+    pub edge_score: i32,
 }
 
 #[derive(Debug, Clone)]

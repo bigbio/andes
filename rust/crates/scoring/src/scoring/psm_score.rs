@@ -13,6 +13,94 @@ use model::peptide::Peptide;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
+/// Compute the per-bond edge-score sum for a PSM, mirroring Java's
+/// `DBScanScorer.getScore` edge loop (reverse direction for suffix-main
+/// HCD/Trypsin, forward direction for prefix-main).
+///
+/// This is intended as an ADDITIVE feature for Percolator: emit it as a
+/// SEPARATE PIN column alongside the unchanged `RawScore`. Per the n=8
+/// audit pattern, modifying RawScore directly with this contribution
+/// regresses Astral 1% FDR by ~30%; adding it as a new feature lets
+/// Percolator learn weights without breaking the existing distribution.
+///
+/// Mirrors Java's `DBScanner.java:513` call: fromIndex=1, toIndex=n+1 →
+/// reverse loop iterates `i` from n-1 down to 1, forward loop iterates
+/// `i` from 1 to n-1.
+pub fn psm_edge_score(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+) -> i32 {
+    if charge == 0 {
+        return 0;
+    }
+    let n = peptide.length();
+    if n < 2 {
+        return 0;
+    }
+
+    let spectrum_parent_mass = scored_spec.parent_mass();
+    let peptide_nominal = peptide.nominal_residue_mass();
+
+    // Build per-position prefix mass arrays (length n+1; [0]=0, [n]=total).
+    let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
+    let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
+    prefix_mass_arr.push(0.0);
+    prefix_nominal_arr.push(0);
+    let mut prefix_mass_acc = 0.0_f64;
+    for s in 1..=n {
+        let aa = &peptide.residues[s - 1];
+        let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        prefix_mass_acc += residue_mass;
+        if s < n {
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(nominal_from(prefix_mass_acc));
+        } else {
+            // Final entry uses the canonical peptide_nominal (computed from
+            // the residue sum) to avoid rounding skew vs the cumulative.
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(peptide_nominal);
+        }
+    }
+
+    let is_prefix_main = scored_spec.main_ion_direction();
+    let mut edge_total: i32 = 0;
+    if !is_prefix_main {
+        let nominal_peptide_mass = prefix_nominal_arr[n];
+        // Java reverse loop: i from n-1 down to 1.
+        for i in (1..n).rev() {
+            let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
+            let prev_nominal = nominal_peptide_mass - prefix_nominal_arr[i + 1];
+            let theo_mass = prefix_mass_arr[i + 1] - prefix_mass_arr[i];
+            edge_total += scored_spec.edge_score(
+                cur_nominal,
+                prev_nominal,
+                theo_mass,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+        }
+    } else {
+        // Java forward loop: i from 1 to n-1.
+        for i in 1..n {
+            let cur_nominal = prefix_nominal_arr[i];
+            let prev_nominal = prefix_nominal_arr[i - 1];
+            let theo_mass = prefix_mass_arr[i] - prefix_mass_arr[i - 1];
+            edge_total += scored_spec.edge_score(
+                cur_nominal,
+                prev_nominal,
+                theo_mass,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+        }
+    }
+    edge_total
+}
+
 /// Score a PSM as the sum of `ScoredSpectrum::node_score(prefix, suffix)`
 /// across each peptide split position.  This produces a raw score on the
 /// same scale as the GF distribution so that `GeneratingFunctionGroup::

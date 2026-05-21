@@ -38,7 +38,7 @@ use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
-use scoring_crate::scoring::{score_psm, RankScorer, ScoredSpectrum};
+use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
 use model::spectrum::Spectrum;
 
 /// One-time-built state shared across every chunk of a streamed search.
@@ -395,7 +395,7 @@ impl<'a> PreparedSearch<'a> {
             queue.fill_post_topn(|psm| {
                 let ss = scored_spec_for_charge(psm.charge_used);
                 let cand = &candidates[psm.primary_candidate_idx() as usize];
-                psm.features = compute_psm_features(ss, &cand.peptide, scorer);
+                psm.features = compute_psm_features(ss, &cand.peptide, scorer, psm.charge_used);
             });
 
                 queue
@@ -716,11 +716,17 @@ pub(crate) fn compute_psm_features(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
     scorer: &RankScorer,
+    charge: u8,
 ) -> PsmFeatures {
     let n = peptide.length();
     if n < 2 {
         return PsmFeatures::default();
     }
+
+    // ADDITIVE Java-parity edge-score feature (new PIN column). Computed
+    // here so it shares the per-PSM ScoredSpectrum + scorer references that
+    // the existing feature-extraction code already has on hand.
+    let edge_score = psm_edge_score(scored_spec, peptide, scorer, charge);
 
     // Predict charge-1 b/y ions; one bool per fragment position.
     let predicted = predict_by_ions(peptide, 1..=1);
@@ -850,6 +856,7 @@ pub(crate) fn compute_psm_features(
         stdev_error_top7,
         mean_rel_error_top7,
         stdev_rel_error_top7,
+        edge_score,
     }
 }
 
@@ -940,7 +947,7 @@ mod feature_tests {
         let pep = ala_peptide(4);
         let spec = make_spectrum(vec![]); // no peaks
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5));
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2);
         assert_eq!(f.mean_error_top7,     0.0, "mean_error_top7 should be 0 with no matches");
         assert_eq!(f.stdev_error_top7,    0.0, "stdev_error_top7 should be 0 with no matches");
         assert_eq!(f.mean_rel_error_top7,  0.0, "mean_rel_error_top7 should be 0 with no matches");
@@ -972,7 +979,7 @@ mod feature_tests {
 
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.01)); // tight tolerance
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.01), 2); // tight tolerance
 
         // All ratios should be positive since all predicted ions match.
         assert!(f.explained_ion_current_ratio > 0.0,
@@ -1020,7 +1027,7 @@ mod feature_tests {
         let spec = make_spectrum(peaks);
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         // tolerance = 0.05 Da so all offset peaks are still within window.
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.05));
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.05), 2);
 
         // All absolute Da errors should be ~offset_da.
         assert!(
@@ -1049,7 +1056,7 @@ mod feature_tests {
         let peaks = vec![(100.0, 50.0_f32), (200.0, 30.0), (300.0, 20.0)];
         let spec = make_spectrum(peaks.clone());
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5));
+        let f = compute_psm_features(&ss, &pep, &make_scorer(0.5), 2);
 
         let expected: f32 = peaks.iter().map(|&(_, i)| i).sum();
         assert_eq!(f.ms2_ion_current, expected,

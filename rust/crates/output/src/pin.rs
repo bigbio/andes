@@ -318,34 +318,27 @@ fn write_psm_row<W: Write>(
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
-    // Label = 1 unless ALL explaining proteins are decoy. Checks whether
-    // the peptide sequence appears in ANY target protein; if so, Label=1
-    // even when the candidate's primary protein_index is a decoy. Cache by
-    // residue sequence so repeated peptides do not re-scan the full target
-    // database.
+    // iter27 (2026-05-21): label by SOURCE PROTEIN accession (standard TDC
+    // convention, matches Java MS-GF+). Pre-iter27, Rust used an "any-target-
+    // match" rule (Label = 1 if peptide sequence appears in ANY target
+    // protein) which inflated target count when a peptide appeared in both
+    // target and decoy proteins (e.g., YFEIRR exists in `sp|P37690|ENVC_ECOLI`
+    // and `XXX_sp|Q53QZ3|RHG15_HUMAN`; the search-hit's source is the decoy
+    // but Rust labeled +1 because the peptide ALSO exists in a target).
     //
-    // The substring lookup uses the precomputed concatenated `target_haystack`
-    // + `memchr::memmem` (Two-Way / SIMD), reducing the cache-miss path from
-    // O(target_count × peptide_len × protein_len) to O(haystack_len + peptide_len).
-    // This was the dominant cost of `pin_write` on PXD001819 (~156s of 159s).
-    let residues: Vec<u8> = cand
-        .peptide
-        .residues
-        .iter()
-        .map(|aa| aa.residue)
-        .collect();
-    let label: i32 = match label_cache.get(&residues) {
-        Some(&cached) => cached,
-        None => {
-            let computed = if peptide_has_target_match_fast(target_haystack, &residues) {
-                1
-            } else {
-                -1
-            };
-            label_cache.insert(residues, computed);
-            computed
-        }
-    };
+    // Java labels by source: if the source protein accession starts with the
+    // decoy prefix, label = -1; otherwise +1. This is standard TDC labeling
+    // and avoids inflating Percolator's target set with peptides actually
+    // sourced from decoy proteins.
+    //
+    // No need to cache: we already have `ctx.accession` in hand, and the
+    // prefix check is a single starts_with call.
+    // Use the candidate's `is_decoy` flag (set at enumeration time from
+    // the protein it came from). This is the source-protein view that
+    // matches Java's TDC labeling.
+    let _ = target_haystack;
+    let _ = label_cache;
+    let label: i32 = if cand.is_decoy { -1 } else { 1 };
 
     // ExpMass: neutral precursor mass = mz * charge - charge * PROTON
     let exp_mass = spec.precursor_mz * charge - charge * PROTON;

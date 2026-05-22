@@ -217,9 +217,54 @@ So **Layer 1 is closed**:
 
 **New finding: EdgeScore PIN column itself diverges from Java by ~26 points
 on this scan.** -18 (Rust) vs +8 (Java effective). Both use the same
-algorithm but produce different values. Source: per-edge `edge_score`
-function in `scored_spectrum.rs:730` vs Java `DBScanScorer.getEdgeScoreInt`.
-Needs a per-edge trace to localize. Iter29 target.
+algorithm but produce different values.
+
+### Per-edge trace localizes the bug — `main_ion_direction` mismatch
+
+Added per-edge `TRACE_JAVA_EDGE` / `TRACE_RUST_EDGE` prints to
+`DBScanScorer.getScore` (Java) and `psm_edge_score` (Rust). Re-ran on scan
+47106:
+
+| trace line | direction | edge_score sum |
+|---|---|---:|
+| Java | reverse (suffix-main) | +8 (effective) |
+| Rust | forward (prefix-main) | -18 |
+
+**Root cause:** `main_ion_from_param` at `scored_spectrum.rs:915` filters
+the rank_dist_table to **prefix ions only**:
+
+```rust
+for (ion, freqs) in table {
+    if !ion.is_prefix() {
+        continue;  // ← BUG: skips all suffix ions
+    }
+    ...
+}
+```
+
+So Rust's `main_ion` is always a prefix ion → `main_ion_direction() = true`
+→ edge_score uses the forward (b-ion-side) loop.
+
+Java's `NewRankScorer.determineIonTypes` at lines 615-634 aggregates
+`fragOFFTable` frequencies across all 4 partition segments for the
+(charge, parent_mass) partition and picks the overall highest-frequency
+ion **regardless of type**. For HCD/QExactive that is typically a y-ion
+(suffix) → `main_ion.isPrefixIon() = false` → direction = false →
+reverse (y-ion-side) loop.
+
+**This is a real bug.** The fix is to drop the `is_prefix()` filter in
+`main_ion_from_param` and aggregate frequencies across segments per Java's
+algorithm. Note: changing this is TOP-1-CHANGING (affects GF DP source/sink,
+node_score direction, edge_score direction, EdgeScore PIN column) — needs
+careful bench with full Astral run before shipping. Per n=9 audit, modify-
+existing changes typically regress Percolator, but this RESTORES the Java
+direction Percolator was trained on, so the polarity is plausibly different.
+
+Trace patch in `DBScanScorer.java` committed for future repro; gated by
+`-Dmsgfplus.trace=true` so no production impact.
+
+Iter29 target: fix `main_ion_from_param` to match Java's selection and
+bench Astral.
 
 ## Bench impact (unchanged)
 

@@ -8,10 +8,29 @@
 //! Per-split node score: `round(getNodeScore(prm, true) + getNodeScore(srm, false))`
 //! where `prm` is the nominal prefix mass and `srm = peptideMass - prm`.
 
+use std::sync::OnceLock;
+
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
+
+/// iter31 P-2: cache the `MSGF_TRACE_PEP` env var once at first read instead
+/// of calling `std::env::var` per `score_psm` invocation. Each `env::var`
+/// call acquires the global environment lock; on Astral runs `score_psm`
+/// is invoked ~3.1 billion times, so the lock acquisition is non-trivial.
+///
+/// Returns `Some(filter)` if the env var is set to a non-empty string,
+/// else `None`. The OnceLock initialization is racy-safe and reads from the
+/// process environment at the first call from any thread.
+fn trace_pep_filter() -> Option<&'static String> {
+    static CELL: OnceLock<Option<String>> = OnceLock::new();
+    CELL.get_or_init(|| match std::env::var("MSGF_TRACE_PEP") {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    })
+    .as_ref()
+}
 
 /// Compute the per-bond edge-score sum for a PSM, mirroring Java's
 /// `DBScanScorer.getScore` edge loop (reverse direction for suffix-main
@@ -147,18 +166,28 @@ pub fn score_psm(
     // residue sequence contains the filter string, emit per-split trace
     // lines on stderr. Mirrors `FastScorer.getScoreWithTrace`, so the two
     // dumps line up split-by-split.
-    let trace_pep = std::env::var("MSGF_TRACE_PEP").ok();
-    let pep_seq_string: String = peptide.residues.iter().map(|aa| aa.residue as char).collect();
-    let trace = trace_pep
-        .as_ref()
-        .map(|p| !p.is_empty() && pep_seq_string.contains(p.as_str()))
-        .unwrap_or(false);
-    if trace {
-        eprintln!(
-            "TRACE_RUST_HEADER\tpep={}\tcharge={}\tparent_mass={:.4}\tpeptide_nominal={}\tn={}\tfragment_tol_da={}",
-            pep_seq_string, charge, spectrum_parent_mass, peptide_nominal, n, fragment_tolerance_da
-        );
-    }
+    //
+    // iter31 P-2: env::var is called once at startup via OnceLock and cached;
+    // the prior per-call `std::env::var("MSGF_TRACE_PEP")` fired on every
+    // one of ~3.1G `score_psm` invocations per Astral run. Each call acquires
+    // the global env lock; hoisting saves a few percent of total wall.
+    let trace = match trace_pep_filter() {
+        Some(filter) => {
+            // Only build the per-residue String when the env var is set.
+            let pep_seq_string: String =
+                peptide.residues.iter().map(|aa| aa.residue as char).collect();
+            if pep_seq_string.contains(filter.as_str()) {
+                eprintln!(
+                    "TRACE_RUST_HEADER\tpep={}\tcharge={}\tparent_mass={:.4}\tpeptide_nominal={}\tn={}\tfragment_tol_da={}",
+                    pep_seq_string, charge, spectrum_parent_mass, peptide_nominal, n, fragment_tolerance_da
+                );
+                Some(pep_seq_string)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
 
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
@@ -172,12 +201,6 @@ pub fn score_psm(
         // Nominal masses at the split position.
         let prefix_nominal = nominal_from(prefix_mass_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
-
-        // Sample cached prefix/suffix scores for trace diagnostics (no
-        // change to the hot-path semantics): the cache exposes the same
-        // FastScorer-style per-index tables Java prints from.
-        let cached_pref = scored_spec.cached_prefix_score(prefix_nominal);
-        let cached_suff = scored_spec.cached_suffix_score(suffix_nominal);
 
         let contribution = scored_spec
             .cached_split_score(prefix_nominal, suffix_nominal)
@@ -193,7 +216,9 @@ pub fn score_psm(
             });
         total += contribution;
 
-        if trace {
+        if let Some(pep_seq_string) = &trace {
+            let cached_pref = scored_spec.cached_prefix_score(prefix_nominal);
+            let cached_suff = scored_spec.cached_suffix_score(suffix_nominal);
             let pref_str = cached_pref
                 .map(|v| format!("{v}"))
                 .unwrap_or_else(|| "NA".to_string());
@@ -207,7 +232,7 @@ pub fn score_psm(
             );
         }
     }
-    if trace {
+    if let Some(pep_seq_string) = &trace {
         eprintln!(
             "TRACE_RUST_FINAL\tpep={}\trawScore={}",
             pep_seq_string, total

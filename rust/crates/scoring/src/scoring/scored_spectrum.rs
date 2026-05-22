@@ -20,12 +20,26 @@
 //! Also exposes `prob_peak`, `main_ion`, `node_score`, `edge_score`,
 //! and `observed_node_mass` for the GF DP graph traversal.
 
+use std::sync::OnceLock;
+
 use crate::param_model::{IonType, Param, Partition, PrecursorOffsetFrequency};
 use crate::scoring::rank_scorer::RankScorer;
 use model::mass::nominal_from;
 use model::spectrum::Spectrum;
 
 const PROTON: f64 = 1.007_276_49;
+
+/// iter31 P-2: cache the (MSGF_TRACE_IONS && MSGF_TRACE_PEP) env-var probe
+/// once instead of calling `env::var_os` twice per `directional_node_score_inner`
+/// invocation. The inner loop fires for every (spectrum × split × segment)
+/// triple in the score_psm cache build.
+fn trace_ions_enabled() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        std::env::var_os("MSGF_TRACE_IONS").is_some()
+            && std::env::var_os("MSGF_TRACE_PEP").is_some()
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct ScoredSpectrum<'a> {
@@ -639,10 +653,11 @@ impl<'a> ScoredSpectrum<'a> {
         let mut total = 0.0_f32;
         let use_cache = !segment_partition_cache.is_empty();
         // Trace gating: only fire when explicitly enabled AND a peptide-trace
-        // env var is set (matches `score_psm`'s gating). Avoid stringifying the
-        // env var on every call — short-circuit on the cheap presence check.
-        let trace_ions = std::env::var_os("MSGF_TRACE_IONS").is_some()
-            && std::env::var_os("MSGF_TRACE_PEP").is_some();
+        // env var is set (matches `score_psm`'s gating). iter31 P-2: cache the
+        // env probe in a OnceLock — was firing `env::var_os` twice per call,
+        // which on Astral runs is ~hundreds of millions of acquisitions of the
+        // global env lock.
+        let trace_ions = trace_ions_enabled();
         for seg in 0..num_segs {
             let ion_logs_slice: &[(IonType, Vec<f32>)] = if use_cache {
                 segment_partition_cache[seg].1.as_slice()

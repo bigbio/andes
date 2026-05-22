@@ -729,13 +729,20 @@ pub(crate) fn compute_psm_features(
     let edge_score = psm_edge_score(scored_spec, peptide, scorer, charge);
 
     // Predict charge-1 b/y ions; one bool per fragment position.
+    //
+    // iter31 P-4: stack-allocate b/y_matched on a 64-slot SmallVec (max
+    // peptide length is 40 → n-1 ≤ 39). The prior `vec![false; n-1]` heap
+    // allocations fired ~150k × 4 / PSM batch and were a measurable hot-path
+    // cost. SmallVec inlines for n ≤ 64.
     let predicted = predict_by_ions(peptide, 1..=1);
-    let mut b_matched = vec![false; n - 1];
-    let mut y_matched = vec![false; n - 1];
+    let mut b_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    let mut y_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
 
     // Collect matched-ion details for ion-current ratio and error-stat features.
-    // Each entry: (intensity, observed_mz, predicted_mz, is_b_ion)
-    let mut matched_ions: Vec<(f32, f64, f64, bool)> = Vec::new();
+    // Each entry: (intensity, observed_mz, predicted_mz, is_b_ion).
+    // SmallVec inlines for up to ~96 matched ions (b+y at n positions, with
+    // some headroom for partition multi-ion-type matches at long peptides).
+    let mut matched_ions: SmallVec<[(f32, f64, f64, bool); 96]> = SmallVec::new();
 
     // Java parity (PSMFeatureFinder.java:51-54): feature-counting uses a
     // HARDCODED fragment tolerance, NOT param.mme. High-res instruments
@@ -825,8 +832,9 @@ pub(crate) fn compute_psm_features(
     let parent_mass = scored_spec.parent_mass();
     let num_segments = scorer.param().num_segments.max(1) as usize;
 
-    let mut b_any_matched = vec![false; n - 1];
-    let mut y_any_matched = vec![false; n - 1];
+    // iter31 P-4: stack-allocate (same rationale as b/y_matched above).
+    let mut b_any_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    let mut y_any_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
     let mut sum_prefix_intensity: f64 = 0.0;
     let mut sum_suffix_intensity: f64 = 0.0;
 
@@ -841,6 +849,18 @@ pub(crate) fn compute_psm_features(
     // from accurate residue mass + ion offset.
     let mut prm_accurate: f64 = 0.0;
     let mut srm_accurate: f64 = 0.0;
+
+    // iter31 P-6: cache the per-segment ion list ONCE per spectrum (constant
+    // for fixed `(charge, parent_mass)`), avoiding the `partition_for` binary
+    // search + HashMap lookup that fired for every (split × segment) pair.
+    // On Astral with ~150k PSMs × ~12 splits × 2 segments = ~3.6M lookups
+    // saved per run. SmallVec<[&[IonType]; 8]> inlines (num_segments is
+    // typically 1-2; clamp at 8 to be safe).
+    let segment_ions: SmallVec<[&[scoring_crate::param_model::IonType]; 8]> =
+        (0..num_segments)
+            .map(|seg| scorer.param().ion_types_for_partition_slice(charge, parent_mass, seg))
+            .collect();
+
     for i in 0..(n - 1) {
         let aa_n = &peptide.residues[i];
         let aa_c = &peptide.residues[n - 1 - i];
@@ -854,7 +874,7 @@ pub(crate) fn compute_psm_features(
         // the computed theoMass falls into that segment (line 271-273). We
         // mirror that exactly so per-bond ion sums match Java's bIC / yIC.
         for seg in 0..num_segments {
-            let ions = scorer.param().ion_types_for_partition_slice(charge, parent_mass, seg);
+            let ions = segment_ions[seg];
             for &ion in ions {
                 let (is_prefix, residue_mass) = match ion {
                     scoring_crate::param_model::IonType::Prefix { charge: ic, offset_bits } => {

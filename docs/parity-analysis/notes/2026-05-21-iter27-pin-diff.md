@@ -147,6 +147,80 @@ requires Java instrumentation (currently lacking). Filed for follow-up.
   divergence, NOT the DeNovoScore divergence.** Item #2 in
   `known-divergences.md` already filed.
 
+## iter28 trace experiment — Layer 1 score_psm CLOSED
+
+_2026-05-22._ Ran a single-scan trace on scan 47106 (HGIPTAQWK, unmodified
+tryptic, iter27 RawScore Δ = -8, DeNovoScore Δ = -13). Method:
+
+1. Extracted scan 47106 from the Astral mzML to a 1-scan MGF via
+   `/tmp/extract_scan.py` (XML stream parser, ~110 LOC).
+2. Built Java jar with `TRACE_JAVA*` per-split prints (already committed
+   in `7823609a`, FastScorer.getScoreWithTrace). Added a temporary
+   `TRACE_JAVA_CLEAVAGE` line in DBScanner to dump nTerm/cTerm cleavage
+   scores at match construction; reverted after experiment.
+3. Ran Java with `-Dmsgfplus.trace=true
+   -Dmsgfplus.trace.scan=47106 -Dmsgfplus.trace.pep=HGIPTAQWK`.
+4. Ran Rust with `MSGF_TRACE_PEP=HGIPTAQWK` on the same MGF.
+5. Diffed per-split traces side by side.
+
+**Result: BIT-EXACT MATCH per-split.**
+
+| split | prefMass | suffMass | prefScore (J=R) | suffScore (J=R) | contribution (J=R) | cumulative |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 137 | 881 | -0.5222 | 11.3515 | 11 | 11 |
+| 2 | 194 | 824 | 4.0091 | 7.2896 | 11 | 22 |
+| 3 | 307 | 711 | 3.4843 | 18.0430 | 22 | 44 |
+| 4 | 404 | 614 | -0.9877 | 3.3076 | 2 | 46 |
+| 5 | 505 | 513 | 0.2636 | 3.5650 | 4 | 50 |
+| 6 | 576 | 442 | 0.0000 | 3.0720 | 3 | 53 |
+| 7 | 704 | 314 | 0.0000 | 5.3150 | 5 | 58 |
+| 8 | 890 | 128 | 0.0000 | 2.5525 | 3 | 61 |
+
+Both engines: per-split rawScore = **61**. Cleavage score: nTerm=+2,
+cTerm=+2, total=+4. Score = 61 + 4 = **65** (both engines).
+
+**Java pin RawScore = 73; Rust pin RawScore = 65 (iter27). Δ = -8.**
+
+**Root cause of the -8 Δ:** Java's HCD scorer is
+`DBScanScorer extends FastScorer`. `DBScanScorer.getScore` OVERRIDES
+`FastScorer.getScore` to add an **edge-score loop** after the node-score
+sum:
+
+```java
+// DBScanScorer.java:36-50
+public int getScore(...) {
+    int nodeScore = super.getScore(...);  // = 61
+    int edgeScore = 0;
+    for (int i = ...) {
+        edgeScore += getEdgeScoreInt(...);  // = 8 for HGIPTAQWK
+    }
+    return nodeScore + edgeScore;  // = 69
+}
+// then match.score = cleavageScore (4) + 69 = 73.
+```
+
+Rust's `score_psm` returns node-only (61). The edge_score lives in a
+SEPARATE PIN column `EdgeScore` (iter19 additive design). For scan 47106
+the iter27 PIN shows `EdgeScore = -18`. Java's effective edge_score = +8
+(per the trace dump). **Both engines compute edge_score with the same
+algorithm** (`scored_spec.edge_score` mirrors `getEdgeScoreInt`), but the
+per-edge value differs significantly (-18 vs +8 = 26-point gap on this
+scan).
+
+So **Layer 1 is closed**:
+- score_psm node scoring is BIT-EXACT
+- cleavage_score is BIT-EXACT (+4 both engines)
+- Rust's RawScore = node + cleavage; Java's RawScore = node + cleavage + edge.
+  This is a **design difference, not a bug** in score_psm. iter17/iter18
+  added edge to Rust's RawScore and regressed -8K PSMs; iter19 made it a
+  separate PIN column.
+
+**New finding: EdgeScore PIN column itself diverges from Java by ~26 points
+on this scan.** -18 (Rust) vs +8 (Java effective). Both use the same
+algorithm but produce different values. Source: per-edge `edge_score`
+function in `scored_spectrum.rs:730` vs Java `DBScanScorer.getEdgeScoreInt`.
+Needs a per-edge trace to localize. Iter29 target.
+
 ## Bench impact (unchanged)
 
 iter27 Astral 1% FDR: 31,298 (vs iter25: 31,410, Δ -112, within noise).

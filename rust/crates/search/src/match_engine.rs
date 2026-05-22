@@ -239,54 +239,82 @@ impl<'a> PreparedSearch<'a> {
             window_cand_indices.sort_unstable();
             window_cand_indices.dedup();
 
+            // iter35 P-2: hoist cleavage-credit constants out of the per-
+            // candidate hot path. Previously `compute_cleavage_credit` was a
+            // closure that captured `aa_set` and re-invoked four small
+            // accessor methods (each a HashMap field deref, not free).
+            // perf-record showed 22% of total Astral wall in this closure's
+            // FnMut::call_mut frame.
+            //
+            // The four credit/penalty values are SearchParams-constant; we
+            // resolve them ONCE here. The per-candidate logic becomes four
+            // branches over precomputed i32 constants.
+            let enz_credit_neighboring = aa_set_for_gf.neighboring_aa_cleavage_credit();
+            let enz_penalty_neighboring = aa_set_for_gf.neighboring_aa_cleavage_penalty();
+            let enz_credit_peptide = aa_set_for_gf.peptide_cleavage_credit();
+            let enz_penalty_peptide = aa_set_for_gf.peptide_cleavage_penalty();
+            let enz_is_c_term = params.enzyme.is_c_term();
+            let enz_is_n_term = params.enzyme.is_n_term();
+            let enz = params.enzyme;
+
             // Per-candidate cleavage credit:
             //   `cleavage_score = n_term_cleavage_score + c_term_cleavage_score`
             // added to the raw PSM score before queue insertion.
-            // For C-term enzymes (Trypsin, default):
-            //   - N-term: credit if isProteinNTerm OR enzyme.is_cleavable(prevAA),
-            //     else penalty
-            //   - C-term: credit if enzyme.is_cleavable(lastResidue), else penalty
-            // Omitting this offsets every PSM score by ≈ -(credit + credit) = -4
-            // for fully tryptic ntt=2 candidates.
             //
             // Use the ENZYME-REGISTERED aa_set (cleavage credit/penalty are
             // populated by register_enzyme — params.aa_set is unregistered).
-            let compute_cleavage_credit = |cand: &Candidate| -> i32 {
-                let aa_set = aa_set_for_gf;
-                let enz = params.enzyme;
+            //
+            // iter35: `fn` (not closure) + `#[inline(always)]` ensures LLVM
+            // monomorphizes + inlines into the candidate loop. Closure form
+            // was not being inlined and went through FnMut::call_mut dispatch.
+            #[inline(always)]
+            fn compute_cleavage_credit(
+                cand: &Candidate,
+                enz: Enzyme,
+                enz_is_c_term: bool,
+                enz_is_n_term: bool,
+                credit_neighboring: i32,
+                penalty_neighboring: i32,
+                credit_peptide: i32,
+                penalty_peptide: i32,
+            ) -> i32 {
                 let mut score: i32 = 0;
                 let pre = cand.peptide.pre;
-                let last = cand.peptide.residues.last().map(|aa| aa.residue).unwrap_or(0);
                 let post = cand.peptide.post;
-                if enz.is_c_term() {
-                    // N-term cleavage
+                if enz_is_c_term {
+                    // N-term cleavage (neighboring)
                     score += if cand.is_protein_n_term || enz.is_cleavable(pre) {
-                        aa_set.neighboring_aa_cleavage_credit()
+                        credit_neighboring
                     } else {
-                        aa_set.neighboring_aa_cleavage_penalty()
+                        penalty_neighboring
                     };
-                    // C-term cleavage
+                    // C-term cleavage (peptide). Inline residues.last() to avoid
+                    // the Option::map call_mut dispatch that perf flagged.
+                    let last = match cand.peptide.residues.last() {
+                        Some(aa) => aa.residue,
+                        None => 0,
+                    };
                     score += if enz.is_cleavable(last) {
-                        aa_set.peptide_cleavage_credit()
+                        credit_peptide
                     } else {
-                        aa_set.peptide_cleavage_penalty()
+                        penalty_peptide
                     };
-                } else if enz.is_n_term() {
-                    // N-term cleavage (peptide N-term)
+                } else if enz_is_n_term {
+                    // N-term cleavage (peptide)
                     score += if enz.is_cleavable(pre) {
-                        aa_set.peptide_cleavage_credit()
+                        credit_peptide
                     } else {
-                        aa_set.peptide_cleavage_penalty()
+                        penalty_peptide
                     };
-                    // C-term cleavage (neighbor)
+                    // C-term cleavage (neighboring)
                     score += if cand.is_protein_c_term || enz.is_cleavable(post) {
-                        aa_set.neighboring_aa_cleavage_credit()
+                        credit_neighboring
                     } else {
-                        aa_set.neighboring_aa_cleavage_penalty()
+                        penalty_neighboring
                     };
                 }
                 score
-            };
+            }
 
             // R-2.1: per-charge queue keyed by charge state. Mirrors Java's
             // per-SpecKey raw-score retention (DBScanner.java:534).
@@ -294,7 +322,16 @@ impl<'a> PreparedSearch<'a> {
 
             for &cand_idx in &window_cand_indices {
                 let cand = &candidates[cand_idx];
-                let cleavage_credit = compute_cleavage_credit(cand) as f32;
+                let cleavage_credit = compute_cleavage_credit(
+                    cand,
+                    enz,
+                    enz_is_c_term,
+                    enz_is_n_term,
+                    enz_credit_neighboring,
+                    enz_penalty_neighboring,
+                    enz_credit_peptide,
+                    enz_penalty_peptide,
+                ) as f32;
                 // iter34: conservative per-peptide bound on the cumulative
                 // edge_score for two-stage gating. `psm_edge_score` returns
                 // `sum of n-1 per-edge scores`, each clamped to roughly [-4, +4]

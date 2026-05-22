@@ -113,6 +113,26 @@ pub struct ScoredSpectrum<'a> {
     /// exact uncached path.
     prefix_score_cache: Vec<f32>,
     suffix_score_cache: Vec<f32>,
+    /// iter36: spectrum-wide cache for `observed_node_mass(node_nominal)`.
+    /// Indexed by `node_nominal` (i32 → usize). Each cell uses an f64 sentinel
+    /// encoding:
+    ///
+    ///   - `f64::NEG_INFINITY` → uncached (not yet computed)
+    ///   - `f64::INFINITY`     → cached / no peak in tolerance window
+    ///   - any finite value    → cached / observed peak mass
+    ///
+    /// `RefCell` for interior mutability — ScoredSpectrum is constructed and
+    /// consumed within a single Rayon worker thread; no cross-thread sharing,
+    /// so single-threaded interior mutability is safe. Note: this REMOVES the
+    /// `Sync` auto-derived bound on ScoredSpectrum, which is acceptable
+    /// because callers only hand out `&ScoredSpectrum` within one thread.
+    ///
+    /// Without this cache, `observed_node_mass` was 11.56% of Astral wall
+    /// (per iter35 perf profile) — each call did a binary_search over peaks
+    /// + linear scan. iter33's per-candidate `psm_edge_score` calls it twice
+    /// per edge × 9 edges × 16M candidates ≈ 290M times per Astral spectrum,
+    /// repeatedly for the same `node_nominal` values.
+    observed_mass_cache: std::cell::RefCell<Vec<f64>>,
 }
 
 impl<'a> ScoredSpectrum<'a> {
@@ -292,6 +312,14 @@ impl<'a> ScoredSpectrum<'a> {
             );
         }
 
+        // iter36: spectrum-wide observed_node_mass cache.
+        // Size = (parent_nominal + 1) so node_nominal in [0, parent_nominal]
+        // is directly indexable. Cap at parent_mass (in Da) → nominal mass
+        // ≈ parent_mass × INTEGER_MASS_SCALER. Add small margin for isotope
+        // tolerance + rounding.
+        let parent_nominal = nominal_from(parent_mass).max(0) as usize;
+        let observed_mass_cache = std::cell::RefCell::new(vec![f64::NEG_INFINITY; parent_nominal + 1]);
+
         Self {
             spec,
             ranks,
@@ -306,6 +334,7 @@ impl<'a> ScoredSpectrum<'a> {
             suffix_score_cache,
             deconv_peaks,
             deconv_ranks,
+            observed_mass_cache,
         }
     }
 
@@ -386,6 +415,9 @@ impl<'a> ScoredSpectrum<'a> {
             suffix_score_cache,
             deconv_peaks: None,
             deconv_ranks: None,
+            // iter36: empty cache for test fixtures (rank_kept path). All
+            // observed_node_mass queries fall through to compute on every call.
+            observed_mass_cache: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -715,6 +747,28 @@ impl<'a> ScoredSpectrum<'a> {
             // Source node mass is exactly 0 by convention.
             return Some(0.0);
         }
+
+        // iter36: check spectrum-wide cache first.
+        //
+        // Sentinel encoding in self.observed_mass_cache:
+        //   NEG_INFINITY → uncached, compute now
+        //   INFINITY     → cached / no peak found in tolerance window
+        //   finite       → cached observed peak mass
+        let idx = node_nominal as usize;
+        {
+            let cache = self.observed_mass_cache.borrow();
+            if idx < cache.len() {
+                let cached = cache[idx];
+                if cached == f64::INFINITY {
+                    return None;
+                }
+                if cached.is_finite() {
+                    return Some(cached);
+                }
+                // NEG_INFINITY → fall through to compute.
+            }
+        }
+
         let theo_mz = self.main_ion.mz(node_nominal as f64);
         let tol_da = scorer.param().mme.as_da(theo_mz);
         // Select the highest-intensity peak within [theo_mz - tol_da, theo_mz + tol_da].
@@ -739,7 +793,20 @@ impl<'a> ScoredSpectrum<'a> {
                 best_peak_mz = Some((mz, intensity));
             }
         }
-        best_peak_mz.map(|(peak_mz, _)| self.main_ion.mass_from_mz(peak_mz))
+        let result = best_peak_mz.map(|(peak_mz, _)| self.main_ion.mass_from_mz(peak_mz));
+
+        // iter36: store result in the spectrum-wide cache. Only if idx fits.
+        {
+            let mut cache = self.observed_mass_cache.borrow_mut();
+            if idx < cache.len() {
+                cache[idx] = match result {
+                    Some(m) => m,
+                    None => f64::INFINITY,
+                };
+            }
+        }
+
+        result
     }
 
     /// Edge score for the GF DP.

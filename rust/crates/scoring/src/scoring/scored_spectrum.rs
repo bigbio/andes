@@ -913,21 +913,41 @@ fn deconvolute_spectrum(
 /// across segments and consider all ion types; for HCD these agree, for
 /// ETD/ECD they may diverge.
 fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) -> IonType {
+    // Mirrors Java's `NewRankScorer.determineIonTypes` (lines 611-640).
+    // Aggregates `frag_off_table` frequencies ACROSS ALL SEGMENTS for the same
+    // `(charge, parent_mass)` partition and picks the overall highest-frequency
+    // ion — regardless of prefix/suffix type. For HCD/QExactive this typically
+    // selects a y-ion (suffix), giving `main_ion_direction() = false`.
+    //
+    // Previous Rust behavior filtered to `is_prefix()` only, forcing direction
+    // always true. That mismatched Java's `getMainIonType` and produced wrong
+    // EdgeScore values for HCD spectra (iter28 trace: scan 47106 EdgeScore
+    // Rust -18 vs Java +8). See
+    // `docs/parity-analysis/notes/2026-05-21-iter27-pin-diff.md`.
     let fallback = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-    let table = match param.rank_dist_table.get(&partition) {
-        Some(t) => t,
-        None => return fallback,
-    };
-    let mut best_ion = None;
-    let mut best_freq = f32::NEG_INFINITY;
-    for (ion, freqs) in table {
-        if !ion.is_prefix() {
-            continue;
+    let num_segments = param.num_segments.max(1) as usize;
+    let mut ion_freq: std::collections::HashMap<IonType, f32> = std::collections::HashMap::new();
+    for seg in 0..num_segments {
+        let part = crate::param_model::Partition {
+            charge: partition.charge,
+            parent_mass: partition.parent_mass,
+            seg_num: seg as i32,
+        };
+        if let Some(frag_list) = param.frag_off_table.get(&part) {
+            for f in frag_list {
+                if matches!(f.ion_type, IonType::Noise) {
+                    continue;
+                }
+                *ion_freq.entry(f.ion_type).or_insert(0.0) += f.frequency;
+            }
         }
-        let freq_at_rank1 = freqs.first().copied().unwrap_or(0.0);
-        if freq_at_rank1 > best_freq {
-            best_freq = freq_at_rank1;
-            best_ion = Some(*ion);
+    }
+    let mut best_ion: Option<IonType> = None;
+    let mut best_freq = f32::NEG_INFINITY;
+    for (&ion, &freq) in &ion_freq {
+        if freq > best_freq {
+            best_freq = freq;
+            best_ion = Some(ion);
         }
     }
     best_ion.unwrap_or(fallback)

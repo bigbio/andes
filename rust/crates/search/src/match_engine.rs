@@ -295,6 +295,15 @@ impl<'a> PreparedSearch<'a> {
             for &cand_idx in &window_cand_indices {
                 let cand = &candidates[cand_idx];
                 let cleavage_credit = compute_cleavage_credit(cand) as f32;
+                // iter34: conservative per-peptide bound on the cumulative
+                // edge_score for two-stage gating. `psm_edge_score` returns
+                // `sum of n-1 per-edge scores`, each clamped to roughly [-4, +4]
+                // (log probability ratios). 10 per edge is a very loose upper
+                // bound; we only need it to never UNDER-estimate the max so
+                // we don't skip a candidate that could win.
+                let max_edge_bonus_per_edge: f32 = 10.0;
+                let n_minus_1 = cand.peptide.length().saturating_sub(1) as f32;
+                let max_edge_bonus = max_edge_bonus_per_edge * n_minus_1;
                 for &z in &charges_to_try {
                     let scored_spec = scored_spec_for_charge(z);
                     // iter33: track (pin_score, edge, rank_score) for the
@@ -302,22 +311,50 @@ impl<'a> PreparedSearch<'a> {
                     // remains the iter19 PIN RawScore distribution Percolator
                     // was trained on. `rank_score` (= node + cleavage + edge)
                     // is the Java-aligned queue-ordering key.
-                    let mut best_for_charge: Option<(MassError, f32, i32, f32)> = None;
+                    //
+                    // iter34: two-stage gating. First compute pin_scores
+                    // across all iso-offsets (cheap, score_psm only). If the
+                    // BEST pin_score + max_edge_bonus cannot exceed the
+                    // queue's worst retained rank_score, skip the expensive
+                    // psm_edge_score entirely for ALL iso-offsets. For top-N=1
+                    // (Astral default) this gates ~99% of candidates.
+                    let mut iso_results: SmallVec<[(MassError, f32); 4]> = SmallVec::new();
                     for offset in params.isotope_error_range.clone() {
                         if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
                             let pin_score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
                                 + cleavage_credit;
-                            // iter33: per-candidate edge_score for queue
-                            // ranking. Mirrors Java DBScanScorer.getScore
-                            // adding edge to FastScorer's node total before
-                            // DBScanner.java:533 adds cleavage. The same
-                            // edge_score is stored on the PsmMatch so
-                            // compute_psm_features doesn't recompute it.
-                            let edge_i = psm_edge_score(scored_spec, &cand.peptide, scorer, z);
-                            let rank_score = pin_score + edge_i as f32;
-                            if best_for_charge.as_ref().map_or(true, |(_, _, _, rs)| rank_score > *rs) {
-                                best_for_charge = Some((err, pin_score, edge_i, rank_score));
-                            }
+                            iso_results.push((err, pin_score));
+                        }
+                    }
+                    if iso_results.is_empty() {
+                        continue;
+                    }
+                    let best_pin = iso_results.iter().map(|(_, p)| *p).fold(f32::NEG_INFINITY, f32::max);
+
+                    // Two-stage gate: if even the most optimistic edge bonus
+                    // can't lift this candidate above the queue's worst
+                    // retained rank_score, skip ALL edge computations.
+                    let could_win = match per_charge_queues.get(&z) {
+                        Some(q) if q.len() >= q.capacity() as usize => {
+                            q.worst_rank_score()
+                                .map_or(true, |worst| best_pin + max_edge_bonus > worst)
+                        }
+                        // Queue below capacity (or doesn't exist yet): accept
+                        // everything until it fills up.
+                        _ => true,
+                    };
+                    if !could_win {
+                        continue;
+                    }
+
+                    // Stage 2: edge_score is iso-offset-independent (depends on
+                    // peptide + charge + spectrum only), so compute ONCE.
+                    let edge_i = psm_edge_score(scored_spec, &cand.peptide, scorer, z);
+                    let mut best_for_charge: Option<(MassError, f32, i32, f32)> = None;
+                    for (err, pin_score) in &iso_results {
+                        let rank_score = pin_score + edge_i as f32;
+                        if best_for_charge.as_ref().map_or(true, |(_, _, _, rs)| rank_score > *rs) {
+                            best_for_charge = Some((*err, *pin_score, edge_i, rank_score));
                         }
                     }
                     if let Some((err, pin_score, edge_i, rank_score)) = best_for_charge {

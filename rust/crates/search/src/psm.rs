@@ -251,6 +251,26 @@ impl TopNQueue {
     pub fn len(&self) -> usize { self.heap.len() }
     pub fn is_empty(&self) -> bool { self.heap.is_empty() }
 
+    /// Return the `rank_score` of the queue's WORST retained PSM in O(1).
+    ///
+    /// The min-heap stores `Reverse<PsmMatch>` so `heap.peek()` returns the
+    /// PSM with the LOWEST `Ord` value — the candidate that would be
+    /// evicted first if a strictly better PSM arrived. Returns `None` if
+    /// the queue is empty.
+    ///
+    /// iter34: used by the per-candidate two-stage gating in
+    /// `match_engine.rs` — candidates whose `pin_score + max_edge_bonus`
+    /// cannot exceed the worst retained `rank_score` skip the expensive
+    /// `psm_edge_score` computation entirely.
+    pub fn worst_rank_score(&self) -> Option<f32> {
+        self.heap.peek().map(|std::cmp::Reverse(m)| m.rank_score)
+    }
+
+    /// Queue capacity (the top-N target). Used by callers that need to
+    /// distinguish "queue has spare capacity, accept everything" from
+    /// "queue at capacity, must beat worst".
+    pub fn capacity(&self) -> u32 { self.capacity }
+
     /// Iterate over all PSMs in the queue (order not guaranteed).
     pub fn iter_psms(&self) -> impl Iterator<Item = &PsmMatch> {
         self.heap.iter().map(|Reverse(m)| m)

@@ -97,8 +97,11 @@ pub struct PsmMatch {
     /// `rank_score` mirrors Java's queue-ordering key without changing the
     /// pin RawScore distribution.
     ///
-    /// Defaults to the `score` value when not explicitly set (which keeps
-    /// pre-iter33 callers / test fixtures behaving as before).
+    /// **No automatic default**: PsmMatch does not implement `Default`, and
+    /// callers MUST set `rank_score` explicitly. Test fixtures that build
+    /// PsmMatch literals should set `rank_score = score` for pre-iter33
+    /// behavior (no edge contribution to ranking). The `match_engine.rs`
+    /// candidate loop computes `rank_score = score + edge_score as f32`.
     pub rank_score: f32,
     /// Per-PSM edge_score = `psm_edge_score(...)` for this candidate.
     /// Computed at queue-insertion time in `match_engine.rs` and reused by
@@ -145,7 +148,14 @@ impl PsmMatch {
 
 impl PartialEq for PsmMatch {
     fn eq(&self, other: &Self) -> bool {
-        self.spec_e_value == other.spec_e_value && self.score == other.score
+        // iter37 HIGH-2: PartialEq MUST agree with `Ord::cmp` (Rust contract
+        // a == b ⇒ a.cmp(b) == Equal). Ord uses (spec_e_value, rank_score)
+        // post-iter33, so PartialEq must compare the same fields. Pre-iter37
+        // this compared `score` (= node + cleavage), violating the contract
+        // for any pair of PSMs with equal `score` but different `rank_score`
+        // (= `score + edge`). BinaryHeap behavior was technically undefined
+        // for those pairs.
+        self.spec_e_value == other.spec_e_value && self.rank_score == other.rank_score
     }
 }
 

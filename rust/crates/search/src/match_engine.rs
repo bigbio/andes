@@ -648,10 +648,21 @@ fn compute_spec_e_values_for_spectrum(
         return;
     }
 
-    // 2. Compute the minimum score across all PSMs (used as score threshold).
+    // 2. Compute the minimum score across all PSMs (used as GF score threshold).
+    //
+    // iter37 HIGH-1: use `rank_score` (= node + cleavage + edge), not `score`
+    // (= node + cleavage only). Java's `DBScanner.java:619-621` reads
+    // `m.getScore()`, which is set at `DBScanner.java:533` as
+    // `cleavageScore + rawScore` where `rawScore` is `DBScanScorer.getScore`'s
+    // `node + edge` return — i.e. Rust's `rank_score`. Using `score` here was
+    // seeding the GF threshold below Java's level by the per-PSM edge_score
+    // value (~+20 typical), widening the score distribution and biasing
+    // SpecEValue. CodeRabbit flagged this as the likely root cause of the
+    // residual 1.05 % Astral gap and the gf_java_parity tolerance widening
+    // (TOLERANCE_LOG10 1.0 → 1.3 in iter30).
     let min_score = queue
         .iter_psms()
-        .map(|p| p.score.round() as i32)
+        .map(|p| p.rank_score.round() as i32)
         .min()
         .unwrap_or(i32::MIN);
 
@@ -739,6 +750,14 @@ fn compute_spec_e_values_for_spectrum(
     }
 
     // 4. For each PSM in the queue, compute spec_e_value from its score.
+    //
+    // iter37 HIGH-1: use `rank_score` (Java-aligned `node + cleavage + edge`),
+    // not `score` (Rust pin-only `node + cleavage`). Java's
+    // `DBScanner.java:697-699` calls `gf.getSpectralProbability(match.getScore())`
+    // where `match.getScore()` is Java's `node + cleavage + edge`. Using
+    // `score` here was looking up the wrong tail of the GF score distribution
+    // (lower by the per-PSM edge contribution ~+20), giving inflated
+    // SpecEValue values for PSMs whose top-1 was chosen via edge contribution.
     let max_score = group.max_score();
 
     queue.update_spec_e_values(|psm| {
@@ -749,7 +768,7 @@ fn compute_spec_e_values_for_spectrum(
         if psm_nominal_mass < min_peptide_mass_idx || psm_nominal_mass > max_peptide_mass_idx {
             return 1.0;
         }
-        let score_int = psm.score.round() as i32;
+        let score_int = psm.rank_score.round() as i32;
         if score_int >= max_score {
             // Score exceeds GF range — return the probability at max_score - 1
             // (which already has the underflow guard applied by the GF DP).

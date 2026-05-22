@@ -797,21 +797,14 @@ fn compute_edge_error_scores(
         scorer.ion_existence_score(part, 3, prob_peak),
     ];
 
-    // Graph-constant: observed peak mass for each node, keyed by dense mass
-    // index `(mass + mass_offset)`. Each unique node mass is observed at most
-    // once instead of once per outgoing edge. With ~18 edges per node on
-    // PXD001819 that's an ~18× reduction in the dominant inner cost of
-    // edge_score. `None` entries mark masses with no qualifying peak in
-    // the tolerance window.
-    let dense_len = (peptide_mass + mass_offset + 1) as usize;
-    // Pre-fill with None so unreachable masses don't need explicit insertion.
-    // Allocates once per graph (~1.3k entries on PXD001819); cheaper than
-    // re-observing 18× per node.
-    let mut observed_by_mass: Vec<Option<f64>> = vec![None; dense_len];
-    for &m in active_nodes {
-        let idx = (m + mass_offset) as usize;
-        observed_by_mass[idx] = scored_spec.observed_node_mass(m, scorer, charge, parent_mass);
-    }
+    // iter37 P-8: the per-graph `observed_by_mass: Vec<Option<f64>>` cache
+    // that pre-iter36 lived here has been REMOVED. iter36 added a
+    // spectrum-wide `observed_mass_cache` on `ScoredSpectrum` that already
+    // de-duplicates calls for the same `(node_nominal)` across mass bins.
+    // Calling `scored_spec.observed_node_mass(...)` directly in the per-edge
+    // inner loop now hits the spectrum cache (~5 ns per call) and saves
+    // ~487k Vec allocations + zero-fills per Astral run.
+    let _ = mass_offset; // retained in signature for ABI stability; no longer needed here.
 
     let mut clamp_count: u32 = 0;
     for ni in 0..node_count {
@@ -819,22 +812,13 @@ fn compute_edge_error_scores(
         if cur_mass == 0 || cur_mass == peptide_mass {
             continue;
         }
-        let cur_obs = observed_by_mass[(cur_mass + mass_offset) as usize];
+        let cur_obs = scored_spec.observed_node_mass(cur_mass, scorer, charge, parent_mass);
         for e in edge_offset[ni]..edge_offset[ni + 1] {
             let prev_mass = edge_prev_node[e];
-            // prev_mass should always be a valid representable mass for an
-            // edge written by build_in_place — fall through to None for
-            // safety if it somehow isn't.
-            let prev_obs = if prev_mass + mass_offset >= 0
-                && (prev_mass + mass_offset) as usize <= peptide_mass as usize + mass_offset as usize
-            {
-                observed_by_mass
-                    .get((prev_mass + mass_offset) as usize)
-                    .copied()
-                    .flatten()
-            } else {
-                None
-            };
+            // prev_mass is always a valid representable mass for any edge
+            // written by build_in_place — the spectrum cache returns None
+            // for out-of-range/unobserved masses.
+            let prev_obs = scored_spec.observed_node_mass(prev_mass, scorer, charge, parent_mass);
 
             // ion_existence_index: 1 if cur observed, +2 if prev observed.
             let mut idx = 0usize;

@@ -702,6 +702,8 @@ mod tests {
             charge_used: charge,
             mass_error_ppm: 1.5,
             score,
+            rank_score: score,  // iter33: test fixtures default rank_score = score
+            edge_score: 0,
             spec_e_value,
             de_novo_score: 42,
             activation_method: Some(model::activation::ActivationMethod::HCD),

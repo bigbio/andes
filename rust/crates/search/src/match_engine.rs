@@ -297,24 +297,39 @@ impl<'a> PreparedSearch<'a> {
                 let cleavage_credit = compute_cleavage_credit(cand) as f32;
                 for &z in &charges_to_try {
                     let scored_spec = scored_spec_for_charge(z);
-                    let mut best_for_charge: Option<(MassError, f32)> = None;
+                    // iter33: track (pin_score, edge, rank_score) for the
+                    // best isotope offset. `pin_score` (= node + cleavage)
+                    // remains the iter19 PIN RawScore distribution Percolator
+                    // was trained on. `rank_score` (= node + cleavage + edge)
+                    // is the Java-aligned queue-ordering key.
+                    let mut best_for_charge: Option<(MassError, f32, i32, f32)> = None;
                     for offset in params.isotope_error_range.clone() {
                         if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
-                            let score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
+                            let pin_score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
                                 + cleavage_credit;
-                            if best_for_charge.as_ref().map_or(true, |(_, s)| score > *s) {
-                                best_for_charge = Some((err, score));
+                            // iter33: per-candidate edge_score for queue
+                            // ranking. Mirrors Java DBScanScorer.getScore
+                            // adding edge to FastScorer's node total before
+                            // DBScanner.java:533 adds cleavage. The same
+                            // edge_score is stored on the PsmMatch so
+                            // compute_psm_features doesn't recompute it.
+                            let edge_i = psm_edge_score(scored_spec, &cand.peptide, scorer, z);
+                            let rank_score = pin_score + edge_i as f32;
+                            if best_for_charge.as_ref().map_or(true, |(_, _, _, rs)| rank_score > *rs) {
+                                best_for_charge = Some((err, pin_score, edge_i, rank_score));
                             }
                         }
                     }
-                    if let Some((err, score)) = best_for_charge {
+                    if let Some((err, pin_score, edge_i, rank_score)) = best_for_charge {
                         let features = PsmFeatures::default();
                         let psm = PsmMatch {
                             spectrum_idx: spec_idx,
                             candidate_idxs: vec![cand_idx as u32],
                             charge_used: z,
                             mass_error_ppm: err.mass_error_ppm,
-                            score,
+                            score: pin_score,
+                            rank_score,
+                            edge_score: edge_i,
                             spec_e_value: 1.0,
                             de_novo_score: i32::MIN,
                             activation_method: Some(scorer.param().data_type.activation),
@@ -392,10 +407,16 @@ impl<'a> PreparedSearch<'a> {
 
             // Feature extraction (unchanged from baseline): post-merge, after
             // the per-spectrum queue is final.
+            //
+            // iter33: pre-computed `psm.edge_score` from the candidate loop
+            // is moved into `features.edge_score` to avoid the per-PSM
+            // recomputation that `compute_psm_features` would otherwise do.
             queue.fill_post_topn(|psm| {
                 let ss = scored_spec_for_charge(psm.charge_used);
                 let cand = &candidates[psm.primary_candidate_idx() as usize];
-                psm.features = compute_psm_features(ss, &cand.peptide, scorer, psm.charge_used);
+                let mut features = compute_psm_features(ss, &cand.peptide, scorer, psm.charge_used);
+                features.edge_score = psm.edge_score; // reuse per-candidate value
+                psm.features = features;
             });
 
                 queue

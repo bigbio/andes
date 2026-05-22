@@ -194,6 +194,8 @@ fn psm_with_lower_spec_e_value_ranks_first() {
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,
+            rank_score: score,  // iter33: queue-ordering test defaults rank_score = score
+            edge_score: 0,
             spec_e_value,
             de_novo_score: i32::MIN,
             activation_method: None,

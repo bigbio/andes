@@ -312,32 +312,38 @@ impl<'a> PreparedSearch<'a> {
                     // was trained on. `rank_score` (= node + cleavage + edge)
                     // is the Java-aligned queue-ordering key.
                     //
-                    // iter34: two-stage gating. First compute pin_scores
-                    // across all iso-offsets (cheap, score_psm only). If the
-                    // BEST pin_score + max_edge_bonus cannot exceed the
-                    // queue's worst retained rank_score, skip the expensive
-                    // psm_edge_score entirely for ALL iso-offsets. For top-N=1
-                    // (Astral default) this gates ~99% of candidates.
-                    let mut iso_results: SmallVec<[(MassError, f32); 4]> = SmallVec::new();
+                    // iter34: `score_psm` and `psm_edge_score` are BOTH
+                    // iso-offset independent (they take `(scored_spec,
+                    // peptide, scorer, charge)` — no iso parameter). The
+                    // pre-iter34 iso loop redundantly re-computed them per
+                    // offset. iter34 hoists them out: iso loop only finds
+                    // which offsets match (cheap precursor-mass check), then
+                    // we compute pin_score + edge_score ONCE.
+                    //
+                    // Two-stage gate: if `pin_score + max_edge_bonus` can't
+                    // exceed the queue's worst retained rank_score, skip the
+                    // edge_score call entirely. For top-N=1 (Astral) this
+                    // gates ~99% of candidates after the queue fills.
+                    let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
                     for offset in params.isotope_error_range.clone() {
                         if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
-                            let pin_score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
-                                + cleavage_credit;
-                            iso_results.push((err, pin_score));
+                            iso_errs.push(err);
                         }
                     }
-                    if iso_results.is_empty() {
+                    if iso_errs.is_empty() {
                         continue;
                     }
-                    let best_pin = iso_results.iter().map(|(_, p)| *p).fold(f32::NEG_INFINITY, f32::max);
 
-                    // Two-stage gate: if even the most optimistic edge bonus
-                    // can't lift this candidate above the queue's worst
-                    // retained rank_score, skip ALL edge computations.
+                    // Compute pin_score ONCE (iso-independent).
+                    let pin_score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
+                        + cleavage_credit;
+
+                    // Gate against the queue's current worst rank_score
+                    // before invoking edge_score.
                     let could_win = match per_charge_queues.get(&z) {
                         Some(q) if q.len() >= q.capacity() as usize => {
                             q.worst_rank_score()
-                                .map_or(true, |worst| best_pin + max_edge_bonus > worst)
+                                .map_or(true, |worst| pin_score + max_edge_bonus > worst)
                         }
                         // Queue below capacity (or doesn't exist yet): accept
                         // everything until it fills up.
@@ -347,39 +353,40 @@ impl<'a> PreparedSearch<'a> {
                         continue;
                     }
 
-                    // Stage 2: edge_score is iso-offset-independent (depends on
-                    // peptide + charge + spectrum only), so compute ONCE.
+                    // Stage 2: compute edge_score ONCE (also iso-independent).
                     let edge_i = psm_edge_score(scored_spec, &cand.peptide, scorer, z);
-                    let mut best_for_charge: Option<(MassError, f32, i32, f32)> = None;
-                    for (err, pin_score) in &iso_results {
-                        let rank_score = pin_score + edge_i as f32;
-                        if best_for_charge.as_ref().map_or(true, |(_, _, _, rs)| rank_score > *rs) {
-                            best_for_charge = Some((*err, *pin_score, edge_i, rank_score));
-                        }
-                    }
-                    if let Some((err, pin_score, edge_i, rank_score)) = best_for_charge {
-                        let features = PsmFeatures::default();
-                        let psm = PsmMatch {
-                            spectrum_idx: spec_idx,
-                            candidate_idxs: vec![cand_idx as u32],
-                            charge_used: z,
-                            mass_error_ppm: err.mass_error_ppm,
-                            score: pin_score,
-                            rank_score,
-                            edge_score: edge_i,
-                            spec_e_value: 1.0,
-                            de_novo_score: i32::MIN,
-                            activation_method: Some(scorer.param().data_type.activation),
-                            e_value: 1.0,
-                            features,
-                            isotope_offset: err.isotope_offset,
-                        };
-                        per_charge_queues
-                            .entry(z)
-                            .or_insert_with(|| TopNQueue::new(params.top_n_psms_per_spectrum))
-                            .push(psm);
-                        psms_pushed.fetch_add(1, Ordering::Relaxed);
-                    }
+                    let rank_score = pin_score + edge_i as f32;
+
+                    // Pick the iso-offset with the smallest |mass_error_ppm|
+                    // for the PIN row (preserves the pre-iter33 tie-break:
+                    // the first-matched iso wins when scores are equal). Since
+                    // score is iso-independent, the iso choice only affects
+                    // the pin `isotope_error` / `dm` columns.
+                    let err = iso_errs.into_iter()
+                        .min_by(|a, b| a.mass_error_ppm.abs().partial_cmp(&b.mass_error_ppm.abs()).unwrap_or(std::cmp::Ordering::Equal))
+                        .unwrap();
+
+                    let features = PsmFeatures::default();
+                    let psm = PsmMatch {
+                        spectrum_idx: spec_idx,
+                        candidate_idxs: vec![cand_idx as u32],
+                        charge_used: z,
+                        mass_error_ppm: err.mass_error_ppm,
+                        score: pin_score,
+                        rank_score,
+                        edge_score: edge_i,
+                        spec_e_value: 1.0,
+                        de_novo_score: i32::MIN,
+                        activation_method: Some(scorer.param().data_type.activation),
+                        e_value: 1.0,
+                        features,
+                        isotope_offset: err.isotope_offset,
+                    };
+                    per_charge_queues
+                        .entry(z)
+                        .or_insert_with(|| TopNQueue::new(params.top_n_psms_per_spectrum))
+                        .push(psm);
+                    psms_pushed.fetch_add(1, Ordering::Relaxed);
                 }
             }
             candidates_visited.fetch_add(window_cand_indices.len() as u64, Ordering::Relaxed);

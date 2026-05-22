@@ -846,8 +846,18 @@ impl<'a> ScoredSpectrum<'a> {
 
         // 3. Partition for this spectrum — Java uses the "last segment" partition
         //    stored at construction time.
+        //
+        // iter38 P-9b: per-edge `param.partition_for(charge, parent_mass, last_seg)`
+        // was 3.26% of Astral wall (~144M calls under iter33's per-candidate
+        // edge scoring). The partition is constant for this ScoredSpectrum's
+        // `(charge, parent_mass)` and is already cached in
+        // `segment_partition_cache`. Use that instead of re-running the binary
+        // search per edge.
         let last_seg = (scorer.param().num_segments - 1).max(0) as usize;
-        let part = scorer.param().partition_for(charge, parent_mass, last_seg);
+        let part = match self.segment_partition_cache.get(last_seg) {
+            Some((p, _)) => *p,
+            None => scorer.param().partition_for(charge, parent_mass, last_seg),
+        };
 
         // 4. Ion existence score.
         let mut s = scorer.ion_existence_score(part, idx, self.prob_peak);

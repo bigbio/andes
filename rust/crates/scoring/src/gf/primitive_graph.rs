@@ -637,7 +637,6 @@ impl PrimitiveAaGraph {
             edge_mass_scratch,
             edge_score,
             peptide_mass,
-            mass_offset,
             scored_spec,
             scorer,
             charge,
@@ -749,8 +748,11 @@ fn aa_total_mass(aa: &AminoAcid) -> f64 {
 /// in the git history for the rationale):
 /// - the `partition_for(charge, parent_mass, last_seg)` lookup
 /// - the 4-entry `ion_existence_score[0..=3]` table
-/// - per-node `observed_node_mass` results (cached into a dense
-///   `Vec<Option<f64>>` keyed by `mass + mass_offset`)
+///
+/// Per-node `observed_node_mass` results are de-duplicated via the
+/// spectrum-wide `ScoredSpectrum::observed_mass_cache` (iter36); the prior
+/// per-graph `Vec<Option<f64>>` keyed by `mass + mass_offset` was dropped
+/// in iter37 P-8.
 ///
 /// Source (mass = 0) and sink (mass = peptide_mass) nodes are skipped.
 /// Scores outside `[-100, 100]` are replaced with `-4`.
@@ -762,7 +764,6 @@ fn compute_edge_error_scores(
     edge_mass_scratch: &[f64],
     edge_score: &mut [i32],
     peptide_mass: i32,
-    mass_offset: i32,
     scored_spec: &ScoredSpectrum<'_>,
     scorer: &RankScorer,
     charge: u8,
@@ -804,7 +805,6 @@ fn compute_edge_error_scores(
     // Calling `scored_spec.observed_node_mass(...)` directly in the per-edge
     // inner loop now hits the spectrum cache (~5 ns per call) and saves
     // ~487k Vec allocations + zero-fills per Astral run.
-    let _ = mass_offset; // retained in signature for ABI stability; no longer needed here.
 
     let mut clamp_count: u32 = 0;
     for ni in 0..node_count {

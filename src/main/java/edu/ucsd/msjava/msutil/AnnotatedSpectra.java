@@ -1,14 +1,12 @@
 package edu.ucsd.msjava.msutil;
 
+import edu.ucsd.msjava.mgf.BufferedLineReader;
 import edu.ucsd.msjava.misc.ExceptionCapturer;
 import edu.ucsd.msjava.misc.ProgressData;
 import edu.ucsd.msjava.misc.ProgressReporter;
 import edu.ucsd.msjava.misc.ThreadPoolExecutorWithExceptions;
-import edu.ucsd.msjava.mzid.MzIDParser;
-import edu.ucsd.msjava.parser.BufferedLineReader;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.util.ArrayList;
@@ -18,6 +16,11 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Restored trainer support class. mzID input has been excised in this fork
+ * (the {@code mzid/} package and its {@code MzIDParser} were removed); only
+ * pre-converted TSV result files are accepted.
+ */
 public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
     private File[] resultFiles;
     private File specDir;
@@ -36,17 +39,17 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
     public ProgressData getProgressData() {
         return progress;
     }
-    
+
     @Override
     public boolean hasException() {
         return exception != null;
     }
-    
+
     @Override
     public Throwable getException() {
         return exception;
     }
-    
+
     public void setDropErrorDatasets(boolean dropErrors) {
         dropErrorDatasets = dropErrors;
     }
@@ -59,7 +62,7 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
         this.aaSet = aaSet;
         this.progress = null;
     }
-    
+
     public AnnotatedSpectra(File[] resultFiles, File specDir, AminoAcidSet aaSet, float fdrThreshold, boolean dropErrors) {
         this.resultFiles = resultFiles;
         this.specDir = specDir;
@@ -68,25 +71,23 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
         this.dropErrorDatasets = dropErrors;
         this.progress = null;
     }
-    
+
     public static class ConcurrentAnnotatedSpectraParser extends AnnotatedSpectra implements Runnable {
         private List<Spectrum> results;
         private List<String> errors;
-        
+
         public ConcurrentAnnotatedSpectraParser(File[] resultFiles, File specDir, AminoAcidSet aaSet, float fdrThreshold, boolean dropErrors, List<Spectrum> resultList, List<String> errorList) {
             super(resultFiles, specDir, aaSet, fdrThreshold, dropErrors);
             results = resultList;
             errors = errorList;
         }
-        
+
         @Override
         public void run() {
-            //String result = parse();
             String result = parse();
             results.addAll(getAnnotatedSpecContainer());
             if (result != null) {
                 errors.add(result);
-                //System.out.println("ERROR: " + result);
             }
         }
     }
@@ -99,7 +100,7 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
     public SpectraContainer getAnnotatedSpecContainer() {
         return annotatedSpectra;
     }
-    
+
     public String parse(int numThreads, boolean dropErrors) {
         if (numThreads <= 1) {
             return parse();
@@ -117,11 +118,7 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
             for (int i = 0; i < numThreads; i++) {
                 taskFiles.add(new ArrayList<File>());
             }
-            for (int i = 0; i < resultFiles.length; i++)
-            {
-                // Evenly distribute the files to the threads; doing it in a collated fashion because files
-                // of similar size will often have similar names, and we don't want to give one thread all
-                // of the largest files.
+            for (int i = 0; i < resultFiles.length; i++) {
                 taskFiles.get(i % numThreads).add(resultFiles[i]);
             }
             for (int i = 0; i < numThreads; i++) {
@@ -131,10 +128,8 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
                 executor.execute(parser);
             }
             taskFiles.clear();
-            
-            // Output initial progress report.
-            executor.outputProgressReport();
 
+            executor.outputProgressReport();
             executor.shutdown();
 
             try {
@@ -144,8 +139,7 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
                     e.printStackTrace();
                 }
             }
-            
-            // Output completed progress report.
+
             executor.outputProgressReport();
         } catch (OutOfMemoryError ex) {
             ex.printStackTrace();
@@ -183,7 +177,6 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
         for (File resultFile : resultFiles)
             System.out.println("\t" + resultFile.getName());
 
-        
         int count = 0;
         int total = resultFiles.length;
         String aggErrs = null;
@@ -191,7 +184,7 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
             String errMsg = parseFile(resultFile);
             count++;
             progress.report(count, total);
-            if (errMsg != null){
+            if (errMsg != null) {
                 String msg = "Error while parsing " + resultFile.getName() + ": " + errMsg;
                 if (dropErrorDatasets) {
                     System.out.println(msg);
@@ -218,46 +211,27 @@ public class AnnotatedSpectra implements ProgressReporter, ExceptionCapturer {
 
     public String parseFile(File resultFile) {
         System.out.println("Parsing " + resultFile.getName());
-        File tsvResultFile = null;
+        File tsvResultFile;
         if (resultFile.getName().endsWith(".mzid")) {
-            String resultFileName = resultFile.getAbsolutePath();
-            String tsvResultFileName = resultFileName.substring(0, resultFileName.lastIndexOf('.')) + ".tsv";
-            tsvResultFile = new File(tsvResultFileName);
-            if (!tsvResultFile.exists()) {
-                if (!tsvResultFile.canWrite()) {
-                    MzIDParser parser = new MzIDParser(resultFile);
-                    parser.writeToTSVFile(tsvResultFile);
-                } else {
-                    try {
-                        System.out.println("Converting " + resultFile.getName());
-                        tsvResultFile = File.createTempFile("__AnnotatedSpectra", ".tsv");
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-
-                    tsvResultFile.deleteOnExit();
-
-                    MzIDParser parser = new MzIDParser(resultFile);
-                    parser.writeToTSVFile(tsvResultFile);
-                }
-            } else {
-                System.out.println(tsvResultFileName + " already exists.");
-            }
+            // mzID input was supported by upstream via MzIDParser; the mzid/ package
+            // was removed in this fork. Pre-convert .mzid to .tsv and pass the .tsv.
+            return "mzid input is not supported in this build; pre-convert to .tsv and supply that instead.";
         } else if (resultFile.getName().endsWith(".tsv")) {
             tsvResultFile = resultFile;
+        } else {
+            return "Unrecognized result file extension (expected .tsv): " + resultFile.getName();
         }
 
-
-        BufferedLineReader in = null;
+        BufferedLineReader in;
         try {
             in = new BufferedLineReader(tsvResultFile.getPath());
         } catch (IOException e) {
             e.printStackTrace();
+            return "Unable to open " + tsvResultFile.getPath();
         }
 
         String s = in.readLine();
-
-        if (!s.startsWith("#")) {
+        if (s == null || !s.startsWith("#")) {
             return "Not a valid tsv result file";
         }
 

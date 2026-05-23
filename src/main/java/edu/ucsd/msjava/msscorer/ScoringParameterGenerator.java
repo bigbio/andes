@@ -1,14 +1,19 @@
 package edu.ucsd.msjava.msscorer;
 
+import edu.ucsd.msjava.mgf.MgfSpectrumParser;
 import edu.ucsd.msjava.msgf.Histogram;
 import edu.ucsd.msjava.msgf.NominalMass;
 import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msutil.*;
-import edu.ucsd.msjava.parser.MgfSpectrumParser;
 
 import java.io.File;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Hashtable;
+import java.util.TreeSet;
 
 /**
  * This only supports low accuracy fragment ions.
@@ -69,7 +74,6 @@ public class ScoringParameterGenerator extends NewRankScorer {
                 outputFile = new File(argv[i + 1]);
                 isText = true;
             } else if (argv[i].equalsIgnoreCase("-fixMod")) {
-                // 0: No mod, 1: Carbamidomethyl C, 2: Carboxymethyl C
                 if (argv[i + 1].equalsIgnoreCase("0"))
                     aaSet = AminoAcidSet.getStandardAminoAcidSet();
                 else if (argv[i + 1].equalsIgnoreCase("1"))
@@ -82,9 +86,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
                 numSpecsPerPeptide = Integer.parseInt(argv[i + 1]);
             } else if (argv[i].equalsIgnoreCase("-err")) {
                 errorScalingFactor = Integer.parseInt(argv[i + 1]);
-            } else if (argv[i].equalsIgnoreCase("-m"))    // Fragmentation method
-            {
-                // (0: written in the spectrum, 1: CID , 2: ETD, 3: HCD, 4: UVPD)
+            } else if (argv[i].equalsIgnoreCase("-m")) {
                 if (argv[i + 1].equalsIgnoreCase("1")) {
                     activationMethod = ActivationMethod.CID;
                 } else if (argv[i + 1].equalsIgnoreCase("2")) {
@@ -96,8 +98,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
                 } else {
                     printUsageAndExit("Invalid activation method: " + argv[i + 1]);
                 }
-            } else if (argv[i].equalsIgnoreCase("-inst"))    // Instrument type
-            {
+            } else if (argv[i].equalsIgnoreCase("-inst")) {
                 if (argv[i + 1].equalsIgnoreCase("0")) {
                     instType = InstrumentType.LOW_RESOLUTION_LTQ;
                 } else if (argv[i + 1].equalsIgnoreCase("1")) {
@@ -107,9 +108,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
                 } else {
                     printUsageAndExit("Invalid instrument type: " + argv[i + 1]);
                 }
-            } else if (argv[i].equalsIgnoreCase("-e"))    // Enzyme
-            {
-                // 0: No enzyme, 1: Trypsin, 2: Chymotrypsin, 3: LysC, 4: LysN, 5: GluC, 6: ArgC, 7: AspN
+            } else if (argv[i].equalsIgnoreCase("-e")) {
                 if (argv[i + 1].equalsIgnoreCase("0"))
                     enzyme = null;
                 else if (argv[i + 1].equalsIgnoreCase("1"))
@@ -145,7 +144,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
 
     public static void printUsageAndExit(String message) {
         System.err.println(message);
-        System.out.println("usage: java -Xmx2000M -cp MSGF.jar msscorer.ScoringParameterGenerator\n" +
+        System.out.println("usage: java -Xmx2000M -cp MSGF.jar edu.ucsd.msjava.msscorer.ScoringParameterGenerator\n" +
                 "\t-i annotatedMgfFileName (*.mgf)\n" +
                 "\t-o outputFileName (e.g. CID_Tryp.param)\n" +
                 "\t-m FragmentationMethodID (1: CID, 2: ETD, 3: HCD, 4: UVPD)\n" +
@@ -194,42 +193,32 @@ public class ScoringParameterGenerator extends NewRankScorer {
         SpecDataType dataType = new SpecDataType(activationMethod, instType, enzyme, protocol);
         ScoringParameterGenerator gen = new ScoringParameterGenerator(specContOnePerPep, dataType);
 
-        // set up the tolerance
         gen.tolerance(new Tolerance(1 / Constants.INTEGER_MASS_SCALER / 2));
 
-        // Step 1: partition spectra
         gen.partition(NUM_SEGMENTS_PER_SPECTRUM);
         if (verbose)
             System.out.println("Partition: " + gen.partitionSet.size());
 
-        // Step 2: compute offset frequency functions of precursor peaks and their neutral losses
         gen.precursorOFF(MIN_PRECURSOR_OFFSET_PROBABILITY);
         if (verbose)
             System.out.println("PrecursorOFF Done.");
 
-        // Step 3: filter out "significant" precursor offsets
         gen.filterPrecursorPeaks();
         if (verbose)
             System.out.println("Filtering Done.");
 
-        // Step 4: compute offset frequency fnction of fragment peaks and determine ion types to be considered for scoring
         gen.selectIonTypes(MIN_ION_OFFSET_PROBABILITY);
         if (verbose)
             System.out.println("Ion types selected.");
 
-        // Step 5: compute rank distributions
         gen.generateRankDist(MAX_RANK);
         if (verbose)
             System.out.println("Rank distribution computed.");
 
-        // Step 6 (optional): generate error distribution, currently not in use
-
-        // Step 7: smoothing parameters
         gen.smoothing();
         if (verbose)
             System.out.println("Smoothing complete.");
 
-        // output
         if (!isText)
             gen.writeParameters(outputFile);
         else
@@ -239,7 +228,6 @@ public class ScoringParameterGenerator extends NewRankScorer {
             System.out.println("Writing Done.");
     }
 
-    // Required
     private SpectraContainer specContainer;
 
     public ScoringParameterGenerator(SpectraContainer specContainer, SpecDataType dataType) {
@@ -274,7 +262,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
                 continue;
 
             int numSpec = parentMassList.size();
-            if (numSpec < Math.round(MIN_NUM_SPECTRA_PER_PARTITION * 0.9f))    // to few spectra
+            if (numSpec < Math.round(MIN_NUM_SPECTRA_PER_PARTITION * 0.9f))
                 continue;
 
             Collections.sort(parentMassList);
@@ -308,7 +296,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
             assert (false) : "partition() must have been called before";
             return;
         }
-        precursorOFFMap = new TreeMap<Integer, ArrayList<PrecursorOffsetFrequency>>();
+        precursorOFFMap = new java.util.TreeMap<Integer, ArrayList<PrecursorOffsetFrequency>>();
         numPrecurOFF = 0;
 
         for (int charge = chargeHist.minKey(); charge <= chargeHist.maxKey(); charge++) {
@@ -388,12 +376,11 @@ public class ScoringParameterGenerator extends NewRankScorer {
             return;
         }
 
-        fragOFFTable = new Hashtable<Partition, ArrayList<FragmentOffsetFrequency>>();
-        insignificantFragOFFTable = new Hashtable<Partition, ArrayList<FragmentOffsetFrequency>>();
+        fragOFFTable = new HashMap<Partition, ArrayList<FragmentOffsetFrequency>>();
+        insignificantFragOFFTable = new HashMap<Partition, ArrayList<FragmentOffsetFrequency>>();
 
         for (Partition partition : partitionSet) {
             int charge = partition.getCharge();
-            // parent mass range check
             Pair<Float, Float> parentMassRange = getPrecursorMassRange(partition);
             int seg = partition.getSegNum();
 
@@ -529,7 +516,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
             return;
         }
 
-        rankDistTable = new Hashtable<Partition, Hashtable<IonType, Float[]>>();
+        rankDistTable = new HashMap<Partition, HashMap<IonType, Float[]>>();
         this.maxRank = maxRank;
 
         for (Partition partition : partitionSet) {
@@ -608,7 +595,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
                                 explainedPeakSet.add(p);
                                 rankDist.get(ion).add(rank);
                             } else {
-                                rankDist.get(ion).add(maxRank + 1);    // maxRank+1: missing ion
+                                rankDist.get(ion).add(maxRank + 1);
                             }
                         }
                     }
@@ -632,7 +619,6 @@ public class ScoringParameterGenerator extends NewRankScorer {
 
                 for (Peak p : unexplainedPeaksAtThisSegment) {
                     int rank = p.getRank();
-//					float noiseFreq = (float)(annotation.size()-1)/(annotation.getParentMass()/(mme.getToleranceAsDa(midMassThisSegment)*2));
                     float noiseFreq = (annotation.size() - 1) / numSegments / numBinsAtThisSegment;
                     if (rank >= maxRank)
                         noiseDist[maxRank] += noiseFreq / numMaxRankPeaksAtThisSegment;
@@ -651,7 +637,7 @@ public class ScoringParameterGenerator extends NewRankScorer {
                 noiseDist[maxRank + 1] += (numBinsAtThisSegment - numPeaksAtThisSegment) * (annotation.size() - 1) / numSegments / numBinsAtThisSegment;
             }
 
-            Hashtable<IonType, Float[]> freqDist = new Hashtable<IonType, Float[]>();
+            HashMap<IonType, Float[]> freqDist = new HashMap<IonType, Float[]>();
             for (IonType ion : ionTypes) {
                 Float[] dist = new Float[maxRank + 1];
                 Histogram<Integer> hist = rankDist.get(ion);
@@ -683,13 +669,12 @@ public class ScoringParameterGenerator extends NewRankScorer {
             return;
         assert (smoothingRanks.length == smoothingWindowSize.length);
         for (Partition partition : rankDistTable.keySet()) {
-            Hashtable<IonType, Float[]> table = this.rankDistTable.get(partition);
+            HashMap<IonType, Float[]> table = this.rankDistTable.get(partition);
             for (IonType ion : table.keySet()) {
                 Float[] freq = table.get(ion);
                 Float[] smoothedFreq = new Float[freq.length];
                 int smoothingIndex = 0;
-                for (int i = 0; i < freq.length - 2; i++)    // last 2 columns: maxRank, unexplained
-                {
+                for (int i = 0; i < freq.length - 2; i++) {
                     if (smoothingIndex < smoothingRanks.length - 1 &&
                             i == smoothingRanks[smoothingIndex])
                         smoothingIndex++;

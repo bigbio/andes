@@ -1,5 +1,5 @@
 # SpectrumFile
-#  *.mzML, *.mzXML, *.mgf, *.ms2, *.pkl or *_dta.txt
+#  *.mzML or *.mgf
 #  Spectra should be centroided (see below for MSConvert example). Profile spectra will be ignored.
 #  Use of -s at the command line will override this filename
 #SpectrumFile=InstrumentFile.mzML
@@ -26,7 +26,7 @@ NumMods=3
 StaticMod=C2H3N1O1,     C,  fix, any,       Carbamidomethyl       # Fixed Carbamidomethyl C (alkylation)
 StaticMod=229.1629,     *,  fix, N-term,    TMT6plex
 StaticMod=229.1629,     K,  fix, any,       TMT6plex
-                            
+
 DynamicMod=O1,          M,  opt, any,       Oxidation             # Oxidized methionine
 DynamicMod=-187.152366, K,  opt, any,       AcNoTMT               # Residue tagged by MSGF+ with static TMT6, but is actually acetylated and does not have TMT
 

@@ -3,7 +3,11 @@ package edu.ucsd.msjava.misc;
 import edu.ucsd.msjava.msscorer.NewRankScorer;
 import edu.ucsd.msjava.msscorer.NewScorerFactory.SpecDataType;
 import edu.ucsd.msjava.msscorer.ScoringParameterGeneratorWithErrors;
-import edu.ucsd.msjava.msutil.*;
+import edu.ucsd.msjava.msutil.ActivationMethod;
+import edu.ucsd.msjava.msutil.AminoAcidSet;
+import edu.ucsd.msjava.msutil.Enzyme;
+import edu.ucsd.msjava.msutil.InstrumentType;
+import edu.ucsd.msjava.msutil.Protocol;
 
 import java.io.BufferedInputStream;
 import java.io.File;
@@ -11,10 +15,14 @@ import java.io.FileInputStream;
 import java.io.InputStream;
 import java.util.Calendar;
 
+/**
+ * Internal harness for batch-training MS-GF+ param files from a fixed
+ * directory layout. Restored verbatim from upstream; not intended as a
+ * customer-facing entry point.
+ */
 public class TrainScoringParameters {
 
     private static final String PARAM_DIR = System.getProperty("user.home") + "/Research/Data/TrainingMSGFPlus/new";
-    //	private static final String PARAM_DIR = System.getProperty("user.home")+"/Developments/MS_Java_Dev/src/main/resources/ionstat";
     private static final String BACKUP_DIR = System.getProperty("user.home") + "/Research/Data/TrainingMSGFPlus/backup";
     private static final String SPEC_DIR = System.getProperty("user.home") + "/Research/Data/TrainingMSGFPlus/AnnotatedSpectra";
 
@@ -79,9 +87,6 @@ public class TrainScoringParameters {
         for (File specFile : specDir.listFiles()) {
             String specFileName = specFile.getName();
             if (specFileName.endsWith(".mgf")) {
-//				if(!specFileName.equals("ETD_LowRes_LysC.mgf"))
-//					continue;
-
                 String id = specFileName.substring(0, specFileName.lastIndexOf('.'));
                 String[] token = id.split("_");
                 if (token.length != 3 && token.length != 4) {

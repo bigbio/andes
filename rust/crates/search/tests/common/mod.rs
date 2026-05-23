@@ -14,7 +14,7 @@ use scoring_crate::{Param, RankScorer};
 /// Resolve a path relative to the workspace root (CARGO_MANIFEST_DIR/../../..).
 ///
 /// Pass the full path from the repo root, e.g.
-/// `fixture("src/test/resources/BSA.fasta")`.
+/// `fixture("rust/test-fixtures/BSA.fasta")`.
 pub fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
@@ -52,7 +52,7 @@ pub fn aa_set() -> model::AminoAcidSet {
 pub fn rank_scorer() -> RankScorer {
     let param_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/main/resources/ionstat/HCD_QExactive_Tryp.param")
+        .join("rust/resources/ionstat/HCD_QExactive_Tryp.param")
         .canonicalize()
         .unwrap_or_else(|e| panic!("canonicalize HCD_QExactive_Tryp.param: {e}"));
     let param = Param::load_from_file(&param_path)

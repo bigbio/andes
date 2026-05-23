@@ -12,11 +12,11 @@ use input::{FastaReader, MgfReader};
 
 #[test]
 fn bsa_test_mgf_produces_some_matches() {
-    let target = FastaReader::load_all(BufReader::new(File::open(fixture("src/test/resources/BSA.fasta")).unwrap())).unwrap();
+    let target = FastaReader::load_all(BufReader::new(File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap())).unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

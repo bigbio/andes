@@ -1558,7 +1558,7 @@ mod tests {
         use crate::param_model::Param;
         use std::path::PathBuf;
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("../../../src/main/resources/ionstat/CID_LowRes_Tryp.param");
+        path.push("../../../rust/resources/ionstat/CID_LowRes_Tryp.param");
         let param = Param::load_from_file(&path).expect("param loads");
         let scorer = RankScorer::new(&param);
         let peaks: Vec<(f64, f32)> = (0..100).map(|i| (50.0 + i as f64 * 19.5, 100.0 - i as f32)).collect();

@@ -70,11 +70,11 @@ fn workspace_root() -> PathBuf {
 }
 
 fn fixture_path() -> PathBuf {
-    workspace_root().join("src/test/resources/benchmark/PXD001819/scan_28787.mzML")
+    workspace_root().join("rust/test-fixtures/benchmark/PXD001819/scan_28787.mzML")
 }
 
 fn param_path() -> PathBuf {
-    workspace_root().join("src/main/resources/ionstat/CID_LowRes_Tryp.param")
+    workspace_root().join("rust/resources/ionstat/CID_LowRes_Tryp.param")
 }
 
 fn build_peptide_ivneefdqleedtpvyk() -> Peptide {

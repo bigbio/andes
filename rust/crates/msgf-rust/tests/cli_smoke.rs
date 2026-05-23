@@ -35,8 +35,8 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     let tsv_path = dir.path().join("rust.tsv");
 
     let status = base_cmd(
-        "src/test/resources/test.mgf",
-        "src/test/resources/BSA.fasta",
+        "rust/test-fixtures/test.mgf",
+        "rust/test-fixtures/BSA.fasta",
         &pin_path,
     )
     .arg("--output-tsv")
@@ -106,8 +106,8 @@ fn cli_accepts_max_missed_cleavages_flag() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "src/test/resources/test.mgf",
-        "src/test/resources/BSA.fasta",
+        "rust/test-fixtures/test.mgf",
+        "rust/test-fixtures/BSA.fasta",
         &pin_path,
     )
     .arg("--max-missed-cleavages")
@@ -124,8 +124,8 @@ fn cli_accepts_min_peaks_flag() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "src/test/resources/test.mgf",
-        "src/test/resources/BSA.fasta",
+        "rust/test-fixtures/test.mgf",
+        "rust/test-fixtures/BSA.fasta",
         &pin_path,
     )
     .arg("--min-peaks")
@@ -142,8 +142,8 @@ fn cli_accepts_min_length_max_length_flags() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "src/test/resources/test.mgf",
-        "src/test/resources/BSA.fasta",
+        "rust/test-fixtures/test.mgf",
+        "rust/test-fixtures/BSA.fasta",
         &pin_path,
     )
     .arg("--min-length")
@@ -180,8 +180,8 @@ fn cli_accepts_mod_fragmentation_instrument_protocol_flags() {
     ).unwrap();
 
     let status = base_cmd(
-        "src/test/resources/test.mgf",
-        "src/test/resources/BSA.fasta",
+        "rust/test-fixtures/test.mgf",
+        "rust/test-fixtures/BSA.fasta",
         &pin_path,
     )
     .arg("--mod").arg(&mods_path)
@@ -210,8 +210,8 @@ fn cli_rejects_invalid_protocol_index() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "src/test/resources/test.mgf",
-        "src/test/resources/BSA.fasta",
+        "rust/test-fixtures/test.mgf",
+        "rust/test-fixtures/BSA.fasta",
         &pin_path,
     )
     .arg("--protocol").arg("42")
@@ -235,8 +235,8 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
     let pin_path = dir.path().join("mzml_out.pin");
 
     let status = base_cmd(
-        "src/test/resources/tiny.pwiz.mzML",
-        "src/test/resources/BSA.fasta",
+        "rust/test-fixtures/tiny.pwiz.mzML",
+        "rust/test-fixtures/BSA.fasta",
         &pin_path,
     )
     // Lower min-peaks so we don't filter out the tiny fixture's sparse spectra.

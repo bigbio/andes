@@ -120,7 +120,7 @@ fn phase6_task10_bsa_specevalue_parity_histogram() {
     eprintln!("Loaded {} Java reference PSMs", java_refs.len());
 
     let target = FastaReader::load_all(BufReader::new(
-        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+        File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap(),
     ))
     .unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -130,7 +130,7 @@ fn phase6_task10_bsa_specevalue_parity_histogram() {
     // default_tryptic already sets: enzyme=Trypsin, isotope_error_range=-1..=2,
     // precursor_tolerance=20ppm, charge_range=2..=3.
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

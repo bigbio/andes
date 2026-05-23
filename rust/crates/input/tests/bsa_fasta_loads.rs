@@ -1,4 +1,4 @@
-//! Load `astral-speed/src/test/resources/BSA.fasta` (1 protein, ~607
+//! Load `astral-speed/rust/test-fixtures/BSA.fasta` (1 protein, ~607
 //! residues) and assert basic invariants.
 
 use std::fs::File;
@@ -10,7 +10,7 @@ use input::FastaReader;
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/test/resources/BSA.fasta")
+        .join("rust/test-fixtures/BSA.fasta")
         .canonicalize()
         .expect("canonicalize BSA.fasta path")
 }

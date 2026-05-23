@@ -1226,7 +1226,7 @@ mod tests {
     #[test]
     fn parses_real_test_fixture() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../src/test/resources/tiny.pwiz.mzML");
+            .join("../../../rust/test-fixtures/tiny.pwiz.mzML");
 
         if !fixture.exists() {
             eprintln!("SKIP: fixture not found at {}", fixture.display());

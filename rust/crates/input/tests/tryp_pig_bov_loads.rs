@@ -1,4 +1,4 @@
-//! Load `astral-speed/src/test/resources/Tryp_Pig_Bov.fasta` (16
+//! Load `astral-speed/rust/test-fixtures/Tryp_Pig_Bov.fasta` (16
 //! proteins) and assert count + per-protein invariants.
 
 use std::fs::File;
@@ -10,7 +10,7 @@ use input::FastaReader;
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/test/resources/Tryp_Pig_Bov.fasta")
+        .join("rust/test-fixtures/Tryp_Pig_Bov.fasta")
         .canonicalize()
         .expect("canonicalize Tryp_Pig_Bov.fasta path")
 }

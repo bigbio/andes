@@ -106,7 +106,7 @@ struct Cli {
     /// Path to the .param scoring model file.
     ///
     /// If not supplied, a bundled file under
-    /// `src/main/resources/ionstat/` is selected from
+    /// `rust/resources/ionstat/` is selected from
     /// `(--fragmentation, --instrument, --protocol)` (default
     /// `HCD_QExactive_Tryp.param`). When running the binary outside the source
     /// tree this path may not exist; supply --param-file explicitly in that
@@ -630,7 +630,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Translate `(--fragmentation, --instrument, --protocol)` into a bundled
 /// `.param` filename and resolve it under
-/// `src/main/resources/ionstat/` relative to the cargo manifest dir.
+/// `rust/resources/ionstat/` relative to the cargo manifest dir.
 ///
 /// CLI indices match Java's:
 /// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
@@ -925,20 +925,20 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 }
 
 /// Resolve a bundled `.param` filename under
-/// `src/main/resources/ionstat/` relative to the crate's cargo manifest
+/// `rust/resources/ionstat/` relative to the crate's cargo manifest
 /// dir (set at compile time). Returns a helpful error if the file does
 /// not exist.
 fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/main/resources/ionstat")
+        .join("rust/resources/ionstat")
         .join(filename);
     candidate.canonicalize().map_err(|e| format!(
         "bundled param file not found at `{}`: {e}\n\
          Hint: not every (fragmentation, instrument, protocol) combination \
          has a bundled .param file. Supply --param-file <PATH> to specify \
          the scoring model explicitly, or list available files under \
-         `src/main/resources/ionstat/`.",
+         `rust/resources/ionstat/`.",
         candidate.display()
     ))
 }

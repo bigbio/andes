@@ -1,7 +1,7 @@
 //! Phase 2 exit gate: load every bundled `.param` file and assert
 //! structural invariants. Path is resolved via `CARGO_MANIFEST_DIR`
 //! (`crates/engine/`) walked up to `astral-speed/`, then into
-//! `src/main/resources/ionstat/`.
+//! `rust/resources/ionstat/`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -11,10 +11,10 @@ use scoring::Param;
 fn ionstat_dir() -> PathBuf {
     // CARGO_MANIFEST_DIR = astral-speed/rust/crates/engine
     // ../../../  → astral-speed/
-    // src/main/resources/ionstat/
+    // rust/resources/ionstat/
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/main/resources/ionstat")
+        .join("rust/resources/ionstat")
         .canonicalize()
         .expect("canonicalize ionstat path")
 }

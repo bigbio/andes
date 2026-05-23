@@ -114,7 +114,7 @@ fn diagnose_peptide_mismatches() {
 
     // ── 2. Build search index + params (same as match_engine_java_parity) ───
     let target = FastaReader::load_all(BufReader::new(
-        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+        File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap(),
     ))
     .unwrap();
     let idx    = SearchIndex::from_target_db(&target, "XXX");
@@ -122,7 +122,7 @@ fn diagnose_peptide_mismatches() {
     let scorer = rank_scorer();
 
     // ── 3. Load spectra ──────────────────────────────────────────────────────
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

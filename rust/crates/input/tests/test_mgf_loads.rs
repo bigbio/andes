@@ -1,4 +1,4 @@
-//! Load `astral-speed/src/test/resources/test.mgf` (small fixture)
+//! Load `astral-speed/rust/test-fixtures/test.mgf` (small fixture)
 //! and assert basic invariants.
 
 use std::fs::File;
@@ -10,7 +10,7 @@ use input::MgfReader;
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/test/resources/test.mgf")
+        .join("rust/test-fixtures/test.mgf")
         .canonicalize()
         .expect("canonicalize test.mgf path")
 }

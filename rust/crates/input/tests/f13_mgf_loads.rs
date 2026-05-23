@@ -1,4 +1,4 @@
-//! Load `astral-speed/src/test/resources/iprg-2013/F13.mgf` (1,406
+//! Load `astral-speed/rust/test-fixtures/iprg-2013/F13.mgf` (1,406
 //! spectra) and assert count + wall-time budget.
 
 use std::fs::File;
@@ -11,7 +11,7 @@ use input::MgfReader;
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/test/resources/iprg-2013/F13.mgf")
+        .join("rust/test-fixtures/iprg-2013/F13.mgf")
         .canonicalize()
         .expect("canonicalize F13.mgf path")
 }

@@ -24,7 +24,7 @@ fn run_search(thread_count: usize) -> (Vec<TopNQueue>, Vec<search::candidate_gen
         .expect("build pool");
 
     let target = FastaReader::load_all(BufReader::new(
-        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+        File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap(),
     ))
     .unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX_");
@@ -37,7 +37,7 @@ fn run_search(thread_count: usize) -> (Vec<TopNQueue>, Vec<search::candidate_gen
     params.charge_range = 2..=3;
     params.isotope_error_range = -1..=2;
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

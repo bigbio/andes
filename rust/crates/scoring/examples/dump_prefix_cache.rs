@@ -20,7 +20,7 @@ use scoring::scoring::rank_scorer::RankScorer;
 use scoring::scoring::scored_spectrum::ScoredSpectrum;
 
 const PARAM_PATH: &str =
-    "/Users/yperez/work/msgfplus-workspace/astral-speed-score-fix/src/main/resources/ionstat/CID_HighRes_Tryp.param";
+    "/Users/yperez/work/msgfplus-workspace/astral-speed-score-fix/rust/resources/ionstat/CID_HighRes_Tryp.param";
 const MZML_PATH: &str =
     "/Users/yperez/work/msgfplus-workspace/benchmark/data/PXD001819/UPS1_5000amol_R1.mzML";
 const TARGET_SCAN: i32 = 28787;

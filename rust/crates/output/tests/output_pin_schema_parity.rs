@@ -91,7 +91,7 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
     // the parity build-out); only schema.
 
     // 1. Run Rust search end-to-end.
-    let target_db = FastaReader::load_all(BufReader::new(File::open(fixture("src/test/resources/BSA.fasta")).unwrap())).unwrap();
+    let target_db = FastaReader::load_all(BufReader::new(File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap())).unwrap();
     let idx = SearchIndex::from_target_db(&target_db, "XXX_");
 
     let cam = Modification {
@@ -116,7 +116,7 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
         .build()
         .unwrap();
 
-    let param_path = fixture("src/main/resources/ionstat/HCD_QExactive_Tryp.param");
+    let param_path = fixture("rust/resources/ionstat/HCD_QExactive_Tryp.param");
     let param = Param::load_from_file(&param_path).unwrap();
     let scorer = RankScorer::new(&param);
 
@@ -126,7 +126,7 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
     params.charge_range = 2..=3;
     params.isotope_error_range = -1..=2;
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

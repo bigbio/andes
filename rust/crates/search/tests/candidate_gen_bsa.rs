@@ -11,7 +11,7 @@ use input::FastaReader;
 fn fasta(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../..")
-        .join("src/test/resources")
+        .join("rust/test-fixtures")
         .join(name)
         .canonicalize()
         .unwrap_or_else(|e| panic!("canonicalize {name}: {e}"))

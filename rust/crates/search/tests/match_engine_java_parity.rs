@@ -19,8 +19,8 @@
 //!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
 //! generated via:
 //!   java -Xmx4g -jar target/MSGFPlus.jar \
-//!     -s src/test/resources/test.mgf \
-//!     -d src/test/resources/BSA.fasta \
+//!     -s rust/test-fixtures/test.mgf \
+//!     -d rust/test-fixtures/BSA.fasta \
 //!     -mod benchmark/parity-fixtures/bsa_test_mgf_mods.txt \
 //!     -o /tmp/bsa.pin -tda 1 -t 20ppm -ti -1,2 -m 3 -inst 0 -e 1 -ntt 2 \
 //!     -minLength 6 -maxLength 40 -minCharge 2 -maxCharge 3 \
@@ -173,13 +173,13 @@ fn rust_matches_superset_java_target_psms() {
     println!("Java identified {} target spectra", java_scans.len());
 
     let target = FastaReader::load_all(BufReader::new(
-        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+        File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap(),
     ))
     .unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();
@@ -246,13 +246,13 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
     println!("Java top-1 peptides: {} entries", java_peps.len());
 
     let target = FastaReader::load_all(BufReader::new(
-        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+        File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap(),
     ))
     .unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();
@@ -345,13 +345,13 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
 #[test]
 fn r1_tie_retention_active_in_production_pipeline() {
     let target = FastaReader::load_all(BufReader::new(
-        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+        File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap(),
     ))
     .unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();
@@ -440,13 +440,13 @@ fn r2_deduped_psm_count_matches_java_on_bsa_fixture() {
     println!("Java distinct (scan, peptide) target PSMs: {}", java_count);
 
     let target = FastaReader::load_all(BufReader::new(
-        File::open(fixture("src/test/resources/BSA.fasta")).unwrap(),
+        File::open(fixture("rust/test-fixtures/BSA.fasta")).unwrap(),
     ))
     .unwrap();
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("src/test/resources/test.mgf")).unwrap();
+    let mgf_file = File::open(fixture("rust/test-fixtures/test.mgf")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

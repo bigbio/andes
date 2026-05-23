@@ -21,11 +21,10 @@
 //!
 //! # Column semantics
 //!
-//! * **Label**: all-decoy rule. `Label = 1` unless the peptide sequence cannot
-//!   be found in ANY target protein (i.e. all explaining proteins are decoy).
-//!   Implemented via `SearchIndex::peptide_has_target_match`, cached per
-//!   distinct peptide sequence during writing so repeated PSMs do not re-scan
-//!   the database.
+//! * **Label**: source-protein TDC rule (iter27, 2026-05-21). `Label = -1`
+//!   if the candidate's source protein is a decoy (`cand.is_decoy`), else
+//!   `+1`. Matches Java MS-GF+ TDC labeling and avoids inflating Percolator's
+//!   target set with peptides whose hit actually came from a decoy protein.
 //!
 //! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, set by
 //!   `match_engine.rs` from `MassError::isotope_offset`.
@@ -69,7 +68,6 @@
 //! - `StdevRelErrorTop7` — population stdev of signed ppm errors for top-7.
 //! - `matchedIonRatio` — `NumMatchedMainIons / peptide.length()`.
 
-use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
@@ -95,9 +93,8 @@ use model::spectrum::Spectrum;
 /// `candidates[psm.primary_candidate_idx() as usize].protein_index`. The combined
 /// target+decoy `ProteinDb` inside `search_index` already carries decoy
 /// prefixes in the decoy accessions, so no separate prefix string is needed
-/// for accession lookup. The `Label` column is similarly derived without
-/// the prefix string — see the target-haystack memmem path in
-/// `write_psm_row`.
+/// for accession lookup. The `Label` column is derived directly from
+/// `cand.is_decoy` (see `write_psm_row`).
 pub fn write_pin(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
@@ -124,22 +121,6 @@ pub fn write_pin_to<W: Write>(
 ) -> io::Result<()> {
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
-    let mut label_cache: HashMap<Vec<u8>, i32> = HashMap::new();
-
-    // Pre-concatenate all target protein sequences into a single haystack
-    // separated by `b'\x01'` (an ASCII byte that never occurs in a residue
-    // sequence — residues are uppercase letters 'A'..='Z'). Substring matches
-    // that would otherwise straddle two proteins are blocked by the
-    // separator, exactly mirroring the naive per-protein scan in
-    // `SearchIndex::peptide_has_target_match` but with a single
-    // memmem-accelerated search over the concatenation.
-    //
-    // Before this optimization, `peptide_has_target_match` did an O(N·M)
-    // naive `slice::windows().any(...)` per unique peptide (~156s on
-    // PXD001819 for 17,960 cache misses across 6,775 target proteins). With
-    // a single haystack and `memchr::memmem::Finder` (Two-Way / SIMD), the
-    // entire label-resolution phase drops to sub-second.
-    let target_haystack = build_target_haystack(search_index);
 
     write_header(writer, min_charge, max_charge)?;
 
@@ -156,45 +137,10 @@ pub fn write_pin_to<W: Write>(
             min_charge,
             max_charge,
             search_index,
-            &target_haystack,
-            &mut label_cache,
             params,
         )?;
     }
     Ok(())
-}
-
-/// Concatenate all target-protein sequences from `search_index` into a single
-/// byte buffer, separated by a byte that cannot appear inside a residue run
-/// (`b'\x01'`). Used by `peptide_has_target_match_fast` so the per-peptide
-/// substring check is a single memmem scan instead of a per-protein
-/// naive loop.
-fn build_target_haystack(search_index: &SearchIndex) -> Vec<u8> {
-    // Pre-size: total target residues + one separator per protein.
-    let total: usize = search_index
-        .iter_target_proteins()
-        .map(|p| p.sequence.len() + 1)
-        .sum();
-    let mut hay = Vec::with_capacity(total);
-    for prot in search_index.iter_target_proteins() {
-        hay.extend_from_slice(&prot.sequence);
-        hay.push(b'\x01');
-    }
-    hay
-}
-
-/// Returns `true` iff `needle` (peptide residues, no flanking) appears as a
-/// substring of any target protein. Drop-in replacement for
-/// `SearchIndex::peptide_has_target_match` that uses the precomputed
-/// concatenated target haystack and `memchr::memmem::find` for an
-/// O(n+m) Two-Way substring search instead of an O(n·m) naive scan.
-fn peptide_has_target_match_fast(target_haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        // Match the original `contains_subsequence` semantics: empty needle
-        // matches any non-empty target.
-        return !target_haystack.is_empty();
-    }
-    memchr::memmem::find(target_haystack, needle).is_some()
 }
 
 // ── header ────────────────────────────────────────────────────────────────────
@@ -266,8 +212,6 @@ fn write_spectrum_rows<W: Write>(
     min_charge: u8,
     max_charge: u8,
     search_index: &SearchIndex,
-    target_haystack: &[u8],
-    label_cache: &mut HashMap<Vec<u8>, i32>,
     params: &SearchParams,
 ) -> io::Result<()> {
     // Sort best-first (lowest spec_e_value first, then highest score).
@@ -289,8 +233,6 @@ fn write_spectrum_rows<W: Write>(
             rank2_spec_e_value,
             min_charge,
             max_charge,
-            target_haystack,
-            label_cache,
             candidates,
             search_index,
             params,
@@ -310,8 +252,6 @@ fn write_psm_row<W: Write>(
     rank2_spec_e_value: f64,
     min_charge: u8,
     max_charge: u8,
-    target_haystack: &[u8],
-    label_cache: &mut HashMap<Vec<u8>, i32>,
     candidates: &[Candidate],
     search_index: &SearchIndex,
     params: &SearchParams,
@@ -322,22 +262,8 @@ fn write_psm_row<W: Write>(
     // convention, matches Java MS-GF+). Pre-iter27, Rust used an "any-target-
     // match" rule (Label = 1 if peptide sequence appears in ANY target
     // protein) which inflated target count when a peptide appeared in both
-    // target and decoy proteins (e.g., YFEIRR exists in `sp|P37690|ENVC_ECOLI`
-    // and `XXX_sp|Q53QZ3|RHG15_HUMAN`; the search-hit's source is the decoy
-    // but Rust labeled +1 because the peptide ALSO exists in a target).
-    //
-    // Java labels by source: if the source protein accession starts with the
-    // decoy prefix, label = -1; otherwise +1. This is standard TDC labeling
-    // and avoids inflating Percolator's target set with peptides actually
-    // sourced from decoy proteins.
-    //
-    // No need to cache: we already have `ctx.accession` in hand, and the
-    // prefix check is a single starts_with call.
-    // Use the candidate's `is_decoy` flag (set at enumeration time from
-    // the protein it came from). This is the source-protein view that
-    // matches Java's TDC labeling.
-    let _ = target_haystack;
-    let _ = label_cache;
+    // target and decoy proteins. Java labels by source: if the source
+    // protein is a decoy, label = -1; otherwise +1.
     let label: i32 = if cand.is_decoy { -1 } else { 1 };
 
     // ExpMass: neutral precursor mass = mz * charge - charge * PROTON

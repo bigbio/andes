@@ -1381,9 +1381,6 @@ mod feature_tests {
 ///
 /// Returns: deduped `Vec<PsmMatch>`. The caller re-pushes these into the
 /// per-charge queue via `queue.push()` for each entry.
-///
-/// Not yet called (Task 3); suppressing dead_code warning until integration.
-#[allow(dead_code)]
 pub(crate) fn dedup_pepseq_score(
     psms: Vec<PsmMatch>,
     candidates: &[Candidate],

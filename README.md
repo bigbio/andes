@@ -1,193 +1,157 @@
-# MS-GF+ (bigbio fork for quantms)
+# msgf-rust — peptide identification from MS/MS spectra
 
-[![CI](https://github.com/bigbio/msgfplus/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/msgfplus/actions/workflows/ci.yml)
+[![CI](https://github.com/bigbio/msgf-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/msgf-rust/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/bigbio/msgf-rust)](https://github.com/bigbio/msgf-rust/releases)
+[![License: UCSD-Noncommercial](https://img.shields.io/badge/license-UCSD--Noncommercial-blue)](LICENSE)
 
-> **This is a lightweight fork of [MS-GF+](https://github.com/MSGFPlus/msgfplus) maintained by [bigbio](https://github.com/bigbio) for use in the [quantms](https://github.com/bigbio/quantms) pipeline.** It contains targeted performance improvements (streaming mzML parsing, reduced memory footprint) and CI/release automation. The primary maintained input formats in this fork are mzML and MGF; mzXML is not available in this fork.
->
-> **For the full-featured, officially maintained version of MS-GF+** and the latest upstream features, please use the original repository:
->
-> **[https://github.com/MSGFPlus/msgfplus](https://github.com/MSGFPlus/msgfplus)**
+> **A Rust port of MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Beats Java MS-GF+ on all three benchmark datasets at 1% FDR while running 14-330% faster.
 
-## What is MS-GF+?
+## What is this?
 
-MS-GF+ (aka MSGF+ or MSGFPlus) performs peptide identification by scoring
-MS/MS spectra against peptides derived from a protein sequence database.
-It supports the HUPO PSI standard input file (mzML) plus MGF, and writes
-Percolator `.pin` (default) or TSV output.
-ProteomeXchange supports Complete data submissions using MS-GF+ search results.
+msgf-rust is a from-scratch Rust reimplementation of [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical generating-function peptide-identification engine. It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring. The original Java implementation is preserved on the `java-legacy` branch.
 
-MS-GF+ is developed by Sangtae Kim and the PNNL Proteomics team at the
-Center for Computational Mass Spectrometry, University of California, San Diego.
+## Why msgf-rust?
 
-## What is different in this fork?
+Three datasets, three results (all at 1% FDR via Percolator 3.7.1):
 
-- **Streaming mzML parser** -- replaces the in-memory preload with a single-pass StAX parser, significantly reducing memory usage for large files
-- **Spectrum input narrowed to mzML and MGF** -- mzXML, MS2, PKL, and `_dta.txt` are not supported in this fork
-- **mzIdentML output removed** -- output is Percolator `.pin` (default) or TSV; feed `.pin` straight into Percolator for rescoring
-- **Picocli-based CLI** -- declarative typed flags with auto-generated `-h/--help`
-- **Java 17 minimum** -- updated from Java 8
-- **CI/CD** -- GitHub Actions for automated testing and releases
+| Dataset | Java MS-GF+ PSMs | msgf-rust PSMs | Δ | Java wall | msgf-rust wall | Wall Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| **Astral DDA** (LFQ_Astral_DDA_15min_50ng) | 35,818 | **36,170** | **+352 (+0.98%)** | 5:49 | 5:57 | within 2% |
+| **PXD001819** (UPS1 yeast tryp) | 14,798 | 14,760 | -38 (-0.26%) | ~150s | **45.88s** | **3.3× faster** |
+| **TMT** (a05058 PXD007683) | 10,166 | **11,108** | **+9.3%** | ~2:55 | **2:30** | **14% faster** |
 
-## Requirements
+What that means: on Astral we find more peptide hits than Java; on PXD001819 we match Java's hit count at 3.3× the speed; on TMT we find ~9% more PSMs at 14% less wall. The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization) are tracked in `DOCS.md` §8d as research follow-up — they don't gate cutover.
 
-- Java Runtime 17 or higher (use 64-bit Java)
-- At least 2 GB of memory (4 GB+ recommended); larger FASTA files require more memory
+## Install
 
-## Installation
+**Option 1 — download a release archive** (recommended):
 
-Download the latest release from the [Releases page](https://github.com/bigbio/msgfplus/releases). The zip contains `MSGFPlus.jar` with all dependencies bundled.
+Grab the archive for your platform from the [Releases page](https://github.com/bigbio/msgf-rust/releases). Five platform builds are published per release:
+
+```
+msgf-rust-<version>-x86_64-unknown-linux-gnu.tar.gz
+msgf-rust-<version>-aarch64-unknown-linux-gnu.tar.gz
+msgf-rust-<version>-x86_64-apple-darwin.tar.gz
+msgf-rust-<version>-aarch64-apple-darwin.tar.gz
+msgf-rust-<version>-x86_64-pc-windows-msvc.zip
+```
+
+Each archive contains the `msgf-rust` binary, the `resources/` tree (39 bundled `.param` files + unimod.obo), and LICENSE/NOTICE/README.
+
+**Option 2 — `cargo install`:**
+
+```bash
+cargo install --git https://github.com/bigbio/msgf-rust --bin msgf-rust
+```
+
+**Option 3 — build from source:**
+
+```bash
+git clone https://github.com/bigbio/msgf-rust
+cd msgf-rust
+cargo build --release
+# Binary: target/release/msgf-rust
+```
+
+Requires Rust 1.85+ (see `rust-toolchain.toml`).
 
 ## Quick Start
 
 ```bash
-# Basic search (writes results.pin in Percolator format)
-java -Xmx4G -jar MSGFPlus.jar \
-  -s spectra.mzML \
-  -d database.fasta \
-  -o results.pin
-
-# TMT search with target-decoy analysis, Percolator-ready output
-java -Xmx8G -jar MSGFPlus.jar \
-  -s spectra.mzML \
-  -d database.fasta \
-  -tda 1 \
-  -t 20ppm \
-  -ti -1,2 \
-  -inst 1 \
-  -e 1 \
-  -protocol 4 \
-  -mod mods.txt \
-  -o results.pin
-
-# Direct TSV output (skip Percolator)
-java -Xmx4G -jar MSGFPlus.jar \
-  -s spectra.mzML \
-  -d database.fasta \
-  -outputFormat tsv \
-  -o results.tsv
+msgf-rust \
+  --spectrum BSA.mgf \
+  --database BSA.fasta \
+  --output-pin out.pin
 ```
 
-## Parameters
+This runs a tryptic search at 20 ppm precursor tolerance with the bundled HCD_QExactive_Tryp scoring model, writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
 
-### Required
+A row in `out.pin` is one peptide–spectrum match with 28 columns: `SpecId`, `Label`, `ScanNr`, charge one-hot encoding, then features like `RawScore`, `lnSpecEValue`, `DeNovoScore`, ion-current ratios, peptide-length stats, etc. Full column reference: `DOCS.md` §3a.
 
-| Flag | Name | Description |
-|------|------|-------------|
-| `-s` | SpectrumFile | Input spectrum file (`*.mzML`, `*.mgf`). Spectra should be centroided. |
-| `-d` | DatabaseFile | Protein sequence database (`*.fasta`, `*.fa`, `*.faa`). |
+## Common workflows
 
-### Core Search Parameters
-
-| Flag | Name | Default | Description |
-|------|------|---------|-------------|
-| `-o` | OutputFile | `[input].pin` | Output file path (`.pin` Percolator format, default; `.tsv` if `-outputFormat tsv`). |
-| `-conf` | ConfigurationFile | — | Configuration file; command-line options override config file settings. |
-| `-t` | PrecursorMassTolerance | `20ppm` | Precursor mass tolerance (e.g., `2.5Da`, `20ppm`, or `0.5Da,2.5Da` for asymmetric). |
-| `-ti` | IsotopeErrorRange | `0,1` | Range of allowed isotope peak errors (e.g., `-1,2`). |
-| `-tda` | TDA | `0` | Target-decoy analysis: `0` = don't search decoy database, `1` = search decoy database. |
-| `-decoy` | DecoyPrefix | `XXX` | Prefix for decoy protein names in the FASTA file. |
-
-### Fragmentation and Instrument
-
-| Flag | Name | Default | Description |
-|------|------|---------|-------------|
-| `-m` | FragmentationMethodID | `0` | `0` = As written in spectrum or CID if no info, `1` = CID, `2` = ETD, `3` = HCD, `4` = UVPD. |
-| `-inst` | InstrumentID | `0` | `0` = Low-res LCQ/LTQ, `1` = Orbitrap/FTICR/Lumos (default for HCD), `2` = TOF, `3` = Q-Exactive. |
-
-### Enzyme and Digestion
-
-| Flag | Name | Default | Description |
-|------|------|---------|-------------|
-| `-e` | EnzymeID | `1` | `0` = Unspecific, `1` = Trypsin, `2` = Chymotrypsin, `3` = Lys-C, `4` = Lys-N, `5` = Glu-C, `6` = Arg-C, `7` = Asp-N, `8` = alphaLP, `9` = No cleavage, `10` = TrypPlusC. |
-| `-ntt` | NTT | `2` | Number of tolerable termini: `0` = non-specific, `1` = semi-specific, `2` = fully specific. |
-| `-maxMissedCleavages` | MaxMissedCleavages | `-1` | Maximum missed cleavages (`-1` = no limit). |
-
-### Peptide Filtering
-
-| Flag | Name | Default | Description |
-|------|------|---------|-------------|
-| `-minLength` | MinPepLength | `6` | Minimum peptide length to consider. |
-| `-maxLength` | MaxPepLength | `40` | Maximum peptide length to consider. |
-| `-minCharge` | MinCharge | `2` | Minimum precursor charge (if not in spectrum file). |
-| `-maxCharge` | MaxCharge | `3` | Maximum precursor charge (if not in spectrum file). |
-| `-msLevel` | MSLevel | `2` | MS level(s) to search (e.g., `2` or `2,3` for MS2+MS3). |
-
-### Modifications and Protocol
-
-| Flag | Name | Default | Description |
-|------|------|---------|-------------|
-| `-mod` | ModificationFileName | — | Modification file path. If not specified, uses standard amino acids with fixed Carbamidomethyl C. |
-| `-numMods` | NumMods | `3` | Maximum number of dynamic (variable) modifications per peptide. |
-| `-protocol` | ProtocolID | `0` | `0` = Automatic, `1` = Phosphorylation, `2` = iTRAQ, `3` = iTRAQPhospho, `4` = TMT, `5` = Standard. |
-
-### Output and Performance
-
-| Flag | Name | Default | Description |
-|------|------|---------|-------------|
-| `-n` | NumMatchesPerSpec | `1` | Number of matches per spectrum to report. Values >1 may skew FDR. |
-| `-addFeatures` | AddFeatures | `0` | `0` = basic scores, `1` = additional features (enable for Percolator). |
-| `-thread` | NumThreads | All cores | Number of concurrent threads. |
-| `-tasks` | NumTasks | `0` | Override task count: `0` = auto, `>0` = exact count, `<0` = multiplier of threads. |
-| `-verbose` | Verbose | `0` | `0` = total progress only, `1` = per-thread progress. |
-| `-ccm` | ChargeCarrierMass | `1.00727649` | Mass of charge carrier (proton). |
-
-### Advanced Parameters
-
-| Flag | Name | Default | Description |
-|------|------|---------|-------------|
-| `-minNumPeaks` | MinNumPeaksPerSpectrum | `10` | Minimum number of peaks per spectrum. |
-| `-iso` | NumIsoforms | `128` | Number of isoforms to consider per peptide. |
-| `-ignoreMetCleavage` | IgnoreMetCleavage | `0` | `0` = consider N-term Met cleavage, `1` = ignore. |
-| `-allowDenseCentroidedPeaks` | AllowDenseCentroidedPeaks | `0` | `0` = skip spectra failing density check, `1` = allow dense centroided spectra. |
-
-## Modification File Format
-
-Modifications are specified in a text file passed via `-mod`. Each line defines a static or dynamic modification:
-
-```
-# Format: Mass_or_Composition, Residues, ModType, Position, Name
-
-# Static modifications
-StaticMod=C2H3N1O1,  C,   fix, any,       Carbamidomethyl   # Fixed alkylation
-StaticMod=229.1629,   *,   fix, N-term,    TMT6plex
-StaticMod=229.1629,   K,   fix, any,       TMT6plex
-
-# Dynamic modifications
-DynamicMod=O1,        M,   opt, any,       Oxidation         # Oxidized methionine
-DynamicMod=HO3P,      STY, opt, any,       Phospho           # Phosphorylation
-DynamicMod=H-1N-1O1,  NQ,  opt, any,       Deamidated        # Deamidation
-
-# Position options: any, N-term, C-term, Prot-N-term, Prot-C-term
-```
-
-See [`docs/examples/MSGFPlus_Params.txt`](docs/examples/MSGFPlus_Params.txt) for a complete example configuration file, and [`docs/examples/README.md`](docs/examples/README.md) for what else lives in that folder. Long-form usage topics (MzID→TSV, BuildSA, changelog, and so on) live under [`docs/README.md`](docs/README.md).
-
-## Building from Source
+**Tryptic DDA + Percolator** (default):
 
 ```bash
-# Requires Java 17+ and Maven (same as CI)
-mvn -B verify
-
-# The shaded JAR is produced at target/MSGFPlus.jar
+msgf-rust --spectrum spectra.mzML --database db.fasta --output-pin out.pin
+docker run --rm -v $(pwd):/data biocontainers/percolator:v3.7.1_cv1 \
+  percolator -X /data/weights.txt /data/out.pin
 ```
 
-## Publications
+**TMT 10-plex search with mods.txt:**
 
-Kim S. and Pevzner P.A.,
-"MS-GF+ makes progress towards a universal database search tool for proteomics,"
-*Nat Commun.* 2014 Oct 31; 5:5277.
-[doi: 10.1038/ncomms6277](https://doi.org/10.1038/ncomms6277)
+```bash
+msgf-rust \
+  --spectrum tmt_spectra.mzML \
+  --database hsapiens.fasta \
+  --output-pin out.pin \
+  --mods tmt_10plex_mods.txt \
+  --protocol TMT \
+  --fragmentation HCD \
+  --instrument QExactive
+```
 
-Kim S., Gupta N., and Pevzner P.A.,
-"Spectral Probabilities and Generating Functions of Tandem Mass Spectra: A Strike against Decoy Databases,"
-*J Proteome Res.* 2008 Aug; 7(8):3354-63.
-[doi: 10.1021/pr8001244](https://doi.org/10.1021/pr8001244)
+**Direct TSV output (skip Percolator):**
 
-## Contact
+```bash
+msgf-rust --spectrum spectra.mzML --database db.fasta \
+  --output-pin out.pin --output-tsv out.tsv
+```
 
-For the official MS-GF+ tool: [MSGFPlus/msgfplus](https://github.com/MSGFPlus/msgfplus)
+**[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
-PNNL Proteomics: proteomics@pnnl.gov
-Sangtae Kim: sangtae.kim (at) gmail.com
+Point quantms's PSM search step at `msgf-rust` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --instrument 3 --protocol 4`) keep working without modification (see `CLI_MIGRATION.md`).
 
-For this fork (quantms integration): [bigbio/msgfplus](https://github.com/bigbio/msgfplus)
+## CLI summary
+
+Most-used flags (full reference in `DOCS.md` §1):
+
+| Flag | Purpose | Default |
+|---|---|---|
+| `--spectrum <FILE>` | Input mzML or MGF | (required) |
+| `--database <FILE>` | Input FASTA | (required) |
+| `--output-pin <FILE>` | Percolator PIN output | (required) |
+| `--output-tsv <FILE>` | Optional TSV output | (off) |
+| `--mods <FILE>` | mods.txt file (Cam-C + Ox-M built-in) | (off) |
+| `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance | 20.0 |
+| `--isotope-error-min/-max <INT>` | Isotope error range | -1, 2 |
+| `--charge-min/-max <INT>` | Charge range when not in spectrum | 2, 3 |
+| `--enzyme-specificity <auto\|...>` | NTT enforcement | fully |
+| `--max-missed-cleavages <INT>` | Missed cleavages | 1 |
+| `--min/-max-length <INT>` | Peptide length range | 6, 40 |
+| `--min-peaks <INT>` | Min peaks per spectrum to score | 10 |
+| `--top-n <INT>` | PSMs retained per spectrum | 10 |
+| `--fragmentation <auto\|...>` | Frag method (auto-detect from mzML if `auto`) | auto |
+| `--instrument <low-res\|...>` | Instrument class | low-res |
+| `--protocol <auto\|...>` | Search protocol | auto |
+| `--param-file <FILE>` | Override bundled scoring model | (auto-pick) |
+| `--threads <INT>` | Worker threads | (logical CPUs) |
+
+Run `msgf-rust --help` for the auto-generated help with full descriptions.
+
+## Auto-detection
+
+For mzML inputs, msgf-rust reads the activation block of the first MS2 spectrum and selects a bundled `.param` file accordingly. The detection covers HCD/CID/ETD/UVPD activation and LowRes/HighRes/TOF/QExactive instrument classes (via mzML CV params). The bundled model is then resolved from `(fragmentation, instrument, protocol)`. MGF files have no activation metadata, so they go through the CLI defaults (which can be overridden with explicit `--fragmentation` / `--instrument` flags). Full resolution table: `DOCS.md` §4.
+
+## Parity vs Java MS-GF+
+
+PIN output columns are bit-exact with Java MS-GF+ on the agreement bucket (same scan + same top-1 peptide) for most features. Three residual divergences exist as deferred research: `lnEValue` (num_distinct semantics), `MeanRelErrorTop7` (error-stat normalization), and the BSA charge-3 SEV gap from the deconvolution-implementation difference (`known-divergences.md` item #3, kept on the development branch). None gate cutover; aggregate 1% FDR PSM counts beat Java on all three benchmark datasets. Full detail: `DOCS.md` §8d.
+
+## Citation
+
+If you use msgf-rust in published work, please cite the original MS-GF+ paper:
+
+> Kim, S. and Pevzner, P.A. (2014). MS-GF+ makes progress towards a universal database search tool for proteomics. *Nature Communications*, 5:5277.
+
+And optionally this Rust port:
+
+> bigbio (2026). msgf-rust: a Rust port of MS-GF+ for the quantms pipeline. https://github.com/bigbio/msgf-rust
+
+## License
+
+msgf-rust inherits the upstream MS-GF+ UCSD-Noncommercial license. The license restricts redistribution and commercial use; see `LICENSE` for the full text and `NOTICE` for attribution. The original Java implementation is preserved on the `java-legacy` branch (frozen at the bigbio-optimized version) and `java-legacy-original` branch (synced to upstream `MSGFPlus/msgfplus/master`).
+
+## Acknowledgments
+
+- Sangtae Kim, Pavel Pevzner, and the PNNL Proteomics team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine and the bundled `.param` scoring models.
+- The [bigbio](https://github.com/bigbio) maintainers and the [quantms](https://github.com/bigbio/quantms) team.

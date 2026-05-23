@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
     PrecursorTolerance, ResidueSpec, Spectrum, Tolerance,
@@ -22,6 +22,49 @@ use model::{
 use scoring_crate::{Param, RankScorer};
 use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
 use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
+
+/// Fragmentation method. Named values map to the same param-file resolution
+/// logic as Java MS-GF+'s `-m` flag. `Auto` means "detect from the mzML's
+/// activation block; fall back to the bundled HCD_QExactive_Tryp.param if
+/// nothing detected" — the same semantics as omitting the flag pre-iter39.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Fragmentation {
+    #[clap(name = "auto")] Auto,
+    #[clap(name = "CID")]  Cid,
+    #[clap(name = "ETD")]  Etd,
+    #[clap(name = "HCD")]  Hcd,
+    #[clap(name = "UVPD")] Uvpd,
+}
+
+/// Instrument class. Drives the `LowRes`/`HighRes`/`TOF`/`QExactive`
+/// classification used to pick the bundled param file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Instrument {
+    #[clap(name = "low-res")]   LowRes,
+    #[clap(name = "high-res")]  HighRes,
+    #[clap(name = "TOF")]       Tof,
+    #[clap(name = "QExactive")] QExactive,
+}
+
+/// Search protocol. Maps to Java MS-GF+'s `-protocol` flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Protocol {
+    #[clap(name = "auto")]          Auto,
+    #[clap(name = "phospho")]       Phospho,
+    #[clap(name = "iTRAQ")]         Itraq,
+    #[clap(name = "iTRAQ-phospho")] ItraqPhospho,
+    #[clap(name = "TMT")]           Tmt,
+    #[clap(name = "standard")]      Standard,
+}
+
+/// Enzymatic-cleavage enforcement at peptide span boundaries. Maps to Java
+/// MS-GF+'s `-ntt` flag where 2=fully, 1=semi, 0=non-specific.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum EnzymeSpecificity {
+    #[clap(name = "non-specific")] NonSpecific,
+    #[clap(name = "semi")]         Semi,
+    #[clap(name = "fully")]        Fully,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -74,14 +117,14 @@ struct Cli {
     #[arg(long, default_value = "10")]
     top_n: u32,
 
-    /// Number of Tolerable Termini.
-    ///
-    /// Controls enzymatic-cleavage enforcement at span boundaries:
-    ///   2 (default): both termini must be cleavage sites (strict / fully specific).
-    ///   1: at least one terminus must be a cleavage site (semi-specific).
-    ///   0: neither terminus needs to be a cleavage site (non-specific).
-    #[arg(long, default_value = "2")]
-    ntt: u8,
+    /// Number of Tolerable Termini (enzymatic-cleavage enforcement at span
+    /// boundaries). `fully`: both termini must be cleavage sites (strict,
+    /// equivalent to Java -ntt 2). `semi`: at least one terminus must be a
+    /// cleavage site (Java -ntt 1). `non-specific`: neither terminus needs
+    /// to be a cleavage site (Java -ntt 0). Legacy numeric 0/1/2 still accepted.
+    #[arg(long = "enzyme-specificity", alias = "ntt",
+          default_value = "fully", value_parser = parse_enzyme_specificity)]
+    enzyme_specificity: EnzymeSpecificity,
 
     /// Maximum number of missed cleavages per peptide (default 1).
     #[arg(long, default_value = "1")]
@@ -114,8 +157,8 @@ struct Cli {
     #[arg(long)]
     param_file: Option<PathBuf>,
 
-    /// Path to a Java-format mods.txt file describing fixed and variable
-    /// modifications. Format: each non-comment line is
+    /// Path to a mods.txt file describing fixed and variable modifications.
+    /// Format: each non-comment line is
     /// `<mass>,<aa>,<fix|opt>,<location>,<name>`, where:
     ///   - `<mass>` is a numeric monoisotopic mass delta (Da). Composition
     ///     strings (e.g. `C2H3N1O1`) are **not** yet supported.
@@ -124,28 +167,25 @@ struct Cli {
     /// A single `NumMods=N` line sets the max variable mods per peptide.
     /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
     /// are ignored. When omitted, the binary uses its built-in defaults
-    /// (Carbamidomethyl-C fixed, Oxidation-M variable).
-    #[arg(long = "mod", value_name = "MODFILE")]
-    mod_file: Option<PathBuf>,
+    /// (Carbamidomethyl-C fixed, Oxidation-M variable). The deprecated
+    /// `--mod` form (singular) is still accepted as a hidden alias.
+    #[arg(long = "mods", alias = "mod", value_name = "MODFILE")]
+    mods: Option<PathBuf>,
 
-    /// Fragmentation method index (Java's `-m`):
-    ///   0=Auto/CID (default), 1=CID, 2=ETD, 3=HCD, 4=UVPD.
-    /// Used to choose the bundled .param file when --param-file is not given.
-    #[arg(long, value_name = "ID")]
-    fragmentation: Option<u8>,
+    /// Fragmentation method. Named values: auto, CID, ETD, HCD, UVPD.
+    /// Legacy numeric (Java MS-GF+ `-m`): 0=auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD.
+    #[arg(long, default_value = "auto", value_parser = parse_fragmentation)]
+    fragmentation: Fragmentation,
 
-    /// Instrument type index (Java's `-inst`):
-    ///   0=LowRes (default), 1=HighRes, 2=TOF, 3=QExactive.
-    /// Used to choose the bundled .param file when --param-file is not given.
-    #[arg(long, value_name = "ID")]
-    instrument: Option<u8>,
+    /// Instrument class. Named values: low-res, high-res, TOF, QExactive.
+    /// Legacy numeric (Java MS-GF+ `-inst`): 0=low-res, 1=high-res, 2=TOF, 3=QExactive.
+    #[arg(long, default_value = "low-res", value_parser = parse_instrument)]
+    instrument: Instrument,
 
-    /// Protocol index (Java's `-protocol`):
-    ///   0=Automatic (default), 1=Phosphorylation, 2=iTRAQ,
-    ///   3=iTRAQPhospho, 4=TMT, 5=Standard.
-    /// Used to choose the bundled .param file when --param-file is not given.
-    #[arg(long, value_name = "ID")]
-    protocol: Option<u8>,
+    /// Search protocol. Named values: auto, phospho, iTRAQ, iTRAQ-phospho, TMT, standard.
+    /// Legacy numeric (Java MS-GF+ `-protocol`): 0=auto, 1=phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=standard.
+    #[arg(long, default_value = "auto", value_parser = parse_protocol)]
+    protocol: Protocol,
 
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
@@ -302,7 +342,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `num_mods_from_file` is populated only when --mod is given and the
     // file contains a `NumMods=N` line; it overrides the default
     // `max_variable_mods_per_peptide` (3) below.
-    let (aa, num_mods_from_file) = match &cli.mod_file {
+    let (aa, num_mods_from_file) = match &cli.mods {
         Some(path) => {
             let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
                 .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
@@ -356,8 +396,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
         None    => {
-            let auto_route_eligible = cli.fragmentation.is_none()
-                && cli.instrument.is_none();
+            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto
+                && cli.instrument == Instrument::LowRes;
             if auto_route_eligible {
                 match detect_dominant_activation(&cli.spectrum) {
                     Some(method) => {
@@ -404,7 +444,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.charge_range = cli.charge_min..=cli.charge_max;
     params.isotope_error_range = cli.isotope_error_min..=cli.isotope_error_max;
     params.top_n_psms_per_spectrum = cli.top_n;
-    params.num_tolerable_termini = cli.ntt;
+    params.num_tolerable_termini = match cli.enzyme_specificity {
+        EnzymeSpecificity::Fully => 2,
+        EnzymeSpecificity::Semi => 1,
+        EnzymeSpecificity::NonSpecific => 0,
+    };
     params.max_missed_cleavages = cli.max_missed_cleavages;
     params.min_peaks = cli.min_peaks;
     params.min_length = cli.min_length;
@@ -650,66 +694,49 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
 /// resources (a packaging defect, not a CLI input error).
 fn resolve_bundled_param(
-    fragmentation: Option<u8>,
-    instrument:    Option<u8>,
-    protocol:      Option<u8>,
+    fragmentation: Fragmentation,
+    instrument:    Instrument,
+    protocol:      Protocol,
 ) -> Result<PathBuf, String> {
-    // Default file when no flags are given — preserves the previous
-    // hard-coded behaviour.
-    if fragmentation.is_none() && instrument.is_none() && protocol.is_none() {
+    // Step 0: default-to-bundled short-circuit. When the caller passes all
+    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto)
+    // we use the historical hardcoded default. This preserves pre-iter39
+    // behavior where omitting all three flags returned HCD_QExactive_Tryp.param.
+    if fragmentation == Fragmentation::Auto
+        && instrument == Instrument::LowRes
+        && protocol == Protocol::Auto {
         return canonicalize_bundled("HCD_QExactive_Tryp.param");
     }
 
-    // Step 0: Validate + normalize inputs (mirrors Java NewScorerFactory.get).
-    //
-    // Java's normalization rules:
-    //   - PQD or null method → CID
-    //   - null enzyme → Trypsin (we hardcode Tryp; n-term enzymes need
-    //     --param-file directly)
-    //   - null instType → LowRes
-    //   - HCD with instType not in {HighRes, QExactive} → upgrade to QExactive
-    //
-    // Our CLI uses 0=Auto/CID for `--fragmentation`, so 0→CID matches Java's
-    // "null→CID" path. PQD is not exposed in our CLI, so `frag` is never
-    // rewritten — only `inst` gets the HCD-upgrade mutation below.
-    let frag = match fragmentation.unwrap_or(0) {
-        0 | 1 => "CID",
-        2     => "ETD",
-        3     => "HCD",
-        4     => "UVPD",
-        n     => return Err(format!(
-            "invalid --fragmentation {n}: valid range is 0..=4 \
-             (0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD)"
-        )),
+    // Step 1: Normalize. Java's normalization rules mirrored here:
+    //   - Auto fragmentation → CID (Java's "null/PQD → CID")
+    //   - HCD with low-res inst → upgrade to QExactive (Java's HCD-upgrade rule)
+    let frag = match fragmentation {
+        Fragmentation::Auto => "CID",
+        Fragmentation::Cid  => "CID",
+        Fragmentation::Etd  => "ETD",
+        Fragmentation::Hcd  => "HCD",
+        Fragmentation::Uvpd => "UVPD",
     };
-    let mut inst = match instrument.unwrap_or(0) {
-        0 => "LowRes",
-        1 => "HighRes",
-        2 => "TOF",
-        3 => "QExactive",
-        n => return Err(format!(
-            "invalid --instrument {n}: valid range is 0..=3 \
-             (0=LowRes, 1=HighRes, 2=TOF, 3=QExactive)"
-        )),
+    let mut inst = match instrument {
+        Instrument::LowRes    => "LowRes",
+        Instrument::HighRes   => "HighRes",
+        Instrument::Tof       => "TOF",
+        Instrument::QExactive => "QExactive",
     };
-    let prot_suffix: &str = match protocol.unwrap_or(0) {
-        // Automatic/Standard: no suffix.
-        0 | 5 => "",
-        1     => "_Phosphorylation",
-        2     => "_iTRAQ",
-        3     => "_iTRAQPhospho",
-        4     => "_TMT",
-        n     => return Err(format!(
-            "invalid --protocol {n}: valid range is 0..=5 \
-             (0=Automatic, 1=Phosphorylation, 2=iTRAQ, \
-              3=iTRAQPhospho, 4=TMT, 5=Standard)"
-        )),
-    };
-
-    // HCD with non-(HighRes|QExactive) inst → upgrade to QExactive (Java rule).
-    if frag == "HCD" && inst != "HighRes" && inst != "QExactive" {
+    // HCD-upgrade rule: HCD with low-res inst → upgrade to QExactive.
+    if frag == "HCD" && inst == "LowRes" {
         inst = "QExactive";
     }
+
+    let prot_suffix: &str = match protocol {
+        Protocol::Auto         => "",          // empty: no protocol suffix
+        Protocol::Phospho      => "_Phosphorylation",
+        Protocol::Itraq        => "_iTRAQ",
+        Protocol::ItraqPhospho => "_iTRAQPhospho",
+        Protocol::Tmt          => "_TMT",
+        Protocol::Standard     => "",          // standard = no suffix
+    };
 
     // Step 1: Try the exact requested combination first.
     //   `{frag}_{inst}_Tryp{prot_suffix}.param`
@@ -872,38 +899,24 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 fn resolve_bundled_param_for_activation(
     method:               ActivationMethod,
     detected_instrument:  Option<InstrumentType>,
-    protocol:             Option<u8>,
+    protocol:             Protocol,
 ) -> Result<PathBuf, String> {
-    // Translate a detected `InstrumentType` to the numeric ID
-    // `resolve_bundled_param` expects. `None` → 0 (LowRes), mirroring Java's
-    // `LOW_RESOLUTION_LTQ` default.
-    let detected_inst_id: u8 = match detected_instrument {
-        Some(InstrumentType::LowRes)    => 0,
-        Some(InstrumentType::HighRes)   => 1,
-        Some(InstrumentType::TOF)       => 2,
-        Some(InstrumentType::QExactive) => 3,
-        None                            => 0, // Java default
-    };
-
-    // Translate the activation method to the (fragmentation, instrument) pair
-    // that `resolve_bundled_param` expects.
-    let (frag_id, inst_id): (u8, u8) = match method {
-        // CID: use detected instrument (LowRes default mirrors Java's
-        // NewScorerFactory).
-        ActivationMethod::CID  => (1, detected_inst_id),
-        // HCD: use detected instrument; `resolve_bundled_param` upgrades
-        // HCD+(LowRes|TOF) → QExactive (Java's NewScorerFactory rule).
-        ActivationMethod::HCD  => (3, detected_inst_id),
-        // ETD: use detected instrument.
-        ActivationMethod::ETD  => (2, detected_inst_id),
+    let frag = match method {
+        ActivationMethod::CID  => Fragmentation::Cid,
+        ActivationMethod::ETD  => Fragmentation::Etd,
+        ActivationMethod::HCD  => Fragmentation::Hcd,
+        ActivationMethod::UVPD => Fragmentation::Uvpd,
         // PQD → CID (Java's NewScorerFactory rule: "PQD or null → CID").
-        ActivationMethod::PQD  => (1, detected_inst_id),
-        // UVPD: only QExactive variant exists bundled. resolve_bundled_param
-        // walks the ladder if missing.
-        ActivationMethod::UVPD => (4, 3),
+        ActivationMethod::PQD  => Fragmentation::Cid,
     };
-
-    resolve_bundled_param(Some(frag_id), Some(inst_id), protocol)
+    let inst = match detected_instrument {
+        Some(InstrumentType::LowRes)    => Instrument::LowRes,
+        Some(InstrumentType::HighRes)   => Instrument::HighRes,
+        Some(InstrumentType::TOF)       => Instrument::Tof,
+        Some(InstrumentType::QExactive) => Instrument::QExactive,
+        None                            => Instrument::LowRes,
+    };
+    resolve_bundled_param(frag, inst, protocol)
 }
 
 /// Helper to call `input::detect_instrument_type` on an mzML path.
@@ -943,6 +956,74 @@ fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
     ))
 }
 
+/// Parse `--fragmentation` value. Accepts named (case-insensitive: auto, CID,
+/// ETD, HCD, UVPD) or legacy numeric (0=Auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD).
+fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
+    if let Ok(v) = <Fragmentation as ValueEnum>::from_str(s, true) { return Ok(v); }
+    match s.parse::<u8>() {
+        Ok(0) => Ok(Fragmentation::Auto),
+        Ok(1) => Ok(Fragmentation::Cid),
+        Ok(2) => Ok(Fragmentation::Etd),
+        Ok(3) => Ok(Fragmentation::Hcd),
+        Ok(4) => Ok(Fragmentation::Uvpd),
+        _ => Err(format!(
+            "invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD \
+             (or legacy 0..=4)"
+        )),
+    }
+}
+
+/// Parse `--instrument` value. Accepts named (low-res, high-res, TOF,
+/// QExactive) or legacy numeric (0=LowRes, 1=HighRes, 2=TOF, 3=QExactive).
+fn parse_instrument(s: &str) -> Result<Instrument, String> {
+    if let Ok(v) = <Instrument as ValueEnum>::from_str(s, true) { return Ok(v); }
+    match s.parse::<u8>() {
+        Ok(0) => Ok(Instrument::LowRes),
+        Ok(1) => Ok(Instrument::HighRes),
+        Ok(2) => Ok(Instrument::Tof),
+        Ok(3) => Ok(Instrument::QExactive),
+        _ => Err(format!(
+            "invalid instrument `{s}`: expected low-res|high-res|TOF|QExactive \
+             (or legacy 0..=3)"
+        )),
+    }
+}
+
+/// Parse `--protocol` value. Accepts named or legacy numeric
+/// (0=Auto, 1=Phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=Standard).
+fn parse_protocol(s: &str) -> Result<Protocol, String> {
+    if let Ok(v) = <Protocol as ValueEnum>::from_str(s, true) { return Ok(v); }
+    match s.parse::<u8>() {
+        Ok(0) => Ok(Protocol::Auto),
+        Ok(1) => Ok(Protocol::Phospho),
+        Ok(2) => Ok(Protocol::Itraq),
+        Ok(3) => Ok(Protocol::ItraqPhospho),
+        Ok(4) => Ok(Protocol::Tmt),
+        Ok(5) => Ok(Protocol::Standard),
+        _ => Err(format!(
+            "invalid --protocol `{s}`: valid range is 0..=5 \
+             (0=Automatic, 1=Phosphorylation, 2=iTRAQ, 3=iTRAQPhospho, \
+              4=TMT, 5=Standard) or named auto|phospho|iTRAQ|iTRAQ-phospho|TMT|standard"
+        )),
+    }
+}
+
+/// Parse `--enzyme-specificity` (`--ntt`) value. Accepts named
+/// (non-specific, semi, fully) or legacy numeric (0=non-specific,
+/// 1=semi, 2=fully).
+fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
+    if let Ok(v) = <EnzymeSpecificity as ValueEnum>::from_str(s, true) { return Ok(v); }
+    match s.parse::<u8>() {
+        Ok(0) => Ok(EnzymeSpecificity::NonSpecific),
+        Ok(1) => Ok(EnzymeSpecificity::Semi),
+        Ok(2) => Ok(EnzymeSpecificity::Fully),
+        _ => Err(format!(
+            "invalid enzyme specificity `{s}`: expected non-specific|semi|fully \
+             (or legacy 0..=2)"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod param_resolver_tests {
     use super::*;
@@ -950,7 +1031,11 @@ mod param_resolver_tests {
     #[test]
     fn default_resolves_to_hcd_qexactive_tryp() {
         // No flags → existing default.
-        let p = resolve_bundled_param(None, None, None).unwrap();
+        let p = resolve_bundled_param(
+            Fragmentation::Auto,
+            Instrument::LowRes,
+            Protocol::Auto,
+        ).unwrap();
         let s = p.to_string_lossy();
         assert!(
             s.ends_with("HCD_QExactive_Tryp.param"),
@@ -961,7 +1046,11 @@ mod param_resolver_tests {
     #[test]
     fn hcd_qexactive_tmt_combo_resolves() {
         // (HCD, QExactive, TMT) → bundled HCD_QExactive_Tryp_TMT.param.
-        let p = resolve_bundled_param(Some(3), Some(3), Some(4)).unwrap();
+        let p = resolve_bundled_param(
+            Fragmentation::Hcd,
+            Instrument::QExactive,
+            Protocol::Tmt,
+        ).unwrap();
         let s = p.to_string_lossy();
         assert!(
             s.ends_with("HCD_QExactive_Tryp_TMT.param"),
@@ -972,7 +1061,11 @@ mod param_resolver_tests {
     #[test]
     fn cid_lowres_tryp_resolves() {
         // (CID, LowRes, Standard) → CID_LowRes_Tryp.param.
-        let p = resolve_bundled_param(Some(1), Some(0), Some(5)).unwrap();
+        let p = resolve_bundled_param(
+            Fragmentation::Cid,
+            Instrument::LowRes,
+            Protocol::Standard,
+        ).unwrap();
         let s = p.to_string_lossy();
         assert!(
             s.ends_with("CID_LowRes_Tryp.param"),
@@ -987,7 +1080,11 @@ mod param_resolver_tests {
         // file is missing (see NewScorerFactory.java line ~120), landing on
         // the protocol-less file. We mirror that behavior: this combination
         // resolves to `CID_HighRes_Tryp.param` rather than erroring out.
-        let p = resolve_bundled_param(Some(1), Some(1), Some(4)).unwrap();
+        let p = resolve_bundled_param(
+            Fragmentation::Cid,
+            Instrument::HighRes,
+            Protocol::Tmt,
+        ).unwrap();
         let s = p.to_string_lossy();
         assert!(
             s.ends_with("CID_HighRes_Tryp.param"),
@@ -1000,7 +1097,11 @@ mod param_resolver_tests {
         // HCD with LowRes is invalid (Java upgrades inst to QExactive in
         // step 0). So (HCD, LowRes, TMT) should land on
         // `HCD_QExactive_Tryp_TMT.param` after normalization.
-        let p = resolve_bundled_param(Some(3), Some(0), Some(4)).unwrap();
+        let p = resolve_bundled_param(
+            Fragmentation::Hcd,
+            Instrument::LowRes,
+            Protocol::Tmt,
+        ).unwrap();
         let s = p.to_string_lossy();
         assert!(
             s.ends_with("HCD_QExactive_Tryp_TMT.param"),
@@ -1013,7 +1114,11 @@ mod param_resolver_tests {
         // (ETD, HighRes, Phospho) — `ETD_HighRes_Tryp_Phosphorylation.param`
         // is not bundled, and the protocol-less `ETD_HighRes_Tryp.param` IS
         // bundled, so the protocol-drop fallback lands on it. Test that.
-        let p = resolve_bundled_param(Some(2), Some(1), Some(1)).unwrap();
+        let p = resolve_bundled_param(
+            Fragmentation::Etd,
+            Instrument::HighRes,
+            Protocol::Phospho,
+        ).unwrap();
         let s = p.to_string_lossy();
         assert!(
             s.ends_with("ETD_HighRes_Tryp.param"),
@@ -1022,21 +1127,21 @@ mod param_resolver_tests {
     }
 
     #[test]
-    fn rejects_out_of_range_fragmentation() {
-        let err = resolve_bundled_param(Some(99), None, None).unwrap_err();
-        assert!(err.contains("--fragmentation"));
+    fn parse_fragmentation_rejects_out_of_range_numeric() {
+        let err = parse_fragmentation("99").unwrap_err();
+        assert!(err.contains("0..=4"), "error message should mention range, got: {err}");
     }
 
     #[test]
-    fn rejects_out_of_range_instrument() {
-        let err = resolve_bundled_param(None, Some(99), None).unwrap_err();
-        assert!(err.contains("--instrument"));
+    fn parse_instrument_rejects_out_of_range_numeric() {
+        let err = parse_instrument("99").unwrap_err();
+        assert!(err.contains("0..=3"), "got: {err}");
     }
 
     #[test]
-    fn rejects_out_of_range_protocol() {
-        let err = resolve_bundled_param(None, None, Some(99)).unwrap_err();
-        assert!(err.contains("--protocol"));
+    fn parse_protocol_rejects_out_of_range_numeric() {
+        let err = parse_protocol("99").unwrap_err();
+        assert!(err.contains("0..=5"), "got: {err}");
     }
 
     // ── resolve_bundled_param_for_activation: instrument routing ──────────────
@@ -1047,7 +1152,7 @@ mod param_resolver_tests {
     #[test]
     fn cid_with_no_detected_instrument_routes_to_lowres() {
         let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, None, None,
+            ActivationMethod::CID, None, Protocol::Auto,
         ).unwrap();
         let s = p.to_string_lossy();
         assert!(
@@ -1059,7 +1164,7 @@ mod param_resolver_tests {
     #[test]
     fn cid_with_lowres_detected_routes_to_lowres() {
         let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::LowRes), None,
+            ActivationMethod::CID, Some(InstrumentType::LowRes), Protocol::Auto,
         ).unwrap();
         assert!(p.to_string_lossy().ends_with("CID_LowRes_Tryp.param"));
     }
@@ -1072,7 +1177,7 @@ mod param_resolver_tests {
         // Most importantly: we must not silently land on the LowRes
         // bucket when QExactive is detected — verify some param resolves.
         let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::QExactive), None,
+            ActivationMethod::CID, Some(InstrumentType::QExactive), Protocol::Auto,
         ).unwrap();
         // Should resolve to *something* — the ladder may fall back, but
         // we just want this not to error.
@@ -1082,7 +1187,7 @@ mod param_resolver_tests {
     #[test]
     fn cid_with_highres_detected_routes_to_highres() {
         let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::HighRes), None,
+            ActivationMethod::CID, Some(InstrumentType::HighRes), Protocol::Auto,
         ).unwrap();
         assert!(
             p.to_string_lossy().ends_with("CID_HighRes_Tryp.param"),
@@ -1096,7 +1201,7 @@ mod param_resolver_tests {
         // to QExactive. Verify the auto-detect path does the same when
         // the mzML claims LowRes (e.g., a CID/HCD-mixed LTQ acquisition).
         let p = resolve_bundled_param_for_activation(
-            ActivationMethod::HCD, Some(InstrumentType::LowRes), None,
+            ActivationMethod::HCD, Some(InstrumentType::LowRes), Protocol::Auto,
         ).unwrap();
         assert!(
             p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"),
@@ -1107,7 +1212,7 @@ mod param_resolver_tests {
     #[test]
     fn hcd_with_qexactive_detected_stays_qexactive() {
         let p = resolve_bundled_param_for_activation(
-            ActivationMethod::HCD, Some(InstrumentType::QExactive), None,
+            ActivationMethod::HCD, Some(InstrumentType::QExactive), Protocol::Auto,
         ).unwrap();
         assert!(p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"));
     }

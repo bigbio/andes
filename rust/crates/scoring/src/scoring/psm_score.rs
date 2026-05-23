@@ -8,10 +8,117 @@
 //! Per-split node score: `round(getNodeScore(prm, true) + getNodeScore(srm, false))`
 //! where `prm` is the nominal prefix mass and `srm = peptideMass - prm`.
 
+use std::sync::OnceLock;
+
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
+
+/// iter31 P-2: cache the `MSGF_TRACE_PEP` env var once at first read instead
+/// of calling `std::env::var` per `score_psm` invocation. Each `env::var`
+/// call acquires the global environment lock; on Astral runs `score_psm`
+/// is invoked ~3.1 billion times, so the lock acquisition is non-trivial.
+///
+/// Returns `Some(filter)` if the env var is set to a non-empty string,
+/// else `None`. The OnceLock initialization is racy-safe and reads from the
+/// process environment at the first call from any thread.
+fn trace_pep_filter() -> Option<&'static String> {
+    static CELL: OnceLock<Option<String>> = OnceLock::new();
+    CELL.get_or_init(|| match std::env::var("MSGF_TRACE_PEP") {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    })
+    .as_ref()
+}
+
+/// Compute the per-bond edge-score sum for a PSM, mirroring Java's
+/// `DBScanScorer.getScore` edge loop (reverse direction for suffix-main
+/// HCD/Trypsin, forward direction for prefix-main).
+///
+/// This is intended as an ADDITIVE feature for Percolator: emit it as a
+/// SEPARATE PIN column alongside the unchanged `RawScore`. Per the n=8
+/// audit pattern, modifying RawScore directly with this contribution
+/// regresses Astral 1% FDR by ~30%; adding it as a new feature lets
+/// Percolator learn weights without breaking the existing distribution.
+///
+/// Mirrors Java's `DBScanner.java:513` call: fromIndex=1, toIndex=n+1 →
+/// reverse loop iterates `i` from n-1 down to 1, forward loop iterates
+/// `i` from 1 to n-1.
+pub fn psm_edge_score(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+) -> i32 {
+    if charge == 0 {
+        return 0;
+    }
+    let n = peptide.length();
+    if n < 2 {
+        return 0;
+    }
+
+    let spectrum_parent_mass = scored_spec.parent_mass();
+    let peptide_nominal = peptide.nominal_residue_mass();
+
+    // Build per-position prefix mass arrays (length n+1; [0]=0, [n]=total).
+    let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
+    let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
+    prefix_mass_arr.push(0.0);
+    prefix_nominal_arr.push(0);
+    let mut prefix_mass_acc = 0.0_f64;
+    for s in 1..=n {
+        let aa = &peptide.residues[s - 1];
+        let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        prefix_mass_acc += residue_mass;
+        if s < n {
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(nominal_from(prefix_mass_acc));
+        } else {
+            // Final entry uses the canonical peptide_nominal (computed from
+            // the residue sum) to avoid rounding skew vs the cumulative.
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(peptide_nominal);
+        }
+    }
+
+    let is_prefix_main = scored_spec.main_ion_direction();
+    let mut edge_total: i32 = 0;
+    if !is_prefix_main {
+        let nominal_peptide_mass = prefix_nominal_arr[n];
+        // Java reverse loop: i from n-1 down to 1.
+        for i in (1..n).rev() {
+            let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
+            let prev_nominal = nominal_peptide_mass - prefix_nominal_arr[i + 1];
+            let theo_mass = prefix_mass_arr[i + 1] - prefix_mass_arr[i];
+            edge_total += scored_spec.edge_score(
+                cur_nominal,
+                prev_nominal,
+                theo_mass,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+        }
+    } else {
+        // Java forward loop: i from 1 to n-1.
+        for i in 1..n {
+            let cur_nominal = prefix_nominal_arr[i];
+            let prev_nominal = prefix_nominal_arr[i - 1];
+            let theo_mass = prefix_mass_arr[i] - prefix_mass_arr[i - 1];
+            edge_total += scored_spec.edge_score(
+                cur_nominal,
+                prev_nominal,
+                theo_mass,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+        }
+    }
+    edge_total
+}
 
 /// Score a PSM as the sum of `ScoredSpectrum::node_score(prefix, suffix)`
 /// across each peptide split position.  This produces a raw score on the
@@ -59,18 +166,28 @@ pub fn score_psm(
     // residue sequence contains the filter string, emit per-split trace
     // lines on stderr. Mirrors `FastScorer.getScoreWithTrace`, so the two
     // dumps line up split-by-split.
-    let trace_pep = std::env::var("MSGF_TRACE_PEP").ok();
-    let pep_seq_string: String = peptide.residues.iter().map(|aa| aa.residue as char).collect();
-    let trace = trace_pep
-        .as_ref()
-        .map(|p| !p.is_empty() && pep_seq_string.contains(p.as_str()))
-        .unwrap_or(false);
-    if trace {
-        eprintln!(
-            "TRACE_RUST_HEADER\tpep={}\tcharge={}\tparent_mass={:.4}\tpeptide_nominal={}\tn={}\tfragment_tol_da={}",
-            pep_seq_string, charge, spectrum_parent_mass, peptide_nominal, n, fragment_tolerance_da
-        );
-    }
+    //
+    // iter31 P-2: env::var is called once at startup via OnceLock and cached;
+    // the prior per-call `std::env::var("MSGF_TRACE_PEP")` fired on every
+    // one of ~3.1G `score_psm` invocations per Astral run. Each call acquires
+    // the global env lock; hoisting saves a few percent of total wall.
+    let trace = match trace_pep_filter() {
+        Some(filter) => {
+            // Only build the per-residue String when the env var is set.
+            let pep_seq_string: String =
+                peptide.residues.iter().map(|aa| aa.residue as char).collect();
+            if pep_seq_string.contains(filter.as_str()) {
+                eprintln!(
+                    "TRACE_RUST_HEADER\tpep={}\tcharge={}\tparent_mass={:.4}\tpeptide_nominal={}\tn={}\tfragment_tol_da={}",
+                    pep_seq_string, charge, spectrum_parent_mass, peptide_nominal, n, fragment_tolerance_da
+                );
+                Some(pep_seq_string)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
 
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
@@ -84,12 +201,6 @@ pub fn score_psm(
         // Nominal masses at the split position.
         let prefix_nominal = nominal_from(prefix_mass_acc);
         let suffix_nominal = peptide_nominal - prefix_nominal;
-
-        // Sample cached prefix/suffix scores for trace diagnostics (no
-        // change to the hot-path semantics): the cache exposes the same
-        // FastScorer-style per-index tables Java prints from.
-        let cached_pref = scored_spec.cached_prefix_score(prefix_nominal);
-        let cached_suff = scored_spec.cached_suffix_score(suffix_nominal);
 
         let contribution = scored_spec
             .cached_split_score(prefix_nominal, suffix_nominal)
@@ -105,7 +216,9 @@ pub fn score_psm(
             });
         total += contribution;
 
-        if trace {
+        if let Some(pep_seq_string) = &trace {
+            let cached_pref = scored_spec.cached_prefix_score(prefix_nominal);
+            let cached_suff = scored_spec.cached_suffix_score(suffix_nominal);
             let pref_str = cached_pref
                 .map(|v| format!("{v}"))
                 .unwrap_or_else(|| "NA".to_string());
@@ -119,7 +232,7 @@ pub fn score_psm(
             );
         }
     }
-    if trace {
+    if let Some(pep_seq_string) = &trace {
         eprintln!(
             "TRACE_RUST_FINAL\tpep={}\trawScore={}",
             pep_seq_string, total

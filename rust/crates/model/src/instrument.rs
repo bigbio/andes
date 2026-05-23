@@ -18,6 +18,21 @@ impl InstrumentType {
         }
     }
 
+    /// Whether the instrument produces high-resolution MS/MS spectra.
+    ///
+    /// Mirrors Java's `InstrumentType.isHighResolution()`: HighRes,
+    /// TOF, and QExactive return `true`; LowRes returns `false`. Used by
+    /// `compute_psm_features` to mirror Java's `PSMFeatureFinder` hardcoded
+    /// 20 ppm (high-res) / 0.5 Da (low-res) fragment tolerance for
+    /// feature counting, independent of `param.mme` (which the rank-based
+    /// scoring tables use at a coarser resolution for binning).
+    pub fn is_high_resolution(self) -> bool {
+        matches!(
+            self,
+            InstrumentType::HighRes | InstrumentType::TOF | InstrumentType::QExactive
+        )
+    }
+
     /// Case-sensitive lookup.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {

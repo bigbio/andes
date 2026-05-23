@@ -229,6 +229,10 @@ def main():
     # ── per-scan top-1 buckets ─────────────────────────────────────────────
     buckets = Counter()
     bucket_examples = defaultdict(list)
+    # iter38 (diagnostic upgrade): collect ALL scans in the 3 non-converging
+    # buckets along with both engines' top-1 rows. Written to non_converging.csv
+    # to enable per-feature analysis of the residual PSM-divergence buckets.
+    non_converging: list = []  # (scan, bucket, j_row, r_row) tuples
     for scan in all_scans:
         j = best_by_lnspec(java_by_scan.get(scan, []))
         r = best_by_lnspec(rust_by_scan.get(scan, []))
@@ -262,18 +266,21 @@ def main():
                     bucket_examples["both_target_diff_peptide"].append(
                         (scan, j["_peptide_residues"], r["_peptide_residues"])
                     )
+                non_converging.append((scan, "both_target_diff_peptide", j, r))
         elif j_lab == 1 and r_lab == -1:
             buckets["java_target_rust_decoy"] += 1
             if len(bucket_examples["java_target_rust_decoy"]) < 5:
                 bucket_examples["java_target_rust_decoy"].append(
                     (scan, j["_peptide_residues"], r["_peptide_residues"])
                 )
+            non_converging.append((scan, "java_target_rust_decoy", j, r))
         elif j_lab == -1 and r_lab == 1:
             buckets["rust_target_java_decoy"] += 1
             if len(bucket_examples["rust_target_java_decoy"]) < 5:
                 bucket_examples["rust_target_java_decoy"].append(
                     (scan, j["_peptide_residues"], r["_peptide_residues"])
                 )
+            non_converging.append((scan, "rust_target_java_decoy", j, r))
         else:
             buckets["both_decoy"] += 1
 
@@ -333,6 +340,34 @@ def main():
                 for c in NUMERIC_COLS
             ])
     print(f"Wrote {csv_path} ({len(per_row)} rows)", file=sys.stderr)
+
+    # iter38 diagnostic upgrade: dump per-feature values for the
+    # 3 non-converging buckets so future audits can characterize which
+    # features are driving the divergence. Each row has both engines'
+    # top-1 PSM values side-by-side for every NUMERIC_COL feature.
+    nc_path = args.out_dir / "non_converging.csv"
+    with open(nc_path, "w", newline="") as f:
+        w = csv.writer(f)
+        header = ["scan", "bucket", "java_peptide", "rust_peptide"]
+        for c in NUMERIC_COLS:
+            header.append(f"java_{c}")
+            header.append(f"rust_{c}")
+        w.writerow(header)
+        for scan, bucket, j, r in non_converging:
+            row = [
+                scan,
+                bucket,
+                j.get("_peptide_residues", ""),
+                r.get("_peptide_residues", ""),
+            ]
+            for c in NUMERIC_COLS:
+                jv = j.get(c, "")
+                rv = r.get(c, "")
+                row.append(jv)
+                row.append(rv)
+            w.writerow(row)
+    print(f"Wrote {nc_path} ({len(non_converging)} non-converging PSMs)",
+          file=sys.stderr)
 
     # ── write markdown report ──────────────────────────────────────────────
     md_path = args.out_dir / "report.md"

@@ -36,15 +36,36 @@ public class DBScanScorer extends FastScorer {
     public int getScore(double[] prefixMassArr, int[] nominalPrefixMassArr, int fromIndex, int toIndex, int numMods) {
         int nodeScore = super.getScore(prefixMassArr, nominalPrefixMassArr, fromIndex, toIndex, numMods);
         int edgeScore = 0;
+        // iter28 per-edge trace gated by `msgfplus.trace=true` (cheap: skipped when off).
+        boolean trace = "true".equals(System.getProperty("msgfplus.trace"));
         if (!isNodeMassPRM)    // reverse
         {
             int nominalPeptideMass = nominalPrefixMassArr[toIndex - 1];
-            for (int i = toIndex - 2; i >= fromIndex; i--)
-                edgeScore += getEdgeScoreInt(nominalPeptideMass - nominalPrefixMassArr[i], nominalPeptideMass - nominalPrefixMassArr[i + 1], (float) (prefixMassArr[i + 1] - prefixMassArr[i]));
+            for (int i = toIndex - 2; i >= fromIndex; i--) {
+                int cur = nominalPeptideMass - nominalPrefixMassArr[i];
+                int prev = nominalPeptideMass - nominalPrefixMassArr[i + 1];
+                float theoAa = (float) (prefixMassArr[i + 1] - prefixMassArr[i]);
+                int es = getEdgeScoreInt(cur, prev, theoAa);
+                if (trace) {
+                    System.err.println("TRACE_JAVA_EDGE\tdir=reverse\ti=" + i + "\tcur=" + cur + "\tprev=" + prev + "\ttheoAa=" + theoAa + "\tedgeScore=" + es);
+                }
+                edgeScore += es;
+            }
         } else                    // forward
         {
-            for (int i = fromIndex; i <= toIndex - 2; i++)
-                edgeScore += getEdgeScoreInt(nominalPrefixMassArr[i], nominalPrefixMassArr[i - 1], (float) (prefixMassArr[i] - prefixMassArr[i - 1]));
+            for (int i = fromIndex; i <= toIndex - 2; i++) {
+                int cur = nominalPrefixMassArr[i];
+                int prev = nominalPrefixMassArr[i - 1];
+                float theoAa = (float) (prefixMassArr[i] - prefixMassArr[i - 1]);
+                int es = getEdgeScoreInt(cur, prev, theoAa);
+                if (trace) {
+                    System.err.println("TRACE_JAVA_EDGE\tdir=forward\ti=" + i + "\tcur=" + cur + "\tprev=" + prev + "\ttheoAa=" + theoAa + "\tedgeScore=" + es);
+                }
+                edgeScore += es;
+            }
+        }
+        if (trace) {
+            System.err.println("TRACE_JAVA_EDGE_TOTAL\tnodeScore=" + nodeScore + "\tedgeScore=" + edgeScore + "\tisPrefixMain=" + isNodeMassPRM);
         }
         return nodeScore + edgeScore;
     }

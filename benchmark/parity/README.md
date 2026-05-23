@@ -43,6 +43,26 @@ Outputs:
   placeholder (Rust's i32::MIN for GF-uncomputed PSMs) are excluded from
   per-feature stats to avoid skewing the mean.
 
+### Mod-file parity (CRITICAL)
+
+Rust's `msgf-rust` binary, when invoked without `--mod`, uses built-in
+defaults (Carbamidomethyl-C fixed + Oxidation-M variable). Java MS-GF+
+typically reads a `mods.txt` configured for the dataset, which for
+HCD-on-protein-N-term datasets (Astral ProteoBench Module 8 included)
+adds **Acetyl-Prot-N-term** as a third variable mod.
+
+If Rust runs without `--mod` against a Java run that uses
+`Acetyl-Prot-N-term`, **Rust silently misses all acetylated peptides**.
+Iter24 measured ~+384 PSMs at 1% FDR (gap to Java 13.5% → 12.4%) just
+from passing the equivalent mods file.
+
+Use the Rust-compatible fixture at
+`benchmark/parity-fixtures/astral_mods_rust.txt` (numeric mass deltas;
+Rust's `--mod` parser does NOT yet support Java composition strings
+like `C2H3N1O1`) when reproducing the Astral parity harness against Java.
+
+Doc: `docs/parity-analysis/notes/2026-05-21-iter24-acetyl-mod-fix.md`.
+
 ## Dependencies
 
 Python stdlib only. No pandas / numpy / scipy. Matches the project's

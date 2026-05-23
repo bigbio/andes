@@ -51,6 +51,15 @@ pub struct PsmFeatures {
     pub mean_rel_error_top7: f32,
     /// Population standard deviation of signed relative errors (ppm) for top-7 ions.
     pub stdev_rel_error_top7: f32,
+
+    // ── Additive Java-parity features ──────────────────────────────────────
+    /// Per-bond edge score sum, mirroring Java's `DBScanScorer.getScore`
+    /// edge loop (IES + error_score per bond). Emitted as a NEW `EdgeScore`
+    /// PIN column alongside the unchanged `RawScore`, so Percolator can
+    /// learn weights without disrupting the existing RawScore distribution
+    /// (which destroyed discrimination in iter17/iter18 when blended into
+    /// RawScore directly). Computed via `psm_edge_score` in `score_psm.rs`.
+    pub edge_score: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -75,8 +84,31 @@ pub struct PsmMatch {
     pub charge_used: u8,
     /// Signed: positive when peptide mass exceeds spectrum's implied mass.
     pub mass_error_ppm: f64,
-    /// Higher is better. Real spectral-similarity score.
+    /// Pin RawScore = `node_score + cleavage_credit`. Higher is better.
+    /// This is what gets emitted in the `RawScore` PIN column (unchanged
+    /// from iter19's design). Used by Percolator as one of many features.
     pub score: f32,
+    /// iter33: queue-ordering score = `node + cleavage + edge`. Java's
+    /// `DBScanScorer.getScore` returns `node + edge` and `DBScanner.java:533`
+    /// adds cleavage, so Java's `match.score` (used by its `PriorityQueue`
+    /// ordering) is `node + cleavage + edge`. Rust's pin RawScore stays at
+    /// `node + cleavage` for Percolator distribution stability (iter19); the
+    /// SEPARATE `EdgeScore` PIN column carries the `+edge` contribution.
+    /// `rank_score` mirrors Java's queue-ordering key without changing the
+    /// pin RawScore distribution.
+    ///
+    /// **No automatic default**: PsmMatch does not implement `Default`, and
+    /// callers MUST set `rank_score` explicitly. Test fixtures that build
+    /// PsmMatch literals should set `rank_score = score` for pre-iter33
+    /// behavior (no edge contribution to ranking). The `match_engine.rs`
+    /// candidate loop computes `rank_score = score + edge_score as f32`.
+    pub rank_score: f32,
+    /// Per-PSM edge_score = `psm_edge_score(...)` for this candidate.
+    /// Computed at queue-insertion time in `match_engine.rs` and reused by
+    /// `compute_psm_features` to populate the iter19 `EdgeScore` PIN column
+    /// (avoids the recompute). Default 0 — features extraction will compute
+    /// it on the fly if it remains 0 (e.g. for test fixtures).
+    pub edge_score: i32,
     /// SpecEValue: lower is better. Default 1.0 = "not yet computed"
     /// / "no signal". Set by `compute_spec_e_values_for_spectrum` after the
     /// per-candidate scoring loop.
@@ -116,7 +148,14 @@ impl PsmMatch {
 
 impl PartialEq for PsmMatch {
     fn eq(&self, other: &Self) -> bool {
-        self.spec_e_value == other.spec_e_value && self.score == other.score
+        // iter37 HIGH-2: PartialEq MUST agree with `Ord::cmp` (Rust contract
+        // a == b ⇒ a.cmp(b) == Equal). Ord uses (spec_e_value, rank_score)
+        // post-iter33, so PartialEq must compare the same fields. Pre-iter37
+        // this compared `score` (= node + cleavage), violating the contract
+        // for any pair of PSMs with equal `score` but different `rank_score`
+        // (= `score + edge`). BinaryHeap behavior was technically undefined
+        // for those pairs.
+        self.spec_e_value == other.spec_e_value && self.rank_score == other.rank_score
     }
 }
 
@@ -129,7 +168,19 @@ impl PartialOrd for PsmMatch {
 }
 
 /// Primary: `spec_e_value` ascending (lower = better).
-/// Secondary: `score` descending (higher = better).
+/// Secondary: `rank_score` descending (higher = better).
+///
+/// iter33: `rank_score` is the Java-aligned queue-ordering key `node +
+/// cleavage + edge`. Pre-iter33 the secondary key was just `score`
+/// (= node + cleavage); post-iter33 it's `rank_score` (= node + cleavage +
+/// edge) so the queue selects Java-equivalent top-1 PSMs even though the
+/// PIN RawScore distribution (iter19) stays unchanged at `node + cleavage`.
+///
+/// For pre-iter33 callers / test fixtures that never set `rank_score`, the
+/// default of 0.0 means an unset `rank_score` would lose to a set one. The
+/// `match_engine` candidate loop always sets both `score` and `rank_score`;
+/// fixtures that build PsmMatch manually should set `rank_score = score`
+/// to preserve old behavior.
 ///
 /// This ordering is used by `TopNQueue`'s min-heap (via `Reverse<PsmMatch>`):
 /// the heap's "minimum" element is the one with the *largest* spec_e_value
@@ -137,17 +188,15 @@ impl PartialOrd for PsmMatch {
 impl Ord for PsmMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        // "Better" PSM = smaller spec_e_value, then larger score.
-        // NaN spec_e_value or score is treated as worst (sorts last / loses to finite).
-        // Map NaN spec_e_value → +infinity (worst, since smaller is better).
-        // Map NaN score        → -infinity (worst, since larger is better).
+        // "Better" PSM = smaller spec_e_value, then larger rank_score.
+        // NaN values are treated as worst (sort last / lose to finite).
         let self_sev  = if self.spec_e_value.is_nan()  { f64::INFINITY }      else { self.spec_e_value };
         let other_sev = if other.spec_e_value.is_nan() { f64::INFINITY }      else { other.spec_e_value };
         match other_sev.partial_cmp(&self_sev).unwrap_or(Ordering::Equal) {
             Ordering::Equal => {
-                let self_score  = if self.score.is_nan()  { f32::NEG_INFINITY } else { self.score };
-                let other_score = if other.score.is_nan() { f32::NEG_INFINITY } else { other.score };
-                self_score.partial_cmp(&other_score).unwrap_or(Ordering::Equal)
+                let self_rank  = if self.rank_score.is_nan()  { f32::NEG_INFINITY } else { self.rank_score };
+                let other_rank = if other.rank_score.is_nan() { f32::NEG_INFINITY } else { other.rank_score };
+                self_rank.partial_cmp(&other_rank).unwrap_or(Ordering::Equal)
             }
             ord => ord,
         }
@@ -211,6 +260,26 @@ impl TopNQueue {
 
     pub fn len(&self) -> usize { self.heap.len() }
     pub fn is_empty(&self) -> bool { self.heap.is_empty() }
+
+    /// Return the `rank_score` of the queue's WORST retained PSM in O(1).
+    ///
+    /// The min-heap stores `Reverse<PsmMatch>` so `heap.peek()` returns the
+    /// PSM with the LOWEST `Ord` value — the candidate that would be
+    /// evicted first if a strictly better PSM arrived. Returns `None` if
+    /// the queue is empty.
+    ///
+    /// iter34: used by the per-candidate two-stage gating in
+    /// `match_engine.rs` — candidates whose `pin_score + max_edge_bonus`
+    /// cannot exceed the worst retained `rank_score` skip the expensive
+    /// `psm_edge_score` computation entirely.
+    pub fn worst_rank_score(&self) -> Option<f32> {
+        self.heap.peek().map(|std::cmp::Reverse(m)| m.rank_score)
+    }
+
+    /// Queue capacity (the top-N target). Used by callers that need to
+    /// distinguish "queue has spare capacity, accept everything" from
+    /// "queue at capacity, must beat worst".
+    pub fn capacity(&self) -> u32 { self.capacity }
 
     /// Iterate over all PSMs in the queue (order not guaranteed).
     pub fn iter_psms(&self) -> impl Iterator<Item = &PsmMatch> {
@@ -312,6 +381,8 @@ mod tests {
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,
+            rank_score: score,  // iter33 fixture default: rank_score = score
+            edge_score: 0,
             spec_e_value: 1.0,  // default sentinel: "not yet computed"
             de_novo_score: i32::MIN,  // sentinel: not yet computed
             activation_method: None,

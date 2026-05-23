@@ -93,3 +93,7 @@ references/
 # Session-local state
 .claude/SESSION_STATUS.md
 .claude/scheduled_tasks.lock
+
+# Rust workspace local state (moved from rust/.gitignore during root restructure)
+.cargo/
+*.rs.bk

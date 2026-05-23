@@ -29,7 +29,7 @@ fn first_line(path: &std::path::Path) -> String {
 
 #[test]
 fn rust_pin_header_matches_java_pin_fixture_header_exactly() {
-    let java_pin_path = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let java_pin_path = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
     let java_header = first_line(&java_pin_path);
 
     // Construct an empty queues-vec but write the header — the writer
@@ -139,7 +139,7 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
     output::write_pin(&rust_pin_path, &spectra, &queues, &candidates, &params, &idx).expect("write_pin");
 
     // 3. Read Java + Rust PIN files and check column counts on first 5 data rows.
-    let java_pin_path = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let java_pin_path = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
     let java_lines: Vec<_> = BufReader::new(File::open(&java_pin_path).unwrap())
         .lines()
         .collect::<Result<_, _>>()

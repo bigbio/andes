@@ -259,3 +259,74 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
         "PIN header should be present for mzML output; got: {first_line}"
     );
 }
+
+/// Regression guard: legacy Java numeric flag values and the new
+/// Rust-idiomatic named values must resolve to byte-identical PIN output.
+/// Quantms scripts use the numeric form; new docs recommend the named form.
+/// If this test breaks, the legacy compat layer is broken.
+#[test]
+fn cli_accepts_both_named_and_numeric_param_values() {
+    let bsa_fasta = fixture("test-fixtures/BSA.fasta");
+    let test_mgf = fixture("test-fixtures/test.mgf");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mods_path = dir.path().join("mods.txt");
+    std::fs::write(
+        &mods_path,
+        "NumMods=2\n\
+         229.162932,K,fix,any,TMT6plex\n\
+         229.162932,*,fix,N-term,TMT6plex\n\
+         57.021464,C,fix,any,Carbamidomethyl\n\
+         15.994915,M,opt,any,Oxidation\n",
+    ).unwrap();
+
+    let tmp_a = tempfile::tempdir().expect("tmpdir a");
+    let pin_a = tmp_a.path().join("legacy.pin");
+
+    let tmp_b = tempfile::tempdir().expect("tmpdir b");
+    let pin_b = tmp_b.path().join("named.pin");
+
+    // Run A: legacy numeric form (mirrors current quantms usage).
+    let status_a = base_cmd(test_mgf.to_str().unwrap(),
+                            bsa_fasta.to_str().unwrap(),
+                            &pin_a)
+        .arg("--mod").arg(&mods_path)
+        .arg("--fragmentation").arg("3")
+        .arg("--instrument").arg("3")
+        .arg("--protocol").arg("4")
+        .arg("--ntt").arg("2")
+        .arg("--precursor-tol-ppm").arg("100")
+        .status()
+        .expect("legacy form exit");
+    assert!(status_a.success(), "legacy CLI form failed");
+
+    // Run B: canonical named form (mirrors new docs).
+    let status_b = base_cmd(test_mgf.to_str().unwrap(),
+                            bsa_fasta.to_str().unwrap(),
+                            &pin_b)
+        .arg("--mods").arg(&mods_path)
+        .arg("--fragmentation").arg("HCD")
+        .arg("--instrument").arg("QExactive")
+        .arg("--protocol").arg("TMT")
+        .arg("--enzyme-specificity").arg("fully")
+        .arg("--precursor-tol-ppm").arg("100")
+        .status()
+        .expect("named form exit");
+    assert!(status_b.success(), "named CLI form failed");
+
+    let pin_a_content = std::fs::read_to_string(&pin_a).expect("read legacy pin");
+    let pin_b_content = std::fs::read_to_string(&pin_b).expect("read named pin");
+
+    // Row order can vary between separate process invocations (Rayon scheduling);
+    // compare header + sorted data rows to verify equivalent search output.
+    let mut lines_a: Vec<&str> = pin_a_content.lines().collect();
+    let mut lines_b: Vec<&str> = pin_b_content.lines().collect();
+    assert!(!lines_a.is_empty() && !lines_b.is_empty(), "PIN files must not be empty");
+    let header_a = lines_a.remove(0);
+    let header_b = lines_b.remove(0);
+    assert_eq!(header_a, header_b, "PIN headers must match");
+    lines_a.sort_unstable();
+    lines_b.sort_unstable();
+    assert_eq!(lines_a, lines_b,
+        "legacy and named CLI forms must produce equivalent PIN output");
+}

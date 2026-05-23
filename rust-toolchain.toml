@@ -1,3 +1,6 @@
 [toolchain]
-channel = "1.80.0"
+# Required >= 1.85 because the resolved `clap_lex` (and other transitive
+# deps) declare `edition = "2024"`, which is only stable from 1.85 onward.
+# Bumped from 1.80.0 to 1.87.0 (current stable on local dev + CI runners).
+channel = "1.87.0"
 components = ["rustfmt", "clippy"]

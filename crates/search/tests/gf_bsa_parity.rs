@@ -7,7 +7,7 @@
 //!   - SOFT gate: ≥50% within 4 OOM (not the aspirational 95% gate)
 //!
 //! Reference fixture:
-//!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
+//!   `astral-speed/test-fixtures/parity/bsa_test_mgf_java.pin`
 
 mod common;
 use common::*;
@@ -39,7 +39,7 @@ struct JavaRef {
 }
 
 fn load_java_reference() -> Vec<JavaRef> {
-    let path = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let path = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
     let f = File::open(&path).unwrap_or_else(|e| panic!("open fixture: {e}"));
     let r = BufReader::new(f);
     let mut lines = r.lines();

@@ -15,7 +15,7 @@
 //! (e_value proxy follow-up).
 //!
 //! Reference fixture (for context, not used for the assertion):
-//!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
+//!   `astral-speed/test-fixtures/parity/bsa_test_mgf_java.pin`
 //!
 //! The 5 PSMs were hand-picked from Label=1 (target) rows spanning the
 //! SpecEValue range. Java SP values come from `GF_TAIL: ... spec_prob=`

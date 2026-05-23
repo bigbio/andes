@@ -16,7 +16,7 @@
 //! Threshold: >= 50% top-1 identity match.
 //!
 //! Reference fixture:
-//!   `astral-speed/benchmark/parity-fixtures/bsa_test_mgf_java.pin`
+//!   `astral-speed/test-fixtures/parity/bsa_test_mgf_java.pin`
 //! generated via:
 //!   java -Xmx4g -jar target/MSGFPlus.jar \
 //!     -s test-fixtures/test.mgf \
@@ -164,7 +164,7 @@ fn peptide_residue_string(p: &model::Peptide) -> String {
 
 #[test]
 fn rust_matches_superset_java_target_psms() {
-    let java_pin = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let java_pin = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
     let java_scans = java_target_scans(&java_pin);
     assert!(
         !java_scans.is_empty(),
@@ -237,7 +237,7 @@ fn rust_matches_superset_java_target_psms() {
 
 #[test]
 fn rust_top1_matches_java_top1_for_majority_of_spectra() {
-    let java_pin = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let java_pin = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
     let java_peps = java_target_peptides(&java_pin);
     assert!(
         !java_peps.is_empty(),
@@ -434,7 +434,7 @@ fn java_target_scan_peptide_pairs(pin_path: &PathBuf) -> HashSet<(i32, String)> 
 /// in retention before assuming the test is wrong.
 #[test]
 fn r2_deduped_psm_count_matches_java_on_bsa_fixture() {
-    let java_pin = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let java_pin = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
     let java_target_pairs = java_target_scan_peptide_pairs(&java_pin);
     let java_count = java_target_pairs.len();
     println!("Java distinct (scan, peptide) target PSMs: {}", java_count);

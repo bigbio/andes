@@ -676,7 +676,7 @@ mod tests {
     // ── Test 1: header columns match the reference fixture ──────────────────
 
     /// The expected column list is copied verbatim from the reference fixture's
-    /// first line (`benchmark/parity-fixtures/bsa_test_mgf_java.pin`), which uses
+    /// first line (`test-fixtures/parity/bsa_test_mgf_java.pin`), which uses
     /// charge2..=charge3 (BSA test uses charge_range 2..=3).
     ///
     /// Byte-parity note: the fixture header is compared column-by-column below.

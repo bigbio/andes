@@ -51,7 +51,7 @@ struct JavaRef {
 }
 
 fn load_java_reference() -> Vec<JavaRef> {
-    let path = fixture("benchmark/parity-fixtures/bsa_test_mgf_java.pin");
+    let path = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
     let f = File::open(&path)
         .unwrap_or_else(|e| panic!("open {:?}: {}", path, e));
     let r = BufReader::new(f);

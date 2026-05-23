@@ -59,13 +59,16 @@ target/
 __pycache__/
 *.pyc
 
-# Benchmark: keep only CI scaffold, ignore heavy local artifacts
+# Benchmark: keep only CI scaffold, ignore heavy local artifacts.
+# Parity scripts + fixtures are local-only context; not part of the tool code.
 benchmark/*
 !benchmark/README.md
 !benchmark/ci/
 !benchmark/capture-references.sh
-!benchmark/parity/
-!benchmark/parity-fixtures/
+
+# Parity-analysis docs (iter-by-iter notes + diff CSVs) are local-only
+# development context, not part of the shipped repo.
+docs/parity-analysis/
 
 # Java reference outputs from `mvn -Pcapture-references` — large; not committed.
 references/

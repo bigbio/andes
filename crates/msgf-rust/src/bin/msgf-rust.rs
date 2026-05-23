@@ -302,10 +302,6 @@ where
             }
         }
     }
-    if bench_cap < usize::MAX && total + chunk.len() > bench_cap {
-        let keep = bench_cap.saturating_sub(total);
-        chunk.truncate(keep);
-    }
     if !chunk.is_empty() {
         let _ = tx.send(chunk);
     }
@@ -396,8 +392,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
         None    => {
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto
-                && cli.instrument == Instrument::LowRes;
+            let ext_is_mzml = cli.spectrum
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|s| s.eq_ignore_ascii_case("mzml"))
+                .unwrap_or(false);
+            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && ext_is_mzml;
             if auto_route_eligible {
                 match detect_dominant_activation(&cli.spectrum) {
                     Some(method) => {
@@ -442,7 +442,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.precursor_tolerance =
         PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm));
     params.charge_range = cli.charge_min..=cli.charge_max;
+    if cli.charge_min > cli.charge_max {
+        return Err(format!(
+            "invalid charge range: --charge-min {} > --charge-max {}",
+            cli.charge_min, cli.charge_max
+        ).into());
+    }
     params.isotope_error_range = cli.isotope_error_min..=cli.isotope_error_max;
+    if cli.isotope_error_min > cli.isotope_error_max {
+        return Err(format!(
+            "invalid isotope error range: --isotope-error-min {} > --isotope-error-max {}",
+            cli.isotope_error_min, cli.isotope_error_max
+        ).into());
+    }
     params.top_n_psms_per_spectrum = cli.top_n;
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
@@ -665,7 +677,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cli.spectrum.display().to_string());
-        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, true)?;
+        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, !is_mzml)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 

@@ -680,11 +680,9 @@ fn compute_spec_e_values_for_spectrum(
         let mut any_c = false;
         for psm in queue.iter_psms() {
             let cand = &candidates[psm.primary_candidate_idx() as usize];
-            if let Some(prot) = search_index.protein_at(cand.protein_index) {
-                let start = cand.start_offset_in_protein;
-                let pep_len = cand.peptide.length();
-                if start == 0 { any_n = true; }
-                if start + pep_len >= prot.sequence.len() { any_c = true; }
+            if search_index.protein_at(cand.protein_index).is_some() {
+                if cand.is_protein_n_term { any_n = true; }
+                if cand.is_protein_c_term { any_c = true; }
                 if any_n && any_c { break; }
             }
         }

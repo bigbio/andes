@@ -260,6 +260,53 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
     );
 }
 
+#[test]
+fn bench_mode_max_spectra_produces_nonempty_pin() {
+    // Regression for send_chunks bench-cap bug: --max-spectra 100 must not
+    // drop the entire final partial chunk (which used to truncate to zero).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("bench.pin");
+
+    let status = base_cmd(
+        "test-fixtures/test.mgf",
+        "test-fixtures/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--max-spectra")
+    .arg("100")
+    .status()
+    .expect("run msgf-rust bench mode");
+
+    assert!(status.success(), "bench mode should exit 0, got: {status}");
+    assert!(pin_path.exists(), "PIN should be written in bench mode");
+
+    let content = std::fs::read_to_string(&pin_path).unwrap();
+    assert!(
+        content.lines().count() > 1,
+        "bench mode with --max-spectra 100 should produce header + data rows"
+    );
+}
+
+#[test]
+fn cli_rejects_inverted_charge_range() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let status = base_cmd(
+        "test-fixtures/test.mgf",
+        "test-fixtures/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--charge-min")
+    .arg("4")
+    .arg("--charge-max")
+    .arg("2")
+    .status()
+    .expect("run msgf-rust with inverted charge range");
+
+    assert!(!status.success(), "inverted charge range must fail");
+}
+
 /// Regression guard: legacy Java numeric flag values and the new
 /// Rust-idiomatic named values must resolve to byte-identical PIN output.
 /// Quantms scripts use the numeric form; new docs recommend the named form.

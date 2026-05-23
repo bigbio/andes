@@ -176,8 +176,8 @@ fn write_psm_row<W: Write>(
     // Precursor m/z formatted to 4 decimal places
     let precursor = format!("{:.4}", spec.precursor_mz);
 
-    // IsotopeError: always 0 (winning isotope offset not threaded here yet)
-    let isotope_error: i32 = 0;
+    // IsotopeError: winning isotope offset from the search (matches PIN column).
+    let isotope_error: i32 = psm.isotope_offset as i32;
 
     // PrecursorError: mass_error_ppm stored on psm; convert to Da if needed
     let precursor_error = if ppm_mode {

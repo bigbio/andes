@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LicenseRef-UCSD-Noncommercial"
+authors = ["bigbio MS-GF+ contributors"]
+
+[workspace.dependencies]
+# Core deps — used across many crates.
+clap = { version = "4.5", features = ["derive"] }
+suffix = "1.3"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+byteorder = "1.5"
+
+# Sage-pattern spectrum readers (Phase 3) — declared at the workspace level so
+# the spectra crate can pull them in without re-pinning. Decision recorded
+# 2026-05-03 after surveying sage-cloudpath; see the M0 plan + design spec.
+# We vendor Sage's mzML + MGF reader patterns (~650 + 550 LOC) rather than
+# depending on sage-cloudpath directly (heavier deps, pre-1.0 maintenance).
+quick-xml = { version = "0.31", features = ["async-tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib"] }
+base64 = "0.22"
+bytes = "1"
+flate2 = "1"
+futures = "0.3"
+regex = "1"

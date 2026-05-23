@@ -1,0 +1,19 @@
+[package]
+name = "search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+model = { path = "../model" }
+rayon = "1.10"
+rustc-hash = "2"
+scoring_crate = { path = "../scoring", package = "scoring" }
+smallvec = "1"
+suffix = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+input = { path = "../input" }

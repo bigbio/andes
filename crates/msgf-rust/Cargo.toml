@@ -1,0 +1,24 @@
+[package]
+name = "msgf-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "msgf-rust"
+path = "src/bin/msgf-rust.rs"
+
+[dependencies]
+model = { path = "../model" }
+scoring_crate = { path = "../scoring", package = "scoring" }
+search = { path = "../search" }
+output = { path = "../output" }
+input = { path = "../input" }
+clap = { workspace = true }
+num_cpus = "1.16"
+rayon = "1.10"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"

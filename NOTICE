@@ -1,0 +1,44 @@
+msgf-rust
+=========
+
+This product is a Rust port of MS-GF+, a peptide identification tool
+developed at the University of California, San Diego.
+
+Upstream
+--------
+
+MS-GF+
+  Authors: Sangtae Kim, Pavel A. Pevzner, et al.
+  Copyright (c) 2012, 2013 The Regents of the University of California.
+  Source: https://github.com/MSGFPlus/msgfplus
+  License: see ./LICENSE (UC Regents non-commercial)
+
+Algorithms and behavior in msgf-rust are derived from the following
+published works; users citing msgf-rust should also cite these:
+
+  Kim, S., Mischerikow, N., Bandeira, N., Navarro, J.D., Wich, L.,
+  Mohammed, S., Heck, A.J., and Pevzner, P.A. (2010). "The generating
+  function of CID, ETD, and CID/ETD pairs of tandem mass spectra:
+  applications to database search." Molecular & Cellular Proteomics
+  9(12):2840-2852.
+
+  Kim, S. and Pevzner, P.A. (2014). "MS-GF+ makes progress towards a
+  universal database search tool for proteomics." Nature
+  Communications 5:5277.
+
+Derivation status
+-----------------
+
+msgf-rust is a derivative work of MS-GF+. It is distributed under the
+same UC Regents non-commercial license terms as the upstream software;
+no broader rights are granted by the msgf-rust authors. Commercial use
+requires a separate license from UC San Diego's Technology Transfer
+Office (contact details in ./LICENSE).
+
+msgf-rust adds Rust-specific architecture, performance optimizations,
+and a parallelized search pipeline. These contributions are made under
+the same UC Regents non-commercial terms.
+
+This NOTICE file must be preserved in all distributions, in source or
+binary form, in accordance with the upstream license requirement that
+the copyright notice and license text appear in all copies.

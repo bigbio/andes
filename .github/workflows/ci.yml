@@ -32,6 +32,10 @@ jobs:
         run: cargo build --release --workspace
 
       - name: Test (release)
+        # Force bash on all runners (Windows defaults to PowerShell, which
+        # rejects the `\` line continuation below). Git Bash is preinstalled
+        # on windows-latest.
+        #
         # Skipped tests fall in two categories:
         #
         # (a) match_engine_smoke — 3 tests fail on baseline because of a
@@ -46,6 +50,7 @@ jobs:
         #     To re-enable: have the fixtures self-generate (build Rust
         #     CompactFasta/SuffixArray writer, write to a tempdir, then
         #     read back) instead of expecting Java-produced bytes.
+        shell: bash
         run: |
           cargo test --release --workspace -- \
             --skip charge_missing_spectrum_uses_per_charge_scored_spec \

@@ -22,7 +22,7 @@ full `cargo test --release --workspace`, and targeted code reading.
 
 | ID | Severity | Location | Issue |
 |---|---|---|---|
-| B9 | **Medium** | `sa_walk.rs` | Does not enforce `max_missed_cleavages`; only used in tests today but would inflate search space if wired to production. |
+| B9 | **Low** | `sa_walk.rs` | Test-only SA walk helper does not enforce `max_missed_cleavages`; production search uses `candidate_gen::enumerate_candidates`, which does. |
 | B10 | **High** | `mzml.rs` `Iterator::next` | First per-spectrum parse error sets `done=true` and aborts the entire file; remaining spectra are silently skipped. |
 | B11 | **Low** | `sa_walk.rs` Met pass | Dedupes Met-cleaved peptides on residue bytes only, collapsing distinct C-terminal contexts. |
 
@@ -52,3 +52,21 @@ cargo test --release --workspace -- \
 
 - PepSeq dedup keys use integer mod units + `Arc` cache per candidate (avoids repeated string formatting).
 - Per-charge `TopNQueue` map uses `FxHashMap<u8, _>` (typically 1–3 charges per spectrum).
+
+## Documentation review (2026-05-24)
+
+Fixes applied on this branch:
+
+| Issue | Location | Fix |
+|---|---|---|
+| PIN column count said "28" | `README.md` | Corrected to 36 (default charge 2–3) + EdgeScore note |
+| Auto-detect described "first spectrum" only | `README.md` | First 64 MS2 histogram; `--instrument` does not gate peek |
+| Auto-detect required `--instrument low-res` | `DOCS.md` §4 | Matches code: only `--fragmentation auto` + mzML |
+| TSV `IsotopeError` documented as always 0 | `DOCS.md` §3b | Updated after B5 fix |
+| Broken `known-divergences.md` links | `README.md`, `DOCS.md` §8d | Legacy file removed in iter39; point to §8d / tests |
+| Inverted charge/isotope ranges undocumented | `DOCS.md` §1 | Startup validation documented |
+
+**Still stale (not fixed here):**
+
+- `benchmark/ci/README.md` — references Java Maven workflow; no Rust benchmark workflow in `.github/workflows/` yet.
+- `.claude/CLAUDE.md` — Java-tree context; accurate on `java-legacy` branch only.

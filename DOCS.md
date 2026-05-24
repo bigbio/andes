@@ -37,15 +37,15 @@ All flags use kebab-case long options (`--flag-name`). Several flags also accept
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--precursor-tol-ppm` | f64 | `20.0` | Symmetric precursor mass tolerance in parts per million. | Java `-t 20ppm` |
-| `--charge-min` | u8 | `2` | Minimum precursor charge to try when the spectrum record does not specify charge. | *(no direct Java flag; set via param file in Java)* |
-| `--charge-max` | u8 | `3` | Maximum precursor charge to try when charge is missing from the spectrum. | *(same)* |
+| `--charge-min` | u8 | `2` | Minimum precursor charge to try when the spectrum record does not specify charge. Must be ≤ `--charge-max` (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
+| `--charge-max` | u8 | `3` | Maximum precursor charge to try when charge is missing from the spectrum. Must be ≥ `--charge-min`. | *(same)* |
 | `--enzyme-specificity` | enum | `fully` | Enzymatic cleavage enforcement at peptide termini (Number of Tolerable Termini). `fully`: both termini must be cleavage sites (Java `-ntt 2`). `semi`: at least one terminus (Java `-ntt 1`). `non-specific`: neither required (Java `-ntt 0`). | `--ntt` alias; numeric `0`/`1`/`2` |
 | `--max-missed-cleavages` | u32 | `1` | Maximum missed enzymatic cleavages allowed per candidate peptide. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length in residues (excluding flanking context). | Java `-minLength 6` |
 | `--max-length` | u32 | `40` | Maximum peptide length in residues. | Java `-maxLength 40` |
 | `--top-n` | u32 | `10` | Maximum PSMs retained per spectrum (ranked by SpecEValue). | Java `-n 10` |
-| `--isotope-error-min` | i8 | `-1` | Minimum isotope error offset to evaluate during precursor matching. | Java `-ti -1,2` (first value) |
-| `--isotope-error-max` | i8 | `2` | Maximum isotope error offset to evaluate. | Java `-ti -1,2` (second value) |
+| `--isotope-error-min` | i8 | `-1` | Minimum isotope error offset to evaluate during precursor matching. Must be ≤ `--isotope-error-max`. | Java `-ti -1,2` (first value) |
+| `--isotope-error-max` | i8 | `2` | Maximum isotope error offset to evaluate. Must be ≥ `--isotope-error-min`. | Java `-ti -1,2` (second value) |
 | `--min-peaks` | u32 | `10` | Minimum number of MS2 peaks required to score a spectrum; spectra below this threshold are skipped. | Java `-minNumPeaks 10` |
 
 ### Modifications
@@ -165,7 +165,7 @@ msgf-rust writes Percolator `.pin` (always) and optionally `.tsv`. Implementatio
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum (lowest SpecEValue first). Charge one-hot columns are emitted for every integer charge in `[--charge-min, --charge-max]`; the table below uses the default range 2–3 (`charge2`, `charge3`).
+Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum (lowest SpecEValue first). With default `--charge-min 2 --charge-max 3`, the header has **36 columns**: 35 Java-parity fields plus Rust-only `EdgeScore` (before `Peptide`). Additional charge states add one `chargeN` column each.
 
 | Column | Type | Description |
 |---|---|---|
@@ -220,7 +220,7 @@ Tab-separated human-readable report. The `Title` column appears **only for MGF**
 | `Title` | string | MGF `TITLE=` field. |
 | `FragMethod` | string | Activation method name (`HCD`, `CID`, …) or `UNKNOWN`. |
 | `Precursor` | float | Precursor m/z (4 decimal places). |
-| `IsotopeError` | int | Always `0` in current release (winning offset not threaded to TSV). |
+| `IsotopeError` | int | Winning isotope offset (same value as PIN `isotope_error`). |
 | `PrecursorError(ppm)` | float | Mass error in ppm when tolerance is ppm mode; column named `PrecursorError(Da)` in Da mode. |
 | `Charge` | int | Assigned precursor charge. |
 | `Peptide` | string | Annotated peptide sequence with modifications. |
@@ -242,14 +242,16 @@ Use **PIN** when the goal is FDR calibration or rescoring: Percolator, MS²Resco
 
 ## 4. Auto-detection
 
-For mzML inputs, when `--fragmentation auto`, `--instrument low-res`, and `--protocol auto` (the CLI defaults), msgf-rust peeks the input file before loading the full dataset:
+For **mzML** inputs when `--fragmentation auto` (the default), msgf-rust peeks the input file before loading the full dataset:
 
 1. **Activation method** — histogram of `<activation>` cvParams across the first 64 MS2 spectra; dominant method wins. Mixed methods trigger an stderr warning but the dominant method is still used file-wide.
 2. **Instrument class** — scans `<instrumentConfiguration>` / analyzer cvParams via `input::detect_instrument_type`; dominant analyzer among MS2 spectra wins. `None` → `low-res` (Java `LOW_RESOLUTION_LTQ` default).
 
-MGF files carry no activation or instrument metadata → auto-detect returns `None` → bundled default `HCD_QExactive_Tryp.param` unless explicit `--fragmentation` / `--instrument` flags override.
+The CLI `--instrument` flag does **not** gate this path — only `--fragmentation auto` + mzML extension does. When peek succeeds, instrument is taken from the file; `--protocol` from the CLI is still used to pick protocol-suffixed `.param` files (e.g. `_TMT`).
 
-Explicit `--fragmentation` (non-auto) or non-default `--instrument` disables the activation peek and uses flag-based resolution directly (§1).
+MGF files carry no activation or instrument metadata → auto-detect returns `None` → bundled default `HCD_QExactive_Tryp.param` unless explicit `--fragmentation` / `--instrument` flags override via `resolve_bundled_param`.
+
+Non-auto `--fragmentation` (e.g. `HCD`, `3`) disables the activation peek and uses flag-based resolution directly (§1), including `--instrument` and `--protocol` from the CLI.
 
 ### Activation CV mapping (mzML `<activation>` cvParam accession → method)
 
@@ -476,9 +478,9 @@ On PSMs where Java and Rust agree on scan + top-1 peptide (the "agreement bucket
 
 | Feature | Divergence | Status |
 |---|---|---|
-| `lnEValue` | ~4 orders of magnitude mean shift (Rust more confident) | Deferred — `num_distinct` semantics differ (`known-divergences.md` #2) |
+| `lnEValue` | ~4 orders of magnitude mean shift (Rust more confident) | Deferred — `num_distinct` semantics differ (see item #2 below) |
 | `MeanRelErrorTop7` / `MeanErrorTop7` / `StdevRelErrorTop7` | >1% relative difference on ~99% of agreement-bucket PSMs | Deferred — error-stat normalization differs |
-| BSA charge-3 SpecEValue (BSA.fasta + test.mgf fixture) | 1–4 OOM gap depending on deconvolution iteration | Known — deconvolution implementation divergence (`known-divergences.md` #3); kept as dev-branch smoke gate |
+| BSA charge-3 SpecEValue (BSA.fasta + test.mgf fixture) | 1–4 OOM gap depending on deconvolution iteration | Known — deconvolution implementation divergence; kept as dev-branch smoke gate (`gf_java_parity` tests) |
 
 Percolator's learned weights absorb these distribution shifts; rescored FDR results remain competitive or better than Java.
 

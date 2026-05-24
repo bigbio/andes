@@ -1,6 +1,8 @@
 # CI benchmark (PXD001819)
 
-- **Workflow:** `.github/workflows/benchmark-pxd001819.yml` (`workflow_dispatch`)
+> **Note:** This scaffold targets the Java MS-GF+ tree (`mvn`, mzIdentML metrics). The Rust port (`msgf-rust`) uses `.github/workflows/ci.yml` for tests but does not yet wire this benchmark harness. See [`benchmark/README.md`](../README.md) for scope.
+
+- **Workflow:** `.github/workflows/benchmark-pxd001819.yml` (`workflow_dispatch`) — Java branch only
 - **Run locally:** `mvn -B package -DskipTests && bash benchmark/ci/PXD001819/run_ci.sh`
 - **Compare:** `python3 benchmark/ci/PXD001819/compare_metrics.py benchmark/results/PXD001819/ci/ci_metrics.txt benchmark/ci/PXD001819/baseline.tsv`
 - **Self-test:** `python3 -m unittest benchmark.ci.PXD001819.test_compare_metrics`

@@ -4,6 +4,11 @@ Only the **CI benchmark scaffold** is committed under this directory; heavy
 local-only harnesses and artifacts (`data/`, `results/`, prebuilt JARs, etc.)
 are intentionally gitignored and not distributed with the fork.
 
+The PXD001819 CI scripts under `ci/` were written for the Java MS-GF+ build
+(`mvn`, mzIdentML output). The Rust binary uses PIN/TSV and a separate CI
+workflow (`.github/workflows/ci.yml`); Rust benchmark automation is not yet
+wired to this scaffold.
+
 ## Datasets
 
 | Dataset | PXD | Instrument | Type | Spectra Source | FASTA / SDRF |

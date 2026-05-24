@@ -12,8 +12,7 @@
 //!
 //! * **FragMethod**: `ActivationMethod::name()` for the five canonical variants;
 //!   `"UNKNOWN"` for unknown / unset activation.
-//! * **IsotopeError**: always `0`; the winning isotope offset is not currently
-//!   threaded into the TSV writer.
+//! * **IsotopeError**: winning isotope offset from the search (`PsmMatch::isotope_offset`).
 //! * **Decoy filtering**: decoys are emitted; downstream Percolator labels them.
 //! * **SpecID for non-MGF**: `"scan=N"` (mzML convention).
 

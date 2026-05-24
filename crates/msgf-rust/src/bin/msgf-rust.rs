@@ -381,23 +381,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
     //
-    // When the user provided `--param-file`, that wins outright. Otherwise:
-    //   * If `--fragmentation`/`--instrument` are set, honour them (existing
-    //     behaviour — preserves the bench harness's explicit-flag path).
-    //   * If none of those are set, peek the input file for its dominant
-    //     activation method and route to the matching bundled .param file.
-    //     This mirrors Java MS-GF+'s ASWRITTEN per-spectrum dispatch at the
-    //     file-wide granularity (good enough when an mzML carries a single
-    //     activation method, which is the common case).
+    // `--param-file` wins outright. Otherwise, for mzML with `--fragmentation auto`,
+    // peek the file's dominant activation method and pick the bundled `.param`.
+    // MGF and explicit fragmentation/instrument flags use `resolve_bundled_param`.
+    let spectrum_ext = cli.spectrum
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    let is_mzml = matches!(spectrum_ext.as_deref(), Some("mzml"));
+
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
         None    => {
-            let ext_is_mzml = cli.spectrum
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|s| s.eq_ignore_ascii_case("mzml"))
-                .unwrap_or(false);
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && ext_is_mzml;
+            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && is_mzml;
             if auto_route_eligible {
                 match detect_dominant_activation(&cli.spectrum) {
                     Some(method) => {
@@ -514,10 +510,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         prepared.bucket_index.len(),
     );
 
-    let ext = cli.spectrum
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase());
+    let ext = spectrum_ext;
     let ms_level_u32 = cli.ms_level as u32;
     let bench_mode = cli.max_spectra > 0;
     let bench_cap = if bench_mode { cli.max_spectra } else { usize::MAX };
@@ -541,7 +534,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the parser thread. It owns the reader (paths + flags moved in).
     // The thread returns ParseStats with the error count + sample messages.
     let spectrum_path = cli.spectrum.clone();
-    let is_mzml = matches!(ext.as_deref(), Some("mzml"));
     let mzml_warn_ms_level_emitted = if !is_mzml && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF files \

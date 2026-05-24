@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 // GF failure-mode diagnostics (2026-05-19). Module-level atomics
 // incremented per-bin from compute_spec_e_values_for_spectrum and
@@ -22,7 +23,7 @@ static GF_BIN_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static GF_SPECTRA_NO_GROUP: AtomicU64 = AtomicU64::new(0);
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::{smallvec, SmallVec};
 
 use model::aa_set::AminoAcidSet;
@@ -318,7 +319,7 @@ impl<'a> PreparedSearch<'a> {
 
             // R-2.1: per-charge queue keyed by charge state. Mirrors Java's
             // per-SpecKey raw-score retention (DBScanner.java:534).
-            let mut per_charge_queues: HashMap<u8, TopNQueue> = HashMap::new();
+            let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
 
             for &cand_idx in &window_cand_indices {
                 let cand = &candidates[cand_idx];
@@ -680,11 +681,9 @@ fn compute_spec_e_values_for_spectrum(
         let mut any_c = false;
         for psm in queue.iter_psms() {
             let cand = &candidates[psm.primary_candidate_idx() as usize];
-            if search_index.protein_at(cand.protein_index).is_some() {
-                if cand.is_protein_n_term { any_n = true; }
-                if cand.is_protein_c_term { any_c = true; }
-                if any_n && any_c { break; }
-            }
+            if cand.is_protein_n_term { any_n = true; }
+            if cand.is_protein_c_term { any_c = true; }
+            if any_n && any_c { break; }
         }
         (any_n, any_c)
     };
@@ -1364,51 +1363,200 @@ mod feature_tests {
     }
 }
 
-/// Pre-merge dedup pass (R-2.2): collapse PSMs that share the same
-/// (peptide_residue, rounded_score) key into a single entry, aggregating
-/// their `candidate_idxs` into a unified Vec. Mirrors Java's
-/// `DBScanner.java:719-733` `pepSeqMap` dedup.
-///
-/// Called by the per-spectrum loop after the per-candidate scoring loop,
-/// before per-charge GF compute (so SpecE is computed on the deduped set).
-///
-/// Inputs:
-/// - `psms`: drained from a per-charge `TopNQueue` via `drain_into_vec`
-/// - `candidates`: the search's enumerated candidate slice; used to resolve
-///   each PSM's peptide residue sequence for the dedup key
-///
-/// Returns: deduped `Vec<PsmMatch>`. The caller re-pushes these into the
-/// per-charge queue via `queue.push()` for each entry.
+/// Pre-merge dedup pass (R-2.2): collapse PSMs sharing the same Java
+/// `(pepSeq, score)` key before per-charge GF compute.
 pub(crate) fn dedup_pepseq_score(
     psms: Vec<PsmMatch>,
     candidates: &[Candidate],
 ) -> Vec<PsmMatch> {
-    use std::collections::HashMap;
+    use std::collections::btree_map::Entry;
+    use std::collections::BTreeMap;
 
-    // Key: (peptide_residue_bytes, rounded_score_i32)
-    // The residue sequence is the unmodified bare AA string, matching Java's
-    // `m.getPepSeq()` used as the dedup key (DBScanner.java:721).
-    let mut groups: HashMap<(Vec<u8>, i32), PsmMatch> = HashMap::new();
+    let mut pep_key_cache: FxHashMap<u32, Arc<PepDedupKey>> = FxHashMap::default();
+    let mut groups: BTreeMap<DedupMapKey, PsmMatch> = BTreeMap::new();
 
     for psm in psms {
-        let cand = &candidates[psm.primary_candidate_idx() as usize];
-        let pep_residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
-        let score_rounded = psm.score.round() as i32;
-        let key = (pep_residues, score_rounded);
+        let primary = psm.primary_candidate_idx();
+        let pep_key = pep_key_cache
+            .entry(primary)
+            .or_insert_with(|| Arc::new(PepDedupKey::from_peptide(&candidates[primary as usize].peptide)))
+            .clone();
+        let key = DedupMapKey {
+            pep: pep_key,
+            score: psm.rank_score.round() as i32,
+        };
 
-        groups
-            .entry(key)
-            .and_modify(|existing| {
-                // Aggregate this PSM's indices into the surviving entry.
-                // Avoid duplicates if the same idx somehow appears twice.
-                for &idx in &psm.candidate_idxs {
-                    if !existing.candidate_idxs.contains(&idx) {
-                        existing.candidate_idxs.push(idx);
-                    }
+        match groups.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(psm);
+            }
+            Entry::Occupied(mut slot) => {
+                let existing = slot.get_mut();
+                merge_unique_candidate_idxs(&mut existing.candidate_idxs, &psm.candidate_idxs);
+                if psm.rank_score > existing.rank_score {
+                    let merged_idxs = std::mem::take(&mut existing.candidate_idxs);
+                    let mut survivor = psm;
+                    merge_unique_candidate_idxs(&mut survivor.candidate_idxs, &merged_idxs);
+                    *existing = survivor;
                 }
-            })
-            .or_insert(psm);
+            }
+        }
     }
 
-    groups.into_values().collect()
+    let mut out = Vec::with_capacity(groups.len());
+    out.extend(groups.into_values());
+    out
+}
+
+/// Mod-aware dedup key: bare residues plus per-position mod mass (1e-5 Da units).
+/// Matches Java pepSeq semantics without string formatting on the hot path.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PepDedupKey {
+    residues: Vec<u8>,
+    mod_units: Vec<i32>,
+}
+
+impl PepDedupKey {
+    fn from_peptide(peptide: &model::Peptide) -> Self {
+        let len = peptide.residues.len();
+        let mut residues = Vec::with_capacity(len);
+        let mut mod_units = Vec::with_capacity(len);
+        for aa in &peptide.residues {
+            residues.push(aa.residue);
+            mod_units.push(
+                aa.mod_
+                    .as_ref()
+                    .map(|m| (m.mass_delta * 100_000.0).round() as i32)
+                    .unwrap_or(0),
+            );
+        }
+        Self { residues, mod_units }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct DedupMapKey {
+    pep: Arc<PepDedupKey>,
+    score: i32,
+}
+
+impl PartialOrd for DedupMapKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DedupMapKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.pep
+            .residues
+            .cmp(&other.pep.residues)
+            .then_with(|| self.pep.mod_units.cmp(&other.pep.mod_units))
+            .then(self.score.cmp(&other.score))
+    }
+}
+
+fn merge_unique_candidate_idxs(into: &mut Vec<u32>, from: &[u32]) {
+    for &idx in from {
+        if !into.contains(&idx) {
+            into.push(idx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+    use std::sync::Arc;
+    use model::amino_acid::AminoAcid;
+    use model::modification::{ModLocation, Modification};
+    use model::peptide::Peptide;
+    use model::ResidueSpec;
+    use crate::psm::PsmMatch;
+
+    fn seq_peptide(bytes: &[u8]) -> Peptide {
+        let residues: Vec<AminoAcid> = bytes
+            .iter()
+            .filter_map(|&b| AminoAcid::standard(b))
+            .collect();
+        Peptide::new(residues, b'R', b'K')
+    }
+
+    fn cand_with_peptide(peptide: Peptide) -> Candidate {
+        Candidate {
+            peptide,
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    fn psm(primary: u32, rank: f32, pin: f32) -> PsmMatch {
+        PsmMatch {
+            spectrum_idx: 0,
+            candidate_idxs: vec![primary],
+            charge_used: 2,
+            mass_error_ppm: 0.0,
+            score: pin,
+            rank_score: rank,
+            edge_score: (rank - pin) as i32,
+            spec_e_value: 1.0,
+            de_novo_score: 0,
+            activation_method: None,
+            e_value: 1.0,
+            features: Default::default(),
+            isotope_offset: 0,
+        }
+    }
+
+    #[test]
+    fn dedup_uses_rank_score_not_pin_score() {
+        let pep = seq_peptide(b"PEPTK");
+        let cands = vec![cand_with_peptide(pep.clone())];
+        let psms = vec![
+            psm(0, 100.4, 99.6),
+            psm(0, 120.0, 99.6),
+        ];
+        let out = dedup_pepseq_score(psms, &cands);
+        assert_eq!(out.len(), 2, "different rank_score keys must not merge");
+    }
+
+    #[test]
+    fn dedup_distinguishes_mod_state() {
+        let mut ox = seq_peptide(b"PEPMK");
+        ox.residues[3].mod_ = Some(Arc::new(Modification {
+            name: "Ox".into(),
+            mass_delta: 15.99491,
+            residue: ResidueSpec::Specific(b'M'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+        }));
+        let cands = vec![
+            cand_with_peptide(seq_peptide(b"PEPMK")),
+            cand_with_peptide(ox),
+        ];
+        let psms = vec![
+            psm(0, 50.0, 50.0),
+            psm(1, 50.0, 50.0),
+        ];
+        let out = dedup_pepseq_score(psms, &cands);
+        assert_eq!(out.len(), 2, "mod-aware pepSeq keys must differ");
+    }
+
+    #[test]
+    fn dedup_keeps_highest_rank_score_survivor() {
+        let pep = seq_peptide(b"PEPTK");
+        let cands = vec![cand_with_peptide(pep)];
+        // Same rounded score bucket (60) but different float rank_score — merge to best.
+        let psms = vec![
+            psm(0, 59.6, 50.0),
+            psm(0, 60.4, 50.0),
+        ];
+        let out = dedup_pepseq_score(psms, &cands);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].rank_score - 60.4).abs() < f32::EPSILON);
+    }
 }

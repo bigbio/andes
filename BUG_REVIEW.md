@@ -15,13 +15,13 @@ full `cargo test --release --workspace`, and targeted code reading.
 | B4 | **High** | `match_engine.rs` GF | SpecE GF graph used `start_offset == 0` for protein N-term instead of `cand.is_protein_n_term`, breaking Met-cleaved N-termini at offset 1. | Use `cand.is_protein_n_term` / `is_protein_c_term`. |
 | B5 | **Medium** | `tsv.rs` | `IsotopeError` column hardcoded to 0 while PIN writes `psm.isotope_offset`. | Thread isotope offset from PSM. |
 | B6 | **Medium** | `msgf-rust.rs` CLI | Inverted `--charge-min/--charge-max` or isotope ranges produced empty ranges with no error. | Validate at startup and return clear error. |
+| B7 | **High** | `match_engine.rs` dedup | Dedup used bare sequence + pin score; merged mod variants incorrectly. | Mod-aware pepSeq key + `rank_score`. |
+| B8 | **Medium** | `match_engine.rs` dedup | HashMap survivor order was nondeterministic. | `BTreeMap` + best-`rank_score` survivor rule. |
 
 ## Open — not fixed (documented for follow-up)
 
 | ID | Severity | Location | Issue |
 |---|---|---|---|
-| B7 | **High** | `match_engine.rs` `dedup_pepseq_score` | Dedup key is `(bare sequence, psm.score.round())`; ignores modifications and uses pin score instead of Java-aligned `rank_score`. Can over-merge TMT/mod variants. |
-| B8 | **Medium** | `match_engine.rs` | `dedup_pepseq_score` keeps first PSM on collision (HashMap iteration order) → nondeterministic primary candidate for shared peptides. |
 | B9 | **Medium** | `sa_walk.rs` | Does not enforce `max_missed_cleavages`; only used in tests today but would inflate search space if wired to production. |
 | B10 | **High** | `mzml.rs` `Iterator::next` | First per-spectrum parse error sets `done=true` and aborts the entire file; remaining spectra are silently skipped. |
 | B11 | **Low** | `sa_walk.rs` Met pass | Dedupes Met-cleaved peptides on residue bytes only, collapsing distinct C-terminal contexts. |
@@ -47,3 +47,8 @@ cargo test --release --workspace -- \
   --skip tryp_pig_bov_revcat_full_set_loads \
   --skip match_spectra_output_invariant_across_thread_counts
 ```
+
+## Performance (dedup pass)
+
+- PepSeq dedup keys use integer mod units + `Arc` cache per candidate (avoids repeated string formatting).
+- Per-charge `TopNQueue` map uses `FxHashMap<u8, _>` (typically 1–3 charges per spectrum).

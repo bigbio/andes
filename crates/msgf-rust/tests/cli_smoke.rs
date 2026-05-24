@@ -307,6 +307,26 @@ fn cli_rejects_inverted_charge_range() {
     assert!(!status.success(), "inverted charge range must fail");
 }
 
+#[test]
+fn cli_rejects_inverted_isotope_error_range() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let status = base_cmd(
+        "test-fixtures/test.mgf",
+        "test-fixtures/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--isotope-error-min")
+    .arg("3")
+    .arg("--isotope-error-max")
+    .arg("-1")
+    .status()
+    .expect("run msgf-rust with inverted isotope range");
+
+    assert!(!status.success(), "inverted isotope error range must fail");
+}
+
 /// Regression guard: legacy Java numeric flag values and the new
 /// Rust-idiomatic named values must resolve to byte-identical PIN output.
 /// Quantms scripts use the numeric form; new docs recommend the named form.

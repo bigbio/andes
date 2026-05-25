@@ -15,3 +15,4 @@ GitHub Actions: workflow **Benchmark PXD001819** (`workflow_dispatch`) on `self-
 | `extract_metrics.py` | Streams the mzIdentML (ElementTree `iterparse`) to count SII and PSMs at 1% FDR; also extracts RSS/CPU from `time -v` |
 | `compare_metrics.py` | Compares key=value metrics to the baseline TSV |
 | `test_compare_metrics.py` | Unit tests for the comparator |
+| `run_bench_calauto_3ds.sh` | Three-dataset precursorCal harness (LFQ/Astral/TMT). Runs `--precursor-cal auto` and writes per-dataset PINs. Pair with Percolator for the G1 ship gate. Dataset paths default to the bigbio bench VM layout — override via env vars (see script header). Status documented in `docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md`. |

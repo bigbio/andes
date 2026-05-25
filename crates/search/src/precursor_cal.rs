@@ -5,14 +5,19 @@
 //! without mutating [`model::Spectrum`] objects.
 
 /// Java `-precursorCal` modes.
+///
+/// `Default` is `Off` until the G1 ship gate closes — matches the CLI default
+/// and `SearchParams::default_tryptic`, so library consumers that derive
+/// `Default` on a struct containing this field cannot silently enable the
+/// pre-pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PrecursorCalMode {
     /// Run pre-pass; apply shift only when ≥200 confident PSMs yield non-zero median.
-    #[default]
     Auto,
     /// Run pre-pass; always store learned shift (still no-op when shift is 0.0).
     On,
     /// Skip pre-pass; `precursor_mass_shift_ppm` stays 0.0 (bit-identical baseline).
+    #[default]
     Off,
 }
 

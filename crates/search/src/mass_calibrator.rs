@@ -47,6 +47,10 @@ pub struct CalibrationStats {
 }
 
 impl CalibrationStats {
+    /// True when the pre-pass produced enough confident PSMs to trust the
+    /// learned shift. `learn_calibration_stats` only ever sets
+    /// `confident_psm_count` to 0 or `>= MIN_CONFIDENT_PSMS`, so the
+    /// `> 0` check is sufficient as a downstream gate.
     pub fn has_reliable_stats(self) -> bool {
         self.confident_psm_count > 0
     }

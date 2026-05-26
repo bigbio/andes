@@ -53,6 +53,14 @@ impl Peptide {
         self.neutral_mass
     }
 
+    /// Residue-only neutral mass (no terminal `H2O`).
+    ///
+    /// Matches Java `DatabaseMatch.getPeptideMass()` and the calibrator's
+    /// `(precursor_mz - proton) * charge - H2O` observed mass convention.
+    pub fn residue_mass(&self) -> f64 {
+        self.neutral_mass - H2O
+    }
+
     pub fn nominal_mass(&self) -> i32 {
         self.nominal_mass
     }
@@ -216,6 +224,13 @@ mod tests {
         let a = AminoAcid::standard(b'A').unwrap().mass;
         let expected = g + a + H2O;
         assert_eq!(p.mass().to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn residue_mass_excludes_h2o() {
+        let p = unmod_pep(b"GA");
+        assert_eq!(p.residue_mass().to_bits(), (p.mass() - H2O).to_bits());
+        assert_eq!(p.nominal_residue_mass(), nominal_from(p.residue_mass()));
     }
 
     #[test]

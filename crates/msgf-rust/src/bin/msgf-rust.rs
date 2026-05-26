@@ -7,9 +7,10 @@
 //! Format dispatch: if `--spectrum` ends in `.mzML` or `.mzml`, `MzMLReader`
 //! is used; otherwise `MgfReader` is used (default / backwards-compatible).
 
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread;
@@ -20,7 +21,12 @@ use model::{
     PrecursorTolerance, ResidueSpec, Spectrum, Tolerance,
 };
 use scoring_crate::{Param, RankScorer};
-use search::{PreparedSearch, SearchIndex, SearchParams, TopNQueue};
+use search::{
+    apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
+    learn_calibration_stats, CalibrationStats,
+    PreparedSearch, PrecursorCalMode, SearchIndex, SearchParams, SpecKey, TopNQueue,
+};
+use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
 
 /// Fragmentation method. Named values map to the same param-file resolution
@@ -69,7 +75,8 @@ pub enum EnzymeSpecificity {
 #[derive(Parser, Debug)]
 #[command(
     name = "msgf-rust",
-    about = "MS-GF+ Rust port: database search of MGF/mzML spectra against FASTA"
+    about = "MS-GF+ Rust port: database search of MGF/mzML spectra against FASTA",
+    allow_hyphen_values = true,
 )]
 struct Cli {
     /// Input spectrum file (MGF or mzML). Format is auto-detected by extension:
@@ -100,6 +107,11 @@ struct Cli {
     /// Maximum isotope error offset to try (default 2).
     #[arg(long, default_value = "2")]
     isotope_error_max: i8,
+
+    /// Precursor mass calibration mode (Java `-precursorCal`). Default `off` until G1
+    /// gate passes (see `DOCS.md` §8e); use `auto` to match Java default behavior.
+    #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
+    precursor_cal: PrecursorCalMode,
 
     /// Precursor mass tolerance in ppm (default 20.0).
     #[arg(long, default_value = "20.0")]
@@ -302,14 +314,188 @@ where
             }
         }
     }
-    if bench_cap < usize::MAX && total + chunk.len() > bench_cap {
-        let keep = bench_cap.saturating_sub(total);
-        chunk.truncate(keep);
-    }
     if !chunk.is_empty() {
         let _ = tx.send(chunk);
     }
     stats
+}
+
+/// Lightweight metadata collected in one linear file scan for precursorCal.
+#[derive(Debug, Clone)]
+struct SpectrumMeta {
+    precursor_mz: f64,
+    precursor_charge: Option<i32>,
+    num_peaks: usize,
+}
+
+fn scan_spectrum_metadata(
+    path: &Path,
+    is_mzml: bool,
+    ms_level: u32,
+    bench_cap: usize,
+) -> Result<Vec<SpectrumMeta>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    if is_mzml {
+        let f = File::open(path)?;
+        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(ms_level, ms_level);
+        for result in reader {
+            if out.len() >= bench_cap {
+                break;
+            }
+            let spec = result.map_err(|e| format!("mzML parse: {e}"))?;
+            out.push(SpectrumMeta {
+                precursor_mz: spec.precursor_mz,
+                precursor_charge: spec.precursor_charge,
+                num_peaks: spec.peaks.len(),
+            });
+        }
+    } else {
+        let f = File::open(path)?;
+        let reader = MgfReader::new(BufReader::new(f));
+        for result in reader {
+            if out.len() >= bench_cap {
+                break;
+            }
+            let spec = result.map_err(|e| format!("MGF parse: {e}"))?;
+            out.push(SpectrumMeta {
+                precursor_mz: spec.precursor_mz,
+                precursor_charge: spec.precursor_charge,
+                num_peaks: spec.peaks.len(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn build_spec_keys_from_metadata(
+    meta: &[SpectrumMeta],
+    charge_range: std::ops::RangeInclusive<u8>,
+    min_peaks: u32,
+) -> Vec<SpecKey> {
+    let spectra: Vec<Spectrum> = meta
+        .iter()
+        .map(|m| Spectrum {
+            title: String::new(),
+            precursor_mz: m.precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: m.precursor_charge,
+            rt_seconds: None,
+            scan: None,
+            peaks: vec![(0.0, 0.0); m.num_peaks],
+            activation_method: None,
+        })
+        .collect();
+    build_spec_keys(&spectra, &charge_range, min_peaks)
+}
+
+fn load_spectra_by_index(
+    path: &Path,
+    is_mzml: bool,
+    ms_level: u32,
+    indices: &HashSet<usize>,
+    bench_cap: usize,
+) -> Result<HashMap<usize, Spectrum>, Box<dyn std::error::Error>> {
+    let mut loaded = HashMap::new();
+    if indices.is_empty() {
+        return Ok(loaded);
+    }
+    if is_mzml {
+        let f = File::open(path)?;
+        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(ms_level, ms_level);
+        for (idx, result) in reader.enumerate() {
+            if idx >= bench_cap {
+                break;
+            }
+            if !indices.contains(&idx) {
+                continue;
+            }
+            let spec = result.map_err(|e| format!("mzML parse: {e}"))?;
+            loaded.insert(idx, spec);
+            if loaded.len() == indices.len() {
+                break;
+            }
+        }
+    } else {
+        let f = File::open(path)?;
+        let reader = MgfReader::new(BufReader::new(f));
+        for (idx, result) in reader.enumerate() {
+            if idx >= bench_cap {
+                break;
+            }
+            if !indices.contains(&idx) {
+                continue;
+            }
+            let spec = result.map_err(|e| format!("MGF parse: {e}"))?;
+            loaded.insert(idx, spec);
+            if loaded.len() == indices.len() {
+                break;
+            }
+        }
+    }
+    Ok(loaded)
+}
+
+fn tolerance_ppm_display(t: Tolerance) -> Option<f64> {
+    match t {
+        Tolerance::Ppm(v) => Some(v),
+        Tolerance::Da(_) => None,
+    }
+}
+
+fn run_precursor_calibration(
+    spectrum_path: &Path,
+    is_mzml: bool,
+    ms_level: u32,
+    bench_cap: usize,
+    params: &SearchParams,
+    prepared: &PreparedSearch<'_>,
+) -> Result<CalibrationStats, Box<dyn std::error::Error>> {
+    if params.precursor_cal_mode == PrecursorCalMode::Off {
+        return Ok(CalibrationStats::default());
+    }
+
+    let t_cal = std::time::Instant::now();
+    let meta = scan_spectrum_metadata(spectrum_path, is_mzml, ms_level, bench_cap)?;
+    let spec_keys = build_spec_keys_from_metadata(&meta, params.charge_range.clone(), params.min_peaks);
+
+    if spec_keys.len() < cal_constants::MIN_SPECKEYS_FOR_PREPASS {
+        eprintln!(
+            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s)",
+            spec_keys.len(),
+            cal_constants::MIN_SPECKEYS_FOR_PREPASS,
+            t_cal.elapsed().as_secs_f64()
+        );
+        return Ok(CalibrationStats::default());
+    }
+
+    let sampled = sample_every_nth(
+        &spec_keys,
+        cal_constants::SAMPLING_STRIDE,
+        cal_constants::MAX_SAMPLED,
+    );
+    let needed: HashSet<usize> = sampled.iter().map(|k| k.spectrum_idx).collect();
+    let originals = load_spectra_by_index(spectrum_path, is_mzml, ms_level, &needed, bench_cap)?;
+
+    let stats = learn_calibration_stats(&spec_keys, &originals, prepared, params);
+
+    if stats.has_reliable_stats() {
+        eprintln!(
+            "Precursor mass shift learned: {:.3} ppm from {} confident PSMs (robust sigma {:.3} ppm; elapsed: {:.2}s)",
+            stats.shift_ppm,
+            stats.confident_psm_count,
+            stats.robust_sigma_ppm,
+            t_cal.elapsed().as_secs_f64()
+        );
+    } else {
+        eprintln!(
+            "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} failed SpecE, {} failed |residual|>50ppm; elapsed: {:.2}s)",
+            stats.queues_with_psm,
+            stats.rejected_spec_e,
+            stats.rejected_residual,
+            t_cal.elapsed().as_secs_f64()
+        );
+    }
+    Ok(stats)
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -385,19 +571,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
     //
-    // When the user provided `--param-file`, that wins outright. Otherwise:
-    //   * If `--fragmentation`/`--instrument` are set, honour them (existing
-    //     behaviour — preserves the bench harness's explicit-flag path).
-    //   * If none of those are set, peek the input file for its dominant
-    //     activation method and route to the matching bundled .param file.
-    //     This mirrors Java MS-GF+'s ASWRITTEN per-spectrum dispatch at the
-    //     file-wide granularity (good enough when an mzML carries a single
-    //     activation method, which is the common case).
+    // `--param-file` wins outright. Otherwise, for mzML with `--fragmentation auto`,
+    // peek the file's dominant activation method and pick the bundled `.param`.
+    // MGF and explicit fragmentation/instrument flags use `resolve_bundled_param`.
+    let spectrum_ext = cli.spectrum
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    let is_mzml = matches!(spectrum_ext.as_deref(), Some("mzml"));
+
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
         None    => {
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto
-                && cli.instrument == Instrument::LowRes;
+            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && is_mzml;
             if auto_route_eligible {
                 match detect_dominant_activation(&cli.spectrum) {
                     Some(method) => {
@@ -442,7 +628,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.precursor_tolerance =
         PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm));
     params.charge_range = cli.charge_min..=cli.charge_max;
+    if cli.charge_min > cli.charge_max {
+        return Err(format!(
+            "invalid charge range: --charge-min {} > --charge-max {}",
+            cli.charge_min, cli.charge_max
+        ).into());
+    }
     params.isotope_error_range = cli.isotope_error_min..=cli.isotope_error_max;
+    if cli.isotope_error_min > cli.isotope_error_max {
+        return Err(format!(
+            "invalid isotope error range: --isotope-error-min {} > --isotope-error-max {}",
+            cli.isotope_error_min, cli.isotope_error_max
+        ).into());
+    }
     params.top_n_psms_per_spectrum = cli.top_n;
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
@@ -456,6 +654,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = num_mods_from_file {
         params.max_variable_mods_per_peptide = n;
     }
+    params.precursor_cal_mode = cli.precursor_cal;
+    params.precursor_mass_shift_ppm = 0.0;
 
     // ── 6+7. Stream-load + chunked search ─────────────────────────────────
     //
@@ -488,6 +688,53 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Fragment tolerance of 0.5 Da matches the gf_bsa_parity integration test
     // (and the canonical HCD default).
     let fragment_tol_da = 0.5_f64;
+
+    let bench_cap = if cli.max_spectra > 0 {
+        cli.max_spectra
+    } else {
+        usize::MAX
+    };
+    let ms_level_u32 = cli.ms_level as u32;
+
+    if params.precursor_cal_mode != PrecursorCalMode::Off {
+        let cal_prepared = PreparedSearch::prepare(
+            &idx,
+            &params,
+            &scorer,
+            fragment_tol_da,
+            &cli.decoy_prefix,
+        );
+        let cal_stats = run_precursor_calibration(
+            &cli.spectrum,
+            is_mzml,
+            ms_level_u32,
+            bench_cap,
+            &params,
+            &cal_prepared,
+        )?;
+        params.precursor_mass_shift_ppm = apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
+        let tol_before = params.precursor_tolerance;
+        apply_tightened_precursor_tolerance(&mut params, cal_stats);
+        if cal_stats.has_reliable_stats() {
+            let left_before = tolerance_ppm_display(tol_before.left);
+            let right_before = tolerance_ppm_display(tol_before.right);
+            let left_after = tolerance_ppm_display(params.precursor_tolerance.left);
+            let right_after = tolerance_ppm_display(params.precursor_tolerance.right);
+            if left_after.is_some()
+                && right_after.is_some()
+                && (left_after != left_before || right_after != right_before)
+            {
+                eprintln!(
+                    "Tightened precursor tolerance for main pass: left {:.3} ppm -> {:.3} ppm, right {:.3} ppm -> {:.3} ppm",
+                    left_before.unwrap_or(0.0),
+                    left_after.unwrap_or(0.0),
+                    right_before.unwrap_or(0.0),
+                    right_after.unwrap_or(0.0),
+                );
+            }
+        }
+    }
+
     let prepared = PreparedSearch::prepare(
         &idx,
         &params,
@@ -502,13 +749,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         prepared.bucket_index.len(),
     );
 
-    let ext = cli.spectrum
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase());
-    let ms_level_u32 = cli.ms_level as u32;
     let bench_mode = cli.max_spectra > 0;
-    let bench_cap = if bench_mode { cli.max_spectra } else { usize::MAX };
 
     let mut all_spectra: Vec<Spectrum> = Vec::new();
     let mut all_queues: Vec<TopNQueue> = Vec::new();
@@ -529,7 +770,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Spawn the parser thread. It owns the reader (paths + flags moved in).
     // The thread returns ParseStats with the error count + sample messages.
     let spectrum_path = cli.spectrum.clone();
-    let is_mzml = matches!(ext.as_deref(), Some("mzml"));
     let mzml_warn_ms_level_emitted = if !is_mzml && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF files \
@@ -665,7 +905,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cli.spectrum.display().to_string());
-        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, true)?;
+        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, !is_mzml)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 
@@ -1011,6 +1251,17 @@ fn parse_protocol(s: &str) -> Result<Protocol, String> {
 /// Parse `--enzyme-specificity` (`--ntt`) value. Accepts named
 /// (non-specific, semi, fully) or legacy numeric (0=non-specific,
 /// 1=semi, 2=fully).
+fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "auto" => Ok(PrecursorCalMode::Auto),
+        "on" => Ok(PrecursorCalMode::On),
+        "off" => Ok(PrecursorCalMode::Off),
+        _ => Err(format!(
+            "invalid precursor-cal `{s}`: expected auto|on|off (Java -precursorCal)"
+        )),
+    }
+}
+
 fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
     if let Ok(v) = <EnzymeSpecificity as ValueEnum>::from_str(s, true) { return Ok(v); }
     match s.parse::<u8>() {
@@ -1142,6 +1393,14 @@ mod param_resolver_tests {
     fn parse_protocol_rejects_out_of_range_numeric() {
         let err = parse_protocol("99").unwrap_err();
         assert!(err.contains("0..=5"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_precursor_cal_accepts_named_modes() {
+        assert_eq!(parse_precursor_cal("auto").unwrap(), PrecursorCalMode::Auto);
+        assert_eq!(parse_precursor_cal("OFF").unwrap(), PrecursorCalMode::Off);
+        assert_eq!(parse_precursor_cal("on").unwrap(), PrecursorCalMode::On);
+        assert!(parse_precursor_cal("bogus").is_err());
     }
 
     // ── resolve_bundled_param_for_activation: instrument routing ──────────────

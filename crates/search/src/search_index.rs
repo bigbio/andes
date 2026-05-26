@@ -63,7 +63,7 @@ impl SearchIndex {
     ///
     /// Counts distinct prefixes of length `l` across the entire suffix array
     /// (target + decoy combined, modulo the still-open mod-context divergence
-    /// tracked in `docs/parity-analysis/known-divergences.md`).
+    /// tracked in `DOCS.md` §8d).
     ///
     /// Distinct identity is the residue byte sequence with no mods and no
     /// flanking residues. Two candidates with identical residues but different

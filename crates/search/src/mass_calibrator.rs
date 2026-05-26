@@ -151,33 +151,7 @@ pub fn learn_calibration_stats(
         &prepared.candidates,
         MIN_DE_NOVO_SCORE,
         constants::MIN_CONFIDENT_PSMS,
-        constants::MAX_SPEC_EVALUE,
     );
-
-    // Fallback: if the strict 1e-6 threshold did not qualify enough
-    // confident PSMs, retry once at 1e-5. Preserves Java parity on
-    // datasets where 1e-6 succeeds; recovers LFQ-shaped distributions
-    // where Rust's SpecE-tail drift leaves the cal pre-pass a handful
-    // of PSMs short. The median-residual + MAD-based sigma are robust
-    // to one decade of noisier outliers.
-    let (residuals, filter) = if residuals.len() < constants::MIN_CONFIDENT_PSMS {
-        let (retry_residuals, retry_filter) = extract_residuals(
-            &sampled,
-            &queues,
-            originals,
-            &prepared.candidates,
-            MIN_DE_NOVO_SCORE,
-            constants::MIN_CONFIDENT_PSMS,
-            constants::MAX_SPEC_EVALUE_FALLBACK,
-        );
-        if retry_residuals.len() >= constants::MIN_CONFIDENT_PSMS {
-            (retry_residuals, retry_filter)
-        } else {
-            (residuals, filter)
-        }
-    } else {
-        (residuals, filter)
-    };
 
     if residuals.len() < constants::MIN_CONFIDENT_PSMS {
         return CalibrationStats {
@@ -259,7 +233,6 @@ fn extract_residuals(
     candidates: &[crate::candidate_gen::Candidate],
     min_de_novo_score: i32,
     keep_top_n: usize,
-    max_spec_evalue: f64,
 ) -> (Vec<f64>, CalFilterCounts) {
     let mut residual_with_eval: Vec<(f64, f64)> = Vec::new();
     let mut filter = CalFilterCounts::default();
@@ -292,7 +265,7 @@ fn extract_residuals(
     }
 
     for (&spectrum_idx, psm) in best_by_spec.iter() {
-        if psm.spec_e_value > max_spec_evalue {
+        if psm.spec_e_value > constants::MAX_SPEC_EVALUE {
             filter.rejected_spec_e += 1;
             continue;
         }

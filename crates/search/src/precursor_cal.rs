@@ -78,11 +78,6 @@ pub mod constants {
     pub const MAX_SAMPLED: usize = 500;
     pub const MIN_CONFIDENT_PSMS: usize = 200;
     pub const MAX_SPEC_EVALUE: f64 = 1e-6;
-    /// Fallback SpecEValue threshold used when the strict 1e-6 cutoff
-    /// fails to qualify `MIN_CONFIDENT_PSMS` (e.g. LFQ datasets with
-    /// shifted SpecE-tail distribution). Java parity is preserved on
-    /// the primary pass; the fallback is a one-shot retry.
-    pub const MAX_SPEC_EVALUE_FALLBACK: f64 = 1e-5;
     pub const MIN_SPECKEYS_FOR_PREPASS: usize = 10_000;
 
     /// Java `DEFAULT_TIGHTENED_WINDOW_*` — post-cal main-pass tolerance tightening.

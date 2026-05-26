@@ -227,13 +227,24 @@ fn main() -> ExitCode {
     }
 }
 
-/// Print VmRSS for the current process under MSGFRUST_RSS_PROBE=1. No-op
+/// Print VmRSS for the current process under MSGF_RSS_PROBE=1. No-op
 /// otherwise and a no-op on non-Linux platforms regardless of the env var.
+/// (Legacy name MSGFRUST_RSS_PROBE is accepted with a deprecation warning.)
 ///
 /// We gate behind an env var so production runs stay quiet; flip the var on
 /// when debugging memory regressions.
 fn log_rss(tag: &str) {
-    if std::env::var_os("MSGFRUST_RSS_PROBE").is_none() {
+    // Accept both new and legacy env var names. Legacy emits a one-time
+    // deprecation warning on stderr.
+    let new_set = std::env::var_os("MSGF_RSS_PROBE").is_some();
+    let legacy_set = std::env::var_os("MSGFRUST_RSS_PROBE").is_some();
+    if legacy_set && !new_set {
+        eprintln!(
+            "WARN: MSGFRUST_RSS_PROBE is deprecated; use MSGF_RSS_PROBE \
+             (legacy name accepted in this release, will be removed next)"
+        );
+    }
+    if !new_set && !legacy_set {
         return;
     }
     #[cfg(target_os = "linux")]

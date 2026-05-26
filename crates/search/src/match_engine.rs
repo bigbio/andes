@@ -1164,7 +1164,7 @@ mod feature_tests {
     use model::instrument::InstrumentType;
     use model::protocol::Protocol;
     use model::tolerance::Tolerance;
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     /// Minimal RankScorer for feature tests, with mme = Da(tol_da).
     ///
@@ -1181,13 +1181,13 @@ mod feature_tests {
         let prefix1 = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits() };
         let suffix1 = IonType::Suffix { charge: 1, offset_bits: ((H2O + PROTON) as f32).to_bits() };
         let noise = IonType::Noise;
-        let mut ion_table = HashMap::new();
+        let mut ion_table = FxHashMap::default();
         ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
         ion_table.insert(suffix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
         ion_table.insert(noise, vec![0.1_f32, 0.2, 0.3, 0.4]);
-        let mut rank_dist_table = HashMap::new();
+        let mut rank_dist_table = FxHashMap::default();
         rank_dist_table.insert(part, ion_table);
-        let mut frag_off_table = HashMap::new();
+        let mut frag_off_table = FxHashMap::default();
         frag_off_table.insert(part, vec![
             FragmentOffsetFrequency { ion_type: prefix1, frequency: 0.7 },
             FragmentOffsetFrequency { ion_type: suffix1, frequency: 0.7 },
@@ -1209,15 +1209,15 @@ mod feature_tests {
             num_segments: 1,
             partitions: vec![part],
             num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
+            precursor_off_map: FxHashMap::default(),
             frag_off_table,
             max_rank: 3,
             rank_dist_table,
             error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-            partition_ion_types_cache: HashMap::new(),
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
         };
         param.rebuild_cache();
         RankScorer::new(&param)

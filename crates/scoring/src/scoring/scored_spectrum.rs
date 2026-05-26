@@ -1111,7 +1111,7 @@ mod tests {
         use crate::param_model::SpecDataType;
         use model::protocol::Protocol;
         use model::tolerance::Tolerance;
-        use std::collections::HashMap;
+        use rustc_hash::FxHashMap;
 
         // Spectrum: precursor_mz=501.00727649 → neutral_mass≈(501.007-PROTON)*2≈1000.0 Da,
         // charge=2.
@@ -1144,15 +1144,15 @@ mod tests {
             num_segments: 1,
             partitions: vec![],
             num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
-            frag_off_table: HashMap::new(),
+            precursor_off_map: FxHashMap::default(),
+            frag_off_table: FxHashMap::default(),
             max_rank: 3,
-            rank_dist_table: HashMap::new(),
+            rank_dist_table: FxHashMap::default(),
             error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-            partition_ion_types_cache: HashMap::new(),
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
         };
 
         let scorer = RankScorer::new(&param);
@@ -1190,7 +1190,7 @@ mod tests {
         use model::instrument::InstrumentType;
         use model::protocol::Protocol;
         use model::tolerance::Tolerance;
-        use std::collections::HashMap;
+        use rustc_hash::FxHashMap;
         Param {
             version: 10001,
             data_type: SpecDataType {
@@ -1208,15 +1208,15 @@ mod tests {
             num_segments: 1,
             partitions: vec![],
             num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
-            frag_off_table: HashMap::new(),
+            precursor_off_map: FxHashMap::default(),
+            frag_off_table: FxHashMap::default(),
             max_rank: 3,
-            rank_dist_table: HashMap::new(),
+            rank_dist_table: FxHashMap::default(),
             error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-            partition_ion_types_cache: HashMap::new(),
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
         }
     }
 
@@ -1496,7 +1496,7 @@ mod tests {
         use crate::param_model::{FragmentOffsetFrequency, SpecDataType};
         use model::protocol::Protocol;
         use model::tolerance::Tolerance;
-        use std::collections::HashMap;
+        use rustc_hash::FxHashMap;
 
         let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
         let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
@@ -1505,14 +1505,14 @@ mod tests {
         let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
         let noise_freqs = vec![0.1_f32, 0.2, 0.3, 0.4];
 
-        let mut ion_table: HashMap<IonType, Vec<f32>> = HashMap::new();
+        let mut ion_table: FxHashMap<IonType, Vec<f32>> = FxHashMap::default();
         ion_table.insert(prefix1, ion_freqs);
         ion_table.insert(noise, noise_freqs);
 
-        let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
+        let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = FxHashMap::default();
         rank_dist_table.insert(part, ion_table);
 
-        let mut frag_off_table = HashMap::new();
+        let mut frag_off_table = FxHashMap::default();
         frag_off_table.insert(part, vec![FragmentOffsetFrequency {
             ion_type: prefix1,
             frequency: 0.7,
@@ -1522,13 +1522,13 @@ mod tests {
         let error_scaling_factor = 2_i32;
         let dist_len = (error_scaling_factor as usize) * 2 + 1;
 
-        let mut ion_err_dist_table: HashMap<Partition, Vec<f32>> = HashMap::new();
+        let mut ion_err_dist_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
         ion_err_dist_table.insert(part, vec![0.1_f32, 0.2, 0.4, 0.2, 0.1]);
 
-        let mut noise_err_dist_table: HashMap<Partition, Vec<f32>> = HashMap::new();
+        let mut noise_err_dist_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
         noise_err_dist_table.insert(part, vec![0.05_f32, 0.1, 0.7, 0.1, 0.05]);
 
-        let mut ion_existence_table: HashMap<Partition, Vec<f32>> = HashMap::new();
+        let mut ion_existence_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
         // [nn, ?, ?, yy] = [0.1, 0.3, 0.3, 0.5]
         ion_existence_table.insert(part, vec![0.1_f32, 0.3, 0.3, 0.5]);
 
@@ -1551,7 +1551,7 @@ mod tests {
             num_segments: 1,
             partitions: vec![part],
             num_precursor_off: 0,
-            precursor_off_map: HashMap::new(),
+            precursor_off_map: FxHashMap::default(),
             frag_off_table,
             max_rank: 3,
             rank_dist_table,
@@ -1559,7 +1559,7 @@ mod tests {
             ion_err_dist_table,
             noise_err_dist_table,
             ion_existence_table,
-            partition_ion_types_cache: HashMap::new(),
+            partition_ion_types_cache: FxHashMap::default(),
         };
         param.rebuild_cache();
 
@@ -1715,12 +1715,12 @@ mod precursor_filter_tests {
     use crate::param_model::{Param, PrecursorOffsetFrequency, SpecDataType};
     use model::protocol::Protocol;
     use model::tolerance::Tolerance;
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
 
     /// Build a Param with a single precursor offset entry: charge 2,
     /// reduced_charge 2, offset 0.0 Da (the precursor itself), tolerance 0.5 Da.
     fn param_with_precursor_filter() -> Param {
-        let mut precursor_off_map: HashMap<i32, Vec<PrecursorOffsetFrequency>> = HashMap::new();
+        let mut precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>> = FxHashMap::default();
         precursor_off_map.insert(
             2,
             vec![PrecursorOffsetFrequency {
@@ -1749,14 +1749,14 @@ mod precursor_filter_tests {
             partitions: vec![],
             num_precursor_off: 1,
             precursor_off_map,
-            frag_off_table: HashMap::new(),
+            frag_off_table: FxHashMap::default(),
             max_rank: 3,
-            rank_dist_table: HashMap::new(),
+            rank_dist_table: FxHashMap::default(),
             error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-            partition_ion_types_cache: HashMap::new(),
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
         }
     }
 
@@ -1784,7 +1784,7 @@ mod precursor_filter_tests {
     /// Let's use reduced_charge=0 for the precursor filter test:
     /// c = 2 - 0 = 2; filter_mz = (neutral + 2*PROTON) / 2 + 0 = precursor_mz.
     fn param_with_precursor_filter_rc0() -> Param {
-        let mut precursor_off_map: HashMap<i32, Vec<PrecursorOffsetFrequency>> = HashMap::new();
+        let mut precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>> = FxHashMap::default();
         precursor_off_map.insert(
             2,
             vec![PrecursorOffsetFrequency {
@@ -1813,14 +1813,14 @@ mod precursor_filter_tests {
             partitions: vec![],
             num_precursor_off: 1,
             precursor_off_map,
-            frag_off_table: HashMap::new(),
+            frag_off_table: FxHashMap::default(),
             max_rank: 3,
-            rank_dist_table: HashMap::new(),
+            rank_dist_table: FxHashMap::default(),
             error_scaling_factor: 0,
-            ion_err_dist_table: HashMap::new(),
-            noise_err_dist_table: HashMap::new(),
-            ion_existence_table: HashMap::new(),
-            partition_ion_types_cache: HashMap::new(),
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
         }
     }
 

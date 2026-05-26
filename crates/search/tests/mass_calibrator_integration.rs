@@ -168,3 +168,18 @@ fn build_spec_keys_skips_below_min_peaks_and_expands_missing_charge() {
     assert!(keys.iter().any(|k| k.spectrum_idx == 1 && k.charge == 3));
     assert!(!keys.iter().any(|k| k.spectrum_idx == 2));
 }
+
+#[test]
+fn fallback_threshold_constant_is_strictly_relaxed() {
+    use search::precursor_cal::constants;
+    let primary: f64 = constants::MAX_SPEC_EVALUE;
+    let fallback: f64 = constants::MAX_SPEC_EVALUE_FALLBACK;
+    assert!(
+        fallback > primary,
+        "fallback threshold ({fallback}) must be more permissive than primary ({primary})",
+    );
+    assert!(
+        fallback <= 1e-3,
+        "fallback should not be excessively permissive; got {fallback}",
+    );
+}

@@ -1,4 +1,4 @@
-//! Scoring sub-system for MS-GF+ Rust port.
+//! Scoring model, ion-type prediction, and generating-function DP.
 //!
 //! Contains the parameter model, rank-based scoring, fragment ion
 //! prediction, and the generating-function DP for SpecEValue.

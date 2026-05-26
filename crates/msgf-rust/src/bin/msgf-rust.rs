@@ -1,7 +1,7 @@
-//! msgf-rust: end-to-end MS-GF+ search.
+//! msgf-rust: end-to-end peptide-spectrum database search.
 //!
 //! Loads an MGF or mzML spectrum file and a FASTA target database, runs a
-//! tryptic database search with default MS-GF+ parameters, and writes output
+//! tryptic database search and writes output
 //! in Percolator `.pin` format (and optionally `.tsv` format).
 //!
 //! Format dispatch: if `--spectrum` ends in `.mzML` or `.mzml`, `MzMLReader`
@@ -29,10 +29,9 @@ use search::{
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
 
-/// Fragmentation method. Named values map to the same param-file resolution
-/// logic as Java MS-GF+'s `-m` flag. `Auto` means "detect from the mzML's
-/// activation block; fall back to the bundled HCD_QExactive_Tryp.param if
-/// nothing detected" — the same semantics as omitting the flag pre-iter39.
+/// Fragmentation method. `Auto` means "detect from the mzML's activation block;
+/// fall back to the bundled HCD_QExactive_Tryp.param if nothing detected" —
+/// the same semantics as omitting the flag pre-iter39.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Fragmentation {
     #[clap(name = "auto")] Auto,
@@ -52,7 +51,7 @@ pub enum Instrument {
     #[clap(name = "QExactive")] QExactive,
 }
 
-/// Search protocol. Maps to Java MS-GF+'s `-protocol` flag.
+/// Search protocol: sample labeling or enrichment strategy applied during the experiment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
     #[clap(name = "auto")]          Auto,
@@ -63,8 +62,8 @@ pub enum Protocol {
     #[clap(name = "standard")]      Standard,
 }
 
-/// Enzymatic-cleavage enforcement at peptide span boundaries. Maps to Java
-/// MS-GF+'s `-ntt` flag where 2=fully, 1=semi, 0=non-specific.
+/// Enzymatic-cleavage enforcement at peptide span boundaries:
+/// 2=fully, 1=semi, 0=non-specific.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum EnzymeSpecificity {
     #[clap(name = "non-specific")] NonSpecific,
@@ -75,7 +74,7 @@ pub enum EnzymeSpecificity {
 #[derive(Parser, Debug)]
 #[command(
     name = "msgf-rust",
-    about = "MS-GF+ Rust port: database search of MGF/mzML spectra against FASTA",
+    about = "msgf-rust: database search of MGF/mzML spectra against FASTA",
     allow_hyphen_values = true,
 )]
 struct Cli {

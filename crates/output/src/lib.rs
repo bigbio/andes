@@ -1,4 +1,4 @@
-//! Output writers for MS-GF+ search results.
+//! Output writers: Percolator PIN, TSV.
 //!
 //! # Known column behaviors
 //!

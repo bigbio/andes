@@ -75,10 +75,9 @@ jobs:
   lint:
     name: Lint (clippy + rustfmt)
     runs-on: ubuntu-latest
-    # Advisory only — the iter1-38 codebase isn't fmt-clean / clippy-clean
-    # yet (~11k lines of fmt churn pending). Surfaces the warnings without
-    # blocking PRs while that cleanup is sequenced separately.
-    continue-on-error: true
+    # Clippy is REQUIRED after the PR-Q1 cleanup sweep (2026-05-26).
+    # Rustfmt remains advisory until a future fmt-clean sweep lands
+    # (~11k lines of cosmetic churn pending; tracked separately).
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -96,5 +95,4 @@ jobs:
         continue-on-error: true
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets
-        continue-on-error: true
+        run: cargo clippy --workspace --all-targets -- -D warnings

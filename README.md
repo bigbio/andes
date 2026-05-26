@@ -66,7 +66,7 @@ msgf-rust \
 
 This runs a tryptic search at 20 ppm precursor tolerance with the bundled HCD_QExactive_Tryp scoring model, writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
 
-A row in `out.pin` is one peptide–spectrum match with 28 columns: `SpecId`, `Label`, `ScanNr`, charge one-hot encoding, then features like `RawScore`, `lnSpecEValue`, `DeNovoScore`, ion-current ratios, peptide-length stats, etc. Full column reference: `DOCS.md` §3a.
+A row in `out.pin` is one peptide–spectrum match. With the default charge range (2–3), each row has **36 tab-separated columns**: 35 Java-parity Percolator features plus Rust-only `EdgeScore` (inserted before `Peptide`). Charge one-hot columns scale with `[--charge-min, --charge-max]`. Full column reference: `DOCS.md` §3a.
 
 ## Common workflows
 
@@ -131,11 +131,11 @@ Run `msgf-rust --help` for the auto-generated help with full descriptions.
 
 ## Auto-detection
 
-For mzML inputs, msgf-rust reads the activation block of the first MS2 spectrum and selects a bundled `.param` file accordingly. The detection covers HCD/CID/ETD/UVPD activation and LowRes/HighRes/TOF/QExactive instrument classes (via mzML CV params). The bundled model is then resolved from `(fragmentation, instrument, protocol)`. MGF files have no activation metadata, so they go through the CLI defaults (which can be overridden with explicit `--fragmentation` / `--instrument` flags). Full resolution table: `DOCS.md` §4.
+For mzML inputs with `--fragmentation auto` (the default), msgf-rust peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a bundled `.param` file from the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when resolving the bundled model. MGF files have no activation metadata, so they use flag-based resolution (defaulting to `HCD_QExactive_Tryp.param`). Full resolution table: `DOCS.md` §4.
 
 ## Parity vs Java MS-GF+
 
-PIN output columns are bit-exact with Java MS-GF+ on the agreement bucket (same scan + same top-1 peptide) for most features. Three residual divergences exist as deferred research: `lnEValue` (num_distinct semantics), `MeanRelErrorTop7` (error-stat normalization), and the BSA charge-3 SEV gap from the deconvolution-implementation difference (`known-divergences.md` item #3, kept on the development branch). None gate cutover; aggregate 1% FDR PSM counts beat Java on all three benchmark datasets. Full detail: `DOCS.md` §8d.
+PIN output columns are bit-exact with Java MS-GF+ on the agreement bucket (same scan + same top-1 peptide) for most features. Three residual divergences exist as deferred research: `lnEValue` (num_distinct semantics), `MeanRelErrorTop7` (error-stat normalization), and the BSA charge-3 SEV gap from deconvolution-implementation differences. None gate cutover; aggregate 1% FDR PSM counts beat Java on all three benchmark datasets. Full detail: `DOCS.md` §8d.
 
 ## Citation
 

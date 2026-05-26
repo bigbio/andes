@@ -11,7 +11,7 @@
 //! Java SP values are now captured directly via
 //! `-Dmsgfplus.gftrace=true` against `target/MSGFPlus.jar` (commit e918376)
 //! so the test compares SP-vs-SP. The remaining `num_distinct`-level
-//! discrepancy is tracked separately as known-divergences item #2
+//! discrepancy is tracked in `DOCS.md` §8d (lnEValue / num_distinct).
 //! (e_value proxy follow-up).
 //!
 //! Reference fixture (for context, not used for the assertion):
@@ -91,7 +91,7 @@ const FIVE_TRACED_PSMS: &[(i32, &str, u8, f64)] = &[
 ///     Best case; Rust and Java agree to within ~18%.
 ///
 /// The remaining SP-level drift is small and is tracked under the
-/// known-divergences list (RawScore scale + Float.MIN_VALUE underflow
+/// known-divergences list (see `DOCS.md` §8d: RawScore scale + Float.MIN_VALUE underflow
 /// guard). The previously suspected scan-3353-specific score-distribution
 /// width bug appears to have been an artifact of the SEV-vs-SP comparison.
 ///
@@ -100,7 +100,7 @@ const FIVE_TRACED_PSMS: &[(i32, &str, u8, f64)] = &[
 /// `NewScoredSpectrum.java:83-88`). The two charge-3 PSMs in this fixture
 /// (scan 3416 and 3353) moved from 0.24/0.13 OOM → 1.03/1.20 OOM. The shift
 /// EXPOSES an underlying deconvolution-implementation divergence between
-/// Rust and Java (`known-divergences.md` item #3, still open). The fix is
+/// Rust and Java (`DOCS.md` §8d — BSA charge-3 deconvolution, still open). The fix is
 /// algorithmically correct — Rust now matches Java's prob_peak ordering —
 /// but the deconvoluted peak list differs from Java's implementation,
 /// shifting ion_existence_score. Charge-2 PSMs (3 of 5 in this fixture) are
@@ -112,7 +112,7 @@ const FIVE_TRACED_PSMS: &[(i32, &str, u8, f64)] = &[
 /// validated on Astral (Rust now BEATS Java by +287 PSMs at 1% FDR;
 /// see project memory `iter32-37-shipped`). It also widens the BSA
 /// charge-3 SEV gap from 1.03/1.20 OOM → 2.56-3.58 OOM because the
-/// deconvolution-implementation divergence (`known-divergences.md` #3)
+/// deconvolution-implementation divergence (`DOCS.md` §8d)
 /// now feeds the corrected score path. Bumping tolerance to 4.0 OOM
 /// keeps this test as a coarse smoke gate while #3 remains open; a
 /// regression beyond 4.0 OOM would still signal a new bug.

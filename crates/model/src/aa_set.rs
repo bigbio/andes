@@ -266,7 +266,7 @@ impl AminoAcidSetBuilder {
                 continue;
             }
             // Take everything after the first `=`. Java accepts whitespace around the value.
-            let value = line.splitn(2, '=').nth(1).unwrap_or("").trim();
+            let value = line.split_once('=').map(|x| x.1).unwrap_or("").trim();
             let n: u32 = value.parse().map_err(|_| AaSetError::BadNumMods {
                 value: value.to_string(),
             })?;

@@ -29,6 +29,25 @@ use model::spectrum::Spectrum;
 
 const PROTON: f64 = 1.007_276_49;
 
+/// Per-segment partition entries: `(Partition, Vec<(IonType, log-probs)>)`.
+pub(crate) type SegmentPartitionCache = Vec<(Partition, Vec<(IonType, Vec<f32>)>)>;
+/// Borrowed slice of per-segment partition entries.
+pub(crate) type SegmentPartitionSlice<'a> = &'a [(Partition, Vec<(IonType, Vec<f32>)>)];
+/// Result of deconvolution: optional peak list and aligned rank list.
+type DeconvResult = (Option<Vec<(f64, f32)>>, Option<Vec<u32>>);
+
+/// Scoring context passed to `ScoredSpectrum::rank_kept`, bundling scalar
+/// per-spectrum fields to stay under the `too_many_arguments` limit.
+struct RankKeptCtx {
+    prob_peak: f32,
+    main_ion: IonType,
+    parent_mass: f64,
+    charge: u8,
+    segment_partition_cache: SegmentPartitionCache,
+    prefix_score_cache: Vec<f32>,
+    suffix_score_cache: Vec<f32>,
+}
+
 /// iter31 P-2: cache the (MSGF_TRACE_IONS && MSGF_TRACE_PEP) env-var probe
 /// once instead of calling `env::var_os` twice per `directional_node_score_inner`
 /// invocation. The inner loop fires for every (spectrum × split × segment)
@@ -105,7 +124,7 @@ pub struct ScoredSpectrum<'a> {
     /// constructor `new_without_filtering` (no Param / RankScorer in scope)
     /// the cache is empty; the hot path tolerates length 0 by simply
     /// iterating no segments and returning 0.0.
-    segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)>,
+    segment_partition_cache: SegmentPartitionCache,
     /// FastScorer-style directional node-score tables indexed by nominal
     /// residue mass. Populated for production `new()` so candidate scoring
     /// can do array lookups instead of recomputing per-split node scores.
@@ -130,8 +149,8 @@ pub struct ScoredSpectrum<'a> {
     /// Without this cache, `observed_node_mass` was 11.56% of Astral wall
     /// (per iter35 perf profile) — each call did a binary_search over peaks
     /// + linear scan. iter33's per-candidate `psm_edge_score` calls it twice
-    /// per edge × 9 edges × 16M candidates ≈ 290M times per Astral spectrum,
-    /// repeatedly for the same `node_nominal` values.
+    ///   per edge × 9 edges × 16M candidates ≈ 290M times per Astral spectrum,
+    ///   repeatedly for the same `node_nominal` values.
     observed_mass_cache: std::cell::RefCell<Vec<f64>>,
 }
 
@@ -230,7 +249,7 @@ impl<'a> ScoredSpectrum<'a> {
         // spectra (a large fraction of the data), introducing a per-spectrum
         // divergence in both `prob_peak` and the prefix/suffix node-score
         // cache.
-        let (deconv_peaks, deconv_ranks): (Option<Vec<(f64, f32)>>, Option<Vec<u32>>) =
+        let (deconv_peaks, deconv_ranks): DeconvResult =
             if param.apply_deconvolution {
                 let tol = param.deconvolution_error_tolerance as f64;
                 let (dp, dr) = deconvolute_spectrum(&spec.peaks, &ranks, charge, tol);
@@ -268,7 +287,7 @@ impl<'a> ScoredSpectrum<'a> {
         // borrowed slice; `.to_vec()` clones it to owned so the cache can
         // outlive the borrow on `scorer`.
         let num_segs = param.num_segments.max(0) as usize;
-        let segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)> = (0..num_segs)
+        let segment_partition_cache: SegmentPartitionCache = (0..num_segs)
             .map(|seg| {
                 let p = param.partition_for(charge, parent_mass, seg);
                 let logs = scorer.partition_ion_logs(&p).to_vec();
@@ -363,14 +382,20 @@ impl<'a> ScoredSpectrum<'a> {
         // empty. `directional_node_score` tolerates an empty cache: the
         // outer loop iterates zero times and the function returns 0.0.
         // The test-fixture path doesn't need the per-segment optimization.
-        let segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)> = Vec::new();
-        let prefix_score_cache: Vec<f32> = Vec::new();
-        let suffix_score_cache: Vec<f32> = Vec::new();
         Self::rank_kept(
-            spec, kept, kept_count, ranks, prob_peak, main_ion, parent_mass, charge,
-            segment_partition_cache,
-            prefix_score_cache,
-            suffix_score_cache,
+            spec,
+            kept,
+            kept_count,
+            ranks,
+            RankKeptCtx {
+                prob_peak,
+                main_ion,
+                parent_mass,
+                charge,
+                segment_partition_cache: Vec::new(),
+                prefix_score_cache: Vec::new(),
+                suffix_score_cache: Vec::new(),
+            },
         )
     }
 
@@ -382,13 +407,7 @@ impl<'a> ScoredSpectrum<'a> {
         mut kept: Vec<(usize, f32, f64)>,
         kept_count: usize,
         mut ranks: Vec<u32>,
-        prob_peak: f32,
-        main_ion: IonType,
-        parent_mass: f64,
-        charge: u8,
-        segment_partition_cache: Vec<(Partition, Vec<(IonType, Vec<f32>)>)>,
-        prefix_score_cache: Vec<f32>,
-        suffix_score_cache: Vec<f32>,
+        ctx: RankKeptCtx,
     ) -> Self {
         let total_intensity: f64 = kept.iter().map(|&(_, intensity, _)| intensity as f64).sum();
         kept.sort_by(|a, b| {
@@ -405,13 +424,13 @@ impl<'a> ScoredSpectrum<'a> {
             ranks,
             kept_count,
             total_intensity,
-            prob_peak,
-            main_ion,
-            parent_mass,
-            charge,
-            segment_partition_cache,
-            prefix_score_cache,
-            suffix_score_cache,
+            prob_peak: ctx.prob_peak,
+            main_ion: ctx.main_ion,
+            parent_mass: ctx.parent_mass,
+            charge: ctx.charge,
+            segment_partition_cache: ctx.segment_partition_cache,
+            prefix_score_cache: ctx.prefix_score_cache,
+            suffix_score_cache: ctx.suffix_score_cache,
             deconv_peaks: None,
             deconv_ranks: None,
             // iter36: empty cache for test fixtures (rank_kept path). All
@@ -542,7 +561,7 @@ impl<'a> ScoredSpectrum<'a> {
             if self.ranks[i] == u32::MAX {
                 continue;
             }
-            if best.as_ref().map_or(true, |(_, best_int)| intensity > *best_int) {
+            if best.as_ref().is_none_or(|(_, best_int)| intensity > *best_int) {
                 best = Some((i, intensity));
             }
         }
@@ -588,7 +607,7 @@ impl<'a> ScoredSpectrum<'a> {
             if self.ranks[i] == u32::MAX {
                 continue;
             }
-            if best.as_ref().map_or(true, |(_, best_int)| intensity > *best_int) {
+            if best.as_ref().is_none_or(|(_, best_int)| intensity > *best_int) {
                 best = Some((i, intensity));
             }
         }
@@ -665,10 +684,11 @@ impl<'a> ScoredSpectrum<'a> {
         )
     }
 
+    #[allow(clippy::too_many_arguments, reason = "private inner driver tightly coupled to the scoring loop; all args are distinct")]
     fn directional_node_score_inner(
         peaks: &[(f64, f32)],
         ranks: &[u32],
-        segment_partition_cache: &[(Partition, Vec<(IonType, Vec<f32>)>)],
+        segment_partition_cache: SegmentPartitionSlice<'_>,
         scorer: &RankScorer,
         nominal_mass: f64,
         is_prefix: bool,
@@ -689,6 +709,9 @@ impl<'a> ScoredSpectrum<'a> {
         // which on Astral runs is ~hundreds of millions of acquisitions of the
         // global env lock.
         let trace_ions = trace_ions_enabled();
+        // `seg` indexes both the cache AND serves as the fallback argument to
+        // `partition_for` when the cache is absent — the range loop is required.
+        #[allow(clippy::needless_range_loop)]
         for seg in 0..num_segs {
             let ion_logs_slice: &[(IonType, Vec<f32>)] = if use_cache {
                 segment_partition_cache[seg].1.as_slice()
@@ -788,7 +811,7 @@ impl<'a> ScoredSpectrum<'a> {
             if ranks[i] == u32::MAX {
                 continue;
             }
-            if best_peak_mz.as_ref().map_or(true, |&(_, best_int)| intensity > best_int) {
+            if best_peak_mz.as_ref().is_none_or(|&(_, best_int)| intensity > best_int) {
                 best_peak_mz = Some((mz, intensity));
             }
         }
@@ -887,7 +910,7 @@ fn nearest_peak_rank_in(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tol
         if ranks[i] == u32::MAX {
             continue;
         }
-        if best.as_ref().map_or(true, |(_, best_int)| intensity > *best_int) {
+        if best.as_ref().is_none_or(|(_, best_int)| intensity > *best_int) {
             best = Some((i, intensity));
         }
     }
@@ -1669,7 +1692,7 @@ mod tests {
                 let mut best: Option<(usize, f64)> = None;
                 for (i, &(mz, _)) in s.peaks.iter().enumerate() {
                     if (mz - target).abs() <= tol
-                        && best.as_ref().map_or(true, |(_, d)| (mz - target).abs() < *d)
+                        && best.as_ref().is_none_or(|(_, d)| (mz - target).abs() < *d)
                     {
                         best = Some((i, (mz - target).abs()));
                     }

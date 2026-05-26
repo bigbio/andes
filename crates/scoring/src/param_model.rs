@@ -362,7 +362,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
     for &partition in &partitions {
         let frag_list = frag_off_table.get(&partition);
         // Skip partitions with no ion types.
-        if frag_list.map_or(true, |v| v.is_empty()) {
+        if frag_list.is_none_or(|v| v.is_empty()) {
             continue;
         }
         let mut table: HashMap<IonType, Vec<f32>> = HashMap::new();

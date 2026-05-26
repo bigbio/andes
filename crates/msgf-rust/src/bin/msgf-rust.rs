@@ -175,6 +175,7 @@ struct Cli {
     ///     strings (e.g. `C2H3N1O1`) are **not** yet supported.
     ///   - `<aa>` is a single uppercase letter or `*` (wildcard).
     ///   - `<location>` is one of `any|N-term|C-term|Prot-N-term|Prot-C-term`.
+    ///
     /// A single `NumMods=N` line sets the max variable mods per peptide.
     /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
     /// are ignored. When omitted, the binary uses its built-in defaults
@@ -930,7 +931,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
 /// - instrument:    0=LowRes,   1=HighRes, 2=TOF, 3=QExactive
 /// - protocol:      0=Automatic,1=Phosphorylation, 2=iTRAQ,
-///                  3=iTRAQPhospho, 4=TMT, 5=Standard
+///   3=iTRAQPhospho, 4=TMT, 5=Standard
 ///
 /// When all three are `None`, the historical default
 /// `HCD_QExactive_Tryp.param` is returned (preserving existing tests'
@@ -1065,12 +1066,10 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
     // Tally counts keyed by ActivationMethod variant.
     let mut counts: std::collections::HashMap<ActivationMethod, usize> =
         std::collections::HashMap::new();
-    let mut seen = 0usize;
-    for item in reader {
+    for (seen, item) in reader.enumerate() {
         if seen >= MAX_PEEK {
             break;
         }
-        seen += 1;
         if let Ok(spec) = item {
             if let Some(m) = spec.activation_method {
                 *counts.entry(m).or_insert(0) += 1;
@@ -1135,13 +1134,13 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 ///
 /// Mapping (Tryp / no-protocol unless protocol overrides):
 ///   - CID  → frag=1, inst=detected (LowRes when none).
-///            LowRes for LTQ Velos / ion-trap data; HighRes / QExactive
-///            for Orbitrap data. Matches Java's default + the user-supplied
-///            `-inst` path.
+///     LowRes for LTQ Velos / ion-trap data; HighRes / QExactive
+///     for Orbitrap data. Matches Java's default + the user-supplied
+///     `-inst` path.
 ///   - HCD  → frag=3, inst=detected. `resolve_bundled_param`'s Java-mirror
-///            normalization upgrades HCD with non-(HighRes|QExactive) to
-///            QExactive, so HCD on LTQ data still routes to a QExactive
-///            model (Java does the same).
+///     normalization upgrades HCD with non-(HighRes|QExactive) to
+///     QExactive, so HCD on LTQ data still routes to a QExactive
+///     model (Java does the same).
 ///   - ETD  → frag=2, inst=detected.
 ///   - PQD  → CID (Java collapses PQD → CID in `NewScorerFactory.get`).
 ///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).

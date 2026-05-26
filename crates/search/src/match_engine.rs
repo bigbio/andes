@@ -294,6 +294,7 @@ impl<'a> PreparedSearch<'a> {
             // monomorphizes + inlines into the candidate loop. Closure form
             // was not being inlined and went through FnMut::call_mut dispatch.
             #[inline(always)]
+            #[allow(clippy::too_many_arguments, reason = "private inner driver for the per-chunk search loop; all args are orthogonal cleavage parameters")]
             fn compute_cleavage_credit(
                 cand: &Candidate,
                 enz: Enzyme,
@@ -413,7 +414,7 @@ impl<'a> PreparedSearch<'a> {
                     let could_win = match per_charge_queues.get(&z) {
                         Some(q) if q.len() >= q.capacity() as usize => {
                             q.worst_rank_score()
-                                .map_or(true, |worst| pin_score + max_edge_bonus > worst)
+                                .is_none_or(|worst| pin_score + max_edge_bonus > worst)
                         }
                         // Queue below capacity (or doesn't exist yet): accept
                         // everything until it fills up.

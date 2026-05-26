@@ -31,8 +31,8 @@ fn add_prob_dist_scalar(
     for t in t_start..t_end {
         let src_idx = (t - other_min) as usize;
         let dst_idx = (t + score_diff - self_min) as usize;
-        let cur = dst.get_probability((t + score_diff) as i32);
-        dst.set_prob((t + score_diff) as i32, cur + src_p(src, src_idx) * aa_prob);
+        let cur = dst.get_probability((t + score_diff));
+        dst.set_prob((t + score_diff), cur + src_p(src, src_idx) * aa_prob);
         let _ = dst_idx; // silence
     }
 }

@@ -1,0 +1,41 @@
+[
+  {
+    "dataset": "lfq",
+    "fixture": "PXD001819",
+    "rust_shift_ppm": null,
+    "java_shift_ppm": 0.101,
+    "confident_psm_count_rust": 193,
+    "confident_psm_count_java": 200,
+    "robust_sigma_ppm_rust": null,
+    "robust_sigma_ppm_java": null,
+    "tightened_ppm_left": null,
+    "tightened_ppm_right": null,
+    "note": "Rust pre-pass falls 7 PSMs short of MIN_CONFIDENT_PSMS=200; Auto mode contract skips shift application. Tracked as deferred SpecE-tail follow-up in 2026-05-25-spece-tail-exploration.md."
+  },
+  {
+    "dataset": "astral",
+    "fixture": "astral",
+    "rust_shift_ppm": -0.029,
+    "java_shift_ppm": -0.030,
+    "confident_psm_count_rust": 200,
+    "confident_psm_count_java": 200,
+    "robust_sigma_ppm_rust": 0.5,
+    "robust_sigma_ppm_java": 0.5,
+    "tightened_ppm_left": 2.0,
+    "tightened_ppm_right": 2.0,
+    "note": "Shift agreement ±0.03 ppm; tightening floor (2.0 ppm) wins over 3*sigma+margin = 2.0 ppm."
+  },
+  {
+    "dataset": "tmt",
+    "fixture": "tmt",
+    "rust_shift_ppm": -0.681,
+    "java_shift_ppm": -0.754,
+    "confident_psm_count_rust": 200,
+    "confident_psm_count_java": 200,
+    "robust_sigma_ppm_rust": 2.55,
+    "robust_sigma_ppm_java": 2.06,
+    "tightened_ppm_left": 8.14,
+    "tightened_ppm_right": 8.14,
+    "note": "Shift agreement within ±0.073 ppm; tightened tolerance lands within ~1.5 ppm of Java (Java 6.67 ppm vs Rust 8.14 ppm)."
+  }
+]

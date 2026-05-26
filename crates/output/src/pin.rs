@@ -655,6 +655,8 @@ mod tests {
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
+            precursor_cal_mode: search::PrecursorCalMode::Auto,
+            precursor_mass_shift_ppm: 0.0,
         }
     }
 

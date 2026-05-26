@@ -22,7 +22,7 @@ static GF_BIN_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static GF_SPECTRA_NO_GROUP: AtomicU64 = AtomicU64::new(0);
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::{smallvec, SmallVec};
 
 use model::aa_set::AminoAcidSet;
@@ -33,6 +33,7 @@ use scoring_crate::gf::group::GeneratingFunctionGroup;
 use scoring_crate::gf::primitive_graph::PrimitiveAaGraph;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
+use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
@@ -147,7 +148,27 @@ impl<'a> PreparedSearch<'a> {
         spectra: &[Spectrum],
         spectrum_idx_offset: usize,
     ) -> Vec<TopNQueue> {
-        let params = self.params;
+        self.run_chunk_with_params(spectra, spectrum_idx_offset, self.params)
+    }
+
+    /// Like [`Self::run_chunk`] but uses `params` for precursor matching and
+    /// queue sizing instead of the params reference stored at prepare time.
+    /// Candidate enumeration and mass buckets are unchanged.
+    pub fn run_chunk_with_params(
+        &self,
+        spectra: &[Spectrum],
+        spectrum_idx_offset: usize,
+        params: &SearchParams,
+    ) -> Vec<TopNQueue> {
+        self.run_chunk_inner(spectra, spectrum_idx_offset, params)
+    }
+
+    fn run_chunk_inner(
+        &self,
+        spectra: &[Spectrum],
+        spectrum_idx_offset: usize,
+        params: &SearchParams,
+    ) -> Vec<TopNQueue> {
         let scorer = self.scorer;
         let idx = self.idx;
         let fragment_tolerance_da = self.fragment_tolerance_da;
@@ -219,9 +240,13 @@ impl<'a> PreparedSearch<'a> {
             // chasing, single sort pass at end. Iteration order matches BTreeSet
             // (ascending), preserving downstream parity / determinism.
             let mut window_cand_indices: Vec<usize> = Vec::with_capacity(2048);
+            let shift_ppm = params.precursor_mass_shift_ppm;
             for &z in &charges_to_try {
                 let charge_f = z as f64;
-                let neutral_mass = (spec.precursor_mz - PROTON) * charge_f - H2O;
+                let neutral_mass = adjusted_observed_neutral_mass(
+                    (spec.precursor_mz - PROTON) * charge_f - H2O,
+                    shift_ppm,
+                );
                 let nominal_center = nominal_from(neutral_mass);
                 let iso_min = *params.isotope_error_range.start() as i32;
                 let iso_max = *params.isotope_error_range.end() as i32;
@@ -318,7 +343,7 @@ impl<'a> PreparedSearch<'a> {
 
             // R-2.1: per-charge queue keyed by charge state. Mirrors Java's
             // per-SpecKey raw-score retention (DBScanner.java:534).
-            let mut per_charge_queues: HashMap<u8, TopNQueue> = HashMap::new();
+            let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
 
             for &cand_idx in &window_cand_indices {
                 let cand = &candidates[cand_idx];
@@ -363,7 +388,14 @@ impl<'a> PreparedSearch<'a> {
                     // gates ~99% of candidates after the queue fills.
                     let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
                     for offset in params.isotope_error_range.clone() {
-                        if let Some(err) = matches_precursor(spec, &cand.peptide, z, offset, &params.precursor_tolerance) {
+                        if let Some(err) = matches_precursor(
+                            spec,
+                            &cand.peptide,
+                            z,
+                            offset,
+                            &params.precursor_tolerance,
+                            shift_ppm,
+                        ) {
                             iso_errs.push(err);
                         }
                     }
@@ -623,7 +655,11 @@ fn compute_spec_e_values_for_spectrum(
     // peptide_neutral_mass = (precursor_mz - H) * charge - H2O
     // This matches Java: scoredSpec.getPrecursorPeak().getMass() - H2O
     // where getPrecursorPeak().getMass() = (mz - H) * charge.
-    let peptide_neutral_mass = (spec.precursor_mz - PROTON) * (charge as f64) - H2O;
+    let shift_ppm = params.precursor_mass_shift_ppm;
+    let peptide_neutral_mass = adjusted_observed_neutral_mass(
+        (spec.precursor_mz - PROTON) * (charge as f64) - H2O,
+        shift_ppm,
+    );
     let nominal_peptide_mass = nominal_from(peptide_neutral_mass);
 
     // Isotope error convention: range [min_iso, max_iso] is applied as

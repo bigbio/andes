@@ -8,6 +8,8 @@ pub mod candidate_gen;
 pub mod decoy;
 pub mod distinct_peptide;
 pub mod match_engine;
+pub mod mass_calibrator;
+pub mod precursor_cal;
 pub mod precursor_matching;
 pub mod psm;
 pub mod sa_walk;
@@ -19,6 +21,13 @@ pub mod suffix_array;
 pub use candidate_gen::enumerate_candidates;
 pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
 pub use match_engine::{match_spectra, PreparedSearch};
+pub use mass_calibrator::{
+    apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
+    learn_calibration_stats, prepass_search_params, CalibrationStats, SpecKey,
+};
+pub use precursor_cal::{
+    PrecursorCalMode, adjusted_observed_neutral_mass, robust_sigma_ppm, tightened_tolerance_ppm,
+};
 pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
 pub use search_index::SearchIndex;

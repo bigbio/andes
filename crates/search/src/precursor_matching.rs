@@ -5,6 +5,8 @@ use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use model::tolerance::PrecursorTolerance;
 
+use crate::precursor_cal::adjusted_observed_neutral_mass;
+
 #[derive(Debug, Clone, Copy)]
 pub struct MassError {
     /// `peptide_mass - spectrum_neutral_mass`. Positive: peptide heavier.
@@ -32,12 +34,16 @@ pub fn matches_precursor(
     charge: u8,
     isotope_offset: i8,
     tolerance: &PrecursorTolerance,
+    shift_ppm: f64,
 ) -> Option<MassError> {
     if charge == 0 {
         return None;
     }
     let z = charge as f64;
-    let spectrum_neutral_obs = spectrum.precursor_mz * z - z * PROTON;
+    let spectrum_neutral_obs = adjusted_observed_neutral_mass(
+        spectrum.precursor_mz * z - z * PROTON,
+        shift_ppm,
+    );
     let spectrum_neutral = spectrum_neutral_obs - (isotope_offset as f64) * ISOTOPE;
     let peptide_mass = peptide.mass();
     let mass_error_da = peptide_mass - spectrum_neutral;

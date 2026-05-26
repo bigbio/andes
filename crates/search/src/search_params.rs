@@ -6,6 +6,8 @@ use model::aa_set::AminoAcidSet;
 use model::enzyme::Enzyme;
 use model::tolerance::{PrecursorTolerance, Tolerance};
 
+use crate::precursor_cal::PrecursorCalMode;
+
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     pub aa_set: AminoAcidSet,
@@ -41,6 +43,13 @@ pub struct SearchParams {
     /// Spectra with fewer peaks than this threshold are skipped entirely.
     /// Default 10.
     pub min_peaks: u32,
+    /// Precursor mass calibration mode (Java `-precursorCal`). Default `Off`
+    /// (opt-in) until the G1 ship gate is closed; see
+    /// `docs/superpowers/specs/2026-05-25-precursor-cal-ship-design.md`.
+    pub precursor_cal_mode: PrecursorCalMode,
+    /// Learned file-wide ppm shift applied to observed neutral masses in the
+    /// main pass. Stays 0.0 until the pre-pass calibrator runs (Phase 3).
+    pub precursor_mass_shift_ppm: f64,
 }
 
 impl SearchParams {
@@ -69,6 +78,8 @@ impl SearchParams {
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
+            precursor_cal_mode: PrecursorCalMode::Off,
+            precursor_mass_shift_ppm: 0.0,
         }
     }
 }
@@ -76,6 +87,7 @@ impl SearchParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::precursor_cal::PrecursorCalMode;
     use model::aa_set::AminoAcidSetBuilder;
 
     #[test]
@@ -97,5 +109,7 @@ mod tests {
             _ => panic!("expected Ppm(20.0)"),
         }
         assert_eq!(params.num_tolerable_termini, 2);
+        assert_eq!(params.precursor_cal_mode, PrecursorCalMode::Off);
+        assert_eq!(params.precursor_mass_shift_ppm, 0.0);
     }
 }

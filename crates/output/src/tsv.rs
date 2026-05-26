@@ -12,8 +12,7 @@
 //!
 //! * **FragMethod**: `ActivationMethod::name()` for the five canonical variants;
 //!   `"UNKNOWN"` for unknown / unset activation.
-//! * **IsotopeError**: always `0`; the winning isotope offset is not currently
-//!   threaded into the TSV writer.
+//! * **IsotopeError**: winning isotope offset from the search (`PsmMatch::isotope_offset`).
 //! * **Decoy filtering**: decoys are emitted; downstream Percolator labels them.
 //! * **SpecID for non-MGF**: `"scan=N"` (mzML convention).
 
@@ -176,8 +175,8 @@ fn write_psm_row<W: Write>(
     // Precursor m/z formatted to 4 decimal places
     let precursor = format!("{:.4}", spec.precursor_mz);
 
-    // IsotopeError: always 0 (winning isotope offset not threaded here yet)
-    let isotope_error: i32 = 0;
+    // IsotopeError: winning isotope offset from the search (matches PIN column).
+    let isotope_error: i32 = psm.isotope_offset as i32;
 
     // PrecursorError: mass_error_ppm stored on psm; convert to Da if needed
     let precursor_error = if ppm_mode {
@@ -354,6 +353,8 @@ mod tests {
             top_n_psms_per_spectrum: 10,
             num_tolerable_termini: 2,
             min_peaks: 10,
+            precursor_cal_mode: search::PrecursorCalMode::Auto,
+            precursor_mass_shift_ppm: 0.0,
         }
     }
 

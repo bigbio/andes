@@ -235,15 +235,18 @@ fn main() -> ExitCode {
 /// We gate behind an env var so production runs stay quiet; flip the var on
 /// when debugging memory regressions.
 fn log_rss(tag: &str) {
-    // Accept both new and legacy env var names. Legacy emits a one-time
-    // deprecation warning on stderr.
+    // Accept both new and legacy env var names. Legacy emits the
+    // deprecation warning once per process (sync::Once guard).
     let new_set = std::env::var_os("MSGF_RSS_PROBE").is_some();
     let legacy_set = std::env::var_os("MSGFRUST_RSS_PROBE").is_some();
     if legacy_set && !new_set {
-        eprintln!(
-            "WARN: MSGFRUST_RSS_PROBE is deprecated; use MSGF_RSS_PROBE \
-             (legacy name accepted in this release, will be removed next)"
-        );
+        static LEGACY_WARN_ONCE: std::sync::Once = std::sync::Once::new();
+        LEGACY_WARN_ONCE.call_once(|| {
+            eprintln!(
+                "WARN: MSGFRUST_RSS_PROBE is deprecated; use MSGF_RSS_PROBE \
+                 (legacy name accepted in this release, will be removed next)"
+            );
+        });
     }
     if !new_set && !legacy_set {
         return;

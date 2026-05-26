@@ -94,7 +94,7 @@ Only tryptic enzyme models are bundled; other enzymes require `--param-file`.
 |---|---|---|---|---|
 | `--output-tsv` | path | *(off)* | Optional tab-separated PSM report (§3b). Skipped in bench mode (`--max-spectra > 0`). | Java `-outputFormat 1` with output path |
 
-**Environment variable:** set `MSGFRUST_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use).
+**Environment variable:** set `MSGF_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use). The legacy name `MSGFRUST_RSS_PROBE=1` is still accepted with a one-line deprecation warning and will be removed in the next quality cleanup.
 
 ---
 

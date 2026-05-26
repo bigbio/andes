@@ -59,8 +59,8 @@ const CV_32BIT: &str = "MS:1000521";
 const CV_ZLIB: &str = "MS:1000574";
 
 // Activation-method CV accessions (inside <precursor><activation>).
-// These mirror Java MS-GF+'s `ActivationMethod.cvTable` in
-// `msutil/ActivationMethod.java` — we map each to one of our five
+// These mirror Java MS-GF+'s `ActivationMethod.cvTable` (Java parity)
+// — we map each to one of our five
 // canonical ActivationMethod variants. Unknown / unhandled child terms
 // fall through and the spectrum's activation_method stays None.
 const CV_CID: &str  = "MS:1000133"; // collision-induced dissociation
@@ -348,7 +348,7 @@ impl<R: BufRead> MzMLReader<R> {
             // here, so downstream param routing picks an ETD-trained
             // model when ECD is the only signal.
             //
-            // Selection rule (mirrors `StaxMzMLParser.java:595-605`):
+            // Selection rule (Java parity for activation-method selection):
             //   - ETD always wins (set unconditionally; matches Java's
             //     `isETD` short-circuit).
             //   - Other methods: first-wins. A spectrum with multiple

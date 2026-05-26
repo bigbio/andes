@@ -73,8 +73,8 @@ pub struct PsmMatch {
     /// share the same peptide sequence and rounded score (typically the same
     /// peptide matched against multiple proteins, e.g. shared tryptic
     /// peptides in target+decoy concat). The PIN writer iterates this Vec to
-    /// emit one tab-separated `Proteins` column per row, matching Java's
-    /// `DirectPinWriter.java:237`.
+    /// emit one tab-separated `Proteins` column per row, matching Java parity
+    /// for the Proteins column in PIN output.
     ///
     /// Every real PSM has length ≥ 1 with valid indices into
     /// `PreparedSearch.candidates`. Test fixtures that don't need to resolve
@@ -89,8 +89,8 @@ pub struct PsmMatch {
     /// from iter19's design). Used by Percolator as one of many features.
     pub score: f32,
     /// iter33: queue-ordering score = `node + cleavage + edge`. Java's
-    /// `DBScanScorer.getScore` returns `node + edge` and `DBScanner.java:533`
-    /// adds cleavage, so Java's `match.score` (used by its `PriorityQueue`
+    /// `DBScanScorer.getScore` returns `node + edge` and Java parity adds
+    /// cleavage, so Java's `match.score` (used by its `PriorityQueue`
     /// ordering) is `node + cleavage + edge`. Rust's pin RawScore stays at
     /// `node + cleavage` for Percolator distribution stability (iter19); the
     /// SEPARATE `EdgeScore` PIN column carries the `+edge` contribution.
@@ -229,7 +229,7 @@ impl TopNQueue {
     /// **Tie handling (R-1, 2026-05-18):** when the queue is at capacity and
     /// a new PSM is `Equal` (in `Ord` terms) to the worst retained PSM, the
     /// new PSM is inserted WITHOUT evicting the tied one. This matches
-    /// Java's `DBScanner.java:540` (`size < n OR score == worst → add`).
+    /// Java parity: `size < n OR score == worst → add`.
     /// As a result, the queue can grow beyond `capacity` when ties exist;
     /// `capacity` becomes a *minimum* top-N, not a hard cap.
     pub fn push(&mut self, m: PsmMatch) {
@@ -244,9 +244,9 @@ impl TopNQueue {
                     self.heap.push(Reverse(m));
                 }
                 std::cmp::Ordering::Equal => {
-                    // R-1 (2026-05-18): Java's DBScanner.java:540 keeps tied
-                    // PSMs at capacity (and DBScanner.java:745 keeps SpecE
-                    // ties on the per-spectrum merge). Rust now matches.
+                    // R-1 (2026-05-18): Java parity keeps tied
+                    // PSMs at capacity (and SpecE ties on the per-spectrum
+                    // merge). Rust now matches.
                     // The queue may exceed `capacity` when ties exist —
                     // `capacity` becomes a *minimum* top-N, not a hard cap.
                     self.heap.push(Reverse(m));
@@ -441,9 +441,9 @@ mod tests {
 
     #[test]
     fn topn_queue_keeps_ties_at_capacity() {
-        // R-1 fix: Java's DBScanner keeps tied PSMs at capacity
-        // (DBScanner.java:540 raw-score retention; DBScanner.java:745 SpecE
-        // merge). Rust's TopNQueue must mirror this — strict-greater eviction
+        // R-1 fix: Java parity keeps tied PSMs at capacity (raw-score
+        // retention and SpecE merge). Rust's TopNQueue must mirror this —
+        // strict-greater eviction
         // was dropping ties Java keeps, plausibly causing the Astral 14K raw-
         // target gap that R-1 + R-2 closed.
         let mut q = TopNQueue::new(1);

@@ -193,7 +193,7 @@ impl<'a> ScoredSpectrum<'a> {
         // MS2IonCurrent / ion-current-ratio denominator: Java zeroes precursor
         // peak intensities via `Spectrum.filterPrecursorPeaks` BEFORE
         // PSMFeatureFinder.computeSumIonCurrent iterates the spec
-        // (NewScoredSpectrum.java:44-45). Those zeroed peaks then contribute
+        // (Java parity: precursor peaks zeroed before ion-current sum). Those zeroed peaks then contribute
         // 0 to MS2IonCurrent. Rust filters precursor peaks for rank
         // assignment but the original `spec.peaks` is unmodified, so summing
         // it directly OVER-COUNTS by the precursor-peak intensity. Use the
@@ -220,8 +220,8 @@ impl<'a> ScoredSpectrum<'a> {
         let parent_mass = neutral_mass; // = (precursor_mz - PROTON) * charge
 
         // iter30 C-1: apply Java-parity isotope-cluster deconvolution FIRST,
-        // BEFORE prob_peak is computed (Java's `NewScoredSpectrum.java:76-88`
-        // does deconv first, then probPeak from the post-deconv spectrum).
+        // BEFORE prob_peak is computed (Java parity: deconv first, then
+        // probPeak from the post-deconv spectrum).
         //
         // No `charge > 2` guard — Java's `applyDeconvolution` is unconditional;
         // `deconvolute_spectrum` is a no-op for charge ≤ 2 because its inner
@@ -240,9 +240,8 @@ impl<'a> ScoredSpectrum<'a> {
             };
 
         // iter30 C-2: compute prob_peak from the ACTIVE peak list (post-deconv
-        // if applied; else kept_count). Java: `probPeak = spec.size() /
-        // max(approxNumBins, 1)` where `spec` is the post-deconv spectrum
-        // (`NewScoredSpectrum.java:83-88`).
+        // if applied; else kept_count). Java parity: `probPeak = spec.size() /
+        // max(approxNumBins, 1)` where `spec` is the post-deconv spectrum.
         //
         // parent_mass    = (precursor_mz - PROTON) * charge
         // approxNumBins  = parent_mass / (mme.raw_value() * 2)
@@ -897,8 +896,8 @@ fn nearest_peak_rank_in(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tol
 
 /// Java-parity isotope-cluster deconvolution.
 ///
-/// Mirrors `Spectrum.getDeconvolutedSpectrum(toleranceBetweenIsotopes)` in
-/// `astral-speed/src/main/java/edu/ucsd/msjava/msutil/Spectrum.java`.
+/// Java parity for spectrum deconvolution semantics
+/// (`Spectrum.getDeconvolutedSpectrum(toleranceBetweenIsotopes)`).
 ///
 /// Input is the spectrum's peak list (sorted ascending by m/z) plus the
 /// rank vector aligned with it (rank 1 = highest intensity; `u32::MAX`
@@ -1236,8 +1235,8 @@ mod tests {
 
     /// T-2: For charge-3 spectra with `apply_deconvolution=true`, `prob_peak`
     /// MUST be computed from the post-deconvolution peak count, not the
-    /// pre-deconvolution kept_count. Java's `NewScoredSpectrum.java:83-88`
-    /// derives `probPeak` from `spec.size()` AFTER `spec` is replaced by the
+    /// pre-deconvolution kept_count. Java parity: `probPeak` is derived from
+    /// `spec.size()` AFTER `spec` is replaced by the
     /// deconvoluted spectrum. Iter30 C-2 enforces this ordering.
     #[test]
     fn deconv_active_for_charge_3_uses_post_deconv_peak_count_for_prob_peak() {

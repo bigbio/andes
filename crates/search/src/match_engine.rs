@@ -343,7 +343,7 @@ impl<'a> PreparedSearch<'a> {
             }
 
             // R-2.1: per-charge queue keyed by charge state. Mirrors Java's
-            // per-SpecKey raw-score retention (DBScanner.java:534).
+            // per-SpecKey raw-score retention (Java parity).
             let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
 
             for &cand_idx in &window_cand_indices {
@@ -463,7 +463,7 @@ impl<'a> PreparedSearch<'a> {
 
             // R-2.2: pepSeq + score dedup per-charge BEFORE GF compute.
             // Same peptide matched against multiple proteins collapses to one
-            // PsmMatch with aggregated candidate_idxs (Java DBScanner.java:719-733).
+            // PsmMatch with aggregated candidate_idxs (Java parity for pepSeq dedup).
             for queue in per_charge_queues.values_mut() {
                 if queue.len() > 1 {
                     let drained = queue.drain_into_vec();
@@ -476,7 +476,7 @@ impl<'a> PreparedSearch<'a> {
 
             // R-2.3: per-charge GF / SpecEValue compute. Each per-charge queue
             // gets SpecE calibrated against its OWN charge's GF distribution
-            // (Java DBScanner.java:606,779 — getRankScorer per SpecKey).
+            // (Java parity: getRankScorer per SpecKey).
             let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
                 && params.enzyme != Enzyme::NonSpecific
             {
@@ -512,7 +512,7 @@ impl<'a> PreparedSearch<'a> {
             // R-2.4: spectrum-level merge with SpecE tie keep. R-1's
             // TopNQueue::push (Ordering::Equal arm) keeps SpecE ties at
             // capacity because PsmMatch::cmp orders by spec_e_value first.
-            // Matches Java DBScanner.java:745.
+            // Matches Java parity: SpecE tie-keep on spectrum-level merge.
             for (_charge, mut per_charge) in per_charge_queues.drain() {
                 for psm in per_charge.drain_into_vec() {
                     queue.push(psm);
@@ -688,8 +688,7 @@ fn compute_spec_e_values_for_spectrum(
     // 2. Compute the minimum score across all PSMs (used as GF score threshold).
     //
     // iter37 HIGH-1: use `rank_score` (= node + cleavage + edge), not `score`
-    // (= node + cleavage only). Java's `DBScanner.java:619-621` reads
-    // `m.getScore()`, which is set at `DBScanner.java:533` as
+    // (= node + cleavage only). Java parity: `match.score` is
     // `cleavageScore + rawScore` where `rawScore` is `DBScanScorer.getScore`'s
     // `node + edge` return — i.e. Rust's `rank_score`. Using `score` here was
     // seeding the GF threshold below Java's level by the per-PSM edge_score
@@ -785,9 +784,9 @@ fn compute_spec_e_values_for_spectrum(
     // 4. For each PSM in the queue, compute spec_e_value from its score.
     //
     // iter37 HIGH-1: use `rank_score` (Java-aligned `node + cleavage + edge`),
-    // not `score` (Rust pin-only `node + cleavage`). Java's
-    // `DBScanner.java:697-699` calls `gf.getSpectralProbability(match.getScore())`
-    // where `match.getScore()` is Java's `node + cleavage + edge`. Using
+    // not `score` (Rust pin-only `node + cleavage`). Java parity:
+    // `gf.getSpectralProbability(match.getScore())` where `match.getScore()`
+    // is `node + cleavage + edge`. Using
     // `score` here was looking up the wrong tail of the GF score distribution
     // (lower by the per-PSM edge contribution ~+20), giving inflated
     // SpecEValue values for PSMs whose top-1 was chosen via edge contribution.
@@ -819,11 +818,10 @@ fn compute_spec_e_values_for_spectrum(
     //
     // e_value = spec_e_value * num_distinct_peptides_at_length.
     //
-    // HIGH-2 (2026-05-18): align lookup index with Java. Java's
-    // `DirectPinWriter.java:165` does
+    // HIGH-2 (2026-05-18): align lookup index with Java parity.
     //     `sa.getNumDistinctPeptides(enzyme == null ? length - 2 : length - 1)`
-    // where `match.getLength() = pepLength + 2` (DBScanner.java:521 includes the
-    // two flanking residues in the stored length). So Java effectively queries
+    // where `match.getLength() = pepLength + 2` (flanking residues included in
+    // the stored length). So Java effectively queries
     //   - with enzyme: `numDistinctPeptides[pepLength + 1]`
     //   - without enzyme: `numDistinctPeptides[pepLength]`
     //
@@ -898,7 +896,7 @@ pub(crate) fn compute_psm_features(
     // some headroom for partition multi-ion-type matches at long peptides).
     let mut matched_ions: SmallVec<[(f32, f64, f64, bool); 96]> = SmallVec::new();
 
-    // Java parity (PSMFeatureFinder.java:51-54): feature-counting uses a
+    // Java parity: feature-counting uses a
     // HARDCODED fragment tolerance, NOT param.mme. High-res instruments
     // (HighRes / TOF / QExactive) get 20 ppm; low-res LTQ gets 0.5 Da.
     // The param.mme value (0.5 Da for HCD_QExactive_Tryp.param) is the
@@ -972,7 +970,7 @@ pub(crate) fn compute_psm_features(
 
     // ── Ion-current ratio features (iter22 partition-ion-list fix) ─────────────
     //
-    // Java's `NewScoredSpectrum.getExplainedIonCurrent` (NewScoredSpectrum.java:253)
+    // Java parity: `NewScoredSpectrum.getExplainedIonCurrent`
     // iterates the FULL partition ion list across all segments (b, y, plus
     // partition-specific variants like a-ion, b-H2O, etc.) and sums matched
     // peak intensities. The current Rust matched-ion buffer above only
@@ -1321,7 +1319,7 @@ mod feature_tests {
 
         // 0.0005 Da offset = ~6 ppm at m/z 89 (Ala b1) — within the
         // hardcoded 20 ppm window that compute_psm_features now uses for
-        // high-resolution instruments (Java parity, PSMFeatureFinder.java:51-54).
+        // high-resolution instruments (Java parity).
         // The previous 0.01 Da offset assumed Rust used param.mme (~0.05 Da
         // in this fixture's make_scorer), but the iter20 fix makes feature
         // counting use 20 ppm regardless of param.mme.

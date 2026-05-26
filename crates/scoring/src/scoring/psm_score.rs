@@ -42,7 +42,7 @@ fn trace_pep_filter() -> Option<&'static String> {
 /// regresses Astral 1% FDR by ~30%; adding it as a new feature lets
 /// Percolator learn weights without breaking the existing distribution.
 ///
-/// Mirrors Java's `DBScanner.java:513` call: fromIndex=1, toIndex=n+1 →
+/// Java parity: fromIndex=1, toIndex=n+1 →
 /// reverse loop iterates `i` from n-1 down to 1, forward loop iterates
 /// `i` from 1 to n-1.
 pub fn psm_edge_score(

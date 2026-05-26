@@ -986,8 +986,8 @@ fn resolve_bundled_param(
     }
 
     // Step 2: Drop protocol — try `{frag}_{inst}_Tryp.param`.
-    // This mirrors Java's `return get(method, instType, enzyme)` fallback
-    // (NewScorerFactory.java line ~120). For (CID, HighRes, Tryp, TMT) this
+    // This mirrors Java parity: `return get(method, instType, enzyme)` fallback
+    // (drop protocol suffix when exact match is missing). For (CID, HighRes, Tryp, TMT) this
     // lands on `CID_HighRes_Tryp.param`, which IS what Java would pick when
     // the protocol-specific file is missing.
     if !prot_suffix.is_empty() {
@@ -1005,7 +1005,7 @@ fn resolve_bundled_param(
     // LysN (for N-term enzymes). We always use Tryp here, so this step is
     // a no-op for now. If/when N-term enzyme support lands, replicate this.
 
-    // Step 4: Final fallback ladder (Java NewScorerFactory.java lines ~136-160).
+    // Step 4: Final fallback ladder (Java parity for scorer factory fallback).
     //   - HCD + (TOF|HighRes) + C-term → CID_TOF_Tryp
     //   - ETD + C-term                  → ETD_LowRes_Tryp
     //   - Non-electron + N-term         → CID_LowRes_LysN  (skipped; N-term TBD)
@@ -1114,8 +1114,7 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 ///
 /// This is the auto-detect path: we already know the activation, and we
 /// pick the bundled instrument+enzyme pair that best matches the dataset.
-/// Mirrors the per-spectrum dispatch Java's MS-GF+ does in
-/// `ScoredSpectraMap.java:262-263` when the user passes `-m 0`
+/// Mirrors Java parity for per-spectrum param dispatch when the user passes `-m 0`
 /// (ASWRITTEN), but applied at file-wide granularity here.
 ///
 /// The `detected_instrument` argument is the instrument type detected by
@@ -1327,8 +1326,8 @@ mod param_resolver_tests {
     #[test]
     fn cid_highres_tmt_falls_back_to_cid_highres_tryp() {
         // (CID, HighRes, TMT) — `CID_HighRes_Tryp_TMT.param` is not bundled.
-        // Java's NewScorerFactory drops the protocol suffix when the exact
-        // file is missing (see NewScorerFactory.java line ~120), landing on
+        // Java parity: NewScorerFactory drops the protocol suffix when the
+        // exact file is missing, landing on
         // the protocol-less file. We mirror that behavior: this combination
         // resolves to `CID_HighRes_Tryp.param` rather than erroring out.
         let p = resolve_bundled_param(

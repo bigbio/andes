@@ -42,3 +42,10 @@ self-hosted runner profile (`self-hosted,linux,msgf-benchmark`) to keep
 CPU/memory comparable between runs.
 
 See [`benchmark/ci/README.md`](ci/README.md) for commands.
+
+## VM calauto gate (precursorCal)
+
+The three-dataset Java-vs-Rust sign-off harness lives under [`benchmark/vm/`](vm/).
+Use it on the self-hosted bench VM with `--precursor-cal auto` / `-precursorCal auto`.
+See [`benchmark/vm/README.md`](vm/README.md) and
+[`docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md`](../docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md).

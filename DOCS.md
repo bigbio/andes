@@ -454,6 +454,7 @@ msgf-rust accepts **both** canonical kebab-case flags with named enum values **a
 | `-maxMissedCleavages 1` | `--max-missed-cleavages 1` | — |
 | `-minNumPeaks 10` | `--min-peaks 10` | — |
 | `-n 10` | `--top-n 10` | — |
+| `-precursorCal auto\|on\|off` | `--precursor-cal auto\|on\|off` | — |
 | model path / `-conf` | `--param-file <FILE>` | — |
 
 ### 8b. Numeric-legacy values
@@ -482,7 +483,31 @@ On PSMs where Java and Rust agree on scan + top-1 peptide (the "agreement bucket
 | `MeanRelErrorTop7` / `MeanErrorTop7` / `StdevRelErrorTop7` | >1% relative difference on ~99% of agreement-bucket PSMs | Deferred — error-stat normalization differs |
 | BSA charge-3 SpecEValue (BSA.fasta + test.mgf fixture) | 1–4 OOM gap depending on deconvolution iteration | Known — deconvolution implementation divergence; kept as dev-branch smoke gate (`gf_java_parity` tests) |
 
-Percolator's learned weights absorb these distribution shifts; rescored FDR results remain competitive or better than Java.
+Percolator's learned weights absorb these distribution shifts; rescored FDR results remain competitive or better than Java on `--precursor-cal off` benchmarks.
+
+### 8e. precursorCal ship gates (`--precursor-cal auto`)
+
+Java `-precursorCal auto` runs a file-wide pre-pass (sampled mini-search → median ppm
+shift → tightened precursor tolerance) before the main search. msgf-rust ports this
+in `mass_calibrator.rs` / `precursor_cal.rs`.
+
+**G1 gate:** Rust @1% FDR within ±1% of Java on all three sign-off datasets (LFQ,
+Astral, TMT) with matching cal mode. Fair comparison requires explicit Rust routing
+flags — especially TMT (`--fragmentation CID --instrument high-res --protocol TMT`).
+Harness: [`benchmark/vm/run_bench_calauto_3ds.sh`](benchmark/vm/run_bench_calauto_3ds.sh).
+
+As of 2026-05-25 (fair v5 gate, `bench-calauto-v5.log`) the calibrator is
+validated (shift + tightening parity), but G1 **fails** on all three datasets:
+LFQ −2.2% (cal skipped), Astral +1.2%, TMT −5.9%. Remaining
+gaps trace to **SpecE tail / Percolator feature parity** (same class as historical
+Astral GF work), not calibrator logic. Full analysis:
+[`docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md`](docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md).
+
+| `--precursor-cal` | Ship recommendation |
+|---|---|
+| `off` | Yes — baseline unchanged (**CLI default** until G1) |
+| `auto` | Opt-in only — no until G1 passes |
+| `on` | Opt-in only — no until G1 passes |
 
 ---
 

@@ -1,6 +1,6 @@
 # msgf-rust documentation
 
-This is the full reference for the `msgf-rust` binary and its outputs. For a quick start and benchmark summary, see [`README.md`](README.md). For porting Java MS-GF+ command lines and numeric legacy flags, see [`CLI_MIGRATION.md`](CLI_MIGRATION.md).
+This is the full reference for the `msgf-rust` binary and its outputs. For a quick start and benchmark summary, see [`README.md`](README.md). For porting Java MS-GF+ command lines and numeric legacy flags, see [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md).
 
 Run `msgf-rust --help` for auto-generated help derived from the same `Cli` struct documented below.
 
@@ -459,7 +459,7 @@ msgf-rust accepts **both** canonical kebab-case flags with named enum values **a
 
 ### 8b. Numeric-legacy values
 
-Full legacy 0…N → named-value tables for `--fragmentation`, `--instrument`, `--protocol`, and `--enzyme-specificity` (`--ntt`) live in [`CLI_MIGRATION.md`](CLI_MIGRATION.md). clap accepts named values case-insensitively (`--fragmentation hcd` ≡ `HCD`).
+Full legacy 0…N → named-value tables for `--fragmentation`, `--instrument`, `--protocol`, and `--enzyme-specificity` (`--ntt`) live in [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md). clap accepts named values case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 
 ### 8c. Behavior differences
 

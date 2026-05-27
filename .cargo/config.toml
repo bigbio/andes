@@ -1,17 +1,22 @@
-# Set the build-baseline CPU to Sandy Bridge (Intel, Q1 2011 / AMD
-# Bulldozer, late 2011). AVX 256-bit f64 vector ops let LLVM auto-vectorize
-# the chunked GF DP inner loop in `crates/scoring/src/gf/generating_function.rs`,
-# which is ~16% of leaf time on Astral. Measured -7..-18% wall on the three
-# reference datasets vs the default `x86-64` baseline; PINs stay bit-identical.
+# Set the build-baseline CPU to Sandy Bridge on x86_64 (Intel, Q1 2011 /
+# AMD Bulldozer, late 2011). AVX 256-bit f64 vector ops let LLVM auto-
+# vectorize the chunked GF DP inner loop in
+# `crates/scoring/src/gf/generating_function.rs`, which is ~16% of leaf
+# time on Astral. Measured -7..-18% wall on the three reference datasets
+# vs the default `x86-64` baseline; PINs stay bit-identical.
 #
-# AVX is enabled, but FMA is NOT — Sandy Bridge predates FMA3 (Haswell, 2013).
-# Fused multiply-add changes intermediate rounding and would drift float
-# results away from the Java reference, breaking the bit-identical PIN gate.
+# AVX is enabled, but FMA is NOT — Sandy Bridge predates FMA3 (Haswell,
+# 2013). Fused multiply-add changes intermediate rounding and would
+# drift float results away from the Java reference, breaking the bit-
+# identical PIN gate.
 #
 # Default `x86-64` baseline = 2003 / SSE2 only. Sandy Bridge is 14 years
 # old and universal across modern proteomics workstations and cloud VMs.
-# Users on older hardware can override with `cargo +nightly build --release
-# -Z target-cpu-features=...` or by editing this file locally.
+# Users on older hardware can edit this file locally.
+#
+# Scoped to `target_arch = "x86_64"` so the macOS-aarch64 and other
+# non-x86 platforms keep their architecture-default baseline (Apple
+# Silicon already has NEON 128-bit vector ops on by default).
 
-[build]
+[target.'cfg(target_arch = "x86_64")']
 rustflags = ["-C", "target-cpu=sandybridge"]

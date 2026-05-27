@@ -1,0 +1,93 @@
+
+==============================================================================
+SCAN 41522  |  Rust PSMs traced: 2  |  Java ions: 20703
+
+  PSM: peptide=R.DPANLPWASLNIDIAIDSTGVFK.E  charge=2  rust_rank_score=128
+    ions: 77 (rust-only: 4)
+    rust contribution sum:    125.5890
+    java contribution sum:    137.6111  (matched ions only)
+    delta (rust - java):      -12.0221
+    divergence counts: {'LOGPROB_DIFF': 73, 'CONTRIB_DIFF': 73, 'RANK_DIFF': 21, 'RUST_ONLY': 4}
+
+  PSM: peptide=VVYGNIYEIEIDRLFLTDQR  charge=2  rust_rank_score=11
+    ions: 68 (rust-only: 4)
+    rust contribution sum:      5.1079
+    java contribution sum:      4.2938  (matched ions only)
+    delta (rust - java):       +0.8140
+    divergence counts: {'LOGPROB_DIFF': 64, 'CONTRIB_DIFF': 64, 'RUST_ONLY': 4, 'RANK_DIFF': 15}
+
+==============================================================================
+SCAN 34685  |  Rust PSMs traced: 2  |  Java ions: 20243
+
+  PSM: peptide=R.DPANLPWGSSNVDIAIDSTGVFK.E  charge=2  rust_rank_score=119
+    ions: 77 (rust-only: 3)
+    rust contribution sum:    115.7682
+    java contribution sum:    128.7127  (matched ions only)
+    delta (rust - java):      -12.9445
+    divergence counts: {'LOGPROB_DIFF': 74, 'CONTRIB_DIFF': 74, 'RUST_ONLY': 3, 'RANK_DIFF': 43}
+
+  PSM: peptide=PDPLSELSDFYMFQKLPTFK  charge=2  rust_rank_score=33
+    ions: 68 (rust-only: 4)
+    rust contribution sum:     26.2166
+    java contribution sum:      9.7547  (matched ions only)
+    delta (rust - java):      +16.4618
+    divergence counts: {'LOGPROB_DIFF': 64, 'CONTRIB_DIFF': 64, 'RUST_ONLY': 4, 'RANK_DIFF': 29}
+
+==============================================================================
+SCAN 23272  |  Rust PSMs traced: 2  |  Java ions: 20270
+
+  PSM: peptide=K.LLYTIPTGQNPTGTSIADHR.K  charge=2  rust_rank_score=107
+    ions: 65 (rust-only: 1)
+    rust contribution sum:    107.4337
+    java contribution sum:    107.8341  (matched ions only)
+    delta (rust - java):       -0.4004
+    divergence counts: {'LOGPROB_DIFF': 64, 'CONTRIB_DIFF': 64, 'RANK_DIFF': 47, 'RUST_ONLY': 1}
+
+  PSM: peptide=FLVENELSGKGWYENKIK  charge=2  rust_rank_score=30
+    ions: 61 (rust-only: 0)
+    rust contribution sum:     25.3727
+    java contribution sum:      5.0307  (matched ions only)
+    delta (rust - java):      +20.3420
+    divergence counts: {'LOGPROB_DIFF': 61, 'CONTRIB_DIFF': 61, 'RANK_DIFF': 25}
+
+==============================================================================
+SCAN 23082  |  Rust PSMs traced: 2  |  Java ions: 15707
+
+  PSM: peptide=K.NQQIVAGKPLYVAIAQR.K  charge=2  rust_rank_score=117
+    ions: 67 (rust-only: 12)
+    rust contribution sum:    118.1152
+    java contribution sum:    123.4094  (matched ions only)
+    delta (rust - java):       -5.2942
+    divergence counts: {'LOGPROB_DIFF': 55, 'CONTRIB_DIFF': 55, 'RUST_ONLY': 12, 'RANK_DIFF': 37}
+
+  PSM: peptide=ELPLSIGILFKRYYR  charge=2  rust_rank_score=25
+    ions: 63 (rust-only: 12)
+    rust contribution sum:     20.8720
+    java contribution sum:     11.2306  (matched ions only)
+    delta (rust - java):       +9.6415
+    divergence counts: {'LOGPROB_DIFF': 51, 'CONTRIB_DIFF': 51, 'RUST_ONLY': 12, 'RANK_DIFF': 21}
+
+==============================================================================
+SCAN 16629  |  Rust PSMs traced: 2  |  Java ions: 14003
+
+  PSM: peptide=K.IVAGQVDTDEAGYIK.T  charge=2  rust_rank_score=116
+    ions: 74 (rust-only: 18)
+    rust contribution sum:    116.6408
+    java contribution sum:    103.2616  (matched ions only)
+    delta (rust - java):      +13.3792
+    divergence counts: {'LOGPROB_DIFF': 56, 'CONTRIB_DIFF': 56, 'RUST_ONLY': 18, 'RANK_DIFF': 36}
+
+  PSM: peptide=ILNMNMVPDYLQK  charge=2  rust_rank_score=26
+    ions: 61 (rust-only: 15)
+    rust contribution sum:     21.2753
+    java contribution sum:     15.3947  (matched ions only)
+    delta (rust - java):       +5.8805
+    divergence counts: {'LOGPROB_DIFF': 46, 'CONTRIB_DIFF': 46, 'RUST_ONLY': 15, 'RANK_DIFF': 27}
+
+==============================================================================
+AGGREGATE (5 scans x ~2 PSMs each):
+  Total divergences across all traced PSMs:
+    LOGPROB_DIFF: 608
+    CONTRIB_DIFF: 608
+    RANK_DIFF: 301
+    RUST_ONLY: 73

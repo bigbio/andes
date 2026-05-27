@@ -1,0 +1,113 @@
+DB: 6775 target proteins, 13550 total (target+decoy)
+Param: activation=HCD instrument=QExactive mme=Da(0.5) num_segments=2 num_partitions=140 error_scaling_factor=100 max_rank=150
+
+  --- Sample rank_dist (partition Partition { charge: 2, parent_mass: 1051.5051, seg_num: 1 }) ---
+    Noise freqs (first 5 ranks): [0.00014884089, 0.00024490492, 0.00032453384, 0.00037213555, 0.00041381564]
+    Noise freq at max_rank (150): 3.6782112
+    Ion Suffix { charge: 1, offset_bits: 1101540429 }: first 5 freqs = [0.0006393862, 0.0012787724, 0.00085251493, 0.00042625747, 0.00042625747]
+                missing slot (150): 2.3913043
+    Ion Suffix { charge: 1, offset_bits: 1073673387 }: first 5 freqs = [0.00051150896, 0.00051150896, 0.00051150896, 0.00085251493, 0.0012787724]
+                missing slot (150): 2.319693
+    Ion Suffix { charge: 1, offset_bits: 1065418864 }: first 5 freqs = [0.00018268176, 0.00018268176, 0.00018268176, 0.00018268176, 0.00025575448]
+                missing slot (150): 2.5076725
+    scorer.node_score(Suffix { charge: 1, offset_bits: 1101540429 }, rank=1) = 1.4576
+    scorer.node_score(Suffix { charge: 1, offset_bits: 1101540429 }, rank=5) = 0.0296
+    scorer.node_score(Suffix { charge: 1, offset_bits: 1101540429 }, rank=20) = 1.9174
+    scorer.node_score(Suffix { charge: 1, offset_bits: 1101540429 }, rank=100) = 2.0425
+    scorer.node_score(Suffix { charge: 1, offset_bits: 1101540429 }, rank=150) = 1.2582
+    scorer.missing_ion_score = -0.4306
+  seg=0: ion_types_for_segment(union) = 9 ion types (prefix=4, suffix=5)
+  seg=1: ion_types_for_segment(union) = 5 ion types (prefix=0, suffix=5)
+  Partition counts per (charge, seg):
+    charge=2 seg=0: 33 partitions
+    charge=2 seg=1: 33 partitions
+    charge=3 seg=0: 33 partitions
+    charge=3 seg=1: 33 partitions
+    charge=4 seg=0: 4 partitions
+    charge=4 seg=1: 4 partitions
+    charge=2 seg=0: per-partition ion-list sizes min=4 median=5 max=7, union=7
+    charge=2 seg=1: per-partition ion-list sizes min=3 median=5 max=5, union=5
+
+=== Spectrum: scan=16629 precursor_mz=789.9081 charge=Some(2) peaks=515 ===
+  spectrum partition target=(c=2 pm=1577.80 seg=0) selected=(c=2 pm=1544.80 seg=0): 6 ion types — ["S(c=1,off=19.018)", "P(c=1,off=1.008)", "S(c=1,off=20.022)", "P(c=1,off=-26.987)", "P(c=1,off=-17.003)", "S(c=1,off=1.008)"]
+  spectrum partition target=(c=2 pm=1577.80 seg=1) selected=(c=2 pm=1544.80 seg=1): 4 ion types — ["S(c=1,off=19.018)", "S(c=1,off=20.022)", "S(c=1,off=21.022)", "S(c=1,off=1.992)"]
+  Rust filtering: 0 of 515 peaks filtered (0.0%); max filtered intensity=0.0
+  Filter m/z values (count=3):
+    788.9076 ± 0.5000
+    789.9081 ± 0.5000
+    790.9086 ± 0.5000
+
+--- Candidate windows ---
+  charge=2: neutral_mass=1559.7911 nominal_center=1559 window=[1558..=1559] (iso_range=[0..=1], tol_da_left=0.0078, tol_da_right=0.0078)
+Yield (chunk): 1 spectra in, 0 skipped by min_peaks, 2406 candidates visited, 240 PSMs pushed, 1 spectra with non-empty queue
+GF diagnostics (cumulative): 2 bin attempts, 0 EmptyScoreRange, 0 SinkUnreachable, 0 of those recovered by unthresholded retry, 0 spectra with no successful bin
+
+--- Rust top-10 PSMs ---
+  #1: peptide=ILNMNMVPDYLQK charge=2 score=26.00 spec_e_val=1.2406e-5 iso_off=0 prot_idx=4042 prot=sp|Q05043|RSF1_YEAST is_decoy=false
+  #2: peptide=MHAIHEIDERLAK charge=2 score=24.00 spec_e_val=3.5464e-5 iso_off=0 prot_idx=3770 prot=sp|P47149|NNF1_YEAST is_decoy=false
+  #3: peptide=FHTSLEQLTFLDK charge=2 score=22.00 spec_e_val=4.9839e-5 iso_off=0 prot_idx=9311 prot=XXX_sp|Q04511|UFO1_YEAST is_decoy=true
+  #4: peptide=SSFFDTVLSTFSLK charge=2 score=18.00 spec_e_val=4.9839e-5 iso_off=0 prot_idx=2742 prot=sp|Q08001|LAM6_YEAST is_decoy=false
+  #5: peptide=AVIGMGAGVMAAAAMLL charge=2 score=16.00 spec_e_val=3.4749e-4 iso_off=0 prot_idx=3351 prot=sp|P33890|TIR2_YEAST is_decoy=false
+  #6: peptide=EETLLTLEELEMK charge=2 score=11.00 spec_e_val=1.8564e-4 iso_off=1 prot_idx=12580 prot=XXX_sp|O13555|JIP3_YEAST is_decoy=true
+  #7: peptide=QETIMKLYSGVHR charge=2 score=10.00 spec_e_val=2.9771e-4 iso_off=1 prot_idx=8821 prot=XXX_sp|P53086|KIP3_YEAST is_decoy=true
+  #8: peptide=MLVSGDKDRAITEK charge=2 score=10.00 spec_e_val=1.5818e-4 iso_off=0 prot_idx=7305 prot=XXX_sp|P21192|ACE2_YEAST is_decoy=true
+  #9: peptide=TTGIVTEISMGTVNR charge=2 score=6.00 spec_e_val=4.7133e-4 iso_off=0 prot_idx=10620 prot=XXX_sp|P53179|PALF_YEAST is_decoy=true
+  #10: peptide=DLKPMNIFIDESR charge=2 score=5.00 spec_e_val=5.4769e-4 iso_off=1 prot_idx=410 prot=sp|P15442|GCN2_YEAST is_decoy=false
+
+--- Java top-1 trace: K.IVAGQVDTDEAGYIK.T ---
+  Enumerator: 2 matches for residue sequence
+    cand_idx=318920 prot_idx=801 prot=sp|P29509|TRXB1_YEAST is_decoy=false pep_mass=1577.7937 nominal=1559
+    cand_idx=319016 prot_idx=801 prot=sp|P29509|TRXB1_YEAST is_decoy=false pep_mass=1577.7937 nominal=1559
+  In Rust's top-10 queue: 0
+
+  Per-split node_score breakdown — Java pep (K.IVAGQVDTDEAGYIK.T+2) ---
+    spectrum_parent_mass=1577.8016, peptide_mass=1577.7937, peptide_nominal=1559
+    split=1 aa[0]=I pref_nom=113 suf_nom=1446 score=-2 (matched=1 sum=1.26, missing=6 sum=-3.73)
+      ions: P1.0@114.1=MISS=-0.62 | P-27.0@86.1=MISS=-0.16 | P-17.0@96.1=MISS=-0.21 | S19.0@1465.7=MISS=-1.36 | S20.0@1466.7=MISS=-1.01 | S21.0@1467.7=MISS=-0.36 | S2.0@1448.7=rk261=1.26
+    split=2 aa[1]=V pref_nom=212 suf_nom=1347 score=13 (matched=4 sum=14.47, missing=3 sum=-1.00)
+    split=3 aa[2]=A pref_nom=283 suf_nom=1276 score=15 (matched=7 sum=15.41, missing=0 sum=0.00)
+    split=4 aa[3]=G pref_nom=340 suf_nom=1219 score=13 (matched=6 sum=13.33, missing=1 sum=-0.21)
+      ions: P1.0@341.2=rk106=0.62 | P-27.0@313.2=rk274=-0.22 | P-17.0@323.2=MISS=-0.21 | S19.0@1238.6=rk21=4.89 | S20.0@1239.6=rk28=4.56 | S21.0@1240.6=rk360=1.27 | S2.0@1221.6=rk47=2.22
+    split=5 aa[4]=Q pref_nom=468 suf_nom=1091 score=18 (matched=7 sum=18.38, missing=0 sum=0.00)
+    split=6 aa[5]=V pref_nom=567 suf_nom=992 score=21 (matched=7 sum=21.47, missing=0 sum=0.00)
+    split=7 aa[6]=D pref_nom=682 suf_nom=877 score=12 (matched=5 sum=12.52, missing=2 sum=-0.84)
+    split=8 aa[7]=T pref_nom=783 suf_nom=776 score=10 (matched=6 sum=10.45, missing=1 sum=-0.62)
+    split=9 aa[8]=D pref_nom=898 suf_nom=661 score=5 (matched=3 sum=4.66, missing=0 sum=0.00)
+    split=10 aa[9]=E pref_nom=1027 suf_nom=532 score=5 (matched=2 sum=5.12, missing=1 sum=-0.32)
+    split=11 aa[10]=A pref_nom=1098 suf_nom=461 score=4 (matched=2 sum=4.32, missing=1 sum=-0.32)
+    split=12 aa[11]=G pref_nom=1155 suf_nom=404 score=3 (matched=2 sum=3.65, missing=1 sum=-0.32)
+    split=13 aa[12]=Y pref_nom=1318 suf_nom=241 score=2 (matched=2 sum=2.38, missing=1 sum=-0.32)
+    split=14 aa[13]=I pref_nom=1431 suf_nom=128 score=-3 (matched=0 sum=0.00, missing=3 sum=-3.11)
+    breakdown_total = 116
+    score_psm total = 116
+
+  Per-split node_score breakdown — Rust top-1 (ILNMNMVPDYLQK +2) ---
+    spectrum_parent_mass=1577.8016, peptide_mass=1577.7946, peptide_nominal=1559
+    split=1 aa[0]=I pref_nom=113 suf_nom=1446 score=-2 (matched=1 sum=1.26, missing=6 sum=-3.73)
+      ions: P1.0@114.1=MISS=-0.62 | P-27.0@86.1=MISS=-0.16 | P-17.0@96.1=MISS=-0.21 | S19.0@1465.7=MISS=-1.36 | S20.0@1466.7=MISS=-1.01 | S21.0@1467.7=MISS=-0.36 | S2.0@1448.7=rk261=1.26
+    split=2 aa[1]=L pref_nom=226 suf_nom=1333 score=-2 (matched=2 sum=-0.11, missing=5 sum=-2.35)
+    split=3 aa[2]=N pref_nom=340 suf_nom=1219 score=13 (matched=6 sum=13.33, missing=1 sum=-0.21)
+    split=4 aa[3]=M pref_nom=471 suf_nom=1088 score=4 (matched=5 sum=4.93, missing=2 sum=-0.62)
+      ions: P1.0@472.2=rk223=-0.37 | P-27.0@444.2=rk410=-0.22 | P-17.0@454.2=rk458=0.01 | S19.0@1107.6=rk83=2.03 | S20.0@1108.6=rk54=3.47 | S21.0@1109.6=MISS=-0.36 | S2.0@1090.5=MISS=-0.26
+    split=5 aa[4]=N pref_nom=585 suf_nom=974 score=8 (matched=5 sum=8.82, missing=2 sum=-0.89)
+    split=6 aa[5]=M pref_nom=716 suf_nom=843 score=0 (matched=4 sum=0.87, missing=3 sum=-0.74)
+    split=7 aa[6]=V pref_nom=815 suf_nom=744 score=0 (matched=3 sum=0.47, missing=1 sum=-0.16)
+    split=8 aa[7]=P pref_nom=912 suf_nom=647 score=2 (matched=3 sum=2.17, missing=0 sum=0.00)
+    split=9 aa[8]=D pref_nom=1027 suf_nom=532 score=5 (matched=2 sum=5.12, missing=1 sum=-0.32)
+    split=10 aa[9]=Y pref_nom=1190 suf_nom=369 score=-1 (matched=2 sum=0.90, missing=1 sum=-2.33)
+    split=11 aa[10]=L pref_nom=1303 suf_nom=256 score=-2 (matched=1 sum=0.77, missing=2 sum=-2.79)
+    split=12 aa[11]=Q pref_nom=1431 suf_nom=128 score=-3 (matched=0 sum=0.00, missing=3 sum=-3.11)
+    breakdown_total = 22
+    PSM.score (from queue) = 26
+
+--- Spectrum top-10 peaks by intensity ---
+  rank=1 mz=684.0408 intensity=194897.69
+  rank=2 mz=1011.5268 intensity=169366.95
+  rank=3 mz=737.5176 intensity=114525.51
+  rank=4 mz=1110.5432 intensity=101880.234
+  rank=5 mz=1012.5068 intensity=72370.63
+  rank=6 mz=1111.5243 intensity=61456.434
+  rank=7 mz=781.1710 intensity=58671.855
+  rank=8 mz=1295.5651 intensity=57269.816
+  rank=9 mz=1366.5999 intensity=53504.457
+  rank=10 mz=1367.6660 intensity=43431.918

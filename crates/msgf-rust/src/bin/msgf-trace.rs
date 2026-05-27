@@ -9,6 +9,80 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+// ─── Per-PSM JSON trace output (additive; no new deps) ─────────────────────
+//
+// Small hand-written JSON via `write!`. The diff harness parses on the
+// Python side where stdlib `json` is sufficient.
+
+struct TraceJson<W: std::io::Write> {
+    out: W,
+    first_psm: bool,
+}
+
+impl<W: std::io::Write> TraceJson<W> {
+    fn new(mut out: W) -> std::io::Result<Self> {
+        out.write_all(b"[\n")?;
+        Ok(Self { out, first_psm: true })
+    }
+
+    fn begin_psm(
+        &mut self,
+        scan: i32,
+        peptide: &str,
+        charge: u8,
+        rust_rank_score: i32,
+    ) -> std::io::Result<()> {
+        if !self.first_psm {
+            self.out.write_all(b",\n")?;
+        }
+        self.first_psm = false;
+        write!(
+            self.out,
+            "  {{\n    \"scan\": {},\n    \"peptide\": \"{}\",\n    \"charge\": {},\n    \"rust_rank_score\": {},\n    \"ions\": [",
+            scan, escape_json(peptide), charge, rust_rank_score
+        )
+    }
+
+    fn end_psm(&mut self) -> std::io::Result<()> {
+        self.out.write_all(b"\n    ]\n  }")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ion(
+        &mut self,
+        first_ion: bool,
+        ion_type: &str,
+        theo_mz: f64,
+        rank_assigned: Option<u32>,
+        max_rank: u32,
+        log_prob: f32,
+        contribution: f32,
+    ) -> std::io::Result<()> {
+        if !first_ion {
+            self.out.write_all(b",")?;
+        }
+        let rank_str = rank_assigned
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        write!(
+            self.out,
+            "\n      {{\"ion_type\": \"{}\", \"theo_mz\": {:.6}, \"rank\": {}, \"max_rank\": {}, \"log_prob\": {:.6}, \"contribution\": {:.6}}}",
+            escape_json(ion_type), theo_mz, rank_str, max_rank, log_prob, contribution
+        )
+    }
+
+    fn finish(mut self) -> std::io::Result<()> {
+        self.out.write_all(b"\n]\n")
+    }
+}
+
+fn escape_json(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
 use clap::Parser;
 use input::{FastaReader, MgfReader, MzMLReader};
 use model::enzyme::Enzyme;
@@ -90,6 +164,10 @@ struct Cli {
     /// (diagnostic; gated to avoid spam in normal trace runs).
     #[arg(long)]
     print_score_dist: bool,
+    /// Output structured per-PSM per-ion JSON to this path. Additive: the
+    /// existing human-readable stderr trace is unaffected.
+    #[arg(long)]
+    trace_json: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -412,6 +490,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // Set up optional structured JSON trace output.
+    let mut trace_json: Option<TraceJson<std::io::BufWriter<File>>> = match cli.trace_json {
+        Some(ref path) => {
+            let file = File::create(path).map_err(|e| {
+                eprintln!("Failed to create --trace-json output {}: {}", path.display(), e);
+                e
+            })?;
+            Some(TraceJson::new(std::io::BufWriter::new(file))?)
+        }
+        None => None,
+    };
+
     // If user supplied Java top-1, search for it in Rust's enumerated set.
     if let Some(java_str) = &cli.java_top1 {
         let java_pep = parse_flanking(java_str)?;
@@ -458,8 +548,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             for &z in &charges_to_try {
                 println!("\n  Per-split node_score breakdown — Java pep ({}+{}) ---", java_str, z);
                 let scored = ScoredSpectrum::new(spec, &scorer, z);
-                print_split_breakdown(&scored, java_cand_pep, &scorer, z);
                 let total = score_psm(&scored, java_cand_pep, &scorer, z, 0.5);
+                print_split_breakdown(
+                    &scored,
+                    java_cand_pep,
+                    &scorer,
+                    z,
+                    trace_json.as_mut(),
+                    cli.scan,
+                    java_str,
+                    total.round() as i32,
+                )?;
                 println!("    score_psm total = {}", total);
             }
         }
@@ -471,7 +570,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let pep_str: String = rust_top1_pep.residues.iter().map(|aa| aa.residue as char).collect();
         println!("\n  Per-split node_score breakdown — Rust top-1 ({} +{}) ---", pep_str, top1.charge_used);
         let scored = ScoredSpectrum::new(spec, &scorer, top1.charge_used);
-        print_split_breakdown(&scored, rust_top1_pep, &scorer, top1.charge_used);
+        let rust_rank_score = top1.score.round() as i32;
+        print_split_breakdown(
+            &scored,
+            rust_top1_pep,
+            &scorer,
+            top1.charge_used,
+            trace_json.as_mut(),
+            cli.scan,
+            &pep_str,
+            rust_rank_score,
+        )?;
         println!("    PSM.score (from queue) = {}", top1.score);
     }
 
@@ -614,6 +723,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!("  rank={} mz={:.4} intensity={}", rank + 1, mz, intensity);
     }
 
+    if let Some(tj) = trace_json {
+        tj.finish().map_err(|e| {
+            eprintln!("Failed to finalize --trace-json output: {}", e);
+            e
+        })?;
+    }
+
     Ok(())
 }
 
@@ -650,14 +766,22 @@ fn parse_flanking(s: &str) -> Result<Peptide, Box<dyn std::error::Error>> {
 
 /// Print per-split node_score: prefix nominal, suffix nominal, score per split,
 /// and which ions matched peaks.
+///
+/// When `trace_json` is `Some`, emits a structured JSON record for this PSM
+/// alongside the existing human-readable output.
+#[allow(clippy::too_many_arguments)]
 fn print_split_breakdown(
     scored: &ScoredSpectrum<'_>,
     peptide: &Peptide,
     scorer: &RankScorer,
     charge: u8,
-) {
+    mut trace_json: Option<&mut TraceJson<std::io::BufWriter<File>>>,
+    scan: i32,
+    peptide_label: &str,
+    rank_score: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let n = peptide.length();
-    if n < 2 { return; }
+    if n < 2 { return Ok(()); }
     // Use SPECTRUM's parent mass for partition lookup (matching score_psm fix).
     let spectrum_parent_mass = scored.parent_mass();
     let peptide_mass = peptide.mass();
@@ -665,6 +789,13 @@ fn print_split_breakdown(
     let mut prefix_acc = 0.0_f64;
     let mut total: i32 = 0;
     let mme = &scorer.param().mme;
+    let max_rank = scorer.max_rank();
+
+    // Begin JSON PSM record if a writer is present.
+    if let Some(ref mut tj) = trace_json {
+        tj.begin_psm(scan, peptide_label, charge, rank_score)?;
+    }
+    let mut first_json_ion = true;
 
     println!("    spectrum_parent_mass={:.4}, peptide_mass={:.4}, peptide_nominal={}",
         spectrum_parent_mass, peptide_mass, peptide_nominal);
@@ -687,21 +818,34 @@ fn print_split_breakdown(
                 let seg = scorer.param().segment_num(theo_mz, spectrum_parent_mass);
                 let part = scorer.param().partition_for(charge, spectrum_parent_mass, seg);
                 let tol_da = mme.as_da(theo_mz);
-                let (score_str, contribution) = match scored.nearest_peak_rank(theo_mz, tol_da) {
+                let peak_rank = scored.nearest_peak_rank(theo_mz, tol_da);
+                let (score_str, contribution, log_prob) = match peak_rank {
                     Some(rank) => {
                         let s = scorer.node_score(part, ion, rank);
                         n_matched += 1;
                         matched_sum += s;
-                        (format!("rk{}={:.2}", rank, s), s)
+                        (format!("rk{}={:.2}", rank, s), s, s)
                     }
                     None => {
                         let s = scorer.missing_ion_score(part, ion);
                         n_missing += 1;
                         missing_sum += s;
-                        (format!("MISS={:.2}", s), s)
+                        (format!("MISS={:.2}", s), s, s)
                     }
                 };
-                let _ = contribution;
+                // Emit JSON ion record if writer is present.
+                if let Some(ref mut tj) = trace_json {
+                    tj.ion(
+                        first_json_ion,
+                        &format!("{:?}", ion),
+                        theo_mz,
+                        peak_rank,
+                        max_rank,
+                        log_prob,
+                        contribution,
+                    )?;
+                    first_json_ion = false;
+                }
                 let kind = if is_prefix { "P" } else { "S" };
                 let off = match ion {
                     scoring_crate::param_model::IonType::Prefix { offset_bits, .. } |
@@ -726,4 +870,11 @@ fn print_split_breakdown(
         }
     }
     println!("    breakdown_total = {}", total);
+
+    // Close JSON PSM record if a writer is present.
+    if let Some(ref mut tj) = trace_json {
+        tj.end_psm()?;
+    }
+
+    Ok(())
 }

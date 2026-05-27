@@ -699,7 +699,7 @@ fn compute_spec_e_values_for_spectrum(
     // (TOLERANCE_LOG10 1.0 → 1.3 in iter30).
     let min_score = queue
         .iter_psms()
-        .map(|p| { let v = p.rank_score; (v + 0.5_f32.copysign(v)) as i32 })
+        .map(|p| p.rank_score.round() as i32)
         .min()
         .unwrap_or(i32::MIN);
 
@@ -801,7 +801,7 @@ fn compute_spec_e_values_for_spectrum(
         if psm_nominal_mass < min_peptide_mass_idx || psm_nominal_mass > max_peptide_mass_idx {
             return 1.0;
         }
-        let score_int = { let v = psm.rank_score; (v + 0.5_f32.copysign(v)) as i32 };
+        let score_int = psm.rank_score.round() as i32;
         if score_int >= max_score {
             // Score exceeds GF range — return the probability at max_score - 1
             // (which already has the underflow guard applied by the GF DP).
@@ -1418,7 +1418,7 @@ pub(crate) fn dedup_pepseq_score(
             .clone();
         let key = DedupMapKey {
             pep: pep_key,
-            score: { let v = psm.rank_score; (v + 0.5_f32.copysign(v)) as i32 },
+            score: psm.rank_score.round() as i32,
         };
 
         match groups.entry(key) {
@@ -1461,7 +1461,7 @@ impl PepDedupKey {
             mod_units.push(
                 aa.mod_
                     .as_ref()
-                    .map(|m| { let v = m.mass_delta * 100_000.0; (v + 0.5_f64.copysign(v)) as i32 })
+                    .map(|m| (m.mass_delta * 100_000.0).round() as i32)
                     .unwrap_or(0),
             );
         }

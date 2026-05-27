@@ -564,6 +564,10 @@ fn compute_inner(
             }
         }
 
+        // compute_inner already tightly written; further perf needs algorithmic changes
+        // outside this iteration (e.g. caching prev_idx alongside valid_edges to avoid
+        // the second node_index_for_mass call, or SIMD-widening the inner multiply loop).
+
         // Underflow guard at max_score - 1.
         // Read-then-write on the same slice; `cur_slice` is already &mut.
         let guard_idx = (cur_max_score - 1 - cur_min_score) as usize;

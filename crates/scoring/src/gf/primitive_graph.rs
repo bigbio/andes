@@ -830,7 +830,10 @@ fn compute_edge_error_scores(
                 let delta = cur_obs.unwrap() - prev_obs.unwrap() - edge_mass_scratch[e];
                 s += scorer.error_score(part, delta as f32);
             }
-            let mut error_score = s.round() as i32;
+            // Branchless `f32::round() as i32` equivalent: avoids libc `roundf` call.
+            // Adds +0.5 for positive, -0.5 for negative, then truncates toward zero.
+            // Matches `round()`'s "round half away from zero" semantics for finite values.
+            let mut error_score = (s + 0.5_f32.copysign(s)) as i32;
             if !(-100..=100).contains(&error_score) {
                 clamp_count += 1;
                 error_score = -4;

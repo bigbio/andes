@@ -477,7 +477,11 @@ impl<'a> ScoredSpectrum<'a> {
         }
         let pref = *self.prefix_score_cache.get(prefix_nominal as usize)?;
         let suff = *self.suffix_score_cache.get(suffix_nominal as usize)?;
-        Some((pref + suff).round() as i32)
+        let v = pref + suff;
+        // Branchless `f32::round() as i32` equivalent: avoids libc `roundf` call.
+        // Adds +0.5 for positive, -0.5 for negative, then truncates toward zero.
+        // Matches `round()`'s "round half away from zero" semantics for finite values.
+        Some((v + 0.5_f32.copysign(v)) as i32)
     }
 
     /// Trace-only accessor: raw `prefix_score_cache[prefix_nominal]` if in
@@ -650,7 +654,8 @@ impl<'a> ScoredSpectrum<'a> {
         let suff = self.directional_node_score(
             suffix_nominal, false, scorer, charge, parent_mass, fragment_tolerance_da,
         );
-        (pref + suff).round() as i32
+        let v = pref + suff;
+        (v + 0.5_f32.copysign(v)) as i32
     }
 
     /// Score for a single directional (prefix or suffix) node at `nominal_mass`.
@@ -890,7 +895,7 @@ impl<'a> ScoredSpectrum<'a> {
             s += scorer.error_score(part, delta as f32);
         }
 
-        s.round() as i32
+        (s + 0.5_f32.copysign(s)) as i32
     }
 }
 

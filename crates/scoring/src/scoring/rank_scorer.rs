@@ -207,7 +207,8 @@ impl RankScorer {
         if esf == 0 {
             return 0.0;
         }
-        let mut err_index = (error * esf as f32).round() as i32;
+        let err_val = error * esf as f32;
+        let mut err_index = (err_val + 0.5_f32.copysign(err_val)) as i32;
         if err_index > esf { err_index = esf; }
         else if err_index < -esf { err_index = -esf; }
         err_index += esf;

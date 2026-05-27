@@ -265,100 +265,129 @@ fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
 ///   merged in addition to Anywhere variants.
 /// - Position n-1: Protein_C_Term (if is_protein_c_term) or C_Term variants are
 ///   merged in addition to Anywhere variants.
-/// - All other positions: Anywhere only (unchanged).
+/// - All other positions: Anywhere only — borrowed directly from AminoAcidSet,
+///   no clone.
 fn expand_mod_combinations(
     span: &[u8],
     params: &SearchParams,
     is_protein_n_term: bool,
     is_protein_c_term: bool,
 ) -> Vec<Vec<AminoAcid>> {
-    use model::modification::ModLocation;
-
     let n = span.len();
-    // For each position, the list of variants at that residue.
-    let position_variants: Vec<Vec<AminoAcid>> = span.iter().enumerate().map(|(i, &r)| {
-        let anywhere_variants = params.aa_set.variants_for(r, ModLocation::Anywhere);
 
-        // Helper: returns true if `term_variants` contains a FIXED mod variant
-        // for this residue. When a fixed terminal mod applies, the residue
-        // MUST carry it — the unmodified Anywhere variant is not a valid
-        // candidate. (Matches Java MS-GF+: fixed mods are mandatory.)
-        let has_fixed_in = |term_variants: &[AminoAcid]| -> bool {
-            term_variants.iter().any(|aa| {
-                aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false)
-            })
-        };
+    // Build owned merged-variant vecs only for the (up to two) terminal
+    // positions. Interior positions will borrow the Anywhere slice directly,
+    // eliminating the per-position `to_vec` clone that showed up in perf
+    // traces (~87% of positions on real tryptic peptides).
+    let pos0_owned: Option<Vec<AminoAcid>> = (n > 0).then(|| {
+        build_terminal_variants(params, span[0], 0, n, is_protein_n_term, is_protein_c_term)
+    });
+    let pos_last_owned: Option<Vec<AminoAcid>> = (n > 1).then(|| {
+        build_terminal_variants(params, span[n - 1], n - 1, n, is_protein_n_term, is_protein_c_term)
+    });
 
-        // Collect the relevant terminal variant sets for this position.
-        let n_term_variants: &[AminoAcid] = if i == 0 {
-            let loc = if is_protein_n_term {
-                ModLocation::ProtNTerm
-            } else {
-                ModLocation::NTerm
-            };
-            params.aa_set.variants_for(r, loc)
+    // Collect per-position variant slices. Terminal positions reference the
+    // owned vecs above; interior positions borrow directly from AminoAcidSet.
+    // All borrows are valid for the duration of this function.
+    use model::modification::ModLocation;
+    let position_variants_refs: Vec<&[AminoAcid]> = span.iter().enumerate().map(|(i, &r)| {
+        if i == 0 {
+            pos0_owned.as_ref().unwrap().as_slice()
+        } else if i == n - 1 {
+            // n > 1 guaranteed here because n == 1 means i == 0 == n-1,
+            // which is already handled by the first branch.
+            pos_last_owned.as_ref().unwrap().as_slice()
         } else {
-            &[]
-        };
-        let c_term_variants: &[AminoAcid] = if i == n - 1 {
-            let loc = if is_protein_c_term {
-                ModLocation::ProtCTerm
-            } else {
-                ModLocation::CTerm
-            };
-            params.aa_set.variants_for(r, loc)
-        } else {
-            &[]
-        };
-
-        let has_fixed_n = has_fixed_in(n_term_variants);
-        let has_fixed_c = has_fixed_in(c_term_variants);
-
-        // If a fixed terminal mod is mandatory at this position, the
-        // unmodified Anywhere variant is not a legal candidate. Drop the
-        // Anywhere variants in that case; otherwise include them. This
-        // prevents the candidate explosion that wildcard fixed N-term TMT
-        // would otherwise cause (every peptide would be enumerated twice
-        // at position 0: once unmodded, once TMT-modded).
-        //
-        // Note: Anywhere variants always include the residue's own fixed
-        // mods folded in (e.g. K-anywhere already carries K-TMT), so this
-        // rule applies only to terminal mods.
-        let mut variants: Vec<AminoAcid> = if has_fixed_n || has_fixed_c {
-            Vec::new()
-        } else {
-            anywhere_variants.to_vec()
-        };
-
-        // Append all terminal variants (fixed + variable). When a fixed
-        // mod is present, the modded variant is the only legal one for
-        // that mod's residue/location slot; variable mods stack on top
-        // by adding additional explored variants.
-        for v in n_term_variants {
-            if !variants.contains(v) {
-                variants.push(v.clone());
-            }
+            // Interior position: borrow Anywhere variants — no clone.
+            params.aa_set.variants_for(r, ModLocation::Anywhere)
         }
-        for v in c_term_variants {
-            if !variants.contains(v) {
-                variants.push(v.clone());
-            }
-        }
-
-        variants
     }).collect();
 
     let mut out = Vec::new();
-    let mut current = Vec::with_capacity(span.len());
+    let mut current = Vec::with_capacity(n);
     expand_recursive(
-        &position_variants, 0, &mut current, 0,
+        &position_variants_refs, 0, &mut current, 0,
         params.max_variable_mods_per_peptide, &mut out,
     );
     out
 }
 
+/// Build the merged variant list for a terminal position (pos 0 or pos n-1).
+///
+/// Mirrors the logic that was previously inlined in `expand_mod_combinations`
+/// for all positions. Only called for the 1-2 terminal positions per span.
+fn build_terminal_variants(
+    params: &SearchParams,
+    residue: u8,
+    pos: usize,
+    span_len: usize,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> Vec<AminoAcid> {
+    use model::modification::ModLocation;
+
+    let anywhere_variants = params.aa_set.variants_for(residue, ModLocation::Anywhere);
+
+    // Helper: returns true if `term_variants` contains a FIXED mod variant
+    // for this residue. When a fixed terminal mod applies, the residue
+    // MUST carry it — the unmodified Anywhere variant is not a valid
+    // candidate. (Matches Java MS-GF+: fixed mods are mandatory.)
+    let has_fixed_in = |term_variants: &[AminoAcid]| -> bool {
+        term_variants.iter().any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false))
+    };
+
+    let n_term_variants: &[AminoAcid] = if pos == 0 {
+        let loc = if is_protein_n_term { ModLocation::ProtNTerm } else { ModLocation::NTerm };
+        params.aa_set.variants_for(residue, loc)
+    } else {
+        &[]
+    };
+    let c_term_variants: &[AminoAcid] = if pos == span_len - 1 {
+        let loc = if is_protein_c_term { ModLocation::ProtCTerm } else { ModLocation::CTerm };
+        params.aa_set.variants_for(residue, loc)
+    } else {
+        &[]
+    };
+
+    let has_fixed_n = has_fixed_in(n_term_variants);
+    let has_fixed_c = has_fixed_in(c_term_variants);
+
+    // If a fixed terminal mod is mandatory at this position, the
+    // unmodified Anywhere variant is not a legal candidate. Drop the
+    // Anywhere variants in that case; otherwise include them. This
+    // prevents the candidate explosion that wildcard fixed N-term TMT
+    // would otherwise cause (every peptide would be enumerated twice
+    // at position 0: once unmodded, once TMT-modded).
+    //
+    // Note: Anywhere variants always include the residue's own fixed
+    // mods folded in (e.g. K-anywhere already carries K-TMT), so this
+    // rule applies only to terminal mods.
+    let mut variants: Vec<AminoAcid> = if has_fixed_n || has_fixed_c {
+        Vec::new()
+    } else {
+        anywhere_variants.to_vec()
+    };
+
+    // Append all terminal variants (fixed + variable). When a fixed
+    // mod is present, the modded variant is the only legal one for
+    // that mod's residue/location slot; variable mods stack on top
+    // by adding additional explored variants.
+    for v in n_term_variants {
+        if !variants.contains(v) {
+            variants.push(v.clone());
+        }
+    }
+    for v in c_term_variants {
+        if !variants.contains(v) {
+            variants.push(v.clone());
+        }
+    }
+
+    variants
+}
+
 fn expand_recursive(
-    position_variants: &[Vec<AminoAcid>],
+    position_variants: &[&[AminoAcid]],
     pos: usize,
     current: &mut Vec<AminoAcid>,
     mods_used: u32,
@@ -369,7 +398,7 @@ fn expand_recursive(
         out.push(current.clone());
         return;
     }
-    for variant in &position_variants[pos] {
+    for variant in position_variants[pos] {
         // Only VARIABLE mods consume slots against the per-peptide cap.
         // Fixed mods are unconditionally applied by the AminoAcidSet (e.g.
         // CAM-on-C, TMT-on-K, TMT-on-N-term-wildcard) and must not count

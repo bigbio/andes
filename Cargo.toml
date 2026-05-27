@@ -12,8 +12,7 @@ authors = ["bigbio MS-GF+ contributors"]
 # Release profile: enable LTO + single codegen unit so LLVM sees the whole
 # binary. Hot paths cross crate boundaries (e.g. search → scoring → model),
 # so default codegen-units=16 leaves cross-crate inlining on the table.
-# No `target-cpu=native` here — we keep the binary portable; opt in via
-# `RUSTFLAGS="-C target-cpu=native"` for bench builds.
+# The release-build CPU baseline is set in `.cargo/config.toml`.
 [profile.release]
 lto = "fat"
 codegen-units = 1

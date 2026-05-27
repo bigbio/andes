@@ -400,6 +400,19 @@ impl ScoreDistArena {
 /// node's probability slice is materialized into a `ScoreDist` and stashed
 /// on `GeneratingFunction.node_dists` so the caller can dump it via
 /// `iter_node_dists`. The production path passes `false`.
+
+/// Cached per-edge values shared between the two passes of `compute_inner`'s
+/// per-node loop. The first pass derives cur_min/cur_max from predecessors;
+/// the second pass accumulates probabilities into cur_slice. Without this
+/// cache, the second pass re-did `node_index_for_mass`, `arena.headers[idx]`,
+/// and the `combined_score` add per edge — all hot in the leaf profile.
+#[derive(Clone, Copy)]
+struct ValidEdge {
+    prev_hdr: NodeSlice,
+    combined_score: i32,
+    aa_prob: f64,
+}
+
 fn compute_inner(
     graph: &PrimitiveAaGraph,
     aa_set: &AminoAcidSet,
@@ -431,12 +444,17 @@ fn compute_inner(
         arena.storage[start] = 1.0;
     }
 
-    // Scratch buffer for valid edge indices.
+    // Scratch buffer for valid edges. Each entry caches everything the
+    // second (DP-fill) pass needs about a predecessor, so we don't redo
+    // the `node_index_for_mass` lookup, `arena.headers[..]` load, and
+    // `combined_score` arithmetic per edge. The first pass populated all
+    // of these already; storing them keeps the inner DP loop straight
+    // memory-access + arithmetic.
     let max_edges_per_node = (0..node_count)
         .map(|ni| graph.edge_offset[ni + 1] - graph.edge_offset[ni])
         .max()
         .unwrap_or(0);
-    let mut valid_edges: Vec<usize> = Vec::with_capacity(max_edges_per_node);
+    let mut valid_edges: Vec<ValidEdge> = Vec::with_capacity(max_edges_per_node);
 
     // Forward DP over nodes in index order.
     for ni in 0..node_count {
@@ -462,7 +480,9 @@ fn compute_inner(
 
         valid_edges.clear();
 
-        // Scan incoming edges.
+        // Scan incoming edges. The first pass derives cur_min/cur_max and
+        // caches everything the second pass needs (prev_hdr is Copy, so
+        // storing it is cheap and avoids re-indexing arena.headers).
         for e in graph.edge_offset[ni]..graph.edge_offset[ni + 1] {
             let prev_mass = graph.edge_prev_node[e];
             let prev_idx = match graph.node_index_for_mass(prev_mass) {
@@ -475,6 +495,7 @@ fn compute_inner(
             }
 
             let combined_score = cur_node_score + graph.edge_score[e];
+            let aa_prob = graph.edge_prob[e] as f64;
             let prev_max = prev_hdr.min_score + prev_hdr.len as i32;
             let possible_max = prev_max + combined_score;
             if possible_max > cur_max_score {
@@ -489,7 +510,7 @@ fn compute_inner(
                 }
             }
 
-            valid_edges.push(e);
+            valid_edges.push(ValidEdge { prev_hdr, combined_score, aa_prob });
         }
 
         // Skip degenerate or out-of-bound ranges.
@@ -517,14 +538,11 @@ fn compute_inner(
         let (prev_region, cur_region) = arena.storage.split_at_mut(cur_start);
         let cur_slice = &mut cur_region[..cur_len];
 
-        for &e in &valid_edges {
-            let prev_mass = graph.edge_prev_node[e];
-            // Safety: we already verified these are valid above.
-            let prev_idx = graph.node_index_for_mass(prev_mass).unwrap();
-            let prev_hdr = arena.headers[prev_idx];
+        for ve in &valid_edges {
+            let prev_hdr = ve.prev_hdr;
             let prev_slice = &prev_region[prev_hdr.range()];
-            let combined_score = cur_node_score + graph.edge_score[e];
-            let aa_prob = graph.edge_prob[e] as f64;
+            let combined_score = ve.combined_score;
+            let aa_prob = ve.aa_prob;
 
             // Mirror ScoreDist::add_prob_dist:
             //   for t in max(other_min, self_min - score_diff)

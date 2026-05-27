@@ -12,7 +12,10 @@ authors = ["bigbio MS-GF+ contributors"]
 # Release profile: enable LTO + single codegen unit so LLVM sees the whole
 # binary. Hot paths cross crate boundaries (e.g. search → scoring → model),
 # so default codegen-units=16 leaves cross-crate inlining on the table.
-# The release-build CPU baseline is set in `.cargo/config.toml`.
+# (These two flags scope to `--release` only; the workspace-wide CPU
+# baseline is set unconditionally in `.cargo/config.toml`, so `cargo test`
+# and `cargo build` also get the same SIMD codegen — this is intentional,
+# so any bit-identity regression surfaces in CI under the same flags.)
 [profile.release]
 lto = "fat"
 codegen-units = 1

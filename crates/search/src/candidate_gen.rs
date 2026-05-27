@@ -14,6 +14,7 @@
 
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
+use model::modification::ModLocation;
 use model::peptide::Peptide;
 use model::protein::Protein;
 use crate::search_index::SearchIndex;
@@ -289,7 +290,6 @@ fn expand_mod_combinations(
     // Collect per-position variant slices. Terminal positions reference the
     // owned vecs above; interior positions borrow directly from AminoAcidSet.
     // All borrows are valid for the duration of this function.
-    use model::modification::ModLocation;
     let position_variants_refs: Vec<&[AminoAcid]> = span.iter().enumerate().map(|(i, &r)| {
         if i == 0 {
             pos0_owned.as_ref().unwrap().as_slice()
@@ -324,8 +324,6 @@ fn build_terminal_variants(
     is_protein_n_term: bool,
     is_protein_c_term: bool,
 ) -> Vec<AminoAcid> {
-    use model::modification::ModLocation;
-
     let anywhere_variants = params.aa_set.variants_for(residue, ModLocation::Anywhere);
 
     // Helper: returns true if `term_variants` contains a FIXED mod variant

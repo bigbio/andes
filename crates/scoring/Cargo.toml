@@ -12,6 +12,5 @@ thiserror = { workspace = true }
 byteorder = { workspace = true }
 
 [dev-dependencies]
-rustc-hash = "2"
 tempfile = "3.10"
 input = { path = "../input" }

@@ -42,6 +42,7 @@ use model::tolerance::Tolerance;
 ///
 /// `is_mgf` controls whether a `Title` column is emitted in the header and
 /// rows, matching Java's behaviour for MGF vs mzML input.
+#[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
 pub fn write_tsv(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
@@ -61,6 +62,7 @@ pub fn write_tsv(
 /// files.
 ///
 /// See [`write_tsv`] for parameter documentation.
+#[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
 pub fn write_tsv_to<W: Write>(
     writer: &mut W,
     spectra: &[Spectrum],
@@ -122,6 +124,7 @@ struct RowCtx<'a> {
     ppm_mode: bool,
 }
 
+#[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
 fn write_spectrum_rows<W: Write>(
     writer: &mut W,
     spec: &Spectrum,

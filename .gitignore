@@ -101,5 +101,6 @@ references/
 .claude/scheduled_tasks.lock
 
 # Rust workspace local state (moved from rust/.gitignore during root restructure)
-.cargo/
+.cargo/*
+!.cargo/config.toml
 *.rs.bk

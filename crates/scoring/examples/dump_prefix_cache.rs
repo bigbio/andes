@@ -110,8 +110,7 @@ fn main() {
         println!("\n== nominal_mass = {:.1} (is_prefix=true) ==", nominal_mass);
         let mut total = 0.0_f32;
         let mut any_iter = false;
-        for seg in 0..num_segs {
-            let logs_slice = &cached_ion_logs[seg];
+        for (seg, logs_slice) in cached_ion_logs.iter().enumerate().take(num_segs) {
             for (ion, logs) in logs_slice {
                 if !ion.is_prefix() {
                     continue;

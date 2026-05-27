@@ -2,7 +2,7 @@
 //!
 //! `cfg(test)` only — does not appear in release builds.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use model::activation::ActivationMethod;
 use model::instrument::InstrumentType;
@@ -33,14 +33,14 @@ pub fn tiny_param() -> Param {
     let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
     let noise_freqs = vec![0.1_f32, 0.2, 0.3, 0.4];
 
-    let mut ion_table_inner: HashMap<IonType, Vec<f32>> = HashMap::new();
+    let mut ion_table_inner: FxHashMap<IonType, Vec<f32>> = FxHashMap::default();
     ion_table_inner.insert(prefix_ion, ion_freqs);
     ion_table_inner.insert(noise_ion, noise_freqs);
 
-    let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
+    let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = FxHashMap::default();
     rank_dist_table.insert(part, ion_table_inner);
 
-    let mut frag_off_table = HashMap::new();
+    let mut frag_off_table = FxHashMap::default();
     frag_off_table.insert(part, vec![]);
 
     let mut p = Param {
@@ -60,15 +60,15 @@ pub fn tiny_param() -> Param {
         num_segments: 1,
         partitions: vec![part],
         num_precursor_off: 0,
-        precursor_off_map: HashMap::new(),
+        precursor_off_map: FxHashMap::default(),
         frag_off_table,
         max_rank,
         rank_dist_table,
         error_scaling_factor: 0,
-        ion_err_dist_table: HashMap::new(),
-        noise_err_dist_table: HashMap::new(),
-        ion_existence_table: HashMap::new(),
-        partition_ion_types_cache: HashMap::new(),
+        ion_err_dist_table: FxHashMap::default(),
+        noise_err_dist_table: FxHashMap::default(),
+        ion_existence_table: FxHashMap::default(),
+        partition_ion_types_cache: FxHashMap::default(),
     };
     p.rebuild_cache();
     p
@@ -94,15 +94,15 @@ pub fn tiny_param_with_ions() -> Param {
     let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
     let noise_freqs = vec![0.1_f32, 0.2, 0.3, 0.4];
 
-    let mut ion_table: HashMap<IonType, Vec<f32>> = HashMap::new();
+    let mut ion_table: FxHashMap<IonType, Vec<f32>> = FxHashMap::default();
     ion_table.insert(prefix1, ion_freqs);
     ion_table.insert(noise, noise_freqs);
 
-    let mut rank_dist_table: HashMap<Partition, HashMap<IonType, Vec<f32>>> = HashMap::new();
+    let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = FxHashMap::default();
     rank_dist_table.insert(part, ion_table);
 
     // frag_off_table: one prefix ion entry so ion_types_for_segment returns it.
-    let mut frag_off_table = HashMap::new();
+    let mut frag_off_table = FxHashMap::default();
     frag_off_table.insert(part, vec![FragmentOffsetFrequency {
         ion_type: prefix1,
         frequency: 0.7,
@@ -125,15 +125,15 @@ pub fn tiny_param_with_ions() -> Param {
         num_segments: 1,
         partitions: vec![part],
         num_precursor_off: 0,
-        precursor_off_map: HashMap::new(),
+        precursor_off_map: FxHashMap::default(),
         frag_off_table,
         max_rank: 3,
         rank_dist_table,
         error_scaling_factor: 0,
-        ion_err_dist_table: HashMap::new(),
-        noise_err_dist_table: HashMap::new(),
-        ion_existence_table: HashMap::new(),
-        partition_ion_types_cache: HashMap::new(),
+        ion_err_dist_table: FxHashMap::default(),
+        noise_err_dist_table: FxHashMap::default(),
+        ion_existence_table: FxHashMap::default(),
+        partition_ion_types_cache: FxHashMap::default(),
     };
     p.rebuild_cache();
     p

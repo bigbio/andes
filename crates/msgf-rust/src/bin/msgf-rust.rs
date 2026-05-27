@@ -1,7 +1,7 @@
-//! msgf-rust: end-to-end MS-GF+ search.
+//! msgf-rust: end-to-end peptide-spectrum database search.
 //!
 //! Loads an MGF or mzML spectrum file and a FASTA target database, runs a
-//! tryptic database search with default MS-GF+ parameters, and writes output
+//! tryptic database search and writes output
 //! in Percolator `.pin` format (and optionally `.tsv` format).
 //!
 //! Format dispatch: if `--spectrum` ends in `.mzML` or `.mzml`, `MzMLReader`
@@ -29,10 +29,9 @@ use search::{
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
 
-/// Fragmentation method. Named values map to the same param-file resolution
-/// logic as Java MS-GF+'s `-m` flag. `Auto` means "detect from the mzML's
-/// activation block; fall back to the bundled HCD_QExactive_Tryp.param if
-/// nothing detected" — the same semantics as omitting the flag pre-iter39.
+/// Fragmentation method. `Auto` means "detect from the mzML's activation block;
+/// fall back to the bundled HCD_QExactive_Tryp.param if nothing detected" —
+/// the same semantics as omitting the flag pre-iter39.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Fragmentation {
     #[clap(name = "auto")] Auto,
@@ -52,7 +51,7 @@ pub enum Instrument {
     #[clap(name = "QExactive")] QExactive,
 }
 
-/// Search protocol. Maps to Java MS-GF+'s `-protocol` flag.
+/// Search protocol: sample labeling or enrichment strategy applied during the experiment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
     #[clap(name = "auto")]          Auto,
@@ -63,8 +62,8 @@ pub enum Protocol {
     #[clap(name = "standard")]      Standard,
 }
 
-/// Enzymatic-cleavage enforcement at peptide span boundaries. Maps to Java
-/// MS-GF+'s `-ntt` flag where 2=fully, 1=semi, 0=non-specific.
+/// Enzymatic-cleavage enforcement at peptide span boundaries:
+/// 2=fully, 1=semi, 0=non-specific.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum EnzymeSpecificity {
     #[clap(name = "non-specific")] NonSpecific,
@@ -75,7 +74,7 @@ pub enum EnzymeSpecificity {
 #[derive(Parser, Debug)]
 #[command(
     name = "msgf-rust",
-    about = "MS-GF+ Rust port: database search of MGF/mzML spectra against FASTA",
+    about = "msgf-rust: database search of MGF/mzML spectra against FASTA",
     allow_hyphen_values = true,
 )]
 struct Cli {
@@ -176,6 +175,7 @@ struct Cli {
     ///     strings (e.g. `C2H3N1O1`) are **not** yet supported.
     ///   - `<aa>` is a single uppercase letter or `*` (wildcard).
     ///   - `<location>` is one of `any|N-term|C-term|Prot-N-term|Prot-C-term`.
+    ///
     /// A single `NumMods=N` line sets the max variable mods per peptide.
     /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
     /// are ignored. When omitted, the binary uses its built-in defaults
@@ -228,13 +228,27 @@ fn main() -> ExitCode {
     }
 }
 
-/// Print VmRSS for the current process under MSGFRUST_RSS_PROBE=1. No-op
+/// Print VmRSS for the current process under MSGF_RSS_PROBE=1. No-op
 /// otherwise and a no-op on non-Linux platforms regardless of the env var.
+/// (Legacy name MSGFRUST_RSS_PROBE is accepted with a deprecation warning.)
 ///
 /// We gate behind an env var so production runs stay quiet; flip the var on
 /// when debugging memory regressions.
 fn log_rss(tag: &str) {
-    if std::env::var_os("MSGFRUST_RSS_PROBE").is_none() {
+    // Accept both new and legacy env var names. Legacy emits the
+    // deprecation warning once per process (sync::Once guard).
+    let new_set = std::env::var_os("MSGF_RSS_PROBE").is_some();
+    let legacy_set = std::env::var_os("MSGFRUST_RSS_PROBE").is_some();
+    if legacy_set && !new_set {
+        static LEGACY_WARN_ONCE: std::sync::Once = std::sync::Once::new();
+        LEGACY_WARN_ONCE.call_once(|| {
+            eprintln!(
+                "WARN: MSGFRUST_RSS_PROBE is deprecated; use MSGF_RSS_PROBE \
+                 (legacy name accepted in this release, will be removed next)"
+            );
+        });
+    }
+    if !new_set && !legacy_set {
         return;
     }
     #[cfg(target_os = "linux")]
@@ -920,7 +934,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
 /// - instrument:    0=LowRes,   1=HighRes, 2=TOF, 3=QExactive
 /// - protocol:      0=Automatic,1=Phosphorylation, 2=iTRAQ,
-///                  3=iTRAQPhospho, 4=TMT, 5=Standard
+///   3=iTRAQPhospho, 4=TMT, 5=Standard
 ///
 /// When all three are `None`, the historical default
 /// `HCD_QExactive_Tryp.param` is returned (preserving existing tests'
@@ -986,8 +1000,8 @@ fn resolve_bundled_param(
     }
 
     // Step 2: Drop protocol — try `{frag}_{inst}_Tryp.param`.
-    // This mirrors Java's `return get(method, instType, enzyme)` fallback
-    // (NewScorerFactory.java line ~120). For (CID, HighRes, Tryp, TMT) this
+    // This mirrors Java parity: `return get(method, instType, enzyme)` fallback
+    // (drop protocol suffix when exact match is missing). For (CID, HighRes, Tryp, TMT) this
     // lands on `CID_HighRes_Tryp.param`, which IS what Java would pick when
     // the protocol-specific file is missing.
     if !prot_suffix.is_empty() {
@@ -1005,7 +1019,7 @@ fn resolve_bundled_param(
     // LysN (for N-term enzymes). We always use Tryp here, so this step is
     // a no-op for now. If/when N-term enzyme support lands, replicate this.
 
-    // Step 4: Final fallback ladder (Java NewScorerFactory.java lines ~136-160).
+    // Step 4: Final fallback ladder (Java parity for scorer factory fallback).
     //   - HCD + (TOF|HighRes) + C-term → CID_TOF_Tryp
     //   - ETD + C-term                  → ETD_LowRes_Tryp
     //   - Non-electron + N-term         → CID_LowRes_LysN  (skipped; N-term TBD)
@@ -1055,12 +1069,10 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
     // Tally counts keyed by ActivationMethod variant.
     let mut counts: std::collections::HashMap<ActivationMethod, usize> =
         std::collections::HashMap::new();
-    let mut seen = 0usize;
-    for item in reader {
+    for (seen, item) in reader.enumerate() {
         if seen >= MAX_PEEK {
             break;
         }
-        seen += 1;
         if let Ok(spec) = item {
             if let Some(m) = spec.activation_method {
                 *counts.entry(m).or_insert(0) += 1;
@@ -1114,8 +1126,7 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 ///
 /// This is the auto-detect path: we already know the activation, and we
 /// pick the bundled instrument+enzyme pair that best matches the dataset.
-/// Mirrors the per-spectrum dispatch Java's MS-GF+ does in
-/// `ScoredSpectraMap.java:262-263` when the user passes `-m 0`
+/// Mirrors Java parity for per-spectrum param dispatch when the user passes `-m 0`
 /// (ASWRITTEN), but applied at file-wide granularity here.
 ///
 /// The `detected_instrument` argument is the instrument type detected by
@@ -1126,13 +1137,13 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 ///
 /// Mapping (Tryp / no-protocol unless protocol overrides):
 ///   - CID  → frag=1, inst=detected (LowRes when none).
-///            LowRes for LTQ Velos / ion-trap data; HighRes / QExactive
-///            for Orbitrap data. Matches Java's default + the user-supplied
-///            `-inst` path.
+///     LowRes for LTQ Velos / ion-trap data; HighRes / QExactive
+///     for Orbitrap data. Matches Java's default + the user-supplied
+///     `-inst` path.
 ///   - HCD  → frag=3, inst=detected. `resolve_bundled_param`'s Java-mirror
-///            normalization upgrades HCD with non-(HighRes|QExactive) to
-///            QExactive, so HCD on LTQ data still routes to a QExactive
-///            model (Java does the same).
+///     normalization upgrades HCD with non-(HighRes|QExactive) to
+///     QExactive, so HCD on LTQ data still routes to a QExactive
+///     model (Java does the same).
 ///   - ETD  → frag=2, inst=detected.
 ///   - PQD  → CID (Java collapses PQD → CID in `NewScorerFactory.get`).
 ///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
@@ -1327,8 +1338,8 @@ mod param_resolver_tests {
     #[test]
     fn cid_highres_tmt_falls_back_to_cid_highres_tryp() {
         // (CID, HighRes, TMT) — `CID_HighRes_Tryp_TMT.param` is not bundled.
-        // Java's NewScorerFactory drops the protocol suffix when the exact
-        // file is missing (see NewScorerFactory.java line ~120), landing on
+        // Java parity: NewScorerFactory drops the protocol suffix when the
+        // exact file is missing, landing on
         // the protocol-less file. We mirror that behavior: this combination
         // resolves to `CID_HighRes_Tryp.param` rather than erroring out.
         let p = resolve_bundled_param(

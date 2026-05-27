@@ -1,5 +1,4 @@
-//! Input-side readers for MS-GF+ Rust port: MGF and mzML spectrum files
-//! and `.fasta` protein databases.
+//! Input readers: MGF, mzML, FASTA.
 
 pub mod fasta;
 pub mod mgf;

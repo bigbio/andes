@@ -9,6 +9,17 @@ rust-version = "1.85"
 license = "LicenseRef-UCSD-Noncommercial"
 authors = ["bigbio MS-GF+ contributors"]
 
+# Release profile: enable LTO + single codegen unit so LLVM sees the whole
+# binary. Hot paths cross crate boundaries (e.g. search → scoring → model),
+# so default codegen-units=16 leaves cross-crate inlining on the table.
+# (These two flags scope to `--release` only; the workspace-wide CPU
+# baseline is set unconditionally in `.cargo/config.toml`, so `cargo test`
+# and `cargo build` also get the same SIMD codegen — this is intentional,
+# so any bit-identity regression surfaces in CI under the same flags.)
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [workspace.dependencies]
 # Core deps — used across many crates.
 clap = { version = "4.5", features = ["derive"] }

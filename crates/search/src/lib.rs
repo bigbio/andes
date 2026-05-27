@@ -1,4 +1,5 @@
-//! Search sub-system for MS-GF+ Rust port.
+//! Peptide database search engine: candidate enumeration, precursor matching,
+//! scoring, and PSM aggregation.
 //!
 //! Contains candidate generation, suffix array, search index, precursor
 //! matching, PSM structures, and the match engine.

@@ -92,7 +92,7 @@ pub fn median_absolute_deviation(values: &[f64], center: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
-    let mut deviations: Vec<f64> = values.iter().map(|v| (v - center).abs()).collect();
+    let deviations: Vec<f64> = values.iter().map(|v| (v - center).abs()).collect();
     median(&deviations)
 }
 

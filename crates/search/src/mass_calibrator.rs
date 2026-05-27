@@ -172,8 +172,8 @@ pub fn learn_calibration_stats(
     }
 }
 
-/// Tighten ppm precursor tolerance after a successful cal pass (Java
-/// `MSGFPlus.java` post-cal block). No-op when stats are unreliable or
+/// Tighten ppm precursor tolerance after a successful cal pass (matching
+/// Java's post-cal block). No-op when stats are unreliable or
 /// tolerance is not ppm-based.
 pub fn apply_tightened_precursor_tolerance(params: &mut SearchParams, stats: CalibrationStats) {
     if !stats.has_reliable_stats() {

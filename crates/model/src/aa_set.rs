@@ -1,10 +1,11 @@
 //! Heavyweight residue-and-modification set. Built via
 //! `AminoAcidSetBuilder`; queried by the candidate generator.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use crate::amino_acid::AminoAcid;
 use crate::enzyme::Enzyme;
@@ -16,10 +17,15 @@ const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 1000.0;
 #[derive(Debug, Clone)]
 pub struct AminoAcidSet {
     /// (residue, location) → all variants (unmodified + modified) at that position.
-    table: HashMap<(u8, ModLocation), Vec<AminoAcid>>,
+    ///
+    /// Iter2 perf: switched from `HashMap` (SipHash13, RandomState) to
+    /// `FxHashMap` after a flamegraph on the post-PR-V1 binary showed 39%
+    /// of Astral CPU in `variants_for` lookups via SipHash. Same hashbrown
+    /// internals, faster hasher.
+    table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>>,
     /// Per-location flattened AA lists, precomputed at build time. Avoids
     /// per-call rebuild in the GF DP hot path (PrimitiveAaGraph::new).
-    aa_lists_cache: HashMap<ModLocation, Vec<AminoAcid>>,
+    aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>>,
     has_cterm_mods: bool,
     min_aa_mass: f64,
     max_aa_mass: f64,
@@ -266,7 +272,7 @@ impl AminoAcidSetBuilder {
                 continue;
             }
             // Take everything after the first `=`. Java accepts whitespace around the value.
-            let value = line.splitn(2, '=').nth(1).unwrap_or("").trim();
+            let value = line.split_once('=').map(|x| x.1).unwrap_or("").trim();
             let n: u32 = value.parse().map_err(|_| AaSetError::BadNumMods {
                 value: value.to_string(),
             })?;
@@ -327,7 +333,7 @@ impl AminoAcidSetBuilder {
             .map(Arc::new)
             .collect();
 
-        let mut table: HashMap<(u8, ModLocation), Vec<AminoAcid>> = HashMap::new();
+        let mut table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>> = FxHashMap::default();
         let locations = [
             ModLocation::Anywhere, ModLocation::NTerm, ModLocation::CTerm,
             ModLocation::ProtNTerm, ModLocation::ProtCTerm,
@@ -404,7 +410,7 @@ impl AminoAcidSetBuilder {
         // 5. Precompute the per-location AA lists used by `aa_list_for` and
         // `cached_aa_list`. Runs once at build time so the GF DP hot path
         // can borrow a slice.
-        let mut aa_lists_cache: HashMap<ModLocation, Vec<AminoAcid>> = HashMap::new();
+        let mut aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>> = FxHashMap::default();
         let anywhere_list: Vec<AminoAcid> = STANDARD_RESIDUES
             .iter()
             .flat_map(|&r| {

@@ -33,7 +33,7 @@ fn main() {
             let num_segs = param.num_segments.max(1) as usize;
             let mut ion_freq: std::collections::HashMap<IonType, f32> = std::collections::HashMap::new();
             for seg in 0..num_segs {
-                let p = scoring::param_model::Partition { charge: charge, parent_mass: part.parent_mass, seg_num: seg as i32 };
+                let p = scoring::param_model::Partition { charge, parent_mass: part.parent_mass, seg_num: seg as i32 };
                 if let Some(frags) = param.frag_off_table.get(&p) {
                     for f in frags {
                         if matches!(f.ion_type, IonType::Noise) { continue; }

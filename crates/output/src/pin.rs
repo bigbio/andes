@@ -351,7 +351,7 @@ fn write_psm_row<W: Write>(
         writer.write_all(&[b'\t', flag])?;
     }
 
-    // enzN, enzC, enzInt — C-4 (2026-05-19): Java DirectPinWriter.java:199-203
+    // enzN, enzC, enzInt — C-4 (2026-05-19): Java parity —
     // emits enzymatic-boundary consistency features. enzN = boundary between
     // protein-pre and peptide[0]; enzC = boundary between peptide[last] and
     // protein-post; enzInt = count of internal positions consistent with the
@@ -414,7 +414,7 @@ fn write_psm_row<W: Write>(
     // Proteins column(s): one tab-separated accession per candidate_idx.
     // After R-2.2 dedup, a PSM that matches the same peptide across multiple
     // proteins keeps all protein indices in candidate_idxs, and the PIN row
-    // emits one accession per index — matching Java DirectPinWriter.java:237.
+    // emits one accession per index — matching Java parity for multi-protein PIN rows.
     // For PSMs with a single candidate_idx (typical), output is identical to
     // the pre-R-2.5 single-accession emit (ctx.accession still used by TSV).
     write!(writer, "\t{}", cand.peptide)?;

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 model = { path = "../model" }
+rustc-hash = "2"
 thiserror = { workspace = true }
 byteorder = { workspace = true }
 

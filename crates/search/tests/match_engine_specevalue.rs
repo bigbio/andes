@@ -5,7 +5,7 @@
 //! 2. For a well-matched spectrum, the top PSM has spec_e_value < 1.0.
 //! 3. The TopNQueue ordering reflects spec_e_value (best first in sorted_vec).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use model::{AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb, Spectrum, PROTON, Tolerance};
 use scoring_crate::{Param, RankScorer};
@@ -36,15 +36,15 @@ fn tiny_scorer() -> RankScorer {
     let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
     let noise = IonType::Noise;
 
-    let mut ion_table = HashMap::new();
+    let mut ion_table = FxHashMap::default();
     ion_table.insert(prefix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
     ion_table.insert(suffix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
     ion_table.insert(noise, vec![0.05_f32, 0.05, 0.05, 0.05]);
 
-    let mut rank_dist_table = HashMap::new();
+    let mut rank_dist_table = FxHashMap::default();
     rank_dist_table.insert(part, ion_table);
 
-    let mut frag_off_table = HashMap::new();
+    let mut frag_off_table = FxHashMap::default();
     frag_off_table.insert(part, vec![]);
 
     let mut param = Param {
@@ -64,15 +64,15 @@ fn tiny_scorer() -> RankScorer {
         num_segments: 1,
         partitions: vec![part],
         num_precursor_off: 0,
-        precursor_off_map: HashMap::new(),
+        precursor_off_map: FxHashMap::default(),
         frag_off_table,
         max_rank: 3,
         rank_dist_table,
         error_scaling_factor: 0,
-        ion_err_dist_table: HashMap::new(),
-        noise_err_dist_table: HashMap::new(),
-        ion_existence_table: HashMap::new(),
-        partition_ion_types_cache: HashMap::new(),
+        ion_err_dist_table: FxHashMap::default(),
+        noise_err_dist_table: FxHashMap::default(),
+        ion_existence_table: FxHashMap::default(),
+        partition_ion_types_cache: FxHashMap::default(),
     };
     param.rebuild_cache();
     RankScorer::new(&param)

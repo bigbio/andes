@@ -89,6 +89,6 @@ mod tests {
         });
         assert_eq!(dp.positions.len(), 2);
         assert_eq!(dp.positions[0].protein_index, 0);
-        assert_eq!(dp.positions[1].is_decoy, true);
+        assert!(dp.positions[1].is_decoy);
     }
 }

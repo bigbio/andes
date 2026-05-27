@@ -10,7 +10,7 @@
 //! cloned the `Modification`'s `String` `name` (and optional accession),
 //! producing one heap allocation per modified residue per candidate. At
 //! Astral scale that drives `PreparedSearch::prepare` to ~27 GB RSS on a
-//! 31 GB VM (verified by the `MSGFRUST_RSS_PROBE=1` probe in
+//! 31 GB VM (verified by the `MSGF_RSS_PROBE=1` probe in
 //! `msgf-rust.rs`). Wrapping `Modification` in `Arc` makes clones a
 //! refcount bump and shrinks `AminoAcid` from ~96 B to 24 B.
 

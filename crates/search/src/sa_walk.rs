@@ -162,9 +162,7 @@ impl<'a> SaPeptideStream<'a> {
                 return None;
             }
             let aa = byte_to_residue(b);
-            if AminoAcid::standard(aa).is_none() {
-                return None;
-            }
+            AminoAcid::standard(aa)?;
             ascii.push(aa);
         }
         // Position resolution doubles as a protein-boundary check: if the

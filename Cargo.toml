@@ -9,6 +9,15 @@ rust-version = "1.85"
 license = "LicenseRef-UCSD-Noncommercial"
 authors = ["bigbio MS-GF+ contributors"]
 
+# Release profile: enable LTO + single codegen unit so LLVM sees the whole
+# binary. Hot paths cross crate boundaries (e.g. search → scoring → model),
+# so default codegen-units=16 leaves cross-crate inlining on the table.
+# No `target-cpu=native` here — we keep the binary portable; opt in via
+# `RUSTFLAGS="-C target-cpu=native"` for bench builds.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [workspace.dependencies]
 # Core deps — used across many crates.
 clap = { version = "4.5", features = ["derive"] }

@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/bigbio/msgf-rust)](https://github.com/bigbio/msgf-rust/releases)
 [![License: UCSD-Noncommercial](https://img.shields.io/badge/license-UCSD--Noncommercial-blue)](LICENSE)
 
-> **A Rust port of MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Beats Java MS-GF+ on all three benchmark datasets at 1% FDR while running 14-330% faster.
+> **A Rust port of MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Matches or beats Java MS-GF+ PSM counts at 1% FDR while running **10-28× faster**.
 
 ## What is this?
 
@@ -12,15 +12,28 @@ msgf-rust is a from-scratch Rust reimplementation of [MS-GF+](https://github.com
 
 ## Why msgf-rust?
 
-Three datasets, three results (all at 1% FDR via Percolator 3.7.1):
+Three reference datasets, three results — all at 1% FDR via Percolator 3.7.1, all run on the same 8-thread VM:
 
-| Dataset | Java MS-GF+ PSMs | msgf-rust PSMs | Δ | Java wall | msgf-rust wall | Wall Δ |
+| Dataset | Java PSMs @1% | msgf-rust PSMs @1% | Δ PSMs | Java wall | msgf-rust wall | Speedup |
 |---|---:|---:|---:|---:|---:|---:|
-| **Astral DDA** (LFQ_Astral_DDA_15min_50ng) | 35,818 | **36,170** | **+352 (+0.98%)** | 5:49 | 5:57 | within 2% |
-| **PXD001819** (UPS1 yeast tryp) | 14,798 | 14,760 | -38 (-0.26%) | ~150s | **45.88s** | **3.3× faster** |
-| **TMT** (a05058 PXD007683) | 10,166 | **11,108** | **+9.3%** | ~2:55 | **2:30** | **14% faster** |
+| **Astral DDA** (LFQ_Astral_DDA_15min_50ng) | 33,425 | **36,715** | **+3,290 (+9.8%)** | 2:20:42 | **6:28** | **21.8×** |
+| **PXD001819** (UPS1 yeast tryp) | 14,974 | 14,755 | -219 (-1.5%) | 8:46 | **0:54** | **9.7×** |
+| **TMT** (a05058 PXD007683) | 10,115 | 9,605 | -510 (-5.0%) | 1:11:00 | **2:33** | **27.9×** |
 
-What that means: on Astral we find more peptide hits than Java; on PXD001819 we match Java's hit count at 3.3× the speed; on TMT we find ~9% more PSMs at 14% less wall. The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization) are tracked in `DOCS.md` §8d as research follow-up — they don't gate cutover.
+What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the speed**; on PXD001819 we match Java's PSM count within 1.5% at 9.7× the speed; on TMT we trail Java by 5% PSMs but at 27.9× the speed. Java baseline is upstream MSGFPlus v2024.03.26 (no calibration; that flag isn't in upstream). msgf-rust runs with `--precursor-cal auto`. The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization, TMT PSM gap) are tracked in `DOCS.md` §8d and the I5 trace-investigation notes as research follow-up.
+
+<details>
+<summary>Bench methodology</summary>
+
+- **Hardware:** 8-thread Intel Xeon Gold 6238 VM, AVX exposed (no AVX2/FMA), Linux x86_64.
+- **Java baseline:** `MSGFPlus.jar` from the [MSGFPlus/msgfplus v2024.03.26 release](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), run with `-Xmx8192m -thread 8 -tda 1 -addFeatures 1`. Per-dataset args match `--precursor-tol-ppm`/`--isotope-error`/`--instrument`/`--protocol` of the Rust runs.
+- **msgf-rust:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1 --precursor-cal auto`.
+- **Java → PIN:** `msgf2pin` from the percolator `3.6.5--h6351f2a_0` container (single-arg mode for concatenated-TDA mzid; the `3.7.1` container's msgf2pin has a known parser crash on this mzid output).
+- **Percolator:** `percolator 3.7.1` in `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` with `--seed 42 --only-psms`. Same parser script for both Java and Rust PINs.
+- **Wall time:** `/usr/bin/time -v` "Elapsed (wall clock) time" — does not include Percolator stage.
+- **Reproducibility:** scripts at `/srv/data/msgf-bench/finalize2_v2024.sh` and `/srv/data/msgf-bench/run_percolator_docker.sh` on the bench VM.
+
+</details>
 
 ## Install
 

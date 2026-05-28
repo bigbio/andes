@@ -220,7 +220,7 @@ fn write_spectrum_rows<W: Write>(
     // find rank-2 SpecEValue: first distinct spec_e_value after rank-1
     let rank2_spec_e_value = find_rank2_spec_e_value(&psms);
 
-    for (rank, psm) in iter_ranked(&psms) {
+    for (row_idx, (rank, psm)) in iter_ranked(&psms).enumerate() {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(
@@ -230,6 +230,7 @@ fn write_spectrum_rows<W: Write>(
             cand,
             &ctx,
             rank,
+            row_idx,
             rank2_spec_e_value,
             min_charge,
             max_charge,
@@ -249,6 +250,7 @@ fn write_psm_row<W: Write>(
     cand: &Candidate,
     ctx: &RowContext,
     rank: u32,
+    row_idx: usize,
     rank2_spec_e_value: f64,
     min_charge: u8,
     max_charge: u8,
@@ -328,8 +330,17 @@ fn write_psm_row<W: Write>(
     // built ~30 intermediate Strings per row × 37k rows = ~1.1M allocs).
     //
     // SpecId: `specID + "_" + scanNum + "_" + rank` — emitted inline via
-    // three `write!` calls so we don't materialise a temporary String.
-    write!(writer, "{}_{}_{}", ctx.spec_id, ctx.scan, rank)?;
+    // `write!` so we don't materialise a temporary String. Under --chimeric a
+    // single scan emits multiple distinct-peptide PSMs that can share a SpecE
+    // rank (rank only increments on a distinct spec_e_value), which would
+    // collide on `_{rank}`; append the per-row emission index to keep SpecIds
+    // unique. The standard (non-chimeric) format is unchanged, preserving the
+    // bit-identical PIN golden.
+    if params.chimeric {
+        write!(writer, "{}_{}_{}_{}", ctx.spec_id, ctx.scan, rank, row_idx)?;
+    } else {
+        write!(writer, "{}_{}_{}", ctx.spec_id, ctx.scan, rank)?;
+    }
     write!(writer, "\t{}\t{}\t", label, ctx.scan)?;
     write_double(writer, exp_mass)?;
     writer.write_all(b"\t")?;
@@ -785,6 +796,33 @@ mod tests {
 
         assert_eq!(rows[0][charge2_idx], "1", "charge2 should be 1 for a charge-2 PSM");
         assert_eq!(rows[0][charge3_idx], "0", "charge3 should be 0 for a charge-2 PSM");
+    }
+
+    // ── Test: chimeric SpecId uniqueness for co-fragmented peptides ─────────
+
+    #[test]
+    fn chimeric_specids_unique_for_cofragmented_peptides_same_scan() {
+        let mut params = make_params(2..=3);
+        params.chimeric = true;
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        // Two distinct peptides (candidates 0 and 1) with the SAME spec_e_value:
+        // iter_ranked assigns them the same SpecE rank, so without the chimeric
+        // per-row suffix their SpecIds (`spec_scan_rank`) would collide.
+        let mut queue = TopNQueue::new(10);
+        queue.push(make_psm(0, 10.0, 1e-5, 0, 2));
+        queue.push(make_psm(0, 9.0, 1e-5, 1, 2));
+        let queues = vec![queue];
+        let idx = make_empty_search_index();
+        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 2, "both co-fragmented PSMs should be emitted");
+        assert_ne!(rows[0][0], rows[1][0],
+            "chimeric SpecIds must be unique per row, got {:?} and {:?}", rows[0][0], rows[1][0]);
     }
 
     // ── Test 4: empty queue → only header ────────────────────────────────────

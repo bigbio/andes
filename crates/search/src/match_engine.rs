@@ -282,6 +282,12 @@ impl<'a> PreparedSearch<'a> {
         let psms_pushed = AtomicU64::new(0);
         let spectra_with_psms = AtomicU64::new(0);
 
+        // Research diagnostic (env-gated, chimeric only): measure the
+        // shared-fragment overlap between the top-2 co-emitted distinct peptides
+        // per scan. Tests the "fragment theft" hypothesis behind chimeric FDR
+        // inflation. Zero cost unless MSGF_CHIMERIC_OVERLAP is set AND --chimeric.
+        let chim_overlap = params.chimeric && std::env::var("MSGF_CHIMERIC_OVERLAP").is_ok();
+
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
         let queues: Vec<TopNQueue> = spectra
@@ -675,6 +681,41 @@ impl<'a> PreparedSearch<'a> {
                 psm.features = features;
             });
 
+            // Chimeric fragment-overlap diagnostic (env-gated). For scans that
+            // emit ≥2 distinct peptides, measure how many MS2 peaks the runner-up
+            // claims that the top peptide also claims (the "fragment theft" the
+            // chimeric FDR inflation is hypothesized to come from).
+            if chim_overlap {
+                let sorted = queue.clone().into_sorted_vec(); // best-first
+                let mut picks: Vec<&PsmMatch> = Vec::new();
+                'outer: for psm in &sorted {
+                    let seq: Vec<u8> = candidates[psm.primary_candidate_idx() as usize]
+                        .peptide.residues.iter().map(|a| a.residue).collect();
+                    for p in &picks {
+                        let pseq: Vec<u8> = candidates[p.primary_candidate_idx() as usize]
+                            .peptide.residues.iter().map(|a| a.residue).collect();
+                        if pseq == seq { continue 'outer; }
+                    }
+                    picks.push(psm);
+                    if picks.len() == 2 { break; }
+                }
+                if picks.len() == 2 {
+                    let pa = &candidates[picks[0].primary_candidate_idx() as usize].peptide;
+                    let pb = &candidates[picks[1].primary_candidate_idx() as usize].peptide;
+                    let ka = matched_peak_keys(scored_spec_for_charge(picks[0].charge_used), pa, scorer);
+                    let kb = matched_peak_keys(scored_spec_for_charge(picks[1].charge_used), pb, scorer);
+                    let shared = ka.intersection(&kb).count();
+                    let uni = ka.union(&kb).count();
+                    let minlen = ka.len().min(kb.len());
+                    eprintln!(
+                        "CHIM_OVERLAP spec_idx={} nA={} nB={} shared={} jacc={:.3} fracmin={:.3}",
+                        spec_idx, ka.len(), kb.len(), shared,
+                        if uni > 0 { shared as f64 / uni as f64 } else { 0.0 },
+                        if minlen > 0 { shared as f64 / minlen as f64 } else { 0.0 },
+                    );
+                }
+            }
+
                 queue
             })
             .collect();
@@ -983,6 +1024,32 @@ fn compute_spec_e_values_for_spectrum(
             .max(1);
         psm.e_value = psm.spec_e_value * num_distinct as f64;
     });
+}
+
+/// Research diagnostic: the set of observed MS2 peaks claimed by `peptide`'s
+/// charge-1 b/y ions, as quantized m/z keys (round(mz·1000)). Mirrors the
+/// matching in `compute_psm_features`. Used only by the env-gated chimeric
+/// fragment-overlap diagnostic; not on any production path.
+fn matched_peak_keys(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+) -> std::collections::HashSet<i64> {
+    let mut keys = std::collections::HashSet::new();
+    let n = peptide.length();
+    if n < 2 {
+        return keys;
+    }
+    let predicted = predict_by_ions(peptide, 1..=1);
+    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
+    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
+    for p in &predicted {
+        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        if let Some((_rank, _intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
+            keys.insert((peak_mz * 1000.0).round() as i64);
+        }
+    }
+    keys
 }
 
 /// Compute fragment-ion feature columns for a single PSM.

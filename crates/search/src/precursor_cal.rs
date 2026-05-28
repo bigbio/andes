@@ -76,7 +76,18 @@ pub fn adjusted_observed_neutral_mass(raw_neutral: f64, shift_ppm: f64) -> f64 {
 pub mod constants {
     pub const SAMPLING_STRIDE: usize = 10;
     pub const MAX_SAMPLED: usize = 500;
-    pub const MIN_CONFIDENT_PSMS: usize = 200;
+    /// Upper bound on the number of best-SpecEValue residuals fed to the median
+    /// shift estimate. Java's `MassCalibrator` uses the top 200. Decoupled from
+    /// the firing minimum below so high-yield datasets (Astral/TMT) keep using a
+    /// full 200-residual estimate unchanged.
+    pub const RESIDUAL_CAP: usize = 200;
+    /// Minimum confident residuals required to TRUST the learned shift. Lowered
+    /// from 200 to 150: low-res-MS2 datasets (e.g. PXD001819 ion-trap CID) yield
+    /// fewer sub-1e-6 SpecEValue PSMs from the 500-spectrum sample (~193), which
+    /// previously fell just under 200 and skipped calibration entirely. 150 is
+    /// still a robust sample size for a median, and the cap above keeps the
+    /// high-yield datasets' estimate identical.
+    pub const MIN_CONFIDENT_PSMS: usize = 150;
     pub const MAX_SPEC_EVALUE: f64 = 1e-6;
     pub const MIN_SPECKEYS_FOR_PREPASS: usize = 10_000;
 

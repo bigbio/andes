@@ -168,6 +168,11 @@ struct Cli {
     /// existing human-readable stderr trace is unaffected.
     #[arg(long)]
     trace_json: Option<PathBuf>,
+    /// Dump the post-filter, post-deconvolution active peak list (sorted by
+    /// rank ascending) for this scan/charge as `rank<TAB>mz<TAB>intensity`
+    /// lines, preceded by a `DUMP_PEAKS` header. Read-only diagnostic.
+    #[arg(long)]
+    dump_peaks: bool,
 }
 
 fn main() -> ExitCode {
@@ -582,6 +587,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rust_rank_score,
         )?;
         println!("    PSM.score (from queue) = {}", top1.score);
+    }
+
+    // ---------------------------------------------------------------------
+    // Diagnostic: dump the active (post-filter, post-deconvolution) peak list
+    // sorted by rank ascending. Read-only; uses the SAME peak/rank set the
+    // scorer consumes. Lets us compare Rust's kept-peak ranks against Java's.
+    // ---------------------------------------------------------------------
+    if cli.dump_peaks {
+        let dump_charge = charges_to_try.first().copied().unwrap_or(cli.charge_min);
+        let scored = ScoredSpectrum::new(spec, &scorer, dump_charge);
+        let active = scored.dump_active_peaks();
+        println!(
+            "DUMP_PEAKS scan={} charge={} precursor_mz={} active_peaks={}",
+            cli.scan,
+            dump_charge,
+            spec.precursor_mz,
+            active.len()
+        );
+        for (rank, mz, intensity) in &active {
+            println!("{}\t{:.5}\t{:.2}", rank, mz, intensity);
+        }
     }
 
     // ---------------------------------------------------------------------

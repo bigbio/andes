@@ -70,6 +70,74 @@ pub struct PreparedSearch<'a> {
     pub aa_set_for_gf: AminoAcidSet,
 }
 
+/// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
+/// for one spectrum at one charge state `z`, used to enumerate candidate
+/// peptides from the mass-bucket index.
+///
+/// Two modes:
+///
+/// * **Standard** (`params.chimeric == false`): the window is centered on the
+///   precursor m/z and widened by the precursor tolerance plus the isotope-error
+///   range. This is the original, byte-for-byte unchanged derivation.
+///
+/// * **Chimeric** (`params.chimeric == true`): the window spans the full
+///   isolation window. The lower/upper isolation-window offsets (in Da, m/z
+///   space) are read from the spectrum, falling back to
+///   `params.chimeric_isolation_halfwidth_da` when the mzML omits them. The
+///   isolation m/z bounds are converted to neutral nominal masses at charge `z`
+///   with the SAME `adjusted_observed_neutral_mass` + `nominal_from` pipeline
+///   as the standard path. Only the isotope-error widening is applied — the
+///   isolation window is already wider than the precursor tolerance, so the
+///   precursor-tolerance widening is intentionally dropped here.
+fn candidate_nominal_bounds(
+    spec: &Spectrum,
+    z: u8,
+    params: &SearchParams,
+    shift_ppm: f64,
+) -> (i32, i32) {
+    let charge_f = z as f64;
+    let iso_min = *params.isotope_error_range.start() as i32;
+    let iso_max = *params.isotope_error_range.end() as i32;
+
+    if params.chimeric {
+        // Span the full isolation window. Offsets are in Da (m/z space);
+        // fall back to the configured half-width when the mzML omits them.
+        let lo_mz = spec.precursor_mz
+            - spec
+                .isolation_lower_offset
+                .unwrap_or(params.chimeric_isolation_halfwidth_da);
+        let hi_mz = spec.precursor_mz
+            + spec
+                .isolation_upper_offset
+                .unwrap_or(params.chimeric_isolation_halfwidth_da);
+        let lo_nominal = nominal_from(adjusted_observed_neutral_mass(
+            (lo_mz - PROTON) * charge_f - H2O,
+            shift_ppm,
+        ));
+        let hi_nominal = nominal_from(adjusted_observed_neutral_mass(
+            (hi_mz - PROTON) * charge_f - H2O,
+            shift_ppm,
+        ));
+        let min_nominal = lo_nominal - iso_max;
+        let max_nominal = hi_nominal - iso_min;
+        (min_nominal, max_nominal)
+    } else {
+        let neutral_mass = adjusted_observed_neutral_mass(
+            (spec.precursor_mz - PROTON) * charge_f - H2O,
+            shift_ppm,
+        );
+        let nominal_center = nominal_from(neutral_mass);
+        let tol_da_left = params.precursor_tolerance.left.as_da(neutral_mass);
+        let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
+        let widen_left = (tol_da_left - 0.4999_f64).round() as i32;
+        let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
+        // Convention: max widens by tol_da_left, min widens by tol_da_right.
+        let min_nominal = nominal_center - iso_max - widen_right;
+        let max_nominal = nominal_center - iso_min + widen_left;
+        (min_nominal, max_nominal)
+    }
+}
+
 impl<'a> PreparedSearch<'a> {
     /// Build the per-search state once. Enumerates candidates, builds the
     /// mass-bucket index, seeds the `SearchIndex` distinct-peptide counts,
@@ -243,21 +311,8 @@ impl<'a> PreparedSearch<'a> {
             let mut window_cand_indices: Vec<usize> = Vec::with_capacity(2048);
             let shift_ppm = params.precursor_mass_shift_ppm;
             for &z in &charges_to_try {
-                let charge_f = z as f64;
-                let neutral_mass = adjusted_observed_neutral_mass(
-                    (spec.precursor_mz - PROTON) * charge_f - H2O,
-                    shift_ppm,
-                );
-                let nominal_center = nominal_from(neutral_mass);
-                let iso_min = *params.isotope_error_range.start() as i32;
-                let iso_max = *params.isotope_error_range.end() as i32;
-                let tol_da_left  = params.precursor_tolerance.left.as_da(neutral_mass);
-                let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
-                let widen_left  = (tol_da_left  - 0.4999_f64).round() as i32;
-                let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
-                // Convention: max widens by tol_da_left, min widens by tol_da_right.
-                let min_nominal = nominal_center - iso_max - widen_right;
-                let max_nominal = nominal_center - iso_min + widen_left;
+                let (min_nominal, max_nominal) =
+                    candidate_nominal_bounds(spec, z, params, shift_ppm);
                 for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
                     window_cand_indices.extend_from_slice(idxs);
                 }
@@ -1242,6 +1297,51 @@ mod feature_tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
         }
+    }
+
+    // ── Test: chimeric widens the candidate nominal-mass window ─────────────
+
+    #[test]
+    fn candidate_nominal_bounds_chimeric_spans_isolation_window() {
+        use model::aa_set::AminoAcidSetBuilder;
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+
+        // Spectrum at precursor m/z 500.0 (charge 2) with a ±1.5 Da isolation
+        // window — far wider than the default 20 ppm precursor tolerance.
+        let mut spec = make_spectrum(vec![]);
+        spec.precursor_mz = 500.0;
+        spec.isolation_lower_offset = Some(1.5);
+        spec.isolation_upper_offset = Some(1.5);
+
+        // Standard (chimeric off): tight window around the selected precursor.
+        params.chimeric = false;
+        let (min_s, max_s) = candidate_nominal_bounds(&spec, 2, &params, 0.0);
+
+        // Chimeric on: window must span the full isolation window, strictly
+        // wider on BOTH sides (the isolation half-width dwarfs 20 ppm).
+        params.chimeric = true;
+        let (min_c, max_c) = candidate_nominal_bounds(&spec, 2, &params, 0.0);
+
+        assert!(min_c < min_s, "chimeric lower bound {min_c} not below standard {min_s}");
+        assert!(max_c > max_s, "chimeric upper bound {max_c} not above standard {max_s}");
+
+        // A co-isolated peptide ~1 Da lighter than the selected precursor
+        // (nominal just below the standard lower bound) is reachable ONLY
+        // under chimeric.
+        let off_precursor_nominal = min_s - 1;
+        assert!(off_precursor_nominal >= min_c && off_precursor_nominal <= max_c,
+            "off-precursor nominal {off_precursor_nominal} outside chimeric window [{min_c},{max_c}]");
+        assert!(off_precursor_nominal < min_s,
+            "off-precursor nominal {off_precursor_nominal} should be outside standard window");
+
+        // Fallback: when the mzML omits offsets, the configured half-width is used.
+        spec.isolation_lower_offset = None;
+        spec.isolation_upper_offset = None;
+        params.chimeric_isolation_halfwidth_da = 1.5;
+        let (min_f, max_f) = candidate_nominal_bounds(&spec, 2, &params, 0.0);
+        assert_eq!((min_f, max_f), (min_c, max_c),
+            "fallback half-width should reproduce the explicit ±1.5 Da window");
     }
 
     // ── Test: empty spectrum → all new features are 0 ───────────────────────

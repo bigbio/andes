@@ -92,3 +92,39 @@ peptide FDR — NOT top-N-always. That is a substantial build, and the gain is r
 only on genuinely co-isolated (wide-window) data (PXD-like), not narrow-window
 (Astral/TMT). Recommendation: shelve the isotope-filter path; revisit chimeric
 only via fragment-competition if pursued at all.
+
+## Addendum (2026-05-28): back-end GF is still single-precursor-centered (verified)
+
+A second-opinion review flagged, and I confirmed against the code, a structural
+incoherence in the current `--chimeric` design that the Layer-1/2/3 analysis above
+did not name explicitly:
+
+- The **front-end** (candidate enumeration) widens to the full isolation window
+  via `matches_isolation_window` (`precursor_matching.rs:78`).
+- The **back-end** SpecEValue does NOT. `compute_spec_e_values_for_spectrum`
+  (`match_engine.rs:777`) builds the GF mass window from the **selected** precursor
+  m/z + `top_charge` ± isotope-error ± precursor-tolerance (`match_engine.rs:802-824`),
+  and assigns `spec_e_value = 1.0` to any PSM whose nominal mass falls outside that
+  narrow window (`match_engine.rs:942-944`).
+
+**Consequence:** a genuinely off-precursor co-isolated peptide (mass ≠ selected ±
+isotope offset) is *un-scoreable* under the current design — it gets the worst
+possible SpecEValue (1.0). So the current branch cannot actually rescue true
+chimeric IDs; the back-end contradicts the front-end.
+
+**Nuance on causality:** because far-off-precursor peptides get `spec_e_value = 1.0`,
+this back-end behavior is a *deflator* for them, NOT the inflation driver. The
+Astral inflation is driven by **top-N multi-emission of near-precursor peptides**
+(within the isotope-offset window, where the GF *does* score them) combined with
+**no peak-claiming** (each emitted peptide counts the same real peaks) and the
+**T/D structural edge** (1.21:1). So #4 and the inflation are two distinct defects
+that happen to share the same root verdict: one-precursor-per-scan assumptions are
+baked in at both the scoring and the FDR layer.
+
+**Strategic note vs. the merge gate ([[merge-gate-beat-java]]):** a correct
+precursor-hypothesis + shared-fragment-competition rebuild (the recommended design)
+helps only where co-isolation is real — PXD001819-like wide windows. It is a no-op
+on narrow-window Astral and was net-negative on TMT (9,605 → 9,473). The gate
+requires beating Java on **PXD AND TMT** PSMs; TMT (−5%, the larger gap) would not
+move under chimeric. Therefore chimeric — however well-built — does not by itself
+clear the merge gate; it addresses (at most) the smaller PXD gap (−1.5%).

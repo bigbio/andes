@@ -659,6 +659,8 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
             precursor_mass_shift_ppm: 0.0,
+            chimeric: false,
+            chimeric_isolation_halfwidth_da: 1.5,
         }
     }
 

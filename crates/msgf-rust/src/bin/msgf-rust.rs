@@ -215,6 +215,15 @@ struct Cli {
     /// files do not encode MS level and are treated as MS2 regardless.
     #[arg(long, default_value = "2")]
     ms_level: u8,
+
+    /// Search the full isolation window per MS2 and emit multiple distinct-peptide
+    /// PSMs per scan (chimeric / co-fragmented peptides; MSFragger-DDA+ style).
+    #[arg(long, default_value = "false")]
+    chimeric: bool,
+
+    /// Fallback isolation half-width in Da when the mzML omits isolation offsets.
+    #[arg(long, default_value = "1.5")]
+    isolation_halfwidth: f64,
 }
 
 fn main() -> ExitCode {
@@ -657,7 +666,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.isotope_error_min, cli.isotope_error_max
         ).into());
     }
-    params.top_n_psms_per_spectrum = cli.top_n;
+    params.chimeric = cli.chimeric;
+    params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
+    let resolved_top_n = if cli.chimeric && cli.top_n == 1 {
+        eprintln!("chimeric mode: raising top-N from 1 to 5");
+        5
+    } else {
+        cli.top_n
+    };
+    params.top_n_psms_per_spectrum = resolved_top_n;
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,

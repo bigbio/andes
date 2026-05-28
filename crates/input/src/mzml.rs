@@ -48,6 +48,10 @@ const CV_MODEL_ORBITRAP_FUSION:       &str = "MS:1002416";
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_SCAN_TIME: &str = "MS:1000016";
 const CV_SELECTED_ION_MZ: &str = "MS:1000744";
+/// Isolation-window lower offset in Da (selected m/z − lower = window start).
+const CV_ISOLATION_LOWER_OFFSET: &str = "MS:1000828";
+/// Isolation-window upper offset in Da (selected m/z + upper = window end).
+const CV_ISOLATION_UPPER_OFFSET: &str = "MS:1000829";
 /// Older mzML files sometimes use plain m/z accession in selectedIon.
 const CV_MZ_PLAIN: &str = "MS:1000040";
 const CV_CHARGE_STATE: &str = "MS:1000041";
@@ -115,6 +119,9 @@ enum State {
     Spectrum,
     Scan,
     SelectedIon,
+    /// Inside `<precursor><isolationWindow>` — we read the lower/upper
+    /// offset cvParams here and set the `SpectrumBuilder` isolation fields.
+    IsolationWindow,
     /// Inside `<precursor><activation>` — we read activation-method
     /// cvParams here and set `SpectrumBuilder::activation_method`.
     Activation,
@@ -165,6 +172,12 @@ struct SpectrumBuilder {
     /// `None` when no `<activation>` block is present or the term is
     /// unknown.
     activation_method: Option<ActivationMethod>,
+    /// Isolation-window lower offset in Da, from `<isolationWindow>`
+    /// `MS:1000828`. `None` when the mzML omits the isolation window.
+    isolation_lower_offset: Option<f64>,
+    /// Isolation-window upper offset in Da, from `<isolationWindow>`
+    /// `MS:1000829`. `None` when the mzML omits the isolation window.
+    isolation_upper_offset: Option<f64>,
     mz_array: Option<Vec<f64>>,
     intensity_array: Option<Vec<f64>>,
 }
@@ -279,8 +292,8 @@ impl<R: BufRead> MzMLReader<R> {
             scan,
             peaks,
             activation_method: sb.activation_method,
-            isolation_lower_offset: None,
-            isolation_upper_offset: None,
+            isolation_lower_offset: sb.isolation_lower_offset,
+            isolation_upper_offset: sb.isolation_upper_offset,
         }))
     }
 
@@ -339,6 +352,24 @@ impl<R: BufRead> MzMLReader<R> {
                 if let Ok(inten) = cv.value.parse::<f32>() {
                     if let Some(sb) = self.current.as_mut() {
                         sb.precursor_intensity = Some(inten);
+                    }
+                }
+            }
+
+            // Isolation-window offsets under `<precursor><isolationWindow>`.
+            // These are only consumed by the `--chimeric` path; absent in
+            // most fixtures, so the builder fields stay `None`.
+            CV_ISOLATION_LOWER_OFFSET if self.state == State::IsolationWindow => {
+                if let Ok(off) = cv.value.parse::<f64>() {
+                    if let Some(sb) = self.current.as_mut() {
+                        sb.isolation_lower_offset = Some(off);
+                    }
+                }
+            }
+            CV_ISOLATION_UPPER_OFFSET if self.state == State::IsolationWindow => {
+                if let Ok(off) = cv.value.parse::<f64>() {
+                    if let Some(sb) = self.current.as_mut() {
+                        sb.isolation_upper_offset = Some(off);
                     }
                 }
             }
@@ -465,6 +496,15 @@ impl<R: BufRead> MzMLReader<R> {
                         b"selectedIon" if self.state == State::Spectrum => {
                             self.state = State::SelectedIon;
                         }
+                        b"isolationWindow" if self.state == State::Spectrum => {
+                            // `<isolationWindow>` is a sibling of
+                            // `<selectedIon>` / `<activation>` under
+                            // `<precursor>`. We don't track the intermediate
+                            // `<precursor>` / `<precursorList>` elements, so
+                            // we transition from Spectrum here. The closing
+                            // tag pops us back to Spectrum.
+                            self.state = State::IsolationWindow;
+                        }
                         b"activation" if self.state == State::Spectrum => {
                             // `<activation>` lives under
                             // `<precursorList><precursor>…</precursor></precursorList>`.
@@ -554,6 +594,9 @@ impl<R: BufRead> MzMLReader<R> {
                             self.state = State::Spectrum;
                         }
                         b"selectedIon" if self.state == State::SelectedIon => {
+                            self.state = State::Spectrum;
+                        }
+                        b"isolationWindow" if self.state == State::IsolationWindow => {
                             self.state = State::Spectrum;
                         }
                         b"activation" if self.state == State::Activation => {
@@ -1563,6 +1606,73 @@ mod tests {
         let spectra = collect_ok(&wrap_spectra(&xml));
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
+    }
+
+    // ── Isolation-window parsing ─────────────────────────────────────────────
+
+    /// `<precursor><isolationWindow>` carries the lower/upper offsets
+    /// (`MS:1000828` / `MS:1000829`). The parser must capture them on the
+    /// emitted `Spectrum` without disturbing the sibling `<selectedIon>`
+    /// precursor m/z. Load-bearing for the `--chimeric` co-isolation path.
+    #[test]
+    fn parses_isolation_window_offsets() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <isolationWindow>
+                    <cvParam accession="MS:1000827" name="isolation window target m/z"
+                             value="500.5"/>
+                    <cvParam accession="MS:1000828" name="isolation window lower offset"
+                             value="1.5"/>
+                    <cvParam accession="MS:1000829" name="isolation window upper offset"
+                             value="1.5"/>
+                  </isolationWindow>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z"
+                               value="500.5"/>
+                    </selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].isolation_lower_offset, Some(1.5));
+        assert_eq!(spectra[0].isolation_upper_offset, Some(1.5));
+        // The isolation-window target (MS:1000827) must NOT clobber the
+        // selectedIon precursor m/z.
+        assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
+    }
+
+    /// When the mzML omits `<isolationWindow>`, both offsets stay `None`.
+    #[test]
+    fn missing_isolation_window_yields_none() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            500.5,
+            Some(2),
+        );
+        let spectra = collect_ok(&wrap_spectra(&spec));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].isolation_lower_offset, None);
+        assert_eq!(spectra[0].isolation_upper_offset, None);
     }
 
     // ── Instrument-type detection ────────────────────────────────────────────

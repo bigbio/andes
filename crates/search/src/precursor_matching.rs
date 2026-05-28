@@ -140,8 +140,7 @@ mod tests {
         let tol = tol_20ppm();
 
         // Tight precursor check (selected m/z) → rejected (1.0 Da >> 20 ppm).
-        let mut spec = Spectrum::default();
-        spec.precursor_mz = selected_mz;
+        let spec = Spectrum { precursor_mz: selected_mz, ..Default::default() };
         assert!(matches_precursor(&spec, &pep, charge, 0, &tol, 0.0).is_none(),
             "tight precursor check should reject the 1 Da off-precursor peptide");
 

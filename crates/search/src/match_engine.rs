@@ -35,7 +35,7 @@ use scoring_crate::gf::primitive_graph::PrimitiveAaGraph;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
-use crate::precursor_matching::{matches_precursor, MassError};
+use crate::precursor_matching::{matches_isolation_window, matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
 use crate::search_index::SearchIndex;
@@ -444,15 +444,32 @@ impl<'a> PreparedSearch<'a> {
                     // edge_score call entirely. For top-N=1 (Astral) this
                     // gates ~99% of candidates after the queue fills.
                     let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
+                    // Chimeric: accept candidates anywhere in the isolation
+                    // window (co-isolated peptides are offset from the selected
+                    // precursor). Standard: tight precursor-tolerance check
+                    // against the selected m/z. Window m/z bounds are constant
+                    // per spectrum, so hoist them out of the offset loop.
+                    let chimeric_window = if params.chimeric {
+                        let lo = spec.precursor_mz
+                            - spec.isolation_lower_offset.unwrap_or(params.chimeric_isolation_halfwidth_da);
+                        let hi = spec.precursor_mz
+                            + spec.isolation_upper_offset.unwrap_or(params.chimeric_isolation_halfwidth_da);
+                        Some((lo, hi))
+                    } else {
+                        None
+                    };
                     for offset in params.isotope_error_range.clone() {
-                        if let Some(err) = matches_precursor(
-                            spec,
-                            &cand.peptide,
-                            z,
-                            offset,
-                            &params.precursor_tolerance,
-                            shift_ppm,
-                        ) {
+                        let matched = match chimeric_window {
+                            Some((lo_mz, hi_mz)) => matches_isolation_window(
+                                &cand.peptide, z, offset, lo_mz, hi_mz,
+                                &params.precursor_tolerance, shift_ppm,
+                            ),
+                            None => matches_precursor(
+                                spec, &cand.peptide, z, offset,
+                                &params.precursor_tolerance, shift_ppm,
+                            ),
+                        };
+                        if let Some(err) = matched {
                             iso_errs.push(err);
                         }
                     }

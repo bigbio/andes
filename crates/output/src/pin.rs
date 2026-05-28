@@ -193,6 +193,11 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         // column so Percolator can learn weights without disrupting the
         // existing RawScore distribution.
         "EdgeScore".to_string(),
+        // ADDITIVE chimeric MS1 precursor-envelope features (Task 4): emitted
+        // adjacent to EdgeScore so they sit just before Peptide/Proteins.
+        // Both are 0.0 unless `--chimeric` populates them from a linked MS1.
+        "PrecursorIsotopeKL".to_string(),
+        "PrecursorSNR".to_string(),
         // Peptide / Proteins
         "Peptide".to_string(),
         "Proteins".to_string(),
@@ -420,6 +425,13 @@ fn write_psm_row<W: Write>(
     // EdgeScore: additive Java-parity feature (iter19).
     writer.write_all(b"\t")?;
     write!(writer, "{}", psm.features.edge_score)?;
+
+    // PrecursorIsotopeKL, PrecursorSNR: additive chimeric MS1 precursor-envelope
+    // features (Task 4). 0.0 unless `--chimeric` populated them from a linked MS1.
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.precursor_isotope_kl as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.precursor_snr as f64)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -728,6 +740,7 @@ mod tests {
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
             "lnDeltaSpecEValue", "matchedIonRatio",
             "EdgeScore",
+            "PrecursorIsotopeKL", "PrecursorSNR",
             "Peptide", "Proteins",
         ];
 

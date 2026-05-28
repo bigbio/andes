@@ -91,6 +91,22 @@ Where are PXD's −1.1% and TMT's −5.0% actually lost? The PIN-diff + parity h
 distribution on low-quality / tail spectra** — the one place Rust still measurably
 diverges *and* it directly drives the FDR-determining feature.
 
+**Critical corollary (selection vs. rescoring):** the 72.8% `spec_e_swap_only` flips
+are lost at **within-scan top-1 selection time** — Rust's `TopNQueue` orders by
+`spec_e_value` first (known-divergences §4), so a wrong SpecE picks the wrong peptide
+*before* Percolator ever sees the scan. **A Percolator feature can only re-rank PSMs
+that were emitted; it cannot recover a top-1 that SpecE never selected.** Therefore
+new features (Lever 3) improve discrimination among emitted PSMs but **cannot, by
+themselves, recover the flips** — those need either a SpecE-*shape* fix (Lever 2a) or a
+change to *what we select top-1 by* (Lever 2b).
+
+**Related known divergence — `lnEValue`:** Rust's `lnEValue = ln(spec_e_value ×
+num_distinct_peptides_at_length)` is **structurally ~27× off** from Java (median ratio
+0.0368), *not* explained by mod-aware counting (known-divergences §2; iter33 diff: the
+single most-divergent emitted feature, mean Δ −2.97, 99.2% of PSMs differ). Since
+`lnEValue ≈ lnSpecE + f(peplen)` and we already emit `lnSpecE` and `peplen` separately,
+this miscalibrated column is largely redundant — a candidate to drop or fix (Lever 3b).
+
 ---
 
 ## 4. Action plan (ranked by expected value: PSM-yield ÷ risk ÷ cost)
@@ -116,7 +132,11 @@ mod set + `.param` + enzyme config as Java.
 measure, keep within ~3%.
 **Expected:** could be large (iter24 precedent); at worst zero. **Best risk-adjusted EV.**
 
-### Lever 2 — GF SpecE-distribution-shape parity  *(highest upside for the gate; research + targeted fix)*
+### Lever 2 — Recover the SpecE-driven top-1 flips  *(highest upside for the gate)*
+
+Two routes to the same prize (the 72.8% `spec_e_swap_only` flips), per §3's corollary.
+
+#### Lever 2a — GF SpecE-distribution-shape parity  *(research + targeted fix)*
 
 **Why:** §3 — the gap lives here. 72.8% spec_e swaps + TMT ranking loss + 2.4× tail.
 This is the only remaining *measurable* scoring divergence and it drives the FDR
@@ -141,12 +161,44 @@ changes).
 surplus; measure wall.
 **Expected:** the principled route to closing TMT −5% and PXD −1.1%.
 
-### Lever 3 — Orthogonal additive Percolator feature  *(safety net: zero regression risk, modest yield)*
+#### Lever 2b — Change the within-scan top-1 selection criterion  *(cheaper, but Rule-2/Rule-4 risk)*
 
-Only if Levers 1–2 fall short. Add a **new dimension uncorrelated** with existing
-columns (the C-4 win pattern, not the EdgeScore/isotope-KL flat pattern). Candidates:
-explained-intensity-fraction-at-top-1; a robust top-1-vs-top-2 SpecE delta; a
-spectrum-quality score. Bench-gate; expected flat-to-small, never negative.
+**Why:** if Rust's SpecE is unreliable, stop letting it pick the top-1. Two variants:
+- **Re-rank selection by RawScore (or a RawScore+delta composite).** RawScore is
+  parity-grade (peak ranks bit-identical; agreement-bucket RawScore Δ ≈ 0.35). **Risk:**
+  RawScore reintroduces the peptide-length bias SpecE was *designed* to remove, and
+  diverges from Java's SpecE-based selection — the Rule-2 regression zone (moving *away*
+  from Java's top-1). Bench-gate hard.
+- **Emit top-2 distinct peptides per scan (narrow mass window, NOT the chimeric wide
+  window)** so Percolator sees Java's peptide and decides via the full feature model
+  (incl. the Lever-3a delta). **Risk:** this is multi-PSM-per-scan emission → Rule 4
+  FDR inflation; far smaller than chimeric's wide-window top-10, but must be hard-gated
+  on the target:decoy ratio and the Astral control.
+
+**Decision:** 2a is the principled fix; 2b is the cheap probe. Try 2b's top-2-narrow
+variant first as a *measurement* (does emitting Java's peptide + a good delta let
+Percolator recover the flips without inflating decoys?), and fall back to 2a if it
+inflates.
+
+### Lever 3 — Orthogonal additive Percolator features  *(safety net: zero regression risk, modest yield)*
+
+Cheap, safe, do alongside Lever 1. Add **new dimensions uncorrelated** with existing
+columns (the C-4 win pattern, not the EdgeScore/isotope-KL flat pattern). Note these
+sharpen discrimination among *emitted* PSMs but cannot recover the §3 selection flips.
+
+- **Lever 3a — `DeltaRawScore` = RawScore(rank1) − RawScore(rank2).** The better version
+  of the existing `lnDeltaSpecEValue` ([pin.rs:471](crates/output/src/pin.rs#L471)),
+  which is SpecE-based and shows up parity-flat (iter33 mean Δ −0.006, not
+  discriminating). A RawScore delta is built on **parity-grade RawScore** (not the
+  divergent SpecE), is a genuinely orthogonal "top-1 dominance" signal, and is **cheap**
+  — rank-2 is already retained ([find_rank2_spec_e_value](crates/output/src/pin.rs#L458));
+  rank-2's RawScore needs no extra GF. Additive → zero Rule-2 risk.
+- **Lever 3b — drop (or fix) the divergent `lnEValue` feature.** Per §3 it is ~27×
+  miscalibrated vs Java and largely redundant with `lnSpecE + peplen`. Removing it is a
+  zero-risk Percolator-retrain experiment; alternatively fix the `num_distinct`
+  denominator to match Java's formula (known-divergences §2 open hypothesis).
+- Further candidates if needed: explained-intensity-fraction-at-top-1; spectrum-quality
+  score. Bench-gate; expected flat-to-small, never negative.
 
 ### Dead-ends — do NOT re-attempt without a genuinely new idea
 
@@ -162,8 +214,11 @@ spectrum-quality score. Bench-gate; expected flat-to-small, never negative.
 
 ## 5. Sequencing & realistic outcome
 
-**Order:** Lever 1 (audit + enable, ~days) → Lever 2 (GF-shape localize + fix,
-~1–2 weeks, research-grade) → Lever 3 (only if still short).
+**Order:** the cheap, zero-risk work first — Lever 1 (mod/param audit) **+** Lever 3a
+(`DeltaRawScore` column) **+** Lever 3b (drop/fix `lnEValue`), all ~days and bench-gated
+together. Then the gate-blocking flips via Lever 2 — start with the 2b top-2-narrow
+*probe* (cheap measurement), fall back to the 2a GF-shape fix (~1–2 weeks,
+research-grade) if 2b inflates decoys.
 
 **Realistic future outcome:**
 - **Lever 1** finding a mod/param gap (plausible — iter24 precedent) is a direct

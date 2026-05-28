@@ -186,17 +186,21 @@ Cheap, safe, do alongside Lever 1. Add **new dimensions uncorrelated** with exis
 columns (the C-4 win pattern, not the EdgeScore/isotope-KL flat pattern). Note these
 sharpen discrimination among *emitted* PSMs but cannot recover the §3 selection flips.
 
-- **Lever 3a — `DeltaRawScore` = RawScore(rank1) − RawScore(rank2).** The better version
-  of the existing `lnDeltaSpecEValue` ([pin.rs:471](crates/output/src/pin.rs#L471)),
-  which is SpecE-based and shows up parity-flat (iter33 mean Δ −0.006, not
-  discriminating). A RawScore delta is built on **parity-grade RawScore** (not the
-  divergent SpecE), is a genuinely orthogonal "top-1 dominance" signal, and is **cheap**
-  — rank-2 is already retained ([find_rank2_spec_e_value](crates/output/src/pin.rs#L458));
-  rank-2's RawScore needs no extra GF. Additive → zero Rule-2 risk.
-- **Lever 3b — drop (or fix) the divergent `lnEValue` feature.** Per §3 it is ~27×
-  miscalibrated vs Java and largely redundant with `lnSpecE + peplen`. Removing it is a
-  zero-risk Percolator-retrain experiment; alternatively fix the `num_distinct`
-  denominator to match Java's formula (known-divergences §2 open hypothesis).
+- **Lever 3a — `DeltaRawScore` = RawScore(best) − RawScore(2nd-best distinct peptide).**
+  ✅ **BENCHED — clean win, keep** (branch `feat/delta-raw-score`, commit `bea5d697`;
+  bench `2026-05-28-delta-raw-score-bench.md`). Captured as a per-spectrum scalar during
+  candidate scoring (so it's populated even at `top_n=1` without feeding the GF
+  `min_score` → no existing column changes). **+129 PXD / +12 TMT / +104 Astral @1% FDR,
+  zero wall cost, no regression**, decoy structure unchanged. Closes the PXD gap to Java
+  from −1.1% → **−0.25%**. Not mergeable alone (gate needs PXD AND TMT). The C-4 pattern
+  realized: a new orthogonal dimension that wins, unlike the flat EdgeScore/isotope-KL.
+- **Lever 3b — drop `lnEValue`.** ❌ **BENCHED — noise, discarded.** −8 PXD / +9 TMT /
+  +18 Astral (sub-0.2%, within Percolator noise) and it *costs* PXD. The fix variant is
+  not clean either: Java's `getEValue = specProb × numPeptides` and Rust's
+  formula+length-arg already match (HIGH-2, 2026-05-18); the residual ~27× divergence is
+  a `num_distinct` count difference + the SpecE tail, and `lnEValue` is redundant with
+  `lnSpecE + peplen`. **lnEValue question closed; keep the column (schema stays
+  Java-faithful).**
 - Further candidates if needed: explained-intensity-fraction-at-top-1; spectrum-quality
   score. Bench-gate; expected flat-to-small, never negative.
 
@@ -214,10 +218,15 @@ sharpen discrimination among *emitted* PSMs but cannot recover the §3 selection
 
 ## 5. Sequencing & realistic outcome
 
-**Order:** the cheap, zero-risk work first — Lever 1 (mod/param audit) **+** Lever 3a
-(`DeltaRawScore` column) **+** Lever 3b (drop/fix `lnEValue`), all ~days and bench-gated
-together. Then the gate-blocking flips via Lever 2 — start with the 2b top-2-narrow
-*probe* (cheap measurement), fall back to the 2a GF-shape fix (~1–2 weeks,
+**Progress (2026-05-28):** Lever 3a benched and kept (+129/+12/+104, free); Lever 3b
+benched and discarded (noise). Net: PXD now −0.25% to Java, Astral still ahead, **TMT
+still −4.9% — the remaining gate blocker.** 3a/3b can't move TMT (confidence/redundant
+features don't recover SpecE selection flips).
+
+**Order (remaining):** the gate now hinges on **TMT**. Next: **Lever 1 TMT mod/param
+config audit** (cheap first probe — does Rust search the same effective mod set as Java
+on TMT? the iter24-class check), then **Lever 2** for the SpecE-driven flips — the 2b
+top-2-narrow *probe* (cheap), falling back to the 2a GF-shape fix (~1–2 weeks,
 research-grade) if 2b inflates decoys.
 
 **Realistic future outcome:**

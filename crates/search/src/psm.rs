@@ -60,6 +60,15 @@ pub struct PsmFeatures {
     /// (which destroyed discrimination in iter17/iter18 when blended into
     /// RawScore directly). Computed via `psm_edge_score` in `score_psm.rs`.
     pub edge_score: i32,
+
+    // ── Chimeric MS1 precursor-envelope features (Task 3) ──────────────────
+    /// KL-divergence between the observed precursor isotope envelope (from the
+    /// linked MS1) and the averagine theoretical envelope. Higher = poorer match
+    /// = likely spurious co-isolation. 0.0 when MS1/feature unavailable.
+    pub precursor_isotope_kl: f32,
+    /// Observed monoisotopic precursor intensity / median MS1 intensity (SNR
+    /// proxy). 0.0 when unavailable.
+    pub precursor_snr: f32,
 }
 
 #[derive(Debug, Clone)]

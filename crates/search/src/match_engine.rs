@@ -1217,6 +1217,10 @@ pub(crate) fn compute_psm_features(
         mean_rel_error_top7,
         stdev_rel_error_top7,
         edge_score,
+        // Chimeric precursor-envelope features default 0.0; populated only
+        // under --chimeric by the feature fill (Task 3, commit 2).
+        precursor_isotope_kl: 0.0,
+        precursor_snr: 0.0,
     }
 }
 

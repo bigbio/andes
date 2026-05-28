@@ -6,6 +6,7 @@
 //! Depends on `model` and `scoring` crates.
 
 pub mod candidate_gen;
+mod chimeric_features;
 pub mod decoy;
 pub mod distinct_peptide;
 pub mod match_engine;

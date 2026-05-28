@@ -150,7 +150,7 @@ pub fn learn_calibration_stats(
         originals,
         &prepared.candidates,
         MIN_DE_NOVO_SCORE,
-        constants::MIN_CONFIDENT_PSMS,
+        constants::RESIDUAL_CAP,
     );
 
     if residuals.len() < constants::MIN_CONFIDENT_PSMS {

@@ -768,7 +768,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let prepared = PreparedSearch::prepare(
+    let mut prepared = PreparedSearch::prepare(
         &idx,
         &params,
         &scorer,
@@ -798,11 +798,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // parse-of-chunk-(N+1) with score-of-chunk-N. Astral parse cost is ~2-3s
     // per chunk × 25 chunks; this recovers ~50-70s of wall time that was
     // previously serial.
-    let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
-
-    // Spawn the parser thread. It owns the reader (paths + flags moved in).
-    // The thread returns ParseStats with the error count + sample messages.
-    let spectrum_path = cli.spectrum.clone();
     let mzml_warn_ms_level_emitted = if !is_mzml && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF files \
@@ -816,47 +811,91 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted; // silenced — unused for now.
 
-    let parser_handle = thread::spawn(move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
-        if is_mzml {
-            let f = File::open(&spectrum_path)
-                .map_err(|e| format!("open mzML: {e}"))?;
-            let reader = MzMLReader::new(BufReader::new(f))
-                .with_ms_level_range(ms_level_u32, ms_level_u32);
-            Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
-        } else {
-            let f = File::open(&spectrum_path)
-                .map_err(|e| format!("open MGF: {e}"))?;
-            let reader = MgfReader::new(BufReader::new(f));
-            Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+    // Task 3: under `--chimeric` on an mzML input, take the BATCH read path
+    // (`read_with_ms1`) so MS1 scans are captured and each MS2 is linked to
+    // its preceding MS1. This Ms1Link is attached to `prepared` and consumed
+    // by the feature fill to populate `precursor_isotope_kl` / `precursor_snr`.
+    // The streaming pipeline below is reserved for the (default) non-chimeric
+    // path and stays byte-for-byte unchanged — the off-path golden test
+    // therefore never touches this branch.
+    let chimeric_mzml = cli.chimeric && is_mzml;
+    let parse_stats = if chimeric_mzml {
+        let f = File::open(&cli.spectrum).map_err(|e| format!("open mzML: {e}"))?;
+        let (mut chimeric_spectra, link) = MzMLReader::new(BufReader::new(f))
+            .with_ms_level_range(ms_level_u32, ms_level_u32)
+            .with_ms1_capture(true)
+            .read_with_ms1()
+            .map_err(|e| format!("read mzML with MS1 capture: {e}"))?;
+        if bench_cap < chimeric_spectra.len() {
+            chimeric_spectra.truncate(bench_cap);
         }
-    });
+        eprintln!(
+            "chimeric mode: batch-read {} MS2 spectra + {} MS1 scans for precursor isotope features",
+            chimeric_spectra.len(),
+            link.ms1_peaks.len(),
+        );
+        prepared = prepared.with_ms1_link(Some(link));
 
-    log_rss("after_parser_thread_spawn");
-
-    // Consumer loop: drain chunks from the channel as they arrive. Each
-    // received chunk is processed via `prepared.run_chunk` (Rayon-parallel)
-    // synchronously on this thread; while the inner Rayon runs, the parser
-    // thread is filling the next chunk concurrently.
-    for chunk in rx {
-        if chunk.is_empty() {
-            continue;
-        }
-        let offset = all_spectra.len();
-        let queues = prepared.run_chunk(&chunk, offset);
+        // Single full-batch scoring pass (offset 0): spec_idx == global index,
+        // matching Ms1Link::ms2_to_ms1 indexing exactly.
+        let queues = prepared.run_chunk(&chimeric_spectra, 0);
         all_queues.extend(queues);
-        for mut spec in chunk.into_iter() {
+        for mut spec in chimeric_spectra.into_iter() {
             spec.peaks = Vec::new();
             all_spectra.push(spec);
         }
-        log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
-    }
+        log_rss("after_chimeric_batch_search");
+        // No streaming parser thread on this path → no parse errors recorded.
+        ParseStats::default()
+    } else {
+        // ── Non-chimeric streaming pipeline (UNCHANGED) ───────────────────
+        let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
 
-    // Reap the parser thread for its stats. join() should never block here
-    // (channel close has already fired on parser exit).
-    let parse_stats = match parser_handle.join() {
-        Ok(Ok(stats)) => stats,
-        Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
-        Err(_) => return Err("parser thread panicked".into()),
+        // Spawn the parser thread. It owns the reader (paths + flags moved in).
+        // The thread returns ParseStats with the error count + sample messages.
+        let spectrum_path = cli.spectrum.clone();
+        let parser_handle = thread::spawn(move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
+            if is_mzml {
+                let f = File::open(&spectrum_path)
+                    .map_err(|e| format!("open mzML: {e}"))?;
+                let reader = MzMLReader::new(BufReader::new(f))
+                    .with_ms_level_range(ms_level_u32, ms_level_u32);
+                Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+            } else {
+                let f = File::open(&spectrum_path)
+                    .map_err(|e| format!("open MGF: {e}"))?;
+                let reader = MgfReader::new(BufReader::new(f));
+                Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+            }
+        });
+
+        log_rss("after_parser_thread_spawn");
+
+        // Consumer loop: drain chunks from the channel as they arrive. Each
+        // received chunk is processed via `prepared.run_chunk` (Rayon-parallel)
+        // synchronously on this thread; while the inner Rayon runs, the parser
+        // thread is filling the next chunk concurrently.
+        for chunk in rx {
+            if chunk.is_empty() {
+                continue;
+            }
+            let offset = all_spectra.len();
+            let queues = prepared.run_chunk(&chunk, offset);
+            all_queues.extend(queues);
+            for mut spec in chunk.into_iter() {
+                spec.peaks = Vec::new();
+                all_spectra.push(spec);
+            }
+            log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+        }
+
+        // Reap the parser thread for its stats. join() should never block here
+        // (channel close has already fired on parser exit).
+        match parser_handle.join() {
+            Ok(Ok(stats)) => stats,
+            Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
+            Err(_) => return Err("parser thread panicked".into()),
+        }
     };
 
     if parse_stats.error_count > 0 {

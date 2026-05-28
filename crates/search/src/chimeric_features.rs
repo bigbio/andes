@@ -7,11 +7,6 @@
 //! flags a precursor barely above MS1 noise. Both are emitted as additive
 //! `PsmFeatures` columns so Percolator can learn weights without disturbing
 //! existing feature distributions.
-//!
-//! NOTE (Task 3, commit 1): the helper is wired into the feature fill in
-//! commit 2. Until then the module is `allow(dead_code)` so the
-//! self-contained helper + tests can land first.
-#![allow(dead_code)]
 
 use model::isotope::averagine_isotope_envelope;
 use model::mass::ISOTOPE;

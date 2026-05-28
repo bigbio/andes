@@ -1112,6 +1112,8 @@ mod tests {
             scan: None,
             peaks: peaks.to_vec(),
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 
@@ -1144,6 +1146,8 @@ mod tests {
             scan: None,
             peaks: vec![(100.0, 1.0), (200.0, 2.0), (300.0, 3.0)],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
 
         let param = Param {
@@ -1258,6 +1262,8 @@ mod tests {
             // window for charge ≥ 2 since the inner loop is empty for charge=2.
             peaks: vec![(100.0, 1.0), (200.0, 2.0), (300.0, 3.0)],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         let param = deconv_param(true);
         let scorer = RankScorer::new(&param);
@@ -1310,6 +1316,8 @@ mod tests {
             scan: None,
             peaks: vec![(p1, 10.0), (p2, 5.0), (p3, 1.0)],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         let param = deconv_param(true);
         let scorer = RankScorer::new(&param);
@@ -1342,6 +1350,8 @@ mod tests {
             scan: None,
             peaks: vec![(100.0, 1.0), (200.0, 2.0), (300.0, 3.0), (400.0, 4.0)],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         let param = deconv_param(false);
         let scorer = RankScorer::new(&param);
@@ -1607,6 +1617,7 @@ mod tests {
             title: "parity".into(), precursor_mz: 800.0, precursor_intensity: None,
             precursor_charge: Some(2), rt_seconds: None, scan: None, peaks,
             activation_method: None,
+            isolation_lower_offset: None, isolation_upper_offset: None,
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         let mut state: u64 = 0xCAFEBABEDEADBEEF;
@@ -1698,6 +1709,8 @@ mod tests {
             scan: None,
             peaks,
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         let ss = ScoredSpectrum::new_without_filtering(&s);
 
@@ -1789,6 +1802,8 @@ mod precursor_filter_tests {
             scan: None,
             peaks: peaks.to_vec(),
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 

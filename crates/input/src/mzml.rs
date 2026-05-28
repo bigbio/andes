@@ -279,6 +279,8 @@ impl<R: BufRead> MzMLReader<R> {
             scan,
             peaks,
             activation_method: sb.activation_method,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }))
     }
 

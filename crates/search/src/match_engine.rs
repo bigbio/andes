@@ -1239,6 +1239,8 @@ mod feature_tests {
             scan: None,
             peaks,
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 

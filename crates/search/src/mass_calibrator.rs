@@ -345,6 +345,8 @@ mod tests {
             scan: None,
             peaks: vec![(100.0, 1.0); 10],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         let keys = build_spec_keys(&[spec], &(2..=3), 10);
         assert_eq!(keys.len(), 2);

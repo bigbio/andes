@@ -397,6 +397,8 @@ fn build_spec_keys_from_metadata(
             scan: None,
             peaks: vec![(0.0, 0.0); m.num_peaks],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         })
         .collect();
     build_spec_keys(&spectra, &charge_range, min_peaks)

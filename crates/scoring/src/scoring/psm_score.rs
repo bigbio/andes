@@ -271,6 +271,8 @@ mod tests {
             scan: None,
             peaks: vec![],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 
@@ -374,6 +376,8 @@ mod tests {
             scan: None,
             peaks,
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         let scored = ScoredSpectrum::new_without_filtering(&spec);
         let scorer = RankScorer::new(&param);
@@ -408,6 +412,8 @@ mod tests {
             scan: None,
             peaks: match_peaks,
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
 
         let scorer = RankScorer::new(&param);

@@ -96,6 +96,8 @@ mod tests {
             scan: None,
             peaks: vec![],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 

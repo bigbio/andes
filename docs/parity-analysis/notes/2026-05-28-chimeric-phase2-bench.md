@@ -53,3 +53,42 @@ the already-inflated set (and may even overfit, as the small increases show).
 Until at least (1)+(2) land and the Astral control returns to a plausible value,
 chimeric is not mergeable. Decision: do NOT pursue more additive features;
 either implement the hard-filter + per-scan FDR, or shelve chimeric.
+
+## Deeper investigation (2026-05-28, "is it an implementation problem?")
+
+Investigated whether the inflation is an implementation/faithfulness gap. Findings:
+
+1. **Real bug: top-N ran at 10, not 5.** The `--chimeric` top-N bump only fires
+   when `cli.top_n == 1`, but the CLI default is 10, so it never triggered — the
+   bench emitted up to 10 PSMs/scan. Over-emission, but NOT the main driver.
+
+2. **Hard MS1 isotope filter is INSUFFICIENT (decisive test).** Post-filtered the
+   Astral chimeric PIN to keep only rows with a real precursor envelope
+   (PrecursorIsotopeKL < 1; dropped the 32% no-envelope KL=10 rows + 33% poor
+   KL≥1 rows) and re-ran Percolator: **72,457 → 69,250** @1% FDR — still +89% over
+   the 36,715 off baseline. The isotope filter (soft OR hard) does NOT deflate.
+
+3. **Root cause — precursor-presence ≠ fragment-origin.** The isotope envelope
+   only confirms a precursor EXISTS at that mass in MS1. On dense MS1 (Astral),
+   almost every wide-window candidate has *some* real co-eluting precursor near
+   its mass, so its envelope passes — even though the MS2 fragments did not come
+   from it. The discriminator between true and spurious co-fragmentation is
+   FRAGMENT-level (shared-fragment competition), which neither Phase 1 nor Phase 2
+   provides.
+
+4. **Wide search inflates scans-passing too.** 58,314 unique scans yield a passing
+   target (vs 36,715 off) — searching a wider window with top-N gives each scan
+   many more chances; PSM-level FDR doesn't catch this multiple-testing inflation.
+
+## Verdict
+
+Implementation gaps exist (top-N bug; soft-not-hard filter; no shared-fragment
+rescoring), but the specific Phase-2 fix (MS1 isotope KL) is empirically the WRONG
+lever — proven by the hard-filter test. A trustworthy chimeric search needs:
+(a) **fragment-level shared-fragment competition** (Phase 3) as the primary
+discriminator, AND (b) a **co-isolation-gated emission** (only report extra
+peptides when MS1 shows a distinct co-isolated precursor) + proper per-scan/
+peptide FDR — NOT top-N-always. That is a substantial build, and the gain is real
+only on genuinely co-isolated (wide-window) data (PXD-like), not narrow-window
+(Astral/TMT). Recommendation: shelve the isotope-filter path; revisit chimeric
+only via fragment-competition if pursued at all.

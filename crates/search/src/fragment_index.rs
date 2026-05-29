@@ -9,6 +9,7 @@
 
 use crate::candidate_gen::Candidate;
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
+use std::cmp::Ordering;
 
 /// Inverted index: fragment-m/z bin -> candidate ids that have a charge-1 b/y
 /// fragment in that bin. CSR layout (offsets + concatenated ids) keeps it
@@ -136,6 +137,73 @@ impl FragmentIndex {
     }
 }
 
+/// Per-thread reusable scratch for the per-spectrum vote/top-K step. `votes` is
+/// sized to the candidate count; `touched` records which entries were written so
+/// reset is O(touched), never O(n_candidates) (the Sage pattern — avoids the
+/// global per-spectrum allocation that OOM'd the Java attempt).
+pub(crate) struct FragmentVoter {
+    votes: Vec<f32>,
+    touched: Vec<u32>,
+}
+
+impl FragmentVoter {
+    pub(crate) fn new(n_candidates: usize) -> Self {
+        FragmentVoter {
+            votes: vec![0.0; n_candidates],
+            touched: Vec::with_capacity(4096),
+        }
+    }
+
+    /// Accumulate one vote per matched fragment bin and return up to `k`
+    /// in-window candidate ids ranked by vote (descending; ties broken by
+    /// ascending id for determinism). `peaks` are `(rank, mz)` for the active
+    /// observed peaks; `in_window(cid)` gates by precursor-mass eligibility.
+    /// Probes the peak's bin and both neighbours to cover ±bin_width tolerance.
+    pub(crate) fn top_k<F: Fn(u32) -> bool>(
+        &mut self,
+        idx: &FragmentIndex,
+        peaks: &[(u32, f64)],
+        in_window: F,
+        k: usize,
+    ) -> Vec<u32> {
+        // Reset prior votes.
+        for &c in &self.touched {
+            self.votes[c as usize] = 0.0;
+        }
+        self.touched.clear();
+
+        for &(_rank, mz) in peaks {
+            // weight = 1.0 (matched-fragment count). Rank-weighting is a P4
+            // tuning knob; count is a strong, deterministic baseline.
+            for probe in [mz - idx.bin_width, mz, mz + idx.bin_width] {
+                for &cid in idx.candidates_in_bin(probe) {
+                    let v = &mut self.votes[cid as usize];
+                    if *v == 0.0 {
+                        self.touched.push(cid);
+                    }
+                    *v += 1.0;
+                }
+            }
+        }
+
+        // Collect in-window touched candidates with their votes, partial-sort top-k.
+        let mut scored: Vec<(f32, u32)> = self
+            .touched
+            .iter()
+            .copied()
+            .filter(|&c| in_window(c))
+            .map(|c| (self.votes[c as usize], c))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        scored.truncate(k);
+        scored.into_iter().map(|(_, c)| c).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +284,50 @@ mod tests {
         let idx = FragmentIndex::build(&cands, 0.02);
         assert!(idx.candidates_in_bin(5.0).is_empty());
         assert!(idx.candidates_in_bin(99999.0).is_empty());
+    }
+
+    #[test]
+    fn voter_ranks_candidate_with_most_matched_fragments_first() {
+        // B shares 3 fragments with the observed peaks; A shares 1. B must rank above A.
+        let cands = vec![cand("PEPTIDEK"), cand("ACDEFGHIK")];
+        let idx = FragmentIndex::build(&cands, 0.02);
+        let b_frags = predict_by_ions(&cands[1].peptide, 1..=1);
+        let a_frags = predict_by_ions(&cands[0].peptide, 1..=1);
+        // observed peaks (rank, mz): 3 of B's fragments + 1 of A's.
+        let peaks = vec![
+            (1u32, b_frags[0].mz),
+            (2, b_frags[1].mz),
+            (3, b_frags[2].mz),
+            (4, a_frags[0].mz),
+        ];
+        let mut voter = FragmentVoter::new(cands.len());
+        // in_window = both candidates eligible.
+        let topk = voter.top_k(&idx, &peaks, |_cid| true, 2);
+        assert_eq!(topk[0], 1u32, "candidate B (3 matches) ranks first");
+        assert!(topk.contains(&0u32));
+    }
+
+    #[test]
+    fn voter_excludes_out_of_window_candidates() {
+        let cands = vec![cand("PEPTIDEK"), cand("ACDEFGHIK")];
+        let idx = FragmentIndex::build(&cands, 0.02);
+        let b_frags = predict_by_ions(&cands[1].peptide, 1..=1);
+        let peaks = vec![(1u32, b_frags[0].mz), (2, b_frags[1].mz)];
+        let mut voter = FragmentVoter::new(cands.len());
+        // window excludes candidate 1 -> it must not appear even though it has the votes.
+        let topk = voter.top_k(&idx, &peaks, |cid| cid == 0, 2);
+        assert!(!topk.contains(&1u32));
+    }
+
+    #[test]
+    fn voter_resets_between_calls() {
+        let cands = vec![cand("PEPTIDEK"), cand("ACDEFGHIK")];
+        let idx = FragmentIndex::build(&cands, 0.02);
+        let b_frags = predict_by_ions(&cands[1].peptide, 1..=1);
+        let mut voter = FragmentVoter::new(cands.len());
+        let _ = voter.top_k(&idx, &[(1, b_frags[0].mz)], |_| true, 2);
+        // second call with NO peaks must yield no votes (scratch cleared).
+        let topk = voter.top_k(&idx, &[], |_| true, 2);
+        assert!(topk.is_empty());
     }
 }

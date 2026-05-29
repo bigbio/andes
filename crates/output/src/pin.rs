@@ -122,7 +122,7 @@ pub fn write_pin_to<W: Write>(
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
 
-    write_header(writer, min_charge, max_charge)?;
+    write_header(writer, min_charge, max_charge, params.chimeric)?;
 
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
@@ -145,7 +145,12 @@ pub fn write_pin_to<W: Write>(
 
 // ── header ────────────────────────────────────────────────────────────────────
 
-fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io::Result<()> {
+fn write_header<W: Write>(
+    writer: &mut W,
+    min_charge: u8,
+    max_charge: u8,
+    chimeric: bool,
+) -> io::Result<()> {
     let mut cols: Vec<String> = vec![
         "SpecId".to_string(),
         "Label".to_string(),
@@ -198,6 +203,19 @@ fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io:
         // Both are 0.0 unless `--chimeric` populates them from a linked MS1.
         "PrecursorIsotopeKL".to_string(),
         "PrecursorSNR".to_string(),
+    ]);
+
+    // ADDITIVE chimeric Phase 3 shared-fragment features. Gated on `--chimeric`
+    // so the off-path PIN schema is byte-identical to the non-chimeric build.
+    if chimeric {
+        cols.extend_from_slice(&[
+            "UniqueMatchedIons".to_string(),
+            "UniqueExplainedFraction".to_string(),
+            "SharedFracClaimed".to_string(),
+        ]);
+    }
+
+    cols.extend_from_slice(&[
         // Peptide / Proteins
         "Peptide".to_string(),
         "Proteins".to_string(),
@@ -432,6 +450,18 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.precursor_isotope_kl as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.precursor_snr as f64)?;
+
+    // UniqueMatchedIons, UniqueExplainedFraction, SharedFracClaimed: additive
+    // chimeric Phase 3 shared-fragment features. Gated on `--chimeric` to keep
+    // the off-path PIN byte-identical (matches the header gating).
+    if params.chimeric {
+        writer.write_all(b"\t")?;
+        write!(writer, "{}", psm.features.unique_matched_ions)?;
+        writer.write_all(b"\t")?;
+        write_double(writer, psm.features.unique_explained_fraction as f64)?;
+        writer.write_all(b"\t")?;
+        write_double(writer, psm.features.shared_frac_claimed as f64)?;
+    }
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -757,6 +787,40 @@ mod tests {
         assert_eq!(
             cols, expected,
             "PIN header columns must match the reference fixture column order exactly"
+        );
+    }
+
+    // ── Test 1b: chimeric Phase 3 columns are gated on --chimeric ─────────────
+
+    /// `--chimeric on` appends the 3 shared-fragment columns immediately after
+    /// `PrecursorSNR` and before `Peptide`; `--chimeric off` does NOT, so the
+    /// off-path header is byte-identical to the non-chimeric build.
+    #[test]
+    fn pin_header_chimeric_phase3_columns_gated() {
+        let phase3 = ["UniqueMatchedIons", "UniqueExplainedFraction", "SharedFracClaimed"];
+
+        // OFF: columns absent.
+        let mut off = make_params(2..=3);
+        off.chimeric = false;
+        let mut buf_off = Vec::<u8>::new();
+        write_pin_to(&mut buf_off, &[], &[], &[], &off, &make_empty_search_index()).unwrap();
+        let cols_off = parse_header(&buf_off);
+        for c in &phase3 {
+            assert!(!cols_off.iter().any(|x| x == c), "off header must NOT contain {c}");
+        }
+
+        // ON: columns present, in order, between PrecursorSNR and Peptide.
+        let mut on = make_params(2..=3);
+        on.chimeric = true;
+        let mut buf_on = Vec::<u8>::new();
+        write_pin_to(&mut buf_on, &[], &[], &[], &on, &make_empty_search_index()).unwrap();
+        let cols_on = parse_header(&buf_on);
+        let snr = cols_on.iter().position(|c| c == "PrecursorSNR").expect("PrecursorSNR");
+        let pep = cols_on.iter().position(|c| c == "Peptide").expect("Peptide");
+        let between: Vec<&str> = cols_on[snr + 1..pep].iter().map(String::as_str).collect();
+        assert_eq!(
+            between, phase3,
+            "chimeric Phase 3 columns must sit between PrecursorSNR and Peptide, in order"
         );
     }
 

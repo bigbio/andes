@@ -48,6 +48,7 @@ use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
+use crate::shared_fragment;
 use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
 use model::spectrum::Spectrum;
 
@@ -716,6 +717,58 @@ impl<'a> PreparedSearch<'a> {
                 }
             }
 
+            // Chimeric Phase 3: greedy shared-fragment competition. Walk the
+            // emitted PSMs most-confident-first; each peptide claims its matched
+            // peaks, and a less-confident peptide is credited only for the peaks
+            // not already claimed. The unique-evidence metrics become additive
+            // PIN columns, and each rank≥2 PSM is re-scored (RawScore + GF
+            // SpecEValue) on the residual (unclaimed) spectrum — a theft /
+            // coincidental peptide gets a worse SpecEValue and drops out of the
+            // FDR set on its own (no hard filter, no parameter). `--chimeric off`
+            // never enters this block, so the off path stays bit-identical.
+            if params.chimeric && !queue.is_empty() {
+                let mut ordered = std::mem::replace(
+                    &mut queue,
+                    TopNQueue::new(params.top_n_psms_per_spectrum),
+                )
+                .into_sorted_vec(); // best-first (smallest spec_e first)
+                let mut claimed: FxHashSet<i64> = FxHashSet::default();
+                for psm in ordered.iter_mut() {
+                    let ss = scored_spec_for_charge(psm.charge_used);
+                    let peptide =
+                        &candidates[psm.primary_candidate_idx() as usize].peptide;
+                    let matched = matched_peaks_with_intensity(ss, peptide, scorer);
+                    let ev = shared_fragment::unique_evidence(&matched, &claimed);
+                    psm.features.unique_matched_ions = ev.unique_matched_ions;
+                    psm.features.unique_explained_fraction = ev.unique_explained_fraction;
+                    psm.features.shared_frac_claimed = ev.shared_frac_claimed;
+
+                    // Re-score on the residual spectrum only when a
+                    // more-confident peptide has already claimed peaks (rank-1,
+                    // and any PSM whose predecessors matched nothing, are
+                    // unchanged).
+                    if !claimed.is_empty() {
+                        rescore_residual_spec_e(
+                            spec,
+                            params,
+                            psm,
+                            &claimed,
+                            ss,
+                            aa_set_for_gf,
+                            enzyme_opt,
+                            scorer,
+                            fragment_tolerance_da,
+                            idx,
+                            candidates,
+                        );
+                    }
+                    shared_fragment::claim(&matched, &mut claimed);
+                }
+                for psm in ordered {
+                    queue.push(psm);
+                }
+            }
+
                 queue
             })
             .collect();
@@ -1052,6 +1105,105 @@ fn matched_peak_keys(
     keys
 }
 
+/// Chimeric Phase 3: a peptide's matched charge-1 b/y peaks as
+/// `(quantized m/z key, intensity)`, deduplicated by key (two predicted ions
+/// hitting the same observed peak count once). Mirrors `matched_peak_keys` but
+/// keeps intensities for the `unique_explained_fraction` metric.
+fn matched_peaks_with_intensity(
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+) -> Vec<(i64, f32)> {
+    let n = peptide.length();
+    if n < 2 {
+        return Vec::new();
+    }
+    let predicted = predict_by_ions(peptide, 1..=1);
+    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
+    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
+    let mut by_key: FxHashMap<i64, f32> = FxHashMap::default();
+    for p in &predicted {
+        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        if let Some((_rank, intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
+            by_key.insert((peak_mz * 1000.0).round() as i64, intensity);
+        }
+    }
+    by_key.into_iter().collect()
+}
+
+/// Chimeric Phase 3: re-score one rank≥2 PSM against the spectrum with the
+/// `claimed` peaks (taken by more-confident peptides) removed.
+///
+/// Recomputes RawScore (`score`), `edge_score`, and `rank_score` on the residual
+/// spectrum — the cleavage credit is peak-independent so it is recovered as
+/// `original_score − score_psm(full_spectrum)` — then runs the GF SpecEValue DP
+/// on the residual spectrum (via a one-PSM queue) and overwrites the PSM's
+/// `spec_e_value` / `de_novo_score` / `e_value`. A peptide stripped of stolen or
+/// coincidental peaks gets a worse residual SpecEValue and falls out of the FDR
+/// set; a genuinely co-isolated peptide retains its unique signal. Applied
+/// symmetrically to targets and decoys.
+#[allow(clippy::too_many_arguments, reason = "chimeric-only re-score; all args are orthogonal scoring context threaded from run_chunk_inner")]
+fn rescore_residual_spec_e(
+    spec: &Spectrum,
+    params: &SearchParams,
+    psm: &mut PsmMatch,
+    claimed: &FxHashSet<i64>,
+    full_scored_spec: &ScoredSpectrum<'_>,
+    aa_set: &AminoAcidSet,
+    enzyme: Option<Enzyme>,
+    scorer: &RankScorer,
+    fragment_tolerance_da: f64,
+    search_index: &SearchIndex,
+    candidates: &[Candidate],
+) {
+    let charge = psm.charge_used;
+    if charge == 0 {
+        return;
+    }
+    let peptide = &candidates[psm.primary_candidate_idx() as usize].peptide;
+
+    // Residual spectrum: drop every peak claimed by a more-confident peptide.
+    let mut residual = spec.clone();
+    residual
+        .peaks
+        .retain(|&(mz, _)| !claimed.contains(&((mz * 1000.0).round() as i64)));
+    let residual_ss = ScoredSpectrum::new(&residual, scorer, charge);
+
+    // Cleavage credit is peak-independent: recover it from the original
+    // RawScore (= node_full + cleavage) minus a fresh full-spectrum node score.
+    let full_node = score_psm(full_scored_spec, peptide, scorer, charge, fragment_tolerance_da);
+    let cleavage = psm.score - full_node;
+
+    // Residual node + edge → residual RawScore / rank_score.
+    let residual_node = score_psm(&residual_ss, peptide, scorer, charge, fragment_tolerance_da);
+    let residual_edge = psm_edge_score(&residual_ss, peptide, scorer, charge);
+    psm.score = residual_node + cleavage;
+    psm.edge_score = residual_edge;
+    psm.rank_score = residual_node + cleavage + residual_edge as f32;
+
+    // Residual GF SpecEValue: run the standard DP on the residual spectrum.
+    let mut one = TopNQueue::new(1);
+    one.push(psm.clone());
+    compute_spec_e_values_for_spectrum(
+        spec,
+        params,
+        &mut one,
+        aa_set,
+        enzyme,
+        scorer,
+        &residual_ss,
+        charge,
+        fragment_tolerance_da,
+        search_index,
+        candidates,
+    );
+    if let Some(rescored) = one.drain_into_vec().into_iter().next() {
+        psm.spec_e_value = rescored.spec_e_value;
+        psm.de_novo_score = rescored.de_novo_score;
+        psm.e_value = rescored.e_value;
+    }
+}
+
 /// Compute fragment-ion feature columns for a single PSM.
 ///
 /// Uses charge-1 b/y ions only (the `NumMatchedMainIons` convention).
@@ -1357,6 +1509,12 @@ pub(crate) fn compute_psm_features(
         // under --chimeric by the feature fill (Task 3, commit 2).
         precursor_isotope_kl: 0.0,
         precursor_snr: 0.0,
+        // Chimeric Phase 3 shared-fragment evidence: defaults represent a
+        // peptide that owns all its peaks (rank-1 / non-chimeric). Populated
+        // for rank≥2 under --chimeric by the shared-fragment competition.
+        unique_matched_ions: num_matched,
+        unique_explained_fraction: 1.0,
+        shared_frac_claimed: 0.0,
     }
 }
 

@@ -17,6 +17,7 @@ pub mod psm;
 pub mod sa_walk;
 pub mod search_index;
 pub mod search_params;
+pub(crate) mod shared_fragment;
 pub mod suffix_array;
 
 // Convenience re-exports.

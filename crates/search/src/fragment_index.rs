@@ -174,6 +174,43 @@ mod tests {
     }
 
     #[test]
+    fn csr_fill_packs_colliding_candidates_and_counts_entries() {
+        let cands = vec![cand("PEPTIDEK"), cand("ACDEFGHIK")];
+        // Deliberately wide bin so fragments from BOTH candidates collide into
+        // the same few bins, exercising the cursor-fill packing across cands.
+        let idx = FragmentIndex::build(&cands, 1000.0);
+
+        // A fragment m/z of candidate 0; with bin_width 1000 candidate 1's
+        // nearby fragments share the bin, so the bin must contain BOTH ids.
+        let frags0 = predict_by_ions(&cands[0].peptide, 1..=1);
+        let probe = frags0[0].mz;
+        let hits = idx.candidates_in_bin(probe);
+        let both_here = hits.contains(&0u32) && hits.contains(&1u32);
+        // Fallback: at minimum some bin across the whole index packs both ids.
+        let both_somewhere = (0..idx.n_bins).any(|b| {
+            let lo = idx.bucket_offsets[b] as usize;
+            let hi = idx.bucket_offsets[b + 1] as usize;
+            let bin = &idx.bucket_candidates[lo..hi];
+            bin.contains(&0u32) && bin.contains(&1u32)
+        });
+        assert!(
+            both_here || both_somewhere,
+            "wide bin_width must pack both candidate ids into a shared bin"
+        );
+
+        // Cursor fill must pack every charge-1 b/y fragment exactly once.
+        let expected: usize = cands
+            .iter()
+            .map(|c| predict_by_ions(&c.peptide, 1..=1).len())
+            .sum();
+        assert_eq!(
+            idx.n_entries(),
+            expected,
+            "n_entries must equal total charge-1 b/y fragments across both candidates"
+        );
+    }
+
+    #[test]
     fn unknown_mz_returns_empty() {
         let cands = vec![cand("PEPTIDEK")];
         let idx = FragmentIndex::build(&cands, 0.02);

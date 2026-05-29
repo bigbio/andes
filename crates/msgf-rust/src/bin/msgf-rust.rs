@@ -27,6 +27,7 @@ use search::{
     PreparedSearch, PrecursorCalMode, SearchIndex, SearchParams, SpecKey, TopNQueue,
 };
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
+use search::search_params::FragIndexMode;
 use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
 
 /// Fragmentation method. `Auto` means "detect from the mzML's activation block;
@@ -220,6 +221,10 @@ struct Cli {
     /// PSMs per scan (chimeric / co-fragmented peptides; MSFragger-DDA+ style).
     #[arg(long, default_value = "false")]
     chimeric: bool,
+
+    /// Chimeric fragment-index prefilter: auto (on under --chimeric), on, off.
+    #[arg(long, value_name = "MODE", default_value = "auto")]
+    chimeric_frag_index: String,
 
     /// Fallback isolation half-width in Da when the mzML omits isolation offsets.
     #[arg(long, default_value = "1.5")]
@@ -668,6 +673,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.chimeric = cli.chimeric;
     params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
+    params.chimeric_frag_index = match cli.chimeric_frag_index.as_str() {
+        "on" => FragIndexMode::On,
+        "off" => FragIndexMode::Off,
+        _ => FragIndexMode::Auto,
+    };
     let resolved_top_n = if cli.chimeric && cli.top_n == 1 {
         eprintln!("chimeric mode: raising top-N from 1 to 5");
         5

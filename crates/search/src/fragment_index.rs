@@ -2,10 +2,7 @@
 //! `fragment-bin -> [candidate_id]` index used as a candidate generator under
 //! `--chimeric`, so only candidates with real fragment evidence are scored.
 //!
-//! Task 1 builds only the data structure; the per-spectrum voter and the
-//! hot-path wiring land in later tasks. Until then the index is exercised only
-//! by unit tests, so the build-time API surface is allowed to be unused.
-#![allow(dead_code)]
+//! Task 3 wires the index into the chimeric hot path via `match_engine`.
 
 use crate::candidate_gen::Candidate;
 use scoring_crate::scoring::fragment_ions::predict_by_ions;

@@ -36,6 +36,7 @@ use model::aa_set::AminoAcidSet;
 use input::Ms1Link;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
 use crate::chimeric_features::precursor_isotope_match;
+use crate::fragment_index;
 use model::enzyme::Enzyme;
 use scoring_crate::gf::generating_function::GeneratingFunction;
 use scoring_crate::gf::group::GeneratingFunctionGroup;
@@ -84,6 +85,10 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
+    /// Fragment-evidence prefilter index. `Some` only when
+    /// `params.frag_index_active()`; `None` keeps the brute-force path (and the
+    /// entire `--chimeric off` / narrow path) bit-identical.
+    pub(crate) fragment_index: Option<fragment_index::FragmentIndex>,
 }
 
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
@@ -209,6 +214,28 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
+        // Build the chimeric fragment-evidence prefilter index (only under
+        // `--chimeric` + frag-index active). `None` keeps the brute-force /
+        // off path bit-identical.
+        let fragment_index = if params.frag_index_active() {
+            // bin width ~ matching tolerance: high-res 0.02 Da, low-res 0.5 Da.
+            let bin_width = if scorer.param().data_type.instrument.is_high_resolution() {
+                0.02
+            } else {
+                0.5
+            };
+            let fi = fragment_index::FragmentIndex::build(&candidates, bin_width);
+            eprintln!(
+                "FragmentIndex: {} candidates, {} fragment entries (~{} MB)",
+                candidates.len(),
+                fi.n_entries(),
+                fi.n_entries() * 4 / 1_000_000
+            );
+            Some(fi)
+        } else {
+            None
+        };
+
         PreparedSearch {
             idx,
             params,
@@ -218,6 +245,7 @@ impl<'a> PreparedSearch<'a> {
             bucket_index,
             aa_set_for_gf,
             ms1_link: None,
+            fragment_index,
         }
     }
 
@@ -270,6 +298,9 @@ impl<'a> PreparedSearch<'a> {
         let candidates = &self.candidates;
         let bucket_index = &self.bucket_index;
         let aa_set_for_gf = &self.aa_set_for_gf;
+        // Chimeric fragment-evidence prefilter index (Task 3). `Some` only under
+        // `--chimeric` + frag-index active; `None` keeps the off/brute path.
+        let fragment_index = self.fragment_index.as_ref();
         // Chimeric precursor-envelope MS1 linkage (Task 3). Only `Some` under
         // `--chimeric`; the off path leaves this `None` and the feature fill
         // below is a no-op, keeping the golden PIN/TSV bit-identical.
@@ -447,7 +478,37 @@ impl<'a> PreparedSearch<'a> {
             // per-SpecKey raw-score retention (Java parity).
             let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
 
-            for &cand_idx in &window_cand_indices {
+            // Chimeric fragment-evidence prefilter: replace the brute-force
+            // window scan with the top-K candidates by fragment vote. The set
+            // fed into scoring shrinks; the scoring/emission path is unchanged.
+            // When the index is `None` (off / narrow path), `cand_iter` is
+            // exactly `window_cand_indices.clone()` — bit-identical to before.
+            let cand_iter: Vec<usize> = if let Some(fi) = fragment_index {
+                if params.chimeric {
+                    // Active observed peaks (rank, mz) for the spectrum's top charge.
+                    let z0 = charges_to_try[0];
+                    let active = scored_spec_for_charge(z0).dump_active_peaks();
+                    let peaks: Vec<(u32, f64)> =
+                        active.iter().map(|&(r, mz, _)| (r, mz)).collect();
+                    // in-window membership: candidate idx present in
+                    // window_cand_indices (sorted+deduped above → binary_search).
+                    let in_window =
+                        |cid: u32| window_cand_indices.binary_search(&(cid as usize)).is_ok();
+                    let mut voter = fragment_index::FragmentVoter::new(candidates.len());
+                    const TOP_K: usize = 64; // tuned in P4
+                    voter
+                        .top_k(fi, &peaks, in_window, TOP_K)
+                        .into_iter()
+                        .map(|c| c as usize)
+                        .collect()
+                } else {
+                    window_cand_indices.clone()
+                }
+            } else {
+                window_cand_indices.clone()
+            };
+
+            for &cand_idx in &cand_iter {
                 let cand = &candidates[cand_idx];
                 let cleavage_credit = compute_cleavage_credit(
                     cand,

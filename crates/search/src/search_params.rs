@@ -8,6 +8,16 @@ use model::tolerance::{PrecursorTolerance, Tolerance};
 
 use crate::precursor_cal::PrecursorCalMode;
 
+/// Controls the chimeric fragment-evidence prefilter (Task 4 / fragment index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FragIndexMode {
+    /// On when `--chimeric` is set (the default).
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     pub aa_set: AminoAcidSet,
@@ -55,9 +65,16 @@ pub struct SearchParams {
     /// Fallback isolation half-width (Da) used when the mzML lacks
     /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.
     pub chimeric_isolation_halfwidth_da: f64,
+    /// Chimeric fragment-evidence prefilter mode. Only active under `chimeric`.
+    pub chimeric_frag_index: FragIndexMode,
 }
 
 impl SearchParams {
+    /// True when the fragment-index prefilter should be active for this search.
+    pub fn frag_index_active(&self) -> bool {
+        self.chimeric && self.chimeric_frag_index != FragIndexMode::Off
+    }
+
     /// Defaults matching MS-GF+ tryptic search:
     /// - enzyme: Trypsin
     /// - length: 6-40
@@ -87,6 +104,7 @@ impl SearchParams {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            chimeric_frag_index: FragIndexMode::Auto,
         }
     }
 }

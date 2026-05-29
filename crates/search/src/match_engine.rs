@@ -289,6 +289,15 @@ impl<'a> PreparedSearch<'a> {
         // inflation. Zero cost unless MSGF_CHIMERIC_OVERLAP is set AND --chimeric.
         let chim_overlap = params.chimeric && std::env::var("MSGF_CHIMERIC_OVERLAP").is_ok();
 
+        // Measurement gate (env, chimeric only): skip the Phase-3 residual
+        // SpecEValue re-score so the emitted PIN is the Phase-1 multi-emission
+        // (original spec_e ranking). Used to regenerate a non-rescored PIN for
+        // the rank-stratified FDR measurement — isolates the FDR-model effect
+        // from the residual rescore. The unique-evidence additive columns are
+        // still populated (harmless). Never set on any production path.
+        let chim_no_rescore =
+            params.chimeric && std::env::var("MSGF_CHIMERIC_NO_RESCORE").is_ok();
+
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
         let queues: Vec<TopNQueue> = spectra
@@ -746,8 +755,9 @@ impl<'a> PreparedSearch<'a> {
                     // Re-score on the residual spectrum only when a
                     // more-confident peptide has already claimed peaks (rank-1,
                     // and any PSM whose predecessors matched nothing, are
-                    // unchanged).
-                    if !claimed.is_empty() {
+                    // unchanged). Skipped under MSGF_CHIMERIC_NO_RESCORE to
+                    // regenerate a Phase-1 (non-rescored) PIN for measurement.
+                    if !claimed.is_empty() && !chim_no_rescore {
                         rescore_residual_spec_e(
                             spec,
                             params,

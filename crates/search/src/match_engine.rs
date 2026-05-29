@@ -334,7 +334,9 @@ impl<'a> PreparedSearch<'a> {
         let queues: Vec<TopNQueue> = spectra
             .par_iter()
             .enumerate()
-            .map(|(local_idx, spec)| {
+            .map_init(
+                || Option::<fragment_index::FragmentVoter>::None,
+                |voter_slot, (local_idx, spec)| {
                 let spec_idx = local_idx + spectrum_idx_offset;
                 let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
 
@@ -484,26 +486,35 @@ impl<'a> PreparedSearch<'a> {
             // When the index is `None` (off / narrow path), `cand_iter` is
             // exactly `window_cand_indices.clone()` — bit-identical to before.
             let cand_iter: Vec<usize> = if let Some(fi) = fragment_index {
-                if params.chimeric {
-                    // Active observed peaks (rank, mz) for the spectrum's top charge.
-                    let z0 = charges_to_try[0];
-                    let active = scored_spec_for_charge(z0).dump_active_peaks();
-                    let peaks: Vec<(u32, f64)> =
-                        active.iter().map(|&(r, mz, _)| (r, mz)).collect();
-                    // in-window membership: candidate idx present in
-                    // window_cand_indices (sorted+deduped above → binary_search).
-                    let in_window =
-                        |cid: u32| window_cand_indices.binary_search(&(cid as usize)).is_ok();
-                    let mut voter = fragment_index::FragmentVoter::new(candidates.len());
-                    const TOP_K: usize = 64; // tuned in P4
-                    voter
-                        .top_k(fi, &peaks, in_window, TOP_K)
-                        .into_iter()
-                        .map(|c| c as usize)
-                        .collect()
-                } else {
-                    window_cand_indices.clone()
-                }
+                // The fragment index is `Some` only under `frag_index_active()`,
+                // which implies `params.chimeric` — so this branch is always the
+                // chimeric+frag-index path (no inner `params.chimeric` check needed).
+                //
+                // Active observed peaks for the spectrum's top charge. The voter
+                // ignores rank, but `top_k` takes `&[(u32, f64)]`, so we extract
+                // `(rank, mz)` in a single allocation (dropping intensity).
+                let z0 = charges_to_try[0];
+                let peaks: Vec<(u32, f64)> = scored_spec_for_charge(z0)
+                    .dump_active_peaks()
+                    .into_iter()
+                    .map(|(r, mz, _)| (r, mz))
+                    .collect();
+                // in-window membership: candidate idx present in
+                // window_cand_indices (sorted+deduped above → binary_search).
+                let in_window =
+                    |cid: u32| window_cand_indices.binary_search(&(cid as usize)).is_ok();
+                // Hoist the voter to one allocation per rayon worker thread: the
+                // `vec![0.0; candidates.len()]` (~56 MB at Astral scale) is built
+                // at most once per worker, not once per spectrum. The voter's
+                // internal `touched`-based reset handles per-spectrum cleanup.
+                let voter = voter_slot
+                    .get_or_insert_with(|| fragment_index::FragmentVoter::new(candidates.len()));
+                const TOP_K: usize = 64; // tuned in P4
+                voter
+                    .top_k(fi, &peaks, in_window, TOP_K)
+                    .into_iter()
+                    .map(|c| c as usize)
+                    .collect()
             } else {
                 window_cand_indices.clone()
             };
@@ -841,7 +852,8 @@ impl<'a> PreparedSearch<'a> {
             }
 
                 queue
-            })
+            },
+            )
             .collect();
 
         // Yield-accounting summary.

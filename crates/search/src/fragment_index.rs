@@ -1,0 +1,183 @@
+//! Chimeric Phase-4 fragment-evidence prefilter: an inverted
+//! `fragment-bin -> [candidate_id]` index used as a candidate generator under
+//! `--chimeric`, so only candidates with real fragment evidence are scored.
+//!
+//! Task 1 builds only the data structure; the per-spectrum voter and the
+//! hot-path wiring land in later tasks. Until then the index is exercised only
+//! by unit tests, so the build-time API surface is allowed to be unused.
+#![allow(dead_code)]
+
+use crate::candidate_gen::Candidate;
+use scoring_crate::scoring::fragment_ions::predict_by_ions;
+
+/// Inverted index: fragment-m/z bin -> candidate ids that have a charge-1 b/y
+/// fragment in that bin. CSR layout (offsets + concatenated ids) keeps it
+/// compact (`u32` ids) — memory was the failure mode of the abandoned Java
+/// attempt, so this stays as tight as possible.
+pub(crate) struct FragmentIndex {
+    bin_width: f64,
+    min_mz: f64,
+    n_bins: usize,
+    /// `bucket_offsets[b]..bucket_offsets[b+1]` indexes into `bucket_candidates`.
+    bucket_offsets: Vec<u32>,
+    bucket_candidates: Vec<u32>,
+}
+
+impl FragmentIndex {
+    /// Build over the full candidate set (target+decoy, mod-expanded).
+    /// `bin_width` is the fragment-m/z bin in Da (caller picks ~tolerance:
+    /// 0.02 for high-res, 0.5 for low-res).
+    pub(crate) fn build(candidates: &[Candidate], bin_width: f64) -> Self {
+        // Pass A: bounds.
+        let mut min_mz = f64::INFINITY;
+        let mut max_mz = f64::NEG_INFINITY;
+        for c in candidates {
+            for ion in predict_by_ions(&c.peptide, 1..=1) {
+                if ion.mz < min_mz {
+                    min_mz = ion.mz;
+                }
+                if ion.mz > max_mz {
+                    max_mz = ion.mz;
+                }
+            }
+        }
+        if !min_mz.is_finite() {
+            return FragmentIndex {
+                bin_width,
+                min_mz: 0.0,
+                n_bins: 0,
+                bucket_offsets: vec![0],
+                bucket_candidates: Vec::new(),
+            };
+        }
+        let n_bins = (((max_mz - min_mz) / bin_width).floor() as usize) + 1;
+
+        // Pass B: per-bin counts.
+        let mut counts = vec![0u32; n_bins];
+        let bin_of = |mz: f64| -> Option<usize> {
+            if mz < min_mz {
+                return None;
+            }
+            let b = ((mz - min_mz) / bin_width).floor() as usize;
+            if b < n_bins {
+                Some(b)
+            } else {
+                None
+            }
+        };
+        for c in candidates {
+            for ion in predict_by_ions(&c.peptide, 1..=1) {
+                if let Some(b) = bin_of(ion.mz) {
+                    counts[b] += 1;
+                }
+            }
+        }
+
+        // Prefix sum -> offsets.
+        let mut bucket_offsets = vec![0u32; n_bins + 1];
+        let mut acc = 0u32;
+        for b in 0..n_bins {
+            bucket_offsets[b] = acc;
+            acc += counts[b];
+        }
+        bucket_offsets[n_bins] = acc;
+
+        // Pass C: fill via a moving cursor copy of offsets.
+        let mut cursor: Vec<u32> = bucket_offsets[..n_bins].to_vec();
+        let mut bucket_candidates = vec![0u32; acc as usize];
+        for (cid, c) in candidates.iter().enumerate() {
+            for ion in predict_by_ions(&c.peptide, 1..=1) {
+                if let Some(b) = bin_of(ion.mz) {
+                    let pos = cursor[b] as usize;
+                    bucket_candidates[pos] = cid as u32;
+                    cursor[b] += 1;
+                }
+            }
+        }
+
+        FragmentIndex {
+            bin_width,
+            min_mz,
+            n_bins,
+            bucket_offsets,
+            bucket_candidates,
+        }
+    }
+
+    #[inline]
+    fn bin_index(&self, mz: f64) -> Option<usize> {
+        if self.n_bins == 0 || mz < self.min_mz {
+            return None;
+        }
+        let b = ((mz - self.min_mz) / self.bin_width).floor() as usize;
+        if b < self.n_bins {
+            Some(b)
+        } else {
+            None
+        }
+    }
+
+    /// Candidate ids whose charge-1 b/y fragment falls in the bin containing `mz`.
+    /// (Callers also probe `mz ± bin_width` to cover tolerance at bin edges.)
+    pub(crate) fn candidates_in_bin(&self, mz: f64) -> &[u32] {
+        match self.bin_index(mz) {
+            Some(b) => {
+                let lo = self.bucket_offsets[b] as usize;
+                let hi = self.bucket_offsets[b + 1] as usize;
+                &self.bucket_candidates[lo..hi]
+            }
+            None => &[],
+        }
+    }
+
+    /// Total indexed (fragment, candidate) entries — for memory accounting.
+    pub(crate) fn n_entries(&self) -> usize {
+        self.bucket_candidates.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::candidate_gen::Candidate;
+    use model::amino_acid::AminoAcid;
+    use model::peptide::Peptide;
+
+    fn cand(seq: &str) -> Candidate {
+        let residues = seq
+            .bytes()
+            .map(|r| AminoAcid::standard(r).unwrap())
+            .collect();
+        Candidate {
+            peptide: Peptide::new(residues, b'-', b'-'),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    #[test]
+    fn build_indexes_every_candidate_fragment() {
+        let cands = vec![cand("PEPTIDEK"), cand("ACDEFGHIK")];
+        let idx = FragmentIndex::build(&cands, 0.02);
+        // Every charge-1 b/y fragment of every candidate must be retrievable:
+        // querying the bin of a known fragment m/z returns that candidate id.
+        let frags = scoring_crate::scoring::fragment_ions::predict_by_ions(&cands[0].peptide, 1..=1);
+        let probe = frags[0].mz;
+        let hits = idx.candidates_in_bin(probe);
+        assert!(
+            hits.contains(&0u32),
+            "candidate 0 must be indexed at its own fragment m/z"
+        );
+    }
+
+    #[test]
+    fn unknown_mz_returns_empty() {
+        let cands = vec![cand("PEPTIDEK")];
+        let idx = FragmentIndex::build(&cands, 0.02);
+        assert!(idx.candidates_in_bin(5.0).is_empty());
+        assert!(idx.candidates_in_bin(99999.0).is_empty());
+    }
+}

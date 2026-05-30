@@ -678,13 +678,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "off" => FragIndexMode::Off,
         _ => FragIndexMode::Auto,
     };
-    let resolved_top_n = if cli.chimeric && cli.top_n == 1 {
-        eprintln!("chimeric mode: raising top-N from 1 to 5");
-        5
-    } else {
-        cli.top_n
-    };
-    params.top_n_psms_per_spectrum = resolved_top_n;
+    // Two-pass cascade: Pass 1 emits the single best (top-1) primary peptide per
+    // scan (NOT the blind multi-emission); the co-isolated secondary peptides come
+    // from Pass 2 (run_pass2_coisolation). So do NOT raise top-N under --chimeric.
+    params.top_n_psms_per_spectrum = cli.top_n;
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,

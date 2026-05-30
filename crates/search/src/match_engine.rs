@@ -111,17 +111,23 @@ pub struct PreparedSearch<'a> {
 ///   as the standard path. Only the isotope-error widening is applied — the
 ///   isolation window is already wider than the precursor tolerance, so the
 ///   precursor-tolerance widening is intentionally dropped here.
+///
+/// The `chimeric` argument selects the window mode independently of
+/// `params.chimeric`, so the cascade's NARROW Pass 1 can force the standard
+/// (precursor-tolerance) derivation even while `params.chimeric == true`. Pass
+/// `params.chimeric` to reproduce the original mode-from-flag behavior.
 fn candidate_nominal_bounds(
     spec: &Spectrum,
     z: u8,
     params: &SearchParams,
     shift_ppm: f64,
+    chimeric: bool,
 ) -> (i32, i32) {
     let charge_f = z as f64;
     let iso_min = *params.isotope_error_range.start() as i32;
     let iso_max = *params.isotope_error_range.end() as i32;
 
-    if params.chimeric {
+    if chimeric {
         // Span the full isolation window. Offsets are in Da (m/z space);
         // fall back to the configured half-width when the mzML omits them.
         let lo_mz = spec.precursor_mz
@@ -335,6 +341,18 @@ impl<'a> PreparedSearch<'a> {
                 let spec_idx = local_idx + spectrum_idx_offset;
                 let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
 
+            // Chimeric two-pass cascade: Pass 1 (this `run_chunk_inner`) is a
+            // NARROW precursor-window search, identical to the non-chimeric path.
+            // Pass 2 (`run_pass2_coisolation`) is the ONLY chimeric-specific
+            // candidate enumeration. So under `--chimeric` we deliberately keep
+            // candidate generation/scoring NARROW here: no wide isolation-window
+            // enumeration, no SageIndex prefilter, no shared-fragment competition.
+            // (The refuted blind-chimeric wide path used `params.chimeric` to
+            // widen; the cascade keeps these `false`.) The MS1 load and the
+            // `precursor_isotope_match` feature fill are unaffected — Pass 2 and
+            // the chimeric features still need MS1.
+            let cascade_wide = false;
+
             // Skip spectra with too few peaks.
             if spec.peaks.len() < params.min_peaks as usize {
                 skipped_min_peaks.fetch_add(1, Ordering::Relaxed);
@@ -384,8 +402,12 @@ impl<'a> PreparedSearch<'a> {
             let mut window_cand_indices: Vec<usize> = Vec::with_capacity(2048);
             let shift_ppm = params.precursor_mass_shift_ppm;
             for &z in &charges_to_try {
+                // Cascade Pass 1 stays NARROW: pass `cascade_wide` (false) so even
+                // under `--chimeric` the bounds use the precursor-tolerance mode,
+                // not the wide isolation window. Off path: `cascade_wide == false`
+                // and `params.chimeric == false` agree → byte-identical.
                 let (min_nominal, max_nominal) =
-                    candidate_nominal_bounds(spec, z, params, shift_ppm);
+                    candidate_nominal_bounds(spec, z, params, shift_ppm, cascade_wide);
                 for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
                     window_cand_indices.extend_from_slice(idxs);
                 }
@@ -481,7 +503,7 @@ impl<'a> PreparedSearch<'a> {
             // When the index is `None` (off / narrow path), `cand_iter` is
             // exactly `window_cand_indices.clone()` — bit-identical to before.
             let cand_iter: Vec<usize> = if let (Some(si), true) =
-                (sage_index, params.chimeric)
+                (sage_index, cascade_wide)
             {
                 // Sage-style candidate generation (Approach B). `sage_index` is
                 // `Some` only under `frag_index_active()`, which implies
@@ -515,7 +537,7 @@ impl<'a> PreparedSearch<'a> {
                 let mut out: Vec<usize> = Vec::new();
                 for &z in &charges_to_try {
                     let (min_nominal, max_nominal) =
-                        candidate_nominal_bounds(spec, z, params, shift_ppm);
+                        candidate_nominal_bounds(spec, z, params, shift_ppm, true);
                     // nominal -> residue mass (Da), widened by ±1 nominal unit +
                     // the 0.5-unit rounding half-step, then -> peptide.mass().
                     let lo = (min_nominal as f64 - 1.5) / SCALER + H2O;
@@ -582,7 +604,10 @@ impl<'a> PreparedSearch<'a> {
                     // precursor). Standard: tight precursor-tolerance check
                     // against the selected m/z. Window m/z bounds are constant
                     // per spectrum, so hoist them out of the offset loop.
-                    let chimeric_window = if params.chimeric {
+                    // Cascade Pass 1 is NARROW: gate on `cascade_wide` (false), so
+                    // even under `--chimeric` the precursor match uses the tight
+                    // `matches_precursor` path, not the wide isolation window.
+                    let chimeric_window = if cascade_wide {
                         let lo = spec.precursor_mz
                             - spec.isolation_lower_offset.unwrap_or(params.chimeric_isolation_halfwidth_da);
                         let hi = spec.precursor_mz
@@ -823,7 +848,12 @@ impl<'a> PreparedSearch<'a> {
             // coincidental peptide gets a worse SpecEValue and drops out of the
             // FDR set on its own (no hard filter, no parameter). `--chimeric off`
             // never enters this block, so the off path stays bit-identical.
-            if params.chimeric && !queue.is_empty() {
+            // Cascade Pass 1 is a clean narrow search — the Phase-3 greedy
+            // shared-fragment competition (blind-chimeric machinery) does NOT run.
+            // Gated on `cascade_wide` (false). With a narrow Pass 1 the queue holds
+            // ~1 peptide, so this was already a near-no-op; gating keeps Pass 1's
+            // emitted distribution byte-for-byte the narrow search's.
+            if cascade_wide && !queue.is_empty() {
                 let mut ordered = std::mem::replace(
                     &mut queue,
                     TopNQueue::new(params.top_n_psms_per_spectrum),
@@ -1902,12 +1932,12 @@ mod feature_tests {
 
         // Standard (chimeric off): tight window around the selected precursor.
         params.chimeric = false;
-        let (min_s, max_s) = candidate_nominal_bounds(&spec, 2, &params, 0.0);
+        let (min_s, max_s) = candidate_nominal_bounds(&spec, 2, &params, 0.0, params.chimeric);
 
         // Chimeric on: window must span the full isolation window, strictly
         // wider on BOTH sides (the isolation half-width dwarfs 20 ppm).
         params.chimeric = true;
-        let (min_c, max_c) = candidate_nominal_bounds(&spec, 2, &params, 0.0);
+        let (min_c, max_c) = candidate_nominal_bounds(&spec, 2, &params, 0.0, params.chimeric);
 
         assert!(min_c < min_s, "chimeric lower bound {min_c} not below standard {min_s}");
         assert!(max_c > max_s, "chimeric upper bound {max_c} not above standard {max_s}");
@@ -1925,7 +1955,7 @@ mod feature_tests {
         spec.isolation_lower_offset = None;
         spec.isolation_upper_offset = None;
         params.chimeric_isolation_halfwidth_da = 1.5;
-        let (min_f, max_f) = candidate_nominal_bounds(&spec, 2, &params, 0.0);
+        let (min_f, max_f) = candidate_nominal_bounds(&spec, 2, &params, 0.0, params.chimeric);
         assert_eq!((min_f, max_f), (min_c, max_c),
             "fallback half-width should reproduce the explicit ±1.5 Da window");
     }

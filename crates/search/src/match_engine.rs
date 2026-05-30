@@ -947,6 +947,61 @@ pub fn match_spectra(
     (queues, prepared.candidates)
 }
 
+/// Per-candidate cleavage credit, module-level mirror of the nested
+/// `compute_cleavage_credit` in `run_chunk_inner`. The chimeric cascade's
+/// `search_secondary` needs the SAME RawScore scale as the production candidate
+/// loop (`score = score_psm(...) + cleavage_credit`), so it calls this instead
+/// of duplicating the branch logic.
+///
+/// Derives the four credit/penalty constants from the ENZYME-REGISTERED
+/// `aa_set` (cleavage credit/penalty are populated by `register_enzyme`) and
+/// the term flags from `enz`. Keep the branch structure bit-identical to the
+/// nested `compute_cleavage_credit`.
+pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoAcidSet) -> i32 {
+    let credit_neighboring = aa_set.neighboring_aa_cleavage_credit();
+    let penalty_neighboring = aa_set.neighboring_aa_cleavage_penalty();
+    let credit_peptide = aa_set.peptide_cleavage_credit();
+    let penalty_peptide = aa_set.peptide_cleavage_penalty();
+    let enz_is_c_term = enz.is_c_term();
+    let enz_is_n_term = enz.is_n_term();
+
+    let mut score: i32 = 0;
+    let pre = cand.peptide.pre;
+    let post = cand.peptide.post;
+    if enz_is_c_term {
+        // N-term cleavage (neighboring)
+        score += if cand.is_protein_n_term || enz.is_cleavable(pre) {
+            credit_neighboring
+        } else {
+            penalty_neighboring
+        };
+        // C-term cleavage (peptide)
+        let last = match cand.peptide.residues.last() {
+            Some(aa) => aa.residue,
+            None => 0,
+        };
+        score += if enz.is_cleavable(last) {
+            credit_peptide
+        } else {
+            penalty_peptide
+        };
+    } else if enz_is_n_term {
+        // N-term cleavage (peptide)
+        score += if enz.is_cleavable(pre) {
+            credit_peptide
+        } else {
+            penalty_peptide
+        };
+        // C-term cleavage (neighboring)
+        score += if cand.is_protein_c_term || enz.is_cleavable(post) {
+            credit_neighboring
+        } else {
+            penalty_neighboring
+        };
+    }
+    score
+}
+
 /// For a single spectrum, compute the GF across the precursor tolerance
 /// window in nominal mass space, then assign `spec_e_value` to every PSM
 /// in `queue` whose nominal_peptide_mass falls within the window.

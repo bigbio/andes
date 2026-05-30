@@ -139,13 +139,21 @@ pub(crate) fn search_secondary(
 
     // 1. Residual spectrum: drop the primary's matched charge-1 b/y peaks so the
     //    second peptide is scored against signal the primary did not explain.
+    //    Build ONE `co_spec` = residual peaks + the CO-ISOLATED precursor fields,
+    //    used for BOTH `ScoredSpectrum::new` and the GF below. The residual is a
+    //    clone of `spec`, so its `precursor_mz` is the PRIMARY's; overwrite the
+    //    precursor fields with `co`'s so the GF mass window (derived from the
+    //    spectrum's precursor in `compute_spec_e_values_for_spectrum`) centers on
+    //    the co-isolated mass rather than the primary mass (Bug-1 fix).
     let full_ss = ScoredSpectrum::new(spec, scorer, z);
     let claimed = matched_peak_keys(&full_ss, primary, scorer);
-    let mut residual = spec.clone();
-    residual
+    let mut co_spec = spec.clone();
+    co_spec
         .peaks
         .retain(|&(mz, _)| !claimed.contains(&((mz * 1000.0).round() as i64)));
-    let res_ss = ScoredSpectrum::new(&residual, scorer, z);
+    co_spec.precursor_mz = co.mono_mz;
+    co_spec.precursor_charge = Some(co.charge as i32);
+    let res_ss = ScoredSpectrum::new(&co_spec, scorer, z);
 
     // 2. Candidates within precursor tol of the co-isolated neutral mass. The
     //    nominal bucket key matches PreparedSearch's `nominal_residue_mass`
@@ -165,13 +173,17 @@ pub(crate) fn search_secondary(
             }
             let pin = score_psm(&res_ss, &cand.peptide, scorer, z, fragment_tolerance_da);
             let edge = psm_edge_score(&res_ss, &cand.peptide, scorer, z);
+            // Cleavage credit: production candidate loop emits RawScore as
+            // `score_psm(...) + cleavage_credit`; mirror it so secondary PSMs
+            // share the primaries' RawScore scale (Bug-2 fix).
+            let cleavage = crate::match_engine::cleavage_credit_for(cand, params.enzyme, aa_set);
             let psm = PsmMatch {
                 spectrum_idx: 0,
                 candidate_idxs: vec![ci as u32],
                 charge_used: z,
                 mass_error_ppm: (cand.peptide.mass() - co.neutral_mass) / co.neutral_mass * 1e6,
-                score: pin,
-                rank_score: pin + edge as f32,
+                score: pin + cleavage as f32,
+                rank_score: pin + cleavage as f32 + edge as f32,
                 edge_score: edge,
                 spec_e_value: 1.0,
                 de_novo_score: i32::MIN,
@@ -189,9 +201,11 @@ pub(crate) fn search_secondary(
     }
 
     // 3. One targeted GF SpecEValue DP on the residual spectrum (fills
-    //    spec_e_value / de_novo_score / e_value on the retained PSM).
+    //    spec_e_value / de_novo_score / e_value on the retained PSM). Pass
+    //    `co_spec` (residual peaks + co precursor fields) so the GF mass window
+    //    centers on the co-isolated mass; `res_ss` supplies the node scores.
     compute_spec_e_values_for_spectrum(
-        spec,
+        &co_spec,
         params,
         &mut queue,
         aa_set,
@@ -396,6 +410,15 @@ mod tests {
         assert_eq!(
             found.residues, planted.residues,
             "secondary PSM should resolve to the planted peptide DAFLGSFLYEYSR"
+        );
+        // Bug-1 lock-in: the planted peptide is in-window for the co-isolated
+        // mass, so the GF must compute a real SpecEValue (< 1.0). A value of
+        // exactly 1.0 means the GF mass window did not include the candidate
+        // mass (the `return 1.0` guard fired).
+        assert!(
+            psm.spec_e_value < 1.0,
+            "secondary PSM SpecEValue must be a real probability < 1.0, got {}",
+            psm.spec_e_value
         );
     }
 }

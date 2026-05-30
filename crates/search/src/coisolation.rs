@@ -204,9 +204,20 @@ pub(crate) fn search_secondary(
     //    spec_e_value / de_novo_score / e_value on the retained PSM). Pass
     //    `co_spec` (residual peaks + co precursor fields) so the GF mass window
     //    centers on the co-isolated mass; `res_ss` supplies the node scores.
+    //
+    //    Perf: the secondary's mass is KNOWN (co.neutral_mass, detected from the
+    //    MS1 monoisotopic peak), so we only need the single GF mass bin at
+    //    isotope offset 0. Clamp `isotope_error_range` to 0..=0 (vs the default
+    //    -1..=2) so `compute_spec_e_values_for_spectrum` builds ~1 mass bin
+    //    instead of 5-7, cutting GF bins and the associated SinkUnreachable
+    //    retries. The candidate was enumerated within `precursor_tolerance` of
+    //    `co.neutral_mass`, so with isotope 0 + the same precursor tol it stays
+    //    in-window (see `secondary_search_finds_planted_peptide`).
+    let mut p2 = params.clone();
+    p2.isotope_error_range = 0..=0;
     compute_spec_e_values_for_spectrum(
         &co_spec,
-        params,
+        &p2,
         &mut queue,
         aa_set,
         enzyme,

@@ -766,7 +766,18 @@ impl<'a> PreparedSearch<'a> {
                 // Guarded on `params.chimeric` AND a linked MS1 for this
                 // spectrum; otherwise the two fields stay 0.0 (off path is
                 // bit-identical, since `ms1_link` is `None` there).
-                if params.chimeric {
+                //
+                // Cascade perf: the two-pass chimeric cascade does NOT consume
+                // this per-PSM MS1 feature (it was the old single-pass Phase-2
+                // chimeric feature). MS1 is used ONLY by Pass 2's
+                // `run_pass2_coisolation` / `detect_coisolated` co-isolation
+                // detection. Computing `precursor_isotope_match` here runs
+                // ~121k times on Astral and costs ~2:40 of wall, so we skip it
+                // and leave `precursor_isotope_kl` / `precursor_snr` at their
+                // 0.0 defaults (PIN schema unchanged). The `ms1_link` field and
+                // its loading stay UNTOUCHED — Pass 2 still needs them.
+                const CASCADE_SKIP_MS1_FEATURE: bool = true;
+                if !CASCADE_SKIP_MS1_FEATURE && params.chimeric {
                     if let Some(link) = ms1_link {
                         if let Some(Some(ms1_idx)) = link.ms2_to_ms1.get(spec_idx) {
                             if let Some(ms1_peaks) = link.ms1_peaks.get(*ms1_idx) {

@@ -1067,7 +1067,11 @@ pub fn run_pass2_coisolation(
             spec.precursor_mz,
             *params.charge_range.start()..=*params.charge_range.end(),
             tol,
-            1.0,
+            // max_kl: averagine-envelope KL gate for accepting a co-isolated
+            // precursor. 1.0 was lenient (entrapment FDP 1.6% combined, above
+            // nominal); 0.3 requires a cleaner MS1 envelope → fewer spurious
+            // secondaries → FDP toward nominal (small PSM cost). Tuning knob.
+            0.3,
             2,
         );
         if cos.is_empty() {

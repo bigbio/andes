@@ -43,3 +43,42 @@
 coisolation.rs (detector + search_secondary), run_pass2_coisolation (parallel),
 narrow Pass-1 (cascade_wide=false), top-1 + force_push secondaries, MS1 per-PSM
 feature skipped. Run with `--chimeric --chimeric-frag-index off`.
+
+## FINAL (optimized) — 2026-05-30
+
+After the Pass-2 single-bin GF optimization (build GF for the secondary's own mass
+bin only, isotope 0..0 — cuts ~5-7× bins + the 31k SinkUnreachable retries) and
+`max_kl` 1.0→0.3:
+
+| | rows | wall | @1% | entrapment FDP |
+|---|---:|---:|---:|---|
+| Java | — | 6:18 | 35,818 | — |
+| Rust narrow | — | 6:01 | 36,715 | — |
+| **cascade FINAL** | 288,958 | **7:25** | **55,547 (+55% vs Java)** | 0.77%/1.54% combined (rank-1 0.67%) |
+
+Speed: cascade went **9:42 → 7:25** via the Pass-2 GF opt (the 8:29 "Pass-1" wall
+was mostly Pass-2's full-GF-per-secondary, not a batch-Pass-1 overhead — sub-chunking
+the batch did NOT help and was reverted). Phase breakdown: index_build 10s, cal 21s,
+search (Pass1 narrow ~5:30 + Pass2 ~38s) ~6:08, write 2s.
+
+## Honest status vs the gate (more PSMs AND faster than Java)
+- **More PSMs: YES, decisively (+55%)** — entrapment-validated (primary rank-1 clean
+  at 0.67%; overall combined FDP 1.54%, slightly above nominal — the secondaries'
+  Percolator calibration is a touch optimistic, NOT a detection-leniency issue
+  since max_kl 1.0→0.3 barely moved it).
+- **Faster: NO (7:25 vs 6:18, +67s)** — but hugely improved from blind chimeric's
+  18:02. The floor is structural: narrow search (~5:30) + MS1 load + Pass 2 overhead
+  (~1:30) vs Java 6:18; narrow alone is only ~17-48s faster than Java.
+
+## Remaining speed levers (to beat Java 6:18)
+1. **GF SpecEValue opt** — the ~35% Pass-1 bottleneck (compute_inner +
+   compute_spec_e_values + directional_node_score). Deep, parity-critical. Speeds
+   narrow AND cascade.
+2. **Streaming-cascade refactor** — overlap MS1/spectra I/O with scoring (the batch
+   path blocks on read_with_ms1). Big but tractable; could save the I/O serialization.
+3. roundf ~5% micro-opt.
+
+## Remaining FDR lever (to nominal)
+Secondaries' combined FDP 1.54% > 1%. The primary set is clean; the secondaries
+need either a per-stratum FDR or a calibration feature (e.g. the co-isolation KL /
+ΔRT as a Percolator feature) so their q-values are honest.

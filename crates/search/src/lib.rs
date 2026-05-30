@@ -7,6 +7,7 @@
 
 pub mod candidate_gen;
 mod chimeric_features;
+pub(crate) mod coisolation;
 pub mod decoy;
 pub mod distinct_peptide;
 pub mod match_engine;

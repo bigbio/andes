@@ -947,6 +947,123 @@ pub fn match_spectra(
     (queues, prepared.candidates)
 }
 
+/// Pass 2 of the chimeric two-pass cascade. After Pass 1 (`run_chunk`) has
+/// filled each spectrum's top-N queue with its PRIMARY peptide, this driver
+/// re-examines every non-empty queue: it detects MS1 co-isolated precursors in
+/// the spectrum's isolation window (excluding the selected precursor), strips
+/// the primary's matched peaks, and runs a targeted second-peptide GF search at
+/// each co-isolated mass. Any secondary PSM found is pushed into the same queue
+/// so the PIN writer emits it as an additional row for that scan.
+///
+/// **Off-path bit-identity:** returns immediately when `params.chimeric` is
+/// false OR `prepared.ms1_link` is `None` (the default non-chimeric path never
+/// attaches an `Ms1Link`). In both cases the `queues` are left untouched, so a
+/// non-chimeric run is byte-for-byte identical with or without this call.
+///
+/// `spectra` must be the SAME slice (in the SAME order) that produced `queues`,
+/// with peaks still present — `prepared.ms1_link.ms2_to_ms1` is indexed by the
+/// MS2 position in that slice. Call this BEFORE peaks are dropped from the
+/// spectra.
+pub fn run_pass2_coisolation(
+    prepared: &PreparedSearch,
+    spectra: &[Spectrum],
+    queues: &mut [TopNQueue],
+    params: &SearchParams,
+) {
+    // Bit-identical guard: no chimeric mode → no-op.
+    if !params.chimeric {
+        return;
+    }
+    let Some(link) = prepared.ms1_link.as_ref() else {
+        return;
+    };
+
+    // The targeted secondary search needs the enzyme only when it actually
+    // constrains cleavage; NoCleavage / NonSpecific carry no cleavage credit.
+    let enzyme = if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
+        Some(params.enzyme)
+    } else {
+        None
+    };
+
+    for (spec_idx, q) in queues.iter_mut().enumerate() {
+        if q.is_empty() {
+            continue;
+        }
+        let Some(spec) = spectra.get(spec_idx) else {
+            continue;
+        };
+
+        // Linked MS1 scan for this MS2 (most-recent preceding MS1).
+        let Some(Some(ms1_idx)) = link.ms2_to_ms1.get(spec_idx) else {
+            continue;
+        };
+        let Some(ms1) = link.ms1_peaks.get(*ms1_idx) else {
+            continue;
+        };
+
+        // Isolation window: prefer the per-scan offsets if the parser recorded
+        // them, else fall back to the configured chimeric half-width.
+        let lo = spec.precursor_mz
+            - spec
+                .isolation_lower_offset
+                .unwrap_or(params.chimeric_isolation_halfwidth_da);
+        let hi = spec.precursor_mz
+            + spec
+                .isolation_upper_offset
+                .unwrap_or(params.chimeric_isolation_halfwidth_da);
+
+        let tol = params
+            .precursor_tolerance
+            .left
+            .as_da(spec.precursor_mz)
+            .max(0.01);
+
+        let cos = crate::coisolation::detect_coisolated(
+            ms1,
+            lo,
+            hi,
+            spec.precursor_mz,
+            *params.charge_range.start()..=*params.charge_range.end(),
+            tol,
+            1.0,
+            2,
+        );
+        if cos.is_empty() {
+            continue;
+        }
+
+        // Primary peptide = the queue's best PSM (smallest SpecEValue).
+        let primary = match q.peek_top() {
+            Some(best) => {
+                prepared.candidates[best.primary_candidate_idx() as usize]
+                    .peptide
+                    .clone()
+            }
+            None => continue,
+        };
+
+        for co in cos {
+            if let Some(mut psm) = crate::coisolation::search_secondary(
+                spec,
+                &primary,
+                co,
+                &prepared.candidates,
+                &prepared.bucket_index,
+                prepared.scorer,
+                &prepared.aa_set_for_gf,
+                enzyme,
+                params,
+                prepared.idx,
+                prepared.fragment_tolerance_da,
+            ) {
+                psm.spectrum_idx = spec_idx;
+                q.push(psm);
+            }
+        }
+    }
+}
+
 /// Per-candidate cleavage credit, module-level mirror of the nested
 /// `compute_cleavage_credit` in `run_chunk_inner`. The chimeric cascade's
 /// `search_secondary` needs the SAME RawScore scale as the production candidate

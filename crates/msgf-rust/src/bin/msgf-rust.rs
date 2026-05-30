@@ -848,7 +848,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         // Single full-batch scoring pass (offset 0): spec_idx == global index,
         // matching Ms1Link::ms2_to_ms1 indexing exactly.
-        let queues = prepared.run_chunk(&chimeric_spectra, 0);
+        let mut queues = prepared.run_chunk(&chimeric_spectra, 0);
+        // Pass 2 (cascade P3): MS1-gated secondary search per scan. MUST run
+        // BEFORE peaks are dropped below — search_secondary needs the spectrum
+        // peaks to build the residual. No-op unless --chimeric (guarded inside).
+        search::match_engine::run_pass2_coisolation(
+            &prepared,
+            &chimeric_spectra,
+            &mut queues,
+            &params,
+        );
         all_queues.extend(queues);
         for mut spec in chimeric_spectra.into_iter() {
             spec.peaks = Vec::new();

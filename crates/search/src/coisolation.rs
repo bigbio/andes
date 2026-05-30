@@ -12,7 +12,7 @@
 
 use crate::candidate_gen::Candidate;
 use crate::chimeric_features::precursor_isotope_match;
-use crate::match_engine::{compute_spec_e_values_for_spectrum, matched_peak_keys};
+use crate::match_engine::compute_spec_e_values_for_spectrum;
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
@@ -21,7 +21,9 @@ use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
-use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
+use scoring_crate::scoring::{
+    predict_by_ions, psm_edge_score, score_psm, RankScorer, ScoredSpectrum,
+};
 use std::collections::BTreeMap;
 
 /// A co-isolated precursor detected in the MS1 isolation window.
@@ -119,6 +121,52 @@ pub(crate) fn detect_coisolated(
 /// `bucket_index` maps `nominal(peptide.mass() - H2O) -> candidate ids`, identical
 /// to `PreparedSearch.bucket_index` (built from `Peptide::nominal_residue_mass`).
 #[allow(clippy::too_many_arguments)]
+/// The set of raw observed MS2 peaks claimed by `peptide`'s charge-1 b/y ions,
+/// as quantized m/z keys (`round(mz·1000)`). Lightweight mirror of
+/// `match_engine::matched_peak_keys` that binary-searches the raw, m/z-sorted
+/// `spec.peaks` directly — NO `ScoredSpectrum` / deconvolution build. Used only
+/// by `search_secondary` to strip the primary's peaks before forming the
+/// residual; the residual is a heuristic, so picking a slightly different
+/// (non-deconvolved) peak in rare multi-charge cases is acceptable.
+///
+/// Mirrors `nearest_peak_full`'s **max-intensity** selection within the
+/// tolerance window (not nearest-by-m/z); the only difference is that raw peaks
+/// carry no rank array, so no peaks are filtered out.
+fn primary_matched_peak_keys(
+    spec: &Spectrum,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+) -> std::collections::HashSet<i64> {
+    let mut keys = std::collections::HashSet::new();
+    if peptide.length() < 2 {
+        return keys;
+    }
+    let predicted = predict_by_ions(peptide, 1..=1);
+    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
+    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
+    for p in &predicted {
+        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        let lo_mz = p.mz - tol_da;
+        let hi_mz = p.mz + tol_da;
+        // `spec.peaks` is sorted ascending by m/z (MGF/mzML readers guarantee
+        // this); binary-search the window start, then scan to `hi_mz`.
+        let start = spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
+        let mut best: Option<(f64, f32)> = None; // (peak_mz, intensity)
+        for &(mz, intensity) in &spec.peaks[start..] {
+            if mz > hi_mz {
+                break;
+            }
+            if best.is_none_or(|(_, best_int)| intensity > best_int) {
+                best = Some((mz, intensity));
+            }
+        }
+        if let Some((peak_mz, _)) = best {
+            keys.insert((peak_mz * 1000.0).round() as i64);
+        }
+    }
+    keys
+}
+
 pub(crate) fn search_secondary(
     spec: &Spectrum,
     primary: &Peptide,
@@ -145,8 +193,7 @@ pub(crate) fn search_secondary(
     //    precursor fields with `co`'s so the GF mass window (derived from the
     //    spectrum's precursor in `compute_spec_e_values_for_spectrum`) centers on
     //    the co-isolated mass rather than the primary mass (Bug-1 fix).
-    let full_ss = ScoredSpectrum::new(spec, scorer, z);
-    let claimed = matched_peak_keys(&full_ss, primary, scorer);
+    let claimed = primary_matched_peak_keys(spec, primary, scorer);
     let mut co_spec = spec.clone();
     co_spec
         .peaks

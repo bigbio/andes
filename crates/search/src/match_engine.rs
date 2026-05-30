@@ -36,7 +36,7 @@ use model::aa_set::AminoAcidSet;
 use input::Ms1Link;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
 use crate::chimeric_features::precursor_isotope_match;
-use crate::fragment_index;
+use crate::sage_index;
 use model::enzyme::Enzyme;
 use scoring_crate::gf::generating_function::GeneratingFunction;
 use scoring_crate::gf::group::GeneratingFunctionGroup;
@@ -85,10 +85,11 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
-    /// Fragment-evidence prefilter index. `Some` only when
-    /// `params.frag_index_active()`; `None` keeps the brute-force path (and the
-    /// entire `--chimeric off` / narrow path) bit-identical.
-    pub(crate) fragment_index: Option<fragment_index::FragmentIndex>,
+    /// Chimeric Sage-style candidate generator (Approach B). `Some` only when
+    /// `params.frag_index_active()`; supersedes `fragment_index` as the active
+    /// chimeric candidate generator. `None` keeps the brute-force / off path
+    /// (and the entire `--chimeric off` / narrow path) bit-identical.
+    pub(crate) sage_index: Option<sage_index::SageIndex>,
 }
 
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
@@ -214,24 +215,18 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
-        // Build the chimeric fragment-evidence prefilter index (only under
-        // `--chimeric` + frag-index active). `None` keeps the brute-force /
+        // Build the chimeric Sage-style candidate generator (Approach B; only
+        // under `--chimeric` + frag-index active). `None` keeps the brute-force /
         // off path bit-identical.
-        let fragment_index = if params.frag_index_active() {
-            // bin width ~ matching tolerance: high-res 0.02 Da, low-res 0.5 Da.
-            let bin_width = if scorer.param().data_type.instrument.is_high_resolution() {
-                0.02
-            } else {
-                0.5
-            };
-            let fi = fragment_index::FragmentIndex::build(&candidates, bin_width);
+        let sage_index = if params.frag_index_active() {
+            let si = sage_index::SageIndex::build(&candidates);
             eprintln!(
-                "FragmentIndex: {} candidates, {} fragment entries (~{} MB)",
+                "SageIndex: {} candidates, {} fragments (~{} MB)",
                 candidates.len(),
-                fi.n_entries(),
-                fi.n_entries() * 4 / 1_000_000
+                si.n_fragments(),
+                si.n_fragments() * 8 / 1_000_000
             );
-            Some(fi)
+            Some(si)
         } else {
             None
         };
@@ -245,7 +240,7 @@ impl<'a> PreparedSearch<'a> {
             bucket_index,
             aa_set_for_gf,
             ms1_link: None,
-            fragment_index,
+            sage_index,
         }
     }
 
@@ -298,9 +293,10 @@ impl<'a> PreparedSearch<'a> {
         let candidates = &self.candidates;
         let bucket_index = &self.bucket_index;
         let aa_set_for_gf = &self.aa_set_for_gf;
-        // Chimeric fragment-evidence prefilter index (Task 3). `Some` only under
-        // `--chimeric` + frag-index active; `None` keeps the off/brute path.
-        let fragment_index = self.fragment_index.as_ref();
+        // Chimeric Sage-style candidate generator (Approach B). `Some` only under
+        // `--chimeric` + frag-index active; supersedes `fragment_index`. `None`
+        // keeps the off/brute path bit-identical.
+        let sage_index = self.sage_index.as_ref();
         // Chimeric precursor-envelope MS1 linkage (Task 3). Only `Some` under
         // `--chimeric`; the off path leaves this `None` and the feature fill
         // below is a no-op, keeping the golden PIN/TSV bit-identical.
@@ -334,9 +330,8 @@ impl<'a> PreparedSearch<'a> {
         let queues: Vec<TopNQueue> = spectra
             .par_iter()
             .enumerate()
-            .map_init(
-                || Option::<fragment_index::FragmentVoter>::None,
-                |voter_slot, (local_idx, spec)| {
+            .map(
+                |(local_idx, spec)| {
                 let spec_idx = local_idx + spectrum_idx_offset;
                 let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
 
@@ -485,36 +480,51 @@ impl<'a> PreparedSearch<'a> {
             // fed into scoring shrinks; the scoring/emission path is unchanged.
             // When the index is `None` (off / narrow path), `cand_iter` is
             // exactly `window_cand_indices.clone()` — bit-identical to before.
-            let cand_iter: Vec<usize> = if let Some(fi) = fragment_index {
-                // The fragment index is `Some` only under `frag_index_active()`,
-                // which implies `params.chimeric` — so this branch is always the
-                // chimeric+frag-index path (no inner `params.chimeric` check needed).
+            let cand_iter: Vec<usize> = if let (Some(si), true) =
+                (sage_index, params.chimeric)
+            {
+                // Sage-style candidate generation (Approach B). `sage_index` is
+                // `Some` only under `frag_index_active()`, which implies
+                // `params.chimeric`; the explicit `params.chimeric` guard makes
+                // the precondition local to this branch.
                 //
-                // Active observed peaks for the spectrum's top charge. The voter
-                // ignores rank, but `top_k` takes `&[(u32, f64)]`, so we extract
-                // `(rank, mz)` in a single allocation (dropping intensity).
-                let z0 = charges_to_try[0];
-                let peaks: Vec<(u32, f64)> = scored_spec_for_charge(z0)
-                    .dump_active_peaks()
-                    .into_iter()
-                    .map(|(r, mz, _)| (r, mz))
-                    .collect();
-                // in-window membership: candidate idx present in
-                // window_cand_indices (sorted+deduped above → binary_search).
-                let in_window =
-                    |cid: u32| window_cand_indices.binary_search(&(cid as usize)).is_ok();
-                // Hoist the voter to one allocation per rayon worker thread: the
-                // `vec![0.0; candidates.len()]` (~56 MB at Astral scale) is built
-                // at most once per worker, not once per spectrum. The voter's
-                // internal `touched`-based reset handles per-spectrum cleanup.
-                let voter = voter_slot
-                    .get_or_insert_with(|| fragment_index::FragmentVoter::new(candidates.len()));
-                const TOP_K: usize = 64; // tuned in P4
-                voter
-                    .top_k(fi, &peaks, in_window, TOP_K)
-                    .into_iter()
-                    .map(|c| c as usize)
-                    .collect()
+                // `SageIndex::query` filters candidates by PEPTIDE NEUTRAL MASS
+                // (`peptide.mass()`, INCLUDING H2O). The brute path's
+                // `window_cand_indices` selects candidates whose
+                // `nominal(peptide.mass() - H2O)` is in
+                // `[min_nominal, max_nominal]` (the `bucket_index` key). To cover
+                // the SAME candidate set, convert the per-charge nominal bounds
+                // back to `peptide.mass()` bounds:
+                //   nominal = round(SCALER * residue_mass)
+                //   => residue_mass ∈ [(min_nominal - 0.5)/SCALER,
+                //                       (max_nominal + 0.5)/SCALER]
+                //   => peptide.mass() = residue_mass + H2O.
+                // We add an extra ±1 nominal-unit of slack (RECALL CORRECTNESS
+                // BEATS TIGHTNESS — a slightly wide window only adds a few cheap
+                // candidates; too narrow drops real PSMs).
+                const TOP_K: usize = 64;
+                const SCALER: f64 = model::mass::INTEGER_MASS_SCALER as f64;
+                let high_res = scorer.param().data_type.instrument.is_high_resolution();
+                let tol = if high_res { 0.02 } else { 0.5 };
+                let mut out: Vec<usize> = Vec::new();
+                for &z in &charges_to_try {
+                    let (min_nominal, max_nominal) =
+                        candidate_nominal_bounds(spec, z, params, shift_ppm);
+                    // nominal -> residue mass (Da), widened by ±1 nominal unit +
+                    // the 0.5-unit rounding half-step, then -> peptide.mass().
+                    let lo = (min_nominal as f64 - 1.5) / SCALER + H2O;
+                    let hi = (max_nominal as f64 + 1.5) / SCALER + H2O;
+                    let ss = scored_spec_for_charge(z);
+                    let peaks: Vec<f64> = ss
+                        .dump_active_peaks()
+                        .into_iter()
+                        .map(|(_, mz, _)| mz)
+                        .collect();
+                    out.extend(si.query(lo, hi, &peaks, tol, TOP_K).into_iter().map(|c| c as usize));
+                }
+                out.sort_unstable();
+                out.dedup();
+                out
             } else {
                 window_cand_indices.clone()
             };

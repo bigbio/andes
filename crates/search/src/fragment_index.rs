@@ -3,6 +3,12 @@
 //! `--chimeric`, so only candidates with real fragment evidence are scored.
 //!
 //! Task 3 wires the index into the chimeric hot path via `match_engine`.
+//!
+//! SUPERSEDED by `sage_index.rs` (Approach B): this Approach-A FragmentIndex /
+//! FragmentVoter is the failed algorithm and is no longer wired into the search
+//! (the `PreparedSearch.fragment_index` build is forced to `None`). Kept in the
+//! tree as a record per the plan; `dead_code` is allowed until it is removed.
+#![allow(dead_code)]
 
 use crate::candidate_gen::Candidate;
 use scoring_crate::scoring::fragment_ions::predict_by_ions;

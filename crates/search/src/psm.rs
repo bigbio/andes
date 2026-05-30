@@ -283,6 +283,14 @@ impl TopNQueue {
         }
     }
 
+    /// Add a PSM unconditionally, bypassing the capacity/eviction logic of `push`.
+    /// Used for chimeric Pass-2 secondary peptides, which are legitimate extra
+    /// emissions (a distinct co-isolated peptide on the same scan), NOT competitors
+    /// for the primary's top-N slot.
+    pub fn force_push(&mut self, m: PsmMatch) {
+        self.heap.push(Reverse(m));
+    }
+
     pub fn len(&self) -> usize { self.heap.len() }
     pub fn is_empty(&self) -> bool { self.heap.is_empty() }
 
@@ -479,6 +487,25 @@ mod tests {
             q.len(),
             3,
             "all three tied PSMs should be retained at capacity=1 (Java parity, R-1)"
+        );
+    }
+
+    #[test]
+    fn force_push_bypasses_capacity_eviction() {
+        // Chimeric Pass-2: a capacity-1 queue holds the primary (Pass 1, top-1).
+        // A Pass-2 secondary is a distinct co-isolated peptide, NOT a competitor
+        // for the primary's slot — force_push must ADD it without eviction.
+        let mut q = TopNQueue::new(1);
+        // Primary: best score. Secondary: strictly worse — `push` would drop it.
+        q.push(make_match(0, 100.0));
+        let mut secondary = make_match(0, 50.0);
+        secondary.candidate_idxs = vec![1]; // distinct peptide
+        q.force_push(secondary);
+        let drained = q.drain_into_vec();
+        assert_eq!(
+            drained.len(),
+            2,
+            "force_push must retain BOTH primary and secondary despite capacity=1"
         );
     }
 

@@ -1088,7 +1088,12 @@ pub fn run_pass2_coisolation(
                 prepared.fragment_tolerance_da,
             ) {
                 psm.spectrum_idx = spec_idx;
-                q.push(psm);
+                // Secondary is a distinct co-isolated peptide on this scan — a
+                // legitimate EXTRA emission, not a competitor for the primary's
+                // top-1 slot. force_push adds it WITHOUT capacity-based eviction
+                // (plain `push` on a capacity-1 queue would evict the primary or
+                // drop the secondary).
+                q.force_push(psm);
             }
         }
     });

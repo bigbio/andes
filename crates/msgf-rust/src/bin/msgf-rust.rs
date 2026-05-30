@@ -680,8 +680,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     // Two-pass cascade: Pass 1 emits the single best (top-1) primary peptide per
     // scan (NOT the blind multi-emission); the co-isolated secondary peptides come
-    // from Pass 2 (run_pass2_coisolation). So do NOT raise top-N under --chimeric.
-    params.top_n_psms_per_spectrum = cli.top_n;
+    // from Pass 2 (run_pass2_coisolation). So FORCE top-1 under --chimeric — the
+    // default top_n (10) would otherwise make Pass 1 emit the top-10 candidates per
+    // scan (blind multi-emission = inflated FDR).
+    params.top_n_psms_per_spectrum = if cli.chimeric { 1 } else { cli.top_n };
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,

@@ -845,22 +845,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
         prepared = prepared.with_ms1_link(Some(link));
 
-        // Pass-1 scoring in fixed-size sub-chunks (mirrors the streaming path's
-        // CHUNK_SIZE) instead of one giant batch — tests a chunk-size / cache-
-        // locality speed effect. The per-chunk `offset` is the global index of
-        // the chunk's first spectrum, so each emitted `PsmMatch::spectrum_idx`
-        // equals the global spectrum index (spec_idx == global index), exactly
-        // as the prior single `offset = 0` batch produced. `queues` is appended
-        // in order, so position i ↔ chimeric_spectra[i] and the downstream
-        // `run_pass2_coisolation` (which indexes `queues`/`spectra`/`ms2_to_ms1`
-        // by POSITION) stays aligned: each scan keeps its correct MS1 link.
-        const CASCADE_CHUNK: usize = 5000;
-        let mut queues: Vec<TopNQueue> = Vec::with_capacity(chimeric_spectra.len());
-        for (ci, chunk) in chimeric_spectra.chunks(CASCADE_CHUNK).enumerate() {
-            let offset = ci * CASCADE_CHUNK;
-            let mut part = prepared.run_chunk(chunk, offset);
-            queues.append(&mut part);
-        }
+        // Single full-batch scoring pass (offset 0): spec_idx == global index,
+        // matching Ms1Link::ms2_to_ms1 indexing exactly.
+        let mut queues = prepared.run_chunk(&chimeric_spectra, 0);
         // Pass 2 (cascade P3): MS1-gated secondary search per scan. MUST run
         // BEFORE peaks are dropped below — search_secondary needs the spectrum
         // peaks to build the residual. No-op unless --chimeric (guarded inside).

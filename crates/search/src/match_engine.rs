@@ -967,7 +967,7 @@ pub fn match_spectra(
 /// * `search_index` — database (target+decoy); used to look up protein sequences
 ///   for protein-terminal flag derivation.
 #[allow(clippy::too_many_arguments)]
-fn compute_spec_e_values_for_spectrum(
+pub(crate) fn compute_spec_e_values_for_spectrum(
     spec: &Spectrum,
     params: &SearchParams,
     queue: &mut TopNQueue,
@@ -1182,7 +1182,7 @@ fn compute_spec_e_values_for_spectrum(
 /// charge-1 b/y ions, as quantized m/z keys (round(mz·1000)). Mirrors the
 /// matching in `compute_psm_features`. Used only by the env-gated chimeric
 /// fragment-overlap diagnostic; not on any production path.
-fn matched_peak_keys(
+pub(crate) fn matched_peak_keys(
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
     scorer: &RankScorer,

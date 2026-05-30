@@ -502,10 +502,16 @@ impl<'a> PreparedSearch<'a> {
                 // We add an extra ±1 nominal-unit of slack (RECALL CORRECTNESS
                 // BEATS TIGHTNESS — a slightly wide window only adds a few cheap
                 // candidates; too narrow drops real PSMs).
-                const TOP_K: usize = 64;
+                // Recall/speed tradeoff knob — tuned at the PXD/Astral gates.
+                // Higher = more candidates survive the prefilter (safer recall),
+                // at some query cost; the sage_index microbenchmark showed ~3.4×
+                // headroom, so 128 trades a little speed for recall safety.
+                const TOP_K: usize = 128;
                 const SCALER: f64 = model::mass::INTEGER_MASS_SCALER as f64;
                 let high_res = scorer.param().data_type.instrument.is_high_resolution();
-                let tol = if high_res { 0.02 } else { 0.5 };
+                // prefilter tol = superset of the scorer's 20ppm/0.5Da matching
+                // window — err wide; the exact GF scorer does real matching.
+                let tol = if high_res { 0.05 } else { 0.5 };
                 let mut out: Vec<usize> = Vec::new();
                 for &z in &charges_to_try {
                     let (min_nominal, max_nominal) =

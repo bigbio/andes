@@ -1016,20 +1016,20 @@ pub fn run_pass2_coisolation(
         None
     };
 
-    for (spec_idx, q) in queues.iter_mut().enumerate() {
+    queues.par_iter_mut().enumerate().for_each(|(spec_idx, q)| {
         if q.is_empty() {
-            continue;
+            return;
         }
         let Some(spec) = spectra.get(spec_idx) else {
-            continue;
+            return;
         };
 
         // Linked MS1 scan for this MS2 (most-recent preceding MS1).
         let Some(Some(ms1_idx)) = link.ms2_to_ms1.get(spec_idx) else {
-            continue;
+            return;
         };
         let Some(ms1) = link.ms1_peaks.get(*ms1_idx) else {
-            continue;
+            return;
         };
 
         // Isolation window: prefer the per-scan offsets if the parser recorded
@@ -1060,7 +1060,7 @@ pub fn run_pass2_coisolation(
             2,
         );
         if cos.is_empty() {
-            continue;
+            return;
         }
 
         // Primary peptide = the queue's best PSM (smallest SpecEValue).
@@ -1070,7 +1070,7 @@ pub fn run_pass2_coisolation(
                     .peptide
                     .clone()
             }
-            None => continue,
+            None => return,
         };
 
         for co in cos {
@@ -1091,7 +1091,7 @@ pub fn run_pass2_coisolation(
                 q.push(psm);
             }
         }
-    }
+    });
 }
 
 /// Per-candidate cleavage credit, module-level mirror of the nested

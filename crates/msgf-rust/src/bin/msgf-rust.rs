@@ -28,7 +28,7 @@ use search::{
 };
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use search::search_params::FragIndexMode;
-use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
+use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
 
 /// Fragmentation method. `Auto` means "detect from the mzML's activation block;
 /// fall back to the bundled HCD_QExactive_Tryp.param if nothing detected" —
@@ -738,6 +738,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let ms_level_u32 = cli.ms_level as u32;
 
+    // Chimeric cascade reads ALL MS2 + MS1 up front (`read_with_ms1`) so Pass 2
+    // can detect co-isolated precursors. That ~20s read is independent of the
+    // SearchIndex build, the candidate enumeration, and the calibration pre-pass,
+    // so kick it off on a background thread NOW and join it only when Pass 2
+    // needs the spectra — fully overlapping it with the ~50s of cal+enumerate
+    // work that would otherwise block it (saves ~20s wall on Astral).
+    let chimeric_read_handle = if cli.chimeric && is_mzml {
+        let spectrum_path = cli.spectrum.clone();
+        let cap = bench_cap;
+        let mslevel = ms_level_u32;
+        let t_bg = std::time::Instant::now();
+        Some(std::thread::spawn(
+            move || -> std::io::Result<(Vec<Spectrum>, Ms1Link)> {
+                let f = File::open(&spectrum_path)?;
+                let (mut spectra, link) = MzMLReader::new(BufReader::new(f))
+                    .with_ms_level_range(mslevel, mslevel)
+                    .with_ms1_capture(true)
+                    .read_with_ms1()?;
+                if cap < spectra.len() {
+                    spectra.truncate(cap);
+                }
+                eprintln!(
+                    "[CASCADE_PHASE bg_read_with_ms1: {:.2}s (overlapped)]",
+                    t_bg.elapsed().as_secs_f64()
+                );
+                Ok((spectra, link))
+            },
+        ))
+    } else {
+        None
+    };
+
     // Calibration pre-pass. The candidate enumeration is precursor-tolerance
     // independent, so we keep the cal pass's enumerated `PreparedParts` and
     // reuse them for the main pass instead of re-enumerating all 16.8M
@@ -860,13 +892,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let chimeric_mzml = cli.chimeric && is_mzml;
     let parse_stats = if chimeric_mzml {
         let _t_read = std::time::Instant::now();
-        let f = File::open(&cli.spectrum).map_err(|e| format!("open mzML: {e}"))?;
-        let (mut chimeric_spectra, link) = MzMLReader::new(BufReader::new(f))
-            .with_ms_level_range(ms_level_u32, ms_level_u32)
-            .with_ms1_capture(true)
-            .read_with_ms1()
+        let (mut chimeric_spectra, link) = chimeric_read_handle
+            .expect("chimeric_read_handle is spawned whenever chimeric_mzml is true")
+            .join()
+            .map_err(|_| "chimeric MS1-capture read thread panicked".to_string())?
             .map_err(|e| format!("read mzML with MS1 capture: {e}"))?;
-        eprintln!("[CASCADE_PHASE read_with_ms1: {:.2}s]", _t_read.elapsed().as_secs_f64());
+        eprintln!("[CASCADE_PHASE read_with_ms1(join): {:.2}s]", _t_read.elapsed().as_secs_f64());
         if bench_cap < chimeric_spectra.len() {
             chimeric_spectra.truncate(bench_cap);
         }

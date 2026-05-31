@@ -683,7 +683,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // from Pass 2 (run_pass2_coisolation). So FORCE top-1 under --chimeric — the
     // default top_n (10) would otherwise make Pass 1 emit the top-10 candidates per
     // scan (blind multi-emission = inflated FDR).
-    params.top_n_psms_per_spectrum = if cli.chimeric { 1 } else { cli.top_n };
+    //
+    // Gate on `is_mzml`: the cascade (Pass 2 co-isolation) requires MS1 scans,
+    // which only the mzML reader captures. With a non-mzML input (MGF) there is no
+    // Pass 2, so forcing top-1 would silently degrade the search to a single match
+    // per scan with NO chimeric recovery. Fall back to the normal `top_n` and warn.
+    let chimeric_active = cli.chimeric && is_mzml;
+    if cli.chimeric && !is_mzml {
+        eprintln!(
+            "WARN: --chimeric requires MS1 data (mzML); the input is not mzML, so the \
+             co-isolation cascade is disabled and the search runs normally."
+        );
+    }
+    params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,

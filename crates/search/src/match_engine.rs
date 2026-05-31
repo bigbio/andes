@@ -1036,25 +1036,26 @@ pub fn match_spectra(
 /// second-peptide GF search at each co-isolated mass; any secondary PSM is pushed
 /// into the same queue as an extra PIN row.
 ///
-/// Off-path bit-identity: no-op when `params.chimeric` is false OR
-/// `prepared.ms1_link` is `None` (the default non-chimeric path).
+/// Off-path bit-identity: no-op when `params.chimeric` is false.
 ///
-/// `spectra` must be the SAME slice (SAME order) that produced `queues`, with
-/// peaks still present (`ms1_link.ms2_to_ms1` indexes by MS2 position). Call
-/// BEFORE peaks are dropped.
+/// `spectra`, `queues`, and `link` are a single CHUNK (the streaming chimeric
+/// path scores one chunk at a time): `spectra[i]` ↔ `queues[i]` ↔
+/// `link.ms2_to_ms1[i]`, all chunk-local. `offset` is the chunk's global start
+/// index, added to each emitted secondary's `spectrum_idx` so it aligns with the
+/// accumulated `all_spectra`. Peaks must still be present (the residual needs
+/// them) — call BEFORE peaks are dropped.
 pub fn run_pass2_coisolation(
     prepared: &PreparedSearch,
     spectra: &[Spectrum],
     queues: &mut [TopNQueue],
     params: &SearchParams,
+    link: &Ms1Link,
+    offset: usize,
 ) {
     // Bit-identical guard: no chimeric mode → no-op.
     if !params.chimeric {
         return;
     }
-    let Some(link) = prepared.ms1_link.as_ref() else {
-        return;
-    };
 
     // The targeted secondary search needs the enzyme only when it actually
     // constrains cleavage; NoCleavage / NonSpecific carry no cleavage credit.
@@ -1137,7 +1138,9 @@ pub fn run_pass2_coisolation(
                 prepared.idx,
                 prepared.fragment_tolerance_da,
             ) {
-                psm.spectrum_idx = spec_idx;
+                // `spec_idx` is chunk-local (indexes `spectra` + `link`); the
+                // emitted spectrum_idx must be global to align with `all_spectra`.
+                psm.spectrum_idx = offset + spec_idx;
                 // Distinct co-isolated peptide — a legitimate EXTRA emission, not a
                 // competitor for the primary's slot. force_push skips capacity-based
                 // eviction (plain `push` at capacity 1 would evict the primary or

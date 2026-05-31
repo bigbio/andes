@@ -740,8 +740,13 @@ impl<R: BufRead> MzMLReader<R> {
                     spectra.push(s);
                 }
                 Ok(None) => break,
-                Err(e) => {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+                Err(_e) => {
+                    // Tolerant: a single malformed spectrum must not abort the whole
+                    // run. Stop streaming and return the spectra parsed so far
+                    // (mirrors the MS2-only streaming path, which counts the error
+                    // and proceeds). Production chimeric runs use the chunked
+                    // variant, which also reports the error count.
+                    break;
                 }
             }
         }
@@ -751,6 +756,99 @@ impl<R: BufRead> MzMLReader<R> {
             ms2_to_ms1,
         };
         Ok((spectra, link))
+    }
+
+    /// Streaming, bounded-memory, tolerant variant of [`Self::read_with_ms1`] for
+    /// the chimeric cascade.
+    ///
+    /// Calls `on_chunk(ms2_spectra, ms1_link)` for each batch of up to
+    /// `chunk_size` MS2 spectra, where `ms1_link` covers ONLY that chunk. RSS
+    /// stays bounded by the chunk size: at most the MS1 scans referenced by the
+    /// in-flight chunk are retained, never the whole file (each MS2 links to its
+    /// most-recent preceding MS1, so only that carry-over scan crosses a chunk
+    /// boundary). Stops after `cap` total MS2 (`usize::MAX` = unbounded).
+    ///
+    /// Tolerant: a malformed spectrum does NOT abort the run. The first parse
+    /// error stops streaming and the successfully-parsed spectra so far are still
+    /// delivered (mirroring the MS2-only streaming path); the error count and the
+    /// first few messages are returned for reporting.
+    pub fn read_with_ms1_chunked<F>(
+        mut self,
+        chunk_size: usize,
+        cap: usize,
+        mut on_chunk: F,
+    ) -> (usize, Vec<String>)
+    where
+        F: FnMut(Vec<Spectrum>, Ms1Link),
+    {
+        self.capture_ms1 = true;
+        self.ms_level_min = 1; // let MS1 reach the capture hook; output stays MS2-only
+
+        let mut err_count = 0usize;
+        let mut first_errors: Vec<String> = Vec::new();
+        let mut total = 0usize;
+
+        let mut chunk: Vec<Spectrum> = Vec::with_capacity(chunk_size);
+        let mut chunk_ms1: Vec<Vec<(f64, f32)>> = Vec::new();
+        let mut links: Vec<Option<usize>> = Vec::with_capacity(chunk_size);
+        // Most-recent MS1 peaks, carried across chunk boundaries. `carry_in_chunk`
+        // is its index within the CURRENT `chunk_ms1`, or `None` until copied in.
+        let mut carry: Option<Vec<(f64, f32)>> = None;
+        let mut carry_in_chunk: Option<usize> = None;
+
+        loop {
+            if total >= cap {
+                break;
+            }
+            match self.pump() {
+                Ok(Some(ms2)) => {
+                    // A newer MS1 was captured since the last MS2: adopt the most
+                    // recent as the carry and clear the reader's buffer to bound RSS.
+                    if self.latest_ms1_idx.is_some() {
+                        carry = self.captured_ms1.pop(); // newest; older ones unreferenced
+                        self.captured_ms1.clear();
+                        self.latest_ms1_idx = None;
+                        carry_in_chunk = None;
+                    }
+                    let link = if carry.is_some() {
+                        if carry_in_chunk.is_none() {
+                            chunk_ms1.push(carry.clone().expect("carry is Some"));
+                            carry_in_chunk = Some(chunk_ms1.len() - 1);
+                        }
+                        carry_in_chunk
+                    } else {
+                        None
+                    };
+                    chunk.push(ms2);
+                    links.push(link);
+                    total += 1;
+
+                    if chunk.len() >= chunk_size {
+                        on_chunk(
+                            std::mem::take(&mut chunk),
+                            Ms1Link { ms1_peaks: std::mem::take(&mut chunk_ms1), ms2_to_ms1: std::mem::take(&mut links) },
+                        );
+                        chunk = Vec::with_capacity(chunk_size);
+                        chunk_ms1 = Vec::new();
+                        links = Vec::with_capacity(chunk_size);
+                        carry_in_chunk = None; // re-copy carry into the next chunk on demand
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    err_count += 1;
+                    if first_errors.len() < 3 {
+                        first_errors.push(format!("{e}"));
+                    }
+                    break; // tolerant: deliver what parsed so far instead of aborting
+                }
+            }
+        }
+
+        if !chunk.is_empty() {
+            on_chunk(chunk, Ms1Link { ms1_peaks: chunk_ms1, ms2_to_ms1: links });
+        }
+        (err_count, first_errors)
     }
 }
 
@@ -2063,6 +2161,90 @@ mod tests {
 
         // Both MS2 link to MS1 index 0.
         assert_eq!(link.ms2_to_ms1, vec![Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn chunked_ms1_linkage_matches_batch_across_boundaries() {
+        // Layout exercising both an MS1 carry-over across a chunk boundary and a
+        // new MS1 mid-chunk:  MS1#a, MS2_1, MS2_2, MS2_3, MS1#b, MS2_4.
+        // With chunk_size=2: chunk1=[1,2]→a; chunk2=[3,4] where 3 carries over a
+        // and 4 links to the new b.
+        let ms1a = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="2">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan/></scanList>
+              <binaryDataArrayList count="2">{mz}{int}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[111.0, 222.0])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[10.0, 20.0])),
+        );
+        let ms1b = format!(
+            r#"<spectrum index="4" id="scan=5" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan/></scanList>
+              <binaryDataArrayList count="2">{mz}{int}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[333.0])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[30.0])),
+        );
+        let mk_ms2 = |id: &str, mz: f64| {
+            ms2_spectrum_xml(
+                id,
+                &bda_plain("MS:1000514", &encode_f64_b64(&[mz])),
+                &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+                mz + 50.0,
+                Some(2),
+            )
+        };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml"><run><spectrumList count="6" defaultDataProcessingRef="dp">
+{a}{m1}{m2}{m3}{b}{m4}
+</spectrumList></run></mzML>"#,
+            a = ms1a,
+            m1 = mk_ms2("scan=2", 300.0),
+            m2 = mk_ms2("scan=3", 400.0),
+            m3 = mk_ms2("scan=4", 410.0),
+            b = ms1b,
+            m4 = mk_ms2("scan=6", 600.0),
+        );
+
+        // Batch reference: resolve each MS2 to its MS1 peak list.
+        let (b_spectra, b_link) = MzMLReader::new(Cursor::new(xml.clone()))
+            .with_ms1_capture(true)
+            .read_with_ms1()
+            .expect("batch read");
+        let batch_resolved: Vec<Option<&Vec<(f64, f32)>>> = b_link
+            .ms2_to_ms1
+            .iter()
+            .map(|o| o.map(|i| &b_link.ms1_peaks[i]))
+            .collect();
+
+        // Chunked read with a small chunk size → multiple chunks + carry-over.
+        let mut chunked_spectra: Vec<Spectrum> = Vec::new();
+        let mut chunked_resolved: Vec<Option<Vec<(f64, f32)>>> = Vec::new();
+        let (errc, _errs) = MzMLReader::new(Cursor::new(xml))
+            .with_ms1_capture(true)
+            .read_with_ms1_chunked(2, usize::MAX, |chunk, link| {
+                for (i, s) in chunk.into_iter().enumerate() {
+                    chunked_resolved.push(link.ms2_to_ms1[i].map(|j| link.ms1_peaks[j].clone()));
+                    chunked_spectra.push(s);
+                }
+            });
+
+        assert_eq!(errc, 0, "clean input → no parse errors");
+        assert_eq!(chunked_spectra.len(), b_spectra.len(), "same MS2 count as batch");
+        assert_eq!(chunked_resolved.len(), batch_resolved.len());
+        for (i, (cr, br)) in chunked_resolved.iter().zip(batch_resolved.iter()).enumerate() {
+            match (cr, br) {
+                (Some(c), Some(b)) => assert_eq!(c, *b, "MS2 #{i} linked to a different MS1 than batch"),
+                (None, None) => {}
+                _ => panic!("MS2 #{i} linkage presence differs from batch: {cr:?} vs {br:?}"),
+            }
+        }
+        // Sanity: MS2 #2 (chunk-2 first) carried over MS1#a; MS2 #3 linked to MS1#b.
+        assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
+        assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
     }
 
     /// An MS2 that appears BEFORE any MS1 links to `None`.

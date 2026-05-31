@@ -749,31 +749,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let ms_level_u32 = cli.ms_level as u32;
 
-    // Chimeric cascade reads ALL MS2 + MS1 up front (`read_with_ms1`) for Pass 2.
-    // That ~20s read is independent of the cal+enumerate work, so run it on a
-    // background thread and join only when Pass 2 needs the spectra (saves ~20s
-    // wall on Astral).
-    let chimeric_read_handle = if cli.chimeric && is_mzml {
-        let spectrum_path = cli.spectrum.clone();
-        let cap = bench_cap;
-        let mslevel = ms_level_u32;
-        Some(std::thread::spawn(
-            move || -> std::io::Result<(Vec<Spectrum>, Ms1Link)> {
-                let f = File::open(&spectrum_path)?;
-                let (mut spectra, link) = MzMLReader::new(BufReader::new(f))
-                    .with_ms_level_range(mslevel, mslevel)
-                    .with_ms1_capture(true)
-                    .read_with_ms1()?;
-                if cap < spectra.len() {
-                    spectra.truncate(cap);
-                }
-                Ok((spectra, link))
-            },
-        ))
-    } else {
-        None
-    };
-
     // Calibration pre-pass. Candidate enumeration is precursor-tolerance
     // independent, so keep the cal pass's `PreparedParts` and reuse them for the
     // main pass instead of re-enumerating all 16.8M candidates (~15s saved on
@@ -822,7 +797,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let mut prepared = match reuse_parts {
+    let prepared = match reuse_parts {
         Some(parts) => {
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
@@ -864,45 +839,62 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted; // silenced — unused for now.
 
-    // Under `--chimeric` on mzML, take the BATCH read path (`read_with_ms1`) so
-    // MS1 scans are captured and each MS2 is linked to its preceding MS1. The
-    // streaming pipeline below handles the (default) non-chimeric path unchanged.
+    // Under `--chimeric` on mzML, stream MS2 in CHUNK_SIZE batches, each paired
+    // with a bounded per-chunk MS1 link (`read_with_ms1_chunked`). Pass 1 + Pass 2
+    // run per chunk on this thread and peaks are dropped immediately, so RSS stays
+    // bounded to ~CHUNK_SIZE spectra (NOT the whole file). The parser runs on a
+    // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
+    // pipeline in the `else` branch handles the (default) non-chimeric path.
     let chimeric_mzml = cli.chimeric && is_mzml;
     let parse_stats = if chimeric_mzml {
-        let (mut chimeric_spectra, link) = chimeric_read_handle
-            .expect("chimeric_read_handle is spawned whenever chimeric_mzml is true")
-            .join()
-            .map_err(|_| "chimeric MS1-capture read thread panicked".to_string())?
-            .map_err(|e| format!("read mzML with MS1 capture: {e}"))?;
-        if bench_cap < chimeric_spectra.len() {
-            chimeric_spectra.truncate(bench_cap);
-        }
-        eprintln!(
-            "chimeric mode: batch-read {} MS2 spectra + {} MS1 scans for precursor isotope features",
-            chimeric_spectra.len(),
-            link.ms1_peaks.len(),
-        );
-        prepared = prepared.with_ms1_link(Some(link));
+        let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
+        let spectrum_path = cli.spectrum.clone();
+        let cap = bench_cap;
+        let mslevel = ms_level_u32;
+        let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
+            let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
+            let reader = MzMLReader::new(BufReader::new(f))
+                .with_ms_level_range(mslevel, mslevel)
+                .with_ms1_capture(true);
+            let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                // If the consumer hung up, sending fails; nothing more to do.
+                let _ = tx.send((chunk, link));
+            });
+            Ok((errc, errs))
+        });
 
-        // Single full-batch scoring pass (offset 0) so spec_idx == global index,
-        // matching Ms1Link::ms2_to_ms1 indexing.
-        let mut queues = prepared.run_chunk(&chimeric_spectra, 0);
-        // Pass 2: MS1-gated secondary search. MUST run BEFORE peaks are dropped
-        // below — search_secondary needs the spectrum peaks for the residual.
-        search::match_engine::run_pass2_coisolation(
-            &prepared,
-            &chimeric_spectra,
-            &mut queues,
-            &params,
-        );
-        all_queues.extend(queues);
-        for mut spec in chimeric_spectra.into_iter() {
-            spec.peaks = Vec::new();
-            all_spectra.push(spec);
+        let mut offset = 0usize;
+        let mut ms1_linked = 0usize;
+        for (chunk_spectra, chunk_link) in rx {
+            // Pass 1 (offset → global spectrum_idx for PIN), then Pass 2 on the same
+            // chunk (BEFORE peaks are dropped — the residual needs them). The chunk's
+            // own `Ms1Link` and `offset` keep chunk-local indexing aligned.
+            let mut queues = prepared.run_chunk(&chunk_spectra, offset);
+            search::match_engine::run_pass2_coisolation(
+                &prepared,
+                &chunk_spectra,
+                &mut queues,
+                &params,
+                &chunk_link,
+                offset,
+            );
+            offset += chunk_spectra.len();
+            ms1_linked += chunk_link.ms1_peaks.len();
+            all_queues.extend(queues);
+            for mut spec in chunk_spectra.into_iter() {
+                spec.peaks = Vec::new();
+                all_spectra.push(spec);
+            }
         }
-        log_rss("after_chimeric_batch_search");
-        // No streaming parser thread on this path → no parse errors recorded.
-        ParseStats::default()
+        let (err_count, first_errors) = parser_handle
+            .join()
+            .map_err(|_| "chimeric parser thread panicked".to_string())??;
+        eprintln!(
+            "chimeric mode: streamed {} MS2 spectra ({} MS1 scans linked) in chunks of {}",
+            offset, ms1_linked, CHUNK_SIZE
+        );
+        log_rss("after_chimeric_stream_search");
+        ParseStats { error_count: err_count, first_errors }
     } else {
         // ── Non-chimeric streaming pipeline (UNCHANGED) ───────────────────
         let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);

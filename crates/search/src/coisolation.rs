@@ -8,6 +8,7 @@
 use crate::candidate_gen::Candidate;
 use crate::chimeric_features::precursor_isotope_match;
 use crate::match_engine::compute_spec_e_values_for_spectrum;
+use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
@@ -189,17 +190,26 @@ pub(crate) fn search_secondary(
 
     // 2. Candidates within precursor tol of the co-isolated neutral mass. Nominal
     //    bucket key matches PreparedSearch: `nominal_from(mass - H2O)`.
+    //
+    //    Apply the learned precursor calibration shift to the co-isolated neutral
+    //    mass FIRST, so the candidate prefilter and reported mass error use the same
+    //    calibrated scale as the rest of the search (`matches_precursor` /
+    //    `candidate_nominal_bounds`). Without this, a non-zero `--precursor-cal`
+    //    shift would exclude the true secondary before GF scoring. The GF below
+    //    derives its own window from `co_spec`'s raw precursor m/z and applies the
+    //    shift internally, so it stays consistent.
+    let co_neutral = adjusted_observed_neutral_mass(co.neutral_mass, params.precursor_mass_shift_ppm);
     let nominal = |m: f64| nominal_from(m - H2O);
-    let tol = params.precursor_tolerance.left.as_da(co.neutral_mass).max(0.01);
-    let lo = nominal(co.neutral_mass - tol) - 1;
-    let hi = nominal(co.neutral_mass + tol) + 1;
+    let tol = params.precursor_tolerance.left.as_da(co_neutral).max(0.01);
+    let lo = nominal(co_neutral - tol) - 1;
+    let hi = nominal(co_neutral + tol) + 1;
 
     let mut queue = TopNQueue::new(1);
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
         for &ci in idxs {
             let cand = &candidates[ci];
             // Exact-mass gate (the nominal range is integer-coarse).
-            if (cand.peptide.mass() - co.neutral_mass).abs() > tol {
+            if (cand.peptide.mass() - co_neutral).abs() > tol {
                 continue;
             }
             let pin = score_psm(&res_ss, &cand.peptide, scorer, z, fragment_tolerance_da);
@@ -210,7 +220,7 @@ pub(crate) fn search_secondary(
                 spectrum_idx: 0,
                 candidate_idxs: vec![ci as u32],
                 charge_used: z,
-                mass_error_ppm: (cand.peptide.mass() - co.neutral_mass) / co.neutral_mass * 1e6,
+                mass_error_ppm: (cand.peptide.mass() - co_neutral) / co_neutral * 1e6,
                 score: pin + cleavage as f32,
                 rank_score: pin + cleavage as f32 + edge as f32,
                 edge_score: edge,
@@ -479,6 +489,75 @@ mod tests {
             psm.spec_e_value < 1.0,
             "secondary PSM SpecEValue must be a real probability < 1.0, got {}",
             psm.spec_e_value
+        );
+    }
+
+    #[test]
+    fn secondary_search_applies_precursor_calibration_shift() {
+        // Regression for the Pass-2 calibration bug: the co-isolated neutral mass
+        // derived from the raw MS1 m/z must be calibration-adjusted before the
+        // candidate prefilter, exactly like the main search. Here the MS1
+        // observation is biased high by a known ppm shift; with the shift applied,
+        // the planted peptide is recovered and its reported error is ~0. Without
+        // the fix the prefilter would search the biased mass and either drop the
+        // peptide or report a ~`shift_ppm` error.
+        let shift_ppm = 30.0_f64; // exaggerated vs a real ~1 ppm shift, to be decisive
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKWVTFISLLRKDAFLGSFLYEYSRK".to_vec(),
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.precursor_mass_shift_ppm = shift_ppm;
+        let scorer = tiny_scorer();
+        let frag_tol = 0.02_f64;
+        let prepared = PreparedSearch::prepare(&idx, &params, &scorer, frag_tol, "XXX");
+
+        let planted = peptide(b"DAFLGSFLYEYSR", b'K', b'K');
+        let z = 2u8;
+        // Raw observed mass biased high by `shift_ppm` (so adjusted == true mass).
+        let true_mass = planted.mass();
+        let raw_neutral = true_mass / (1.0 - shift_ppm * 1e-6);
+        let co_mz = (raw_neutral + z as f64 * PROTON) / z as f64;
+        let co = CoIsolated { mono_mz: co_mz, charge: z, neutral_mass: raw_neutral };
+
+        let mut peaks: Vec<(f64, f32)> = predict_by_ions(&planted, 1..=1)
+            .into_iter()
+            .map(|p| (p.mz, 100.0_f32))
+            .collect();
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let primary = peptide(b"WVTFISLLR", b'K', b'K');
+        let prim_mz = (primary.mass() + z as f64 * PROTON) / z as f64;
+        let spec = Spectrum {
+            title: "chimeric-cal".into(),
+            precursor_mz: prim_mz,
+            precursor_intensity: None,
+            precursor_charge: Some(z as i32),
+            rt_seconds: None,
+            scan: None,
+            peaks,
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+
+        let got = search_secondary(
+            &spec, &primary, co, &prepared.candidates, &prepared.bucket_index, &scorer,
+            &prepared.aa_set_for_gf, Some(params.enzyme), &params, &idx, frag_tol,
+        );
+        let psm = got.expect("secondary must be found at the calibration-adjusted mass");
+        let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;
+        assert_eq!(found.residues, planted.residues, "should resolve to the planted peptide");
+        // The candidate matches the ADJUSTED mass, so the reported error is ~0,
+        // not ~-30 ppm (which is what the un-calibrated raw mass would report).
+        assert!(
+            psm.mass_error_ppm.abs() < 5.0,
+            "mass error must be reported on the calibrated scale (~0), got {} ppm",
+            psm.mass_error_ppm
         );
     }
 }

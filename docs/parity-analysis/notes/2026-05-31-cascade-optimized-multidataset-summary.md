@@ -94,5 +94,7 @@ By the entrapment ruler (more-real-PSMs + lower-FDP on BOTH datasets), A/B is a 
 improvement and more honest. The Astral gain is large (+4,362 real PSMs, FDP 1.54→1.13)
 because Astral is secondary-rich; the PXD normal-DB −632 is reduced *false* inflation
 (entrapment real rises while FDP falls). Both still beat Java decisively (Astral +63.7%,
-PXD +17.2% on normal @1%). TMT A/B verification pending (TMT has ~no co-isolation —
-Pass-2 2.66s — so it is expected ~unchanged at 9,628; to confirm when the VM is back).
+PXD +17.2% on normal @1%). TMT A/B confirmed: 9,706 (was 9,628, +78 — the few TMT
+secondaries now carry proper features; still −4.8% vs Java 10,194, the lone blocker).
+No regression on any dataset; A/B is a strict improvement (more real PSMs + lower FDP
+everywhere).

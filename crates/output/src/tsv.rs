@@ -175,8 +175,12 @@ fn write_psm_row<W: Write>(
         .map(|m| m.name().to_string())
         .unwrap_or_else(|| "UNKNOWN".to_string());
 
-    // Precursor m/z formatted to 4 decimal places
-    let precursor = format!("{:.4}", spec.precursor_mz);
+    // Precursor m/z. For chimeric Pass-2 secondaries this is the co-isolated
+    // precursor's m/z (`precursor_mz_override`), NOT the scan's selected/primary
+    // m/z; `None` (every ordinary PSM) falls back to the spectrum's precursor m/z
+    // so the non-secondary path is byte-identical. Mirrors `pin.rs::write_psm_row`.
+    let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+    let precursor = format!("{:.4}", precursor_mz);
 
     // IsotopeError: winning isotope offset from the search (matches PIN column).
     let isotope_error: i32 = psm.isotope_offset as i32;
@@ -185,8 +189,8 @@ fn write_psm_row<W: Write>(
     let precursor_error = if ppm_mode {
         format!("{:.4}", psm.mass_error_ppm)
     } else {
-        // Convert ppm error back to Da using precursor_mz
-        let da = psm.mass_error_ppm * 1e-6 * spec.precursor_mz;
+        // Convert ppm error back to Da using the (override-aware) precursor m/z
+        let da = psm.mass_error_ppm * 1e-6 * precursor_mz;
         format!("{:.4}", da)
     };
 

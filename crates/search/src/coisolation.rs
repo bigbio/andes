@@ -112,15 +112,6 @@ pub(crate) fn detect_coisolated(
     out
 }
 
-/// Best secondary PSM for `co` on `spec`, after removing the primary peptide's
-/// matched charge-1 b/y peaks (residual spectrum). Scores ONLY candidates within
-/// `params.precursor_tolerance` of `co.neutral_mass` (the candidate-count cut that
-/// makes the chimeric cascade cheap), then runs ONE targeted GF SpecEValue DP on
-/// the residual. Returns `None` if no candidate clears scoring.
-///
-/// `bucket_index` maps `nominal(peptide.mass() - H2O) -> candidate ids`, identical
-/// to `PreparedSearch.bucket_index` (built from `Peptide::nominal_residue_mass`).
-#[allow(clippy::too_many_arguments)]
 /// The set of raw observed MS2 peaks claimed by `peptide`'s charge-1 b/y ions,
 /// as quantized m/z keys (`round(mz·1000)`). Lightweight mirror of
 /// `match_engine::matched_peak_keys` that binary-searches the raw, m/z-sorted
@@ -167,6 +158,15 @@ fn primary_matched_peak_keys(
     keys
 }
 
+/// Best secondary PSM for `co` on `spec`, after removing the primary peptide's
+/// matched charge-1 b/y peaks (residual spectrum). Scores ONLY candidates within
+/// `params.precursor_tolerance` of `co.neutral_mass` (the candidate-count cut that
+/// makes the chimeric cascade cheap), then runs ONE targeted GF SpecEValue DP on
+/// the residual. Returns `None` if no candidate clears scoring.
+///
+/// `bucket_index` maps `nominal(peptide.mass() - H2O) -> candidate ids`, identical
+/// to `PreparedSearch.bucket_index` (built from `Peptide::nominal_residue_mass`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_secondary(
     spec: &Spectrum,
     primary: &Peptide,

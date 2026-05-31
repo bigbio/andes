@@ -77,3 +77,51 @@ fully won on both axes (entrapment-clean); see `MEMORY.md` index.
 
 Analysis scripts (local on VM `/srv/data/msgf-bench/`): `tmt_pin_diff.py`,
 `tmt_pin_diff2.py`, `tmt_norow.py`, `java_tmt_entrap.sh`.
+
+---
+
+## Addendum: traced the 438 label-flips to the root (2026-05-31, user chose "trace flips")
+
+Ran Rust narrow `--top-n 10` on TMT (cal-auto), joined Java's @1% peptide against
+Rust's full ranking on the 438 flip scans (233 to-target, 205 to-decoy):
+
+- **Java's peptide is in Rust's top-10 (by RawScore) for only 20/438 (5%).** For 418
+  (95%) it is **not in Rust's top-10 at all** — Rust scores it well below contention.
+
+Ruled out, one by one:
+- **Mass window / calibration** — NOT it. Cal tightened TMT 20ppm→8.135ppm (robust
+  sigma 2.545ppm), but `--precursor-cal off` (full 20ppm) gave FEWER PSMs (9,238 vs
+  cal-auto 9,628), not more. Widening admits more noise than it recovers; tightening
+  is net-helpful. The window is not excluding Java's peptides on net.
+- **Modifications** — NOT it. `mods.txt` (Java) and `mods-numeric.txt` (Rust) are
+  numerically identical: Carbamidomethyl-C 57.021464, TMT6plex-K & N-term 229.162932,
+  Ox-M 15.994915, NumMods=1. Same masses → same enumerated peptide space.
+- **Top-1 selection criterion** — NOT it. `PsmMatch::Ord` already ranks by
+  (spec_e_value asc, rank_score desc). The issue isn't SpecE-vs-RawScore selection:
+  Java's peptide isn't even in Rust's RawScore top-10, so a larger SpecE-eval pool
+  (K>1) wouldn't include it.
+- **Aggregate T/D discrimination** — NOT worse. Top-1 RawScore target−decoy
+  separation: Rust 14 vs Java 13; lnSpecE separation Rust 2.71 vs Java 2.17; both 24%
+  competitive decoys; T/D 2.16 vs 2.14. Rust's aggregate discrimination is equal-or-
+  better.
+
+**Root:** Rust computes a LOWER RawScore (node score) than Java for Java's winning
+peptide on these specific CID/TMT spectra — the peptide falls out of Rust's
+RawScore-ranked contention entirely. This is a **per-peptide CID node-scoring
+divergence** (RankScorer ion-match / per-rank log-prob behavior on CID spectra), the
+deepest scoring layer. Both engines load the same `CID_HighRes_Tryp.param`, so the
+divergence is in how Rust APPLIES it (ion-type list, peak-rank assignment, or per-rank
+probability tables) on CID fragmentation — the same three hypotheses as the 2026-05-20
+Astral score_psm divergence, now CID-specific.
+
+**Why no clean fix is visible:** aggregate Rust discrimination is already competitive
+(equal/better T/D separation), the GF SpecEValue is in global parity, and there is no
+window/mods/selection bug. The gap is emergent from per-peptide CID node-score
+differences in the FDR tail — exactly the territory the n=8 audit shows resists
+piecewise fixes. Closing it requires per-ion CID score tracing (dump Rust's matched
+ions + per-rank scores for a flip peptide, diff against Java instrumentation) —
+multi-day, Rule-2 regression risk, low probability of a clean Percolator-FDR win.
+
+**Recommendation:** bank the cascade wins (Astral +55%, PXD +21.4%, entrapment-clean,
+faster-or-tied) as an opt-in `--chimeric` PR; treat TMT as a documented deep-CID-
+scoring limitation. The per-ion CID trace is a separate research project if pursued.

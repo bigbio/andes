@@ -175,10 +175,8 @@ fn write_psm_row<W: Write>(
         .map(|m| m.name().to_string())
         .unwrap_or_else(|| "UNKNOWN".to_string());
 
-    // Precursor m/z. For chimeric Pass-2 secondaries this is the co-isolated
-    // precursor's m/z (`precursor_mz_override`), NOT the scan's selected/primary
-    // m/z; `None` (every ordinary PSM) falls back to the spectrum's precursor m/z
-    // so the non-secondary path is byte-identical. Mirrors `pin.rs::write_psm_row`.
+    // For chimeric Pass-2 secondaries, use the co-isolated precursor m/z; `None`
+    // (every ordinary PSM) falls back to the spectrum's. Mirrors `pin.rs`.
     let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
     let precursor = format!("{:.4}", precursor_mz);
 

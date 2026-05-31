@@ -85,20 +85,16 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
-    /// Chimeric inverted fragment-posting candidate generator (Approach B). `Some` only when
-    /// `params.frag_index_active()`; supersedes `fragment_index` as the active
-    /// chimeric candidate generator. `None` keeps the brute-force / off path
-    /// (and the entire `--chimeric off` / narrow path) bit-identical.
+    /// Chimeric inverted fragment-posting candidate generator. `Some` only when
+    /// `params.frag_index_active()`; `None` keeps the brute-force / off path
+    /// bit-identical.
     pub(crate) fragment_posting_index: Option<fragment_posting_index::FragmentPostingIndex>,
 }
 
-/// Owned, precursor-tolerance-independent products of
-/// [`PreparedSearch::prepare`]: the enumerated candidate list, mass-bucket
-/// index, GF-registered aa_set, and optional fragment-posting index. These depend only on
-/// the database, enzyme, mods, and length range — NOT on the precursor
-/// tolerance — so they can be built once during the calibration pre-pass and
-/// reused for the tightened-tolerance main pass, avoiding a second full
-/// candidate enumeration (~15s on the 16.8M-candidate Astral search).
+/// Owned, precursor-tolerance-independent products of [`PreparedSearch::prepare`]
+/// (candidates, bucket index, GF aa_set, posting index). Built once during the
+/// calibration pre-pass and reused for the tightened-tolerance main pass, avoiding
+/// a second full candidate enumeration (~15s on the 16.8M-candidate Astral search).
 pub struct PreparedParts {
     candidates: Vec<Candidate>,
     bucket_index: BTreeMap<i32, Vec<usize>>,
@@ -235,9 +231,8 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
-        // Build the chimeric inverted fragment-posting candidate generator (Approach B; only
-        // under `--chimeric` + frag-index active). `None` keeps the brute-force /
-        // off path bit-identical.
+        // Chimeric inverted fragment-posting candidate generator, only under
+        // `--chimeric` + frag-index active. `None` keeps the off path bit-identical.
         let fragment_posting_index = if params.frag_index_active() {
             let si = fragment_posting_index::FragmentPostingIndex::build(&candidates);
             eprintln!(
@@ -264,11 +259,9 @@ impl<'a> PreparedSearch<'a> {
         }
     }
 
-    /// Consume this prepared search, returning its precursor-tolerance-
-    /// independent parts (candidates, bucket index, GF aa_set, posting index) as an
-    /// owned [`PreparedParts`]. Drops the `idx`/`params`/`scorer` borrows so the
-    /// caller can mutate `params` (e.g. tighten the precursor tolerance after
-    /// calibration) before rebuilding via [`Self::from_parts`].
+    /// Consume this prepared search into owned [`PreparedParts`], dropping the
+    /// `idx`/`params`/`scorer` borrows so the caller can mutate `params` (e.g.
+    /// tighten the precursor tolerance) before rebuilding via [`Self::from_parts`].
     pub fn into_parts(self) -> PreparedParts {
         PreparedParts {
             candidates: self.candidates,
@@ -279,10 +272,9 @@ impl<'a> PreparedSearch<'a> {
     }
 
     /// Rebuild a [`PreparedSearch`] from previously-enumerated [`PreparedParts`]
-    /// and a (possibly mutated) `params`, reusing the candidate enumeration
-    /// instead of re-walking the database. The parts are precursor-tolerance
-    /// independent, so this is correct after calibration tightens the tolerance.
-    /// `ms1_link` starts `None`; attach via [`Self::with_ms1_link`] as usual.
+    /// and a (possibly mutated) `params`, reusing the candidate enumeration. The
+    /// parts are precursor-tolerance independent, so this is correct after
+    /// calibration tightens the tolerance. `ms1_link` starts `None`.
     pub fn from_parts(
         idx: &'a SearchIndex,
         params: &'a SearchParams,
@@ -394,16 +386,12 @@ impl<'a> PreparedSearch<'a> {
                 let spec_idx = local_idx + spectrum_idx_offset;
                 let mut queue = TopNQueue::new(params.top_n_psms_per_spectrum);
 
-            // Chimeric two-pass cascade: Pass 1 (this `run_chunk_inner`) is a
-            // NARROW precursor-window search, identical to the non-chimeric path.
-            // Pass 2 (`run_pass2_coisolation`) is the ONLY chimeric-specific
-            // candidate enumeration. So under `--chimeric` we deliberately keep
-            // candidate generation/scoring NARROW here: no wide isolation-window
-            // enumeration, no FragmentPostingIndex prefilter, no shared-fragment competition.
-            // (The refuted blind-chimeric wide path used `params.chimeric` to
-            // widen; the cascade keeps these `false`.) The MS1 load and the
-            // `precursor_isotope_match` feature fill are unaffected — Pass 2 and
-            // the chimeric features still need MS1.
+            // Cascade Pass 1 is a NARROW precursor-window search, identical to the
+            // non-chimeric path; Pass 2 (`run_pass2_coisolation`) is the only
+            // chimeric-specific enumeration. Keep candidate generation narrow here
+            // (no wide isolation-window enumeration, no FragmentPostingIndex
+            // prefilter, no shared-fragment competition). MS1 load + the
+            // `precursor_isotope_match` feature fill still run for Pass 2.
             let cascade_wide = false;
 
             // Skip spectra with too few peaks.
@@ -1042,23 +1030,18 @@ pub fn match_spectra(
     (queues, prepared.candidates)
 }
 
-/// Pass 2 of the chimeric two-pass cascade. After Pass 1 (`run_chunk`) has
-/// filled each spectrum's top-N queue with its PRIMARY peptide, this driver
-/// re-examines every non-empty queue: it detects MS1 co-isolated precursors in
-/// the spectrum's isolation window (excluding the selected precursor), strips
-/// the primary's matched peaks, and runs a targeted second-peptide GF search at
-/// each co-isolated mass. Any secondary PSM found is pushed into the same queue
-/// so the PIN writer emits it as an additional row for that scan.
+/// Pass 2 of the chimeric cascade. For each non-empty top-N queue (filled by
+/// Pass 1 with its PRIMARY peptide), detects MS1 co-isolated precursors in the
+/// isolation window, strips the primary's matched peaks, and runs a targeted
+/// second-peptide GF search at each co-isolated mass; any secondary PSM is pushed
+/// into the same queue as an extra PIN row.
 ///
-/// **Off-path bit-identity:** returns immediately when `params.chimeric` is
-/// false OR `prepared.ms1_link` is `None` (the default non-chimeric path never
-/// attaches an `Ms1Link`). In both cases the `queues` are left untouched, so a
-/// non-chimeric run is byte-for-byte identical with or without this call.
+/// Off-path bit-identity: no-op when `params.chimeric` is false OR
+/// `prepared.ms1_link` is `None` (the default non-chimeric path).
 ///
-/// `spectra` must be the SAME slice (in the SAME order) that produced `queues`,
-/// with peaks still present — `prepared.ms1_link.ms2_to_ms1` is indexed by the
-/// MS2 position in that slice. Call this BEFORE peaks are dropped from the
-/// spectra.
+/// `spectra` must be the SAME slice (SAME order) that produced `queues`, with
+/// peaks still present (`ms1_link.ms2_to_ms1` indexes by MS2 position). Call
+/// BEFORE peaks are dropped.
 pub fn run_pass2_coisolation(
     prepared: &PreparedSearch,
     spectra: &[Spectrum],
@@ -1121,10 +1104,8 @@ pub fn run_pass2_coisolation(
             spec.precursor_mz,
             *params.charge_range.start()..=*params.charge_range.end(),
             tol,
-            // max_kl: averagine-envelope KL gate for accepting a co-isolated
-            // precursor. 1.0 was lenient (entrapment FDP 1.6% combined, above
-            // nominal); 0.3 requires a cleaner MS1 envelope → fewer spurious
-            // secondaries → FDP toward nominal (small PSM cost). Tuning knob.
+            // max_kl: averagine-envelope KL gate. 0.3 requires a clean MS1 envelope
+            // → fewer spurious secondaries → FDP toward nominal (small PSM cost).
             0.3,
             2,
         );
@@ -1157,10 +1138,9 @@ pub fn run_pass2_coisolation(
                 prepared.fragment_tolerance_da,
             ) {
                 psm.spectrum_idx = spec_idx;
-                // Secondary is a distinct co-isolated peptide on this scan — a
-                // legitimate EXTRA emission, not a competitor for the primary's
-                // top-1 slot. force_push adds it WITHOUT capacity-based eviction
-                // (plain `push` on a capacity-1 queue would evict the primary or
+                // Distinct co-isolated peptide — a legitimate EXTRA emission, not a
+                // competitor for the primary's slot. force_push skips capacity-based
+                // eviction (plain `push` at capacity 1 would evict the primary or
                 // drop the secondary).
                 q.force_push(psm);
             }
@@ -1169,15 +1149,10 @@ pub fn run_pass2_coisolation(
 }
 
 /// Per-candidate cleavage credit, module-level mirror of the nested
-/// `compute_cleavage_credit` in `run_chunk_inner`. The chimeric cascade's
-/// `search_secondary` needs the SAME RawScore scale as the production candidate
-/// loop (`score = score_psm(...) + cleavage_credit`), so it calls this instead
-/// of duplicating the branch logic.
-///
-/// Derives the four credit/penalty constants from the ENZYME-REGISTERED
-/// `aa_set` (cleavage credit/penalty are populated by `register_enzyme`) and
-/// the term flags from `enz`. Keep the branch structure bit-identical to the
-/// nested `compute_cleavage_credit`.
+/// `compute_cleavage_credit` in `run_chunk_inner`. `search_secondary` calls this
+/// so secondaries share the production RawScore scale (`score_psm(...) + credit`).
+/// Credit/penalty constants come from the ENZYME-REGISTERED `aa_set`; keep the
+/// branch structure bit-identical to `compute_cleavage_credit`.
 pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoAcidSet) -> i32 {
     let credit_neighboring = aa_set.neighboring_aa_cleavage_credit();
     let penalty_neighboring = aa_set.neighboring_aa_cleavage_penalty();

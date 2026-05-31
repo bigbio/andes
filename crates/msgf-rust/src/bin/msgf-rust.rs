@@ -222,11 +222,9 @@ struct Cli {
     #[arg(long, default_value = "false")]
     chimeric: bool,
 
-    /// Chimeric fragment-index prefilter: on, off (default), auto. The two-pass
-    /// cascade does NOT use this prefilter (it was the refuted inverted fragment-posting "Approach
-    /// B" wide-window path, which is unreachable in the shipped cascade), so it
-    /// defaults to `off` — leaving it on/auto only builds an unused index and costs
-    /// memory + startup time. Kept as a flag pending removal of the dead path.
+    /// Chimeric fragment-index prefilter: on, off (default), auto. The shipped
+    /// two-pass cascade does NOT use it (unreachable wide-window path), so `off`
+    /// avoids building an unused index. Kept pending removal of the dead path.
     #[arg(long, value_name = "MODE", default_value = "off")]
     chimeric_frag_index: String,
 
@@ -675,12 +673,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.isotope_error_min, cli.isotope_error_max
         ).into());
     }
-    // The two-pass cascade (Pass 2 co-isolation) requires MS1 scans, which only the
-    // mzML reader captures. With a non-mzML input (MGF) there is no Pass 2, so
-    // `--chimeric` is inert there. Keep `params.chimeric` FALSE in that case so the
-    // ENTIRE chimeric path stays off — not just Pass 2, but also the PIN writer's
-    // chimeric column/SpecId gates and the top-N forcing — i.e. the run is truly
-    // identical to a normal (non-chimeric) search, as the warning promises.
+    // Pass 2 co-isolation requires MS1 scans, which only the mzML reader captures.
+    // On non-mzML input `--chimeric` is inert, so keep `params.chimeric` FALSE to
+    // turn the ENTIRE chimeric path off (Pass 2, PIN column/SpecId gates, top-N
+    // forcing) — the run is then identical to a normal search.
     let chimeric_active = cli.chimeric && is_mzml;
     if cli.chimeric && !is_mzml {
         eprintln!(
@@ -695,11 +691,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "off" => FragIndexMode::Off,
         _ => FragIndexMode::Auto,
     };
-    // Two-pass cascade: Pass 1 emits the single best (top-1) primary peptide per
-    // scan (NOT the blind multi-emission); the co-isolated secondary peptides come
-    // from Pass 2 (run_pass2_coisolation). FORCE top-1 when the cascade is active —
-    // the default top_n (10) would otherwise make Pass 1 emit the top-10 candidates
-    // per scan (blind multi-emission = inflated FDR).
+    // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
+    // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
+    // blind multi-emission per scan = inflated FDR.
     params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
@@ -755,12 +749,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let ms_level_u32 = cli.ms_level as u32;
 
-    // Chimeric cascade reads ALL MS2 + MS1 up front (`read_with_ms1`) so Pass 2
-    // can detect co-isolated precursors. That ~20s read is independent of the
-    // SearchIndex build, the candidate enumeration, and the calibration pre-pass,
-    // so kick it off on a background thread NOW and join it only when Pass 2
-    // needs the spectra — fully overlapping it with the ~50s of cal+enumerate
-    // work that would otherwise block it (saves ~20s wall on Astral).
+    // Chimeric cascade reads ALL MS2 + MS1 up front (`read_with_ms1`) for Pass 2.
+    // That ~20s read is independent of the cal+enumerate work, so run it on a
+    // background thread and join only when Pass 2 needs the spectra (saves ~20s
+    // wall on Astral).
     let chimeric_read_handle = if cli.chimeric && is_mzml {
         let spectrum_path = cli.spectrum.clone();
         let cap = bench_cap;
@@ -782,12 +774,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Calibration pre-pass. The candidate enumeration is precursor-tolerance
-    // independent, so we keep the cal pass's enumerated `PreparedParts` and
-    // reuse them for the main pass instead of re-enumerating all 16.8M
-    // candidates a second time (~15s saved on Astral). `into_parts()` is called
-    // BEFORE the tolerance is tightened so the owned parts outlive the `params`
-    // borrow that the cal `PreparedSearch` held.
+    // Calibration pre-pass. Candidate enumeration is precursor-tolerance
+    // independent, so keep the cal pass's `PreparedParts` and reuse them for the
+    // main pass instead of re-enumerating all 16.8M candidates (~15s saved on
+    // Astral). `into_parts()` runs BEFORE tightening so the owned parts outlive
+    // the `params` borrow the cal `PreparedSearch` held.
     let reuse_parts = if params.precursor_cal_mode != PrecursorCalMode::Off {
         let cal_prepared = PreparedSearch::prepare(
             &idx,
@@ -873,13 +864,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted; // silenced — unused for now.
 
-    // Task 3: under `--chimeric` on an mzML input, take the BATCH read path
-    // (`read_with_ms1`) so MS1 scans are captured and each MS2 is linked to
-    // its preceding MS1. This Ms1Link is attached to `prepared` and consumed
-    // by the feature fill to populate `precursor_isotope_kl` / `precursor_snr`.
-    // The streaming pipeline below is reserved for the (default) non-chimeric
-    // path and stays byte-for-byte unchanged — the off-path golden test
-    // therefore never touches this branch.
+    // Under `--chimeric` on mzML, take the BATCH read path (`read_with_ms1`) so
+    // MS1 scans are captured and each MS2 is linked to its preceding MS1. The
+    // streaming pipeline below handles the (default) non-chimeric path unchanged.
     let chimeric_mzml = cli.chimeric && is_mzml;
     let parse_stats = if chimeric_mzml {
         let (mut chimeric_spectra, link) = chimeric_read_handle
@@ -897,12 +884,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
         prepared = prepared.with_ms1_link(Some(link));
 
-        // Single full-batch scoring pass (offset 0): spec_idx == global index,
-        // matching Ms1Link::ms2_to_ms1 indexing exactly.
+        // Single full-batch scoring pass (offset 0) so spec_idx == global index,
+        // matching Ms1Link::ms2_to_ms1 indexing.
         let mut queues = prepared.run_chunk(&chimeric_spectra, 0);
-        // Pass 2 (cascade P3): MS1-gated secondary search per scan. MUST run
-        // BEFORE peaks are dropped below — search_secondary needs the spectrum
-        // peaks to build the residual. No-op unless --chimeric (guarded inside).
+        // Pass 2: MS1-gated secondary search. MUST run BEFORE peaks are dropped
+        // below — search_secondary needs the spectrum peaks for the residual.
         search::match_engine::run_pass2_coisolation(
             &prepared,
             &chimeric_spectra,

@@ -291,11 +291,9 @@ fn write_psm_row<W: Write>(
     // protein is a decoy, label = -1; otherwise +1.
     let label: i32 = if cand.is_decoy { -1 } else { 1 };
 
-    // Precursor m/z for the mass-error columns. For chimeric Pass-2 secondaries
-    // this is the co-isolated precursor's m/z (the secondary's true precursor),
-    // NOT the scan's selected/primary m/z; `precursor_mz_override` carries it.
-    // `None` (every ordinary PSM) falls back to the spectrum's precursor m/z, so
-    // the non-secondary path is byte-identical.
+    // For chimeric Pass-2 secondaries, mass-error columns use the co-isolated
+    // precursor m/z (the secondary's true precursor). `None` (every ordinary PSM)
+    // falls back to the spectrum's precursor m/z, keeping that path byte-identical.
     let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
 
     // ExpMass: neutral precursor mass = mz * charge - charge * PROTON
@@ -355,17 +353,12 @@ fn write_psm_row<W: Write>(
     // matchedIonRatio: from psm.features.
     let matched_ion_ratio = psm.features.matched_ion_ratio as f64;
 
-    // Build row — tab-separated. We write directly into the BufWriter to
-    // avoid heap-allocating each formatted column (the old implementation
-    // built ~30 intermediate Strings per row × 37k rows = ~1.1M allocs).
+    // Write columns directly into the BufWriter (avoids ~30 String allocs/row).
     //
-    // SpecId: `specID + "_" + scanNum + "_" + rank` — emitted inline via
-    // `write!` so we don't materialise a temporary String. Under --chimeric a
-    // single scan emits multiple distinct-peptide PSMs that can share a SpecE
-    // rank (rank only increments on a distinct spec_e_value), which would
-    // collide on `_{rank}`; append the per-row emission index to keep SpecIds
-    // unique. The standard (non-chimeric) format is unchanged, preserving the
-    // bit-identical PIN golden.
+    // SpecId = `specID_scanNum_rank`. Under --chimeric, one scan can emit multiple
+    // distinct-peptide PSMs sharing a SpecE rank (rank only increments on a distinct
+    // spec_e_value), which would collide on `_{rank}`; append the per-row emission
+    // index to keep SpecIds unique. The non-chimeric format is unchanged.
     if params.chimeric {
         write!(writer, "{}_{}_{}_{}", ctx.spec_id, ctx.scan, rank, row_idx)?;
     } else {

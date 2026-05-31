@@ -1,13 +1,8 @@
 //! Chimeric two-pass cascade: detect co-isolated precursors in an MS2 scan's MS1
 //! isolation window (excluding the selected precursor), then run a targeted
-//! second-peptide search at each. This is the speed-correct chimeric path: it
-//! scores few candidates at MS1-confirmed masses instead of thousands across the
-//! blind window (see docs/parity-analysis/notes/2026-05-30-chimeric-cost-profile.md).
-//!
-//! Task 1 (this commit) ships only the detector. The targeted second-peptide
-//! search (`search_secondary`) and the binary-level driver land in Tasks 2/3,
-//! which consume `CoIsolated` / `detect_coisolated`. Until then they are
-//! unreferenced outside tests, so allow dead_code at the module level.
+//! second-peptide search at each. Speed-correct chimeric path: scores few
+//! candidates at MS1-confirmed masses instead of thousands across the blind
+//! window.
 #![allow(dead_code)]
 
 use crate::candidate_gen::Candidate;
@@ -65,14 +60,11 @@ pub(crate) fn detect_coisolated(
             continue; // skip the selected precursor (monoisotope)
         }
         // Skip the selected precursor's isotope peaks in BOTH directions: a peak at
-        // selected_mz +/- k*ISOTOPE/z (k >= 1) is part of the Pass-1 precursor's own
-        // envelope, not a distinct co-isolated species. The LOWER side matters when
-        // the instrument selected M+1/M+2 (the isotope-error search still matches the
-        // primary) and the true monoisotope sits at selected_mz - k*ISOTOPE/z; without
-        // this guard Pass 2 would re-discover the primary's own peptide as a fake
-        // secondary (self-inflation). Selected charge is unknown, so reject if the
-        // peak lines up with any isotope spacing in `charge_range` on either side
-        // (`d.abs()` makes the test symmetric).
+        // selected_mz +/- k*ISOTOPE/z is part of the Pass-1 precursor's own envelope,
+        // not a distinct species. The lower side matters when the instrument selected
+        // M+1/M+2; without this guard Pass 2 re-discovers the primary as a fake
+        // secondary (self-inflation). Selected charge is unknown, so reject any isotope
+        // spacing in `charge_range` on either side (`d.abs()` makes it symmetric).
         if charge_range.clone().filter(|&z| z != 0).any(|z| {
             let d = (mz - selected_mz).abs();
             (1..6).any(|k| (d - k as f64 * ISOTOPE / z as f64).abs() <= tol_da)
@@ -115,17 +107,11 @@ pub(crate) fn detect_coisolated(
     out
 }
 
-/// The set of raw observed MS2 peaks claimed by `peptide`'s charge-1 b/y ions,
-/// as quantized m/z keys (`round(mz·1000)`). Lightweight mirror of
-/// `match_engine::matched_peak_keys` that binary-searches the raw, m/z-sorted
-/// `spec.peaks` directly — NO `ScoredSpectrum` / deconvolution build. Used only
-/// by `search_secondary` to strip the primary's peaks before forming the
-/// residual; the residual is a heuristic, so picking a slightly different
-/// (non-deconvolved) peak in rare multi-charge cases is acceptable.
-///
-/// Mirrors `nearest_peak_full`'s **max-intensity** selection within the
-/// tolerance window (not nearest-by-m/z); the only difference is that raw peaks
-/// carry no rank array, so no peaks are filtered out.
+/// Raw MS2 peaks claimed by `peptide`'s charge-1 b/y ions, as quantized m/z keys
+/// (`round(mz·1000)`). Binary-searches the raw, m/z-sorted `spec.peaks` directly
+/// (no `ScoredSpectrum` build). Used by `search_secondary` to strip the primary's
+/// peaks before forming the residual; matches `nearest_peak_full`'s max-intensity
+/// selection within the tolerance window.
 fn primary_matched_peak_keys(
     spec: &Spectrum,
     peptide: &Peptide,
@@ -142,8 +128,7 @@ fn primary_matched_peak_keys(
         let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
         let lo_mz = p.mz - tol_da;
         let hi_mz = p.mz + tol_da;
-        // `spec.peaks` is sorted ascending by m/z (MGF/mzML readers guarantee
-        // this); binary-search the window start, then scan to `hi_mz`.
+        // `spec.peaks` is m/z-sorted; binary-search the window start, scan to `hi_mz`.
         let start = spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
         let mut best: Option<(f64, f32)> = None; // (peak_mz, intensity)
         for &(mz, intensity) in &spec.peaks[start..] {
@@ -190,12 +175,9 @@ pub(crate) fn search_secondary(
 
     // 1. Residual spectrum: drop the primary's matched charge-1 b/y peaks so the
     //    second peptide is scored against signal the primary did not explain.
-    //    Build ONE `co_spec` = residual peaks + the CO-ISOLATED precursor fields,
-    //    used for BOTH `ScoredSpectrum::new` and the GF below. The residual is a
-    //    clone of `spec`, so its `precursor_mz` is the PRIMARY's; overwrite the
-    //    precursor fields with `co`'s so the GF mass window (derived from the
-    //    spectrum's precursor in `compute_spec_e_values_for_spectrum`) centers on
-    //    the co-isolated mass rather than the primary mass (Bug-1 fix).
+    //    Overwrite the precursor fields with `co`'s so the GF mass window (derived
+    //    from the spectrum's precursor) centers on the co-isolated mass, not the
+    //    primary's. `co_spec` feeds both `ScoredSpectrum::new` and the GF below.
     let claimed = primary_matched_peak_keys(spec, primary, scorer);
     let mut co_spec = spec.clone();
     co_spec
@@ -205,9 +187,8 @@ pub(crate) fn search_secondary(
     co_spec.precursor_charge = Some(co.charge as i32);
     let res_ss = ScoredSpectrum::new(&co_spec, scorer, z);
 
-    // 2. Candidates within precursor tol of the co-isolated neutral mass. The
-    //    nominal bucket key matches PreparedSearch's `nominal_residue_mass`
-    //    convention: `nominal_from(mass - H2O)`.
+    // 2. Candidates within precursor tol of the co-isolated neutral mass. Nominal
+    //    bucket key matches PreparedSearch: `nominal_from(mass - H2O)`.
     let nominal = |m: f64| nominal_from(m - H2O);
     let tol = params.precursor_tolerance.left.as_da(co.neutral_mass).max(0.01);
     let lo = nominal(co.neutral_mass - tol) - 1;
@@ -223,9 +204,7 @@ pub(crate) fn search_secondary(
             }
             let pin = score_psm(&res_ss, &cand.peptide, scorer, z, fragment_tolerance_da);
             let edge = psm_edge_score(&res_ss, &cand.peptide, scorer, z);
-            // Cleavage credit: production candidate loop emits RawScore as
-            // `score_psm(...) + cleavage_credit`; mirror it so secondary PSMs
-            // share the primaries' RawScore scale (Bug-2 fix).
+            // Mirror the production RawScore scale: `score_psm(...) + cleavage_credit`.
             let cleavage = crate::match_engine::cleavage_credit_for(cand, params.enzyme, aa_set);
             let psm = PsmMatch {
                 spectrum_idx: 0,
@@ -241,8 +220,7 @@ pub(crate) fn search_secondary(
                 e_value: 1.0,
                 features: PsmFeatures::default(),
                 isotope_offset: 0,
-                // Set to the co-isolated precursor m/z after the winner is
-                // chosen (see end of `search_secondary`); `None` here.
+                // Set to co.mono_mz once the winner is chosen (end of fn).
                 precursor_mz_override: None,
             };
             queue.push(psm);
@@ -253,19 +231,10 @@ pub(crate) fn search_secondary(
         return None;
     }
 
-    // 3. One targeted GF SpecEValue DP on the residual spectrum (fills
-    //    spec_e_value / de_novo_score / e_value on the retained PSM). Pass
-    //    `co_spec` (residual peaks + co precursor fields) so the GF mass window
-    //    centers on the co-isolated mass; `res_ss` supplies the node scores.
-    //
-    //    Perf: the secondary's mass is KNOWN (co.neutral_mass, detected from the
-    //    MS1 monoisotopic peak), so we only need the single GF mass bin at
-    //    isotope offset 0. Clamp `isotope_error_range` to 0..=0 (vs the default
-    //    -1..=2) so `compute_spec_e_values_for_spectrum` builds ~1 mass bin
-    //    instead of 5-7, cutting GF bins and the associated SinkUnreachable
-    //    retries. The candidate was enumerated within `precursor_tolerance` of
-    //    `co.neutral_mass`, so with isotope 0 + the same precursor tol it stays
-    //    in-window (see `secondary_search_finds_planted_peptide`).
+    // 3. One targeted GF SpecEValue DP on the residual (fills spec_e_value /
+    //    de_novo_score / e_value). The secondary's mass is KNOWN from the MS1
+    //    monoisotopic peak, so clamp `isotope_error_range` to 0..=0 to build a
+    //    single GF mass bin instead of 5-7 (cuts GF bins + SinkUnreachable retries).
     let mut p2 = params.clone();
     p2.isotope_error_range = 0..=0;
     compute_spec_e_values_for_spectrum(
@@ -282,22 +251,11 @@ pub(crate) fn search_secondary(
         candidates,
     );
 
-    // Fragment-ion feature extraction for the secondary, mirroring the primary
-    // path in `run_chunk_inner` (`compute_psm_features` + reuse of the
-    // per-candidate `edge_score`). Without this the secondary's PIN row carries
-    // all-zero feature columns (NumMatchedMainIons, ExplainedIonCurrentRatio,
-    // MeanErrorTop7, EdgeScore, ...), starving Percolator of the secondary's
-    // discriminative signal. Features are computed on the RESIDUAL `res_ss` —
-    // the same spectrum the secondary was scored against — so they are
-    // consistent with its RawScore / SpecEValue. The precursor-mass override
-    // (Pass-2 secondaries center on the co-isolated mass, not the primary's
-    // selected m/z) is set so the PIN writer emits correct ExpMass/dm/absdm.
-    // Pick the winner by SCORE, not heap order: `drain_into_vec` is unordered, and
-    // `TopNQueue` keeps ties even at capacity 1, so a tied secondary set can survive
-    // GF scoring. Selecting `.next()` would make the result heap-order dependent
-    // (nondeterministic) in a user-visible ranking path. Order by smallest
-    // spec_e_value, then largest rank_score, then smallest candidate index as a
-    // deterministic final tiebreak.
+    // Pick the winner by SCORE, not heap order: `drain_into_vec` is unordered and
+    // `TopNQueue` keeps ties even at capacity 1, so selecting `.next()` would be
+    // heap-order dependent (nondeterministic) in a user-visible ranking path.
+    // Order by smallest spec_e_value, then largest rank_score, then smallest
+    // candidate index as a deterministic final tiebreak.
     let mut best = queue
         .drain_into_vec()
         .into_iter()
@@ -312,6 +270,9 @@ pub(crate) fn search_secondary(
                 )
                 .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
         })?;
+    // Features on the RESIDUAL (the spectrum the secondary was scored against), so
+    // they stay consistent with its RawScore / SpecEValue. The override makes the
+    // PIN writer compute ExpMass/dm/absdm from the co-isolated mass.
     let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
     let mut features = crate::match_engine::compute_psm_features(&res_ss, cand_peptide, scorer, z);
     features.edge_score = best.edge_score;
@@ -511,10 +472,9 @@ mod tests {
             found.residues, planted.residues,
             "secondary PSM should resolve to the planted peptide DAFLGSFLYEYSR"
         );
-        // Bug-1 lock-in: the planted peptide is in-window for the co-isolated
-        // mass, so the GF must compute a real SpecEValue (< 1.0). A value of
-        // exactly 1.0 means the GF mass window did not include the candidate
-        // mass (the `return 1.0` guard fired).
+        // The planted peptide is in-window for the co-isolated mass, so the GF
+        // must compute a real SpecEValue (< 1.0). Exactly 1.0 means the GF mass
+        // window did not include the candidate (the `return 1.0` guard fired).
         assert!(
             psm.spec_e_value < 1.0,
             "secondary PSM SpecEValue must be a real probability < 1.0, got {}",

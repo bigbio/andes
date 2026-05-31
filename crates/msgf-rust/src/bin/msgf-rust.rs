@@ -748,7 +748,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let spectrum_path = cli.spectrum.clone();
         let cap = bench_cap;
         let mslevel = ms_level_u32;
-        let t_bg = std::time::Instant::now();
         Some(std::thread::spawn(
             move || -> std::io::Result<(Vec<Spectrum>, Ms1Link)> {
                 let f = File::open(&spectrum_path)?;
@@ -759,10 +758,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if cap < spectra.len() {
                     spectra.truncate(cap);
                 }
-                eprintln!(
-                    "[CASCADE_PHASE bg_read_with_ms1: {:.2}s (overlapped)]",
-                    t_bg.elapsed().as_secs_f64()
-                );
                 Ok((spectra, link))
             },
         ))
@@ -777,7 +772,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // BEFORE the tolerance is tightened so the owned parts outlive the `params`
     // borrow that the cal `PreparedSearch` held.
     let reuse_parts = if params.precursor_cal_mode != PrecursorCalMode::Off {
-        let _t_calprep = std::time::Instant::now();
         let cal_prepared = PreparedSearch::prepare(
             &idx,
             &params,
@@ -785,7 +779,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             fragment_tol_da,
             &cli.decoy_prefix,
         );
-        eprintln!("[CASCADE_PHASE cal_prepare(enumerate): {:.2}s]", _t_calprep.elapsed().as_secs_f64());
         let cal_stats = run_precursor_calibration(
             &cli.spectrum,
             is_mzml,
@@ -821,30 +814,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let _t_mainprep = std::time::Instant::now();
     let mut prepared = match reuse_parts {
         Some(parts) => {
-            let p = PreparedSearch::from_parts(
-                &idx,
-                &params,
-                &scorer,
-                fragment_tol_da,
-                parts,
-            );
-            eprintln!("[CASCADE_PHASE main_prepare(reused): {:.2}s]", _t_mainprep.elapsed().as_secs_f64());
-            p
+            PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
-        None => {
-            let p = PreparedSearch::prepare(
-                &idx,
-                &params,
-                &scorer,
-                fragment_tol_da,
-                &cli.decoy_prefix,
-            );
-            eprintln!("[CASCADE_PHASE main_prepare(enumerate): {:.2}s]", _t_mainprep.elapsed().as_secs_f64());
-            p
-        }
+        None => PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix),
     };
     log_rss("after_prepared_search");
     eprintln!(
@@ -891,13 +865,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // therefore never touches this branch.
     let chimeric_mzml = cli.chimeric && is_mzml;
     let parse_stats = if chimeric_mzml {
-        let _t_read = std::time::Instant::now();
         let (mut chimeric_spectra, link) = chimeric_read_handle
             .expect("chimeric_read_handle is spawned whenever chimeric_mzml is true")
             .join()
             .map_err(|_| "chimeric MS1-capture read thread panicked".to_string())?
             .map_err(|e| format!("read mzML with MS1 capture: {e}"))?;
-        eprintln!("[CASCADE_PHASE read_with_ms1(join): {:.2}s]", _t_read.elapsed().as_secs_f64());
         if bench_cap < chimeric_spectra.len() {
             chimeric_spectra.truncate(bench_cap);
         }
@@ -910,20 +882,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         // Single full-batch scoring pass (offset 0): spec_idx == global index,
         // matching Ms1Link::ms2_to_ms1 indexing exactly.
-        let _t_p1 = std::time::Instant::now();
         let mut queues = prepared.run_chunk(&chimeric_spectra, 0);
-        eprintln!("[CASCADE_PHASE pass1_run_chunk: {:.2}s]", _t_p1.elapsed().as_secs_f64());
         // Pass 2 (cascade P3): MS1-gated secondary search per scan. MUST run
         // BEFORE peaks are dropped below — search_secondary needs the spectrum
         // peaks to build the residual. No-op unless --chimeric (guarded inside).
-        let _t_p2 = std::time::Instant::now();
         search::match_engine::run_pass2_coisolation(
             &prepared,
             &chimeric_spectra,
             &mut queues,
             &params,
         );
-        eprintln!("[CASCADE_PHASE pass2_coisolation: {:.2}s]", _t_p2.elapsed().as_secs_f64());
         all_queues.extend(queues);
         for mut spec in chimeric_spectra.into_iter() {
             spec.peaks = Vec::new();

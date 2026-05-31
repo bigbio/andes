@@ -92,6 +92,20 @@ pub struct PreparedSearch<'a> {
     pub(crate) sage_index: Option<sage_index::SageIndex>,
 }
 
+/// Owned, precursor-tolerance-independent products of
+/// [`PreparedSearch::prepare`]: the enumerated candidate list, mass-bucket
+/// index, GF-registered aa_set, and optional Sage index. These depend only on
+/// the database, enzyme, mods, and length range — NOT on the precursor
+/// tolerance — so they can be built once during the calibration pre-pass and
+/// reused for the tightened-tolerance main pass, avoiding a second full
+/// candidate enumeration (~15s on the 16.8M-candidate Astral search).
+pub struct PreparedParts {
+    candidates: Vec<Candidate>,
+    bucket_index: BTreeMap<i32, Vec<usize>>,
+    aa_set_for_gf: AminoAcidSet,
+    sage_index: Option<sage_index::SageIndex>,
+}
+
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
 /// for one spectrum at one charge state `z`, used to enumerate candidate
 /// peptides from the mass-bucket index.
@@ -247,6 +261,45 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf,
             ms1_link: None,
             sage_index,
+        }
+    }
+
+    /// Consume this prepared search, returning its precursor-tolerance-
+    /// independent parts (candidates, bucket index, GF aa_set, sage index) as an
+    /// owned [`PreparedParts`]. Drops the `idx`/`params`/`scorer` borrows so the
+    /// caller can mutate `params` (e.g. tighten the precursor tolerance after
+    /// calibration) before rebuilding via [`Self::from_parts`].
+    pub fn into_parts(self) -> PreparedParts {
+        PreparedParts {
+            candidates: self.candidates,
+            bucket_index: self.bucket_index,
+            aa_set_for_gf: self.aa_set_for_gf,
+            sage_index: self.sage_index,
+        }
+    }
+
+    /// Rebuild a [`PreparedSearch`] from previously-enumerated [`PreparedParts`]
+    /// and a (possibly mutated) `params`, reusing the candidate enumeration
+    /// instead of re-walking the database. The parts are precursor-tolerance
+    /// independent, so this is correct after calibration tightens the tolerance.
+    /// `ms1_link` starts `None`; attach via [`Self::with_ms1_link`] as usual.
+    pub fn from_parts(
+        idx: &'a SearchIndex,
+        params: &'a SearchParams,
+        scorer: &'a RankScorer,
+        fragment_tolerance_da: f64,
+        parts: PreparedParts,
+    ) -> Self {
+        PreparedSearch {
+            idx,
+            params,
+            scorer,
+            fragment_tolerance_da,
+            candidates: parts.candidates,
+            bucket_index: parts.bucket_index,
+            aa_set_for_gf: parts.aa_set_for_gf,
+            ms1_link: None,
+            sage_index: parts.sage_index,
         }
     }
 

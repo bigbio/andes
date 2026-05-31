@@ -1,4 +1,4 @@
-//! Chimeric Sage-style fragment index (Approach B). Peptides sorted by precursor
+//! Chimeric inverted fragment-posting fragment index (Approach B). Peptides sorted by precursor
 //! mass (so a mass window is a contiguous index range); fragments sorted by m/z in
 //! fixed buckets, each bucket re-sorted by peptide index. The per-spectrum query
 //! (Task 2) does a dual binary search bounded to the precursor window — the bound
@@ -11,17 +11,17 @@
 use crate::candidate_gen::Candidate;
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 
-/// Fixed fragment bucket size (Sage uses 8192; power-of-two).
+/// Fixed fragment bucket size (fixed at 8192; power-of-two).
 const BUCKET: usize = 8192;
 
 #[derive(Clone, Copy)]
 struct Frag {
     mz: f32,
-    /// index into `sorted_cand` / `sorted_mass` (Sage's PeptideIx).
+    /// index into `sorted_cand` / `sorted_mass` (the candidate index).
     pidx: u32,
 }
 
-pub(crate) struct SageIndex {
+pub(crate) struct FragmentPostingIndex {
     /// candidate ids ordered by ascending peptide neutral mass.
     sorted_cand: Vec<u32>,
     /// parallel to `sorted_cand`: ascending neutral masses (for precursor binary search).
@@ -33,7 +33,7 @@ pub(crate) struct SageIndex {
     bucket_min_mz: Vec<f32>,
 }
 
-impl SageIndex {
+impl FragmentPostingIndex {
     /// Build over the full candidate set (target+decoy, mod-expanded).
     pub(crate) fn build(candidates: &[Candidate]) -> Self {
         // 1. mass-sorted candidate order.
@@ -72,7 +72,7 @@ impl SageIndex {
             start = end;
         }
 
-        SageIndex {
+        FragmentPostingIndex {
             sorted_cand: order,
             sorted_mass,
             fragments,
@@ -159,7 +159,7 @@ mod tests {
     fn build_sorts_by_mass_and_indexes_fragments() {
         // ACDEFGHIK is heavier than AAK -> mass order must be [AAK, ACDEFGHIK].
         let cands = vec![cand("ACDEFGHIK"), cand("AAK")];
-        let idx = SageIndex::build(&cands);
+        let idx = FragmentPostingIndex::build(&cands);
         // sorted_mass ascending:
         assert!(idx.sorted_mass[0] <= idx.sorted_mass[1]);
         // lighter peptide (AAK = candidate id 1) is pidx 0:
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn query_returns_in_window_candidate_matching_peaks() {
         let cands = vec![cand("AAK"), cand("ACDEFGHIK"), cand("PEPTIDEK")];
-        let idx = SageIndex::build(&cands);
+        let idx = FragmentPostingIndex::build(&cands);
         // Target candidate 2 (PEPTIDEK): observed peaks = its fragments; precursor
         // window = its mass +/- 0.01.
         let m = cands[2].peptide.mass();
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn query_excludes_out_of_precursor_window_even_if_fragments_match() {
         let cands = vec![cand("AAK"), cand("PEPTIDEK")];
-        let idx = SageIndex::build(&cands);
+        let idx = FragmentPostingIndex::build(&cands);
         // Feed PEPTIDEK's fragments but a precursor window around AAK's mass only.
         let m_aak = cands[0].peptide.mass();
         let peaks = frag_mzs(&cands[1]);
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn query_ranks_by_matched_fragment_count() {
         let cands = vec![cand("PEPTIDEK"), cand("ACDEFGHIK")];
-        let idx = SageIndex::build(&cands);
+        let idx = FragmentPostingIndex::build(&cands);
         // wide precursor window covering both; peaks = 3 of candidate 0 + 1 of candidate 1.
         let lo = idx.sorted_mass[0] - 1.0;
         let hi = idx.sorted_mass[idx.sorted_mass.len()-1] + 1.0;
@@ -224,7 +224,7 @@ mod tests {
                     "LLLLLLLR","GGGGTESTK","MNPQRSTK","FFFYYYWK","CCDDEEK"];
         let mut cands = Vec::new();
         for i in 0..2000 { cands.push(cand(seqs[i % seqs.len()])); }
-        let idx = SageIndex::build(&cands);
+        let idx = FragmentPostingIndex::build(&cands);
         // dense spectrum: 60 peaks spanning typical fragment m/z.
         let peaks: Vec<f64> = (0..60).map(|i| 200.0 + i as f64 * 18.0).collect();
         let lo = idx.sorted_mass[0] - 5.0;

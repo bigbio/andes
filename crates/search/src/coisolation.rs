@@ -64,16 +64,19 @@ pub(crate) fn detect_coisolated(
         if (mz - selected_mz).abs() <= tol_da {
             continue; // skip the selected precursor (monoisotope)
         }
-        // Skip the selected precursor's HIGHER isotope peaks too: a peak at
-        // selected_mz + k*ISOTOPE/z (k >= 1) is part of the Pass-1 envelope, not
-        // a distinct co-isolated species. The selected charge is unknown here, so
-        // reject if the peak lines up with any isotope spacing in `charge_range`.
-        if mz > selected_mz
-            && charge_range.clone().filter(|&z| z != 0).any(|z| {
-                let d = mz - selected_mz;
-                (1..6).any(|k| (d - k as f64 * ISOTOPE / z as f64).abs() <= tol_da)
-            })
-        {
+        // Skip the selected precursor's isotope peaks in BOTH directions: a peak at
+        // selected_mz +/- k*ISOTOPE/z (k >= 1) is part of the Pass-1 precursor's own
+        // envelope, not a distinct co-isolated species. The LOWER side matters when
+        // the instrument selected M+1/M+2 (the isotope-error search still matches the
+        // primary) and the true monoisotope sits at selected_mz - k*ISOTOPE/z; without
+        // this guard Pass 2 would re-discover the primary's own peptide as a fake
+        // secondary (self-inflation). Selected charge is unknown, so reject if the
+        // peak lines up with any isotope spacing in `charge_range` on either side
+        // (`d.abs()` makes the test symmetric).
+        if charge_range.clone().filter(|&z| z != 0).any(|z| {
+            let d = (mz - selected_mz).abs();
+            (1..6).any(|k| (d - k as f64 * ISOTOPE / z as f64).abs() <= tol_da)
+        }) {
             continue;
         }
         // Don't re-report a peak that's an isotope of an already-accepted envelope.
@@ -289,7 +292,26 @@ pub(crate) fn search_secondary(
     // consistent with its RawScore / SpecEValue. The precursor-mass override
     // (Pass-2 secondaries center on the co-isolated mass, not the primary's
     // selected m/z) is set so the PIN writer emits correct ExpMass/dm/absdm.
-    let mut best = queue.drain_into_vec().into_iter().next()?;
+    // Pick the winner by SCORE, not heap order: `drain_into_vec` is unordered, and
+    // `TopNQueue` keeps ties even at capacity 1, so a tied secondary set can survive
+    // GF scoring. Selecting `.next()` would make the result heap-order dependent
+    // (nondeterministic) in a user-visible ranking path. Order by smallest
+    // spec_e_value, then largest rank_score, then smallest candidate index as a
+    // deterministic final tiebreak.
+    let mut best = queue
+        .drain_into_vec()
+        .into_iter()
+        .min_by(|a, b| {
+            a.spec_e_value
+                .partial_cmp(&b.spec_e_value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(
+                    b.rank_score
+                        .partial_cmp(&a.rank_score)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+                .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
+        })?;
     let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
     let mut features = crate::match_engine::compute_psm_features(&res_ss, cand_peptide, scorer, z);
     features.edge_score = best.edge_score;

@@ -19,7 +19,7 @@ pub mod sa_walk;
 pub mod search_index;
 pub mod search_params;
 pub(crate) mod fragment_index;
-pub(crate) mod sage_index;
+pub(crate) mod fragment_posting_index;
 pub(crate) mod shared_fragment;
 pub mod suffix_array;
 

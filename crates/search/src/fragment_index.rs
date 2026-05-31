@@ -4,7 +4,7 @@
 //!
 //! Task 3 wires the index into the chimeric hot path via `match_engine`.
 //!
-//! SUPERSEDED by `sage_index.rs` (Approach B): this Approach-A FragmentIndex /
+//! SUPERSEDED by `fragment_posting_index.rs` (Approach B): this Approach-A FragmentIndex /
 //! FragmentVoter is the failed algorithm and is no longer wired into the search
 //! (the `PreparedSearch.fragment_index` build is forced to `None`). Kept in the
 //! tree as a record per the plan; `dead_code` is allowed until it is removed.
@@ -142,7 +142,7 @@ impl FragmentIndex {
 
 /// Per-thread reusable scratch for the per-spectrum vote/top-K step. `votes` is
 /// sized to the candidate count; `touched` records which entries were written so
-/// reset is O(touched), never O(n_candidates) (the Sage pattern — avoids the
+/// reset is O(touched), never O(n_candidates) (the touched-only reset pattern — avoids the
 /// global per-spectrum allocation that OOM'd the Java attempt).
 pub(crate) struct FragmentVoter {
     votes: Vec<f32>,

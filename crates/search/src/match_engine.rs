@@ -36,7 +36,7 @@ use model::aa_set::AminoAcidSet;
 use input::Ms1Link;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
 use crate::chimeric_features::precursor_isotope_match;
-use crate::sage_index;
+use crate::fragment_posting_index;
 use model::enzyme::Enzyme;
 use scoring_crate::gf::generating_function::GeneratingFunction;
 use scoring_crate::gf::group::GeneratingFunctionGroup;
@@ -85,16 +85,16 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
-    /// Chimeric Sage-style candidate generator (Approach B). `Some` only when
+    /// Chimeric inverted fragment-posting candidate generator (Approach B). `Some` only when
     /// `params.frag_index_active()`; supersedes `fragment_index` as the active
     /// chimeric candidate generator. `None` keeps the brute-force / off path
     /// (and the entire `--chimeric off` / narrow path) bit-identical.
-    pub(crate) sage_index: Option<sage_index::SageIndex>,
+    pub(crate) fragment_posting_index: Option<fragment_posting_index::FragmentPostingIndex>,
 }
 
 /// Owned, precursor-tolerance-independent products of
 /// [`PreparedSearch::prepare`]: the enumerated candidate list, mass-bucket
-/// index, GF-registered aa_set, and optional Sage index. These depend only on
+/// index, GF-registered aa_set, and optional fragment-posting index. These depend only on
 /// the database, enzyme, mods, and length range — NOT on the precursor
 /// tolerance — so they can be built once during the calibration pre-pass and
 /// reused for the tightened-tolerance main pass, avoiding a second full
@@ -103,7 +103,7 @@ pub struct PreparedParts {
     candidates: Vec<Candidate>,
     bucket_index: BTreeMap<i32, Vec<usize>>,
     aa_set_for_gf: AminoAcidSet,
-    sage_index: Option<sage_index::SageIndex>,
+    fragment_posting_index: Option<fragment_posting_index::FragmentPostingIndex>,
 }
 
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
@@ -235,13 +235,13 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
-        // Build the chimeric Sage-style candidate generator (Approach B; only
+        // Build the chimeric inverted fragment-posting candidate generator (Approach B; only
         // under `--chimeric` + frag-index active). `None` keeps the brute-force /
         // off path bit-identical.
-        let sage_index = if params.frag_index_active() {
-            let si = sage_index::SageIndex::build(&candidates);
+        let fragment_posting_index = if params.frag_index_active() {
+            let si = fragment_posting_index::FragmentPostingIndex::build(&candidates);
             eprintln!(
-                "SageIndex: {} candidates, {} fragments (~{} MB)",
+                "FragmentPostingIndex: {} candidates, {} fragments (~{} MB)",
                 candidates.len(),
                 si.n_fragments(),
                 si.n_fragments() * 8 / 1_000_000
@@ -260,12 +260,12 @@ impl<'a> PreparedSearch<'a> {
             bucket_index,
             aa_set_for_gf,
             ms1_link: None,
-            sage_index,
+            fragment_posting_index,
         }
     }
 
     /// Consume this prepared search, returning its precursor-tolerance-
-    /// independent parts (candidates, bucket index, GF aa_set, sage index) as an
+    /// independent parts (candidates, bucket index, GF aa_set, posting index) as an
     /// owned [`PreparedParts`]. Drops the `idx`/`params`/`scorer` borrows so the
     /// caller can mutate `params` (e.g. tighten the precursor tolerance after
     /// calibration) before rebuilding via [`Self::from_parts`].
@@ -274,7 +274,7 @@ impl<'a> PreparedSearch<'a> {
             candidates: self.candidates,
             bucket_index: self.bucket_index,
             aa_set_for_gf: self.aa_set_for_gf,
-            sage_index: self.sage_index,
+            fragment_posting_index: self.fragment_posting_index,
         }
     }
 
@@ -299,7 +299,7 @@ impl<'a> PreparedSearch<'a> {
             bucket_index: parts.bucket_index,
             aa_set_for_gf: parts.aa_set_for_gf,
             ms1_link: None,
-            sage_index: parts.sage_index,
+            fragment_posting_index: parts.fragment_posting_index,
         }
     }
 
@@ -352,10 +352,10 @@ impl<'a> PreparedSearch<'a> {
         let candidates = &self.candidates;
         let bucket_index = &self.bucket_index;
         let aa_set_for_gf = &self.aa_set_for_gf;
-        // Chimeric Sage-style candidate generator (Approach B). `Some` only under
+        // Chimeric inverted fragment-posting candidate generator (Approach B). `Some` only under
         // `--chimeric` + frag-index active; supersedes `fragment_index`. `None`
         // keeps the off/brute path bit-identical.
-        let sage_index = self.sage_index.as_ref();
+        let fragment_posting_index = self.fragment_posting_index.as_ref();
         // Chimeric precursor-envelope MS1 linkage (Task 3). Only `Some` under
         // `--chimeric`; the off path leaves this `None` and the feature fill
         // below is a no-op, keeping the golden PIN/TSV bit-identical.
@@ -399,7 +399,7 @@ impl<'a> PreparedSearch<'a> {
             // Pass 2 (`run_pass2_coisolation`) is the ONLY chimeric-specific
             // candidate enumeration. So under `--chimeric` we deliberately keep
             // candidate generation/scoring NARROW here: no wide isolation-window
-            // enumeration, no SageIndex prefilter, no shared-fragment competition.
+            // enumeration, no FragmentPostingIndex prefilter, no shared-fragment competition.
             // (The refuted blind-chimeric wide path used `params.chimeric` to
             // widen; the cascade keeps these `false`.) The MS1 load and the
             // `precursor_isotope_match` feature fill are unaffected — Pass 2 and
@@ -556,14 +556,14 @@ impl<'a> PreparedSearch<'a> {
             // When the index is `None` (off / narrow path), `cand_iter` is
             // exactly `window_cand_indices.clone()` — bit-identical to before.
             let cand_iter: Vec<usize> = if let (Some(si), true) =
-                (sage_index, cascade_wide)
+                (fragment_posting_index, cascade_wide)
             {
-                // Sage-style candidate generation (Approach B). `sage_index` is
+                // inverted fragment-posting candidate generation (Approach B). `fragment_posting_index` is
                 // `Some` only under `frag_index_active()`, which implies
                 // `params.chimeric`; the explicit `params.chimeric` guard makes
                 // the precondition local to this branch.
                 //
-                // `SageIndex::query` filters candidates by PEPTIDE NEUTRAL MASS
+                // `FragmentPostingIndex::query` filters candidates by PEPTIDE NEUTRAL MASS
                 // (`peptide.mass()`, INCLUDING H2O). The brute path's
                 // `window_cand_indices` selects candidates whose
                 // `nominal(peptide.mass() - H2O)` is in
@@ -579,7 +579,7 @@ impl<'a> PreparedSearch<'a> {
                 // candidates; too narrow drops real PSMs).
                 // Recall/speed tradeoff knob — tuned at the PXD/Astral gates.
                 // Higher = more candidates survive the prefilter (safer recall),
-                // at some query cost; the sage_index microbenchmark showed ~3.4×
+                // at some query cost; the fragment_posting_index microbenchmark showed ~3.4×
                 // headroom, so 128 trades a little speed for recall safety.
                 const TOP_K: usize = 128;
                 const SCALER: f64 = model::mass::INTEGER_MASS_SCALER as f64;

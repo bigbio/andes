@@ -67,3 +67,32 @@ or a per-ion CID node-scoring trace, not the chimeric cascade.
 [[merge-gate-beat-java]] requires Rust to beat Java on PSMs AND speed on all 3 datasets.
 2/3 met (Astral, PXD001819). TMT PSMs (−5.5%) blocks a full merge. NOT merged — branch
 parked as a clean, reviewable opt-in `--chimeric` feature pending the TMT strategy.
+
+---
+
+## Addendum: code-review fixes A/B revalidated — strict improvement (2026-05-31)
+
+After the multi-agent code review, two secondary-PSM correctness fixes landed
+(commit `c7940916`): **(A)** Pass-2 secondaries now get real fragment-ion features
+(`compute_psm_features` on the residual ScoredSpectrum + reused edge_score) instead
+of all-zeros; **(B)** new `PsmMatch.precursor_mz_override` so the PIN writer emits
+correct ExpMass/dm/absdm from the co-isolated precursor mass (not the primary's).
+Plus **(E)** `--chimeric` no longer forces top_n=1 on non-mzML inputs (`ffaab1d9`).
+
+Same-machine revalidation vs the pre-fix cascade (entrapment = authoritative ruler):
+
+| dataset | metric | pre-A/B | A/B | Δ |
+|---|---|---:|---:|---:|
+| Astral | normal @1% | 55,581 | **58,641** | +3,060 |
+| Astral | entrapment REAL PSMs | 45,248 | **49,610** | **+4,362** |
+| Astral | entrapment FDP (combined) | 1.54% | **1.13%** | cleaner |
+| PXD001819 | normal @1% | 18,197 | 17,565 | −632 |
+| PXD001819 | entrapment REAL PSMs | 16,276 | **16,371** | +95 |
+| PXD001819 | entrapment FDP (combined) | 1.52% | **1.37%** | cleaner |
+
+By the entrapment ruler (more-real-PSMs + lower-FDP on BOTH datasets), A/B is a strict
+improvement and more honest. The Astral gain is large (+4,362 real PSMs, FDP 1.54→1.13)
+because Astral is secondary-rich; the PXD normal-DB −632 is reduced *false* inflation
+(entrapment real rises while FDP falls). Both still beat Java decisively (Astral +63.7%,
+PXD +17.2% on normal @1%). TMT A/B verification pending (TMT has ~no co-isolation —
+Pass-2 2.66s — so it is expected ~unchanged at 9,628; to confirm when the VM is back).

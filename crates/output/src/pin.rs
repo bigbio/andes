@@ -291,8 +291,15 @@ fn write_psm_row<W: Write>(
     // protein is a decoy, label = -1; otherwise +1.
     let label: i32 = if cand.is_decoy { -1 } else { 1 };
 
+    // Precursor m/z for the mass-error columns. For chimeric Pass-2 secondaries
+    // this is the co-isolated precursor's m/z (the secondary's true precursor),
+    // NOT the scan's selected/primary m/z; `precursor_mz_override` carries it.
+    // `None` (every ordinary PSM) falls back to the spectrum's precursor m/z, so
+    // the non-secondary path is byte-identical.
+    let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+
     // ExpMass: neutral precursor mass = mz * charge - charge * PROTON
-    let exp_mass = spec.precursor_mz * charge - charge * PROTON;
+    let exp_mass = precursor_mz * charge - charge * PROTON;
 
     // CalcMass: theoretical neutral mass. peptide.mass() already includes H2O.
     // ExpMass = mz * charge - charge * PROTON is also a neutral mass.
@@ -338,7 +345,7 @@ fn write_psm_row<W: Write>(
     //   theo_mz         = peptide.mass() / charge + PROTON  (peptide.mass() includes H2O)
     //   dm              = adjusted_exp_mz - theo_mz
     let theo_mz = calc_mass / charge + PROTON;
-    let adjusted_exp_mz = spec.precursor_mz - ISOTOPE * (isotope_error as f64) / charge;
+    let adjusted_exp_mz = precursor_mz - ISOTOPE * (isotope_error as f64) / charge;
     let dm = adjusted_exp_mz - theo_mz;
     let absdm = dm.abs();
 
@@ -691,6 +698,7 @@ mod tests {
             e_value: spec_e_value * 100.0,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         }
     }
 

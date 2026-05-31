@@ -160,6 +160,13 @@ pub struct PsmMatch {
     /// (precursor_matching.rs) via match_engine.rs. Written as the PIN
     /// `isotope_error` column.
     pub isotope_offset: i8,
+    /// Chimeric cascade Pass-2 secondaries only: the co-isolated precursor m/z
+    /// this PSM was actually scored at (the SECONDARY peptide's precursor, not
+    /// the scan's selected/primary m/z). `None` for every ordinary PSM, in which
+    /// case the PIN writer uses the spectrum's `precursor_mz`. `Some(mz)` makes
+    /// the PIN writer compute ExpMass / dm / absdm from the secondary's own
+    /// precursor mass instead of the primary's selected m/z.
+    pub precursor_mz_override: Option<f64>,
 }
 
 impl PsmMatch {
@@ -422,6 +429,7 @@ mod tests {
             e_value: 1.0,  // sentinel: not yet computed
             features: PsmFeatures::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         }
     }
 

@@ -204,6 +204,7 @@ fn psm_with_lower_spec_e_value_ranks_first() {
             e_value: 1.0,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         }
     }
 

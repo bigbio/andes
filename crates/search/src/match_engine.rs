@@ -735,6 +735,7 @@ impl<'a> PreparedSearch<'a> {
                         e_value: 1.0,
                         features,
                         isotope_offset: err.isotope_offset,
+                        precursor_mz_override: None,
                     };
                     per_charge_queues
                         .entry(z)
@@ -2334,6 +2335,7 @@ mod dedup_tests {
             e_value: 1.0,
             features: Default::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         }
     }
 

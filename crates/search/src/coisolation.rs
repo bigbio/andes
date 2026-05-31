@@ -238,6 +238,9 @@ pub(crate) fn search_secondary(
                 e_value: 1.0,
                 features: PsmFeatures::default(),
                 isotope_offset: 0,
+                // Set to the co-isolated precursor m/z after the winner is
+                // chosen (see end of `search_secondary`); `None` here.
+                precursor_mz_override: None,
             };
             queue.push(psm);
         }
@@ -275,7 +278,24 @@ pub(crate) fn search_secondary(
         search_index,
         candidates,
     );
-    queue.drain_into_vec().into_iter().next()
+
+    // Fragment-ion feature extraction for the secondary, mirroring the primary
+    // path in `run_chunk_inner` (`compute_psm_features` + reuse of the
+    // per-candidate `edge_score`). Without this the secondary's PIN row carries
+    // all-zero feature columns (NumMatchedMainIons, ExplainedIonCurrentRatio,
+    // MeanErrorTop7, EdgeScore, ...), starving Percolator of the secondary's
+    // discriminative signal. Features are computed on the RESIDUAL `res_ss` —
+    // the same spectrum the secondary was scored against — so they are
+    // consistent with its RawScore / SpecEValue. The precursor-mass override
+    // (Pass-2 secondaries center on the co-isolated mass, not the primary's
+    // selected m/z) is set so the PIN writer emits correct ExpMass/dm/absdm.
+    let mut best = queue.drain_into_vec().into_iter().next()?;
+    let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
+    let mut features = crate::match_engine::compute_psm_features(&res_ss, cand_peptide, scorer, z);
+    features.edge_score = best.edge_score;
+    best.features = features;
+    best.precursor_mz_override = Some(co.mono_mz);
+    Some(best)
 }
 
 #[cfg(test)]

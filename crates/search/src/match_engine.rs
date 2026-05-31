@@ -1124,10 +1124,16 @@ pub fn run_pass2_coisolation(
             None => return,
         };
 
+        // Secondaries on the SAME scan compete for residual evidence: each accepted
+        // secondary's matched peaks are added to `claimed` so the next co-isolated
+        // mass is scored against still-unexplained signal (no double-counting of
+        // shared leftover peaks across multiple co-isolated precursors).
+        let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
         for co in cos {
-            if let Some(mut psm) = crate::coisolation::search_secondary(
+            if let Some((mut psm, winner_claimed)) = crate::coisolation::search_secondary(
                 spec,
                 &primary,
+                &claimed,
                 co,
                 &prepared.candidates,
                 &prepared.bucket_index,
@@ -1146,6 +1152,7 @@ pub fn run_pass2_coisolation(
                 // eviction (plain `push` at capacity 1 would evict the primary or
                 // drop the secondary).
                 q.force_push(psm);
+                claimed.extend(winner_claimed);
             }
         }
     });

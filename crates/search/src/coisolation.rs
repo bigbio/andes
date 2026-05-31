@@ -155,10 +155,16 @@ fn primary_matched_peak_keys(
 ///
 /// `bucket_index` maps `nominal(peptide.mass() - H2O) -> candidate ids`, identical
 /// to `PreparedSearch.bucket_index` (built from `Peptide::nominal_residue_mass`).
+/// Returns the winning secondary PSM AND the set of raw-peak keys it claimed (its
+/// matched charge-1 b/y peaks). When a scan has multiple co-isolated precursors,
+/// the caller threads these keys into `prior_claimed` for the NEXT call so the
+/// secondaries COMPETE for residual evidence (a peak explained by one secondary is
+/// removed before the next is scored) instead of double-counting shared leftovers.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_secondary(
     spec: &Spectrum,
     primary: &Peptide,
+    prior_claimed: &std::collections::HashSet<i64>,
     co: CoIsolated,
     candidates: &[Candidate],
     bucket_index: &BTreeMap<i32, Vec<usize>>,
@@ -168,18 +174,20 @@ pub(crate) fn search_secondary(
     params: &SearchParams,
     search_index: &SearchIndex,
     fragment_tolerance_da: f64,
-) -> Option<PsmMatch> {
+) -> Option<(PsmMatch, std::collections::HashSet<i64>)> {
     let z = co.charge;
     if z == 0 {
         return None;
     }
 
-    // 1. Residual spectrum: drop the primary's matched charge-1 b/y peaks so the
-    //    second peptide is scored against signal the primary did not explain.
-    //    Overwrite the precursor fields with `co`'s so the GF mass window (derived
-    //    from the spectrum's precursor) centers on the co-isolated mass, not the
-    //    primary's. `co_spec` feeds both `ScoredSpectrum::new` and the GF below.
-    let claimed = primary_matched_peak_keys(spec, primary, scorer);
+    // 1. Residual spectrum: drop the peaks already explained on this scan — the
+    //    primary's matched charge-1 b/y peaks PLUS any peaks claimed by earlier
+    //    secondaries (`prior_claimed`) — so this peptide is scored only against
+    //    still-unexplained signal. Overwrite the precursor fields with `co`'s so
+    //    the GF mass window (derived from the spectrum's precursor) centers on the
+    //    co-isolated mass. `co_spec` feeds both `ScoredSpectrum::new` and the GF.
+    let mut claimed = primary_matched_peak_keys(spec, primary, scorer);
+    claimed.extend(prior_claimed.iter().copied());
     let mut co_spec = spec.clone();
     co_spec
         .peaks
@@ -288,7 +296,11 @@ pub(crate) fn search_secondary(
     features.edge_score = best.edge_score;
     best.features = features;
     best.precursor_mz_override = Some(co.mono_mz);
-    Some(best)
+    // Peaks this secondary explained (its charge-1 b/y matches on the FULL spectrum),
+    // returned so the caller can remove them before the next co-isolated mass on
+    // this scan is searched (sequential competition; see fn doc).
+    let winner_claimed = primary_matched_peak_keys(spec, cand_peptide, scorer);
+    Some((best, winner_claimed))
 }
 
 #[cfg(test)]
@@ -465,6 +477,7 @@ mod tests {
         let got = search_secondary(
             &spec,
             &primary,
+            &std::collections::HashSet::new(),
             co,
             &prepared.candidates,
             &prepared.bucket_index,
@@ -476,11 +489,43 @@ mod tests {
             frag_tol,
         );
 
-        let psm = got.expect("secondary search should return a PSM at the co-isolated mass");
+        let (psm, winner_claimed) = got.expect("secondary search should return a PSM at the co-isolated mass");
         let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;
         assert_eq!(
             found.residues, planted.residues,
             "secondary PSM should resolve to the planted peptide DAFLGSFLYEYSR"
+        );
+
+        // Competition check: searching the SAME co-isolated mass again with the
+        // winner's peaks already claimed strips them from the residual, so the
+        // peptide can no longer earn its fragment matches — it must NOT come back
+        // with the same evidence. (Proves prior_claimed removes shared peaks so two
+        // co-isolated precursors can't double-count the same leftover signal.)
+        assert!(!winner_claimed.is_empty(), "winner should claim its matched peaks");
+        let again = search_secondary(
+            &spec,
+            &primary,
+            &winner_claimed,
+            co,
+            &prepared.candidates,
+            &prepared.bucket_index,
+            &scorer,
+            &prepared.aa_set_for_gf,
+            Some(params.enzyme),
+            &params,
+            &idx,
+            frag_tol,
+        );
+        let matched_after = again
+            .as_ref()
+            .map(|(p, _)| p.features.num_matched_main_ions)
+            .unwrap_or(0);
+        assert!(
+            matched_after < psm.features.num_matched_main_ions,
+            "with its peaks already claimed, the secondary must match fewer ions \
+             (was {}, now {})",
+            psm.features.num_matched_main_ions,
+            matched_after
         );
         // The planted peptide is in-window for the co-isolated mass, so the GF
         // must compute a real SpecEValue (< 1.0). Exactly 1.0 means the GF mass
@@ -546,10 +591,11 @@ mod tests {
         };
 
         let got = search_secondary(
-            &spec, &primary, co, &prepared.candidates, &prepared.bucket_index, &scorer,
-            &prepared.aa_set_for_gf, Some(params.enzyme), &params, &idx, frag_tol,
+            &spec, &primary, &std::collections::HashSet::new(), co, &prepared.candidates,
+            &prepared.bucket_index, &scorer, &prepared.aa_set_for_gf, Some(params.enzyme),
+            &params, &idx, frag_tol,
         );
-        let psm = got.expect("secondary must be found at the calibration-adjusted mass");
+        let (psm, _claimed) = got.expect("secondary must be found at the calibration-adjusted mass");
         let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;
         assert_eq!(found.residues, planted.residues, "should resolve to the planted peptide");
         // The candidate matches the ADJUSTED mass, so the reported error is ~0,

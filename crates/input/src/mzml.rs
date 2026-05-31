@@ -741,12 +741,13 @@ impl<R: BufRead> MzMLReader<R> {
                 }
                 Ok(None) => break,
                 Err(_e) => {
-                    // Tolerant: a single malformed spectrum must not abort the whole
-                    // run. Stop streaming and return the spectra parsed so far
-                    // (mirrors the MS2-only streaming path, which counts the error
-                    // and proceeds). Production chimeric runs use the chunked
-                    // variant, which also reports the error count.
-                    break;
+                    // Resync past the malformed spectrum and keep parsing (skip the
+                    // bad scan, not the rest of the file). Only an unreadable XML
+                    // stream stops us.
+                    match self.resync_to_next_spectrum() {
+                        Ok(true) => continue,
+                        Ok(false) | Err(_) => break,
+                    }
                 }
             }
         }
@@ -840,7 +841,13 @@ impl<R: BufRead> MzMLReader<R> {
                     if first_errors.len() < 3 {
                         first_errors.push(format!("{e}"));
                     }
-                    break; // tolerant: deliver what parsed so far instead of aborting
+                    // Resync past the bad scan and keep parsing the rest of the file
+                    // (skip-one-bad-spectrum, not truncate-the-tail). Only a broken
+                    // XML stream — where resync itself can't read — stops us.
+                    match self.resync_to_next_spectrum() {
+                        Ok(true) => continue,
+                        Ok(false) | Err(_) => break,
+                    }
                 }
             }
         }
@@ -849,6 +856,34 @@ impl<R: BufRead> MzMLReader<R> {
             on_chunk(chunk, Ms1Link { ms1_peaks: chunk_ms1, ms2_to_ms1: links });
         }
         (err_count, first_errors)
+    }
+
+    /// After a recoverable per-spectrum parse error, discard the partial spectrum
+    /// and skip events until the next `<spectrum>` start, so streaming RESYNCS and
+    /// continues past one bad scan instead of truncating the rest of the file.
+    /// Returns `Ok(true)` positioned at a fresh spectrum (caller continues),
+    /// `Ok(false)` at EOF. Propagates `Err` only when the XML stream itself is
+    /// unreadable (broken markup) — that is genuinely unrecoverable.
+    fn resync_to_next_spectrum(&mut self) -> Result<bool, MzMLParseError> {
+        self.current = None;
+        self.binary_ctx = None;
+        self.state = State::Outside;
+        loop {
+            self.buf.clear();
+            match self.xml.read_event_into(&mut self.buf)? {
+                Event::Eof => {
+                    self.done = true;
+                    return Ok(false);
+                }
+                Event::Start(ref e) if e.local_name().as_ref() == b"spectrum" => {
+                    let id = attr_str(e, b"id").unwrap_or_default();
+                    self.current = Some(SpectrumBuilder { id, ..Default::default() });
+                    self.state = State::Spectrum;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -2245,6 +2280,51 @@ mod tests {
         // Sanity: MS2 #2 (chunk-2 first) carried over MS1#a; MS2 #3 linked to MS1#b.
         assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
         assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
+    }
+
+    #[test]
+    fn chunked_resyncs_past_a_malformed_spectrum() {
+        // A bad MS2 (invalid base64 in its m/z array) sits between two good MS2s.
+        // The reader must resync past the bad scan and still deliver BOTH good ones
+        // — NOT truncate the file at the first error.
+        let good1 = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            350.0,
+            Some(2),
+        );
+        let bad = ms2_spectrum_xml(
+            "scan=2",
+            &bda_plain("MS:1000514", "@@@not-valid-base64@@@"),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            450.0,
+            Some(2),
+        );
+        let good2 = ms2_spectrum_xml(
+            "scan=3",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[500.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            550.0,
+            Some(2),
+        );
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml"><run><spectrumList count="3" defaultDataProcessingRef="dp">
+{good1}{bad}{good2}
+</spectrumList></run></mzML>"#
+        );
+
+        let mut got: Vec<Spectrum> = Vec::new();
+        let (errc, errs) = MzMLReader::new(Cursor::new(xml))
+            .with_ms1_capture(true)
+            .read_with_ms1_chunked(5000, usize::MAX, |chunk, _link| got.extend(chunk));
+
+        assert_eq!(errc, 1, "exactly one malformed spectrum should be counted");
+        assert_eq!(errs.len(), 1, "the error message should be captured");
+        assert_eq!(got.len(), 2, "both good spectra must survive the resync (no truncation)");
+        assert_eq!(got[0].scan, Some(1));
+        assert_eq!(got[1].scan, Some(3), "the post-error spectrum must still be parsed");
     }
 
     /// An MS2 that appears BEFORE any MS1 links to `None`.

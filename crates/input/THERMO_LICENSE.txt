@@ -1,0 +1,25 @@
+Thermo RawFileReader — license notice
+======================================
+
+Native Thermo `.raw` reading (the optional `thermo` cargo feature) uses Thermo
+Fisher Scientific's official **RawFileReader** .NET assemblies, accessed through
+the `thermorawfilereader` / `dotnetrawfilereader-sys` Rust crates, which vendor
+those assemblies.
+
+RawFileReader is distributed by Thermo Fisher under **Thermo's own license**
+(the "RawFileReader License"), NOT under msgf-rust's open-source license. By
+building or running msgf-rust with the `thermo` feature, or by using a release
+archive that bundles the .NET runtime for `.raw` support, you agree to Thermo's
+RawFileReader license terms.
+
+License text and source:
+  https://github.com/thermofisherlsms/RawFileReader/blob/main/License.doc
+  https://github.com/thermofisherlsms/RawFileReader
+
+The bundled `.NET 8` runtime shipped in the release archives is redistributed
+under the MIT License (Microsoft .NET):
+  https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+
+msgf-rust itself and all of its own source code remain under the license stated
+in the repository's LICENSE file. mzML and MGF input do not use RawFileReader or
+.NET in any way.

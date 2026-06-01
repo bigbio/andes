@@ -317,6 +317,21 @@ impl<'a> PreparedSearch<'a> {
                 return queue;
             }
 
+            // DeltaRawScore capture (additive feature): track the best and the
+            // second-best *distinct-peptide* rounded RawScore across ALL
+            // mass-matching candidates for this spectrum — independent of the
+            // TopNQueue, so it survives `top_n = 1` (where the runner-up is
+            // evicted) AND never feeds the GF `min_score` (so no emitted PSM's
+            // SpecEValue is perturbed). Distinct-peptide keyed by nominal
+            // residue mass: collapses the same peptide scored at multiple
+            // charges / matched in multiple proteins (which share a neutral
+            // mass) so a shared peptide doesn't zero the delta. Isobaric
+            // different-sequence peptides at the same nominal mass are rare and
+            // only make the delta conservative (slightly understated).
+            let mut best_raw = i32::MIN;
+            let mut best_mass_key = i32::MIN;
+            let mut second_raw = i32::MIN;
+
             // Determine which charge states to try for this spectrum.
             // For charge-explicit spectra this is a single entry; for charge-missing,
             // typically 2-3 entries (small overhead, correct behavior).
@@ -519,6 +534,26 @@ impl<'a> PreparedSearch<'a> {
                     let pin_score = score_psm(scored_spec, &cand.peptide, scorer, z, fragment_tolerance_da)
                         + cleavage_credit;
 
+                    // DeltaRawScore capture: fold this candidate's RawScore into
+                    // the per-spectrum best / second-best-distinct-peptide
+                    // trackers BEFORE the `could_win` gate, so a strong runner-up
+                    // that can't beat the top-1 still contributes to the delta.
+                    {
+                        let s = pin_score.round() as i32;
+                        let mkey = cand.peptide.nominal_residue_mass();
+                        if mkey == best_mass_key {
+                            if s > best_raw {
+                                best_raw = s;
+                            }
+                        } else if s > best_raw {
+                            second_raw = second_raw.max(best_raw);
+                            best_raw = s;
+                            best_mass_key = mkey;
+                        } else {
+                            second_raw = second_raw.max(s);
+                        }
+                    }
+
                     // Gate against the queue's current worst rank_score
                     // before invoking edge_score.
                     let could_win = match per_charge_queues.get(&z) {
@@ -637,6 +672,15 @@ impl<'a> PreparedSearch<'a> {
             // Pre-computed `psm.edge_score` from the candidate loop
             // is moved into `features.edge_score` to avoid the per-PSM
             // recomputation that `compute_psm_features` would otherwise do.
+            // Spectrum-level DeltaRawScore: positive lead of the best RawScore
+            // over the second-best distinct peptide. 0.0 when no distinct
+            // runner-up was scored (uncontested top-1, e.g. top_n=1 with a
+            // single candidate). The PIN writer emits it on the rank-1 row only.
+            let delta_raw_score = if second_raw > i32::MIN {
+                (best_raw - second_raw) as f32
+            } else {
+                0.0
+            };
             queue.fill_post_topn(|psm| {
                 let ss = scored_spec_for_charge(psm.charge_used);
                 let cand = &candidates[psm.primary_candidate_idx() as usize];
@@ -693,6 +737,8 @@ impl<'a> PreparedSearch<'a> {
                     }
                 }
 
+
+                features.delta_raw_score = delta_raw_score;
                 psm.features = features;
             });
 
@@ -1547,6 +1593,9 @@ pub(crate) fn compute_psm_features(
         // under --chimeric by the feature fill.
         precursor_isotope_kl: 0.0,
         precursor_snr: 0.0,
+        // Set by the caller (run_chunk_inner) from the per-spectrum capture;
+        // `compute_psm_features` has no cross-candidate view, so default here.
+        delta_raw_score: 0.0,
     }
 }
 

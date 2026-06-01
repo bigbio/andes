@@ -69,6 +69,15 @@ pub struct PsmFeatures {
     /// Observed monoisotopic precursor intensity / median MS1 intensity (SNR
     /// proxy). 0.0 when unavailable.
     pub precursor_snr: f32,
+
+    /// Top-1 RawScore dominance: `RawScore(best) − RawScore(2nd-best distinct
+    /// peptide)` for this spectrum, a positive "lead over the runner-up"
+    /// confidence signal. Emitted as the additive `DeltaRawScore` PIN column on
+    /// the rank-1 row only (0.0 elsewhere). Captured during candidate scoring
+    /// (NOT from the retained queue), so it is populated even at `top_n = 1`
+    /// where the runner-up is otherwise evicted — and without perturbing the
+    /// GF `min_score` / SpecEValue of any emitted PSM (purely additive).
+    pub delta_raw_score: f32,
 }
 
 #[derive(Debug, Clone)]

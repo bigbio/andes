@@ -54,11 +54,13 @@ fn rust_pin_header_matches_java_pin_fixture_header_exactly() {
     // Java fixture does not emit:
     //   - "EdgeScore" (iter19, 2026-05-21)
     //   - "PrecursorIsotopeKL" / "PrecursorSNR" (chimeric Task 4, 2026-05-28)
+    //   - "DeltaRawScore" (Lever 3a, 2026-05-28)
     // Check that the Java header is a prefix-modulo-additive-insertions of
     // Rust's: every Java column appears in Rust in the same relative order, and
-    // the only extra Rust columns are the three additive features (all sitting
+    // the only extra Rust columns are the four additive features (all sitting
     // between matchedIonRatio and Peptide).
-    const RUST_ONLY: [&str; 3] = ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR"];
+    const RUST_ONLY: [&str; 4] =
+        ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore"];
     let java_cols: Vec<&str> = java_header.split('\t').collect();
     let rust_cols: Vec<&str> = rust_header.split('\t').collect();
     let rust_minus_additive: Vec<&str> = rust_cols
@@ -163,13 +165,14 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
     // Check first 5 data rows (lines 1..=5; line 0 is header).
     let java_header_cols = java_lines[0].split('\t').count();
     let rust_header_cols = rust_lines[0].split('\t').count();
-    // Rust has three ADDITIVE columns not present in the Java fixture:
-    // EdgeScore (iter19, 2026-05-21) plus PrecursorIsotopeKL / PrecursorSNR
-    // (chimeric Task 4, 2026-05-28), so expect Rust to be Java + 3.
+    // Rust has four ADDITIVE columns not present in the Java fixture:
+    // EdgeScore (iter19, 2026-05-21), PrecursorIsotopeKL / PrecursorSNR
+    // (chimeric Task 4, 2026-05-28), and DeltaRawScore (Lever 3a, 2026-05-28),
+    // so expect Rust to be Java + 4.
     assert_eq!(
         rust_header_cols,
-        java_header_cols + 3,
-        "header column count mismatch (Rust {rust_header_cols} vs Java {java_header_cols}; expected Rust = Java + 3 additive cols)"
+        java_header_cols + 4,
+        "header column count mismatch (Rust {rust_header_cols} vs Java {java_header_cols}; expected Rust = Java + 4 additive cols)"
     );
 
     let mut row_count = 0;

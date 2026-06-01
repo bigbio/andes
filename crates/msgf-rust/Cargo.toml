@@ -20,5 +20,12 @@ num_cpus = "1.16"
 rayon = "1.10"
 thiserror = { workspace = true }
 
+[features]
+# Native Bruker timsTOF `.d` input (delegates to the input crate's `timstof`
+# feature). Not enabled by default: turn on with `--features timstof` on a
+# toolchain with a recent-enough rustc for the `timsrust` dep tree. Reading a
+# `.d` needs no vendor runtime (pure Rust). Default builds read mzML/MGF only.
+timstof = ["input/timstof"]
+
 [dev-dependencies]
 tempfile = "3.10"

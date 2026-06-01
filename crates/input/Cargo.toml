@@ -12,3 +12,13 @@ quick-xml = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
 byteorder = { workspace = true }
+timsrust = { version = "0.4.2", optional = true }
+
+[features]
+# Native Bruker timsTOF `.d` reading via the pure-Rust `timsrust` crate (the
+# same reader Sage uses). Optional + off-by-default; the msgf-rust binary turns
+# it on only under `--features timstof`. NO vendor runtime and NO bundling — a
+# `.d` is read natively (TDF SQLite + binary blob). Default builds stay pure and
+# read mzML/MGF only; the optional dep tree only compiles under this feature
+# (its transitive deps may need a newer rustc than the default toolchain pins).
+timstof = ["dep:timsrust"]

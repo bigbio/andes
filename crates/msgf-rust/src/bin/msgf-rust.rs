@@ -27,7 +27,6 @@ use search::{
     PreparedSearch, PrecursorCalMode, SearchIndex, SearchParams, SpecKey, TopNQueue,
 };
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
-use search::search_params::FragIndexMode;
 use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
 
 /// Fragmentation method. `Auto` detects from the mzML's activation block and
@@ -219,11 +218,6 @@ struct Cli {
     /// PSM. Requires mzML (MS1 scans); has no effect on MGF input.
     #[arg(long, default_value = "false")]
     chimeric: bool,
-
-    /// (Advanced) Chimeric fragment-index prefilter mode: `off`, `on`, `auto`.
-    /// The shipped cascade does not use this prefilter; leave it `off`.
-    #[arg(long, value_name = "MODE", default_value = "off", hide = true)]
-    chimeric_frag_index: String,
 
     /// Chimeric mode: fallback isolation half-width in Da when the mzML omits the
     /// per-scan isolation-window offsets.
@@ -684,11 +678,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.chimeric = chimeric_active;
     params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
-    params.chimeric_frag_index = match cli.chimeric_frag_index.as_str() {
-        "on" => FragIndexMode::On,
-        "off" => FragIndexMode::Off,
-        _ => FragIndexMode::Auto,
-    };
     // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
     // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
     // blind multi-emission per scan = inflated FDR.

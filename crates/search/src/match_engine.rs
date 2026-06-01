@@ -35,7 +35,6 @@ use model::aa_set::AminoAcidSet;
 use input::Ms1Link;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
 use crate::chimeric_features::precursor_isotope_match;
-use crate::fragment_posting_index;
 use model::enzyme::Enzyme;
 use scoring_crate::gf::generating_function::GeneratingFunction;
 use scoring_crate::gf::group::GeneratingFunctionGroup;
@@ -43,12 +42,11 @@ use scoring_crate::gf::primitive_graph::PrimitiveAaGraph;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
-use crate::precursor_matching::{matches_isolation_window, matches_precursor, MassError};
+use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
 use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
-use crate::shared_fragment;
 use scoring_crate::scoring::{psm_edge_score, score_psm, RankScorer, ScoredSpectrum};
 use model::spectrum::Spectrum;
 
@@ -84,95 +82,49 @@ pub struct PreparedSearch<'a> {
     /// precursor-envelope computation and the two new `PsmFeatures` fields
     /// stay 0.0 — keeping the off path bit-identical.
     pub ms1_link: Option<Ms1Link>,
-    /// Chimeric inverted fragment-posting candidate generator. `Some` only when
-    /// `params.frag_index_active()`; `None` keeps the brute-force / off path
-    /// bit-identical.
-    pub(crate) fragment_posting_index: Option<fragment_posting_index::FragmentPostingIndex>,
 }
 
 /// Owned, precursor-tolerance-independent products of [`PreparedSearch::prepare`]
-/// (candidates, bucket index, GF aa_set, posting index). Built once during the
+/// (candidates, bucket index, GF aa_set). Built once during the
 /// calibration pre-pass and reused for the tightened-tolerance main pass, avoiding
 /// a second full candidate enumeration (~15s on the 16.8M-candidate Astral search).
 pub struct PreparedParts {
     candidates: Vec<Candidate>,
     bucket_index: BTreeMap<i32, Vec<usize>>,
     aa_set_for_gf: AminoAcidSet,
-    fragment_posting_index: Option<fragment_posting_index::FragmentPostingIndex>,
 }
 
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
 /// for one spectrum at one charge state `z`, used to enumerate candidate
 /// peptides from the mass-bucket index.
 ///
-/// Two modes:
-///
-/// * **Standard** (`params.chimeric == false`): the window is centered on the
-///   precursor m/z and widened by the precursor tolerance plus the isotope-error
-///   range. This is the original, byte-for-byte unchanged derivation.
-///
-/// * **Chimeric** (`params.chimeric == true`): the window spans the full
-///   isolation window. The lower/upper isolation-window offsets (in Da, m/z
-///   space) are read from the spectrum, falling back to
-///   `params.chimeric_isolation_halfwidth_da` when the mzML omits them. The
-///   isolation m/z bounds are converted to neutral nominal masses at charge `z`
-///   with the SAME `adjusted_observed_neutral_mass` + `nominal_from` pipeline
-///   as the standard path. Only the isotope-error widening is applied — the
-///   isolation window is already wider than the precursor tolerance, so the
-///   precursor-tolerance widening is intentionally dropped here.
-///
-/// The `chimeric` argument selects the window mode independently of
-/// `params.chimeric`, so the cascade's NARROW Pass 1 can force the standard
-/// (precursor-tolerance) derivation even while `params.chimeric == true`. Pass
-/// `params.chimeric` to reproduce the original mode-from-flag behavior.
+/// The window is centered on the precursor m/z and widened by the precursor
+/// tolerance plus the isotope-error range. This is the original, byte-for-byte
+/// unchanged derivation used by both the standard search and the cascade's
+/// NARROW Pass 1.
 fn candidate_nominal_bounds(
     spec: &Spectrum,
     z: u8,
     params: &SearchParams,
     shift_ppm: f64,
-    chimeric: bool,
 ) -> (i32, i32) {
     let charge_f = z as f64;
     let iso_min = *params.isotope_error_range.start() as i32;
     let iso_max = *params.isotope_error_range.end() as i32;
 
-    if chimeric {
-        // Span the full isolation window. Offsets are in Da (m/z space);
-        // fall back to the configured half-width when the mzML omits them.
-        let lo_mz = spec.precursor_mz
-            - spec
-                .isolation_lower_offset
-                .unwrap_or(params.chimeric_isolation_halfwidth_da);
-        let hi_mz = spec.precursor_mz
-            + spec
-                .isolation_upper_offset
-                .unwrap_or(params.chimeric_isolation_halfwidth_da);
-        let lo_nominal = nominal_from(adjusted_observed_neutral_mass(
-            (lo_mz - PROTON) * charge_f - H2O,
-            shift_ppm,
-        ));
-        let hi_nominal = nominal_from(adjusted_observed_neutral_mass(
-            (hi_mz - PROTON) * charge_f - H2O,
-            shift_ppm,
-        ));
-        let min_nominal = lo_nominal - iso_max;
-        let max_nominal = hi_nominal - iso_min;
-        (min_nominal, max_nominal)
-    } else {
-        let neutral_mass = adjusted_observed_neutral_mass(
-            (spec.precursor_mz - PROTON) * charge_f - H2O,
-            shift_ppm,
-        );
-        let nominal_center = nominal_from(neutral_mass);
-        let tol_da_left = params.precursor_tolerance.left.as_da(neutral_mass);
-        let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
-        let widen_left = (tol_da_left - 0.4999_f64).round() as i32;
-        let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
-        // Convention: max widens by tol_da_left, min widens by tol_da_right.
-        let min_nominal = nominal_center - iso_max - widen_right;
-        let max_nominal = nominal_center - iso_min + widen_left;
-        (min_nominal, max_nominal)
-    }
+    let neutral_mass = adjusted_observed_neutral_mass(
+        (spec.precursor_mz - PROTON) * charge_f - H2O,
+        shift_ppm,
+    );
+    let nominal_center = nominal_from(neutral_mass);
+    let tol_da_left = params.precursor_tolerance.left.as_da(neutral_mass);
+    let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
+    let widen_left = (tol_da_left - 0.4999_f64).round() as i32;
+    let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
+    // Convention: max widens by tol_da_left, min widens by tol_da_right.
+    let min_nominal = nominal_center - iso_max - widen_right;
+    let max_nominal = nominal_center - iso_min + widen_left;
+    (min_nominal, max_nominal)
 }
 
 impl<'a> PreparedSearch<'a> {
@@ -230,21 +182,6 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
-        // Chimeric inverted fragment-posting candidate generator, only under
-        // `--chimeric` + frag-index active. `None` keeps the off path bit-identical.
-        let fragment_posting_index = if params.frag_index_active() {
-            let si = fragment_posting_index::FragmentPostingIndex::build(&candidates);
-            eprintln!(
-                "FragmentPostingIndex: {} candidates, {} fragments (~{} MB)",
-                candidates.len(),
-                si.n_fragments(),
-                si.n_fragments() * 8 / 1_000_000
-            );
-            Some(si)
-        } else {
-            None
-        };
-
         PreparedSearch {
             idx,
             params,
@@ -254,7 +191,6 @@ impl<'a> PreparedSearch<'a> {
             bucket_index,
             aa_set_for_gf,
             ms1_link: None,
-            fragment_posting_index,
         }
     }
 
@@ -266,7 +202,6 @@ impl<'a> PreparedSearch<'a> {
             candidates: self.candidates,
             bucket_index: self.bucket_index,
             aa_set_for_gf: self.aa_set_for_gf,
-            fragment_posting_index: self.fragment_posting_index,
         }
     }
 
@@ -290,7 +225,6 @@ impl<'a> PreparedSearch<'a> {
             bucket_index: parts.bucket_index,
             aa_set_for_gf: parts.aa_set_for_gf,
             ms1_link: None,
-            fragment_posting_index: parts.fragment_posting_index,
         }
     }
 
@@ -343,10 +277,6 @@ impl<'a> PreparedSearch<'a> {
         let candidates = &self.candidates;
         let bucket_index = &self.bucket_index;
         let aa_set_for_gf = &self.aa_set_for_gf;
-        // Chimeric inverted fragment-posting candidate generator (Approach B). `Some` only under
-        // `--chimeric` + frag-index active; supersedes `fragment_index`. `None`
-        // keeps the off/brute path bit-identical.
-        let fragment_posting_index = self.fragment_posting_index.as_ref();
         // Chimeric precursor-envelope MS1 linkage. Only `Some` under
         // `--chimeric`; the off path leaves this `None` and the feature fill
         // below is a no-op, keeping the golden PIN/TSV bit-identical.
@@ -366,15 +296,6 @@ impl<'a> PreparedSearch<'a> {
         // inflation. Zero cost unless MSGF_CHIMERIC_OVERLAP is set AND --chimeric.
         let chim_overlap = params.chimeric && std::env::var("MSGF_CHIMERIC_OVERLAP").is_ok();
 
-        // Measurement gate (env, chimeric only): skip the residual
-        // SpecEValue re-score so the emitted PIN is the raw multi-emission
-        // (original spec_e ranking). Used to regenerate a non-rescored PIN for
-        // the rank-stratified FDR measurement — isolates the FDR-model effect
-        // from the residual rescore. The unique-evidence additive columns are
-        // still populated (harmless). Never set on any production path.
-        let chim_no_rescore =
-            params.chimeric && std::env::var("MSGF_CHIMERIC_NO_RESCORE").is_ok();
-
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
         let queues: Vec<TopNQueue> = spectra
@@ -387,11 +308,8 @@ impl<'a> PreparedSearch<'a> {
 
             // Cascade Pass 1 is a NARROW precursor-window search, identical to the
             // non-chimeric path; Pass 2 (`run_pass2_coisolation`) is the only
-            // chimeric-specific enumeration. Keep candidate generation narrow here
-            // (no wide isolation-window enumeration, no FragmentPostingIndex
-            // prefilter, no shared-fragment competition). MS1 load + the
+            // chimeric-specific enumeration. MS1 load + the
             // `precursor_isotope_match` feature fill still run for Pass 2.
-            let cascade_wide = false;
 
             // Skip spectra with too few peaks.
             if spec.peaks.len() < params.min_peaks as usize {
@@ -442,12 +360,11 @@ impl<'a> PreparedSearch<'a> {
             let mut window_cand_indices: Vec<usize> = Vec::with_capacity(2048);
             let shift_ppm = params.precursor_mass_shift_ppm;
             for &z in &charges_to_try {
-                // Cascade Pass 1 stays NARROW: pass `cascade_wide` (false) so even
-                // under `--chimeric` the bounds use the precursor-tolerance mode,
-                // not the wide isolation window. Off path: `cascade_wide == false`
-                // and `params.chimeric == false` agree → byte-identical.
+                // Cascade Pass 1 stays NARROW: the bounds use the
+                // precursor-tolerance mode, not the wide isolation window. Off path
+                // and `--chimeric` Pass 1 agree → byte-identical.
                 let (min_nominal, max_nominal) =
-                    candidate_nominal_bounds(spec, z, params, shift_ppm, cascade_wide);
+                    candidate_nominal_bounds(spec, z, params, shift_ppm);
                 for (_nm, idxs) in bucket_index.range(min_nominal..=max_nominal) {
                     window_cand_indices.extend_from_slice(idxs);
                 }
@@ -537,65 +454,9 @@ impl<'a> PreparedSearch<'a> {
             // per-SpecKey raw-score retention (Java parity).
             let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
 
-            // Chimeric fragment-evidence prefilter: replace the brute-force
-            // window scan with the top-K candidates by fragment vote. The set
-            // fed into scoring shrinks; the scoring/emission path is unchanged.
-            // When the index is `None` (off / narrow path), `cand_iter` is
-            // exactly `window_cand_indices.clone()` — bit-identical to before.
-            let cand_iter: Vec<usize> = if let (Some(si), true) =
-                (fragment_posting_index, cascade_wide)
-            {
-                // inverted fragment-posting candidate generation (Approach B). `fragment_posting_index` is
-                // `Some` only under `frag_index_active()`, which implies
-                // `params.chimeric`; the explicit `params.chimeric` guard makes
-                // the precondition local to this branch.
-                //
-                // `FragmentPostingIndex::query` filters candidates by PEPTIDE NEUTRAL MASS
-                // (`peptide.mass()`, INCLUDING H2O). The brute path's
-                // `window_cand_indices` selects candidates whose
-                // `nominal(peptide.mass() - H2O)` is in
-                // `[min_nominal, max_nominal]` (the `bucket_index` key). To cover
-                // the SAME candidate set, convert the per-charge nominal bounds
-                // back to `peptide.mass()` bounds:
-                //   nominal = round(SCALER * residue_mass)
-                //   => residue_mass ∈ [(min_nominal - 0.5)/SCALER,
-                //                       (max_nominal + 0.5)/SCALER]
-                //   => peptide.mass() = residue_mass + H2O.
-                // We add an extra ±1 nominal-unit of slack (RECALL CORRECTNESS
-                // BEATS TIGHTNESS — a slightly wide window only adds a few cheap
-                // candidates; too narrow drops real PSMs).
-                // Recall/speed tradeoff knob — tuned at the PXD/Astral gates.
-                // Higher = more candidates survive the prefilter (safer recall),
-                // at some query cost; the fragment_posting_index microbenchmark showed ~3.4×
-                // headroom, so 128 trades a little speed for recall safety.
-                const TOP_K: usize = 128;
-                const SCALER: f64 = model::mass::INTEGER_MASS_SCALER as f64;
-                let high_res = scorer.param().data_type.instrument.is_high_resolution();
-                // prefilter tol = superset of the scorer's 20ppm/0.5Da matching
-                // window — err wide; the exact GF scorer does real matching.
-                let tol = if high_res { 0.05 } else { 0.5 };
-                let mut out: Vec<usize> = Vec::new();
-                for &z in &charges_to_try {
-                    let (min_nominal, max_nominal) =
-                        candidate_nominal_bounds(spec, z, params, shift_ppm, true);
-                    // nominal -> residue mass (Da), widened by ±1 nominal unit +
-                    // the 0.5-unit rounding half-step, then -> peptide.mass().
-                    let lo = (min_nominal as f64 - 1.5) / SCALER + H2O;
-                    let hi = (max_nominal as f64 + 1.5) / SCALER + H2O;
-                    let ss = scored_spec_for_charge(z);
-                    let peaks: Vec<f64> = ss
-                        .dump_active_peaks()
-                        .into_iter()
-                        .map(|(_, mz, _)| mz)
-                        .collect();
-                    out.extend(si.query(lo, hi, &peaks, tol, TOP_K).into_iter().map(|c| c as usize));
-                }
-                out.sort_unstable();
-                out.dedup();
-                out
-            } else {
-                window_cand_indices.clone()
-            };
+            // Cascade Pass 1 is a NARROW brute-force window scan: iterate every
+            // candidate whose nominal mass falls in the precursor window.
+            let cand_iter: Vec<usize> = window_cand_indices.clone();
 
             for &cand_idx in &cand_iter {
                 let cand = &candidates[cand_idx];
@@ -638,34 +499,14 @@ impl<'a> PreparedSearch<'a> {
                     // edge_score call entirely. For top-N=1 (Astral) this
                     // gates ~99% of candidates after the queue fills.
                     let mut iso_errs: SmallVec<[MassError; 4]> = SmallVec::new();
-                    // Chimeric: accept candidates anywhere in the isolation
-                    // window (co-isolated peptides are offset from the selected
-                    // precursor). Standard: tight precursor-tolerance check
-                    // against the selected m/z. Window m/z bounds are constant
-                    // per spectrum, so hoist them out of the offset loop.
-                    // Cascade Pass 1 is NARROW: gate on `cascade_wide` (false), so
-                    // even under `--chimeric` the precursor match uses the tight
-                    // `matches_precursor` path, not the wide isolation window.
-                    let chimeric_window = if cascade_wide {
-                        let lo = spec.precursor_mz
-                            - spec.isolation_lower_offset.unwrap_or(params.chimeric_isolation_halfwidth_da);
-                        let hi = spec.precursor_mz
-                            + spec.isolation_upper_offset.unwrap_or(params.chimeric_isolation_halfwidth_da);
-                        Some((lo, hi))
-                    } else {
-                        None
-                    };
+                    // Cascade Pass 1 is NARROW: the precursor match uses the tight
+                    // `matches_precursor` path against the selected m/z, not the
+                    // wide isolation window.
                     for offset in params.isotope_error_range.clone() {
-                        let matched = match chimeric_window {
-                            Some((lo_mz, hi_mz)) => matches_isolation_window(
-                                &cand.peptide, z, offset, lo_mz, hi_mz,
-                                &params.precursor_tolerance, shift_ppm,
-                            ),
-                            None => matches_precursor(
-                                spec, &cand.peptide, z, offset,
-                                &params.precursor_tolerance, shift_ppm,
-                            ),
-                        };
+                        let matched = matches_precursor(
+                            spec, &cand.peptide, z, offset,
+                            &params.precursor_tolerance, shift_ppm,
+                        );
                         if let Some(err) = matched {
                             iso_errs.push(err);
                         }
@@ -887,64 +728,6 @@ impl<'a> PreparedSearch<'a> {
                         if uni > 0 { shared as f64 / uni as f64 } else { 0.0 },
                         if minlen > 0 { shared as f64 / minlen as f64 } else { 0.0 },
                     );
-                }
-            }
-
-            // Chimeric greedy shared-fragment competition. Walk the
-            // emitted PSMs most-confident-first; each peptide claims its matched
-            // peaks, and a less-confident peptide is credited only for the peaks
-            // not already claimed. The unique-evidence metrics become additive
-            // PIN columns, and each rank≥2 PSM is re-scored (RawScore + GF
-            // SpecEValue) on the residual (unclaimed) spectrum — a theft /
-            // coincidental peptide gets a worse SpecEValue and drops out of the
-            // FDR set on its own (no hard filter, no parameter). `--chimeric off`
-            // never enters this block, so the off path stays bit-identical.
-            // Cascade Pass 1 is a clean narrow search — the greedy
-            // shared-fragment competition (blind-chimeric machinery) does NOT run.
-            // Gated on `cascade_wide` (false). With a narrow Pass 1 the queue holds
-            // ~1 peptide, so this was already a near-no-op; gating keeps Pass 1's
-            // emitted distribution byte-for-byte the narrow search's.
-            if cascade_wide && !queue.is_empty() {
-                let mut ordered = std::mem::replace(
-                    &mut queue,
-                    TopNQueue::new(params.top_n_psms_per_spectrum),
-                )
-                .into_sorted_vec(); // best-first (smallest spec_e first)
-                let mut claimed: FxHashSet<i64> = FxHashSet::default();
-                for psm in ordered.iter_mut() {
-                    let ss = scored_spec_for_charge(psm.charge_used);
-                    let peptide =
-                        &candidates[psm.primary_candidate_idx() as usize].peptide;
-                    let matched = matched_peaks_with_intensity(ss, peptide, scorer);
-                    let ev = shared_fragment::unique_evidence(&matched, &claimed);
-                    psm.features.unique_matched_ions = ev.unique_matched_ions;
-                    psm.features.unique_explained_fraction = ev.unique_explained_fraction;
-                    psm.features.shared_frac_claimed = ev.shared_frac_claimed;
-
-                    // Re-score on the residual spectrum only when a
-                    // more-confident peptide has already claimed peaks (rank-1,
-                    // and any PSM whose predecessors matched nothing, are
-                    // unchanged). Skipped under MSGF_CHIMERIC_NO_RESCORE to
-                    // regenerate a raw (non-rescored) PIN for measurement.
-                    if !claimed.is_empty() && !chim_no_rescore {
-                        rescore_residual_spec_e(
-                            spec,
-                            params,
-                            psm,
-                            &claimed,
-                            ss,
-                            aa_set_for_gf,
-                            enzyme_opt,
-                            scorer,
-                            fragment_tolerance_da,
-                            idx,
-                            candidates,
-                        );
-                    }
-                    shared_fragment::claim(&matched, &mut claimed);
-                }
-                for psm in ordered {
-                    queue.push(psm);
                 }
             }
 
@@ -1459,105 +1242,6 @@ pub(crate) fn matched_peak_keys(
     keys
 }
 
-/// Chimeric: a peptide's matched charge-1 b/y peaks as
-/// `(quantized m/z key, intensity)`, deduplicated by key (two predicted ions
-/// hitting the same observed peak count once). Mirrors `matched_peak_keys` but
-/// keeps intensities for the `unique_explained_fraction` metric.
-fn matched_peaks_with_intensity(
-    scored_spec: &ScoredSpectrum<'_>,
-    peptide: &Peptide,
-    scorer: &RankScorer,
-) -> Vec<(i64, f32)> {
-    let n = peptide.length();
-    if n < 2 {
-        return Vec::new();
-    }
-    let predicted = predict_by_ions(peptide, 1..=1);
-    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
-    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
-    let mut by_key: FxHashMap<i64, f32> = FxHashMap::default();
-    for p in &predicted {
-        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
-        if let Some((_rank, intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
-            by_key.insert((peak_mz * 1000.0).round() as i64, intensity);
-        }
-    }
-    by_key.into_iter().collect()
-}
-
-/// Chimeric: re-score one rank≥2 PSM against the spectrum with the
-/// `claimed` peaks (taken by more-confident peptides) removed.
-///
-/// Recomputes RawScore (`score`), `edge_score`, and `rank_score` on the residual
-/// spectrum — the cleavage credit is peak-independent so it is recovered as
-/// `original_score − score_psm(full_spectrum)` — then runs the GF SpecEValue DP
-/// on the residual spectrum (via a one-PSM queue) and overwrites the PSM's
-/// `spec_e_value` / `de_novo_score` / `e_value`. A peptide stripped of stolen or
-/// coincidental peaks gets a worse residual SpecEValue and falls out of the FDR
-/// set; a genuinely co-isolated peptide retains its unique signal. Applied
-/// symmetrically to targets and decoys.
-#[allow(clippy::too_many_arguments, reason = "chimeric-only re-score; all args are orthogonal scoring context threaded from run_chunk_inner")]
-fn rescore_residual_spec_e(
-    spec: &Spectrum,
-    params: &SearchParams,
-    psm: &mut PsmMatch,
-    claimed: &FxHashSet<i64>,
-    full_scored_spec: &ScoredSpectrum<'_>,
-    aa_set: &AminoAcidSet,
-    enzyme: Option<Enzyme>,
-    scorer: &RankScorer,
-    fragment_tolerance_da: f64,
-    search_index: &SearchIndex,
-    candidates: &[Candidate],
-) {
-    let charge = psm.charge_used;
-    if charge == 0 {
-        return;
-    }
-    let peptide = &candidates[psm.primary_candidate_idx() as usize].peptide;
-
-    // Residual spectrum: drop every peak claimed by a more-confident peptide.
-    let mut residual = spec.clone();
-    residual
-        .peaks
-        .retain(|&(mz, _)| !claimed.contains(&((mz * 1000.0).round() as i64)));
-    let residual_ss = ScoredSpectrum::new(&residual, scorer, charge);
-
-    // Cleavage credit is peak-independent: recover it from the original
-    // RawScore (= node_full + cleavage) minus a fresh full-spectrum node score.
-    let full_node = score_psm(full_scored_spec, peptide, scorer, charge, fragment_tolerance_da);
-    let cleavage = psm.score - full_node;
-
-    // Residual node + edge → residual RawScore / rank_score.
-    let residual_node = score_psm(&residual_ss, peptide, scorer, charge, fragment_tolerance_da);
-    let residual_edge = psm_edge_score(&residual_ss, peptide, scorer, charge);
-    psm.score = residual_node + cleavage;
-    psm.edge_score = residual_edge;
-    psm.rank_score = residual_node + cleavage + residual_edge as f32;
-
-    // Residual GF SpecEValue: run the standard DP on the residual spectrum.
-    let mut one = TopNQueue::new(1);
-    one.push(psm.clone());
-    compute_spec_e_values_for_spectrum(
-        spec,
-        params,
-        &mut one,
-        aa_set,
-        enzyme,
-        scorer,
-        &residual_ss,
-        charge,
-        fragment_tolerance_da,
-        search_index,
-        candidates,
-    );
-    if let Some(rescored) = one.drain_into_vec().into_iter().next() {
-        psm.spec_e_value = rescored.spec_e_value;
-        psm.de_novo_score = rescored.de_novo_score;
-        psm.e_value = rescored.e_value;
-    }
-}
-
 /// Compute fragment-ion feature columns for a single PSM.
 ///
 /// Uses charge-1 b/y ions only (the `NumMatchedMainIons` convention).
@@ -1863,12 +1547,6 @@ pub(crate) fn compute_psm_features(
         // under --chimeric by the feature fill.
         precursor_isotope_kl: 0.0,
         precursor_snr: 0.0,
-        // Chimeric shared-fragment evidence: defaults represent a
-        // peptide that owns all its peaks (rank-1 / non-chimeric). Populated
-        // for rank≥2 under --chimeric by the shared-fragment competition.
-        unique_matched_ions: num_matched,
-        unique_explained_fraction: 1.0,
-        shared_frac_claimed: 0.0,
     }
 }
 
@@ -1964,51 +1642,6 @@ mod feature_tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
         }
-    }
-
-    // ── Test: chimeric widens the candidate nominal-mass window ─────────────
-
-    #[test]
-    fn candidate_nominal_bounds_chimeric_spans_isolation_window() {
-        use model::aa_set::AminoAcidSetBuilder;
-        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut params = SearchParams::default_tryptic(aa_set);
-
-        // Spectrum at precursor m/z 500.0 (charge 2) with a ±1.5 Da isolation
-        // window — far wider than the default 20 ppm precursor tolerance.
-        let mut spec = make_spectrum(vec![]);
-        spec.precursor_mz = 500.0;
-        spec.isolation_lower_offset = Some(1.5);
-        spec.isolation_upper_offset = Some(1.5);
-
-        // Standard (chimeric off): tight window around the selected precursor.
-        params.chimeric = false;
-        let (min_s, max_s) = candidate_nominal_bounds(&spec, 2, &params, 0.0, params.chimeric);
-
-        // Chimeric on: window must span the full isolation window, strictly
-        // wider on BOTH sides (the isolation half-width dwarfs 20 ppm).
-        params.chimeric = true;
-        let (min_c, max_c) = candidate_nominal_bounds(&spec, 2, &params, 0.0, params.chimeric);
-
-        assert!(min_c < min_s, "chimeric lower bound {min_c} not below standard {min_s}");
-        assert!(max_c > max_s, "chimeric upper bound {max_c} not above standard {max_s}");
-
-        // A co-isolated peptide ~1 Da lighter than the selected precursor
-        // (nominal just below the standard lower bound) is reachable ONLY
-        // under chimeric.
-        let off_precursor_nominal = min_s - 1;
-        assert!(off_precursor_nominal >= min_c && off_precursor_nominal <= max_c,
-            "off-precursor nominal {off_precursor_nominal} outside chimeric window [{min_c},{max_c}]");
-        assert!(off_precursor_nominal < min_s,
-            "off-precursor nominal {off_precursor_nominal} should be outside standard window");
-
-        // Fallback: when the mzML omits offsets, the configured half-width is used.
-        spec.isolation_lower_offset = None;
-        spec.isolation_upper_offset = None;
-        params.chimeric_isolation_halfwidth_da = 1.5;
-        let (min_f, max_f) = candidate_nominal_bounds(&spec, 2, &params, 0.0, params.chimeric);
-        assert_eq!((min_f, max_f), (min_c, max_c),
-            "fallback half-width should reproduce the explicit ±1.5 Da window");
     }
 
     // ── Test: empty spectrum → all new features are 0 ───────────────────────

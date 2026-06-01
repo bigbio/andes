@@ -69,22 +69,6 @@ pub struct PsmFeatures {
     /// Observed monoisotopic precursor intensity / median MS1 intensity (SNR
     /// proxy). 0.0 when unavailable.
     pub precursor_snr: f32,
-
-    // ── Chimeric shared-fragment competition features ──────────────────────
-    /// Number of this peptide's matched charge-1 b/y peaks that were NOT already
-    /// claimed by a more-confident peptide on the same scan (greedy, rank-1
-    /// first). For rank-1 (and the entire non-chimeric path) this equals the
-    /// full matched-peak count. Emitted as the additive `UniqueMatchedIons`
-    /// PIN column. See `shared_fragment.rs`.
-    pub unique_matched_ions: u32,
-    /// Σ intensity(unique matched peaks) / Σ intensity(all matched peaks of this
-    /// PSM), in 0.0..=1.0. 1.0 for rank-1 / non-chimeric. Additive
-    /// `UniqueExplainedFraction` PIN column.
-    pub unique_explained_fraction: f32,
-    /// Fraction of this peptide's matched peaks already claimed by a
-    /// more-confident peptide: |matched ∩ claimed| / |matched|, in 0.0..=1.0.
-    /// 0.0 for rank-1 / non-chimeric. Additive `SharedFracClaimed` PIN column.
-    pub shared_frac_claimed: f32,
 }
 
 #[derive(Debug, Clone)]

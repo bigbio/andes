@@ -365,7 +365,6 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
-            chimeric_frag_index: search::search_params::FragIndexMode::Off,
         }
     }
 

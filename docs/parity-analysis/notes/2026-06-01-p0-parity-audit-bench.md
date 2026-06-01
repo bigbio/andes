@@ -25,3 +25,20 @@ The reviewer's single-scan trace (34306 RawScore 79->80) did not generalize.
 Same class, lower confidence than P0.4. Per n=9, expected neutral-to-regressive.
 Recommendation: do NOT pursue the P0 parity tweaks; the TMT CID gap needs the deferred
 per-ion CID scoring trace + Java instrumentation, not incremental SpecE parity edits.
+
+## P0.6 (sentinel GF PSMs) — ALREADY IMPLEMENTED (reviewer finding stale)
+The safe "count + per-run log" the audit asked for already exists:
+`GF_SPECTRA_NO_GROUP` (release-safe static AtomicU64) is incremented at the
+`!group.is_computed()` early return and printed in the per-run "GF diagnostics
+(cumulative): ... {} spectra with no successful bin" line. No change needed.
+The remaining options (fallback SpecE policy / reduce-failures) are scoring
+changes and were not pursued.
+
+## Decision (user, 2026-06-01)
+STOP the P0 parity grind. Bank the safe P1/P2 batch (shipped, commit cb808ce3).
+Do NOT pursue P0.2 (round->truncate) / P0.3 (max_score guard) / P0.5
+(features-on-deconv) / P0.1 (sink-retry): same class as P0.4 which bench-regressed
+the TMT blocker; P0.3 additionally requires undoing a deliberate anti-inversion
+guard and risks spec_e=0 -> lnSpecE=-f64::MAX Percolator outliers. The TMT CID gap
+needs the deferred per-ion CID scoring trace + Java instrumentation, not these
+incremental SpecE-parity edits.

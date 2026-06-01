@@ -637,14 +637,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
         None    => {
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && is_mzml;
+            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw);
+            // Detect (activation, instrument) from the input. mzML peeks the
+            // file; Thermo `.raw` reads the vendor activation/analyzer metadata
+            // so a CID/ETD/ion-trap `.raw` is not silently scored with the
+            // HCD/QExactive model.
+            let detected = if !auto_route_eligible {
+                None
+            } else if is_mzml {
+                detect_dominant_activation(&cli.spectrum)
+                    .map(|m| (m, detect_instrument_type_for_path(&cli.spectrum)))
+            } else {
+                // is_raw
+                #[cfg(feature = "thermo")]
+                {
+                    input::thermo::detect_activation_instrument(&cli.spectrum, 64)
+                }
+                #[cfg(not(feature = "thermo"))]
+                {
+                    None
+                }
+            };
             if auto_route_eligible {
-                match detect_dominant_activation(&cli.spectrum) {
-                    Some(method) => {
-                        // Detect instrument type from the same mzML file.
-                        // None ⇒ resolver picks LowRes (Java's
-                        // NewScorerFactory default when no `-inst` flag).
-                        let inst = detect_instrument_type_for_path(&cli.spectrum);
+                match detected {
+                    Some((method, inst)) => {
                         eprintln!(
                             "Param resolver: auto-detected dominant activation \
                              method = {} (instrument = {}) from {}",
@@ -695,10 +711,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.isotope_error_min, cli.isotope_error_max
         ).into());
     }
-    // Pass 2 co-isolation requires MS1 scans, which only the mzML reader captures.
-    // On non-mzML input `--chimeric` is inert, so keep `params.chimeric` FALSE to
-    // turn the ENTIRE chimeric path off (Pass 2, PIN column/SpecId gates, top-N
-    // forcing) — the run is then identical to a normal search.
+    // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
+    // `.raw` readers. On MGF (no MS1) `--chimeric` is inert, so keep
+    // `params.chimeric` FALSE to turn the ENTIRE chimeric path off (Pass 2, PIN
+    // column/SpecId gates, top-N forcing) — the run is then identical to a normal search.
     // The co-isolation cascade needs MS1 data, available from mzML and Thermo
     // `.raw` (not MGF).
     let chimeric_active = cli.chimeric && (is_mzml || is_raw);
@@ -706,6 +722,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "WARN: --chimeric requires MS1 data (mzML or Thermo .raw); the input is MGF, \
              so the co-isolation cascade is disabled and the search runs normally."
+        );
+    }
+    // The cascade pairs MS2 with its preceding MS1 — it is MS2-only by
+    // construction. Ignore a non-2 `--ms-level` under `--chimeric` so MS3+
+    // (e.g. TMT SPS-MS3) can never enter the search on any input format.
+    if chimeric_active && cli.ms_level != 2 {
+        eprintln!(
+            "WARN: --ms-level={} is ignored under --chimeric; the cascade always searches MS2.",
+            cli.ms_level
         );
     }
     params.chimeric = chimeric_active;
@@ -868,8 +893,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted; // silenced — unused for now.
 
-    // Under `--chimeric` on mzML, stream MS2 in CHUNK_SIZE batches, each paired
-    // with a bounded per-chunk MS1 link (`read_with_ms1_chunked`). Pass 1 + Pass 2
+    // Under `--chimeric` (mzML or Thermo `.raw`), stream MS2 in CHUNK_SIZE batches,
+    // each paired with a bounded per-chunk MS1 link (`read_with_ms1_chunked`). Pass 1 + Pass 2
     // run per chunk on this thread and peaks are dropped immediately, so RSS stays
     // bounded to ~CHUNK_SIZE spectra (NOT the whole file). The parser runs on a
     // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
@@ -879,7 +904,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
         let spectrum_path = cli.spectrum.clone();
         let cap = bench_cap;
-        let mslevel = ms_level_u32;
+        // The cascade is MS2-only by construction (MS2 paired with its preceding
+        // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
+        // range to admit MS3 (the .raw chunked reader is already MS2-only).
+        let mslevel = 2;
         let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
             // The inner closures borrow `tx` (SyncSender::send takes &self), so
             // both reader branches can use it without moving it twice.

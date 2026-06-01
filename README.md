@@ -110,7 +110,7 @@ Required:
 
 | Flag | Purpose |
 |---|---|
-| `--spectrum <FILE>` | Input mzML or MGF |
+| `--spectrum <FILE>` | Input mzML, MGF, or Bruker timsTOF `.d` (auto-detected by extension; `.d` needs the `timstof` feature) |
 | `--database <FILE>` | Input FASTA (targets only; decoys generated) |
 | `--output-pin <FILE>` | Percolator PIN output |
 
@@ -143,6 +143,19 @@ Run `msgf-rust --help` for the auto-generated help with full descriptions and th
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
 DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML only), msgf-rust runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
+
+## Reading Bruker timsTOF `.d` files
+
+msgf-rust reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate (the same reader [Sage](https://github.com/lazear/sage) uses), so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
+
+It is feature-gated to keep the default build pure-Rust. Build with `--features timstof` on a toolchain with a recent rustc (the `timsrust` dependency tree needs rustc ≥ 1.88):
+
+```bash
+cargo build --release -p msgf-rust --features timstof
+msgf-rust --spectrum sample.d --database human.fasta --output-pin out.pin
+```
+
+Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is carried as metadata but not used by scoring. `--chimeric` on a `.d` degrades gracefully to a normal search (the co-isolation cascade needs an MS1 stream the DDA reader does not expose), as does `--precursor-cal`. Default (non-`timstof`) builds read mzML/MGF only and never pull in `timsrust`.
 
 ## Auto-detection
 

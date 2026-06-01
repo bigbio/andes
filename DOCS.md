@@ -500,8 +500,7 @@ As of 2026-05-25 (fair v5 gate, `bench-calauto-v5.log`) the calibrator is
 validated (shift + tightening parity), but G1 **fails** on all three datasets:
 LFQ −2.2% (cal skipped), Astral +1.2%, TMT −5.9%. Remaining
 gaps trace to **SpecE tail / Percolator feature parity** (same class as historical
-Astral GF work), not calibrator logic. Full analysis:
-[`docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md`](docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md).
+Astral GF work), not calibrator logic.
 
 | `--precursor-cal` | Ship recommendation |
 |---|---|

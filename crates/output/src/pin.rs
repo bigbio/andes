@@ -202,6 +202,13 @@ fn write_header<W: Write>(
         // Both are 0.0 unless `--chimeric` populates them from a linked MS1.
         "PrecursorIsotopeKL".to_string(),
         "PrecursorSNR".to_string(),
+        // ADDITIVE top-1 dominance feature: RawScore(best) − RawScore(2nd-best
+        // distinct peptide) on the rank-1 row, 0.0 elsewhere. Built on
+        // parity-grade RawScore (not the divergent SpecE), so it adds an
+        // orthogonal "lead over the runner-up" signal without touching any
+        // existing column. Populated only when a distinct runner-up was scored
+        // (i.e. effectively needs internal retention ≥ 2 candidates per scan).
+        "DeltaRawScore".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -439,6 +446,14 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.precursor_isotope_kl as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.precursor_snr as f64)?;
+
+    // DeltaRawScore: additive top-1 dominance feature. Emitted on the rank-1
+    // row only (mirrors lnDeltaSpecEValue's rank gating); 0.0 for rank > 1.
+    // The value is a per-spectrum scalar stored identically on every retained
+    // PSM by the match engine, so gating on rank avoids double-attributing it.
+    let delta_raw_score = if rank == 1 { psm.features.delta_raw_score as f64 } else { 0.0 };
+    writer.write_all(b"\t")?;
+    write_double(writer, delta_raw_score)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -748,7 +763,7 @@ mod tests {
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
             "lnDeltaSpecEValue", "matchedIonRatio",
             "EdgeScore",
-            "PrecursorIsotopeKL", "PrecursorSNR",
+            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore",
             "Peptide", "Proteins",
         ];
 
@@ -997,6 +1012,47 @@ mod tests {
             rows[0][col_idx], "5",
             "NumMatchedMainIons should be 5, not zero-stubbed"
         );
+    }
+
+    /// DeltaRawScore is emitted on the rank-1 row from `features.delta_raw_score`
+    /// (a per-spectrum scalar the match engine stores on every retained PSM),
+    /// and gated to 0.0 on rank > 1 rows — mirroring lnDeltaSpecEValue.
+    #[test]
+    fn pin_emits_delta_raw_score_on_rank1_only() {
+        let params = make_params(2..=3);
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        // Two distinct-SpecE PSMs on one spectrum → rank 1 then rank 2. The
+        // engine stores the same spectrum-level delta on both; the writer must
+        // emit it for rank 1 and 0.0 for rank 2 (no double-attribution).
+        let mut psm1 = make_psm(0, 12.0, 1e-6, 0, 2);
+        psm1.features.delta_raw_score = 7.0;
+        let mut psm2 = make_psm(0, 5.0, 1e-3, 1, 2);
+        psm2.features.delta_raw_score = 7.0;
+
+        let mut queue = TopNQueue::new(10);
+        queue.push(psm1);
+        queue.push(psm2);
+        let queues = vec![queue];
+        let idx = make_empty_search_index();
+
+        let mut buf = Vec::<u8>::new();
+        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let cols = parse_header(&buf);
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 2, "two PSMs → two rows");
+
+        let col_idx = cols
+            .iter()
+            .position(|c| c == "DeltaRawScore")
+            .expect("DeltaRawScore column missing");
+
+        let r1: f64 = rows[0][col_idx].parse().expect("rank-1 DeltaRawScore numeric");
+        let r2: f64 = rows[1][col_idx].parse().expect("rank-2 DeltaRawScore numeric");
+        assert!((r1 - 7.0).abs() < 1e-6, "rank-1 DeltaRawScore should be 7.0, got {r1}");
+        assert_eq!(r2, 0.0, "rank-2 DeltaRawScore should be gated to 0.0, got {r2}");
     }
 
     /// Verify that `longest_y_pct` is formatted with 6 decimal places.

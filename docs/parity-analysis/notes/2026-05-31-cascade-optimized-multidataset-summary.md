@@ -1,9 +1,12 @@
 # Chimeric two-pass cascade: optimized + multi-dataset gate summary (2026-05-31)
 
-Branch `feat/chimeric-dda-plus`, clean HEAD `161d719e`. This note summarizes the
-two-pass chimeric cascade, the speed optimizations landed this session, and the
-same-machine entrapment-validated results vs Java MS-GF+ on all three benchmark
-datasets. It is the reference for a future opt-in `--chimeric` PR.
+Branch `feat/chimeric-dda-plus`. This note summarizes the two-pass chimeric
+cascade, the speed optimizations landed this session, and the same-machine
+entrapment-validated results vs Java MS-GF+ on all three benchmark datasets.
+It is the reference for opt-in `--chimeric` **DRAFT PR #42**. The cascade has
+since been hardened through code review, two adversarial rounds, a dead-code
+cleanup, and an external GF/SpecE parity audit — see the **Final state (rev5)**
+section at the bottom for the current HEAD and final numbers.
 
 ## What the cascade is
 
@@ -98,3 +101,52 @@ PXD +17.2% on normal @1%). TMT A/B confirmed: 9,706 (was 9,628, +78 — the few 
 secondaries now carry proper features; still −4.8% vs Java 10,194, the lone blocker).
 No regression on any dataset; A/B is a strict improvement (more real PSMs + lower FDP
 everywhere).
+
+## Final state (rev5) — DRAFT PR #42, HEAD `b46b610b`
+
+After the A/B round above, the cascade was hardened and shipped as a do-not-merge
+DRAFT (PR #42 → `dev`). Work done, in order:
+
+- **Code review (5-agent)** — clean; A/B feature fixes already folded in.
+- **Adversarial review round 1** (`429cf1bf`): bounded-memory streaming
+  (`read_with_ms1_chunked`, per-chunk MS1 link + parser-thread pipeline + offset),
+  Pass-2 precursor calibration (`adjusted_observed_neutral_mass` before the
+  prefilter), tolerant MS1 read.
+- **Adversarial review round 2** (`16f396b7`): Pass-2 secondaries COMPETE for shared
+  peaks (`search_secondary` threads `prior_claimed`, returns the winner's claimed
+  set); real resync (`resync_to_next_spectrum` skips one bad scan and continues
+  instead of silently truncating the tail).
+- **Doc refinement** (`c5c8ea8d`): CLI/README parameter tables with defaults; ~150
+  dev-history jargon comments stripped.
+- **Dead-code removal** (`d824deab`): the refuted wide-window / fragment-posting-index
+  / shared-fragment machinery, the `--chimeric-frag-index` flag, and 3 always-zero PIN
+  columns removed (chimeric PIN 42→39 columns); cascade @1% preserved (71,839 ≈ 71,877,
+  within noise).
+- **GF/SpecE parity audit** (`docs/parity-analysis/notes/2026-06-01-p0-parity-audit-bench.md`):
+  safe P1/P2 perf+robustness batch shipped (`cb808ce3`, behavior-neutral). The
+  strongest parity candidate (P0.4, precursor-filter Java parity) was bench-validated
+  and **regressed TMT 9,671→9,579** (the lone blocker dataset) → reverted (`1c706522`).
+  This is the **n=9** confirmation that Java-faithful SpecEValue fixes redistribute
+  rather than improve aggregate Percolator FDR. P0 grind stopped by user decision.
+
+### rev5 final numbers (entrapment-clean, same machine)
+
+| dataset | Rust @1% | Java @1% | Δ vs Java | entrapment FDP | wall | maxRSS |
+|---|---:|---:|---:|---:|---:|---:|
+| Astral | **71,877** | 35,818 | **+101%** | 1.04% | 6:38 | 10.9 GB |
+| PXD001819 | **16,592** | 14,974 | **+11%** | 1.13% | 1:14 | 2.3 GB |
+| TMT | 9,671 | 10,194 | **−5%** | 0.80% | 2:14 | 7.7 GB |
+
+maxRSS on Astral equals the non-chimeric run (10.9 GB) — bounded-memory confirmed;
+the footprint is index-dominated (scales with DB size, not input). Speed beats Java on
+all three datasets same-machine (e.g. Astral chimeric 6:39 vs Java 6:46).
+
+### Gate status
+
+PSMs win 2/3 (Astral + PXD decisive and entrapment-validated), speed wins 3/3. **TMT
+PSMs (−5%) is the only thing blocking the merge gate.** The TMT gap is diagnosed as a
+per-peptide CID node-scoring divergence (RankScorer ion-match / peak-rank / per-rank
+log-prob), NOT a cascade issue and NOT a gross GF-DP bug — CID narrow windows have
+~no co-isolation, so the cascade cannot help TMT. Closing it needs a per-ion CID trace
++ Java instrumentation, or an additive CID-specific Percolator feature. PR #42 stays
+DRAFT until TMT beats Java.

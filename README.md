@@ -66,7 +66,7 @@ msgf-rust \
 
 This runs a tryptic search at 20 ppm precursor tolerance with the bundled HCD_QExactive_Tryp scoring model, writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
 
-A row in `out.pin` is one peptide–spectrum match. With the default charge range (2–3), each row has **36 tab-separated columns**: 35 Java-parity Percolator features plus Rust-only `EdgeScore` (inserted before `Peptide`). Charge one-hot columns scale with `[--charge-min, --charge-max]`. Full column reference: `DOCS.md` §3a.
+A row in `out.pin` is one peptide–spectrum match, with the Java-parity Percolator features plus Rust-only additive columns (`EdgeScore`, …) before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`). Full column reference: `DOCS.md` §3a.
 
 ## Common workflows
 
@@ -123,7 +123,7 @@ Optional (default in **bold**):
 | `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance (ppm) | **20.0** |
 | `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift | **off** |
 | `--isotope-error-min/-max <INT>` | Isotope-error range | **-1, 2** |
-| `--charge-min/-max <INT>` | Charge range when absent in the spectrum | **2, 3** |
+| `--charge-min/-max <INT>` | Charge range when absent in the spectrum | **2, 5** |
 | `--enzyme-specificity <fully\|semi\|non-specific>` | Tolerable termini (NTT) | **fully** |
 | `--max-missed-cleavages <INT>` | Missed cleavages | **1** |
 | `--min-length/-max-length <INT>` | Peptide length range | **6, 40** |

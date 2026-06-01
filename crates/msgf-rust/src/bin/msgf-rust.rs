@@ -122,7 +122,7 @@ struct Cli {
     charge_min: u8,
 
     /// Maximum precursor charge to try when not specified in the spectrum.
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "5")]
     charge_max: u8,
 
     /// Maximum number of PSMs to retain per spectrum.

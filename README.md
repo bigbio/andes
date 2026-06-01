@@ -134,7 +134,7 @@ Optional (default in **bold**):
 | `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
 | `--param-file <FILE>` | Override the bundled scoring model | **auto-pick** |
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
-| `--ms-level <INT>` | MS level to search (mzML only) | **2** |
+| `--ms-level <INT>` | MS level to search; MS1/MS3+ (e.g. TMT SPS-MS3) filtered out (mzML or `.raw`) | **2** |
 | `--threads <INT>` | Worker threads | **logical CPUs** |
 | `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
 

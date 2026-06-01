@@ -205,9 +205,12 @@ struct Cli {
     #[arg(long, default_value = "0")]
     max_spectra: usize,
 
-    /// MS level to search. MS1 (and any other levels) are filtered out at load
-    /// time so they never enter the search loop. Only meaningful for mzML — MGF
-    /// files do not encode MS level and are always treated as MS2.
+    /// MS level to search. Defaults to MS2 (identification); MS1 and any higher
+    /// levels (e.g. TMT SPS-MS3 reporter-quant scans) are filtered out at load
+    /// time so they never enter the search loop. Override only if you explicitly
+    /// want a different level. Applies to mzML and Thermo `.raw`; MGF files do
+    /// not encode MS level and are always treated as MS2. The chimeric cascade
+    /// always searches MS2 (it pairs MS2 with its preceding MS1).
     #[arg(long, default_value = "2")]
     ms_level: u8,
 

@@ -153,6 +153,7 @@ impl ThermoRawReader {
         let mut ms2_to_ms1: Vec<Option<usize>> = Vec::new();
         let mut current_ms1: Option<usize> = None;
         let mut emitted_ms2 = 0usize;
+        let mut skipped_higher_ms = 0usize;
 
         for i in 0..self.len {
             if cap > 0 && emitted_ms2 >= cap {
@@ -167,6 +168,13 @@ impl ThermoRawReader {
                     let idx = ms1_peaks.len();
                     ms1_peaks.push(extract_peaks(&raw));
                     current_ms1 = Some(idx);
+                }
+                // MS3+ scans (e.g. TMT SPS-MS3 reporter-quant scans) are NOT
+                // identification spectra — only MS2 is searched and only MS1
+                // links it, in chimeric OR normal mode. Skipping them here keeps
+                // the cascade from ever scoring an MS3 in TMT-MS3 acquisitions.
+                level if level >= 3 => {
+                    skipped_higher_ms += 1;
                 }
                 2 => {
                     chunk.push(Self::convert(&raw));
@@ -193,6 +201,12 @@ impl ThermoRawReader {
 
         if !chunk.is_empty() {
             on_chunk(chunk, Ms1Link { ms1_peaks, ms2_to_ms1 });
+        }
+        if skipped_higher_ms > 0 {
+            eprintln!(
+                "Thermo .raw: skipped {skipped_higher_ms} MS3+ scans (not searched; \
+                 e.g. TMT SPS-MS3 reporter-quant scans)"
+            );
         }
         (0, Vec::new())
     }

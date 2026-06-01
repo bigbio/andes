@@ -639,7 +639,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let charge_used = matched_psm.charge_used;
-        let matched_score = matched_psm.score.round() as i32;
+        // GF score threshold: use `rank_score` (= node + cleavage + edge), the
+        // Java-aligned key the production SpecEValue path uses
+        // (`compute_spec_e_values_for_spectrum` seeds `min_score` from
+        // `rank_score.round()`), NOT the pin-only `score` (= node + cleavage).
+        // Using `score` here would seed the threshold ~+20 below production and
+        // produce a misleadingly wide score distribution in the dump.
+        //
+        // NOTE: this dump still differs from production SpecEValue in two ways
+        // that are intentionally NOT changed here (the dump's purpose is a
+        // per-node distribution trace, which the production merged group does
+        // not retain):
+        //   1. It builds a SINGLE-BIN graph for this peptide's nominal mass via
+        //      `with_score_threshold_retain_node_dists`, whereas production
+        //      merges a `GeneratingFunctionGroup` across the full nominal-mass
+        //      bin range (with SinkUnreachable retry).
+        //   2. Protein-terminal flags are hardcoded false/false below, whereas
+        //      production ORs `use_protein_n_term`/`use_protein_c_term` across
+        //      all PSMs in the queue.
+        // So absolute SpecEValue from this dump may differ from the production
+        // value; the per-node score distribution shape is the intended output.
+        let matched_score = matched_psm.rank_score.round() as i32;
         let matched_cand = &run_candidates[matched_psm.primary_candidate_idx() as usize];
         let pep_nominal = matched_cand.peptide.nominal_residue_mass();
 

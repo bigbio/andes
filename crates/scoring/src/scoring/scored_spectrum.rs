@@ -1684,12 +1684,30 @@ mod tests {
     }
 
     #[test]
-    fn closest_among_multiple_in_tolerance() {
-        // Multiple peaks within the tolerance window; the closest wins.
-        let s = spec(&[(99.5, 1.0), (100.0, 5.0), (100.5, 2.0)]);
+    fn nearest_peak_full_picks_max_intensity_within_tolerance() {
+        // Production selection is MAX-INTENSITY within the window, NOT
+        // closest-by-m/z. Construct data where those two criteria disagree:
+        // the peak nearest the target has the LOWEST intensity, while a
+        // farther-but-in-window peak has the highest intensity.
+        //
+        // Peaks (m/z, intensity); global rank = intensity DESC:
+        //   100.0 -> int 9.0 -> rank 1
+        //    99.6 -> int 5.0 -> rank 2
+        //   100.5 -> int 1.0 -> rank 3
+        let s = spec(&[(99.6, 5.0), (100.0, 9.0), (100.5, 1.0)]);
         let ss = ScoredSpectrum::new_without_filtering(&s);
-        // Target 100.1 with tol 0.6: all three are within. Closest is 100.0 → rank 1.
-        assert_eq!(ss.nearest_peak_rank(100.1, 0.6), Some(1));
+
+        // Target 100.45, tol 0.6 -> window [99.85, 101.05] contains the
+        // 100.0 (rank 1, int 9) and 100.5 (rank 3, int 1) peaks.
+        // Closest by m/z is 100.5 (delta 0.05) but the MAX-intensity peak is
+        // 100.0. Production must pick the max-intensity peak -> rank 1.
+        let (rank, intensity, mz) = ss.nearest_peak_full(100.45, 0.6).unwrap();
+        assert_eq!(rank, 1, "max-intensity peak (100.0) must win, not nearest-mz (100.5)");
+        assert_eq!(mz, 100.0);
+        assert_eq!(intensity, 9.0);
+
+        // nearest_peak_rank shares the same selection and must agree.
+        assert_eq!(ss.nearest_peak_rank(100.45, 0.6), Some(1));
     }
 
     #[test]

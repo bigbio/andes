@@ -456,9 +456,7 @@ impl<'a> PreparedSearch<'a> {
 
             // Cascade Pass 1 is a NARROW brute-force window scan: iterate every
             // candidate whose nominal mass falls in the precursor window.
-            let cand_iter: Vec<usize> = window_cand_indices.clone();
-
-            for &cand_idx in &cand_iter {
+            for &cand_idx in &window_cand_indices {
                 let cand = &candidates[cand_idx];
                 let cleavage_credit = compute_cleavage_credit(
                     cand,
@@ -502,7 +500,9 @@ impl<'a> PreparedSearch<'a> {
                     // Cascade Pass 1 is NARROW: the precursor match uses the tight
                     // `matches_precursor` path against the selected m/z, not the
                     // wide isolation window.
-                    for offset in params.isotope_error_range.clone() {
+                    for offset in
+                        *params.isotope_error_range.start()..=*params.isotope_error_range.end()
+                    {
                         let matched = matches_precursor(
                             spec, &cand.peptide, z, offset,
                             &params.precursor_tolerance, shift_ppm,
@@ -1894,8 +1894,16 @@ impl Ord for DedupMapKey {
 }
 
 fn merge_unique_candidate_idxs(into: &mut Vec<u32>, from: &[u32]) {
+    // O(k) dedup: track membership in an FxHashSet seeded from `into`'s
+    // current contents while preserving the SAME output order as the prior
+    // `Vec::contains` (O(k^2)) implementation — existing entries first, then
+    // new unique `from` entries in `from` order.
+    if from.is_empty() {
+        return;
+    }
+    let mut seen: FxHashSet<u32> = into.iter().copied().collect();
     for &idx in from {
-        if !into.contains(&idx) {
+        if seen.insert(idx) {
             into.push(idx);
         }
     }

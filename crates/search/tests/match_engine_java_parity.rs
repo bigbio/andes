@@ -26,29 +26,12 @@
 //!     -minLength 6 -maxLength 40 -minCharge 2 -maxCharge 3 \
 //!     -maxMissedCleavages 1 -n 1 -addFeatures 1 -msLevel 2
 //!
-//! ## Known parity gaps NOT caught by this test file
+//! ## Scope of this test file
 //!
-//! The integration tests below verify *spectrum coverage* and *top-1 identity*
-//! but do NOT validate several algorithmic divergences between Rust and Java:
-//!
-//! - **R-2.1:** Per-SpecKey raw-score retention vs Rust's per-spectrum queue
-//!   (Java keeps N PSMs per charge; Rust keeps N PSMs shared across charges)
-//! - **R-2.2:** Pre-merge pepSeq + score dedup (Java collapses identical
-//!   peptides at the same score before spectrum merge; Rust preserves them)
-//! - **R-2.3:** Per-charge GF / SpecEValue compute (Java calibrates per SpecKey;
-//!   Rust picks one top_charge for the whole spectrum)
-//! - **R-2.4:** Spectrum-level merge with SpecE tie keep (Java's post-merge
-//!   layer; Rust has no per-spectrum merge because the queue is already per-spectrum)
-//! - **R-2.5:** Protein-index aggregation (Java emits 1 row per PSM listing all
-//!   matching proteins; Rust emits N rows, one protein per row)
-//! - **R-3:** PIN row count / minDeNovoScore filter (difference in output filtering)
-//! - **C-4, C-5, C-5b, F-1:** Feature-denominator parity (score-distribution
-//!   compression, audit-tier divergences in feature computation)
-//!
-//! Reference: `docs/parity-analysis/notes/2026-05-18-r2-bench-results.md`
-//! for the R-2 landing summary and the audit-tier feature work that follows
-//! (R-3 minDeNovoScore, C-4 enzN/enzC/enzInt, C-5 multi-charge ions,
-//! C-5b longest_y_pct denom, F-1 matched_ion_ratio denom).
+//! The integration tests below verify *spectrum coverage* and *top-1 peptide
+//! identity* against the Java reference `.pin`. They do NOT validate the full
+//! per-feature score distribution or SpecEValue parity — those are covered by
+//! the unit tests in the scoring/output crates and the benchmark harness.
 
 mod common;
 use common::*;

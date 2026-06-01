@@ -122,7 +122,7 @@ struct Cli {
     charge_min: u8,
 
     /// Maximum precursor charge to try when not specified in the spectrum.
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "5")]
     charge_max: u8,
 
     /// Maximum number of PSMs to retain per spectrum.
@@ -205,9 +205,12 @@ struct Cli {
     #[arg(long, default_value = "0")]
     max_spectra: usize,
 
-    /// MS level to search. MS1 (and any other levels) are filtered out at load
-    /// time so they never enter the search loop. Only meaningful for mzML — MGF
-    /// files do not encode MS level and are always treated as MS2.
+    /// MS level to search. Defaults to MS2 (identification); MS1 and any higher
+    /// levels (e.g. TMT SPS-MS3 reporter-quant scans) are filtered out at load
+    /// time so they never enter the search loop. Override only if you explicitly
+    /// want a different level. Applies to mzML and Thermo `.raw`; MGF files do
+    /// not encode MS level and are always treated as MS2. The chimeric cascade
+    /// always searches MS2 (it pairs MS2 with its preceding MS1).
     #[arg(long, default_value = "2")]
     ms_level: u8,
 
@@ -226,12 +229,35 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    #[cfg(feature = "thermo")]
+    configure_bundled_dotnet();
     let cli = Cli::parse();
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("msgf-rust: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Make Thermo `.raw` reading work with zero setup when the runtime is bundled.
+///
+/// If a .NET runtime ships next to the executable (`<exe_dir>/dotnet`, as the
+/// release archives do), point `DOTNET_ROOT` at it so opening a `.raw` "just
+/// works". An existing `DOTNET_ROOT` or a system-wide .NET install is left
+/// untouched (it takes precedence). No effect on mzML/MGF, which never load .NET.
+#[cfg(feature = "thermo")]
+fn configure_bundled_dotnet() {
+    if std::env::var_os("DOTNET_ROOT").is_some() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("dotnet");
+            if bundled.join("shared").join("Microsoft.NETCore.App").is_dir() {
+                std::env::set_var("DOTNET_ROOT", &bundled);
+            }
         }
     }
 }
@@ -603,18 +629,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
     let is_mzml = matches!(spectrum_ext.as_deref(), Some("mzml"));
+    // Native Thermo `.raw` (feature-gated; needs the .NET 8 runtime). Anything
+    // that is neither mzML nor `.raw` is treated as MGF (the default).
+    let is_raw = matches!(spectrum_ext.as_deref(), Some("raw"));
+    let is_mgf = !is_mzml && !is_raw;
 
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
         None    => {
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && is_mzml;
+            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw);
+            // Detect (activation, instrument) from the input. mzML peeks the
+            // file; Thermo `.raw` reads the vendor activation/analyzer metadata
+            // so a CID/ETD/ion-trap `.raw` is not silently scored with the
+            // HCD/QExactive model.
+            let detected = if !auto_route_eligible {
+                None
+            } else if is_mzml {
+                detect_dominant_activation(&cli.spectrum)
+                    .map(|m| (m, detect_instrument_type_for_path(&cli.spectrum)))
+            } else {
+                // is_raw
+                #[cfg(feature = "thermo")]
+                {
+                    input::thermo::detect_activation_instrument(&cli.spectrum, 64)
+                }
+                #[cfg(not(feature = "thermo"))]
+                {
+                    None
+                }
+            };
             if auto_route_eligible {
-                match detect_dominant_activation(&cli.spectrum) {
-                    Some(method) => {
-                        // Detect instrument type from the same mzML file.
-                        // None ⇒ resolver picks LowRes (Java's
-                        // NewScorerFactory default when no `-inst` flag).
-                        let inst = detect_instrument_type_for_path(&cli.spectrum);
+                match detected {
+                    Some((method, inst)) => {
                         eprintln!(
                             "Param resolver: auto-detected dominant activation \
                              method = {} (instrument = {}) from {}",
@@ -665,15 +711,26 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.isotope_error_min, cli.isotope_error_max
         ).into());
     }
-    // Pass 2 co-isolation requires MS1 scans, which only the mzML reader captures.
-    // On non-mzML input `--chimeric` is inert, so keep `params.chimeric` FALSE to
-    // turn the ENTIRE chimeric path off (Pass 2, PIN column/SpecId gates, top-N
-    // forcing) — the run is then identical to a normal search.
-    let chimeric_active = cli.chimeric && is_mzml;
-    if cli.chimeric && !is_mzml {
+    // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
+    // `.raw` readers. On MGF (no MS1) `--chimeric` is inert, so keep
+    // `params.chimeric` FALSE to turn the ENTIRE chimeric path off (Pass 2, PIN
+    // column/SpecId gates, top-N forcing) — the run is then identical to a normal search.
+    // The co-isolation cascade needs MS1 data, available from mzML and Thermo
+    // `.raw` (not MGF).
+    let chimeric_active = cli.chimeric && (is_mzml || is_raw);
+    if cli.chimeric && is_mgf {
         eprintln!(
-            "WARN: --chimeric requires MS1 data (mzML); the input is not mzML, so the \
-             co-isolation cascade is disabled and the search runs normally."
+            "WARN: --chimeric requires MS1 data (mzML or Thermo .raw); the input is MGF, \
+             so the co-isolation cascade is disabled and the search runs normally."
+        );
+    }
+    // The cascade pairs MS2 with its preceding MS1 — it is MS2-only by
+    // construction. Ignore a non-2 `--ms-level` under `--chimeric` so MS3+
+    // (e.g. TMT SPS-MS3) can never enter the search on any input format.
+    if chimeric_active && cli.ms_level != 2 {
+        eprintln!(
+            "WARN: --ms-level={} is ignored under --chimeric; the cascade always searches MS2.",
+            cli.ms_level
         );
     }
     params.chimeric = chimeric_active;
@@ -735,6 +792,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         usize::MAX
     };
     let ms_level_u32 = cli.ms_level as u32;
+
+    // The precursor-calibration pre-pass currently reads only mzML/MGF. For a
+    // Thermo `.raw` it would be misread as MGF, so skip calibration and warn
+    // (full `.raw` calibration support is a follow-up).
+    if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
+        eprintln!(
+            "WARN: --precursor-cal is not yet supported for Thermo .raw input; \
+             proceeding without calibration."
+        );
+        params.precursor_cal_mode = PrecursorCalMode::Off;
+    }
 
     // Calibration pre-pass. Candidate enumeration is precursor-tolerance
     // independent, so keep the cal pass's `PreparedParts` and reuse them for the
@@ -812,7 +880,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the parser stays at most one chunk ahead of the scorer, overlapping
     // parse-of-chunk-(N+1) with score-of-chunk-N — so parse time (Astral
     // ~2-3s per chunk) overlaps scoring instead of running serially.
-    let mzml_warn_ms_level_emitted = if !is_mzml && cli.ms_level != 2 {
+    let mzml_warn_ms_level_emitted = if is_mgf && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF files \
              do not record MS level (treated as MS2). The flag has \
@@ -825,28 +893,52 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted; // silenced — unused for now.
 
-    // Under `--chimeric` on mzML, stream MS2 in CHUNK_SIZE batches, each paired
-    // with a bounded per-chunk MS1 link (`read_with_ms1_chunked`). Pass 1 + Pass 2
+    // Under `--chimeric` (mzML or Thermo `.raw`), stream MS2 in CHUNK_SIZE batches,
+    // each paired with a bounded per-chunk MS1 link (`read_with_ms1_chunked`). Pass 1 + Pass 2
     // run per chunk on this thread and peaks are dropped immediately, so RSS stays
     // bounded to ~CHUNK_SIZE spectra (NOT the whole file). The parser runs on a
     // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
     // pipeline in the `else` branch handles the (default) non-chimeric path.
-    let chimeric_mzml = cli.chimeric && is_mzml;
-    let parse_stats = if chimeric_mzml {
+    let chimeric_input = chimeric_active;
+    let parse_stats = if chimeric_input {
         let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
         let spectrum_path = cli.spectrum.clone();
         let cap = bench_cap;
-        let mslevel = ms_level_u32;
+        // The cascade is MS2-only by construction (MS2 paired with its preceding
+        // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
+        // range to admit MS3 (the .raw chunked reader is already MS2-only).
+        let mslevel = 2;
         let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
-            let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
-            let reader = MzMLReader::new(BufReader::new(f))
-                .with_ms_level_range(mslevel, mslevel)
-                .with_ms1_capture(true);
-            let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
-                // If the consumer hung up, sending fails; nothing more to do.
-                let _ = tx.send((chunk, link));
-            });
-            Ok((errc, errs))
+            // The inner closures borrow `tx` (SyncSender::send takes &self), so
+            // both reader branches can use it without moving it twice.
+            if is_mzml {
+                let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
+                let reader = MzMLReader::new(BufReader::new(f))
+                    .with_ms_level_range(mslevel, mslevel)
+                    .with_ms1_capture(true);
+                let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                    // If the consumer hung up, sending fails; nothing more to do.
+                    let _ = tx.send((chunk, link));
+                });
+                Ok((errc, errs))
+            } else {
+                // is_raw — same MS2 + bounded-MS1 chunk stream from the .raw.
+                #[cfg(feature = "thermo")]
+                {
+                    let reader = input::ThermoRawReader::open(&spectrum_path)
+                        .map_err(|e| format!("open Thermo .raw: {e}"))?;
+                    let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                        let _ = tx.send((chunk, link));
+                    });
+                    Ok((errc, errs))
+                }
+                #[cfg(not(feature = "thermo"))]
+                {
+                    Err("this msgf-rust build has no Thermo .raw support; \
+                         rebuild with `--features thermo`."
+                        .to_string())
+                }
+            }
         });
 
         let mut offset = 0usize;
@@ -895,6 +987,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let reader = MzMLReader::new(BufReader::new(f))
                     .with_ms_level_range(ms_level_u32, ms_level_u32);
                 Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+            } else if is_raw {
+                // Native Thermo .raw (feature-gated). The reader spawns no
+                // thread of its own; it yields the same Spectrum stream as the
+                // mzML/MGF readers, filtered to the requested MS level.
+                #[cfg(feature = "thermo")]
+                {
+                    let reader = input::ThermoRawReader::open(&spectrum_path)
+                        .map_err(|e| format!("open Thermo .raw: {e}"))?
+                        .with_ms_level(Some(ms_level_u32 as u8));
+                    Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+                }
+                #[cfg(not(feature = "thermo"))]
+                {
+                    Err("this msgf-rust build has no Thermo .raw support; \
+                         rebuild with `--features thermo` (and run with the \
+                         .NET 8 runtime installed). mzML/MGF inputs work without it."
+                        .into())
+                }
             } else {
                 let f = File::open(&spectrum_path)
                     .map_err(|e| format!("open MGF: {e}"))?;
@@ -947,7 +1057,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if is_mzml {
+    if is_mzml || is_raw {
         eprintln!(
             "MS-level filter: {} (only MS{} spectra entered the search)",
             cli.ms_level, cli.ms_level
@@ -1011,7 +1121,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cli.spectrum.display().to_string());
-        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, !is_mzml)?;
+        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 

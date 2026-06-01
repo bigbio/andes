@@ -5,10 +5,12 @@ name: Release
 # (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
 #
 # The mainstream targets (linux-x64, macOS x64 + arm64, windows-x64) are built
-# with `--features thermo` and ship a **self-contained .NET 8 runtime** next to
-# the binary (`dotnet/`), so reading Thermo `.raw` files works with nothing to
-# install — the binary auto-points `DOTNET_ROOT` at the bundled runtime. The
-# linux-arm64 archive is a plain (no-thermo) cross build.
+# with `--features "thermo timstof"`: native Thermo `.raw` (ships a
+# **self-contained .NET 8 runtime** next to the binary in `dotnet/`, so `.raw`
+# works with nothing to install — the binary auto-points `DOTNET_ROOT` at it) AND
+# native Bruker timsTOF `.d` (pure Rust, no runtime). The linux-arm64 archive is
+# a plain build without either native format (timsrust's zstd C dependency
+# complicates the cross build).
 #
 # Each archive contains:
 #   - the `msgf-rust` binary (or `msgf-rust.exe` on Windows)
@@ -92,9 +94,13 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
+          # The native-format targets bundle BOTH backends: Thermo `.raw` (.NET 8,
+          # bundled below) and Bruker timsTOF `.d` (pure Rust, no runtime). The
+          # no-thermo cross target (linux-arm64) ships without either, since
+          # timsrust's zstd C dependency complicates the cross build.
           if [ "${{ matrix.thermo }}" = "true" ]; then
             export RUSTUP_TOOLCHAIN=stable
-            cargo build --release --target ${{ matrix.target }} -p msgf-rust --features thermo
+            cargo build --release --target ${{ matrix.target }} -p msgf-rust --features "thermo timstof"
           else
             cargo build --release --target ${{ matrix.target }} --bin msgf-rust
           fi

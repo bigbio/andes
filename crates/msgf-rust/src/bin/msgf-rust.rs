@@ -641,18 +641,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
         None    => {
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw);
+            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
             // Detect (activation, instrument) from the input. mzML peeks the
             // file; Thermo `.raw` reads the vendor activation/analyzer metadata
             // so a CID/ETD/ion-trap `.raw` is not silently scored with the
-            // HCD/QExactive model.
+            // HCD/QExactive model; Bruker `.d` (timsTOF DDA-PASEF) is beam-type
+            // CID on a TOF analyzer, so route it to the CID/TOF model rather than
+            // letting it fall through to the Orbitrap HCD/QExactive default.
             let detected = if !auto_route_eligible {
                 None
             } else if is_mzml {
                 detect_dominant_activation(&cli.spectrum)
                     .map(|m| (m, detect_instrument_type_for_path(&cli.spectrum)))
-            } else {
-                // is_raw
+            } else if is_raw {
                 #[cfg(feature = "thermo")]
                 {
                     input::thermo::detect_activation_instrument(&cli.spectrum, 64)
@@ -661,6 +662,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 {
                     None
                 }
+            } else {
+                // is_d — timsTOF DDA-PASEF. `timsrust` does not expose a per-scan
+                // activation/analyzer, so route to the CID/TOF bundled model
+                // (CID_TOF_Tryp). Override with --fragmentation/--instrument.
+                Some((ActivationMethod::CID, Some(InstrumentType::TOF)))
             };
             if auto_route_eligible {
                 match detected {
@@ -796,6 +802,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         usize::MAX
     };
     let ms_level_u32 = cli.ms_level as u32;
+    // Native `.raw`/`.d` readers search MS2 (identification) scans only. A non-2
+    // `--ms-level` would otherwise make the Thermo iterator emit MS3 scans (which
+    // carry a precursor and would be searched — e.g. TMT SPS-MS3 reporter scans)
+    // or MS1 (no precursor → an empty run). Force MS2 + warn. `--ms-level` still
+    // applies to mzML.
+    if (is_raw || is_d) && cli.ms_level != 2 {
+        eprintln!(
+            "WARN: --ms-level={} is ignored for native .raw/.d input; these formats \
+             search MS2 (identification) scans only.",
+            cli.ms_level
+        );
+    }
 
     // The precursor-calibration pre-pass currently reads only mzML/MGF. For a
     // Thermo `.raw` or Bruker `.d` it would be misread as MGF, so skip
@@ -885,11 +903,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the parser stays at most one chunk ahead of the scorer, overlapping
     // parse-of-chunk-(N+1) with score-of-chunk-N — so parse time (Astral
     // ~2-3s per chunk) overlaps scoring instead of running serially.
+    // MGF carries no MS level (always treated as MS2). (Native `.raw`/`.d` are
+    // warned separately above.)
     let mzml_warn_ms_level_emitted = if is_mgf && cli.ms_level != 2 {
         eprintln!(
-            "WARN: --ms-level={} requested for an MGF / Bruker .d input; these \
-             inputs do not select an MS level here (MGF has none; the .d reader \
-             yields DDA MS2 only). The flag has no effect on this input.",
+            "WARN: --ms-level={} requested for an MGF input; MGF carries no MS \
+             level (always treated as MS2). The flag has no effect on this input.",
             cli.ms_level
         );
         true
@@ -995,12 +1014,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else if is_raw {
                 // Native Thermo .raw (feature-gated). The reader spawns no
                 // thread of its own; it yields the same Spectrum stream as the
-                // mzML/MGF readers, filtered to the requested MS level.
+                // mzML/MGF readers. MS2-only: identification scans, never MS3
+                // (e.g. TMT SPS-MS3 reporter scans) regardless of `--ms-level`.
                 #[cfg(feature = "thermo")]
                 {
                     let reader = input::ThermoRawReader::open(&spectrum_path)
                         .map_err(|e| format!("open Thermo .raw: {e}"))?
-                        .with_ms_level(Some(ms_level_u32 as u8));
+                        .with_ms_level(Some(2));
                     Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
                 }
                 #[cfg(not(feature = "thermo"))]

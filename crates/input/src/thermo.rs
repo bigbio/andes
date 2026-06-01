@@ -13,7 +13,7 @@ use std::path::Path;
 
 use thermorawfilereader::{RawFileReader, RawSpectrum};
 
-use crate::Spectrum;
+use crate::{Ms1Link, Spectrum};
 
 /// Error opening a Thermo `.raw` file.
 #[derive(Debug, thiserror::Error)]
@@ -85,29 +85,30 @@ impl ThermoRawReader {
     fn convert(raw: &RawSpectrum) -> Spectrum {
         let scan_number = raw.index() as i32 + 1;
 
-        let (precursor_mz, precursor_charge, precursor_intensity) = match raw.precursor() {
-            Some(p) => {
-                let charge = match p.charge() {
-                    0 => None,
-                    z => Some(z),
-                };
-                let inten = p.intensity();
-                let inten = if inten > 0.0 { Some(inten) } else { None };
-                (p.mz(), charge, inten)
+        let mut precursor_mz = 0.0;
+        let mut precursor_charge = None;
+        let mut precursor_intensity = None;
+        let mut isolation_lower_offset = None;
+        let mut isolation_upper_offset = None;
+        if let Some(p) = raw.precursor() {
+            precursor_mz = p.mz();
+            precursor_charge = match p.charge() {
+                0 => None,
+                z => Some(z),
+            };
+            let inten = p.intensity();
+            precursor_intensity = if inten > 0.0 { Some(inten) } else { None };
+            // Isolation window: RawFileReader gives absolute m/z bounds
+            // (lower, target, upper); the model stores offsets from the target,
+            // matching mzML's `isolation window lower/upper offset`. Skip a
+            // degenerate/absent window (the cascade is its only consumer).
+            let w = p.isolation_window();
+            let (lo, tg, up) = (w.lower(), w.target(), w.upper());
+            if tg > 0.0 && up > lo {
+                isolation_lower_offset = Some((tg - lo).abs());
+                isolation_upper_offset = Some((up - tg).abs());
             }
-            None => (0.0, None, None),
-        };
-
-        // `data_raw()` exposes the FlatBuffers vectors directly; `.mz()` /
-        // `.intensity()` are `Option<Vector<_>>`, and a `Vector`'s `iter()`
-        // already yields owned scalars (no `.copied()`).
-        let peaks: Vec<(f64, f32)> = match raw.data_raw() {
-            Some(data) => match (data.mz(), data.intensity()) {
-                (Some(mz), Some(intensity)) => mz.iter().zip(intensity.iter()).collect(),
-                _ => Vec::new(),
-            },
-            None => Vec::new(),
-        };
+        }
 
         Spectrum {
             // The Thermo controller native id (e.g.
@@ -121,14 +122,91 @@ impl ThermoRawReader {
             // RawFileReader retention time is in minutes; the model uses seconds.
             rt_seconds: Some(raw.time() * 60.0),
             scan: Some(scan_number),
-            peaks,
-            // Activation + isolation window are mapped in a later milestone
-            // (the CLI accepts `--fragmentation`/`--instrument`; the chimeric
-            // cascade is the only consumer of the isolation window).
+            peaks: extract_peaks(raw),
+            // Activation is left to the CLI (`--fragmentation`/`--instrument`).
             activation_method: None,
-            isolation_lower_offset: None,
-            isolation_upper_offset: None,
+            isolation_lower_offset,
+            isolation_upper_offset,
         }
+    }
+
+    /// Stream MS2 in `chunk_size` batches, each paired with a bounded
+    /// [`Ms1Link`] (the MS1 scans seen in that chunk plus a per-MS2 link to the
+    /// most-recent preceding MS1). Mirrors `MzMLReader::read_with_ms1_chunked`
+    /// so the chimeric cascade consumes `.raw` exactly like mzML. The last MS1
+    /// of a chunk is carried into the next chunk (index 0) so the first MS2 of
+    /// a chunk still links to its true preceding MS1 across the boundary.
+    ///
+    /// Returns `(error_count, sample_errors)` for API symmetry; `.raw` reads do
+    /// not surface per-scan parse errors, so these are always `(0, vec![])`.
+    pub fn read_with_ms1_chunked<F>(
+        self,
+        chunk_size: usize,
+        cap: usize,
+        mut on_chunk: F,
+    ) -> (usize, Vec<String>)
+    where
+        F: FnMut(Vec<Spectrum>, Ms1Link),
+    {
+        let mut chunk: Vec<Spectrum> = Vec::new();
+        let mut ms1_peaks: Vec<Vec<(f64, f32)>> = Vec::new();
+        let mut ms2_to_ms1: Vec<Option<usize>> = Vec::new();
+        let mut current_ms1: Option<usize> = None;
+        let mut emitted_ms2 = 0usize;
+
+        for i in 0..self.len {
+            if cap > 0 && emitted_ms2 >= cap {
+                break;
+            }
+            let raw = match self.handle.get(i) {
+                Some(raw) => raw,
+                None => continue,
+            };
+            match raw.ms_level() {
+                1 => {
+                    let idx = ms1_peaks.len();
+                    ms1_peaks.push(extract_peaks(&raw));
+                    current_ms1 = Some(idx);
+                }
+                2 => {
+                    chunk.push(Self::convert(&raw));
+                    ms2_to_ms1.push(current_ms1);
+                    emitted_ms2 += 1;
+                    if chunk.len() >= chunk_size {
+                        // Carry the current MS1's peaks into the next chunk so
+                        // its first MS2 still links across the boundary.
+                        let carry = current_ms1.map(|idx| ms1_peaks[idx].clone());
+                        let link = Ms1Link {
+                            ms1_peaks: std::mem::take(&mut ms1_peaks),
+                            ms2_to_ms1: std::mem::take(&mut ms2_to_ms1),
+                        };
+                        on_chunk(std::mem::take(&mut chunk), link);
+                        current_ms1 = carry.map(|p| {
+                            ms1_peaks.push(p);
+                            0
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !chunk.is_empty() {
+            on_chunk(chunk, Ms1Link { ms1_peaks, ms2_to_ms1 });
+        }
+        (0, Vec::new())
+    }
+}
+
+/// Extract centroided peaks `(m/z, intensity)` from a raw spectrum. The
+/// FlatBuffers vectors yield owned scalars, so no `.copied()` is needed.
+fn extract_peaks(raw: &RawSpectrum) -> Vec<(f64, f32)> {
+    match raw.data_raw() {
+        Some(data) => match (data.mz(), data.intensity()) {
+            (Some(mz), Some(intensity)) => mz.iter().zip(intensity.iter()).collect(),
+            _ => Vec::new(),
+        },
+        None => Vec::new(),
     }
 }
 

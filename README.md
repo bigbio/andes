@@ -110,7 +110,7 @@ Required:
 
 | Flag | Purpose |
 |---|---|
-| `--spectrum <FILE>` | Input mzML or MGF |
+| `--spectrum <FILE>` | Input mzML, MGF, or Thermo `.raw` (auto-detected by extension; `.raw` needs the `thermo` feature + .NET 8) |
 | `--database <FILE>` | Input FASTA (targets only; decoys generated) |
 | `--output-pin <FILE>` | Percolator PIN output |
 
@@ -136,13 +136,36 @@ Optional (default in **bold**):
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
 | `--ms-level <INT>` | MS level to search (mzML only) | **2** |
 | `--threads <INT>` | Worker threads | **logical CPUs** |
-| `--chimeric` | Two-pass co-isolated-peptide cascade (mzML only) | **off** — see below |
+| `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
 
 Run `msgf-rust --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
 
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
-DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML only), msgf-rust runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
+DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), msgf-rust runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
+
+## Reading Thermo `.raw` files
+
+msgf-rust reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is parity-identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).
+
+There are two ways to use it:
+
+- **Pre-built release archives (recommended) — nothing to install.** The macOS (x64/arm64), Windows (x64), and Linux (x64) archives bundle a self-contained .NET 8 runtime next to the binary, so `.raw` reading works out of the box.
+- **Building from source** with `--features thermo`. Then `.raw` reading needs the **.NET 8 runtime** installed (the build itself does not need the .NET SDK — the RawFileReader assemblies are vendored):
+  - Linux: `sudo dnf install dotnet-runtime-8.0` (RHEL/Fedora) or `apt-get install dotnet-runtime-8.0` (Debian/Ubuntu), or `curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 8.0 --runtime dotnet`
+  - macOS: `brew install dotnet@8`
+  - Windows: the [.NET 8 Desktop/Runtime installer](https://dotnet.microsoft.com/download/dotnet/8.0)
+  - Build needs rustc ≥ 1.88: `RUSTUP_TOOLCHAIN=stable cargo build --release -p msgf-rust --features thermo`
+
+The runtime is auto-discovered: a bundled `dotnet/` next to the binary is used automatically; otherwise an existing `DOTNET_ROOT` or a system install is used. mzML/MGF reading never loads .NET. RawFileReader is under Thermo's license — see `crates/input/THERMO_LICENSE.txt`.
+
+**Containers:** base on a .NET 8 runtime image (or add the runtime), e.g.
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/runtime:8.0
+COPY msgf-rust /usr/local/bin/msgf-rust   # built with --features thermo
+ENTRYPOINT ["msgf-rust"]
+```
 
 ## Auto-detection
 

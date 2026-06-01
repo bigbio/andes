@@ -226,12 +226,35 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    #[cfg(feature = "thermo")]
+    configure_bundled_dotnet();
     let cli = Cli::parse();
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("msgf-rust: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Make Thermo `.raw` reading work with zero setup when the runtime is bundled.
+///
+/// If a .NET runtime ships next to the executable (`<exe_dir>/dotnet`, as the
+/// release archives do), point `DOTNET_ROOT` at it so opening a `.raw` "just
+/// works". An existing `DOTNET_ROOT` or a system-wide .NET install is left
+/// untouched (it takes precedence). No effect on mzML/MGF, which never load .NET.
+#[cfg(feature = "thermo")]
+fn configure_bundled_dotnet() {
+    if std::env::var_os("DOTNET_ROOT").is_some() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("dotnet");
+            if bundled.join("shared").join("Microsoft.NETCore.App").is_dir() {
+                std::env::set_var("DOTNET_ROOT", &bundled);
+            }
         }
     }
 }
@@ -673,11 +696,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // On non-mzML input `--chimeric` is inert, so keep `params.chimeric` FALSE to
     // turn the ENTIRE chimeric path off (Pass 2, PIN column/SpecId gates, top-N
     // forcing) — the run is then identical to a normal search.
-    let chimeric_active = cli.chimeric && is_mzml;
-    if cli.chimeric && !is_mzml {
+    // The co-isolation cascade needs MS1 data, available from mzML and Thermo
+    // `.raw` (not MGF).
+    let chimeric_active = cli.chimeric && (is_mzml || is_raw);
+    if cli.chimeric && is_mgf {
         eprintln!(
-            "WARN: --chimeric requires MS1 data (mzML); the input is not mzML, so the \
-             co-isolation cascade is disabled and the search runs normally."
+            "WARN: --chimeric requires MS1 data (mzML or Thermo .raw); the input is MGF, \
+             so the co-isolation cascade is disabled and the search runs normally."
         );
     }
     params.chimeric = chimeric_active;
@@ -846,22 +871,43 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // bounded to ~CHUNK_SIZE spectra (NOT the whole file). The parser runs on a
     // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
     // pipeline in the `else` branch handles the (default) non-chimeric path.
-    let chimeric_mzml = cli.chimeric && is_mzml;
-    let parse_stats = if chimeric_mzml {
+    let chimeric_input = chimeric_active;
+    let parse_stats = if chimeric_input {
         let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
         let spectrum_path = cli.spectrum.clone();
         let cap = bench_cap;
         let mslevel = ms_level_u32;
         let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
-            let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
-            let reader = MzMLReader::new(BufReader::new(f))
-                .with_ms_level_range(mslevel, mslevel)
-                .with_ms1_capture(true);
-            let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
-                // If the consumer hung up, sending fails; nothing more to do.
-                let _ = tx.send((chunk, link));
-            });
-            Ok((errc, errs))
+            // The inner closures borrow `tx` (SyncSender::send takes &self), so
+            // both reader branches can use it without moving it twice.
+            if is_mzml {
+                let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
+                let reader = MzMLReader::new(BufReader::new(f))
+                    .with_ms_level_range(mslevel, mslevel)
+                    .with_ms1_capture(true);
+                let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                    // If the consumer hung up, sending fails; nothing more to do.
+                    let _ = tx.send((chunk, link));
+                });
+                Ok((errc, errs))
+            } else {
+                // is_raw — same MS2 + bounded-MS1 chunk stream from the .raw.
+                #[cfg(feature = "thermo")]
+                {
+                    let reader = input::ThermoRawReader::open(&spectrum_path)
+                        .map_err(|e| format!("open Thermo .raw: {e}"))?;
+                    let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                        let _ = tx.send((chunk, link));
+                    });
+                    Ok((errc, errs))
+                }
+                #[cfg(not(feature = "thermo"))]
+                {
+                    Err("this msgf-rust build has no Thermo .raw support; \
+                         rebuild with `--features thermo`."
+                        .to_string())
+                }
+            }
         });
 
         let mut offset = 0usize;

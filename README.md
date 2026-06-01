@@ -110,7 +110,7 @@ Required:
 
 | Flag | Purpose |
 |---|---|
-| `--spectrum <FILE>` | Input mzML, MGF, or Thermo `.raw` (auto-detected by extension; `.raw` needs the `thermo` feature + .NET 8) |
+| `--spectrum <FILE>` | Input mzML, MGF, Thermo `.raw` (needs `thermo` feature + .NET 8), or Bruker timsTOF `.d` (needs `timstof` feature). Auto-detected by extension |
 | `--database <FILE>` | Input FASTA (targets only; decoys generated) |
 | `--output-pin <FILE>` | Percolator PIN output |
 
@@ -166,6 +166,19 @@ FROM mcr.microsoft.com/dotnet/runtime:8.0
 COPY msgf-rust /usr/local/bin/msgf-rust   # built with --features thermo
 ENTRYPOINT ["msgf-rust"]
 ```
+
+## Reading Bruker timsTOF `.d` files
+
+msgf-rust reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate (the same reader [Sage](https://github.com/lazear/sage) uses), so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
+
+It is feature-gated to keep the default build pure-Rust. Build with `--features timstof` on a toolchain with a recent rustc (the `timsrust` dependency tree needs rustc ≥ 1.88):
+
+```bash
+cargo build --release -p msgf-rust --features timstof
+msgf-rust --spectrum sample.d --database human.fasta --output-pin out.pin
+```
+
+Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is carried as metadata but not used by scoring. `--chimeric` on a `.d` degrades gracefully to a normal search (the co-isolation cascade needs an MS1 stream the DDA reader does not expose), as does `--precursor-cal`. Default (non-`timstof`) builds read mzML/MGF only and never pull in `timsrust`.
 
 ## Auto-detection
 

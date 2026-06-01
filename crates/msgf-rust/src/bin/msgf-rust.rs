@@ -4,8 +4,9 @@
 //! tryptic database search and writes output
 //! in Percolator `.pin` format (and optionally `.tsv` format).
 //!
-//! Format dispatch: if `--spectrum` ends in `.mzML` or `.mzml`, `MzMLReader`
-//! is used; otherwise `MgfReader` is used (default / backwards-compatible).
+//! Format dispatch by `--spectrum` extension: `.mzML`/`.mzml` → `MzMLReader`;
+//! `.d` → `TimsTofReader` (native Bruker timsTOF, only under `--features
+//! timstof`); otherwise `MgfReader` (default / backwards-compatible).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -629,10 +630,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
     let is_mzml = matches!(spectrum_ext.as_deref(), Some("mzml"));
-    // Native Thermo `.raw` (feature-gated; needs the .NET 8 runtime). Anything
-    // that is neither mzML nor `.raw` is treated as MGF (the default).
+    // Native Thermo `.raw` (feature-gated; needs the .NET 8 runtime).
     let is_raw = matches!(spectrum_ext.as_deref(), Some("raw"));
-    let is_mgf = !is_mzml && !is_raw;
+    // Native Bruker timsTOF `.d` (feature-gated; pure Rust, no vendor runtime).
+    // A `.d` is a directory, but the path still carries the `.d` extension.
+    let is_d = matches!(spectrum_ext.as_deref(), Some("d"));
+    // Anything that is neither mzML, `.raw`, nor `.d` is treated as MGF (default).
+    let is_mgf = !is_mzml && !is_raw && !is_d;
 
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
@@ -712,16 +716,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ).into());
     }
     // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
-    // `.raw` readers. On MGF (no MS1) `--chimeric` is inert, so keep
+    // `.raw` readers. MGF (no MS1) and the Bruker `.d` reader (DDA MS2 only;
+    // chimeric on `.d` is out of scope) make `--chimeric` inert, so keep
     // `params.chimeric` FALSE to turn the ENTIRE chimeric path off (Pass 2, PIN
     // column/SpecId gates, top-N forcing) — the run is then identical to a normal search.
-    // The co-isolation cascade needs MS1 data, available from mzML and Thermo
-    // `.raw` (not MGF).
     let chimeric_active = cli.chimeric && (is_mzml || is_raw);
-    if cli.chimeric && is_mgf {
+    if cli.chimeric && !(is_mzml || is_raw) {
         eprintln!(
-            "WARN: --chimeric requires MS1 data (mzML or Thermo .raw); the input is MGF, \
-             so the co-isolation cascade is disabled and the search runs normally."
+            "WARN: --chimeric requires MS1 data (mzML or Thermo .raw); the input is {} \
+             so the co-isolation cascade is disabled and the search runs normally.",
+            if is_d { "Bruker .d (DDA MS2 only)," } else { "MGF," }
         );
     }
     // The cascade pairs MS2 with its preceding MS1 — it is MS2-only by
@@ -794,11 +798,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let ms_level_u32 = cli.ms_level as u32;
 
     // The precursor-calibration pre-pass currently reads only mzML/MGF. For a
-    // Thermo `.raw` it would be misread as MGF, so skip calibration and warn
-    // (full `.raw` calibration support is a follow-up).
-    if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
+    // Thermo `.raw` or Bruker `.d` it would be misread as MGF, so skip
+    // calibration and warn (native-format calibration support is a follow-up).
+    if (is_raw || is_d) && params.precursor_cal_mode != PrecursorCalMode::Off {
+        let fmt = if is_raw { "Thermo .raw" } else { "Bruker .d" };
         eprintln!(
-            "WARN: --precursor-cal is not yet supported for Thermo .raw input; \
+            "WARN: --precursor-cal is not yet supported for {fmt} input; \
              proceeding without calibration."
         );
         params.precursor_cal_mode = PrecursorCalMode::Off;
@@ -882,9 +887,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ~2-3s per chunk) overlaps scoring instead of running serially.
     let mzml_warn_ms_level_emitted = if is_mgf && cli.ms_level != 2 {
         eprintln!(
-            "WARN: --ms-level={} requested for an MGF input; MGF files \
-             do not record MS level (treated as MS2). The flag has \
-             no effect on this input.",
+            "WARN: --ms-level={} requested for an MGF / Bruker .d input; these \
+             inputs do not select an MS level here (MGF has none; the .d reader \
+             yields DDA MS2 only). The flag has no effect on this input.",
             cli.ms_level
         );
         true
@@ -1003,6 +1008,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     Err("this msgf-rust build has no Thermo .raw support; \
                          rebuild with `--features thermo` (and run with the \
                          .NET 8 runtime installed). mzML/MGF inputs work without it."
+                        .into())
+                }
+            } else if is_d {
+                // Native Bruker timsTOF `.d` (feature-gated). The reader opens
+                // the `.d` directory and yields the same MS2 `Spectrum` stream
+                // as the mzML/MGF readers; it spawns no thread of its own.
+                #[cfg(feature = "timstof")]
+                {
+                    let reader = input::TimsTofReader::open(&spectrum_path)
+                        .map_err(|e| format!("open Bruker .d: {e}"))?;
+                    Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+                }
+                #[cfg(not(feature = "timstof"))]
+                {
+                    Err("this msgf-rust build has no Bruker .d (timsTOF) support; \
+                         rebuild with `--features timstof`. mzML/MGF inputs work \
+                         without it."
                         .into())
                 }
             } else {

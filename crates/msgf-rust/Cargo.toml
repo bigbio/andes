@@ -26,6 +26,10 @@ thiserror = { workspace = true }
 # toolchain with rustc >= 1.88; opening a `.raw` then needs the .NET 8 runtime
 # at runtime. Default builds stay pure-Rust and read mzML/MGF only.
 thermo = ["input/thermo"]
+# Native Bruker timsTOF `.d` input (delegates to the input crate's `timstof`
+# feature). Not enabled by default: turn on with `--features timstof`. Reading a
+# `.d` needs no vendor runtime (pure Rust). Default builds read mzML/MGF only.
+timstof = ["input/timstof"]
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -810,9 +810,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // thread (this one) drains the channel and calls `prepared.run_chunk` on
     // each chunk (which is itself Rayon-parallel internally). With capacity 2
     // the parser stays at most one chunk ahead of the scorer, overlapping
-    // parse-of-chunk-(N+1) with score-of-chunk-N. Astral parse cost is ~2-3s
-    // per chunk × 25 chunks; this recovers ~50-70s of wall time that was
-    // previously serial.
+    // parse-of-chunk-(N+1) with score-of-chunk-N — so parse time (Astral
+    // ~2-3s per chunk) overlaps scoring instead of running serially.
     let mzml_warn_ms_level_emitted = if !is_mzml && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF files \

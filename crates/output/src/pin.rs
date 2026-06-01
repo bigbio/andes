@@ -981,8 +981,7 @@ mod tests {
 
     // ── PIN emits real feature values ────────────────────────────────────────
 
-    /// Verify that `NumMatchedMainIons` is emitted from `psm.features`
-    /// rather than always being zero-stubbed.
+    /// Verify that `NumMatchedMainIons` is emitted from `psm.features`.
     #[test]
     fn pin_emits_real_num_matched_main_ions_when_features_populated() {
         let params = make_params(2..=3);

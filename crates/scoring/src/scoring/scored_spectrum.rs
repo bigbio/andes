@@ -217,8 +217,7 @@ impl<'a> ScoredSpectrum<'a> {
         // assignment but the original `spec.peaks` is unmodified, so summing
         // it directly OVER-COUNTS by the precursor-peak intensity. Use the
         // kept set (post-precursor-filter) for the running sum, matching
-        // Java's effective denominator. (The PIN diff harness flagged
-        // MS2IonCurrent as ~1.6x over Java; this is the source.)
+        // Java's effective denominator.
         let total_intensity: f64 = kept.iter().map(|&(_, intensity, _)| intensity as f64).sum();
 
         // Ranks must be computed BEFORE the FastScorer cache below reads them.
@@ -245,10 +244,6 @@ impl<'a> ScoredSpectrum<'a> {
         // No `charge > 2` guard — Java's `applyDeconvolution` is unconditional;
         // `deconvolute_spectrum` is a no-op for charge ≤ 2 because its inner
         // loop `for ion_charge_i in 2..charge.min(4)` runs zero iterations.
-        // The guard previously skipped deconvolution for Astral charge-2 HCD
-        // spectra (a large fraction of the data), introducing a per-spectrum
-        // divergence in both `prob_peak` and the prefix/suffix node-score
-        // cache.
         let (deconv_peaks, deconv_ranks): DeconvResult =
             if param.apply_deconvolution {
                 let tol = param.deconvolution_error_tolerance as f64;

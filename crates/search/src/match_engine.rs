@@ -387,12 +387,10 @@ impl<'a> PreparedSearch<'a> {
             window_cand_indices.sort_unstable();
             window_cand_indices.dedup();
 
-            // Hoist cleavage-credit constants out of the per-
-            // candidate hot path. Previously `compute_cleavage_credit` was a
-            // closure that captured `aa_set` and re-invoked four small
-            // accessor methods (each a HashMap field deref, not free).
-            // perf-record showed 22% of total Astral wall in this closure's
-            // FnMut::call_mut frame.
+            // Hoist the loop-invariant cleavage-credit constants out of the
+            // per-candidate hot path: resolving them once here avoids
+            // re-invoking four small `aa_set` accessor methods (each a
+            // HashMap field deref) for every candidate.
             //
             // The four credit/penalty values are SearchParams-constant; we
             // resolve them ONCE here. The per-candidate logic becomes four
@@ -1243,10 +1241,6 @@ pub(crate) fn compute_spec_e_values_for_spectrum(
     // the stored length). So Java effectively queries
     //   - with enzyme: `numDistinctPeptides[pepLength + 1]`
     //   - without enzyme: `numDistinctPeptides[pepLength]`
-    //
-    // Rust previously queried `num_distinct(pepLength)` for both cases, which
-    // was the right semantics for the "without enzyme" branch and an
-    // off-by-one for the typical tryptic case.
     let de_novo_score = max_score - 1;
     let lookup_offset = match params.enzyme {
         Enzyme::NoCleavage | Enzyme::NonSpecific => 0,
@@ -1300,7 +1294,7 @@ pub(crate) fn matched_peak_keys(
 ///
 /// # Ion-current + error-stat features
 ///
-/// All 9 previously zero-stubbed PIN columns are now filled:
+/// The ion-current and error-stat PIN columns:
 /// - Ion-current ratios use raw peak intensities vs total MS2 ion current.
 /// - `MS2IonCurrent` is the raw sum (NOT log10); the PIN emitter emits it as-is.
 /// - `IsolationWindowEfficiency` is always 0.0 (no isolation-window data
@@ -1547,9 +1541,8 @@ pub(crate) fn compute_psm_features(
     // is misleading: `MeanErrorTop7` = mean of |ppm error| (absolute),
     // `MeanRelErrorTop7` = mean of signed ppm error. Both are ppm; the
     // "Rel" suffix in Java distinguishes signed vs absolute, NOT
-    // Da-vs-ppm. Rust previously emitted MeanErrorTop7/StdevErrorTop7 in
-    // Da, which produced a 100% feature-divergence rate vs Java per the
-    // PIN diff harness. Switching to abs-ppm aligns the units.
+    // Da-vs-ppm. MeanErrorTop7/StdevErrorTop7 are therefore emitted as
+    // absolute ppm (not Da) to match Java's units.
     //
     // Population stdev formula: sqrt(sum_sq/n - mean²).
     let abs_ppm_errors: Vec<f64> = top7.iter()

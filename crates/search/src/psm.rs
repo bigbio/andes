@@ -56,8 +56,8 @@ pub struct PsmFeatures {
     /// Per-bond edge score sum, mirroring Java's `DBScanScorer.getScore`
     /// edge loop (IES + error_score per bond). Emitted as a NEW `EdgeScore`
     /// PIN column alongside the unchanged `RawScore`, so Percolator can
-    /// learn weights without disrupting the existing RawScore distribution
-    /// (which destroyed discrimination when blended into RawScore directly).
+    /// learn weights without disrupting the existing RawScore distribution.
+    /// Kept separate from `RawScore` rather than blended into it.
     /// Computed via `psm_edge_score` in `score_psm.rs`.
     pub edge_score: i32,
 

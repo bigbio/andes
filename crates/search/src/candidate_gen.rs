@@ -314,8 +314,7 @@ fn expand_mod_combinations(
 
 /// Build the merged variant list for a terminal position (pos 0 or pos n-1).
 ///
-/// Mirrors the logic that was previously inlined in `expand_mod_combinations`
-/// for all positions. Only called for the 1-2 terminal positions per span.
+/// Only called for the 1-2 terminal positions per span.
 fn build_terminal_variants(
     params: &SearchParams,
     residue: u8,

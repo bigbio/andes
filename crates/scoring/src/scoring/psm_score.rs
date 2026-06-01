@@ -37,10 +37,9 @@ fn trace_pep_filter() -> Option<&'static String> {
 /// HCD/Trypsin, forward direction for prefix-main).
 ///
 /// This is intended as an ADDITIVE feature for Percolator: emit it as a
-/// SEPARATE PIN column alongside the unchanged `RawScore`. Per the n=8
-/// audit pattern, modifying RawScore directly with this contribution
-/// regresses Astral 1% FDR by ~30%; adding it as a new feature lets
-/// Percolator learn weights without breaking the existing distribution.
+/// SEPARATE PIN column alongside the unchanged `RawScore`. It must not be
+/// blended into `RawScore`; kept separate, it lets Percolator learn its
+/// weight without disturbing the existing RawScore distribution.
 ///
 /// Java parity: fromIndex=1, toIndex=n+1 →
 /// reverse loop iterates `i` from n-1 down to 1, forward loop iterates

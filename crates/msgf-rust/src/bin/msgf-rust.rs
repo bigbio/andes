@@ -27,11 +27,10 @@ use search::{
     PreparedSearch, PrecursorCalMode, SearchIndex, SearchParams, SpecKey, TopNQueue,
 };
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
-use input::{detect_instrument_type, FastaReader, MgfReader, MzMLReader};
+use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
 
-/// Fragmentation method. `Auto` means "detect from the mzML's activation block;
-/// fall back to the bundled HCD_QExactive_Tryp.param if nothing detected" —
-/// the same semantics as omitting the flag pre-iter39.
+/// Fragmentation method. `Auto` detects from the mzML's activation block and
+/// falls back to the bundled `HCD_QExactive_Tryp.param` when nothing is detected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Fragmentation {
     #[clap(name = "auto")] Auto,
@@ -78,8 +77,8 @@ pub enum EnzymeSpecificity {
     allow_hyphen_values = true,
 )]
 struct Cli {
-    /// Input spectrum file (MGF or mzML). Format is auto-detected by extension:
-    /// `.mzML`/`.mzml` → MzMLReader; anything else → MgfReader.
+    /// Input spectrum file. Format is auto-detected by extension:
+    /// `.mzML`/`.mzml` is read as mzML, anything else as MGF.
     #[arg(long)]
     spectrum: PathBuf,
 
@@ -99,20 +98,22 @@ struct Cli {
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
 
-    /// Minimum isotope error offset to try (default -1).
+    /// Minimum isotope-error offset to try.
     #[arg(long, default_value = "-1")]
     isotope_error_min: i8,
 
-    /// Maximum isotope error offset to try (default 2).
+    /// Maximum isotope-error offset to try.
     #[arg(long, default_value = "2")]
     isotope_error_max: i8,
 
-    /// Precursor mass calibration mode (Java `-precursorCal`). Default `off` until G1
-    /// gate passes (see `DOCS.md` §8e); use `auto` to match Java default behavior.
+    /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
+    /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
+    /// precursor tolerance for the main search; `auto` skips the correction when
+    /// the sample is too small to be reliable.
     #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
 
-    /// Precursor mass tolerance in ppm (default 20.0).
+    /// Precursor mass tolerance in ppm.
     #[arg(long, default_value = "20.0")]
     precursor_tol_ppm: f64,
 
@@ -137,23 +138,20 @@ struct Cli {
           default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
 
-    /// Maximum number of missed cleavages per peptide (default 1).
+    /// Maximum number of missed cleavages per peptide.
     #[arg(long, default_value = "1")]
     max_missed_cleavages: u32,
 
-    /// Minimum number of peaks required in an MS2 spectrum to attempt scoring.
-    ///
-    /// Spectra with fewer peaks are skipped (default 10).
+    /// Minimum number of peaks an MS2 spectrum must have to be scored; spectra
+    /// with fewer peaks are skipped.
     #[arg(long, default_value = "10")]
     min_peaks: u32,
 
-    /// Minimum peptide length (in residues) to consider during the search.
-    /// Default 6.
+    /// Minimum peptide length, in residues.
     #[arg(long, default_value = "6")]
     min_length: u32,
 
-    /// Maximum peptide length (in residues) to consider during the search.
-    /// Default 40.
+    /// Maximum peptide length, in residues.
     #[arg(long, default_value = "40")]
     max_length: u32,
 
@@ -203,18 +201,28 @@ struct Cli {
     #[arg(long, default_value_t = num_cpus::get())]
     threads: usize,
 
-    /// Bench mode: process only the first N MS2 spectra and skip writing
-    /// PIN/TSV. Use for fast Fix B iteration (1k-2k spectra ≈ <1 min vs
-    /// 70 min on full PXD001819). When 0 (default) the full input is used.
+    /// Debug/benchmark cap: process only the first N spectra (0 = no cap).
     #[arg(long, default_value = "0")]
     max_spectra: usize,
 
-    /// MS level to search. Default 2 (MS2). MS1 spectra (and any other levels)
-    /// in the input file are filtered out at load time so they never enter
-    /// the search loop or consume RAM. Only meaningful for mzML inputs — MGF
-    /// files do not encode MS level and are treated as MS2 regardless.
+    /// MS level to search. MS1 (and any other levels) are filtered out at load
+    /// time so they never enter the search loop. Only meaningful for mzML — MGF
+    /// files do not encode MS level and are always treated as MS2.
     #[arg(long, default_value = "2")]
     ms_level: u8,
+
+    /// Enable the two-pass chimeric cascade for co-isolated (co-fragmented)
+    /// peptides. Pass 1 is the normal top-1 search; Pass 2 detects co-isolated
+    /// precursors in each scan's MS1 isolation window and runs a targeted search
+    /// for the second peptide on the residual spectrum, emitting it as an extra
+    /// PSM. Requires mzML (MS1 scans); has no effect on MGF input.
+    #[arg(long, default_value = "false")]
+    chimeric: bool,
+
+    /// Chimeric mode: fallback isolation half-width in Da when the mzML omits the
+    /// per-scan isolation-window offsets.
+    #[arg(long, default_value = "1.5")]
+    isolation_halfwidth: f64,
 }
 
 fn main() -> ExitCode {
@@ -287,9 +295,9 @@ struct ParseStats {
 /// Generic over the reader's error type so the same helper serves both
 /// MGF and mzML.
 ///
-/// iter32 P-1: this runs on a dedicated thread so chunk N+1 is being
-/// PARSED while chunk N is being SCORED. Channel capacity is 2 (one
-/// in-flight + one queued) so the producer stays at most one chunk ahead.
+/// Runs on a dedicated thread so chunk N+1 is PARSED while chunk N is SCORED.
+/// Channel capacity is 2 (one in-flight + one queued) so the producer stays at
+/// most one chunk ahead.
 fn send_chunks<R, E>(
     reader: R,
     chunk_size: usize,
@@ -397,6 +405,8 @@ fn build_spec_keys_from_metadata(
             scan: None,
             peaks: vec![(0.0, 0.0); m.num_peaks],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         })
         .collect();
     build_spec_keys(&spectra, &charge_range, min_peaks)
@@ -655,7 +665,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.isotope_error_min, cli.isotope_error_max
         ).into());
     }
-    params.top_n_psms_per_spectrum = cli.top_n;
+    // Pass 2 co-isolation requires MS1 scans, which only the mzML reader captures.
+    // On non-mzML input `--chimeric` is inert, so keep `params.chimeric` FALSE to
+    // turn the ENTIRE chimeric path off (Pass 2, PIN column/SpecId gates, top-N
+    // forcing) — the run is then identical to a normal search.
+    let chimeric_active = cli.chimeric && is_mzml;
+    if cli.chimeric && !is_mzml {
+        eprintln!(
+            "WARN: --chimeric requires MS1 data (mzML); the input is not mzML, so the \
+             co-isolation cascade is disabled and the search runs normally."
+        );
+    }
+    params.chimeric = chimeric_active;
+    params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
+    // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
+    // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
+    // blind multi-emission per scan = inflated FDR.
+    params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,
@@ -710,7 +736,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let ms_level_u32 = cli.ms_level as u32;
 
-    if params.precursor_cal_mode != PrecursorCalMode::Off {
+    // Calibration pre-pass. Candidate enumeration is precursor-tolerance
+    // independent, so keep the cal pass's `PreparedParts` and reuse them for the
+    // main pass instead of re-enumerating all 16.8M candidates (~15s saved on
+    // Astral). `into_parts()` runs BEFORE tightening so the owned parts outlive
+    // the `params` borrow the cal `PreparedSearch` held.
+    let reuse_parts = if params.precursor_cal_mode != PrecursorCalMode::Off {
         let cal_prepared = PreparedSearch::prepare(
             &idx,
             &params,
@@ -726,6 +757,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &params,
             &cal_prepared,
         )?;
+        let parts = cal_prepared.into_parts();
         params.precursor_mass_shift_ppm = apply_shift_for_mode(params.precursor_cal_mode, cal_stats);
         let tol_before = params.precursor_tolerance;
         apply_tightened_precursor_tolerance(&mut params, cal_stats);
@@ -747,15 +779,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
         }
-    }
+        Some(parts)
+    } else {
+        None
+    };
 
-    let prepared = PreparedSearch::prepare(
-        &idx,
-        &params,
-        &scorer,
-        fragment_tol_da,
-        &cli.decoy_prefix,
-    );
+    let prepared = match reuse_parts {
+        Some(parts) => {
+            PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
+        }
+        None => PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix),
+    };
     log_rss("after_prepared_search");
     eprintln!(
         "PreparedSearch: {} candidates, {} mass buckets",
@@ -770,20 +804,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let t_search_start = std::time::Instant::now();
 
-    // iter32 Phase C: pipeline mzML/MGF parsing with Rayon scoring via a
-    // bounded sync_channel. The parser runs on a dedicated thread and pushes
+    // Pipeline mzML/MGF parsing with Rayon scoring via a bounded sync_channel.
+    // The parser runs on a dedicated thread and pushes
     // CHUNK_SIZE-sized `Vec<Spectrum>` payloads through the channel; the main
     // thread (this one) drains the channel and calls `prepared.run_chunk` on
     // each chunk (which is itself Rayon-parallel internally). With capacity 2
     // the parser stays at most one chunk ahead of the scorer, overlapping
-    // parse-of-chunk-(N+1) with score-of-chunk-N. Astral parse cost is ~2-3s
-    // per chunk × 25 chunks; this recovers ~50-70s of wall time that was
-    // previously serial.
-    let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
-
-    // Spawn the parser thread. It owns the reader (paths + flags moved in).
-    // The thread returns ParseStats with the error count + sample messages.
-    let spectrum_path = cli.spectrum.clone();
+    // parse-of-chunk-(N+1) with score-of-chunk-N — so parse time (Astral
+    // ~2-3s per chunk) overlaps scoring instead of running serially.
     let mzml_warn_ms_level_emitted = if !is_mzml && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF files \
@@ -797,47 +825,111 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let _ = mzml_warn_ms_level_emitted; // silenced — unused for now.
 
-    let parser_handle = thread::spawn(move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
-        if is_mzml {
-            let f = File::open(&spectrum_path)
-                .map_err(|e| format!("open mzML: {e}"))?;
+    // Under `--chimeric` on mzML, stream MS2 in CHUNK_SIZE batches, each paired
+    // with a bounded per-chunk MS1 link (`read_with_ms1_chunked`). Pass 1 + Pass 2
+    // run per chunk on this thread and peaks are dropped immediately, so RSS stays
+    // bounded to ~CHUNK_SIZE spectra (NOT the whole file). The parser runs on a
+    // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
+    // pipeline in the `else` branch handles the (default) non-chimeric path.
+    let chimeric_mzml = cli.chimeric && is_mzml;
+    let parse_stats = if chimeric_mzml {
+        let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
+        let spectrum_path = cli.spectrum.clone();
+        let cap = bench_cap;
+        let mslevel = ms_level_u32;
+        let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
+            let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
             let reader = MzMLReader::new(BufReader::new(f))
-                .with_ms_level_range(ms_level_u32, ms_level_u32);
-            Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
-        } else {
-            let f = File::open(&spectrum_path)
-                .map_err(|e| format!("open MGF: {e}"))?;
-            let reader = MgfReader::new(BufReader::new(f));
-            Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
-        }
-    });
+                .with_ms_level_range(mslevel, mslevel)
+                .with_ms1_capture(true);
+            let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                // If the consumer hung up, sending fails; nothing more to do.
+                let _ = tx.send((chunk, link));
+            });
+            Ok((errc, errs))
+        });
 
-    log_rss("after_parser_thread_spawn");
-
-    // Consumer loop: drain chunks from the channel as they arrive. Each
-    // received chunk is processed via `prepared.run_chunk` (Rayon-parallel)
-    // synchronously on this thread; while the inner Rayon runs, the parser
-    // thread is filling the next chunk concurrently.
-    for chunk in rx {
-        if chunk.is_empty() {
-            continue;
+        let mut offset = 0usize;
+        let mut ms1_linked = 0usize;
+        for (chunk_spectra, chunk_link) in rx {
+            // Pass 1 (offset → global spectrum_idx for PIN), then Pass 2 on the same
+            // chunk (BEFORE peaks are dropped — the residual needs them). The chunk's
+            // own `Ms1Link` and `offset` keep chunk-local indexing aligned.
+            let mut queues = prepared.run_chunk(&chunk_spectra, offset);
+            search::match_engine::run_pass2_coisolation(
+                &prepared,
+                &chunk_spectra,
+                &mut queues,
+                &params,
+                &chunk_link,
+                offset,
+            );
+            offset += chunk_spectra.len();
+            ms1_linked += chunk_link.ms1_peaks.len();
+            all_queues.extend(queues);
+            for mut spec in chunk_spectra.into_iter() {
+                spec.peaks = Vec::new();
+                all_spectra.push(spec);
+            }
         }
-        let offset = all_spectra.len();
-        let queues = prepared.run_chunk(&chunk, offset);
-        all_queues.extend(queues);
-        for mut spec in chunk.into_iter() {
-            spec.peaks = Vec::new();
-            all_spectra.push(spec);
-        }
-        log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
-    }
+        let (err_count, first_errors) = parser_handle
+            .join()
+            .map_err(|_| "chimeric parser thread panicked".to_string())??;
+        eprintln!(
+            "chimeric mode: streamed {} MS2 spectra ({} MS1 scans linked) in chunks of {}",
+            offset, ms1_linked, CHUNK_SIZE
+        );
+        log_rss("after_chimeric_stream_search");
+        ParseStats { error_count: err_count, first_errors }
+    } else {
+        // ── Non-chimeric streaming pipeline (UNCHANGED) ───────────────────
+        let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
 
-    // Reap the parser thread for its stats. join() should never block here
-    // (channel close has already fired on parser exit).
-    let parse_stats = match parser_handle.join() {
-        Ok(Ok(stats)) => stats,
-        Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
-        Err(_) => return Err("parser thread panicked".into()),
+        // Spawn the parser thread. It owns the reader (paths + flags moved in).
+        // The thread returns ParseStats with the error count + sample messages.
+        let spectrum_path = cli.spectrum.clone();
+        let parser_handle = thread::spawn(move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
+            if is_mzml {
+                let f = File::open(&spectrum_path)
+                    .map_err(|e| format!("open mzML: {e}"))?;
+                let reader = MzMLReader::new(BufReader::new(f))
+                    .with_ms_level_range(ms_level_u32, ms_level_u32);
+                Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+            } else {
+                let f = File::open(&spectrum_path)
+                    .map_err(|e| format!("open MGF: {e}"))?;
+                let reader = MgfReader::new(BufReader::new(f));
+                Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+            }
+        });
+
+        log_rss("after_parser_thread_spawn");
+
+        // Consumer loop: drain chunks from the channel as they arrive. Each
+        // received chunk is processed via `prepared.run_chunk` (Rayon-parallel)
+        // synchronously on this thread; while the inner Rayon runs, the parser
+        // thread is filling the next chunk concurrently.
+        for chunk in rx {
+            if chunk.is_empty() {
+                continue;
+            }
+            let offset = all_spectra.len();
+            let queues = prepared.run_chunk(&chunk, offset);
+            all_queues.extend(queues);
+            for mut spec in chunk.into_iter() {
+                spec.peaks = Vec::new();
+                all_spectra.push(spec);
+            }
+            log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+        }
+
+        // Reap the parser thread for its stats. join() should never block here
+        // (channel close has already fired on parser exit).
+        match parser_handle.join() {
+            Ok(Ok(stats)) => stats,
+            Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
+            Err(_) => return Err("parser thread panicked".into()),
+        }
     };
 
     if parse_stats.error_count > 0 {
@@ -953,9 +1045,9 @@ fn resolve_bundled_param(
     protocol:      Protocol,
 ) -> Result<PathBuf, String> {
     // Step 0: default-to-bundled short-circuit. When the caller passes all
-    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto)
-    // we use the historical hardcoded default. This preserves pre-iter39
-    // behavior where omitting all three flags returned HCD_QExactive_Tryp.param.
+    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto),
+    // fall back to the bundled HCD_QExactive_Tryp.param — the behavior of
+    // omitting all three flags.
     if fragmentation == Fragmentation::Auto
         && instrument == Instrument::LowRes
         && protocol == Protocol::Auto {

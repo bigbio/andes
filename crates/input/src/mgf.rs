@@ -138,6 +138,8 @@ impl<R: BufRead> Iterator for MgfReader<R> {
             // header set; could be extended via a custom `ACTIVATION=`
             // field if needed. For now: leave it absent.
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }))
     }
 }

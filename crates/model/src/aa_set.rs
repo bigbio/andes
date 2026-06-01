@@ -18,10 +18,9 @@ const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 1000.0;
 pub struct AminoAcidSet {
     /// (residue, location) → all variants (unmodified + modified) at that position.
     ///
-    /// Iter2 perf: switched from `HashMap` (SipHash13, RandomState) to
-    /// `FxHashMap` after a flamegraph on the post-PR-V1 binary showed 39%
-    /// of Astral CPU in `variants_for` lookups via SipHash. Same hashbrown
-    /// internals, faster hasher.
+    /// Uses `FxHashMap` rather than the std `HashMap`: `variants_for` is a
+    /// hot lookup, and profiling showed SipHash (std's default hasher)
+    /// dominating its cost. Same hashbrown internals, faster hasher.
     table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>>,
     /// Per-location flattened AA lists, precomputed at build time. Avoids
     /// per-call rebuild in the GF DP hot path (PrimitiveAaGraph::new).
@@ -808,7 +807,7 @@ mod tests {
 
     #[test]
     fn acetyl_prot_n_term_appears_in_source_aas_for_gf() {
-        // iter28 audit: GF DP source AAs at Prot-N-term must include
+        // GF DP source AAs at Prot-N-term must include
         // both unmodified residues AND wildcard-Acetyl variants for each
         // residue. Java's getAAList(Protein_N_Term) returns the Anywhere
         // list (locMap propagation) PLUS Prot-N-term-specific variants.

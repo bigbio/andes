@@ -20,6 +20,8 @@ fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
         scan: None,
         peaks: vec![],
         activation_method: None,
+        isolation_lower_offset: None,
+        isolation_upper_offset: None,
     }
 }
 

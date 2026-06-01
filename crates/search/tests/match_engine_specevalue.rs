@@ -26,6 +26,8 @@ fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
         scan: None,
         peaks: vec![],
         activation_method: None,
+        isolation_lower_offset: None,
+        isolation_upper_offset: None,
     }
 }
 
@@ -202,6 +204,7 @@ fn psm_with_lower_spec_e_value_ranks_first() {
             e_value: 1.0,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         }
     }
 

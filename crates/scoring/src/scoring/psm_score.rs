@@ -15,7 +15,7 @@ use model::peptide::Peptide;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
-/// iter31 P-2: cache the `MSGF_TRACE_PEP` env var once at first read instead
+/// Cache the `MSGF_TRACE_PEP` env var once at first read instead
 /// of calling `std::env::var` per `score_psm` invocation. Each `env::var`
 /// call acquires the global environment lock; on Astral runs `score_psm`
 /// is invoked ~3.1 billion times, so the lock acquisition is non-trivial.
@@ -37,10 +37,9 @@ fn trace_pep_filter() -> Option<&'static String> {
 /// HCD/Trypsin, forward direction for prefix-main).
 ///
 /// This is intended as an ADDITIVE feature for Percolator: emit it as a
-/// SEPARATE PIN column alongside the unchanged `RawScore`. Per the n=8
-/// audit pattern, modifying RawScore directly with this contribution
-/// regresses Astral 1% FDR by ~30%; adding it as a new feature lets
-/// Percolator learn weights without breaking the existing distribution.
+/// SEPARATE PIN column alongside the unchanged `RawScore`. It must not be
+/// blended into `RawScore`; kept separate, it lets Percolator learn its
+/// weight without disturbing the existing RawScore distribution.
 ///
 /// Java parity: fromIndex=1, toIndex=n+1 →
 /// reverse loop iterates `i` from n-1 down to 1, forward loop iterates
@@ -167,7 +166,7 @@ pub fn score_psm(
     // lines on stderr. Mirrors `FastScorer.getScoreWithTrace`, so the two
     // dumps line up split-by-split.
     //
-    // iter31 P-2: env::var is called once at startup via OnceLock and cached;
+    // env::var is called once at startup via OnceLock and cached;
     // the prior per-call `std::env::var("MSGF_TRACE_PEP")` fired on every
     // one of ~3.1G `score_psm` invocations per Astral run. Each call acquires
     // the global env lock; hoisting saves a few percent of total wall.
@@ -271,6 +270,8 @@ mod tests {
             scan: None,
             peaks: vec![],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 
@@ -374,6 +375,8 @@ mod tests {
             scan: None,
             peaks,
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         let scored = ScoredSpectrum::new_without_filtering(&spec);
         let scorer = RankScorer::new(&param);
@@ -408,6 +411,8 @@ mod tests {
             scan: None,
             peaks: match_peaks,
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
 
         let scorer = RankScorer::new(&param);

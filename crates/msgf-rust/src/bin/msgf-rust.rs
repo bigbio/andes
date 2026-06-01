@@ -603,6 +603,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
     let is_mzml = matches!(spectrum_ext.as_deref(), Some("mzml"));
+    // Native Thermo `.raw` (feature-gated; needs the .NET 8 runtime). Anything
+    // that is neither mzML nor `.raw` is treated as MGF (the default).
+    let is_raw = matches!(spectrum_ext.as_deref(), Some("raw"));
+    let is_mgf = !is_mzml && !is_raw;
 
     let param_path = match cli.param_file.clone() {
         Some(p) => p,
@@ -736,6 +740,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
     let ms_level_u32 = cli.ms_level as u32;
 
+    // The precursor-calibration pre-pass currently reads only mzML/MGF. For a
+    // Thermo `.raw` it would be misread as MGF, so skip calibration and warn
+    // (full `.raw` calibration support is a follow-up).
+    if is_raw && params.precursor_cal_mode != PrecursorCalMode::Off {
+        eprintln!(
+            "WARN: --precursor-cal is not yet supported for Thermo .raw input; \
+             proceeding without calibration."
+        );
+        params.precursor_cal_mode = PrecursorCalMode::Off;
+    }
+
     // Calibration pre-pass. Candidate enumeration is precursor-tolerance
     // independent, so keep the cal pass's `PreparedParts` and reuse them for the
     // main pass instead of re-enumerating all 16.8M candidates (~15s saved on
@@ -812,7 +827,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the parser stays at most one chunk ahead of the scorer, overlapping
     // parse-of-chunk-(N+1) with score-of-chunk-N — so parse time (Astral
     // ~2-3s per chunk) overlaps scoring instead of running serially.
-    let mzml_warn_ms_level_emitted = if !is_mzml && cli.ms_level != 2 {
+    let mzml_warn_ms_level_emitted = if is_mgf && cli.ms_level != 2 {
         eprintln!(
             "WARN: --ms-level={} requested for an MGF input; MGF files \
              do not record MS level (treated as MS2). The flag has \
@@ -895,6 +910,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let reader = MzMLReader::new(BufReader::new(f))
                     .with_ms_level_range(ms_level_u32, ms_level_u32);
                 Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+            } else if is_raw {
+                // Native Thermo .raw (feature-gated). The reader spawns no
+                // thread of its own; it yields the same Spectrum stream as the
+                // mzML/MGF readers, filtered to the requested MS level.
+                #[cfg(feature = "thermo")]
+                {
+                    let reader = input::ThermoRawReader::open(&spectrum_path)
+                        .map_err(|e| format!("open Thermo .raw: {e}"))?
+                        .with_ms_level(Some(ms_level_u32 as u8));
+                    Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
+                }
+                #[cfg(not(feature = "thermo"))]
+                {
+                    Err("this msgf-rust build has no Thermo .raw support; \
+                         rebuild with `--features thermo` (and run with the \
+                         .NET 8 runtime installed). mzML/MGF inputs work without it."
+                        .into())
+                }
             } else {
                 let f = File::open(&spectrum_path)
                     .map_err(|e| format!("open MGF: {e}"))?;
@@ -947,7 +980,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if is_mzml {
+    if is_mzml || is_raw {
         eprintln!(
             "MS-level filter: {} (only MS{} spectra entered the search)",
             cli.ms_level, cli.ms_level
@@ -1011,7 +1044,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cli.spectrum.display().to_string());
-        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, !is_mzml)?;
+        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 

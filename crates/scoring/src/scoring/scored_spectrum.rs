@@ -48,7 +48,7 @@ struct RankKeptCtx {
     suffix_score_cache: Vec<f32>,
 }
 
-/// iter31 P-2: cache the (MSGF_TRACE_IONS && MSGF_TRACE_PEP) env-var probe
+/// Cache the (MSGF_TRACE_IONS && MSGF_TRACE_PEP) env-var probe
 /// once instead of calling `env::var_os` twice per `directional_node_score_inner`
 /// invocation. The inner loop fires for every (spectrum × split × segment)
 /// triple in the score_psm cache build.
@@ -132,7 +132,7 @@ pub struct ScoredSpectrum<'a> {
     /// exact uncached path.
     prefix_score_cache: Vec<f32>,
     suffix_score_cache: Vec<f32>,
-    /// iter36: spectrum-wide cache for `observed_node_mass(node_nominal)`.
+    /// Spectrum-wide cache for `observed_node_mass(node_nominal)`.
     /// Indexed by `node_nominal` (i32 → usize). Each cell uses an f64 sentinel
     /// encoding:
     ///
@@ -146,9 +146,9 @@ pub struct ScoredSpectrum<'a> {
     /// `Sync` auto-derived bound on ScoredSpectrum, which is acceptable
     /// because callers only hand out `&ScoredSpectrum` within one thread.
     ///
-    /// Without this cache, `observed_node_mass` was 11.56% of Astral wall
-    /// (per iter35 perf profile) — each call did a binary_search over peaks
-    /// + linear scan. iter33's per-candidate `psm_edge_score` calls it twice
+    /// Without this cache, `observed_node_mass` was 11.56% of Astral wall —
+    /// each call did a binary_search over peaks
+    /// + linear scan. The per-candidate `psm_edge_score` calls it twice
     ///   per edge × 9 edges × 16M candidates ≈ 290M times per Astral spectrum,
     ///   repeatedly for the same `node_nominal` values.
     observed_mass_cache: std::cell::RefCell<Vec<f64>>,
@@ -217,7 +217,7 @@ impl<'a> ScoredSpectrum<'a> {
         // assignment but the original `spec.peaks` is unmodified, so summing
         // it directly OVER-COUNTS by the precursor-peak intensity. Use the
         // kept set (post-precursor-filter) for the running sum, matching
-        // Java's effective denominator. (2026-05-19 PIN diff harness flagged
+        // Java's effective denominator. (The PIN diff harness flagged
         // MS2IonCurrent as ~1.6x over Java; this is the source.)
         let total_intensity: f64 = kept.iter().map(|&(_, intensity, _)| intensity as f64).sum();
 
@@ -238,7 +238,7 @@ impl<'a> ScoredSpectrum<'a> {
 
         let parent_mass = neutral_mass; // = (precursor_mz - PROTON) * charge
 
-        // iter30 C-1: apply Java-parity isotope-cluster deconvolution FIRST,
+        // Apply Java-parity isotope-cluster deconvolution FIRST,
         // BEFORE prob_peak is computed (Java parity: deconv first, then
         // probPeak from the post-deconv spectrum).
         //
@@ -258,7 +258,7 @@ impl<'a> ScoredSpectrum<'a> {
                 (None, None)
             };
 
-        // iter30 C-2: compute prob_peak from the ACTIVE peak list (post-deconv
+        // Compute prob_peak from the ACTIVE peak list (post-deconv
         // if applied; else kept_count). Java parity: `probPeak = spec.size() /
         // max(approxNumBins, 1)` where `spec` is the post-deconv spectrum.
         //
@@ -330,7 +330,7 @@ impl<'a> ScoredSpectrum<'a> {
             );
         }
 
-        // iter36: spectrum-wide observed_node_mass cache.
+        // Spectrum-wide observed_node_mass cache.
         // Size = (parent_nominal + 1) so node_nominal in [0, parent_nominal]
         // is directly indexable. Cap at parent_mass (in Da) → nominal mass
         // ≈ parent_mass × INTEGER_MASS_SCALER. Add small margin for isotope
@@ -433,7 +433,7 @@ impl<'a> ScoredSpectrum<'a> {
             suffix_score_cache: ctx.suffix_score_cache,
             deconv_peaks: None,
             deconv_ranks: None,
-            // iter36: empty cache for test fixtures (rank_kept path). All
+            // Empty cache for test fixtures (rank_kept path). All
             // observed_node_mass queries fall through to compute on every call.
             observed_mass_cache: std::cell::RefCell::new(Vec::new()),
         }
@@ -723,7 +723,7 @@ impl<'a> ScoredSpectrum<'a> {
         let mut total = 0.0_f32;
         let use_cache = !segment_partition_cache.is_empty();
         // Trace gating: only fire when explicitly enabled AND a peptide-trace
-        // env var is set (matches `score_psm`'s gating). iter31 P-2: cache the
+        // env var is set (matches `score_psm`'s gating). Cache the
         // env probe in a OnceLock — was firing `env::var_os` twice per call,
         // which on Astral runs is ~hundreds of millions of acquisitions of the
         // global env lock.
@@ -789,7 +789,7 @@ impl<'a> ScoredSpectrum<'a> {
             return Some(0.0);
         }
 
-        // iter36: check spectrum-wide cache first.
+        // Check spectrum-wide cache first.
         //
         // Sentinel encoding in self.observed_mass_cache:
         //   NEG_INFINITY → uncached, compute now
@@ -836,7 +836,7 @@ impl<'a> ScoredSpectrum<'a> {
         }
         let result = best_peak_mz.map(|(peak_mz, _)| self.main_ion.mass_from_mz(peak_mz));
 
-        // iter36: store result in the spectrum-wide cache. Only if idx fits.
+        // Store result in the spectrum-wide cache. Only if idx fits.
         {
             let mut cache = self.observed_mass_cache.borrow_mut();
             if idx < cache.len() {
@@ -888,8 +888,8 @@ impl<'a> ScoredSpectrum<'a> {
         // 3. Partition for this spectrum — Java uses the "last segment" partition
         //    stored at construction time.
         //
-        // iter38 P-9b: per-edge `param.partition_for(charge, parent_mass, last_seg)`
-        // was 3.26% of Astral wall (~144M calls under iter33's per-candidate
+        // Per-edge `param.partition_for(charge, parent_mass, last_seg)`
+        // was 3.26% of Astral wall (~144M calls under the per-candidate
         // edge scoring). The partition is constant for this ScoredSpectrum's
         // `(charge, parent_mass)` and is already cached in
         // `segment_partition_cache`. Use that instead of re-running the binary
@@ -1063,9 +1063,8 @@ fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) 
     //
     // Previous Rust behavior filtered to `is_prefix()` only, forcing direction
     // always true. That mismatched Java's `getMainIonType` and produced wrong
-    // EdgeScore values for HCD spectra (iter28 trace: scan 47106 EdgeScore
-    // Rust -18 vs Java +8). See
-    // `docs/parity-analysis/notes/2026-05-21-iter27-pin-diff.md`.
+    // EdgeScore values for HCD spectra (trace: scan 47106 EdgeScore
+    // Rust -18 vs Java +8).
     let fallback = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
     let num_segments = param.num_segments.max(1) as usize;
     let mut ion_freq: std::collections::HashMap<IonType, f32> = std::collections::HashMap::new();
@@ -1205,7 +1204,7 @@ mod tests {
         );
     }
 
-    // --- iter30 C-1 + C-2 deconvolution tests ---
+    // --- deconvolution tests ---
 
     /// Helper: build a minimal Param with apply_deconvolution toggleable.
     fn deconv_param(apply: bool) -> Param {
@@ -1247,7 +1246,7 @@ mod tests {
     /// path must be exercised (no early guard) and the output must equal the
     /// input mathematically — because `deconvolute_spectrum`'s inner loop is
     /// `for ion_charge_i in 2..charge.min(4)` which produces an empty range
-    /// for charge=2. Iter30 C-1 dropped the `charge > 2` guard so this case
+    /// for charge=2. There is no `charge > 2` guard, so this case
     /// follows Java's unconditional `applyDeconvolution()` branch.
     #[test]
     fn deconv_active_for_charge_2_produces_input_equivalent_peaks() {
@@ -1285,7 +1284,7 @@ mod tests {
     /// MUST be computed from the post-deconvolution peak count, not the
     /// pre-deconvolution kept_count. Java parity: `probPeak` is derived from
     /// `spec.size()` AFTER `spec` is replaced by the
-    /// deconvoluted spectrum. Iter30 C-2 enforces this ordering.
+    /// deconvoluted spectrum. This ordering is enforced here.
     #[test]
     fn deconv_active_for_charge_3_uses_post_deconv_peak_count_for_prob_peak() {
         // Pick a charge=3 spectrum whose peaks include an isotope cluster
@@ -1337,8 +1336,8 @@ mod tests {
     }
 
     /// T-2b: When `apply_deconvolution=false`, prob_peak follows the pre-deconv
-    /// kept count (existing behavior). Sanity check to ensure C-2 doesn't
-    /// flip the deconv-off path.
+    /// kept count (existing behavior). Sanity check to ensure the deconv-on
+    /// ordering doesn't flip the deconv-off path.
     #[test]
     fn deconv_off_uses_kept_count_for_prob_peak() {
         let s = Spectrum {

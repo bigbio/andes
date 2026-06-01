@@ -106,28 +106,43 @@ Point quantms's PSM search step at `msgf-rust` and use the standard quantms post
 
 Most-used flags (full reference in `DOCS.md` §1):
 
+Required:
+
+| Flag | Purpose |
+|---|---|
+| `--spectrum <FILE>` | Input mzML or MGF |
+| `--database <FILE>` | Input FASTA (targets only; decoys generated) |
+| `--output-pin <FILE>` | Percolator PIN output |
+
+Optional (default in **bold**):
+
 | Flag | Purpose | Default |
 |---|---|---|
-| `--spectrum <FILE>` | Input mzML or MGF | (required) |
-| `--database <FILE>` | Input FASTA | (required) |
-| `--output-pin <FILE>` | Percolator PIN output | (required) |
-| `--output-tsv <FILE>` | Optional TSV output | (off) |
-| `--mods <FILE>` | mods.txt file (Cam-C + Ox-M built-in) | (off) |
-| `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance | 20.0 |
-| `--isotope-error-min/-max <INT>` | Isotope error range | -1, 2 |
-| `--charge-min/-max <INT>` | Charge range when not in spectrum | 2, 3 |
-| `--enzyme-specificity <auto\|...>` | NTT enforcement | fully |
-| `--max-missed-cleavages <INT>` | Missed cleavages | 1 |
-| `--min/-max-length <INT>` | Peptide length range | 6, 40 |
-| `--min-peaks <INT>` | Min peaks per spectrum to score | 10 |
-| `--top-n <INT>` | PSMs retained per spectrum | 10 |
-| `--fragmentation <auto\|...>` | Frag method (auto-detect from mzML if `auto`) | auto |
-| `--instrument <low-res\|...>` | Instrument class | low-res |
-| `--protocol <auto\|...>` | Search protocol | auto |
-| `--param-file <FILE>` | Override bundled scoring model | (auto-pick) |
-| `--threads <INT>` | Worker threads | (logical CPUs) |
+| `--output-tsv <FILE>` | Also write a TSV | **none** |
+| `--mods <FILE>` | mods.txt file | **Cam-C fixed + Ox-M variable** |
+| `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance (ppm) | **20.0** |
+| `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift | **off** |
+| `--isotope-error-min/-max <INT>` | Isotope-error range | **-1, 2** |
+| `--charge-min/-max <INT>` | Charge range when absent in the spectrum | **2, 3** |
+| `--enzyme-specificity <fully\|semi\|non-specific>` | Tolerable termini (NTT) | **fully** |
+| `--max-missed-cleavages <INT>` | Missed cleavages | **1** |
+| `--min-length/-max-length <INT>` | Peptide length range | **6, 40** |
+| `--min-peaks <INT>` | Min peaks per spectrum to score | **10** |
+| `--top-n <INT>` | PSMs retained per spectrum | **10** |
+| `--fragmentation <auto\|CID\|ETD\|HCD\|UVPD>` | Fragmentation (auto-detected from mzML) | **auto** |
+| `--instrument <low-res\|high-res\|TOF\|QExactive>` | Instrument class | **low-res** |
+| `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
+| `--param-file <FILE>` | Override the bundled scoring model | **auto-pick** |
+| `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
+| `--ms-level <INT>` | MS level to search (mzML only) | **2** |
+| `--threads <INT>` | Worker threads | **logical CPUs** |
+| `--chimeric` | Two-pass co-isolated-peptide cascade (mzML only) | **off** — see below |
 
-Run `msgf-rust --help` for the auto-generated help with full descriptions.
+Run `msgf-rust --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
+
+## Chimeric / co-isolated peptides (`--chimeric`, experimental)
+
+DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML only), msgf-rust runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
 
 ## Auto-detection
 

@@ -76,8 +76,6 @@ impl SearchIndex {
     /// `enumerate_candidates` pass at PXD001819 scale. Hash-collision
     /// probability at N=10M is ~3e-7, and a collision merely undercounts by 1
     /// (well below the precision the distinct count is used at).
-    /// See `docs/superpowers/specs/2026-05-10-evalue-search-index-design.md`
-    /// for the memory analysis.
     pub fn with_distinct_peptide_counts(
         self,
         params: &SearchParams,

@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn acetyl_prot_n_term_appears_in_source_aas_for_gf() {
-        // iter28 audit: GF DP source AAs at Prot-N-term must include
+        // GF DP source AAs at Prot-N-term must include
         // both unmodified residues AND wildcard-Acetyl variants for each
         // residue. Java's getAAList(Protein_N_Term) returns the Anywhere
         // list (locMap propagation) PLUS Prot-N-term-specific variants.

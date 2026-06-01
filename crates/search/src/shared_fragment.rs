@@ -1,10 +1,10 @@
-//! Chimeric Phase 3 — greedy shared-fragment competition.
+//! Chimeric greedy shared-fragment competition.
 //!
 //! When `--chimeric` emits multiple distinct peptides per scan, PSM-level FDR
-//! over the inflated multi-PSM set is structurally untrustworthy (chimeric
-//! Phase 2 bench). The 2026-05-29 Astral overlap diagnostic confirmed the
-//! "fragment-theft" premise: a substantial fraction of co-emitted runner-up
-//! peptides match the SAME MS2 peaks as the more-confident top peptide.
+//! over the inflated multi-PSM set is structurally untrustworthy. The Astral
+//! overlap diagnostic confirmed the "fragment-theft" premise: a substantial
+//! fraction of co-emitted runner-up peptides match the SAME MS2 peaks as the
+//! more-confident top peptide.
 //!
 //! This module implements the discriminator: peptides compete for fragment
 //! peaks **most-confident-first** (greedy, à la Yu et al. 2023). Each peptide

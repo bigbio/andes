@@ -1,8 +1,6 @@
-//! Chimeric Phase-4 fragment-evidence prefilter: an inverted
+//! Chimeric fragment-evidence prefilter: an inverted
 //! `fragment-bin -> [candidate_id]` index used as a candidate generator under
 //! `--chimeric`, so only candidates with real fragment evidence are scored.
-//!
-//! Task 3 wires the index into the chimeric hot path via `match_engine`.
 //!
 //! SUPERSEDED by `fragment_posting_index.rs` (Approach B): this Approach-A FragmentIndex /
 //! FragmentVoter is the failed algorithm and is no longer wired into the search

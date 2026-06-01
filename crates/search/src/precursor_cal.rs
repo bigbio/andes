@@ -1,12 +1,12 @@
 //! Two-pass precursor mass calibration (Java P2-cal / `MassCalibrator`).
 //!
-//! Phase 0–1: helpers + mode wiring. The pre-pass calibrator (Phase 3) learns
-//! a file-wide ppm shift; the main pass applies it to observed neutral masses
-//! without mutating [`model::Spectrum`] objects.
+//! The pre-pass calibrator learns a file-wide ppm shift; the main pass
+//! applies it to observed neutral masses without mutating
+//! [`model::Spectrum`] objects.
 
 /// Java `-precursorCal` modes.
 ///
-/// `Default` is `Off` until the G1 ship gate closes — matches the CLI default
+/// `Default` is `Off` (opt-in) — matches the CLI default
 /// and `SearchParams::default_tryptic`, so library consumers that derive
 /// `Default` on a struct containing this field cannot silently enable the
 /// pre-pass.

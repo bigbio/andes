@@ -1,11 +1,11 @@
 //! Chimeric inverted fragment-posting fragment index (Approach B). Peptides sorted by precursor
 //! mass (so a mass window is a contiguous index range); fragments sorted by m/z in
 //! fixed buckets, each bucket re-sorted by peptide index. The per-spectrum query
-//! (Task 2) does a dual binary search bounded to the precursor window — the bound
+//! does a dual binary search bounded to the precursor window — the bound
 //! Approach A's vote-all-touched prefilter lacked.
 //!
 //! `build` + `query` are exercised only by this module's own tests until the
-//! search hot path is rewired to call them (Task 3); allow dead_code until then.
+//! search hot path is rewired to call them; allow dead_code until then.
 #![allow(dead_code)]
 
 use crate::candidate_gen::Candidate;

@@ -15,7 +15,7 @@ use model::peptide::Peptide;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
-/// iter31 P-2: cache the `MSGF_TRACE_PEP` env var once at first read instead
+/// Cache the `MSGF_TRACE_PEP` env var once at first read instead
 /// of calling `std::env::var` per `score_psm` invocation. Each `env::var`
 /// call acquires the global environment lock; on Astral runs `score_psm`
 /// is invoked ~3.1 billion times, so the lock acquisition is non-trivial.
@@ -167,7 +167,7 @@ pub fn score_psm(
     // lines on stderr. Mirrors `FastScorer.getScoreWithTrace`, so the two
     // dumps line up split-by-split.
     //
-    // iter31 P-2: env::var is called once at startup via OnceLock and cached;
+    // env::var is called once at startup via OnceLock and cached;
     // the prior per-call `std::env::var("MSGF_TRACE_PEP")` fired on every
     // one of ~3.1G `score_psm` invocations per Astral run. Each call acquires
     // the global env lock; hoisting saves a few percent of total wall.

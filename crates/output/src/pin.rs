@@ -21,7 +21,7 @@
 //!
 //! # Column semantics
 //!
-//! * **Label**: source-protein TDC rule (iter27, 2026-05-21). `Label = -1`
+//! * **Label**: source-protein TDC rule. `Label = -1`
 //!   if the candidate's source protein is a decoy (`cand.is_decoy`), else
 //!   `+1`. Matches Java MS-GF+ TDC labeling and avoids inflating Percolator's
 //!   target set with peptides whose hit actually came from a decoy protein.
@@ -36,7 +36,7 @@
 //! * **Proteins**: single column with the real protein accession resolved from
 //!   `SearchIndex::protein_at(candidates[psm.primary_candidate_idx() as usize].protein_index)`.
 //!   Decoy accessions already carry the decoy prefix. Multi-protein support
-//!   (merging Candidates that share pepSeq + score) comes in Task 4 of the R-2 refactor.
+//!   merges Candidates that share pepSeq + score.
 //!
 //! * **peplen**: residue count + 2 (includes both flanking residues).
 //!
@@ -193,19 +193,19 @@ fn write_header<W: Write>(
         // PIN_EXTRA_FEATURES
         "lnDeltaSpecEValue".to_string(),
         "matchedIonRatio".to_string(),
-        // ADDITIVE Java-parity feature (2026-05-21 iter19): per-bond
+        // ADDITIVE Java-parity feature: per-bond
         // DBScanScorer edge sum (IES + error_score), emitted as a NEW
         // column so Percolator can learn weights without disrupting the
         // existing RawScore distribution.
         "EdgeScore".to_string(),
-        // ADDITIVE chimeric MS1 precursor-envelope features (Task 4): emitted
+        // ADDITIVE chimeric MS1 precursor-envelope features: emitted
         // adjacent to EdgeScore so they sit just before Peptide/Proteins.
         // Both are 0.0 unless `--chimeric` populates them from a linked MS1.
         "PrecursorIsotopeKL".to_string(),
         "PrecursorSNR".to_string(),
     ]);
 
-    // ADDITIVE chimeric Phase 3 shared-fragment features. Gated on `--chimeric`
+    // ADDITIVE chimeric shared-fragment features. Gated on `--chimeric`
     // so the off-path PIN schema is byte-identical to the non-chimeric build.
     if chimeric {
         cols.extend_from_slice(&[
@@ -283,12 +283,12 @@ fn write_psm_row<W: Write>(
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
-    // iter27 (2026-05-21): label by SOURCE PROTEIN accession (standard TDC
-    // convention, matches Java MS-GF+). Pre-iter27, Rust used an "any-target-
-    // match" rule (Label = 1 if peptide sequence appears in ANY target
-    // protein) which inflated target count when a peptide appeared in both
-    // target and decoy proteins. Java labels by source: if the source
-    // protein is a decoy, label = -1; otherwise +1.
+    // Label by SOURCE PROTEIN accession (standard TDC convention, matches
+    // Java MS-GF+). An "any-target-match" rule (Label = 1 if peptide
+    // sequence appears in ANY target protein) would inflate target count
+    // when a peptide appeared in both target and decoy proteins. Java
+    // labels by source: if the source protein is a decoy, label = -1;
+    // otherwise +1.
     let label: i32 = if cand.is_decoy { -1 } else { 1 };
 
     // For chimeric Pass-2 secondaries, mass-error columns use the co-isolated
@@ -385,7 +385,7 @@ fn write_psm_row<W: Write>(
         writer.write_all(&[b'\t', flag])?;
     }
 
-    // enzN, enzC, enzInt — C-4 (2026-05-19): Java parity —
+    // enzN, enzC, enzInt — Java parity —
     // emits enzymatic-boundary consistency features. enzN = boundary between
     // protein-pre and peptide[0]; enzC = boundary between peptide[last] and
     // protein-post; enzInt = count of internal positions consistent with the
@@ -440,19 +440,19 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, matched_ion_ratio)?;
 
-    // EdgeScore: additive Java-parity feature (iter19).
+    // EdgeScore: additive Java-parity feature.
     writer.write_all(b"\t")?;
     write!(writer, "{}", psm.features.edge_score)?;
 
     // PrecursorIsotopeKL, PrecursorSNR: additive chimeric MS1 precursor-envelope
-    // features (Task 4). 0.0 unless `--chimeric` populated them from a linked MS1.
+    // features. 0.0 unless `--chimeric` populated them from a linked MS1.
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.precursor_isotope_kl as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.precursor_snr as f64)?;
 
     // UniqueMatchedIons, UniqueExplainedFraction, SharedFracClaimed: additive
-    // chimeric Phase 3 shared-fragment features. Gated on `--chimeric` to keep
+    // chimeric shared-fragment features. Gated on `--chimeric` to keep
     // the off-path PIN byte-identical (matches the header gating).
     if params.chimeric {
         writer.write_all(b"\t")?;
@@ -465,11 +465,11 @@ fn write_psm_row<W: Write>(
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
-    // After R-2.2 dedup, a PSM that matches the same peptide across multiple
-    // proteins keeps all protein indices in candidate_idxs, and the PIN row
-    // emits one accession per index — matching Java parity for multi-protein PIN rows.
-    // For PSMs with a single candidate_idx (typical), output is identical to
-    // the pre-R-2.5 single-accession emit (ctx.accession still used by TSV).
+    // After pepSeq+score dedup, a PSM that matches the same peptide across
+    // multiple proteins keeps all protein indices in candidate_idxs, and the
+    // PIN row emits one accession per index — matching Java parity for
+    // multi-protein PIN rows. For PSMs with a single candidate_idx (typical),
+    // output is a single-accession emit (ctx.accession still used by TSV).
     write!(writer, "\t{}", cand.peptide)?;
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
@@ -683,7 +683,7 @@ mod tests {
             charge_used: charge,
             mass_error_ppm: 1.5,
             score,
-            rank_score: score,  // iter33: test fixtures default rank_score = score
+            rank_score: score,  // test fixtures default rank_score = score
             edge_score: 0,
             spec_e_value,
             de_novo_score: 42,
@@ -755,7 +755,7 @@ mod tests {
         // lnDeltaSpecEValue matchedIonRatio
         // Peptide Proteins
         // Java-fixture columns followed by Rust-only additive features.
-        // `EdgeScore` is an iter19 ADDITIVE Java-parity feature emitted by
+        // `EdgeScore` is an ADDITIVE Java-parity feature emitted by
         // Rust only (Java doesn't compute it standalone — it's blended into
         // RawScore by DBScanScorer). Lives between matchedIonRatio and
         // Peptide so legacy Percolator readers using column order still
@@ -792,7 +792,7 @@ mod tests {
         );
     }
 
-    // ── Test 1b: chimeric Phase 3 columns are gated on --chimeric ─────────────
+    // ── Test 1b: chimeric shared-fragment columns are gated on --chimeric ──────
 
     /// `--chimeric on` appends the 3 shared-fragment columns immediately after
     /// `PrecursorSNR` and before `Peptide`; `--chimeric off` does NOT, so the
@@ -1022,7 +1022,7 @@ mod tests {
         );
     }
 
-    // ── Phase 7 followup: PIN emits real feature values ──────────────────────
+    // ── PIN emits real feature values ────────────────────────────────────────
 
     /// Verify that `NumMatchedMainIons` is emitted from `psm.features`
     /// rather than always being zero-stubbed.

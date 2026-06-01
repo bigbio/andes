@@ -8,7 +8,7 @@ use model::tolerance::{PrecursorTolerance, Tolerance};
 
 use crate::precursor_cal::PrecursorCalMode;
 
-/// Controls the chimeric fragment-evidence prefilter (Task 4 / fragment index).
+/// Controls the chimeric fragment-evidence prefilter (fragment index).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FragIndexMode {
     /// On when `--chimeric` is set (the default).
@@ -54,11 +54,10 @@ pub struct SearchParams {
     /// Default 10.
     pub min_peaks: u32,
     /// Precursor mass calibration mode (Java `-precursorCal`). Default `Off`
-    /// (opt-in) until the G1 ship gate is closed; see
-    /// `docs/superpowers/specs/2026-05-25-precursor-cal-ship-design.md`.
+    /// (opt-in).
     pub precursor_cal_mode: PrecursorCalMode,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
-    /// main pass. Stays 0.0 until the pre-pass calibrator runs (Phase 3).
+    /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
     /// Full-isolation-window chimeric search (MSFragger-DDA+ style). Default false.
     pub chimeric: bool,

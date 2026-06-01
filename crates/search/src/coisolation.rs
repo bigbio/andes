@@ -348,7 +348,7 @@ mod tests {
         assert!(got.is_empty(), "only the selected precursor -> no co-isolation");
     }
 
-    // ── Task 2: targeted second-peptide residual search ────────────────────
+    // ── Targeted second-peptide residual search ─────────────────────────────
 
     use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
     use rustc_hash::FxHashMap;

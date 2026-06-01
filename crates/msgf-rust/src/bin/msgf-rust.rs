@@ -30,9 +30,8 @@ use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use search::search_params::FragIndexMode;
 use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
 
-/// Fragmentation method. `Auto` means "detect from the mzML's activation block;
-/// fall back to the bundled HCD_QExactive_Tryp.param if nothing detected" —
-/// the same semantics as omitting the flag pre-iter39.
+/// Fragmentation method. `Auto` detects from the mzML's activation block and
+/// falls back to the bundled `HCD_QExactive_Tryp.param` when nothing is detected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Fragmentation {
     #[clap(name = "auto")] Auto,
@@ -79,8 +78,8 @@ pub enum EnzymeSpecificity {
     allow_hyphen_values = true,
 )]
 struct Cli {
-    /// Input spectrum file (MGF or mzML). Format is auto-detected by extension:
-    /// `.mzML`/`.mzml` → MzMLReader; anything else → MgfReader.
+    /// Input spectrum file. Format is auto-detected by extension:
+    /// `.mzML`/`.mzml` is read as mzML, anything else as MGF.
     #[arg(long)]
     spectrum: PathBuf,
 
@@ -100,20 +99,22 @@ struct Cli {
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
 
-    /// Minimum isotope error offset to try (default -1).
+    /// Minimum isotope-error offset to try.
     #[arg(long, default_value = "-1")]
     isotope_error_min: i8,
 
-    /// Maximum isotope error offset to try (default 2).
+    /// Maximum isotope-error offset to try.
     #[arg(long, default_value = "2")]
     isotope_error_max: i8,
 
-    /// Precursor mass calibration mode (Java `-precursorCal`). Default `off` until G1
-    /// gate passes (see `DOCS.md` §8e); use `auto` to match Java default behavior.
+    /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
+    /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
+    /// precursor tolerance for the main search; `auto` skips the correction when
+    /// the sample is too small to be reliable.
     #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
 
-    /// Precursor mass tolerance in ppm (default 20.0).
+    /// Precursor mass tolerance in ppm.
     #[arg(long, default_value = "20.0")]
     precursor_tol_ppm: f64,
 
@@ -138,23 +139,20 @@ struct Cli {
           default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
 
-    /// Maximum number of missed cleavages per peptide (default 1).
+    /// Maximum number of missed cleavages per peptide.
     #[arg(long, default_value = "1")]
     max_missed_cleavages: u32,
 
-    /// Minimum number of peaks required in an MS2 spectrum to attempt scoring.
-    ///
-    /// Spectra with fewer peaks are skipped (default 10).
+    /// Minimum number of peaks an MS2 spectrum must have to be scored; spectra
+    /// with fewer peaks are skipped.
     #[arg(long, default_value = "10")]
     min_peaks: u32,
 
-    /// Minimum peptide length (in residues) to consider during the search.
-    /// Default 6.
+    /// Minimum peptide length, in residues.
     #[arg(long, default_value = "6")]
     min_length: u32,
 
-    /// Maximum peptide length (in residues) to consider during the search.
-    /// Default 40.
+    /// Maximum peptide length, in residues.
     #[arg(long, default_value = "40")]
     max_length: u32,
 
@@ -204,31 +202,31 @@ struct Cli {
     #[arg(long, default_value_t = num_cpus::get())]
     threads: usize,
 
-    /// Bench mode: process only the first N MS2 spectra and skip writing
-    /// PIN/TSV. Use for fast Fix B iteration (1k-2k spectra ≈ <1 min vs
-    /// 70 min on full PXD001819). When 0 (default) the full input is used.
+    /// Debug/benchmark cap: process only the first N spectra (0 = no cap).
     #[arg(long, default_value = "0")]
     max_spectra: usize,
 
-    /// MS level to search. Default 2 (MS2). MS1 spectra (and any other levels)
-    /// in the input file are filtered out at load time so they never enter
-    /// the search loop or consume RAM. Only meaningful for mzML inputs — MGF
-    /// files do not encode MS level and are treated as MS2 regardless.
+    /// MS level to search. MS1 (and any other levels) are filtered out at load
+    /// time so they never enter the search loop. Only meaningful for mzML — MGF
+    /// files do not encode MS level and are always treated as MS2.
     #[arg(long, default_value = "2")]
     ms_level: u8,
 
-    /// Search the full isolation window per MS2 and emit multiple distinct-peptide
-    /// PSMs per scan (chimeric / co-fragmented peptides; MSFragger-DDA+ style).
+    /// Enable the two-pass chimeric cascade for co-isolated (co-fragmented)
+    /// peptides. Pass 1 is the normal top-1 search; Pass 2 detects co-isolated
+    /// precursors in each scan's MS1 isolation window and runs a targeted search
+    /// for the second peptide on the residual spectrum, emitting it as an extra
+    /// PSM. Requires mzML (MS1 scans); has no effect on MGF input.
     #[arg(long, default_value = "false")]
     chimeric: bool,
 
-    /// Chimeric fragment-index prefilter: on, off (default), auto. The shipped
-    /// two-pass cascade does NOT use it (unreachable wide-window path), so `off`
-    /// avoids building an unused index. Kept pending removal of the dead path.
-    #[arg(long, value_name = "MODE", default_value = "off")]
+    /// (Advanced) Chimeric fragment-index prefilter mode: `off`, `on`, `auto`.
+    /// The shipped cascade does not use this prefilter; leave it `off`.
+    #[arg(long, value_name = "MODE", default_value = "off", hide = true)]
     chimeric_frag_index: String,
 
-    /// Fallback isolation half-width in Da when the mzML omits isolation offsets.
+    /// Chimeric mode: fallback isolation half-width in Da when the mzML omits the
+    /// per-scan isolation-window offsets.
     #[arg(long, default_value = "1.5")]
     isolation_halfwidth: f64,
 }
@@ -303,9 +301,9 @@ struct ParseStats {
 /// Generic over the reader's error type so the same helper serves both
 /// MGF and mzML.
 ///
-/// iter32 P-1: this runs on a dedicated thread so chunk N+1 is being
-/// PARSED while chunk N is being SCORED. Channel capacity is 2 (one
-/// in-flight + one queued) so the producer stays at most one chunk ahead.
+/// Runs on a dedicated thread so chunk N+1 is PARSED while chunk N is SCORED.
+/// Channel capacity is 2 (one in-flight + one queued) so the producer stays at
+/// most one chunk ahead.
 fn send_chunks<R, E>(
     reader: R,
     chunk_size: usize,
@@ -817,8 +815,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let t_search_start = std::time::Instant::now();
 
-    // iter32 Phase C: pipeline mzML/MGF parsing with Rayon scoring via a
-    // bounded sync_channel. The parser runs on a dedicated thread and pushes
+    // Pipeline mzML/MGF parsing with Rayon scoring via a bounded sync_channel.
+    // The parser runs on a dedicated thread and pushes
     // CHUNK_SIZE-sized `Vec<Spectrum>` payloads through the channel; the main
     // thread (this one) drains the channel and calls `prepared.run_chunk` on
     // each chunk (which is itself Rayon-parallel internally). With capacity 2
@@ -1059,9 +1057,9 @@ fn resolve_bundled_param(
     protocol:      Protocol,
 ) -> Result<PathBuf, String> {
     // Step 0: default-to-bundled short-circuit. When the caller passes all
-    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto)
-    // we use the historical hardcoded default. This preserves pre-iter39
-    // behavior where omitting all three flags returned HCD_QExactive_Tryp.param.
+    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto),
+    // fall back to the bundled HCD_QExactive_Tryp.param — the behavior of
+    // omitting all three flags.
     if fragmentation == Fragmentation::Auto
         && instrument == Instrument::LowRes
         && protocol == Protocol::Auto {

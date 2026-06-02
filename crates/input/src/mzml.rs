@@ -44,6 +44,9 @@ const CV_MODEL_Q_EXACTIVE_HF:         &str = "MS:1002523";
 const CV_MODEL_Q_EXACTIVE_HF_X:       &str = "MS:1002634";
 const CV_MODEL_Q_EXACTIVE_PLUS:       &str = "MS:1002877";
 const CV_MODEL_ORBITRAP_FUSION:       &str = "MS:1002416";
+// Orbitrap Astral instrument model (PSI-MS MS:1003378). Checked BEFORE the
+// generic Orbitrap-analyzer → QExactive mapping so Astral wins.
+const CV_MODEL_ORBITRAP_ASTRAL:       &str = "MS:1003378";
 
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_SCAN_TIME: &str = "MS:1000016";
@@ -1048,14 +1051,29 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                         // (not inside <analyzer>): an instrument-model cvParam
                         // may be present and gives us a stronger signal for
                         // Orbitrap-class boxes than analyzer alone.
+                        // OrbitrapAstral is checked FIRST so it wins over the
+                        // generic QExactive group.
                         S::InstrumentConfiguration => {
                             let model = match acc.as_str() {
+                                CV_MODEL_ORBITRAP_ASTRAL => Some(InstrumentType::OrbitrapAstral),
                                 CV_MODEL_Q_EXACTIVE
                                 | CV_MODEL_Q_EXACTIVE_HF
                                 | CV_MODEL_Q_EXACTIVE_HF_X
                                 | CV_MODEL_Q_EXACTIVE_PLUS
                                 | CV_MODEL_ORBITRAP_FUSION => Some(InstrumentType::QExactive),
-                                _ => None,
+                                _ => {
+                                    // Name-substring fallback: some mzML files record
+                                    // the instrument model name even when using an
+                                    // unregistered or future accession. If the cvParam
+                                    // `name` attribute contains "astral" (case-insensitive)
+                                    // treat it as OrbitrapAstral so detection is robust.
+                                    let cv_name = attr_str(e, b"name").unwrap_or_default();
+                                    if cv_name.to_ascii_lowercase().contains("astral") {
+                                        Some(InstrumentType::OrbitrapAstral)
+                                    } else {
+                                        None
+                                    }
+                                }
                             };
                             if let Some(t) = model {
                                 // Model wins outright if seen.

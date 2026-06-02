@@ -263,14 +263,15 @@ fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
 }
 
 /// Map a Thermo `MassAnalyzer` to the model's [`InstrumentType`]. FTMS
-/// (Orbitrap) and ASTMS (Astral) are high-res Orbitrap-class (`QExactive`
-/// bundled model); TOFMS is `TOF`; ITMS (ion trap) is `LowRes`. Others return
-/// `None`.
+/// (Orbitrap) maps to `QExactive`; ASTMS (Astral) maps to the explicit
+/// `OrbitrapAstral` class; TOFMS is `TOF`; ITMS (ion trap) is `LowRes`.
+/// Others return `None`.
 fn map_analyzer(a: MassAnalyzer) -> Option<InstrumentType> {
     match a.0 {
-        1 => Some(InstrumentType::LowRes),     // ITMS (ion trap)
-        4 => Some(InstrumentType::TOF),        // TOFMS
-        5 | 7 => Some(InstrumentType::QExactive), // FTMS (Orbitrap), ASTMS (Astral)
+        1 => Some(InstrumentType::LowRes),         // ITMS (ion trap)
+        4 => Some(InstrumentType::TOF),            // TOFMS
+        5 => Some(InstrumentType::QExactive),      // FTMS (Orbitrap)
+        7 => Some(InstrumentType::OrbitrapAstral), // ASTMS (Astral)
         _ => None,
     }
 }
@@ -323,9 +324,11 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
         .into_iter()
         .max_by_key(|&(_, n)| n)
         .map(|(k, _)| match k {
-            x if x == InstrumentType::LowRes as u8 => InstrumentType::LowRes,
-            x if x == InstrumentType::TOF as u8 => InstrumentType::TOF,
-            x if x == InstrumentType::HighRes as u8 => InstrumentType::HighRes,
+            x if x == InstrumentType::LowRes as u8         => InstrumentType::LowRes,
+            x if x == InstrumentType::TOF as u8            => InstrumentType::TOF,
+            x if x == InstrumentType::HighRes as u8        => InstrumentType::HighRes,
+            x if x == InstrumentType::OrbitrapAstral as u8 => InstrumentType::OrbitrapAstral,
+            x if x == InstrumentType::TimsTOF as u8        => InstrumentType::TimsTOF,
             _ => InstrumentType::QExactive,
         });
     Some((activation, instrument))
@@ -374,10 +377,10 @@ mod tests {
 
     #[test]
     fn analyzer_maps_to_instrument() {
-        assert_eq!(map_analyzer(MassAnalyzer(1)), Some(InstrumentType::LowRes));    // ITMS
-        assert_eq!(map_analyzer(MassAnalyzer(4)), Some(InstrumentType::TOF));       // TOFMS
-        assert_eq!(map_analyzer(MassAnalyzer(5)), Some(InstrumentType::QExactive)); // FTMS (Orbitrap)
-        assert_eq!(map_analyzer(MassAnalyzer(7)), Some(InstrumentType::QExactive)); // ASTMS (Astral)
+        assert_eq!(map_analyzer(MassAnalyzer(1)), Some(InstrumentType::LowRes));         // ITMS
+        assert_eq!(map_analyzer(MassAnalyzer(4)), Some(InstrumentType::TOF));            // TOFMS
+        assert_eq!(map_analyzer(MassAnalyzer(5)), Some(InstrumentType::QExactive));      // FTMS (Orbitrap)
+        assert_eq!(map_analyzer(MassAnalyzer(7)), Some(InstrumentType::OrbitrapAstral)); // ASTMS (Astral)
         assert_eq!(map_analyzer(MassAnalyzer(0)), None); // Unknown
     }
 }

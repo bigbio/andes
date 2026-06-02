@@ -664,9 +664,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 // is_d — timsTOF DDA-PASEF. `timsrust` does not expose a per-scan
-                // activation/analyzer, so route to the CID/TOF bundled model
-                // (CID_TOF_Tryp). Override with --fragmentation/--instrument.
-                Some((ActivationMethod::CID, Some(InstrumentType::TOF)))
+                // activation/analyzer, so report the instrument as TimsTOF and route
+                // to the CID/TOF bundled model (CID_TOF_Tryp) via the family-fallback
+                // path in `resolve_bundled_param_for_activation`.
+                // Override with --fragmentation/--instrument.
+                Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
             };
             if auto_route_eligible {
                 match detected {
@@ -1404,12 +1406,18 @@ fn resolve_bundled_param_for_activation(
         // PQD → CID (Java's NewScorerFactory rule: "PQD or null → CID").
         ActivationMethod::PQD  => Fragmentation::Cid,
     };
-    let inst = match detected_instrument {
+    // New instrument classes fall back to their family for model resolution
+    // (no Astral-specific or TimsTOF-specific .param file bundled yet).
+    let inst = match detected_instrument.map(|i| i.family_fallback()) {
         Some(InstrumentType::LowRes)    => Instrument::LowRes,
         Some(InstrumentType::HighRes)   => Instrument::HighRes,
         Some(InstrumentType::TOF)       => Instrument::Tof,
         Some(InstrumentType::QExactive) => Instrument::QExactive,
-        None                            => Instrument::LowRes,
+        // OrbitrapAstral → QExactive and TimsTOF → TOF via family_fallback above;
+        // these arms are unreachable after fallback but keep the match exhaustive.
+        Some(InstrumentType::OrbitrapAstral) => Instrument::QExactive,
+        Some(InstrumentType::TimsTOF)        => Instrument::Tof,
+        None                                 => Instrument::LowRes,
     };
     resolve_bundled_param(frag, inst, protocol)
 }

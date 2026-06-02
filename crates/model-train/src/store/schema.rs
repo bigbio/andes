@@ -116,6 +116,72 @@ pub fn tables_schema() -> SchemaRef {
     ]))
 }
 
+/// Combined schema for a single-file store: manifest rows and table rows
+/// share one Parquet file.
+///
+/// Layout:
+/// - `record_kind` (non-null) — `"manifest"` | `"table"`
+/// - `model_id` (non-null)
+/// - every manifest-only column (nullable) — table rows leave these null
+/// - every table-only column (nullable) — manifest rows leave these null
+pub fn combined_schema() -> SchemaRef {
+    let charge_hist_dt = list_of_struct([
+        Field::new("charge", DataType::Int32, false),
+        Field::new("count", DataType::Int32, false),
+    ]);
+
+    let offsets_dt = list_of_struct([
+        Field::new("offset", DataType::Float32, false),
+        Field::new("freq", DataType::Float32, false),
+    ]);
+
+    // Precursor offsets carry extra fields beyond plain (offset, freq).
+    let precursor_off_dt = list_of_struct([
+        Field::new("reduced_charge", DataType::Int32, false),
+        Field::new("offset", DataType::Float32, false),
+        Field::new("tol_is_ppm", DataType::Boolean, false),
+        Field::new("tol_val", DataType::Float32, false),
+        Field::new("frequency", DataType::Float32, false),
+    ]);
+
+    Arc::new(Schema::new(vec![
+        // ── shared ──────────────────────────────────────────────────────────
+        rf("record_kind", DataType::Utf8),
+        rf("model_id", DataType::Utf8),
+        // ── manifest-only ───────────────────────────────────────────────────
+        nf("activation", DataType::Utf8),
+        nf("instrument", DataType::Utf8),
+        nf("enzyme", DataType::Utf8),
+        nf("protocol", DataType::Utf8),
+        nf("version", DataType::Int32),
+        nf("mme_val", DataType::Float32),
+        nf("mme_is_ppm", DataType::Boolean),
+        nf("apply_deconv", DataType::Boolean),
+        nf("deconv_tol", DataType::Float32),
+        nf("num_segments", DataType::Int32),
+        nf("max_rank", DataType::Int32),
+        nf("error_scaling_factor", DataType::Int32),
+        nf("min_charge", DataType::Int32),
+        nf("max_charge", DataType::Int32),
+        nf("num_precursor_off", DataType::Int32),
+        nf("charge_hist", charge_hist_dt),
+        // ── table-only ──────────────────────────────────────────────────────
+        nf("part_charge", DataType::Int32),
+        nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 for bit-exact round-trip
+        nf("part_seg", DataType::Int32),
+        nf("ion_kind", DataType::Utf8),        // "prefix"|"suffix"|"noise"|"-"
+        nf("ion_charge", DataType::Int32),
+        nf("ion_offset_bits", DataType::Int32), // f32::to_bits() as i32; 0 for noise/dist rows
+        nf("table_kind", DataType::Utf8),
+        // "rank_dist", "ion_err", "noise_err", "ion_existence" → values
+        nf("values", list_of(DataType::Float32)),
+        // "frag_off" → offsets (offset+freq only)
+        nf("offsets", offsets_dt),
+        // "precursor_off" → precursor_offsets (full struct)
+        nf("precursor_offsets", precursor_off_dt),
+    ]))
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

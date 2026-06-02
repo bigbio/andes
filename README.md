@@ -51,7 +51,7 @@ msgf-rust-<version>-aarch64-apple-darwin.tar.gz
 msgf-rust-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive contains the `msgf-rust` binary, the `resources/` tree (39 bundled `.param` files + unimod.obo), and LICENSE/NOTICE/README.
+Each archive contains the `msgf-rust` binary, the `resources/` tree (bundled `models.parquet` model store with all 39 scoring models), and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
@@ -197,7 +197,7 @@ Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is
 
 ## Auto-detection
 
-For mzML inputs with `--fragmentation auto` (the default), msgf-rust peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a bundled `.param` file from the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when resolving the bundled model. MGF files have no activation metadata, so they use flag-based resolution (defaulting to `HCD_QExactive_Tryp.param`). Full resolution table: `DOCS.md` §4.
+For mzML inputs with `--fragmentation auto` (the default), msgf-rust peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a scoring model from the bundled `models.parquet` store based on the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when selecting the model. MGF files have no activation metadata, so they use flag-based selection (defaulting to `hcd_qexactive_tryp`). Full resolution table: `DOCS.md` §4.
 
 ## Parity vs Java MS-GF+
 

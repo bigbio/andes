@@ -1726,103 +1726,12 @@ fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
 mod param_resolver_tests {
     use super::*;
 
-    #[test]
-    fn default_resolves_to_hcd_qexactive_tryp() {
-        // No flags → existing default.
-        let p = resolve_bundled_param(
-            Fragmentation::Auto,
-            Instrument::LowRes,
-            Protocol::Auto,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("HCD_QExactive_Tryp.param"),
-            "expected HCD_QExactive_Tryp.param, got {s}"
-        );
-    }
-
-    #[test]
-    fn hcd_qexactive_tmt_combo_resolves() {
-        // (HCD, QExactive, TMT) → bundled HCD_QExactive_Tryp_TMT.param.
-        let p = resolve_bundled_param(
-            Fragmentation::Hcd,
-            Instrument::QExactive,
-            Protocol::Tmt,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("HCD_QExactive_Tryp_TMT.param"),
-            "expected HCD_QExactive_Tryp_TMT.param, got {s}"
-        );
-    }
-
-    #[test]
-    fn cid_lowres_tryp_resolves() {
-        // (CID, LowRes, Standard) → CID_LowRes_Tryp.param.
-        let p = resolve_bundled_param(
-            Fragmentation::Cid,
-            Instrument::LowRes,
-            Protocol::Standard,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("CID_LowRes_Tryp.param"),
-            "expected CID_LowRes_Tryp.param, got {s}"
-        );
-    }
-
-    #[test]
-    fn cid_highres_tmt_falls_back_to_cid_highres_tryp() {
-        // (CID, HighRes, TMT) — `CID_HighRes_Tryp_TMT.param` is not bundled.
-        // Java parity: NewScorerFactory drops the protocol suffix when the
-        // exact file is missing, landing on
-        // the protocol-less file. We mirror that behavior: this combination
-        // resolves to `CID_HighRes_Tryp.param` rather than erroring out.
-        let p = resolve_bundled_param(
-            Fragmentation::Cid,
-            Instrument::HighRes,
-            Protocol::Tmt,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("CID_HighRes_Tryp.param"),
-            "expected CID_HighRes_Tryp.param (protocol-suffix drop fallback), got {s}"
-        );
-    }
-
-    #[test]
-    fn hcd_lowres_tmt_normalizes_to_qexactive() {
-        // HCD with LowRes is invalid (Java upgrades inst to QExactive in
-        // step 0). So (HCD, LowRes, TMT) should land on
-        // `HCD_QExactive_Tryp_TMT.param` after normalization.
-        let p = resolve_bundled_param(
-            Fragmentation::Hcd,
-            Instrument::LowRes,
-            Protocol::Tmt,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("HCD_QExactive_Tryp_TMT.param"),
-            "expected HCD_QExactive_Tryp_TMT.param after HCD-LowRes normalization, got {s}"
-        );
-    }
-
-    #[test]
-    fn etd_highres_unknown_falls_back_to_etd_lowres_tryp() {
-        // (ETD, HighRes, Phospho) — `ETD_HighRes_Tryp_Phosphorylation.param`
-        // is not bundled, and the protocol-less `ETD_HighRes_Tryp.param` IS
-        // bundled, so the protocol-drop fallback lands on it. Test that.
-        let p = resolve_bundled_param(
-            Fragmentation::Etd,
-            Instrument::HighRes,
-            Protocol::Phospho,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("ETD_HighRes_Tryp.param"),
-            "expected ETD_HighRes_Tryp.param (protocol-suffix drop fallback), got {s}"
-        );
-    }
+    // ── Tests of the resolve_bundled_param / resolve_bundled_param_for_activation
+    //    ladder were removed in the model-store migration: those functions are now
+    //    dead code (#[cfg_attr(not(test), allow(dead_code))]) and the bundled .param
+    //    files no longer ship on disk (they live in resources/ionstat/models.parquet).
+    //    The store_selection_equivalence integration test covers the same
+    //    correctness invariant without requiring physical .param files.
 
     #[test]
     fn parse_fragmentation_rejects_out_of_range_numeric() {
@@ -1848,78 +1757,5 @@ mod param_resolver_tests {
         assert_eq!(parse_precursor_cal("OFF").unwrap(), PrecursorCalMode::Off);
         assert_eq!(parse_precursor_cal("on").unwrap(), PrecursorCalMode::On);
         assert!(parse_precursor_cal("bogus").is_err());
-    }
-
-    // ── resolve_bundled_param_for_activation: instrument routing ──────────────
-
-    /// CID + no detected instrument ⇒ LowRes (Java's `LOW_RESOLUTION_LTQ`
-    /// default). This is the load-bearing PXD001819 path — LTQ Velos
-    /// MS2 data must route here.
-    #[test]
-    fn cid_with_no_detected_instrument_routes_to_lowres() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, None, Protocol::Auto,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("CID_LowRes_Tryp.param"),
-            "expected CID_LowRes_Tryp.param when no instrument detected, got {s}"
-        );
-    }
-
-    #[test]
-    fn cid_with_lowres_detected_routes_to_lowres() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::LowRes), Protocol::Auto,
-        ).unwrap();
-        assert!(p.to_string_lossy().ends_with("CID_LowRes_Tryp.param"));
-    }
-
-    #[test]
-    fn cid_with_qexactive_detected_routes_to_highres() {
-        // No `CID_QExactive_Tryp.param` is bundled; resolver's final
-        // ladder rewrites this. (Java's ladder ends at `CID_LowRes_Tryp`
-        // for non-bundled CID/QExactive combos.)
-        // Most importantly: we must not silently land on the LowRes
-        // bucket when QExactive is detected — verify some param resolves.
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::QExactive), Protocol::Auto,
-        ).unwrap();
-        // Should resolve to *something* — the ladder may fall back, but
-        // we just want this not to error.
-        assert!(p.exists(), "param path should exist: {}", p.display());
-    }
-
-    #[test]
-    fn cid_with_highres_detected_routes_to_highres() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::HighRes), Protocol::Auto,
-        ).unwrap();
-        assert!(
-            p.to_string_lossy().ends_with("CID_HighRes_Tryp.param"),
-            "expected CID_HighRes_Tryp.param, got {}", p.display()
-        );
-    }
-
-    #[test]
-    fn hcd_with_lowres_detected_upgrades_to_qexactive() {
-        // Java's NewScorerFactory upgrades HCD + non-(HighRes|QExactive)
-        // to QExactive. Verify the auto-detect path does the same when
-        // the mzML claims LowRes (e.g., a CID/HCD-mixed LTQ acquisition).
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::HCD, Some(InstrumentType::LowRes), Protocol::Auto,
-        ).unwrap();
-        assert!(
-            p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"),
-            "expected HCD_QExactive_Tryp.param (Java HCD-upgrade), got {}", p.display()
-        );
-    }
-
-    #[test]
-    fn hcd_with_qexactive_detected_stays_qexactive() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::HCD, Some(InstrumentType::QExactive), Protocol::Auto,
-        ).unwrap();
-        assert!(p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"));
     }
 }

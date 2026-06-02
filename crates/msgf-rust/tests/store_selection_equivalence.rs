@@ -115,19 +115,46 @@ fn resolve_for_activation_old(
     resolve_bundled_param_old(frag, inst, protocol)
 }
 
+/// Build a path under resources/ionstat for a given filename WITHOUT requiring
+/// the file to exist on disk. Used only to derive the lowercased stem for
+/// comparison with the parquet store's model IDs — the .param files themselves
+/// are no longer shipped on disk (they live in models.parquet).
 fn canonicalize_bundled(filename: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../resources/ionstat")
         .join(filename)
-        .canonicalize()
-        .unwrap_or_else(|_| panic!("bundled file not found: {filename}"))
 }
 
+/// Lazily initialized set of model IDs from the bundled parquet store.
+/// Opened once and reused across all `try_bundled` calls in the test.
+fn bundled_model_ids() -> &'static std::collections::BTreeSet<String> {
+    use std::sync::OnceLock;
+    static IDS: OnceLock<std::collections::BTreeSet<String>> = OnceLock::new();
+    IDS.get_or_init(|| {
+        let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/ionstat/models.parquet");
+        let store = model_train::ModelStore::open(&store_path)
+            .unwrap_or_else(|e| panic!("failed to open bundled models.parquet: {e}"));
+        store.model_ids().into_iter().collect()
+    })
+}
+
+/// Check whether a bundled .param file WOULD have existed under the old naming
+/// scheme. Since the files no longer live on disk, we derive the expected
+/// existence from the bundled parquet store: a model exists iff it has an
+/// entry in the store.
 fn try_bundled(filename: &str) -> Result<PathBuf, ()> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/ionstat")
-        .join(filename);
-    if p.exists() { p.canonicalize().map_err(|_| ()) } else { Err(()) }
+    // Derive the expected model ID from the filename stem (lowercase).
+    let stem = PathBuf::from(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if bundled_model_ids().contains(&stem) {
+        Ok(canonicalize_bundled(filename))
+    } else {
+        Err(())
+    }
 }
 
 /// Extract the lowercased filename stem from a `.param` path.

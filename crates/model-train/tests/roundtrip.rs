@@ -3,19 +3,20 @@ use scoring_crate::param_model::Param;
 use std::path::Path;
 
 fn fixture() -> Param {
-    // Look relative to the workspace root (crates/model-train/../.. = workspace root).
-    // Integration tests run with the crate root as cwd, so use absolute path via env.
-    let manifest = std::env!("CARGO_MANIFEST_DIR");
-    let param_path = Path::new(manifest)
-        .join("../../resources/ionstat/CID_TOF_aLP.param");
-    Param::load_from_file(&param_path).expect("load fixture CID_TOF_aLP.param")
+    // Load from the local test fixtures directory (not the bundled resources).
+    let param_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/CID_TOF_aLP.param"
+    ));
+    Param::load_from_file(param_path).expect("load fixture CID_TOF_aLP.param")
 }
 
 fn fixture2() -> Param {
-    let manifest = std::env!("CARGO_MANIFEST_DIR");
-    let param_path = Path::new(manifest)
-        .join("../../resources/ionstat/HCD_TOF_aLP.param");
-    Param::load_from_file(&param_path).expect("load fixture HCD_TOF_aLP.param")
+    let param_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/HCD_TOF_aLP.param"
+    ));
+    Param::load_from_file(param_path).expect("load fixture HCD_TOF_aLP.param")
 }
 
 #[test]

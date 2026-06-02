@@ -7,13 +7,13 @@ fn every_bundled_model_round_trips_via_store() {
     let dir = tempfile::tempdir().unwrap();
     let store_path = dir.path().join("models.parquet");
 
-    // Integration tests run with the crate root as cwd, so use CARGO_MANIFEST_DIR
-    // to build an absolute path to the resources/ionstat directory.
-    let manifest = std::env!("CARGO_MANIFEST_DIR");
-    let ionstat = Path::new(manifest).join("../../resources/ionstat");
+    // Migrate the local test fixtures (3 representative .param files) instead of
+    // the full resources/ionstat directory (which no longer ships .param files —
+    // models are now bundled in a single resources/ionstat/models.parquet store).
+    let fixtures = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
 
-    let ids = migrate_dir(&ionstat, &store_path).expect("migrate");
-    assert!(ids.len() >= 39, "expected >=39 migrated models, got {}", ids.len());
+    let ids = migrate_dir(fixtures, &store_path).expect("migrate");
+    assert!(ids.len() >= 3, "expected >=3 migrated fixture models, got {}", ids.len());
 
     let store = ModelStore::open(&store_path).unwrap();
     for (id, file) in &ids {

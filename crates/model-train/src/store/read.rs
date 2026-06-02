@@ -186,11 +186,16 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                                 .ok_or_else(|| TrainError::Other("missing tol_val".into()))?;
                             let freq_col = structs.column_by_name("frequency")
                                 .ok_or_else(|| TrainError::Other("missing frequency".into()))?;
-                            let rcs = rc_col.as_any().downcast_ref::<Int32Array>().unwrap();
-                            let offs = off_col.as_any().downcast_ref::<Float32Array>().unwrap();
-                            let tols = tol_is_ppm_col.as_any().downcast_ref::<BooleanArray>().unwrap();
-                            let tolvs = tol_val_col.as_any().downcast_ref::<Float32Array>().unwrap();
-                            let freqs = freq_col.as_any().downcast_ref::<Float32Array>().unwrap();
+                            let rcs = rc_col.as_any().downcast_ref::<Int32Array>()
+                                .ok_or_else(|| TrainError::Other("column reduced_charge has unexpected arrow type".into()))?;
+                            let offs = off_col.as_any().downcast_ref::<Float32Array>()
+                                .ok_or_else(|| TrainError::Other("column offset has unexpected arrow type".into()))?;
+                            let tols = tol_is_ppm_col.as_any().downcast_ref::<BooleanArray>()
+                                .ok_or_else(|| TrainError::Other("column tol_is_ppm has unexpected arrow type".into()))?;
+                            let tolvs = tol_val_col.as_any().downcast_ref::<Float32Array>()
+                                .ok_or_else(|| TrainError::Other("column tol_val has unexpected arrow type".into()))?;
+                            let freqs = freq_col.as_any().downcast_ref::<Float32Array>()
+                                .ok_or_else(|| TrainError::Other("column frequency has unexpected arrow type".into()))?;
                             let entries = precursor_off_map.entry(charge).or_default();
                             for j in 0..structs.len() {
                                 let is_ppm = tols.value(j);
@@ -400,8 +405,10 @@ fn parse_manifest_row(
             .ok_or_else(|| TrainError::Other("missing charge_hist.charge".into()))?;
         let counts = structs.column_by_name("count")
             .ok_or_else(|| TrainError::Other("missing charge_hist.count".into()))?;
-        let ca = charges.as_any().downcast_ref::<Int32Array>().unwrap();
-        let co = counts.as_any().downcast_ref::<Int32Array>().unwrap();
+        let ca = charges.as_any().downcast_ref::<Int32Array>()
+            .ok_or_else(|| TrainError::Other("column charge_hist.charge has unexpected arrow type".into()))?;
+        let co = counts.as_any().downcast_ref::<Int32Array>()
+            .ok_or_else(|| TrainError::Other("column charge_hist.count has unexpected arrow type".into()))?;
         for j in 0..structs.len() {
             charge_hist.push((ca.value(j), co.value(j)));
         }

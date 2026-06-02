@@ -130,11 +130,6 @@ pub fn combined_schema() -> SchemaRef {
         Field::new("count", DataType::Int32, false),
     ]);
 
-    let offsets_dt = list_of_struct([
-        Field::new("offset", DataType::Float32, false),
-        Field::new("freq", DataType::Float32, false),
-    ]);
-
     // Precursor offsets carry extra fields beyond plain (offset, freq).
     let precursor_off_dt = list_of_struct([
         Field::new("reduced_charge", DataType::Int32, false),
@@ -173,10 +168,8 @@ pub fn combined_schema() -> SchemaRef {
         nf("ion_charge", DataType::Int32),
         nf("ion_offset_bits", DataType::Int32), // f32::to_bits() as i32; 0 for noise/dist rows
         nf("table_kind", DataType::Utf8),
-        // "rank_dist", "ion_err", "noise_err", "ion_existence" → values
+        // "rank_dist", "ion_err", "noise_err", "ion_existence", "frag_off" → values
         nf("values", list_of(DataType::Float32)),
-        // "frag_off" → offsets (offset+freq only)
-        nf("offsets", offsets_dt),
         // "precursor_off" → precursor_offsets (full struct)
         nf("precursor_offsets", precursor_off_dt),
     ]))

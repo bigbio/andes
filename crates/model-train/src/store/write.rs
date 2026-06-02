@@ -163,13 +163,6 @@ fn build_manifest_batch(
     let null_i32 = null_i32_array(n);
     let null_utf8 = null_utf8_array(n);
     let null_float_list = null_float_list_array(n);
-    let null_offset_list = null_struct_list_array(
-        n,
-        vec![
-            Field::new("offset", DataType::Float32, false),
-            Field::new("freq", DataType::Float32, false),
-        ],
-    );
     let null_precursor_list = null_struct_list_array(
         n,
         vec![
@@ -209,7 +202,6 @@ fn build_manifest_batch(
         null_i32.clone(),     // ion_offset_bits
         null_utf8.clone(),    // table_kind
         null_float_list,      // values
-        null_offset_list,     // offsets
         null_precursor_list,  // precursor_offsets
     ];
 
@@ -235,7 +227,6 @@ fn build_table_batch(
 
     // Per-row payloads.
     let mut all_values: Vec<Option<Vec<f32>>> = Vec::new();
-    let mut all_offsets: Vec<Option<Vec<(f32, f32)>>> = Vec::new(); // (offset, freq)
     let mut all_precursor_offsets: Vec<Option<Vec<PrecursorEntry>>> = Vec::new();
 
     for &(model_id, param) in models {
@@ -254,7 +245,6 @@ fn build_table_batch(
             ion_offset_bits.push(Some(0));
             table_kinds.push(Some("partition"));
             all_values.push(None);
-            all_offsets.push(None);
             all_precursor_offsets.push(None);
         }
 
@@ -284,7 +274,6 @@ fn build_table_batch(
             ion_offset_bits.push(Some(0));
             table_kinds.push(Some("precursor_off"));
             all_values.push(None);
-            all_offsets.push(None);
             all_precursor_offsets.push(Some(payload));
         }
 
@@ -292,30 +281,6 @@ fn build_table_batch(
         // Iterate partitions in sorted order (same order the binary reader stores them).
         for part in &param.partitions {
             if let Some(frags) = param.frag_off_table.get(part) {
-                let payload: Vec<(f32, f32)> = frags
-                    .iter()
-                    .map(|f| {
-                        // Encode ion_kind as part of the offset struct: we store the full
-                        // FragmentOffsetFrequency inline. For frag_off rows the ion_kind
-                        // column is set to "frag_off_list" so the reader can distinguish.
-                        // The actual per-entry ion info is encoded in the offsets struct
-                        // with a sign convention: positive offset_bits = prefix.
-                        // We use a separate encoding: store 4 sentinel fields in the
-                        // offsets list: (is_prefix_f32, charge_f32, offset_f32, freq_f32).
-                        // Specifically we use the (offset, freq) pair where:
-                        //   offset field index 0 = encoded: f32::from_bits(is_prefix as u32) -- but this
-                        //   is awkward. Instead we emit one row per (part, ion_type) for frag_off.
-                        // Actually: emit one row per partition, carrying ALL frag entries in a
-                        // single list. We reuse the offsets column but store 4 floats per entry:
-                        // (is_prefix_bit, ion_charge_f32, ion_offset_f32, frequency).
-                        // For this we'd need a 4-element struct. Instead use a flat f32 values list:
-                        // groups of 4: [is_prefix(0.0/1.0), ion_charge, ion_offset, freq]
-                        let _ = f; // will be handled below
-                        (0.0f32, 0.0f32) // placeholder
-                    })
-                    .collect();
-                let _ = payload; // we re-encode below
-
                 // Encode as flat f32 list: groups of 4 per entry.
                 // offset_bits is already f32::to_bits() so we recover the exact f32
                 // via f32::from_bits() — this round-trips without precision loss.
@@ -341,7 +306,6 @@ fn build_table_batch(
                 ion_offset_bits.push(Some(0));
                 table_kinds.push(Some("frag_off"));
                 all_values.push(Some(flat));
-                all_offsets.push(None);
                 all_precursor_offsets.push(None);
             }
         }
@@ -368,7 +332,6 @@ fn build_table_batch(
                     ion_offset_bits.push(Some(iob));
                     table_kinds.push(Some("rank_dist"));
                     all_values.push(Some(freqs.clone()));
-                    all_offsets.push(None);
                     all_precursor_offsets.push(None);
                 }
             }
@@ -381,7 +344,7 @@ fn build_table_batch(
                     &mut record_kinds, &mut model_ids, &mut part_charges,
                     &mut part_mass_bits, &mut part_segs, &mut ion_kinds,
                     &mut ion_charges, &mut ion_offset_bits, &mut table_kinds,
-                    &mut all_values, &mut all_offsets, &mut all_precursor_offsets,
+                    &mut all_values, &mut all_precursor_offsets,
                     model_id, part.charge, part.parent_mass, part.seg_num,
                     "ion_err", v,
                 );
@@ -391,7 +354,7 @@ fn build_table_batch(
                     &mut record_kinds, &mut model_ids, &mut part_charges,
                     &mut part_mass_bits, &mut part_segs, &mut ion_kinds,
                     &mut ion_charges, &mut ion_offset_bits, &mut table_kinds,
-                    &mut all_values, &mut all_offsets, &mut all_precursor_offsets,
+                    &mut all_values, &mut all_precursor_offsets,
                     model_id, part.charge, part.parent_mass, part.seg_num,
                     "noise_err", v,
                 );
@@ -401,7 +364,7 @@ fn build_table_batch(
                     &mut record_kinds, &mut model_ids, &mut part_charges,
                     &mut part_mass_bits, &mut part_segs, &mut ion_kinds,
                     &mut ion_charges, &mut ion_offset_bits, &mut table_kinds,
-                    &mut all_values, &mut all_offsets, &mut all_precursor_offsets,
+                    &mut all_values, &mut all_precursor_offsets,
                     model_id, part.charge, part.parent_mass, part.seg_num,
                     "ion_existence", v,
                 );
@@ -430,15 +393,6 @@ fn build_table_batch(
 
     // values: List<Float32>
     let values_arr = build_float_list(all_values);
-
-    // offsets: List<Struct<offset: Float32, freq: Float32>>  — null for all table rows here
-    let offsets_arr = null_struct_list_array(
-        nrows,
-        vec![
-            Field::new("offset", DataType::Float32, false),
-            Field::new("freq", DataType::Float32, false),
-        ],
-    );
 
     // precursor_offsets: List<Struct<...>>
     let precursor_arr = build_precursor_list(all_precursor_offsets);
@@ -485,7 +439,6 @@ fn build_table_batch(
         ion_offset_bits_arr,
         table_kind_arr,
         values_arr,
-        offsets_arr,
         precursor_arr,
     ];
 
@@ -506,7 +459,6 @@ fn emit_dist_row<'a>(
     ion_offset_bits: &mut Vec<Option<i32>>,
     table_kinds: &mut Vec<Option<&'a str>>,
     all_values: &mut Vec<Option<Vec<f32>>>,
-    all_offsets: &mut Vec<Option<Vec<(f32, f32)>>>,
     all_precursor_offsets: &mut Vec<Option<Vec<PrecursorEntry>>>,
     model_id: &'a str,
     charge: i32,
@@ -525,7 +477,6 @@ fn emit_dist_row<'a>(
     ion_offset_bits.push(Some(0));
     table_kinds.push(Some(kind));
     all_values.push(Some(values.to_vec()));
-    all_offsets.push(None);
     all_precursor_offsets.push(None);
 }
 

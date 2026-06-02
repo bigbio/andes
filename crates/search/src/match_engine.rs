@@ -21,12 +21,6 @@ static GF_SINK_RETRY_OK: AtomicU64 = AtomicU64::new(0);
 static GF_BIN_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static GF_SPECTRA_NO_GROUP: AtomicU64 = AtomicU64::new(0);
 
-/// Number of isotope peaks compared when matching a peptide's theoretical
-/// precursor envelope against the observed MS1 (chimeric features).
-/// 4 peaks (mono + 3) captures the discriminative envelope shape for the
-/// peptide mass range we search without over-weighting the noisy tail.
-const N_PRECURSOR_ISOTOPES: usize = 4;
-
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::{smallvec, SmallVec};
@@ -34,7 +28,6 @@ use smallvec::{smallvec, SmallVec};
 use model::aa_set::AminoAcidSet;
 use input::Ms1Link;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
-use crate::chimeric_features::precursor_isotope_match;
 use model::enzyme::Enzyme;
 use scoring_crate::gf::generating_function::GeneratingFunction;
 use scoring_crate::gf::group::GeneratingFunctionGroup;
@@ -277,10 +270,6 @@ impl<'a> PreparedSearch<'a> {
         let candidates = &self.candidates;
         let bucket_index = &self.bucket_index;
         let aa_set_for_gf = &self.aa_set_for_gf;
-        // Chimeric precursor-envelope MS1 linkage. Only `Some` under
-        // `--chimeric`; the off path leaves this `None` and the feature fill
-        // below is a no-op, keeping the golden PIN/TSV bit-identical.
-        let ms1_link = self.ms1_link.as_ref();
 
         // Yield-accounting counters.
         // Aggregated across all worker threads via Relaxed atomics — exact counts
@@ -685,56 +674,13 @@ impl<'a> PreparedSearch<'a> {
                 let mut features = compute_psm_features(ss, &cand.peptide, scorer, psm.charge_used);
                 features.edge_score = psm.edge_score; // reuse per-candidate value
 
-                // Chimeric precursor isotope-envelope features.
-                // Guarded on `params.chimeric` AND a linked MS1 for this
-                // spectrum; otherwise the two fields stay 0.0 (off path is
-                // bit-identical, since `ms1_link` is `None` there).
-                //
-                // Cascade perf: the two-pass chimeric cascade does NOT consume
-                // this per-PSM MS1 feature (it was the old single-pass
-                // chimeric feature). MS1 is used ONLY by Pass 2's
-                // `run_pass2_coisolation` / `detect_coisolated` co-isolation
-                // detection. Computing `precursor_isotope_match` here runs
-                // ~121k times on Astral and costs ~2:40 of wall, so we skip it
-                // and leave `precursor_isotope_kl` / `precursor_snr` at their
-                // 0.0 defaults (PIN schema unchanged). The `ms1_link` field and
-                // its loading stay UNTOUCHED — Pass 2 still needs them.
-                const CASCADE_SKIP_MS1_FEATURE: bool = true;
-                if !CASCADE_SKIP_MS1_FEATURE && params.chimeric {
-                    if let Some(link) = ms1_link {
-                        if let Some(Some(ms1_idx)) = link.ms2_to_ms1.get(spec_idx) {
-                            if let Some(ms1_peaks) = link.ms1_peaks.get(*ms1_idx) {
-                                let z = psm.charge_used;
-                                if z > 0 {
-                                    // Theoretical monoisotopic precursor m/z
-                                    // for this peptide at the matched charge.
-                                    let neutral_mass = cand.peptide.mass();
-                                    let theo_mono_mz =
-                                        (neutral_mass + z as f64 * PROTON) / z as f64;
-                                    // Precursor-matching tolerance (Da) at this
-                                    // m/z; clamp to a sane minimum so a 0-ppm
-                                    // tolerance still admits the nearest peak.
-                                    let tol_da = params
-                                        .precursor_tolerance
-                                        .left
-                                        .as_da(theo_mono_mz)
-                                        .max(0.01);
-                                    let (kl, snr) = precursor_isotope_match(
-                                        ms1_peaks,
-                                        theo_mono_mz,
-                                        z,
-                                        neutral_mass,
-                                        tol_da,
-                                        N_PRECURSOR_ISOTOPES,
-                                    );
-                                    features.precursor_isotope_kl = kl;
-                                    features.precursor_snr = snr;
-                                }
-                            }
-                        }
-                    }
-                }
-
+                // The PIN `precursor_isotope_kl` / `precursor_snr` columns are
+                // left at their 0.0 defaults here. They were a per-PSM MS1
+                // isotope-envelope feature of the old single-pass chimeric mode;
+                // the two-pass cascade does not consume them (computing them ran
+                // ~121k times on Astral for ~2:40 of wall). The cascade uses MS1
+                // only in Pass 2's `run_pass2_coisolation` / `detect_coisolated`
+                // co-isolation detection — `ms1_link` and its loading stay.
 
                 features.delta_raw_score = delta_raw_score;
                 psm.features = features;

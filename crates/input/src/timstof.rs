@@ -156,12 +156,18 @@ impl TimsTofReader {
 /// Downstream consumers require m/z-ascending peaks (the scorer and chimeric
 /// co-isolation detection binary-search the list). `timsrust` returns peaks
 /// sorted by m/z, so the list is only re-sorted if an inversion is present.
+///
+/// The two arrays are paired only over their overlapping prefix, so a malformed
+/// length mismatch can't read past either vector, and non-finite or
+/// non-positive-m/z / negative-intensity points are dropped before they can
+/// reach the scorer.
 fn extract_peaks(raw: &timsrust::Spectrum) -> Vec<(f64, f32)> {
-    let mut peaks: Vec<(f64, f32)> = raw
-        .mz_values
-        .iter()
-        .zip(raw.intensities.iter())
-        .map(|(&mz, &intensity)| (mz, intensity as f32))
+    let n = raw.mz_values.len().min(raw.intensities.len());
+    let mut peaks: Vec<(f64, f32)> = (0..n)
+        .map(|i| (raw.mz_values[i], raw.intensities[i] as f32))
+        .filter(|&(mz, intensity)| {
+            mz.is_finite() && mz > 0.0 && intensity.is_finite() && intensity >= 0.0
+        })
         .collect();
     if peaks.windows(2).any(|w| w[0].0 > w[1].0) {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -285,5 +291,27 @@ mod tests {
             peaks,
             vec![(100.0, 1.0_f32), (200.0, 2.0_f32), (300.0, 3.0_f32)]
         );
+    }
+
+    #[test]
+    fn extract_peaks_drops_nonfinite_and_nonpositive() {
+        let raw = spectrum(
+            0,
+            None,
+            0.0,
+            vec![100.0, f64::NAN, 0.0, 200.0, f64::INFINITY, 300.0],
+            vec![1.0, 5.0, 5.0, f64::NAN, 5.0, -1.0],
+        );
+        // Drops: NaN m/z, 0.0 m/z, +inf m/z, NaN intensity, negative intensity.
+        let peaks = extract_peaks(&raw);
+        assert_eq!(peaks, vec![(100.0, 1.0_f32)]);
+    }
+
+    #[test]
+    fn extract_peaks_pairs_only_overlapping_prefix() {
+        // A malformed length mismatch must not read past the shorter vector.
+        let raw = spectrum(0, None, 0.0, vec![100.0, 200.0, 300.0], vec![1.0, 2.0]);
+        let peaks = extract_peaks(&raw);
+        assert_eq!(peaks, vec![(100.0, 1.0_f32), (200.0, 2.0_f32)]);
     }
 }

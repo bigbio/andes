@@ -1,4 +1,5 @@
 //! Scoring-model training and the Parquet model store.
+pub mod accumulate;
 pub mod counts;
 pub mod estimate;
 pub mod catalog;

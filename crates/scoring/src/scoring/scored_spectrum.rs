@@ -25,6 +25,7 @@ use std::sync::OnceLock;
 use crate::param_model::{IonType, Param, Partition, PrecursorOffsetFrequency};
 use crate::scoring::rank_scorer::RankScorer;
 use model::mass::nominal_from;
+use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 
 const PROTON: f64 = 1.007_276_49;
@@ -58,6 +59,27 @@ fn trace_ions_enabled() -> bool {
         std::env::var_os("MSGF_TRACE_IONS").is_some()
             && std::env::var_os("MSGF_TRACE_PEP").is_some()
     })
+}
+
+/// Per-ion match result returned by [`ScoredSpectrum::ion_match_facts`].
+///
+/// Used by `StatsAccumulator` in `model-train` to accumulate rank and
+/// error-bin histograms without re-implementing any matching logic.
+#[derive(Debug, Clone, Copy)]
+pub struct IonMatchFact {
+    /// The partition this ion belongs to (from the scorer's segment-partition
+    /// cache, identical to the partition used inside `directional_node_score_inner`).
+    pub partition: Partition,
+    /// The ion type (Prefix or Suffix; never Noise).
+    pub ion_type: IonType,
+    /// Intensity rank of the matched peak (1 = highest intensity), clamped to
+    /// `[1, max_rank]`.  `None` when no peak is within tolerance — the
+    /// "missing ion" slot (index `max_rank` in the log table).
+    pub rank: Option<u32>,
+    /// Mass-error bin index `(error_da * error_scaling_factor + esf)`, where
+    /// `esf = error_scaling_factor` (the centre of the histogram).  `None` when
+    /// the ion is unmatched OR `error_scaling_factor == 0`.
+    pub error_bin: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -906,6 +928,157 @@ impl<'a> ScoredSpectrum<'a> {
 
         s.round() as i32
     }
+
+    /// For each theoretical ion of `peptide` (using the scorer's trained partition
+    /// ion list), report the production match result: which partition + ion type,
+    /// the matched peak's intensity rank (None if unmatched/"missing"), and the
+    /// scaled mass-error bin (None if unmatched or `error_scaling_factor == 0`).
+    ///
+    /// Uses the **identical** matching path as `directional_node_score_inner`:
+    /// same partition-cache lookup, same `nearest_peak_rank_in` call, same
+    /// tolerance from `param.mme`.  The only difference is that instead of
+    /// summing log scores, the results are collected into `Vec<IonMatchFact>`.
+    ///
+    /// The "missing ion" convention mirrors [`RankScorer::missing_ion_score`]:
+    /// `rank = None` means "no peak matched" — the caller should use the slot
+    /// at index `max_rank` (the last entry in the rank-distribution array).
+    ///
+    /// Nominal masses are computed the same way as in `score_psm`:
+    /// `nominal_from(prefix_real_mass) as f64` — the integer nominal mass cast
+    /// to f64, matching the GF DP's `active_nodes[ni] as f64` convention.
+    pub fn ion_match_facts(&self, peptide: &Peptide, scorer: &RankScorer) -> Vec<IonMatchFact> {
+        use crate::param_model::IonType;
+
+        let param = scorer.param();
+        let mme = &param.mme;
+        let max_rank = scorer.max_rank();
+        let esf = param.error_scaling_factor;
+        let num_segs = param.num_segments as usize;
+
+        // Use the active (possibly deconvoluted) peaks + ranks — identical to
+        // `directional_node_score_inner`.
+        let (peaks, ranks) = self.active_peaks_and_ranks();
+
+        let n = peptide.length();
+        if n < 2 {
+            return Vec::new();
+        }
+
+        // Compute per-split prefix and suffix NOMINAL masses exactly as `score_psm` does:
+        //   prefix_nominal[s] = nominal_from(sum of residues[0..s])
+        //   peptide_nominal = nominal_from(total residue sum)
+        //   suffix_nominal[s] = peptide_nominal - prefix_nominal[s]
+        // This ensures the theo_mz values we compute are bit-identical to the scoring path.
+        let peptide_nominal = peptide.nominal_residue_mass();
+        let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
+        prefix_nominal_arr.push(0);
+        let mut prefix_acc = 0.0_f64;
+        for s in 1..n {
+            let aa = &peptide.residues[s - 1];
+            prefix_acc += aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+            prefix_nominal_arr.push(nominal_from(prefix_acc));
+        }
+        // The last internal split uses the accumulated value.
+        let last_aa = &peptide.residues[n - 1];
+        prefix_acc += last_aa.mass + last_aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        prefix_nominal_arr.push(nominal_from(prefix_acc));
+
+        let mut out: Vec<IonMatchFact> = Vec::new();
+
+        let use_cache = !self.segment_partition_cache.is_empty();
+
+        // Walk each split position (internal bonds only: 1..n).
+        // For each split, visit prefix node (is_prefix=true) and suffix node (is_prefix=false).
+        // The index `split` is used for BOTH prefix_nominal_arr[split] and computing suffix,
+        // so the needless_range_loop lint is a false positive here.
+        #[allow(clippy::needless_range_loop)]
+        for split in 1..n {
+            let prefix_nom = prefix_nominal_arr[split] as f64;
+            let suffix_nom = (peptide_nominal - prefix_nominal_arr[split]) as f64;
+
+            for &(is_prefix, nominal_mass) in &[(true, prefix_nom), (false, suffix_nom)] {
+                // Replicate the inner loop body of `directional_node_score_inner`
+                // EXACTLY: same segment/partition/ion iteration, same `nearest_peak_rank_in`.
+                // SYNC NOTE: if `directional_node_score_inner` is changed, this loop must
+                // be updated in lockstep.
+                #[allow(clippy::needless_range_loop)]
+                for seg in 0..num_segs {
+                    let (partition, ion_logs_slice): (Partition, &[(IonType, Vec<f32>)]) =
+                        if use_cache {
+                            (self.segment_partition_cache[seg].0,
+                             self.segment_partition_cache[seg].1.as_slice())
+                        } else {
+                            let p = param.partition_for(self.charge, self.parent_mass, seg);
+                            let logs = scorer.partition_ion_logs(&p);
+                            (p, logs)
+                        };
+
+                    for (ion, _logs) in ion_logs_slice {
+                        let theo_mz = match (is_prefix, *ion) {
+                            (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
+                            (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                            _ => continue,
+                        };
+                        if param.segment_num(theo_mz, self.parent_mass) != seg {
+                            continue;
+                        }
+                        let tol_da = mme.as_da(theo_mz);
+                        let (rank, error_bin) =
+                            match nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da) {
+                                Some(r) => {
+                                    let clamped = r.min(max_rank).max(1);
+                                    // Compute mass-error bin when error_scaling_factor > 0.
+                                    let ebin = if esf > 0 {
+                                        // Find the matched peak's actual m/z to compute error.
+                                        let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
+                                            .map(|peak_mz| (peak_mz - theo_mz) as f32)
+                                            .unwrap_or(0.0);
+                                        let mut idx = (error_da * esf as f32).round() as i32;
+                                        if idx > esf { idx = esf; }
+                                        else if idx < -esf { idx = -esf; }
+                                        idx += esf;
+                                        Some(idx as u32)
+                                    } else {
+                                        None
+                                    };
+                                    (Some(clamped), ebin)
+                                }
+                                None => (None, None),
+                            };
+                        out.push(IonMatchFact { partition, ion_type: *ion, rank, error_bin });
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Return the m/z of the **highest-intensity** peak within `tolerance_da` of
+/// `target_mz`, or `None` if no such peak exists.  Mirrors the selection
+/// semantics of `nearest_peak_rank_in` (intensity-max, not nearest-m/z).
+/// Used by `ion_match_facts` to compute the mass error for each matched ion.
+fn matched_peak_mz(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<f64> {
+    if peaks.is_empty() {
+        return None;
+    }
+    let lo_mz = target_mz - tolerance_da;
+    let hi_mz = target_mz + tolerance_da;
+    let start = peaks.partition_point(|&(mz, _)| mz < lo_mz);
+    let mut best: Option<(f64, f32)> = None; // (mz, intensity)
+    for i in start..peaks.len() {
+        let (mz, intensity) = peaks[i];
+        if mz > hi_mz {
+            break;
+        }
+        if ranks[i] == u32::MAX {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, best_int)| intensity > *best_int) {
+            best = Some((mz, intensity));
+        }
+    }
+    best.map(|(mz, _)| mz)
 }
 
 fn nearest_peak_rank_in(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<u32> {

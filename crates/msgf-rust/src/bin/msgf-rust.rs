@@ -21,6 +21,11 @@ use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
     PrecursorTolerance, ResidueSpec, Spectrum, Tolerance,
 };
+use model_train::{
+    ModelStore,
+    select::{select, SelectionKey},
+    protocol_to_experiment_class as store_protocol_to_experiment_class,
+};
 use scoring_crate::{Param, RankScorer};
 use search::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
@@ -638,40 +643,47 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Anything that is neither mzML, `.raw`, nor `.d` is treated as MGF (default).
     let is_mgf = !is_mzml && !is_raw && !is_d;
 
-    let param_path = match cli.param_file.clone() {
-        Some(p) => p,
-        None    => {
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
-            // Detect (activation, instrument) from the input. mzML peeks the
-            // file; Thermo `.raw` reads the vendor activation/analyzer metadata
-            // so a CID/ETD/ion-trap `.raw` is not silently scored with the
-            // HCD/QExactive model; Bruker `.d` (timsTOF DDA-PASEF) is beam-type
-            // CID on a TOF analyzer, so route it to the CID/TOF model rather than
-            // letting it fall through to the Orbitrap HCD/QExactive default.
-            let detected = if !auto_route_eligible {
+    // Detect (activation, instrument) from the input for auto-routing.
+    // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
+    // is always CID/TimsTOF (DDA-PASEF). Detection only runs when
+    // `--fragmentation auto` is set (otherwise the CLI flags override).
+    let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
+    let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
+        if !auto_route_eligible {
+            None
+        } else if is_mzml {
+            detect_dominant_activation(&cli.spectrum)
+                .map(|m| (m, detect_instrument_type_for_path(&cli.spectrum)))
+        } else if is_raw {
+            #[cfg(feature = "thermo")]
+            {
+                input::thermo::detect_activation_instrument(&cli.spectrum, 64)
+            }
+            #[cfg(not(feature = "thermo"))]
+            {
                 None
-            } else if is_mzml {
-                detect_dominant_activation(&cli.spectrum)
-                    .map(|m| (m, detect_instrument_type_for_path(&cli.spectrum)))
-            } else if is_raw {
-                #[cfg(feature = "thermo")]
-                {
-                    input::thermo::detect_activation_instrument(&cli.spectrum, 64)
-                }
-                #[cfg(not(feature = "thermo"))]
-                {
-                    None
-                }
-            } else {
-                // is_d — timsTOF DDA-PASEF. `timsrust` does not expose a per-scan
-                // activation/analyzer, so report the instrument as TimsTOF and route
-                // to the CID/TOF bundled model (CID_TOF_Tryp) via the family-fallback
-                // path in `resolve_bundled_param_for_activation`.
-                // Override with --fragmentation/--instrument.
-                Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
-            };
+            }
+        } else {
+            // is_d — timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
+            Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
+        };
+
+    let t_phase = std::time::Instant::now();
+    let param = if let Some(ref override_path) = cli.param_file {
+        // ── Override path: load binary .param directly (unchanged behaviour). ──
+        eprintln!("Param file (override): {}", override_path.display());
+        Param::load_from_file(override_path)
+            .map_err(|e| format!("loading param file {}: {e}", override_path.display()))?
+    } else {
+        // ── Auto / explicit flags: resolve from the Parquet model store. ──────
+        //
+        // For `--fragmentation auto` with a detectable input the detected
+        // (activation, instrument) is used; for explicit flags or MGF (no
+        // detection) the CLI enum values are converted to ActivationMethod /
+        // InstrumentType for the store lookup.
+        let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             if auto_route_eligible {
-                match detected {
+                match detected_activation_instrument {
                     Some((method, inst)) => {
                         eprintln!(
                             "Param resolver: auto-detected dominant activation \
@@ -680,28 +692,29 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             inst.map(|i| i.name()).unwrap_or("unknown/default"),
                             cli.spectrum.display()
                         );
-                        resolve_bundled_param_for_activation(method, inst, cli.protocol)?
+                        (method, inst)
                     }
                     None => {
-                        // No detectable activation in the input — fall back to
-                        // the historical hard-coded default. This keeps MGF
-                        // files (no activation header) and older mzML files
-                        // (no `<activation>` block) working as before.
-                        resolve_bundled_param(
-                            cli.fragmentation, cli.instrument, cli.protocol
-                        )?
+                        // No detectable activation — fall back to CLI flags.
+                        // For the all-defaults case (Auto+LowRes+Auto) this
+                        // returns HCD/QExactive to match the historical default.
+                        cli_flags_to_activation_instrument(
+                            cli.fragmentation, cli.instrument, cli.protocol,
+                        )
                     }
                 }
             } else {
-                resolve_bundled_param(cli.fragmentation, cli.instrument, cli.protocol)?
-            }
-        }
-    };
-    eprintln!("Param file: {}", param_path.display());
+                // Explicit `--fragmentation` / `--instrument` flags (or MGF
+                // where auto-detection is not eligible).
+                cli_flags_to_activation_instrument(
+                    cli.fragmentation, cli.instrument, cli.protocol,
+                )
+            };
 
-    let t_phase = std::time::Instant::now();
-    let param = Param::load_from_file(&param_path)
-        .map_err(|e| format!("loading param file {}: {e}", param_path.display()))?;
+        let (model_id, p) = load_param_from_store(activation, instrument_opt, cli.protocol)?;
+        eprintln!("Param model: {model_id} (from store)");
+        p
+    };
     let scorer = RankScorer::new(&param);
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
@@ -1172,6 +1185,58 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Convert the CLI `Fragmentation` enum to `ActivationMethod`.
+///
+/// `Fragmentation::Auto` is treated as `ActivationMethod::CID` here because
+/// the old ladder normalised `Auto → CID` when explicit flags were used
+/// (without mzML peek). When `--fragmentation auto` is combined with mzML/raw
+/// input the detection path is taken instead of this function.
+fn cli_fragmentation_to_activation(f: Fragmentation) -> ActivationMethod {
+    match f {
+        Fragmentation::Auto => ActivationMethod::CID,
+        Fragmentation::Cid  => ActivationMethod::CID,
+        Fragmentation::Etd  => ActivationMethod::ETD,
+        Fragmentation::Hcd  => ActivationMethod::HCD,
+        Fragmentation::Uvpd => ActivationMethod::UVPD,
+    }
+}
+
+/// Convert the CLI `Instrument` enum to `InstrumentType`.
+fn cli_instrument_to_instrument_type(i: Instrument) -> InstrumentType {
+    match i {
+        Instrument::LowRes    => InstrumentType::LowRes,
+        Instrument::HighRes   => InstrumentType::HighRes,
+        Instrument::Tof       => InstrumentType::TOF,
+        Instrument::QExactive => InstrumentType::QExactive,
+    }
+}
+
+/// Resolve `(Fragmentation, Instrument, Protocol)` from CLI flags to
+/// `(ActivationMethod, InstrumentType, Protocol)` for store lookup.
+///
+/// Handles the historical all-defaults short-circuit: when the user omits
+/// all scoring-model flags (`--fragmentation auto`, `--instrument low-res`,
+/// `--protocol auto`) the old ladder returned `HCD_QExactive_Tryp.param`.
+/// We replicate this by returning `(HCD, QExactive, Auto)` for that case
+/// instead of `(CID, LowRes, Auto)` (which would resolve to `cid_lowres_tryp`).
+fn cli_flags_to_activation_instrument(
+    fragmentation: Fragmentation,
+    instrument: Instrument,
+    protocol: Protocol,
+) -> (ActivationMethod, Option<InstrumentType>) {
+    // Historical all-defaults short-circuit (mirrors resolve_bundled_param step 0).
+    if fragmentation == Fragmentation::Auto
+        && instrument == Instrument::LowRes
+        && protocol == Protocol::Auto
+    {
+        return (ActivationMethod::HCD, Some(InstrumentType::QExactive));
+    }
+    (
+        cli_fragmentation_to_activation(fragmentation),
+        Some(cli_instrument_to_instrument_type(instrument)),
+    )
+}
+
 /// Translate `(--fragmentation, --instrument, --protocol)` into a bundled
 /// `.param` filename and resolve it under
 /// `resources/ionstat/` relative to the cargo manifest dir.
@@ -1193,6 +1258,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// `(frag, inst)`-keyed ladder. Returns an error only if even the
 /// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
 /// resources (a packaging defect, not a CLI input error).
+///
+/// Retained for the inline unit tests in `param_resolver_tests`; the search
+/// path now goes through [`load_param_from_store`] instead.
+#[cfg_attr(not(test), allow(dead_code))]
 fn resolve_bundled_param(
     fragmentation: Fragmentation,
     instrument:    Instrument,
@@ -1393,6 +1462,10 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 ///   - ETD  → frag=2, inst=detected.
 ///   - PQD  → CID (Java collapses PQD → CID in `NewScorerFactory.get`).
 ///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
+///
+/// Retained for the inline unit tests in `param_resolver_tests`; the search
+/// path now goes through [`load_param_from_store`] instead.
+#[cfg_attr(not(test), allow(dead_code))]
 fn resolve_bundled_param_for_activation(
     method:               ActivationMethod,
     detected_instrument:  Option<InstrumentType>,
@@ -1444,6 +1517,7 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 /// `resources/ionstat/` relative to the crate's cargo manifest
 /// dir (set at compile time). Returns a helpful error if the file does
 /// not exist.
+#[cfg_attr(not(test), allow(dead_code))]
 fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -1457,6 +1531,116 @@ fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
          `resources/ionstat/`.",
         candidate.display()
     ))
+}
+
+/// Resolve the path to the bundled `models.parquet` store.
+///
+/// Uses the same `CARGO_MANIFEST_DIR` anchor as [`canonicalize_bundled`] so
+/// both in-source-tree tests and installed-binary runs locate the file the
+/// same way.
+fn bundled_store_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../resources/ionstat/models.parquet")
+}
+
+/// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying
+/// all old-ladder normalizations. This is the new entry point used by the
+/// search binary in place of `resolve_bundled_param*`.
+///
+/// `activation`: the detected or explicitly set `ActivationMethod`.
+/// `instrument`: the detected or explicitly set `InstrumentType` (None = undetected → LowRes).
+/// `protocol`:   the CLI `Protocol` value.
+fn build_selection_key(
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+) -> SelectionKey {
+    use std::collections::BTreeSet;
+
+    // 1. PQD → CID (Java's NewScorerFactory rule).
+    let act_str: &str = match activation {
+        ActivationMethod::PQD => "CID",
+        other                 => other.name(),
+    };
+    // 2. Apply family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF).
+    let inst_after_family: &str = match instrument {
+        Some(i) => i.family_fallback().name(),
+        None    => "LowRes",
+    };
+
+    // 3. Apply old-ladder (activation, instrument) normalization.
+    //    Because `normalize_for_store` returns `&'static str` only for the
+    //    normalizing arms (to avoid lifetime issues), we handle identity
+    //    inline here.
+    let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
+        match (act_str, inst_after_family) {
+            ("HCD", "LowRes")    => ("HCD", "QExactive", false),
+            ("HCD", "TOF")       => ("CID", "TOF",       true),
+            ("CID", "QExactive") => ("CID", "LowRes",    true),
+            ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),
+            ("UVPD", i) if i != "QExactive" => ("CID", "LowRes", true),
+            _ => (act_str, inst_after_family, false),
+        };
+
+    // 4. Build experiment_class from protocol (unless the final fallback dropped it).
+    //    Protocol → experiment_class mapping matches the parquet's `protocol` column.
+    let protocol_for_store: &str = match protocol {
+        Protocol::Auto | Protocol::Standard => "Automatic",
+        Protocol::Tmt          => "TMT",
+        Protocol::Phospho      => "Phosphorylation",
+        Protocol::Itraq        => "iTRAQ",
+        Protocol::ItraqPhospho => "iTRAQPhospho",
+    };
+    let experiment_class: BTreeSet<String> = if drop_protocol {
+        BTreeSet::new()
+    } else {
+        store_protocol_to_experiment_class(protocol_for_store)
+    };
+
+    SelectionKey {
+        activation: final_act.to_string(),
+        instrument: final_inst.to_string(),
+        // Parquet stores enzyme as "Trypsin" for the tryptic models.
+        enzyme: "Trypsin".to_string(),
+        experiment_class,
+    }
+}
+
+/// Load the scoring [`Param`] from the bundled Parquet store for the given
+/// `(activation, instrument, protocol)` combination.
+///
+/// This is the new model-resolution path that replaces
+/// `Param::load_from_file(resolve_bundled_param*(...))`. The `model_id`
+/// selected from the store will be identical to the lowercased filename
+/// stem of the old `.param` path (guaranteed by the equivalence gate test
+/// `store_selection_matches_old_ladder_for_all_combos`).
+fn load_param_from_store(
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+) -> Result<(String, Param), Box<dyn std::error::Error>> {
+    let store_path = bundled_store_path();
+    let store = ModelStore::open(&store_path)
+        .map_err(|e| format!("opening model store {}: {e}", store_path.display()))?;
+    let entries = store.selection_entries();
+
+    let key = build_selection_key(activation, instrument, protocol);
+
+    let model_id = select(
+        &entries,
+        &key,
+        // `build_selection_key` already applies family fallback + all
+        // normalizations, so the family_fn here is the identity.
+        |i| i.to_string(),
+        Some("hcd_qexactive_tryp"),
+    )
+    .unwrap_or("hcd_qexactive_tryp")
+    .to_string();
+
+    let param = store.load_param(&model_id)
+        .map_err(|e| format!("loading model '{model_id}' from store: {e}"))?;
+
+    Ok((model_id, param))
 }
 
 /// Parse `--fragmentation` value. Accepts named (case-insensitive: auto, CID,

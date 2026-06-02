@@ -19,6 +19,7 @@ use scoring_crate::param_model::{
     FragmentOffsetFrequency, IonType, Param, Partition, PrecursorOffsetFrequency, SpecDataType,
 };
 
+use crate::select::{parse_experiment_class, SelectionEntry};
 use crate::TrainError;
 
 // ── public API ───────────────────────────────────────────────────────────────
@@ -26,8 +27,23 @@ use crate::TrainError;
 /// A handle to a Parquet model store.  Created by [`ModelStore::open`].
 pub struct ModelStore {
     path: PathBuf,
-    /// IDs of models available in the file (parsed at open time).
-    manifest: Vec<String>,
+    /// Full manifest rows read at open time.
+    manifest: Vec<RawManifestEntry>,
+}
+
+/// Raw manifest entry as stored in the Parquet file (before type conversion).
+#[derive(Debug, Clone)]
+pub struct RawManifestEntry {
+    /// Lowercased model identifier, e.g. `"hcd_qexactive_tryp"`.
+    pub model_id: String,
+    /// Activation method string as stored, e.g. `"HCD"`, `"CID"`.
+    pub activation: String,
+    /// Instrument string as stored, e.g. `"QExactive"`, `"LowRes"`.
+    pub instrument: String,
+    /// Enzyme string as stored, e.g. `"Trypsin"`, `"ArgC"`.
+    pub enzyme: String,
+    /// Protocol string as stored, e.g. `"Automatic"`, `"TMT"`, `"Phosphorylation"`.
+    pub protocol: String,
 }
 
 impl ModelStore {
@@ -38,8 +54,37 @@ impl ModelStore {
     }
 
     /// List all model IDs in the store.
-    pub fn model_ids(&self) -> &[String] {
+    pub fn model_ids(&self) -> Vec<String> {
+        self.manifest.iter().map(|e| e.model_id.clone()).collect()
+    }
+
+    /// Return the raw manifest entries (one per model).
+    pub fn manifest_entries(&self) -> &[RawManifestEntry] {
         &self.manifest
+    }
+
+    /// Convert each manifest entry to a [`SelectionEntry`] for use with
+    /// [`crate::select::select`].
+    ///
+    /// The mapping from the parquet `protocol` column to `experiment_class` is:
+    /// - `"Automatic"` or `"Standard"` → empty set
+    /// - `"TMT"` → `{"tmt"}`
+    /// - `"Phosphorylation"` → `{"phospho"}`
+    /// - `"iTRAQ"` → `{"itraq"}`
+    /// - `"iTRAQPhospho"` → `{"itraq", "phospho"}`
+    ///
+    /// Any unrecognised protocol falls back to empty set (same as "standard").
+    pub fn selection_entries(&self) -> Vec<SelectionEntry> {
+        self.manifest
+            .iter()
+            .map(|e| SelectionEntry {
+                model_id: e.model_id.clone(),
+                activation: e.activation.clone(),
+                instrument: e.instrument.clone(),
+                enzyme: e.enzyme.clone(),
+                experiment_class: protocol_to_experiment_class(&e.protocol),
+            })
+            .collect()
     }
 
     /// Load and reconstruct a [`Param`] for the given `model_id`.
@@ -48,15 +93,44 @@ impl ModelStore {
     }
 }
 
+/// Convert the parquet `protocol` column value to a `BTreeSet<String>` experiment class.
+///
+/// This maps the Java/binary naming convention in the store to the lowercase
+/// slug-set used by [`crate::select`].
+///
+/// `iTRAQPhospho` is intentionally mapped to the single slug `"itraqphospho"`
+/// (not `{"itraq","phospho"}`) so that:
+/// - exact-match (step 1) in [`crate::select::select`] finds combo models
+///   like `hcd_qexactive_tryp_itraqphospho` when a `SelectionKey` with
+///   `{"itraqphospho"}` is used, and
+/// - when no iTRAQPhospho-specific model is bundled, select() falls through
+///   to the empty-class fallback (the protocol-less model) rather than
+///   spuriously matching a `{"phospho"}` subset entry.
+pub fn protocol_to_experiment_class(protocol: &str) -> std::collections::BTreeSet<String> {
+    match protocol {
+        "Automatic" | "Standard" => std::collections::BTreeSet::new(),
+        "TMT"                    => parse_experiment_class("tmt"),
+        "Phosphorylation"        => parse_experiment_class("phospho"),
+        "iTRAQ"                  => parse_experiment_class("itraq"),
+        // Keep as a single opaque slug — do NOT split into {"itraq","phospho"}.
+        "iTRAQPhospho"           => {
+            let mut s = std::collections::BTreeSet::new();
+            s.insert("itraqphospho".to_string());
+            s
+        }
+        other                    => parse_experiment_class(other),
+    }
+}
+
 // ── manifest reader ──────────────────────────────────────────────────────────
 
-fn read_manifest(path: &Path) -> Result<Vec<String>, TrainError> {
+fn read_manifest(path: &Path) -> Result<Vec<RawManifestEntry>, TrainError> {
     let file = std::fs::File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
     let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
 
-    let mut ids: Vec<String> = Vec::new();
+    let mut entries: Vec<RawManifestEntry> = Vec::new();
     for batch in reader {
         let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
         let record_kind = batch
@@ -75,11 +149,29 @@ fn read_manifest(path: &Path) -> Result<Vec<String>, TrainError> {
 
         for i in 0..batch.num_rows() {
             if !rk.is_null(i) && rk.value(i) == "manifest" {
-                ids.push(mid.value(i).to_string());
+                let activation = str_col(&batch, "activation")
+                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .unwrap_or_default();
+                let instrument = str_col(&batch, "instrument")
+                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .unwrap_or_default();
+                let enzyme = str_col(&batch, "enzyme")
+                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .unwrap_or_default();
+                let protocol = str_col(&batch, "protocol")
+                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .unwrap_or_default();
+                entries.push(RawManifestEntry {
+                    model_id: mid.value(i).to_string(),
+                    activation,
+                    instrument,
+                    enzyme,
+                    protocol,
+                });
             }
         }
     }
-    Ok(ids)
+    Ok(entries)
 }
 
 // ── param reconstructor ──────────────────────────────────────────────────────
@@ -503,4 +595,39 @@ fn list_col<'a>(
         .as_any()
         .downcast_ref::<ListArray>()
         .ok_or_else(|| TrainError::Other(format!("column {name} not ListArray")))
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Resolve the bundled `models.parquet` path relative to this file's
+    /// manifest dir (same convention the binary uses via `CARGO_MANIFEST_DIR`).
+    fn bundled_store_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/ionstat/models.parquet")
+    }
+
+    #[test]
+    fn selection_entries_returns_39_with_hcd_qexactive_tryp() {
+        let path = bundled_store_path();
+        let store = ModelStore::open(&path)
+            .expect("failed to open bundled models.parquet");
+        let entries = store.selection_entries();
+        assert_eq!(
+            entries.len(),
+            39,
+            "expected 39 selection entries, got {}",
+            entries.len()
+        );
+        let found = entries
+            .iter()
+            .any(|e| e.model_id == "hcd_qexactive_tryp");
+        assert!(
+            found,
+            "expected an entry with model_id == \"hcd_qexactive_tryp\""
+        );
+    }
 }

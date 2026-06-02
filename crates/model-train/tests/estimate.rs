@@ -1,0 +1,290 @@
+//! TDD tests for [`model_train::estimate::Estimator`].
+//!
+//! The three tests correspond directly to the specification:
+//! 1. An estimated `Param` from real counts is scorable (finite node scores, no panic).
+//! 2. A partition with counts below `min_count` backs off rather than producing
+//!    all-zero / -inf entries.
+//! 3. Dense counts recover the empirical rank-1 fraction within tolerance.
+
+use std::path::Path;
+
+use model::amino_acid::AminoAcid;
+use model::mass::nominal_from;
+use model::peptide::Peptide;
+use model::spectrum::Spectrum;
+use scoring_crate::param_model::{IonType, Param, Partition};
+use scoring_crate::scoring::rank_scorer::RankScorer;
+
+use model_train::accumulate::StatsAccumulator;
+use model_train::counts::CountStats;
+use model_train::estimate::{Estimator, EstimatorConfig};
+
+// ---------------------------------------------------------------------------
+// Shared fixtures
+// ---------------------------------------------------------------------------
+
+fn make_peptide(seq: &[u8]) -> Peptide {
+    let residues: Vec<AminoAcid> = seq
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
+    Peptide::new(residues, b'_', b'-')
+}
+
+fn load_hcd_scorer() -> (Param, RankScorer) {
+    let param_path = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/HCD_QExactive_Tryp.param"
+    ));
+    let param = Param::load_from_file(param_path).expect("load HCD_QExactive_Tryp.param");
+    let scorer = RankScorer::new(&param);
+    (param, scorer)
+}
+
+/// Build a synthetic spectrum with peaks at every theoretical ion position for
+/// `peptide`, with strictly decreasing intensities so that split-1 ions get
+/// rank 1.
+fn build_synthetic_spectrum(
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    precursor_mz: f64,
+    charge: u8,
+) -> Spectrum {
+    let param = scorer.param();
+    let n = peptide.length();
+    assert!(n >= 2);
+
+    let peptide_nominal = peptide.nominal_residue_mass();
+    let mut prefix_acc = 0.0_f64;
+    let mut prefix_nominals: Vec<i32> = vec![0];
+    for s in 1..n {
+        let aa = &peptide.residues[s - 1];
+        prefix_acc += aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        prefix_nominals.push(nominal_from(prefix_acc));
+    }
+
+    const PROTON: f64 = 1.007_276_49;
+    let parent_mass = (precursor_mz - PROTON) * (charge as f64);
+
+    let num_segs = param.num_segments as usize;
+    let mut all_ions: Vec<(f64, f32)> = Vec::new();
+    let mut global_index = 0usize;
+
+    for split in 1..n {
+        let prefix_nom = prefix_nominals[split] as f64;
+        let suffix_nom = (peptide_nominal - prefix_nominals[split]) as f64;
+        for (is_prefix, nominal_mass) in [(true, prefix_nom), (false, suffix_nom)] {
+            for seg in 0..num_segs {
+                let part = param.partition_for(charge, parent_mass, seg);
+                let ions = param.ion_types_for_partition_slice(charge, parent_mass, seg);
+                for &ion in ions {
+                    let theo_mz = match (is_prefix, ion) {
+                        (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
+                        (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                        _ => continue,
+                    };
+                    if param.segment_num(theo_mz, parent_mass) != seg { continue; }
+                    if theo_mz <= 0.0 { continue; }
+                    let _ = part; // partition is used implicitly via param lookups
+                    let intensity = 100_000.0_f32 / (1.0 + global_index as f32);
+                    all_ions.push((theo_mz, intensity));
+                    global_index += 1;
+                }
+            }
+        }
+    }
+
+    let mut peaks: Vec<(f64, f32)> = all_ions;
+    peaks.push((3000.1, 0.001));
+    peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    Spectrum {
+        title: "synthetic".into(),
+        precursor_mz,
+        precursor_intensity: None,
+        precursor_charge: Some(charge as i32),
+        rt_seconds: None,
+        scan: None,
+        peaks,
+        activation_method: None,
+        isolation_lower_offset: None,
+        isolation_upper_offset: None,
+    }
+}
+
+/// Accumulate N identical PSMs into a `CountStats` using the real HCD scorer.
+fn accumulate_n(n: usize) -> (CountStats, Param) {
+    let (template, scorer) = load_hcd_scorer();
+    let peptide = make_peptide(b"PEPTIDE");
+    let charge: u8 = 2;
+    const PROTON: f64 = 1.007_276_49;
+    let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
+    let spectrum = build_synthetic_spectrum(&peptide, &scorer, precursor_mz, charge);
+
+    let acc = StatsAccumulator::new(&scorer);
+    let mut stats = CountStats::new();
+    for _ in 0..n {
+        acc.accumulate(&mut stats, &spectrum, &peptide, charge);
+    }
+    (stats, template)
+}
+
+// ---------------------------------------------------------------------------
+// Test 1: estimated Param is scorable and produces finite node scores
+// ---------------------------------------------------------------------------
+
+#[test]
+fn estimated_param_is_scorable_and_finite() {
+    // Accumulate 200 identical synthetic PSMs so every partition sees counts.
+    let (counts, template) = accumulate_n(200);
+
+    let estimator = Estimator::new(EstimatorConfig::default());
+    let param = estimator.estimate(&counts, &template);
+
+    // RankScorer::new must not panic.
+    let scorer = RankScorer::new(&param);
+
+    // For every populated partition × ion, node_score at rank 1 must be finite
+    // (not NaN or +/-inf).  The binary template has a rich ion set; the estimated
+    // param should cover at least the partitions we observed.
+    let mut checked = 0usize;
+    for (&part, ion_table) in &param.rank_dist_table {
+        for (&ion, _) in ion_table {
+            if ion.is_noise() { continue; }
+            let s = scorer.node_score(part, ion, 1);
+            assert!(
+                s.is_finite(),
+                "node_score({:?}, {:?}, rank=1) = {s} is not finite",
+                part, ion
+            );
+            let m = scorer.missing_ion_score(part, ion);
+            assert!(
+                m.is_finite(),
+                "missing_ion_score({:?}, {:?}) = {m} is not finite",
+                part, ion
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no (partition, ion) pairs were checked — rank_dist_table is empty");
+}
+
+// ---------------------------------------------------------------------------
+// Test 2: empty (below min_count) partition backs off to a non-degenerate
+//         distribution (never all-zero, never -inf log)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn empty_partition_backs_off_not_zero() {
+    // Use an *empty* CountStats so every partition is below min_count.
+    let (template, _scorer) = load_hcd_scorer();
+    let empty_counts = CountStats::new();
+
+    let estimator = Estimator::new(EstimatorConfig::default());
+    let param = estimator.estimate(&empty_counts, &template);
+
+    // Even with zero observed counts, every rank_dist_table entry must be
+    // populated (Laplace + global-pool backoff) and the resulting log scores
+    // must be finite.
+    let scorer = RankScorer::new(&param);
+
+    let mut checked = 0usize;
+    for (&part, ion_table) in &param.rank_dist_table {
+        // Noise entry must be present.
+        assert!(
+            ion_table.contains_key(&IonType::Noise),
+            "partition {:?} missing Noise entry in rank_dist_table",
+            part
+        );
+        for (&ion, freqs) in ion_table {
+            // Every frequency must be positive (no zeros — Laplace guarantees this).
+            for (i, &f) in freqs.iter().enumerate() {
+                assert!(
+                    f > 0.0,
+                    "freq[{i}] = {f} <= 0 for partition {:?} ion {:?}",
+                    part, ion
+                );
+            }
+            if ion.is_noise() { continue; }
+            let s = scorer.node_score(part, ion, 1);
+            assert!(
+                s.is_finite(),
+                "node_score for {:?} {:?} = {s} is not finite after empty-count backoff",
+                part, ion
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no entries checked — rank_dist_table unexpectedly empty");
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: dense counts recover empirical rank-1 fraction within tolerance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dense_counts_recover_empirical_within_tolerance() {
+    // With a very small pseudo (effectively zero relative to many counts) and
+    // many PSMs, the normalised rank-1 frequency for the most-observed
+    // (partition, ion) should be close to the empirical fraction.
+
+    let (template, scorer_seed) = load_hcd_scorer();
+    let peptide = make_peptide(b"PEPTIDE");
+    let charge: u8 = 2;
+    const PROTON: f64 = 1.007_276_49;
+    let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
+    let spectrum = build_synthetic_spectrum(&peptide, &scorer_seed, precursor_mz, charge);
+
+    // 2000 PSMs: Laplace pseudo (1.0) is negligible relative to counts.
+    let acc = StatsAccumulator::new(&scorer_seed);
+    let mut counts = CountStats::new();
+    for _ in 0..2000 {
+        acc.accumulate(&mut counts, &spectrum, &peptide, charge);
+    }
+
+    // Estimator with tiny pseudo to minimise smoothing bias.
+    let cfg = EstimatorConfig {
+        pseudo: 0.001,
+        min_count: 1,    // disable backoff (all partitions will exceed 1 count)
+        backoff_weight: 0.0,
+        ..Default::default()
+    };
+    let estimator = Estimator::new(cfg);
+    let param = estimator.estimate(&counts, &template);
+
+    // Find the (partition, ion) with the most counts at rank index 0.
+    let mut best: Option<(Partition, IonType, u64, u64)> = None; // (part, ion, rank0, total)
+    for (&(part, ion), v) in &counts.rank {
+        if ion.is_noise() { continue; }
+        let rank0 = v.get(0).copied().unwrap_or(0);
+        let total: u64 = v.iter().sum();
+        if rank0 > 0 && total > 0 {
+            if best.as_ref().map_or(true, |&(_, _, b_r, _)| rank0 > b_r) {
+                best = Some((part, ion, rank0, total));
+            }
+        }
+    }
+    let (best_part, best_ion, rank0_count, total_count) =
+        best.expect("expected at least one (partition, ion) with rank-0 counts");
+
+    // Empirical fraction for rank-1 (index 0).
+    let empirical = rank0_count as f32 / total_count as f32;
+
+    // Estimated frequency at index 0 from the rank_dist_table.
+    let estimated = param
+        .rank_dist_table
+        .get(&best_part)
+        .and_then(|t| t.get(&best_ion))
+        .and_then(|v| v.first().copied())
+        .expect("rank_dist_table entry missing for best (partition, ion)");
+
+    // With pseudo=0.001 and n=2000, the smoothed value should be within 1%
+    // of the empirical fraction.
+    let tol = 0.01_f32;
+    assert!(
+        (estimated - empirical).abs() <= tol,
+        "estimated rank-1 freq {estimated:.4} deviates from empirical {empirical:.4} by more than {tol} \
+         for partition {:?} ion {:?}",
+        best_part, best_ion
+    );
+}

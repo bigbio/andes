@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, BooleanArray, Float32Array, Int32Array, ListArray, StringArray, StructArray,
+    Array, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, StringArray, StructArray,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rustc_hash::FxHashMap;
@@ -19,7 +19,9 @@ use scoring_crate::param_model::{
     FragmentOffsetFrequency, IonType, Param, Partition, PrecursorOffsetFrequency, SpecDataType,
 };
 
+use crate::counts::CountStats;
 use crate::select::{parse_experiment_class, SelectionEntry};
+use crate::store::write::SourceLedger;
 use crate::TrainError;
 
 // ── public API ───────────────────────────────────────────────────────────────
@@ -90,6 +92,27 @@ impl ModelStore {
     /// Load and reconstruct a [`Param`] for the given `model_id`.
     pub fn load_param(&self, model_id: &str) -> Result<Param, TrainError> {
         reconstruct_param(&self.path, model_id)
+    }
+
+    /// Return the source ledger entries for the given `model_id`.
+    ///
+    /// Returns an empty `Vec` if the store contains no `"source"` rows for
+    /// this model (e.g. stores written by the legacy [`super::write_models`]).
+    pub fn load_sources(&self, model_id: &str) -> Result<Vec<SourceLedger>, TrainError> {
+        read_sources(&self.path, model_id)
+    }
+
+    /// Reconstruct the [`CountStats`] for `(model_id, source_id)` from the
+    /// `"stat"` rows in the store.
+    ///
+    /// Returns [`TrainError::NoModel`] if no stat rows are found for the
+    /// given `(model_id, source_id)` pair.
+    pub fn load_source_stats(
+        &self,
+        model_id: &str,
+        source_id: &str,
+    ) -> Result<CountStats, TrainError> {
+        read_source_stats(&self.path, model_id, source_id)
     }
 }
 
@@ -595,6 +618,243 @@ fn list_col<'a>(
         .as_any()
         .downcast_ref::<ListArray>()
         .ok_or_else(|| TrainError::Other(format!("column {name} not ListArray")))
+}
+
+fn i64_col<'a>(
+    batch: &'a arrow::record_batch::RecordBatch,
+    name: &str,
+) -> Result<&'a Int64Array, TrainError> {
+    batch
+        .column_by_name(name)
+        .ok_or_else(|| TrainError::Other(format!("missing column {name}")))?
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| TrainError::Other(format!("column {name} not Int64Array")))
+}
+
+// ── source ledger reader ──────────────────────────────────────────────────────
+
+fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainError> {
+    let file = std::fs::File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
+    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+
+    let mut ledgers: Vec<SourceLedger> = Vec::new();
+
+    for batch in reader {
+        let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
+
+        // Check if this batch has source/stat columns at all.
+        if batch.column_by_name("source_id").is_none() {
+            continue;
+        }
+
+        let record_kind = str_col(&batch, "record_kind")?;
+        let mid_col = str_col(&batch, "model_id")?;
+
+        for i in 0..batch.num_rows() {
+            if mid_col.value(i) != model_id {
+                continue;
+            }
+            if record_kind.is_null(i) || record_kind.value(i) != "source" {
+                continue;
+            }
+
+            let source_id = opt_str_col(&batch, "source_id", i);
+            let dataset = opt_str_col(&batch, "dataset", i);
+            let date = opt_str_col(&batch, "date", i);
+            let instrument = opt_str_col(&batch, "src_instrument", i);
+            let experiment_class = opt_str_col(&batch, "src_experiment_class", i);
+
+            let n_psms = if let Ok(col) = i64_col(&batch, "n_psms") {
+                if col.is_null(i) { 0 } else { col.value(i) }
+            } else { 0 };
+
+            let weight = if let Ok(col) = f32_col(&batch, "weight") {
+                if col.is_null(i) { 1.0 } else { col.value(i) }
+            } else { 1.0 };
+
+            let train_fdr = if let Ok(col) = f32_col(&batch, "train_fdr") {
+                if col.is_null(i) { 0.01 } else { col.value(i) }
+            } else { 0.01 };
+
+            ledgers.push(SourceLedger {
+                source_id,
+                dataset,
+                n_psms,
+                date,
+                weight,
+                train_fdr,
+                instrument,
+                experiment_class,
+            });
+        }
+    }
+
+    Ok(ledgers)
+}
+
+fn opt_str_col(
+    batch: &arrow::record_batch::RecordBatch,
+    name: &str,
+    i: usize,
+) -> String {
+    match batch.column_by_name(name) {
+        Some(col) => match col.as_any().downcast_ref::<StringArray>() {
+            Some(arr) => if arr.is_null(i) { String::new() } else { arr.value(i).to_string() },
+            None => String::new(),
+        },
+        None => String::new(),
+    }
+}
+
+// ── per-source stats reader ───────────────────────────────────────────────────
+
+fn read_source_stats(path: &Path, model_id: &str, source_id: &str) -> Result<CountStats, TrainError> {
+    let file = std::fs::File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
+    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+
+    let mut stats = CountStats::new();
+    let mut found_any = false;
+
+    for batch in reader {
+        let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
+
+        // Skip batches that don't have stat columns.
+        if batch.column_by_name("counts").is_none() {
+            continue;
+        }
+        if batch.column_by_name("source_id").is_none() {
+            continue;
+        }
+
+        let record_kind = str_col(&batch, "record_kind")?;
+        let mid_col = str_col(&batch, "model_id")?;
+        let sid_col = str_col(&batch, "source_id")?;
+
+        for i in 0..batch.num_rows() {
+            if mid_col.value(i) != model_id {
+                continue;
+            }
+            if record_kind.is_null(i) || record_kind.value(i) != "stat" {
+                continue;
+            }
+            if sid_col.is_null(i) || sid_col.value(i) != source_id {
+                continue;
+            }
+
+            found_any = true;
+
+            let table_kind_col = str_col(&batch, "table_kind")?;
+            if table_kind_col.is_null(i) { continue; }
+            let tk = table_kind_col.value(i);
+
+            let counts_list = list_col(&batch, "counts")?;
+
+            match tk {
+                "rank" => {
+                    // Reconstruct (Partition, IonType) from columns.
+                    let part = read_partition(&batch, i)?;
+                    let ion = read_ion_type(&batch, i)?;
+
+                    if counts_list.is_null(i) { continue; }
+                    let arr = counts_list.value(i);
+                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                        .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
+                    let counts: Vec<u64> = (0..int64_arr.len()).map(|j| int64_arr.value(j) as u64).collect();
+                    stats.rank.insert((part, ion), counts);
+                }
+                "error" => {
+                    let part = read_partition(&batch, i)?;
+                    if counts_list.is_null(i) { continue; }
+                    let arr = counts_list.value(i);
+                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                        .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
+                    let counts: Vec<u64> = (0..int64_arr.len()).map(|j| int64_arr.value(j) as u64).collect();
+                    stats.error.insert(part, counts);
+                }
+                "noise_error" => {
+                    let part = read_partition(&batch, i)?;
+                    if counts_list.is_null(i) { continue; }
+                    let arr = counts_list.value(i);
+                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                        .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
+                    let counts: Vec<u64> = (0..int64_arr.len()).map(|j| int64_arr.value(j) as u64).collect();
+                    stats.noise_error.insert(part, counts);
+                }
+                "existence" => {
+                    // counts[idx] = count for existence key (partition, idx).
+                    let part = read_partition(&batch, i)?;
+                    if counts_list.is_null(i) { continue; }
+                    let arr = counts_list.value(i);
+                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                        .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
+                    for j in 0..int64_arr.len() {
+                        let count = int64_arr.value(j) as u64;
+                        if count > 0 {
+                            stats.existence.insert((part, j as u32), count);
+                        }
+                    }
+                }
+                "charge" => {
+                    // counts parallel to charge_keys.
+                    let charge_keys_col = list_col(&batch, "charge_keys")?;
+                    if counts_list.is_null(i) || charge_keys_col.is_null(i) { continue; }
+
+                    let counts_arr = counts_list.value(i);
+                    let keys_arr = charge_keys_col.value(i);
+                    let int64_arr = counts_arr.as_any().downcast_ref::<Int64Array>()
+                        .ok_or_else(|| TrainError::Other("charge counts not Int64Array".into()))?;
+                    let int32_arr = keys_arr.as_any().downcast_ref::<Int32Array>()
+                        .ok_or_else(|| TrainError::Other("charge_keys not Int32Array".into()))?;
+                    for j in 0..int64_arr.len().min(int32_arr.len()) {
+                        let charge_key = int32_arr.value(j);
+                        let count = int64_arr.value(j) as u64;
+                        if count > 0 {
+                            stats.charge.insert(charge_key, count);
+                        }
+                    }
+                }
+                _ => {} // unknown stat table_kind: skip
+            }
+        }
+    }
+
+    if !found_any {
+        return Err(TrainError::NoModel(format!("source_stats({model_id}, {source_id})")));
+    }
+
+    Ok(stats)
+}
+
+fn read_partition(
+    batch: &arrow::record_batch::RecordBatch,
+    i: usize,
+) -> Result<Partition, TrainError> {
+    let charge = i32_col(batch, "part_charge")?.value(i);
+    let mass_bits = i32_col(batch, "part_mass_bits")?.value(i) as u32;
+    let seg = i32_col(batch, "part_seg")?.value(i);
+    Ok(Partition {
+        charge,
+        parent_mass: f32::from_bits(mass_bits),
+        seg_num: seg,
+    })
+}
+
+fn read_ion_type(
+    batch: &arrow::record_batch::RecordBatch,
+    i: usize,
+) -> Result<IonType, TrainError> {
+    let ik_col = str_col(batch, "ion_kind")?;
+    let ic_col = i32_col(batch, "ion_charge")?;
+    let iob_col = i32_col(batch, "ion_offset_bits")?;
+    let kind = ik_col.value(i);
+    let ic = ic_col.value(i);
+    let iob = iob_col.value(i) as u32;
+    decode_ion_type(kind, ic, iob)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────

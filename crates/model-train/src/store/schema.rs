@@ -120,10 +120,40 @@ pub fn tables_schema() -> SchemaRef {
 /// share one Parquet file.
 ///
 /// Layout:
-/// - `record_kind` (non-null) — `"manifest"` | `"table"`
+/// - `record_kind` (non-null) — `"manifest"` | `"table"` | `"source"` | `"stat"`
 /// - `model_id` (non-null)
 /// - every manifest-only column (nullable) — table rows leave these null
 /// - every table-only column (nullable) — manifest rows leave these null
+/// - every source-only column (nullable) — other rows leave these null
+/// - `source_id` (nullable) — shared by `"source"` and `"stat"` rows
+///
+/// # Source ledger (`"source"` rows)
+///
+/// One row per `(model_id, source_id)` that was used during training.
+/// Columns: `source_id`, `dataset`, `n_psms`, `date`, `weight`,
+/// `train_fdr`, `src_instrument`, `src_experiment_class`.
+///
+/// # Per-source sufficient statistics (`"stat"` rows)
+///
+/// One row per `(model_id, source_id, partition, ion_kind, ion_charge, table_kind)`.
+/// Reuses `part_charge`, `part_mass_bits`, `part_seg`, `ion_kind`,
+/// `ion_charge`, `table_kind` from the table column set.
+///
+/// `table_kind` values for `"stat"` rows:
+/// - `"rank"` — keyed by `(Partition, IonType)`; `ion_kind`/`ion_charge`/
+///   `ion_offset_bits` carry the IonType; `counts` carries `Vec<u64>` as
+///   `List<Int64>`.
+/// - `"error"` / `"noise_error"` — keyed by `Partition`; `ion_kind = "-"`,
+///   `ion_charge = 0`, `ion_offset_bits = 0`; `counts = Vec<u64>`.
+/// - `"existence"` — keyed by `Partition`; one row per partition; the
+///   existence map `{(Partition, u32) → u64}` is serialised as a flat
+///   `counts` list where `counts[idx]` = the count for existence index
+///   `idx`.  The maximum `u32` idx seen determines the list length.
+/// - `"charge"` — one row with `part_charge = 0`, `part_mass_bits = 0`,
+///   `part_seg = 0`, `ion_kind = "-"`, `ion_charge = 0`,
+///   `ion_offset_bits = 0`.  The charge map `{i32 → u64}` is serialised
+///   as two parallel `counts` + `charge_keys: List<Int32>` (same row).
+///   `counts[j]` corresponds to `charge_keys[j]`.
 pub fn combined_schema() -> SchemaRef {
     let charge_hist_dt = list_of_struct([
         Field::new("charge", DataType::Int32, false),
@@ -172,6 +202,23 @@ pub fn combined_schema() -> SchemaRef {
         nf("values", list_of(DataType::Float32)),
         // "precursor_off" → precursor_offsets (full struct)
         nf("precursor_offsets", precursor_off_dt),
+        // ── source-only ─────────────────────────────────────────────────────
+        nf("source_id", DataType::Utf8),
+        nf("dataset", DataType::Utf8),
+        nf("n_psms", DataType::Int64),
+        nf("date", DataType::Utf8),
+        nf("weight", DataType::Float32),
+        nf("train_fdr", DataType::Float32),
+        nf("src_instrument", DataType::Utf8),
+        nf("src_experiment_class", DataType::Utf8),
+        // ── stat-only ────────────────────────────────────────────────────────
+        // "stat" rows reuse part_charge/part_mass_bits/part_seg/ion_kind/
+        // ion_charge/ion_offset_bits/table_kind from the table section.
+        // They carry counts as List<Int64> (u64 histogram bins).
+        // For "charge" table_kind, charge_keys carries the i32 charge values
+        // parallel to counts.
+        nf("counts", list_of(DataType::Int64)),
+        nf("charge_keys", list_of(DataType::Int32)),
     ]))
 }
 

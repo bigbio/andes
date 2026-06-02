@@ -199,6 +199,10 @@ Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is
 
 For mzML inputs with `--fragmentation auto` (the default), msgf-rust peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a scoring model from the bundled `models.parquet` store based on the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when selecting the model. MGF files have no activation metadata, so they use flag-based selection (defaulting to `hcd_qexactive_tryp`). Full resolution table: `DOCS.md` §4.
 
+## Training your own models
+
+msgf-rust can generate scoring models from your own data (`msgf-rust train`) and select them automatically by instrument at search time — useful for instruments or experiment classes the bundled models don't cover well (Orbitrap Astral, timsTOF, TMT/phospho/immunopeptidomics, …). Models live in a single Parquet store and support incremental add/remove/reweight updates with a held-out acceptance gate. See [`TRAIN.md`](TRAIN.md).
+
 ## Parity vs Java MS-GF+
 
 PIN output columns are bit-exact with Java MS-GF+ on the agreement bucket (same scan + same top-1 peptide) for most features. Three residual divergences exist as deferred research: `lnEValue` (num_distinct semantics), `MeanRelErrorTop7` (error-stat normalization), and the BSA charge-3 SEV gap from deconvolution-implementation differences. None gate cutover; aggregate 1% FDR PSM counts beat Java on all three benchmark datasets. Full detail: `DOCS.md` §8d.

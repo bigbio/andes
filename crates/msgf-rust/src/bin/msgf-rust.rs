@@ -26,10 +26,15 @@ use model_train::{
     accumulate::{merge, StatsAccumulator},
     counts::CountStats,
     estimate::{Estimator, EstimatorConfig},
+    gate::evaluate_candidate,
     labeled::bootstrap_labels,
     select::{select, SelectionKey},
     protocol_to_experiment_class as store_protocol_to_experiment_class,
-    store::write_models,
+    store::{
+        SourceLedger,
+        update_add, update_remove, update_reweight, update_decay, commit_update,
+        write_all_models_with_sources_pub,
+    },
 };
 use scoring_crate::{Param, RankScorer};
 use search::{
@@ -39,6 +44,9 @@ use search::{
 };
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
+
+// Type alias to reduce clippy type_complexity warnings in the train path.
+type ModelEntryOwned = (String, Param, Vec<(SourceLedger, CountStats)>);
 
 /// Fragmentation method. `Auto` detects from the mzML's activation block and
 /// falls back to the bundled `HCD_QExactive_Tryp.param` when nothing is detected.
@@ -260,12 +268,20 @@ struct SearchArgs {
 struct TrainArgs {
     /// Input spectrum file (training data). Same format dispatch as for search:
     /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
+    ///
+    /// Required for initial training.  In `--update` mode with `--remove-source`
+    /// or `--reweight` / `--decay`, `--spectra` is only required when
+    /// `--validate` is also given (to run the acceptance gate).
     #[arg(long)]
-    spectra: PathBuf,
+    spectra: Option<PathBuf>,
 
     /// Input FASTA target database (decoys are generated automatically).
+    ///
+    /// Required for initial training and for `--update --add`.
+    /// In `--update` mode without `--add`, only required when `--validate` is
+    /// given.
     #[arg(long)]
-    database: PathBuf,
+    database: Option<PathBuf>,
 
     /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
     /// a path to a binary `.param` file. When omitted, the bundled
@@ -304,6 +320,53 @@ struct TrainArgs {
     /// Number of worker threads. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
     threads: usize,
+
+    /// ISO 8601 date string (e.g. `2026-01-01`) recorded in the source ledger.
+    /// When omitted, the current date is used for initial training; empty string
+    /// is stored when `--date ""` is explicitly passed.
+    #[arg(long)]
+    date: Option<String>,
+
+    // ── Update mode ──────────────────────────────────────────────────────────
+
+    /// Switch to incremental update mode for this model ID.
+    /// When set, one of `--add`, `--remove-source`, `--reweight`, or `--decay`
+    /// must be provided.
+    #[arg(long = "update", value_name = "MODEL_ID")]
+    update_model: Option<String>,
+
+    /// (Update mode) Add a new source from `--spectra`.
+    /// Requires `--source-id` and `--database`.
+    #[arg(long, requires = "update_model")]
+    add: bool,
+
+    /// (Update mode) Source identifier for the new source being added
+    /// (used with `--add`).
+    #[arg(long = "source-id", requires = "add", value_name = "ID")]
+    source_id: Option<String>,
+
+    /// (Update mode) Remove the source with this ID from the model.
+    #[arg(long = "remove-source", requires = "update_model", value_name = "ID")]
+    remove_source: Option<String>,
+
+    /// (Update mode) Set a source's weight.  Format: `<source-id>=<weight>`,
+    /// e.g. `--reweight s0=0.5`.
+    #[arg(long = "reweight", requires = "update_model", value_name = "ID=W")]
+    reweight: Option<String>,
+
+    /// (Update mode) Apply exponential age-decay to all sources with this
+    /// half-life in days.
+    #[arg(long = "decay", requires = "update_model", value_name = "DAYS")]
+    decay: Option<f32>,
+
+    /// (Update mode) Held-out validation spectra for the acceptance gate.
+    /// When omitted the gate is skipped (a warning is printed).
+    #[arg(long = "validate", requires = "update_model")]
+    validate: Option<PathBuf>,
+
+    /// (Update mode) Commit the update even if the acceptance gate fails.
+    #[arg(long, requires = "update_model")]
+    force: bool,
 }
 
 /// Available subcommands.
@@ -1366,6 +1429,9 @@ fn load_spectra_for_train(
 }
 
 /// Run the full training pipeline and write a model to a Parquet store.
+///
+/// When `args.update_model` is set, runs in incremental update mode (Part D).
+/// Otherwise runs the standard initial-training pipeline (Part A).
 fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = std::time::Instant::now();
 
@@ -1378,79 +1444,27 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
             .expect("build_global");
     });
 
+    if let Some(ref update_model_id) = args.update_model.clone() {
+        return run_train_update(args, update_model_id, t0);
+    }
+
+    // ── Standard training path ────────────────────────────────────────────────
+
     // ── 2. Load spectra ───────────────────────────────────────────────────────
-    eprintln!("train: loading spectra from {} ...", args.spectra.display());
-    let spectra = load_spectra_for_train(&args.spectra)?;
+    let spectra_path = args.spectra.clone().ok_or("--spectra is required for initial training")?;
+    eprintln!("train: loading spectra from {} ...", spectra_path.display());
+    let spectra = load_spectra_for_train(&spectra_path)?;
     eprintln!("train: loaded {} spectra", spectra.len());
 
+    let database = args.database.clone().ok_or("--database is required for initial training")?;
+
     // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
-    // `--seed-model` may be: (a) absent → use hcd_qexactive_tryp from bundled
-    // store; (b) a slug like "hcd_qexactive_tryp" → look up in bundled store;
-    // (c) a path to a binary .param file.
-    let (seed_model_id, seed_param): (String, Param) = match &args.seed_model {
-        None => {
-            let store_path = bundled_store_path();
-            let store = ModelStore::open(&store_path)
-                .map_err(|e| format!("opening bundled store: {e}"))?;
-            let p = store.load_param("hcd_qexactive_tryp")
-                .map_err(|e| format!("loading seed model: {e}"))?;
-            ("hcd_qexactive_tryp".to_string(), p)
-        }
-        Some(seed) => {
-            let as_path = Path::new(seed);
-            if as_path.is_file() {
-                // Treat as a binary .param file path.
-                let p = Param::load_from_file(as_path)
-                    .map_err(|e| format!("loading seed param file {}: {e}", as_path.display()))?;
-                (seed.clone(), p)
-            } else {
-                // Treat as a store slug.
-                let store_path = bundled_store_path();
-                let store = ModelStore::open(&store_path)
-                    .map_err(|e| format!("opening bundled store: {e}"))?;
-                let p = store.load_param(seed)
-                    .map_err(|e| format!("loading seed model '{seed}': {e}"))?;
-                (seed.clone(), p)
-            }
-        }
-    };
+    let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
     eprintln!("train: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
     // ── 4. Build AminoAcidSet ─────────────────────────────────────────────────
-    let aa = match &args.mods {
-        Some(path) => {
-            let set = AminoAcidSetBuilder::new_standard()
-                .add_mods_from_file(path)
-                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
-                .build()
-                .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
-            eprintln!("train: loaded modifications from {}", path.display());
-            set
-        }
-        None => {
-            let cam = Modification {
-                name: "Carbamidomethyl".into(),
-                mass_delta: 57.02146,
-                residue: ResidueSpec::Specific(b'C'),
-                location: ModLocation::Anywhere,
-                fixed: true,
-                accession: None,
-            };
-            let ox = Modification {
-                name: "Oxidation".into(),
-                mass_delta: 15.99491,
-                residue: ResidueSpec::Specific(b'M'),
-                location: ModLocation::Anywhere,
-                fixed: false,
-                accession: None,
-            };
-            AminoAcidSetBuilder::new_standard()
-                .add_fixed_mod(cam)
-                .add_variable_mod(ox)
-                .build()?
-        }
-    };
+    let aa = build_aa_set(&args.mods)?;
 
     // ── 5. Bootstrap labels ───────────────────────────────────────────────────
     let search_params = SearchParams::default_tryptic(aa);
@@ -1460,7 +1474,7 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
     let labels = bootstrap_labels(
         &spectra,
-        &args.database,
+        &database,
         &seed_scorer,
         &search_params,
         args.train_fdr,
@@ -1484,7 +1498,6 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
         let spec = &spectra[label.spectrum_index];
         accumulator.accumulate(&mut stats, spec, &label.peptide, label.charge);
     }
-    // Sequential merge (merge() expects a Vec; we've already accumulated into one).
     let stats = merge(vec![stats]);
 
     // ── 7. Estimate model ─────────────────────────────────────────────────────
@@ -1502,37 +1515,72 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| format!("trained_{}_{}", args.instrument, args.protocol));
     eprintln!("train: model ID = {model_id}");
 
-    // ── 9. Write to store (read-existing + rewrite-all + new) ────────────────
+    // ── 9. Build source ledger (Part A) ───────────────────────────────────────
+    // Determine date: use args.date if provided, else today's date in ISO 8601.
+    let date_str = args.date.clone().unwrap_or_else(|| {
+        // Format today as YYYY-MM-DD using std::time.
+        format_today_iso8601()
+    });
+    let spectra_filename = spectra_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| spectra_path.display().to_string());
+    let source_id = format!("bootstrap_{model_id}");
+    let ledger = SourceLedger {
+        source_id: source_id.clone(),
+        dataset: spectra_filename,
+        n_psms: labels.len() as i64,
+        date: date_str,
+        weight: 1.0,
+        train_fdr: args.train_fdr as f32,
+        instrument: args.instrument.clone(),
+        experiment_class: args.protocol.clone(),
+    };
+
+    // ── 10. Write to store with source tracking ────────────────────────────────
+    // Read existing OTHER models from the store (preserve them on append).
     let store_path = &args.out_store;
-    let mut existing: Vec<(String, Param)> = Vec::new();
+    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
     if store_path.exists() {
         let store = ModelStore::open(store_path)
             .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
         for id in store.model_ids() {
             if id == model_id {
                 eprintln!("train: overwriting existing model '{id}' in store");
-                continue; // will be replaced by the new trained model
+                continue;
             }
             let p = store.load_param(&id)
-                .map_err(|e| format!("reading model '{id}' from existing store: {e}"))?;
-            existing.push((id, p));
+                .map_err(|e| format!("reading model '{id}': {e}"))?;
+            let src_ledgers = store.load_sources(&id)
+                .unwrap_or_default();
+            let mut src = Vec::new();
+            for l in src_ledgers {
+                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                    src.push((l, s));
+                }
+            }
+            existing_other.push((id, p, src));
         }
     }
 
-    // Build the full list: existing models + the new trained model.
-    let mut all_models: Vec<(String, &Param)> = existing
-        .iter()
-        .map(|(id, p)| (id.clone(), p))
-        .collect();
-    all_models.push((model_id.clone(), &trained_param));
+    // Combine all models: write the trained model + existing others together.
+    let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+    all_entries.push((model_id.clone(), trained_param.clone(), vec![(ledger, stats)]));
+    for (id, p, src) in existing_other {
+        all_entries.push((id, p, src));
+    }
 
-    write_models(store_path, &all_models)
-        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    write_all_models_with_sources_pub(
+        store_path,
+        &all_entries.iter()
+            .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
 
     eprintln!(
-        "train: wrote model '{model_id}' to {} ({} total model(s)) [{:.2}s]",
+        "train: wrote model '{model_id}' to {} (source '{source_id}') [{:.2}s]",
         store_path.display(),
-        all_models.len(),
         t0.elapsed().as_secs_f64(),
     );
     eprintln!(
@@ -1543,6 +1591,279 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     Ok(())
+}
+
+/// Incremental update mode (Part D): `--update <MODEL_ID>` plus one of
+/// `--add`, `--remove-source`, `--reweight`, `--decay`.
+fn run_train_update(
+    args: TrainArgs,
+    model_id: &str,
+    t0: std::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store_path = &args.out_store;
+    let cfg = EstimatorConfig::default();
+
+    // ── Dispatch to the right update operation ────────────────────────────────
+    let (candidate, new_sources) = if args.add {
+        // --add mode: search spectra, accumulate stats, call update_add.
+        let spectra_path = args.spectra.clone()
+            .ok_or("--spectra is required with --add")?;
+        let database = args.database.clone()
+            .ok_or("--database is required with --add")?;
+        let source_id = args.source_id.clone()
+            .ok_or("--source-id is required with --add")?;
+
+        eprintln!("train update: loading spectra from {} ...", spectra_path.display());
+        let spectra = load_spectra_for_train(&spectra_path)?;
+        eprintln!("train update: loaded {} spectra", spectra.len());
+
+        // Load the current stored model as the seed.
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening store {}: {e}", store_path.display()))?;
+        let current_param = store.load_param(model_id)
+            .map_err(|e| format!("loading model '{model_id}': {e}"))?;
+        let current_scorer = RankScorer::new(&current_param);
+
+        let aa = build_aa_set(&args.mods)?;
+        let search_params = SearchParams::default_tryptic(aa);
+
+        eprintln!("train update: running seed search (train-fdr={}) ...", args.train_fdr);
+        let labels = bootstrap_labels(
+            &spectra,
+            &database,
+            &current_scorer,
+            &search_params,
+            args.train_fdr,
+        )
+        .map_err(|e| format!("bootstrap_labels: {e}"))?;
+        eprintln!("train update: {} confident labels", labels.len());
+
+        if labels.is_empty() {
+            return Err(format!(
+                "no confident labels at train-fdr={} — try a higher --train-fdr",
+                args.train_fdr
+            ).into());
+        }
+
+        let accumulator = StatsAccumulator::new(&current_scorer);
+        let mut stats = CountStats::new();
+        for label in &labels {
+            accumulator.accumulate(&mut stats, &spectra[label.spectrum_index], &label.peptide, label.charge);
+        }
+        let stats = merge(vec![stats]);
+
+        let spectra_filename = spectra_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| spectra_path.display().to_string());
+        let date_str = args.date.clone().unwrap_or_else(format_today_iso8601);
+        let ledger = SourceLedger {
+            source_id: source_id.clone(),
+            dataset: spectra_filename,
+            n_psms: labels.len() as i64,
+            date: date_str,
+            weight: 1.0,
+            train_fdr: args.train_fdr as f32,
+            instrument: args.instrument.clone(),
+            experiment_class: args.protocol.clone(),
+        };
+
+        update_add(store_path, model_id, ledger, stats, cfg)
+            .map_err(|e| format!("update_add: {e}"))?
+
+    } else if let Some(ref sid) = args.remove_source.clone() {
+        update_remove(store_path, model_id, sid, cfg)
+            .map_err(|e| format!("update_remove: {e}"))?
+
+    } else if let Some(ref spec) = args.reweight.clone() {
+        // Parse "source-id=weight"
+        let (sid, weight) = parse_reweight_spec(spec)?;
+        update_reweight(store_path, model_id, &sid, weight, cfg)
+            .map_err(|e| format!("update_reweight: {e}"))?
+
+    } else if let Some(half_life) = args.decay {
+        update_decay(store_path, model_id, half_life, cfg)
+            .map_err(|e| format!("update_decay: {e}"))?
+
+    } else {
+        return Err(
+            "update mode requires one of: --add, --remove-source, --reweight, --decay".into()
+        );
+    };
+
+    // ── Acceptance gate (Part D) ──────────────────────────────────────────────
+    let commit = if let Some(ref validate_path) = args.validate.clone() {
+        let database = args.database.clone()
+            .ok_or("--database is required with --validate")?;
+
+        eprintln!("train update: running acceptance gate on {} ...", validate_path.display());
+        let val_spectra = load_spectra_for_train(validate_path)?;
+
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening store for gate: {e}"))?;
+        let current_param = store.load_param(model_id)
+            .map_err(|e| format!("loading current model for gate: {e}"))?;
+        let current_scorer = RankScorer::new(&current_param);
+        let candidate_scorer = RankScorer::new(&candidate);
+
+        let aa = build_aa_set(&args.mods)?;
+        let search_params = SearchParams::default_tryptic(aa);
+
+        let delta = evaluate_candidate(
+            &val_spectra,
+            &database,
+            &current_scorer,
+            &candidate_scorer,
+            &search_params,
+            args.train_fdr,
+        )
+        .map_err(|e| format!("evaluate_candidate: {e}"))?;
+
+        eprintln!(
+            "train update: gate — current={} PSMs, candidate={} PSMs at FDR={}",
+            delta.current_count, delta.candidate_count, args.train_fdr
+        );
+
+        if delta.is_accepted() {
+            eprintln!("train update: ACCEPTED (candidate >= current)");
+            true
+        } else {
+            eprintln!("train update: REJECTED (candidate < current)");
+            if args.force {
+                eprintln!("train update: --force set, committing anyway");
+                true
+            } else {
+                eprintln!("train update: skipping commit (use --force to override)");
+                false
+            }
+        }
+    } else {
+        eprintln!("train update: no --validate dataset; skipping acceptance gate");
+        if args.force {
+            eprintln!("train update: --force set, committing unconditionally");
+        }
+        // Without --validate, commit unless user explicitly uses --force to control.
+        // Default: commit (no gate run = no evidence of regression).
+        true
+    };
+
+    if commit {
+        commit_update(store_path, model_id, &candidate, &new_sources)
+            .map_err(|e| format!("commit_update: {e}"))?;
+        eprintln!(
+            "train update: committed model '{model_id}' to {} [{:.2}s]",
+            store_path.display(),
+            t0.elapsed().as_secs_f64(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Parse `"source-id=weight"` from a `--reweight` argument.
+fn parse_reweight_spec(spec: &str) -> Result<(String, f32), Box<dyn std::error::Error>> {
+    let pos = spec.rfind('=').ok_or_else(|| {
+        format!("--reweight value must be <source-id>=<weight>, got '{spec}'")
+    })?;
+    let sid = spec[..pos].to_string();
+    let weight: f32 = spec[pos + 1..].parse()
+        .map_err(|e| format!("invalid weight in --reweight '{spec}': {e}"))?;
+    Ok((sid, weight))
+}
+
+/// Load the seed Param from the optional seed model specifier.
+fn load_seed_param(seed_model: &Option<String>) -> Result<(String, Param), Box<dyn std::error::Error>> {
+    match seed_model {
+        None => {
+            let store_path = bundled_store_path();
+            let store = ModelStore::open(&store_path)
+                .map_err(|e| format!("opening bundled store: {e}"))?;
+            let p = store.load_param("hcd_qexactive_tryp")
+                .map_err(|e| format!("loading seed model: {e}"))?;
+            Ok(("hcd_qexactive_tryp".to_string(), p))
+        }
+        Some(seed) => {
+            let as_path = Path::new(seed);
+            if as_path.is_file() {
+                let p = Param::load_from_file(as_path)
+                    .map_err(|e| format!("loading seed param file {}: {e}", as_path.display()))?;
+                Ok((seed.clone(), p))
+            } else {
+                let store_path = bundled_store_path();
+                let store = ModelStore::open(&store_path)
+                    .map_err(|e| format!("opening bundled store: {e}"))?;
+                let p = store.load_param(seed)
+                    .map_err(|e| format!("loading seed model '{seed}': {e}"))?;
+                Ok((seed.clone(), p))
+            }
+        }
+    }
+}
+
+/// Build an `AminoAcidSet` from an optional mods file, defaulting to
+/// Carbamidomethyl-C fixed + Oxidation-M variable.
+fn build_aa_set(
+    mods: &Option<PathBuf>,
+) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
+    match mods {
+        Some(path) => {
+            let set = AminoAcidSetBuilder::new_standard()
+                .add_mods_from_file(path)
+                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
+                .build()
+                .map_err(|e| format!("building amino-acid set: {e}"))?;
+            Ok(set)
+        }
+        None => {
+            let cam = Modification {
+                name: "Carbamidomethyl".into(),
+                mass_delta: 57.02146,
+                residue: ResidueSpec::Specific(b'C'),
+                location: ModLocation::Anywhere,
+                fixed: true,
+                accession: None,
+            };
+            let ox = Modification {
+                name: "Oxidation".into(),
+                mass_delta: 15.99491,
+                residue: ResidueSpec::Specific(b'M'),
+                location: ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+            };
+            Ok(AminoAcidSetBuilder::new_standard()
+                .add_fixed_mod(cam)
+                .add_variable_mod(ox)
+                .build()?)
+        }
+    }
+}
+
+/// Format today's date as `YYYY-MM-DD` using `std::time::SystemTime`.
+fn format_today_iso8601() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Simple Gregorian calendar conversion from Unix timestamp (days since epoch).
+    let days = secs / 86400;
+    unix_days_to_iso8601(days)
+}
+
+fn unix_days_to_iso8601(days: u64) -> String {
+    // Algorithm: Gregorian calendar from Julian Day Number.
+    // JDN for 1970-01-01 = 2440588.
+    let jdn = days as i64 + 2_440_588;
+    let a = jdn + 32044;
+    let b = (4 * a + 3) / 146097;
+    let c = a - (146097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = e - (153 * m + 2) / 5 + 1;
+    let month = m + 3 - 12 * (m / 10);
+    let year = 100 * b + d - 4800 + m / 10;
+    format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
 /// Convert the CLI `Fragmentation` enum to `ActivationMethod`.

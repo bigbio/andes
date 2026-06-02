@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod select;
 pub mod labeled;
 pub mod store;
+pub mod gate;
 
 // Re-export the most commonly used types at the crate root.
 pub use store::{ModelStore, RawManifestEntry, protocol_to_experiment_class};

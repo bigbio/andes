@@ -1052,6 +1052,33 @@ impl<'a> ScoredSpectrum<'a> {
         }
         out
     }
+
+    /// Background ("noise") rank observations for training the `IonType::Noise`
+    /// rank-distribution, using the MS-GF+ target-decoy noise model: match the
+    /// theoretical b/y ions of a **reversed (decoy)** peptide against this
+    /// spectrum. Decoy ions sit at "wrong" m/z that mostly do NOT align with
+    /// real peaks, so the resulting rank distribution is dominated by the
+    /// "missing" slot. That shape calibrates `ln(ion_freq / noise_freq)` so a
+    /// matched ion scores positive and a missing ion is penalised (not
+    /// rewarded). Reuses `ion_match_facts` verbatim — the SAME production
+    /// matcher, tolerance, and partitioning — at the same ion density.
+    pub fn noise_match_facts(
+        &self,
+        peptide: &Peptide,
+        scorer: &RankScorer,
+    ) -> Vec<(Partition, Option<u32>)> {
+        if peptide.length() < 2 {
+            return Vec::new();
+        }
+        // Decoy = reversed residues (same total mass → same partitions).
+        let mut rev = peptide.residues.clone();
+        rev.reverse();
+        let decoy = Peptide::new(rev, peptide.pre, peptide.post);
+        self.ion_match_facts(&decoy, scorer)
+            .into_iter()
+            .map(|f| (f.partition, f.rank))
+            .collect()
+    }
 }
 
 /// Return the m/z of the **highest-intensity** peak within `tolerance_da` of

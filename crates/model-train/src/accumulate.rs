@@ -11,6 +11,7 @@
 
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
+use scoring_crate::param_model::IonType;
 use scoring_crate::scoring::rank_scorer::RankScorer;
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 
@@ -88,6 +89,20 @@ impl<'a> StatsAccumulator<'a> {
             if let (Some(_), Some(bin)) = (fact.rank, fact.error_bin) {
                 stats.bump_error(fact.partition, bin);
             }
+        }
+
+        // Noise rank distribution: probe background m/z positions (same matcher,
+        // same density as the ions) and record their ranks under IonType::Noise.
+        // RankScorer needs a Noise entry per partition, and its SHAPE (dominated
+        // by the "missing" slot) calibrates the ion-vs-noise likelihood ratio.
+        // Without this the missing-ion penalty inverts and the model scores
+        // target and decoy alike (0 PSMs at 1% FDR).
+        for (partition, rank) in scored_spec.noise_match_facts(peptide, self.scorer) {
+            let rank_idx = match rank {
+                Some(r) => r.min(max_rank).max(1) - 1,
+                None => max_rank,
+            };
+            stats.bump_rank(partition, IonType::Noise, rank_idx);
         }
 
         // Charge histogram: one bump per PSM.

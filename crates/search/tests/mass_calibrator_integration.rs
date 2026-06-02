@@ -155,6 +155,8 @@ fn build_spec_keys_skips_below_min_peaks_and_expands_missing_charge() {
             scan: None,
             peaks: vec![(0.0, 0.0); n_peaks],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
     let spectra = vec![

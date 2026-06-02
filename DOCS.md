@@ -24,11 +24,24 @@ Run `msgf-rust --help` for auto-generated help derived from the same `Cli` struc
 
 All flags use kebab-case long options (`--flag-name`). Several flags also accept legacy Java MS-GF+ numeric values (see §8). The CLI is implemented in `crates/msgf-rust/src/bin/msgf-rust.rs`.
 
+### Input formats
+
+`--spectrum` auto-detects the reader from the file extension — there is **no format flag** to set:
+
+| Extension | Reader | Build requirement | Runtime requirement | Notes |
+|---|---|---|---|---|
+| `.mzML` / `.mzml` | mzML (streaming) | always built | none | Full activation + instrument auto-detection (§4). |
+| `.raw` | Thermo RawFileReader | `--features thermo` (release archives ship it) | .NET 8 runtime — **bundled in the release archives** (nothing to install); from source, install .NET 8 | Native Thermo; parity-identical to the equivalent mzML. Supports `--chimeric`. Activation/instrument read from vendor metadata (§4). |
+| `.d` | Bruker timsTOF (`timsrust`) | `--features timstof` | none (pure Rust) | DDA-PASEF, **MS2 only**; auto-routed to `CID_TOF_Tryp.param`. A `.d` is a *directory*. `--chimeric` / `--precursor-cal` degrade to a normal search. |
+| any other (e.g. `.mgf`) | MGF | always built | none | No MS-level/activation metadata; treated as MS2 with flag-based model resolution. |
+
+Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so `--ms-level 3` cannot accidentally search reporter scans. Default builds (no extra features) read mzML/MGF only; see [`README.md`](README.md) for `.raw`/`.d` install details and container recipes.
+
 ### Required
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--spectrum` | path | *(required)* | Input spectrum file. Extension `.mzML`/`.mzml` selects the mzML reader; any other extension (including `.mgf`) selects MGF. | Java `-s <FILE>` |
+| `--spectrum` | path | *(required)* | Input spectrum file. Reader auto-selected by extension — mzML, MGF, Thermo `.raw`, or Bruker timsTOF `.d` (see *Input formats* above). | Java `-s <FILE>` |
 | `--database` | path | *(required)* | Target FASTA database. Decoys are generated automatically by reversing target sequences (see `--decoy-prefix`). | Java `-d <FILE>` |
 | `--output-pin` | path | *(required)* | Output Percolator `.pin` file path. Always written unless the process exits with an error before the write phase. | Java `-o <FILE>` (when `-outputFormat pin`) |
 
@@ -38,7 +51,7 @@ All flags use kebab-case long options (`--flag-name`). Several flags also accept
 |---|---|---|---|---|
 | `--precursor-tol-ppm` | f64 | `20.0` | Symmetric precursor mass tolerance in parts per million. | Java `-t 20ppm` |
 | `--charge-min` | u8 | `2` | Minimum precursor charge to try when the spectrum record does not specify charge. Must be ≤ `--charge-max` (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
-| `--charge-max` | u8 | `3` | Maximum precursor charge to try when charge is missing from the spectrum. Must be ≥ `--charge-min`. | *(same)* |
+| `--charge-max` | u8 | `5` | Maximum precursor charge to try when charge is missing from the spectrum. Must be ≥ `--charge-min`. The default range is **2–5**. | *(same)* |
 | `--enzyme-specificity` | enum | `fully` | Enzymatic cleavage enforcement at peptide termini (Number of Tolerable Termini). `fully`: both termini must be cleavage sites (Java `-ntt 2`). `semi`: at least one terminus (Java `-ntt 1`). `non-specific`: neither required (Java `-ntt 0`). | `--ntt` alias; numeric `0`/`1`/`2` |
 | `--max-missed-cleavages` | u32 | `1` | Maximum missed enzymatic cleavages allowed per candidate peptide. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length in residues (excluding flanking context). | Java `-minLength 6` |
@@ -79,12 +92,27 @@ All flags use kebab-case long options (`--flag-name`). Several flags also accept
 
 Only tryptic enzyme models are bundled; other enzymes require `--param-file`.
 
+### Calibration
+
+| Flag | Type | Default | Description | Legacy form |
+|---|---|---|---|---|
+| `--precursor-cal` | enum | `off` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` skips the correction when the sample is too small to be reliable. Opt-in only — see the ship gates in §8e. No effect on `.d` input (degrades to a normal search). | Java `-precursorCal auto\|on\|off` |
+
+### Chimeric cascade
+
+Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1 stream, so it runs on **mzML or Thermo `.raw`** only; on MGF/`.d` it warns and falls back to a normal search.
+
+| Flag | Type | Default | Description | Legacy form |
+|---|---|---|---|---|
+| `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade. Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. Forces top-1 per pass and always searches MS2 (`--ms-level` is ignored). Gains are entrapment-FDP validated. Experimental. | *(no Java equivalent)* |
+| `--isolation-halfwidth` | f64 | `1.5` | Fallback isolation-window half-width in Da, used only when the mzML/`.raw` omits the per-scan isolation-window offsets. | *(no Java equivalent)* |
+
 ### Runtime
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--threads` | usize | logical CPU count | Rayon worker threads for the search loop. Pool is initialised once per process. | Java `-thread N` |
-| `--ms-level` | u8 | `2` | MS level to search. Non-matching spectra are filtered at load time. Meaningful for mzML only; MGF has no MS-level metadata and is always treated as MS2 (a warning is printed if `--ms-level` ≠ 2 on MGF). | *(no Java equivalent)* |
+| `--ms-level` | u8 | `2` | MS level to search. Defaults to MS2 (identification); MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so they never enter the search loop. Applies to mzML. Native `.raw`/`.d` always search MS2 regardless of this flag (a warning is printed if overridden), as does the chimeric cascade. MGF has no MS-level metadata and is always MS2. | *(no Java equivalent)* |
 | `--max-spectra` | usize | `0` | Bench mode: process only the first N MS2 spectra. `0` = full input. When > 0, TSV output is skipped (PIN is still written). | *(no Java equivalent)* |
 | `--decoy-prefix` | string | `XXX_` | Prefix prepended to reversed decoy protein accessions during index construction. | Java decoy tag in `-tda` workflows |
 
@@ -165,7 +193,7 @@ msgf-rust writes Percolator `.pin` (always) and optionally `.tsv`. Implementatio
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum (lowest SpecEValue first). With default `--charge-min 2 --charge-max 3`, the header has **36 columns**: 35 Java-parity fields plus Rust-only `EdgeScore` (before `Peptide`). Additional charge states add one `chargeN` column each.
+Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum (lowest SpecEValue first). With the default charge range `--charge-min 2 --charge-max 5`, the header has **38 columns**: 37 Java-parity fields (including the `charge2`…`charge5` one-hots) plus Rust-only `EdgeScore` (before `Peptide`). Narrowing/widening the charge range adds or removes one `chargeN` column each.
 
 | Column | Type | Description |
 |---|---|---|
@@ -253,6 +281,14 @@ MGF files carry no activation or instrument metadata → auto-detect returns `No
 
 Non-auto `--fragmentation` (e.g. `HCD`, `3`) disables the activation peek and uses flag-based resolution directly (§1), including `--instrument` and `--protocol` from the CLI.
 
+### Native Thermo `.raw`
+
+A `.raw` file carries the activation method and analyzer in vendor metadata, so msgf-rust reads them directly (no mzML peek) and routes through the same bundled-`.param` ladder as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `HCD_QExactive_Tryp.param`. `--protocol` from the CLI still selects protocol-suffixed files (`_TMT`, `_iTRAQ`); explicit `--fragmentation`/`--instrument` are not required.
+
+### Native Bruker timsTOF `.d`
+
+timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes to **`CID_TOF_Tryp.param`**. `--protocol` still applies. Searched **MS2 only**; the ion-mobility dimension is carried as metadata but not used by scoring.
+
 ### Activation CV mapping (mzML `<activation>` cvParam accession → method)
 
 | CV accession | Name (PSI-MS) | msgf-rust method | Notes |
@@ -312,8 +348,23 @@ UVPD_QExactive_Tryp.param             UVPD_QExactive_Tryp_TMT.param
 git clone https://github.com/bigbio/msgf-rust
 cd msgf-rust
 cargo build --release
-# Binary: target/release/msgf-rust
+# Binary: target/release/msgf-rust   (mzML + MGF; pure Rust)
 ```
+
+**Native vendor formats** are feature-gated (the default build stays pure-Rust):
+
+```bash
+# Thermo .raw — needs rustc >= 1.88 and, at run time, the .NET 8 runtime
+RUSTUP_TOOLCHAIN=stable cargo build --release -p msgf-rust --features thermo
+
+# Bruker timsTOF .d — pure Rust, no vendor runtime
+cargo build --release -p msgf-rust --features timstof
+
+# Both at once (what the release archives ship for desktop/server targets)
+RUSTUP_TOOLCHAIN=stable cargo build --release -p msgf-rust --features "thermo timstof"
+```
+
+See [`README.md`](README.md) (§Reading Thermo `.raw` / §Reading Bruker timsTOF `.d`) for the .NET 8 install, the bundled-runtime release archives, and container recipes.
 
 Run the full workspace test suite:
 
@@ -465,7 +516,7 @@ Full legacy 0…N → named-value tables for `--fragmentation`, `--instrument`, 
 
 | Area | Java MS-GF+ | msgf-rust |
 |---|---|---|
-| Spectrum inputs | mzML, MGF, mzXML, MS2, PKL, `_dta.txt`, … | **mzML and MGF only** |
+| Spectrum inputs | mzML, MGF, mzXML, MS2, PKL, `_dta.txt`, … | **mzML, MGF, native Thermo `.raw` (`thermo` feature), native Bruker timsTOF `.d` (`timstof` feature)** — see §1 *Input formats* |
 | Identification output | PIN, TSV, mzIdentML | **PIN + optional TSV** (no mzIdentML) |
 | Decoys | Separate target/decoy FASTA or `-tda` modes | **Always auto-generated** reversed decoys from target FASTA (`--decoy-prefix`) |
 | Enzymes | Many via param file / CLI | **Trypsin only** in bundled models; other enzymes via `--param-file` |
@@ -500,8 +551,7 @@ As of 2026-05-25 (fair v5 gate, `bench-calauto-v5.log`) the calibrator is
 validated (shift + tightening parity), but G1 **fails** on all three datasets:
 LFQ −2.2% (cal skipped), Astral +1.2%, TMT −5.9%. Remaining
 gaps trace to **SpecE tail / Percolator feature parity** (same class as historical
-Astral GF work), not calibrator logic. Full analysis:
-[`docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md`](docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md).
+Astral GF work), not calibrator logic.
 
 | `--precursor-cal` | Ship recommendation |
 |---|---|

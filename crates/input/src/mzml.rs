@@ -48,6 +48,10 @@ const CV_MODEL_ORBITRAP_FUSION:       &str = "MS:1002416";
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_SCAN_TIME: &str = "MS:1000016";
 const CV_SELECTED_ION_MZ: &str = "MS:1000744";
+/// Isolation-window lower offset in Da (selected m/z − lower = window start).
+const CV_ISOLATION_LOWER_OFFSET: &str = "MS:1000828";
+/// Isolation-window upper offset in Da (selected m/z + upper = window end).
+const CV_ISOLATION_UPPER_OFFSET: &str = "MS:1000829";
 /// Older mzML files sometimes use plain m/z accession in selectedIon.
 const CV_MZ_PLAIN: &str = "MS:1000040";
 const CV_CHARGE_STATE: &str = "MS:1000041";
@@ -115,6 +119,9 @@ enum State {
     Spectrum,
     Scan,
     SelectedIon,
+    /// Inside `<precursor><isolationWindow>` — we read the lower/upper
+    /// offset cvParams here and set the `SpectrumBuilder` isolation fields.
+    IsolationWindow,
     /// Inside `<precursor><activation>` — we read activation-method
     /// cvParams here and set `SpectrumBuilder::activation_method`.
     Activation,
@@ -165,6 +172,12 @@ struct SpectrumBuilder {
     /// `None` when no `<activation>` block is present or the term is
     /// unknown.
     activation_method: Option<ActivationMethod>,
+    /// Isolation-window lower offset in Da, from `<isolationWindow>`
+    /// `MS:1000828`. `None` when the mzML omits the isolation window.
+    isolation_lower_offset: Option<f64>,
+    /// Isolation-window upper offset in Da, from `<isolationWindow>`
+    /// `MS:1000829`. `None` when the mzML omits the isolation window.
+    isolation_upper_offset: Option<f64>,
     mz_array: Option<Vec<f64>>,
     intensity_array: Option<Vec<f64>>,
 }
@@ -188,6 +201,27 @@ impl CvParamInfo {
     }
 }
 
+// ── MS1 linkage side structure ───────────────────────────────────────────────
+
+/// Side structure produced by the opt-in MS1-capture reader path
+/// ([`MzMLReader::read_with_ms1`]). It records the peak lists of the captured
+/// MS1 scans (stored ONCE) and, for each emitted MS2 spectrum, the index of
+/// its most-recent preceding MS1.
+///
+/// The chimeric MS1 isotope filter consumes this to subtract co-isolated
+/// precursors from the MS2 candidate space. Producing it is opt-in; the
+/// default reader path never builds one and stays MS2-only.
+#[derive(Debug, Default, Clone)]
+pub struct Ms1Link {
+    /// Peak lists of the captured MS1 scans, in file order. Stored ONCE
+    /// (not duplicated per MS2).
+    pub ms1_peaks: Vec<Vec<(f64, f32)>>,
+    /// For each emitted MS2 (by its index in the returned `Vec<Spectrum>`),
+    /// the index into `ms1_peaks` of the most-recent preceding MS1, or
+    /// `None` if no MS1 preceded it. Length equals the number of emitted MS2.
+    pub ms2_to_ms1: Vec<Option<usize>>,
+}
+
 // ── Public reader ────────────────────────────────────────────────────────────
 
 /// Streaming mzML reader. Emits MS2 spectra by default.
@@ -200,6 +234,18 @@ pub struct MzMLReader<R: BufRead> {
     current: Option<SpectrumBuilder>,
     binary_ctx: Option<BinaryArrayCtx>,
     done: bool,
+    /// When `true`, [`Self::read_with_ms1`] additionally captures MS1 scans
+    /// (level 1) into an [`Ms1Link`] instead of discarding them. Has NO effect
+    /// on the default [`Iterator`] path or on `read_with_ms1` emitting MS2-only
+    /// — it only controls whether MS1 peaks are retained for linkage.
+    capture_ms1: bool,
+    /// MS1 peak lists captured during a `read_with_ms1` run (capture on).
+    /// Stored once; the default path never touches this.
+    captured_ms1: Vec<Vec<(f64, f32)>>,
+    /// Index (into `captured_ms1`) of the most-recent preceding MS1, or
+    /// `None` if no MS1 has been seen yet. Read when emitting each MS2 to
+    /// build `Ms1Link::ms2_to_ms1`.
+    latest_ms1_idx: Option<usize>,
 }
 
 impl<R: BufRead> MzMLReader<R> {
@@ -216,6 +262,9 @@ impl<R: BufRead> MzMLReader<R> {
             current: None,
             binary_ctx: None,
             done: false,
+            capture_ms1: false,
+            captured_ms1: Vec::new(),
+            latest_ms1_idx: None,
         }
     }
 
@@ -227,6 +276,17 @@ impl<R: BufRead> MzMLReader<R> {
         self
     }
 
+    /// Opt in to MS1 capture for the [`Self::read_with_ms1`] path. When
+    /// enabled, MS1 scans (level 1) are retained in the returned [`Ms1Link`]
+    /// and each emitted MS2 is linked to its most-recent preceding MS1.
+    ///
+    /// This flag has NO effect on the default [`Iterator`] path, which always
+    /// emits MS2-only. Default is `false` (no capture).
+    pub fn with_ms1_capture(mut self, capture: bool) -> Self {
+        self.capture_ms1 = capture;
+        self
+    }
+
     // ── Build a Spectrum from a completed SpectrumBuilder ────────────────────
 
     fn finish_spectrum(&self, sb: SpectrumBuilder) -> Result<Option<Spectrum>, MzMLParseError> {
@@ -234,7 +294,15 @@ impl<R: BufRead> MzMLReader<R> {
         if level < self.ms_level_min || level > self.ms_level_max {
             return Ok(None);
         }
+        Self::build_spectrum(sb)
+    }
 
+    /// Build a [`Spectrum`] from a completed builder, applying the
+    /// Thermo-trailer precursor preference and the ascending-m/z invariant.
+    /// Returns `Ok(None)` for spectra without any precursor m/z (e.g. an MS2
+    /// that never recorded a precursor). Caller is responsible for the
+    /// ms-level filter (see [`Self::finish_spectrum`]).
+    fn build_spectrum(sb: SpectrumBuilder) -> Result<Option<Spectrum>, MzMLParseError> {
         // Prefer the Thermo Trailer Extra monoisotopic m/z when available —
         // the instrument firmware's deisotoping is more accurate than the
         // raw isolation m/z (selectedIon.MS:1000744) for Orbitrap-class
@@ -247,8 +315,31 @@ impl<R: BufRead> MzMLReader<R> {
             (None, None) => return Ok(None),
         };
 
-        let mz_vals = sb.mz_array.unwrap_or_default();
-        let int_vals = sb.intensity_array.unwrap_or_default();
+        let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array)?;
+        let scan = extract_scan_from_id(&sb.id);
+
+        Ok(Some(Spectrum {
+            title: sb.id,
+            precursor_mz,
+            precursor_charge: sb.precursor_charge,
+            precursor_intensity: sb.precursor_intensity,
+            rt_seconds: sb.rt_seconds,
+            scan,
+            peaks,
+            activation_method: sb.activation_method,
+            isolation_lower_offset: sb.isolation_lower_offset,
+            isolation_upper_offset: sb.isolation_upper_offset,
+        }))
+    }
+
+    /// Zip the decoded m/z and intensity arrays into ascending-by-m/z peaks.
+    /// Shared by [`Self::build_spectrum`] and the MS1-capture path.
+    fn build_peaks(
+        mz_array: Option<Vec<f64>>,
+        intensity_array: Option<Vec<f64>>,
+    ) -> Result<Vec<(f64, f32)>, MzMLParseError> {
+        let mz_vals = mz_array.unwrap_or_default();
+        let int_vals = intensity_array.unwrap_or_default();
 
         if mz_vals.len() != int_vals.len() {
             return Err(MzMLParseError::LengthMismatch {
@@ -268,18 +359,7 @@ impl<R: BufRead> MzMLReader<R> {
             peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }
 
-        let scan = extract_scan_from_id(&sb.id);
-
-        Ok(Some(Spectrum {
-            title: sb.id,
-            precursor_mz,
-            precursor_charge: sb.precursor_charge,
-            precursor_intensity: sb.precursor_intensity,
-            rt_seconds: sb.rt_seconds,
-            scan,
-            peaks,
-            activation_method: sb.activation_method,
-        }))
+        Ok(peaks)
     }
 
     // ── Apply a CvParamInfo to current parse state ───────────────────────────
@@ -337,6 +417,24 @@ impl<R: BufRead> MzMLReader<R> {
                 if let Ok(inten) = cv.value.parse::<f32>() {
                     if let Some(sb) = self.current.as_mut() {
                         sb.precursor_intensity = Some(inten);
+                    }
+                }
+            }
+
+            // Isolation-window offsets under `<precursor><isolationWindow>`.
+            // These are only consumed by the `--chimeric` path; absent in
+            // most fixtures, so the builder fields stay `None`.
+            CV_ISOLATION_LOWER_OFFSET if self.state == State::IsolationWindow => {
+                if let Ok(off) = cv.value.parse::<f64>() {
+                    if let Some(sb) = self.current.as_mut() {
+                        sb.isolation_lower_offset = Some(off);
+                    }
+                }
+            }
+            CV_ISOLATION_UPPER_OFFSET if self.state == State::IsolationWindow => {
+                if let Ok(off) = cv.value.parse::<f64>() {
+                    if let Some(sb) = self.current.as_mut() {
+                        sb.isolation_upper_offset = Some(off);
                     }
                 }
             }
@@ -463,6 +561,15 @@ impl<R: BufRead> MzMLReader<R> {
                         b"selectedIon" if self.state == State::Spectrum => {
                             self.state = State::SelectedIon;
                         }
+                        b"isolationWindow" if self.state == State::Spectrum => {
+                            // `<isolationWindow>` is a sibling of
+                            // `<selectedIon>` / `<activation>` under
+                            // `<precursor>`. We don't track the intermediate
+                            // `<precursor>` / `<precursorList>` elements, so
+                            // we transition from Spectrum here. The closing
+                            // tag pops us back to Spectrum.
+                            self.state = State::IsolationWindow;
+                        }
                         b"activation" if self.state == State::Spectrum => {
                             // `<activation>` lives under
                             // `<precursorList><precursor>…</precursor></precursorList>`.
@@ -543,6 +650,20 @@ impl<R: BufRead> MzMLReader<R> {
                             let sb = self.current.take();
                             self.state = State::Outside;
                             if let Some(sb) = sb {
+                                // Capture path: intercept MS1 scans before they
+                                // reach the level filter. MS1 peaks are stored
+                                // once in `captured_ms1` and never emitted as a
+                                // scorable Spectrum; we just remember the latest
+                                // MS1 index so the next MS2 can link to it.
+                                // This branch is inert when `capture_ms1` is
+                                // false (default), keeping that path byte-exact.
+                                if self.capture_ms1 && sb.ms_level == Some(1) {
+                                    let peaks =
+                                        Self::build_peaks(sb.mz_array, sb.intensity_array)?;
+                                    self.captured_ms1.push(peaks);
+                                    self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
+                                    continue;
+                                }
                                 if let Some(s) = self.finish_spectrum(sb)? {
                                     return Ok(Some(s));
                                 }
@@ -552,6 +673,9 @@ impl<R: BufRead> MzMLReader<R> {
                             self.state = State::Spectrum;
                         }
                         b"selectedIon" if self.state == State::SelectedIon => {
+                            self.state = State::Spectrum;
+                        }
+                        b"isolationWindow" if self.state == State::IsolationWindow => {
                             self.state = State::Spectrum;
                         }
                         b"activation" if self.state == State::Activation => {
@@ -577,6 +701,186 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
 
+                _ => {}
+            }
+        }
+    }
+
+    /// Drain the reader, returning the emitted MS2 spectra plus an
+    /// [`Ms1Link`] linking each MS2 to its most-recent preceding MS1.
+    ///
+    /// The returned `Vec<Spectrum>` is exactly what the default [`Iterator`]
+    /// path produces (MS2-only, in file order). When [`Self::with_ms1_capture`]
+    /// is `false` (default), `Ms1Link::ms1_peaks` is empty and every entry in
+    /// `ms2_to_ms1` is `None`; only the linkage bookkeeping is added on top of
+    /// the unchanged MS2 stream. When capture is `true`, MS1 scans are
+    /// retained once in `ms1_peaks` and each MS2 links to its preceding MS1.
+    ///
+    /// `ms2_to_ms1.len()` always equals the number of returned MS2 spectra.
+    pub fn read_with_ms1(mut self) -> std::io::Result<(Vec<Spectrum>, Ms1Link)> {
+        // To capture MS1 (level 1) the parser must let level-1 spectra reach
+        // the spectrum-End handler rather than being dropped by the level
+        // filter. We widen the internal min level to 1 ONLY when capturing;
+        // MS1 is intercepted before `finish_spectrum`, so the effective output
+        // is still MS2-only. With capture off, the filter is untouched.
+        if self.capture_ms1 {
+            self.ms_level_min = 1;
+        }
+
+        let mut spectra: Vec<Spectrum> = Vec::new();
+        let mut ms2_to_ms1: Vec<Option<usize>> = Vec::new();
+
+        loop {
+            match self.pump() {
+                Ok(Some(s)) => {
+                    // Each spectrum returned by `pump` here is an emitted MS2
+                    // (MS1 is intercepted inside `pump` and never returned).
+                    // Link it to whatever MS1 most recently preceded it.
+                    ms2_to_ms1.push(self.latest_ms1_idx);
+                    spectra.push(s);
+                }
+                Ok(None) => break,
+                Err(_e) => {
+                    // Resync past the malformed spectrum and keep parsing (skip the
+                    // bad scan, not the rest of the file). Only an unreadable XML
+                    // stream stops us.
+                    match self.resync_to_next_spectrum() {
+                        Ok(true) => continue,
+                        Ok(false) | Err(_) => break,
+                    }
+                }
+            }
+        }
+
+        let link = Ms1Link {
+            ms1_peaks: std::mem::take(&mut self.captured_ms1),
+            ms2_to_ms1,
+        };
+        Ok((spectra, link))
+    }
+
+    /// Streaming, bounded-memory, tolerant variant of [`Self::read_with_ms1`] for
+    /// the chimeric cascade.
+    ///
+    /// Calls `on_chunk(ms2_spectra, ms1_link)` for each batch of up to
+    /// `chunk_size` MS2 spectra, where `ms1_link` covers ONLY that chunk. RSS
+    /// stays bounded by the chunk size: at most the MS1 scans referenced by the
+    /// in-flight chunk are retained, never the whole file (each MS2 links to its
+    /// most-recent preceding MS1, so only that carry-over scan crosses a chunk
+    /// boundary). Stops after `cap` total MS2 (`usize::MAX` = unbounded).
+    ///
+    /// Tolerant: a malformed spectrum does NOT abort the run. The first parse
+    /// error stops streaming and the successfully-parsed spectra so far are still
+    /// delivered (mirroring the MS2-only streaming path); the error count and the
+    /// first few messages are returned for reporting.
+    pub fn read_with_ms1_chunked<F>(
+        mut self,
+        chunk_size: usize,
+        cap: usize,
+        mut on_chunk: F,
+    ) -> (usize, Vec<String>)
+    where
+        F: FnMut(Vec<Spectrum>, Ms1Link),
+    {
+        self.capture_ms1 = true;
+        self.ms_level_min = 1; // let MS1 reach the capture hook; output stays MS2-only
+
+        let mut err_count = 0usize;
+        let mut first_errors: Vec<String> = Vec::new();
+        let mut total = 0usize;
+
+        let mut chunk: Vec<Spectrum> = Vec::with_capacity(chunk_size);
+        let mut chunk_ms1: Vec<Vec<(f64, f32)>> = Vec::new();
+        let mut links: Vec<Option<usize>> = Vec::with_capacity(chunk_size);
+        // Most-recent MS1 peaks, carried across chunk boundaries. `carry_in_chunk`
+        // is its index within the CURRENT `chunk_ms1`, or `None` until copied in.
+        let mut carry: Option<Vec<(f64, f32)>> = None;
+        let mut carry_in_chunk: Option<usize> = None;
+
+        loop {
+            if total >= cap {
+                break;
+            }
+            match self.pump() {
+                Ok(Some(ms2)) => {
+                    // A newer MS1 was captured since the last MS2: adopt the most
+                    // recent as the carry and clear the reader's buffer to bound RSS.
+                    if self.latest_ms1_idx.is_some() {
+                        carry = self.captured_ms1.pop(); // newest; older ones unreferenced
+                        self.captured_ms1.clear();
+                        self.latest_ms1_idx = None;
+                        carry_in_chunk = None;
+                    }
+                    let link = if carry.is_some() {
+                        if carry_in_chunk.is_none() {
+                            chunk_ms1.push(carry.clone().expect("carry is Some"));
+                            carry_in_chunk = Some(chunk_ms1.len() - 1);
+                        }
+                        carry_in_chunk
+                    } else {
+                        None
+                    };
+                    chunk.push(ms2);
+                    links.push(link);
+                    total += 1;
+
+                    if chunk.len() >= chunk_size {
+                        on_chunk(
+                            std::mem::take(&mut chunk),
+                            Ms1Link { ms1_peaks: std::mem::take(&mut chunk_ms1), ms2_to_ms1: std::mem::take(&mut links) },
+                        );
+                        chunk = Vec::with_capacity(chunk_size);
+                        chunk_ms1 = Vec::new();
+                        links = Vec::with_capacity(chunk_size);
+                        carry_in_chunk = None; // re-copy carry into the next chunk on demand
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    err_count += 1;
+                    if first_errors.len() < 3 {
+                        first_errors.push(format!("{e}"));
+                    }
+                    // Resync past the bad scan and keep parsing the rest of the file
+                    // (skip-one-bad-spectrum, not truncate-the-tail). Only a broken
+                    // XML stream — where resync itself can't read — stops us.
+                    match self.resync_to_next_spectrum() {
+                        Ok(true) => continue,
+                        Ok(false) | Err(_) => break,
+                    }
+                }
+            }
+        }
+
+        if !chunk.is_empty() {
+            on_chunk(chunk, Ms1Link { ms1_peaks: chunk_ms1, ms2_to_ms1: links });
+        }
+        (err_count, first_errors)
+    }
+
+    /// After a recoverable per-spectrum parse error, discard the partial spectrum
+    /// and skip events until the next `<spectrum>` start, so streaming RESYNCS and
+    /// continues past one bad scan instead of truncating the rest of the file.
+    /// Returns `Ok(true)` positioned at a fresh spectrum (caller continues),
+    /// `Ok(false)` at EOF. Propagates `Err` only when the XML stream itself is
+    /// unreadable (broken markup) — that is genuinely unrecoverable.
+    fn resync_to_next_spectrum(&mut self) -> Result<bool, MzMLParseError> {
+        self.current = None;
+        self.binary_ctx = None;
+        self.state = State::Outside;
+        loop {
+            self.buf.clear();
+            match self.xml.read_event_into(&mut self.buf)? {
+                Event::Eof => {
+                    self.done = true;
+                    return Ok(false);
+                }
+                Event::Start(ref e) if e.local_name().as_ref() == b"spectrum" => {
+                    let id = attr_str(e, b"id").unwrap_or_default();
+                    self.current = Some(SpectrumBuilder { id, ..Default::default() });
+                    self.state = State::Spectrum;
+                    return Ok(true);
+                }
                 _ => {}
             }
         }
@@ -1563,6 +1867,73 @@ mod tests {
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
     }
 
+    // ── Isolation-window parsing ─────────────────────────────────────────────
+
+    /// `<precursor><isolationWindow>` carries the lower/upper offsets
+    /// (`MS:1000828` / `MS:1000829`). The parser must capture them on the
+    /// emitted `Spectrum` without disturbing the sibling `<selectedIon>`
+    /// precursor m/z. Load-bearing for the `--chimeric` co-isolation path.
+    #[test]
+    fn parses_isolation_window_offsets() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <isolationWindow>
+                    <cvParam accession="MS:1000827" name="isolation window target m/z"
+                             value="500.5"/>
+                    <cvParam accession="MS:1000828" name="isolation window lower offset"
+                             value="1.5"/>
+                    <cvParam accession="MS:1000829" name="isolation window upper offset"
+                             value="1.5"/>
+                  </isolationWindow>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z"
+                               value="500.5"/>
+                    </selectedIon>
+                  </selectedIonList>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+        let spectra = collect_ok(&wrap_spectra(&xml));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].isolation_lower_offset, Some(1.5));
+        assert_eq!(spectra[0].isolation_upper_offset, Some(1.5));
+        // The isolation-window target (MS:1000827) must NOT clobber the
+        // selectedIon precursor m/z.
+        assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
+    }
+
+    /// When the mzML omits `<isolationWindow>`, both offsets stay `None`.
+    #[test]
+    fn missing_isolation_window_yields_none() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            500.5,
+            Some(2),
+        );
+        let spectra = collect_ok(&wrap_spectra(&spec));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].isolation_lower_offset, None);
+        assert_eq!(spectra[0].isolation_upper_offset, None);
+    }
+
     // ── Instrument-type detection ────────────────────────────────────────────
 
     /// Build an mzML wrapper with one or more `<instrumentConfiguration>`
@@ -1751,6 +2122,286 @@ mod tests {
         let xml = wrap_spectra(&spec);
         let result = detect_instrument_type(Cursor::new(xml));
         assert_eq!(result, None);
+    }
+
+    // ── MS1 capture + MS2→MS1 linkage (Ms1Link) ──────────────────────────────
+
+    /// One MS1 followed by two MS2 spectra: the capture path stores the MS1
+    /// peaks once, emits only the two MS2 spectra, and links both MS2 to the
+    /// single preceding MS1 (index 0).
+    #[test]
+    fn ms1_capture_links_two_ms2_to_preceding_ms1() {
+        // MS1 with two peaks.
+        let ms1_mz_b64 = encode_f64_b64(&[111.0, 222.0]);
+        let ms1_int_b64 = encode_f64_b64(&[10.0, 20.0]);
+        let ms1 = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="2">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan/></scanList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &ms1_mz_b64),
+            int = bda_plain("MS:1000515", &ms1_int_b64),
+        );
+
+        let ms2a = ms2_spectrum_xml(
+            "scan=2",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0, 400.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0, 2.0])),
+            500.0,
+            Some(2),
+        );
+        let ms2b = ms2_spectrum_xml(
+            "scan=3",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[500.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[3.0])),
+            600.0,
+            Some(2),
+        );
+
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <run>
+    <spectrumList count="3" defaultDataProcessingRef="dp">
+      {ms1}
+      {ms2a}
+      {ms2b}
+    </spectrumList>
+  </run>
+</mzML>"#
+        );
+
+        let (spectra, link) = MzMLReader::new(Cursor::new(xml))
+            .with_ms1_capture(true)
+            .read_with_ms1()
+            .expect("read_with_ms1 failed");
+
+        // Only the two MS2 spectra are emitted (the MS1 is NOT in the Vec).
+        assert_eq!(spectra.len(), 2, "expected exactly two MS2 spectra");
+        assert_eq!(spectra[0].scan, Some(2));
+        assert_eq!(spectra[1].scan, Some(3));
+
+        // MS1 peaks stored once.
+        assert_eq!(link.ms1_peaks.len(), 1, "expected one captured MS1");
+        let ms1_peaks = &link.ms1_peaks[0];
+        assert_eq!(ms1_peaks.len(), 2);
+        assert!((ms1_peaks[0].0 - 111.0).abs() < 1e-6);
+        assert!((ms1_peaks[1].0 - 222.0).abs() < 1e-6);
+        assert!((ms1_peaks[0].1 - 10.0_f32).abs() < 1e-3);
+        assert!((ms1_peaks[1].1 - 20.0_f32).abs() < 1e-3);
+
+        // Both MS2 link to MS1 index 0.
+        assert_eq!(link.ms2_to_ms1, vec![Some(0), Some(0)]);
+    }
+
+    #[test]
+    fn chunked_ms1_linkage_matches_batch_across_boundaries() {
+        // Layout exercising both an MS1 carry-over across a chunk boundary and a
+        // new MS1 mid-chunk:  MS1#a, MS2_1, MS2_2, MS2_3, MS1#b, MS2_4.
+        // With chunk_size=2: chunk1=[1,2]→a; chunk2=[3,4] where 3 carries over a
+        // and 4 links to the new b.
+        let ms1a = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="2">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan/></scanList>
+              <binaryDataArrayList count="2">{mz}{int}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[111.0, 222.0])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[10.0, 20.0])),
+        );
+        let ms1b = format!(
+            r#"<spectrum index="4" id="scan=5" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan/></scanList>
+              <binaryDataArrayList count="2">{mz}{int}</binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[333.0])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[30.0])),
+        );
+        let mk_ms2 = |id: &str, mz: f64| {
+            ms2_spectrum_xml(
+                id,
+                &bda_plain("MS:1000514", &encode_f64_b64(&[mz])),
+                &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+                mz + 50.0,
+                Some(2),
+            )
+        };
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml"><run><spectrumList count="6" defaultDataProcessingRef="dp">
+{a}{m1}{m2}{m3}{b}{m4}
+</spectrumList></run></mzML>"#,
+            a = ms1a,
+            m1 = mk_ms2("scan=2", 300.0),
+            m2 = mk_ms2("scan=3", 400.0),
+            m3 = mk_ms2("scan=4", 410.0),
+            b = ms1b,
+            m4 = mk_ms2("scan=6", 600.0),
+        );
+
+        // Batch reference: resolve each MS2 to its MS1 peak list.
+        let (b_spectra, b_link) = MzMLReader::new(Cursor::new(xml.clone()))
+            .with_ms1_capture(true)
+            .read_with_ms1()
+            .expect("batch read");
+        let batch_resolved: Vec<Option<&Vec<(f64, f32)>>> = b_link
+            .ms2_to_ms1
+            .iter()
+            .map(|o| o.map(|i| &b_link.ms1_peaks[i]))
+            .collect();
+
+        // Chunked read with a small chunk size → multiple chunks + carry-over.
+        let mut chunked_spectra: Vec<Spectrum> = Vec::new();
+        let mut chunked_resolved: Vec<Option<Vec<(f64, f32)>>> = Vec::new();
+        let (errc, _errs) = MzMLReader::new(Cursor::new(xml))
+            .with_ms1_capture(true)
+            .read_with_ms1_chunked(2, usize::MAX, |chunk, link| {
+                for (i, s) in chunk.into_iter().enumerate() {
+                    chunked_resolved.push(link.ms2_to_ms1[i].map(|j| link.ms1_peaks[j].clone()));
+                    chunked_spectra.push(s);
+                }
+            });
+
+        assert_eq!(errc, 0, "clean input → no parse errors");
+        assert_eq!(chunked_spectra.len(), b_spectra.len(), "same MS2 count as batch");
+        assert_eq!(chunked_resolved.len(), batch_resolved.len());
+        for (i, (cr, br)) in chunked_resolved.iter().zip(batch_resolved.iter()).enumerate() {
+            match (cr, br) {
+                (Some(c), Some(b)) => assert_eq!(c, *b, "MS2 #{i} linked to a different MS1 than batch"),
+                (None, None) => {}
+                _ => panic!("MS2 #{i} linkage presence differs from batch: {cr:?} vs {br:?}"),
+            }
+        }
+        // Sanity: MS2 #2 (chunk-2 first) carried over MS1#a; MS2 #3 linked to MS1#b.
+        assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
+        assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
+    }
+
+    #[test]
+    fn chunked_resyncs_past_a_malformed_spectrum() {
+        // A bad MS2 (invalid base64 in its m/z array) sits between two good MS2s.
+        // The reader must resync past the bad scan and still deliver BOTH good ones
+        // — NOT truncate the file at the first error.
+        let good1 = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            350.0,
+            Some(2),
+        );
+        let bad = ms2_spectrum_xml(
+            "scan=2",
+            &bda_plain("MS:1000514", "@@@not-valid-base64@@@"),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            450.0,
+            Some(2),
+        );
+        let good2 = ms2_spectrum_xml(
+            "scan=3",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[500.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            550.0,
+            Some(2),
+        );
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml"><run><spectrumList count="3" defaultDataProcessingRef="dp">
+{good1}{bad}{good2}
+</spectrumList></run></mzML>"#
+        );
+
+        let mut got: Vec<Spectrum> = Vec::new();
+        let (errc, errs) = MzMLReader::new(Cursor::new(xml))
+            .with_ms1_capture(true)
+            .read_with_ms1_chunked(5000, usize::MAX, |chunk, _link| got.extend(chunk));
+
+        assert_eq!(errc, 1, "exactly one malformed spectrum should be counted");
+        assert_eq!(errs.len(), 1, "the error message should be captured");
+        assert_eq!(got.len(), 2, "both good spectra must survive the resync (no truncation)");
+        assert_eq!(got[0].scan, Some(1));
+        assert_eq!(got[1].scan, Some(3), "the post-error spectrum must still be parsed");
+    }
+
+    /// An MS2 that appears BEFORE any MS1 links to `None`.
+    #[test]
+    fn ms1_capture_ms2_before_any_ms1_links_to_none() {
+        // MS2 first, then an MS1, then a second MS2.
+        let ms2a = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            500.0,
+            Some(2),
+        );
+        let ms1 = format!(
+            r#"<spectrum index="1" id="scan=2" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="1"/>
+              <scanList count="1"><scan/></scanList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz = bda_plain("MS:1000514", &encode_f64_b64(&[999.0])),
+            int = bda_plain("MS:1000515", &encode_f64_b64(&[5.0])),
+        );
+        let ms2b = ms2_spectrum_xml(
+            "scan=3",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[400.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[2.0])),
+            600.0,
+            Some(2),
+        );
+
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <run>
+    <spectrumList count="3" defaultDataProcessingRef="dp">
+      {ms2a}
+      {ms1}
+      {ms2b}
+    </spectrumList>
+  </run>
+</mzML>"#
+        );
+
+        let (spectra, link) = MzMLReader::new(Cursor::new(xml))
+            .with_ms1_capture(true)
+            .read_with_ms1()
+            .expect("read_with_ms1 failed");
+
+        assert_eq!(spectra.len(), 2, "expected two MS2 spectra");
+        assert_eq!(link.ms1_peaks.len(), 1, "one captured MS1");
+        // First MS2 had no preceding MS1 → None; second is after the MS1 → Some(0).
+        assert_eq!(link.ms2_to_ms1, vec![None, Some(0)]);
+    }
+
+    /// With capture OFF (default), the new path is not engaged and the plain
+    /// iterator still emits MS2-only with no MS1 side effects.
+    #[test]
+    fn ms1_capture_off_yields_empty_link() {
+        let mz_b64 = encode_f64_b64(&[100.0, 200.0]);
+        let int_b64 = encode_f64_b64(&[1000.0, 500.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            500.5,
+            Some(2),
+        );
+        let (spectra, link) = MzMLReader::new(Cursor::new(wrap_spectra(&spec)))
+            .read_with_ms1()
+            .expect("read_with_ms1 failed");
+        assert_eq!(spectra.len(), 1);
+        assert!(link.ms1_peaks.is_empty(), "no MS1 captured when capture off");
+        // ms2_to_ms1 still has one entry per emitted MS2 (all None).
+        assert_eq!(link.ms2_to_ms1, vec![None]);
     }
 
     #[test]

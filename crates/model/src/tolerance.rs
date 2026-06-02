@@ -27,7 +27,7 @@ impl Tolerance {
     }
 }
 
-/// Asymmetric precursor mass tolerance. Phase B's calibrator produces
+/// Asymmetric precursor mass tolerance. The precursor calibrator produces
 /// asymmetric `(left, right)` pairs; symmetric tolerances are a special
 /// case constructed via `symmetric`.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -744,15 +744,12 @@ fn aa_total_mass(aa: &AminoAcid) -> f64 {
 /// `scorer.error_score(part, delta)` term where `delta = obs(cur) -
 /// obs(prev) - theo_aa_mass`.
 ///
-/// Constants hoisted out of the per-edge inner loop (see the perf commit
-/// in the git history for the rationale):
+/// Constants hoisted out of the per-edge inner loop:
 /// - the `partition_for(charge, parent_mass, last_seg)` lookup
 /// - the 4-entry `ion_existence_score[0..=3]` table
 ///
 /// Per-node `observed_node_mass` results are de-duplicated via the
-/// spectrum-wide `ScoredSpectrum::observed_mass_cache` (iter36); the prior
-/// per-graph `Vec<Option<f64>>` keyed by `mass + mass_offset` was dropped
-/// in iter37 P-8.
+/// spectrum-wide `ScoredSpectrum::observed_mass_cache`.
 ///
 /// Source (mass = 0) and sink (mass = peptide_mass) nodes are skipped.
 /// Scores outside `[-100, 100]` are replaced with `-4`.
@@ -798,13 +795,13 @@ fn compute_edge_error_scores(
         scorer.ion_existence_score(part, 3, prob_peak),
     ];
 
-    // iter37 P-8: the per-graph `observed_by_mass: Vec<Option<f64>>` cache
-    // that pre-iter36 lived here has been REMOVED. iter36 added a
-    // spectrum-wide `observed_mass_cache` on `ScoredSpectrum` that already
-    // de-duplicates calls for the same `(node_nominal)` across mass bins.
-    // Calling `scored_spec.observed_node_mass(...)` directly in the per-edge
-    // inner loop now hits the spectrum cache (~5 ns per call) and saves
-    // ~487k Vec allocations + zero-fills per Astral run.
+    // Node observed-mass lookups go through the spectrum-wide
+    // `observed_mass_cache` on `ScoredSpectrum`, which de-duplicates calls
+    // for the same `(node_nominal)` across mass bins. Calling
+    // `scored_spec.observed_node_mass(...)` directly in the per-edge inner
+    // loop hits the spectrum cache (~5 ns per call) and avoids a per-graph
+    // `Vec<Option<f64>>` cache (~487k Vec allocations + zero-fills per
+    // Astral run).
 
     let mut clamp_count: u32 = 0;
     for ni in 0..node_count {
@@ -928,6 +925,8 @@ mod tests {
             scan: None,
             peaks: vec![],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 

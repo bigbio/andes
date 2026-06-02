@@ -57,4 +57,19 @@ Local-only, gitignored (`benchmark/*` with `!benchmark/README.md` / `!benchmark/
 
 ## Next planned work
 
-**Speed v2: fragment-index as candidate generator.** The current `feat/frag-index-phase1` branch (local, not pushed) has a working fragment-index OFF-path and a broken ON-path. The next session's mission is a clean rewrite per `~/.claude/plans/msgfplus-fragment-index/speed-rewrite-v2.md`. Target: ≥10× Astral speedup while preserving recall and reducing memory.
+**Chimeric two-pass cascade — DRAFT PR #42 (`feat/chimeric-dda-plus`, opt-in `--chimeric`).**
+Beats Java on PSMs (Astral +101%, PXD +11%, all entrapment-FDP validated) and on speed
+on all 3 datasets; **blocked from merge only by TMT PSMs (−5%)** per the beat-Java-on-both
+gate. Reviewed (5-agent + 2 adversarial rounds), dead-code-cleaned, and GF/SpecE-parity
+audited. See `docs/parity-analysis/notes/2026-05-31-cascade-optimized-multidataset-summary.md`.
+
+TMT closing options (a future iteration, not the cascade): an **additive** Percolator
+feature (e.g. DeltaRawScore) or a per-ion CID node-scoring trace. A native rescoring
+pipeline (in-process Percolator + ms2pip/deeplc) is brainstormed in
+`docs/superpowers/specs/2026-05-31-native-rescoring-pipeline-design.md` (4 open decisions).
+
+**Abandoned:** the fragment-index candidate generator ("speed v2") was built and refuted
+this session — Approach A degenerates (in-loop vote-all-touched), Approach B hits an
+irreducible recall/speed tension (a top-K fragment prefilter drops exactly the secondary
+co-isolated peptides that are the chimeric gain). Do not revisit fragment indexing for
+chimeric speed; the cascade already beats Java on speed without it.

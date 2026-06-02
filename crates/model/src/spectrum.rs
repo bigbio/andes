@@ -27,6 +27,11 @@ pub struct Spectrum {
     /// hasn't overridden `--param-file`/`--fragmentation`/`--instrument`.
     /// It is NOT used by the scoring loop directly.
     pub activation_method: Option<ActivationMethod>,
+    /// Isolation-window lower offset in Da (selected m/z − lower = window start).
+    /// `None` when the mzML omits `<isolationWindow>`. Used only by `--chimeric`.
+    pub isolation_lower_offset: Option<f64>,
+    /// Isolation-window upper offset in Da (selected m/z + upper = window end).
+    pub isolation_upper_offset: Option<f64>,
 }
 
 impl Spectrum {
@@ -45,6 +50,8 @@ impl Default for Spectrum {
             scan: None,
             peaks: Vec::new(),
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 }
@@ -63,7 +70,16 @@ mod tests {
             scan: Some(100),
             peaks: vec![(100.0, 1.0), (200.0, 2.0), (300.0, 3.0)],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
+    }
+
+    #[test]
+    fn spectrum_isolation_offsets_default_none() {
+        let s = Spectrum::default();
+        assert_eq!(s.isolation_lower_offset, None);
+        assert_eq!(s.isolation_upper_offset, None);
     }
 
     #[test]
@@ -85,6 +101,7 @@ mod tests {
             precursor_charge: None, rt_seconds: None, scan: None,
             peaks: vec![],
             activation_method: None,
+            isolation_lower_offset: None, isolation_upper_offset: None,
         };
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);

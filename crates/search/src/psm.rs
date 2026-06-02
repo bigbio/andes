@@ -56,10 +56,28 @@ pub struct PsmFeatures {
     /// Per-bond edge score sum, mirroring Java's `DBScanScorer.getScore`
     /// edge loop (IES + error_score per bond). Emitted as a NEW `EdgeScore`
     /// PIN column alongside the unchanged `RawScore`, so Percolator can
-    /// learn weights without disrupting the existing RawScore distribution
-    /// (which destroyed discrimination in iter17/iter18 when blended into
-    /// RawScore directly). Computed via `psm_edge_score` in `score_psm.rs`.
+    /// learn weights without disrupting the existing RawScore distribution.
+    /// Kept separate from `RawScore` rather than blended into it.
+    /// Computed via `psm_edge_score` in `score_psm.rs`.
     pub edge_score: i32,
+
+    // ── Chimeric MS1 precursor-envelope features ───────────────────────────
+    /// KL-divergence between the observed precursor isotope envelope (from the
+    /// linked MS1) and the averagine theoretical envelope. Higher = poorer match
+    /// = likely spurious co-isolation. 0.0 when MS1/feature unavailable.
+    pub precursor_isotope_kl: f32,
+    /// Observed monoisotopic precursor intensity / median MS1 intensity (SNR
+    /// proxy). 0.0 when unavailable.
+    pub precursor_snr: f32,
+
+    /// Top-1 RawScore dominance: `RawScore(best) − RawScore(2nd-best distinct
+    /// peptide)` for this spectrum, a positive "lead over the runner-up"
+    /// confidence signal. Emitted as the additive `DeltaRawScore` PIN column on
+    /// the rank-1 row only (0.0 elsewhere). Captured during candidate scoring
+    /// (NOT from the retained queue), so it is populated even at `top_n = 1`
+    /// where the runner-up is otherwise evicted — and without perturbing the
+    /// GF `min_score` / SpecEValue of any emitted PSM (purely additive).
+    pub delta_raw_score: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +87,7 @@ pub struct PsmMatch {
     /// Length is always ≥ 1. The first index (`candidate_idxs[0]`) is the
     /// "primary" candidate — used by callers that need a single Candidate
     /// (most do; see `primary_candidate_idx()`). Multiple indices accumulate
-    /// when the R-2 pepSeq+score dedup pass merges multiple Candidates that
+    /// when the pepSeq+score dedup pass merges multiple Candidates that
     /// share the same peptide sequence and rounded score (typically the same
     /// peptide matched against multiple proteins, e.g. shared tryptic
     /// peptides in target+decoy concat). The PIN writer iterates this Vec to
@@ -85,27 +103,27 @@ pub struct PsmMatch {
     /// Signed: positive when peptide mass exceeds spectrum's implied mass.
     pub mass_error_ppm: f64,
     /// Pin RawScore = `node_score + cleavage_credit`. Higher is better.
-    /// This is what gets emitted in the `RawScore` PIN column (unchanged
-    /// from iter19's design). Used by Percolator as one of many features.
+    /// This is what gets emitted in the `RawScore` PIN column. Used by
+    /// Percolator as one of many features.
     pub score: f32,
-    /// iter33: queue-ordering score = `node + cleavage + edge`. Java's
+    /// Queue-ordering score = `node + cleavage + edge`. Java's
     /// `DBScanScorer.getScore` returns `node + edge` and Java parity adds
     /// cleavage, so Java's `match.score` (used by its `PriorityQueue`
     /// ordering) is `node + cleavage + edge`. Rust's pin RawScore stays at
-    /// `node + cleavage` for Percolator distribution stability (iter19); the
+    /// `node + cleavage` for Percolator distribution stability; the
     /// SEPARATE `EdgeScore` PIN column carries the `+edge` contribution.
     /// `rank_score` mirrors Java's queue-ordering key without changing the
     /// pin RawScore distribution.
     ///
     /// **No automatic default**: PsmMatch does not implement `Default`, and
     /// callers MUST set `rank_score` explicitly. Test fixtures that build
-    /// PsmMatch literals should set `rank_score = score` for pre-iter33
-    /// behavior (no edge contribution to ranking). The `match_engine.rs`
+    /// PsmMatch literals should set `rank_score = score` for behavior with
+    /// no edge contribution to ranking. The `match_engine.rs`
     /// candidate loop computes `rank_score = score + edge_score as f32`.
     pub rank_score: f32,
     /// Per-PSM edge_score = `psm_edge_score(...)` for this candidate.
     /// Computed at queue-insertion time in `match_engine.rs` and reused by
-    /// `compute_psm_features` to populate the iter19 `EdgeScore` PIN column
+    /// `compute_psm_features` to populate the `EdgeScore` PIN column
     /// (avoids the recompute). Default 0 — features extraction will compute
     /// it on the fly if it remains 0 (e.g. for test fixtures).
     pub edge_score: i32,
@@ -135,6 +153,11 @@ pub struct PsmMatch {
     /// (precursor_matching.rs) via match_engine.rs. Written as the PIN
     /// `isotope_error` column.
     pub isotope_offset: i8,
+    /// Chimeric Pass-2 secondaries only: the co-isolated precursor m/z this PSM was
+    /// scored at. `Some(mz)` makes the PIN/TSV writers compute ExpMass / dm / absdm
+    /// from the secondary's own precursor mass; `None` (every ordinary PSM) falls
+    /// back to the spectrum's `precursor_mz`.
+    pub precursor_mz_override: Option<f64>,
 }
 
 impl PsmMatch {
@@ -148,13 +171,13 @@ impl PsmMatch {
 
 impl PartialEq for PsmMatch {
     fn eq(&self, other: &Self) -> bool {
-        // iter37 HIGH-2: PartialEq MUST agree with `Ord::cmp` (Rust contract
-        // a == b ⇒ a.cmp(b) == Equal). Ord uses (spec_e_value, rank_score)
-        // post-iter33, so PartialEq must compare the same fields. Pre-iter37
-        // this compared `score` (= node + cleavage), violating the contract
-        // for any pair of PSMs with equal `score` but different `rank_score`
-        // (= `score + edge`). BinaryHeap behavior was technically undefined
-        // for those pairs.
+        // PartialEq MUST agree with `Ord::cmp` (Rust contract
+        // a == b ⇒ a.cmp(b) == Equal). Ord uses (spec_e_value, rank_score),
+        // so PartialEq must compare the same fields. Comparing `score`
+        // (= node + cleavage) would violate the contract for any pair of
+        // PSMs with equal `score` but different `rank_score`
+        // (= `score + edge`), leaving BinaryHeap behavior undefined for
+        // those pairs.
         self.spec_e_value == other.spec_e_value && self.rank_score == other.rank_score
     }
 }
@@ -170,13 +193,11 @@ impl PartialOrd for PsmMatch {
 /// Primary: `spec_e_value` ascending (lower = better).
 /// Secondary: `rank_score` descending (higher = better).
 ///
-/// iter33: `rank_score` is the Java-aligned queue-ordering key `node +
-/// cleavage + edge`. Pre-iter33 the secondary key was just `score`
-/// (= node + cleavage); post-iter33 it's `rank_score` (= node + cleavage +
-/// edge) so the queue selects Java-equivalent top-1 PSMs even though the
-/// PIN RawScore distribution (iter19) stays unchanged at `node + cleavage`.
+/// `rank_score` is the Java-aligned queue-ordering key `node +
+/// cleavage + edge`, so the queue selects Java-equivalent top-1 PSMs even
+/// though the PIN RawScore distribution stays unchanged at `node + cleavage`.
 ///
-/// For pre-iter33 callers / test fixtures that never set `rank_score`, the
+/// For callers / test fixtures that never set `rank_score`, the
 /// default of 0.0 means an unset `rank_score` would lose to a set one. The
 /// `match_engine` candidate loop always sets both `score` and `rank_score`;
 /// fixtures that build PsmMatch manually should set `rank_score = score`
@@ -226,7 +247,7 @@ impl TopNQueue {
     /// Before `compute_spec_e_values_for_spectrum` runs, all PSMs have
     /// `spec_e_value = 1.0` and the secondary `score` key governs eviction.
     ///
-    /// **Tie handling (R-1, 2026-05-18):** when the queue is at capacity and
+    /// **Tie handling:** when the queue is at capacity and
     /// a new PSM is `Equal` (in `Ord` terms) to the worst retained PSM, the
     /// new PSM is inserted WITHOUT evicting the tied one. This matches
     /// Java parity: `size < n OR score == worst → add`.
@@ -244,9 +265,8 @@ impl TopNQueue {
                     self.heap.push(Reverse(m));
                 }
                 std::cmp::Ordering::Equal => {
-                    // R-1 (2026-05-18): Java parity keeps tied
-                    // PSMs at capacity (and SpecE ties on the per-spectrum
-                    // merge). Rust now matches.
+                    // Java parity keeps tied PSMs at capacity (and SpecE
+                    // ties on the per-spectrum merge).
                     // The queue may exceed `capacity` when ties exist —
                     // `capacity` becomes a *minimum* top-N, not a hard cap.
                     self.heap.push(Reverse(m));
@@ -256,6 +276,14 @@ impl TopNQueue {
                 }
             }
         }
+    }
+
+    /// Add a PSM unconditionally, bypassing the capacity/eviction logic of `push`.
+    /// Used for chimeric Pass-2 secondary peptides, which are legitimate extra
+    /// emissions (a distinct co-isolated peptide on the same scan), NOT competitors
+    /// for the primary's top-N slot.
+    pub fn force_push(&mut self, m: PsmMatch) {
+        self.heap.push(Reverse(m));
     }
 
     pub fn len(&self) -> usize { self.heap.len() }
@@ -268,7 +296,7 @@ impl TopNQueue {
     /// evicted first if a strictly better PSM arrived. Returns `None` if
     /// the queue is empty.
     ///
-    /// iter34: used by the per-candidate two-stage gating in
+    /// Used by the per-candidate two-stage gating in
     /// `match_engine.rs` — candidates whose `pin_score + max_edge_bonus`
     /// cannot exceed the worst retained `rank_score` skip the expensive
     /// `psm_edge_score` computation entirely.
@@ -307,7 +335,7 @@ impl TopNQueue {
     /// retention.
     ///
     /// This is distinct from `update_psm_enrichment` only in intent
-    /// (post-top-N feature fill vs Phase-7 score/e-value enrichment) — the
+    /// (post-top-N feature fill vs score/e-value enrichment) — the
     /// mechanism is identical.
     pub fn fill_post_topn<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
@@ -381,7 +409,7 @@ mod tests {
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,
-            rank_score: score,  // iter33 fixture default: rank_score = score
+            rank_score: score,  // fixture default: rank_score = score
             edge_score: 0,
             spec_e_value: 1.0,  // default sentinel: "not yet computed"
             de_novo_score: i32::MIN,  // sentinel: not yet computed
@@ -389,6 +417,7 @@ mod tests {
             e_value: 1.0,  // sentinel: not yet computed
             features: PsmFeatures::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         }
     }
 
@@ -441,11 +470,9 @@ mod tests {
 
     #[test]
     fn topn_queue_keeps_ties_at_capacity() {
-        // R-1 fix: Java parity keeps tied PSMs at capacity (raw-score
-        // retention and SpecE merge). Rust's TopNQueue must mirror this —
-        // strict-greater eviction
-        // was dropping ties Java keeps, plausibly causing the Astral 14K raw-
-        // target gap that R-1 + R-2 closed.
+        // Java parity keeps tied PSMs at capacity (raw-score retention and
+        // SpecE merge). Rust's TopNQueue must mirror this — strict-greater
+        // eviction would drop ties Java keeps.
         let mut q = TopNQueue::new(1);
         q.push(make_match(0, 100.0));
         q.push(make_match(0, 100.0));
@@ -458,8 +485,27 @@ mod tests {
     }
 
     #[test]
+    fn force_push_bypasses_capacity_eviction() {
+        // Chimeric Pass-2: a capacity-1 queue holds the primary (Pass 1, top-1).
+        // A Pass-2 secondary is a distinct co-isolated peptide, NOT a competitor
+        // for the primary's slot — force_push must ADD it without eviction.
+        let mut q = TopNQueue::new(1);
+        // Primary: best score. Secondary: strictly worse — `push` would drop it.
+        q.push(make_match(0, 100.0));
+        let mut secondary = make_match(0, 50.0);
+        secondary.candidate_idxs = vec![1]; // distinct peptide
+        q.force_push(secondary);
+        let drained = q.drain_into_vec();
+        assert_eq!(
+            drained.len(),
+            2,
+            "force_push must retain BOTH primary and secondary despite capacity=1"
+        );
+    }
+
+    #[test]
     fn dedup_pepseq_score_aggregates_candidate_idxs() {
-        // R-2.2 (2026-05-18): synthetic test for pepSeq+score dedup. Two PSMs
+        // Synthetic test for pepSeq+score dedup. Two PSMs
         // with the same (peptide_residue, score) key should collapse to one
         // PsmMatch with both candidate_idxs aggregated into the surviving Vec.
         //

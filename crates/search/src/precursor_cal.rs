@@ -1,12 +1,12 @@
 //! Two-pass precursor mass calibration (Java P2-cal / `MassCalibrator`).
 //!
-//! Phase 0–1: helpers + mode wiring. The pre-pass calibrator (Phase 3) learns
-//! a file-wide ppm shift; the main pass applies it to observed neutral masses
-//! without mutating [`model::Spectrum`] objects.
+//! The pre-pass calibrator learns a file-wide ppm shift; the main pass
+//! applies it to observed neutral masses without mutating
+//! [`model::Spectrum`] objects.
 
 /// Java `-precursorCal` modes.
 ///
-/// `Default` is `Off` until the G1 ship gate closes — matches the CLI default
+/// `Default` is `Off` (opt-in) — matches the CLI default
 /// and `SearchParams::default_tryptic`, so library consumers that derive
 /// `Default` on a struct containing this field cannot silently enable the
 /// pre-pass.
@@ -81,12 +81,11 @@ pub mod constants {
     /// the firing minimum below so high-yield datasets (Astral/TMT) keep using a
     /// full 200-residual estimate unchanged.
     pub const RESIDUAL_CAP: usize = 200;
-    /// Minimum confident residuals required to TRUST the learned shift. Lowered
-    /// from 200 to 150: low-res-MS2 datasets (e.g. PXD001819 ion-trap CID) yield
-    /// fewer sub-1e-6 SpecEValue PSMs from the 500-spectrum sample (~193), which
-    /// previously fell just under 200 and skipped calibration entirely. 150 is
-    /// still a robust sample size for a median, and the cap above keeps the
-    /// high-yield datasets' estimate identical.
+    /// Minimum confident residuals required to TRUST the learned shift. Set to
+    /// 150 because low-res-MS2 datasets (e.g. PXD001819 ion-trap CID) yield only
+    /// ~193 sub-1e-6 SpecEValue PSMs from the 500-spectrum sample; a higher
+    /// threshold would skip calibration on them, while 150 is still a robust
+    /// sample size for a median (the cap above keeps high-yield datasets identical).
     pub const MIN_CONFIDENT_PSMS: usize = 150;
     pub const MAX_SPEC_EVALUE: f64 = 1e-6;
     pub const MIN_SPECKEYS_FOR_PREPASS: usize = 10_000;

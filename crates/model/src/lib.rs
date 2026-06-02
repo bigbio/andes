@@ -10,6 +10,7 @@ pub mod amino_acid;
 pub mod compact_fasta;
 pub mod enzyme;
 pub mod instrument;
+pub mod isotope;
 pub mod mass;
 pub mod modification;
 pub mod peptide;

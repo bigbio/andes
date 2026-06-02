@@ -76,8 +76,6 @@ impl SearchIndex {
     /// `enumerate_candidates` pass at PXD001819 scale. Hash-collision
     /// probability at N=10M is ~3e-7, and a collision merely undercounts by 1
     /// (well below the precision the distinct count is used at).
-    /// See `docs/superpowers/specs/2026-05-10-evalue-search-index-design.md`
-    /// for the memory analysis.
     pub fn with_distinct_peptide_counts(
         self,
         params: &SearchParams,
@@ -103,8 +101,7 @@ impl SearchIndex {
         }
         // Per-length seen-set holds 8-byte FxHash fingerprints, not
         // `Vec<u8>`. At PXD001819 scale that avoids ~5-10M Vec<u8>
-        // allocations per pass (root cause of the T2-5 wall regression
-        // 5-6 min → 9 min) while preserving bare-residue dedup semantics.
+        // allocations per pass while preserving bare-residue dedup semantics.
         let mut seen_per_length: HashMap<usize, FxHashSet<u64>> = HashMap::new();
         for cand in enumerate_candidates(self, params, decoy_prefix) {
             let residues = &cand.peptide.residues;

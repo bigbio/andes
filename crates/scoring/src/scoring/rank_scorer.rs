@@ -156,7 +156,7 @@ impl RankScorer {
     ///
     /// Returns 0.0 if the `ion_existence_table` has no entry for `part`.
     ///
-    /// **Java-parity edge case (iter25 fix)**: when `prob_peak > 1` (happens
+    /// **Java-parity edge case**: when `prob_peak > 1` (happens
     /// for high-density spectra at small parent_mass — peak_count >
     /// approx_num_bins), the noise probability for `index ∈ {1, 2}`
     /// becomes NEGATIVE (`prob_peak * (1 - prob_peak)`). Java's
@@ -167,9 +167,7 @@ impl RankScorer {
     /// inflating GF DP max_score by ~10× on length-7/8 charge-2 peptides.
     /// We now match Java exactly: do NOT clamp; let NaN/inf propagate so
     /// the downstream `round() as i32` produces 0 (NaN) or `i32::MAX`
-    /// (+inf, then caller clamps to -4). Audit doc:
-    /// `docs/parity-analysis/notes/2026-05-21-audit-12pct-gap.md` and
-    /// `2026-05-21-iter25-prob-peak-bug.md`.
+    /// (+inf, then caller clamps to -4).
     pub fn ion_existence_score(&self, partition: Partition, index: usize, prob_peak: f32) -> f32 {
         let table = match self.param.ion_existence_table.get(&partition) {
             Some(t) => t,
@@ -191,7 +189,7 @@ impl RankScorer {
         }
         // NO clamp on noise_existence_prob — Java doesn't clamp, and the
         // downstream f32->i32 round naturally handles NaN (→0) and ±inf
-        // (→i32::MAX/MIN, then -4 fallback). See iter25 audit.
+        // (→i32::MAX/MIN, then -4 fallback).
         (ion_prob / noise_existence_prob).ln()
     }
 

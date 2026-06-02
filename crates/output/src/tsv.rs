@@ -175,8 +175,10 @@ fn write_psm_row<W: Write>(
         .map(|m| m.name().to_string())
         .unwrap_or_else(|| "UNKNOWN".to_string());
 
-    // Precursor m/z formatted to 4 decimal places
-    let precursor = format!("{:.4}", spec.precursor_mz);
+    // For chimeric Pass-2 secondaries, use the co-isolated precursor m/z; `None`
+    // (every ordinary PSM) falls back to the spectrum's. Mirrors `pin.rs`.
+    let precursor_mz = psm.precursor_mz_override.unwrap_or(spec.precursor_mz);
+    let precursor = format!("{:.4}", precursor_mz);
 
     // IsotopeError: winning isotope offset from the search (matches PIN column).
     let isotope_error: i32 = psm.isotope_offset as i32;
@@ -185,8 +187,8 @@ fn write_psm_row<W: Write>(
     let precursor_error = if ppm_mode {
         format!("{:.4}", psm.mass_error_ppm)
     } else {
-        // Convert ppm error back to Da using precursor_mz
-        let da = psm.mass_error_ppm * 1e-6 * spec.precursor_mz;
+        // Convert ppm error back to Da using the (override-aware) precursor m/z
+        let da = psm.mass_error_ppm * 1e-6 * precursor_mz;
         format!("{:.4}", da)
     };
 
@@ -305,6 +307,8 @@ mod tests {
             scan: Some(scan),
             peaks: vec![],
             activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         }
     }
 
@@ -329,7 +333,7 @@ mod tests {
             charge_used: 2,
             mass_error_ppm: 1.5,
             score,
-            rank_score: score,  // iter33: test fixtures default rank_score = score
+            rank_score: score,  // test fixtures default rank_score = score
             edge_score: 0,
             spec_e_value,
             de_novo_score: 42,
@@ -337,6 +341,7 @@ mod tests {
             e_value: spec_e_value * 100.0,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         }
     }
 
@@ -358,6 +363,8 @@ mod tests {
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
             precursor_mass_shift_ppm: 0.0,
+            chimeric: false,
+            chimeric_isolation_halfwidth_da: 1.5,
         }
     }
 
@@ -529,6 +536,7 @@ mod tests {
             e_value: 1e-3,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
+            precursor_mz_override: None,
         };
 
         let mut queue = TopNQueue::new(10);

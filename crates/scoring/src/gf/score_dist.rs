@@ -77,8 +77,10 @@ impl ScoreDist {
     }
 
     /// Returns `prob_distribution[max(0, score - min_score)]`.
-    /// A score below `min_score` returns the entry at index 0; above
-    /// `max_score` is caller's responsibility (panics if out of bounds).
+    /// A score below `min_score` returns the entry at index 0; a score above
+    /// `max_score` (index out of range) returns `0.0` — the empty-tail-mass
+    /// semantics for out-of-range scores (defensive; callers normally guard
+    /// `score >= max_score` themselves).
     pub fn get_probability(&self, score: i32) -> f64 {
         let p = self.prob_distribution.as_ref().expect("prob distribution not allocated");
         let idx = if score >= self.bound.min_score {
@@ -86,6 +88,9 @@ impl ScoreDist {
         } else {
             0
         };
+        if idx >= p.len() {
+            return 0.0;
+        }
         p[idx]
     }
 
@@ -204,6 +209,17 @@ mod tests {
         assert_eq!(d.get_probability(0), 0.5);
         assert_eq!(d.get_probability(-2), 0.1);
         assert_eq!(d.get_probability(4), 0.2);
+    }
+
+    #[test]
+    fn get_probability_above_max_score_is_zero() {
+        // Allocated range is [min_score, max_score) == [-2, 5), valid scores -2..=4.
+        let mut d = ScoreDist::new(-2, 5, false, true);
+        d.set_prob(4, 0.7);
+        assert_eq!(d.get_probability(4), 0.7);
+        // score == max_score and above are out of range -> empty tail mass 0.0.
+        assert_eq!(d.get_probability(5), 0.0);
+        assert_eq!(d.get_probability(100), 0.0);
     }
 
     #[test]

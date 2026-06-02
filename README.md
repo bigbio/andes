@@ -35,6 +35,8 @@ What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the spe
 
 </details>
 
+In a four-engine comparison against Java MS-GF+, Sage, and MSFragger on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), msgf-rust returns the most PSMs *and* distinct peptides at 1% FDR on both datasets — and is the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, and config files: [`docs/benchmarks/`](docs/benchmarks/).
+
 ## Install
 
 **Option 1 — download a release archive** (recommended):
@@ -79,7 +81,7 @@ msgf-rust \
 
 This runs a tryptic search at 20 ppm precursor tolerance with the bundled HCD_QExactive_Tryp scoring model, writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
 
-A row in `out.pin` is one peptide–spectrum match. With the default charge range (2–3), each row has **36 tab-separated columns**: 35 Java-parity Percolator features plus Rust-only `EdgeScore` (inserted before `Peptide`). Charge one-hot columns scale with `[--charge-min, --charge-max]`. Full column reference: `DOCS.md` §3a.
+A row in `out.pin` is one peptide–spectrum match, with the Java-parity Percolator features plus Rust-only additive columns (`EdgeScore`, …) before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`). Full column reference: `DOCS.md` §3a.
 
 ## Common workflows
 
@@ -119,28 +121,79 @@ Point quantms's PSM search step at `msgf-rust` and use the standard quantms post
 
 Most-used flags (full reference in `DOCS.md` §1):
 
+Required:
+
+| Flag | Purpose |
+|---|---|
+| `--spectrum <FILE>` | Input mzML, MGF, Thermo `.raw` (needs `thermo` feature + .NET 8), or Bruker timsTOF `.d` (needs `timstof` feature). Auto-detected by extension |
+| `--database <FILE>` | Input FASTA (targets only; decoys generated) |
+| `--output-pin <FILE>` | Percolator PIN output |
+
+Optional (default in **bold**):
+
 | Flag | Purpose | Default |
 |---|---|---|
-| `--spectrum <FILE>` | Input mzML or MGF | (required) |
-| `--database <FILE>` | Input FASTA | (required) |
-| `--output-pin <FILE>` | Percolator PIN output | (required) |
-| `--output-tsv <FILE>` | Optional TSV output | (off) |
-| `--mods <FILE>` | mods.txt file (Cam-C + Ox-M built-in) | (off) |
-| `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance | 20.0 |
-| `--isotope-error-min/-max <INT>` | Isotope error range | -1, 2 |
-| `--charge-min/-max <INT>` | Charge range when not in spectrum | 2, 3 |
-| `--enzyme-specificity <auto\|...>` | NTT enforcement | fully |
-| `--max-missed-cleavages <INT>` | Missed cleavages | 1 |
-| `--min/-max-length <INT>` | Peptide length range | 6, 40 |
-| `--min-peaks <INT>` | Min peaks per spectrum to score | 10 |
-| `--top-n <INT>` | PSMs retained per spectrum | 10 |
-| `--fragmentation <auto\|...>` | Frag method (auto-detect from mzML if `auto`) | auto |
-| `--instrument <low-res\|...>` | Instrument class | low-res |
-| `--protocol <auto\|...>` | Search protocol | auto |
-| `--param-file <FILE>` | Override bundled scoring model | (auto-pick) |
-| `--threads <INT>` | Worker threads | (logical CPUs) |
+| `--output-tsv <FILE>` | Also write a TSV | **none** |
+| `--mods <FILE>` | mods.txt file | **Cam-C fixed + Ox-M variable** |
+| `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance (ppm) | **20.0** |
+| `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift | **off** |
+| `--isotope-error-min/-max <INT>` | Isotope-error range | **-1, 2** |
+| `--charge-min/-max <INT>` | Charge range when absent in the spectrum | **2, 5** |
+| `--enzyme-specificity <fully\|semi\|non-specific>` | Tolerable termini (NTT) | **fully** |
+| `--max-missed-cleavages <INT>` | Missed cleavages | **1** |
+| `--min-length/-max-length <INT>` | Peptide length range | **6, 40** |
+| `--min-peaks <INT>` | Min peaks per spectrum to score | **10** |
+| `--top-n <INT>` | PSMs retained per spectrum | **10** |
+| `--fragmentation <auto\|CID\|ETD\|HCD\|UVPD>` | Fragmentation (auto-detected from mzML) | **auto** |
+| `--instrument <low-res\|high-res\|TOF\|QExactive>` | Instrument class | **low-res** |
+| `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
+| `--param-file <FILE>` | Override the bundled scoring model | **auto-pick** |
+| `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
+| `--ms-level <INT>` | MS level to search; MS1/MS3+ (e.g. TMT SPS-MS3) filtered out (mzML or `.raw`) | **2** |
+| `--threads <INT>` | Worker threads | **logical CPUs** |
+| `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
 
-Run `msgf-rust --help` for the auto-generated help with full descriptions.
+Run `msgf-rust --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
+
+## Chimeric / co-isolated peptides (`--chimeric`, experimental)
+
+DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), msgf-rust runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
+
+## Reading Thermo `.raw` files
+
+msgf-rust reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is parity-identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).
+
+There are two ways to use it:
+
+- **Pre-built release archives (recommended) — nothing to install.** The macOS (x64/arm64), Windows (x64), and Linux (x64) archives bundle a self-contained .NET 8 runtime next to the binary, so `.raw` reading works out of the box.
+- **Building from source** with `--features thermo`. Then `.raw` reading needs the **.NET 8 runtime** installed (the build itself does not need the .NET SDK — the RawFileReader assemblies are vendored):
+  - Linux: `sudo dnf install dotnet-runtime-8.0` (RHEL/Fedora) or `apt-get install dotnet-runtime-8.0` (Debian/Ubuntu), or `curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 8.0 --runtime dotnet`
+  - macOS: `brew install dotnet@8`
+  - Windows: the [.NET 8 Desktop/Runtime installer](https://dotnet.microsoft.com/download/dotnet/8.0)
+  - Build needs rustc ≥ 1.88: `RUSTUP_TOOLCHAIN=stable cargo build --release -p msgf-rust --features thermo`
+
+The runtime is auto-discovered: a bundled `dotnet/` next to the binary is used automatically; otherwise an existing `DOTNET_ROOT` or a system install is used. mzML/MGF reading never loads .NET. RawFileReader is under Thermo's license — see `crates/input/THERMO_LICENSE.txt`.
+
+**Containers:** base on a .NET 8 runtime image (or add the runtime), e.g.
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/runtime:8.0
+COPY msgf-rust /usr/local/bin/msgf-rust   # built with --features thermo
+ENTRYPOINT ["msgf-rust"]
+```
+
+## Reading Bruker timsTOF `.d` files
+
+msgf-rust reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate (the same reader [Sage](https://github.com/lazear/sage) uses), so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
+
+It is feature-gated to keep the default build pure-Rust. Build with `--features timstof` on a toolchain with a recent rustc (the `timsrust` dependency tree needs rustc ≥ 1.88):
+
+```bash
+cargo build --release -p msgf-rust --features timstof
+msgf-rust --spectrum sample.d --database human.fasta --output-pin out.pin
+```
+
+Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is carried as metadata but not used by scoring. `--chimeric` on a `.d` degrades gracefully to a normal search (the co-isolation cascade needs an MS1 stream the DDA reader does not expose), as does `--precursor-cal`. Default (non-`timstof`) builds read mzML/MGF only and never pull in `timsrust`.
 
 ## Auto-detection
 

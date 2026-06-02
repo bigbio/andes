@@ -13,9 +13,24 @@
 //! `PrimitiveAaGraph` and produce a single final `ScoreDist` (plus enzyme
 //! adjustment).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use model::aa_set::AminoAcidSet;
 use crate::gf::primitive_graph::PrimitiveAaGraph;
 use crate::gf::score_dist::{ScoreBound, ScoreDist};
+
+/// Release-safe counter of GF-DP nodes silently dropped because their score
+/// range fell outside `[-10000, 10000]`. Incremented in both debug and
+/// release builds (a single relaxed atomic add, no logging in the hot loop)
+/// so callers can report how many nodes were pruned. Process-global and
+/// monotonically increasing across all GF computations.
+static DROPPED_NODES: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the cumulative number of GF-DP nodes dropped by the
+/// `|score| > 10000` range guard since process start.
+pub fn dropped_nodes_count() -> u64 {
+    DROPPED_NODES.load(Ordering::Relaxed)
+}
 
 /// Errors returned by the graph-based GF DP.
 #[derive(thiserror::Error, Debug)]
@@ -498,6 +513,8 @@ fn compute_inner(
             continue;
         }
         if cur_min_score < -10000 || cur_max_score > 10000 {
+            // Release-safe drop counter (single relaxed add, no logging).
+            DROPPED_NODES.fetch_add(1, Ordering::Relaxed);
             #[cfg(debug_assertions)]
             {
                 score_range_overflow_count += 1;

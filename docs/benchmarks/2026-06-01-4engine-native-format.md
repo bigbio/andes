@@ -81,6 +81,25 @@ mode-independent procedure for every engine (see §5).
 | msgf-rust | `dev` (2026-06-01 build, `--features "thermo timstof"`) |
 | Percolator | 3.7.1 (biocontainers); Java PIN via `msgf2pin` 3.6.5 |
 
+### Data availability — download links
+
+**Astral** — from [ProteoBench](https://proteobench.readthedocs.io/) (DDA quantification, precursor ions, Astral module). Do **not** rename the ProteoBench files.
+
+- Raw (the file searched here): <https://proteobench.cubimed.rub.de/datasets/raw_files/DDA-astral/LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw>
+  - The module ships 6 files (`Condition_A_REP1..3`, `Condition_B_REP1..3`) under the same directory: <https://proteobench.cubimed.rub.de/datasets/raw_files/DDA-astral/>
+- FASTA (Human + Yeast + *E. coli* + contaminants): <https://proteobench.cubimed.rub.de/datasets/fasta/ProteoBenchFASTA_MixedSpecies_HYE.zip>
+- mzML (needed for Java/Sage/MSFragger, which don't read Thermo `.raw`): convert the `.raw` with [ThermoRawFileParser](https://github.com/compomics/ThermoRawFileParser) (`ThermoRawFileParser.sh -i <file>.raw -f 2`).
+
+**timsTOF** — from PRIDE [PXD072598](https://www.ebi.ac.uk/pride/archive/projects/PXD072598).
+
+- `.d` (the file searched here, zipped): <https://ftp.pride.ebi.ac.uk/pride/data/archive/2026/03/PXD072598/HeLa_IAA_F51_1.d.zip> — unzip to get `HeLa_IAA_F51_1.d/`.
+- FASTA: a combined UniProt **reviewed** (Swiss-Prot) Human ([UP000005640](https://www.uniprot.org/proteomes/UP000005640)) + Yeast ([UP000002311](https://www.uniprot.org/proteomes/UP000002311)) database, e.g.
+  - Human: `https://rest.uniprot.org/uniprotkb/stream?format=fasta&query=%28proteome%3AUP000005640%29%20AND%20%28reviewed%3Atrue%29`
+  - Yeast: `https://rest.uniprot.org/uniprotkb/stream?format=fasta&query=%28proteome%3AUP000002311%29%20AND%20%28reviewed%3Atrue%29`
+  - concatenate the two FASTAs. (This database was reused from a TMT setup; the HeLa sample is human, so yeast acts as extra background.)
+
+> All four engines search the **target-only** FASTA and add their own reversed decoys (Java `-tda 1`, Sage `generate_decoys`, msgf-rust auto) — except MSFragger, which needs a pre-built `rev_` target+decoy FASTA (see §4).
+
 ---
 
 ## 4. Harmonized parameters

@@ -22,6 +22,8 @@ Three datasets, three results (all at 1% FDR via Percolator 3.7.1):
 
 What that means: on Astral we find more peptide hits than Java; on PXD001819 we match Java's hit count at 3.3× the speed; on TMT we find ~9% more PSMs at 14% less wall. The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization) are tracked in `DOCS.md` §8d as research follow-up — they don't gate cutover.
 
+In a four-engine comparison against Java MS-GF+, Sage, and MSFragger on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), msgf-rust returns the most PSMs *and* distinct peptides at 1% FDR on both datasets — and is the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, and config files: [`docs/benchmarks/`](docs/benchmarks/).
+
 ## Install
 
 **Option 1 — download a release archive** (recommended):

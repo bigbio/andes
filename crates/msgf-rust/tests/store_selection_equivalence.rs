@@ -8,7 +8,7 @@
 //! for the bundled store.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use model::{activation::ActivationMethod, InstrumentType};
 use model_train::{
@@ -159,7 +159,7 @@ fn try_bundled(filename: &str) -> Result<PathBuf, ()> {
 
 /// Extract the lowercased filename stem from a `.param` path.
 /// e.g. `.../HCD_QExactive_Tryp.param` → `"hcd_qexactive_tryp"`.
-fn stem_of(p: &PathBuf) -> String {
+fn stem_of(p: &Path) -> String {
     p.file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())

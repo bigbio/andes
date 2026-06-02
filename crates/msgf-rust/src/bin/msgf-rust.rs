@@ -1940,9 +1940,11 @@ fn cli_flags_to_activation_instrument(
 /// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
 /// resources (a packaging defect, not a CLI input error).
 ///
-/// Retained for the inline unit tests in `param_resolver_tests`; the search
-/// path now goes through [`load_param_from_store`] instead.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Reference implementation of the historical filename-based resolution ladder.
+/// The search path now goes through [`load_param_from_store`]; the store-selection
+/// equivalence test validates the store-based selection against an independent
+/// copy of this logic.
+#[allow(dead_code)]
 fn resolve_bundled_param(
     fragmentation: Fragmentation,
     instrument:    Instrument,
@@ -2144,9 +2146,10 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 ///   - PQD  → CID (Java collapses PQD → CID in `NewScorerFactory.get`).
 ///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
 ///
-/// Retained for the inline unit tests in `param_resolver_tests`; the search
-/// path now goes through [`load_param_from_store`] instead.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Reference implementation of the historical activation-aware resolution ladder
+/// (kept alongside [`resolve_bundled_param`]); the search path now uses
+/// [`load_param_from_store`].
+#[allow(dead_code)]
 fn resolve_bundled_param_for_activation(
     method:               ActivationMethod,
     detected_instrument:  Option<InstrumentType>,
@@ -2198,7 +2201,7 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 /// `resources/ionstat/` relative to the crate's cargo manifest
 /// dir (set at compile time). Returns a helpful error if the file does
 /// not exist.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

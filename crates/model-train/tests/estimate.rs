@@ -70,6 +70,7 @@ fn build_synthetic_spectrum(
     let mut all_ions: Vec<(f64, f32)> = Vec::new();
     let mut global_index = 0usize;
 
+    #[allow(clippy::needless_range_loop)] // `split` indexes parallel arrays
     for split in 1..n {
         let prefix_nom = prefix_nominals[split] as f64;
         let suffix_nom = (peptide_nominal - prefix_nominals[split]) as f64;
@@ -149,7 +150,7 @@ fn estimated_param_is_scorable_and_finite() {
     // param should cover at least the partitions we observed.
     let mut checked = 0usize;
     for (&part, ion_table) in &param.rank_dist_table {
-        for (&ion, _) in ion_table {
+        for &ion in ion_table.keys() {
             if ion.is_noise() { continue; }
             let s = scorer.node_score(part, ion, 1);
             assert!(
@@ -256,12 +257,10 @@ fn dense_counts_recover_empirical_within_tolerance() {
     let mut best: Option<(Partition, IonType, u64, u64)> = None; // (part, ion, rank0, total)
     for (&(part, ion), v) in &counts.rank {
         if ion.is_noise() { continue; }
-        let rank0 = v.get(0).copied().unwrap_or(0);
+        let rank0 = v.first().copied().unwrap_or(0);
         let total: u64 = v.iter().sum();
-        if rank0 > 0 && total > 0 {
-            if best.as_ref().map_or(true, |&(_, _, b_r, _)| rank0 > b_r) {
-                best = Some((part, ion, rank0, total));
-            }
+        if rank0 > 0 && total > 0 && best.as_ref().is_none_or(|&(_, _, b_r, _)| rank0 > b_r) {
+            best = Some((part, ion, rank0, total));
         }
     }
     let (best_part, best_ion, rank0_count, total_count) =

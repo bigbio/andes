@@ -94,6 +94,7 @@ fn build_synthetic_spectrum(
     let mut all_ions: Vec<(f64, Partition, IonType, f32)> = Vec::new();
     let mut global_index = 0usize;
 
+    #[allow(clippy::needless_range_loop)] // `split` indexes parallel arrays
     for split in 1..n {
         let prefix_nom = prefix_nominals[split] as f64;
         let suffix_nom = (peptide_nominal - prefix_nominals[split]) as f64;

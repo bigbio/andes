@@ -16,15 +16,20 @@ use std::process::ExitCode;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread;
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
     PrecursorTolerance, ResidueSpec, Spectrum, Tolerance,
 };
 use model_train::{
     ModelStore,
+    accumulate::{merge, StatsAccumulator},
+    counts::CountStats,
+    estimate::{Estimator, EstimatorConfig},
+    labeled::bootstrap_labels,
     select::{select, SelectionKey},
     protocol_to_experiment_class as store_protocol_to_experiment_class,
+    store::write_models,
 };
 use scoring_crate::{Param, RankScorer};
 use search::{
@@ -76,25 +81,28 @@ pub enum EnzymeSpecificity {
     #[clap(name = "fully")]        Fully,
 }
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "msgf-rust",
-    about = "msgf-rust: database search of MGF/mzML spectra against FASTA",
-    allow_hyphen_values = true,
-)]
-struct Cli {
+/// Search arguments (shared by the default search path and exposed as a
+/// flat arg group so that `msgf-rust --spectrum X --database Y --output-pin Z`
+/// keeps working unchanged).
+///
+/// Note: `spectrum`, `database`, and `output_pin` are declared `Option<PathBuf>`
+/// at the clap level so that they are not required when a subcommand (e.g.
+/// `train`) is given.  When no subcommand is present, `run()` validates them
+/// manually and returns an early error if they are missing.
+#[derive(Args, Debug)]
+struct SearchArgs {
     /// Input spectrum file. Format is auto-detected by extension:
     /// `.mzML`/`.mzml` is read as mzML, anything else as MGF.
     #[arg(long)]
-    spectrum: PathBuf,
+    spectrum: Option<PathBuf>,
 
     /// Input FASTA database (target sequences only; decoys are generated automatically).
     #[arg(long)]
-    database: PathBuf,
+    database: Option<PathBuf>,
 
     /// Output Percolator PIN file path.
     #[arg(long)]
-    output_pin: PathBuf,
+    output_pin: Option<PathBuf>,
 
     /// Output TSV file path (optional).
     #[arg(long)]
@@ -232,13 +240,140 @@ struct Cli {
     /// per-scan isolation-window offsets.
     #[arg(long, default_value = "1.5")]
     isolation_halfwidth: f64,
+
+    /// Path to a Parquet model store to use instead of the bundled
+    /// `resources/ionstat/models.parquet`. When set, model selection reads from
+    /// this store; when unset, the bundled store is used.
+    #[arg(long = "model-store")]
+    model_store: Option<PathBuf>,
+
+    /// Exact model ID to load from the model store (bundled or `--model-store`).
+    /// When set, skips automatic selection by `(--fragmentation, --instrument,
+    /// --protocol)` and loads this ID directly. Useful after `msgf-rust train`
+    /// to search with the freshly-trained model.
+    #[arg(long = "model")]
+    model_id_override: Option<String>,
 }
+
+/// Training arguments for `msgf-rust train`.
+#[derive(Args, Debug)]
+struct TrainArgs {
+    /// Input spectrum file (training data). Same format dispatch as for search:
+    /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
+    #[arg(long)]
+    spectra: PathBuf,
+
+    /// Input FASTA target database (decoys are generated automatically).
+    #[arg(long)]
+    database: PathBuf,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
+    /// a path to a binary `.param` file. When omitted, the bundled
+    /// `hcd_qexactive_tryp` model is used as the seed.
+    #[arg(long = "seed-model")]
+    seed_model: Option<String>,
+
+    /// Target-decoy q-value threshold for accepting PSMs as confident training
+    /// labels. Use a lenient value (e.g. 0.1 or 0.5) for small fixtures.
+    #[arg(long = "train-fdr", default_value = "0.01")]
+    train_fdr: f64,
+
+    /// Instrument tag to embed in the trained model's metadata. Default: `QExactive`.
+    #[arg(long, default_value = "QExactive")]
+    instrument: String,
+
+    /// Experiment-class / protocol tag (e.g. `Automatic`, `TMT`). Default: `Automatic`.
+    #[arg(long, default_value = "Automatic")]
+    protocol: String,
+
+    /// Path to the Parquet model store to write (created if absent, appended
+    /// otherwise). REQUIRED.
+    #[arg(long = "out-store")]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `trained_<instrument>_<protocol>`.
+    #[arg(long = "model-id")]
+    model_id: Option<String>,
+
+    /// Path to a mods.txt file (same format as `--mods` for search). When
+    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M
+    /// variable).
+    #[arg(long)]
+    mods: Option<PathBuf>,
+
+    /// Number of worker threads. Defaults to logical CPU count.
+    #[arg(long, default_value_t = num_cpus::get())]
+    threads: usize,
+}
+
+/// Available subcommands.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Train a scoring model from spectra and a FASTA database, writing the
+    /// result to a Parquet model store.
+    Train(TrainArgs),
+}
+
+/// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
+/// drive the existing search path (byte-identical to the pre-subcommand
+/// behaviour).
+#[derive(Parser, Debug)]
+#[command(
+    name = "msgf-rust",
+    about = "msgf-rust: database search of MGF/mzML spectra against FASTA",
+    allow_hyphen_values = true,
+)]
+struct TopCli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    search: SearchArgs,
+}
+
+// Backward-compatibility alias: keep old name pointing to the search args.
+type Cli = SearchArgs;
 
 fn main() -> ExitCode {
     #[cfg(feature = "thermo")]
     configure_bundled_dotnet();
-    let cli = Cli::parse();
-    match run(cli) {
+    let top = TopCli::parse();
+    let result = match top.command {
+        Some(Command::Train(args)) => run_train(args),
+        None => {
+            // Validate required search args that are Option<> at the clap level.
+            let search = top.search;
+            let spectrum = match search.spectrum {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: --spectrum is required for search (or use `msgf-rust train`)");
+                    return ExitCode::from(2);
+                }
+            };
+            let database = match search.database {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: --database is required for search");
+                    return ExitCode::from(2);
+                }
+            };
+            let output_pin = match search.output_pin {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: --output-pin is required for search");
+                    return ExitCode::from(2);
+                }
+            };
+            // Reconstruct a Cli (= SearchArgs) with the validated paths.
+            run(Cli {
+                spectrum: Some(spectrum),
+                database: Some(database),
+                output_pin: Some(output_pin),
+                ..search
+            })
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("msgf-rust: {e}");
@@ -555,16 +690,21 @@ fn run_precursor_calibration(
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // These three were validated as Some(..) by main() before calling run().
+    let spectrum_path: PathBuf = cli.spectrum.expect("spectrum validated in main");
+    let database_path: PathBuf = cli.database.expect("database validated in main");
+    let output_pin_path: PathBuf = cli.output_pin.expect("output_pin validated in main");
+
     log_rss("startup");
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
     // ── 1. Load FASTA target database ────────────────────────────────────────
     let target_db =
-        FastaReader::load_all(BufReader::new(File::open(&cli.database)?))?;
+        FastaReader::load_all(BufReader::new(File::open(&database_path)?))?;
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
-        cli.database.display(),
+        database_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
     log_rss("after_fasta_load");
@@ -630,7 +770,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--param-file` wins outright. Otherwise, for mzML with `--fragmentation auto`,
     // peek the file's dominant activation method and pick the bundled `.param`.
     // MGF and explicit fragmentation/instrument flags use `resolve_bundled_param`.
-    let spectrum_ext = cli.spectrum
+    let spectrum_ext = spectrum_path
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
@@ -652,12 +792,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if !auto_route_eligible {
             None
         } else if is_mzml {
-            detect_dominant_activation(&cli.spectrum)
-                .map(|m| (m, detect_instrument_type_for_path(&cli.spectrum)))
+            detect_dominant_activation(&spectrum_path)
+                .map(|m| (m, detect_instrument_type_for_path(&spectrum_path)))
         } else if is_raw {
             #[cfg(feature = "thermo")]
             {
-                input::thermo::detect_activation_instrument(&cli.spectrum, 64)
+                input::thermo::detect_activation_instrument(&spectrum_path, 64)
             }
             #[cfg(not(feature = "thermo"))]
             {
@@ -690,7 +830,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                              method = {} (instrument = {}) from {}",
                             method.name(),
                             inst.map(|i| i.name()).unwrap_or("unknown/default"),
-                            cli.spectrum.display()
+                            spectrum_path.display()
                         );
                         (method, inst)
                     }
@@ -711,7 +851,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 )
             };
 
-        let (model_id, p) = load_param_from_store(activation, instrument_opt, cli.protocol)?;
+        let (model_id, p) = load_param_from_store(
+            activation,
+            instrument_opt,
+            cli.protocol,
+            cli.model_store.as_deref(),
+            cli.model_id_override.as_deref(),
+        )?;
         eprintln!("Param model: {model_id} (from store)");
         p
     };
@@ -856,7 +1002,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &cli.decoy_prefix,
         );
         let cal_stats = run_precursor_calibration(
-            &cli.spectrum,
+            &spectrum_path,
             is_mzml,
             ms_level_u32,
             bench_cap,
@@ -941,7 +1087,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let chimeric_input = chimeric_active;
     let parse_stats = if chimeric_input {
         let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
-        let spectrum_path = cli.spectrum.clone();
+        let spectrum_path = spectrum_path.clone();
         let cap = bench_cap;
         // The cascade is MS2-only by construction (MS2 paired with its preceding
         // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
@@ -1018,7 +1164,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         // Spawn the parser thread. It owns the reader (paths + flags moved in).
         // The thread returns ParseStats with the error count + sample messages.
-        let spectrum_path = cli.spectrum.clone();
+        let spectrum_path = spectrum_path.clone();
         let parser_handle = thread::spawn(move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
             if is_mzml {
                 let f = File::open(&spectrum_path)
@@ -1124,7 +1270,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if all_spectra.is_empty() {
         return Err(format!(
             "no spectra parsed from {}",
-            cli.spectrum.display()
+            spectrum_path.display()
         )
         .into());
     }
@@ -1134,7 +1280,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "Loaded+scored {} spectra from {} in chunks of {} [PHASE stream_search: {:.2}s]",
         all_spectra.len(),
-        cli.spectrum.display(),
+        spectrum_path.display(),
         CHUNK_SIZE,
         t_phase.elapsed().as_secs_f64()
     );
@@ -1157,10 +1303,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    output::write_pin(&cli.output_pin, &spectra, &queues, &prepared.candidates, &params, &idx)?;
+    output::write_pin(&output_pin_path, &spectra, &queues, &prepared.candidates, &params, &idx)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
-        cli.output_pin.display(),
+        output_pin_path.display(),
         t_phase.elapsed().as_secs_f64(),
         t_total.elapsed().as_secs_f64()
     );
@@ -1173,14 +1319,228 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 9. Write TSV (optional) ───────────────────────────────────────────────
     if let Some(ref tsv_path) = cli.output_tsv {
-        let spec_file_name = cli
-            .spectrum
+        let spec_file_name = spectrum_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| cli.spectrum.display().to_string());
+            .unwrap_or_else(|| spectrum_path.display().to_string());
         output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
+
+    Ok(())
+}
+
+// ── Training pipeline ─────────────────────────────────────────────────────────
+
+/// Load all MS2 spectra from a path using the same format-dispatch logic as
+/// the search path (mzML by extension, otherwise MGF).
+fn load_spectra_for_train(
+    path: &Path,
+) -> Result<Vec<Spectrum>, Box<dyn std::error::Error>> {
+    let ext_lower = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    let is_mzml = matches!(ext_lower.as_deref(), Some("mzml"));
+    let mut spectra = Vec::new();
+    if is_mzml {
+        let f = File::open(path)?;
+        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(2, 2);
+        for item in reader {
+            match item {
+                Ok(s) => spectra.push(s),
+                Err(e) => eprintln!("WARN: mzML parse: {e}"),
+            }
+        }
+    } else {
+        let f = File::open(path)?;
+        let reader = MgfReader::new(BufReader::new(f));
+        for item in reader {
+            match item {
+                Ok(s) => spectra.push(s),
+                Err(e) => eprintln!("WARN: MGF parse: {e}"),
+            }
+        }
+    }
+    Ok(spectra)
+}
+
+/// Run the full training pipeline and write a model to a Parquet store.
+fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    // ── 2. Load spectra ───────────────────────────────────────────────────────
+    eprintln!("train: loading spectra from {} ...", args.spectra.display());
+    let spectra = load_spectra_for_train(&args.spectra)?;
+    eprintln!("train: loaded {} spectra", spectra.len());
+
+    // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
+    // `--seed-model` may be: (a) absent → use hcd_qexactive_tryp from bundled
+    // store; (b) a slug like "hcd_qexactive_tryp" → look up in bundled store;
+    // (c) a path to a binary .param file.
+    let (seed_model_id, seed_param): (String, Param) = match &args.seed_model {
+        None => {
+            let store_path = bundled_store_path();
+            let store = ModelStore::open(&store_path)
+                .map_err(|e| format!("opening bundled store: {e}"))?;
+            let p = store.load_param("hcd_qexactive_tryp")
+                .map_err(|e| format!("loading seed model: {e}"))?;
+            ("hcd_qexactive_tryp".to_string(), p)
+        }
+        Some(seed) => {
+            let as_path = Path::new(seed);
+            if as_path.is_file() {
+                // Treat as a binary .param file path.
+                let p = Param::load_from_file(as_path)
+                    .map_err(|e| format!("loading seed param file {}: {e}", as_path.display()))?;
+                (seed.clone(), p)
+            } else {
+                // Treat as a store slug.
+                let store_path = bundled_store_path();
+                let store = ModelStore::open(&store_path)
+                    .map_err(|e| format!("opening bundled store: {e}"))?;
+                let p = store.load_param(seed)
+                    .map_err(|e| format!("loading seed model '{seed}': {e}"))?;
+                (seed.clone(), p)
+            }
+        }
+    };
+    eprintln!("train: seed model = {seed_model_id}");
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4. Build AminoAcidSet ─────────────────────────────────────────────────
+    let aa = match &args.mods {
+        Some(path) => {
+            let set = AminoAcidSetBuilder::new_standard()
+                .add_mods_from_file(path)
+                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
+                .build()
+                .map_err(|e| format!("building amino-acid set from {}: {e}", path.display()))?;
+            eprintln!("train: loaded modifications from {}", path.display());
+            set
+        }
+        None => {
+            let cam = Modification {
+                name: "Carbamidomethyl".into(),
+                mass_delta: 57.02146,
+                residue: ResidueSpec::Specific(b'C'),
+                location: ModLocation::Anywhere,
+                fixed: true,
+                accession: None,
+            };
+            let ox = Modification {
+                name: "Oxidation".into(),
+                mass_delta: 15.99491,
+                residue: ResidueSpec::Specific(b'M'),
+                location: ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+            };
+            AminoAcidSetBuilder::new_standard()
+                .add_fixed_mod(cam)
+                .add_variable_mod(ox)
+                .build()?
+        }
+    };
+
+    // ── 5. Bootstrap labels ───────────────────────────────────────────────────
+    let search_params = SearchParams::default_tryptic(aa);
+    eprintln!(
+        "train: running seed search (train-fdr = {}) ...",
+        args.train_fdr
+    );
+    let labels = bootstrap_labels(
+        &spectra,
+        &args.database,
+        &seed_scorer,
+        &search_params,
+        args.train_fdr,
+    )
+    .map_err(|e| format!("bootstrap_labels: {e}"))?;
+    eprintln!("train: {} confident labels at q <= {}", labels.len(), args.train_fdr);
+
+    if labels.is_empty() {
+        return Err(format!(
+            "no confident labels found at train-fdr={} — try a higher --train-fdr",
+            args.train_fdr
+        )
+        .into());
+    }
+
+    // ── 6. Accumulate stats ───────────────────────────────────────────────────
+    eprintln!("train: accumulating ion-match statistics ...");
+    let accumulator = StatsAccumulator::new(&seed_scorer);
+    let mut stats = CountStats::new();
+    for label in &labels {
+        let spec = &spectra[label.spectrum_index];
+        accumulator.accumulate(&mut stats, spec, &label.peptide, label.charge);
+    }
+    // Sequential merge (merge() expects a Vec; we've already accumulated into one).
+    let stats = merge(vec![stats]);
+
+    // ── 7. Estimate model ─────────────────────────────────────────────────────
+    eprintln!("train: estimating model parameters ...");
+    let cfg = EstimatorConfig::default();
+    let estimator = Estimator::new(cfg);
+    let trained_param = estimator.estimate(&stats, &seed_param);
+    let n_partitions = trained_param.partitions.len();
+    eprintln!("train: trained model has {} partitions", n_partitions);
+
+    // ── 8. Determine model ID ─────────────────────────────────────────────────
+    let model_id = args
+        .model_id
+        .clone()
+        .unwrap_or_else(|| format!("trained_{}_{}", args.instrument, args.protocol));
+    eprintln!("train: model ID = {model_id}");
+
+    // ── 9. Write to store (read-existing + rewrite-all + new) ────────────────
+    let store_path = &args.out_store;
+    let mut existing: Vec<(String, Param)> = Vec::new();
+    if store_path.exists() {
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+        for id in store.model_ids() {
+            if id == model_id {
+                eprintln!("train: overwriting existing model '{id}' in store");
+                continue; // will be replaced by the new trained model
+            }
+            let p = store.load_param(&id)
+                .map_err(|e| format!("reading model '{id}' from existing store: {e}"))?;
+            existing.push((id, p));
+        }
+    }
+
+    // Build the full list: existing models + the new trained model.
+    let mut all_models: Vec<(String, &Param)> = existing
+        .iter()
+        .map(|(id, p)| (id.clone(), p))
+        .collect();
+    all_models.push((model_id.clone(), &trained_param));
+
+    write_models(store_path, &all_models)
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+
+    eprintln!(
+        "train: wrote model '{model_id}' to {} ({} total model(s)) [{:.2}s]",
+        store_path.display(),
+        all_models.len(),
+        t0.elapsed().as_secs_f64(),
+    );
+    eprintln!(
+        "train: summary — labels={}, partitions={}, store={}",
+        labels.len(),
+        n_partitions,
+        store_path.display(),
+    );
 
     Ok(())
 }
@@ -1614,28 +1974,41 @@ fn build_selection_key(
 /// selected from the store will be identical to the lowercased filename
 /// stem of the old `.param` path (guaranteed by the equivalence gate test
 /// `store_selection_matches_old_ladder_for_all_combos`).
+///
+/// `custom_store_path`: when `Some`, use that Parquet file instead of the
+/// bundled `resources/ionstat/models.parquet` (honours `--model-store`).
+///
+/// `model_id_override`: when `Some`, skip automatic selection and load this
+/// exact model ID (honours `--model`).
 fn load_param_from_store(
     activation: ActivationMethod,
     instrument: Option<InstrumentType>,
     protocol: Protocol,
+    custom_store_path: Option<&Path>,
+    model_id_override: Option<&str>,
 ) -> Result<(String, Param), Box<dyn std::error::Error>> {
-    let store_path = bundled_store_path();
+    let store_path = custom_store_path
+        .map(|p| p.to_owned())
+        .unwrap_or_else(bundled_store_path);
     let store = ModelStore::open(&store_path)
         .map_err(|e| format!("opening model store {}: {e}", store_path.display()))?;
-    let entries = store.selection_entries();
 
-    let key = build_selection_key(activation, instrument, protocol);
-
-    let model_id = select(
-        &entries,
-        &key,
-        // `build_selection_key` already applies family fallback + all
-        // normalizations, so the family_fn here is the identity.
-        |i| i.to_string(),
-        Some("hcd_qexactive_tryp"),
-    )
-    .unwrap_or("hcd_qexactive_tryp")
-    .to_string();
+    let model_id: String = if let Some(id) = model_id_override {
+        id.to_string()
+    } else {
+        let entries = store.selection_entries();
+        let key = build_selection_key(activation, instrument, protocol);
+        select(
+            &entries,
+            &key,
+            // `build_selection_key` already applies family fallback + all
+            // normalizations, so the family_fn here is the identity.
+            |i| i.to_string(),
+            Some("hcd_qexactive_tryp"),
+        )
+        .unwrap_or("hcd_qexactive_tryp")
+        .to_string()
+    };
 
     let param = store.load_param(&model_id)
         .map_err(|e| format!("loading model '{model_id}' from store: {e}"))?;

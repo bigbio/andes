@@ -8,4 +8,4 @@ pub mod scored_spectrum;
 pub use fragment_ions::{predict_by_ions, PredictedIon};
 pub use psm_score::{psm_edge_score, score_psm};
 pub use rank_scorer::RankScorer;
-pub use scored_spectrum::ScoredSpectrum;
+pub use scored_spectrum::{IonMatchFact, ScoredSpectrum};

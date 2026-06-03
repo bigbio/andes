@@ -15,7 +15,7 @@ use model::instrument::InstrumentType;
 use model::protocol::Protocol;
 use model::tolerance::Tolerance;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub version: i32,
     pub data_type: SpecDataType,
@@ -556,7 +556,7 @@ impl IonType {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrecursorOffsetFrequency {
     pub reduced_charge: i32,
     pub offset: f32,
@@ -564,7 +564,7 @@ pub struct PrecursorOffsetFrequency {
     pub frequency: f32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FragmentOffsetFrequency {
     pub ion_type: IonType,
     pub frequency: f32,

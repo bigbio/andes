@@ -13,4 +13,4 @@ pub(crate) mod testutil;
 
 // Convenience re-exports.
 pub use param_model::{Param, ParamParseError};
-pub use scoring::{RankScorer, ScoredSpectrum};
+pub use scoring::{IonMatchFact, RankScorer, ScoredSpectrum};

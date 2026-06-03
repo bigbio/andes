@@ -15,6 +15,7 @@ scoring_crate = { path = "../scoring", package = "scoring" }
 search = { path = "../search" }
 output = { path = "../output" }
 input = { path = "../input" }
+model-train = { path = "../model-train" }
 clap = { workspace = true }
 num_cpus = "1.16"
 rayon = "1.10"

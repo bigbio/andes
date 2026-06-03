@@ -35,7 +35,7 @@ What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the spe
 
 </details>
 
-In a four-engine comparison against Java MS-GF+, Sage, and MSFragger on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), msgf-rust returns the most PSMs *and* distinct peptides at 1% FDR on both datasets — and is the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, and config files: [`docs/benchmarks/`](docs/benchmarks/).
+In four-engine comparisons against Java MS-GF+, Sage, and MSFragger, msgf-rust returns the most PSMs *and* distinct peptides at 1% FDR: on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), and on a real human-tissue **TMT** dataset acquired as ion-trap CID-MS2 ([PXD016999](https://www.ebi.ac.uk/pride/archive/projects/PXD016999): 22,217 PSMs / 10,473 peptides, ahead of Java, MSFragger, and Sage). It is also the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, data URLs, and config files: [`docs/benchmarks/`](docs/benchmarks/).
 
 ## Install
 
@@ -51,7 +51,7 @@ msgf-rust-<version>-aarch64-apple-darwin.tar.gz
 msgf-rust-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive contains the `msgf-rust` binary, the `resources/` tree (39 bundled `.param` files + unimod.obo), and LICENSE/NOTICE/README.
+Each archive contains the `msgf-rust` binary, the `resources/` tree (bundled `models.parquet` model store with all 39 scoring models), and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
@@ -197,7 +197,11 @@ Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is
 
 ## Auto-detection
 
-For mzML inputs with `--fragmentation auto` (the default), msgf-rust peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a bundled `.param` file from the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when resolving the bundled model. MGF files have no activation metadata, so they use flag-based resolution (defaulting to `HCD_QExactive_Tryp.param`). Full resolution table: `DOCS.md` §4.
+For mzML inputs with `--fragmentation auto` (the default), msgf-rust peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a scoring model from the bundled `models.parquet` store based on the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when selecting the model. MGF files have no activation metadata, so they use flag-based selection (defaulting to `hcd_qexactive_tryp`). Full resolution table: `DOCS.md` §4.
+
+## Training your own models
+
+msgf-rust can generate scoring models from your own data (`msgf-rust train`) and select them automatically by instrument at search time — useful for instruments or experiment classes the bundled models don't cover well (Orbitrap Astral, timsTOF, TMT/phospho/immunopeptidomics, …). Models live in a single Parquet store and support incremental add/remove/reweight updates with a held-out acceptance gate. See [`TRAIN.md`](TRAIN.md).
 
 ## Parity vs Java MS-GF+
 
@@ -219,5 +223,5 @@ msgf-rust inherits the upstream MS-GF+ UCSD-Noncommercial license. The license r
 
 ## Acknowledgments
 
-- Sangtae Kim, Pavel Pevzner, and the PNNL Proteomics team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine and the bundled `.param` scoring models.
+- Sangtae Kim, Pavel Pevzner, and the PNNL Proteomics team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine and the bundled scoring models.
 - The [bigbio](https://github.com/bigbio) maintainers and the [quantms](https://github.com/bigbio/quantms) team.

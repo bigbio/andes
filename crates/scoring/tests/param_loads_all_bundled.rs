@@ -1,26 +1,20 @@
-//! Phase 2 exit gate: load every bundled `.param` file and assert
-//! structural invariants. Path is resolved via `CARGO_MANIFEST_DIR`
-//! (`crates/engine/`) walked up to `astral-speed/`, then into
-//! `resources/ionstat/`.
+//! Binary `.param` reader gate: load the representative `.param` fixtures and
+//! assert structural invariants. The 39 production models now ship as a single
+//! `resources/ionstat/models.parquet` store (see the `model-train` crate); a
+//! diverse subset is kept under `tests/fixtures/` to exercise the binary reader
+//! across activations, resolutions, and protocols.
 
 use std::fs;
 use std::path::PathBuf;
 
 use scoring::Param;
 
-fn ionstat_dir() -> PathBuf {
-    // CARGO_MANIFEST_DIR = astral-speed/rust/crates/engine
-    // ../../../  → astral-speed/
-    // resources/ionstat/
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("resources/ionstat")
-        .canonicalize()
-        .expect("canonicalize ionstat path")
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 fn collect_param_files() -> Vec<PathBuf> {
-    let dir = ionstat_dir();
+    let dir = fixtures_dir();
     let mut files: Vec<PathBuf> = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read_dir {dir:?}: {e}"))
         .filter_map(|entry| entry.ok().map(|e| e.path()))
@@ -31,12 +25,12 @@ fn collect_param_files() -> Vec<PathBuf> {
 }
 
 #[test]
-fn all_39_bundled_param_files_load() {
+fn bundled_param_fixtures_load() {
     let files = collect_param_files();
-    assert_eq!(
-        files.len(), 39,
-        "expected 39 .param files in {:?}, found {}",
-        ionstat_dir(), files.len()
+    assert!(
+        !files.is_empty(),
+        "expected at least one .param fixture in {:?}",
+        fixtures_dir()
     );
 
     let mut failures = Vec::new();
@@ -64,14 +58,19 @@ fn all_39_bundled_param_files_load() {
     }
 
     if !failures.is_empty() {
-        panic!("{} of {} .param files failed to load:\n{}",
-            failures.len(), files.len(), failures.join("\n"));
+        panic!(
+            "{} of {} .param fixtures failed to load:\n{}",
+            failures.len(),
+            files.len(),
+            failures.join("\n")
+        );
     }
 }
 
 #[test]
 fn each_param_round_trips_validation_marker() {
     let files = collect_param_files();
+    assert!(!files.is_empty());
     for path in &files {
         let bytes = fs::read(path).unwrap();
         let result = Param::load_from_bytes(&bytes);

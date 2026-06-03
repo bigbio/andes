@@ -276,7 +276,7 @@ For **mzML** inputs when `--fragmentation auto` (the default), msgf-rust peeks t
 1. **Activation method** — histogram of `<activation>` cvParams across the first 64 MS2 spectra; dominant method wins. Mixed methods trigger an stderr warning but the dominant method is still used file-wide.
 2. **Instrument class** — scans `<instrumentConfiguration>` / analyzer cvParams via `input::detect_instrument_type`; dominant analyzer among MS2 spectra wins. `None` → `low-res` (Java `LOW_RESOLUTION_LTQ` default).
 
-The CLI `--instrument` flag does **not** gate this path — only `--fragmentation auto` + mzML extension does. When peek succeeds, instrument is taken from the file; `--protocol` from the CLI is still used to pick protocol-suffixed `.param` files (e.g. `_TMT`).
+The CLI `--instrument` flag does **not** gate this path — only `--fragmentation auto` + mzML extension does. When peek succeeds, instrument is taken from the file; `--protocol` from the CLI is still used to pick protocol-specific models from the parquet store (e.g. the `tmt` experiment-class entry).
 
 MGF files carry no activation or instrument metadata → auto-detect returns `None` → bundled default `hcd_qexactive_tryp` model (from the parquet store) unless explicit `--fragmentation` / `--instrument` flags override the store selection key.
 

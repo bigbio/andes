@@ -283,8 +283,18 @@ pub fn commit_update(
             .as_slice(),
     )?;
 
-    // Atomic rename.
-    std::fs::rename(&tmp, path)?;
+    // Commit the temp file. `rename` replaces atomically on Unix, but on Windows
+    // it fails when the destination already exists — so fall back to
+    // remove-then-rename there (only when the rename actually failed and the
+    // destination is present), keeping the Unix path atomic.
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => {}
+        Err(_) if path.exists() => {
+            std::fs::remove_file(path)?;
+            std::fs::rename(&tmp, path)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
     Ok(())
 }
 
@@ -400,10 +410,13 @@ fn parse_date(date: &str) -> Option<u32> {
     // Using the Gregorian formula (valid for 1970+):
     let jdn = julian_day_number(y, m, d);
     let epoch_jdn = julian_day_number(1970, 1, 1);
+    // Pre-1970 dates are out of the supported range: treat them as invalid
+    // (→ weight unchanged) rather than as 1970-01-01 (which would apply an
+    // extreme decay).
     if jdn >= epoch_jdn {
         Some((jdn - epoch_jdn) as u32)
     } else {
-        Some(0)
+        None
     }
 }
 

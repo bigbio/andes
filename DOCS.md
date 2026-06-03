@@ -13,7 +13,7 @@ Run `msgf-rust --help` for auto-generated help derived from the same `Cli` struc
 3. [Output formats](#3-output-formats)
 4. [Auto-detection](#4-auto-detection)
 5. [Building from source](#5-building-from-source)
-6. [Training new `.param` files](#6-training-new-param-files)
+6. [Training new scoring models](#6-training-new-scoring-models)
 7. [Isobaric labeling](#7-isobaric-labeling)
 8. [Java MS-GF+ → msgf-rust migration](#8-java-ms-gf--msgf-rust-migration)
 9. [License and citation](#9-license-and-citation)
@@ -32,7 +32,7 @@ All flags use kebab-case long options (`--flag-name`). Several flags also accept
 |---|---|---|---|---|
 | `.mzML` / `.mzml` | mzML (streaming) | always built | none | Full activation + instrument auto-detection (§4). |
 | `.raw` | Thermo RawFileReader | `--features thermo` (release archives ship it) | .NET 8 runtime — **bundled in the release archives** (nothing to install); from source, install .NET 8 | Native Thermo; parity-identical to the equivalent mzML. Supports `--chimeric`. Activation/instrument read from vendor metadata (§4). |
-| `.d` | Bruker timsTOF (`timsrust`) | `--features timstof` | none (pure Rust) | DDA-PASEF, **MS2 only**; auto-routed to `CID_TOF_Tryp.param`. A `.d` is a *directory*. `--chimeric` / `--precursor-cal` degrade to a normal search. |
+| `.d` | Bruker timsTOF (`timsrust`) | `--features timstof` | none (pure Rust) | DDA-PASEF, **MS2 only**; auto-routed to the `cid_tof_tryp` model. A `.d` is a *directory*. `--chimeric` / `--precursor-cal` degrade to a normal search. |
 | any other (e.g. `.mgf`) | MGF | always built | none | No MS-level/activation metadata; treated as MS2 with flag-based model resolution. |
 
 Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so `--ms-level 3` cannot accidentally search reporter scans. Default builds (no extra features) read mzML/MGF only; see [`README.md`](README.md) for `.raw`/`.d` install details and container recipes.
@@ -72,9 +72,9 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--fragmentation` | enum | `auto` | Fragmentation method for bundled `.param` resolution. Named: `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` on mzML triggers activation detection (§4); on MGF falls back to bundled defaults. | Java `-m`; numeric `0`=auto, `1`=CID, `2`=ETD, `3`=HCD, `4`=UVPD |
-| `--instrument` | enum | `low-res` | Instrument class for bundled `.param` resolution. Named: `low-res`, `high-res`, `TOF`, `QExactive`. | Java `-inst`; numeric `0`=low-res, `1`=high-res, `2`=TOF, `3`=QExactive |
-| `--protocol` | enum | `auto` | Search protocol suffix for bundled `.param` resolution. Named: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
+| `--fragmentation` | enum | `auto` | Fragmentation method for bundled model resolution. Named: `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` on mzML triggers activation detection (§4); on MGF falls back to bundled defaults. | Java `-m`; numeric `0`=auto, `1`=CID, `2`=ETD, `3`=HCD, `4`=UVPD |
+| `--instrument` | enum | `low-res` | Instrument class for bundled model resolution. Named: `low-res`, `high-res`, `TOF`, `QExactive`. | Java `-inst`; numeric `0`=low-res, `1`=high-res, `2`=TOF, `3`=QExactive |
+| `--protocol` | enum | `auto` | Search protocol suffix for bundled model resolution. Named: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
 | `--param-file` | path | *(auto)* | Explicit path to a `.param` scoring model file. When set, overrides all auto-detection and bundled resolution. Required when running a release binary outside the source tree if bundled resources are not present. | Java `-conf` / model path |
 
 **Bundled default when all scoring flags are at their defaults** (`--fragmentation auto --instrument low-res --protocol auto`): `hcd_qexactive_tryp` (from the parquet model store). This preserves pre-auto-detect behaviour for MGF inputs and mzML files without activation metadata.
@@ -172,7 +172,7 @@ NumMods=2
 229.162932,*,fix,N-term,TMT10plex
 ```
 
-Pair with `--protocol TMT --fragmentation HCD --instrument QExactive` to select `HCD_QExactive_Tryp_TMT.param` (§4, §7).
+Pair with `--protocol TMT --fragmentation HCD --instrument QExactive` to select the `hcd_qexactive_tryp_tmt` model from the store (§4, §7).
 
 ### Example (c) — Phosphorylation on S, T, Y
 
@@ -184,7 +184,7 @@ NumMods=3
 79.966331,Y,opt,any,Phospho
 ```
 
-Pair with `--protocol phospho` to prefer a `_Phosphorylation` protocol-suffixed `.param` file when bundled.
+Pair with `--protocol phospho` to prefer a phosphorylation-specific model (e.g. `hcd_qexactive_tryp_phosphorylation`) from the store when one is available.
 
 ---
 
@@ -381,24 +381,36 @@ cargo test --release --workspace -- \
   --skip match_spectra_output_invariant_across_thread_counts
 ```
 
-Release archives bundle the binary, all 39 `.param` files, and `unimod.obo` under `resources/` — see [`README.md`](README.md) §Install.
+Release archives bundle the binary, the `models.parquet` model store (all 39 scoring models), and `unimod.obo` under `resources/` — see [`README.md`](README.md) §Install.
 
 ---
 
-## 6. Training new `.param` files
+## 6. Training new scoring models
 
-msgf-rust loads Java MS-GF+ `.param` scoring models **without conversion** when passed via `--param-file`. All 39 original scoring models are bundled as a single Parquet store at `resources/ionstat/models.parquet`; the individual binary `.param` files are no longer shipped on disk (git history preserves them).
+msgf-rust includes a native Rust training engine — **`msgf-rust train`** — that generates scoring models from your own data and writes them into the same Parquet model store the bundled models live in. No Java `ScoringParamGen` round-trip is needed.
 
-Training **new** models (novel fragmentation chemistry, instrument class, or acquisition protocol) requires a scoring-parameter generator. Java MS-GF+'s **`ScoringParamGen`** is the canonical trainer.
+Training is **bootstrap-supervised**: msgf-rust searches your spectra with a seed model, keeps the confident PSMs (target-decoy q ≤ `--train-fdr`), and re-estimates the per-partition rank and mass-error distributions from them. Trained models are auto-selected by instrument/protocol at search time, and the store supports incremental add / remove / reweight / decay updates with a held-out acceptance gate.
 
-**Status in v0.1.0:** search and scoring are fully ported and benchmark-validated; **`ScoringParamGen` is not yet ported** to Rust. Track progress on the [GitHub issues](https://github.com/bigbio/msgf-rust/issues) page.
+```bash
+msgf-rust train \
+  --spectra mydata.mzML \
+  --database mydata.fasta \
+  --seed-model hcd_qexactive_tryp \
+  --out-store models.parquet \
+  --model-id astral_tryp \
+  --train-fdr 0.01
+```
 
-**Interim workflows:**
+Then search with it:
 
-1. **Use bundled models** — the parquet store covers HCD QExactive tryptic DDA, CID low-res ion trap, ETD, phosphorylation, TMT, and iTRAQ variants (§4 model list). All 39 models are loaded at runtime via the store; no external files are required.
-2. **Train on the `java-legacy` branch** — check out the preserved Java tree (`git checkout java-legacy`), run Java `ScoringParamGen` on representative training data, then point msgf-rust at the output: `--param-file /path/to/MyModel.param`.
+```bash
+msgf-rust --spectrum more.mzML --database mydata.fasta --output-pin out.pin \
+  --model-store models.parquet --model astral_tryp
+```
 
-The Rust scorer reads any valid Java `.param` file via `Param::load_from_file` (the binary reader is retained for `--param-file` and for migration tooling).
+See **[`TRAIN.md`](TRAIN.md)** for the full guide: where to get training data, the experiment-class catalog, incremental training (`--update --add` / `--remove-source` / `--reweight` / `--decay`), and how to evaluate a candidate model on held-out data before committing it.
+
+msgf-rust also still loads any Java MS-GF+ binary `.param` file directly via `--param-file` — the binary reader is retained for custom/external models and for the migration tooling. The 39 original models are bundled in `resources/ionstat/models.parquet`; the individual `.param` files are no longer shipped on disk (git history preserves them, and `cargo run -p model-train --example gen_bundled_store` regenerates the store from them).
 
 ---
 

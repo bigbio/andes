@@ -48,11 +48,14 @@ pub fn aa_set() -> model::AminoAcidSet {
         .unwrap()
 }
 
-/// Load the bundled `HCD_QExactive_Tryp.param` and construct a RankScorer.
+/// Load `HCD_QExactive_Tryp.param` and construct a RankScorer.
+///
+/// The bundled `resources/ionstat/*.param` files were migrated into the Parquet
+/// store and removed from the tree; load the retained test fixture instead.
 pub fn rank_scorer() -> RankScorer {
     let param_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("resources/ionstat/HCD_QExactive_Tryp.param")
+        .join("test-fixtures/HCD_QExactive_Tryp.param")
         .canonicalize()
         .unwrap_or_else(|e| panic!("canonicalize HCD_QExactive_Tryp.param: {e}"));
     let param = Param::load_from_file(&param_path)

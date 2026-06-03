@@ -74,7 +74,7 @@ fn fixture_path() -> PathBuf {
 }
 
 fn param_path() -> PathBuf {
-    workspace_root().join("resources/ionstat/CID_LowRes_Tryp.param")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/CID_LowRes_Tryp.param")
 }
 
 fn build_peptide_ivneefdqleedtpvyk() -> Peptide {

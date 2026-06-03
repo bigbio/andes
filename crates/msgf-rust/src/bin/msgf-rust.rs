@@ -16,10 +16,25 @@ use std::process::ExitCode;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::thread;
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
     PrecursorTolerance, ResidueSpec, Spectrum, Tolerance,
+};
+use model_train::{
+    ModelStore,
+    accumulate::{merge, StatsAccumulator},
+    counts::CountStats,
+    estimate::{Estimator, EstimatorConfig},
+    gate::evaluate_candidate,
+    labeled::bootstrap_labels,
+    select::{select, SelectionKey},
+    protocol_to_experiment_class as store_protocol_to_experiment_class,
+    store::{
+        SourceLedger,
+        update_add, update_remove, update_reweight, update_decay, commit_update,
+        write_all_models_with_sources_pub,
+    },
 };
 use scoring_crate::{Param, RankScorer};
 use search::{
@@ -29,6 +44,9 @@ use search::{
 };
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
+
+// Type alias to reduce clippy type_complexity warnings in the train path.
+type ModelEntryOwned = (String, Param, Vec<(SourceLedger, CountStats)>);
 
 /// Fragmentation method. `Auto` detects from the mzML's activation block and
 /// falls back to the bundled `HCD_QExactive_Tryp.param` when nothing is detected.
@@ -71,25 +89,28 @@ pub enum EnzymeSpecificity {
     #[clap(name = "fully")]        Fully,
 }
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "msgf-rust",
-    about = "msgf-rust: database search of MGF/mzML spectra against FASTA",
-    allow_hyphen_values = true,
-)]
-struct Cli {
+/// Search arguments (shared by the default search path and exposed as a
+/// flat arg group so that `msgf-rust --spectrum X --database Y --output-pin Z`
+/// keeps working unchanged).
+///
+/// Note: `spectrum`, `database`, and `output_pin` are declared `Option<PathBuf>`
+/// at the clap level so that they are not required when a subcommand (e.g.
+/// `train`) is given.  When no subcommand is present, `run()` validates them
+/// manually and returns an early error if they are missing.
+#[derive(Args, Debug)]
+struct SearchArgs {
     /// Input spectrum file. Format is auto-detected by extension:
     /// `.mzML`/`.mzml` is read as mzML, anything else as MGF.
     #[arg(long)]
-    spectrum: PathBuf,
+    spectrum: Option<PathBuf>,
 
     /// Input FASTA database (target sequences only; decoys are generated automatically).
     #[arg(long)]
-    database: PathBuf,
+    database: Option<PathBuf>,
 
     /// Output Percolator PIN file path.
     #[arg(long)]
-    output_pin: PathBuf,
+    output_pin: Option<PathBuf>,
 
     /// Output TSV file path (optional).
     #[arg(long)]
@@ -227,13 +248,195 @@ struct Cli {
     /// per-scan isolation-window offsets.
     #[arg(long, default_value = "1.5")]
     isolation_halfwidth: f64,
+
+    /// Path to a Parquet model store to use instead of the bundled
+    /// `resources/ionstat/models.parquet`. When set, model selection reads from
+    /// this store; when unset, the bundled store is used.
+    #[arg(long = "model-store")]
+    model_store: Option<PathBuf>,
+
+    /// Exact model ID to load from the model store (bundled or `--model-store`).
+    /// When set, skips automatic selection by `(--fragmentation, --instrument,
+    /// --protocol)` and loads this ID directly. Useful after `msgf-rust train`
+    /// to search with the freshly-trained model.
+    #[arg(long = "model")]
+    model_id_override: Option<String>,
 }
+
+/// Training arguments for `msgf-rust train`.
+#[derive(Args, Debug)]
+struct TrainArgs {
+    /// Input spectrum file (training data). Same format dispatch as for search:
+    /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
+    ///
+    /// Required for initial training.  In `--update` mode with `--remove-source`
+    /// or `--reweight` / `--decay`, `--spectra` is only required when
+    /// `--validate` is also given (to run the acceptance gate).
+    #[arg(long)]
+    spectra: Option<PathBuf>,
+
+    /// Input FASTA target database (decoys are generated automatically).
+    ///
+    /// Required for initial training and for `--update --add`.
+    /// In `--update` mode without `--add`, only required when `--validate` is
+    /// given.
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
+    /// a path to a binary `.param` file. When omitted, the bundled
+    /// `hcd_qexactive_tryp` model is used as the seed.
+    #[arg(long = "seed-model")]
+    seed_model: Option<String>,
+
+    /// Target-decoy q-value threshold for accepting PSMs as confident training
+    /// labels. Use a lenient value (e.g. 0.1 or 0.5) for small fixtures.
+    #[arg(long = "train-fdr", default_value = "0.01")]
+    train_fdr: f64,
+
+    /// Instrument tag to embed in the trained model's metadata. Default: `QExactive`.
+    #[arg(long, default_value = "QExactive")]
+    instrument: String,
+
+    /// Experiment-class / protocol tag (e.g. `Automatic`, `TMT`). Default: `Automatic`.
+    #[arg(long, default_value = "Automatic")]
+    protocol: String,
+
+    /// Path to the Parquet model store to write (created if absent, appended
+    /// otherwise). REQUIRED.
+    #[arg(long = "out-store")]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `trained_<instrument>_<protocol>`.
+    #[arg(long = "model-id")]
+    model_id: Option<String>,
+
+    /// Path to a mods.txt file (same format as `--mods` for search). When
+    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M
+    /// variable).
+    #[arg(long)]
+    mods: Option<PathBuf>,
+
+    /// Number of worker threads. Defaults to logical CPU count.
+    #[arg(long, default_value_t = num_cpus::get())]
+    threads: usize,
+
+    /// ISO 8601 date string (e.g. `2026-01-01`) recorded in the source ledger.
+    /// When omitted, the current date is used for initial training; empty string
+    /// is stored when `--date ""` is explicitly passed.
+    #[arg(long)]
+    date: Option<String>,
+
+    // ── Update mode ──────────────────────────────────────────────────────────
+
+    /// Switch to incremental update mode for this model ID.
+    /// When set, one of `--add`, `--remove-source`, `--reweight`, or `--decay`
+    /// must be provided.
+    #[arg(long = "update", value_name = "MODEL_ID")]
+    update_model: Option<String>,
+
+    /// (Update mode) Add a new source from `--spectra`.
+    /// Requires `--source-id` and `--database`.
+    #[arg(long, requires = "update_model")]
+    add: bool,
+
+    /// (Update mode) Source identifier for the new source being added
+    /// (used with `--add`).
+    #[arg(long = "source-id", requires = "add", value_name = "ID")]
+    source_id: Option<String>,
+
+    /// (Update mode) Remove the source with this ID from the model.
+    #[arg(long = "remove-source", requires = "update_model", value_name = "ID")]
+    remove_source: Option<String>,
+
+    /// (Update mode) Set a source's weight.  Format: `<source-id>=<weight>`,
+    /// e.g. `--reweight s0=0.5`.
+    #[arg(long = "reweight", requires = "update_model", value_name = "ID=W")]
+    reweight: Option<String>,
+
+    /// (Update mode) Apply exponential age-decay to all sources with this
+    /// half-life in days.
+    #[arg(long = "decay", requires = "update_model", value_name = "DAYS")]
+    decay: Option<f32>,
+
+    /// (Update mode) Held-out validation spectra for the acceptance gate.
+    /// When omitted the gate is skipped (a warning is printed).
+    #[arg(long = "validate", requires = "update_model")]
+    validate: Option<PathBuf>,
+
+    /// (Update mode) Commit the update even if the acceptance gate fails.
+    #[arg(long, requires = "update_model")]
+    force: bool,
+}
+
+/// Available subcommands.
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Train a scoring model from spectra and a FASTA database, writing the
+    /// result to a Parquet model store.
+    Train(TrainArgs),
+}
+
+/// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
+/// drive the existing search path (byte-identical to the pre-subcommand
+/// behaviour).
+#[derive(Parser, Debug)]
+#[command(
+    name = "msgf-rust",
+    about = "msgf-rust: database search of MGF/mzML spectra against FASTA",
+    allow_hyphen_values = true,
+)]
+struct TopCli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    search: SearchArgs,
+}
+
+// Backward-compatibility alias: keep old name pointing to the search args.
+type Cli = SearchArgs;
 
 fn main() -> ExitCode {
     #[cfg(feature = "thermo")]
     configure_bundled_dotnet();
-    let cli = Cli::parse();
-    match run(cli) {
+    let top = TopCli::parse();
+    let result = match top.command {
+        Some(Command::Train(args)) => run_train(args),
+        None => {
+            // Validate required search args that are Option<> at the clap level.
+            let search = top.search;
+            let spectrum = match search.spectrum {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: --spectrum is required for search (or use `msgf-rust train`)");
+                    return ExitCode::from(2);
+                }
+            };
+            let database = match search.database {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: --database is required for search");
+                    return ExitCode::from(2);
+                }
+            };
+            let output_pin = match search.output_pin {
+                Some(p) => p,
+                None => {
+                    eprintln!("error: --output-pin is required for search");
+                    return ExitCode::from(2);
+                }
+            };
+            // Reconstruct a Cli (= SearchArgs) with the validated paths.
+            run(Cli {
+                spectrum: Some(spectrum),
+                database: Some(database),
+                output_pin: Some(output_pin),
+                ..search
+            })
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("msgf-rust: {e}");
@@ -550,16 +753,21 @@ fn run_precursor_calibration(
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // These three were validated as Some(..) by main() before calling run().
+    let spectrum_path: PathBuf = cli.spectrum.expect("spectrum validated in main");
+    let database_path: PathBuf = cli.database.expect("database validated in main");
+    let output_pin_path: PathBuf = cli.output_pin.expect("output_pin validated in main");
+
     log_rss("startup");
     let t_total = std::time::Instant::now();
     let t_phase = std::time::Instant::now();
     // ── 1. Load FASTA target database ────────────────────────────────────────
     let target_db =
-        FastaReader::load_all(BufReader::new(File::open(&cli.database)?))?;
+        FastaReader::load_all(BufReader::new(File::open(&database_path)?))?;
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
-        cli.database.display(),
+        database_path.display(),
         t_phase.elapsed().as_secs_f64()
     );
     log_rss("after_fasta_load");
@@ -625,7 +833,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `--param-file` wins outright. Otherwise, for mzML with `--fragmentation auto`,
     // peek the file's dominant activation method and pick the bundled `.param`.
     // MGF and explicit fragmentation/instrument flags use `resolve_bundled_param`.
-    let spectrum_ext = cli.spectrum
+    let spectrum_ext = spectrum_path
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
@@ -638,68 +846,84 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Anything that is neither mzML, `.raw`, nor `.d` is treated as MGF (default).
     let is_mgf = !is_mzml && !is_raw && !is_d;
 
-    let param_path = match cli.param_file.clone() {
-        Some(p) => p,
-        None    => {
-            let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
-            // Detect (activation, instrument) from the input. mzML peeks the
-            // file; Thermo `.raw` reads the vendor activation/analyzer metadata
-            // so a CID/ETD/ion-trap `.raw` is not silently scored with the
-            // HCD/QExactive model; Bruker `.d` (timsTOF DDA-PASEF) is beam-type
-            // CID on a TOF analyzer, so route it to the CID/TOF model rather than
-            // letting it fall through to the Orbitrap HCD/QExactive default.
-            let detected = if !auto_route_eligible {
+    // Detect (activation, instrument) from the input for auto-routing.
+    // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
+    // is always CID/TimsTOF (DDA-PASEF). Detection only runs when
+    // `--fragmentation auto` is set (otherwise the CLI flags override).
+    let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
+    let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
+        if !auto_route_eligible {
+            None
+        } else if is_mzml {
+            detect_dominant_activation(&spectrum_path)
+                .map(|m| (m, detect_instrument_type_for_path(&spectrum_path)))
+        } else if is_raw {
+            #[cfg(feature = "thermo")]
+            {
+                input::thermo::detect_activation_instrument(&spectrum_path, 64)
+            }
+            #[cfg(not(feature = "thermo"))]
+            {
                 None
-            } else if is_mzml {
-                detect_dominant_activation(&cli.spectrum)
-                    .map(|m| (m, detect_instrument_type_for_path(&cli.spectrum)))
-            } else if is_raw {
-                #[cfg(feature = "thermo")]
-                {
-                    input::thermo::detect_activation_instrument(&cli.spectrum, 64)
-                }
-                #[cfg(not(feature = "thermo"))]
-                {
-                    None
-                }
-            } else {
-                // is_d — timsTOF DDA-PASEF. `timsrust` does not expose a per-scan
-                // activation/analyzer, so route to the CID/TOF bundled model
-                // (CID_TOF_Tryp). Override with --fragmentation/--instrument.
-                Some((ActivationMethod::CID, Some(InstrumentType::TOF)))
-            };
+            }
+        } else {
+            // is_d — timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
+            Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
+        };
+
+    let t_phase = std::time::Instant::now();
+    let param = if let Some(ref override_path) = cli.param_file {
+        // ── Override path: load binary .param directly (unchanged behaviour). ──
+        eprintln!("Param file (override): {}", override_path.display());
+        Param::load_from_file(override_path)
+            .map_err(|e| format!("loading param file {}: {e}", override_path.display()))?
+    } else {
+        // ── Auto / explicit flags: resolve from the Parquet model store. ──────
+        //
+        // For `--fragmentation auto` with a detectable input the detected
+        // (activation, instrument) is used; for explicit flags or MGF (no
+        // detection) the CLI enum values are converted to ActivationMethod /
+        // InstrumentType for the store lookup.
+        let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             if auto_route_eligible {
-                match detected {
+                match detected_activation_instrument {
                     Some((method, inst)) => {
                         eprintln!(
                             "Param resolver: auto-detected dominant activation \
                              method = {} (instrument = {}) from {}",
                             method.name(),
                             inst.map(|i| i.name()).unwrap_or("unknown/default"),
-                            cli.spectrum.display()
+                            spectrum_path.display()
                         );
-                        resolve_bundled_param_for_activation(method, inst, cli.protocol)?
+                        (method, inst)
                     }
                     None => {
-                        // No detectable activation in the input — fall back to
-                        // the historical hard-coded default. This keeps MGF
-                        // files (no activation header) and older mzML files
-                        // (no `<activation>` block) working as before.
-                        resolve_bundled_param(
-                            cli.fragmentation, cli.instrument, cli.protocol
-                        )?
+                        // No detectable activation — fall back to CLI flags.
+                        // For the all-defaults case (Auto+LowRes+Auto) this
+                        // returns HCD/QExactive to match the historical default.
+                        cli_flags_to_activation_instrument(
+                            cli.fragmentation, cli.instrument, cli.protocol,
+                        )
                     }
                 }
             } else {
-                resolve_bundled_param(cli.fragmentation, cli.instrument, cli.protocol)?
-            }
-        }
-    };
-    eprintln!("Param file: {}", param_path.display());
+                // Explicit `--fragmentation` / `--instrument` flags (or MGF
+                // where auto-detection is not eligible).
+                cli_flags_to_activation_instrument(
+                    cli.fragmentation, cli.instrument, cli.protocol,
+                )
+            };
 
-    let t_phase = std::time::Instant::now();
-    let param = Param::load_from_file(&param_path)
-        .map_err(|e| format!("loading param file {}: {e}", param_path.display()))?;
+        let (model_id, p) = load_param_from_store(
+            activation,
+            instrument_opt,
+            cli.protocol,
+            cli.model_store.as_deref(),
+            cli.model_id_override.as_deref(),
+        )?;
+        eprintln!("Param model: {model_id} (from store)");
+        p
+    };
     let scorer = RankScorer::new(&param);
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
@@ -841,7 +1065,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &cli.decoy_prefix,
         );
         let cal_stats = run_precursor_calibration(
-            &cli.spectrum,
+            &spectrum_path,
             is_mzml,
             ms_level_u32,
             bench_cap,
@@ -926,7 +1150,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let chimeric_input = chimeric_active;
     let parse_stats = if chimeric_input {
         let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
-        let spectrum_path = cli.spectrum.clone();
+        let spectrum_path = spectrum_path.clone();
         let cap = bench_cap;
         // The cascade is MS2-only by construction (MS2 paired with its preceding
         // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
@@ -1003,7 +1227,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         // Spawn the parser thread. It owns the reader (paths + flags moved in).
         // The thread returns ParseStats with the error count + sample messages.
-        let spectrum_path = cli.spectrum.clone();
+        let spectrum_path = spectrum_path.clone();
         let parser_handle = thread::spawn(move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
             if is_mzml {
                 let f = File::open(&spectrum_path)
@@ -1109,7 +1333,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if all_spectra.is_empty() {
         return Err(format!(
             "no spectra parsed from {}",
-            cli.spectrum.display()
+            spectrum_path.display()
         )
         .into());
     }
@@ -1119,7 +1343,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "Loaded+scored {} spectra from {} in chunks of {} [PHASE stream_search: {:.2}s]",
         all_spectra.len(),
-        cli.spectrum.display(),
+        spectrum_path.display(),
         CHUNK_SIZE,
         t_phase.elapsed().as_secs_f64()
     );
@@ -1142,10 +1366,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    output::write_pin(&cli.output_pin, &spectra, &queues, &prepared.candidates, &params, &idx)?;
+    output::write_pin(&output_pin_path, &spectra, &queues, &prepared.candidates, &params, &idx)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
-        cli.output_pin.display(),
+        output_pin_path.display(),
         t_phase.elapsed().as_secs_f64(),
         t_total.elapsed().as_secs_f64()
     );
@@ -1158,16 +1382,609 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 9. Write TSV (optional) ───────────────────────────────────────────────
     if let Some(ref tsv_path) = cli.output_tsv {
-        let spec_file_name = cli
-            .spectrum
+        let spec_file_name = spectrum_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| cli.spectrum.display().to_string());
+            .unwrap_or_else(|| spectrum_path.display().to_string());
         output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 
     Ok(())
+}
+
+// ── Training pipeline ─────────────────────────────────────────────────────────
+
+/// Load all MS2 spectra from a path using the same format-dispatch logic as
+/// the search path (mzML by extension, otherwise MGF).
+fn load_spectra_for_train(
+    path: &Path,
+) -> Result<Vec<Spectrum>, Box<dyn std::error::Error>> {
+    let ext_lower = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    let mut spectra = Vec::new();
+    match ext_lower.as_deref() {
+        Some("mzml") => {
+            let f = File::open(path)?;
+            let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(2, 2);
+            for item in reader {
+                match item {
+                    Ok(s) => spectra.push(s),
+                    Err(e) => eprintln!("WARN: mzML parse: {e}"),
+                }
+            }
+        }
+        // Native Thermo `.raw` — MS2 only, same Spectrum stream as the search
+        // path. Requires building with `--features thermo`.
+        Some("raw") => {
+            #[cfg(feature = "thermo")]
+            {
+                let reader = input::ThermoRawReader::open(path)
+                    .map_err(|e| format!("open Thermo .raw {}: {e}", path.display()))?
+                    .with_ms_level(Some(2));
+                for item in reader {
+                    match item {
+                        Ok(s) => spectra.push(s),
+                        Err(e) => eprintln!("WARN: .raw parse: {e}"),
+                    }
+                }
+            }
+            #[cfg(not(feature = "thermo"))]
+            {
+                return Err(format!(
+                    "native Thermo `.raw` training input requires building with \
+                     `--features thermo` (and the .NET 8 runtime): {}",
+                    path.display()
+                )
+                .into());
+            }
+        }
+        // Native Bruker timsTOF `.d` (a directory). Requires `--features timstof`.
+        Some("d") => {
+            #[cfg(feature = "timstof")]
+            {
+                let reader = input::TimsTofReader::open(path)
+                    .map_err(|e| format!("open Bruker .d {}: {e}", path.display()))?;
+                for item in reader {
+                    match item {
+                        Ok(s) => spectra.push(s),
+                        Err(e) => eprintln!("WARN: .d parse: {e}"),
+                    }
+                }
+            }
+            #[cfg(not(feature = "timstof"))]
+            {
+                return Err(format!(
+                    "native Bruker `.d` training input requires building with \
+                     `--features timstof`: {}",
+                    path.display()
+                )
+                .into());
+            }
+        }
+        // MGF (default / backwards-compatible).
+        _ => {
+            let f = File::open(path)?;
+            let reader = MgfReader::new(BufReader::new(f));
+            for item in reader {
+                match item {
+                    Ok(s) => spectra.push(s),
+                    Err(e) => eprintln!("WARN: MGF parse: {e}"),
+                }
+            }
+        }
+    }
+    Ok(spectra)
+}
+
+/// Build the `SearchParams` used by every training mode (initial bootstrap,
+/// `--add`, and the acceptance gate) in one place, so they stay consistent with
+/// each other and with the production search:
+///   - charge span `2..=5` (the search binary's default; `default_tryptic` alone
+///     is the narrow `2..=3`, which drops z=4/5 labels common on Astral/timsTOF),
+///   - the `NumMods=` variable-mod limit from the `--mods` file when present
+///     (the search path applies it too).
+fn build_train_search_params(
+    mods: &Option<PathBuf>,
+) -> Result<SearchParams, Box<dyn std::error::Error>> {
+    let aa = build_aa_set(mods)?;
+    let mut params = SearchParams::default_tryptic(aa);
+    params.charge_range = 2..=5;
+    if let Some(path) = mods {
+        if let Some(n) = AminoAcidSetBuilder::parse_num_mods_from_file(path)
+            .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?
+        {
+            params.max_variable_mods_per_peptide = n;
+        }
+    }
+    Ok(params)
+}
+
+/// Run the full training pipeline and write a model to a Parquet store.
+///
+/// When `args.update_model` is set, runs in incremental update mode (Part D).
+/// Otherwise runs the standard initial-training pipeline (Part A).
+fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    if let Some(ref update_model_id) = args.update_model.clone() {
+        return run_train_update(args, update_model_id, t0);
+    }
+
+    // ── Standard training path ────────────────────────────────────────────────
+
+    // ── 2. Load spectra ───────────────────────────────────────────────────────
+    let spectra_path = args.spectra.clone().ok_or("--spectra is required for initial training")?;
+    eprintln!("train: loading spectra from {} ...", spectra_path.display());
+    let spectra = load_spectra_for_train(&spectra_path)?;
+    eprintln!("train: loaded {} spectra", spectra.len());
+
+    let database = args.database.clone().ok_or("--database is required for initial training")?;
+
+    // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
+    let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
+    eprintln!("train: seed model = {seed_model_id}");
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4-5. Build search params (charge span + NumMods) + bootstrap labels ───
+    let search_params = build_train_search_params(&args.mods)?;
+    eprintln!(
+        "train: running seed search (train-fdr = {}) ...",
+        args.train_fdr
+    );
+    let labels = bootstrap_labels(
+        &spectra,
+        &database,
+        &seed_scorer,
+        &search_params,
+        args.train_fdr,
+    )
+    .map_err(|e| format!("bootstrap_labels: {e}"))?;
+    eprintln!("train: {} confident labels at q <= {}", labels.len(), args.train_fdr);
+
+    if labels.is_empty() {
+        return Err(format!(
+            "no confident labels found at train-fdr={} — try a higher --train-fdr",
+            args.train_fdr
+        )
+        .into());
+    }
+
+    // ── 6. Accumulate stats ───────────────────────────────────────────────────
+    eprintln!("train: accumulating ion-match statistics ...");
+    let accumulator = StatsAccumulator::new(&seed_scorer);
+    let mut stats = CountStats::new();
+    for label in &labels {
+        let spec = &spectra[label.spectrum_index];
+        accumulator.accumulate(&mut stats, spec, &label.peptide, label.charge);
+    }
+    let stats = merge(vec![stats]);
+
+    // ── 7. Estimate model ─────────────────────────────────────────────────────
+    eprintln!("train: estimating model parameters ...");
+    let cfg = EstimatorConfig::default();
+    let estimator = Estimator::new(cfg);
+    let trained_param = estimator.estimate(&stats, &seed_param);
+    let n_partitions = trained_param.partitions.len();
+    eprintln!("train: trained model has {} partitions", n_partitions);
+
+    // ── 8. Determine model ID ─────────────────────────────────────────────────
+    let model_id = args
+        .model_id
+        .clone()
+        .unwrap_or_else(|| format!("trained_{}_{}", args.instrument, args.protocol));
+    eprintln!("train: model ID = {model_id}");
+
+    // ── 9. Build source ledger (Part A) ───────────────────────────────────────
+    // Determine date: use args.date if provided, else today's date in ISO 8601.
+    let date_str = args.date.clone().unwrap_or_else(|| {
+        // Format today as YYYY-MM-DD using std::time.
+        format_today_iso8601()
+    });
+    let spectra_filename = spectra_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| spectra_path.display().to_string());
+    let source_id = format!("bootstrap_{model_id}");
+    let ledger = SourceLedger {
+        source_id: source_id.clone(),
+        dataset: spectra_filename,
+        n_psms: labels.len() as i64,
+        date: date_str,
+        weight: 1.0,
+        train_fdr: args.train_fdr as f32,
+        instrument: args.instrument.clone(),
+        experiment_class: args.protocol.clone(),
+    };
+
+    // ── 10. Write to store with source tracking ────────────────────────────────
+    // Read existing OTHER models from the store (preserve them on append).
+    let store_path = &args.out_store;
+    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+    if store_path.exists() {
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+        for id in store.model_ids() {
+            if id == model_id {
+                eprintln!("train: overwriting existing model '{id}' in store");
+                continue;
+            }
+            let p = store.load_param(&id)
+                .map_err(|e| format!("reading model '{id}': {e}"))?;
+            let src_ledgers = store.load_sources(&id)
+                .unwrap_or_default();
+            let mut src = Vec::new();
+            for l in src_ledgers {
+                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                    src.push((l, s));
+                }
+            }
+            existing_other.push((id, p, src));
+        }
+    }
+
+    // Combine all models: write the trained model + existing others together.
+    let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+    all_entries.push((model_id.clone(), trained_param.clone(), vec![(ledger, stats)]));
+    for (id, p, src) in existing_other {
+        all_entries.push((id, p, src));
+    }
+
+    write_all_models_with_sources_pub(
+        store_path,
+        &all_entries.iter()
+            .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+
+    eprintln!(
+        "train: wrote model '{model_id}' to {} (source '{source_id}') [{:.2}s]",
+        store_path.display(),
+        t0.elapsed().as_secs_f64(),
+    );
+    eprintln!(
+        "train: summary — labels={}, partitions={}, store={}",
+        labels.len(),
+        n_partitions,
+        store_path.display(),
+    );
+
+    Ok(())
+}
+
+/// Incremental update mode (Part D): `--update <MODEL_ID>` plus one of
+/// `--add`, `--remove-source`, `--reweight`, `--decay`.
+fn run_train_update(
+    args: TrainArgs,
+    model_id: &str,
+    t0: std::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let store_path = &args.out_store;
+    let cfg = EstimatorConfig::default();
+
+    // ── Dispatch to the right update operation ────────────────────────────────
+    let (candidate, new_sources) = if args.add {
+        // --add mode: search spectra, accumulate stats, call update_add.
+        let spectra_path = args.spectra.clone()
+            .ok_or("--spectra is required with --add")?;
+        let database = args.database.clone()
+            .ok_or("--database is required with --add")?;
+        let source_id = args.source_id.clone()
+            .ok_or("--source-id is required with --add")?;
+
+        eprintln!("train update: loading spectra from {} ...", spectra_path.display());
+        let spectra = load_spectra_for_train(&spectra_path)?;
+        eprintln!("train update: loaded {} spectra", spectra.len());
+
+        // Load the current stored model as the seed.
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening store {}: {e}", store_path.display()))?;
+        let current_param = store.load_param(model_id)
+            .map_err(|e| format!("loading model '{model_id}': {e}"))?;
+        let current_scorer = RankScorer::new(&current_param);
+
+        let search_params = build_train_search_params(&args.mods)?;
+
+        eprintln!("train update: running seed search (train-fdr={}) ...", args.train_fdr);
+        let labels = bootstrap_labels(
+            &spectra,
+            &database,
+            &current_scorer,
+            &search_params,
+            args.train_fdr,
+        )
+        .map_err(|e| format!("bootstrap_labels: {e}"))?;
+        eprintln!("train update: {} confident labels", labels.len());
+
+        if labels.is_empty() {
+            return Err(format!(
+                "no confident labels at train-fdr={} — try a higher --train-fdr",
+                args.train_fdr
+            ).into());
+        }
+
+        let accumulator = StatsAccumulator::new(&current_scorer);
+        let mut stats = CountStats::new();
+        for label in &labels {
+            accumulator.accumulate(&mut stats, &spectra[label.spectrum_index], &label.peptide, label.charge);
+        }
+        let stats = merge(vec![stats]);
+
+        let spectra_filename = spectra_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| spectra_path.display().to_string());
+        let date_str = args.date.clone().unwrap_or_else(format_today_iso8601);
+        let ledger = SourceLedger {
+            source_id: source_id.clone(),
+            dataset: spectra_filename,
+            n_psms: labels.len() as i64,
+            date: date_str,
+            weight: 1.0,
+            train_fdr: args.train_fdr as f32,
+            instrument: args.instrument.clone(),
+            experiment_class: args.protocol.clone(),
+        };
+
+        update_add(store_path, model_id, ledger, stats, cfg)
+            .map_err(|e| format!("update_add: {e}"))?
+
+    } else if let Some(ref sid) = args.remove_source.clone() {
+        update_remove(store_path, model_id, sid, cfg)
+            .map_err(|e| format!("update_remove: {e}"))?
+
+    } else if let Some(ref spec) = args.reweight.clone() {
+        // Parse "source-id=weight"
+        let (sid, weight) = parse_reweight_spec(spec)?;
+        update_reweight(store_path, model_id, &sid, weight, cfg)
+            .map_err(|e| format!("update_reweight: {e}"))?
+
+    } else if let Some(half_life) = args.decay {
+        update_decay(store_path, model_id, half_life, cfg)
+            .map_err(|e| format!("update_decay: {e}"))?
+
+    } else {
+        return Err(
+            "update mode requires one of: --add, --remove-source, --reweight, --decay".into()
+        );
+    };
+
+    // ── Acceptance gate (Part D) ──────────────────────────────────────────────
+    let commit = if let Some(ref validate_path) = args.validate.clone() {
+        let database = args.database.clone()
+            .ok_or("--database is required with --validate")?;
+
+        eprintln!("train update: running acceptance gate on {} ...", validate_path.display());
+        let val_spectra = load_spectra_for_train(validate_path)?;
+
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening store for gate: {e}"))?;
+        let current_param = store.load_param(model_id)
+            .map_err(|e| format!("loading current model for gate: {e}"))?;
+        let current_scorer = RankScorer::new(&current_param);
+        let candidate_scorer = RankScorer::new(&candidate);
+
+        let search_params = build_train_search_params(&args.mods)?;
+
+        let delta = evaluate_candidate(
+            &val_spectra,
+            &database,
+            &current_scorer,
+            &candidate_scorer,
+            &search_params,
+            args.train_fdr,
+        )
+        .map_err(|e| format!("evaluate_candidate: {e}"))?;
+
+        eprintln!(
+            "train update: gate — current={} PSMs, candidate={} PSMs at FDR={}",
+            delta.current_count, delta.candidate_count, args.train_fdr
+        );
+
+        if delta.is_accepted() {
+            eprintln!("train update: ACCEPTED (candidate >= current)");
+            true
+        } else {
+            eprintln!("train update: REJECTED (candidate < current)");
+            if args.force {
+                eprintln!("train update: --force set, committing anyway");
+                true
+            } else {
+                eprintln!("train update: skipping commit (use --force to override)");
+                false
+            }
+        }
+    } else {
+        eprintln!("train update: no --validate dataset; skipping acceptance gate");
+        if args.force {
+            eprintln!("train update: --force set, committing unconditionally");
+        }
+        // Without --validate, commit unless user explicitly uses --force to control.
+        // Default: commit (no gate run = no evidence of regression).
+        true
+    };
+
+    if commit {
+        commit_update(store_path, model_id, &candidate, &new_sources)
+            .map_err(|e| format!("commit_update: {e}"))?;
+        eprintln!(
+            "train update: committed model '{model_id}' to {} [{:.2}s]",
+            store_path.display(),
+            t0.elapsed().as_secs_f64(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Parse `"source-id=weight"` from a `--reweight` argument.
+fn parse_reweight_spec(spec: &str) -> Result<(String, f32), Box<dyn std::error::Error>> {
+    let pos = spec.rfind('=').ok_or_else(|| {
+        format!("--reweight value must be <source-id>=<weight>, got '{spec}'")
+    })?;
+    let sid = spec[..pos].to_string();
+    let weight: f32 = spec[pos + 1..].parse()
+        .map_err(|e| format!("invalid weight in --reweight '{spec}': {e}"))?;
+    Ok((sid, weight))
+}
+
+/// Load the seed Param from the optional seed model specifier.
+fn load_seed_param(seed_model: &Option<String>) -> Result<(String, Param), Box<dyn std::error::Error>> {
+    match seed_model {
+        None => {
+            let store_path = bundled_store_path();
+            let store = ModelStore::open(&store_path)
+                .map_err(|e| format!("opening bundled store: {e}"))?;
+            let p = store.load_param("hcd_qexactive_tryp")
+                .map_err(|e| format!("loading seed model: {e}"))?;
+            Ok(("hcd_qexactive_tryp".to_string(), p))
+        }
+        Some(seed) => {
+            let as_path = Path::new(seed);
+            if as_path.is_file() {
+                let p = Param::load_from_file(as_path)
+                    .map_err(|e| format!("loading seed param file {}: {e}", as_path.display()))?;
+                Ok((seed.clone(), p))
+            } else {
+                let store_path = bundled_store_path();
+                let store = ModelStore::open(&store_path)
+                    .map_err(|e| format!("opening bundled store: {e}"))?;
+                let p = store.load_param(seed)
+                    .map_err(|e| format!("loading seed model '{seed}': {e}"))?;
+                Ok((seed.clone(), p))
+            }
+        }
+    }
+}
+
+/// Build an `AminoAcidSet` from an optional mods file, defaulting to
+/// Carbamidomethyl-C fixed + Oxidation-M variable.
+fn build_aa_set(
+    mods: &Option<PathBuf>,
+) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
+    match mods {
+        Some(path) => {
+            let set = AminoAcidSetBuilder::new_standard()
+                .add_mods_from_file(path)
+                .map_err(|e| format!("loading mods from {}: {e}", path.display()))?
+                .build()
+                .map_err(|e| format!("building amino-acid set: {e}"))?;
+            Ok(set)
+        }
+        None => {
+            let cam = Modification {
+                name: "Carbamidomethyl".into(),
+                mass_delta: 57.02146,
+                residue: ResidueSpec::Specific(b'C'),
+                location: ModLocation::Anywhere,
+                fixed: true,
+                accession: None,
+            };
+            let ox = Modification {
+                name: "Oxidation".into(),
+                mass_delta: 15.99491,
+                residue: ResidueSpec::Specific(b'M'),
+                location: ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+            };
+            Ok(AminoAcidSetBuilder::new_standard()
+                .add_fixed_mod(cam)
+                .add_variable_mod(ox)
+                .build()?)
+        }
+    }
+}
+
+/// Format today's date as `YYYY-MM-DD` using `std::time::SystemTime`.
+fn format_today_iso8601() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Simple Gregorian calendar conversion from Unix timestamp (days since epoch).
+    let days = secs / 86400;
+    unix_days_to_iso8601(days)
+}
+
+fn unix_days_to_iso8601(days: u64) -> String {
+    // Algorithm: Gregorian calendar from Julian Day Number.
+    // JDN for 1970-01-01 = 2440588.
+    let jdn = days as i64 + 2_440_588;
+    let a = jdn + 32044;
+    let b = (4 * a + 3) / 146097;
+    let c = a - (146097 * b) / 4;
+    let d = (4 * c + 3) / 1461;
+    let e = c - (1461 * d) / 4;
+    let m = (5 * e + 2) / 153;
+    let day = e - (153 * m + 2) / 5 + 1;
+    let month = m + 3 - 12 * (m / 10);
+    let year = 100 * b + d - 4800 + m / 10;
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+/// Convert the CLI `Fragmentation` enum to `ActivationMethod`.
+///
+/// `Fragmentation::Auto` is treated as `ActivationMethod::CID` here because
+/// the old ladder normalised `Auto → CID` when explicit flags were used
+/// (without mzML peek). When `--fragmentation auto` is combined with mzML/raw
+/// input the detection path is taken instead of this function.
+fn cli_fragmentation_to_activation(f: Fragmentation) -> ActivationMethod {
+    match f {
+        Fragmentation::Auto => ActivationMethod::CID,
+        Fragmentation::Cid  => ActivationMethod::CID,
+        Fragmentation::Etd  => ActivationMethod::ETD,
+        Fragmentation::Hcd  => ActivationMethod::HCD,
+        Fragmentation::Uvpd => ActivationMethod::UVPD,
+    }
+}
+
+/// Convert the CLI `Instrument` enum to `InstrumentType`.
+fn cli_instrument_to_instrument_type(i: Instrument) -> InstrumentType {
+    match i {
+        Instrument::LowRes    => InstrumentType::LowRes,
+        Instrument::HighRes   => InstrumentType::HighRes,
+        Instrument::Tof       => InstrumentType::TOF,
+        Instrument::QExactive => InstrumentType::QExactive,
+    }
+}
+
+/// Resolve `(Fragmentation, Instrument, Protocol)` from CLI flags to
+/// `(ActivationMethod, InstrumentType, Protocol)` for store lookup.
+///
+/// Handles the historical all-defaults short-circuit: when the user omits
+/// all scoring-model flags (`--fragmentation auto`, `--instrument low-res`,
+/// `--protocol auto`) the old ladder returned `HCD_QExactive_Tryp.param`.
+/// We replicate this by returning `(HCD, QExactive, Auto)` for that case
+/// instead of `(CID, LowRes, Auto)` (which would resolve to `cid_lowres_tryp`).
+fn cli_flags_to_activation_instrument(
+    fragmentation: Fragmentation,
+    instrument: Instrument,
+    protocol: Protocol,
+) -> (ActivationMethod, Option<InstrumentType>) {
+    // Historical all-defaults short-circuit (mirrors resolve_bundled_param step 0).
+    if fragmentation == Fragmentation::Auto
+        && instrument == Instrument::LowRes
+        && protocol == Protocol::Auto
+    {
+        return (ActivationMethod::HCD, Some(InstrumentType::QExactive));
+    }
+    (
+        cli_fragmentation_to_activation(fragmentation),
+        Some(cli_instrument_to_instrument_type(instrument)),
+    )
 }
 
 /// Translate `(--fragmentation, --instrument, --protocol)` into a bundled
@@ -1191,6 +2008,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 /// `(frag, inst)`-keyed ladder. Returns an error only if even the
 /// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
 /// resources (a packaging defect, not a CLI input error).
+///
+/// Reference implementation of the historical filename-based resolution ladder.
+/// The search path now goes through [`load_param_from_store`]; the store-selection
+/// equivalence test validates the store-based selection against an independent
+/// copy of this logic.
+#[allow(dead_code)]
 fn resolve_bundled_param(
     fragmentation: Fragmentation,
     instrument:    Instrument,
@@ -1391,6 +2214,11 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 ///   - ETD  → frag=2, inst=detected.
 ///   - PQD  → CID (Java collapses PQD → CID in `NewScorerFactory.get`).
 ///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
+///
+/// Reference implementation of the historical activation-aware resolution ladder
+/// (kept alongside [`resolve_bundled_param`]); the search path now uses
+/// [`load_param_from_store`].
+#[allow(dead_code)]
 fn resolve_bundled_param_for_activation(
     method:               ActivationMethod,
     detected_instrument:  Option<InstrumentType>,
@@ -1404,12 +2232,18 @@ fn resolve_bundled_param_for_activation(
         // PQD → CID (Java's NewScorerFactory rule: "PQD or null → CID").
         ActivationMethod::PQD  => Fragmentation::Cid,
     };
-    let inst = match detected_instrument {
+    // New instrument classes fall back to their family for model resolution
+    // (no Astral-specific or TimsTOF-specific .param file bundled yet).
+    let inst = match detected_instrument.map(|i| i.family_fallback()) {
         Some(InstrumentType::LowRes)    => Instrument::LowRes,
         Some(InstrumentType::HighRes)   => Instrument::HighRes,
         Some(InstrumentType::TOF)       => Instrument::Tof,
         Some(InstrumentType::QExactive) => Instrument::QExactive,
-        None                            => Instrument::LowRes,
+        // OrbitrapAstral → QExactive and TimsTOF → TOF via family_fallback above;
+        // these arms are unreachable after fallback but keep the match exhaustive.
+        Some(InstrumentType::OrbitrapAstral) => Instrument::QExactive,
+        Some(InstrumentType::TimsTOF)        => Instrument::Tof,
+        None                                 => Instrument::LowRes,
     };
     resolve_bundled_param(frag, inst, protocol)
 }
@@ -1436,6 +2270,7 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 /// `resources/ionstat/` relative to the crate's cargo manifest
 /// dir (set at compile time). Returns a helpful error if the file does
 /// not exist.
+#[allow(dead_code)]
 fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -1449,6 +2284,158 @@ fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
          `resources/ionstat/`.",
         candidate.display()
     ))
+}
+
+/// Resolve the path to the bundled `models.parquet` store.
+///
+/// A packaged release ships `resources/` next to the binary, so prefer
+/// `<exe_dir>/resources/ionstat/models.parquet` when it exists — that makes an
+/// installed binary self-contained regardless of where it runs. Fall back to the
+/// compile-time source tree (`CARGO_MANIFEST_DIR`) for `cargo run` / tests.
+fn bundled_store_path() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let next_to_binary = dir.join("resources/ionstat/models.parquet");
+            if next_to_binary.exists() {
+                return next_to_binary;
+            }
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/ionstat/models.parquet")
+}
+
+/// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying
+/// all old-ladder normalizations. This is the new entry point used by the
+/// search binary in place of `resolve_bundled_param*`.
+///
+/// `activation`: the detected or explicitly set `ActivationMethod`.
+/// `instrument`: the detected or explicitly set `InstrumentType` (None = undetected → LowRes).
+/// `protocol`:   the CLI `Protocol` value.
+fn build_selection_key(
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+) -> SelectionKey {
+    use std::collections::BTreeSet;
+
+    // 1. PQD → CID (Java's NewScorerFactory rule).
+    let act_str: &str = match activation {
+        ActivationMethod::PQD => "CID",
+        other                 => other.name(),
+    };
+    // 2. Apply family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF).
+    let inst_after_family: &str = match instrument {
+        Some(i) => i.family_fallback().name(),
+        None    => "LowRes",
+    };
+
+    // 3. Apply old-ladder (activation, instrument) normalization.
+    //    Because `normalize_for_store` returns `&'static str` only for the
+    //    normalizing arms (to avoid lifetime issues), we handle identity
+    //    inline here.
+    let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
+        match (act_str, inst_after_family) {
+            ("HCD", "LowRes")    => ("HCD", "QExactive", false),
+            ("HCD", "TOF")       => ("CID", "TOF",       true),
+            ("CID", "QExactive") => ("CID", "LowRes",    true),
+            ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),
+            ("UVPD", i) if i != "QExactive" => ("CID", "LowRes", true),
+            _ => (act_str, inst_after_family, false),
+        };
+
+    // 4. Build experiment_class from protocol (unless the final fallback dropped it).
+    //    Protocol → experiment_class mapping matches the parquet's `protocol` column.
+    let protocol_for_store: &str = match protocol {
+        Protocol::Auto | Protocol::Standard => "Automatic",
+        Protocol::Tmt          => "TMT",
+        Protocol::Phospho      => "Phosphorylation",
+        Protocol::Itraq        => "iTRAQ",
+        Protocol::ItraqPhospho => "iTRAQPhospho",
+    };
+    let experiment_class: BTreeSet<String> = if drop_protocol {
+        BTreeSet::new()
+    } else {
+        store_protocol_to_experiment_class(protocol_for_store)
+    };
+
+    SelectionKey {
+        activation: final_act.to_string(),
+        instrument: final_inst.to_string(),
+        // Parquet stores enzyme as "Trypsin" for the tryptic models.
+        enzyme: "Trypsin".to_string(),
+        experiment_class,
+    }
+}
+
+/// Load the scoring [`Param`] from the bundled Parquet store for the given
+/// `(activation, instrument, protocol)` combination.
+///
+/// This is the new model-resolution path that replaces
+/// `Param::load_from_file(resolve_bundled_param*(...))`. The `model_id`
+/// selected from the store will be identical to the lowercased filename
+/// stem of the old `.param` path (guaranteed by the equivalence gate test
+/// `store_selection_matches_old_ladder_for_all_combos`).
+///
+/// `custom_store_path`: when `Some`, use that Parquet file instead of the
+/// bundled `resources/ionstat/models.parquet` (honours `--model-store`).
+///
+/// `model_id_override`: when `Some`, skip automatic selection and load this
+/// exact model ID (honours `--model`).
+fn load_param_from_store(
+    activation: ActivationMethod,
+    instrument: Option<InstrumentType>,
+    protocol: Protocol,
+    custom_store_path: Option<&Path>,
+    model_id_override: Option<&str>,
+) -> Result<(String, Param), Box<dyn std::error::Error>> {
+    let store_path = custom_store_path
+        .map(|p| p.to_owned())
+        .unwrap_or_else(bundled_store_path);
+    let store = ModelStore::open(&store_path)
+        .map_err(|e| format!("opening model store {}: {e}", store_path.display()))?;
+
+    let model_id: String = if let Some(id) = model_id_override {
+        id.to_string()
+    } else {
+        let entries = store.selection_entries();
+        let key = build_selection_key(activation, instrument, protocol);
+
+        // Forward-compat: `build_selection_key` collapses instruments with a real
+        // family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF) so the
+        // bundled models resolve correctly. But that also hides a model trained
+        // for the EXACT instrument (e.g. a user-trained OrbitrapAstral model).
+        // Try the exact detected instrument FIRST; only when no such model exists
+        // (the bundled case) do we fall through to the normalized family ladder —
+        // so bundled selection (and the equivalence gate) is unchanged.
+        let exact_id: Option<String> = match instrument {
+            Some(i) if i.family_fallback().name() != i.name() => {
+                let raw_key = SelectionKey {
+                    instrument: i.name().to_string(),
+                    ..key.clone()
+                };
+                select(&entries, &raw_key, |s| s.to_string(), None).map(|s| s.to_string())
+            }
+            _ => None,
+        };
+
+        exact_id.unwrap_or_else(|| {
+            select(
+                &entries,
+                &key,
+                // `build_selection_key` already applies family fallback + all
+                // normalizations, so the family_fn here is the identity.
+                |i| i.to_string(),
+                Some("hcd_qexactive_tryp"),
+            )
+            .unwrap_or("hcd_qexactive_tryp")
+            .to_string()
+        })
+    };
+
+    let param = store.load_param(&model_id)
+        .map_err(|e| format!("loading model '{model_id}' from store: {e}"))?;
+
+    Ok((model_id, param))
 }
 
 /// Parse `--fragmentation` value. Accepts named (case-insensitive: auto, CID,
@@ -1534,103 +2521,12 @@ fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
 mod param_resolver_tests {
     use super::*;
 
-    #[test]
-    fn default_resolves_to_hcd_qexactive_tryp() {
-        // No flags → existing default.
-        let p = resolve_bundled_param(
-            Fragmentation::Auto,
-            Instrument::LowRes,
-            Protocol::Auto,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("HCD_QExactive_Tryp.param"),
-            "expected HCD_QExactive_Tryp.param, got {s}"
-        );
-    }
-
-    #[test]
-    fn hcd_qexactive_tmt_combo_resolves() {
-        // (HCD, QExactive, TMT) → bundled HCD_QExactive_Tryp_TMT.param.
-        let p = resolve_bundled_param(
-            Fragmentation::Hcd,
-            Instrument::QExactive,
-            Protocol::Tmt,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("HCD_QExactive_Tryp_TMT.param"),
-            "expected HCD_QExactive_Tryp_TMT.param, got {s}"
-        );
-    }
-
-    #[test]
-    fn cid_lowres_tryp_resolves() {
-        // (CID, LowRes, Standard) → CID_LowRes_Tryp.param.
-        let p = resolve_bundled_param(
-            Fragmentation::Cid,
-            Instrument::LowRes,
-            Protocol::Standard,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("CID_LowRes_Tryp.param"),
-            "expected CID_LowRes_Tryp.param, got {s}"
-        );
-    }
-
-    #[test]
-    fn cid_highres_tmt_falls_back_to_cid_highres_tryp() {
-        // (CID, HighRes, TMT) — `CID_HighRes_Tryp_TMT.param` is not bundled.
-        // Java parity: NewScorerFactory drops the protocol suffix when the
-        // exact file is missing, landing on
-        // the protocol-less file. We mirror that behavior: this combination
-        // resolves to `CID_HighRes_Tryp.param` rather than erroring out.
-        let p = resolve_bundled_param(
-            Fragmentation::Cid,
-            Instrument::HighRes,
-            Protocol::Tmt,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("CID_HighRes_Tryp.param"),
-            "expected CID_HighRes_Tryp.param (protocol-suffix drop fallback), got {s}"
-        );
-    }
-
-    #[test]
-    fn hcd_lowres_tmt_normalizes_to_qexactive() {
-        // HCD with LowRes is invalid (Java upgrades inst to QExactive in
-        // step 0). So (HCD, LowRes, TMT) should land on
-        // `HCD_QExactive_Tryp_TMT.param` after normalization.
-        let p = resolve_bundled_param(
-            Fragmentation::Hcd,
-            Instrument::LowRes,
-            Protocol::Tmt,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("HCD_QExactive_Tryp_TMT.param"),
-            "expected HCD_QExactive_Tryp_TMT.param after HCD-LowRes normalization, got {s}"
-        );
-    }
-
-    #[test]
-    fn etd_highres_unknown_falls_back_to_etd_lowres_tryp() {
-        // (ETD, HighRes, Phospho) — `ETD_HighRes_Tryp_Phosphorylation.param`
-        // is not bundled, and the protocol-less `ETD_HighRes_Tryp.param` IS
-        // bundled, so the protocol-drop fallback lands on it. Test that.
-        let p = resolve_bundled_param(
-            Fragmentation::Etd,
-            Instrument::HighRes,
-            Protocol::Phospho,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("ETD_HighRes_Tryp.param"),
-            "expected ETD_HighRes_Tryp.param (protocol-suffix drop fallback), got {s}"
-        );
-    }
+    // ── Tests of the resolve_bundled_param / resolve_bundled_param_for_activation
+    //    ladder were removed in the model-store migration: those functions are now
+    //    dead code (#[cfg_attr(not(test), allow(dead_code))]) and the bundled .param
+    //    files no longer ship on disk (they live in resources/ionstat/models.parquet).
+    //    The store_selection_equivalence integration test covers the same
+    //    correctness invariant without requiring physical .param files.
 
     #[test]
     fn parse_fragmentation_rejects_out_of_range_numeric() {
@@ -1656,78 +2552,5 @@ mod param_resolver_tests {
         assert_eq!(parse_precursor_cal("OFF").unwrap(), PrecursorCalMode::Off);
         assert_eq!(parse_precursor_cal("on").unwrap(), PrecursorCalMode::On);
         assert!(parse_precursor_cal("bogus").is_err());
-    }
-
-    // ── resolve_bundled_param_for_activation: instrument routing ──────────────
-
-    /// CID + no detected instrument ⇒ LowRes (Java's `LOW_RESOLUTION_LTQ`
-    /// default). This is the load-bearing PXD001819 path — LTQ Velos
-    /// MS2 data must route here.
-    #[test]
-    fn cid_with_no_detected_instrument_routes_to_lowres() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, None, Protocol::Auto,
-        ).unwrap();
-        let s = p.to_string_lossy();
-        assert!(
-            s.ends_with("CID_LowRes_Tryp.param"),
-            "expected CID_LowRes_Tryp.param when no instrument detected, got {s}"
-        );
-    }
-
-    #[test]
-    fn cid_with_lowres_detected_routes_to_lowres() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::LowRes), Protocol::Auto,
-        ).unwrap();
-        assert!(p.to_string_lossy().ends_with("CID_LowRes_Tryp.param"));
-    }
-
-    #[test]
-    fn cid_with_qexactive_detected_routes_to_highres() {
-        // No `CID_QExactive_Tryp.param` is bundled; resolver's final
-        // ladder rewrites this. (Java's ladder ends at `CID_LowRes_Tryp`
-        // for non-bundled CID/QExactive combos.)
-        // Most importantly: we must not silently land on the LowRes
-        // bucket when QExactive is detected — verify some param resolves.
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::QExactive), Protocol::Auto,
-        ).unwrap();
-        // Should resolve to *something* — the ladder may fall back, but
-        // we just want this not to error.
-        assert!(p.exists(), "param path should exist: {}", p.display());
-    }
-
-    #[test]
-    fn cid_with_highres_detected_routes_to_highres() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::CID, Some(InstrumentType::HighRes), Protocol::Auto,
-        ).unwrap();
-        assert!(
-            p.to_string_lossy().ends_with("CID_HighRes_Tryp.param"),
-            "expected CID_HighRes_Tryp.param, got {}", p.display()
-        );
-    }
-
-    #[test]
-    fn hcd_with_lowres_detected_upgrades_to_qexactive() {
-        // Java's NewScorerFactory upgrades HCD + non-(HighRes|QExactive)
-        // to QExactive. Verify the auto-detect path does the same when
-        // the mzML claims LowRes (e.g., a CID/HCD-mixed LTQ acquisition).
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::HCD, Some(InstrumentType::LowRes), Protocol::Auto,
-        ).unwrap();
-        assert!(
-            p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"),
-            "expected HCD_QExactive_Tryp.param (Java HCD-upgrade), got {}", p.display()
-        );
-    }
-
-    #[test]
-    fn hcd_with_qexactive_detected_stays_qexactive() {
-        let p = resolve_bundled_param_for_activation(
-            ActivationMethod::HCD, Some(InstrumentType::QExactive), Protocol::Auto,
-        ).unwrap();
-        assert!(p.to_string_lossy().ends_with("HCD_QExactive_Tryp.param"));
     }
 }

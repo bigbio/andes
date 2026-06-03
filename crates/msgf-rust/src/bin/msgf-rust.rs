@@ -1404,28 +1404,102 @@ fn load_spectra_for_train(
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
-    let is_mzml = matches!(ext_lower.as_deref(), Some("mzml"));
     let mut spectra = Vec::new();
-    if is_mzml {
-        let f = File::open(path)?;
-        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(2, 2);
-        for item in reader {
-            match item {
-                Ok(s) => spectra.push(s),
-                Err(e) => eprintln!("WARN: mzML parse: {e}"),
+    match ext_lower.as_deref() {
+        Some("mzml") => {
+            let f = File::open(path)?;
+            let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(2, 2);
+            for item in reader {
+                match item {
+                    Ok(s) => spectra.push(s),
+                    Err(e) => eprintln!("WARN: mzML parse: {e}"),
+                }
             }
         }
-    } else {
-        let f = File::open(path)?;
-        let reader = MgfReader::new(BufReader::new(f));
-        for item in reader {
-            match item {
-                Ok(s) => spectra.push(s),
-                Err(e) => eprintln!("WARN: MGF parse: {e}"),
+        // Native Thermo `.raw` — MS2 only, same Spectrum stream as the search
+        // path. Requires building with `--features thermo`.
+        Some("raw") => {
+            #[cfg(feature = "thermo")]
+            {
+                let reader = input::ThermoRawReader::open(path)
+                    .map_err(|e| format!("open Thermo .raw {}: {e}", path.display()))?
+                    .with_ms_level(Some(2));
+                for item in reader {
+                    match item {
+                        Ok(s) => spectra.push(s),
+                        Err(e) => eprintln!("WARN: .raw parse: {e}"),
+                    }
+                }
+            }
+            #[cfg(not(feature = "thermo"))]
+            {
+                return Err(format!(
+                    "native Thermo `.raw` training input requires building with \
+                     `--features thermo` (and the .NET 8 runtime): {}",
+                    path.display()
+                )
+                .into());
+            }
+        }
+        // Native Bruker timsTOF `.d` (a directory). Requires `--features timstof`.
+        Some("d") => {
+            #[cfg(feature = "timstof")]
+            {
+                let reader = input::TimsTofReader::open(path)
+                    .map_err(|e| format!("open Bruker .d {}: {e}", path.display()))?;
+                for item in reader {
+                    match item {
+                        Ok(s) => spectra.push(s),
+                        Err(e) => eprintln!("WARN: .d parse: {e}"),
+                    }
+                }
+            }
+            #[cfg(not(feature = "timstof"))]
+            {
+                return Err(format!(
+                    "native Bruker `.d` training input requires building with \
+                     `--features timstof`: {}",
+                    path.display()
+                )
+                .into());
+            }
+        }
+        // MGF (default / backwards-compatible).
+        _ => {
+            let f = File::open(path)?;
+            let reader = MgfReader::new(BufReader::new(f));
+            for item in reader {
+                match item {
+                    Ok(s) => spectra.push(s),
+                    Err(e) => eprintln!("WARN: MGF parse: {e}"),
+                }
             }
         }
     }
     Ok(spectra)
+}
+
+/// Build the `SearchParams` used by every training mode (initial bootstrap,
+/// `--add`, and the acceptance gate) in one place, so they stay consistent with
+/// each other and with the production search:
+///   - charge span `2..=5` (the search binary's default; `default_tryptic` alone
+///     is the narrow `2..=3`, which drops z=4/5 labels common on Astral/timsTOF),
+///   - the `NumMods=` variable-mod limit from the `--mods` file when present
+///     (the search path applies it too).
+fn build_train_search_params(
+    mods: &Option<PathBuf>,
+) -> Result<SearchParams, Box<dyn std::error::Error>> {
+    let aa = build_aa_set(mods)?;
+    let mut params = SearchParams::default_tryptic(aa);
+    params.charge_range = 2..=5;
+    if let Some(path) = mods {
+        if let Some(n) = AminoAcidSetBuilder::parse_num_mods_from_file(path)
+            .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?
+        {
+            params.max_variable_mods_per_peptide = n;
+        }
+    }
+    Ok(params)
 }
 
 /// Run the full training pipeline and write a model to a Parquet store.
@@ -1463,16 +1537,8 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("train: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4. Build AminoAcidSet ─────────────────────────────────────────────────
-    let aa = build_aa_set(&args.mods)?;
-
-    // ── 5. Bootstrap labels ───────────────────────────────────────────────────
-    let mut search_params = SearchParams::default_tryptic(aa);
-    // Match the production search binary's default charge span (2..=5) rather
-    // than `default_tryptic`'s narrow 2..=3, so the seed search enumerates the
-    // same charges production would and high-charge precursors (z=4/5, common on
-    // Astral/timsTOF) contribute training labels.
-    search_params.charge_range = 2..=5;
+    // ── 4-5. Build search params (charge span + NumMods) + bootstrap labels ───
+    let search_params = build_train_search_params(&args.mods)?;
     eprintln!(
         "train: running seed search (train-fdr = {}) ...",
         args.train_fdr
@@ -1629,8 +1695,7 @@ fn run_train_update(
             .map_err(|e| format!("loading model '{model_id}': {e}"))?;
         let current_scorer = RankScorer::new(&current_param);
 
-        let aa = build_aa_set(&args.mods)?;
-        let search_params = SearchParams::default_tryptic(aa);
+        let search_params = build_train_search_params(&args.mods)?;
 
         eprintln!("train update: running seed search (train-fdr={}) ...", args.train_fdr);
         let labels = bootstrap_labels(
@@ -1711,8 +1776,7 @@ fn run_train_update(
         let current_scorer = RankScorer::new(&current_param);
         let candidate_scorer = RankScorer::new(&candidate);
 
-        let aa = build_aa_set(&args.mods)?;
-        let search_params = SearchParams::default_tryptic(aa);
+        let search_params = build_train_search_params(&args.mods)?;
 
         let delta = evaluate_candidate(
             &val_spectra,
@@ -2224,12 +2288,20 @@ fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
 
 /// Resolve the path to the bundled `models.parquet` store.
 ///
-/// Uses the same `CARGO_MANIFEST_DIR` anchor as [`canonicalize_bundled`] so
-/// both in-source-tree tests and installed-binary runs locate the file the
-/// same way.
+/// A packaged release ships `resources/` next to the binary, so prefer
+/// `<exe_dir>/resources/ionstat/models.parquet` when it exists — that makes an
+/// installed binary self-contained regardless of where it runs. Fall back to the
+/// compile-time source tree (`CARGO_MANIFEST_DIR`) for `cargo run` / tests.
 fn bundled_store_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/ionstat/models.parquet")
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let next_to_binary = dir.join("resources/ionstat/models.parquet");
+            if next_to_binary.exists() {
+                return next_to_binary;
+            }
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/ionstat/models.parquet")
 }
 
 /// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying

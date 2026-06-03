@@ -65,7 +65,7 @@ pub fn models_schema() -> SchemaRef {
         nf("experiment_class", DataType::Utf8), // sorted slug set, e.g. "phospho+tmt"
         // --- scalar model parameters ---
         nf("version", DataType::Int32),
-        nf("mme_ppm", DataType::Float32),
+        nf("mme_val", DataType::Float32),
         nf("mme_is_ppm", DataType::Boolean),
         nf("apply_deconv", DataType::Boolean),
         nf("deconv_tol", DataType::Float32),
@@ -102,7 +102,7 @@ pub fn tables_schema() -> SchemaRef {
         rf("model_id", DataType::Utf8),
         // --- partition axes ---
         nf("part_charge", DataType::Int32),
-        nf("part_mass", DataType::Float32),
+        nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 (matches combined_schema)
         nf("part_seg", DataType::Int32),
         // --- ion descriptor ---
         nf("ion_kind", DataType::Utf8),   // "prefix" | "suffix" | "noise" | "-"

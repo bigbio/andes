@@ -101,6 +101,15 @@ impl Estimator {
     /// `noise_err_dist_table`, `ion_existence_table`, `charge_hist`,
     /// `partitions` — are built from `counts`.
     pub fn estimate(&self, counts: &CountStats, template: &Param) -> Param {
+        // `pseudo` must be > 0: it is the Laplace smoothing mass that guarantees
+        // every distribution slot is strictly positive. With `pseudo == 0` an
+        // all-zero raw count would normalize to all-zero probabilities, and
+        // `RankScorer::new` would then compute `ln(0) = -inf` and break scoring.
+        assert!(
+            self.cfg.pseudo > 0.0,
+            "EstimatorConfig.pseudo must be > 0 (got {})",
+            self.cfg.pseudo
+        );
         let max_rank = template.max_rank;
         let esf = self.cfg.error_scaling_factor_override
             .unwrap_or(template.error_scaling_factor);

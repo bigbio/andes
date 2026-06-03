@@ -69,6 +69,17 @@ pub fn update_add(
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
 
+    // Reject a duplicate source_id: appending it would list the source twice and
+    // `estimate_from_sources` would double-count its weighted stats. Callers that
+    // want to change an existing source should use --reweight / --remove-source.
+    if existing_ledgers.iter().any(|l| l.source_id == ledger.source_id) {
+        return Err(TrainError::Other(format!(
+            "source '{}' already exists in model '{model_id}'; \
+             use --reweight to change its weight or --remove-source first",
+            ledger.source_id
+        )));
+    }
+
     // Load per-source stats for all existing sources.
     let mut sources: Vec<(SourceLedger, CountStats)> = Vec::new();
     for l in existing_ledgers {

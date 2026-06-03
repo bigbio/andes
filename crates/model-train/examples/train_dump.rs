@@ -59,6 +59,13 @@ fn dump(tag: &str, p: &Param, part: &scoring_crate::param_model::Partition) {
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.len() < 3 {
+        eprintln!(
+            "usage: {} <spectra.mzML|.mgf> <database.fasta> [seed_slug]",
+            a.first().map(|s| s.as_str()).unwrap_or("train_dump")
+        );
+        std::process::exit(2);
+    }
     let spectra_path = Path::new(&a[1]);
     let fasta = Path::new(&a[2]);
     let seed_slug = a.get(3).map(|s| s.as_str()).unwrap_or("hcd_qexactive_tryp");
@@ -80,11 +87,18 @@ fn main() {
     let stats = merge(vec![stats]);
     let trained = Estimator::new(EstimatorConfig::default()).estimate(&stats, &seed_param);
 
-    // Pick the 3 partitions with the most ion counts to compare.
-    let mut by_count: Vec<(scoring_crate::param_model::Partition, u64)> = stats.rank.iter()
-        .filter(|((_, it), _)| matches!(it, IonType::Prefix { .. }))
-        .map(|((p, _), v)| (*p, v.iter().sum::<u64>()))
-        .collect();
+    // Pick the 3 partitions with the most prefix-ion counts. Aggregate per
+    // partition first (stats.rank is keyed by (Partition, IonType), so a
+    // partition has several Prefix entries) so each partition appears once.
+    let mut per_partition: std::collections::HashMap<scoring_crate::param_model::Partition, u64> =
+        std::collections::HashMap::new();
+    for ((p, it), v) in stats.rank.iter() {
+        if matches!(it, IonType::Prefix { .. }) {
+            *per_partition.entry(*p).or_default() += v.iter().sum::<u64>();
+        }
+    }
+    let mut by_count: Vec<(scoring_crate::param_model::Partition, u64)> =
+        per_partition.into_iter().collect();
     by_count.sort_by(|a, b| b.1.cmp(&a.1));
     for (part, cnt) in by_count.iter().take(3) {
         println!("\npartition charge={} mass={:.0} seg={}  ion_count={cnt}", part.charge, part.parent_mass, part.seg_num);

@@ -1467,7 +1467,12 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     let aa = build_aa_set(&args.mods)?;
 
     // ── 5. Bootstrap labels ───────────────────────────────────────────────────
-    let search_params = SearchParams::default_tryptic(aa);
+    let mut search_params = SearchParams::default_tryptic(aa);
+    // Match the production search binary's default charge span (2..=5) rather
+    // than `default_tryptic`'s narrow 2..=3, so the seed search enumerates the
+    // same charges production would and high-charge precursors (z=4/5, common on
+    // Astral/timsTOF) contribute training labels.
+    search_params.charge_range = 2..=5;
     eprintln!(
         "train: running seed search (train-fdr = {}) ...",
         args.train_fdr
@@ -2322,16 +2327,37 @@ fn load_param_from_store(
     } else {
         let entries = store.selection_entries();
         let key = build_selection_key(activation, instrument, protocol);
-        select(
-            &entries,
-            &key,
-            // `build_selection_key` already applies family fallback + all
-            // normalizations, so the family_fn here is the identity.
-            |i| i.to_string(),
-            Some("hcd_qexactive_tryp"),
-        )
-        .unwrap_or("hcd_qexactive_tryp")
-        .to_string()
+
+        // Forward-compat: `build_selection_key` collapses instruments with a real
+        // family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF) so the
+        // bundled models resolve correctly. But that also hides a model trained
+        // for the EXACT instrument (e.g. a user-trained OrbitrapAstral model).
+        // Try the exact detected instrument FIRST; only when no such model exists
+        // (the bundled case) do we fall through to the normalized family ladder —
+        // so bundled selection (and the equivalence gate) is unchanged.
+        let exact_id: Option<String> = match instrument {
+            Some(i) if i.family_fallback().name() != i.name() => {
+                let raw_key = SelectionKey {
+                    instrument: i.name().to_string(),
+                    ..key.clone()
+                };
+                select(&entries, &raw_key, |s| s.to_string(), None).map(|s| s.to_string())
+            }
+            _ => None,
+        };
+
+        exact_id.unwrap_or_else(|| {
+            select(
+                &entries,
+                &key,
+                // `build_selection_key` already applies family fallback + all
+                // normalizations, so the family_fn here is the identity.
+                |i| i.to_string(),
+                Some("hcd_qexactive_tryp"),
+            )
+            .unwrap_or("hcd_qexactive_tryp")
+            .to_string()
+        })
     };
 
     let param = store.load_param(&model_id)

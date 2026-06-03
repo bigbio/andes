@@ -97,12 +97,20 @@ impl<'a> StatsAccumulator<'a> {
         // by the "missing" slot) calibrates the ion-vs-noise likelihood ratio.
         // Without this the missing-ion penalty inverts and the model scores
         // target and decoy alike (0 PSMs at 1% FDR).
-        for (partition, rank) in scored_spec.noise_match_facts(peptide, self.scorer) {
+        for (partition, rank, error_bin) in scored_spec.noise_match_facts(peptide, self.scorer) {
             let rank_idx = match rank {
                 Some(r) => r.min(max_rank).max(1) - 1,
                 None => max_rank,
             };
             stats.bump_rank(partition, IonType::Noise, rank_idx);
+
+            // Noise mass-error distribution: record the matched decoy-ion's error
+            // bin so `Estimator::build_error_tables` learns the real noise error
+            // shape instead of falling back to a flat Laplace prior. Only matched
+            // (Some(rank)) noise ions carry an error bin (esf > 0).
+            if let (Some(_), Some(bin)) = (rank, error_bin) {
+                stats.bump_noise_error(partition, bin);
+            }
         }
 
         // Charge histogram: one bump per PSM.

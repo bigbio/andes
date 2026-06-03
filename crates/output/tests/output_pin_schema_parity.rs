@@ -126,7 +126,9 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
         .build()
         .unwrap();
 
-    let param_path = fixture("resources/ionstat/HCD_QExactive_Tryp.param");
+    // The bundled `resources/ionstat/*.param` files were migrated into the
+    // Parquet store; load the retained test fixture instead.
+    let param_path = fixture("test-fixtures/HCD_QExactive_Tryp.param");
     let param = Param::load_from_file(&param_path).unwrap();
     let scorer = RankScorer::new(&param);
 

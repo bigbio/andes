@@ -175,6 +175,15 @@ pub fn update_decay(
     half_life_days: f32,
     est_cfg: EstimatorConfig,
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
+    // Guard against a non-positive half-life: `exp(-ln2 * age / 0)` underflows to
+    // 0, silently zeroing every source weight and collapsing the model to a flat
+    // distribution. Reject it instead of corrupting the store. (`!(x > 0.0)` also
+    // rejects NaN.)
+    if !(half_life_days > 0.0) {
+        return Err(TrainError::Other(format!(
+            "decay half-life must be > 0 days, got {half_life_days}"
+        )));
+    }
     let today = today_naive();
 
     let store = ModelStore::open(path)?;

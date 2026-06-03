@@ -1062,11 +1062,15 @@ impl<'a> ScoredSpectrum<'a> {
     /// matched ion scores positive and a missing ion is penalised (not
     /// rewarded). Reuses `ion_match_facts` verbatim — the SAME production
     /// matcher, tolerance, and partitioning — at the same ion density.
+    ///
+    /// Each tuple is `(partition, rank, error_bin)` — the same fields the ion
+    /// matcher produces, so callers can train BOTH the noise rank distribution
+    /// and the noise mass-error distribution from one pass.
     pub fn noise_match_facts(
         &self,
         peptide: &Peptide,
         scorer: &RankScorer,
-    ) -> Vec<(Partition, Option<u32>)> {
+    ) -> Vec<(Partition, Option<u32>, Option<u32>)> {
         if peptide.length() < 2 {
             return Vec::new();
         }
@@ -1076,7 +1080,7 @@ impl<'a> ScoredSpectrum<'a> {
         let decoy = Peptide::new(rev, peptide.pre, peptide.post);
         self.ion_match_facts(&decoy, scorer)
             .into_iter()
-            .map(|f| (f.partition, f.rank))
+            .map(|f| (f.partition, f.rank, f.error_bin))
             .collect()
     }
 }

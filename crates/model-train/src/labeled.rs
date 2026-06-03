@@ -48,8 +48,15 @@ use crate::TrainError;
 /// decoy database and classifying candidates as target or decoy.
 pub const BOOTSTRAP_DECOY_PREFIX: &str = "XXX_";
 
-/// Fragment-mass tolerance (Da) passed to the scoring engine.
-/// Matches the production binary's default for HCD.
+/// Fragment-mass tolerance (Da) for the GF node-scoring match window.
+///
+/// Intentionally 0.5 Da regardless of instrument, and MUST stay equal to the
+/// production search binary's `fragment_tol_da` (also 0.5). The generating
+/// function scores over an integer nominal-mass axis (~0.5 Da bins), so the
+/// node-match window cannot be tighter than ~0.5 Da — accurate-mass (ppm)
+/// discrimination is recaptured in the Percolator features, NOT here. Deriving
+/// this from `seed.param().mme` (e.g. 20 ppm) would make training diverge from
+/// the production search and is incorrect.
 const FRAGMENT_TOL_DA: f64 = 0.5;
 
 // ---------------------------------------------------------------------------

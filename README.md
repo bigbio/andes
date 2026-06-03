@@ -35,7 +35,7 @@ What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the spe
 
 </details>
 
-In a four-engine comparison against Java MS-GF+, Sage, and MSFragger on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), msgf-rust returns the most PSMs *and* distinct peptides at 1% FDR on both datasets — and is the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, and config files: [`docs/benchmarks/`](docs/benchmarks/).
+In four-engine comparisons against Java MS-GF+, Sage, and MSFragger, msgf-rust returns the most PSMs *and* distinct peptides at 1% FDR: on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), and on a real human-tissue **TMT** dataset acquired as ion-trap CID-MS2 ([PXD016999](https://www.ebi.ac.uk/pride/archive/projects/PXD016999): 22,217 PSMs / 10,473 peptides, ahead of Java, MSFragger, and Sage). It is also the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, data URLs, and config files: [`docs/benchmarks/`](docs/benchmarks/).
 
 ## Install
 

@@ -1,4 +1,4 @@
-//! simas: end-to-end peptide-spectrum database search.
+//! cimas: end-to-end peptide-spectrum database search.
 //!
 //! Loads an MGF or mzML spectrum file and a FASTA target database, runs a
 //! tryptic database search and writes output
@@ -90,7 +90,7 @@ pub enum EnzymeSpecificity {
 }
 
 /// Search arguments (shared by the default search path and exposed as a
-/// flat arg group so that `simas --spectrum X --database Y --output-pin Z`
+/// flat arg group so that `cimas --spectrum X --database Y --output-pin Z`
 /// keeps working unchanged).
 ///
 /// Note: `spectrum`, `database`, and `output_pin` are declared `Option<PathBuf>`
@@ -257,13 +257,13 @@ struct SearchArgs {
 
     /// Exact model ID to load from the model store (bundled or `--model-store`).
     /// When set, skips automatic selection by `(--fragmentation, --instrument,
-    /// --protocol)` and loads this ID directly. Useful after `simas train`
+    /// --protocol)` and loads this ID directly. Useful after `cimas train`
     /// to search with the freshly-trained model.
     #[arg(long = "model")]
     model_id_override: Option<String>,
 }
 
-/// Training arguments for `simas train`.
+/// Training arguments for `cimas train`.
 #[derive(Args, Debug)]
 struct TrainArgs {
     /// Input spectrum file (training data). Same format dispatch as for search:
@@ -382,8 +382,8 @@ enum Command {
 /// behaviour).
 #[derive(Parser, Debug)]
 #[command(
-    name = "simas",
-    about = "simas: database search of MGF/mzML spectra against FASTA",
+    name = "cimas",
+    about = "cimas: database search of MGF/mzML spectra against FASTA",
     allow_hyphen_values = true,
 )]
 struct TopCli {
@@ -409,7 +409,7 @@ fn main() -> ExitCode {
             let spectrum = match search.spectrum {
                 Some(p) => p,
                 None => {
-                    eprintln!("error: --spectrum is required for search (or use `simas train`)");
+                    eprintln!("error: --spectrum is required for search (or use `cimas train`)");
                     return ExitCode::from(2);
                 }
             };
@@ -439,7 +439,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("simas: {e}");
+            eprintln!("cimas: {e}");
             ExitCode::from(1)
         }
     }
@@ -781,7 +781,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
     //
     // If --mod is given, parse the Java-format mods.txt file. Otherwise
-    // fall back to simas's historical defaults (CAM fixed on C,
+    // fall back to cimas's historical defaults (CAM fixed on C,
     // Oxidation variable on M) so existing tests keep their behaviour.
     //
     // `num_mods_from_file` is populated only when --mod is given and the
@@ -1182,7 +1182,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 #[cfg(not(feature = "thermo"))]
                 {
-                    Err("this simas build has no Thermo .raw support; \
+                    Err("this cimas build has no Thermo .raw support; \
                          rebuild with `--features thermo`."
                         .to_string())
                 }
@@ -1249,7 +1249,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 #[cfg(not(feature = "thermo"))]
                 {
-                    Err("this simas build has no Thermo .raw support; \
+                    Err("this cimas build has no Thermo .raw support; \
                          rebuild with `--features thermo` (and run with the \
                          .NET 8 runtime installed). mzML/MGF inputs work without it."
                         .into())
@@ -1266,7 +1266,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 #[cfg(not(feature = "timstof"))]
                 {
-                    Err("this simas build has no Bruker .d (timsTOF) support; \
+                    Err("this cimas build has no Bruker .d (timsTOF) support; \
                          rebuild with `--features timstof`. mzML/MGF inputs work \
                          without it."
                         .into())

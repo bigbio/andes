@@ -1,12 +1,12 @@
-# Fundamental deterministic candidate-scoring improvements for SIMAS
+# Fundamental deterministic candidate-scoring improvements for CIMAS
 
-**2026-06-04** — synthesis of the internal idea docs (`internal-docs/2026-06-04-simas-
+**2026-06-04** — synthesis of the internal idea docs (`internal-docs/2026-06-04-cimas-
 relational-candidate-rescoring-architecture.md`, `…cluster-latent-psm-math.md`,
 `…tmt-lfq-transformational-algorithms-research.md`, `…high-resolution-generating-
 function-investigation.md`), the papers (`internal-docs/papers/`), and the
 parity-analysis findings.
 
-**Frame (the SIMAS identity):** SIMAS is a *deterministic candidate-generation-and-
+**Frame (the CIMAS identity):** CIMAS is a *deterministic candidate-generation-and-
 scoring* engine for **one MS run**. Its scores should deterministically capture three
 axes: **(1) spectrum explanation**, **(2) the candidate's relation to other candidates'
 ranks** (competitive/listwise), **(3) experiment-level context**. ONNX/Prosit rescoring
@@ -42,14 +42,14 @@ hole the GF left.
 ### 1B. Fold high-res accuracy INTO the score (not only Percolator features)
 The GF forced ~0.5 Da matching (integer mass axis) and wasted the instrument's 20 ppm —
 accuracy currently lives only in Percolator (`MeanErrorTop7`/`StdevErrorTop7`). GF-free,
-SIMAS can match at true ppm and add a **mass-error-consistency** term + an **averagine
+CIMAS can match at true ppm and add a **mass-error-consistency** term + an **averagine
 mass-defect-band noise filter** (a peak whose fractional mass is outside the expected band
 for its nominal mass is unlikely real → down-weight). Deterministic, in-engine.
 
 ### 1C. Residual-spectrum + precursor-existence scoring
 Score what's **unexplained** after the candidate (clean residual = single peptide;
 structured = chimeric). Plus the **targeted-XIC + KL-divergence isotope gate** (does this
-precursor exist with the right isotope envelope — DDA+). SIMAS reads `.raw`/`.d` natively,
+precursor exist with the right isotope envelope — DDA+). CIMAS reads `.raw`/`.d` natively,
 so the XICs are free. Deterministic.
 
 ### 1D. Cheap local-null calibrators (zero-cost, add regardless)
@@ -58,7 +58,7 @@ offsets) and the **consecutive-ion-run bonus** `R` (contiguous b/y ladders are s
 
 ---
 
-## Axis 2 — Relation to other candidates (the SIMAS differentiator)
+## Axis 2 — Relation to other candidates (the CIMAS differentiator)
 
 ### 2A. DeltaRawScore — **ship it now** *(already a proven win)*
 `RawScore(best) − RawScore(2nd-best distinct)`. Benched **+129 PXD / +12 TMT / +104 Astral
@@ -97,7 +97,7 @@ ONE latent peptide `z`. Deterministic kernel:
 `cluster_score(p) = Σ_i calibrated_score(s_i,p) + α·coverage − β·ambiguity − γ·impurity`,
 gated by `transfer_weight = P(cluster pure)`, with **leave-one-out back-transfer** (a
 spectrum can't be in its own consensus) and **cluster-level TDC** (one cluster = one
-discovery, not N). "Weak + weak + same-latent constraint = strong." Needs only SIMAS's
+discovery, not N). "Weak + weak + same-latent constraint = strong." Needs only CIMAS's
 calibrated scores + cheap cosine clustering + candidate unions — **no NN, no extra data**.
 This is the "experiment graph" the architecture doc centers on, in its leanest deterministic
 form, and it's the most novel-vs-MSFragger/MS-GF+/Percolator idea here.
@@ -142,7 +142,7 @@ only via retrained tables (Phase 3), gated on entrapment.
    principled.
 6. **Experiment-conditioned tables** (3D) — folds into Phase 3.
 
-NOT SIMAS's job (keep in the separate rescoring layer): transformer/contrastive rerankers,
+NOT CIMAS's job (keep in the separate rescoring layer): transformer/contrastive rerankers,
 Prosit/MS2PIP predicted-intensity, MSBooster/MS2Rescore, GLEAMS embeddings, de-novo engines,
 all quant/MBR. The cross-run recurrence term and full peptide-centric detection need
 multi-run data and are out of single-run scope until a cohort mode exists.

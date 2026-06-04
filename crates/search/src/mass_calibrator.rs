@@ -32,7 +32,7 @@ const MAX_REASONABLE_RESIDUAL_PPM: f64 = 50.0;
 /// Permissive `rank_score` (RawScore = node + cleavage + edge) pre-filter for a
 /// pre-pass PSM before the real confidence gate runs.
 ///
-/// SIMAS no longer computes the generating function, so the calibration
+/// CIMAS no longer computes the generating function, so the calibration
 /// pre-pass can no longer gate on SpecEValue — and raw `rank_score` is NOT
 /// comparable across spectra / candidate-window sizes / DB complexity, so it
 /// must not be used as a confidence threshold on its own. The REAL confidence

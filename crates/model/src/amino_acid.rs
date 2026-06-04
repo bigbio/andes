@@ -11,7 +11,7 @@
 //! producing one heap allocation per modified residue per candidate. At
 //! Astral scale that drives `PreparedSearch::prepare` to ~27 GB RSS on a
 //! 31 GB VM (verified by the `MSGF_RSS_PROBE=1` probe in
-//! `simas.rs`). Wrapping `Modification` in `Arc` makes clones a
+//! `cimas.rs`). Wrapping `Modification` in `Arc` makes clones a
 //! refcount bump and shrinks `AminoAcid` from ~96 B to 24 B.
 
 use std::hash::{Hash, Hasher};

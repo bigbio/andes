@@ -15,8 +15,8 @@
 //! after an intentional off-path change, run:
 //!
 //! ```text
-//! cargo build --release -p simas
-//! ./target/release/simas \
+//! cargo build --release -p cimas
+//! ./target/release/cimas \
 //!   --spectrum test-fixtures/test.mgf \
 //!   --database test-fixtures/BSA.fasta \
 //!   --output-pin test-fixtures/parity/goldens/precursor_cal_off.pin \
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR points at crates/simas at test compile time.
+    // CARGO_MANIFEST_DIR points at crates/cimas at test compile time.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -52,7 +52,7 @@ fn read_sorted_rows(path: &PathBuf) -> (String, Vec<String>) {
 #[test]
 fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
     let root = workspace_root();
-    let binary = PathBuf::from(env!("CARGO_BIN_EXE_simas"));
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_cimas"));
     let spectra = root.join("test-fixtures/test.mgf");
     let fasta = root.join("test-fixtures/BSA.fasta");
     assert!(spectra.exists(), "fixture missing: {}", spectra.display());
@@ -69,8 +69,8 @@ fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
         .arg("--output-tsv").arg(&actual_tsv)
         // No --precursor-cal flag → default 'off'.
         .status()
-        .expect("run simas");
-    assert!(status.success(), "simas exited {status}");
+        .expect("run cimas");
+    assert!(status.success(), "cimas exited {status}");
 
     let golden_pin = root.join("test-fixtures/parity/goldens/precursor_cal_off.pin");
     let golden_tsv = root.join("test-fixtures/parity/goldens/precursor_cal_off.tsv");

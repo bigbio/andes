@@ -1,13 +1,13 @@
 [package]
-name = "simas"
+name = "cimas"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "simas"
-path = "src/bin/simas.rs"
+name = "cimas"
+path = "src/bin/cimas.rs"
 
 [dependencies]
 model = { path = "../model" }

@@ -1,4 +1,4 @@
-//! End-to-end smoke tests: invoke simas on various fixtures and verify
+//! End-to-end smoke tests: invoke cimas on various fixtures and verify
 //! the PIN and TSV outputs exist with sensible content.
 
 use std::path::PathBuf;
@@ -16,7 +16,7 @@ fn fixture(rel: &str) -> PathBuf {
 
 /// Build a base Command with the mandatory arguments that every test requires.
 fn base_cmd(spectrum: &str, database: &str, pin: &std::path::Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_simas"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cimas"));
     cmd.arg("--spectrum")
         .arg(fixture(spectrum))
         .arg("--database")
@@ -44,9 +44,9 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     .arg("--decoy-prefix")
     .arg("XXX_")
     .status()
-    .expect("run simas");
+    .expect("run cimas");
 
-    assert!(status.success(), "simas exit code: {status}");
+    assert!(status.success(), "cimas exit code: {status}");
     assert!(pin_path.exists(), "PIN output not written");
     assert!(tsv_path.exists(), "TSV output not written");
 
@@ -113,7 +113,7 @@ fn cli_accepts_max_missed_cleavages_flag() {
     .arg("--max-missed-cleavages")
     .arg("2")
     .status()
-    .expect("run simas");
+    .expect("run cimas");
 
     assert!(status.success(), "--max-missed-cleavages 2 should exit 0, got: {status}");
 }
@@ -131,7 +131,7 @@ fn cli_accepts_min_peaks_flag() {
     .arg("--min-peaks")
     .arg("5")
     .status()
-    .expect("run simas");
+    .expect("run cimas");
 
     assert!(status.success(), "--min-peaks 5 should exit 0, got: {status}");
 }
@@ -151,7 +151,7 @@ fn cli_accepts_min_length_max_length_flags() {
     .arg("--max-length")
     .arg("35")
     .status()
-    .expect("run simas");
+    .expect("run cimas");
 
     assert!(status.success(), "--min-length 7 --max-length 35 should exit 0, got: {status}");
 }
@@ -193,11 +193,11 @@ fn cli_accepts_mod_fragmentation_instrument_protocol_flags() {
     // recall on a non-TMT fixture.
     .arg("--precursor-tol-ppm").arg("100")
     .status()
-    .expect("run simas with TMT flags");
+    .expect("run cimas with TMT flags");
 
     assert!(
         status.success(),
-        "simas should exit 0 with --mod + TMT flags, got: {status}"
+        "cimas should exit 0 with --mod + TMT flags, got: {status}"
     );
     assert!(pin_path.exists(), "PIN output should still be written");
 }
@@ -216,7 +216,7 @@ fn cli_rejects_invalid_protocol_index() {
     )
     .arg("--protocol").arg("42")
     .status()
-    .expect("run simas with bad protocol");
+    .expect("run cimas with bad protocol");
 
     assert!(!status.success(), "out-of-range --protocol must fail");
 }
@@ -243,11 +243,11 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
     .arg("--min-peaks")
     .arg("1")
     .status()
-    .expect("run simas on mzML");
+    .expect("run cimas on mzML");
 
     assert!(
         status.success(),
-        "simas should exit 0 on mzML input, got: {status}"
+        "cimas should exit 0 on mzML input, got: {status}"
     );
     assert!(pin_path.exists(), "PIN output should be written for mzML input");
 
@@ -275,7 +275,7 @@ fn bench_mode_max_spectra_produces_nonempty_pin() {
     .arg("--max-spectra")
     .arg("100")
     .status()
-    .expect("run simas bench mode");
+    .expect("run cimas bench mode");
 
     assert!(status.success(), "bench mode should exit 0, got: {status}");
     assert!(pin_path.exists(), "PIN should be written in bench mode");
@@ -302,7 +302,7 @@ fn cli_rejects_inverted_charge_range() {
     .arg("--charge-max")
     .arg("2")
     .status()
-    .expect("run simas with inverted charge range");
+    .expect("run cimas with inverted charge range");
 
     assert!(!status.success(), "inverted charge range must fail");
 }
@@ -322,7 +322,7 @@ fn cli_rejects_inverted_isotope_error_range() {
     .arg("--isotope-error-max")
     .arg("-1")
     .status()
-    .expect("run simas with inverted isotope range");
+    .expect("run cimas with inverted isotope range");
 
     assert!(!status.success(), "inverted isotope error range must fail");
 }
@@ -344,7 +344,7 @@ fn cli_accepts_isotope_error_min_negative_one() {
     .arg("--max-spectra")
     .arg("10")
     .status()
-    .expect("run simas with isotope-error-min -1");
+    .expect("run cimas with isotope-error-min -1");
 
     assert!(status.success(), "space-separated -1 must parse as isotope min");
     assert!(pin_path.exists());
@@ -365,7 +365,7 @@ fn cli_accepts_precursor_cal_off() {
     .arg("--max-spectra")
     .arg("10")
     .status()
-    .expect("run simas with precursor-cal off");
+    .expect("run cimas with precursor-cal off");
 
     assert!(status.success());
     assert!(pin_path.exists());

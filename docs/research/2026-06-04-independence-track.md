@@ -1,6 +1,6 @@
-# SIMAS independence track — derivation audit + plan
+# CIMAS independence track — derivation audit + plan
 
-**2026-06-04** — Goal: make SIMAS legally independent of MS-GF+ (no UC-licensed derived
+**2026-06-04** — Goal: make CIMAS legally independent of MS-GF+ (no UC-licensed derived
 code/models), so it can be relicensed (e.g. Apache-2.0). Keep `NOTICE` as the honest
 acknowledgment of origin. No external consultation — replace the derived parts so
 there is nothing to argue about. Final relicense gets an internal EBI-legal nod only.
@@ -57,7 +57,7 @@ a replacement calibration cover it).
 
 ### Phase 3 — Retrain models on public/MSnet data  *(swapped: was Phase 2)*
 - Harvest high-confidence PSMs from PRIDE/MSnet reanalyses across
-  activation×instrument×enzyme×label; train SIMAS-native models via the existing
+  activation×instrument×enzyme×label; train CIMAS-native models via the existing
   engine; write a fresh `models.parquet` with zero MS-GF+-derived rows; retire the
   `.param` fixtures. **Likely also carries the low-res 6%.**
 - **Hard part:** bootstrap training *diluted* (−4.3% cross-dataset). Needs a better
@@ -65,7 +65,7 @@ a replacement calibration cover it).
   This is the real research risk of the track.
 
 ### Phase 4 — Relicense (and drop the NOTICE requirement)
-- Once Phases 2+3 are done, SIMAS contains **no MS-GF+-derived code or models** → it is
+- Once Phases 2+3 are done, CIMAS contains **no MS-GF+-derived code or models** → it is
   no longer a derivative work, so the **UC license + the NOTICE attribution requirement
   no longer apply.** Switch `LICENSE` → Apache-2.0; the legal `NOTICE` can be dropped
   (keep at most a brief *courtesy* acknowledgment of MS-GF+'s intellectual influence —

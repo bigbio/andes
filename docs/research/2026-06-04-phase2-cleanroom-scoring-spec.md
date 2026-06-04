@@ -1,6 +1,6 @@
 # Phase 2 — Clean-room the scoring code (spec)
 
-**2026-06-04** — Make SIMAS's scoring an **independent implementation** of the published
+**2026-06-04** — Make CIMAS's scoring an **independent implementation** of the published
 intensity-rank method, removing the derived *expression* of MS-GF+'s Java, so it is no
 longer a copyright-derivative. Preserve scoring **semantics** (so the current models +
 yield hold; Phase 3 swaps in own models later).
@@ -24,7 +24,7 @@ method + first principles, not a line-by-line translation of their Java.
 
 Honest limitation: this is *independent reimplementation from public sources*, not a
 formal legal clean-room (which walls implementers off from ever seeing the original).
-For SIMAS's purpose (not a verbatim derivative) that is the practical standard.
+For CIMAS's purpose (not a verbatim derivative) that is the practical standard.
 
 ## The method, from public sources (what we reimplement)
 

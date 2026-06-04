@@ -2,7 +2,7 @@
 
 **Goal:** replace the 39 bundled models (`cid_lowres_tryp`, `hcd_qexactive_tryp`, …) —
 which are **MS-GF+'s trained `.param` tables** (the last derived *data*) — with
-SIMAS-native models trained from **public** data. This removes the final derivation →
+CIMAS-native models trained from **public** data. This removes the final derivation →
 enables relicense, **and** is where the **low-res 6%** gets recovered.
 
 ## The core challenge (why this is research, not "press train")
@@ -54,7 +54,7 @@ data *diluted*). Two layers:
   validation.
 
 ### Step 4 — Train + validate the full model set
-Train SIMAS-native models with the fixed estimator; write a fresh `models.parquet` with
+Train CIMAS-native models with the fixed estimator; write a fresh `models.parquet` with
 **zero MS-GF+-derived rows**; retire the `.param` fixtures + (optionally) the `.param`
 loader. **Gate:** yield ≥ curated on Astral + a05058 + a cross-dataset hold-out
 (entrapment-validated). Recovering the low-res a05058 toward 11,128 is the headline test.

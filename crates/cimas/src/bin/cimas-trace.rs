@@ -97,7 +97,7 @@ use scoring_crate::scoring::fragment_ions::ions_for_node;
 use search::{enumerate_candidates, match_spectra, SearchIndex, SearchParams};
 
 #[derive(Parser, Debug)]
-#[command(name = "simas-trace", about = "Single-scan parity diagnostic for simas")]
+#[command(name = "cimas-trace", about = "Single-scan parity diagnostic for cimas")]
 struct Cli {
     /// Spectrum file (MGF or mzML — format auto-detected by extension).
     #[arg(long)]
@@ -167,7 +167,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("simas-trace: {e}");
+            eprintln!("cimas-trace: {e}");
             ExitCode::from(1)
         }
     }

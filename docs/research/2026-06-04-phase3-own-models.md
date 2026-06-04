@@ -37,11 +37,21 @@ Candidate fixes (pick by Step-1 evidence):
   before), or richer label sources (MSnet's confident reanalysis PSMs).
 - Validate each candidate on held-out data (cross-dataset, not train=test).
 
-### Step 3 — Source public/MSnet training data
+### Step 3 — Source public/MSnet training data (**quality-prefiltered**)
 Harvest confident PSMs across **activation × instrument × enzyme × label** from PRIDE/MSnet
 reanalyses (Parquet results) + raw where needed. Map coverage to the 39 model slugs;
 prioritize the ones that matter (CID/HCD × tryp × {none, TMT, phospho}). Note: MSnet is
 mostly label-free + 2 TMT projects — supplement TMT/iTRAQ from ProteomeTools/PRIDE.
+
+**PREFILTER to only the *really good* data — quality over quantity** (tonight proved more
+data *diluted*). Two layers:
+- **Dataset-level:** keep only well-characterized, high-quality reanalyses (high ID rate,
+  clean instrument/acquisition, trusted submitters); drop noisy/low-yield projects.
+- **PSM-level:** strict confidence (well below 1% q, high score margin / unambiguous
+  rank-1), clean spectra (good fragment coverage, low co-isolation). Only these confident
+  PSMs feed the estimator — a small, *sharp* training set beats a large, noisy one for
+  this estimator (the dilution lesson). Define explicit selection thresholds in Step 2's
+  validation.
 
 ### Step 4 — Train + validate the full model set
 Train SIMAS-native models with the fixed estimator; write a fresh `models.parquet` with

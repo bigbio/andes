@@ -46,16 +46,7 @@ a replacement calibration cover it).
   stays ~lossless; low-res CID is allowed to cost ~6% (recovered later / accepted).
 - **Outcome:** patent excised; `gf/` subtree removable; biggest single derived chunk gone.
 
-### Phase 2 — Retrain models on public/MSnet data *(parallel)*
-- Harvest high-confidence PSMs from PRIDE/MSnet reanalyses across
-  activation×instrument×enzyme×label; train SIMAS-native models via the existing
-  engine; write a fresh `models.parquet` with zero MS-GF+-derived rows; retire the
-  `.param` fixtures.
-- **Hard part:** tonight's bootstrap training *diluted* (−4.3% cross-dataset). Needs a
-  better estimator (shrinkage/sharpening toward a non-derived prior) to match curated
-  quality. This is the real research risk of the whole track.
-
-### Phase 3 — Clean-room the scoring code
+### Phase 2 — Clean-room the scoring code  *(swapped: was Phase 3)*
 - Reimplement `rank_scorer` + `psm_score` + the `scored_spectrum` preprocessing from a
   spec written off the *public papers* (not the Java), keeping the `Param`/`score_psm`
   contract; drop the bit-parity goal and the `.param` binary loader. Phase 1 having
@@ -64,9 +55,33 @@ a replacement calibration cover it).
 - Largest single effort (`scored_spectrum.rs` is 96 KB of parity-tuned logic; the
   n=12 lesson warns scoring changes regress Percolator — so gate hard on yield).
 
-### Phase 4 — Relicense
-- GF-free + own scoring + own models ⇒ independent ⇒ switch `LICENSE` to Apache-2.0,
-  keep `NOTICE` as acknowledgment. Internal EBI-legal sign-off on the flip.
+### Phase 3 — Retrain models on public/MSnet data  *(swapped: was Phase 2)*
+- Harvest high-confidence PSMs from PRIDE/MSnet reanalyses across
+  activation×instrument×enzyme×label; train SIMAS-native models via the existing
+  engine; write a fresh `models.parquet` with zero MS-GF+-derived rows; retire the
+  `.param` fixtures. **Likely also carries the low-res 6%.**
+- **Hard part:** bootstrap training *diluted* (−4.3% cross-dataset). Needs a better
+  estimator (shrinkage/sharpening toward a non-derived prior) to match curated quality.
+  This is the real research risk of the track.
+
+### Phase 4 — Relicense (and drop the NOTICE requirement)
+- Once Phases 2+3 are done, SIMAS contains **no MS-GF+-derived code or models** → it is
+  no longer a derivative work, so the **UC license + the NOTICE attribution requirement
+  no longer apply.** Switch `LICENSE` → Apache-2.0; the legal `NOTICE` can be dropped
+  (keep at most a brief *courtesy* acknowledgment of MS-GF+'s intellectual influence —
+  optional, good practice, not required). **Internal EBI-legal nod** to confirm the
+  independence is genuine before the flip.
+
+### Phase R — Literature & strategy review  *(before rebrand finalization)*
+- A full review of the papers + strategies (build on `internal-docs/papers`) to:
+  (a) **make the analysis even faster** — fragment-ion indexing (MSFragger/Sage),
+  tag prefilters, SIMD/bit-parallel matched-peak counting, cache-friendly layout,
+  no-GPU tricks; and (b) **improve TMT PSMs** — predicted-intensity rescoring
+  (MS2PIP/Prosit-TMT), TMT-aware / complementary-ion scoring, low-res-CID-specific
+  methods, and what recovers the low-res 6%.
+- Output: a ranked, evidence-backed action list feeding Phases 2/3 + the chimeric
+  speed work. (Methodology: the same multi-agent literature fan-out used for the LLR
+  charter.)
 
 ## Highest-leverage first move
 **Phase 1 (remove the GF).** Patented + isolated + doesn't affect ranking + de-risks

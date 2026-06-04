@@ -245,6 +245,11 @@ fn write_spectrum_rows<W: Write>(
     let psms = queue.clone().into_rank_sorted_vec();
 
     let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
+    // When a scan emits more than one row, `rank` alone can collide (ranks tie
+    // on equal `rank_score`, and `TopNQueue` retains ties at capacity), so the
+    // SpecId must include the per-row index to stay unique. Single-row scans
+    // keep the historical `specID_scan_rank` format (schema parity).
+    let multi_row = ranked.len() > 1;
     for (row_idx, (rank, psm)) in ranked.into_iter().enumerate() {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
@@ -256,6 +261,7 @@ fn write_spectrum_rows<W: Write>(
             &ctx,
             rank,
             row_idx,
+            multi_row,
             min_charge,
             max_charge,
             candidates,
@@ -275,6 +281,7 @@ fn write_psm_row<W: Write>(
     ctx: &RowContext,
     rank: u32,
     row_idx: usize,
+    multi_row: bool,
     min_charge: u8,
     max_charge: u8,
     candidates: &[Candidate],
@@ -335,11 +342,13 @@ fn write_psm_row<W: Write>(
 
     // Write columns directly into the BufWriter (avoids ~30 String allocs/row).
     //
-    // SpecId = `specID_scanNum_rank`. Under --chimeric, one scan can emit multiple
-    // distinct-peptide PSMs sharing a rank (rank only increments on a distinct
-    // rank_score), which would collide on `_{rank}`; append the per-row emission
-    // index to keep SpecIds unique. The non-chimeric format is unchanged.
-    if params.chimeric {
+    // SpecId = `specID_scanNum_rank`. Whenever a scan emits more than one row
+    // (under --chimeric, OR because ranks tie on equal `rank_score` and the
+    // `TopNQueue` retained the ties), `_{rank}` can collide, producing duplicate
+    // SpecIds in the PIN (ambiguous downstream mapping). Append the per-row
+    // emission index to disambiguate. Single-row-per-scan keeps the historical
+    // `specID_scan_rank` format so the schema/common case is unchanged.
+    if multi_row {
         write!(writer, "{}_{}_{}_{}", ctx.spec_id, ctx.scan, rank, row_idx)?;
     } else {
         write!(writer, "{}_{}_{}", ctx.spec_id, ctx.scan, rank)?;
@@ -799,6 +808,36 @@ mod tests {
         assert_eq!(rows.len(), 2, "both co-fragmented PSMs should be emitted");
         assert_ne!(rows[0][0], rows[1][0],
             "chimeric SpecIds must be unique per row, got {:?} and {:?}", rows[0][0], rows[1][0]);
+    }
+
+    // ── Test: non-chimeric tied-PSM SpecId uniqueness ──────────────────────
+    #[test]
+    fn non_chimeric_tied_psms_same_scan_get_distinct_specids() {
+        // With the generating function removed, ranks tie on equal `rank_score`
+        // and `TopNQueue` retains the ties at capacity, so even a *non-chimeric*
+        // scan can emit two rows that would share `spec_scan_rank`. Both rows
+        // must still get distinct SpecIds.
+        let params = make_params(2..=3); // chimeric == false (default)
+        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
+
+        // Two distinct peptides with the SAME rank_score (10.0) → same rank.
+        let mut queue = TopNQueue::new(10);
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2));
+        queue.push(make_psm(0, 10.0, 10.0, 1, 2));
+        let queues = vec![queue];
+        let idx = make_empty_search_index();
+        let cands = vec![make_candidate(0, false), make_candidate(1, false)];
+
+        let mut buf = Vec::<u8>::new();
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let rows = parse_rows(&buf);
+        assert_eq!(rows.len(), 2, "both tied PSMs should be emitted");
+        assert_ne!(
+            rows[0][0], rows[1][0],
+            "non-chimeric tied SpecIds must be unique, got {:?} and {:?}",
+            rows[0][0], rows[1][0]
+        );
     }
 
     // ── Test 4: empty queue → only header ────────────────────────────────────

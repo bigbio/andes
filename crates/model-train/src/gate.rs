@@ -172,6 +172,12 @@ pub(crate) fn count_target_psms(
         *q = min_q;
     }
 
+    // Step 6b: conservative tie handling — give every PSM in an equal-`rank_score`
+    // bucket the WORST q in that bucket so a tied decoy fails the whole bucket
+    // rather than letting target-before-decoy ordering accept a tied target.
+    // Must match `bootstrap_labels` exactly so the gate and the label path agree.
+    crate::labeled::assign_bucket_worst_q(&best_psms, &mut mono_q, |p| p.rank_score);
+
     // Step 7: count accepted targets.
     let count = best_psms
         .iter()

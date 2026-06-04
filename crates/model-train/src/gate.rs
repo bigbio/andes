@@ -119,7 +119,7 @@ pub(crate) fn count_target_psms(
 
     // Step 3: collect best PSM per spectrum.
     struct BestPsm {
-        spec_e_value: f64,
+        rank_score: f32,
         is_decoy: bool,
     }
 
@@ -132,17 +132,18 @@ pub(crate) fn count_target_psms(
             let cand_idx = psm.primary_candidate_idx() as usize;
             let cand = &candidates[cand_idx];
             best_psms.push(BestPsm {
-                spec_e_value: psm.spec_e_value,
+                rank_score: psm.rank_score,
                 is_decoy: cand.is_decoy,
             });
         }
     }
 
-    // Step 4: sort by spec_e_value ascending.
+    // Step 4: sort by rank_score DESCENDING (highest RawScore = most confident
+    // first), now that the generating function / SpecEValue is removed.
     best_psms.sort_by(|a, b| {
-        let av = if a.spec_e_value.is_nan() { f64::INFINITY } else { a.spec_e_value };
-        let bv = if b.spec_e_value.is_nan() { f64::INFINITY } else { b.spec_e_value };
-        av.partial_cmp(&bv)
+        let av = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+        let bv = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+        bv.partial_cmp(&av)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.is_decoy.cmp(&b.is_decoy))
     });

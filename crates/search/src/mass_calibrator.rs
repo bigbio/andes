@@ -29,8 +29,16 @@ pub struct SpecKey {
 /// Residuals whose magnitude exceeds this are rejected as isotope contamination.
 const MAX_REASONABLE_RESIDUAL_PPM: f64 = 50.0;
 
-/// Java default `Constants.MIN_DE_NOVO_SCORE`.
-const MIN_DE_NOVO_SCORE: i32 = 0;
+/// Minimum `rank_score` (RawScore = node + cleavage + edge) for a pre-pass PSM
+/// to be treated as confident enough to contribute a calibration residual.
+///
+/// SIMAS no longer computes the generating function, so the calibration
+/// pre-pass can no longer gate on SpecEValue. It now gates on `rank_score`
+/// (RawScore): higher is a more confident match. This floor is intentionally
+/// permissive — the final `RESIDUAL_CAP` top-N-by-rank_score selection in
+/// `extract_residuals` does the real confidence filtering, mirroring how the
+/// old code took the top `RESIDUAL_CAP` by SpecEValue.
+const MIN_CONFIDENT_RANK_SCORE: f32 = 0.0;
 
 /// Summary of a successful (or skipped) calibration pre-pass.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -38,8 +46,9 @@ pub struct CalibrationStats {
     pub shift_ppm: f64,
     pub robust_sigma_ppm: f64,
     pub confident_psm_count: usize,
-    /// PSMs rejected because top-1 `spec_e_value` > 1e-6.
-    pub rejected_spec_e: usize,
+    /// PSMs rejected because top-1 `rank_score` (RawScore) was below the
+    /// confidence floor.
+    pub rejected_low_score: usize,
     /// PSMs rejected because `|residual_ppm|` > 50.
     pub rejected_residual: usize,
     /// Sampled spectra with at least one PSM in the prepass queue.
@@ -149,13 +158,13 @@ pub fn learn_calibration_stats(
         &queues,
         originals,
         &prepared.candidates,
-        MIN_DE_NOVO_SCORE,
+        MIN_CONFIDENT_RANK_SCORE,
         constants::RESIDUAL_CAP,
     );
 
     if residuals.len() < constants::MIN_CONFIDENT_PSMS {
         return CalibrationStats {
-            rejected_spec_e: filter.rejected_spec_e,
+            rejected_low_score: filter.rejected_low_score,
             rejected_residual: filter.rejected_residual,
             queues_with_psm: filter.queues_with_psm,
             ..CalibrationStats::default()
@@ -221,8 +230,7 @@ fn spectrum_with_charge(spec: &Spectrum, charge: u8) -> Spectrum {
 #[derive(Debug, Default)]
 struct CalFilterCounts {
     queues_with_psm: usize,
-    rejected_spec_e: usize,
-    rejected_de_novo: usize,
+    rejected_low_score: usize,
     rejected_residual: usize,
 }
 
@@ -231,21 +239,25 @@ fn extract_residuals(
     queues: &[crate::TopNQueue],
     originals: &HashMap<usize, Spectrum>,
     candidates: &[crate::candidate_gen::Candidate],
-    min_de_novo_score: i32,
+    min_rank_score: f32,
     keep_top_n: usize,
 ) -> (Vec<f64>, CalFilterCounts) {
-    let mut residual_with_eval: Vec<(f64, f64)> = Vec::new();
+    // Each residual is paired with the PSM's `rank_score` (RawScore) so the
+    // final selection can keep the top-`keep_top_n` most-confident matches —
+    // the rank-score analogue of the old "top-N by SpecEValue".
+    let mut residual_with_score: Vec<(f64, f32)> = Vec::new();
     let mut filter = CalFilterCounts::default();
 
-    // Java `generateSpecIndexDBMatchMap` keeps the best SpecEValue per
-    // spectrum index across all sampled SpecKeys (e.g. charge variants).
+    // Keep the best (highest `rank_score`) PSM per spectrum index across all
+    // sampled SpecKeys (e.g. charge variants). SIMAS no longer computes
+    // SpecEValue, so confidence is ranked by `rank_score` (RawScore) instead.
     let mut best_by_spec: HashMap<usize, crate::PsmMatch> = HashMap::new();
     for (key, queue) in sampled.iter().zip(queues.iter()) {
         let Some(psm) = queue
             .iter_psms()
-            .min_by(|a, b| {
-                a.spec_e_value
-                    .partial_cmp(&b.spec_e_value)
+            .max_by(|a, b| {
+                a.rank_score
+                    .partial_cmp(&b.rank_score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
         else {
@@ -255,9 +267,7 @@ fn extract_residuals(
         best_by_spec
             .entry(key.spectrum_idx)
             .and_modify(|best| {
-                if psm.spec_e_value < best.spec_e_value
-                    || (psm.spec_e_value == best.spec_e_value && psm.rank_score > best.rank_score)
-                {
+                if psm.rank_score > best.rank_score {
                     *best = psm.clone();
                 }
             })
@@ -265,12 +275,8 @@ fn extract_residuals(
     }
 
     for (&spectrum_idx, psm) in best_by_spec.iter() {
-        if psm.spec_e_value > constants::MAX_SPEC_EVALUE {
-            filter.rejected_spec_e += 1;
-            continue;
-        }
-        if psm.de_novo_score < min_de_novo_score {
-            filter.rejected_de_novo += 1;
+        if psm.rank_score < min_rank_score {
+            filter.rejected_low_score += 1;
             continue;
         }
 
@@ -294,12 +300,16 @@ fn extract_residuals(
             filter.rejected_residual += 1;
             continue;
         }
-        residual_with_eval.push((residual, psm.spec_e_value));
+        residual_with_score.push((residual, psm.rank_score));
     }
 
-    residual_with_eval.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    let keep_n = residual_with_eval.len().min(keep_top_n);
-    let residuals = residual_with_eval
+    // Keep the top-`keep_top_n` residuals by `rank_score` DESCENDING (most
+    // confident first), mirroring the old top-N-by-SpecEValue selection.
+    residual_with_score.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let keep_n = residual_with_score.len().min(keep_top_n);
+    let residuals = residual_with_score
         .into_iter()
         .take(keep_n)
         .map(|(r, _)| r)
@@ -333,7 +343,6 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
-            gf_free: false,
         }
     }
 

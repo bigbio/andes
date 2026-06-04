@@ -249,17 +249,6 @@ struct SearchArgs {
     #[arg(long, default_value = "1.5")]
     isolation_halfwidth: f64,
 
-    /// GF-free scoring (opt-in). Skips the patented generating function
-    /// (SpecEValue) in the search path: candidates are still selected and
-    /// ranked by RawScore, PSMs are ordered for output by RawScore, the
-    /// GF-derived PIN/TSV columns (lnSpecEValue, lnEValue, lnDeltaSpecEValue,
-    /// DeNovoScore, SpecEValue, EValue) are omitted, and FDR is left to
-    /// Percolator over RawScore + the remaining features. Also disables
-    /// precursor mass calibration (its pre-pass needs SpecEValue). A speed win.
-    /// Default off; the default path is bit-identical to prior releases.
-    #[arg(long, default_value = "false")]
-    gf_free: bool,
-
     /// Path to a Parquet model store to use instead of the bundled
     /// `resources/ionstat/models.parquet`. When set, model selection reads from
     /// this store; when unset, the bundled store is used.
@@ -719,20 +708,6 @@ fn run_precursor_calibration(
         return Ok(CalibrationStats::default());
     }
 
-    // GF-free mode: the calibration pre-pass selects confident PSMs by
-    // `spec_e_value` (gated at MAX_SPEC_EVALUE) — a signal the generating
-    // function produces and that is unavailable when the GF is skipped.
-    // Rather than re-deriving a rank_score confidence threshold (which would
-    // change the calibrated shift relative to the GF path), DISABLE precursor
-    // calibration in GF-free mode and leave the precursor tolerance untouched.
-    if params.gf_free {
-        eprintln!(
-            "Precursor mass calibration disabled under --gf-free (the calibration \
-             pre-pass requires SpecEValue, which the generating function provides)."
-        );
-        return Ok(CalibrationStats::default());
-    }
-
     let t_cal = std::time::Instant::now();
     let meta = scan_spectrum_metadata(spectrum_path, is_mzml, ms_level, bench_cap)?;
     let spec_keys = build_spec_keys_from_metadata(&meta, params.charge_range.clone(), params.min_peaks);
@@ -767,9 +742,9 @@ fn run_precursor_calibration(
         );
     } else {
         eprintln!(
-            "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} failed SpecE, {} failed |residual|>50ppm; elapsed: {:.2}s)",
+            "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} below RawScore floor, {} failed |residual|>50ppm; elapsed: {:.2}s)",
             stats.queues_with_psm,
-            stats.rejected_spec_e,
+            stats.rejected_low_score,
             stats.rejected_residual,
             t_cal.elapsed().as_secs_f64()
         );
@@ -994,13 +969,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.chimeric = chimeric_active;
     params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
-    params.gf_free = cli.gf_free;
-    if cli.gf_free {
-        eprintln!(
-            "GF-free mode: skipping the generating function; ranking by RawScore, \
-             FDR via Percolator over RawScore + features."
-        );
-    }
     // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
     // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
     // blind multi-emission per scan = inflated FDR.

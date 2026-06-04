@@ -127,23 +127,9 @@ pub struct PsmMatch {
     /// (avoids the recompute). Default 0 — features extraction will compute
     /// it on the fly if it remains 0 (e.g. for test fixtures).
     pub edge_score: i32,
-    /// SpecEValue: lower is better. Default 1.0 = "not yet computed"
-    /// / "no signal". Set by `compute_spec_e_values_for_spectrum` after the
-    /// per-candidate scoring loop.
-    pub spec_e_value: f64,
-    /// De-novo score: `gf_group.max_score() - 1` for the GF that scored
-    /// this peptide. Set during `compute_spec_e_values_for_spectrum`.
-    /// Sentinel: `i32::MIN` if not yet computed.
-    pub de_novo_score: i32,
     /// Activation method captured from `param.data_type.activation` at scoring
     /// time. `None` if unknown or not yet set.
     pub activation_method: Option<model::activation::ActivationMethod>,
-    /// `spec_e_value * num_distinct_peptides_at_length`. Set in
-    /// `compute_spec_e_values_for_spectrum` using
-    /// `SearchIndex::num_distinct_peptides_at_length` (counts distinct bare
-    /// residue sequences at that length over the enumerated candidate set).
-    /// Sentinel before enrichment: `1.0`.
-    pub e_value: f64,
     /// Fragment-ion feature columns computed after `score_psm`.
     /// Defaults to all-zero until `compute_psm_features` runs.
     pub features: PsmFeatures,
@@ -172,13 +158,13 @@ impl PsmMatch {
 impl PartialEq for PsmMatch {
     fn eq(&self, other: &Self) -> bool {
         // PartialEq MUST agree with `Ord::cmp` (Rust contract
-        // a == b ⇒ a.cmp(b) == Equal). Ord uses (spec_e_value, rank_score),
-        // so PartialEq must compare the same fields. Comparing `score`
+        // a == b ⇒ a.cmp(b) == Equal). Ord ranks by `rank_score` alone,
+        // so PartialEq compares the same field. Comparing `score`
         // (= node + cleavage) would violate the contract for any pair of
         // PSMs with equal `score` but different `rank_score`
         // (= `score + edge`), leaving BinaryHeap behavior undefined for
         // those pairs.
-        self.spec_e_value == other.spec_e_value && self.rank_score == other.rank_score
+        self.rank_score == other.rank_score
     }
 }
 
@@ -190,12 +176,13 @@ impl PartialOrd for PsmMatch {
     }
 }
 
-/// Primary: `spec_e_value` ascending (lower = better).
-/// Secondary: `rank_score` descending (higher = better).
+/// `rank_score` descending (higher = better).
 ///
 /// `rank_score` is the Java-aligned queue-ordering key `node +
 /// cleavage + edge`, so the queue selects Java-equivalent top-1 PSMs even
 /// though the PIN RawScore distribution stays unchanged at `node + cleavage`.
+/// With the generating function removed, `rank_score` is the sole ranking
+/// signal for both queue retention and output ordering.
 ///
 /// For callers / test fixtures that never set `rank_score`, the
 /// default of 0.0 means an unset `rank_score` would lose to a set one. The
@@ -204,23 +191,16 @@ impl PartialOrd for PsmMatch {
 /// to preserve old behavior.
 ///
 /// This ordering is used by `TopNQueue`'s min-heap (via `Reverse<PsmMatch>`):
-/// the heap's "minimum" element is the one with the *largest* spec_e_value
+/// the heap's "minimum" element is the one with the *smallest* rank_score
 /// (worst), so `push` evicts it when over capacity.
 impl Ord for PsmMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        // "Better" PSM = smaller spec_e_value, then larger rank_score.
+        // "Better" PSM = larger rank_score.
         // NaN values are treated as worst (sort last / lose to finite).
-        let self_sev  = if self.spec_e_value.is_nan()  { f64::INFINITY }      else { self.spec_e_value };
-        let other_sev = if other.spec_e_value.is_nan() { f64::INFINITY }      else { other.spec_e_value };
-        match other_sev.partial_cmp(&self_sev).unwrap_or(Ordering::Equal) {
-            Ordering::Equal => {
-                let self_rank  = if self.rank_score.is_nan()  { f32::NEG_INFINITY } else { self.rank_score };
-                let other_rank = if other.rank_score.is_nan() { f32::NEG_INFINITY } else { other.rank_score };
-                self_rank.partial_cmp(&other_rank).unwrap_or(Ordering::Equal)
-            }
-            ord => ord,
-        }
+        let self_rank  = if self.rank_score.is_nan()  { f32::NEG_INFINITY } else { self.rank_score };
+        let other_rank = if other.rank_score.is_nan() { f32::NEG_INFINITY } else { other.rank_score };
+        self_rank.partial_cmp(&other_rank).unwrap_or(Ordering::Equal)
     }
 }
 
@@ -240,12 +220,9 @@ impl TopNQueue {
     /// Insert a PSM. The queue keeps **at least** `capacity` of the *best*
     /// PSMs, plus any additional PSMs tied with the current worst.
     ///
-    /// "Best" = smallest `spec_e_value` first (then largest `score` for ties).
-    /// The min-heap (via `Reverse<PsmMatch>`) puts the *worst* PSM at the top
-    /// so it can be evicted when a strictly-better PSM arrives.
-    ///
-    /// Before `compute_spec_e_values_for_spectrum` runs, all PSMs have
-    /// `spec_e_value = 1.0` and the secondary `score` key governs eviction.
+    /// "Best" = largest `rank_score` first. The min-heap (via
+    /// `Reverse<PsmMatch>`) puts the *worst* PSM at the top so it can be
+    /// evicted when a strictly-better PSM arrives.
     ///
     /// **Tie handling:** when the queue is at capacity and
     /// a new PSM is `Equal` (in `Ord` terms) to the worst retained PSM, the
@@ -333,10 +310,6 @@ impl TopNQueue {
     /// (it would let callers break the heap invariant). Since features do
     /// not participate in ordering, the re-push is logically a no-op for
     /// retention.
-    ///
-    /// This is distinct from `update_psm_enrichment` only in intent
-    /// (post-top-N feature fill vs score/e-value enrichment) — the
-    /// mechanism is identical.
     pub fn fill_post_topn<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
@@ -347,8 +320,8 @@ impl TopNQueue {
         }
     }
 
-    /// Return the best PSM (smallest `spec_e_value`, then largest `score`)
-    /// without removing it. Returns `None` if the queue is empty.
+    /// Return the best PSM (largest `rank_score`) without removing it.
+    /// Returns `None` if the queue is empty.
     ///
     /// The heap is a min-heap on `Reverse<PsmMatch>` so the *worst* entry sits
     /// at the top (for cheap eviction). To find the *best* entry we iterate
@@ -358,36 +331,7 @@ impl TopNQueue {
         self.heap.iter().map(|Reverse(m)| m).max_by(|a, b| a.cmp(b))
     }
 
-    /// Apply `f` to each PSM to compute its `spec_e_value`, then rebuild
-    /// the heap so the ordering invariant holds.
-    ///
-    /// Draining + re-inserting is O(N log N) — cheap for small N (top-10).
-    pub fn update_spec_e_values<F: Fn(&PsmMatch) -> f64>(&mut self, f: F) {
-        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
-        for psm in &mut psms {
-            psm.spec_e_value = f(psm);
-        }
-        for psm in psms {
-            self.heap.push(Reverse(psm));
-        }
-    }
-
-    /// Apply `f` to each PSM in-place (mutable borrow), then rebuild the heap.
-    ///
-    /// Used by enrichment to set `de_novo_score`, `e_value`, and other
-    /// fields that don't affect ordering. The heap is rebuilt after all mutations
-    /// (O(N) heapify) to maintain the invariant.
-    pub fn update_psm_enrichment<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
-        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
-        for psm in &mut psms {
-            f(psm);
-        }
-        for psm in psms {
-            self.heap.push(Reverse(psm));
-        }
-    }
-
-    /// Drain into a Vec sorted best-first (smallest spec_e_value, then largest score).
+    /// Drain into a Vec sorted best-first (largest `rank_score`).
     pub fn into_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
         v.sort_by(|a, b| b.cmp(a));
@@ -396,9 +340,8 @@ impl TopNQueue {
 
     /// Drain into a Vec sorted best-first by `rank_score` DESCENDING (the
     /// larger RawScore = better), then by `score` descending as a stable
-    /// tiebreak. Used only by the GF-free output path, where `spec_e_value` is
-    /// the uniform "not computed" sentinel and so cannot order the queue.
-    /// The default (GF) output path keeps using [`into_sorted_vec`].
+    /// tiebreak. This is the canonical output ordering: `rank_score` is the
+    /// sole ranking signal now that the generating function is removed.
     pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
         v.sort_by(|a, b| {
@@ -432,19 +375,17 @@ mod tests {
             score,
             rank_score: score,  // fixture default: rank_score = score
             edge_score: 0,
-            spec_e_value: 1.0,  // default sentinel: "not yet computed"
-            de_novo_score: i32::MIN,  // sentinel: not yet computed
             activation_method: None,
-            e_value: 1.0,  // sentinel: not yet computed
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
         }
     }
 
-    fn make_match_with_evalue(spectrum_idx: usize, score: f32, spec_e_value: f64) -> PsmMatch {
+    /// Build a fixture PSM whose `rank_score` is set independently of `score`.
+    fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         let mut m = make_match(spectrum_idx, score);
-        m.spec_e_value = spec_e_value;
+        m.rank_score = rank_score;
         m
     }
 
@@ -461,7 +402,7 @@ mod tests {
         for s in [1.0, 2.0, 3.0] { q.push(make_match(0, s)); }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
-        // All spec_e_value = 1.0 (default) → secondary sort by score descending.
+        // rank_score = score (fixture default) → sort by score descending.
         assert_eq!(sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
                    vec![3.0, 2.0, 1.0]);
     }
@@ -472,7 +413,7 @@ mod tests {
         for s in [1.0, 5.0, 2.0, 4.0, 3.0] { q.push(make_match(0, s)); }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
-        // All spec_e_value = 1.0 → secondary score keeps top-3 by score.
+        // rank_score = score → keeps top-3 by score.
         assert_eq!(sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
                    vec![5.0, 4.0, 3.0]);
     }
@@ -587,62 +528,38 @@ mod tests {
         let cloned = m.clone();
         assert_eq!(cloned.spectrum_idx, 7);
         assert_eq!(cloned.score, 4.2);
-        assert_eq!(cloned.spec_e_value, 1.0);
+        assert_eq!(cloned.rank_score, 4.2);
     }
 
     // -----------------------------------------------------------------------
-    // SpecEValue ordering tests
+    // rank_score ordering tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn psm_match_orders_by_spec_e_value_ascending_then_score_descending() {
-        // Lower spec_e_value means "better" → should sort before (greater in
-        // natural Ord so the min-heap can evict the worst).
-        let better = make_match_with_evalue(0, 5.0, 0.001);
-        let worse  = make_match_with_evalue(0, 5.0, 0.5);
-        // "better" is greater in natural order (because lower e-value wins).
+    fn psm_match_orders_by_rank_score_descending() {
+        // Higher rank_score means "better" → Ord-greater so the min-heap can
+        // evict the worst.
+        let better = make_match_with_rank(0, 5.0, 10.0);
+        let worse  = make_match_with_rank(0, 5.0, 1.0);
         assert!(better > worse,
-            "PSM with lower spec_e_value should be Ord-greater (better in the min-heap)");
-
-        // Tie-break by score descending.
-        let high_score = make_match_with_evalue(0, 10.0, 0.01);
-        let low_score  = make_match_with_evalue(0, 3.0,  0.01);
-        assert!(high_score > low_score,
-            "when spec_e_value equal, higher score should be Ord-greater");
+            "PSM with higher rank_score should be Ord-greater (better in the min-heap)");
     }
 
     #[test]
-    fn queue_keeps_best_spec_e_value_psms_when_full() {
-        // Three PSMs with same score but different spec_e_values; capacity = 2.
+    fn queue_keeps_best_rank_score_psms_when_full() {
+        // Three PSMs with same score but different rank_scores; capacity = 2.
         let mut q = TopNQueue::new(2);
-        q.push(make_match_with_evalue(0, 5.0, 0.5));   // worst
-        q.push(make_match_with_evalue(0, 5.0, 0.001)); // best
+        q.push(make_match_with_rank(0, 5.0, 1.0));   // worst
+        q.push(make_match_with_rank(0, 5.0, 100.0)); // best
         assert_eq!(q.len(), 2);
-        // Push a medium one; it should evict the worst (0.5).
-        q.push(make_match_with_evalue(0, 5.0, 0.1));
+        // Push a medium one; it should evict the worst (rank 1.0).
+        q.push(make_match_with_rank(0, 5.0, 50.0));
         assert_eq!(q.len(), 2);
         let sorted = q.into_sorted_vec();
-        // Should keep 0.001 and 0.1 (best two).
-        let evalues: Vec<f64> = sorted.iter().map(|m| m.spec_e_value).collect();
-        assert!(evalues.contains(&0.001), "best e-value 0.001 should be retained");
-        assert!(evalues.contains(&0.1),   "medium e-value 0.1 should be retained");
-        assert!(!evalues.contains(&0.5),  "worst e-value 0.5 should be evicted");
-    }
-
-    #[test]
-    fn update_spec_e_values_applies_to_all_psms() {
-        let mut q = TopNQueue::new(5);
-        for s in [1.0_f32, 2.0, 3.0] {
-            q.push(make_match(0, s));
-        }
-        // Set spec_e_value = 1.0 / score for each PSM.
-        q.update_spec_e_values(|psm| 1.0 / psm.score as f64);
-        let sorted = q.into_sorted_vec();
-        // After update: score 3.0 → e=0.333, score 2.0 → e=0.5, score 1.0 → e=1.0.
-        // Best e-value first.
-        assert!((sorted[0].spec_e_value - 1.0 / 3.0).abs() < 1e-9);
-        assert!((sorted[1].spec_e_value - 0.5).abs() < 1e-9);
-        assert!((sorted[2].spec_e_value - 1.0).abs() < 1e-9);
+        let ranks: Vec<f32> = sorted.iter().map(|m| m.rank_score).collect();
+        assert!(ranks.contains(&100.0), "best rank 100.0 should be retained");
+        assert!(ranks.contains(&50.0),  "medium rank 50.0 should be retained");
+        assert!(!ranks.contains(&1.0),  "worst rank 1.0 should be evicted");
     }
 
     #[test]
@@ -666,24 +583,6 @@ mod tests {
         let m = make_match(0, 1.0);
         assert_eq!(m.isotope_offset, 0,
             "isotope_offset sentinel should be 0 before match_engine populates it");
-    }
-
-    // -----------------------------------------------------------------------
-    // Enrichment field sentinel defaults
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn psm_match_default_de_novo_score_is_min() {
-        let m = make_match(0, 1.0);
-        assert_eq!(m.de_novo_score, i32::MIN,
-            "de_novo_score sentinel should be i32::MIN before enrichment");
-    }
-
-    #[test]
-    fn psm_match_default_e_value_is_one() {
-        let m = make_match(0, 1.0);
-        assert_eq!(m.e_value, 1.0,
-            "e_value sentinel should be 1.0 before enrichment");
     }
 
     // -----------------------------------------------------------------------
@@ -749,39 +648,27 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn psm_match_with_nan_spec_evalue_orders_as_worst() {
-        // NaN spec_e_value should sort as WORSE than any finite value.
+    fn psm_match_with_nan_rank_score_orders_as_worst() {
+        // NaN rank_score should sort as WORSE than any finite value.
         // "Better" = greater in natural Ord (used by the min-heap via Reverse).
-        let nan_sev = make_match_with_evalue(0, 5.0, f64::NAN);
-        let finite  = make_match_with_evalue(0, 0.0, 1.0);
+        let nan_rank = make_match_with_rank(0, 5.0, f32::NAN);
+        let finite   = make_match_with_rank(0, 0.0, 1.0);
         assert_eq!(
-            nan_sev.cmp(&finite),
+            nan_rank.cmp(&finite),
             std::cmp::Ordering::Less,
-            "NaN spec_e_value should sort as worse (Less) than a finite value"
+            "NaN rank_score should sort as worse (Less) than a finite value"
         );
     }
 
     #[test]
-    fn psm_match_with_nan_score_orders_as_worst() {
-        // When spec_e_value ties, NaN score should sort as worse than any finite score.
-        let nan_score     = make_match_with_evalue(0, f32::NAN, 0.01);
-        let finite_score  = make_match_with_evalue(0, 0.0,      0.01);
-        assert_eq!(
-            nan_score.cmp(&finite_score),
-            std::cmp::Ordering::Less,
-            "NaN score should sort as worse (Less) than a finite score at equal spec_e_value"
-        );
-    }
-
-    #[test]
-    fn psm_match_two_nan_spec_evalues_compare_equal() {
-        // Two PSMs both with NaN spec_e_value and same score → Equal.
-        let a = make_match_with_evalue(0, 5.0, f64::NAN);
-        let b = make_match_with_evalue(0, 5.0, f64::NAN);
+    fn psm_match_two_nan_rank_scores_compare_equal() {
+        // Two PSMs both with NaN rank_score → Equal.
+        let a = make_match_with_rank(0, 5.0, f32::NAN);
+        let b = make_match_with_rank(0, 5.0, f32::NAN);
         assert_eq!(
             a.cmp(&b),
             std::cmp::Ordering::Equal,
-            "Two PSMs with NaN spec_e_value and equal score should compare Equal"
+            "Two PSMs with NaN rank_score should compare Equal"
         );
     }
 }

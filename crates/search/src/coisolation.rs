@@ -7,13 +7,10 @@
 
 use crate::candidate_gen::Candidate;
 use crate::chimeric_features::precursor_isotope_match;
-use crate::match_engine::compute_spec_e_values_for_spectrum;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
-use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 use model::aa_set::AminoAcidSet;
-use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
@@ -170,9 +167,7 @@ pub(crate) fn search_secondary(
     bucket_index: &BTreeMap<i32, Vec<usize>>,
     scorer: &RankScorer,
     aa_set: &AminoAcidSet,
-    enzyme: Option<Enzyme>,
     params: &SearchParams,
-    search_index: &SearchIndex,
     fragment_tolerance_da: f64,
 ) -> Option<(PsmMatch, std::collections::HashSet<i64>)> {
     let z = co.charge;
@@ -184,8 +179,7 @@ pub(crate) fn search_secondary(
     //    primary's matched charge-1 b/y peaks PLUS any peaks claimed by earlier
     //    secondaries (`prior_claimed`) — so this peptide is scored only against
     //    still-unexplained signal. Overwrite the precursor fields with `co`'s so
-    //    the GF mass window (derived from the spectrum's precursor) centers on the
-    //    co-isolated mass. `co_spec` feeds both `ScoredSpectrum::new` and the GF.
+    //    the residual `ScoredSpectrum` is built at the co-isolated precursor mass.
     let mut claimed = primary_matched_peak_keys(spec, primary, scorer);
     claimed.extend(prior_claimed.iter().copied());
     let mut co_spec = spec.clone();
@@ -232,10 +226,7 @@ pub(crate) fn search_secondary(
                 score: pin + cleavage as f32,
                 rank_score: pin + cleavage as f32 + edge as f32,
                 edge_score: edge,
-                spec_e_value: 1.0,
-                de_novo_score: i32::MIN,
                 activation_method: Some(scorer.param().data_type.activation),
-                e_value: 1.0,
                 features: PsmFeatures::default(),
                 isotope_offset: 0,
                 // Set to co.mono_mz once the winner is chosen (end of fn).
@@ -249,48 +240,18 @@ pub(crate) fn search_secondary(
         return None;
     }
 
-    // 3. One targeted GF SpecEValue DP on the residual (fills spec_e_value /
-    //    de_novo_score / e_value). The secondary's mass is KNOWN from the MS1
-    //    monoisotopic peak, so clamp `isotope_error_range` to 0..=0 to build a
-    //    single GF mass bin instead of 5-7 (cuts GF bins + SinkUnreachable retries).
-    let mut p2 = params.clone();
-    p2.isotope_error_range = 0..=0;
-    // GF-free mode skips the SpecEValue DP here too (the secondary winner is
-    // then chosen by rank_score below, since all spec_e_values stay at the
-    // sentinel). Default path unchanged.
-    if !params.gf_free {
-        compute_spec_e_values_for_spectrum(
-            &co_spec,
-            &p2,
-            &mut queue,
-            aa_set,
-            enzyme,
-            scorer,
-            &res_ss,
-            z,
-            fragment_tolerance_da,
-            search_index,
-            candidates,
-        );
-    }
-
-    // Pick the winner by SCORE, not heap order: `drain_into_vec` is unordered and
-    // `TopNQueue` keeps ties even at capacity 1, so selecting `.next()` would be
-    // heap-order dependent (nondeterministic) in a user-visible ranking path.
-    // Order by smallest spec_e_value, then largest rank_score, then smallest
+    // 3. Pick the winning secondary by `rank_score` (RawScore), not heap order:
+    // `drain_into_vec` is unordered and `TopNQueue` keeps ties even at capacity
+    // 1, so selecting `.next()` would be heap-order dependent (nondeterministic)
+    // in a user-visible ranking path. Order by largest rank_score, then smallest
     // candidate index as a deterministic final tiebreak.
     let mut best = queue
         .drain_into_vec()
         .into_iter()
         .min_by(|a, b| {
-            a.spec_e_value
-                .partial_cmp(&b.spec_e_value)
+            b.rank_score
+                .partial_cmp(&a.rank_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(
-                    b.rank_score
-                        .partial_cmp(&a.rank_score)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
                 .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
         })?;
     // Features on the RESIDUAL (the spectrum the secondary was scored against), so
@@ -311,6 +272,7 @@ pub(crate) fn search_secondary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search_index::SearchIndex;
     use model::isotope::averagine_isotope_envelope;
 
     /// Build a synthetic MS1 peak list (m/z-sorted) containing a 4-peak averagine
@@ -488,9 +450,7 @@ mod tests {
             &prepared.bucket_index,
             &scorer,
             &prepared.aa_set_for_gf,
-            Some(params.enzyme),
             &params,
-            &idx,
             frag_tol,
         );
 
@@ -516,9 +476,7 @@ mod tests {
             &prepared.bucket_index,
             &scorer,
             &prepared.aa_set_for_gf,
-            Some(params.enzyme),
             &params,
-            &idx,
             frag_tol,
         );
         let matched_after = again
@@ -532,13 +490,12 @@ mod tests {
             psm.features.num_matched_main_ions,
             matched_after
         );
-        // The planted peptide is in-window for the co-isolated mass, so the GF
-        // must compute a real SpecEValue (< 1.0). Exactly 1.0 means the GF mass
-        // window did not include the candidate (the `return 1.0` guard fired).
+        // The planted peptide is in-window for the co-isolated mass and matched
+        // its fragment ions, so it must earn a positive RawScore (rank_score).
         assert!(
-            psm.spec_e_value < 1.0,
-            "secondary PSM SpecEValue must be a real probability < 1.0, got {}",
-            psm.spec_e_value
+            psm.rank_score > 0.0,
+            "secondary PSM rank_score (RawScore) must be positive, got {}",
+            psm.rank_score
         );
     }
 
@@ -597,8 +554,8 @@ mod tests {
 
         let got = search_secondary(
             &spec, &primary, &std::collections::HashSet::new(), co, &prepared.candidates,
-            &prepared.bucket_index, &scorer, &prepared.aa_set_for_gf, Some(params.enzyme),
-            &params, &idx, frag_tol,
+            &prepared.bucket_index, &scorer, &prepared.aa_set_for_gf,
+            &params, frag_tol,
         );
         let (psm, _claimed) = got.expect("secondary must be found at the calibration-adjusted mass");
         let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;

@@ -52,27 +52,10 @@ pub(crate) fn resolve_accession(cand: &Candidate, search_index: &SearchIndex) ->
     }
 }
 
-/// Iterate a slice of PSMs (pre-sorted best-first) yielding `(rank, psm)`.
-///
-/// Rank is 1-based and increments only when `spec_e_value` changes — ties
-/// share the same rank.
-pub(crate) fn iter_ranked(queue_sorted: &[PsmMatch]) -> impl Iterator<Item = (u32, &PsmMatch)> {
-    let mut rank = 0u32;
-    let mut prev_sev = f64::NAN;
-    queue_sorted.iter().map(move |psm| {
-        if psm.spec_e_value != prev_sev {
-            rank += 1;
-            prev_sev = psm.spec_e_value;
-        }
-        (rank, psm)
-    })
-}
-
-/// GF-free variant of [`iter_ranked`]: rank increments when `rank_score`
-/// changes (PSMs pre-sorted best-first by `rank_score` descending). In GF-free
-/// mode every PSM shares the uniform `spec_e_value` sentinel, so the GF-based
-/// `iter_ranked` would collapse all rows to rank 1; ranking on `rank_score`
-/// keeps SpecIds unique and the best-first order meaningful.
+/// Iterate a slice of PSMs (pre-sorted best-first by `rank_score` descending)
+/// yielding `(rank, psm)`. Rank is 1-based and increments when `rank_score`
+/// changes — ties share the same rank. `rank_score` (RawScore) is the sole
+/// ranking signal now that the generating function is removed.
 pub(crate) fn iter_ranked_by_rank_score(
     queue_sorted: &[PsmMatch],
 ) -> impl Iterator<Item = (u32, &PsmMatch)> {

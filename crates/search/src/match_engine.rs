@@ -5,22 +5,6 @@ use std::hash::Hasher;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-// GF failure-mode diagnostics. Module-level atomics
-// incremented per-bin from compute_spec_e_values_for_spectrum and
-// reported in the yield-accounting summary. Used to characterise the
-// ~4.7% of Astral PSMs where GF compute fails. Module-level rather than
-// per-PreparedSearch because we want cumulative counts across all
-// chunks and the per-call wiring would be invasive.
-//
-// These are diagnostics-only; behavior is unchanged. They are reset at
-// the start of each run_chunk invocation so per-bench numbers don't
-// accumulate across calls.
-static GF_EMPTY_SCORE_RANGE: AtomicU64 = AtomicU64::new(0);
-static GF_SINK_UNREACHABLE: AtomicU64 = AtomicU64::new(0);
-static GF_SINK_RETRY_OK: AtomicU64 = AtomicU64::new(0);
-static GF_BIN_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
-static GF_SPECTRA_NO_GROUP: AtomicU64 = AtomicU64::new(0);
-
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::{smallvec, SmallVec};
@@ -29,9 +13,6 @@ use model::aa_set::AminoAcidSet;
 use input::Ms1Link;
 use crate::candidate_gen::{enumerate_candidates, Candidate};
 use model::enzyme::Enzyme;
-use scoring_crate::gf::generating_function::GeneratingFunction;
-use scoring_crate::gf::group::GeneratingFunctionGroup;
-use scoring_crate::gf::primitive_graph::PrimitiveAaGraph;
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
@@ -265,7 +246,6 @@ impl<'a> PreparedSearch<'a> {
         params: &SearchParams,
     ) -> Vec<TopNQueue> {
         let scorer = self.scorer;
-        let idx = self.idx;
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let candidates = &self.candidates;
         let bucket_index = &self.bucket_index;
@@ -353,9 +333,9 @@ impl<'a> PreparedSearch<'a> {
             };
 
             // Compute per-charge candidate windows and union them into a deduplicated
-            // set of candidate indices. Window derivation mirrors
-            // compute_spec_e_values_for_spectrum's logic so any candidate admitted by
-            // matches_precursor is guaranteed to be in at least one charge's window.
+            // set of candidate indices. Window derivation mirrors the precursor
+            // mass-bin logic so any candidate admitted by matches_precursor is
+            // guaranteed to be in at least one charge's window.
             //
             // Vec + sort_unstable + dedup is faster than BTreeSet for the typical
             // 1k-3k indices per spectrum: better cache locality, no tree pointer
@@ -578,10 +558,7 @@ impl<'a> PreparedSearch<'a> {
                         score: pin_score,
                         rank_score,
                         edge_score: edge_i,
-                        spec_e_value: 1.0,
-                        de_novo_score: i32::MIN,
                         activation_method: Some(scorer.param().data_type.activation),
-                        e_value: 1.0,
                         features,
                         isotope_offset: err.isotope_offset,
                         precursor_mz_override: None,
@@ -608,54 +585,18 @@ impl<'a> PreparedSearch<'a> {
                 }
             }
 
-            // Per-charge GF / SpecEValue compute. Each per-charge queue
-            // gets SpecE calibrated against its OWN charge's GF distribution
-            // (Java parity: getRankScorer per SpecKey).
-            let enzyme_opt = if params.enzyme != Enzyme::NoCleavage
-                && params.enzyme != Enzyme::NonSpecific
-            {
-                Some(params.enzyme)
-            } else {
-                None
-            };
-            let mut any_queue_nonempty = false;
-            for (&charge, queue) in per_charge_queues.iter_mut() {
-                if queue.is_empty() {
-                    continue;
-                }
-                any_queue_nonempty = true;
-                // GF-free mode: SKIP the generating-function DP entirely (a
-                // speed win, and it removes the patented SpecEValue from the
-                // search path). Candidate selection/ranking already happened on
-                // `rank_score`; the PSMs keep their GF-field sentinels
-                // (`spec_e_value = 1.0`, `de_novo_score = i32::MIN`,
-                // `e_value = 1.0`). Output ordering switches to `rank_score`.
-                // The default (`!gf_free`) path is unchanged below.
-                if !params.gf_free {
-                    let scored_spec_charge = scored_spec_for_charge(charge);
-                    compute_spec_e_values_for_spectrum(
-                        spec,
-                        params,
-                        queue,
-                        aa_set_for_gf,
-                        enzyme_opt,
-                        scorer,
-                        scored_spec_charge,
-                        charge,
-                        fragment_tolerance_da,
-                        idx,
-                        candidates,
-                    );
-                }
-            }
+            // Candidate selection/ranking already happened on `rank_score`
+            // (RawScore = node + cleavage + edge). The generating function has
+            // been removed, so there is no per-charge SpecEValue DP — the
+            // per-charge queues are merged directly into the spectrum queue.
+            let any_queue_nonempty = per_charge_queues.values().any(|q| !q.is_empty());
             if any_queue_nonempty {
                 spectra_with_psms.fetch_add(1, Ordering::Relaxed);
             }
 
-            // Spectrum-level merge with SpecE tie keep. The
-            // TopNQueue::push (Ordering::Equal arm) keeps SpecE ties at
-            // capacity because PsmMatch::cmp orders by spec_e_value first.
-            // Matches Java parity: SpecE tie-keep on spectrum-level merge.
+            // Spectrum-level merge. The TopNQueue::push (Ordering::Equal arm)
+            // keeps rank_score ties at capacity, mirroring Java's tie-keep on
+            // the spectrum-level merge.
             for (_charge, mut per_charge) in per_charge_queues.drain() {
                 for psm in per_charge.drain_into_vec() {
                     queue.push(psm);
@@ -750,21 +691,6 @@ impl<'a> PreparedSearch<'a> {
             psms_pushed.load(Ordering::Relaxed),
             spectra_with_psms.load(Ordering::Relaxed),
         );
-        // GF DP failure-mode diagnostics.
-        // Cumulative across all chunks in this run; not reset between
-        // chunks. Helps localize the ~4.7% Astral PSMs with sentinel
-        // DeNovoScore / lnSpecEValue=0 (GF failed for that spectrum's
-        // entire precursor-mass window).
-        eprintln!(
-            "GF diagnostics (cumulative): {} bin attempts, {} EmptyScoreRange, \
-             {} SinkUnreachable, {} of those recovered by unthresholded retry, \
-             {} spectra with no successful bin",
-            GF_BIN_ATTEMPTS.load(Ordering::Relaxed),
-            GF_EMPTY_SCORE_RANGE.load(Ordering::Relaxed),
-            GF_SINK_UNREACHABLE.load(Ordering::Relaxed),
-            GF_SINK_RETRY_OK.load(Ordering::Relaxed),
-            GF_SPECTRA_NO_GROUP.load(Ordering::Relaxed),
-        );
 
         queues
     }
@@ -835,14 +761,6 @@ pub fn run_pass2_coisolation(
     if !params.chimeric {
         return;
     }
-
-    // The targeted secondary search needs the enzyme only when it actually
-    // constrains cleavage; NoCleavage / NonSpecific carry no cleavage credit.
-    let enzyme = if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
-        Some(params.enzyme)
-    } else {
-        None
-    };
 
     queues.par_iter_mut().enumerate().for_each(|(spec_idx, q)| {
         if q.is_empty() {
@@ -918,9 +836,7 @@ pub fn run_pass2_coisolation(
                 &prepared.bucket_index,
                 prepared.scorer,
                 &prepared.aa_set_for_gf,
-                enzyme,
                 params,
-                prepared.idx,
                 prepared.fragment_tolerance_da,
             ) {
                 // `spec_idx` is chunk-local (indexes `spectra` + `link`); the
@@ -987,229 +903,6 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
     score
 }
 
-/// For a single spectrum, compute the GF across the precursor tolerance
-/// window in nominal mass space, then assign `spec_e_value` to every PSM
-/// in `queue` whose nominal_peptide_mass falls within the window.
-///
-/// # Arguments
-/// * `spec` — the spectrum (used for precursor m/z).
-/// * `params` — search params (precursor_tolerance, isotope_error_range).
-/// * `queue` — the PSM queue for this spectrum (mutated in place).
-/// * `aa_set` — amino acid set with enzyme already registered via `register_enzyme`.
-/// * `enzyme` — the search enzyme (passed to PrimitiveAaGraph; may be None).
-/// * `scorer` — RankScorer.
-/// * `scored_spec` — ScoredSpectrum built with `top_charge` (per-charge cache).
-/// * `top_charge` — charge of the top PSM in the queue; used for GF mass window.
-///   For charge-explicit spectra this equals `spec.precursor_charge.unwrap()`.
-///   For charge-missing spectra, using the top PSM's charge ensures the GF
-///   reflects the dominant scoring context.
-/// * `fragment_tolerance_da` — fragment mass tolerance in Da.
-/// * `search_index` — database (target+decoy); used to look up protein sequences
-///   for protein-terminal flag derivation.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compute_spec_e_values_for_spectrum(
-    spec: &Spectrum,
-    params: &SearchParams,
-    queue: &mut TopNQueue,
-    aa_set: &AminoAcidSet,
-    enzyme: Option<Enzyme>,
-    scorer: &RankScorer,
-    scored_spec: &ScoredSpectrum<'_>,
-    top_charge: u8,
-    fragment_tolerance_da: f64,
-    search_index: &SearchIndex,
-    candidates: &[Candidate],
-) {
-    // 1. Determine the peptide neutral mass and its tolerance window.
-    // For charge-explicit spectra, `top_charge` == spec.precursor_charge.unwrap().
-    // For charge-missing spectra, `top_charge` is the top PSM's charge (B3 fix).
-    let charge = top_charge;
-    if charge == 0 {
-        return;
-    }
-
-    // peptide_neutral_mass = (precursor_mz - H) * charge - H2O
-    // This matches Java: scoredSpec.getPrecursorPeak().getMass() - H2O
-    // where getPrecursorPeak().getMass() = (mz - H) * charge.
-    let shift_ppm = params.precursor_mass_shift_ppm;
-    let peptide_neutral_mass = adjusted_observed_neutral_mass(
-        (spec.precursor_mz - PROTON) * (charge as f64) - H2O,
-        shift_ppm,
-    );
-    let nominal_peptide_mass = nominal_from(peptide_neutral_mass);
-
-    // Isotope error convention: range [min_iso, max_iso] is applied as
-    //   minNominalPeptideMass = nominalPeptideMass - maxIsotopeError
-    //   maxNominalPeptideMass = nominalPeptideMass - minIsotopeError
-    let iso_min = *params.isotope_error_range.start() as i32;
-    let iso_max = *params.isotope_error_range.end() as i32;
-    let min_iso_nominal = nominal_peptide_mass - iso_max;
-    let max_iso_nominal = nominal_peptide_mass - iso_min;
-
-    // Tolerance widening: round(tol_da - 0.4999).
-    // tol_da_left governs the upper bound; tol_da_right governs the lower bound.
-    let tol_da_left = params.precursor_tolerance.left.as_da(peptide_neutral_mass);
-    let tol_da_right = params.precursor_tolerance.right.as_da(peptide_neutral_mass);
-    let widen_left = (tol_da_left - 0.4999_f64).round() as i32;
-    let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
-
-    let max_peptide_mass_idx = max_iso_nominal + widen_left;
-    let min_peptide_mass_idx = min_iso_nominal - widen_right;
-
-    if max_peptide_mass_idx < min_peptide_mass_idx {
-        return;
-    }
-
-    // 2. Compute the minimum score across all PSMs (used as GF score threshold).
-    //
-    // Use `rank_score` (= node + cleavage + edge), not `score`
-    // (= node + cleavage only). Java parity: `match.score` is
-    // `cleavageScore + rawScore` where `rawScore` is `DBScanScorer.getScore`'s
-    // `node + edge` return — i.e. Rust's `rank_score`. Using `score` here
-    // seeds the GF threshold below Java's level by the per-PSM edge_score
-    // value (~+20 typical), widening the score distribution and biasing
-    // SpecEValue.
-    let min_score = queue
-        .iter_psms()
-        .map(|p| p.rank_score.round() as i32)
-        .min()
-        .unwrap_or(i32::MIN);
-
-    // parent_mass = (mz - PROTON) * charge  (precursor peak mass + proton, as in NewScoredSpectrum).
-    let parent_mass = (spec.precursor_mz - PROTON) * (charge as f64);
-
-    // 3. Derive protein-terminal flags by OR-ing across ALL PSMs in the queue.
-    //
-    // Aggregates `use_protein_n_term` / `use_protein_c_term` across all
-    // candidates before GF construction. Iterates the full queue and sets
-    // either flag the moment any PSM is at a protein N- or C-terminus,
-    // short-circuiting once both are set.
-    let (use_protein_n_term, use_protein_c_term) = {
-        let mut any_n = false;
-        let mut any_c = false;
-        for psm in queue.iter_psms() {
-            let cand = &candidates[psm.primary_candidate_idx() as usize];
-            if cand.is_protein_n_term { any_n = true; }
-            if cand.is_protein_c_term { any_c = true; }
-            if any_n && any_c { break; }
-        }
-        (any_n, any_c)
-    };
-
-    // 3b. Build the GF group across the nominal mass range.
-    let mut group = GeneratingFunctionGroup::new();
-
-    for nominal_mass_idx in min_peptide_mass_idx..=max_peptide_mass_idx {
-        if nominal_mass_idx <= 0 {
-            continue;
-        }
-        // Use the thread-local arena-pooled constructor: eliminates 11
-        // Vec allocations per call (~4.4M allocs per PXD001819 run) by
-        // recycling the buffers between graph builds. Output is bit-
-        // identical to `new` (gated by primitive_graph_arena_parity tests).
-        let graph = PrimitiveAaGraph::new_pooled(
-            aa_set,
-            nominal_mass_idx,
-            enzyme,
-            scored_spec,
-            scorer,
-            charge,
-            parent_mass,
-            fragment_tolerance_da,
-            use_protein_n_term,
-            use_protein_c_term,
-        );
-        GF_BIN_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-        match GeneratingFunction::with_score_threshold(&graph, min_score, aa_set) {
-            Ok(gf) => group.accept(gf),
-            Err(scoring_crate::gf::generating_function::GfError::EmptyScoreRange { .. }) => {
-                GF_EMPTY_SCORE_RANGE.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            Err(scoring_crate::gf::generating_function::GfError::SinkUnreachable) => {
-                // SinkUnreachable from the thresholded DP means the
-                // score-threshold pre-pass (`setup_score_threshold`) pruned
-                // every path from source to sink because no AA-path could
-                // theoretically reach the queue's `min_score`. This is a
-                // pruning artifact, not a real reachability problem: the
-                // unthresholded DP (`GeneratingFunction::compute`) still has
-                // valid paths to compute a complete distribution from. Retry
-                // without the threshold to recover ~10% of bin attempts that
-                // would otherwise emit sentinel DeNovoScore / lnSpecEValue=0
-                // and leave Percolator with broken features on ~5K Astral PSMs.
-                GF_SINK_UNREACHABLE.fetch_add(1, Ordering::Relaxed);
-                if let Ok(gf) = GeneratingFunction::compute(&graph, aa_set) {
-                    GF_SINK_RETRY_OK.fetch_add(1, Ordering::Relaxed);
-                    group.accept(gf);
-                }
-                continue;
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if !group.is_computed() {
-        GF_SPECTRA_NO_GROUP.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    // 4. For each PSM in the queue, compute spec_e_value from its score.
-    //
-    // Use `rank_score` (Java-aligned `node + cleavage + edge`),
-    // not `score` (Rust pin-only `node + cleavage`). Java parity:
-    // `gf.getSpectralProbability(match.getScore())` where `match.getScore()`
-    // is `node + cleavage + edge`. Using
-    // `score` here would look up the wrong tail of the GF score distribution
-    // (lower by the per-PSM edge contribution ~+20), giving inflated
-    // SpecEValue values for PSMs whose top-1 was chosen via edge contribution.
-    let max_score = group.max_score();
-
-    queue.update_spec_e_values(|psm| {
-        // Nominal peptide mass: residue masses sum + no water (mass-index convention).
-        // Use nominal_from() (INTEGER_MASS_SCALER-aware) to match how graph nodes are indexed.
-        let cand = &candidates[psm.primary_candidate_idx() as usize];
-        let psm_nominal_mass = cand.peptide.nominal_residue_mass();
-        if psm_nominal_mass < min_peptide_mass_idx || psm_nominal_mass > max_peptide_mass_idx {
-            return 1.0;
-        }
-        let score_int = psm.rank_score.round() as i32;
-        if score_int >= max_score {
-            // Score exceeds GF range — return the probability at max_score - 1
-            // (which already has the underflow guard applied by the GF DP).
-            // Avoids returning a grossly inflated value (1/max_score ≈ 0.01)
-            // that would invert ranking of the best PSMs.
-            return group.spectral_probability(max_score - 1)
-                .unwrap_or(f32::from_bits(1) as f64);
-        }
-        group.spectral_probability(score_int).unwrap_or(1.0)
-    });
-
-    // 5. Enrichment: set de_novo_score and e_value for output writers.
-    //
-    // de_novo_score = group.max_score() - 1.
-    //
-    // e_value = spec_e_value * num_distinct_peptides_at_length.
-    //
-    // Align lookup index with Java parity.
-    //     `sa.getNumDistinctPeptides(enzyme == null ? length - 2 : length - 1)`
-    // where `match.getLength() = pepLength + 2` (flanking residues included in
-    // the stored length). So Java effectively queries
-    //   - with enzyme: `numDistinctPeptides[pepLength + 1]`
-    //   - without enzyme: `numDistinctPeptides[pepLength]`
-    let de_novo_score = max_score - 1;
-    let lookup_offset = match params.enzyme {
-        Enzyme::NoCleavage | Enzyme::NonSpecific => 0,
-        _ => 1,
-    };
-    queue.update_psm_enrichment(|psm| {
-        psm.de_novo_score = de_novo_score;
-        let len = candidates[psm.primary_candidate_idx() as usize].peptide.length();
-        let num_distinct = search_index
-            .num_distinct_peptides_at_length(len + lookup_offset)
-            .max(1);
-        psm.e_value = psm.spec_e_value * num_distinct as f64;
-    });
-}
 
 /// Research diagnostic: the set of observed MS2 peaks claimed by `peptide`'s
 /// charge-1 b/y ions, as quantized m/z keys (round(mz·1000)). Mirrors the
@@ -1944,10 +1637,7 @@ mod dedup_tests {
             score: pin,
             rank_score: rank,
             edge_score: (rank - pin) as i32,
-            spec_e_value: 1.0,
-            de_novo_score: 0,
             activation_method: None,
-            e_value: 1.0,
             features: Default::default(),
             isotope_offset: 0,
             precursor_mz_override: None,

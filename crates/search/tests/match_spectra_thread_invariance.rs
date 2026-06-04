@@ -1,6 +1,6 @@
 //! Thread-count invariance: match_spectra must produce bit-identical output
 //! regardless of the Rayon thread count, because each spectrum's full pipeline
-//! (scoring + GF + spec_e_value assignment) runs entirely on one Rayon worker
+//! (node scoring + rank_score assignment) runs entirely on one Rayon worker
 //! — there is no FP-accumulation non-determinism across thread counts, only
 //! wall time changes.
 
@@ -96,10 +96,10 @@ fn match_spectra_output_invariant_across_thread_counts() {
                     i, j, a.score, b.score
                 );
                 assert_eq!(
-                    a.spec_e_value.to_bits(),
-                    b.spec_e_value.to_bits(),
-                    "spectrum {} PSM rank {}: spec_e_value differs ({} vs {})",
-                    i, j, a.spec_e_value, b.spec_e_value
+                    a.rank_score.to_bits(),
+                    b.rank_score.to_bits(),
+                    "spectrum {} PSM rank {}: rank_score differs ({} vs {})",
+                    i, j, a.rank_score, b.rank_score
                 );
             }
         }

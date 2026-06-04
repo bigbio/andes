@@ -1,8 +1,16 @@
-//! `.pin` schema parity gate against the Java reference fixture.
+//! `.pin` schema test for SIMAS's GF-free output.
 //!
-//! The Rust `.pin` writer's header must match the reference fixture exactly,
-//! so Percolator (and any downstream tool that uses regex column-name matching)
-//! consumes Rust output without modification.
+//! NOTE: SIMAS removed the generating function entirely, so its `.pin` schema
+//! INTENTIONALLY diverges from the historical Java MS-GF+ schema: the
+//! GF-derived columns (`DeNovoScore`, `lnSpecEValue`, `lnEValue`,
+//! `lnDeltaSpecEValue`) are no longer emitted, and `RawScore` is the sole score
+//! column. This test no longer compares against the Java reference fixture
+//! (that parity goal is obsolete); instead it asserts the GF-free schema:
+//!   - `RawScore` is present, the GF columns are absent.
+//!   - The additive feature columns (`EdgeScore`, `PrecursorIsotopeKL`,
+//!     `PrecursorSNR`, `DeltaRawScore`) are present, between `matchedIonRatio`
+//!     and `Peptide`.
+//!   - Every data row has at least as many columns as the header.
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -27,62 +35,47 @@ fn first_line(path: &std::path::Path) -> String {
     BufReader::new(f).lines().next().expect("file is empty").expect("read first line")
 }
 
-#[test]
-fn rust_pin_header_matches_java_pin_fixture_header_exactly() {
-    let java_pin_path = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
-    let java_header = first_line(&java_pin_path);
+/// Columns that the generating function used to emit and that GF-free SIMAS
+/// must NOT emit anymore.
+const GF_COLUMNS: [&str; 4] = ["DeNovoScore", "lnSpecEValue", "lnEValue", "lnDeltaSpecEValue"];
 
-    // Construct an empty queues-vec but write the header — the writer
-    // produces the header regardless of queue contents.
-    // Match Java's params: charge2..=3, Trypsin (no charge1).
+/// Additive feature columns SIMAS emits between matchedIonRatio and Peptide.
+const ADDITIVE_COLUMNS: [&str; 4] =
+    ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore"];
+
+#[test]
+fn rust_pin_header_is_gf_free_schema() {
     let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
     let mut params = SearchParams::default_tryptic(aa.clone());
     params.enzyme = Enzyme::Trypsin;
     params.charge_range = 2..=3;
 
-    // Empty PIN — header-only. We need a SearchIndex for the API, but the
-    // header writer doesn't use protein accessions, so an empty index suffices.
     let empty_target = ProteinDb::default();
     let empty_idx = SearchIndex::from_target_db(&empty_target, "XXX_");
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("empty.pin");
     output::write_pin(&rust_pin_path, &[], &[], &[], &params, &empty_idx).expect("write_pin");
 
-    let rust_header = first_line(&rust_pin_path);
+    let header = first_line(&rust_pin_path);
+    let cols: Vec<&str> = header.split('\t').collect();
 
-    // Rust adds ADDITIVE columns between matchedIonRatio and Peptide that the
-    // Java fixture does not emit:
-    //   - "EdgeScore" (iter19, 2026-05-21)
-    //   - "PrecursorIsotopeKL" / "PrecursorSNR" (chimeric Task 4, 2026-05-28)
-    //   - "DeltaRawScore" (Lever 3a, 2026-05-28)
-    // Check that the Java header is a prefix-modulo-additive-insertions of
-    // Rust's: every Java column appears in Rust in the same relative order, and
-    // the only extra Rust columns are the four additive features (all sitting
-    // between matchedIonRatio and Peptide).
-    const RUST_ONLY: [&str; 4] =
-        ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore"];
-    let java_cols: Vec<&str> = java_header.split('\t').collect();
-    let rust_cols: Vec<&str> = rust_header.split('\t').collect();
-    let rust_minus_additive: Vec<&str> = rust_cols
-        .iter()
-        .copied()
-        .filter(|c| !RUST_ONLY.contains(c))
-        .collect();
-    assert_eq!(
-        rust_minus_additive, java_cols,
-        "Rust .pin header (excluding additive Rust-only columns) must match Java reference header.\n\
-         Java:   {java_header}\n\
-         Rust:   {rust_header}\n\
-         (Common cause: column rename, missing column, or charge_range mismatch.)",
-    );
-    // Each additive column must appear after matchedIonRatio and before Peptide.
-    let matched_ratio_pos = rust_cols
+    // RawScore present; GF columns absent.
+    assert!(cols.contains(&"RawScore"), "RawScore column must be present:\n{header}");
+    for gf in GF_COLUMNS {
+        assert!(
+            !cols.contains(&gf),
+            "GF-derived column {gf} must NOT appear in the GF-free schema:\n{header}"
+        );
+    }
+
+    // Additive feature columns present, between matchedIonRatio and Peptide.
+    let matched_ratio_pos = cols
         .iter()
         .position(|c| *c == "matchedIonRatio")
         .expect("matchedIonRatio missing");
-    let peptide_pos = rust_cols.iter().position(|c| *c == "Peptide").expect("Peptide missing");
-    for name in RUST_ONLY {
-        let pos = rust_cols
+    let peptide_pos = cols.iter().position(|c| *c == "Peptide").expect("Peptide missing");
+    for name in ADDITIVE_COLUMNS {
+        let pos = cols
             .iter()
             .position(|c| *c == name)
             .unwrap_or_else(|| panic!("Rust .pin header is missing the additive feature column {name}"));
@@ -94,13 +87,11 @@ fn rust_pin_header_matches_java_pin_fixture_header_exactly() {
 }
 
 #[test]
-fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
-    // Run a real search, then for at least 5 of Java's reference scans assert
-    // Rust's row has the same number of tab-separated columns as Java's row.
-    // We don't compare values (SpecEValue / lnSpecEValue may differ during
-    // the parity build-out); only schema.
+fn rust_pin_rows_have_at_least_header_column_count() {
+    // Run a real search and assert each data row has at least as many columns
+    // as the header (trailing Proteins columns may add more). Schema-only; no
+    // value comparison against any Java reference.
 
-    // 1. Run Rust search end-to-end.
     let target_db = FastaReader::load_all(BufReader::new(File::open(fixture("test-fixtures/BSA.fasta")).unwrap())).unwrap();
     let idx = SearchIndex::from_target_db(&target_db, "XXX_");
 
@@ -126,8 +117,6 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
         .build()
         .unwrap();
 
-    // The bundled `resources/ionstat/*.param` files were migrated into the
-    // Parquet store; load the retained test fixture instead.
     let param_path = fixture("test-fixtures/HCD_QExactive_Tryp.param");
     let param = Param::load_from_file(&param_path).unwrap();
     let scorer = RankScorer::new(&param);
@@ -145,47 +134,24 @@ fn rust_pin_row_column_count_matches_java_for_at_least_5_scans() {
 
     let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.5, "XXX_");
 
-    // 2. Write Rust PIN.
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("bsa.pin");
     output::write_pin(&rust_pin_path, &spectra, &queues, &candidates, &params, &idx).expect("write_pin");
 
-    // 3. Read Java + Rust PIN files and check column counts on first 5 data rows.
-    let java_pin_path = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
-    let java_lines: Vec<_> = BufReader::new(File::open(&java_pin_path).unwrap())
-        .lines()
-        .collect::<Result<_, _>>()
-        .unwrap();
     let rust_lines: Vec<_> = BufReader::new(File::open(&rust_pin_path).unwrap())
         .lines()
         .collect::<Result<_, _>>()
         .unwrap();
 
-    assert!(java_lines.len() >= 6, "Java fixture should have at least 5 data rows");
     assert!(rust_lines.len() >= 6, "Rust pin should have at least 5 data rows");
 
-    // Check first 5 data rows (lines 1..=5; line 0 is header).
-    let java_header_cols = java_lines[0].split('\t').count();
-    let rust_header_cols = rust_lines[0].split('\t').count();
-    // Rust has four ADDITIVE columns not present in the Java fixture:
-    // EdgeScore (iter19, 2026-05-21), PrecursorIsotopeKL / PrecursorSNR
-    // (chimeric Task 4, 2026-05-28), and DeltaRawScore (Lever 3a, 2026-05-28),
-    // so expect Rust to be Java + 4.
-    assert_eq!(
-        rust_header_cols,
-        java_header_cols + 4,
-        "header column count mismatch (Rust {rust_header_cols} vs Java {java_header_cols}; expected Rust = Java + 4 additive cols)"
-    );
-
+    let header_cols = rust_lines[0].split('\t').count();
     let mut row_count = 0;
-    for (i, rust_line) in rust_lines.iter().enumerate().skip(1).take(rust_lines.len().min(java_lines.len()).min(6) - 1) {
+    for (i, rust_line) in rust_lines.iter().enumerate().skip(1) {
         let rust_row_cols = rust_line.split('\t').count();
-        // The fixture may have variable trailing Proteins columns; allow Rust
-        // to differ ONLY in the trailing columns (after position ==
-        // header_cols - 1). For now, just assert column count >= header_cols.
         assert!(
-            rust_row_cols >= rust_header_cols,
-            "Rust row {i} has {rust_row_cols} cols, expected >= {rust_header_cols}"
+            rust_row_cols >= header_cols,
+            "Rust row {i} has {rust_row_cols} cols, expected >= {header_cols}"
         );
         row_count += 1;
     }

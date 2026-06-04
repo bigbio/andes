@@ -1,10 +1,8 @@
-//! Scoring model, ion-type prediction, and generating-function DP.
+//! Scoring model and ion-type prediction.
 //!
-//! Contains the parameter model, rank-based scoring, fragment ion
-//! prediction, and the generating-function DP for SpecEValue.
-//! Depends only on the `model` crate.
+//! Contains the parameter model, rank-based node scoring, and fragment ion
+//! prediction. Depends only on the `model` crate.
 
-pub mod gf;
 pub mod param_model;
 pub mod scoring;
 

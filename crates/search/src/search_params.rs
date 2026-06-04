@@ -54,17 +54,6 @@ pub struct SearchParams {
     /// Fallback isolation half-width (Da) used when the mzML lacks
     /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.
     pub chimeric_isolation_halfwidth_da: f64,
-    /// GF-free scoring mode (opt-in, default false). When true, the patented
-    /// generating function (SpecEValue DP) is SKIPPED entirely: candidate
-    /// selection/ranking stays on `rank_score` (RawScore), PSMs are ordered
-    /// for output by `rank_score` (descending), and the GF-derived PIN/TSV
-    /// columns (`lnSpecEValue`, `lnEValue`, `lnDeltaSpecEValue`, `DeNovoScore`,
-    /// `SpecEValue`, `EValue`) are omitted so Percolator calibrates FDR from
-    /// RawScore + the remaining features. The `PsmMatch` GF fields keep their
-    /// "not yet computed" sentinels (`spec_e_value = 1.0`, `de_novo_score =
-    /// i32::MIN`, `e_value = 1.0`). MUST be bit-identical to the default path
-    /// when false.
-    pub gf_free: bool,
 }
 
 impl SearchParams {
@@ -97,7 +86,6 @@ impl SearchParams {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
-            gf_free: false,
         }
     }
 }
@@ -131,6 +119,5 @@ mod tests {
         assert_eq!(params.precursor_mass_shift_ppm, 0.0);
         assert!(!params.chimeric);
         assert_eq!(params.chimeric_isolation_halfwidth_da, 1.5);
-        assert!(!params.gf_free);
     }
 }

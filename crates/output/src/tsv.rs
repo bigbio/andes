@@ -5,7 +5,7 @@
 //! ```text
 //! #SpecFile  SpecID  ScanNum  [Title — only when is_mgf]  FragMethod
 //! Precursor  IsotopeError  PrecursorError(ppm|Da)  Charge
-//! Peptide  Protein  DeNovoScore  MSGFScore  SpecEValue  EValue
+//! Peptide  Protein  MSGFScore
 //! ```
 //!
 //! # Column semantics
@@ -18,7 +18,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::row_context::{iter_ranked, iter_ranked_by_rank_score, RowContext};
+use crate::row_context::{iter_ranked_by_rank_score, RowContext};
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
@@ -107,13 +107,9 @@ fn write_header<W: Write>(
         "Peptide",
         "Protein",
     ]);
-    // DeNovoScore / SpecEValue / EValue are GF-derived; emit only on the
-    // default path. MSGFScore (the integer RawScore) is always emitted.
-    if params.gf_free {
-        cols.push("MSGFScore");
-    } else {
-        cols.extend_from_slice(&["DeNovoScore", "MSGFScore", "SpecEValue", "EValue"]);
-    }
+    // MSGFScore (the integer RawScore) is the sole score column. The GF-derived
+    // DeNovoScore / SpecEValue / EValue columns are no longer emitted.
+    cols.push("MSGFScore");
 
     writeln!(writer, "{}", cols.join("\t"))
 }
@@ -125,7 +121,6 @@ struct RowCtx<'a> {
     spec_file_name: &'a str,
     is_mgf: bool,
     ppm_mode: bool,
-    gf_free: bool,
 }
 
 #[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
@@ -139,25 +134,16 @@ fn write_spectrum_rows<W: Write>(
     is_mgf: bool,
     search_index: &SearchIndex,
 ) -> io::Result<()> {
-    // GF-free: order by rank_score (RawScore) descending. Default: by spec_e_value.
-    let psms = if params.gf_free {
-        queue.clone().into_rank_sorted_vec()
-    } else {
-        queue.clone().into_sorted_vec()
-    };
+    // Order by rank_score (RawScore) descending — the sole ranking signal.
+    let psms = queue.clone().into_rank_sorted_vec();
 
     let row_ctx = RowCtx {
         spec_file_name,
         is_mgf,
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
-        gf_free: params.gf_free,
     };
 
-    let ranked: Vec<(u32, &PsmMatch)> = if params.gf_free {
-        iter_ranked_by_rank_score(&psms).collect()
-    } else {
-        iter_ranked(&psms).collect()
-    };
+    let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
     for (_rank, psm) in ranked {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
@@ -213,22 +199,10 @@ fn write_psm_row<W: Write>(
     let peptide = &cand.peptide;
     let protein = &ctx.accession;
 
-    // DeNovoScore
-    let de_novo_score = psm.de_novo_score;
-
-    // MSGFScore: integer-rounded raw score
+    // MSGFScore: integer-rounded raw score (the sole score column now that the
+    // GF-derived DeNovoScore / SpecEValue / EValue are no longer emitted).
     let msgf_score = psm.score.round() as i32;
 
-    // SpecEValue: format as scientific notation with 6 decimal places
-    let spec_e_value = format_e_value(psm.spec_e_value);
-
-    // EValue: same formatting
-    let e_value = format_e_value(psm.e_value);
-
-    // Build row. The leading columns (up to Protein) are identical in both
-    // modes. The trailing score columns differ: GF-free emits only MSGFScore
-    // (the RawScore); the default path emits DeNovoScore / MSGFScore /
-    // SpecEValue / EValue. The `!gf_free` branch is byte-identical to history.
     let lead = if is_mgf {
         format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -259,25 +233,7 @@ fn write_psm_row<W: Write>(
             protein,
         )
     };
-    if row_ctx.gf_free {
-        writeln!(writer, "{}\t{}", lead, msgf_score)
-    } else {
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}",
-            lead, de_novo_score, msgf_score, spec_e_value, e_value,
-        )
-    }
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-
-/// Format a SpecEValue / EValue in scientific notation.
-///
-/// Matches Java's `%.6e` formatting: always lowercase `e`, 6 fractional digits.
-fn format_e_value(v: f64) -> String {
-    format!("{:.6e}", v)
+    writeln!(writer, "{}\t{}", lead, msgf_score)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -342,19 +298,16 @@ mod tests {
         }
     }
 
-    fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64) -> PsmMatch {
+    fn make_psm(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
             candidate_idxs: vec![0],
             charge_used: 2,
             mass_error_ppm: 1.5,
             score,
-            rank_score: score,  // test fixtures default rank_score = score
+            rank_score,
             edge_score: 0,
-            spec_e_value,
-            de_novo_score: 42,
             activation_method: Some(model::activation::ActivationMethod::HCD),
-            e_value: spec_e_value * 100.0,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
@@ -381,7 +334,6 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
-            gf_free: false,
         }
     }
 
@@ -428,10 +380,7 @@ mod tests {
                 "Charge",
                 "Peptide",
                 "Protein",
-                "DeNovoScore",
                 "MSGFScore",
-                "SpecEValue",
-                "EValue",
             ],
             "Header columns must match expected order when is_mgf=true"
         );
@@ -473,7 +422,7 @@ mod tests {
         assert!(rows.is_empty(), "empty queue should produce no data rows");
     }
 
-    // ── Test 4: PSMs written in rank order (best spec_e_value first) ───────
+    // ── Test 4: PSMs written in rank order (highest rank_score first) ──────
 
     #[test]
     fn tsv_writes_one_row_per_psm_in_rank_order() {
@@ -481,10 +430,10 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        // Push 3 PSMs with descending spec_e_values (best = smallest)
-        queue.push(make_psm(0, 10.0, 1e-10)); // best (rank 1)
-        queue.push(make_psm(0, 8.0,  1e-8));  // middle (rank 2)
-        queue.push(make_psm(0, 6.0,  1e-6));  // worst (rank 3)
+        // Push 3 PSMs with descending rank_score (best = largest)
+        queue.push(make_psm(0, 10.0, 10.0)); // best (rank 1)
+        queue.push(make_psm(0, 8.0,  8.0));  // middle (rank 2)
+        queue.push(make_psm(0, 6.0,  6.0));  // worst (rank 3)
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
@@ -495,22 +444,14 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 3, "should have 3 data rows");
 
-        // Extract SpecEValue column (index 13 when is_mgf=true: 0=#SpecFile 1=SpecID
+        // MSGFScore column (index 11 when is_mgf=true: 0=#SpecFile 1=SpecID
         // 2=ScanNum 3=Title 4=FragMethod 5=Precursor 6=IsotopeError 7=PrecursorError
-        // 8=Charge 9=Peptide 10=Protein 11=DeNovoScore 12=MSGFScore 13=SpecEValue)
-        let spec_evalues: Vec<&str> = rows.iter().map(|r| r[13].as_str()).collect();
+        // 8=Charge 9=Peptide 10=Protein 11=MSGFScore)
+        let scores: Vec<&str> = rows.iter().map(|r| r[11].as_str()).collect();
 
-        // Best PSM (1e-10) should come first
-        assert!(
-            spec_evalues[0].contains("1.000000e") && spec_evalues[0].contains("-10"),
-            "first row should have spec_e_value 1e-10, got: {}",
-            spec_evalues[0]
-        );
-        assert!(
-            spec_evalues[2].contains("1.000000e") && spec_evalues[2].contains("-6"),
-            "last row should have spec_e_value 1e-6, got: {}",
-            spec_evalues[2]
-        );
+        // Highest RawScore should come first, lowest last.
+        assert_eq!(scores[0], "10", "first row should be the highest-score PSM");
+        assert_eq!(scores[2], "6", "last row should be the lowest-score PSM");
     }
 
     // ── Test 5: peptide column includes mods ───────────────────────────────
@@ -547,10 +488,7 @@ mod tests {
             score: 10.0,
             rank_score: 10.0,
             edge_score: 0,
-            spec_e_value: 1e-5,
-            de_novo_score: 0,
             activation_method: None,
-            e_value: 1e-3,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
@@ -597,7 +535,7 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         // protein_index = 0 → first target protein
-        let psm = make_psm(0, 10.0, 1e-5);
+        let psm = make_psm(0, 10.0, 10.0);
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
         let queues = vec![queue];
@@ -628,7 +566,7 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         // SearchIndex: 1 target (idx 0) + 1 decoy (idx 1, accession = "XXX_<base>")
-        let psm = make_psm(0, 10.0, 1e-5);
+        let psm = make_psm(0, 10.0, 10.0);
 
         let mut queue = TopNQueue::new(10);
         queue.push(psm);

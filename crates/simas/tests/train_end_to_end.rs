@@ -40,8 +40,12 @@ fn train_writes_model_and_search_uses_it() {
         .arg("--out-store")
         .arg(&store_path)
         // Use a lenient FDR so the small BSA fixture yields confident labels.
+        // SIMAS ranks training PSMs by RawScore (rank_score) since the
+        // generating function / SpecEValue was removed; on this tiny low-info
+        // fixture RawScore separates targets from decoys weakly, so a higher
+        // train-fdr is needed than the old SpecEValue path required.
         .arg("--train-fdr")
-        .arg("0.5")
+        .arg("0.9")
         .arg("--model-id")
         .arg("bsa_test")
         .status()

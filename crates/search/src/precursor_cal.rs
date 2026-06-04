@@ -87,7 +87,6 @@ pub mod constants {
     /// threshold would skip calibration on them, while 150 is still a robust
     /// sample size for a median (the cap above keeps high-yield datasets identical).
     pub const MIN_CONFIDENT_PSMS: usize = 150;
-    pub const MAX_SPEC_EVALUE: f64 = 1e-6;
     pub const MIN_SPECKEYS_FOR_PREPASS: usize = 10_000;
 
     /// Java `DEFAULT_TIGHTENED_WINDOW_*` — post-cal main-pass tolerance tightening.

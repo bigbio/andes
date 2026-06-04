@@ -7,9 +7,9 @@
 //!    reversed decoys), reusing the same construction as the production binary.
 //! 2. Run the full search with the seed `RankScorer` via [`match_spectra`] —
 //!    no search or scoring logic is re-implemented here.
-//! 3. For each spectrum take the **best PSM** (lowest `spec_e_value`, then
-//!    highest `score`) from the queue.
-//! 4. Sort best-per-spectrum PSMs by `spec_e_value` ascending (best first).
+//! 3. For each spectrum take the **best PSM** (highest `rank_score`) from the
+//!    queue.
+//! 4. Sort best-per-spectrum PSMs by `rank_score` descending (best first).
 //! 5. Walk the sorted list computing a running target/decoy count and q-value
 //!    at each position: `q = running_decoys / max(running_targets, 1)`.
 //! 6. Convert to a proper monotone q-value by scanning from the bottom and
@@ -134,13 +134,13 @@ pub fn bootstrap_labels(
     );
 
     // ── 3. Collect best PSM per spectrum ──────────────────────────────────────
-    // Each TopNQueue is already sorted best-first by `spec_e_value`. We take
+    // Each TopNQueue is already sorted best-first by `rank_score`. We take
     // the single best entry per spectrum.
     struct BestPsm {
         spectrum_index: usize,
         peptide: Peptide,
         charge: u8,
-        spec_e_value: f64,
+        rank_score: f32,
         is_decoy: bool,
     }
 
@@ -149,7 +149,7 @@ pub fn bootstrap_labels(
         if queue.is_empty() {
             continue;
         }
-        // peek_top returns the best (lowest spec_e_value, then highest score).
+        // peek_top returns the best (highest rank_score).
         if let Some(psm) = queue.peek_top() {
             let cand_idx = psm.primary_candidate_idx() as usize;
             let cand = &candidates[cand_idx];
@@ -157,18 +157,18 @@ pub fn bootstrap_labels(
                 spectrum_index: spec_idx,
                 peptide: cand.peptide.clone(),
                 charge: psm.charge_used,
-                spec_e_value: psm.spec_e_value,
+                rank_score: psm.rank_score,
                 is_decoy: cand.is_decoy,
             });
         }
     }
 
-    // ── 4. Sort by spec_e_value ascending (best/most-confident first) ─────────
+    // ── 4. Sort by rank_score DESCENDING (best/most-confident first) ──────────
     // Tie-break by is_decoy ascending (target before decoy) for stability.
     best_psms.sort_by(|a, b| {
-        let av = if a.spec_e_value.is_nan() { f64::INFINITY } else { a.spec_e_value };
-        let bv = if b.spec_e_value.is_nan() { f64::INFINITY } else { b.spec_e_value };
-        av.partial_cmp(&bv)
+        let av = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+        let bv = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+        bv.partial_cmp(&av)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.is_decoy.cmp(&b.is_decoy))
     });

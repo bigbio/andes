@@ -1,9 +1,7 @@
 //! PSM scoring integration.
 //!
 //! `score_psm` sums `ScoredSpectrum::node_score(prefix, suffix)` across each
-//! peptide split position. The result is on the same score scale used by the
-//! GF DP, so `GeneratingFunctionGroup::spectral_probability(psm.score)` is
-//! calibrated.
+//! peptide split position, producing the RawScore that ranks PSMs.
 //!
 //! Per-split node score: `round(getNodeScore(prm, true) + getNodeScore(srm, false))`
 //! where `prm` is the nominal prefix mass and `srm = peptideMass - prm`.
@@ -120,9 +118,8 @@ pub fn psm_edge_score(
 }
 
 /// Score a PSM as the sum of `ScoredSpectrum::node_score(prefix, suffix)`
-/// across each peptide split position.  This produces a raw score on the
-/// same scale as the GF distribution so that `GeneratingFunctionGroup::
-/// spectral_probability(psm.score.round() as i32)` is calibrated.
+/// across each peptide split position. This produces the integer RawScore
+/// used to rank PSMs.
 ///
 /// For each split `i` in `1..n`:
 /// - `nominal_prefix_mass[i] = nominal_from(sum of residues 0..i)`

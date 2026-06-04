@@ -72,7 +72,7 @@ use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
 use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
-use crate::row_context::{iter_ranked, iter_ranked_by_rank_score, RowContext};
+use crate::row_context::{iter_ranked_by_rank_score, RowContext};
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
@@ -122,7 +122,7 @@ pub fn write_pin_to<W: Write>(
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
 
-    write_header(writer, min_charge, max_charge, params.gf_free)?;
+    write_header(writer, min_charge, max_charge)?;
 
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
@@ -149,8 +149,11 @@ fn write_header<W: Write>(
     writer: &mut W,
     min_charge: u8,
     max_charge: u8,
-    gf_free: bool,
 ) -> io::Result<()> {
+    // RawScore is the sole score column. The generating function has been
+    // removed, so the GF-derived columns (DeNovoScore / lnSpecEValue / lnEValue
+    // / lnDeltaSpecEValue) are not emitted: Percolator calibrates FDR from
+    // RawScore + the remaining fragment/mass features.
     let mut cols: Vec<String> = vec![
         "SpecId".to_string(),
         "Label".to_string(),
@@ -160,16 +163,6 @@ fn write_header<W: Write>(
         "mass".to_string(),
         "RawScore".to_string(),
     ];
-    // GF-derived columns are emitted only on the default (GF) path. In GF-free
-    // mode the generating function never runs, so `DeNovoScore` / `lnSpecEValue`
-    // / `lnEValue` carry only sentinels — omit them entirely so Percolator
-    // calibrates from RawScore + the remaining features. The `!gf_free` branch
-    // is byte-identical to the historical header.
-    if !gf_free {
-        cols.push("DeNovoScore".to_string());
-        cols.push("lnSpecEValue".to_string());
-        cols.push("lnEValue".to_string());
-    }
     cols.extend_from_slice(&[
         "isotope_error".to_string(),
         "peplen".to_string(),
@@ -200,10 +193,6 @@ fn write_header<W: Write>(
         "MeanRelErrorTop7".to_string(),
         "StdevRelErrorTop7".to_string(),
     ]);
-    // GF-derived delta column — omit in GF-free mode (sentinel-only otherwise).
-    if !gf_free {
-        cols.push("lnDeltaSpecEValue".to_string());
-    }
     cols.extend_from_slice(&[
         "matchedIonRatio".to_string(),
         // ADDITIVE Java-parity feature: per-bond
@@ -247,23 +236,10 @@ fn write_spectrum_rows<W: Write>(
     search_index: &SearchIndex,
     params: &SearchParams,
 ) -> io::Result<()> {
-    // GF-free: order by rank_score (RawScore) descending, since spec_e_value is
-    // the uniform sentinel. Default path: order by spec_e_value (then score).
-    let psms = if params.gf_free {
-        queue.clone().into_rank_sorted_vec()
-    } else {
-        queue.clone().into_sorted_vec()
-    };
+    // Order by rank_score (RawScore) descending — the sole ranking signal.
+    let psms = queue.clone().into_rank_sorted_vec();
 
-    // find rank-2 SpecEValue: first distinct spec_e_value after rank-1.
-    // Unused in GF-free mode (lnDeltaSpecEValue is not emitted).
-    let rank2_spec_e_value = find_rank2_spec_e_value(&psms);
-
-    let ranked: Vec<(u32, &PsmMatch)> = if params.gf_free {
-        iter_ranked_by_rank_score(&psms).collect()
-    } else {
-        iter_ranked(&psms).collect()
-    };
+    let ranked: Vec<(u32, &PsmMatch)> = iter_ranked_by_rank_score(&psms).collect();
     for (row_idx, (rank, psm)) in ranked.into_iter().enumerate() {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
@@ -275,7 +251,6 @@ fn write_spectrum_rows<W: Write>(
             &ctx,
             rank,
             row_idx,
-            rank2_spec_e_value,
             min_charge,
             max_charge,
             candidates,
@@ -295,7 +270,6 @@ fn write_psm_row<W: Write>(
     ctx: &RowContext,
     rank: u32,
     row_idx: usize,
-    rank2_spec_e_value: f64,
     min_charge: u8,
     max_charge: u8,
     candidates: &[Candidate],
@@ -333,23 +307,6 @@ fn write_psm_row<W: Write>(
     // RawScore: integer-rounded score
     let raw_score = psm.score.round() as i32;
 
-    // DeNovoScore
-    let de_novo_score = psm.de_novo_score;
-
-    // lnSpecEValue
-    let ln_spec_e_value = if psm.spec_e_value > 0.0 {
-        psm.spec_e_value.ln()
-    } else {
-        -f64::MAX
-    };
-
-    // lnEValue
-    let ln_e_value = if psm.e_value > 0.0 {
-        psm.e_value.ln()
-    } else {
-        -f64::MAX
-    };
-
     // isotope_error: from PsmMatch::isotope_offset (threaded from
     // MassError::isotope_offset in match_engine.rs).
     let isotope_error: i32 = psm.isotope_offset as i32;
@@ -368,17 +325,14 @@ fn write_psm_row<W: Write>(
     let dm = adjusted_exp_mz - theo_mz;
     let absdm = dm.abs();
 
-    // lnDeltaSpecEValue
-    let ln_delta_spec_e_value = compute_ln_delta_spec_e_value(rank, psm.spec_e_value, rank2_spec_e_value);
-
     // matchedIonRatio: from psm.features.
     let matched_ion_ratio = psm.features.matched_ion_ratio as f64;
 
     // Write columns directly into the BufWriter (avoids ~30 String allocs/row).
     //
     // SpecId = `specID_scanNum_rank`. Under --chimeric, one scan can emit multiple
-    // distinct-peptide PSMs sharing a SpecE rank (rank only increments on a distinct
-    // spec_e_value), which would collide on `_{rank}`; append the per-row emission
+    // distinct-peptide PSMs sharing a rank (rank only increments on a distinct
+    // rank_score), which would collide on `_{rank}`; append the per-row emission
     // index to keep SpecIds unique. The non-chimeric format is unchanged.
     if params.chimeric {
         write!(writer, "{}_{}_{}_{}", ctx.spec_id, ctx.scan, rank, row_idx)?;
@@ -391,17 +345,9 @@ fn write_psm_row<W: Write>(
     write_double(writer, calc_mass)?;
     writer.write_all(b"\t")?;
     write_double(writer, mass)?;
-    // RawScore is always emitted. The GF-derived DeNovoScore / lnSpecEValue /
-    // lnEValue columns are emitted only on the default path; in GF-free mode
-    // they are omitted (matching the header).
-    if params.gf_free {
-        write!(writer, "\t{}", raw_score)?;
-    } else {
-        write!(writer, "\t{}\t{}\t", raw_score, de_novo_score)?;
-        write_double(writer, ln_spec_e_value)?;
-        writer.write_all(b"\t")?;
-        write_double(writer, ln_e_value)?;
-    }
+    // RawScore is the sole score column (GF-derived DeNovoScore / lnSpecEValue /
+    // lnEValue are no longer emitted).
+    write!(writer, "\t{}", raw_score)?;
     write!(writer, "\t{}\t{}\t", isotope_error, peplen)?;
     write_double(writer, dm)?;
     writer.write_all(b"\t")?;
@@ -462,11 +408,7 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.stdev_rel_error_top7 as f64)?;
 
-    // lnDeltaSpecEValue (GF-derived; omitted in GF-free mode), matchedIonRatio
-    if !params.gf_free {
-        writer.write_all(b"\t")?;
-        write_double(writer, ln_delta_spec_e_value)?;
-    }
+    // matchedIonRatio (the GF-derived lnDeltaSpecEValue is no longer emitted).
     writer.write_all(b"\t")?;
     write_double(writer, matched_ion_ratio)?;
 
@@ -506,38 +448,6 @@ fn write_psm_row<W: Write>(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-/// Find the rank-2 SpecEValue: the first distinct spec_e_value encountered after
-/// the rank-1 value (skipping ties). Returns `f64::NAN` if no rank-2 exists.
-///
-/// PSMs must be sorted best-first (lowest spec_e_value first).
-fn find_rank2_spec_e_value(psms: &[PsmMatch]) -> f64 {
-    let mut rank1 = f64::NAN;
-    for psm in psms {
-        let se = psm.spec_e_value;
-        if rank1.is_nan() {
-            rank1 = se;
-        } else if se != rank1 {
-            return se;
-        }
-    }
-    f64::NAN
-}
-
-/// `log(rank1 SpecEValue / rank2 SpecEValue)` for rank-1 PSMs; `0.0` otherwise
-/// or when either SpecEValue is non-positive / NaN.
-fn compute_ln_delta_spec_e_value(rank: u32, rank1_spec_e_value: f64, rank2_spec_e_value: f64) -> f64 {
-    if rank != 1 {
-        return 0.0;
-    }
-    if rank1_spec_e_value.is_nan() || rank2_spec_e_value.is_nan() {
-        return 0.0;
-    }
-    if rank1_spec_e_value <= 0.0 || rank2_spec_e_value <= 0.0 {
-        return 0.0;
-    }
-    (rank1_spec_e_value / rank2_spec_e_value).ln()
-}
 
 /// Write a `f64` in `%.6g` style (6 significant figures) directly into
 /// `writer`, matching Java's `String.format(Locale.ROOT, "%.6g", v)` used in
@@ -702,19 +612,16 @@ mod tests {
         }
     }
 
-    fn make_psm(spectrum_idx: usize, score: f32, spec_e_value: f64, candidate_idx: u32, charge: u8) -> PsmMatch {
+    fn make_psm(spectrum_idx: usize, score: f32, rank_score: f32, candidate_idx: u32, charge: u8) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
             candidate_idxs: vec![candidate_idx],
             charge_used: charge,
             mass_error_ppm: 1.5,
             score,
-            rank_score: score,  // test fixtures default rank_score = score
+            rank_score,
             edge_score: 0,
-            spec_e_value,
-            de_novo_score: 42,
             activation_method: Some(model::activation::ActivationMethod::HCD),
-            e_value: spec_e_value * 100.0,
             features: search::psm::PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
@@ -741,7 +648,6 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
-            gf_free: false,
         }
     }
 
@@ -768,27 +674,15 @@ mod tests {
     ///
     /// Byte-parity note: the fixture header is compared column-by-column below.
     #[test]
-    fn pin_header_columns_match_java_fixture_without_features() {
-        // Reference fixture first line (charge2..=charge3):
-        // SpecId Label ScanNr ExpMass CalcMass mass RawScore DeNovoScore
-        // lnSpecEValue lnEValue isotope_error peplen dm absdm
-        // charge2 charge3
-        // enzN enzC enzInt
-        // NumMatchedMainIons longest_b longest_y longest_y_pct
-        // ExplainedIonCurrentRatio NTermIonCurrentRatio CTermIonCurrentRatio
-        // MS2IonCurrent IsolationWindowEfficiency
-        // MeanErrorTop7 StdevErrorTop7 MeanRelErrorTop7 StdevRelErrorTop7
-        // lnDeltaSpecEValue matchedIonRatio
-        // Peptide Proteins
-        // Java-fixture columns followed by Rust-only additive features.
-        // `EdgeScore` is an ADDITIVE Java-parity feature emitted by
-        // Rust only (Java doesn't compute it standalone — it's blended into
-        // RawScore by DBScanScorer). Lives between matchedIonRatio and
-        // Peptide so legacy Percolator readers using column order still
-        // parse Peptide/Proteins at the tail.
+    fn pin_header_columns_are_gf_free_schema() {
+        // GF-free schema: RawScore is the sole score column; the GF-derived
+        // DeNovoScore / lnSpecEValue / lnEValue / lnDeltaSpecEValue columns are
+        // NOT emitted. The additive feature columns (EdgeScore,
+        // PrecursorIsotopeKL, PrecursorSNR, DeltaRawScore) sit between
+        // matchedIonRatio and Peptide.
         let expected: Vec<&str> = vec![
             "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "mass",
-            "RawScore", "DeNovoScore", "lnSpecEValue", "lnEValue", "isotope_error",
+            "RawScore", "isotope_error",
             "peplen", "dm", "absdm",
             "charge2", "charge3",
             "enzN", "enzC", "enzInt",
@@ -796,7 +690,7 @@ mod tests {
             "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
             "MS2IonCurrent", "IsolationWindowEfficiency",
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
-            "lnDeltaSpecEValue", "matchedIonRatio",
+            "matchedIonRatio",
             "EdgeScore",
             "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore",
             "Peptide", "Proteins",
@@ -826,7 +720,7 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 1e-5, 0, 2)); // decoy
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2)); // decoy
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
@@ -849,7 +743,7 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 1e-5, 0, 2)); // charge 2
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2)); // charge 2
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
@@ -877,12 +771,12 @@ mod tests {
         params.chimeric = true;
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // Two distinct peptides (candidates 0 and 1) with the SAME spec_e_value:
-        // iter_ranked assigns them the same SpecE rank, so without the chimeric
-        // per-row suffix their SpecIds (`spec_scan_rank`) would collide.
+        // Two distinct peptides (candidates 0 and 1) with the SAME rank_score:
+        // iter_ranked_by_rank_score assigns them the same rank, so without the
+        // chimeric per-row suffix their SpecIds (`spec_scan_rank`) would collide.
         let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 1e-5, 0, 2));
-        queue.push(make_psm(0, 9.0, 1e-5, 1, 2));
+        queue.push(make_psm(0, 10.0, 10.0, 0, 2));
+        queue.push(make_psm(0, 9.0, 10.0, 1, 2));
         let queues = vec![queue];
         let idx = make_empty_search_index();
         let cands = vec![make_candidate(0, false), make_candidate(1, false)];
@@ -913,41 +807,6 @@ mod tests {
         assert!(rows.is_empty(), "empty queue should produce no data rows");
     }
 
-    // ── Test 5: lnDeltaSpecEValue = 0 when no rank-2 ─────────────────────────
-
-    #[test]
-    fn pin_lndelta_spec_evalue_zero_when_no_rank2() {
-        let params = make_params(2..=3);
-        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
-
-        let mut queue = TopNQueue::new(10);
-        queue.push(make_psm(0, 10.0, 1e-10, 0, 2)); // single PSM → no rank-2
-        let queues = vec![queue];
-        let idx = make_empty_search_index();
-
-        let mut buf = Vec::<u8>::new();
-        let cands = vec![make_candidate(0, false)];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
-
-        let cols = parse_header(&buf);
-        let rows = parse_rows(&buf);
-        assert_eq!(rows.len(), 1);
-
-        let ln_delta_idx = cols
-            .iter()
-            .position(|c| c == "lnDeltaSpecEValue")
-            .expect("lnDeltaSpecEValue column missing");
-
-        let val: f64 = rows[0][ln_delta_idx]
-            .parse()
-            .expect("lnDeltaSpecEValue should be a number");
-        assert!(
-            val.abs() < 1e-9,
-            "lnDeltaSpecEValue should be 0 when no rank-2 exists, got: {}",
-            val
-        );
-    }
-
     // ── Test 6: real accession emitted for target PSM ─────────────────────────
 
     #[test]
@@ -959,7 +818,7 @@ mod tests {
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
         // protein_index = 0 → first target protein
-        let psm = make_psm(0, 10.0, 1e-5, 0, 2);
+        let psm = make_psm(0, 10.0, 10.0, 0, 2);
 
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
@@ -992,7 +851,7 @@ mod tests {
 
         // SearchIndex has 1 target (idx 0) + 1 decoy (idx 1). Decoy accession
         // is set to "XXX_sp|P02769|ALBU_BOVIN" by target_plus_decoy.
-        let psm = make_psm(0, 10.0, 1e-5, 0, 2);
+        let psm = make_psm(0, 10.0, 10.0, 0, 2);
 
         let mut queue = TopNQueue::new(10);
         queue.push(psm);
@@ -1022,7 +881,7 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        let mut psm = make_psm(0, 10.0, 1e-5, 0, 2);
+        let mut psm = make_psm(0, 10.0, 10.0, 0, 2);
         psm.features.num_matched_main_ions = 5;
 
         let mut queue = TopNQueue::new(10);
@@ -1056,12 +915,12 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        // Two distinct-SpecE PSMs on one spectrum → rank 1 then rank 2. The
+        // Two distinct-rank_score PSMs on one spectrum → rank 1 then rank 2. The
         // engine stores the same spectrum-level delta on both; the writer must
         // emit it for rank 1 and 0.0 for rank 2 (no double-attribution).
-        let mut psm1 = make_psm(0, 12.0, 1e-6, 0, 2);
+        let mut psm1 = make_psm(0, 12.0, 12.0, 0, 2);
         psm1.features.delta_raw_score = 7.0;
-        let mut psm2 = make_psm(0, 5.0, 1e-3, 1, 2);
+        let mut psm2 = make_psm(0, 5.0, 5.0, 1, 2);
         psm2.features.delta_raw_score = 7.0;
 
         let mut queue = TopNQueue::new(10);
@@ -1095,7 +954,7 @@ mod tests {
         let params = make_params(2..=3);
         let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
 
-        let mut psm = make_psm(0, 10.0, 1e-5, 0, 2);
+        let mut psm = make_psm(0, 10.0, 10.0, 0, 2);
         psm.features.longest_y = 1;
         psm.features.longest_y_pct = 0.5;
 

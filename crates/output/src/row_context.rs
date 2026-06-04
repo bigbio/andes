@@ -67,3 +67,22 @@ pub(crate) fn iter_ranked(queue_sorted: &[PsmMatch]) -> impl Iterator<Item = (u3
         (rank, psm)
     })
 }
+
+/// GF-free variant of [`iter_ranked`]: rank increments when `rank_score`
+/// changes (PSMs pre-sorted best-first by `rank_score` descending). In GF-free
+/// mode every PSM shares the uniform `spec_e_value` sentinel, so the GF-based
+/// `iter_ranked` would collapse all rows to rank 1; ranking on `rank_score`
+/// keeps SpecIds unique and the best-first order meaningful.
+pub(crate) fn iter_ranked_by_rank_score(
+    queue_sorted: &[PsmMatch],
+) -> impl Iterator<Item = (u32, &PsmMatch)> {
+    let mut rank = 0u32;
+    let mut prev_rs = f32::NAN;
+    queue_sorted.iter().map(move |psm| {
+        if psm.rank_score != prev_rs {
+            rank += 1;
+            prev_rs = psm.rank_score;
+        }
+        (rank, psm)
+    })
+}

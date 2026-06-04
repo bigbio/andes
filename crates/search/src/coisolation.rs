@@ -255,19 +255,24 @@ pub(crate) fn search_secondary(
     //    single GF mass bin instead of 5-7 (cuts GF bins + SinkUnreachable retries).
     let mut p2 = params.clone();
     p2.isotope_error_range = 0..=0;
-    compute_spec_e_values_for_spectrum(
-        &co_spec,
-        &p2,
-        &mut queue,
-        aa_set,
-        enzyme,
-        scorer,
-        &res_ss,
-        z,
-        fragment_tolerance_da,
-        search_index,
-        candidates,
-    );
+    // GF-free mode skips the SpecEValue DP here too (the secondary winner is
+    // then chosen by rank_score below, since all spec_e_values stay at the
+    // sentinel). Default path unchanged.
+    if !params.gf_free {
+        compute_spec_e_values_for_spectrum(
+            &co_spec,
+            &p2,
+            &mut queue,
+            aa_set,
+            enzyme,
+            scorer,
+            &res_ss,
+            z,
+            fragment_tolerance_da,
+            search_index,
+            candidates,
+        );
+    }
 
     // Pick the winner by SCORE, not heap order: `drain_into_vec` is unordered and
     // `TopNQueue` keeps ties even at capacity 1, so selecting `.next()` would be

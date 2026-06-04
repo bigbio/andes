@@ -393,6 +393,27 @@ impl TopNQueue {
         v.sort_by(|a, b| b.cmp(a));
         v
     }
+
+    /// Drain into a Vec sorted best-first by `rank_score` DESCENDING (the
+    /// larger RawScore = better), then by `score` descending as a stable
+    /// tiebreak. Used only by the GF-free output path, where `spec_e_value` is
+    /// the uniform "not computed" sentinel and so cannot order the queue.
+    /// The default (GF) output path keeps using [`into_sorted_vec`].
+    pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
+        let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
+        v.sort_by(|a, b| {
+            let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+            let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+            br.partial_cmp(&ar)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let asc = if a.score.is_nan() { f32::NEG_INFINITY } else { a.score };
+                    let bsc = if b.score.is_nan() { f32::NEG_INFINITY } else { b.score };
+                    bsc.partial_cmp(&asc).unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        v
+    }
 }
 
 #[cfg(test)]

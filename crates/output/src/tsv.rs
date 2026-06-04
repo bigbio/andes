@@ -18,7 +18,7 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::row_context::{iter_ranked, RowContext};
+use crate::row_context::{iter_ranked, iter_ranked_by_rank_score, RowContext};
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
@@ -106,11 +106,14 @@ fn write_header<W: Write>(
         "Charge",
         "Peptide",
         "Protein",
-        "DeNovoScore",
-        "MSGFScore",
-        "SpecEValue",
-        "EValue",
     ]);
+    // DeNovoScore / SpecEValue / EValue are GF-derived; emit only on the
+    // default path. MSGFScore (the integer RawScore) is always emitted.
+    if params.gf_free {
+        cols.push("MSGFScore");
+    } else {
+        cols.extend_from_slice(&["DeNovoScore", "MSGFScore", "SpecEValue", "EValue"]);
+    }
 
     writeln!(writer, "{}", cols.join("\t"))
 }
@@ -122,6 +125,7 @@ struct RowCtx<'a> {
     spec_file_name: &'a str,
     is_mgf: bool,
     ppm_mode: bool,
+    gf_free: bool,
 }
 
 #[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
@@ -135,16 +139,26 @@ fn write_spectrum_rows<W: Write>(
     is_mgf: bool,
     search_index: &SearchIndex,
 ) -> io::Result<()> {
-    // Sort best-first (lowest spec_e_value first).
-    let psms = queue.clone().into_sorted_vec();
+    // GF-free: order by rank_score (RawScore) descending. Default: by spec_e_value.
+    let psms = if params.gf_free {
+        queue.clone().into_rank_sorted_vec()
+    } else {
+        queue.clone().into_sorted_vec()
+    };
 
     let row_ctx = RowCtx {
         spec_file_name,
         is_mgf,
         ppm_mode: matches!(params.precursor_tolerance.left, Tolerance::Ppm(_)),
+        gf_free: params.gf_free,
     };
 
-    for (_rank, psm) in iter_ranked(&psms) {
+    let ranked: Vec<(u32, &PsmMatch)> = if params.gf_free {
+        iter_ranked_by_rank_score(&psms).collect()
+    } else {
+        iter_ranked(&psms).collect()
+    };
+    for (_rank, psm) in ranked {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(writer, spec, psm, cand, &ctx, &row_ctx)?;
@@ -211,15 +225,17 @@ fn write_psm_row<W: Write>(
     // EValue: same formatting
     let e_value = format_e_value(psm.e_value);
 
-    // Build row
-    if is_mgf {
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+    // Build row. The leading columns (up to Protein) are identical in both
+    // modes. The trailing score columns differ: GF-free emits only MSGFScore
+    // (the RawScore); the default path emits DeNovoScore / MSGFScore /
+    // SpecEValue / EValue. The `!gf_free` branch is byte-identical to history.
+    let lead = if is_mgf {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             spec_file_name,
             spec_id,
             scan_num,
-            spec.title,   // Title column (MGF only)
+            spec.title, // Title column (MGF only)
             frag_method,
             precursor,
             isotope_error,
@@ -227,29 +243,29 @@ fn write_psm_row<W: Write>(
             charge,
             peptide,
             protein,
-            de_novo_score,
-            msgf_score,
-            spec_e_value,
-            e_value,
         )
+    } else {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            spec_file_name,
+            spec_id,
+            scan_num,
+            frag_method,
+            precursor,
+            isotope_error,
+            precursor_error,
+            charge,
+            peptide,
+            protein,
+        )
+    };
+    if row_ctx.gf_free {
+        writeln!(writer, "{}\t{}", lead, msgf_score)
     } else {
         writeln!(
             writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            spec_file_name,
-            spec_id,
-            scan_num,
-            frag_method,
-            precursor,
-            isotope_error,
-            precursor_error,
-            charge,
-            peptide,
-            protein,
-            de_novo_score,
-            msgf_score,
-            spec_e_value,
-            e_value,
+            "{}\t{}\t{}\t{}\t{}",
+            lead, de_novo_score, msgf_score, spec_e_value, e_value,
         )
     }
 }
@@ -365,6 +381,7 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            gf_free: false,
         }
     }
 

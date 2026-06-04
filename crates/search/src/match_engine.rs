@@ -624,20 +624,29 @@ impl<'a> PreparedSearch<'a> {
                     continue;
                 }
                 any_queue_nonempty = true;
-                let scored_spec_charge = scored_spec_for_charge(charge);
-                compute_spec_e_values_for_spectrum(
-                    spec,
-                    params,
-                    queue,
-                    aa_set_for_gf,
-                    enzyme_opt,
-                    scorer,
-                    scored_spec_charge,
-                    charge,
-                    fragment_tolerance_da,
-                    idx,
-                    candidates,
-                );
+                // GF-free mode: SKIP the generating-function DP entirely (a
+                // speed win, and it removes the patented SpecEValue from the
+                // search path). Candidate selection/ranking already happened on
+                // `rank_score`; the PSMs keep their GF-field sentinels
+                // (`spec_e_value = 1.0`, `de_novo_score = i32::MIN`,
+                // `e_value = 1.0`). Output ordering switches to `rank_score`.
+                // The default (`!gf_free`) path is unchanged below.
+                if !params.gf_free {
+                    let scored_spec_charge = scored_spec_for_charge(charge);
+                    compute_spec_e_values_for_spectrum(
+                        spec,
+                        params,
+                        queue,
+                        aa_set_for_gf,
+                        enzyme_opt,
+                        scorer,
+                        scored_spec_charge,
+                        charge,
+                        fragment_tolerance_da,
+                        idx,
+                        candidates,
+                    );
+                }
             }
             if any_queue_nonempty {
                 spectra_with_psms.fetch_add(1, Ordering::Relaxed);

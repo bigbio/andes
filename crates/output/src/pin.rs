@@ -72,7 +72,7 @@ use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
 use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
-use crate::row_context::{iter_ranked, RowContext};
+use crate::row_context::{iter_ranked, iter_ranked_by_rank_score, RowContext};
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
@@ -122,7 +122,7 @@ pub fn write_pin_to<W: Write>(
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
 
-    write_header(writer, min_charge, max_charge)?;
+    write_header(writer, min_charge, max_charge, params.gf_free)?;
 
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
@@ -149,6 +149,7 @@ fn write_header<W: Write>(
     writer: &mut W,
     min_charge: u8,
     max_charge: u8,
+    gf_free: bool,
 ) -> io::Result<()> {
     let mut cols: Vec<String> = vec![
         "SpecId".to_string(),
@@ -158,14 +159,23 @@ fn write_header<W: Write>(
         "CalcMass".to_string(),
         "mass".to_string(),
         "RawScore".to_string(),
-        "DeNovoScore".to_string(),
-        "lnSpecEValue".to_string(),
-        "lnEValue".to_string(),
+    ];
+    // GF-derived columns are emitted only on the default (GF) path. In GF-free
+    // mode the generating function never runs, so `DeNovoScore` / `lnSpecEValue`
+    // / `lnEValue` carry only sentinels — omit them entirely so Percolator
+    // calibrates from RawScore + the remaining features. The `!gf_free` branch
+    // is byte-identical to the historical header.
+    if !gf_free {
+        cols.push("DeNovoScore".to_string());
+        cols.push("lnSpecEValue".to_string());
+        cols.push("lnEValue".to_string());
+    }
+    cols.extend_from_slice(&[
         "isotope_error".to_string(),
         "peplen".to_string(),
         "dm".to_string(),
         "absdm".to_string(),
-    ];
+    ]);
 
     for c in min_charge..=max_charge {
         cols.push(format!("charge{}", c));
@@ -189,8 +199,12 @@ fn write_header<W: Write>(
         "StdevErrorTop7".to_string(),
         "MeanRelErrorTop7".to_string(),
         "StdevRelErrorTop7".to_string(),
-        // PIN_EXTRA_FEATURES
-        "lnDeltaSpecEValue".to_string(),
+    ]);
+    // GF-derived delta column — omit in GF-free mode (sentinel-only otherwise).
+    if !gf_free {
+        cols.push("lnDeltaSpecEValue".to_string());
+    }
+    cols.extend_from_slice(&[
         "matchedIonRatio".to_string(),
         // ADDITIVE Java-parity feature: per-bond
         // DBScanScorer edge sum (IES + error_score), emitted as a NEW
@@ -233,13 +247,24 @@ fn write_spectrum_rows<W: Write>(
     search_index: &SearchIndex,
     params: &SearchParams,
 ) -> io::Result<()> {
-    // Sort best-first (lowest spec_e_value first, then highest score).
-    let psms = queue.clone().into_sorted_vec();
+    // GF-free: order by rank_score (RawScore) descending, since spec_e_value is
+    // the uniform sentinel. Default path: order by spec_e_value (then score).
+    let psms = if params.gf_free {
+        queue.clone().into_rank_sorted_vec()
+    } else {
+        queue.clone().into_sorted_vec()
+    };
 
-    // find rank-2 SpecEValue: first distinct spec_e_value after rank-1
+    // find rank-2 SpecEValue: first distinct spec_e_value after rank-1.
+    // Unused in GF-free mode (lnDeltaSpecEValue is not emitted).
     let rank2_spec_e_value = find_rank2_spec_e_value(&psms);
 
-    for (row_idx, (rank, psm)) in iter_ranked(&psms).enumerate() {
+    let ranked: Vec<(u32, &PsmMatch)> = if params.gf_free {
+        iter_ranked_by_rank_score(&psms).collect()
+    } else {
+        iter_ranked(&psms).collect()
+    };
+    for (row_idx, (rank, psm)) in ranked.into_iter().enumerate() {
         let cand = &candidates[psm.primary_candidate_idx() as usize];
         let ctx = RowContext::new(spec, cand, search_index);
         write_psm_row(
@@ -366,10 +391,17 @@ fn write_psm_row<W: Write>(
     write_double(writer, calc_mass)?;
     writer.write_all(b"\t")?;
     write_double(writer, mass)?;
-    write!(writer, "\t{}\t{}\t", raw_score, de_novo_score)?;
-    write_double(writer, ln_spec_e_value)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, ln_e_value)?;
+    // RawScore is always emitted. The GF-derived DeNovoScore / lnSpecEValue /
+    // lnEValue columns are emitted only on the default path; in GF-free mode
+    // they are omitted (matching the header).
+    if params.gf_free {
+        write!(writer, "\t{}", raw_score)?;
+    } else {
+        write!(writer, "\t{}\t{}\t", raw_score, de_novo_score)?;
+        write_double(writer, ln_spec_e_value)?;
+        writer.write_all(b"\t")?;
+        write_double(writer, ln_e_value)?;
+    }
     write!(writer, "\t{}\t{}\t", isotope_error, peplen)?;
     write_double(writer, dm)?;
     writer.write_all(b"\t")?;
@@ -430,9 +462,11 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.stdev_rel_error_top7 as f64)?;
 
-    // lnDeltaSpecEValue, matchedIonRatio
-    writer.write_all(b"\t")?;
-    write_double(writer, ln_delta_spec_e_value)?;
+    // lnDeltaSpecEValue (GF-derived; omitted in GF-free mode), matchedIonRatio
+    if !params.gf_free {
+        writer.write_all(b"\t")?;
+        write_double(writer, ln_delta_spec_e_value)?;
+    }
     writer.write_all(b"\t")?;
     write_double(writer, matched_ion_ratio)?;
 
@@ -707,6 +741,7 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            gf_free: false,
         }
     }
 

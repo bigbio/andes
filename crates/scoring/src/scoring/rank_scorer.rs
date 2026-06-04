@@ -1,12 +1,26 @@
-//! Per-ion rank score lookup.
+//! Per-ion intensity-rank log-likelihood-ratio (LLR) scoring.
 //!
-//! Score formula:
-//!   chargeOrSeg = min(ionType.charge, numSegments)
-//!   log_score[i] = log(ion_freq[i] / (noise_freq[i] * chargeOrSeg))
+//! Implements the published intensity-rank node-scoring method (Frank,
+//! *J. Proteome Res.* 2005; PMC2738854): peaks are ranked by intensity, and a
+//! matched fragment ion observed at a given rank contributes a log-likelihood
+//! ratio comparing how often a true ion of that type lands at that rank
+//! (`ion_freq`) against how often a random noise peak does (`noise_freq`):
 //!
-//! Rank-distribution arrays have length `maxRank + 1`. Indices `[0..maxRank-1]`
-//! correspond to ranks 1..maxRank. Index `maxRank` (the last) is the
-//! "missing ion" slot, used by `missing_ion_score`.
+//! ```text
+//!   norm        = min(ion_charge, num_segments)
+//!   llr[rank]    = ln( ion_freq[rank] / (noise_freq[rank] * norm) )
+//! ```
+//!
+//! The `norm` term (denoted `charge_or_seg` below) caps the ion's charge at
+//! the model's segment count; it normalizes the noise expectation so that
+//! multiply-charged ions, which can land in several m/z segments, are not
+//! over-credited. It is a model-derived normalization, not a tunable.
+//!
+//! The per-rank frequency tables come from the trained model and have length
+//! `max_rank + 1`. The first `max_rank` entries (indices `0..max_rank`) hold
+//! the LLR for observed ranks `1..=max_rank`; the final entry (index
+//! `max_rank`) is a separate "absent" slot scoring an expected ion that is not
+//! observed in the spectrum (see [`RankScorer::missing_ion_score`]).
 
 use std::collections::HashMap;
 
@@ -14,74 +28,80 @@ use crate::param_model::{IonType, Param, Partition};
 
 #[derive(Debug, Clone)]
 pub struct RankScorer {
-    /// The `Param` this scorer was built from. Cloned at construction so
-    /// that `match_engine` can forward precursor-filter information to
-    /// `ScoredSpectrum::new` without a separate `Param` argument.
+    /// The model this scorer was precomputed from. Held so callers (e.g.
+    /// `match_engine`) can reach precursor-filter settings without threading a
+    /// separate `Param` argument through `ScoredSpectrum::new`.
     param: Param,
-    /// Cached log scores: `(partition, non-noise ion_type) → Vec<f32>` where
-    /// the Vec has length `max_rank + 1` (indices 0..max_rank-1 for ranks
-    /// 1..max_rank, index max_rank for the missing-ion slot).
-    /// Retained for `node_score`/`missing_ion_score` API compatibility (tests,
-    /// diagnostics). Hot-path callers should use `partition_ion_logs` instead.
+    /// Precomputed LLR tables keyed by `(partition, ion_type)`, each of length
+    /// `max_rank + 1` (entries `0..max_rank` are the observed-rank scores for
+    /// ranks `1..=max_rank`; entry `max_rank` is the absent-ion score). Noise
+    /// is never a key — it only supplies the denominator. This map backs the
+    /// per-ion query API (`node_score`, `missing_ion_score`) used by tests and
+    /// diagnostics; the DP hot path indexes `partition_ion_logs` instead.
     pub(crate) log_table: HashMap<(Partition, IonType), Vec<f32>>,
-    /// Dense-indexed log tables for the hot path. Keyed by `Partition` →
-    /// `Vec<(IonType, Vec<f32>)>` parallel to that partition's ion list
-    /// (Noise excluded). The inner `(IonType, Vec<f32>)` pairs are in the
-    /// same order as `Param::ion_types_for_partition_slice`. Replaces the
-    /// per-ion HashMap lookup in `directional_node_score` with array
-    /// indexing — eliminates ~200M HashMap operations per PXD001819 search.
+    /// Same LLR tables flattened per partition into a dense list of
+    /// `(ion_type, table)` pairs, ordered to match
+    /// `Param::ion_types_for_partition_slice`. The DP loop holds a partition
+    /// fixed across many node evaluations, so iterating this slice replaces a
+    /// `(partition, ion)` hash lookup per ion with a plain array walk — on a
+    /// PXD001819 search that removes on the order of 200M map probes.
     pub(crate) partition_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>>,
-    /// Cached `min(rank - 1, max_rank - 1)` clamp constant.
+    /// Highest observed rank the model distinguishes; ranks beyond this are
+    /// clamped down to it before indexing.
     max_rank: u32,
 }
 
 impl RankScorer {
     pub fn new(param: &Param) -> Self {
+        // Precompute, for every (partition, ion) pair, the per-rank LLR table
+        // ln(ion_freq / (noise_freq * norm)). The noise frequencies are the
+        // shared denominator for all ions within a partition.
         let mut log_table: HashMap<(Partition, IonType), Vec<f32>> = HashMap::new();
 
         for (partition, ion_table) in &param.rank_dist_table {
-            // Noise frequencies come from the IonType::Noise entry in the
-            // same partition's rank-dist table. Skip if absent.
-            let noise_freqs = match ion_table.get(&IonType::Noise) {
-                Some(v) => v,
-                None => continue,
+            // A partition without a noise distribution has no denominator, so
+            // nothing in it can be scored — skip it entirely.
+            let Some(noise_freqs) = ion_table.get(&IonType::Noise) else {
+                continue;
             };
 
             for (ion_type, ion_freqs) in ion_table {
-                if matches!(ion_type, IonType::Noise) {
-                    continue;
-                }
-                let charge = match ion_type {
+                let ion_charge = match ion_type {
                     IonType::Prefix { charge, .. } | IonType::Suffix { charge, .. } => *charge,
-                    IonType::Noise => unreachable!(),
+                    // Noise is the denominator, not a scored ion.
+                    IonType::Noise => continue,
                 };
-                // chargeOrSeg = min(ion.charge, num_segments).
-                let charge_or_seg = (charge as u32).min(param.num_segments as u32) as f32;
-                let n = ion_freqs.len().min(noise_freqs.len());
-                let mut logs = Vec::with_capacity(n);
-                for i in 0..n {
-                    let ion_f = ion_freqs[i];
-                    let noise_f = noise_freqs[i] * charge_or_seg;
-                    logs.push((ion_f / noise_f).ln());
-                }
-                log_table.insert((*partition, *ion_type), logs);
+
+                // Cap the ion charge at the model's segment count (see module
+                // docs): a charge-z ion can fall into up to `num_segments`
+                // segments, so its noise expectation is scaled accordingly.
+                let charge_or_seg = (ion_charge as u32).min(param.num_segments as u32) as f32;
+
+                // Tables may differ in length across releases; the shared
+                // prefix is all that is jointly defined.
+                let rank_count = ion_freqs.len().min(noise_freqs.len());
+                let table: Vec<f32> = (0..rank_count)
+                    .map(|r| (ion_freqs[r] / (noise_freqs[r] * charge_or_seg)).ln())
+                    .collect();
+
+                log_table.insert((*partition, *ion_type), table);
             }
         }
 
-        // Build the dense partition_ion_logs cache. For each partition, walk
-        // its ion list (in the same order as
-        // `Param::ion_types_for_partition_slice`) and pair each ion with its
-        // log table (cloned). Used by the hot path to avoid HashMap lookups
-        // per-ion; the partition is constant per outer-segment iteration in
-        // `directional_node_score`.
+        // Flatten the per-pair tables into per-partition dense lists so the DP
+        // hot path can iterate by index. Ion order mirrors
+        // `Param::ion_types_for_partition_slice`; ions with no LLR table
+        // (e.g. missing a noise denominator) are simply absent here.
         let mut partition_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>> = HashMap::new();
         for (&partition, ions) in &param.partition_ion_types_cache {
-            let mut paired: Vec<(IonType, Vec<f32>)> = Vec::with_capacity(ions.len());
-            for &ion in ions {
-                if let Some(logs) = log_table.get(&(partition, ion)) {
-                    paired.push((ion, logs.clone()));
-                }
-            }
+            let paired: Vec<(IonType, Vec<f32>)> = ions
+                .iter()
+                .filter_map(|&ion| {
+                    log_table
+                        .get(&(partition, ion))
+                        .map(|table| (ion, table.clone()))
+                })
+                .collect();
             partition_ion_logs.insert(partition, paired);
         }
 
@@ -114,83 +134,77 @@ impl RankScorer {
         &self.param
     }
 
-    /// Score a peak-matched ion at rank `rank` (1-based, 1 = highest intensity).
-    /// `rank > max_rank` clamps to `rank = max_rank` (so the rank index
-    /// becomes `max_rank - 1`, the LAST observed-rank entry, NOT the
-    /// missing-ion sentinel).
+    /// LLR for a matched ion observed at intensity `rank` (1-based; rank 1 is
+    /// the most intense peak). Ranks beyond `max_rank` are folded onto
+    /// `max_rank`, so they index the last *observed-rank* entry
+    /// (`max_rank - 1`) — never the absent-ion slot. Returns 0 (neutral) for an
+    /// ion/partition the model doesn't cover.
     pub fn node_score(&self, partition: Partition, ion_type: IonType, rank: u32) -> f32 {
-        let logs = match self.log_table.get(&(partition, ion_type)) {
-            Some(v) => v,
-            None => return 0.0,
+        let Some(table) = self.log_table.get(&(partition, ion_type)) else {
+            return 0.0;
         };
-        let rank_clamped = rank.min(self.max_rank).max(1);
-        let idx = (rank_clamped - 1) as usize;
-        if idx < logs.len() {
-            logs[idx]
-        } else {
-            0.0
-        }
+        let observed_rank = rank.clamp(1, self.max_rank);
+        table
+            .get((observed_rank - 1) as usize)
+            .copied()
+            .unwrap_or(0.0)
     }
 
-    /// Score for an ion that isn't observed in the spectrum. Uses the slot
-    /// at index `max_rank` (the LAST entry in the `max_rank + 1`-length array).
+    /// LLR penalty for an expected ion that does not appear in the spectrum.
+    /// This is the dedicated absent slot at index `max_rank`, the final entry
+    /// of the `max_rank + 1`-length table. Returns 0 if the ion/partition is
+    /// uncovered.
     pub fn missing_ion_score(&self, partition: Partition, ion_type: IonType) -> f32 {
-        let logs = match self.log_table.get(&(partition, ion_type)) {
-            Some(v) => v,
-            None => return 0.0,
+        let Some(table) = self.log_table.get(&(partition, ion_type)) else {
+            return 0.0;
         };
-        let idx = self.max_rank as usize;
-        if idx < logs.len() {
-            logs[idx]
-        } else {
-            0.0
-        }
+        table.get(self.max_rank as usize).copied().unwrap_or(0.0)
     }
 
-    /// Ion-existence score.
+    /// Ion-pair existence LLR.
     ///
-    /// Computes `log(ionExistenceProb[index] / noiseExistenceProb)` where:
-    /// - `index == 0` (nn): `noiseProb = (1 - probPeak)^2`
-    /// - `index == 3` (yy): `noiseProb = probPeak^2`
-    /// - otherwise: `noiseProb = probPeak * (1 - probPeak)`
+    /// Scores whether the prefix/suffix peak pair flanking a cleavage site is
+    /// present, by comparing the model's learned existence probability for the
+    /// pair against the probability that random noise would produce the same
+    /// presence/absence pattern. With `prob_peak` the per-position chance of a
+    /// noise peak, the four patterns indexed `0..=3` get the independent-noise
+    /// baseline:
     ///
-    /// Returns 0.0 if the `ion_existence_table` has no entry for `part`.
+    /// - index 0 (neither present): `(1 - prob_peak)^2`
+    /// - index 1, 2 (exactly one present): `prob_peak * (1 - prob_peak)`
+    /// - index 3 (both present): `prob_peak^2`
     ///
-    /// **Java-parity edge case**: when `prob_peak > 1` (happens
-    /// for high-density spectra at small parent_mass — peak_count >
-    /// approx_num_bins), the noise probability for `index ∈ {1, 2}`
-    /// becomes NEGATIVE (`prob_peak * (1 - prob_peak)`). Java's
-    /// `Math.log(positive / negative)` yields NaN, then `Math.round(NaN)`
-    /// returns 0 at the caller — edge_score becomes 0. The previous Rust
-    /// implementation clamped `noise_existence_prob` to `f32::MIN_POSITIVE`
-    /// which produced `ln(0.028 / 1e-38) ≈ +84` per affected edge,
-    /// inflating GF DP max_score by ~10× on length-7/8 charge-2 peptides.
-    /// We now match Java exactly: do NOT clamp; let NaN/inf propagate so
-    /// the downstream `round() as i32` produces 0 (NaN) or `i32::MAX`
-    /// (+inf, then caller clamps to -4).
+    /// Returns `ln(ion_existence_prob / noise_baseline)`. Yields 0 if the
+    /// partition has no existence table, or `index` is out of range.
+    ///
+    /// Degenerate-input behavior is load-bearing and intentionally left
+    /// un-clamped on the denominator: for very peak-dense spectra at small
+    /// parent mass, `prob_peak` can exceed 1, which makes the one-present
+    /// baseline (`prob_peak * (1 - prob_peak)`) negative. `ln` of a
+    /// positive/negative ratio is NaN, and the caller's `round() as i32` maps
+    /// NaN to 0 — neutralizing that edge. Clamping the denominator to a tiny
+    /// positive value instead would emit a large spurious positive score
+    /// (e.g. `ln(0.028 / 1e-38) ≈ +84`) per affected edge and inflate DP
+    /// maxima by roughly an order of magnitude on short charge-2 peptides, so
+    /// we let NaN/±inf flow through to the rounding step unchanged.
     pub fn ion_existence_score(&self, partition: Partition, index: usize, prob_peak: f32) -> f32 {
-        let table = match self.param.ion_existence_table.get(&partition) {
-            Some(t) => t,
-            None => return 0.0,
+        let Some(table) = self.param.ion_existence_table.get(&partition) else {
+            return 0.0;
         };
         if index >= table.len() {
             return 0.0;
         }
-        let noise_existence_prob = match index {
+        let noise_baseline = match index {
             0 => (1.0 - prob_peak) * (1.0 - prob_peak),
             3 => prob_peak * prob_peak,
             _ => prob_peak * (1.0 - prob_peak),
         };
-        let mut ion_prob = table[index];
-        // Zero-probability slots are clamped to 0.01 to avoid log(0)
-        // (mirrors Java's `if (ionExistenceProb[index] == 0) ionExistenceProb[index] = 0.01f`).
-        if ion_prob == 0.0 {
-            ion_prob = 0.01;
-        }
-        // NO clamp on noise_existence_prob — Java doesn't clamp, and the
-        // downstream f32->i32 round naturally handles NaN (→0) and ±inf
-        // (→i32::MAX/MIN, then -4 fallback).
-        (ion_prob / noise_existence_prob).ln()
+        // Floor an exact-zero learned probability to 0.01 so ln stays finite;
+        // a true 0 would otherwise force ln(0) = -inf for an observed pair.
+        let ion_prob = if table[index] == 0.0 { 0.01 } else { table[index] };
+        // Deliberately no denominator clamp (see the doc note): NaN/±inf are
+        // expected on degenerate input and are resolved by the caller's round.
+        (ion_prob / noise_baseline).ln()
     }
 
     /// Mass-error score.

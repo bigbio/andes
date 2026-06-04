@@ -49,15 +49,15 @@ struct RankKeptCtx {
     suffix_score_cache: Vec<f32>,
 }
 
-/// Cache the (MSGF_TRACE_IONS && MSGF_TRACE_PEP) env-var probe
-/// once instead of calling `env::var_os` twice per `directional_node_score_inner`
-/// invocation. The inner loop fires for every (spectrum × split × segment)
-/// triple in the score_psm cache build.
+/// Memoize the `(SIMAS_TRACE_IONS && SIMAS_TRACE_PEP)` env-var probe once,
+/// rather than calling `env::var_os` twice per `directional_node_score_inner`
+/// invocation. That inner loop fires for every (spectrum × split × segment)
+/// triple while building the score_psm cache.
 fn trace_ions_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| {
-        std::env::var_os("MSGF_TRACE_IONS").is_some()
-            && std::env::var_os("MSGF_TRACE_PEP").is_some()
+        std::env::var_os("SIMAS_TRACE_IONS").is_some()
+            && std::env::var_os("SIMAS_TRACE_PEP").is_some()
     })
 }
 

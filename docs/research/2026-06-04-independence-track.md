@@ -1,0 +1,73 @@
+# SIMAS independence track — derivation audit + plan
+
+**2026-06-04** — Goal: make SIMAS legally independent of MS-GF+ (no UC-licensed derived
+code/models), so it can be relicensed (e.g. Apache-2.0). Keep `NOTICE` as the honest
+acknowledgment of origin. No external consultation — replace the derived parts so
+there is nothing to argue about. Final relicense gets an internal EBI-legal nod only.
+
+## Derivation audit (what's derived, what's the work)
+
+| Component | Files | Derived? | Replace =  | Effort |
+|---|---|---|---|---|
+| **Generating function** | `crates/scoring/src/gf/*` (~140 KB) | **Yes + patented** | RawScore ranking (already used) + a target-decoy/EVD calibration to replace `spec_e_value` | **MED** |
+| **Core scoring** | `psm_score.rs`, `rank_scorer.rs`, `scored_spectrum.rs` (96 KB), `param_model.rs`, `fragment_ions.rs` | **Yes — line-by-line port** (61 Java-parity comments, copied constants `0.999497`/`chargeOrSeg`, `.param` loader) | clean-room reimplement the intensity-rank-LLR *idea* (Frank 2005 / Kim papers) against the `Param`/`score_psm` interface; drop bit-parity + `.param` loader | **HIGH** |
+| **Trained models** | `resources/ionstat/models.parquet` (39 models) | **Yes — MS-GF+'s `.param` files** (slugs = exact lowercased filenames) | retrain all from public/MSnet data via existing `train` engine | **MED-HIGH** |
+
+**Key favorable finding:** the GF does **not** drive candidate ranking — PSMs are
+ranked by `rank_score`; the GF only attaches significance afterward (single producer
+`compute_spec_e_values_for_spectrum`, `match_engine.rs:1001`). So removing it does
+**not** change which peptides win; it removes only the significance score (Percolator +
+a replacement calibration cover it).
+
+## Coupling
+- GF-removal ⟂ model-retraining (different artifacts).
+- GF-removal **simplifies** clean-room scoring (lifts the integer-score-scale parity
+  constraint on node scores).
+- Clean-room scoring keeps the `Param`/`score_psm` interface → search/queue unchanged,
+  retrained models drop in unchanged.
+
+## Plan (dependency order)
+
+### Phase 1 — Remove the generating function *(start here)*
+- Add a GF-free path: skip `compute_spec_e_values_for_spectrum`; rank/sort by
+  `rank_score` (no ranking change); replace `spec_e_value`/`e_value`/`de_novo_score`
+  with a **patent-clean calibration** of `rank_score` (per-spectrum target-decoy
+  empirical p-value or fitted EVD/Gumbel tail); handle the two other GF consumers (the
+  mass-calibrator PSM gate → use a `rank_score` percentile; the final per-spectrum
+  re-sort → by `rank_score`).
+- PIN: drop `lnSpecEValue`/`lnDeltaSpecEValue`/`DeNovoScore` (or replace with the new
+  calibrated stat); let Percolator lean on RawScore/DeltaRawScore + the rest.
+- Ship as a flag first (bit-identical when off), measure, then make it the default for
+  high-res.
+- **Validation gate:** PSM/protein yield at 1% FDR on Astral (high-res — tonight's
+  column-drop proxy showed −1.1%/−0.2%, validate end-to-end) + a low-res set. Caveat
+  (from parity lessons): Rust raw TDC is weaker than Java, masked by Percolator — so
+  validate the *end-to-end* search, not just a PIN column-drop. Keep only if high-res
+  stays ~lossless; low-res CID is allowed to cost ~6% (recovered later / accepted).
+- **Outcome:** patent excised; `gf/` subtree removable; biggest single derived chunk gone.
+
+### Phase 2 — Retrain models on public/MSnet data *(parallel)*
+- Harvest high-confidence PSMs from PRIDE/MSnet reanalyses across
+  activation×instrument×enzyme×label; train SIMAS-native models via the existing
+  engine; write a fresh `models.parquet` with zero MS-GF+-derived rows; retire the
+  `.param` fixtures.
+- **Hard part:** tonight's bootstrap training *diluted* (−4.3% cross-dataset). Needs a
+  better estimator (shrinkage/sharpening toward a non-derived prior) to match curated
+  quality. This is the real research risk of the whole track.
+
+### Phase 3 — Clean-room the scoring code
+- Reimplement `rank_scorer` + `psm_score` + the `scored_spectrum` preprocessing from a
+  spec written off the *public papers* (not the Java), keeping the `Param`/`score_psm`
+  contract; drop the bit-parity goal and the `.param` binary loader. Phase 1 having
+  removed the GF means the new node score is free of the integer-scale parity
+  constraint.
+- Largest single effort (`scored_spectrum.rs` is 96 KB of parity-tuned logic; the
+  n=12 lesson warns scoring changes regress Percolator — so gate hard on yield).
+
+### Phase 4 — Relicense
+- GF-free + own scoring + own models ⇒ independent ⇒ switch `LICENSE` to Apache-2.0,
+  keep `NOTICE` as acknowledgment. Internal EBI-legal sign-off on the flip.
+
+## Highest-leverage first move
+**Phase 1 (remove the GF).** Patented + isolated + doesn't affect ranking + de-risks
+Phase 3. Start now.

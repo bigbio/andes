@@ -1,4 +1,5 @@
-//! Loader for the MS-GF+ `.param` binary format.
+//! Loader for the binary `.param` model format (a legacy single-file
+//! representation; the Parquet model store is the canonical format).
 
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
@@ -194,9 +195,9 @@ impl Param {
             .unwrap_or(&[])
     }
 
-    /// Parse a complete `.param` byte stream produced by Java's
-    /// `DataOutputStream`. Errors on buffer underruns, unknown enum
-    /// names, missing validation marker, or trailing bytes.
+    /// Parse a complete big-endian `.param` byte stream (the legacy single-file
+    /// binary model format). Errors on buffer underruns, unknown enum names,
+    /// missing validation marker, or trailing bytes.
     pub fn load_from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(bytes);
         let param = read_param(&mut cursor)?;
@@ -1090,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn ion_type_mass_from_mz_matches_java() {
+    fn ion_type_mass_from_mz_roundtrip() {
         // mass_from_mz(mz) = (mz - offset) * charge
         // Returns the REAL monoisotopic mass (Da), not nominal mass.
         // Round-trip: mz(nominal) → mass_from_mz(mz) = (nominal/scaler/c+offset - offset)*c

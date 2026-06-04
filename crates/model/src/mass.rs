@@ -1,5 +1,5 @@
-//! Chemistry constants and mass utilities. See
-//! `tests/chemistry_constants_match_java.rs` for the parity gate.
+//! Chemistry constants and mass utilities (monoisotopic masses, nominal-mass
+//! scaling). Constant values are physical facts; a test pins their bit patterns.
 
 /// Monoisotopic mass of hydrogen.
 pub const H: f64 = 1.007825035;
@@ -31,13 +31,14 @@ pub const C13: f64 = 13.00335483;
 /// step for isotope-error tolerance.
 pub const ISOTOPE: f64 = C13 - C;
 
-/// Single-precision integer-mass scaler. Used in `nominal_from` via
-/// float-domain arithmetic; the multiply must happen in f32 (single
-/// precision) before rounding to preserve the rounding boundary.
+/// Single-precision integer-mass scaler — the mean ratio of nominal (integer)
+/// to monoisotopic residue mass. Used in `nominal_from` via float-domain
+/// arithmetic; the multiply must happen in f32 (single precision) before
+/// rounding to preserve the rounding boundary.
 pub const INTEGER_MASS_SCALER: f32 = 0.999497;
 
-/// Convert a monoisotopic mass to the integer "nominal" mass that
-/// indexes MS-GF+'s scoring DP table.
+/// Convert a monoisotopic mass to the integer "nominal" mass that indexes
+/// the per-rank scoring tables.
 ///
 /// The multiply happens in f32 (single precision) before rounding —
 /// this is the rounding boundary the DP table is built against.

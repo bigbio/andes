@@ -71,3 +71,24 @@ a replacement calibration cover it).
 ## Highest-leverage first move
 **Phase 1 (remove the GF).** Patented + isolated + doesn't affect ranking + de-risks
 Phase 3. Start now.
+
+---
+
+## Phase 1 — DONE + VALIDATED (2026-06-04, commit a8b16788)
+
+`--gf-free` opt-in mode shipped (bit-identical when off, schema-parity tests pass).
+End-to-end Percolator validation (same configs as the baselines):
+
+| dataset | default (GF) | `--gf-free` | Δ PSMs / proteins | speed |
+|---|---|---|---|---|
+| Astral (high-res) | 37,176 / 4,745 | 36,750 / 4,735 | **−1.1% / −0.2%** | **186.9s vs 536.8s = 2.9× faster** |
+| a05058 (low-res TMT) | 11,128 / 4,710 | 10,433 / 4,507 | −6.2% / −4.3% | 44.7s vs ~124s = 2.8× faster |
+
+**Verdict: PASS for high-res.** Removing the patented generating function on high-res
+is **~lossless AND ~3× faster** (the GF DP was a major runtime cost). Low-res CID keeps
+the ~6% gap — recover via Phase 2/3 (own models + clean-room scoring) or keep GF for
+low-res only until then.
+
+**Next:** make GF-free the default by resolution (high-res → GF-free; low-res → GF until
+recovered), then Phase 2/3 to delete the `gf/` subtree entirely. The speed win also
+directly serves the "competitive with Sage/MSFragger" goal.

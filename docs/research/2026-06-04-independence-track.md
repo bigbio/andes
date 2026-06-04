@@ -69,8 +69,7 @@ a replacement calibration cover it).
   no longer a derivative work, so the **UC license + the NOTICE attribution requirement
   no longer apply.** Switch `LICENSE` → Apache-2.0; the legal `NOTICE` can be dropped
   (keep at most a brief *courtesy* acknowledgment of MS-GF+'s intellectual influence —
-  optional, good practice, not required). **Internal EBI-legal nod** to confirm the
-  independence is genuine before the flip.
+  optional, good practice, not required).
 
 ### Phase R — Literature & strategy review  *(before rebrand finalization)*
 - A full review of the papers + strategies (build on `internal-docs/papers`) to:

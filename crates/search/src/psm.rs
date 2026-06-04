@@ -78,6 +78,73 @@ pub struct PsmFeatures {
     /// where the runner-up is otherwise evicted — and without perturbing the
     /// GF `min_score` / SpecEValue of any emitted PSM (purely additive).
     pub delta_raw_score: f32,
+
+    /// Tailor per-spectrum score calibration (Yang et al., JPR 2020):
+    /// `RawScore / denom`, where `denom` is this spectrum's RawScore at the
+    /// top-1% quantile of its candidate-score distribution (the score at rank
+    /// `ceil(0.01 * N)` from the top). Dividing each PSM's RawScore by its own
+    /// spectrum's high-quantile score makes RawScores comparable across spectra
+    /// — the role the removed generating function used to play. Emitted as the
+    /// additive `TailorScore` PIN column. Falls back to `denom = 1.0`
+    /// (TailorScore = RawScore) when the spectrum has too few candidates
+    /// (< 100) or the quantile score is `<= 0`, so it never divides by zero or
+    /// amplifies noise on tiny candidate sets. Purely additive: the histogram
+    /// it is computed from never alters which candidates are scored or kept.
+    pub tailor_score: f32,
+}
+
+/// Number of candidates below which Tailor calibration is skipped (denom = 1.0).
+/// On tiny candidate sets the top-1% quantile is noisy / undefined, so we fall
+/// back to the uncalibrated RawScore rather than amplify noise.
+pub const TAILOR_MIN_CANDIDATES: u32 = 100;
+
+/// Tailor top-quantile fraction (q): the denominator is the RawScore at the
+/// top `q` of the candidate-score distribution (Yang et al. use q = 0.01).
+pub const TAILOR_QUANTILE: f64 = 0.01;
+
+/// Compute the Tailor calibration denominator for one spectrum from a histogram
+/// of its candidate RawScores.
+///
+/// `hist` maps a (rounded, integer) RawScore to the number of candidates that
+/// achieved it; `total` is the total candidate count (== sum of histogram
+/// counts). Returns the RawScore `s` at the top-`TAILOR_QUANTILE` of the
+/// distribution: the smallest `s` such that
+/// `count(candidates with RawScore >= s) <= ceil(q * total)` — i.e. the score
+/// at rank `ceil(q * total)` counting from the highest score down.
+///
+/// Returns the fallback `1.0` (no calibration) when `total < TAILOR_MIN_CANDIDATES`
+/// or when the resolved quantile score is `<= 0`, so `RawScore / denom` never
+/// divides by zero and never amplifies noise on tiny candidate sets.
+pub fn tailor_denominator<S: std::hash::BuildHasher>(
+    hist: &std::collections::HashMap<i32, u32, S>,
+    total: u32,
+) -> f64 {
+    if total < TAILOR_MIN_CANDIDATES {
+        return 1.0;
+    }
+    // Number of candidates that define the "top" tail. ceil(q * total), at least 1.
+    let top_k = (TAILOR_QUANTILE * total as f64).ceil() as u64;
+    let top_k = top_k.max(1);
+
+    // Walk scores from highest to lowest, accumulating counts. The quantile
+    // score is the lowest score still inside the top-`top_k` candidates: the
+    // first score at which the running count (candidates with RawScore >= s)
+    // reaches/exceeds `top_k`.
+    let mut scores: Vec<i32> = hist.keys().copied().collect();
+    scores.sort_unstable_by(|a, b| b.cmp(a)); // descending
+    let mut cum: u64 = 0;
+    let mut quantile_score: Option<i32> = None;
+    for s in scores {
+        cum += hist[&s] as u64;
+        if cum >= top_k {
+            quantile_score = Some(s);
+            break;
+        }
+    }
+    match quantile_score {
+        Some(s) if s > 0 => s as f64,
+        _ => 1.0, // <= 0 quantile score → fall back (avoids div-by-zero / sign flip)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -658,6 +725,74 @@ mod tests {
             std::cmp::Ordering::Less,
             "NaN rank_score should sort as worse (Less) than a finite value"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tailor per-spectrum calibration
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+
+    /// Build a histogram with `score` repeated `count` times, summing total.
+    fn hist_from(pairs: &[(i32, u32)]) -> (HashMap<i32, u32>, u32) {
+        let mut h = HashMap::new();
+        let mut total = 0u32;
+        for &(s, c) in pairs {
+            *h.entry(s).or_insert(0) += c;
+            total += c;
+        }
+        (h, total)
+    }
+
+    #[test]
+    fn tailor_denom_top1pct_quantile_basic() {
+        // 1000 candidates: 990 at score 5, 10 at score 50 (the top 1%).
+        // top_k = ceil(0.01 * 1000) = 10. Walking from highest: 10 candidates
+        // at score 50 reach top_k exactly → quantile score = 50.
+        let (h, total) = hist_from(&[(5, 990), (50, 10)]);
+        assert_eq!(total, 1000);
+        assert_eq!(tailor_denominator(&h, total), 50.0);
+        // TailorScore for a RawScore-50 PSM = 50 / 50 = 1.0.
+        assert!(((50.0f64 / tailor_denominator(&h, total)) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tailor_denom_ceil_rounds_up() {
+        // 150 candidates → ceil(0.01 * 150) = ceil(1.5) = 2 candidates in the
+        // top tail. 1 candidate at 100, 1 at 90, rest at 10. Walking down:
+        // 100 (cum 1) < 2, then 90 (cum 2) >= 2 → quantile score = 90.
+        let (h, total) = hist_from(&[(100, 1), (90, 1), (10, 148)]);
+        assert_eq!(total, 150);
+        assert_eq!(tailor_denominator(&h, total), 90.0);
+    }
+
+    #[test]
+    fn tailor_denom_small_n_falls_back_to_one() {
+        // < TAILOR_MIN_CANDIDATES (100): no calibration → denom 1.0, so
+        // TailorScore == RawScore.
+        let (h, total) = hist_from(&[(5, 50), (50, 5)]);
+        assert_eq!(total, 55);
+        assert!(total < TAILOR_MIN_CANDIDATES);
+        assert_eq!(tailor_denominator(&h, total), 1.0);
+    }
+
+    #[test]
+    fn tailor_denom_nonpositive_quantile_falls_back_to_one() {
+        // Enough candidates but the top-1% quantile score is <= 0 (all negative
+        // RawScores). Must fall back to 1.0 to avoid div-by-zero / sign flip.
+        let (h, total) = hist_from(&[(-10, 990), (-1, 10)]);
+        assert_eq!(total, 1000);
+        // top tail is the 10 candidates at -1, which is <= 0 → fallback.
+        assert_eq!(tailor_denominator(&h, total), 1.0);
+    }
+
+    #[test]
+    fn tailor_denom_exactly_min_candidates_calibrates() {
+        // Exactly TAILOR_MIN_CANDIDATES → calibrates (>= threshold).
+        // 100 candidates, top_k = ceil(0.01*100) = 1. Highest score = 40.
+        let (h, total) = hist_from(&[(10, 99), (40, 1)]);
+        assert_eq!(total, 100);
+        assert_eq!(tailor_denominator(&h, total), 40.0);
     }
 
     #[test]

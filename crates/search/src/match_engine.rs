@@ -301,6 +301,15 @@ impl<'a> PreparedSearch<'a> {
             let mut best_mass_key = i32::MIN;
             let mut second_raw = i32::MIN;
 
+            // Tailor per-spectrum score calibration (additive PIN feature):
+            // accumulate a histogram of EVERY scored candidate's rounded RawScore
+            // for this spectrum. RawScore is a bounded integer so the map is
+            // small and cheap; it never influences which candidates are scored
+            // or kept (purely a side-channel for the post-loop denominator).
+            // Each spectrum's closure owns its own histogram → parallel-safe.
+            let mut tailor_hist: FxHashMap<i32, u32> = FxHashMap::default();
+            let mut tailor_total: u32 = 0;
+
             // Determine which charge states to try for this spectrum.
             // For charge-explicit spectra this is a single entry; for charge-missing,
             // typically 2-3 entries (small overhead, correct behavior).
@@ -507,6 +516,11 @@ impl<'a> PreparedSearch<'a> {
                     // that can't beat the top-1 still contributes to the delta.
                     {
                         let s = pin_score.round() as i32;
+                        // Tailor histogram: fold this candidate's rounded RawScore
+                        // in (same `s` the DeltaRawScore tracker uses). One u32
+                        // increment, no per-candidate allocation.
+                        *tailor_hist.entry(s).or_insert(0) += 1;
+                        tailor_total += 1;
                         let mkey = cand.peptide.nominal_residue_mass();
                         if mkey == best_mass_key {
                             if s > best_raw {
@@ -618,6 +632,13 @@ impl<'a> PreparedSearch<'a> {
             } else {
                 0.0
             };
+
+            // Tailor denominator: the RawScore at the top-1% quantile of this
+            // spectrum's candidate-score distribution. Falls back to 1.0 (no
+            // calibration) for small-N spectra or a non-positive quantile.
+            // Computed ONCE per spectrum from the histogram (purely additive).
+            let tailor_denom = crate::psm::tailor_denominator(&tailor_hist, tailor_total) as f32;
+
             queue.fill_post_topn(|psm| {
                 let ss = scored_spec_for_charge(psm.charge_used);
                 let cand = &candidates[psm.primary_candidate_idx() as usize];
@@ -633,6 +654,11 @@ impl<'a> PreparedSearch<'a> {
                 // co-isolation detection — `ms1_link` and its loading stay.
 
                 features.delta_raw_score = delta_raw_score;
+                // Tailor calibrated score: this PSM's RawScore divided by the
+                // spectrum's top-1% quantile RawScore. Additive — does not
+                // affect ranking. Uses `psm.score` (the PIN RawScore =
+                // node + cleavage), the same value emitted in the RawScore column.
+                features.tailor_score = psm.score / tailor_denom;
                 psm.features = features;
             });
 
@@ -1237,6 +1263,10 @@ pub(crate) fn compute_psm_features(
         // Set by the caller (run_chunk_inner) from the per-spectrum capture;
         // `compute_psm_features` has no cross-candidate view, so default here.
         delta_raw_score: 0.0,
+        // Set by the caller from the per-spectrum Tailor histogram + denominator;
+        // `compute_psm_features` has no cross-candidate view, so default to the
+        // uncalibrated RawScore-equivalent here (overwritten in fill_post_topn).
+        tailor_score: 0.0,
     }
 }
 

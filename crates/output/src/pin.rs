@@ -212,6 +212,11 @@ fn write_header<W: Write>(
         // existing column. Populated only when a distinct runner-up was scored
         // (i.e. effectively needs internal retention ≥ 2 candidates per scan).
         "DeltaRawScore".to_string(),
+        // ADDITIVE Tailor per-spectrum calibration (Yang et al., JPR 2020):
+        // RawScore / (spectrum's top-1% quantile RawScore). Makes RawScores
+        // comparable across spectra — the role the removed generating function
+        // used to play — recovering low-res discrimination without the GF.
+        "TailorScore".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -430,6 +435,12 @@ fn write_psm_row<W: Write>(
     let delta_raw_score = if rank == 1 { psm.features.delta_raw_score as f64 } else { 0.0 };
     writer.write_all(b"\t")?;
     write_double(writer, delta_raw_score)?;
+
+    // TailorScore: additive per-spectrum calibration. Emitted on every row
+    // (unlike DeltaRawScore) — each PSM has its own RawScore, so each row's
+    // TailorScore = that PSM's RawScore / the spectrum's shared denominator.
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.tailor_score as f64)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -692,7 +703,7 @@ mod tests {
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
             "matchedIonRatio",
             "EdgeScore",
-            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore",
+            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore", "TailorScore",
             "Peptide", "Proteins",
         ];
 

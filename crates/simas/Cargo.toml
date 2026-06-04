@@ -1,13 +1,13 @@
 [package]
-name = "msgf-rust"
+name = "simas"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "msgf-rust"
-path = "src/bin/msgf-rust.rs"
+name = "simas"
+path = "src/bin/simas.rs"
 
 [dependencies]
 model = { path = "../model" }

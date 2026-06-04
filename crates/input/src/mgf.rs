@@ -1,4 +1,4 @@
-//! Streaming MGF reader. Sage's regex-based pattern adapted to msgf-rust's
+//! Streaming MGF reader. Sage's regex-based pattern adapted to simas's
 //! Spectrum shape. Sync I/O — MGF is line-oriented, no async benefit.
 
 use std::io::BufRead;

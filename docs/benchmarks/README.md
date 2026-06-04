@@ -1,12 +1,12 @@
 # Benchmarks
 
-Reproducible engine comparisons for msgf-rust. Each benchmark documents the
+Reproducible engine comparisons for simas. Each benchmark documents the
 datasets, the exact per-engine parameters, and the FDR methodology so the
 numbers can be regenerated.
 
 | Benchmark | Date | Engines | Datasets |
 |---|---|---|---|
-| [4-engine native-format](2026-06-01-4engine-native-format.md) | 2026-06-01 | Java MS-GF+, Sage, MSFragger, msgf-rust | Orbitrap Astral (`.raw`), Bruker timsTOF (`.d`) |
-| [PXD016999 TMT tissue (4-engine)](2026-06-03-pxd016999-tmt-4engine.md) | 2026-06-03 | Java MS-GF+, MSFragger, Sage, msgf-rust | PXD016999 human tissue TMT, ion-trap CID-MS2 (`.raw`) |
+| [4-engine native-format](2026-06-01-4engine-native-format.md) | 2026-06-01 | Java MS-GF+, Sage, MSFragger, simas | Orbitrap Astral (`.raw`), Bruker timsTOF (`.d`) |
+| [PXD016999 TMT tissue (4-engine)](2026-06-03-pxd016999-tmt-4engine.md) | 2026-06-03 | Java MS-GF+, MSFragger, Sage, simas | PXD016999 human tissue TMT, ion-trap CID-MS2 (`.raw`) |
 
 Configuration files used by each benchmark live under [`configs/`](configs/).

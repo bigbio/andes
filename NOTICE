@@ -1,5 +1,5 @@
-msgf-rust
-=========
+SIMAS
+=====
 
 This product is a Rust port of MS-GF+, a peptide identification tool
 developed at the University of California, San Diego.
@@ -13,8 +13,8 @@ MS-GF+
   Source: https://github.com/MSGFPlus/msgfplus
   License: see ./LICENSE (UC Regents non-commercial)
 
-Algorithms and behavior in msgf-rust are derived from the following
-published works; users citing msgf-rust should also cite these:
+Algorithms and behavior in SIMAS are derived from the following
+published works; users citing SIMAS should also cite these:
 
   Kim, S., Mischerikow, N., Bandeira, N., Navarro, J.D., Wich, L.,
   Mohammed, S., Heck, A.J., and Pevzner, P.A. (2010). "The generating
@@ -29,13 +29,13 @@ published works; users citing msgf-rust should also cite these:
 Derivation status
 -----------------
 
-msgf-rust is a derivative work of MS-GF+. It is distributed under the
+SIMAS is a derivative work of MS-GF+. It is distributed under the
 same UC Regents non-commercial license terms as the upstream software;
-no broader rights are granted by the msgf-rust authors. Commercial use
+no broader rights are granted by the SIMAS authors. Commercial use
 requires a separate license from UC San Diego's Technology Transfer
 Office (contact details in ./LICENSE).
 
-msgf-rust adds Rust-specific architecture, performance optimizations,
+SIMAS adds Rust-specific architecture, performance optimizations,
 and a parallelized search pipeline. These contributions are made under
 the same UC Regents non-commercial terms.
 

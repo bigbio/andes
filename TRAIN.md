@@ -1,6 +1,6 @@
-# Training scoring models with msgf-rust
+# Training scoring models with simas
 
-msgf-rust can **generate its own scoring models** from your data and store them in a single
+simas can **generate its own scoring models** from your data and store them in a single
 Parquet model store (`resources/ionstat/models.parquet` by default). This guide covers training a
 model from scratch, where to get training data, the experiment-class catalog, incremental
 updates, and how a model is selected at search time.
@@ -13,7 +13,7 @@ For the full CLI/parameter reference see [`DOCS.md`](DOCS.md).
 
 A scoring model captures, per `(charge, parent-mass, fragment-segment)` partition, the
 intensity-rank and mass-error statistics of fragment ions — the numbers the generating-function
-scorer turns into per-peak scores. msgf-rust ships 39 models (consolidated into one Parquet
+scorer turns into per-peak scores. simas ships 39 models (consolidated into one Parquet
 store) covering common fragmentation × instrument × enzyme × protocol combinations.
 
 **Train your own when:**
@@ -22,13 +22,13 @@ store) covering common fragmentation × instrument × enzyme × protocol combina
   phospho-enrichment, immunopeptidomics, glyco …), or
 - you simply want a model tuned to your own acquisition.
 
-Training is **bootstrap-supervised**: msgf-rust searches your data with a seed model, keeps the
+Training is **bootstrap-supervised**: simas searches your data with a seed model, keeps the
 confident PSMs (target-decoy q-value ≤ a threshold), and learns the statistics from them.
 
 ## 2. Quick start
 
 ```bash
-msgf-rust train \
+simas train \
   --spectra mydata.mzML \
   --database mydb.fasta \
   --out-store models.parquet \
@@ -48,14 +48,14 @@ it can be updated later (§5).
 Search with the new model:
 
 ```bash
-msgf-rust --spectrum mydata.mzML --database mydb.fasta --output-pin out.pin \
+simas --spectrum mydata.mzML --database mydb.fasta --output-pin out.pin \
   --model-store models.parquet --model astral_tryp
 ```
 
 (Without `--model-store`/`--model`, search auto-selects from the bundled store by detected
 instrument — see §6.)
 
-**Key flags** (full list: `msgf-rust train --help`):
+**Key flags** (full list: `simas train --help`):
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -108,17 +108,17 @@ spectra are re-read. Every update produces a **candidate** that must pass an **a
 
 ```bash
 # Add a new dataset to an existing model
-msgf-rust train --update astral_tryp --out-store models.parquet \
+simas train --update astral_tryp --out-store models.parquet \
   --add --spectra more.mzML --database mydb.fasta --source-id batch2 \
   --validate heldout.mzML
 
 # Remove a source
-msgf-rust train --update astral_tryp --out-store models.parquet \
+simas train --update astral_tryp --out-store models.parquet \
   --remove-source batch2 --validate heldout.mzML
 
 # Down-weight a source, or decay stale sources by age
-msgf-rust train --update astral_tryp --out-store models.parquet --reweight batch1=0.5 --validate heldout.mzML
-msgf-rust train --update astral_tryp --out-store models.parquet --decay 180 --validate heldout.mzML
+simas train --update astral_tryp --out-store models.parquet --reweight batch1=0.5 --validate heldout.mzML
+simas train --update astral_tryp --out-store models.parquet --decay 180 --validate heldout.mzML
 ```
 
 - The candidate is searched against `--validate` and compared to the current model at 1% FDR; it

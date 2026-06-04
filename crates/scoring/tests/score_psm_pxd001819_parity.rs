@@ -17,7 +17,7 @@
 //! The two load-bearing assertions are:
 //!   1. The mzML parser sets `spec.activation_method == ActivationMethod::CID`
 //!      from the `<activation>` cvParam `MS:1000133`. This is what triggers
-//!      auto-routing in `bin/msgf-rust` — losing the cvParam in extraction
+//!      auto-routing in `bin/simas` — losing the cvParam in extraction
 //!      or in the parser breaks the fix silently.
 //!   2. The resulting score is stable around the locked Rust value (no
 //!      Java baseline exists for scan=28787 under CID_LowRes — diagnostic
@@ -58,7 +58,7 @@ const EXPECTED_RAWSCORE: i32 = 293;
 const TOLERANCE: i32 = 15;
 
 /// Fragment tolerance Da used by the production CID search path (see
-/// `bin/msgf-rust.rs` and `match_engine.rs` — both use 0.5 Da for CID).
+/// `bin/simas.rs` and `match_engine.rs` — both use 0.5 Da for CID).
 const FRAGMENT_TOLERANCE_DA: f64 = 0.5;
 
 /// Repo-relative path: `astral-speed/rust/crates/scoring` → workspace root.

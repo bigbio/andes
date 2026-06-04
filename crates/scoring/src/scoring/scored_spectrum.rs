@@ -489,7 +489,7 @@ impl<'a> ScoredSpectrum<'a> {
     /// `(rank, mz, intensity)` triples sorted by rank ascending (rank 1 = most
     /// intense). Filtered-out peaks (rank == `u32::MAX`) are skipped.
     ///
-    /// Read-only — does not affect scoring. Used by `msgf-trace --dump-peaks`
+    /// Read-only — does not affect scoring. Used by `simas-trace --dump-peaks`
     /// to compare Rust's kept-peak/rank assignment against Java's.
     pub fn dump_active_peaks(&self) -> Vec<(u32, f64, f32)> {
         let (peaks, ranks) = self.active_peaks_and_ranks();

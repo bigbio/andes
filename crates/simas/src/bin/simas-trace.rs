@@ -100,7 +100,7 @@ use scoring_crate::scoring::fragment_ions::ions_for_node;
 use search::{enumerate_candidates, match_spectra, SearchIndex, SearchParams};
 
 #[derive(Parser, Debug)]
-#[command(name = "msgf-trace", about = "Single-scan parity diagnostic for msgf-rust")]
+#[command(name = "simas-trace", about = "Single-scan parity diagnostic for simas")]
 struct Cli {
     /// Spectrum file (MGF or mzML — format auto-detected by extension).
     #[arg(long)]
@@ -180,7 +180,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("msgf-trace: {e}");
+            eprintln!("simas-trace: {e}");
             ExitCode::from(1)
         }
     }

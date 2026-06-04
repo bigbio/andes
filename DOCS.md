@@ -1,8 +1,8 @@
-# msgf-rust documentation
+# simas documentation
 
-This is the full reference for the `msgf-rust` binary and its outputs. For a quick start and benchmark summary, see [`README.md`](README.md). For porting Java MS-GF+ command lines and numeric legacy flags, see [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md).
+This is the full reference for the `simas` binary and its outputs. For a quick start and benchmark summary, see [`README.md`](README.md). For porting Java MS-GF+ command lines and numeric legacy flags, see [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md).
 
-Run `msgf-rust --help` for auto-generated help derived from the same `Cli` struct documented below.
+Run `simas --help` for auto-generated help derived from the same `Cli` struct documented below.
 
 ---
 
@@ -15,14 +15,14 @@ Run `msgf-rust --help` for auto-generated help derived from the same `Cli` struc
 5. [Building from source](#5-building-from-source)
 6. [Training new scoring models](#6-training-new-scoring-models)
 7. [Isobaric labeling](#7-isobaric-labeling)
-8. [Java MS-GF+ → msgf-rust migration](#8-java-ms-gf--msgf-rust-migration)
+8. [Java MS-GF+ → simas migration](#8-java-ms-gf--simas-migration)
 9. [License and citation](#9-license-and-citation)
 
 ---
 
 ## 1. CLI reference
 
-All flags use kebab-case long options (`--flag-name`). Several flags also accept legacy Java MS-GF+ numeric values (see §8). The CLI is implemented in `crates/msgf-rust/src/bin/msgf-rust.rs`.
+All flags use kebab-case long options (`--flag-name`). Several flags also accept legacy Java MS-GF+ numeric values (see §8). The CLI is implemented in `crates/simas/src/bin/simas.rs`.
 
 ### Input formats
 
@@ -129,7 +129,7 @@ Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1
 
 ## 2. Mods.txt format
 
-msgf-rust reads the same modification file format as Java MS-GF+. The parser lives in `crates/model/src/modification.rs` and `crates/model/src/aa_set.rs`.
+simas reads the same modification file format as Java MS-GF+. The parser lives in `crates/model/src/modification.rs` and `crates/model/src/aa_set.rs`.
 
 ### Grammar
 
@@ -141,7 +141,7 @@ Each non-comment line is five comma-separated fields:
 
 | Field | Rule |
 |---|---|
-| `<mass>` | Numeric monoisotopic mass delta in Da. Composition strings (`C2H3N1O1`) are **not** supported in msgf-rust. |
+| `<mass>` | Numeric monoisotopic mass delta in Da. Composition strings (`C2H3N1O1`) are **not** supported in simas. |
 | `<aa>` | Single uppercase ASCII letter, or `*` (wildcard). Multi-residue strings like `STY` are **not** supported — declare one line per residue. |
 | `<fix\|opt>` | `fix` = fixed (static) modification; `opt` = variable modification. Case-insensitive. |
 | `<location>` | One of `any`, `N-term`, `C-term`, `Prot-N-term`, `Prot-C-term` (case-insensitive; hyphens optional). |
@@ -161,7 +161,7 @@ NumMods=3
 15.99491,M,opt,any,Oxidation
 ```
 
-When `--mods` is omitted, msgf-rust uses these two modifications as built-in defaults.
+When `--mods` is omitted, simas uses these two modifications as built-in defaults.
 
 ### Example (b) — TMT 10-plex on K and peptide N-term
 
@@ -190,7 +190,7 @@ Pair with `--protocol phospho` to prefer a phosphorylation-specific model (e.g. 
 
 ## 3. Output formats
 
-msgf-rust writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `crates/output/src/pin.rs`, `crates/output/src/tsv.rs`.
+simas writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `crates/output/src/pin.rs`, `crates/output/src/tsv.rs`.
 
 ### 3a. PIN columns
 
@@ -271,7 +271,7 @@ Use **PIN** when the goal is FDR calibration or rescoring: Percolator, MS²Resco
 
 ## 4. Auto-detection
 
-For **mzML** inputs when `--fragmentation auto` (the default), msgf-rust peeks the input file before loading the full dataset:
+For **mzML** inputs when `--fragmentation auto` (the default), simas peeks the input file before loading the full dataset:
 
 1. **Activation method** — histogram of `<activation>` cvParams across the first 64 MS2 spectra; dominant method wins. Mixed methods trigger an stderr warning but the dominant method is still used file-wide.
 2. **Instrument class** — scans `<instrumentConfiguration>` / analyzer cvParams via `input::detect_instrument_type`; dominant analyzer among MS2 spectra wins. `None` → `low-res` (Java `LOW_RESOLUTION_LTQ` default).
@@ -284,7 +284,7 @@ Non-auto `--fragmentation` (e.g. `HCD`, `3`) disables the activation peek and us
 
 ### Native Thermo `.raw`
 
-A `.raw` file carries the activation method and analyzer in vendor metadata, so msgf-rust reads them directly (no mzML peek) and routes through the same parquet-store selection as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `hcd_qexactive_tryp`. `--protocol` from the CLI still selects protocol-specific models (`tmt`, `itraq`); explicit `--fragmentation`/`--instrument` are not required.
+A `.raw` file carries the activation method and analyzer in vendor metadata, so simas reads them directly (no mzML peek) and routes through the same parquet-store selection as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `hcd_qexactive_tryp`. `--protocol` from the CLI still selects protocol-specific models (`tmt`, `itraq`); explicit `--fragmentation`/`--instrument` are not required.
 
 ### Native Bruker timsTOF `.d`
 
@@ -292,7 +292,7 @@ timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes 
 
 ### Activation CV mapping (mzML `<activation>` cvParam accession → method)
 
-| CV accession | Name (PSI-MS) | msgf-rust method | Notes |
+| CV accession | Name (PSI-MS) | simas method | Notes |
 |---|---|---|---|
 | `MS:1000133` | collision-induced dissociation | CID | |
 | `MS:1000422` | beam-type collision-induced dissociation (HCD) | HCD | |
@@ -320,7 +320,7 @@ protocol variants for Phospho, TMT, iTRAQ, iTRAQPhospho). The individual binary
 `.param` files are no longer shipped on disk; git history preserves them if the
 store needs to be regenerated via `cargo run --example gen_bundled_store`.
 
-**When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): msgf-rust falls back to the `hcd_qexactive_tryp` model for default-flag runs, or to the resolution ladder in §1 for explicit flags. If no model resolves in the store, the process exits with an error instructing you to pass `--param-file <PATH>` with an external binary `.param` file.
+**When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): simas falls back to the `hcd_qexactive_tryp` model for default-flag runs, or to the resolution ladder in §1 for explicit flags. If no model resolves in the store, the process exits with an error instructing you to pass `--param-file <PATH>` with an external binary `.param` file.
 
 ---
 
@@ -329,23 +329,23 @@ store needs to be regenerated via `cargo run --example gen_bundled_store`.
 **Requirements:** Rust **1.85+** (workspace pins **1.87.0** in `rust-toolchain.toml` because transitive dependencies use `edition = "2024"`).
 
 ```bash
-git clone https://github.com/bigbio/msgf-rust
-cd msgf-rust
+git clone https://github.com/bigbio/simas
+cd simas
 cargo build --release
-# Binary: target/release/msgf-rust   (mzML + MGF; pure Rust)
+# Binary: target/release/simas   (mzML + MGF; pure Rust)
 ```
 
 **Native vendor formats** are feature-gated (the default build stays pure-Rust):
 
 ```bash
 # Thermo .raw — needs rustc >= 1.88 and, at run time, the .NET 8 runtime
-RUSTUP_TOOLCHAIN=stable cargo build --release -p msgf-rust --features thermo
+RUSTUP_TOOLCHAIN=stable cargo build --release -p simas --features thermo
 
 # Bruker timsTOF .d — pure Rust, no vendor runtime
-cargo build --release -p msgf-rust --features timstof
+cargo build --release -p simas --features timstof
 
 # Both at once (what the release archives ship for desktop/server targets)
-RUSTUP_TOOLCHAIN=stable cargo build --release -p msgf-rust --features "thermo timstof"
+RUSTUP_TOOLCHAIN=stable cargo build --release -p simas --features "thermo timstof"
 ```
 
 See [`README.md`](README.md) (§Reading Thermo `.raw` / §Reading Bruker timsTOF `.d`) for the .NET 8 install, the bundled-runtime release archives, and container recipes.
@@ -387,12 +387,12 @@ Release archives bundle the binary, the `models.parquet` model store (all 39 sco
 
 ## 6. Training new scoring models
 
-msgf-rust includes a native Rust training engine — **`msgf-rust train`** — that generates scoring models from your own data and writes them into the same Parquet model store the bundled models live in. No Java `ScoringParamGen` round-trip is needed.
+simas includes a native Rust training engine — **`simas train`** — that generates scoring models from your own data and writes them into the same Parquet model store the bundled models live in. No Java `ScoringParamGen` round-trip is needed.
 
-Training is **bootstrap-supervised**: msgf-rust searches your spectra with a seed model, keeps the confident PSMs (target-decoy q ≤ `--train-fdr`), and re-estimates the per-partition rank and mass-error distributions from them. Trained models are auto-selected by instrument/protocol at search time, and the store supports incremental add / remove / reweight / decay updates with a held-out acceptance gate.
+Training is **bootstrap-supervised**: simas searches your spectra with a seed model, keeps the confident PSMs (target-decoy q ≤ `--train-fdr`), and re-estimates the per-partition rank and mass-error distributions from them. Trained models are auto-selected by instrument/protocol at search time, and the store supports incremental add / remove / reweight / decay updates with a held-out acceptance gate.
 
 ```bash
-msgf-rust train \
+simas train \
   --spectra mydata.mzML \
   --database mydata.fasta \
   --seed-model hcd_qexactive_tryp \
@@ -404,13 +404,13 @@ msgf-rust train \
 Then search with it:
 
 ```bash
-msgf-rust --spectrum more.mzML --database mydata.fasta --output-pin out.pin \
+simas --spectrum more.mzML --database mydata.fasta --output-pin out.pin \
   --model-store models.parquet --model astral_tryp
 ```
 
 See **[`TRAIN.md`](TRAIN.md)** for the full guide: where to get training data, the experiment-class catalog, incremental training (`--update --add` / `--remove-source` / `--reweight` / `--decay`), and how to evaluate a candidate model on held-out data before committing it.
 
-msgf-rust also still loads any Java MS-GF+ binary `.param` file directly via `--param-file` — the binary reader is retained for custom/external models and for the migration tooling. The 39 original models are bundled in `resources/ionstat/models.parquet`; the individual `.param` files are no longer shipped on disk (git history preserves them, and `cargo run -p model-train --example gen_bundled_store` regenerates the store from them).
+simas also still loads any Java MS-GF+ binary `.param` file directly via `--param-file` — the binary reader is retained for custom/external models and for the migration tooling. The 39 original models are bundled in `resources/ionstat/models.parquet`; the individual `.param` files are no longer shipped on disk (git history preserves them, and `cargo run -p model-train --example gen_bundled_store` regenerates the store from them).
 
 ---
 
@@ -434,7 +434,7 @@ NumMods=2
 **Command:**
 
 ```bash
-msgf-rust \
+simas \
   --spectrum tmt_spectra.mzML \
   --database hsapiens.fasta \
   --output-pin out.pin \
@@ -460,7 +460,7 @@ NumMods=2
 **Command:**
 
 ```bash
-msgf-rust \
+simas \
   --spectrum itraq_spectra.mzML \
   --database hsapiens.fasta \
   --output-pin out.pin \
@@ -474,13 +474,13 @@ For phospho-enriched isobaric data use `--protocol iTRAQ-phospho` (legacy `--pro
 
 ---
 
-## 8. Java MS-GF+ → msgf-rust migration
+## 8. Java MS-GF+ → simas migration
 
-msgf-rust accepts **both** canonical kebab-case flags with named enum values **and** legacy Java short flags / numeric IDs. Existing quantms scripts using `--fragmentation 3 --instrument 3 --protocol 4` continue to work.
+simas accepts **both** canonical kebab-case flags with named enum values **and** legacy Java short flags / numeric IDs. Existing quantms scripts using `--fragmentation 3 --instrument 3 --protocol 4` continue to work.
 
 ### 8a. Flag rename table
 
-| Java MS-GF+ | msgf-rust canonical | msgf-rust legacy alias |
+| Java MS-GF+ | simas canonical | simas legacy alias |
 |---|---|---|
 | `-s <FILE>` | `--spectrum <FILE>` | — |
 | `-d <FILE>` | `--database <FILE>` | — |
@@ -510,7 +510,7 @@ Full legacy 0…N → named-value tables for `--fragmentation`, `--instrument`, 
 
 ### 8c. Behavior differences
 
-| Area | Java MS-GF+ | msgf-rust |
+| Area | Java MS-GF+ | simas |
 |---|---|---|
 | Spectrum inputs | mzML, MGF, mzXML, MS2, PKL, `_dta.txt`, … | **mzML, MGF, native Thermo `.raw` (`thermo` feature), native Bruker timsTOF `.d` (`timstof` feature)** — see §1 *Input formats* |
 | Identification output | PIN, TSV, mzIdentML | **PIN + optional TSV** (no mzIdentML) |
@@ -535,7 +535,7 @@ Percolator's learned weights absorb these distribution shifts; rescored FDR resu
 ### 8e. precursorCal ship gates (`--precursor-cal auto`)
 
 Java `-precursorCal auto` runs a file-wide pre-pass (sampled mini-search → median ppm
-shift → tightened precursor tolerance) before the main search. msgf-rust ports this
+shift → tightened precursor tolerance) before the main search. simas ports this
 in `mass_calibrator.rs` / `precursor_cal.rs`.
 
 **G1 gate:** Rust @1% FDR within ±1% of Java on all three sign-off datasets (LFQ,
@@ -559,18 +559,18 @@ Astral GF work), not calibrator logic.
 
 ## 9. License and citation
 
-msgf-rust is distributed under the **UCSD Noncommercial License** — the same terms as upstream MS-GF+. The license permits copying, modification, and distribution for **educational, research, and non-profit** purposes without fee, provided the copyright notice and liability paragraphs are retained. **Commercial use requires written permission** from the UCSD Technology Transfer Office (see `LICENSE` for contact details).
+simas is distributed under the **UCSD Noncommercial License** — the same terms as upstream MS-GF+. The license permits copying, modification, and distribution for **educational, research, and non-profit** purposes without fee, provided the copyright notice and liability paragraphs are retained. **Commercial use requires written permission** from the UCSD Technology Transfer Office (see `LICENSE` for contact details).
 
 The software is provided **"as is"** without warranty. See [`LICENSE`](LICENSE) for the full upstream text and [`NOTICE`](NOTICE) for port attribution.
 
 ### Citation
 
-If you use msgf-rust in published work, cite the original MS-GF+ paper:
+If you use simas in published work, cite the original MS-GF+ paper:
 
 > Kim, S. and Pevzner, P.A. (2014). MS-GF+ makes progress towards a universal database search tool for proteomics. *Nature Communications*, 5:5277.
 
 And optionally this Rust port:
 
-> bigbio (2026). msgf-rust: a Rust port of MS-GF+ for the quantms pipeline. https://github.com/bigbio/msgf-rust
+> bigbio (2026). simas: a Rust port of MS-GF+ for the quantms pipeline. https://github.com/bigbio/simas
 
 The original Java implementation is preserved on the `java-legacy` branch; upstream MS-GF+ lives at https://github.com/MSGFPlus/msgfplus.

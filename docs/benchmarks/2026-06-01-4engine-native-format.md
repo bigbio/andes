@@ -1,12 +1,12 @@
 # 4-engine native-format benchmark (2026-06-01)
 
-Head-to-head of **Java MS-GF+**, **Sage**, **MSFragger**, and **msgf-rust** on two
+Head-to-head of **Java MS-GF+**, **Sage**, **MSFragger**, and **simas** on two
 vendor-native datasets — a Thermo Orbitrap Astral run (`.raw`) and a Bruker
 timsTOF DDA-PASEF run (`.d`). Search parameters are harmonized across engines;
 every result is re-scored through the **same Percolator** so the FDR is computed
 identically.
 
-> **Headline:** msgf-rust returns the most PSMs *and* the most distinct peptides
+> **Headline:** simas returns the most PSMs *and* the most distinct peptides
 > at 1% FDR on **both** datasets, and is the **only** engine that reads Thermo
 > `.raw` natively (Sage and MSFragger fall back to mzML; Java reads neither
 > `.raw` nor `.d`).
@@ -23,7 +23,7 @@ mode-independent procedure for every engine (see §5).
 
 | Engine | Input | Wall time | Peak RAM | PSMs @1% | Peptides @1% |
 |---|---|---:|---:|---:|---:|
-| **msgf-rust** (`--chimeric`) | **`.raw` (native)** | 6:40 | 10.5 GB | **77,859** | **27,637** |
+| **simas** (`--chimeric`) | **`.raw` (native)** | 6:40 | 10.5 GB | **77,859** | **27,637** |
 | MSFragger (DDA+, topN 2) | mzML | 4:27 | 23 GB | 73,909 | 25,600 |
 | Java MS-GF+ | mzML | 2:26:49 | 6.0 GB | 33,425 | 22,050 |
 | Sage (chimera, report_psms 5) | mzML | 1:48 | 8.0 GB | 32,091 | 21,397 |
@@ -32,7 +32,7 @@ mode-independent procedure for every engine (see §5).
 
 | Engine | Input | Wall time | Peak RAM | PSMs @1% | Peptides @1% |
 |---|---|---:|---:|---:|---:|
-| **msgf-rust** | **`.d` (native)** | 2:57 | 9.4 GB | **4,345** | **1,418** |
+| **simas** | **`.d` (native)** | 2:57 | 9.4 GB | **4,345** | **1,418** |
 | Sage | `.d` (native) | 0:41 | 5.7 GB | 3,607 | 1,210 |
 | MSFragger | `.d` (native) | 1:00 | 7.6 GB | 3,423 | 1,170 |
 | Java MS-GF+ | — | — | — | n/a (no `.d` reader) | — |
@@ -41,24 +41,24 @@ mode-independent procedure for every engine (see §5).
 
 ## 2. Findings
 
-1. **msgf-rust leads on PSMs *and* peptides on both datasets.**
+1. **simas leads on PSMs *and* peptides on both datasets.**
    Astral: **+5.3% PSMs / +8.0% peptides** vs MSFragger DDA+, and ~**2.3×** vs the
    non-chimeric Java/Sage. timsTOF: **+20% PSMs / +17% peptides** vs Sage,
    **+27% / +21%** vs MSFragger.
-2. **Native `.raw` reading is exclusive to msgf-rust.** On this host Sage read
+2. **Native `.raw` reading is exclusive to simas.** On this host Sage read
    **0 spectra** from the `.raw` and MSFragger aborted (`Could not find Batmass-IO
    Thermo binary`); both were run on the equivalent mzML instead. Java MS-GF+
    reads neither `.raw` nor `.d`. All engines except Java read the timsTOF `.d`
    natively.
-3. **Chimeric ~doubles confident IDs.** msgf-rust's two-pass cascade and
+3. **Chimeric ~doubles confident IDs.** simas's two-pass cascade and
    MSFragger's DDA+ both roughly double the non-chimeric engines on Astral.
    Sage's `chimera` flag added almost nothing here (+1.4% even at
    `report_psms: 5`): it emits many more PSMs per spectrum, but they do not
    survive FDR.
-4. **Speed.** Sage is fastest on both datasets; msgf-rust is mid-pack; **Java
-   MS-GF+ is ~22× slower than msgf-rust on Astral** (2.5 h vs 6:40). msgf-rust
+4. **Speed.** Sage is fastest on both datasets; simas is mid-pack; **Java
+   MS-GF+ is ~22× slower than simas on Astral** (2.5 h vs 6:40). simas
    uses less than half of MSFragger's peak memory on Astral (10.5 GB vs 23 GB).
-5. **The msgf-rust counts are method-robust.** Across Percolator mix-max, `-Y`
+5. **The simas counts are method-robust.** Across Percolator mix-max, `-Y`
    target-decoy competition, and a forced-concatenated re-scoring, the Astral
    count stays 77,859–78,057 and the timsTOF count 4,345–4,402 — the lead is not
    a Percolator-mode artifact (§5).
@@ -78,7 +78,7 @@ mode-independent procedure for every engine (see §5).
 | Java MS-GF+ | `MSGFPlus_v20240326` |
 | Sage | v0.14.7 |
 | MSFragger | 4.2 |
-| msgf-rust | `dev` (2026-06-01 build, `--features "thermo timstof"`) |
+| simas | `dev` (2026-06-01 build, `--features "thermo timstof"`) |
 | Percolator | 3.7.1 (biocontainers); Java PIN via `msgf2pin` 3.6.5 |
 
 ### Data availability — download links
@@ -98,7 +98,7 @@ mode-independent procedure for every engine (see §5).
   - Yeast: `https://rest.uniprot.org/uniprotkb/stream?format=fasta&query=%28proteome%3AUP000002311%29%20AND%20%28reviewed%3Atrue%29`
   - concatenate the two FASTAs. (This database was reused from a TMT setup; the HeLa sample is human, so yeast acts as extra background.)
 
-> All four engines search the **target-only** FASTA and add their own reversed decoys (Java `-tda 1`, Sage `generate_decoys`, msgf-rust auto) — except MSFragger, which needs a pre-built `rev_` target+decoy FASTA (see §4).
+> All four engines search the **target-only** FASTA and add their own reversed decoys (Java `-tda 1`, Sage `generate_decoys`, simas auto) — except MSFragger, which needs a pre-built `rev_` target+decoy FASTA (see §4).
 
 ---
 
@@ -107,7 +107,7 @@ mode-independent procedure for every engine (see §5).
 | Parameter | Value |
 |---|---|
 | Precursor tolerance | **10 ppm** (Astral) / **15 ppm** (timsTOF) |
-| Fragment tolerance | **20 ppm** (Sage/MSFragger; Java & msgf-rust are model-based) |
+| Fragment tolerance | **20 ppm** (Sage/MSFragger; Java & simas are model-based) |
 | Charge range | **2–4** |
 | Enzyme / specificity | **Trypsin, fully specific (NTT = 2)** |
 | Missed cleavages | **≤ 2** |
@@ -117,7 +117,7 @@ mode-independent procedure for every engine (see §5).
 | Variable mods | **Oxidation M (+15.99491)**, **Acetyl protein-N-term (+42.01057)**, max 3 |
 | Decoys | **reversed protein**, target-decoy |
 | Threads | **8** |
-| Chimeric (Astral) | msgf-rust `--chimeric`; MSFragger DDA+ `output_report_topN 2`; Sage `chimera: true` + `report_psms: 5` |
+| Chimeric (Astral) | simas `--chimeric`; MSFragger DDA+ `output_report_topN 2`; Sage `chimera: true` + `report_psms: 5` |
 | Chimeric (timsTOF) | off for all engines |
 
 ### Per-engine commands (paths abbreviated)
@@ -130,18 +130,18 @@ java -Xmx7g -jar MSGFPlus.jar -s astral.mzML -d HYE.fasta -mod mods.txt -o java.
   -maxMissedCleavages 2 -n 1 -addFeatures 1 -thread 8
 ```
 
-**msgf-rust — Astral** (native `.raw`, chimeric):
+**simas — Astral** (native `.raw`, chimeric):
 ```bash
-msgf-rust --spectrum astral.raw --database HYE.fasta --output-pin rust.pin --mods mods.txt \
+simas --spectrum astral.raw --database HYE.fasta --output-pin rust.pin --mods mods.txt \
   --enzyme-specificity fully --max-missed-cleavages 2 --min-peaks 10 \
   --min-length 6 --max-length 40 --charge-min 2 --charge-max 4 --threads 8 \
   --precursor-tol-ppm 10 --isotope-error-min -1 --isotope-error-max 2 \
   --fragmentation HCD --instrument QExactive --chimeric
 ```
 
-**msgf-rust — timsTOF** (native `.d`):
+**simas — timsTOF** (native `.d`):
 ```bash
-msgf-rust --spectrum HeLa.d --database human_yeast.fasta --output-pin rust.pin --mods mods.txt \
+simas --spectrum HeLa.d --database human_yeast.fasta --output-pin rust.pin --mods mods.txt \
   --enzyme-specificity fully --max-missed-cleavages 2 --min-peaks 10 \
   --min-length 6 --max-length 40 --charge-min 2 --charge-max 4 --threads 8 \
   --precursor-tol-ppm 15 --isotope-error-min -1 --isotope-error-max 2 \
@@ -164,7 +164,7 @@ Config files: [`configs/sage-astral.json`](configs/sage-astral.json),
 [`configs/sage-timstof.json`](configs/sage-timstof.json),
 [`configs/msfragger-astral.params`](configs/msfragger-astral.params),
 [`configs/msfragger-timstof.params`](configs/msfragger-timstof.params),
-[`configs/mods.txt`](configs/mods.txt) (the msgf-rust / Java mods file).
+[`configs/mods.txt`](configs/mods.txt) (the simas / Java mods file).
 
 ---
 
@@ -177,12 +177,12 @@ percolator --seed 42 -Y --results-psms t.psms.txt --decoy-results-psms d.psms.tx
 ```
 
 `-Y` forces **target-decoy competition**, which is mode-independent — important
-because Percolator's automatic mode selection differs by engine. msgf-rust emits
+because Percolator's automatic mode selection differs by engine. simas emits
 the per-scan *winner* (mostly targets; a decoy row only when a decoy outscores
 every target on that scan), so Percolator's auto-detection labels its input
 "Separate" and would otherwise use the mix-max estimator, whereas the other
 engines auto-detect as "Concatenated". To verify this is not a scoring artifact,
-the msgf-rust pins were additionally re-scored with (a) auto mix-max and (b) a
+the simas pins were additionally re-scored with (a) auto mix-max and (b) a
 forced single-accession concatenated pin; all three agree (Astral
 77,859–78,057; timsTOF 4,345–4,402).
 
@@ -190,10 +190,10 @@ forced single-accession concatenated pin; all three agree (Astral
 
 ## 6. Caveats
 
-- **Input format.** msgf-rust searches the vendor-native `.raw`/`.d`; the other
+- **Input format.** simas searches the vendor-native `.raw`/`.d`; the other
   engines use the equivalent mzML (Astral) or native `.d` — the same underlying
-  scans. Native reading is itself a msgf-rust capability, not a parameter.
-- **timsTOF raw discrimination.** msgf-rust leads the timsTOF IDs but with a
+  scans. Native reading is itself a simas capability, not a parameter.
+- **timsTOF raw discrimination.** simas leads the timsTOF IDs but with a
   *weaker* raw target/decoy ratio (1.07 vs Sage 1.31 / MSFragger 1.48) — more of
   the separation comes from Percolator. The `CID_TOF` scoring model on timsTOF is
   less discriminative than on Orbitrap data and is a tracked follow-up.
@@ -204,5 +204,5 @@ forced single-accession concatenated pin; all three agree (Astral
 - **timsTOF FASTA.** A combined human+yeast database was searched against a human
   HeLa sample, which enlarges the decoy space equally for all engines.
 
-See the user manual ([`../../DOCS.md`](../../DOCS.md)) for the full msgf-rust CLI,
+See the user manual ([`../../DOCS.md`](../../DOCS.md)) for the full simas CLI,
 the `mods.txt` format, and the `.raw`/`.d` input details.

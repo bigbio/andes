@@ -2,7 +2,7 @@
 #
 # Three-dataset precursor-cal bench harness (G1 ship gate).
 #
-# Runs msgf-rust with `--precursor-cal auto` against LFQ (PXD001819), Astral,
+# Runs simas with `--precursor-cal auto` against LFQ (PXD001819), Astral,
 # and TMT fixtures. Pair with `compare_*_3arm_percolator.sh` to compute
 # Percolator @1% FDR vs the Java baseline.
 #
@@ -28,14 +28,14 @@ TMT_FASTA="${TMT_FASTA:-/srv/data/msgf-bench/tmt/uniprot.fasta}"
 TMT_PARAM="${TMT_PARAM:-HCD_HighRes_Tryp_TMT.param}"
 
 OUT_DIR="${OUT_DIR:-./bench-results/calauto-$(date +%Y%m%d-%H%M)}"
-MSGF_RUST="${MSGF_RUST:-./target/release/msgf-rust}"
+SIMAS="${SIMAS:-./target/release/simas}"
 MODE="${MODE:-auto}"
 
 mkdir -p "${OUT_DIR}"
 
-if [ ! -x "${MSGF_RUST}" ]; then
-  echo "ERROR: msgf-rust binary not found at ${MSGF_RUST}" >&2
-  echo "Run: cargo build --release -p msgf-rust" >&2
+if [ ! -x "${SIMAS}" ]; then
+  echo "ERROR: simas binary not found at ${SIMAS}" >&2
+  echo "Run: cargo build --release -p simas" >&2
   exit 1
 fi
 
@@ -52,7 +52,7 @@ run_one() {
   echo "=== ${label} (--precursor-cal ${MODE}) ==="
   local pin_path="${OUT_DIR}/${label}.pin"
   local log_path="${OUT_DIR}/${label}.log"
-  /usr/bin/time -v "${MSGF_RUST}" \
+  /usr/bin/time -v "${SIMAS}" \
     --spectrum "${spectra}" \
     --database "${fasta}" \
     --param-file "${param}" \

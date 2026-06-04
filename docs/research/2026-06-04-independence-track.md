@@ -92,3 +92,20 @@ low-res only until then.
 **Next:** make GF-free the default by resolution (high-res → GF-free; low-res → GF until
 recovered), then Phase 2/3 to delete the `gf/` subtree entirely. The speed win also
 directly serves the "competitive with Sage/MSFragger" goal.
+
+## Low-res 6% recovery — attempt 1: Tailor calibration (commit dec3bb03)
+
+Added `TailorScore` (per-spectrum RawScore quantile calibration) as an additive PIN feature.
+
+| dataset | GF baseline | GF-free | GF-free + Tailor |
+|---|---|---|---|
+| Astral (high-res) | 37,176 / 4,745 | 36,750 / 4,735 | **36,868 / 4,746** (≈ GF parity, +118 vs no-Tailor) |
+| a05058 (low-res) | 11,128 / 4,710 | 10,433 / 4,507 | 10,417 / 4,503 (flat — NOT recovered) |
+
+**Verdict:** Tailor brings **high-res to GF parity** (proteins ≥ GF, PSMs −0.8%, ~3× faster)
+— high-res is effectively DONE, patent-clean. But it does **NOT** recover the low-res 6%:
+the gap is not a calibration problem (Tailor normalizes only observed candidate scores;
+the GF's low-res value was its full theoretical null over all peptides). Keep Tailor
+(helps high-res, harmless low-res). Recover the low-res 6% via richer calibration (EVD)
+or, more likely, Phase 2/3 (own models + clean-room scoring) — it looks like scoring
+signal, not calibration.

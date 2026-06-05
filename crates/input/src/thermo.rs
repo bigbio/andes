@@ -318,7 +318,11 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
         x if x == ActivationMethod::HCD as u8 => ActivationMethod::HCD,
         x if x == ActivationMethod::ETD as u8 => ActivationMethod::ETD,
         x if x == ActivationMethod::PQD as u8 => ActivationMethod::PQD,
-        _ => ActivationMethod::UVPD,
+        x if x == ActivationMethod::UVPD as u8 => ActivationMethod::UVPD,
+        // dominant_act always round-trips a known ActivationMethod; a future
+        // variant added to map_dissociation falls back to HCD (the common case)
+        // rather than silently mislabeling it as UVPD.
+        _ => ActivationMethod::HCD,
     };
     let instrument = inst
         .into_iter()

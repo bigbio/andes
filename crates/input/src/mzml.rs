@@ -912,12 +912,29 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
         if self.done {
             return None;
         }
-        match self.pump() {
-            Ok(Some(s)) => Some(Ok(s)),
-            Ok(None) => None,
-            Err(e) => {
-                self.done = true;
-                Some(Err(e))
+        loop {
+            match self.pump() {
+                Ok(Some(s)) => return Some(Ok(s)),
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
+                Err(_e) => {
+                    // Resync past the malformed spectrum and keep parsing (skip the
+                    // bad scan, not the rest of the file). Only an unreadable XML
+                    // stream stops us — mirrors `read_with_ms1` / chunked paths.
+                    match self.resync_to_next_spectrum() {
+                        Ok(true) => continue,
+                        Ok(false) => {
+                            self.done = true;
+                            return None;
+                        }
+                        Err(e) => {
+                            self.done = true;
+                            return Some(Err(e));
+                        }
+                    }
+                }
             }
         }
     }
@@ -2368,6 +2385,44 @@ mod tests {
         // Sanity: MS2 #2 (chunk-2 first) carried over MS1#a; MS2 #3 linked to MS1#b.
         assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
         assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
+    }
+
+    #[test]
+    fn iterator_resyncs_past_a_malformed_spectrum() {
+        // The default Iterator path must skip a bad scan and still yield the next
+        // good spectrum — same resync semantics as `read_with_ms1` / chunked.
+        let good1 = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            350.0,
+            Some(2),
+        );
+        let bad = ms2_spectrum_xml(
+            "scan=2",
+            &bda_plain("MS:1000514", "@@@not-valid-base64@@@"),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            450.0,
+            Some(2),
+        );
+        let good2 = ms2_spectrum_xml(
+            "scan=3",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[500.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            550.0,
+            Some(2),
+        );
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml"><run><spectrumList count="3" defaultDataProcessingRef="dp">
+{good1}{bad}{good2}
+</spectrumList></run></mzML>"#
+        );
+
+        let got = collect_ok(&xml);
+        assert_eq!(got.len(), 2, "both good spectra must survive the resync (no truncation)");
+        assert_eq!(got[0].scan, Some(1));
+        assert_eq!(got[1].scan, Some(3), "the post-error spectrum must still be parsed");
     }
 
     #[test]

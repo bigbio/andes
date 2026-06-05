@@ -91,9 +91,9 @@ pub struct ScoredSpectrum<'a> {
     /// Peaks filtered out by precursor-peak filtering receive rank `u32::MAX`.
     ///
     /// When deconvolution is applied (see `deconv_peaks`), the active
-    /// rank list is `deconv_ranks`, NOT this field. This field is
-    /// retained for `nearest_peak_full` / `nearest_peak_rank` which by
-    /// design operate on the original spectrum peaks.
+    /// rank list is `deconv_ranks`, NOT this field.  `nearest_peak_full` /
+    /// `nearest_peak_rank` currently use `active_peaks_and_ranks()` as a
+    /// DRAFT (Task S-C, pending entrapment-FDP validation).
     ranks: Vec<u32>,
     /// Deconvoluted peak list when `param.apply_deconvolution = true`.
     /// Each entry is `(mz, intensity)` after charge-reducing multi-charge
@@ -587,20 +587,25 @@ impl<'a> ScoredSpectrum<'a> {
     /// error-stat columns. Closest-by-m/z selection would disagree with
     /// the intensity-comparator selection and affect PIN feature columns
     /// even when the rank lookup matches.
+    ///
+    /// DRAFT (Task S-C, pending entrapment-FDP validation): should use
+    /// `active_peaks_and_ranks()` so PIN features agree with node scoring
+    /// when `apply_deconvolution` is on. NOT committed until validated.
     pub fn nearest_peak_full(&self, target_mz: f64, tolerance_da: f64) -> Option<(u32, f32, f64)> {
-        if self.spec.peaks.is_empty() {
+        let (peaks, ranks) = self.active_peaks_and_ranks();
+        if peaks.is_empty() {
             return None;
         }
         let lo_mz = target_mz - tolerance_da;
         let hi_mz = target_mz + tolerance_da;
-        let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
+        let start = peaks.partition_point(|&(mz, _)| mz < lo_mz);
         let mut best: Option<(usize, f32)> = None; // (peak_index, intensity)
-        for i in start..self.spec.peaks.len() {
-            let (mz, intensity) = self.spec.peaks[i];
+        for i in start..peaks.len() {
+            let (mz, intensity) = peaks[i];
             if mz > hi_mz {
                 break;
             }
-            if self.ranks[i] == u32::MAX {
+            if ranks[i] == u32::MAX {
                 continue;
             }
             if best.as_ref().is_none_or(|(_, best_int)| intensity > *best_int) {
@@ -608,8 +613,8 @@ impl<'a> ScoredSpectrum<'a> {
             }
         }
         best.map(|(i, _)| {
-            let (peak_mz, intensity) = self.spec.peaks[i];
-            (self.ranks[i], intensity, peak_mz)
+            let (peak_mz, intensity) = peaks[i];
+            (ranks[i], intensity, peak_mz)
         })
     }
 
@@ -625,35 +630,39 @@ impl<'a> ScoredSpectrum<'a> {
     ///
     /// Filtered-out peaks (rank == `u32::MAX`) are never returned.
     ///
+    /// DRAFT (Task S-C, pending entrapment-FDP validation): uses
+    /// `active_peaks_and_ranks()` — see `nearest_peak_full`.
+    ///
     /// `spec.peaks` is sorted ascending by m/z (the MGF reader guarantees
     /// this). Binary search (`partition_point`) locates the first
     /// peak with `mz >= target_mz - tolerance_da`; the forward scan then
     /// stops as soon as `mz > target_mz + tolerance_da`, so only the O(k)
     /// peaks in the window are visited.
     pub fn nearest_peak_rank(&self, target_mz: f64, tolerance_da: f64) -> Option<u32> {
-        if self.spec.peaks.is_empty() {
+        let (peaks, ranks) = self.active_peaks_and_ranks();
+        if peaks.is_empty() {
             return None;
         }
         let lo_mz = target_mz - tolerance_da;
         let hi_mz = target_mz + tolerance_da;
         // Find first peak with mz >= lo_mz via binary search.
-        let start = self.spec.peaks.partition_point(|&(mz, _)| mz < lo_mz);
+        let start = peaks.partition_point(|&(mz, _)| mz < lo_mz);
         // Track (peak_index, intensity); pick max intensity (intensity-comparator selection).
         let mut best: Option<(usize, f32)> = None;
-        for i in start..self.spec.peaks.len() {
-            let (mz, intensity) = self.spec.peaks[i];
+        for i in start..peaks.len() {
+            let (mz, intensity) = peaks[i];
             if mz > hi_mz {
                 break;
             }
             // Skip filtered-out peaks.
-            if self.ranks[i] == u32::MAX {
+            if ranks[i] == u32::MAX {
                 continue;
             }
             if best.as_ref().is_none_or(|(_, best_int)| intensity > *best_int) {
                 best = Some((i, intensity));
             }
         }
-        best.map(|(i, _)| self.ranks[i])
+        best.map(|(i, _)| ranks[i])
     }
 
     /// Return the rank of the peak at index `idx`, or `None` if the peak has
@@ -737,47 +746,20 @@ impl<'a> ScoredSpectrum<'a> {
         charge: u8,
         parent_mass: f64,
     ) -> f32 {
-        use crate::param_model::IonType;
-        let param = scorer.param();
-        let mme = &param.mme;
         let max_rank = scorer.max_rank();
         let max_rank_idx = max_rank as usize;
-        let num_segs = param.num_segments as usize;
         let mut total = 0.0_f32;
-        let use_cache = !segment_partition_cache.is_empty();
-        // Trace gating: only fire when explicitly enabled AND a peptide-trace
-        // env var is set (matches `score_psm`'s gating). Cache the
-        // env probe in a OnceLock — was firing `env::var_os` twice per call,
-        // which on Astral runs is ~hundreds of millions of acquisitions of the
-        // global env lock.
-        let trace_ions = trace_ions_enabled();
-        // `seg` indexes both the cache AND serves as the fallback argument to
-        // `partition_for` when the cache is absent — the range loop is required.
-        #[allow(clippy::needless_range_loop)]
-        for seg in 0..num_segs {
-            let ion_logs_slice: &[(IonType, Vec<f32>)] = if use_cache {
-                segment_partition_cache[seg].1.as_slice()
-            } else {
-                let p = param.partition_for(charge, parent_mass, seg);
-                scorer.partition_ion_logs(&p)
-            };
-            if trace_ions {
-                eprintln!(
-                    "TRACE_RUST_IONS\tnominal={:.3}\tis_prefix={}\tseg={}\tnum_ions={}",
-                    nominal_mass, is_prefix, seg, ion_logs_slice.len()
-                );
-            }
-            for (ion, logs) in ion_logs_slice {
-                let theo_mz = match (is_prefix, *ion) {
-                    (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
-                    (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
-                    _ => continue,
-                };
-                if param.segment_num(theo_mz, parent_mass) != seg {
-                    continue;
-                }
-                let tol_da = mme.as_da(theo_mz);
-                let score = match nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da) {
+        visit_directional_node_ion_matches(
+            peaks,
+            ranks,
+            segment_partition_cache,
+            scorer,
+            nominal_mass,
+            is_prefix,
+            charge,
+            parent_mass,
+            |_, _, rank, logs, _, _| {
+                let score = match rank {
                     Some(rank) => {
                         let idx = rank.min(max_rank).max(1) as usize - 1;
                         if idx < logs.len() { logs[idx] } else { 0.0 }
@@ -787,8 +769,8 @@ impl<'a> ScoredSpectrum<'a> {
                     }
                 };
                 total += score;
-            }
-        }
+            },
+        );
         total
     }
 
@@ -984,13 +966,9 @@ impl<'a> ScoredSpectrum<'a> {
     /// `nominal_from(prefix_real_mass) as f64` — the integer nominal mass cast
     /// to f64, matching the GF DP's `active_nodes[ni] as f64` convention.
     pub fn ion_match_facts(&self, peptide: &Peptide, scorer: &RankScorer) -> Vec<IonMatchFact> {
-        use crate::param_model::IonType;
-
         let param = scorer.param();
-        let mme = &param.mme;
         let max_rank = scorer.max_rank();
         let esf = param.error_scaling_factor;
-        let num_segs = param.num_segments as usize;
 
         // Use the active (possibly deconvoluted) peaks + ranks — identical to
         // `directional_node_score_inner`.
@@ -1022,8 +1000,6 @@ impl<'a> ScoredSpectrum<'a> {
 
         let mut out: Vec<IonMatchFact> = Vec::new();
 
-        let use_cache = !self.segment_partition_cache.is_empty();
-
         // Walk each split position (internal bonds only: 1..n).
         // For each split, visit prefix node (is_prefix=true) and suffix node (is_prefix=false).
         // The index `split` is used for BOTH prefix_nominal_arr[split] and computing suffix,
@@ -1034,57 +1010,46 @@ impl<'a> ScoredSpectrum<'a> {
             let suffix_nom = (peptide_nominal - prefix_nominal_arr[split]) as f64;
 
             for &(is_prefix, nominal_mass) in &[(true, prefix_nom), (false, suffix_nom)] {
-                // Replicate the inner loop body of `directional_node_score_inner`
-                // EXACTLY: same segment/partition/ion iteration, same `nearest_peak_rank_in`.
-                // SYNC NOTE: if `directional_node_score_inner` is changed, this loop must
-                // be updated in lockstep.
-                #[allow(clippy::needless_range_loop)]
-                for seg in 0..num_segs {
-                    let (partition, ion_logs_slice): (Partition, &[(IonType, Vec<f32>)]) =
-                        if use_cache {
-                            (self.segment_partition_cache[seg].0,
-                             self.segment_partition_cache[seg].1.as_slice())
-                        } else {
-                            let p = param.partition_for(self.charge, self.parent_mass, seg);
-                            let logs = scorer.partition_ion_logs(&p);
-                            (p, logs)
+                visit_directional_node_ion_matches(
+                    peaks,
+                    ranks,
+                    &self.segment_partition_cache,
+                    scorer,
+                    nominal_mass,
+                    is_prefix,
+                    self.charge,
+                    self.parent_mass,
+                    |partition, ion, rank, _logs, theo_mz, tol_da| {
+                        let (rank, error_bin) = match rank {
+                            Some(r) => {
+                                let clamped = r.min(max_rank).max(1);
+                                let ebin = if esf > 0 {
+                                    let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
+                                        .map(|peak_mz| (peak_mz - theo_mz) as f32)
+                                        .unwrap_or(0.0);
+                                    let mut idx = (error_da * esf as f32).round() as i32;
+                                    if idx > esf {
+                                        idx = esf;
+                                    } else if idx < -esf {
+                                        idx = -esf;
+                                    }
+                                    idx += esf;
+                                    Some(idx as u32)
+                                } else {
+                                    None
+                                };
+                                (Some(clamped), ebin)
+                            }
+                            None => (None, None),
                         };
-
-                    for (ion, _logs) in ion_logs_slice {
-                        let theo_mz = match (is_prefix, *ion) {
-                            (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
-                            (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
-                            _ => continue,
-                        };
-                        if param.segment_num(theo_mz, self.parent_mass) != seg {
-                            continue;
-                        }
-                        let tol_da = mme.as_da(theo_mz);
-                        let (rank, error_bin) =
-                            match nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da) {
-                                Some(r) => {
-                                    let clamped = r.min(max_rank).max(1);
-                                    // Compute mass-error bin when error_scaling_factor > 0.
-                                    let ebin = if esf > 0 {
-                                        // Find the matched peak's actual m/z to compute error.
-                                        let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
-                                            .map(|peak_mz| (peak_mz - theo_mz) as f32)
-                                            .unwrap_or(0.0);
-                                        let mut idx = (error_da * esf as f32).round() as i32;
-                                        if idx > esf { idx = esf; }
-                                        else if idx < -esf { idx = -esf; }
-                                        idx += esf;
-                                        Some(idx as u32)
-                                    } else {
-                                        None
-                                    };
-                                    (Some(clamped), ebin)
-                                }
-                                None => (None, None),
-                            };
-                        out.push(IonMatchFact { partition, ion_type: *ion, rank, error_bin });
-                    }
-                }
+                        out.push(IonMatchFact {
+                            partition,
+                            ion_type: ion,
+                            rank,
+                            error_bin,
+                        });
+                    },
+                );
             }
         }
         out
@@ -1119,6 +1084,67 @@ impl<'a> ScoredSpectrum<'a> {
             .into_iter()
             .map(|f| (f.partition, f.rank, f.error_bin))
             .collect()
+    }
+}
+
+/// Shared segment→partition→ion matching step for node scoring and
+/// `ion_match_facts`. Invokes `visit` once per (segment, ion) that passes the
+/// directional filter and `segment_num` check.
+#[allow(clippy::too_many_arguments, reason = "mirrors the scoring loop's argument bundle")]
+fn visit_directional_node_ion_matches<F>(
+    peaks: &[(f64, f32)],
+    ranks: &[u32],
+    segment_partition_cache: SegmentPartitionSlice<'_>,
+    scorer: &RankScorer,
+    nominal_mass: f64,
+    is_prefix: bool,
+    charge: u8,
+    parent_mass: f64,
+    mut visit: F,
+) where
+    F: FnMut(Partition, IonType, Option<u32>, &[f32], f64, f64),
+{
+    use crate::param_model::IonType;
+
+    let param = scorer.param();
+    let mme = &param.mme;
+    let num_segs = param.num_segments as usize;
+    let use_cache = !segment_partition_cache.is_empty();
+    let trace_ions = trace_ions_enabled();
+    #[allow(clippy::needless_range_loop)]
+    for seg in 0..num_segs {
+        let (partition, ion_logs_slice): (Partition, &[(IonType, Vec<f32>)]) = if use_cache {
+            (
+                segment_partition_cache[seg].0,
+                segment_partition_cache[seg].1.as_slice(),
+            )
+        } else {
+            let p = param.partition_for(charge, parent_mass, seg);
+            let logs = scorer.partition_ion_logs(&p);
+            (p, logs)
+        };
+        if trace_ions {
+            eprintln!(
+                "TRACE_RUST_IONS\tnominal={:.3}\tis_prefix={}\tseg={}\tnum_ions={}",
+                nominal_mass,
+                is_prefix,
+                seg,
+                ion_logs_slice.len()
+            );
+        }
+        for (ion, logs) in ion_logs_slice {
+            let theo_mz = match (is_prefix, *ion) {
+                (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
+                (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                _ => continue,
+            };
+            if param.segment_num(theo_mz, parent_mass) != seg {
+                continue;
+            }
+            let tol_da = mme.as_da(theo_mz);
+            let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
+            visit(partition, *ion, rank, logs, theo_mz, tol_da);
+        }
     }
 }
 

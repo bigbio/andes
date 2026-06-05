@@ -17,6 +17,7 @@ use std::sync::OnceLock;
 
 use model::mass::nominal_from;
 use model::peptide::Peptide;
+use crate::param_model::Partition;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
@@ -132,6 +133,90 @@ pub fn psm_edge_score(
         }
     }
     edge_total
+}
+
+/// Collect the per-edge `(partition, ion_existence_index)` facts for a PSM,
+/// walking the cleavage sites in the **exact same order and direction** as
+/// [`psm_edge_score`] (so the training accumulator learns the
+/// `ion_existence_table` under the partition/index the scorer later reads).
+///
+/// Unlike [`psm_edge_score`], this does not consult the existence table or the
+/// `error_scaling_factor`/empty-table guards — it is meant to be called while
+/// *training* a model whose existence table is still empty. The caller feeds
+/// each `(partition, idx)` to `CountStats::bump_existence`.
+///
+/// Returns an empty vec for `charge == 0` or peptides shorter than 2 residues
+/// (no internal cleavage sites), mirroring `psm_edge_score`'s early returns.
+pub fn psm_edge_existence_facts(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+) -> Vec<(Partition, u32)> {
+    if charge == 0 {
+        return Vec::new();
+    }
+    let n = peptide.length();
+    if n < 2 {
+        return Vec::new();
+    }
+
+    let spectrum_parent_mass = scored_spec.parent_mass();
+    let peptide_nominal = peptide.nominal_residue_mass();
+
+    // Per-position prefix mass arrays (length n+1; [0]=0, [n]=total) — built
+    // identically to psm_edge_score.
+    let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
+    let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
+    prefix_mass_arr.push(0.0);
+    prefix_nominal_arr.push(0);
+    let mut prefix_mass_acc = 0.0_f64;
+    for s in 1..=n {
+        let aa = &peptide.residues[s - 1];
+        let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        prefix_mass_acc += residue_mass;
+        if s < n {
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(nominal_from(prefix_mass_acc));
+        } else {
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(peptide_nominal);
+        }
+    }
+
+    let is_prefix_main = scored_spec.main_ion_direction();
+    let mut facts: Vec<(Partition, u32)> = Vec::with_capacity(n - 1);
+    if !is_prefix_main {
+        // Suffix-dominant: walk the suffix-ion series from the C-terminus inward.
+        let nominal_peptide_mass = prefix_nominal_arr[n];
+        for i in (1..n).rev() {
+            let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
+            let prev_nominal = nominal_peptide_mass - prefix_nominal_arr[i + 1];
+            let (part, idx, _, _) = scored_spec.edge_existence_facts(
+                cur_nominal,
+                prev_nominal,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+            facts.push((part, idx as u32));
+        }
+    } else {
+        // Prefix-dominant: walk the prefix-ion series from the N-terminus outward.
+        for i in 1..n {
+            let cur_nominal = prefix_nominal_arr[i];
+            let prev_nominal = prefix_nominal_arr[i - 1];
+            let (part, idx, _, _) = scored_spec.edge_existence_facts(
+                cur_nominal,
+                prev_nominal,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+            facts.push((part, idx as u32));
+        }
+    }
+    facts
 }
 
 /// Score a PSM as the sum of `ScoredSpectrum::node_score(prefix, suffix)`

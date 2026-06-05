@@ -212,6 +212,91 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
     );
 }
 
+/// Ion-existence accumulation test.
+///
+/// Regression guard for the bug where `accumulate` never called
+/// `bump_existence`, leaving `counts.existence` empty so the estimator fell
+/// back to a uniform 0.25 existence prior (dead edge term).
+///
+/// The synthetic spectrum places a peak at every theoretical ion position, so
+/// consecutive backbone nodes are both observed → existence index 3
+/// ("both present"). The accumulator must therefore record at least one count
+/// at index 3.
+#[test]
+fn accumulator_records_ion_existence_both_present() {
+    let (_param, scorer) = load_hcd_scorer();
+    let peptide = make_peptide(b"PEPTIDE");
+    let charge: u8 = 2;
+
+    const PROTON: f64 = 1.007_276_49;
+    let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
+    let (spectrum, _, _) = build_synthetic_spectrum(&peptide, &scorer, precursor_mz, charge);
+
+    let accumulator = StatsAccumulator::new(&scorer);
+    let mut stats = CountStats::new();
+    accumulator.accumulate(&mut stats, &spectrum, &peptide, charge);
+
+    assert!(
+        !stats.existence.is_empty(),
+        "existence counts must be recorded (was empty → uniform-0.25 bug)"
+    );
+    let both_present: u64 = stats
+        .existence
+        .iter()
+        .filter(|((_, idx), _)| *idx == 3)
+        .map(|(_, &c)| c)
+        .sum();
+    assert!(
+        both_present >= 1,
+        "expected >=1 existence count at index 3 (both nodes observed), got {both_present}"
+    );
+}
+
+/// Ion-existence on an empty spectrum: no real peak is ever matched, so the
+/// "current node observed" bit (index 1 or 3) must never be set. The only
+/// observed node is the mass-0 source/sink terminal (`observed_node_mass`
+/// returns `Some(0.0)` by convention), which can set the "previous observed"
+/// bit on the terminal-adjacent edge → index 2. So indices ⊆ {0, 2}, matching
+/// exactly what `edge_score` would see at scoring time.
+#[test]
+fn accumulator_records_ion_existence_both_absent_on_empty_spectrum() {
+    let (_param, scorer) = load_hcd_scorer();
+    let peptide = make_peptide(b"PEPTIDE");
+    let charge: u8 = 2;
+
+    const PROTON: f64 = 1.007_276_49;
+    let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
+    let empty_spec = Spectrum {
+        title: "empty".into(),
+        precursor_mz,
+        precursor_intensity: None,
+        precursor_charge: Some(charge as i32),
+        rt_seconds: None,
+        scan: None,
+        peaks: vec![],
+        activation_method: None,
+        isolation_lower_offset: None,
+        isolation_upper_offset: None,
+    };
+
+    let accumulator = StatsAccumulator::new(&scorer);
+    let mut stats = CountStats::new();
+    accumulator.accumulate(&mut stats, &empty_spec, &peptide, charge);
+
+    assert!(!stats.existence.is_empty(), "existence counts must be recorded");
+    let nonzero_idx: Vec<u32> = stats
+        .existence
+        .iter()
+        .filter(|(_, &c)| c > 0)
+        .map(|((_, idx), _)| *idx)
+        .collect();
+    assert!(
+        nonzero_idx.iter().all(|&idx| idx == 0 || idx == 2),
+        "empty spectrum → no real peak matched, so the 'cur observed' bit must \
+         never be set; expected indices ⊆ {{0, 2}}, got {nonzero_idx:?}"
+    );
+}
+
 /// Missing-ion slot test.
 ///
 /// An empty spectrum means every ion is unmatched → the "missing ion" slot

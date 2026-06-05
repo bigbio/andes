@@ -873,34 +873,27 @@ impl<'a> ScoredSpectrum<'a> {
         result
     }
 
-    /// Edge score for the GF DP.
+    /// Resolve the existence facts for one GF edge: the partition the edge is
+    /// scored under, its `ion_existence_index`, and the observed node masses.
     ///
-    /// If `param.ion_existence_table` is empty (edge scoring not supported),
-    /// returns 0. Otherwise:
+    /// Shared by [`edge_score`](Self::edge_score) (search path) and the training
+    /// accumulator (`psm_edge_existence_facts`), so the learned
+    /// `ion_existence_table` is populated under exactly the partition/index the
+    /// scorer later reads. Does **not** consult the existence table itself, so
+    /// it is safe to call while training a model whose table is still empty.
+    ///
     ///   1. Look up observed node masses for `cur_nominal` and `prev_nominal`.
-    ///   2. `ion_existence_index` = (cur observed?) + 2*(prev observed?).
-    ///   3. `score = ion_existence_score(part, idx, prob_peak)`.
-    ///   4. If `idx == 3` (both observed), also add `error_score(cur_mass - prev_mass - theo_aa_mass)`.
-    ///   5. Return `round(score) as i32`.
-    pub fn edge_score(
+    ///   2. `idx` = (cur observed?) + 2*(prev observed?).
+    ///   3. Partition = the "last segment" partition for this spectrum
+    ///      (cached at construction; identical for every edge of the PSM).
+    pub(crate) fn edge_existence_facts(
         &self,
         cur_nominal: i32,
         prev_nominal: i32,
-        theo_aa_mass: f64,
         scorer: &RankScorer,
         charge: u8,
         parent_mass: f64,
-    ) -> i32 {
-        // Edge scoring is only meaningful when the model carries a mass-error
-        // distribution (error_scaling_factor != 0); otherwise there is no error
-        // term to add and edges contribute nothing.
-        if scorer.param().error_scaling_factor == 0 {
-            return 0;
-        }
-        if scorer.param().ion_existence_table.is_empty() {
-            return 0;
-        }
-
+    ) -> (Partition, usize, Option<f64>, Option<f64>) {
         // 1. Observed masses for cur and prev nodes.
         let cur_mass = self.observed_node_mass(cur_nominal, scorer, charge, parent_mass);
         let prev_mass = self.observed_node_mass(prev_nominal, scorer, charge, parent_mass);
@@ -924,6 +917,42 @@ impl<'a> ScoredSpectrum<'a> {
             Some((p, _)) => *p,
             None => scorer.param().partition_for(charge, parent_mass, last_seg),
         };
+
+        (part, idx, cur_mass, prev_mass)
+    }
+
+    /// Edge score for the GF DP.
+    ///
+    /// If `param.ion_existence_table` is empty (edge scoring not supported),
+    /// returns 0. Otherwise:
+    ///   1-3. Resolve `(part, idx, cur_mass, prev_mass)` via
+    ///        [`edge_existence_facts`](Self::edge_existence_facts).
+    ///   4. `score = ion_existence_score(part, idx, prob_peak)`.
+    ///   5. If `idx == 3` (both observed), also add `error_score(cur_mass - prev_mass - theo_aa_mass)`.
+    ///   6. Return `round(score) as i32`.
+    pub fn edge_score(
+        &self,
+        cur_nominal: i32,
+        prev_nominal: i32,
+        theo_aa_mass: f64,
+        scorer: &RankScorer,
+        charge: u8,
+        parent_mass: f64,
+    ) -> i32 {
+        // Edge scoring is only meaningful when the model carries a mass-error
+        // distribution (error_scaling_factor != 0); otherwise there is no error
+        // term to add and edges contribute nothing.
+        if scorer.param().error_scaling_factor == 0 {
+            return 0;
+        }
+        if scorer.param().ion_existence_table.is_empty() {
+            return 0;
+        }
+
+        // 1-3. Observed masses, existence index, and partition (shared with the
+        //       training accumulator via `edge_existence_facts`).
+        let (part, idx, cur_mass, prev_mass) =
+            self.edge_existence_facts(cur_nominal, prev_nominal, scorer, charge, parent_mass);
 
         // 4. Ion existence score.
         let mut s = scorer.ion_existence_score(part, idx, self.prob_peak);

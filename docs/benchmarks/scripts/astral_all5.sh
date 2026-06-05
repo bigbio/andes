@@ -6,8 +6,9 @@ MZML=$AD/LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.mzML
 FASTA=$AD/ProteoBenchFASTA_MixedSpecies_HYE.fasta
 MODS=/srv/data/msgf-bench/astral_mods_rust.txt
 REPO=/srv/data/msgf-bench/repo/msgf-rust
-# Binary renamed simas -> cimas; fall back to the old name on pre-rename checkouts.
-SIMAS=$REPO/target/release/cimas; [ -x "$SIMAS" ] || SIMAS=$REPO/target/release/simas
+# Binary renamed to andes; fall back to the old cimas/simas names on pre-rename checkouts.
+ANDES="${ANDES:-$REPO/target/release/andes}"; [ -x "$ANDES" ] || ANDES="$REPO/target/release/cimas"; [ -x "$ANDES" ] || ANDES="$REPO/target/release/simas"
+SIMAS=$ANDES
 SMODEL=/srv/data/msgf-bench/repo/msgf-rust/resources/ionstat/models.parquet
 JAR=/srv/data/msgf-bench/MSGFPlus_v20240326.jar
 FRAGGER=/srv/data/msgf-bench/engines/msfragger-env/share/msfragger-4.2-0/MSFragger-4.2/MSFragger-4.2.jar

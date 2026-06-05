@@ -4,7 +4,9 @@ AD=/srv/data/msgf-bench/astral-data
 RAW=$AD/LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw
 EDB=$AD/ASTRAL_entrapment.fasta
 MODS=/srv/data/msgf-bench/astral_mods_rust.txt
-B=/srv/data/msgf-bench/repo/msgf-rust/target/release/simas
+# Binary renamed to andes; fall back to the old cimas/simas names on pre-rename checkouts.
+REPO=/srv/data/msgf-bench/repo/msgf-rust
+B="${ANDES:-$REPO/target/release/andes}"; [ -x "$B" ] || B="$REPO/target/release/cimas"; [ -x "$B" ] || B="$REPO/target/release/simas"
 M=/srv/data/msgf-bench/repo/msgf-rust/resources/ionstat/models.parquet
 RES=/srv/data/msgf-bench/repo/bench-entrapment; mkdir -p $RES
 PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2

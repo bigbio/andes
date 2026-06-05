@@ -1,4 +1,6 @@
-# Andes
+<img src="docs/assets/andes-logo.png" alt="Andes" width="440" align="left">
+
+<br clear="left">
 
 _The data-driven peptide search engine of the quantms ecosystem. Built and maintained by the quantms team._
 
@@ -22,14 +24,14 @@ Three reference datasets, three results — all at 1% FDR via Percolator 3.7.1, 
 | **PXD001819** (UPS1 yeast tryp) | 14,974 | 14,755 | -219 (-1.5%) | 8:46 | **0:54** | **9.7×** |
 | **TMT** (a05058 PXD007683) | 10,115 | 9,605 | -510 (-5.0%) | 1:11:00 | **2:33** | **27.9×** |
 
-What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the speed**; on PXD001819 we match Java's PSM count within 1.5% at 9.7× the speed; on TMT we trail Java by 5% PSMs but at 27.9× the speed. Java baseline is upstream MSGFPlus v2024.03.26 (no calibration; that flag isn't in upstream). andes runs with `--precursor-cal auto`. The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization, TMT PSM gap) are tracked in `DOCS.md` §8d and the I5 trace-investigation notes as research follow-up.
+What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the speed**; on PXD001819 we match Java's PSM count within 1.5% at 9.7× the speed; on TMT we trail Java by 5% PSMs but at 27.9× the speed. Java baseline is upstream MSGFPlus v2024.03.26 (no calibration; that flag isn't in upstream). The andes benchmark runs do not rely on precursor calibration (it is opt-in and off by default; `auto` self-skips the correction when it can't find enough confident PSMs). The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization, TMT PSM gap) are tracked in `DOCS.md` §8d and the I5 trace-investigation notes as research follow-up.
 
 <details>
 <summary>Bench methodology</summary>
 
 - **Hardware:** 8-thread Intel Xeon Gold 6238 VM, AVX exposed (no AVX2/FMA), Linux x86_64.
 - **Java baseline:** `MSGFPlus.jar` from the [MSGFPlus/msgfplus v2024.03.26 release](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), run with `-Xmx8192m -thread 8 -tda 1 -addFeatures 1`. Per-dataset args match `--precursor-tol-ppm`/`--isotope-error`/`--instrument`/`--protocol` of the Rust runs.
-- **andes:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1 --precursor-cal auto`.
+- **andes:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1` (precursor calibration off — the default).
 - **Java → PIN:** `msgf2pin` from the percolator `3.6.5--h6351f2a_0` container (single-arg mode for concatenated-TDA mzid; the `3.7.1` container's msgf2pin has a known parser crash on this mzid output).
 - **Percolator:** `percolator 3.7.1` in `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` with `--seed 42 --only-psms`. Same parser script for both Java and Rust PINs.
 - **Wall time:** `/usr/bin/time -v` "Elapsed (wall clock) time" — does not include Percolator stage.

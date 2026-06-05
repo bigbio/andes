@@ -1,8 +1,8 @@
 # Migrating to andes from Java MS-GF+
 
-andes accepts both the canonical Rust-idiomatic CLI form (named values, kebab-case) and the legacy Java MS-GF+ form (numeric IDs and short flag names) silently — running scripts written against Java MS-GF+ unchanged is supported.
+andes provides *equivalents* for the Java MS-GF+ flags rather than a literal drop-in. The core I/O flags use long options (`--spectrum`, `--database`, `--output-pin`), so the Java short forms (`-s`, `-d`, `-o`) do not translate verbatim. The search-parameter flags, however, accept the legacy *numeric flag values* (e.g. `--fragmentation 3`, `--instrument 3`, `--protocol 4`) alongside the canonical named values, so the parameter portion of existing scripts ports with minimal changes.
 
-This page is a quick-reference for porting commands. For the full CLI reference, see [`DOCS.md`](DOCS.md) §1.
+This page is a quick-reference for porting commands. For the full CLI reference, see [`DOCS.md`](../DOCS.md) §1.
 
 ## Table A — Java MS-GF+ flag → andes flag
 

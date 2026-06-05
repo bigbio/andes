@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#172554"/>
+    </linearGradient>
+    <linearGradient id="pk" x1="0" y1="64" x2="0" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#BAE6FD"/>
+      <stop offset="0.5" stop-color="#60A5FA"/>
+      <stop offset="1" stop-color="#2563EB"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="58" fill="url(#bg)"/>
+
+  <g fill="url(#pk)">
+    <rect x="62"  y="166" width="8" height="22"  rx="2.5"/>
+    <rect x="76"  y="148" width="8" height="40"  rx="2.5"/>
+    <rect x="90"  y="156" width="8" height="32"  rx="2.5"/>
+    <rect x="104" y="118" width="8" height="70"  rx="2.5"/>
+    <rect x="118" y="90"  width="8" height="98"  rx="2.5"/>
+    <rect x="132" y="70"  width="8" height="118" rx="2.5"/>
+    <rect x="146" y="98"  width="8" height="90"  rx="2.5"/>
+    <rect x="160" y="128" width="8" height="60"  rx="2.5"/>
+    <rect x="174" y="113" width="8" height="75"  rx="2.5"/>
+    <rect x="188" y="143" width="8" height="45"  rx="2.5"/>
+  </g>
+
+  <!-- snow cap on the dominant peak -->
+  <polygon points="129,78 136,64 143,78" fill="#F8FAFC"/>
+
+  <!-- m/z baseline -->
+  <line x1="54" y1="188" x2="200" y2="188" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round"/>
+  <polygon points="200,183 210,188 200,193" fill="#CBD5E1"/>
+</svg>

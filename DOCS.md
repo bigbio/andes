@@ -76,6 +76,8 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | `--instrument` | enum | `low-res` | Instrument class for bundled model resolution. Named: `low-res`, `high-res`, `TOF`, `QExactive`. | Java `-inst`; numeric `0`=low-res, `1`=high-res, `2`=TOF, `3`=QExactive |
 | `--protocol` | enum | `auto` | Search protocol suffix for bundled model resolution. Named: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
 | `--param-file` | path | *(auto)* | Explicit path to a `.param` scoring model file. When set, overrides all auto-detection and bundled resolution. Required when running a release binary outside the source tree if bundled resources are not present. | Java `-conf` / model path |
+| `--model-store` | path | *(bundled)* | Path to a Parquet model store to use instead of the bundled `resources/ionstat/models.parquet`. Model selection reads from this store when set. | *(no Java equivalent)* |
+| `--model` | string | *(auto-select)* | Exact model ID to load from the model store, skipping automatic selection by `(--fragmentation, --instrument, --protocol)`. Useful for searching with a freshly-trained model (see `andes train`). | *(no Java equivalent)* |
 
 **Bundled default when all scoring flags are at their defaults** (`--fragmentation auto --instrument low-res --protocol auto`): `hcd_qexactive_tryp` (from the parquet model store). This preserves pre-auto-detect behaviour for MGF inputs and mzML files without activation metadata.
 
@@ -97,7 +99,7 @@ Only tryptic enzyme models are in the store; other enzymes require `--param-file
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-cal` | enum | `off` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` skips the correction when the sample is too small to be reliable. Opt-in only — see the ship gates in §8e. No effect on `.d` input (degrades to a normal search). | Java `-precursorCal auto\|on\|off` |
+| `--precursor-cal` | enum | `off` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` skips the correction when the sample is too small to be reliable. Opt-in only — see the ship gates in §8e. No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
 
 ### Chimeric cascade
 
@@ -541,7 +543,7 @@ in `mass_calibrator.rs` / `precursor_cal.rs`.
 **G1 gate:** Rust @1% FDR within ±1% of Java on all three sign-off datasets (LFQ,
 Astral, TMT) with matching cal mode. Fair comparison requires explicit Rust routing
 flags — especially TMT (`--fragmentation CID --instrument high-res --protocol TMT`).
-Harness: [`benchmark/vm/run_bench_calauto_3ds.sh`](benchmark/vm/run_bench_calauto_3ds.sh).
+Harness: [`benchmark/ci/run_bench_calauto_3ds.sh`](benchmark/ci/run_bench_calauto_3ds.sh).
 
 As of 2026-05-25 (fair v5 gate, `bench-calauto-v5.log`) the calibrator is
 validated (shift + tightening parity), but G1 **fails** on all three datasets:

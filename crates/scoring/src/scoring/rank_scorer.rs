@@ -143,6 +143,12 @@ impl RankScorer {
         let Some(table) = self.log_table.get(&(partition, ion_type)) else {
             return 0.0;
         };
+        // Panic-safety: `clamp` requires min <= max. A degenerate model with
+        // `max_rank == 0` would make `clamp(1, 0)` panic. Real models always
+        // have `max_rank > 0`, so this is inert for any valid model.
+        if self.max_rank == 0 {
+            return 0.0;
+        }
         let observed_rank = rank.clamp(1, self.max_rank);
         table
             .get((observed_rank - 1) as usize)

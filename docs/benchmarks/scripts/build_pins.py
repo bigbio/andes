@@ -73,5 +73,8 @@ def build_prose(idxml, out):
             o.write(f"{specid}\t{label}\t{scan}\t"+"\t".join(f"{x:.6g}" for x in feats)+f"\t-.{seq}.-\t{prot}\n")
     print(f"prose pin: {len(rows)} rows")
 
+if len(sys.argv) < 4 or sys.argv[1] not in ("java", "prose"):
+    sys.stderr.write("Usage: build_pins.py <java|prose> <input> <output.pin>\n")
+    sys.exit(2)
 if sys.argv[1]=="java": build_java(sys.argv[2], sys.argv[3])
 else: build_prose(sys.argv[2], sys.argv[3])

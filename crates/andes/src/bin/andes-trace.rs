@@ -631,8 +631,10 @@ fn parse_flanking(s: &str) -> Result<Peptide, Box<dyn std::error::Error>> {
     if parts.len() != 3 {
         return Err(format!("expected K.PEPTIDE.D form, got: {s}").into());
     }
-    let pre = parts[0].as_bytes()[0];
-    let post = parts[2].as_bytes()[0];
+    // Empty flanking residues (e.g. ".PEPTIDE.") fall back to the "no flank"
+    // marker `b'-'` instead of indexing an empty slice (which would panic).
+    let pre = parts[0].bytes().next().unwrap_or(b'-');
+    let post = parts[2].bytes().next().unwrap_or(b'-');
     let body = parts[1];
     // Strip mod annotations like "C+57.021" → "C". Simple heuristic: keep only A-Z.
     let residues: Vec<AminoAcid> = body

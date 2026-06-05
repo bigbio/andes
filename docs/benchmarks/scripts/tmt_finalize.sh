@@ -5,6 +5,8 @@ RES=/srv/data/msgf-bench/repo/bench-tmt
 JAR=/srv/data/msgf-bench/MSGFPlus_v20240326.jar
 OIMG=ghcr.io/openms/openms-tools-thirdparty:latest
 PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
+# build_pins.py lives next to this script, not at the repo root.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd /srv/data/msgf-bench/repo
 echo "################ TMT FINALIZE (uniform Percolator) $(date -Is) ################"
 
@@ -20,8 +22,8 @@ java -Xmx8g -cp $JAR edu.ucsd.msjava.ui.MzIDToTsv -i /tmp/tmt-bench/java_tmt.mzi
 echo "  java tsv rows=$(($(wc -l < $RES/java_tmt.tsv 2>/dev/null || echo 1)-1))"
 
 echo "=== build PINs ==="
-python3 build_pins.py java $RES/java_tmt.tsv $RES/java_tmt.pin
-python3 build_pins.py prose $RES/prose-out/prose.idXML $RES/prose_tmt.pin
+python3 "$SCRIPT_DIR/build_pins.py" java $RES/java_tmt.tsv $RES/java_tmt.pin
+python3 "$SCRIPT_DIR/build_pins.py" prose $RES/prose-out/prose.idXML $RES/prose_tmt.pin
 
 perc(){ docker run --rm --platform linux/amd64 -v "$RES":/r $PIMG percolator --seed 42 -Y --results-psms /r/$1.t.psms --decoy-results-psms /r/$1.d.psms --only-psms=false /r/$1.pin > $RES/$1.perc.log 2>&1; echo "  perc $1 exit=$?"; }
 count(){ tp=$RES/$1.t.psms; [ -f "$tp" ] || { printf "  %-16s (no percolator output)\n" "$1"; return; }

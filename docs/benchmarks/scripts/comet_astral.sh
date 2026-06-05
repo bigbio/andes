@@ -39,7 +39,8 @@ cp /data/'"$MZML"' /out/comet_in.mzML
 $C -P$P /out/comet_in.mzML 2>&1 | tail -8
 rm -f /out/comet_in.mzML
 ' > $RES/comet_astral.log 2>&1
-echo "  comet exit=$?"; grep -E "Elapsed \(wall|Maximum resident" $RES/comet_astral.log | sed "s/^/  /"
+COMET_EXIT=$?
+echo "  comet exit=$COMET_EXIT"; grep -E "Elapsed \(wall|Maximum resident" $RES/comet_astral.log | sed "s/^/  /"
 [ -f $RES/comet_in.pin ] && mv -f $RES/comet_in.pin $RES/comet_astral.pin
 echo "  rows=$(($(wc -l < $RES/comet_astral.pin 2>/dev/null || echo 1)-1))"
 docker run --rm --platform linux/amd64 -v "$RES":/r $PIMG percolator --seed 42 -Y --results-psms /r/comet_astral.t.psms --decoy-results-psms /r/comet_astral.d.psms --only-psms=false /r/comet_astral.pin > $RES/comet_astral.perc.log 2>&1

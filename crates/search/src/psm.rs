@@ -112,6 +112,10 @@ pub struct PsmFeatures {
     /// better — a real PSM explains most big peaks; a coincidental match
     /// leaves intense unexplained signal.
     pub unexplained_top_intensity_fraction: f32,
+    /// Count of matched b/y ions that also have a neutral-loss partner peak at
+    /// −H2O (−18.0106 Da) or −NH3 (−17.0265 Da) within feature tolerance.
+    /// Strong CID/TMT signal that the intensity-rank model underuses.
+    pub neutral_loss_ion_count: u32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

@@ -1027,6 +1027,11 @@ pub(crate) fn compute_psm_features(
     };
     let feature_tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
 
+    // Neutral-loss masses (charge-1 fragment partners at −H2O / −NH3).
+    const H2O_LOSS_DA: f64 = 18.0106;
+    const NH3_LOSS_DA: f64 = 17.0265;
+    let mut neutral_loss_ion_count: u32 = 0;
+
     for p in &predicted {
         let tol_da = if feature_tol_is_ppm {
             p.mz * feature_tol / 1e6
@@ -1052,6 +1057,16 @@ pub(crate) fn compute_psm_features(
                         y_matched[pos] = true;
                     }
                 }
+            }
+
+            // Matched ion with a neutral-loss partner at −H2O or −NH3 (charge 1).
+            let ion_charge = 1.0_f64;
+            let h2o_target = p.mz - H2O_LOSS_DA / ion_charge;
+            let nh3_target = p.mz - NH3_LOSS_DA / ion_charge;
+            if scored_spec.nearest_peak_full(h2o_target, tol_da).is_some()
+                || scored_spec.nearest_peak_full(nh3_target, tol_da).is_some()
+            {
+                neutral_loss_ion_count += 1;
             }
         }
     }
@@ -1328,6 +1343,7 @@ pub(crate) fn compute_psm_features(
         ppm_gaussian_score,
         complementary_ion_count,
         unexplained_top_intensity_fraction,
+        neutral_loss_ion_count,
     }
 }
 
@@ -1491,6 +1507,34 @@ mod feature_tests {
 
         // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: neutral-loss ion count ─────────────────────────────────────────
+
+    #[test]
+    fn compute_psm_features_neutral_loss_ion_count() {
+        let pep = ala_peptide(3);
+        let predicted = predict_by_ions(&pep, 1..=1);
+        let b2 = predicted
+            .iter()
+            .find(|p| matches!(p.kind, IonKind::B) && p.position == 2)
+            .expect("b2 should exist");
+
+        // Peak at b2 and its −H2O partner → count == 1.
+        let mut peaks = vec![
+            (b2.mz, 100.0_f32),
+            (b2.mz - 18.0106, 50.0_f32),
+        ];
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(peaks)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        assert_eq!(
+            f.neutral_loss_ion_count, 1,
+            "b2 + b2−H2O partner should yield neutral_loss_ion_count=1, got {}",
+            f.neutral_loss_ion_count
+        );
     }
 
     // ── Test: unexplained top-intensity fraction ─────────────────────────────

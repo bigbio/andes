@@ -13,10 +13,10 @@ including Java and ProSE, whose outputs are converted to a Percolator PIN by han
 > and neck (cimas ahead on PSMs+peptides, MSFragger on proteins). cimas is the
 > fastest real search — ~30× faster than its own MS-GF+ ancestor.
 
-> **Caveat (not yet resolved here):** the chimeric ~74 k PSM counts rest on
-> reversed-decoy TDC, which is blind to coincidental real-DB targets in
-> multi-PSM-per-scan output. These numbers are **pending entrapment-FDP
-> validation** before they are trusted as real gains.
+> **Chimeric FDR — validated (see §8).** An entrapment-FDP check (paired,
+> r = 1) confirms the chimeric gain is **real**, not coincidental-target
+> inflation: doubling accepted PSMs moves the *true* FDP only from **0.98%**
+> (top-1) to **1.16%** (chimeric) against a 1% TDC claim.
 
 ---
 
@@ -129,19 +129,46 @@ After Percolator (`-Y --seed 42 --results-psms`), from the target PSM list:
   run. The four engines that emit a native PIN (cimas, MSFragger, Sage, Comet) are
   the strictest apples-to-apples subset.
 - **Chimeric FDP**: reversed-decoy TDC does not expose coincidental real-DB targets
-  in multi-PSM-per-scan output. The chimeric counts (cimas `--chimeric`, MSFragger
-  DDA+) require an entrapment-FDP check before they are trusted.
+  in multi-PSM-per-scan output — so it is validated separately against an entrapment
+  database (§8). The MSFragger DDA+ chimeric counts were not entrapment-checked here
+  (cimas's were) and remain TDC-only.
 
 ## 7. Reproduce
 
 On the benchmark host (engines + data staged under `/srv/data/msgf-bench`):
 
 ```bash
-bash scripts/astral_all5.sh      # cimas top1+chimeric, MSFragger, Sage, ProSE
-bash scripts/comet_astral.sh     # Comet
-bash scripts/uniform_perc.sh     # build Java+ProSE PINs, percolate all 7 uniformly
+bash scripts/astral_all5.sh        # cimas top1+chimeric, MSFragger, Sage, ProSE
+bash scripts/comet_astral.sh       # Comet
+bash scripts/uniform_perc.sh       # build Java+ProSE PINs, percolate all 7 uniformly
+bash scripts/entrapment_validate.sh  # §8 entrapment-FDP check (cimas top-1 vs chimeric)
 ```
 
 Environment: RHEL 9, 8 cores; Percolator 3.7.1 and ProSE/Comet via
 `ghcr.io/openms/openms-tools-thirdparty:latest`; Sage v0.14.7 and MSFragger 4.2
 binaries; `MSGFPlus_v20240326.jar`.
+
+## 8. Chimeric FDR — entrapment-FDP validation
+
+Reversed-decoy TDC is blind to **coincidental real-DB targets**: in
+multi-PSM-per-scan (chimeric) output, a second peptide can win by chance against a
+real database sequence and TDC never sees it. To check whether cimas's `--chimeric`
+gain is real or such inflation, the same Astral run is searched against an
+**entrapment database** — the ProteoBench proteins plus a paired `ENT_`-prefixed
+**shuffled twin** of every protein (r = 1, 31,889 + 31,889) — with reversed decoys
+generated as usual. After Percolator @1%, any accepted PSM mapping **only** to an
+`ENT_` protein is a confirmed false positive. With r = 1 the estimated true FDP is
+`2 · N_ent / N_total` (Wen & Noble paired estimator). Script:
+[`scripts/entrapment_validate.sh`](scripts/entrapment_validate.sh).
+
+| cimas mode | accepted @1% (TDC) | original | entrapment | **true FDP (est.)** |
+|---|---:|---:|---:|---:|
+| top-1 | 32,965 | 32,803 | 162 | **0.98%** |
+| `--chimeric` | 69,052 | 68,652 | 400 | **1.16%** |
+
+**Verdict:** the gain is real. Doubling accepted PSMs raises the true FDP only from
+0.98% to 1.16% against a 1% TDC claim — the chimeric cascade recovers genuine
+co-isolated identifications, not coincidental-target noise. (Counts are lower than
+§3 because the entrapment DB is 2× larger, adding candidate competition; the FDP
+ratio is the meaningful quantity. The +0.16 pp overshoot could be removed by a
+slightly stricter chimeric acceptance threshold.)

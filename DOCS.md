@@ -1,6 +1,6 @@
 # andes documentation
 
-This is the full reference for the `andes` binary and its outputs. For a quick start and benchmark summary, see [`README.md`](README.md). For porting Java MS-GF+ command lines and numeric legacy flags, see [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md).
+This is the full reference for the `andes` binary and its outputs. For a quick start and benchmark summary, see [`README.md`](README.md).
 
 Run `andes --help` for auto-generated help derived from the same `Cli` struct documented below.
 
@@ -15,7 +15,7 @@ Run `andes --help` for auto-generated help derived from the same `Cli` struct do
 5. [Building from source](#5-building-from-source)
 6. [Training new scoring models](#6-training-new-scoring-models)
 7. [Isobaric labeling](#7-isobaric-labeling)
-8. [Java MS-GF+ → andes migration](#8-java-ms-gf--andes-migration)
+8. [Legacy numeric values & behavior notes](#8-legacy-numeric-values--behavior-notes)
 9. [License and citation](#9-license-and-citation)
 
 ---
@@ -476,86 +476,45 @@ For phospho-enriched isobaric data use `--protocol iTRAQ-phospho` (legacy `--pro
 
 ---
 
-## 8. Java MS-GF+ → andes migration
+## 8. Legacy numeric values & behavior notes
 
-andes accepts **both** canonical kebab-case flags with named enum values **and** legacy Java short flags / numeric IDs. Existing quantms scripts using `--fragmentation 3 --instrument 3 --protocol 4` continue to work.
+For backward compatibility, the routing flags accept legacy 0…N numeric values in
+addition to their canonical named values; clap parses named values
+case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 
-### 8a. Flag rename table
-
-| Java MS-GF+ | andes canonical | andes legacy alias |
+| Flag | Numeric | Named |
 |---|---|---|
-| `-s <FILE>` | `--spectrum <FILE>` | — |
-| `-d <FILE>` | `--database <FILE>` | — |
-| `-o <FILE>` | `--output-pin <FILE>` | — |
-| `-mod <FILE>` | `--mods <FILE>` | `--mod <FILE>` (hidden) |
-| `-t 20ppm` | `--precursor-tol-ppm 20` | — |
-| `-ti -1,2` | `--isotope-error-min -1 --isotope-error-max 2` | — |
-| `-m 3` (HCD) | `--fragmentation HCD` | `--fragmentation 3` |
-| `-inst 3` (QExactive) | `--instrument QExactive` | `--instrument 3` |
-| `-protocol 4` (TMT) | `--protocol TMT` | `--protocol 4` |
-| `-ntt 2` (fully specific) | `--enzyme-specificity fully` | `--ntt 2` |
-| `-tda 1` | *(omit — decoys auto-generated)* | — |
-| `-e 1` (Trypsin) | *(omit — Trypsin only; other enzymes need `--param-file`)* | — |
-| `-outputFormat 1` (TSV) | `--output-tsv <FILE>` | — |
-| `-thread N` | `--threads N` | — |
-| `-minLength 6` | `--min-length 6` | — |
-| `-maxLength 40` | `--max-length 40` | — |
-| `-maxMissedCleavages 1` | `--max-missed-cleavages 1` | — |
-| `-minNumPeaks 10` | `--min-peaks 10` | — |
-| `-n 10` | `--top-n 10` | — |
-| `-precursorCal auto\|on\|off` | `--precursor-cal auto\|on\|off` | — |
-| model path / `-conf` | `--param-file <FILE>` | — |
+| `--fragmentation` | `0` | `auto` |
+| `--fragmentation` | `1` | `CID` |
+| `--fragmentation` | `2` | `ETD` |
+| `--fragmentation` | `3` | `HCD` |
+| `--fragmentation` | `4` | `UVPD` |
+| `--instrument` | `0` | `low-res` |
+| `--instrument` | `1` | `high-res` |
+| `--instrument` | `2` | `TOF` |
+| `--instrument` | `3` | `QExactive` |
+| `--protocol` | `0` | `auto` |
+| `--protocol` | `1` | `phospho` |
+| `--protocol` | `2` | `iTRAQ` |
+| `--protocol` | `3` | `iTRAQ-phospho` |
+| `--protocol` | `4` | `TMT` |
+| `--protocol` | `5` | `standard` |
+| `--enzyme-specificity` (alias `--ntt`) | `0` | `non-specific` |
+| `--enzyme-specificity` (alias `--ntt`) | `1` | `semi` |
+| `--enzyme-specificity` (alias `--ntt`) | `2` | `fully` |
 
-### 8b. Numeric-legacy values
+### Behavior notes
 
-Full legacy 0…N → named-value tables for `--fragmentation`, `--instrument`, `--protocol`, and `--enzyme-specificity` (`--ntt`) live in [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md). clap accepts named values case-insensitively (`--fragmentation hcd` ≡ `HCD`).
-
-### 8c. Behavior differences
-
-| Area | Java MS-GF+ | andes |
-|---|---|---|
-| Spectrum inputs | mzML, MGF, mzXML, MS2, PKL, `_dta.txt`, … | **mzML, MGF, native Thermo `.raw` (`thermo` feature), native Bruker timsTOF `.d` (`timstof` feature)** — see §1 *Input formats* |
-| Identification output | PIN, TSV, mzIdentML | **PIN + optional TSV** (no mzIdentML) |
-| Decoys | Separate target/decoy FASTA or `-tda` modes | **Always auto-generated** reversed decoys from target FASTA (`--decoy-prefix`) |
-| Enzymes | Many via param file / CLI | **Trypsin only** in bundled models; other enzymes via `--param-file` |
-| Mods file | Composition strings supported | **Numeric Da masses only** |
-| Help | Picocli | clap-derived `--help` |
-| Memory model | Loads full spectrum list | **Chunked streaming** (5000 spectra/chunk) for large mzML files |
-
-### 8d. Known parity divergences
-
-On PSMs where Java and Rust agree on scan + top-1 peptide (the "agreement bucket"), three PIN features still differ systematically. None block production use — aggregate 1% FDR PSM counts meet or beat Java on all three benchmark datasets (see [`README.md`](README.md)).
-
-| Feature | Divergence | Status |
-|---|---|---|
-| `lnEValue` | ~4 orders of magnitude mean shift (Rust more confident) | Deferred — `num_distinct` semantics differ (see item #2 below) |
-| `MeanRelErrorTop7` / `MeanErrorTop7` / `StdevRelErrorTop7` | >1% relative difference on ~99% of agreement-bucket PSMs | Deferred — error-stat normalization differs |
-| BSA charge-3 SpecEValue (BSA.fasta + test.mgf fixture) | 1–4 OOM gap depending on deconvolution iteration | Known — deconvolution implementation divergence; kept as dev-branch smoke gate (`gf_java_parity` tests) |
-
-Percolator's learned weights absorb these distribution shifts; rescored FDR results remain competitive or better than Java on `--precursor-cal off` benchmarks.
-
-### 8e. precursorCal ship gates (`--precursor-cal auto`)
-
-Java `-precursorCal auto` runs a file-wide pre-pass (sampled mini-search → median ppm
-shift → tightened precursor tolerance) before the main search. andes ports this
-in `mass_calibrator.rs` / `precursor_cal.rs`.
-
-**G1 gate:** Rust @1% FDR within ±1% of Java on all three sign-off datasets (LFQ,
-Astral, TMT) with matching cal mode. Fair comparison requires explicit Rust routing
-flags — especially TMT (`--fragmentation CID --instrument high-res --protocol TMT`).
-Harness: [`benchmark/ci/run_bench_calauto_3ds.sh`](benchmark/ci/run_bench_calauto_3ds.sh).
-
-As of 2026-05-25 (fair v5 gate, `bench-calauto-v5.log`) the calibrator is
-validated (shift + tightening parity), but G1 **fails** on all three datasets:
-LFQ −2.2% (cal skipped), Astral +1.2%, TMT −5.9%. Remaining
-gaps trace to **SpecE tail / Percolator feature parity** (same class as historical
-Astral GF work), not calibrator logic.
-
-| `--precursor-cal` | Ship recommendation |
-|---|---|
-| `off` | Yes — baseline unchanged (**CLI default** until G1) |
-| `auto` | Opt-in only — no until G1 passes |
-| `on` | Opt-in only — no until G1 passes |
+- **Spectrum inputs:** mzML, MGF, native Thermo `.raw` (`thermo` feature), and native
+  Bruker timsTOF `.d` (`timstof` feature) — see §1 *Input formats*.
+- **Identification output:** Percolator PIN (always) plus an optional TSV; no mzIdentML.
+- **Decoys:** always auto-generated by reversing target sequences at search time
+  (prefix configurable via `--decoy-prefix`, default `XXX_`).
+- **Enzyme:** Trypsin in the bundled models; other enzymes require a custom
+  `--param-file`.
+- **Modifications:** numeric Da masses only (composition strings are not parsed).
+- **Memory:** spectra are processed in chunked streaming (5000/chunk), so large mzML
+  files do not load fully into memory.
 
 ---
 

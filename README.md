@@ -119,7 +119,7 @@ andes --spectrum spectra.mzML --database db.fasta \
 
 **[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
-Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --instrument 3 --protocol 4`) keep working without modification (see [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md)).
+Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --instrument 3 --protocol 4`) keep working without modification (the legacy numeric flag values are documented in [`DOCS.md`](DOCS.md)).
 
 ## CLI summary
 

@@ -104,8 +104,18 @@ impl Param {
         } else if charge > max_charge {
             max_charge
         } else {
-            // charge is in range but had no exact match — already handled above.
-            return self.partitions.last().copied();
+            // charge is in range but had no exact partition (a gap between
+            // available charges). Prefer the floor candidate — the nearest
+            // partition <= target — over jumping to `partitions.last()` (max
+            // charge / mass / segment), which would score against an unrelated
+            // partition. If the target sorts below every partition (pos == 0,
+            // e.g. parent_mass below the smallest trained mass) there is no
+            // floor, so fall through to the clamp-and-retry path with min_charge.
+            let pos = self.partitions.partition_point(|p| p <= &target);
+            if pos > 0 {
+                return self.partitions.get(pos - 1).copied();
+            }
+            min_charge
         };
         let fallback_target = Partition { charge: fallback_charge, parent_mass, seg_num };
         let fallback_pos = self.partitions.partition_point(|p| p <= &fallback_target);
@@ -300,23 +310,21 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
     }
     // Sections 7 (frag_off) and 8 (rank_dist) are written in the partitions'
     // sorted order (charge → seg → parent_mass). The wire order in Section 5
-    // should already match this; the sort here is a defensive no-op. If the
-    // wire order disagrees with the sorted order, Sections 7/8 below would
-    // be assigned to the wrong partition keys (silent rank_dist corruption).
+    // must already match this; the sort here is a defensive no-op. If the wire
+    // order disagrees with the sorted order, Sections 7/8 below would be
+    // assigned to the wrong partition keys (silent rank_dist corruption), so we
+    // hard-fail the load rather than emit a model that scores incorrectly.
     let wire_order = partitions.clone();
     partitions.sort();
     if wire_order != partitions {
-        // Find the first divergence to point at the bug.
         let first_diff = wire_order.iter().zip(&partitions)
             .position(|(a, b)| a != b)
             .unwrap_or(0);
-        eprintln!(
-            "WARNING: param wire order != sorted order (first diff at idx {}: wire={:?} sorted={:?}). \
-             Sections 7-8 will be misassigned to partition keys.",
-            first_diff,
-            wire_order.get(first_diff),
-            partitions.get(first_diff),
-        );
+        return Err(ParamParseError::WireOrderMismatch {
+            idx: first_diff,
+            wire: format!("{:?}", wire_order.get(first_diff)),
+            sorted: format!("{:?}", partitions.get(first_diff)),
+        });
     }
 
     // -- Section 6: precursor offset frequency --
@@ -585,6 +593,11 @@ pub enum ParamParseError {
     TrailingBytes { unread: usize },
     #[error("bad string length {got} (negative)")]
     BadStringLength { got: i8 },
+    #[error(
+        "partition wire order != sorted order (first diff at idx {idx}: wire={wire:?} \
+         sorted={sorted:?}); rank/frag tables would be misassigned to partition keys"
+    )]
+    WireOrderMismatch { idx: usize, wire: String, sorted: String },
     #[error("param reader path not yet implemented")]
     Unimplemented,
 }

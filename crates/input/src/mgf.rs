@@ -147,6 +147,12 @@ impl<R: BufRead> Iterator for MgfReader<R> {
 fn parse_pepmass(value: &str) -> Result<(f64, Option<f32>), ()> {
     let mut iter = value.split_ascii_whitespace();
     let mz: f64 = iter.next().ok_or(())?.parse().map_err(|_| ())?;
+    // Reject a non-finite or non-positive precursor m/z (e.g. `PEPMASS=0` or
+    // `inf`) — it would produce nonsense search windows. The Thermo and timsTOF
+    // readers gate on `precursor_mz > 0`; do the same here for consistency.
+    if !mz.is_finite() || mz <= 0.0 {
+        return Err(());
+    }
     let intensity = iter.next().map(|s| s.parse::<f32>()).transpose().map_err(|_| ())?;
     Ok((mz, intensity))
 }
@@ -203,6 +209,17 @@ mod tests {
     #[test]
     fn parse_pepmass_without_intensity() {
         assert_eq!(parse_pepmass("500.5").unwrap(), (500.5, None));
+    }
+
+    #[test]
+    fn parse_pepmass_rejects_nonpositive_and_nonfinite() {
+        // A non-positive or non-finite precursor m/z would produce nonsense
+        // search windows — reject it, matching the Thermo/timsTOF readers.
+        assert!(parse_pepmass("0").is_err());
+        assert!(parse_pepmass("0.0 1000.0").is_err());
+        assert!(parse_pepmass("-5.0").is_err());
+        assert!(parse_pepmass("inf").is_err());
+        assert!(parse_pepmass("nan").is_err());
     }
 
     #[test]

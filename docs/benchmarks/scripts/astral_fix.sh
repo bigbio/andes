@@ -24,9 +24,11 @@ wallrss(){ grep -E "Elapsed \(wall|Maximum resident" $1 | sed 's/^[[:space:]]*/ 
 
 echo "################ ASTRAL FIX (Sage+MSFragger+ProSE) $(date -Is) ################"
 
-echo "=== Sage v0.14.7 chimera=true (native .raw) $(date -Is) ==="
+echo "=== Sage v0.14.7 chimera=true (mzML) $(date -Is) ==="
+# Sage's generic release lacks the proprietary Thermo reader, so it runs on the
+# mzML (the benchmark doc records Sage as an mzML run).
 sed -E "s#\"fasta\": *\"[^\"]*\"#\"fasta\": \"$FASTA\"#; s#\"output_directory\": *\"[^\"]*\"#\"output_directory\": \"$WORK/sage_astral\"#" $SAGECFG > $WORK/sage_astral.json
-/usr/bin/time -v $SAGE $WORK/sage_astral.json --write-pin -o $WORK/sage_astral $RAW > $RES/sage_astral.log 2>&1
+/usr/bin/time -v $SAGE $WORK/sage_astral.json --write-pin -o $WORK/sage_astral $MZML > $RES/sage_astral.log 2>&1
 echo "  exit=$?"; wallrss $RES/sage_astral.log
 [ -f $WORK/sage_astral/results.sage.pin ] && cp -f $WORK/sage_astral/results.sage.pin $RES/sage_astral.pin
 echo "  rows=$(($(wc -l < $RES/sage_astral.pin 2>/dev/null || echo 1)-1))"; perc sage_astral; count sage_astral

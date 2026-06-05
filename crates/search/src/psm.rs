@@ -230,8 +230,11 @@ impl PartialEq for PsmMatch {
         // (= node + cleavage) would violate the contract for any pair of
         // PSMs with equal `score` but different `rank_score`
         // (= `score + edge`), leaving BinaryHeap behavior undefined for
-        // those pairs.
-        self.rank_score == other.rank_score
+        // those pairs. Delegate to `cmp` (rather than a raw `==`) so the two
+        // agree on NaN: `cmp` maps NaN `rank_score` to NEG_INFINITY, making
+        // two NaN-ranked PSMs compare Equal — a raw float `==` would report
+        // them unequal and break the Eq/Ord contract.
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 

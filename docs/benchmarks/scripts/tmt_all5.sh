@@ -4,7 +4,9 @@ TD=/srv/data/msgf-bench/tmt-data
 MZML=$TD/a05058.mzML
 FASTA=$TD/PXD007683_UP000005640_UP000002311_reviewed.fasta
 MODS=$TD/mods-numeric.txt
-SIMAS=/srv/data/msgf-bench/repo/msgf-rust/target/release/simas
+REPO=/srv/data/msgf-bench/repo/msgf-rust
+# Binary renamed simas -> cimas; fall back to the old name on pre-rename checkouts.
+SIMAS=$REPO/target/release/cimas; [ -x "$SIMAS" ] || SIMAS=$REPO/target/release/simas
 SMODEL=/srv/data/msgf-bench/repo/msgf-rust/resources/ionstat/models.parquet
 JAR=/srv/data/msgf-bench/MSGFPlus_v20240326.jar
 FRAGGER=/srv/data/msgf-bench/engines/msfragger-env/share/msfragger-4.2-0/MSFragger-4.2/MSFragger-4.2.jar

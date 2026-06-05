@@ -65,11 +65,14 @@ a replacement calibration cover it).
   This is the real research risk of the track.
 
 ### Phase 4 — Relicense (and drop the NOTICE requirement)
-- Once Phases 2+3 are done, CIMAS contains **no MS-GF+-derived code or models** → it is
-  no longer a derivative work, so the **UC license + the NOTICE attribution requirement
-  no longer apply.** Switch `LICENSE` → Apache-2.0; the legal `NOTICE` can be dropped
-  (keep at most a brief *courtesy* acknowledgment of MS-GF+'s intellectual influence —
-  optional, good practice, not required).
+- Once Phases 2+3 are done, the *intent* is that CIMAS contains **no MS-GF+-derived code
+  or models** → it would no longer be a derivative work, so the **UC license + the NOTICE
+  attribution requirement would no longer apply.** This conclusion is **not settled by
+  this doc**: relicensing `LICENSE` → Apache-2.0 and dropping the legal `NOTICE` must be
+  gated on (a) an explicit EBI-legal determination and (b) a documented provenance/proof
+  audit confirming no MS-GF+-derived code or models remain. Until both are on record,
+  keep the NOTICE. A brief *courtesy* acknowledgment of MS-GF+'s intellectual influence
+  may be retained regardless (optional, good practice, not required).
 
 ### Phase R — Literature & strategy review  *(before rebrand finalization)*
 - A full review of the papers + strategies (build on `internal-docs/papers`) to:

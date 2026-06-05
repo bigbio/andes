@@ -5,7 +5,9 @@ RAW=$AD/LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw
 MZML=$AD/LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.mzML
 FASTA=$AD/ProteoBenchFASTA_MixedSpecies_HYE.fasta
 MODS=/srv/data/msgf-bench/astral_mods_rust.txt
-SIMAS=/srv/data/msgf-bench/repo/msgf-rust/target/release/simas
+REPO=/srv/data/msgf-bench/repo/msgf-rust
+# Binary renamed simas -> cimas; fall back to the old name on pre-rename checkouts.
+SIMAS=$REPO/target/release/cimas; [ -x "$SIMAS" ] || SIMAS=$REPO/target/release/simas
 SMODEL=/srv/data/msgf-bench/repo/msgf-rust/resources/ionstat/models.parquet
 JAR=/srv/data/msgf-bench/MSGFPlus_v20240326.jar
 FRAGGER=/srv/data/msgf-bench/engines/msfragger-env/share/msfragger-4.2-0/MSFragger-4.2/MSFragger-4.2.jar
@@ -46,20 +48,22 @@ echo "  exit=$?"; wallrss $RES/java_astral.log
 docker run --rm --platform linux/amd64 -v "$WORK":/w -v "$RES":/r $PIMG msgf2pin -P XXX_ -e trypsin -o /r/java_astral.pin /w/java_astral.mzid > $RES/java_msgf2pin.log 2>&1
 echo "  msgf2pin exit=$? rows=$(($(wc -l < $RES/java_astral.pin 2>/dev/null || echo 1)-1))"; perc java_astral; count java_astral
 
-echo "=== [4] Sage v0.14.7 chimera=true (native .raw) $(date -Is) ==="
+echo "=== [4] Sage v0.14.7 chimera=true (mzML) $(date -Is) ==="
+# Sage's generic release lacks the proprietary Thermo reader, so it runs on the mzML.
 sed "s#\"fasta\":.*#\"fasta\": \"$FASTA\",#; s#\"output_directory\":.*#\"output_directory\": \"$WORK/sage_astral\"#" $SAGECFG > $WORK/sage_astral.json
-/usr/bin/time -v $SAGE $WORK/sage_astral.json --write-pin -o $WORK/sage_astral $RAW > $RES/sage_astral.log 2>&1
+/usr/bin/time -v $SAGE $WORK/sage_astral.json --write-pin -o $WORK/sage_astral $MZML > $RES/sage_astral.log 2>&1
 echo "  exit=$?"; wallrss $RES/sage_astral.log
 [ -f $WORK/sage_astral/results.sage.pin ] && cp -f $WORK/sage_astral/results.sage.pin $RES/sage_astral.pin
 echo "  rows=$(($(wc -l < $RES/sage_astral.pin 2>/dev/null || echo 1)-1))"; perc sage_astral; count sage_astral
 
-echo "=== [5] MSFragger 4.2 DDA+ data_type=3 (native .raw) $(date -Is) ==="
-cp -f $RAW $WORK/astral.raw
-/usr/bin/time -v java -Xmx14g -jar $FRAGGER $FRGCFG $WORK/astral.raw > $RES/fragger_astral.log 2>&1
+echo "=== [5] MSFragger 4.2 DDA+ data_type=3 (mzML) $(date -Is) ==="
+# MSFragger runs on the mzML here (the ext/thermo Batmass-IO reader is not installed).
+cp -f $MZML $WORK/astral.mzML
+/usr/bin/time -v java -Xmx14g -jar $FRAGGER $FRGCFG $WORK/astral.mzML > $RES/fragger_astral.log 2>&1
 echo "  exit=$?"; wallrss $RES/fragger_astral.log
 [ -f $WORK/astral.pin ] && cp -f $WORK/astral.pin $RES/fragger_astral.pin
 echo "  rows=$(($(wc -l < $RES/fragger_astral.pin 2>/dev/null || echo 1)-1))"; perc fragger_astral; count fragger_astral
-rm -f $WORK/astral.raw $WORK/astral.pin $WORK/astral.pepXML $WORK/astral.tsv
+rm -f $WORK/astral.mzML $WORK/astral.pin $WORK/astral.pepXML $WORK/astral.tsv
 
 echo "=== [6] ProSE (native .raw, OpenMS) $(date -Is) ==="
 mkdir -p $RES/prose-out

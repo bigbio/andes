@@ -56,7 +56,7 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | `--max-missed-cleavages` | u32 | `1` | Maximum missed enzymatic cleavages allowed per candidate peptide. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length in residues (excluding flanking context). | Java `-minLength 6` |
 | `--max-length` | u32 | `40` | Maximum peptide length in residues. | Java `-maxLength 40` |
-| `--top-n` | u32 | `10` | Maximum PSMs retained per spectrum (ranked by SpecEValue). | Java `-n 10` |
+| `--top-n` | u32 | `10` | Maximum PSMs retained per spectrum (ranked by `RawScore`, best-first). | Java `-n 10` |
 | `--isotope-error-min` | i8 | `-1` | Minimum isotope error offset to evaluate during precursor matching. Must be ≤ `--isotope-error-max`. | Java `-ti -1,2` (first value) |
 | `--isotope-error-max` | i8 | `2` | Maximum isotope error offset to evaluate. Must be ≥ `--isotope-error-min`. | Java `-ti -1,2` (second value) |
 | `--min-peaks` | u32 | `10` | Minimum number of MS2 peaks required to score a spectrum; spectra below this threshold are skipped. | Java `-minNumPeaks 10` |
@@ -196,46 +196,50 @@ andes writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum (lowest SpecEValue first). With the default charge range `--charge-min 2 --charge-max 5`, the header has **38 columns**: 37 Java-parity fields (including the `charge2`…`charge5` one-hots) plus Rust-only `EdgeScore` (before `Peptide`). Narrowing/widening the charge range adds or removes one `chargeN` column each.
+Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RawScore` (the GF-free rank score) — the generating function and all of its derived score columns have been removed. With the default charge range `--charge-min 2 --charge-max 5`, the header has **39 columns** (listed below in order). The `chargeN` one-hots track the `--charge-min`…`--charge-max` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`).
 
-| Column | Type | Description |
-|---|---|---|
-| `SpecId` | string | `{specID}_{scan}_{rank}` — unique PSM identifier. |
-| `Label` | int | `+1` target, `-1` decoy (by **source protein**, not peptide sequence). |
-| `ScanNr` | int | MS2 scan number from the input file. |
-| `ExpMass` | float | Experimental neutral precursor mass (Da): `precursor_mz × charge − charge × proton`. |
-| `CalcMass` | float | Theoretical neutral peptide mass (includes H₂O). |
-| `mass` | float | Duplicate of `ExpMass` (OpenMS PercolatorAdapter convention). |
-| `RawScore` | int | Rounded MS-GF+ score (`MSGFScore`). |
-| `DeNovoScore` | int | Best de novo graph score for the spectrum. |
-| `lnSpecEValue` | float | `ln(SpecEValue)`; `-MAX` if non-positive. |
-| `lnEValue` | float | `ln(EValue)` where EValue = SpecEValue × num_distinct peptides. |
-| `isotope_error` | int | Winning isotope offset (−1…2 by default). |
-| `peplen` | int | Peptide residue count **+ 2** (includes flanking pre/post residues). |
-| `dm` | float | Precursor mass error (Da) after isotope correction. |
-| `absdm` | float | Absolute value of `dm`. |
-| `charge2` … `chargeK` | 0/1 | One-hot encoding of assigned precursor charge. |
-| `enzN` | 0/1 | N-terminal boundary consistent with enzyme rules. |
-| `enzC` | 0/1 | C-terminal boundary consistent with enzyme rules. |
-| `enzInt` | int | Count of internal enzymatic cleavage positions in the peptide. |
-| `NumMatchedMainIons` | int | Matched charge-1 b/y fragment positions. |
-| `longest_b` | int | Longest contiguous matched b-ion run. |
-| `longest_y` | int | Longest contiguous matched y-ion run. |
-| `longest_y_pct` | float | `longest_y / peptide.length()` (6 decimal places). |
-| `ExplainedIonCurrentRatio` | float | Matched b+y intensity / total MS2 intensity. |
-| `NTermIonCurrentRatio` | float | Matched b-ion intensity / total MS2 intensity. |
-| `CTermIonCurrentRatio` | float | Matched y-ion intensity / total MS2 intensity. |
-| `MS2IonCurrent` | float | Sum of all MS2 peak intensities (not log-scaled). |
-| `IsolationWindowEfficiency` | float | Always `0.0` (not available from parsed spectra). |
-| `MeanErrorTop7` | float | Mean absolute Da error of top-7 most-intense matched ions. |
-| `StdevErrorTop7` | float | Population stdev of absolute Da errors (top-7). |
-| `MeanRelErrorTop7` | float | Mean signed ppm error of top-7 ions. |
-| `StdevRelErrorTop7` | float | Population stdev of signed ppm errors (top-7). |
-| `lnDeltaSpecEValue` | float | `ln(rank1 SpecEValue / rank2 SpecEValue)` for rank-1 PSMs; `0` otherwise. |
-| `matchedIonRatio` | float | `NumMatchedMainIons / peptide.length()`. |
-| `EdgeScore` | int | Per-bond DBScanScorer edge sum (IES + error score). **Rust-only additive column** — not present in Java MS-GF+ PIN output; placed before `Peptide` so legacy column-index parsers still find sequence at the tail. |
-| `Peptide` | string | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| `Proteins` | string | Protein accession(s); decoy accessions carry `--decoy-prefix`. Multiple accessions tab-separated when one peptide maps to several proteins. |
+`--chimeric` does **not** change the column set; the header is the same 39 columns. What it changes: it populates the `PrecursorIsotopeKL` / `PrecursorSNR` features (`0.0` otherwise) from a linked MS1, and — because a single scan can then emit several rows — the `SpecId` of multi-row scans gains a trailing per-row index (see `SpecId` below). Multi-row scans also occur without `--chimeric` whenever rank-1 candidates tie on `RawScore`.
+
+Columns in emission order (39 with the default 2–5 charge range):
+
+| # | Column | Type | Description |
+|---|---|---|---|
+| 1 | `SpecId` | string | `{specID}_{scan}_{rank}` PSM identifier. On scans that emit more than one row (under `--chimeric`, or when candidates tie on `RawScore`), a per-row index is appended → `{specID}_{scan}_{rank}_{rowIdx}` to keep SpecIds unique. |
+| 2 | `Label` | int | `+1` target, `-1` decoy (by **source protein**, not peptide sequence). |
+| 3 | `ScanNr` | int | MS2 scan number from the input file. |
+| 4 | `ExpMass` | float | Experimental neutral precursor mass (Da): `precursor_mz × charge − charge × proton`. |
+| 5 | `CalcMass` | float | Theoretical neutral peptide mass (includes H₂O). |
+| 6 | `mass` | float | Duplicate of `ExpMass` (OpenMS PercolatorAdapter convention). |
+| 7 | `RawScore` | int | Rounded MS-GF+ score — the sole score/rank column. |
+| 8 | `isotope_error` | int | Winning isotope offset (−1…2 by default). |
+| 9 | `peplen` | int | Peptide residue count **+ 2** (includes flanking pre/post residues). |
+| 10 | `dm` | float | Precursor mass error (Da) after isotope correction. |
+| 11 | `absdm` | float | Absolute value of `dm`. |
+| 12… | `charge2` … `chargeK` | 0/1 | One-hot encoding of assigned precursor charge; one column per state in the `--charge-min`…`--charge-max` range. |
+| | `enzN` | 0/1 | N-terminal boundary consistent with enzyme rules. |
+| | `enzC` | 0/1 | C-terminal boundary consistent with enzyme rules. |
+| | `enzInt` | int | Count of internal enzymatic cleavage positions in the peptide. |
+| | `NumMatchedMainIons` | int | Matched charge-1 b/y fragment positions. |
+| | `longest_b` | int | Longest contiguous matched b-ion run. |
+| | `longest_y` | int | Longest contiguous matched y-ion run. |
+| | `longest_y_pct` | float | `longest_y / peptide.length()` (6 decimal places). |
+| | `ExplainedIonCurrentRatio` | float | Matched b+y intensity / total MS2 intensity. |
+| | `NTermIonCurrentRatio` | float | Matched b-ion intensity / total MS2 intensity. |
+| | `CTermIonCurrentRatio` | float | Matched y-ion intensity / total MS2 intensity. |
+| | `MS2IonCurrent` | float | Sum of all MS2 peak intensities (not log-scaled). |
+| | `IsolationWindowEfficiency` | float | Always `0.0` (not available from parsed spectra). |
+| | `MeanErrorTop7` | float | Mean absolute Da error of top-7 most-intense matched ions. |
+| | `StdevErrorTop7` | float | Population stdev of absolute Da errors (top-7). |
+| | `MeanRelErrorTop7` | float | Mean signed ppm error of top-7 ions. |
+| | `StdevRelErrorTop7` | float | Population stdev of signed ppm errors (top-7). |
+| | `matchedIonRatio` | float | `NumMatchedMainIons / peptide.length()`. |
+| | `EdgeScore` | int | Per-bond DBScanScorer edge sum (IES + error score). Additive feature — not present in Java MS-GF+ PIN output. |
+| | `PrecursorIsotopeKL` | float | KL divergence of the precursor isotope envelope vs the theoretical model (MS1). `0.0` unless `--chimeric` populates it from a linked MS1 scan. |
+| | `PrecursorSNR` | float | Precursor signal-to-noise ratio from the MS1 envelope. `0.0` unless `--chimeric` populates it. |
+| | `DeltaRawScore` | float | `RawScore(best) − RawScore(2nd-best distinct peptide)` for the spectrum; emitted on the rank-1 row only (`0.0` on lower-ranked rows). |
+| | `TailorScore` | float | Tailor per-spectrum calibration (Yang et al., JPR 2020): `RawScore` ÷ the spectrum's top-1% RawScore quantile — makes RawScores comparable across spectra. |
+| 38 | `Peptide` | string | `pre.SEQUENCE.post` with `+mass` mod annotations. |
+| 39 | `Proteins` | string | Protein accession(s); decoy accessions carry `--decoy-prefix`. Multiple accessions tab-separated when one peptide maps to several proteins. |
 
 ### 3b. TSV columns
 
@@ -256,12 +260,9 @@ Tab-separated human-readable report. The `Title` column appears **only for MGF**
 | `Charge` | int | Assigned precursor charge. |
 | `Peptide` | string | Annotated peptide sequence with modifications. |
 | `Protein` | string | Single protein accession (primary candidate). |
-| `DeNovoScore` | int | De novo score. |
-| `MSGFScore` | int | Rounded raw score. |
-| `SpecEValue` | float | SpecEValue in `%.6e` notation. |
-| `EValue` | float | Database E-value in `%.6e` notation. |
+| `MSGFScore` | int | Rounded `RawScore` — the sole score column (the generating function and its derived score columns have been removed). |
 
-**mzML header** — same as above **without** the `Title` column (14 columns total).
+**mzML header** — same as above **without** the `Title` column (11 columns total).
 
 Decoy PSMs are included in TSV output; downstream tools label them via Percolator or manual filtering.
 

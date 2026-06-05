@@ -1,9 +1,9 @@
-//! End-to-end test for `cimas train` and the resulting model store.
+//! End-to-end test for `andes train` and the resulting model store.
 //!
 //! Verifies:
-//! 1. `cimas train` exits 0 and writes a Parquet store.
+//! 1. `andes train` exits 0 and writes a Parquet store.
 //! 2. The store contains the trained model ID.
-//! 3. A subsequent `cimas --spectrum ... --model-store ... --model ...`
+//! 3. A subsequent `andes --spectrum ... --model-store ... --model ...`
 //!    search using that model exits 0 and produces a non-empty PIN file.
 
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use std::process::Command;
 use model_train::ModelStore;
 
 /// Resolve a path relative to the workspace root (two levels above the crate
-/// manifest dir: crates/cimas → workspace root).
+/// manifest dir: crates/andes → workspace root).
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -30,8 +30,8 @@ fn train_writes_model_and_search_uses_it() {
     let bsa_mgf = fixture("test-fixtures/test.mgf");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
-    // ── Step 1: run `cimas train` ────────────────────────────────────────
-    let train_status = Command::new(env!("CARGO_BIN_EXE_cimas"))
+    // ── Step 1: run `andes train` ────────────────────────────────────────
+    let train_status = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("train")
         .arg("--spectra")
         .arg(&bsa_mgf)
@@ -40,7 +40,7 @@ fn train_writes_model_and_search_uses_it() {
         .arg("--out-store")
         .arg(&store_path)
         // Use a lenient FDR so the small BSA fixture yields confident labels.
-        // CIMAS ranks training PSMs by RawScore (rank_score) since the
+        // Andes ranks training PSMs by RawScore (rank_score) since the
         // generating function / SpecEValue was removed; on this tiny low-info
         // fixture RawScore separates targets from decoys weakly, so a higher
         // train-fdr is needed than the old SpecEValue path required.
@@ -49,11 +49,11 @@ fn train_writes_model_and_search_uses_it() {
         .arg("--model-id")
         .arg("bsa_test")
         .status()
-        .expect("run cimas train");
+        .expect("run andes train");
 
     assert!(
         train_status.success(),
-        "cimas train should exit 0, got: {train_status}"
+        "andes train should exit 0, got: {train_status}"
     );
 
     // ── Step 2: verify the store file exists and contains the model ──────────
@@ -74,7 +74,7 @@ fn train_writes_model_and_search_uses_it() {
     );
 
     // ── Step 3: run search using the trained model ────────────────────────────
-    let search_status = Command::new(env!("CARGO_BIN_EXE_cimas"))
+    let search_status = Command::new(env!("CARGO_BIN_EXE_andes"))
         .arg("--spectrum")
         .arg(&bsa_mgf)
         .arg("--database")

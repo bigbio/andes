@@ -18,7 +18,7 @@ timsrust = { version = "0.4.2", optional = true }
 [features]
 # Native Thermo .raw reading via the official RawFileReader (hosted .NET 8
 # runtime, FlatBuffers). Optional + off-by-default at the crate level; the
-# cimas binary turns it on by default. Builds without the .NET SDK
+# andes binary turns it on by default. Builds without the .NET SDK
 # (assemblies are vendored); only opening a `.raw` needs the .NET 8 runtime.
 thermo = ["dep:thermorawfilereader"]
 # Native Bruker timsTOF `.d` reading via the pure-Rust `timsrust` crate (the

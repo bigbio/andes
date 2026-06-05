@@ -1,6 +1,6 @@
 # CI benchmark (PXD001819)
 
-> **Note:** This scaffold targets the Java MS-GF+ tree (`mvn`, mzIdentML metrics). The Rust port (`cimas`) uses `.github/workflows/ci.yml` for tests but does not yet wire this benchmark harness. See [`benchmark/README.md`](../README.md) for scope.
+> **Note:** This scaffold targets the Java MS-GF+ tree (`mvn`, mzIdentML metrics). The Rust port (`andes`) uses `.github/workflows/ci.yml` for tests but does not yet wire this benchmark harness. See [`benchmark/README.md`](../README.md) for scope.
 
 - **Workflow:** `.github/workflows/benchmark-pxd001819.yml` (`workflow_dispatch`) — Java branch only
 - **Run locally:** `mvn -B package -DskipTests && bash benchmark/ci/PXD001819/run_ci.sh`

@@ -58,6 +58,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "andes"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "input",
+ "model",
+ "model-train",
+ "num_cpus",
+ "output",
+ "rayon",
+ "scoring",
+ "search",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -487,23 +504,6 @@ dependencies = [
  "iana-time-zone",
  "num-traits",
  "windows-targets",
-]
-
-[[package]]
-name = "cimas"
-version = "0.1.0"
-dependencies = [
- "clap",
- "input",
- "model",
- "model-train",
- "num_cpus",
- "output",
- "rayon",
- "scoring",
- "search",
- "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -1,33 +1,35 @@
-# CIMAS — peptide identification from MS/MS spectra
+# Andes
 
-[![CI](https://github.com/bigbio/cimas/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/cimas/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/bigbio/cimas)](https://github.com/bigbio/cimas/releases)
+_The data-driven peptide search engine of the quantms ecosystem. Built and maintained by the quantms team._
+
+[![CI](https://github.com/bigbio/andes/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/andes/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/bigbio/andes)](https://github.com/bigbio/andes/releases)
 [![License: UCSD-Noncommercial](https://img.shields.io/badge/license-UCSD--Noncommercial-blue)](LICENSE)
 
 > **A Rust port of MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Matches or beats Java MS-GF+ PSM counts at 1% FDR while running **10-28× faster**.
 
 ## What is this?
 
-CIMAS originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical generating-function peptide-identification engine, and remains a derivative work of it (see [`NOTICE`](NOTICE)). It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring. The original Java implementation is preserved on the `java-legacy` branch.
+Andes originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical generating-function peptide-identification engine, and remains a derivative work of it (see [`NOTICE`](NOTICE)). It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring. The original Java implementation is preserved on the `java-legacy` branch.
 
-## Why cimas?
+## Why andes?
 
 Three reference datasets, three results — all at 1% FDR via Percolator 3.7.1, all run on the same 8-thread VM:
 
-| Dataset | Java PSMs @1% | cimas PSMs @1% | Δ PSMs | Java wall | cimas wall | Speedup |
+| Dataset | Java PSMs @1% | andes PSMs @1% | Δ PSMs | Java wall | andes wall | Speedup |
 |---|---:|---:|---:|---:|---:|---:|
 | **Astral DDA** (LFQ_Astral_DDA_15min_50ng) | 33,425 | **36,715** | **+3,290 (+9.8%)** | 2:20:42 | **6:28** | **21.8×** |
 | **PXD001819** (UPS1 yeast tryp) | 14,974 | 14,755 | -219 (-1.5%) | 8:46 | **0:54** | **9.7×** |
 | **TMT** (a05058 PXD007683) | 10,115 | 9,605 | -510 (-5.0%) | 1:11:00 | **2:33** | **27.9×** |
 
-What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the speed**; on PXD001819 we match Java's PSM count within 1.5% at 9.7× the speed; on TMT we trail Java by 5% PSMs but at 27.9× the speed. Java baseline is upstream MSGFPlus v2024.03.26 (no calibration; that flag isn't in upstream). cimas runs with `--precursor-cal auto`. The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization, TMT PSM gap) are tracked in `DOCS.md` §8d and the I5 trace-investigation notes as research follow-up.
+What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the speed**; on PXD001819 we match Java's PSM count within 1.5% at 9.7× the speed; on TMT we trail Java by 5% PSMs but at 27.9× the speed. Java baseline is upstream MSGFPlus v2024.03.26 (no calibration; that flag isn't in upstream). andes runs with `--precursor-cal auto`. The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization, TMT PSM gap) are tracked in `DOCS.md` §8d and the I5 trace-investigation notes as research follow-up.
 
 <details>
 <summary>Bench methodology</summary>
 
 - **Hardware:** 8-thread Intel Xeon Gold 6238 VM, AVX exposed (no AVX2/FMA), Linux x86_64.
 - **Java baseline:** `MSGFPlus.jar` from the [MSGFPlus/msgfplus v2024.03.26 release](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), run with `-Xmx8192m -thread 8 -tda 1 -addFeatures 1`. Per-dataset args match `--precursor-tol-ppm`/`--isotope-error`/`--instrument`/`--protocol` of the Rust runs.
-- **cimas:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1 --precursor-cal auto`.
+- **andes:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1 --precursor-cal auto`.
 - **Java → PIN:** `msgf2pin` from the percolator `3.6.5--h6351f2a_0` container (single-arg mode for concatenated-TDA mzid; the `3.7.1` container's msgf2pin has a known parser crash on this mzid output).
 - **Percolator:** `percolator 3.7.1` in `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` with `--seed 42 --only-psms`. Same parser script for both Java and Rust PINs.
 - **Wall time:** `/usr/bin/time -v` "Elapsed (wall clock) time" — does not include Percolator stage.
@@ -35,37 +37,37 @@ What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the spe
 
 </details>
 
-In four-engine comparisons against Java MS-GF+, Sage, and MSFragger, cimas returns the most PSMs *and* distinct peptides at 1% FDR: on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), and on a real human-tissue **TMT** dataset acquired as ion-trap CID-MS2 ([PXD016999](https://www.ebi.ac.uk/pride/archive/projects/PXD016999): 22,217 PSMs / 10,473 peptides, ahead of Java, MSFragger, and Sage). It is also the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, data URLs, and config files: [`docs/benchmarks/`](docs/benchmarks/).
+In four-engine comparisons against Java MS-GF+, Sage, and MSFragger, andes returns the most PSMs *and* distinct peptides at 1% FDR: on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), and on a real human-tissue **TMT** dataset acquired as ion-trap CID-MS2 ([PXD016999](https://www.ebi.ac.uk/pride/archive/projects/PXD016999): 22,217 PSMs / 10,473 peptides, ahead of Java, MSFragger, and Sage). It is also the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, data URLs, and config files: [`docs/benchmarks/`](docs/benchmarks/).
 
 ## Install
 
 **Option 1 — download a release archive** (recommended):
 
-Grab the archive for your platform from the [Releases page](https://github.com/bigbio/cimas/releases). Five platform builds are published per release:
+Grab the archive for your platform from the [Releases page](https://github.com/bigbio/andes/releases). Five platform builds are published per release:
 
 ```
-cimas-<version>-x86_64-unknown-linux-gnu.tar.gz
-cimas-<version>-aarch64-unknown-linux-gnu.tar.gz
-cimas-<version>-x86_64-apple-darwin.tar.gz
-cimas-<version>-aarch64-apple-darwin.tar.gz
-cimas-<version>-x86_64-pc-windows-msvc.zip
+andes-<version>-x86_64-unknown-linux-gnu.tar.gz
+andes-<version>-aarch64-unknown-linux-gnu.tar.gz
+andes-<version>-x86_64-apple-darwin.tar.gz
+andes-<version>-aarch64-apple-darwin.tar.gz
+andes-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive contains the `cimas` binary, the `resources/` tree (bundled `models.parquet` model store with all 39 scoring models), and LICENSE/NOTICE/README.
+Each archive contains the `andes` binary, the `resources/` tree (bundled `models.parquet` model store with all 39 scoring models), and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
 ```bash
-cargo install --git https://github.com/bigbio/cimas --bin cimas
+cargo install --git https://github.com/bigbio/andes --bin andes
 ```
 
 **Option 3 — build from source:**
 
 ```bash
-git clone https://github.com/bigbio/cimas
-cd cimas
+git clone https://github.com/bigbio/andes
+cd andes
 cargo build --release
-# Binary: target/release/cimas
+# Binary: target/release/andes
 ```
 
 Requires Rust 1.85+ (see `rust-toolchain.toml`).
@@ -73,7 +75,7 @@ Requires Rust 1.85+ (see `rust-toolchain.toml`).
 ## Quick Start
 
 ```bash
-cimas \
+andes \
   --spectrum BSA.mgf \
   --database BSA.fasta \
   --output-pin out.pin
@@ -88,7 +90,7 @@ A row in `out.pin` is one peptide–spectrum match, with the Java-parity Percola
 **Tryptic DDA + Percolator** (default):
 
 ```bash
-cimas --spectrum spectra.mzML --database db.fasta --output-pin out.pin
+andes --spectrum spectra.mzML --database db.fasta --output-pin out.pin
 docker run --rm -v $(pwd):/data biocontainers/percolator:v3.7.1_cv1 \
   percolator -X /data/weights.txt /data/out.pin
 ```
@@ -96,7 +98,7 @@ docker run --rm -v $(pwd):/data biocontainers/percolator:v3.7.1_cv1 \
 **TMT 10-plex search with mods.txt:**
 
 ```bash
-cimas \
+andes \
   --spectrum tmt_spectra.mzML \
   --database hsapiens.fasta \
   --output-pin out.pin \
@@ -109,13 +111,13 @@ cimas \
 **Direct TSV output (skip Percolator):**
 
 ```bash
-cimas --spectrum spectra.mzML --database db.fasta \
+andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-tsv out.tsv
 ```
 
 **[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
-Point quantms's PSM search step at `cimas` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --instrument 3 --protocol 4`) keep working without modification (see [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md)).
+Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --instrument 3 --protocol 4`) keep working without modification (see [`docs/CLI_MIGRATION.md`](docs/CLI_MIGRATION.md)).
 
 ## CLI summary
 
@@ -153,15 +155,15 @@ Optional (default in **bold**):
 | `--threads <INT>` | Worker threads | **logical CPUs** |
 | `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
 
-Run `cimas --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
+Run `andes --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
 
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
-DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), cimas runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
+DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), andes runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
 
 ## Reading Thermo `.raw` files
 
-cimas reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is parity-identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).
+andes reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is parity-identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).
 
 There are two ways to use it:
 
@@ -170,7 +172,7 @@ There are two ways to use it:
   - Linux: `sudo dnf install dotnet-runtime-8.0` (RHEL/Fedora) or `apt-get install dotnet-runtime-8.0` (Debian/Ubuntu), or `curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 8.0 --runtime dotnet`
   - macOS: `brew install dotnet@8`
   - Windows: the [.NET 8 Desktop/Runtime installer](https://dotnet.microsoft.com/download/dotnet/8.0)
-  - Build needs rustc ≥ 1.88: `RUSTUP_TOOLCHAIN=stable cargo build --release -p cimas --features thermo`
+  - Build needs rustc ≥ 1.88: `RUSTUP_TOOLCHAIN=stable cargo build --release -p andes --features thermo`
 
 The runtime is auto-discovered: a bundled `dotnet/` next to the binary is used automatically; otherwise an existing `DOTNET_ROOT` or a system install is used. mzML/MGF reading never loads .NET. RawFileReader is under Thermo's license — see `crates/input/THERMO_LICENSE.txt`.
 
@@ -178,30 +180,30 @@ The runtime is auto-discovered: a bundled `dotnet/` next to the binary is used a
 
 ```dockerfile
 FROM mcr.microsoft.com/dotnet/runtime:8.0
-COPY cimas /usr/local/bin/cimas   # built with --features thermo
-ENTRYPOINT ["cimas"]
+COPY andes /usr/local/bin/andes   # built with --features thermo
+ENTRYPOINT ["andes"]
 ```
 
 ## Reading Bruker timsTOF `.d` files
 
-cimas reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate (the same reader [Sage](https://github.com/lazear/sage) uses), so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
+andes reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate (the same reader [Sage](https://github.com/lazear/sage) uses), so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
 
 It is feature-gated to keep the default build pure-Rust. Build with `--features timstof` on a toolchain with a recent rustc (the `timsrust` dependency tree needs rustc ≥ 1.88):
 
 ```bash
-cargo build --release -p cimas --features timstof
-cimas --spectrum sample.d --database human.fasta --output-pin out.pin
+cargo build --release -p andes --features timstof
+andes --spectrum sample.d --database human.fasta --output-pin out.pin
 ```
 
 Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is carried as metadata but not used by scoring. `--chimeric` on a `.d` degrades gracefully to a normal search (the co-isolation cascade needs an MS1 stream the DDA reader does not expose), as does `--precursor-cal`. Default (non-`timstof`) builds read mzML/MGF only and never pull in `timsrust`.
 
 ## Auto-detection
 
-For mzML inputs with `--fragmentation auto` (the default), cimas peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a scoring model from the bundled `models.parquet` store based on the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when selecting the model. MGF files have no activation metadata, so they use flag-based selection (defaulting to `hcd_qexactive_tryp`). Full resolution table: `DOCS.md` §4.
+For mzML inputs with `--fragmentation auto` (the default), andes peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a scoring model from the bundled `models.parquet` store based on the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when selecting the model. MGF files have no activation metadata, so they use flag-based selection (defaulting to `hcd_qexactive_tryp`). Full resolution table: `DOCS.md` §4.
 
 ## Training your own models
 
-cimas can generate scoring models from your own data (`cimas train`) and select them automatically by instrument at search time — useful for instruments or experiment classes the bundled models don't cover well (Orbitrap Astral, timsTOF, TMT/phospho/immunopeptidomics, …). Models live in a single Parquet store and support incremental add/remove/reweight updates with a held-out acceptance gate. See [`TRAIN.md`](TRAIN.md).
+andes can generate scoring models from your own data (`andes train`) and select them automatically by instrument at search time — useful for instruments or experiment classes the bundled models don't cover well (Orbitrap Astral, timsTOF, TMT/phospho/immunopeptidomics, …). Models live in a single Parquet store and support incremental add/remove/reweight updates with a held-out acceptance gate. See [`TRAIN.md`](TRAIN.md).
 
 ## Parity vs Java MS-GF+
 
@@ -209,17 +211,17 @@ PIN output columns are bit-exact with Java MS-GF+ on the agreement bucket (same 
 
 ## Citation
 
-If you use cimas in published work, please cite the original MS-GF+ paper:
+If you use andes in published work, please cite the original MS-GF+ paper:
 
 > Kim, S. and Pevzner, P.A. (2014). MS-GF+ makes progress towards a universal database search tool for proteomics. *Nature Communications*, 5:5277.
 
 And optionally this Rust port:
 
-> bigbio (2026). cimas: a Rust port of MS-GF+ for the quantms pipeline. https://github.com/bigbio/cimas
+> bigbio (2026). andes: a Rust port of MS-GF+ for the quantms pipeline. https://github.com/bigbio/andes
 
 ## License
 
-cimas inherits the upstream MS-GF+ UCSD-Noncommercial license. The license restricts redistribution and commercial use; see `LICENSE` for the full text and `NOTICE` for attribution. The original Java implementation is preserved on the `java-legacy` branch (frozen at the bigbio-optimized version) and `java-legacy-original` branch (synced to upstream `MSGFPlus/msgfplus/master`).
+andes inherits the upstream MS-GF+ UCSD-Noncommercial license. The license restricts redistribution and commercial use; see `LICENSE` for the full text and `NOTICE` for attribution. The original Java implementation is preserved on the `java-legacy` branch (frozen at the bigbio-optimized version) and `java-legacy-original` branch (synced to upstream `MSGFPlus/msgfplus/master`).
 
 ## Acknowledgments
 

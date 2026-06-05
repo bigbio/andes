@@ -1,6 +1,6 @@
 # 7-engine Astral benchmark — uniform Percolator (2026-06-04)
 
-Head-to-head of **cimas** (top-1 and `--chimeric`), **MSFragger 4.2** (DDA+),
+Head-to-head of **andes** (top-1 and `--chimeric`), **MSFragger 4.2** (DDA+),
 **Sage 0.14.7**, **Comet 2025.01**, **Java MS-GF+ v20240326**, and **ProSE**
 (OpenMS, fragment-index engine, `openms-tools-thirdparty:latest`) on a single
 Thermo Orbitrap Astral run. Every engine's output is re-scored through the
@@ -8,9 +8,9 @@ Thermo Orbitrap Astral run. Every engine's output is re-scored through the
 including Java and ProSE, whose outputs are converted to a Percolator PIN by hand
 (see §4).
 
-> **Headline:** Among single-best-per-scan engines, cimas top-1 leads on PSMs and
-> peptides. In the chimeric tier, cimas `--chimeric` and MSFragger DDA+ are neck
-> and neck (cimas ahead on PSMs+peptides, MSFragger on proteins). cimas is the
+> **Headline:** Among single-best-per-scan engines, andes top-1 leads on PSMs and
+> peptides. In the chimeric tier, andes `--chimeric` and MSFragger DDA+ are neck
+> and neck (andes ahead on PSMs+peptides, MSFragger on proteins). andes is the
 > fastest real search — ~30× faster than its own MS-GF+ ancestor.
 
 > **Chimeric FDR — validated (see §8).** An entrapment-FDP check (paired,
@@ -48,25 +48,25 @@ including Java and ProSE, whose outputs are converted to a Percolator PIN by han
 | Engine | Input | Wall | Proteins @1% | PSMs @1% | Peptides @1% |
 |---|---|---:|---:|---:|---:|
 | MSFragger 4.2 (DDA+) | mzML | 7:17 | **5,836** | 73,909 | 25,594 |
-| **cimas** (`--chimeric`) | **`.raw`** | 4:06 | 5,199 | **74,830** | **26,993** |
+| **andes** (`--chimeric`) | **`.raw`** | 4:06 | 5,199 | **74,830** | **26,993** |
 | Sage 0.14.7 (chimera) | mzML | 4:50 | 5,059 | 32,091 | 21,397 |
-| **cimas** (top-1) | **`.raw`** | 3:13 | 4,752 | 35,508 | 22,904 |
+| **andes** (top-1) | **`.raw`** | 3:13 | 4,752 | 35,508 | 22,904 |
 | Java MS-GF+ | mzML | 2:06:36 | 4,570 | 26,542 | 17,954 |
 | ProSE (OpenMS) | mzML | 2:51 | 4,407 | 30,646 | 20,596 |
 | Comet 2025.01 | mzML | 3:30 | 4,354 | 31,435 | 20,607 |
 
 Notes:
-- **cimas** is the only engine reading Thermo `.raw` natively. Sage's generic
+- **andes** is the only engine reading Thermo `.raw` natively. Sage's generic
   release lacks the proprietary Thermo reader (it tries to parse `.raw` as mzML
   and fails), so Sage/MSFragger/Comet/Java/ProSE all run on the mzML.
-- Java MS-GF+ search wall is **2 h 6 min** vs cimas's 3–4 min on identical data.
-- Among top-1 engines, cimas leads PSMs (35,508) and peptides (22,904).
+- Java MS-GF+ search wall is **2 h 6 min** vs andes's 3–4 min on identical data.
+- Among top-1 engines, andes leads PSMs (35,508) and peptides (22,904).
 
 ## 4. Per-engine procedure — exactly how each was run and FDR-controlled
 
 All scripts referenced are in [`scripts/`](scripts/).
 
-### cimas (top-1 and chimeric) — `astral_all5.sh`
+### andes (top-1 and chimeric) — `astral_all5.sh`
 Native `.raw`, built with `--features thermo` (needs rustc ≥ 1.88 + .NET 8 at
 runtime). `--fragmentation auto` selects the HCD/QExactive model. Writes a
 Percolator PIN directly (`--output-pin`). `--chimeric` enables the two-pass
@@ -126,22 +126,22 @@ After Percolator (`-Y --seed 42 --results-psms`), from the target PSM list:
   (`−1/0/1/2/3`) is the closest superset.
 - **Java & ProSE feature sets** are hand-built (§4), not produced by a native
   converter, so their absolute counts are a faithful-but-not-canonical Percolator
-  run. The four engines that emit a native PIN (cimas, MSFragger, Sage, Comet) are
+  run. The four engines that emit a native PIN (andes, MSFragger, Sage, Comet) are
   the strictest apples-to-apples subset.
 - **Chimeric FDP**: reversed-decoy TDC does not expose coincidental real-DB targets
   in multi-PSM-per-scan output — so it is validated separately against an entrapment
   database (§8). The MSFragger DDA+ chimeric counts were not entrapment-checked here
-  (cimas's were) and remain TDC-only.
+  (andes's were) and remain TDC-only.
 
 ## 7. Reproduce
 
 On the benchmark host (engines + data staged under `/srv/data/msgf-bench`):
 
 ```bash
-bash scripts/astral_all5.sh        # cimas top1+chimeric, MSFragger, Sage, ProSE
+bash scripts/astral_all5.sh        # andes top1+chimeric, MSFragger, Sage, ProSE
 bash scripts/comet_astral.sh       # Comet
 bash scripts/uniform_perc.sh       # build Java+ProSE PINs, percolate all 7 uniformly
-bash scripts/entrapment_validate.sh  # §8 entrapment-FDP check (cimas top-1 vs chimeric)
+bash scripts/entrapment_validate.sh  # §8 entrapment-FDP check (andes top-1 vs chimeric)
 ```
 
 Environment: RHEL 9, 8 cores; Percolator 3.7.1 and ProSE/Comet via
@@ -152,7 +152,7 @@ binaries; `MSGFPlus_v20240326.jar`.
 
 Reversed-decoy TDC is blind to **coincidental real-DB targets**: in
 multi-PSM-per-scan (chimeric) output, a second peptide can win by chance against a
-real database sequence and TDC never sees it. To check whether cimas's `--chimeric`
+real database sequence and TDC never sees it. To check whether andes's `--chimeric`
 gain is real or such inflation, the same Astral run is searched against an
 **entrapment database** — the ProteoBench proteins plus a paired `ENT_`-prefixed
 **shuffled twin** of every protein (r = 1, 31,889 + 31,889) — with reversed decoys
@@ -161,7 +161,7 @@ generated as usual. After Percolator @1%, any accepted PSM mapping **only** to a
 `2 · N_ent / N_total` (Wen & Noble paired estimator). Script:
 [`scripts/entrapment_validate.sh`](scripts/entrapment_validate.sh).
 
-| cimas mode | accepted @1% (TDC) | original | entrapment | **true FDP (est.)** |
+| andes mode | accepted @1% (TDC) | original | entrapment | **true FDP (est.)** |
 |---|---:|---:|---:|---:|
 | top-1 | 32,965 | 32,803 | 162 | **0.98%** |
 | `--chimeric` | 69,052 | 68,652 | 400 | **1.16%** |

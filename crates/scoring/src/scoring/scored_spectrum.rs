@@ -49,15 +49,15 @@ struct RankKeptCtx {
     suffix_score_cache: Vec<f32>,
 }
 
-/// Memoize the `(CIMAS_TRACE_IONS && CIMAS_TRACE_PEP)` env-var probe once,
+/// Memoize the `(Andes_TRACE_IONS && Andes_TRACE_PEP)` env-var probe once,
 /// rather than calling `env::var_os` twice per `directional_node_score_inner`
 /// invocation. That inner loop fires for every (spectrum × split × segment)
 /// triple while building the score_psm cache.
 fn trace_ions_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| {
-        std::env::var_os("CIMAS_TRACE_IONS").is_some()
-            && std::env::var_os("CIMAS_TRACE_PEP").is_some()
+        std::env::var_os("Andes_TRACE_IONS").is_some()
+            && std::env::var_os("Andes_TRACE_PEP").is_some()
     })
 }
 
@@ -494,7 +494,7 @@ impl<'a> ScoredSpectrum<'a> {
     /// `(rank, mz, intensity)` triples sorted by rank ascending (rank 1 = most
     /// intense). Filtered-out peaks (rank == `u32::MAX`) are skipped.
     ///
-    /// Read-only — does not affect scoring. Used by `cimas-trace --dump-peaks`
+    /// Read-only — does not affect scoring. Used by `andes-trace --dump-peaks`
     /// to inspect this implementation's kept-peak/rank assignment.
     pub fn dump_active_peaks(&self) -> Vec<(u32, f64, f32)> {
         let (peaks, ranks) = self.active_peaks_and_ranks();

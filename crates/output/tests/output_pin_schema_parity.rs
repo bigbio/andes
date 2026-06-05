@@ -1,6 +1,6 @@
-//! `.pin` schema test for CIMAS's GF-free output.
+//! `.pin` schema test for Andes's GF-free output.
 //!
-//! NOTE: CIMAS removed the generating function entirely, so its `.pin` schema
+//! NOTE: Andes removed the generating function entirely, so its `.pin` schema
 //! INTENTIONALLY diverges from the historical Java MS-GF+ schema: the
 //! GF-derived columns (`DeNovoScore`, `lnSpecEValue`, `lnEValue`,
 //! `lnDeltaSpecEValue`) are no longer emitted, and `RawScore` is the sole score
@@ -35,11 +35,11 @@ fn first_line(path: &std::path::Path) -> String {
     BufReader::new(f).lines().next().expect("file is empty").expect("read first line")
 }
 
-/// Columns that the generating function used to emit and that GF-free CIMAS
+/// Columns that the generating function used to emit and that GF-free Andes
 /// must NOT emit anymore.
 const GF_COLUMNS: [&str; 4] = ["DeNovoScore", "lnSpecEValue", "lnEValue", "lnDeltaSpecEValue"];
 
-/// Additive feature columns CIMAS emits between matchedIonRatio and Peptide.
+/// Additive feature columns Andes emits between matchedIonRatio and Peptide.
 const ADDITIVE_COLUMNS: [&str; 4] =
     ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore"];
 

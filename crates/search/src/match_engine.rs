@@ -1240,6 +1240,34 @@ pub(crate) fn compute_psm_features(
     let (mean_error_top7, stdev_error_top7)         = mean_and_pop_stdev(&abs_ppm_errors);
     let (mean_rel_error_top7, stdev_rel_error_top7) = mean_and_pop_stdev(&rel_ppm_errors);
 
+    // ── Strong-score Stage-1: ppm-Gaussian "tight-match evidence" ─────────────
+    // Σ exp(-½ (ppmᵢ/σ)²) over ALL matched ions (not just top-7), σ = 7 ppm.
+    // Each ion contributes ~1 when matched within a few ppm and ~0 near the
+    // tolerance edge, so the sum rewards PSMs whose fragments cluster tightly in
+    // mass accuracy — the high-res signal the intensity-rank model throws away.
+    // For low-res spectra every ppm error is large, so the term is ~0 for all
+    // candidates and Percolator simply learns a near-zero weight (harmless).
+    const PPM_SIGMA: f64 = 7.0;
+    let ppm_gaussian_score: f32 = matched_ions
+        .iter()
+        .filter(|&&(_, _, pred, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _)| {
+            let ppm = (obs - pred) / pred * 1e6;
+            (-0.5 * (ppm / PPM_SIGMA) * (ppm / PPM_SIGMA)).exp()
+        })
+        .sum::<f64>() as f32;
+
+    // ── Strong-score Stage-1: complementary-ion count ────────────────────────
+    // Bond i (1-based) is reported by both b_i and y_{n-i}; count the cleavage
+    // sites where BOTH halves are observed. `b_any_matched`/`y_any_matched` are
+    // 0-indexed by ion number, so b_i = [i-1] and y_{n-i} = [n-i-1].
+    let mut complementary_ion_count: u32 = 0;
+    for i in 1..n {
+        if b_any_matched[i - 1] && y_any_matched[n - i - 1] {
+            complementary_ion_count += 1;
+        }
+    }
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
@@ -1267,6 +1295,8 @@ pub(crate) fn compute_psm_features(
         // `compute_psm_features` has no cross-candidate view, so default to the
         // uncalibrated RawScore-equivalent here (overwritten in fill_post_topn).
         tailor_score: 0.0,
+        ppm_gaussian_score,
+        complementary_ion_count,
     }
 }
 
@@ -1430,6 +1460,61 @@ mod feature_tests {
 
         // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: strong-score Stage-1 bolt-ons (ppm-Gaussian + complementary) ──
+
+    #[test]
+    fn compute_psm_features_strong_score_stage1_bolt_ons() {
+        // ALA-ALA-ALA → predict_by_ions(charge 1) yields b1,b2,y1,y2.
+        // Bonds 1 and 2 are each reported by a (b, complementary-y) pair:
+        //   bond 1 = b1 + y2, bond 2 = b2 + y1.
+        let pep = ala_peptide(3);
+        let predicted = predict_by_ions(&pep, 1..=1);
+
+        // (a) Peaks exactly at every predicted m/z (0 ppm error).
+        let mut exact: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        exact.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_exact = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(exact)),
+            &pep, &make_scorer(0.01), 2,
+        );
+
+        // All 4 ions matched at 0 ppm → each Gaussian kernel == 1 → sum ≈ 4.
+        assert!(
+            (f_exact.ppm_gaussian_score - 4.0).abs() < 0.05,
+            "ppm_gaussian_score should be ~4 for 4 exact matches, got {}",
+            f_exact.ppm_gaussian_score
+        );
+        // Both bonds have b and complementary y observed.
+        assert_eq!(
+            f_exact.complementary_ion_count, 2,
+            "both cleavage sites should be complementary, got {}",
+            f_exact.complementary_ion_count
+        );
+
+        // (b) Same peaks shifted by ~15 ppm: still matched (20 ppm feature
+        //     window) but each kernel exp(-½(15/7)²) ≈ 0.10, so the sum drops
+        //     far below the exact case — tight matches are worth more evidence.
+        let mut shifted: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz * (1.0 + 15e-6), (i + 1) as f32 * 10.0))
+            .collect();
+        shifted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_shift = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(shifted)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        assert!(
+            f_shift.ppm_gaussian_score < f_exact.ppm_gaussian_score * 0.5,
+            "ppm_gaussian_score should fall sharply when matches scatter (exact={}, shifted={})",
+            f_exact.ppm_gaussian_score, f_shift.ppm_gaussian_score
+        );
     }
 
     // ── Test: top-7 error stats are nonzero when ions match ─────────────────

@@ -91,6 +91,22 @@ pub struct PsmFeatures {
     /// amplifies noise on tiny candidate sets. Purely additive: the histogram
     /// it is computed from never alters which candidates are scored or kept.
     pub tailor_score: f32,
+
+    // ── Strong-score Stage-1 additive bolt-ons (new PIN columns) ───────────
+    /// `Σ exp(-½ (ppmᵢ/σ)²)` over all matched b/y ions (σ = 7 ppm). A
+    /// Gaussian-kernel "tight-match evidence" sum: a fragment matched at a few
+    /// ppm contributes ~1, one scattered near the tolerance edge contributes
+    /// ~0. Turns fragment mass accuracy into evidence (the rank model discards
+    /// it), so a real high-res PSM whose ions cluster at low ppm scores far
+    /// above a coincidental match whose ions scatter. ~0 for all low-res PSMs
+    /// (every ppm is huge), so Percolator simply down-weights it there.
+    pub ppm_gaussian_score: f32,
+    /// Number of backbone cleavage sites where BOTH the b-ion and its
+    /// complementary y-ion (bond `i` ↔ `b_i` + `y_{n-i}`) are observed.
+    /// Both halves of one cleavage matching by chance is rare, so this is a
+    /// strong "real peptide" signal that `num_matched_main_ions` (b OR y per
+    /// position) does not capture.
+    pub complementary_ion_count: u32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

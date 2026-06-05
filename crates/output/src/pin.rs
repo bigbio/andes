@@ -62,8 +62,8 @@
 //! - `CTermIonCurrentRatio` — matched y intensity / total MS2 intensity.
 //! - `MS2IonCurrent` — raw sum of all MS2 peak intensities (NOT log10).
 //! - `IsolationWindowEfficiency` — always 0.0 (not available from the Spectrum object).
-//! - `MeanErrorTop7` — mean |Da| error of top-7 most-intense matched ions.
-//! - `StdevErrorTop7` — population stdev of |Da| errors for top-7 ions.
+//! - `MeanErrorTop7` — mean |ppm| error of top-7 most-intense matched ions.
+//! - `StdevErrorTop7` — population stdev of |ppm| errors for top-7 ions.
 //! - `MeanRelErrorTop7` — mean signed ppm error of top-7 ions.
 //! - `StdevRelErrorTop7` — population stdev of signed ppm errors for top-7.
 //! - `matchedIonRatio` — `NumMatchedMainIons / peptide.length()`.
@@ -217,6 +217,12 @@ fn write_header<W: Write>(
         // comparable across spectra — the role the removed generating function
         // used to play — recovering low-res discrimination without the GF.
         "TailorScore".to_string(),
+        // ADDITIVE strong-score Stage-1 bolt-ons (deterministic, no model
+        // change): PpmGaussianScore = Σ exp(-½(ppm/7)²) over matched ions
+        // (turns fragment mass accuracy into evidence the rank model discards);
+        // ComplementaryIonCount = cleavage sites where both b and y match.
+        "PpmGaussianScore".to_string(),
+        "ComplementaryIonCount".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -450,6 +456,11 @@ fn write_psm_row<W: Write>(
     // TailorScore = that PSM's RawScore / the spectrum's shared denominator.
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.tailor_score as f64)?;
+
+    // Strong-score Stage-1 bolt-ons (additive, per-PSM).
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.ppm_gaussian_score as f64)?;
+    write!(writer, "\t{}", psm.features.complementary_ion_count)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -713,6 +724,7 @@ mod tests {
             "matchedIonRatio",
             "EdgeScore",
             "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore", "TailorScore",
+            "PpmGaussianScore", "ComplementaryIonCount",
             "Peptide", "Proteins",
         ];
 

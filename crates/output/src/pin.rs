@@ -223,6 +223,9 @@ fn write_header<W: Write>(
         // ComplementaryIonCount = cleavage sites where both b and y match.
         "PpmGaussianScore".to_string(),
         "ComplementaryIonCount".to_string(),
+        // UnexplainedTopIntensityFraction = fraction of top-20 peaks not matched
+        // by any predicted b/y ion (lower = better).
+        "UnexplainedTopIntensityFraction".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -461,6 +464,8 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.ppm_gaussian_score as f64)?;
     write!(writer, "\t{}", psm.features.complementary_ion_count)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.unexplained_top_intensity_fraction as f64)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -725,6 +730,7 @@ mod tests {
             "EdgeScore",
             "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore", "TailorScore",
             "PpmGaussianScore", "ComplementaryIonCount",
+            "UnexplainedTopIntensityFraction",
             "Peptide", "Proteins",
         ];
 

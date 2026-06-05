@@ -107,6 +107,11 @@ pub struct PsmFeatures {
     /// strong "real peptide" signal that `num_matched_main_ions` (b OR y per
     /// position) does not capture.
     pub complementary_ion_count: u32,
+    /// Fraction of the spectrum's top-20 most-intense peaks that are NOT
+    /// matched by any predicted b/y ion (within feature tolerance). Lower =
+    /// better — a real PSM explains most big peaks; a coincidental match
+    /// leaves intense unexplained signal.
+    pub unexplained_top_intensity_fraction: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

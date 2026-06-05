@@ -1268,6 +1268,36 @@ pub(crate) fn compute_psm_features(
         }
     }
 
+    // ── Strong-score Stage-1: unexplained top-intensity fraction ───────────
+    // Of the top-20 most-intense peaks, what fraction is NOT explained by any
+    // matched b/y ion? Uses the same feature tolerance as ion matching.
+    let matched_obs_mz: SmallVec<[f64; 96]> =
+        matched_ions.iter().map(|&(_, obs, _, _)| obs).collect();
+    let tol_da_for_mz = |mz: f64| -> f64 {
+        if feature_tol_is_ppm {
+            mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        }
+    };
+    let peak_is_explained = |peak_mz: f64| -> bool {
+        let tol = tol_da_for_mz(peak_mz);
+        matched_obs_mz
+            .iter()
+            .any(|&obs| (peak_mz - obs).abs() <= tol)
+    };
+    let top_peaks = scored_spec.dump_active_peaks(); // rank-ordered (1 = most intense)
+    let top_n = top_peaks.len().min(20);
+    let unexplained_count = top_peaks[..top_n]
+        .iter()
+        .filter(|&&(_, mz, _)| !peak_is_explained(mz))
+        .count();
+    let unexplained_top_intensity_fraction = if top_n > 0 {
+        unexplained_count as f32 / top_n as f32
+    } else {
+        0.0
+    };
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
@@ -1297,6 +1327,7 @@ pub(crate) fn compute_psm_features(
         tailor_score: 0.0,
         ppm_gaussian_score,
         complementary_ion_count,
+        unexplained_top_intensity_fraction,
     }
 }
 
@@ -1460,6 +1491,58 @@ mod feature_tests {
 
         // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: unexplained top-intensity fraction ─────────────────────────────
+
+    #[test]
+    fn compute_psm_features_unexplained_top_intensity_fraction() {
+        let pep = ala_peptide(3);
+        let predicted = predict_by_ions(&pep, 1..=1);
+
+        // (a) Peaks only at predicted m/z → all top peaks explained → fraction 0.
+        let mut matched_only: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        matched_only.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_all = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(matched_only)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        assert_eq!(
+            f_all.unexplained_top_intensity_fraction, 0.0,
+            "all top peaks matched → fraction should be 0, got {}",
+            f_all.unexplained_top_intensity_fraction
+        );
+
+        // (b) Add 5 intense unmatched peaks → fraction rises.
+        let mut with_noise = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect::<Vec<_>>();
+        for j in 0..5 {
+            with_noise.push((1500.0 + j as f64 * 10.0, 1000.0 + j as f32));
+        }
+        with_noise.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_noise = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(with_noise)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        assert!(
+            f_noise.unexplained_top_intensity_fraction > f_all.unexplained_top_intensity_fraction,
+            "big unmatched peaks should raise fraction (all={}, noise={})",
+            f_all.unexplained_top_intensity_fraction,
+            f_noise.unexplained_top_intensity_fraction
+        );
+        // 5 unmatched peaks among top-9 (4 matched + 5 noise) → 5/9.
+        assert!(
+            (f_noise.unexplained_top_intensity_fraction - 5.0 / 9.0).abs() < 0.05,
+            "expected ~5/9 unexplained, got {}",
+            f_noise.unexplained_top_intensity_fraction
+        );
     }
 
     // ── Test: strong-score Stage-1 bolt-ons (ppm-Gaussian + complementary) ──

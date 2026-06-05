@@ -61,12 +61,14 @@ dependencies = [
 name = "andes"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "clap",
  "input",
  "model",
  "model-train",
  "num_cpus",
  "output",
+ "parquet",
  "rayon",
  "scoring",
  "search",

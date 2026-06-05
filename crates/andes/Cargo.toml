@@ -20,6 +20,8 @@ clap = { workspace = true }
 num_cpus = "1.16"
 rayon = "1.10"
 thiserror = { workspace = true }
+arrow = "53"
+parquet = "53"
 
 [features]
 # Native Thermo .raw input (delegates to the input crate's `thermo` feature).
@@ -34,3 +36,5 @@ timstof = ["input/timstof"]
 
 [dev-dependencies]
 tempfile = "3.10"
+arrow = "53"
+parquet = "53"

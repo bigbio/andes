@@ -369,12 +369,69 @@ struct TrainArgs {
     force: bool,
 }
 
+/// Training arguments for `andes train-from-msnet`.
+///
+/// Trains a scoring model directly from externally-labeled, high-confidence
+/// PSMs supplied as a "flat training parquet" (one row per PSM, each carrying
+/// the spectrum peaks + identified peptide + resolved mod mass-deltas). This
+/// bypasses the bootstrap-search label step entirely: every input row is a
+/// label. The seed model supplies only structural hyperparameters (`mme`,
+/// deconvolution, segments, frag/precursor offset tables, max_rank); all
+/// learned distributions come from the input data.
+#[derive(Args, Debug)]
+struct TrainFromMsnetArgs {
+    /// Input flat training parquet(s). Repeatable; stats accumulate across all
+    /// inputs into a single model.
+    #[arg(long = "in", required = true)]
+    inputs: Vec<PathBuf>,
+
+    /// Path to the Parquet model store to write (created if absent; existing
+    /// models are preserved and re-written alongside the new one). REQUIRED.
+    #[arg(long = "out-store")]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `default`.
+    #[arg(long = "model-id", default_value = "default")]
+    model_id: String,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or a
+    /// path to a binary `.param` file. Supplies structural hyperparameters only.
+    #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
+    seed_model: String,
+
+    /// Fragment match tolerance in ppm. Overwrites the seed model's `mme`
+    /// before training. Mutually exclusive with `--fragment-tol-da`. When
+    /// neither is given, the seed model's `mme` is kept.
+    #[arg(long = "fragment-tol-ppm", conflicts_with = "fragment_tol_da")]
+    fragment_tol_ppm: Option<f64>,
+
+    /// Fragment match tolerance in Da. Overwrites the seed model's `mme`
+    /// before training. Mutually exclusive with `--fragment-tol-ppm`.
+    #[arg(long = "fragment-tol-da")]
+    fragment_tol_da: Option<f64>,
+
+    /// Number of worker threads. Defaults to logical CPU count.
+    #[arg(long, default_value_t = num_cpus::get())]
+    threads: usize,
+}
+
 /// Available subcommands.
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Train a scoring model from spectra and a FASTA database, writing the
     /// result to a Parquet model store.
-    Train(TrainArgs),
+    ///
+    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
+    Train(Box<TrainArgs>),
+
+    /// Train a scoring model directly from externally-labeled, high-confidence
+    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
+    /// search. Used for the Phase-3 "own models" path.
+    ///
+    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`):
+    /// the largest variant (`Train`) dominates the size otherwise.
+    #[command(name = "train-from-msnet")]
+    TrainFromMsnet(Box<TrainFromMsnetArgs>),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -402,7 +459,8 @@ fn main() -> ExitCode {
     configure_bundled_dotnet();
     let top = TopCli::parse();
     let result = match top.command {
-        Some(Command::Train(args)) => run_train(args),
+        Some(Command::Train(args)) => run_train(*args),
+        Some(Command::TrainFromMsnet(args)) => run_train_from_msnet(*args),
         None => {
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
@@ -1664,6 +1722,380 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// train-from-msnet: supervised training from externally-labeled PSM parquets
+// ════════════════════════════════════════════════════════════════════════════
+
+/// One confident, externally-labeled PSM read from a flat training parquet.
+///
+/// This is the in-memory form of one parquet row (see the column contract in
+/// the `train-from-msnet` CLI docs). The peaks are stored already sorted
+/// ascending by m/z (the parquet stores acquisition order; the reader sorts).
+struct MsnetPsm {
+    spectrum: Spectrum,
+    peptide: model::peptide::Peptide,
+    charge: u8,
+}
+
+/// Build a [`model::peptide::Peptide`] from a bare uppercase sequence plus
+/// resolved modification mass-deltas.
+///
+/// Modifications are applied two ways, matching how the scoring code computes
+/// peptide mass (`Peptide::new` sums `aa.mass + mod_.mass_delta` per residue):
+///
+/// - **Residue mods** (`res_mod_pos` / `res_mod_delta`, 1-based positions):
+///   attached to the residue at that position via `AminoAcid::with_mod` with a
+///   `ModLocation::Anywhere`, `ResidueSpec::Specific(residue)` modification.
+/// - **Terminal mods** (`nterm_delta` / `cterm_delta`): folded onto the first /
+///   last residue's mass-delta. Because `Peptide::new` only sums per-residue
+///   `mod_.mass_delta`, a terminal delta must be carried by a residue's `mod_`
+///   to be counted. If a residue already carries a residue mod, the terminal
+///   delta is *added* to that residue's existing delta (a single combined
+///   `Modification`); otherwise a fresh terminal `Modification` is attached.
+///   This keeps `peptide.mass()` correct regardless of overlap.
+///
+/// Returns an error if `seq` contains a non-standard residue or the mod arrays
+/// are misaligned.
+fn build_msnet_peptide(
+    seq: &str,
+    res_mod_pos: &[i32],
+    res_mod_delta: &[f64],
+    nterm_delta: f64,
+    cterm_delta: f64,
+) -> Result<model::peptide::Peptide, Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    if res_mod_pos.len() != res_mod_delta.len() {
+        return Err(format!(
+            "res_mod_pos ({}) and res_mod_delta ({}) length mismatch",
+            res_mod_pos.len(),
+            res_mod_delta.len()
+        )
+        .into());
+    }
+    let bytes = seq.as_bytes();
+    if bytes.is_empty() {
+        return Err("empty peptide sequence".into());
+    }
+    let n = bytes.len();
+
+    // Accumulate the total mod delta to apply to each residue (1-based -> 0-based).
+    // Residue mods first, then terminal deltas folded onto the end residues.
+    let mut residue_delta = vec![0.0f64; n];
+    let mut residue_modded = vec![false; n];
+    for (&pos1, &delta) in res_mod_pos.iter().zip(res_mod_delta.iter()) {
+        if pos1 < 1 || (pos1 as usize) > n {
+            return Err(format!(
+                "res_mod_pos {pos1} out of range for sequence of length {n}"
+            )
+            .into());
+        }
+        let idx = (pos1 - 1) as usize;
+        residue_delta[idx] += delta;
+        residue_modded[idx] = true;
+    }
+    if nterm_delta != 0.0 {
+        residue_delta[0] += nterm_delta;
+        residue_modded[0] = true;
+    }
+    if cterm_delta != 0.0 {
+        residue_delta[n - 1] += cterm_delta;
+        residue_modded[n - 1] = true;
+    }
+
+    let mut residues = Vec::with_capacity(n);
+    for (i, &r) in bytes.iter().enumerate() {
+        let aa = model::AminoAcid::standard(r)
+            .ok_or_else(|| format!("non-standard residue {:?} at position {}", r as char, i + 1))?;
+        if residue_modded[i] {
+            let m = Modification {
+                name: "msnet".to_string(),
+                mass_delta: residue_delta[i],
+                residue: ResidueSpec::Specific(r),
+                location: ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+            };
+            residues.push(aa.with_mod(Arc::new(m)));
+        } else {
+            residues.push(aa);
+        }
+    }
+
+    // Flanking residues per the spec: pre=`_`, post=`-`.
+    Ok(model::peptide::Peptide::new(residues, b'_', b'-'))
+}
+
+/// Read one flat training parquet into a vector of [`MsnetPsm`].
+///
+/// Reads via the workspace `parquet`/`arrow` crates in record-batch chunks.
+/// List columns (`res_mod_pos`, `res_mod_delta`, `mz`, `intensity`) are
+/// decoded per-row from their `ListArray` offsets. Peaks are sorted ascending
+/// by m/z (the parquet stores acquisition order).
+fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn std::error::Error>> {
+    use arrow::array::{Array, Float32Array, Float64Array, Int32Array, ListArray, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let file = File::open(path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| format!("parquet reader for {}: {e}", path.display()))?
+        .build()
+        .map_err(|e| format!("building parquet reader for {}: {e}", path.display()))?;
+
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| format!("reading batch from {}: {e}", path.display()))?;
+
+        let col = |name: &str| -> Result<&std::sync::Arc<dyn Array>, Box<dyn std::error::Error>> {
+            batch
+                .column_by_name(name)
+                .ok_or_else(|| format!("missing column '{name}' in {}", path.display()).into())
+        };
+
+        let seq = col("seq")?.as_any().downcast_ref::<StringArray>()
+            .ok_or("column 'seq' is not a STRING column")?;
+        let charge = col("charge")?.as_any().downcast_ref::<Int32Array>()
+            .ok_or("column 'charge' is not an INT32 column")?;
+        let prec_mz = col("prec_mz")?.as_any().downcast_ref::<Float64Array>()
+            .ok_or("column 'prec_mz' is not a DOUBLE column")?;
+        let res_mod_pos = col("res_mod_pos")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'res_mod_pos' is not a LIST column")?;
+        let res_mod_delta = col("res_mod_delta")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'res_mod_delta' is not a LIST column")?;
+        let nterm = col("nterm_delta")?.as_any().downcast_ref::<Float64Array>()
+            .ok_or("column 'nterm_delta' is not a DOUBLE column")?;
+        let cterm = col("cterm_delta")?.as_any().downcast_ref::<Float64Array>()
+            .ok_or("column 'cterm_delta' is not a DOUBLE column")?;
+        let mz = col("mz")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'mz' is not a LIST column")?;
+        let intensity = col("intensity")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'intensity' is not a LIST column")?;
+
+        // Helper to pull a Vec<i32> out of one ListArray row.
+        let list_i32 = |list: &ListArray, i: usize| -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+            if list.is_null(i) {
+                return Ok(Vec::new());
+            }
+            let v = list.value(i);
+            let a = v.as_any().downcast_ref::<Int32Array>()
+                .ok_or("list element is not INT32")?;
+            Ok((0..a.len()).map(|j| a.value(j)).collect())
+        };
+        let list_f64 = |list: &ListArray, i: usize| -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+            if list.is_null(i) {
+                return Ok(Vec::new());
+            }
+            let v = list.value(i);
+            let a = v.as_any().downcast_ref::<Float64Array>()
+                .ok_or("list element is not DOUBLE")?;
+            Ok((0..a.len()).map(|j| a.value(j)).collect())
+        };
+        let list_f32 = |list: &ListArray, i: usize| -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+            if list.is_null(i) {
+                return Ok(Vec::new());
+            }
+            let v = list.value(i);
+            let a = v.as_any().downcast_ref::<Float32Array>()
+                .ok_or("list element is not FLOAT")?;
+            Ok((0..a.len()).map(|j| a.value(j)).collect())
+        };
+
+        for i in 0..batch.num_rows() {
+            let seq_s = seq.value(i);
+            let ch = charge.value(i);
+            if !(1..=255).contains(&ch) {
+                return Err(format!("invalid charge {ch} at row {i} of {}", path.display()).into());
+            }
+            let charge_u8 = ch as u8;
+
+            let positions = list_i32(res_mod_pos, i)?;
+            let deltas = list_f64(res_mod_delta, i)?;
+            let peptide = build_msnet_peptide(
+                seq_s,
+                &positions,
+                &deltas,
+                nterm.value(i),
+                cterm.value(i),
+            )?;
+
+            let mzs = list_f32(mz, i)?;
+            let ints = list_f32(intensity, i)?;
+            if mzs.len() != ints.len() {
+                return Err(format!(
+                    "mz ({}) and intensity ({}) length mismatch at row {i} of {}",
+                    mzs.len(),
+                    ints.len(),
+                    path.display()
+                )
+                .into());
+            }
+            let mut peaks: Vec<(f64, f32)> =
+                mzs.iter().zip(ints.iter()).map(|(&m, &it)| (m as f64, it)).collect();
+            // Input is acquisition order; the scoring path requires ascending m/z.
+            peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            let spectrum = Spectrum {
+                title: format!("row{i}"),
+                precursor_mz: prec_mz.value(i),
+                precursor_intensity: None,
+                precursor_charge: Some(charge_u8 as i32),
+                rt_seconds: None,
+                scan: None,
+                peaks,
+                activation_method: None,
+                isolation_lower_offset: None,
+                isolation_upper_offset: None,
+            };
+
+            out.push(MsnetPsm { spectrum, peptide, charge: charge_u8 });
+        }
+    }
+    Ok(out)
+}
+
+/// `andes train-from-msnet`: train a scoring model directly from
+/// externally-labeled PSM parquets, reusing the existing
+/// accumulate → estimate → store machinery but bypassing the bootstrap search.
+fn run_train_from_msnet(
+    args: TrainFromMsnetArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rayon::prelude::*;
+
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    // ── 2. Read all input parquets ────────────────────────────────────────────
+    let mut psms: Vec<MsnetPsm> = Vec::new();
+    let mut rows_read = 0usize;
+    for input in &args.inputs {
+        eprintln!("train-from-msnet: reading {} ...", input.display());
+        let part = read_msnet_parquet(input)?;
+        rows_read += part.len();
+        eprintln!("train-from-msnet:   {} PSM rows", part.len());
+        psms.extend(part);
+    }
+    if psms.is_empty() {
+        return Err("no PSM rows read from any --in parquet".into());
+    }
+    eprintln!("train-from-msnet: {rows_read} total PSM rows across {} file(s)", args.inputs.len());
+
+    // ── 3. Load seed Param and apply the fragment-tolerance override ──────────
+    let (seed_model_id, mut seed_param): (String, Param) =
+        load_seed_param(&Some(args.seed_model.clone()))?;
+    eprintln!("train-from-msnet: seed model = {seed_model_id}");
+    if let Some(ppm) = args.fragment_tol_ppm {
+        seed_param.mme = Tolerance::Ppm(ppm);
+        eprintln!("train-from-msnet: fragment tolerance overridden to {ppm} ppm");
+    } else if let Some(da) = args.fragment_tol_da {
+        seed_param.mme = Tolerance::Da(da);
+        eprintln!("train-from-msnet: fragment tolerance overridden to {da} Da");
+    } else {
+        eprintln!("train-from-msnet: using seed fragment tolerance {:?}", seed_param.mme);
+    }
+
+    // Build the scorer AFTER the tolerance override so accumulation uses it.
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4. Accumulate ion-match statistics (parallel; per-worker CountStats) ──
+    eprintln!("train-from-msnet: accumulating ion-match statistics ...");
+    let stats = psms
+        .par_iter()
+        .fold(
+            CountStats::new,
+            |mut acc, psm| {
+                let accumulator = StatsAccumulator::new(&seed_scorer);
+                accumulator.accumulate(&mut acc, &psm.spectrum, &psm.peptide, psm.charge);
+                acc
+            },
+        )
+        .collect::<Vec<_>>();
+    let stats = merge(stats);
+    eprintln!("train-from-msnet: accumulated {} PSMs", psms.len());
+
+    // ── 5. Estimate the model (replaces all learned tables in the seed) ───────
+    eprintln!("train-from-msnet: estimating model parameters ...");
+    let cfg = EstimatorConfig::default();
+    let estimator = Estimator::new(cfg);
+    let trained_param = estimator.estimate(&stats, &seed_param);
+    let n_partitions = trained_param.partitions.len();
+    eprintln!("train-from-msnet: trained model has {n_partitions} partitions");
+
+    // ── 6. Build the source ledger (sentinel train_fdr; pre-labeled input) ────
+    let dataset = args
+        .inputs
+        .first()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "msnet".to_string());
+    let ledger = SourceLedger {
+        source_id: "msnet".to_string(),
+        dataset,
+        n_psms: psms.len() as i64,
+        date: format_today_iso8601(),
+        weight: 1.0,
+        train_fdr: 1.0, // sentinel: input is pre-labeled, no q-value filtering here
+        instrument: String::new(),
+        experiment_class: String::new(),
+    };
+
+    // ── 7. Write to store, preserving any other existing models ───────────────
+    let store_path = &args.out_store;
+    let model_id = args.model_id.clone();
+    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+    if store_path.exists() {
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+        for id in store.model_ids() {
+            if id == model_id {
+                eprintln!("train-from-msnet: overwriting existing model '{id}' in store");
+                continue;
+            }
+            let p = store.load_param(&id)
+                .map_err(|e| format!("reading model '{id}': {e}"))?;
+            let src_ledgers = store.load_sources(&id).unwrap_or_default();
+            let mut src = Vec::new();
+            for l in src_ledgers {
+                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                    src.push((l, s));
+                }
+            }
+            existing_other.push((id, p, src));
+        }
+    }
+
+    let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+    all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
+    for (id, p, src) in existing_other {
+        all_entries.push((id, p, src));
+    }
+
+    write_all_models_with_sources_pub(
+        store_path,
+        &all_entries.iter()
+            .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+
+    eprintln!(
+        "train-from-msnet: wrote model '{model_id}' to {} (source 'msnet', {} PSMs, {n_partitions} partitions) [{:.2}s]",
+        store_path.display(),
+        psms.len(),
+        t0.elapsed().as_secs_f64(),
+    );
+
+    Ok(())
+}
+
 /// Incremental update mode (Part D): `--update <MODEL_ID>` plus one of
 /// `--add`, `--remove-source`, `--reweight`, `--decay`.
 fn run_train_update(
@@ -2552,5 +2984,77 @@ mod param_resolver_tests {
         assert_eq!(parse_precursor_cal("OFF").unwrap(), PrecursorCalMode::Off);
         assert_eq!(parse_precursor_cal("on").unwrap(), PrecursorCalMode::On);
         assert!(parse_precursor_cal("bogus").is_err());
+    }
+}
+
+#[cfg(test)]
+mod train_from_msnet_tests {
+    use super::*;
+    use model::mass::H2O;
+
+    /// Reference: unmodified peptide mass = sum of residue masses + H2O.
+    fn unmod_mass(seq: &[u8]) -> f64 {
+        let rsum: f64 = seq
+            .iter()
+            .map(|&r| model::AminoAcid::standard(r).unwrap().mass)
+            .sum();
+        rsum + H2O
+    }
+
+    #[test]
+    fn unmodified_peptide_mass_matches_reference() {
+        let p = build_msnet_peptide("PEPTIDEK", &[], &[], 0.0, 0.0).unwrap();
+        let expected = unmod_mass(b"PEPTIDEK");
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert!(p.residues.iter().all(|aa| !aa.is_modified()));
+    }
+
+    /// Oxidation on residue 1 of "MPEPTIDE" must add exactly +15.994915 Da to
+    /// the unmodified mass — verifying mods are actually applied, not dropped.
+    #[test]
+    fn residue_mod_mass_is_correct() {
+        const OX: f64 = 15.994915;
+        let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], 0.0, 0.0).unwrap();
+        let expected = unmod_mass(b"MPEPTIDE") + OX;
+        // Exact: Peptide::new sums aa.mass + mod_.mass_delta, so the delta is
+        // added with the same arithmetic as the reference.
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert!(p.residues[0].is_modified(), "residue 1 should carry the mod");
+        assert_eq!(p.residues[0].mod_.as_ref().unwrap().mass_delta, OX);
+    }
+
+    /// N-terminal Acetyl folds onto the first residue's mass-delta.
+    #[test]
+    fn nterm_mod_mass_is_correct() {
+        const ACETYL: f64 = 42.010565;
+        let p = build_msnet_peptide("PEPTIDEK", &[], &[], ACETYL, 0.0).unwrap();
+        let expected = unmod_mass(b"PEPTIDEK") + ACETYL;
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert!(p.residues[0].is_modified());
+    }
+
+    /// A residue mod and a terminal mod on the SAME residue must sum (not
+    /// clobber) so the total mass stays correct.
+    #[test]
+    fn overlapping_residue_and_nterm_mods_sum() {
+        const OX: f64 = 15.994915;
+        const ACETYL: f64 = 42.010565;
+        // Oxidation on residue 1 (M) AND N-term acetyl on the same first residue.
+        let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], ACETYL, 0.0).unwrap();
+        let expected = unmod_mass(b"MPEPTIDE") + OX + ACETYL;
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert_eq!(p.residues[0].mod_.as_ref().unwrap().mass_delta, OX + ACETYL);
+    }
+
+    #[test]
+    fn mismatched_mod_arrays_error() {
+        let r = build_msnet_peptide("PEPTIDE", &[1, 2], &[1.0], 0.0, 0.0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn nonstandard_residue_errors() {
+        let r = build_msnet_peptide("PEPTBDE", &[], &[], 0.0, 0.0);
+        assert!(r.is_err());
     }
 }

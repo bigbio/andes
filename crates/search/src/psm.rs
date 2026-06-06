@@ -120,6 +120,9 @@ pub struct PsmFeatures {
     /// −H2O (−18.0106 Da) or −NH3 (−17.0265 Da) within feature tolerance.
     /// Strong CID/TMT signal that the intensity-rank model underuses.
     pub neutral_loss_ion_count: u32,
+    /// Mean intensity-rank of matched b/y ions (rank 1 = most intense peak).
+    /// Real PSMs match dominant peaks; coincidental matches hit weak peaks.
+    pub mean_matched_intensity_rank: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

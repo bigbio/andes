@@ -1008,6 +1008,7 @@ pub(crate) fn compute_psm_features(
     // SmallVec inlines for up to ~96 matched ions (b+y at n positions, with
     // some headroom for partition multi-ion-type matches at long peptides).
     let mut matched_ions: SmallVec<[(f32, f64, f64, bool); 96]> = SmallVec::new();
+    let mut matched_ion_ranks: SmallVec<[u32; 96]> = SmallVec::new();
 
     // Java parity: feature-counting uses a
     // HARDCODED fragment tolerance, NOT param.mme. High-res instruments
@@ -1038,11 +1039,12 @@ pub(crate) fn compute_psm_features(
         } else {
             feature_tol
         };
-        if let Some((_rank, intensity, peak_mz)) =
+        if let Some((rank, intensity, peak_mz)) =
             scored_spec.nearest_peak_full(p.mz, tol_da)
         {
             let is_b = matches!(p.kind, IonKind::B);
             matched_ions.push((intensity, peak_mz, p.mz, is_b));
+            matched_ion_ranks.push(rank);
 
             // position is 1-based (b1/y1 = index 0 in the matched arrays)
             let pos = (p.position - 1) as usize;
@@ -1317,6 +1319,16 @@ pub(crate) fn compute_psm_features(
         0.0
     };
 
+    // ── Strong-score Stage-1: mean matched intensity rank ──────────────────
+    // Average intensity-rank of matched b/y ions (1 = most intense). Lower =
+    // better — real PSMs explain dominant peaks.
+    let mean_matched_intensity_rank = if matched_ion_ranks.is_empty() {
+        0.0
+    } else {
+        matched_ion_ranks.iter().map(|&r| r as f32).sum::<f32>()
+            / matched_ion_ranks.len() as f32
+    };
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
@@ -1349,6 +1361,7 @@ pub(crate) fn compute_psm_features(
         longest_complementary_ladder,
         unexplained_top_intensity_fraction,
         neutral_loss_ion_count,
+        mean_matched_intensity_rank,
     }
 }
 
@@ -1512,6 +1525,52 @@ mod feature_tests {
 
         // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: mean matched intensity rank ────────────────────────────────────
+
+    #[test]
+    fn compute_psm_features_mean_matched_intensity_rank() {
+        let pep = ala_peptide(3);
+        let predicted = predict_by_ions(&pep, 1..=1);
+
+        // (a) Ion peaks are the most intense → mean rank near 1.
+        let mut top: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, 1000.0 - i as f32))
+            .collect();
+        top.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_top = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(top)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        // Only ion peaks present → ranks 1..4 → mean 2.5.
+        assert!(
+            (f_top.mean_matched_intensity_rank - 2.5).abs() < 0.1,
+            "ions as the only peaks → mean rank should be ~2.5, got {}",
+            f_top.mean_matched_intensity_rank
+        );
+
+        // (b) Bury ion peaks under many bigger noise peaks → mean rank rises.
+        let mut buried: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, 10.0 + i as f32))
+            .collect();
+        for j in 0..10 {
+            buried.push((1500.0 + j as f64 * 10.0, 500.0 + j as f32 * 50.0));
+        }
+        buried.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_buried = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(buried)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        assert!(
+            f_buried.mean_matched_intensity_rank > f_top.mean_matched_intensity_rank,
+            "buried ions should have higher mean rank (top={}, buried={})",
+            f_top.mean_matched_intensity_rank, f_buried.mean_matched_intensity_rank
+        );
     }
 
     // ── Test: longest complementary ladder ─────────────────────────────────

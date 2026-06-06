@@ -231,6 +231,9 @@ fn write_header<W: Write>(
         // LongestComplementaryLadder = longest consecutive run of complementary
         // cleavage sites (both b and y matched).
         "LongestComplementaryLadder".to_string(),
+        // MeanMatchedIntensityRank = mean intensity-rank of matched ions (lower
+        // = matched dominant peaks).
+        "MeanMatchedIntensityRank".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -473,6 +476,8 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.unexplained_top_intensity_fraction as f64)?;
     write!(writer, "\t{}", psm.features.neutral_loss_ion_count)?;
     write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mean_matched_intensity_rank as f64)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -740,6 +745,7 @@ mod tests {
             "UnexplainedTopIntensityFraction",
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
+            "MeanMatchedIntensityRank",
             "Peptide", "Proteins",
         ];
 

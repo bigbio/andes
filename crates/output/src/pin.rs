@@ -229,6 +229,8 @@ fn write_header<W: Write>(
         // MeanMatchedIntensityRank = mean intensity-rank of matched ions (lower
         // = matched dominant peaks).
         "MeanMatchedIntensityRank".to_string(),
+        // DoublyChargedMatchedIonCount = matched charge-2 b/y ions.
+        "DoublyChargedMatchedIonCount".to_string(),
         // ChanceMatchSurprise = strong-score Stage-2 null moat: Σ max(0,
         // -ln(ρ·Δ)) per matched ion — how improbable the matches are by chance.
         "ChanceMatchSurprise".to_string(),
@@ -473,6 +475,7 @@ fn write_psm_row<W: Write>(
     write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.mean_matched_intensity_rank as f64)?;
+    write!(writer, "\t{}", psm.features.doubly_charged_matched_ion_count)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.chance_match_surprise as f64)?;
 
@@ -742,6 +745,7 @@ mod tests {
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
             "MeanMatchedIntensityRank",
+            "DoublyChargedMatchedIonCount",
             "ChanceMatchSurprise",
             "Peptide", "Proteins",
         ];

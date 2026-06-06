@@ -1082,6 +1082,22 @@ pub(crate) fn compute_psm_features(
     let num_matched: u32 = (b_matched.iter().filter(|&&m| m).count()
         + y_matched.iter().filter(|&&m| m).count()) as u32;
 
+    // ── Strong-score Stage-1: charge-2 matched-ion count ─────────────────────
+    // High-charge precursors fragment into +2 ions ignored by the charge-1
+    // loop above. Separate probe — does not alter existing feature values.
+    let predicted_z2 = predict_by_ions(peptide, 2..=2);
+    let mut doubly_charged_matched_ion_count: u32 = 0;
+    for p in &predicted_z2 {
+        let tol_da = if feature_tol_is_ppm {
+            p.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
+        if scored_spec.nearest_peak_full(p.mz, tol_da).is_some() {
+            doubly_charged_matched_ion_count += 1;
+        }
+    }
+
     fn longest_run(matched: &[bool]) -> u32 {
         let mut best = 0u32;
         let mut cur = 0u32;
@@ -1345,6 +1361,7 @@ pub(crate) fn compute_psm_features(
         longest_complementary_ladder,
         neutral_loss_ion_count,
         mean_matched_intensity_rank,
+        doubly_charged_matched_ion_count,
         chance_match_surprise,
     }
 }
@@ -1509,6 +1526,44 @@ mod feature_tests {
 
         // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: doubly-charged matched-ion count ───────────────────────────────
+
+    #[test]
+    fn compute_psm_features_doubly_charged_matched_ion_count() {
+        let pep = ala_peptide(4);
+        let predicted_z2 = predict_by_ions(&pep, 2..=2);
+        assert!(!predicted_z2.is_empty(), "charge-2 ions should exist for 4-mer");
+
+        // Empty spectrum → count 0.
+        let f_empty = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(vec![])),
+            &pep, &make_scorer(0.01), 3,
+        );
+        assert_eq!(f_empty.doubly_charged_matched_ion_count, 0);
+
+        // Peaks at charge-2 b/y m/z → count > 0.
+        let mut peaks: Vec<(f64, f32)> = predicted_z2
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(peaks)),
+            &pep, &make_scorer(0.01), 3,
+        );
+        assert!(
+            f.doubly_charged_matched_ion_count > 0,
+            "charge-2 peaks should match, got {}",
+            f.doubly_charged_matched_ion_count
+        );
+        assert_eq!(
+            f.doubly_charged_matched_ion_count, predicted_z2.len() as u32,
+            "all charge-2 ions placed → count should equal {}",
+            predicted_z2.len()
+        );
     }
 
     // ── Test: mean matched intensity rank ────────────────────────────────────

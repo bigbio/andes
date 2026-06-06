@@ -112,6 +112,9 @@ pub struct PsmFeatures {
     /// Mean intensity-rank of matched b/y ions (rank 1 = most intense peak).
     /// Real PSMs match dominant peaks; coincidental matches hit weak peaks.
     pub mean_matched_intensity_rank: f32,
+    /// Count of matched charge-2 b/y fragment ions (high-charge precursors
+    /// produce +2 fragments the charge-1 path ignores).
+    pub doubly_charged_matched_ion_count: u32,
 
     // ── Strong-score Stage-2: competition/null denominator (the moat) ──────
     /// `Σ max(0, -ln(ρᵢ·Δᵢ))` over matched ions — the per-peak Poisson

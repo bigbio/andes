@@ -220,12 +220,7 @@ fn write_header<W: Write>(
         // ADDITIVE strong-score Stage-1 bolt-ons (deterministic, no model
         // change): PpmGaussianScore = Σ exp(-½(ppm/7)²) over matched ions
         // (turns fragment mass accuracy into evidence the rank model discards);
-        // ComplementaryIonCount = cleavage sites where both b and y match.
         "PpmGaussianScore".to_string(),
-        "ComplementaryIonCount".to_string(),
-        // UnexplainedTopIntensityFraction = fraction of top-20 peaks not matched
-        // by any predicted b/y ion (lower = better).
-        "UnexplainedTopIntensityFraction".to_string(),
         // NeutralLossIonCount = matched b/y ions with −H2O/−NH3 partner peaks.
         "NeutralLossIonCount".to_string(),
         // LongestComplementaryLadder = longest consecutive run of complementary
@@ -474,9 +469,6 @@ fn write_psm_row<W: Write>(
     // Strong-score Stage-1 bolt-ons (additive, per-PSM).
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.ppm_gaussian_score as f64)?;
-    write!(writer, "\t{}", psm.features.complementary_ion_count)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.unexplained_top_intensity_fraction as f64)?;
     write!(writer, "\t{}", psm.features.neutral_loss_ion_count)?;
     write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
     writer.write_all(b"\t")?;
@@ -746,8 +738,7 @@ mod tests {
             "matchedIonRatio",
             "EdgeScore",
             "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore", "TailorScore",
-            "PpmGaussianScore", "ComplementaryIonCount",
-            "UnexplainedTopIntensityFraction",
+            "PpmGaussianScore",
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
             "MeanMatchedIntensityRank",

@@ -1293,50 +1293,16 @@ pub(crate) fn compute_psm_features(
         })
         .sum::<f64>() as f32;
 
-    // ── Strong-score Stage-1: complementary-ion count + ladder ─────────────
-    // Bond i (1-based) is reported by both b_i and y_{n-i}; count the cleavage
+    // ── Strong-score Stage-1: complementary ladder ─────────────────────────
+    // Bond i (1-based) is reported by both b_i and y_{n-i}; track cleavage
     // sites where BOTH halves are observed. `b_any_matched`/`y_any_matched` are
     // 0-indexed by ion number, so b_i = [i-1] and y_{n-i} = [n-i-1].
     let mut complementary_sites: SmallVec<[bool; 64]> = smallvec![false; n - 1];
-    let mut complementary_ion_count: u32 = 0;
     for i in 1..n {
-        let both = b_any_matched[i - 1] && y_any_matched[n - i - 1];
-        complementary_sites[i - 1] = both;
-        if both {
-            complementary_ion_count += 1;
-        }
+        complementary_sites[i - 1] =
+            b_any_matched[i - 1] && y_any_matched[n - i - 1];
     }
     let longest_complementary_ladder = longest_run(&complementary_sites);
-
-    // ── Strong-score Stage-1: unexplained top-intensity fraction ───────────
-    // Of the top-20 most-intense peaks, what fraction is NOT explained by any
-    // matched b/y ion? Uses the same feature tolerance as ion matching.
-    let matched_obs_mz: SmallVec<[f64; 96]> =
-        matched_ions.iter().map(|&(_, obs, _, _)| obs).collect();
-    let tol_da_for_mz = |mz: f64| -> f64 {
-        if feature_tol_is_ppm {
-            mz * feature_tol / 1e6
-        } else {
-            feature_tol
-        }
-    };
-    let peak_is_explained = |peak_mz: f64| -> bool {
-        let tol = tol_da_for_mz(peak_mz);
-        matched_obs_mz
-            .iter()
-            .any(|&obs| (peak_mz - obs).abs() <= tol)
-    };
-    let top_peaks = scored_spec.dump_active_peaks(); // rank-ordered (1 = most intense)
-    let top_n = top_peaks.len().min(20);
-    let unexplained_count = top_peaks[..top_n]
-        .iter()
-        .filter(|&&(_, mz, _)| !peak_is_explained(mz))
-        .count();
-    let unexplained_top_intensity_fraction = if top_n > 0 {
-        unexplained_count as f32 / top_n as f32
-    } else {
-        0.0
-    };
 
     // ── Strong-score Stage-1: mean matched intensity rank ──────────────────
     // Average intensity-rank of matched b/y ions (1 = most intense). Lower =
@@ -1376,9 +1342,7 @@ pub(crate) fn compute_psm_features(
         // uncalibrated RawScore-equivalent here (overwritten in fill_post_topn).
         tailor_score: 0.0,
         ppm_gaussian_score,
-        complementary_ion_count,
         longest_complementary_ladder,
-        unexplained_top_intensity_fraction,
         neutral_loss_ion_count,
         mean_matched_intensity_rank,
         chance_match_surprise,
@@ -1601,7 +1565,7 @@ mod feature_tests {
         let predicted = predict_by_ions(&pep, 1..=1);
         let n = pep.length();
 
-        // (a) All predicted ions matched → ladder == count == n-1.
+        // (a) All predicted ions matched → ladder == n-1.
         let mut all: Vec<(f64, f32)> = predicted
             .iter()
             .enumerate()
@@ -1614,18 +1578,9 @@ mod feature_tests {
         );
         let expected = (n - 1) as u32;
         assert_eq!(
-            f_all.complementary_ion_count, expected,
-            "all ions matched → complementary_ion_count should be n-1={expected}, got {}",
-            f_all.complementary_ion_count
-        );
-        assert_eq!(
             f_all.longest_complementary_ladder, expected,
             "all ions matched → ladder should equal n-1={expected}, got {}",
             f_all.longest_complementary_ladder
-        );
-        assert_eq!(
-            f_all.longest_complementary_ladder, f_all.complementary_ion_count,
-            "full ladder should equal scattered count when unbroken"
         );
 
         // (b) Drop the middle bond's complementary y (y3 for bond 2) → ladder
@@ -1642,10 +1597,6 @@ mod feature_tests {
             &pep, &make_scorer(0.01), 2,
         );
         // Bonds 1 and 2-4 split at bond 2: runs of 1 and 2 → longest = 2.
-        assert_eq!(
-            f_split.complementary_ion_count, expected - 1,
-            "dropping y3 should remove one complementary site"
-        );
         assert_eq!(
             f_split.longest_complementary_ladder, 2,
             "missing middle bond should leave a length-2 ladder, got {}",
@@ -1686,58 +1637,6 @@ mod feature_tests {
         );
     }
 
-    // ── Test: unexplained top-intensity fraction ─────────────────────────────
-
-    #[test]
-    fn compute_psm_features_unexplained_top_intensity_fraction() {
-        let pep = ala_peptide(3);
-        let predicted = predict_by_ions(&pep, 1..=1);
-
-        // (a) Peaks only at predicted m/z → all top peaks explained → fraction 0.
-        let mut matched_only: Vec<(f64, f32)> = predicted
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
-            .collect();
-        matched_only.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let f_all = compute_psm_features(
-            &ScoredSpectrum::new_without_filtering(&make_spectrum(matched_only)),
-            &pep, &make_scorer(0.01), 2,
-        );
-        assert_eq!(
-            f_all.unexplained_top_intensity_fraction, 0.0,
-            "all top peaks matched → fraction should be 0, got {}",
-            f_all.unexplained_top_intensity_fraction
-        );
-
-        // (b) Add 5 intense unmatched peaks → fraction rises.
-        let mut with_noise = predicted
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
-            .collect::<Vec<_>>();
-        for j in 0..5 {
-            with_noise.push((1500.0 + j as f64 * 10.0, 1000.0 + j as f32));
-        }
-        with_noise.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let f_noise = compute_psm_features(
-            &ScoredSpectrum::new_without_filtering(&make_spectrum(with_noise)),
-            &pep, &make_scorer(0.01), 2,
-        );
-        assert!(
-            f_noise.unexplained_top_intensity_fraction > f_all.unexplained_top_intensity_fraction,
-            "big unmatched peaks should raise fraction (all={}, noise={})",
-            f_all.unexplained_top_intensity_fraction,
-            f_noise.unexplained_top_intensity_fraction
-        );
-        // 5 unmatched peaks among top-9 (4 matched + 5 noise) → 5/9.
-        assert!(
-            (f_noise.unexplained_top_intensity_fraction - 5.0 / 9.0).abs() < 0.05,
-            "expected ~5/9 unexplained, got {}",
-            f_noise.unexplained_top_intensity_fraction
-        );
-    }
-
     // ── Test: strong-score Stage-1 bolt-ons (ppm-Gaussian + complementary) ──
 
     #[test]
@@ -1766,11 +1665,11 @@ mod feature_tests {
             "ppm_gaussian_score should be ~4 for 4 exact matches, got {}",
             f_exact.ppm_gaussian_score
         );
-        // Both bonds have b and complementary y observed.
+        // Both bonds have b and complementary y observed → full ladder.
         assert_eq!(
-            f_exact.complementary_ion_count, 2,
-            "both cleavage sites should be complementary, got {}",
-            f_exact.complementary_ion_count
+            f_exact.longest_complementary_ladder, 2,
+            "both cleavage sites should form a length-2 ladder, got {}",
+            f_exact.longest_complementary_ladder
         );
 
         // (b) Same peaks shifted by ~15 ppm: still matched (20 ppm feature

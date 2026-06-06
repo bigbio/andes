@@ -101,21 +101,10 @@ pub struct PsmFeatures {
     /// above a coincidental match whose ions scatter. ~0 for all low-res PSMs
     /// (every ppm is huge), so Percolator simply down-weights it there.
     pub ppm_gaussian_score: f32,
-    /// Number of backbone cleavage sites where BOTH the b-ion and its
-    /// complementary y-ion (bond `i` ↔ `b_i` + `y_{n-i}`) are observed.
-    /// Both halves of one cleavage matching by chance is rare, so this is a
-    /// strong "real peptide" signal that `num_matched_main_ions` (b OR y per
-    /// position) does not capture.
-    pub complementary_ion_count: u32,
     /// Longest consecutive run of complementary cleavage sites (both `b_i`
     /// and `y_{n-i}` matched). A contiguous ladder is stronger evidence than
     /// scattered complementary pairs.
     pub longest_complementary_ladder: u32,
-    /// Fraction of the spectrum's top-20 most-intense peaks that are NOT
-    /// matched by any predicted b/y ion (within feature tolerance). Lower =
-    /// better — a real PSM explains most big peaks; a coincidental match
-    /// leaves intense unexplained signal.
-    pub unexplained_top_intensity_fraction: f32,
     /// Count of matched b/y ions that also have a neutral-loss partner peak at
     /// −H2O (−18.0106 Da) or −NH3 (−17.0265 Da) within feature tolerance.
     /// Strong CID/TMT signal that the intensity-rank model underuses.

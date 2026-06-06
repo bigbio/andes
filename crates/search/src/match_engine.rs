@@ -1272,16 +1272,20 @@ pub(crate) fn compute_psm_features(
         })
         .sum::<f64>() as f32;
 
-    // ── Strong-score Stage-1: complementary-ion count ────────────────────────
+    // ── Strong-score Stage-1: complementary-ion count + ladder ─────────────
     // Bond i (1-based) is reported by both b_i and y_{n-i}; count the cleavage
     // sites where BOTH halves are observed. `b_any_matched`/`y_any_matched` are
     // 0-indexed by ion number, so b_i = [i-1] and y_{n-i} = [n-i-1].
+    let mut complementary_sites: SmallVec<[bool; 64]> = smallvec![false; n - 1];
     let mut complementary_ion_count: u32 = 0;
     for i in 1..n {
-        if b_any_matched[i - 1] && y_any_matched[n - i - 1] {
+        let both = b_any_matched[i - 1] && y_any_matched[n - i - 1];
+        complementary_sites[i - 1] = both;
+        if both {
             complementary_ion_count += 1;
         }
     }
+    let longest_complementary_ladder = longest_run(&complementary_sites);
 
     // ── Strong-score Stage-1: unexplained top-intensity fraction ───────────
     // Of the top-20 most-intense peaks, what fraction is NOT explained by any
@@ -1342,6 +1346,7 @@ pub(crate) fn compute_psm_features(
         tailor_score: 0.0,
         ppm_gaussian_score,
         complementary_ion_count,
+        longest_complementary_ladder,
         unexplained_top_intensity_fraction,
         neutral_loss_ion_count,
     }
@@ -1507,6 +1512,71 @@ mod feature_tests {
 
         // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: longest complementary ladder ─────────────────────────────────
+
+    #[test]
+    fn compute_psm_features_longest_complementary_ladder() {
+        let pep = ala_peptide(5);
+        let predicted = predict_by_ions(&pep, 1..=1);
+        let n = pep.length();
+
+        // (a) All predicted ions matched → ladder == count == n-1.
+        let mut all: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_all = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(all)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        let expected = (n - 1) as u32;
+        assert_eq!(
+            f_all.complementary_ion_count, expected,
+            "all ions matched → complementary_ion_count should be n-1={expected}, got {}",
+            f_all.complementary_ion_count
+        );
+        assert_eq!(
+            f_all.longest_complementary_ladder, expected,
+            "all ions matched → ladder should equal n-1={expected}, got {}",
+            f_all.longest_complementary_ladder
+        );
+        assert_eq!(
+            f_all.longest_complementary_ladder, f_all.complementary_ion_count,
+            "full ladder should equal scattered count when unbroken"
+        );
+
+        // (b) Drop the middle bond's complementary y (y3 for bond 2) → ladder
+        //     splits; longest run is the longer of the two halves.
+        let mut split: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !(matches!(p.kind, IonKind::Y) && p.position == 3))
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        split.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_split = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(split)),
+            &pep, &make_scorer(0.01), 2,
+        );
+        // Bonds 1 and 2-4 split at bond 2: runs of 1 and 2 → longest = 2.
+        assert_eq!(
+            f_split.complementary_ion_count, expected - 1,
+            "dropping y3 should remove one complementary site"
+        );
+        assert_eq!(
+            f_split.longest_complementary_ladder, 2,
+            "missing middle bond should leave a length-2 ladder, got {}",
+            f_split.longest_complementary_ladder
+        );
+        assert!(
+            f_split.longest_complementary_ladder < f_all.longest_complementary_ladder,
+            "split ladder ({}) should be shorter than full ({})",
+            f_split.longest_complementary_ladder, f_all.longest_complementary_ladder
+        );
     }
 
     // ── Test: neutral-loss ion count ─────────────────────────────────────────

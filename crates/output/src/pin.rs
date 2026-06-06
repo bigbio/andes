@@ -228,6 +228,9 @@ fn write_header<W: Write>(
         "UnexplainedTopIntensityFraction".to_string(),
         // NeutralLossIonCount = matched b/y ions with −H2O/−NH3 partner peaks.
         "NeutralLossIonCount".to_string(),
+        // LongestComplementaryLadder = longest consecutive run of complementary
+        // cleavage sites (both b and y matched).
+        "LongestComplementaryLadder".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -469,6 +472,7 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.unexplained_top_intensity_fraction as f64)?;
     write!(writer, "\t{}", psm.features.neutral_loss_ion_count)?;
+    write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -735,6 +739,7 @@ mod tests {
             "PpmGaussianScore", "ComplementaryIonCount",
             "UnexplainedTopIntensityFraction",
             "NeutralLossIonCount",
+            "LongestComplementaryLadder",
             "Peptide", "Proteins",
         ];
 

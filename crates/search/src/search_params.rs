@@ -8,6 +8,27 @@ use model::tolerance::{PrecursorTolerance, Tolerance};
 
 use crate::precursor_cal::PrecursorCalMode;
 
+/// Rank-score pool retained in the hot loop when `--score strong` and user
+/// `top_n` is smaller. Runners-up survive to `fill_post_topn` / strong re-rank.
+///
+/// Widened 10 -> 25 after the Phase-V gate: strong improved FDP but lost
+/// PSMs@1%, and with K=10 a true peptide that rank-scores outside the top-10
+/// can never be promoted by the strong re-rank (the pool is rank-gated). 25
+/// gives the strong score a larger pool to recover those top-1 flips. Strong
+/// mode only — default `rank` retention is unchanged. Re-run the Astral/TMT
+/// A/B after changing this; raise further if it keeps recovering PSMs.
+pub const STRONG_SCORE_RETENTION_K: u32 = 25;
+
+/// Primary ranking mode for candidate selection and PIN `RawScore` emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScoreMode {
+    /// Rank by inherited `node + cleavage + edge` (`rank_score`). Default; byte-identical path.
+    #[default]
+    Rank,
+    /// Rank by fused `strong_score` and emit it as PIN `RawScore`.
+    Strong,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     pub aa_set: AminoAcidSet,
@@ -54,6 +75,8 @@ pub struct SearchParams {
     /// Fallback isolation half-width (Da) used when the mzML lacks
     /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.
     pub chimeric_isolation_halfwidth_da: f64,
+    /// Ranking / RawScore source: `Rank` (default) or `Strong` (S3 fused score).
+    pub score_mode: ScoreMode,
 }
 
 impl SearchParams {
@@ -86,6 +109,19 @@ impl SearchParams {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            score_mode: ScoreMode::Rank,
+        }
+    }
+
+    /// Top-N cap for `TopNQueue` retention in the candidate hot loop.
+    /// Under `Strong`, widens to at least [`STRONG_SCORE_RETENTION_K`] so the
+    /// post-loop strong re-rank can promote runners-up; PIN emission still
+    /// trims to `top_n_psms_per_spectrum` afterward.
+    pub fn hot_loop_retention_cap(&self) -> u32 {
+        if self.score_mode == ScoreMode::Strong {
+            self.top_n_psms_per_spectrum.max(STRONG_SCORE_RETENTION_K)
+        } else {
+            self.top_n_psms_per_spectrum
         }
     }
 }
@@ -95,6 +131,22 @@ mod tests {
     use super::*;
     use crate::precursor_cal::PrecursorCalMode;
     use model::aa_set::AminoAcidSetBuilder;
+
+    #[test]
+    fn hot_loop_retention_cap_widens_only_under_strong() {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.top_n_psms_per_spectrum = 1;
+        assert_eq!(params.hot_loop_retention_cap(), 1);
+        params.score_mode = ScoreMode::Strong;
+        assert_eq!(
+            params.hot_loop_retention_cap(),
+            STRONG_SCORE_RETENTION_K
+        );
+        // User top_n larger than K → user value wins.
+        params.top_n_psms_per_spectrum = STRONG_SCORE_RETENTION_K + 5;
+        assert_eq!(params.hot_loop_retention_cap(), STRONG_SCORE_RETENTION_K + 5);
+    }
 
     #[test]
     fn default_tryptic_has_expected_values() {
@@ -119,5 +171,6 @@ mod tests {
         assert_eq!(params.precursor_mass_shift_ppm, 0.0);
         assert!(!params.chimeric);
         assert_eq!(params.chimeric_isolation_halfwidth_da, 1.5);
+        assert_eq!(params.score_mode, ScoreMode::Rank);
     }
 }

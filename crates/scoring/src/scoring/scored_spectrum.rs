@@ -568,6 +568,23 @@ impl<'a> ScoredSpectrum<'a> {
         self.kept_count
     }
 
+    /// Local peak density (peaks per Da) in the window `[mz - hw, mz + hw]`.
+    ///
+    /// The enabling primitive for the strong-score competition/null denominator:
+    /// the per-peak chance-match probability is `ρ(mz)·Δ`, so a match in a
+    /// crowded region (high ρ) is far more likely coincidental than one in a
+    /// sparse region. Uses the sorted original peak list (ascending m/z), so the
+    /// window bounds are two binary searches.
+    pub fn local_peak_density(&self, mz: f64, hw: f64) -> f64 {
+        if hw <= 0.0 {
+            return 0.0;
+        }
+        let peaks = &self.spec.peaks;
+        let lo = peaks.partition_point(|&(m, _)| m < mz - hw);
+        let hi = peaks.partition_point(|&(m, _)| m <= mz + hw);
+        (hi - lo) as f64 / (2.0 * hw)
+    }
+
     /// Summed intensity of the peaks that survived precursor-peak filtering —
     /// the fragment ion current used as the denominator for ion-current-ratio
     /// PSM features.

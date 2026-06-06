@@ -123,6 +123,16 @@ pub struct PsmFeatures {
     /// Mean intensity-rank of matched b/y ions (rank 1 = most intense peak).
     /// Real PSMs match dominant peaks; coincidental matches hit weak peaks.
     pub mean_matched_intensity_rank: f32,
+
+    // ── Strong-score Stage-2: competition/null denominator (the moat) ──────
+    /// `Σ max(0, -ln(ρᵢ·Δᵢ))` over matched ions — the per-peak Poisson
+    /// chance-match "surprise". `ρᵢ` = local peak density (peaks/Da) around the
+    /// matched peak, `Δᵢ` = the match window (Da). A match in a sparse region at
+    /// tight tolerance is improbable by chance (large surprise = strong
+    /// evidence); a match in a crowded region within a wide window is nearly
+    /// free (≈0). This is the deterministic null no ML rescorer computes — it
+    /// weighs each match by how *non-coincidental* it is.
+    pub chance_match_surprise: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

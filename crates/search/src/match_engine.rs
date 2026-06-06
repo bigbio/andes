@@ -1274,6 +1274,25 @@ pub(crate) fn compute_psm_features(
         })
         .sum::<f64>() as f32;
 
+    // ── Strong-score Stage-2: per-peak chance-match "surprise" (null moat) ───
+    // For each matched ion: p_chance = ρ·Δ, ρ = local peak density (peaks/Da)
+    // in a ±50 m/z window, Δ = the match window (2·tol_da). surprise =
+    // max(0, -ln(p_chance)): a tight match in a sparse region is improbable by
+    // chance (high surprise); a wide match in a crowded region is nearly free
+    // (~0). Summed over matched ions = total deterministic evidence that the
+    // matches are NOT coincidental — the denominator no ML rescorer computes.
+    const DENSITY_HW: f64 = 50.0;
+    let chance_match_surprise: f32 = matched_ions
+        .iter()
+        .filter(|&&(_, _, pred, _)| pred > 0.0)
+        .map(|&(_, obs, pred, _)| {
+            let tol_da = if feature_tol_is_ppm { pred * feature_tol / 1e6 } else { feature_tol };
+            let rho = scored_spec.local_peak_density(obs, DENSITY_HW);
+            let p_chance = rho * (2.0 * tol_da);
+            if p_chance > 0.0 { (-p_chance.ln()).max(0.0) } else { 0.0 }
+        })
+        .sum::<f64>() as f32;
+
     // ── Strong-score Stage-1: complementary-ion count + ladder ─────────────
     // Bond i (1-based) is reported by both b_i and y_{n-i}; count the cleavage
     // sites where BOTH halves are observed. `b_any_matched`/`y_any_matched` are
@@ -1362,6 +1381,7 @@ pub(crate) fn compute_psm_features(
         unexplained_top_intensity_fraction,
         neutral_loss_ion_count,
         mean_matched_intensity_rank,
+        chance_match_surprise,
     }
 }
 

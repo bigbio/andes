@@ -100,6 +100,10 @@ pub fn prepass_search_params(main: &SearchParams) -> SearchParams {
     p.isotope_error_range = 0..=0;
     p.top_n_psms_per_spectrum = 1;
     p.precursor_mass_shift_ppm = 0.0;
+    // The calibration pre-pass always ranks by the bundled Rank score: it runs
+    // before the strong-score model is relevant, and using Strong here would
+    // make the precursor-mass calibration depend on the experimental score path.
+    p.score_mode = crate::search_params::ScoreMode::Rank;
     p
 }
 
@@ -431,6 +435,7 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            score_mode: crate::search_params::ScoreMode::Rank,
         }
     }
 

@@ -125,6 +125,12 @@ pub struct PsmFeatures {
     /// free (≈0). This is the deterministic null no ML rescorer computes — it
     /// weighs each match by how *non-coincidental* it is.
     pub chance_match_surprise: f32,
+    /// Within-peptide alternative-mass competition: mean per-ion
+    /// `1/(1+ambiguity)` over matched charge-1 ions, where `ambiguity` counts
+    /// how many OTHER theoretical ions (b/y + neutral-loss offsets) also claim
+    /// the same peak. 1.0 = every matched peak uniquely explained; lower =
+    /// contested/coincidental matches.
+    pub unique_match_fraction: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

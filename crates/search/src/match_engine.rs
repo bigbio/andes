@@ -1330,6 +1330,39 @@ pub(crate) fn compute_psm_features(
             / matched_ion_ranks.len() as f32
     };
 
+    // ── Strong-score Stage-2: unique-match fraction (within-peptide) ───────
+    // Per matched charge-1 ion: how many OTHER theoretical ions (b/y at z=1
+    // plus −H2O/−NH3 offsets) also claim the same peak? evidence = 1/(1+amb).
+    let unique_match_fraction = if num_matched == 0 {
+        0.0
+    } else {
+        let charge1_predicted = predict_by_ions(peptide, 1..=1);
+        let mut theo_mz_list: SmallVec<[f64; 128]> = SmallVec::new();
+        for p in &charge1_predicted {
+            theo_mz_list.push(p.mz);
+            theo_mz_list.push(p.mz - H2O_LOSS_DA);
+            theo_mz_list.push(p.mz - NH3_LOSS_DA);
+        }
+        let evidence_sum: f64 = matched_ions
+            .iter()
+            .map(|&(_, obs, pred, _)| {
+                let tol_da = if feature_tol_is_ppm {
+                    obs * feature_tol / 1e6
+                } else {
+                    feature_tol
+                };
+                let ambiguity = theo_mz_list
+                    .iter()
+                    .filter(|&&theo| {
+                        (theo - obs).abs() <= tol_da && (theo - pred).abs() > 1e-9
+                    })
+                    .count();
+                1.0 / (1.0 + ambiguity as f64)
+            })
+            .sum();
+        (evidence_sum / num_matched as f64) as f32
+    };
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
@@ -1363,6 +1396,7 @@ pub(crate) fn compute_psm_features(
         mean_matched_intensity_rank,
         doubly_charged_matched_ion_count,
         chance_match_surprise,
+        unique_match_fraction,
     }
 }
 
@@ -1526,6 +1560,83 @@ mod feature_tests {
 
         // isolation_window_efficiency always 0.0.
         assert_eq!(f.isolation_window_efficiency, 0.0);
+    }
+
+    // ── Test: unique-match fraction ──────────────────────────────────────────
+
+    #[test]
+    fn compute_psm_features_unique_match_fraction() {
+        let scorer = make_scorer(0.01);
+
+        // (a) Well-separated ions → fraction ~1.0.
+        let pep = ala_peptide(5);
+        let predicted = predict_by_ions(&pep, 1..=1);
+        let mut peaks: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_unique = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(peaks)),
+            &pep, &scorer, 2,
+        );
+        // Neutral-loss offsets in the theo list can add minor ambiguity even
+        // when peaks are well separated; still expect a high fraction.
+        assert!(
+            f_unique.unique_match_fraction > 0.7,
+            "separated ions should yield a high fraction, got {}",
+            f_unique.unique_match_fraction
+        );
+
+        // (b) Two theoretical ions within tol of one peak → evidence 0.5 each.
+        // Scan alanine peptides for a charge-1 ion pair whose m/z values fall
+        // within the 20 ppm feature window (including neutral-loss offsets).
+        const H2O: f64 = 18.0106;
+        const NH3: f64 = 17.0265;
+        let mut contested_case: Option<(Peptide, f64, f64)> = None;
+        'search: for len in 3..=12 {
+            let pep2 = ala_peptide(len);
+            let pred2 = predict_by_ions(&pep2, 1..=1);
+            let mut theo: Vec<f64> = Vec::new();
+            for p in &pred2 {
+                theo.push(p.mz);
+                theo.push(p.mz - H2O);
+                theo.push(p.mz - NH3);
+            }
+            for i in 0..theo.len() {
+                let tol = theo[i] * 20e-6;
+                for j in (i + 1)..theo.len() {
+                    if (theo[i] - theo[j]).abs() <= 2.0 * tol {
+                        contested_case = Some((pep2, theo[i], theo[j]));
+                        break 'search;
+                    }
+                }
+            }
+        }
+        let (pep2, peak_mz, other_mz) =
+            contested_case.expect("should find a contested theo pair in alanine scan");
+        let tol = peak_mz * 20e-6;
+        assert!(
+            (other_mz - peak_mz).abs() <= tol,
+            "contested pair should be within feature tolerance"
+        );
+        let contested = vec![(peak_mz, 100.0_f32)];
+        let f_contested = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(contested)),
+            &pep2, &scorer, 2,
+        );
+        assert!(
+            f_contested.unique_match_fraction < f_unique.unique_match_fraction,
+            "contested peak should lower fraction (unique={}, contested={})",
+            f_unique.unique_match_fraction, f_contested.unique_match_fraction
+        );
+        // Both ions match one peak → each evidence 0.5 → fraction 0.5.
+        assert!(
+            (f_contested.unique_match_fraction - 0.5).abs() < 0.15,
+            "two ions on one peak → fraction ~0.5, got {}",
+            f_contested.unique_match_fraction
+        );
     }
 
     // ── Test: doubly-charged matched-ion count ───────────────────────────────

@@ -181,6 +181,33 @@ pub struct ScoredSpectrum<'a> {
     observed_mass_cache: std::cell::RefCell<Vec<f64>>,
 }
 
+/// Parsed `MSGF_PEAK_WINDOW` / `MSGF_PEAK_PER_WINDOW` override for the windowed
+/// peak filter (see `ScoredSpectrum::new`).
+enum PeakFilterEnv {
+    /// `MSGF_PEAK_WINDOW=0` (or ≤0): force the filter off regardless of protocol.
+    Disabled,
+    /// Both env vars set: use this window/K for every spectrum.
+    Override(f64, usize),
+    /// Unset: fall back to protocol-based gating (isobaric → default 100 Da/20).
+    Unset,
+}
+
+/// Read the env override once (it is process-wide and constant for a run) rather
+/// than on every `ScoredSpectrum::new` — `std::env::var` takes a global lock and
+/// allocates, and `new` is called once per spectrum per charge.
+fn peak_filter_env() -> &'static PeakFilterEnv {
+    static CACHE: OnceLock<PeakFilterEnv> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let w = std::env::var("MSGF_PEAK_WINDOW").ok().and_then(|s| s.parse::<f64>().ok());
+        let k = std::env::var("MSGF_PEAK_PER_WINDOW").ok().and_then(|s| s.parse::<usize>().ok());
+        match (w, k) {
+            (Some(w), _) if w <= 0.0 => PeakFilterEnv::Disabled,
+            (Some(w), Some(k)) => PeakFilterEnv::Override(w, k),
+            _ => PeakFilterEnv::Unset,
+        }
+    })
+}
+
 impl<'a> ScoredSpectrum<'a> {
     /// Construct, filtering precursor peaks at offsets from
     /// `param.precursor_off_map[charge]` before ranking. Also computes
@@ -247,19 +274,13 @@ impl<'a> ScoredSpectrum<'a> {
         // it regresses high-res Astral ~14%). `MSGF_PEAK_WINDOW` /
         // `MSGF_PEAK_PER_WINDOW` env vars override the window/K for tuning;
         // `MSGF_PEAK_WINDOW=0` force-disables.
-        let window_kk: Option<(f64, usize)> = {
-            let env_w = std::env::var("MSGF_PEAK_WINDOW").ok().and_then(|s| s.parse::<f64>().ok());
-            let env_k = std::env::var("MSGF_PEAK_PER_WINDOW").ok().and_then(|s| s.parse::<usize>().ok());
-            match (env_w, env_k) {
-                (Some(w), _) if w <= 0.0 => None, // explicit force-disable
-                (Some(w), Some(k)) => Some((w, k)),
-                _ => match param.data_type.protocol {
-                    Protocol::TMT | Protocol::ITRAQ | Protocol::ITRAQPhospho => {
-                        Some((env_w.unwrap_or(100.0), env_k.unwrap_or(20)))
-                    }
-                    _ => None,
-                },
-            }
+        let window_kk: Option<(f64, usize)> = match peak_filter_env() {
+            PeakFilterEnv::Disabled => None,
+            PeakFilterEnv::Override(w, k) => Some((*w, *k)),
+            PeakFilterEnv::Unset => match param.data_type.protocol {
+                Protocol::TMT | Protocol::ITRAQ | Protocol::ITRAQPhospho => Some((100.0, 20)),
+                _ => None,
+            },
         };
         if let Some((w, k)) = window_kk {
             if w > 0.0 && k > 0 && !kept.is_empty() {

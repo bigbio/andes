@@ -131,6 +131,18 @@ impl IntensityModel {
                 if ion_col.is_null(i) || flank_n_col.is_null(i) || flank_c_col.is_null(i) {
                     continue;
                 }
+                // Skip rows with null numeric/position fields: arrow `.value(i)`
+                // on a null returns a default (0), which would silently corrupt
+                // the key/stats. A well-formed `train-intensity` parquet has no
+                // nulls here, but be defensive against externally-produced files.
+                if pos_col.is_null(i)
+                    || charge_col.is_null(i)
+                    || count_col.is_null(i)
+                    || mean_col.is_null(i)
+                    || var_col.is_null(i)
+                {
+                    continue;
+                }
                 let ion_s = ion_col.value(i);
                 let Some(ion_type) = IntensityIonType::parse(ion_s) else {
                     continue;

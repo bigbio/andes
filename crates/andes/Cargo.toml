@@ -19,6 +19,7 @@ model-train = { path = "../model-train" }
 clap = { workspace = true }
 num_cpus = "1.16"
 rayon = "1.10"
+rustc-hash = "2"
 thiserror = { workspace = true }
 arrow = "53"
 parquet = "53"

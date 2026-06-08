@@ -51,9 +51,18 @@ use crate::counts::CountStats;
 /// Hyper-parameters for the [`Estimator`].
 #[derive(Debug, Clone)]
 pub struct EstimatorConfig {
-    /// Laplace pseudo-count added to **every** rank/error bin before
-    /// normalising.  Must be > 0.  Default: `1.0`.
+    /// Laplace pseudo-count added to **every** signal (prefix/suffix) rank/error
+    /// bin before normalising.  Must be > 0.  Default: `1.0`.
     pub pseudo: f32,
+    /// Laplace pseudo-count for the **noise** rank distribution.  Noise is
+    /// abundantly sampled and strongly concentrated (random theoretical
+    /// positions are almost always *absent*), so the signal `pseudo=1.0` spread
+    /// over ~`max_rank` slots over-flattens it — inflating `noise_freq[r]` at
+    /// the ranks where real ions land and compressing `ln(ion/noise)` node
+    /// scores (the diagnosed estimator dilution). A much smaller value keeps the
+    /// noise model sharp while still flooring every slot > 0 for log-safety.
+    /// Must be > 0.  Default: `0.05`.
+    pub noise_pseudo: f32,
     /// Partition total below which backoff blending is applied.  Default: `50`.
     pub min_count: u64,
     /// Prior weight `w` in `(n*emp + w*parent) / (n+w)`.  Default: `20.0`.
@@ -67,6 +76,7 @@ impl Default for EstimatorConfig {
     fn default() -> Self {
         Self {
             pseudo: 1.0,
+            noise_pseudo: 0.05,
             min_count: 50,
             backoff_weight: 20.0,
             error_scaling_factor_override: None,
@@ -109,6 +119,11 @@ impl Estimator {
             self.cfg.pseudo > 0.0,
             "EstimatorConfig.pseudo must be > 0 (got {})",
             self.cfg.pseudo
+        );
+        assert!(
+            self.cfg.noise_pseudo > 0.0,
+            "EstimatorConfig.noise_pseudo must be > 0 (got {})",
+            self.cfg.noise_pseudo
         );
         let max_rank = template.max_rank;
         let esf = self.cfg.error_scaling_factor_override
@@ -166,6 +181,7 @@ impl Estimator {
         // Array length: max_rank observed-rank slots + 1 missing-ion slot.
         let n_slots = (max_rank + 1) as usize;
         let pseudo = self.cfg.pseudo;
+        let noise_pseudo = self.cfg.noise_pseudo;
         let min_count = self.cfg.min_count;
         let w = self.cfg.backoff_weight;
 
@@ -213,14 +229,15 @@ impl Estimator {
             let seg_parent: Option<&FxHashMap<IonType, Vec<u64>>> =
                 seg_collapsed.get(&seg_key);
 
-            // Helper: compute a normalised parent vector for `ion`.
-            let parent_vec = |ion: IonType| -> Vec<f32> {
+            // Helper: compute a normalised parent vector for `ion` using the
+            // given pseudo-count (signal vs noise differ — see `noise_pseudo`).
+            let parent_vec = |ion: IonType, ps: f32| -> Vec<f32> {
                 // Level 1: segment-collapse.
                 if let Some(seg_map) = seg_parent {
                     if let Some(raw) = seg_map.get(&ion) {
                         let n: u64 = raw.iter().sum();
                         if n >= min_count {
-                            return normalize_with_pseudo(raw, n_slots, pseudo);
+                            return normalize_with_pseudo(raw, n_slots, ps);
                         }
                     }
                 }
@@ -228,7 +245,7 @@ impl Estimator {
                 let graw = global_pool.get(&ion)
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
-                normalize_with_pseudo(graw, n_slots, pseudo)
+                normalize_with_pseudo(graw, n_slots, ps)
             };
 
             for &ion in &ions {
@@ -238,21 +255,23 @@ impl Estimator {
                 let n: u64 = raw.iter().sum();
                 let emp = normalize_with_pseudo(raw, n_slots, pseudo);
                 let blended = if n < min_count {
-                    blend(&emp, &parent_vec(ion), n as f32, w)
+                    blend(&emp, &parent_vec(ion, pseudo), n as f32, w)
                 } else {
                     emp
                 };
                 ion_table.insert(ion, blended);
             }
 
-            // Noise is required by RankScorer::new.
+            // Noise is required by RankScorer::new. It uses a much smaller
+            // pseudo-count (`noise_pseudo`) so its sharp, concentrated shape is
+            // preserved rather than flattened across all `max_rank` slots.
             let noise_raw = counts.rank.get(&(part, IonType::Noise))
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             let noise_n: u64 = noise_raw.iter().sum();
-            let noise_emp = normalize_with_pseudo(noise_raw, n_slots, pseudo);
+            let noise_emp = normalize_with_pseudo(noise_raw, n_slots, noise_pseudo);
             let noise_dist = if noise_n < min_count {
-                blend(&noise_emp, &parent_vec(IonType::Noise), noise_n as f32, w)
+                blend(&noise_emp, &parent_vec(IonType::Noise, noise_pseudo), noise_n as f32, w)
             } else {
                 noise_emp
             };

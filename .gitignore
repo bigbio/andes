@@ -65,7 +65,6 @@ benchmark/*
 !benchmark/README.md
 !benchmark/ci/
 !benchmark/capture-references.sh
-!benchmark/vm/
 
 # Parity-analysis docs (iter-by-iter notes + diff CSVs) are local-only
 # development context, not part of the shipped repo.

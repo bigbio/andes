@@ -236,6 +236,19 @@ fn write_header<W: Write>(
         // ChanceMatchSurprise = strong-score Stage-2 null moat: Σ max(0,
         // -ln(ρ·Δ)) per matched ion — how improbable the matches are by chance.
         "ChanceMatchSurprise".to_string(),
+        // IntensitySignal = strong-score S1 numerator: cosine similarity between
+        // IntensityModel predictions and observed relative intensities (0 without model).
+        "IntensitySignal".to_string(),
+        // MassCompetitionEvidence = S2 null term 2: Σ 1/(1+ambiguity+ρ).
+        "MassCompetitionEvidence".to_string(),
+        // CandidateRankEntropy = S2 listwise: softmax entropy over retained top-K.
+        "CandidateRankEntropy".to_string(),
+        // ListwiseScoreGap = S2 listwise: top-1 − top-2 RawScore in retained queue.
+        "ListwiseScoreGap".to_string(),
+        // StrongScore = S3 fused signal − null (always emitted; ranks when --score strong).
+        "StrongScore".to_string(),
+        // StrongScoreCal = S4 per-spectrum z-scored significance.
+        "StrongScoreCal".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -482,6 +495,18 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.unique_match_fraction as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.chance_match_surprise as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.intensity_signal as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mass_competition_evidence as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.candidate_rank_entropy as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.listwise_score_gap as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.strong_score as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.strong_score_cal as f64)?;
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.
@@ -700,6 +725,7 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            score_mode: search::ScoreMode::Rank,
         }
     }
 
@@ -752,6 +778,12 @@ mod tests {
             "DoublyChargedMatchedIonCount",
             "UniqueMatchFraction",
             "ChanceMatchSurprise",
+            "IntensitySignal",
+            "MassCompetitionEvidence",
+            "CandidateRankEntropy",
+            "ListwiseScoreGap",
+            "StrongScore",
+            "StrongScoreCal",
             "Peptide", "Proteins",
         ];
 

@@ -26,6 +26,7 @@ use crate::param_model::{IonType, Param, Partition, PrecursorOffsetFrequency};
 use crate::scoring::rank_scorer::RankScorer;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
+use model::protocol::Protocol;
 use model::spectrum::Spectrum;
 
 const PROTON: f64 = 1.007_276_49;
@@ -230,6 +231,61 @@ impl<'a> ScoredSpectrum<'a> {
                 .any(|&(fmz, tol)| (mz - fmz).abs() <= tol);
             if !filtered {
                 kept.push((i, intensity, mz));
+            }
+        }
+
+        // WINDOWED top-K peak filtering — within each m/z window of width `w` Da
+        // keep only the top `k` most intense peaks. Unlike a global top-N (which
+        // discards real fragments in sparse high-res spectra), this adapts to
+        // local density: it trims the dense, noisy ion-trap tails of isobaric
+        // (TMT/iTRAQ) low-res CID-MS2 spectra while preserving signal spread
+        // across m/z. Applies to BOTH training and scoring (shared
+        // ScoredSpectrum). MS-GF+ uses this style of filter.
+        //
+        // Gating: auto-ON for isobaric protocols (validated +~3.5% PSMs@1% on
+        // PXD007683 TMT a05058; ~neutral on LFQ; OFF for everything else because
+        // it regresses high-res Astral ~14%). `MSGF_PEAK_WINDOW` /
+        // `MSGF_PEAK_PER_WINDOW` env vars override the window/K for tuning;
+        // `MSGF_PEAK_WINDOW=0` force-disables.
+        let window_kk: Option<(f64, usize)> = {
+            let env_w = std::env::var("MSGF_PEAK_WINDOW").ok().and_then(|s| s.parse::<f64>().ok());
+            let env_k = std::env::var("MSGF_PEAK_PER_WINDOW").ok().and_then(|s| s.parse::<usize>().ok());
+            match (env_w, env_k) {
+                (Some(w), _) if w <= 0.0 => None, // explicit force-disable
+                (Some(w), Some(k)) => Some((w, k)),
+                _ => match param.data_type.protocol {
+                    Protocol::TMT | Protocol::ITRAQ | Protocol::ITRAQPhospho => {
+                        Some((env_w.unwrap_or(100.0), env_k.unwrap_or(20)))
+                    }
+                    _ => None,
+                },
+            }
+        };
+        if let Some((w, k)) = window_kk {
+            if w > 0.0 && k > 0 && !kept.is_empty() {
+                // Sort by (window ascending, intensity descending), then keep
+                // the first k per window in a single linear pass.
+                kept.sort_by(|a, b| {
+                    let wa = (a.2 / w).floor() as i64;
+                    let wb = (b.2 / w).floor() as i64;
+                    wa.cmp(&wb)
+                        .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+                });
+                let mut out: Vec<(usize, f32, f64)> = Vec::with_capacity(kept.len());
+                let mut cur_win = i64::MIN;
+                let mut in_win = 0usize;
+                for &p in kept.iter() {
+                    let win = (p.2 / w).floor() as i64;
+                    if win != cur_win {
+                        cur_win = win;
+                        in_win = 0;
+                    }
+                    if in_win < k {
+                        out.push(p);
+                        in_win += 1;
+                    }
+                }
+                kept = out;
             }
         }
 
@@ -1395,6 +1451,37 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
         }
+    }
+
+    /// Windowed peak filter: isobaric (TMT/iTRAQ) protocols cap dense windows to
+    /// the top-K most intense peaks; non-isobaric protocols keep every peak.
+    #[test]
+    fn isobaric_windowed_peak_filter_caps_dense_window() {
+        use model::protocol::Protocol;
+        // 30 peaks inside a single 100-Da window (m/z 200..226), intensity 100..71.
+        let peaks: Vec<(f64, f32)> = (0..30)
+            .map(|i| (200.0 + i as f64 * 0.9, (100 - i) as f32))
+            .collect();
+        let s = spec(&peaks);
+
+        // Non-isobaric: filter off → all 30 peaks ranked.
+        let mut p = tiny_param_with_ions();
+        p.data_type.protocol = Protocol::Automatic;
+        let scorer = RankScorer::new(&p);
+        assert_eq!(
+            ScoredSpectrum::new(&s, &scorer, 2).dump_active_peaks().len(),
+            30,
+            "non-isobaric must keep all peaks"
+        );
+
+        // Isobaric (TMT): default window 100 Da / K=20 → top-20 in this window.
+        let mut pt = tiny_param_with_ions();
+        pt.data_type.protocol = Protocol::TMT;
+        let scorer_t = RankScorer::new(&pt);
+        let kept = ScoredSpectrum::new(&s, &scorer_t, 2).dump_active_peaks();
+        assert_eq!(kept.len(), 20, "TMT must cap to top-20 per 100-Da window");
+        let min_kept = kept.iter().map(|&(_, _, it)| it).fold(f32::INFINITY, f32::min);
+        assert!(min_kept >= 81.0, "kept peaks must be the most intense (got min {min_kept})");
     }
 
     // --- prob_peak uses raw mme value ---

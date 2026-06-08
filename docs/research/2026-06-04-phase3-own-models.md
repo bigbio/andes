@@ -66,3 +66,7 @@ substance ⇒ Phase 4 relicense (Apache-2.0, drop NOTICE requirement).
 ## First move
 **Step 1 — the dilution diagnosis.** Cheap, uses the trained model from tonight
 (`tmt_store.parquet`) vs `cid_lowres`, and it determines the whole estimator fix.
+
+**Structural skeleton (no Java seed):** `train-from-msnet` still needs a partition/ion layout
+that is not learned from counts today. See workspace doc
+[`internal-docs/2026-06-06-cid-native-model-structural-skeleton.md`](../../../internal-docs/2026-06-06-cid-native-model-structural-skeleton.md).

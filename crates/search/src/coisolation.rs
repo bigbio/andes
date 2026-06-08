@@ -169,6 +169,7 @@ pub(crate) fn search_secondary(
     aa_set: &AminoAcidSet,
     params: &SearchParams,
     fragment_tolerance_da: f64,
+    intensity_model: Option<&scoring_crate::IntensityModel>,
 ) -> Option<(PsmMatch, std::collections::HashSet<i64>)> {
     let z = co.charge;
     if z == 0 {
@@ -231,6 +232,7 @@ pub(crate) fn search_secondary(
     let mut best_raw: i32 = i32::MIN;
     let mut best_mass_key: i32 = i32::MIN;
     let mut second_raw: i32 = i32::MIN;
+    let mut secondary_scores: Vec<f32> = Vec::new();
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
         for &ci in idxs {
             let cand = &candidates[ci];
@@ -253,6 +255,7 @@ pub(crate) fn search_secondary(
             // Fold this candidate's RawScore into the tailor histogram + the
             // best/second-best-distinct-peptide trackers (same logic as
             // run_chunk_inner's per-spectrum DeltaRawScore/Tailor capture).
+            secondary_scores.push(raw_score);
             let s = raw_score.round() as i32;
             *tailor_hist.entry(s).or_insert(0) += 1;
             tailor_total += 1;
@@ -309,7 +312,9 @@ pub(crate) fn search_secondary(
     // they stay consistent with its RawScore / SpecEValue. The override makes the
     // PIN writer compute ExpMass/dm/absdm from the co-isolated mass.
     let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
-    let mut features = crate::match_engine::compute_psm_features(&res_ss, cand_peptide, scorer, z);
+    let mut features = crate::match_engine::compute_psm_features(
+        &res_ss, cand_peptide, scorer, z, intensity_model,
+    );
     features.edge_score = best.edge_score;
     // TailorScore / DeltaRawScore over this secondary's residual candidate
     // distribution — the same per-spectrum features run_chunk_inner fills for
@@ -322,6 +327,31 @@ pub(crate) fn search_secondary(
     } else {
         0.0
     };
+    let mut sorted_secondary = secondary_scores.clone();
+    sorted_secondary.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    features.listwise_score_gap =
+        scoring_crate::scoring::listwise_score_gap(&sorted_secondary);
+    features.candidate_rank_entropy =
+        scoring_crate::scoring::candidate_rank_entropy(&sorted_secondary);
+    features.strong_score = scoring_crate::scoring::fuse_strong_score(
+        &scoring_crate::scoring::StrongScoreInputs {
+            intensity_signal: features.intensity_signal,
+            chance_match_surprise: features.chance_match_surprise,
+            mass_competition_evidence: features.mass_competition_evidence,
+            candidate_rank_entropy: features.candidate_rank_entropy,
+            listwise_score_gap: features.listwise_score_gap,
+        },
+    );
+    let mut strong_null = scoring_crate::scoring::OnlineStats::default();
+    for &s in &secondary_scores {
+        strong_null.push(s);
+    }
+    features.strong_score_cal =
+        scoring_crate::scoring::strong_score_zscore(features.strong_score, &strong_null);
+    if params.score_mode == crate::search_params::ScoreMode::Strong {
+        best.score = features.strong_score;
+        best.rank_score = features.strong_score;
+    }
     best.features = features;
     best.precursor_mz_override = Some(co.mono_mz);
     // Peaks this secondary explained (its charge-1 b/y matches on the FULL spectrum),
@@ -514,6 +544,7 @@ mod tests {
             &prepared.aa_set_for_gf,
             &params,
             frag_tol,
+            None,
         );
 
         let (psm, winner_claimed) = got.expect("secondary search should return a PSM at the co-isolated mass");
@@ -540,6 +571,7 @@ mod tests {
             &prepared.aa_set_for_gf,
             &params,
             frag_tol,
+            None,
         );
         let matched_after = again
             .as_ref()
@@ -617,7 +649,7 @@ mod tests {
         let got = search_secondary(
             &spec, &primary, &std::collections::HashSet::new(), co, &prepared.candidates,
             &prepared.bucket_index, &scorer, &prepared.aa_set_for_gf,
-            &params, frag_tol,
+            &params, frag_tol, None,
         );
         let (psm, _claimed) = got.expect("secondary must be found at the calibration-adjusted mass");
         let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;

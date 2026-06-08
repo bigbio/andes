@@ -10,6 +10,8 @@ model = { path = "../model" }
 rustc-hash = "2"
 thiserror = { workspace = true }
 byteorder = { workspace = true }
+arrow = "53"
+parquet = "53"
 
 [dev-dependencies]
 tempfile = "3.10"

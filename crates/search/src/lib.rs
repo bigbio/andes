@@ -34,5 +34,5 @@ pub use precursor_cal::{
 pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
 pub use search_index::SearchIndex;
-pub use search_params::SearchParams;
+pub use search_params::{ScoreMode, SearchParams};
 pub use suffix_array::SuffixArray;

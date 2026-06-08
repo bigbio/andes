@@ -131,6 +131,36 @@ pub struct PsmFeatures {
     /// the same peak. 1.0 = every matched peak uniquely explained; lower =
     /// contested/coincidental matches.
     pub unique_match_fraction: f32,
+
+    // ── Strong-score S1: intensity-model signal numerator ───────────────────
+    /// Cosine similarity between IntensityModel-predicted and observed relative
+    /// intensities over b/y ions. 0.0 when no intensity model is loaded.
+    pub intensity_signal: f32,
+
+    // ── Strong-score S2: null denominator terms (additive PIN columns) ────
+    /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
+    /// alternative-mass ambiguity + local peak density (S2 term 2).
+    pub mass_competition_evidence: f32,
+    /// Shannon entropy of a softmax over retained top-K candidate RawScores
+    /// (S2 listwise term; spectrum-level, identical on all retained rows).
+    pub candidate_rank_entropy: f32,
+    /// RawScore gap between the top two retained candidates in the queue
+    /// (S2 listwise term; distinct from `delta_raw_score` which uses all scored
+    /// distinct peptides, not only the retained top-K).
+    pub listwise_score_gap: f32,
+
+    // ── Strong-score S3: fused signal − null ────────────────────────────────
+    /// `intensity_signal − null` where `null` combines chance-match surprise,
+    /// mass-competition penalty, and listwise ambiguity. Always computed;
+    /// drives ranking and PIN `RawScore` only under `ScoreMode::Strong`.
+    pub strong_score: f32,
+
+    // ── Strong-score S4: per-spectrum significance calibration ──────────────
+    /// Z-scored `strong_score` for cross-spectrum comparability: leave-one-out
+    /// among retained top-N strong scores when N ≥ 2, else z-score against the
+    /// per-spectrum scored-candidate null pool. Uncalibrated `strong_score` when
+    /// the spectrum has too few scored candidates.
+    pub strong_score_cal: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).
@@ -430,6 +460,49 @@ impl TopNQueue {
         }
     }
 
+    /// Re-rank retained PSMs by `features.strong_score` and mirror it into
+    /// `score` / `rank_score` for queue ordering and PIN `RawScore` emission.
+    /// Called only under `ScoreMode::Strong` after `fill_post_topn`.
+    pub fn reorder_by_strong_score(&mut self) {
+        let cap = self.capacity as usize;
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        for psm in &mut psms {
+            let s = psm.features.strong_score;
+            psm.score = s;
+            psm.rank_score = s;
+        }
+        psms.sort_by(|a, b| b.cmp(a));
+        Self::retain_top_with_ties(&mut psms, cap);
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
+    /// Drop PSMs strictly worse than the Nth-best, keeping ties at the cutoff
+    /// (Java / `TopNQueue::push` parity).
+    fn retain_top_with_ties(psms: &mut Vec<PsmMatch>, cap: usize) {
+        if psms.len() <= cap {
+            return;
+        }
+        let cutoff = psms[cap - 1].clone();
+        psms.retain(|p| p.cmp(&cutoff) != std::cmp::Ordering::Less);
+    }
+
+    /// Trim to at most `cap` best PSMs (plus ties at the cutoff). Used after
+    /// strong re-rank to restore user `top_n` PIN row count.
+    pub fn trim_to_capacity(&mut self, cap: u32) {
+        let cap = cap as usize;
+        if self.heap.len() <= cap {
+            return;
+        }
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        psms.sort_by(|a, b| b.cmp(a));
+        Self::retain_top_with_ties(&mut psms, cap);
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
     /// Return the best PSM (largest `rank_score`) without removing it.
     /// Returns `None` if the queue is empty.
     ///
@@ -717,6 +790,52 @@ mod tests {
         assert_eq!(f.stdev_error_top7, 0.0);
         assert_eq!(f.mean_rel_error_top7, 0.0);
         assert_eq!(f.stdev_rel_error_top7, 0.0);
+        assert_eq!(f.strong_score, 0.0);
+        assert_eq!(f.strong_score_cal, 0.0);
+    }
+
+    #[test]
+    fn trim_to_capacity_keeps_ties_at_cutoff() {
+        let mut q = TopNQueue::new(10);
+        for s in [5.0, 4.0, 3.0, 3.0, 2.0] {
+            q.push(make_match(0, s));
+        }
+        q.trim_to_capacity(3);
+        let scores: Vec<f32> = q.into_sorted_vec().iter().map(|m| m.score).collect();
+        assert_eq!(scores, vec![5.0, 4.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn reorder_by_strong_score_updates_ranking_fields() {
+        let mut q = TopNQueue::new(2);
+        let low = PsmMatch {
+            spectrum_idx: 0,
+            candidate_idxs: vec![0],
+            charge_used: 2,
+            mass_error_ppm: 0.0,
+            score: 50.0,
+            rank_score: 50.0,
+            edge_score: 0,
+            activation_method: None,
+            features: PsmFeatures {
+                strong_score: 1.0,
+                ..Default::default()
+            },
+            isotope_offset: 0,
+            precursor_mz_override: None,
+        };
+        let mut high = low.clone();
+        high.candidate_idxs = vec![1];
+        high.score = 100.0;
+        high.rank_score = 100.0;
+        high.features.strong_score = 5.0;
+        q.push(low);
+        q.push(high);
+        q.reorder_by_strong_score();
+        let top = q.peek_top().unwrap();
+        assert!((top.features.strong_score - 5.0).abs() < f32::EPSILON);
+        assert!((top.score - 5.0).abs() < f32::EPSILON);
+        assert!((top.rank_score - 5.0).abs() < f32::EPSILON);
     }
 
     #[test]

@@ -1179,6 +1179,54 @@ impl<'a> ScoredSpectrum<'a> {
             .map(|f| (f.partition, f.rank, f.error_bin))
             .collect()
     }
+
+    /// MS-GF+-style **dense** noise sampling: probe `n_samples` evenly-spaced
+    /// theoretical nominal masses across this peptide's fragment range (both
+    /// prefix and suffix orientation) and record, per partition, the
+    /// nearest-peak rank or the missing-ion slot. Random positions are almost
+    /// always empty, so the resulting noise rank distribution is sharp and
+    /// missing-slot-dominated — unlike `noise_match_facts` (reversed peptide),
+    /// which samples noise at signal density and over-flattens it. Routes
+    /// through the same `visit_directional_node_ion_matches` as scoring, so
+    /// partitions/segments/ranks are consistent. `error_bin` is left `None`
+    /// (noise error tables are not the lever — the edge term is esf-gated).
+    pub fn dense_noise_facts(
+        &self,
+        peptide: &Peptide,
+        scorer: &RankScorer,
+        n_samples: usize,
+    ) -> Vec<(Partition, Option<u32>, Option<u32>)> {
+        let max_rank = scorer.max_rank();
+        if n_samples == 0 {
+            return Vec::new();
+        }
+        let (peaks, ranks) = self.active_peaks_and_ranks();
+        let peptide_nominal = peptide.nominal_residue_mass();
+        let lo: i64 = 57; // ~smallest residue nominal
+        let hi: i64 = (peptide_nominal as i64 - 57).max(lo + 1);
+        let mut out: Vec<(Partition, Option<u32>, Option<u32>)> =
+            Vec::with_capacity(n_samples * 2);
+        for i in 0..n_samples {
+            let nominal = (lo + (hi - lo) * i as i64 / n_samples as i64) as f64;
+            for &is_prefix in &[true, false] {
+                visit_directional_node_ion_matches(
+                    peaks,
+                    ranks,
+                    &self.segment_partition_cache,
+                    scorer,
+                    nominal,
+                    is_prefix,
+                    self.charge,
+                    self.parent_mass,
+                    |partition, _ion, rank, _logs, _theo_mz, _tol| {
+                        let r = rank.map(|r| r.min(max_rank).max(1));
+                        out.push((partition, r, None));
+                    },
+                );
+            }
+        }
+        out
+    }
 }
 
 /// Shared segment→partition→ion matching step for node scoring and

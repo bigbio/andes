@@ -103,7 +103,17 @@ impl<'a> StatsAccumulator<'a> {
         // by the "missing" slot) calibrates the ion-vs-noise likelihood ratio.
         // Without this the missing-ion penalty inverts and the model scores
         // target and decoy alike (0 PSMs at 1% FDR).
-        for (partition, rank, error_bin) in scored_spec.noise_match_facts(peptide, self.scorer) {
+        // Noise model: default = reversed-peptide decoy ions; opt-in env
+        // MSGF_DENSE_NOISE=<n> = MS-GF+-style dense random-position sampling
+        // (sharper, missing-slot-dominated noise — see dense_noise_facts).
+        let noise_facts = match std::env::var("MSGF_DENSE_NOISE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            Some(n) if n > 0 => scored_spec.dense_noise_facts(peptide, self.scorer, n),
+            _ => scored_spec.noise_match_facts(peptide, self.scorer),
+        };
+        for (partition, rank, error_bin) in noise_facts {
             let rank_idx = match rank {
                 Some(r) => r.min(max_rank).max(1) - 1,
                 None => max_rank,

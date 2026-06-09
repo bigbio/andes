@@ -7,9 +7,9 @@
 //!    reversed decoys), reusing the same construction as the production binary.
 //! 2. Run the full search with the seed `RankScorer` via [`match_spectra`] —
 //!    no search or scoring logic is re-implemented here.
-//! 3. For each spectrum take the **best PSM** (lowest `spec_e_value`, then
-//!    highest `score`) from the queue.
-//! 4. Sort best-per-spectrum PSMs by `spec_e_value` ascending (best first).
+//! 3. For each spectrum take the **best PSM** (highest `rank_score`) from the
+//!    queue.
+//! 4. Sort best-per-spectrum PSMs by `rank_score` descending (best first).
 //! 5. Walk the sorted list computing a running target/decoy count and q-value
 //!    at each position: `q = running_decoys / max(running_targets, 1)`.
 //! 6. Convert to a proper monotone q-value by scanning from the bottom and
@@ -134,13 +134,13 @@ pub fn bootstrap_labels(
     );
 
     // ── 3. Collect best PSM per spectrum ──────────────────────────────────────
-    // Each TopNQueue is already sorted best-first by `spec_e_value`. We take
+    // Each TopNQueue is already sorted best-first by `rank_score`. We take
     // the single best entry per spectrum.
     struct BestPsm {
         spectrum_index: usize,
         peptide: Peptide,
         charge: u8,
-        spec_e_value: f64,
+        rank_score: f32,
         is_decoy: bool,
     }
 
@@ -149,7 +149,7 @@ pub fn bootstrap_labels(
         if queue.is_empty() {
             continue;
         }
-        // peek_top returns the best (lowest spec_e_value, then highest score).
+        // peek_top returns the best (highest rank_score).
         if let Some(psm) = queue.peek_top() {
             let cand_idx = psm.primary_candidate_idx() as usize;
             let cand = &candidates[cand_idx];
@@ -157,18 +157,18 @@ pub fn bootstrap_labels(
                 spectrum_index: spec_idx,
                 peptide: cand.peptide.clone(),
                 charge: psm.charge_used,
-                spec_e_value: psm.spec_e_value,
+                rank_score: psm.rank_score,
                 is_decoy: cand.is_decoy,
             });
         }
     }
 
-    // ── 4. Sort by spec_e_value ascending (best/most-confident first) ─────────
+    // ── 4. Sort by rank_score DESCENDING (best/most-confident first) ──────────
     // Tie-break by is_decoy ascending (target before decoy) for stability.
     best_psms.sort_by(|a, b| {
-        let av = if a.spec_e_value.is_nan() { f64::INFINITY } else { a.spec_e_value };
-        let bv = if b.spec_e_value.is_nan() { f64::INFINITY } else { b.spec_e_value };
-        av.partial_cmp(&bv)
+        let av = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+        let bv = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+        bv.partial_cmp(&av)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.is_decoy.cmp(&b.is_decoy))
     });
@@ -200,6 +200,17 @@ pub fn bootstrap_labels(
         *q = min_q;
     }
 
+    // ── 6b. Conservative tie handling for equal `rank_score` buckets ──────────
+    // Raw `rank_score` (RawScore) is coarse, so ties are common. The sort above
+    // is not guaranteed to order target-vs-decoy within a tie favourably, and
+    // target-before-decoy ordering would deflate the running decoy ratio inside
+    // the bucket, accepting a target at the requested FDR even when a tied decoy
+    // should fail it. Assign every PSM in an equal-`rank_score` bucket the WORST
+    // (max) q-value seen anywhere in that bucket so the whole bucket passes or
+    // fails together (pessimistic). `best_psms` is sorted by `rank_score`
+    // descending, so equal scores are contiguous.
+    assign_bucket_worst_q(&best_psms, &mut mono_q, |p| p.rank_score);
+
     // ── 7. Collect accepted TARGET PSMs ──────────────────────────────────────
     let mut labels: Vec<LabeledMatch> = Vec::new();
     for (psm, q) in best_psms.into_iter().zip(mono_q.into_iter()) {
@@ -214,4 +225,129 @@ pub fn bootstrap_labels(
     }
 
     Ok(labels)
+}
+
+/// Make q-values conservative across equal-`rank_score` ties.
+///
+/// `psms` MUST be sorted by `rank_score` descending (equal scores contiguous),
+/// matching the order `q` was computed in. For each maximal run of PSMs with
+/// the same `rank_score` (compared on exact `f32` bits, NaN-safe), every q in
+/// that run is set to the WORST (maximum) q seen in the run. This prevents a
+/// favourable within-tie ordering (e.g. target-before-decoy) from accepting a
+/// target at a given FDR when a tied decoy should make the whole bucket fail.
+///
+/// Shared by [`bootstrap_labels`] and [`crate::gate::count_target_psms`].
+pub(crate) fn assign_bucket_worst_q<T>(
+    psms: &[T],
+    q: &mut [f64],
+    score_of: impl Fn(&T) -> f32,
+) {
+    debug_assert_eq!(psms.len(), q.len());
+    let mut start = 0usize;
+    while start < psms.len() {
+        let s = score_of(&psms[start]);
+        let mut end = start + 1;
+        while end < psms.len() && scores_tie(score_of(&psms[end]), s) {
+            end += 1;
+        }
+        // Worst (max) q within [start, end).
+        let mut worst = q[start];
+        for &qi in &q[start + 1..end] {
+            if qi > worst {
+                worst = qi;
+            }
+        }
+        for qi in &mut q[start..end] {
+            *qi = worst;
+        }
+        start = end;
+    }
+}
+
+/// Two `rank_score`s tie iff they have identical bit patterns. Treats all NaNs
+/// as a single tie class (they sort together as `NEG_INFINITY` above).
+fn scores_tie(a: f32, b: f32) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    a.to_bits() == b.to_bits()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal stand-in for the per-spectrum best PSM used by the FDR walk.
+    struct P {
+        rank_score: f32,
+        is_decoy: bool,
+    }
+
+    /// Reproduce Steps 4-6b of the FDR computation on a fixture and return the
+    /// per-PSM q-values plus the number of accepted targets at `fdr`.
+    fn fdr(mut psms: Vec<P>, fdr: f64) -> (Vec<f64>, usize) {
+        // Step 4: target-before-decoy tie-break (the original, "optimistic"
+        // ordering) — the conservative bucket pass must neutralise its bias.
+        psms.sort_by(|a, b| {
+            let av = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+            let bv = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+            bv.partial_cmp(&av)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.is_decoy.cmp(&b.is_decoy))
+        });
+        let n = psms.len();
+        let mut q = vec![1.0_f64; n];
+        let (mut t, mut d) = (0u64, 0u64);
+        for (i, p) in psms.iter().enumerate() {
+            if p.is_decoy { d += 1 } else { t += 1 }
+            q[i] = d as f64 / t.max(1) as f64;
+        }
+        let mut min_q = 1.0;
+        for qi in q.iter_mut().rev() {
+            if *qi < min_q { min_q = *qi; }
+            *qi = min_q;
+        }
+        assign_bucket_worst_q(&psms, &mut q, |p| p.rank_score);
+        let accepted = psms
+            .iter()
+            .zip(q.iter())
+            .filter(|(p, &qi)| !p.is_decoy && qi <= fdr)
+            .count();
+        (q, accepted)
+    }
+
+    #[test]
+    fn tied_target_and_decoy_bucket_is_counted_conservatively() {
+        // One confident target, then a target tied with a decoy at the same
+        // raw rank_score. With target-before-decoy ordering the running ratio
+        // would dip *before* the decoy is counted, accepting the tied target at
+        // 1% FDR. The conservative bucket pass must give both tied PSMs the same
+        // (worst) q, so the tied decoy makes the bucket fail and the tied target
+        // is NOT accepted.
+        let psms = vec![
+            P { rank_score: 10.0, is_decoy: false }, // clearly good target
+            P { rank_score: 5.0, is_decoy: false },  // tied with decoy below
+            P { rank_score: 5.0, is_decoy: true },   // tied decoy
+        ];
+        let (q, accepted) = fdr(psms, 0.01);
+        // The two tied PSMs share the worst q in their bucket (q = 0.5 here),
+        // so neither passes 1% FDR. Only the first, clearly-good target does.
+        assert_eq!(accepted, 1, "tied target must not be accepted when its bucket has a decoy");
+        assert_eq!(q[1], q[2], "tied PSMs must share a q-value");
+        assert!(q[1] > 0.01, "tied bucket q must reflect the decoy");
+    }
+
+    #[test]
+    fn untied_scores_are_unaffected() {
+        // With strictly distinct scores the bucket pass is a no-op: each PSM is
+        // its own bucket, so q-values match the plain monotone TDC result.
+        let psms = vec![
+            P { rank_score: 10.0, is_decoy: false },
+            P { rank_score: 9.0, is_decoy: false },
+            P { rank_score: 8.0, is_decoy: true },
+        ];
+        let (q, accepted) = fdr(psms, 0.01);
+        assert_eq!(accepted, 2, "both distinct-score targets pass at 1% FDR");
+        assert!(q[0] <= 0.01 && q[1] <= 0.01);
+    }
 }

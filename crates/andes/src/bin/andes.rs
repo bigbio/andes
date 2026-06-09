@@ -1,4 +1,4 @@
-//! msgf-rust: end-to-end peptide-spectrum database search.
+//! andes: end-to-end peptide-spectrum database search.
 //!
 //! Loads an MGF or mzML spectrum file and a FASTA target database, runs a
 //! tryptic database search and writes output
@@ -14,6 +14,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::Arc;
 use std::thread;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -89,8 +90,16 @@ pub enum EnzymeSpecificity {
     #[clap(name = "fully")]        Fully,
 }
 
+/// Primary ranking mode: inherited RawScore (`rank`) or fused strong score (`strong`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum ScoreFlag {
+    #[default]
+    Rank,
+    Strong,
+}
+
 /// Search arguments (shared by the default search path and exposed as a
-/// flat arg group so that `msgf-rust --spectrum X --database Y --output-pin Z`
+/// flat arg group so that `andes --spectrum X --database Y --output-pin Z`
 /// keeps working unchanged).
 ///
 /// Note: `spectrum`, `database`, and `output_pin` are declared `Option<PathBuf>`
@@ -99,10 +108,10 @@ pub enum EnzymeSpecificity {
 /// manually and returns an early error if they are missing.
 #[derive(Args, Debug)]
 struct SearchArgs {
-    /// Input spectrum file. Format is auto-detected by extension:
-    /// `.mzML`/`.mzml` is read as mzML, anything else as MGF.
+    /// Input spectrum file(s). Repeat `--spectrum` for multiple inputs (one PIN).
+    /// Format is auto-detected per file by extension.
     #[arg(long)]
-    spectrum: Option<PathBuf>,
+    spectrum: Vec<PathBuf>,
 
     /// Input FASTA database (target sequences only; decoys are generated automatically).
     #[arg(long)]
@@ -257,13 +266,24 @@ struct SearchArgs {
 
     /// Exact model ID to load from the model store (bundled or `--model-store`).
     /// When set, skips automatic selection by `(--fragmentation, --instrument,
-    /// --protocol)` and loads this ID directly. Useful after `msgf-rust train`
+    /// --protocol)` and loads this ID directly. Useful after `andes train`
     /// to search with the freshly-trained model.
     #[arg(long = "model")]
     model_id_override: Option<String>,
+
+    /// Path to a trained intensity model parquet (`andes train-intensity` output).
+    /// Populates the additive `IntensitySignal` PIN column; ranking stays on RawScore
+    /// until `--score strong` is enabled in a later phase. When unset, the column is 0.0.
+    #[arg(long = "intensity-model")]
+    intensity_model: Option<PathBuf>,
+
+    /// Ranking / PIN RawScore source: `rank` (default, byte-identical) or `strong`
+    /// (fused intensity + competition score from S1–S3).
+    #[arg(long = "score", default_value = "rank")]
+    score: ScoreFlag,
 }
 
-/// Training arguments for `msgf-rust train`.
+/// Training arguments for `andes train`.
 #[derive(Args, Debug)]
 struct TrainArgs {
     /// Input spectrum file (training data). Same format dispatch as for search:
@@ -369,12 +389,109 @@ struct TrainArgs {
     force: bool,
 }
 
+/// Training arguments for `andes train-from-msnet`.
+///
+/// Trains a scoring model directly from externally-labeled, high-confidence
+/// PSMs supplied as a "flat training parquet" (one row per PSM, each carrying
+/// the spectrum peaks + identified peptide + resolved mod mass-deltas). This
+/// bypasses the bootstrap-search label step entirely: every input row is a
+/// label. The seed model supplies only structural hyperparameters (`mme`,
+/// deconvolution, segments, frag/precursor offset tables, max_rank); all
+/// learned distributions come from the input data.
+#[derive(Args, Debug)]
+struct TrainFromMsnetArgs {
+    /// Input flat training parquet(s). Repeatable; stats accumulate across all
+    /// inputs into a single model.
+    #[arg(long = "in", required = true)]
+    inputs: Vec<PathBuf>,
+
+    /// Path to the Parquet model store to write (created if absent; existing
+    /// models are preserved and re-written alongside the new one). REQUIRED.
+    #[arg(long = "out-store")]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `default`.
+    #[arg(long = "model-id", default_value = "default")]
+    model_id: String,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or a
+    /// path to a binary `.param` file. Supplies structural hyperparameters only.
+    #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
+    seed_model: String,
+
+    /// Fragment match tolerance in ppm. Overwrites the seed model's `mme`
+    /// before training. Mutually exclusive with `--fragment-tol-da`. When
+    /// neither is given, the seed model's `mme` is kept.
+    #[arg(long = "fragment-tol-ppm", conflicts_with = "fragment_tol_da")]
+    fragment_tol_ppm: Option<f64>,
+
+    /// Fragment match tolerance in Da. Overwrites the seed model's `mme`
+    /// before training. Mutually exclusive with `--fragment-tol-ppm`.
+    #[arg(long = "fragment-tol-da")]
+    fragment_tol_da: Option<f64>,
+
+    /// Number of worker threads. Defaults to logical CPU count.
+    #[arg(long, default_value_t = num_cpus::get())]
+    threads: usize,
+
+    /// Laplace pseudo-count for rank/error tables (lower = sharper; default 1.0).
+    #[arg(long = "train-pseudo", default_value_t = 1.0)]
+    train_pseudo: f32,
+
+    /// Laplace pseudo-count for the NOISE rank distribution (lower = sharper).
+    /// Noise is abundant and concentrated, so it needs far less smoothing than
+    /// signal ions; the signal `--train-pseudo` over-flattens it. Default 0.05.
+    #[arg(long = "train-noise-pseudo", default_value_t = 0.05)]
+    train_noise_pseudo: f32,
+
+    /// Partition backoff prior weight (lower = less smoothing toward parent; default 20).
+    #[arg(long = "train-backoff-weight", default_value_t = 20.0)]
+    train_backoff_weight: f32,
+
+    /// Minimum partition count before backoff blending (default 50).
+    #[arg(long = "train-min-count", default_value_t = 50)]
+    train_min_count: u64,
+}
+
+/// Training arguments for `andes train-intensity`.
+///
+/// Merges one or more partial intensity aggregation parquets (from
+/// `msnet_intensity_agg.py`) into a finalized `intensity_model.parquet` with
+/// `mean_log_rel` / `var_log_rel` columns for runtime lookup.
+#[derive(Args, Debug)]
+struct TrainIntensityArgs {
+    /// Input partial or finalized intensity parquets. Repeatable; stats merge
+    /// across all inputs.
+    #[arg(long = "in", required = true)]
+    inputs: Vec<PathBuf>,
+
+    /// Output path for the finalized intensity model parquet.
+    #[arg(long = "out", required = true)]
+    out: PathBuf,
+}
+
 /// Available subcommands.
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Train a scoring model from spectra and a FASTA database, writing the
     /// result to a Parquet model store.
-    Train(TrainArgs),
+    ///
+    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
+    Train(Box<TrainArgs>),
+
+    /// Train a scoring model directly from externally-labeled, high-confidence
+    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
+    /// search. Used for the Phase-3 "own models" path.
+    ///
+    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`):
+    /// the largest variant (`Train`) dominates the size otherwise.
+    #[command(name = "train-from-msnet")]
+    TrainFromMsnet(Box<TrainFromMsnetArgs>),
+
+    /// Merge MSNet intensity aggregation parquets into a finalized intensity
+    /// model for the strong-score numerator.
+    #[command(name = "train-intensity")]
+    TrainIntensity(Box<TrainIntensityArgs>),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -382,8 +499,8 @@ enum Command {
 /// behaviour).
 #[derive(Parser, Debug)]
 #[command(
-    name = "msgf-rust",
-    about = "msgf-rust: database search of MGF/mzML spectra against FASTA",
+    name = "andes",
+    about = "andes: database search of MGF/mzML spectra against FASTA",
     allow_hyphen_values = true,
 )]
 struct TopCli {
@@ -402,17 +519,16 @@ fn main() -> ExitCode {
     configure_bundled_dotnet();
     let top = TopCli::parse();
     let result = match top.command {
-        Some(Command::Train(args)) => run_train(args),
+        Some(Command::Train(args)) => run_train(*args),
+        Some(Command::TrainFromMsnet(args)) => run_train_from_msnet(*args),
+        Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
         None => {
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
-            let spectrum = match search.spectrum {
-                Some(p) => p,
-                None => {
-                    eprintln!("error: --spectrum is required for search (or use `msgf-rust train`)");
-                    return ExitCode::from(2);
-                }
-            };
+            if search.spectrum.is_empty() {
+                eprintln!("error: --spectrum is required for search (or use `andes train`)");
+                return ExitCode::from(2);
+            }
             let database = match search.database {
                 Some(p) => p,
                 None => {
@@ -427,9 +543,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            // Reconstruct a Cli (= SearchArgs) with the validated paths.
             run(Cli {
-                spectrum: Some(spectrum),
                 database: Some(database),
                 output_pin: Some(output_pin),
                 ..search
@@ -439,7 +553,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("msgf-rust: {e}");
+            eprintln!("andes: {e}");
             ExitCode::from(1)
         }
     }
@@ -514,6 +628,45 @@ fn log_rss(tag: &str) {
 struct ParseStats {
     error_count: usize,
     first_errors: Vec<String>,
+}
+
+fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    let is_mzml = matches!(ext.as_deref(), Some("mzml"));
+    let is_raw = matches!(ext.as_deref(), Some("raw"));
+    let is_d = matches!(ext.as_deref(), Some("d"));
+    let is_mgf = !is_mzml && !is_raw && !is_d;
+    (is_mzml, is_raw, is_d, is_mgf)
+}
+
+/// Prefix spectrum titles so pooled multi-file PIN SpecIds stay unique.
+/// Decide the per-file SpecId/title prefix. Returns `None` for a single-file
+/// search so its PIN output stays byte-identical to the pre-multi-file path;
+/// returns `Some("<stem>/")` only when disambiguating across multiple inputs.
+fn title_prefix_for(num_files: usize, file_stem: &str) -> Option<String> {
+    (num_files > 1).then(|| format!("{file_stem}/"))
+}
+
+fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
+    for spec in chunk.iter_mut() {
+        if spec.title.is_empty() {
+            spec.title = format!("{prefix}scan={}", spec.scan.unwrap_or(0));
+        } else {
+            spec.title = format!("{prefix}{}", spec.title);
+        }
+    }
+}
+
+fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
+    acc.error_count += part.error_count;
+    for e in part.first_errors {
+        if acc.first_errors.len() < 10 {
+            acc.first_errors.push(e);
+        }
+    }
 }
 
 /// Producer helper: drains `reader` into fixed-size chunks of `Spectrum`
@@ -742,9 +895,9 @@ fn run_precursor_calibration(
         );
     } else {
         eprintln!(
-            "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} failed SpecE, {} failed |residual|>50ppm; elapsed: {:.2}s)",
+            "Precursor mass calibration skipped (insufficient confident PSMs: {} with PSMs, {} below RawScore floor, {} failed |residual|>50ppm; elapsed: {:.2}s)",
             stats.queues_with_psm,
-            stats.rejected_spec_e,
+            stats.rejected_low_score,
             stats.rejected_residual,
             t_cal.elapsed().as_secs_f64()
         );
@@ -754,9 +907,19 @@ fn run_precursor_calibration(
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
-    let spectrum_path: PathBuf = cli.spectrum.expect("spectrum validated in main");
+    if cli.spectrum.is_empty() {
+        return Err("no --spectrum inputs".into());
+    }
+    let spectrum_paths = &cli.spectrum;
+    let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
     let output_pin_path: PathBuf = cli.output_pin.expect("output_pin validated in main");
+    if spectrum_paths.len() > 1 {
+        eprintln!(
+            "Multi-spectrum search: {} inputs → one PIN",
+            spectrum_paths.len()
+        );
+    }
 
     log_rss("startup");
     let t_total = std::time::Instant::now();
@@ -781,7 +944,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
     //
     // If --mod is given, parse the Java-format mods.txt file. Otherwise
-    // fall back to msgf-rust's historical defaults (CAM fixed on C,
+    // fall back to andes's historical defaults (CAM fixed on C,
     // Oxidation variable on M) so existing tests keep their behaviour.
     //
     // `num_mods_from_file` is populated only when --mod is given and the
@@ -872,7 +1035,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
 
     let t_phase = std::time::Instant::now();
-    let param = if let Some(ref override_path) = cli.param_file {
+    let mut param = if let Some(ref override_path) = cli.param_file {
         // ── Override path: load binary .param directly (unchanged behaviour). ──
         eprintln!("Param file (override): {}", override_path.display());
         Param::load_from_file(override_path)
@@ -924,6 +1087,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Param model: {model_id} (from store)");
         p
     };
+    // Stamp the requested isobaric protocol onto the loaded model so the dense-
+    // spectrum windowed peak filter (ScoredSpectrum) engages on TMT/iTRAQ
+    // searches even when model selection fell back to a non-isobaric table
+    // (there is no bundled CID-TMT model, so `--protocol TMT` resolves to
+    // `cid_lowres_tryp`, whose stored protocol is Standard).
+    match cli.protocol {
+        Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
+        Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
+        Protocol::ItraqPhospho => param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho,
+        _ => {}
+    }
     let scorer = RankScorer::new(&param);
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
@@ -987,6 +1161,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.precursor_cal_mode = cli.precursor_cal;
     params.precursor_mass_shift_ppm = 0.0;
+    params.score_mode = match cli.score {
+        ScoreFlag::Rank => search::ScoreMode::Rank,
+        ScoreFlag::Strong => search::ScoreMode::Strong,
+    };
+    if params.score_mode == search::ScoreMode::Strong {
+        eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
+    }
 
     // ── 6+7. Stream-load + chunked search ─────────────────────────────────
     //
@@ -1099,12 +1280,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let intensity_model: Option<Arc<scoring_crate::IntensityModel>> = cli
+        .intensity_model
+        .as_ref()
+        .map(|path| {
+            eprintln!("loading intensity model from {} ...", path.display());
+            scoring_crate::IntensityModel::load(path)
+                .map(Arc::new)
+                .map_err(|e| format!("intensity model {}: {e}", path.display()))
+        })
+        .transpose()?;
+
     let prepared = match reuse_parts {
         Some(parts) => {
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
         None => PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix),
-    };
+    }
+    .with_intensity_model(intensity_model);
     log_rss("after_prepared_search");
     eprintln!(
         "PreparedSearch: {} candidates, {} mass buckets",
@@ -1148,165 +1341,194 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // dedicated thread so chunk N+1 parses while chunk N scores. The streaming
     // pipeline in the `else` branch handles the (default) non-chimeric path.
     let chimeric_input = chimeric_active;
-    let parse_stats = if chimeric_input {
-        let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
-        let spectrum_path = spectrum_path.clone();
-        let cap = bench_cap;
-        // The cascade is MS2-only by construction (MS2 paired with its preceding
-        // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
-        // range to admit MS3 (the .raw chunked reader is already MS2-only).
-        let mslevel = 2;
-        let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
-            // The inner closures borrow `tx` (SyncSender::send takes &self), so
-            // both reader branches can use it without moving it twice.
-            if is_mzml {
-                let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
-                let reader = MzMLReader::new(BufReader::new(f))
-                    .with_ms_level_range(mslevel, mslevel)
-                    .with_ms1_capture(true);
-                let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
-                    // If the consumer hung up, sending fails; nothing more to do.
-                    let _ = tx.send((chunk, link));
-                });
-                Ok((errc, errs))
-            } else {
-                // is_raw — same MS2 + bounded-MS1 chunk stream from the .raw.
-                #[cfg(feature = "thermo")]
-                {
-                    let reader = input::ThermoRawReader::open(&spectrum_path)
-                        .map_err(|e| format!("open Thermo .raw: {e}"))?;
-                    let (errc, errs) = reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
-                        let _ = tx.send((chunk, link));
-                    });
-                    Ok((errc, errs))
-                }
-                #[cfg(not(feature = "thermo"))]
-                {
-                    Err("this msgf-rust build has no Thermo .raw support; \
-                         rebuild with `--features thermo`."
-                        .to_string())
-                }
-            }
-        });
+    let mut parse_stats = ParseStats::default();
 
-        let mut offset = 0usize;
-        let mut ms1_linked = 0usize;
-        for (chunk_spectra, chunk_link) in rx {
-            // Pass 1 (offset → global spectrum_idx for PIN), then Pass 2 on the same
-            // chunk (BEFORE peaks are dropped — the residual needs them). The chunk's
-            // own `Ms1Link` and `offset` keep chunk-local indexing aligned.
-            let mut queues = prepared.run_chunk(&chunk_spectra, offset);
-            search::match_engine::run_pass2_coisolation(
-                &prepared,
-                &chunk_spectra,
-                &mut queues,
-                &params,
-                &chunk_link,
-                offset,
+    for (file_idx, input_path) in spectrum_paths.iter().enumerate() {
+        if bench_mode && all_spectra.len() >= bench_cap {
+            break;
+        }
+        let remaining_cap = if bench_mode {
+            bench_cap.saturating_sub(all_spectra.len())
+        } else {
+            usize::MAX
+        };
+
+        let (file_is_mzml, file_is_raw, file_is_d, _file_is_mgf) =
+            input_format_flags(input_path);
+        let file_stem = input_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("spectrum");
+        let title_prefix = title_prefix_for(spectrum_paths.len(), file_stem);
+
+        if spectrum_paths.len() > 1 {
+            eprintln!(
+                "=== spectrum [{}/{}] {} ===",
+                file_idx + 1,
+                spectrum_paths.len(),
+                input_path.display()
             );
-            offset += chunk_spectra.len();
-            ms1_linked += chunk_link.ms1_peaks.len();
-            all_queues.extend(queues);
-            for mut spec in chunk_spectra.into_iter() {
-                spec.peaks = Vec::new();
-                all_spectra.push(spec);
-            }
-        }
-        let (err_count, first_errors) = parser_handle
-            .join()
-            .map_err(|_| "chimeric parser thread panicked".to_string())??;
-        eprintln!(
-            "chimeric mode: streamed {} MS2 spectra ({} MS1 scans linked) in chunks of {}",
-            offset, ms1_linked, CHUNK_SIZE
-        );
-        log_rss("after_chimeric_stream_search");
-        ParseStats { error_count: err_count, first_errors }
-    } else {
-        // ── Non-chimeric streaming pipeline (UNCHANGED) ───────────────────
-        let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
-
-        // Spawn the parser thread. It owns the reader (paths + flags moved in).
-        // The thread returns ParseStats with the error count + sample messages.
-        let spectrum_path = spectrum_path.clone();
-        let parser_handle = thread::spawn(move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
-            if is_mzml {
-                let f = File::open(&spectrum_path)
-                    .map_err(|e| format!("open mzML: {e}"))?;
-                let reader = MzMLReader::new(BufReader::new(f))
-                    .with_ms_level_range(ms_level_u32, ms_level_u32);
-                Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
-            } else if is_raw {
-                // Native Thermo .raw (feature-gated). The reader spawns no
-                // thread of its own; it yields the same Spectrum stream as the
-                // mzML/MGF readers. MS2-only: identification scans, never MS3
-                // (e.g. TMT SPS-MS3 reporter scans) regardless of `--ms-level`.
-                #[cfg(feature = "thermo")]
-                {
-                    let reader = input::ThermoRawReader::open(&spectrum_path)
-                        .map_err(|e| format!("open Thermo .raw: {e}"))?
-                        .with_ms_level(Some(2));
-                    Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
-                }
-                #[cfg(not(feature = "thermo"))]
-                {
-                    Err("this msgf-rust build has no Thermo .raw support; \
-                         rebuild with `--features thermo` (and run with the \
-                         .NET 8 runtime installed). mzML/MGF inputs work without it."
-                        .into())
-                }
-            } else if is_d {
-                // Native Bruker timsTOF `.d` (feature-gated). The reader opens
-                // the `.d` directory and yields the same MS2 `Spectrum` stream
-                // as the mzML/MGF readers; it spawns no thread of its own.
-                #[cfg(feature = "timstof")]
-                {
-                    let reader = input::TimsTofReader::open(&spectrum_path)
-                        .map_err(|e| format!("open Bruker .d: {e}"))?;
-                    Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
-                }
-                #[cfg(not(feature = "timstof"))]
-                {
-                    Err("this msgf-rust build has no Bruker .d (timsTOF) support; \
-                         rebuild with `--features timstof`. mzML/MGF inputs work \
-                         without it."
-                        .into())
-                }
-            } else {
-                let f = File::open(&spectrum_path)
-                    .map_err(|e| format!("open MGF: {e}"))?;
-                let reader = MgfReader::new(BufReader::new(f));
-                Ok(send_chunks(reader, CHUNK_SIZE, bench_cap, tx))
-            }
-        });
-
-        log_rss("after_parser_thread_spawn");
-
-        // Consumer loop: drain chunks from the channel as they arrive. Each
-        // received chunk is processed via `prepared.run_chunk` (Rayon-parallel)
-        // synchronously on this thread; while the inner Rayon runs, the parser
-        // thread is filling the next chunk concurrently.
-        for chunk in rx {
-            if chunk.is_empty() {
-                continue;
-            }
-            let offset = all_spectra.len();
-            let queues = prepared.run_chunk(&chunk, offset);
-            all_queues.extend(queues);
-            for mut spec in chunk.into_iter() {
-                spec.peaks = Vec::new();
-                all_spectra.push(spec);
-            }
-            log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
         }
 
-        // Reap the parser thread for its stats. join() should never block here
-        // (channel close has already fired on parser exit).
-        match parser_handle.join() {
-            Ok(Ok(stats)) => stats,
-            Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
-            Err(_) => return Err("parser thread panicked".into()),
+        if chimeric_input && !(file_is_mzml || file_is_raw) {
+            return Err(format!(
+                "--chimeric only supports mzML/.raw inputs, got {}",
+                input_path.display()
+            )
+            .into());
         }
-    };
+
+        let file_stats = if chimeric_input {
+            let (tx, rx) = sync_channel::<(Vec<Spectrum>, Ms1Link)>(2);
+            let spectrum_path = input_path.clone();
+            let cap = remaining_cap;
+            // The cascade is MS2-only by construction (MS2 paired with its preceding
+            // MS1); hardcode MS2 so `--ms-level 3` can never widen the mzML reader's
+            // range to admit MS3 (the .raw chunked reader is already MS2-only).
+            let mslevel = 2;
+            let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
+                if file_is_mzml {
+                    let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
+                    let reader = MzMLReader::new(BufReader::new(f))
+                        .with_ms_level_range(mslevel, mslevel)
+                        .with_ms1_capture(true);
+                    let (errc, errs) =
+                        reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                            let _ = tx.send((chunk, link));
+                        });
+                    Ok((errc, errs))
+                } else {
+                    #[cfg(feature = "thermo")]
+                    {
+                        let reader = input::ThermoRawReader::open(&spectrum_path)
+                            .map_err(|e| format!("open Thermo .raw: {e}"))?;
+                        let (errc, errs) =
+                            reader.read_with_ms1_chunked(CHUNK_SIZE, cap, |chunk, link| {
+                                let _ = tx.send((chunk, link));
+                            });
+                        Ok((errc, errs))
+                    }
+                    #[cfg(not(feature = "thermo"))]
+                    {
+                        Err("this andes build has no Thermo .raw support; \
+                             rebuild with `--features thermo`."
+                            .to_string())
+                    }
+                }
+            });
+
+            let mut file_offset = 0usize;
+            let mut ms1_linked = 0usize;
+            for (mut chunk_spectra, chunk_link) in rx {
+                if let Some(prefix) = &title_prefix {
+                    prefix_spectrum_titles(&mut chunk_spectra, prefix);
+                }
+                let offset = all_spectra.len();
+                let mut queues = prepared.run_chunk(&chunk_spectra, offset);
+                search::match_engine::run_pass2_coisolation(
+                    &prepared,
+                    &chunk_spectra,
+                    &mut queues,
+                    &params,
+                    &chunk_link,
+                    offset,
+                );
+                file_offset += chunk_spectra.len();
+                ms1_linked += chunk_link.ms1_peaks.len();
+                all_queues.extend(queues);
+                for mut spec in chunk_spectra.into_iter() {
+                    spec.peaks = Vec::new();
+                    all_spectra.push(spec);
+                }
+            }
+            let (err_count, first_errors) = parser_handle
+                .join()
+                .map_err(|_| "chimeric parser thread panicked".to_string())??;
+            eprintln!(
+                "chimeric mode: streamed {} MS2 spectra ({} MS1 scans linked) from {}",
+                file_offset, ms1_linked, input_path.display()
+            );
+            log_rss("after_chimeric_stream_search");
+            ParseStats {
+                error_count: err_count,
+                first_errors,
+            }
+        } else {
+            let (tx, rx) = sync_channel::<Vec<Spectrum>>(2);
+            let spectrum_path = input_path.clone();
+            let parser_handle = thread::spawn(
+                move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
+                    if file_is_mzml {
+                        let f = File::open(&spectrum_path)
+                            .map_err(|e| format!("open mzML: {e}"))?;
+                        let reader = MzMLReader::new(BufReader::new(f))
+                            .with_ms_level_range(ms_level_u32, ms_level_u32);
+                        Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                    } else if file_is_raw {
+                        #[cfg(feature = "thermo")]
+                        {
+                            let reader = input::ThermoRawReader::open(&spectrum_path)
+                                .map_err(|e| format!("open Thermo .raw: {e}"))?
+                                .with_ms_level(Some(2));
+                            Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                        }
+                        #[cfg(not(feature = "thermo"))]
+                        {
+                            Err("this andes build has no Thermo .raw support; \
+                                 rebuild with `--features thermo` (and run with the \
+                                 .NET 8 runtime installed). mzML/MGF inputs work without it."
+                                .into())
+                        }
+                    } else if file_is_d {
+                        #[cfg(feature = "timstof")]
+                        {
+                            let reader = input::TimsTofReader::open(&spectrum_path)
+                                .map_err(|e| format!("open Bruker .d: {e}"))?;
+                            Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                        }
+                        #[cfg(not(feature = "timstof"))]
+                        {
+                            Err("this andes build has no Bruker .d (timsTOF) support; \
+                                 rebuild with `--features timstof`. mzML/MGF inputs work \
+                                 without it."
+                                .into())
+                        }
+                    } else {
+                        let f = File::open(&spectrum_path)
+                            .map_err(|e| format!("open MGF: {e}"))?;
+                        let reader = MgfReader::new(BufReader::new(f));
+                        Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
+                    }
+                },
+            );
+
+            log_rss("after_parser_thread_spawn");
+
+            for mut chunk in rx {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if let Some(prefix) = &title_prefix {
+                    prefix_spectrum_titles(&mut chunk, prefix);
+                }
+                let offset = all_spectra.len();
+                let queues = prepared.run_chunk(&chunk, offset);
+                all_queues.extend(queues);
+                for mut spec in chunk.into_iter() {
+                    spec.peaks = Vec::new();
+                    all_spectra.push(spec);
+                }
+                log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
+            }
+
+            match parser_handle.join() {
+                Ok(Ok(stats)) => stats,
+                Ok(Err(e)) => return Err(format!("parser thread error: {e}").into()),
+                Err(_) => return Err("parser thread panicked".into()),
+            }
+        };
+        merge_parse_stats(&mut parse_stats, file_stats);
+    }
 
     if parse_stats.error_count > 0 {
         eprintln!(
@@ -1331,11 +1553,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if all_spectra.is_empty() {
-        return Err(format!(
-            "no spectra parsed from {}",
-            spectrum_path.display()
-        )
-        .into());
+        let paths: Vec<String> = spectrum_paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        return Err(format!("no spectra parsed from {}", paths.join(", ")).into());
     }
 
     log_rss("after_all_spectra");
@@ -1382,10 +1604,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 9. Write TSV (optional) ───────────────────────────────────────────────
     if let Some(ref tsv_path) = cli.output_tsv {
-        let spec_file_name = spectrum_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| spectrum_path.display().to_string());
+        let spec_file_name = if spectrum_paths.len() == 1 {
+            spectrum_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| spectrum_path.display().to_string())
+        } else {
+            spectrum_paths
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .collect::<Vec<_>>()
+                .join("+")
+        };
         output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
@@ -1659,6 +1889,668 @@ fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
         labels.len(),
         n_partitions,
         store_path.display(),
+    );
+
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// train-from-msnet: supervised training from externally-labeled PSM parquets
+// ════════════════════════════════════════════════════════════════════════════
+
+/// One confident, externally-labeled PSM read from a flat training parquet.
+///
+/// This is the in-memory form of one parquet row (see the column contract in
+/// the `train-from-msnet` CLI docs). The peaks are stored already sorted
+/// ascending by m/z (the parquet stores acquisition order; the reader sorts).
+struct MsnetPsm {
+    spectrum: Spectrum,
+    peptide: model::peptide::Peptide,
+    charge: u8,
+}
+
+/// Build a [`model::peptide::Peptide`] from a bare uppercase sequence plus
+/// resolved modification mass-deltas.
+///
+/// Modifications are applied two ways, matching how the scoring code computes
+/// peptide mass (`Peptide::new` sums `aa.mass + mod_.mass_delta` per residue):
+///
+/// - **Residue mods** (`res_mod_pos` / `res_mod_delta`, 1-based positions):
+///   attached to the residue at that position via `AminoAcid::with_mod` with a
+///   `ModLocation::Anywhere`, `ResidueSpec::Specific(residue)` modification.
+/// - **Terminal mods** (`nterm_delta` / `cterm_delta`): folded onto the first /
+///   last residue's mass-delta. Because `Peptide::new` only sums per-residue
+///   `mod_.mass_delta`, a terminal delta must be carried by a residue's `mod_`
+///   to be counted. If a residue already carries a residue mod, the terminal
+///   delta is *added* to that residue's existing delta (a single combined
+///   `Modification`); otherwise a fresh terminal `Modification` is attached.
+///   This keeps `peptide.mass()` correct regardless of overlap.
+///
+/// Returns an error if `seq` contains a non-standard residue or the mod arrays
+/// are misaligned.
+fn build_msnet_peptide(
+    seq: &str,
+    res_mod_pos: &[i32],
+    res_mod_delta: &[f64],
+    nterm_delta: f64,
+    cterm_delta: f64,
+) -> Result<model::peptide::Peptide, Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    if res_mod_pos.len() != res_mod_delta.len() {
+        return Err(format!(
+            "res_mod_pos ({}) and res_mod_delta ({}) length mismatch",
+            res_mod_pos.len(),
+            res_mod_delta.len()
+        )
+        .into());
+    }
+    let bytes = seq.as_bytes();
+    if bytes.is_empty() {
+        return Err("empty peptide sequence".into());
+    }
+    let n = bytes.len();
+
+    // Accumulate the total mod delta to apply to each residue (1-based -> 0-based).
+    // Residue mods first, then terminal deltas folded onto the end residues.
+    let mut residue_delta = vec![0.0f64; n];
+    let mut residue_modded = vec![false; n];
+    for (&pos1, &delta) in res_mod_pos.iter().zip(res_mod_delta.iter()) {
+        if pos1 < 1 || (pos1 as usize) > n {
+            return Err(format!(
+                "res_mod_pos {pos1} out of range for sequence of length {n}"
+            )
+            .into());
+        }
+        let idx = (pos1 - 1) as usize;
+        residue_delta[idx] += delta;
+        residue_modded[idx] = true;
+    }
+    if nterm_delta != 0.0 {
+        residue_delta[0] += nterm_delta;
+        residue_modded[0] = true;
+    }
+    if cterm_delta != 0.0 {
+        residue_delta[n - 1] += cterm_delta;
+        residue_modded[n - 1] = true;
+    }
+
+    let mut residues = Vec::with_capacity(n);
+    for (i, &r) in bytes.iter().enumerate() {
+        let aa = model::AminoAcid::standard(r)
+            .ok_or_else(|| format!("non-standard residue {:?} at position {}", r as char, i + 1))?;
+        if residue_modded[i] {
+            let m = Modification {
+                name: "msnet".to_string(),
+                mass_delta: residue_delta[i],
+                residue: ResidueSpec::Specific(r),
+                location: ModLocation::Anywhere,
+                fixed: false,
+                accession: None,
+            };
+            residues.push(aa.with_mod(Arc::new(m)));
+        } else {
+            residues.push(aa);
+        }
+    }
+
+    // Flanking residues per the spec: pre=`_`, post=`-`.
+    Ok(model::peptide::Peptide::new(residues, b'_', b'-'))
+}
+
+/// Read one flat training parquet into a vector of [`MsnetPsm`].
+///
+/// Reads via the workspace `parquet`/`arrow` crates in record-batch chunks.
+/// List columns (`res_mod_pos`, `res_mod_delta`, `mz`, `intensity`) are
+/// decoded per-row from their `ListArray` offsets. Peaks are sorted ascending
+/// by m/z (the parquet stores acquisition order).
+fn read_msnet_parquet(path: &Path) -> Result<Vec<MsnetPsm>, Box<dyn std::error::Error>> {
+    use arrow::array::{Array, Float32Array, Float64Array, Int32Array, ListArray, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let file = File::open(path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| format!("parquet reader for {}: {e}", path.display()))?
+        .build()
+        .map_err(|e| format!("building parquet reader for {}: {e}", path.display()))?;
+
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| format!("reading batch from {}: {e}", path.display()))?;
+
+        let col = |name: &str| -> Result<&std::sync::Arc<dyn Array>, Box<dyn std::error::Error>> {
+            batch
+                .column_by_name(name)
+                .ok_or_else(|| format!("missing column '{name}' in {}", path.display()).into())
+        };
+
+        let seq = col("seq")?.as_any().downcast_ref::<StringArray>()
+            .ok_or("column 'seq' is not a STRING column")?;
+        let charge = col("charge")?.as_any().downcast_ref::<Int32Array>()
+            .ok_or("column 'charge' is not an INT32 column")?;
+        let prec_mz = col("prec_mz")?.as_any().downcast_ref::<Float64Array>()
+            .ok_or("column 'prec_mz' is not a DOUBLE column")?;
+        let res_mod_pos = col("res_mod_pos")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'res_mod_pos' is not a LIST column")?;
+        let res_mod_delta = col("res_mod_delta")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'res_mod_delta' is not a LIST column")?;
+        let nterm = col("nterm_delta")?.as_any().downcast_ref::<Float64Array>()
+            .ok_or("column 'nterm_delta' is not a DOUBLE column")?;
+        let cterm = col("cterm_delta")?.as_any().downcast_ref::<Float64Array>()
+            .ok_or("column 'cterm_delta' is not a DOUBLE column")?;
+        let mz = col("mz")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'mz' is not a LIST column")?;
+        let intensity = col("intensity")?.as_any().downcast_ref::<ListArray>()
+            .ok_or("column 'intensity' is not a LIST column")?;
+
+        // Helper to pull a Vec<i32> out of one ListArray row.
+        let list_i32 = |list: &ListArray, i: usize| -> Result<Vec<i32>, Box<dyn std::error::Error>> {
+            if list.is_null(i) {
+                return Ok(Vec::new());
+            }
+            let v = list.value(i);
+            let a = v.as_any().downcast_ref::<Int32Array>()
+                .ok_or("list element is not INT32")?;
+            Ok((0..a.len()).map(|j| a.value(j)).collect())
+        };
+        let list_f64 = |list: &ListArray, i: usize| -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+            if list.is_null(i) {
+                return Ok(Vec::new());
+            }
+            let v = list.value(i);
+            let a = v.as_any().downcast_ref::<Float64Array>()
+                .ok_or("list element is not DOUBLE")?;
+            Ok((0..a.len()).map(|j| a.value(j)).collect())
+        };
+        let list_f32 = |list: &ListArray, i: usize| -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+            if list.is_null(i) {
+                return Ok(Vec::new());
+            }
+            let v = list.value(i);
+            let a = v.as_any().downcast_ref::<Float32Array>()
+                .ok_or("list element is not FLOAT")?;
+            Ok((0..a.len()).map(|j| a.value(j)).collect())
+        };
+
+        for i in 0..batch.num_rows() {
+            let seq_s = seq.value(i);
+            let ch = charge.value(i);
+            if !(1..=255).contains(&ch) {
+                return Err(format!("invalid charge {ch} at row {i} of {}", path.display()).into());
+            }
+            let charge_u8 = ch as u8;
+
+            let positions = list_i32(res_mod_pos, i)?;
+            let deltas = list_f64(res_mod_delta, i)?;
+            let peptide = build_msnet_peptide(
+                seq_s,
+                &positions,
+                &deltas,
+                nterm.value(i),
+                cterm.value(i),
+            )?;
+
+            let mzs = list_f32(mz, i)?;
+            let ints = list_f32(intensity, i)?;
+            if mzs.len() != ints.len() {
+                return Err(format!(
+                    "mz ({}) and intensity ({}) length mismatch at row {i} of {}",
+                    mzs.len(),
+                    ints.len(),
+                    path.display()
+                )
+                .into());
+            }
+            let mut peaks: Vec<(f64, f32)> =
+                mzs.iter().zip(ints.iter()).map(|(&m, &it)| (m as f64, it)).collect();
+            // Input is acquisition order; the scoring path requires ascending m/z.
+            peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            let spectrum = Spectrum {
+                title: format!("row{i}"),
+                precursor_mz: prec_mz.value(i),
+                precursor_intensity: None,
+                precursor_charge: Some(charge_u8 as i32),
+                rt_seconds: None,
+                scan: None,
+                peaks,
+                activation_method: None,
+                isolation_lower_offset: None,
+                isolation_upper_offset: None,
+            };
+
+            out.push(MsnetPsm { spectrum, peptide, charge: charge_u8 });
+        }
+    }
+    Ok(out)
+}
+
+// train-intensity: merge partial intensity stats into a finalized model parquet
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct IntensityAggKey {
+    ion_type: String,
+    flank_n: String,
+    flank_c: String,
+    pos_bin: i32,
+    charge: i32,
+    nce_bin: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct IntensityAggStats {
+    count: i64,
+    sum_log_rel: f64,
+    sum_log_rel_sq: f64,
+}
+
+fn read_intensity_partial(path: &Path) -> Result<Vec<(IntensityAggKey, IntensityAggStats)>, Box<dyn std::error::Error>> {
+    use arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| format!("parquet reader for {}: {e}", path.display()))?;
+    let has_mean = builder.schema().field_with_name("mean_log_rel").is_ok();
+    let mut rows = Vec::new();
+
+    for batch_result in builder.build().map_err(|e| format!("build reader: {e}"))? {
+        let batch = batch_result?;
+        let ion_col = batch
+            .column_by_name("ion_type")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing ion_type")?;
+        let flank_n_col = batch
+            .column_by_name("flank_n")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing flank_n")?;
+        let flank_c_col = batch
+            .column_by_name("flank_c")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing flank_c")?;
+        let pos_col = batch
+            .column_by_name("pos_bin")
+            .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
+            .ok_or("missing pos_bin")?;
+        let charge_col = batch
+            .column_by_name("charge")
+            .and_then(|c| c.as_any().downcast_ref::<Int32Array>())
+            .ok_or("missing charge")?;
+        let nce_col = batch
+            .column_by_name("nce_bin")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .ok_or("missing nce_bin")?;
+        let count_col = batch
+            .column_by_name("count")
+            .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+            .ok_or("missing count")?;
+
+        let sum_col = if has_mean {
+            None
+        } else {
+            Some(
+                batch
+                    .column_by_name("sum_log_rel")
+                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+                    .ok_or("missing sum_log_rel")?,
+            )
+        };
+        let sum_sq_col = if has_mean {
+            None
+        } else {
+            Some(
+                batch
+                    .column_by_name("sum_log_rel_sq")
+                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+                    .ok_or("missing sum_log_rel_sq")?,
+            )
+        };
+        let mean_col = if has_mean {
+            Some(
+                batch
+                    .column_by_name("mean_log_rel")
+                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+                    .ok_or("missing mean_log_rel")?,
+            )
+        } else {
+            None
+        };
+        let var_col = if has_mean {
+            Some(
+                batch
+                    .column_by_name("var_log_rel")
+                    .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+                    .ok_or("missing var_log_rel")?,
+            )
+        } else {
+            None
+        };
+
+        for i in 0..batch.num_rows() {
+            let count = count_col.value(i);
+            let (sum, sum_sq) = if let (Some(sum_c), Some(sq_c)) = (sum_col, sum_sq_col) {
+                (sum_c.value(i), sq_c.value(i))
+            } else {
+                let mean = mean_col.unwrap().value(i);
+                let var = var_col.unwrap().value(i);
+                (mean * count as f64, (var + mean * mean) * count as f64)
+            };
+            let key = IntensityAggKey {
+                ion_type: ion_col.value(i).to_string(),
+                flank_n: flank_n_col.value(i).to_string(),
+                flank_c: flank_c_col.value(i).to_string(),
+                pos_bin: pos_col.value(i),
+                charge: charge_col.value(i),
+                nce_bin: nce_col.value(i).to_string(),
+            };
+            rows.push((
+                key,
+                IntensityAggStats {
+                    count,
+                    sum_log_rel: sum,
+                    sum_log_rel_sq: sum_sq,
+                },
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+/// Finalize one aggregation cell into `(mean_log_rel, var_log_rel)`.
+/// Returns `None` for `count <= 0` so empty cells (e.g. from a partial
+/// aggregation parquet) are dropped instead of writing NaN. Variance is
+/// clamped at 0 to absorb floating-point round-off in `E[x²] − E[x]²`.
+fn finalize_intensity_stats(sum_log_rel: f64, sum_log_rel_sq: f64, count: i64) -> Option<(f64, f64)> {
+    if count <= 0 {
+        return None;
+    }
+    let n = count as f64;
+    let mean = sum_log_rel / n;
+    let var = (sum_log_rel_sq / n - mean * mean).max(0.0);
+    Some((mean, var))
+}
+
+fn write_intensity_model(
+    path: &Path,
+    merged: &rustc_hash::FxHashMap<IntensityAggKey, IntensityAggStats>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use arrow::array::{Float64Array, Int32Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+
+    let mut keys: Vec<_> = merged.iter().collect();
+    // Drop empty cells so they never write NaN mean/var (a partial aggregation
+    // parquet can carry count==0 rows). finalize_intensity_stats gates on this.
+    keys.retain(|(_, s)| s.count > 0);
+    keys.sort_by(|a, b| {
+        (&a.0.ion_type, &a.0.flank_n, &a.0.flank_c, a.0.pos_bin, a.0.charge, &a.0.nce_bin)
+            .cmp(&(
+                &b.0.ion_type,
+                &b.0.flank_n,
+                &b.0.flank_c,
+                b.0.pos_bin,
+                b.0.charge,
+                &b.0.nce_bin,
+            ))
+    });
+
+    let ion: Vec<_> = keys.iter().map(|(k, _)| k.ion_type.as_str()).collect();
+    let flank_n: Vec<_> = keys.iter().map(|(k, _)| k.flank_n.as_str()).collect();
+    let flank_c: Vec<_> = keys.iter().map(|(k, _)| k.flank_c.as_str()).collect();
+    let pos_bin: Vec<_> = keys.iter().map(|(k, _)| k.pos_bin).collect();
+    let charge: Vec<_> = keys.iter().map(|(k, _)| k.charge).collect();
+    let nce: Vec<_> = keys.iter().map(|(k, _)| k.nce_bin.as_str()).collect();
+    let count: Vec<_> = keys.iter().map(|(_, s)| s.count).collect();
+    // Safe to unwrap: zero-count keys were retained out above.
+    let mean: Vec<_> = keys
+        .iter()
+        .map(|(_, s)| finalize_intensity_stats(s.sum_log_rel, s.sum_log_rel_sq, s.count).unwrap().0)
+        .collect();
+    let var: Vec<_> = keys
+        .iter()
+        .map(|(_, s)| finalize_intensity_stats(s.sum_log_rel, s.sum_log_rel_sq, s.count).unwrap().1)
+        .collect();
+
+    let schema = Schema::new(vec![
+        Field::new("ion_type", DataType::Utf8, false),
+        Field::new("flank_n", DataType::Utf8, false),
+        Field::new("flank_c", DataType::Utf8, false),
+        Field::new("pos_bin", DataType::Int32, false),
+        Field::new("charge", DataType::Int32, false),
+        Field::new("nce_bin", DataType::Utf8, false),
+        Field::new("count", DataType::Int64, false),
+        Field::new("mean_log_rel", DataType::Float64, false),
+        Field::new("var_log_rel", DataType::Float64, false),
+    ]);
+    let batch = RecordBatch::try_new(
+        std::sync::Arc::new(schema.clone()),
+        vec![
+            std::sync::Arc::new(StringArray::from(ion)),
+            std::sync::Arc::new(StringArray::from(flank_n)),
+            std::sync::Arc::new(StringArray::from(flank_c)),
+            std::sync::Arc::new(Int32Array::from(pos_bin)),
+            std::sync::Arc::new(Int32Array::from(charge)),
+            std::sync::Arc::new(StringArray::from(nce)),
+            std::sync::Arc::new(Int64Array::from(count)),
+            std::sync::Arc::new(Float64Array::from(mean)),
+            std::sync::Arc::new(Float64Array::from(var)),
+        ],
+    )?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(path)?;
+    let mut writer = ArrowWriter::try_new(file, std::sync::Arc::new(schema), None)?;
+    writer.write(&batch)?;
+    writer.close()?;
+    Ok(())
+}
+
+fn sanity_check_intensity_model(model: &scoring_crate::IntensityModel) -> Result<(), Box<dyn std::error::Error>> {
+    use scoring_crate::IntensityIonType;
+
+    // y after K/R should be brighter than b1 at N-terminus (when keys exist).
+    let (y_kr, _) = model.predict_log_rel(IntensityIonType::Y, b'K', b'R', 5, 2, "25");
+    let (b1, _) = model.predict_log_rel(IntensityIonType::B, b'A', b'L', 1, 2, "25");
+    if y_kr <= b1 {
+        eprintln!(
+            "train-intensity: warning: y(K|R) mean {y_kr:.3} not above b1 mean {b1:.3} (sparse training data?)"
+        );
+    } else {
+        eprintln!("train-intensity: sanity OK: y(K|R)={y_kr:.3} > b1={b1:.3}");
+    }
+    Ok(())
+}
+
+/// `andes train-intensity`: merge partial intensity aggregation parquets.
+fn run_train_intensity(args: TrainIntensityArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use rustc_hash::FxHashMap;
+    use scoring_crate::IntensityModel;
+
+    let t0 = std::time::Instant::now();
+    let mut merged: FxHashMap<IntensityAggKey, IntensityAggStats> = FxHashMap::default();
+    let mut rows_read = 0usize;
+
+    for input in &args.inputs {
+        eprintln!("train-intensity: reading {} ...", input.display());
+        let part = read_intensity_partial(input)?;
+        rows_read += part.len();
+        for (key, stats) in part {
+            let slot = merged.entry(key).or_default();
+            slot.count += stats.count;
+            slot.sum_log_rel += stats.sum_log_rel;
+            slot.sum_log_rel_sq += stats.sum_log_rel_sq;
+        }
+        eprintln!("train-intensity:   {} key rows", rows_read);
+    }
+    if merged.is_empty() {
+        return Err("no intensity key rows read from any --in parquet".into());
+    }
+
+    write_intensity_model(&args.out, &merged)?;
+    eprintln!(
+        "train-intensity: wrote {} keys -> {}",
+        merged.len(),
+        args.out.display()
+    );
+
+    let model = IntensityModel::load(&args.out)?;
+    sanity_check_intensity_model(&model)?;
+    eprintln!("train-intensity: done in {:.1}s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// `andes train-from-msnet`: train a scoring model directly from
+/// externally-labeled PSM parquets, reusing the existing
+/// accumulate → estimate → store machinery but bypassing the bootstrap search.
+fn run_train_from_msnet(
+    args: TrainFromMsnetArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rayon::prelude::*;
+
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    // ── 2. Read all input parquets ────────────────────────────────────────────
+    let mut psms: Vec<MsnetPsm> = Vec::new();
+    let mut rows_read = 0usize;
+    for input in &args.inputs {
+        eprintln!("train-from-msnet: reading {} ...", input.display());
+        let part = read_msnet_parquet(input)?;
+        rows_read += part.len();
+        eprintln!("train-from-msnet:   {} PSM rows", part.len());
+        psms.extend(part);
+    }
+    if psms.is_empty() {
+        return Err("no PSM rows read from any --in parquet".into());
+    }
+    eprintln!("train-from-msnet: {rows_read} total PSM rows across {} file(s)", args.inputs.len());
+
+    // ── 3. Load seed Param and apply the fragment-tolerance override ──────────
+    let (seed_model_id, mut seed_param): (String, Param) =
+        load_seed_param(&Some(args.seed_model.clone()))?;
+    eprintln!("train-from-msnet: seed model = {seed_model_id}");
+    if let Some(ppm) = args.fragment_tol_ppm {
+        seed_param.mme = Tolerance::Ppm(ppm);
+        eprintln!("train-from-msnet: fragment tolerance overridden to {ppm} ppm");
+    } else if let Some(da) = args.fragment_tol_da {
+        seed_param.mme = Tolerance::Da(da);
+        eprintln!("train-from-msnet: fragment tolerance overridden to {da} Da");
+    } else {
+        eprintln!("train-from-msnet: using seed fragment tolerance {:?}", seed_param.mme);
+    }
+
+    // Build the scorer AFTER the tolerance override so accumulation uses it.
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4. Accumulate ion-match statistics (parallel; per-worker CountStats) ──
+    eprintln!("train-from-msnet: accumulating ion-match statistics ...");
+    let stats = psms
+        .par_iter()
+        .fold(
+            CountStats::new,
+            |mut acc, psm| {
+                let accumulator = StatsAccumulator::new(&seed_scorer);
+                accumulator.accumulate(&mut acc, &psm.spectrum, &psm.peptide, psm.charge);
+                acc
+            },
+        )
+        .collect::<Vec<_>>();
+    let stats = merge(stats);
+    eprintln!("train-from-msnet: accumulated {} PSMs", psms.len());
+
+    // ── 5. Estimate the model (replaces all learned tables in the seed) ───────
+    eprintln!("train-from-msnet: estimating model parameters ...");
+    let cfg = EstimatorConfig {
+        pseudo: args.train_pseudo,
+        noise_pseudo: args.train_noise_pseudo,
+        min_count: args.train_min_count,
+        backoff_weight: args.train_backoff_weight,
+        error_scaling_factor_override: None,
+    };
+    eprintln!(
+        "train-from-msnet: estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
+        cfg.pseudo, cfg.noise_pseudo, cfg.backoff_weight, cfg.min_count
+    );
+    let estimator = Estimator::new(cfg);
+    let trained_param = estimator.estimate(&stats, &seed_param);
+    let n_partitions = trained_param.partitions.len();
+    eprintln!("train-from-msnet: trained model has {n_partitions} partitions");
+
+    // ── 6. Build the source ledger (sentinel train_fdr; pre-labeled input) ────
+    let dataset = args
+        .inputs
+        .first()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "msnet".to_string());
+    let ledger = SourceLedger {
+        source_id: "msnet".to_string(),
+        dataset,
+        n_psms: psms.len() as i64,
+        date: format_today_iso8601(),
+        weight: 1.0,
+        train_fdr: 1.0, // sentinel: input is pre-labeled, no q-value filtering here
+        instrument: String::new(),
+        experiment_class: String::new(),
+    };
+
+    // ── 7. Write to store, preserving any other existing models ───────────────
+    let store_path = &args.out_store;
+    let model_id = args.model_id.clone();
+    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+    if store_path.exists() {
+        let store = ModelStore::open(store_path)
+            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+        for id in store.model_ids() {
+            if id == model_id {
+                eprintln!("train-from-msnet: overwriting existing model '{id}' in store");
+                continue;
+            }
+            let p = store.load_param(&id)
+                .map_err(|e| format!("reading model '{id}': {e}"))?;
+            let src_ledgers = store.load_sources(&id).unwrap_or_default();
+            let mut src = Vec::new();
+            for l in src_ledgers {
+                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                    src.push((l, s));
+                }
+            }
+            existing_other.push((id, p, src));
+        }
+    }
+
+    let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+    all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
+    for (id, p, src) in existing_other {
+        all_entries.push((id, p, src));
+    }
+
+    write_all_models_with_sources_pub(
+        store_path,
+        &all_entries.iter()
+            .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+
+    eprintln!(
+        "train-from-msnet: wrote model '{model_id}' to {} (source 'msnet', {} PSMs, {n_partitions} partitions) [{:.2}s]",
+        store_path.display(),
+        psms.len(),
+        t0.elapsed().as_secs_f64(),
     );
 
     Ok(())
@@ -2552,5 +3444,105 @@ mod param_resolver_tests {
         assert_eq!(parse_precursor_cal("OFF").unwrap(), PrecursorCalMode::Off);
         assert_eq!(parse_precursor_cal("on").unwrap(), PrecursorCalMode::On);
         assert!(parse_precursor_cal("bogus").is_err());
+    }
+
+    #[test]
+    fn finalize_intensity_stats_drops_zero_count() {
+        // A count==0 key (e.g. from a partial aggregation parquet) must not
+        // produce NaN mean/var in the finalized model — it carries no signal.
+        assert_eq!(finalize_intensity_stats(0.0, 0.0, 0), None);
+    }
+
+    #[test]
+    fn finalize_intensity_stats_computes_mean_and_clamped_var() {
+        // sum=6, sum_sq=14, count=2 -> mean=3, var=max(0, 14/2 - 9)= max(0,-2)=0.
+        let (mean, var) = finalize_intensity_stats(6.0, 14.0, 2).unwrap();
+        assert_eq!(mean, 3.0);
+        assert_eq!(var, 0.0);
+    }
+
+    #[test]
+    fn single_file_search_does_not_prefix_titles() {
+        // Regression (default-path PIN parity): with one input file the
+        // SpecId/title must stay unprefixed so PIN output is byte-identical to
+        // the single-file behavior that predates multi-`--spectrum` support.
+        assert_eq!(title_prefix_for(1, "myfile"), None);
+    }
+
+    #[test]
+    fn multi_file_search_prefixes_titles_with_file_stem() {
+        assert_eq!(title_prefix_for(2, "myfile").as_deref(), Some("myfile/"));
+    }
+}
+
+#[cfg(test)]
+mod train_from_msnet_tests {
+    use super::*;
+    use model::mass::H2O;
+
+    /// Reference: unmodified peptide mass = sum of residue masses + H2O.
+    fn unmod_mass(seq: &[u8]) -> f64 {
+        let rsum: f64 = seq
+            .iter()
+            .map(|&r| model::AminoAcid::standard(r).unwrap().mass)
+            .sum();
+        rsum + H2O
+    }
+
+    #[test]
+    fn unmodified_peptide_mass_matches_reference() {
+        let p = build_msnet_peptide("PEPTIDEK", &[], &[], 0.0, 0.0).unwrap();
+        let expected = unmod_mass(b"PEPTIDEK");
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert!(p.residues.iter().all(|aa| !aa.is_modified()));
+    }
+
+    /// Oxidation on residue 1 of "MPEPTIDE" must add exactly +15.994915 Da to
+    /// the unmodified mass — verifying mods are actually applied, not dropped.
+    #[test]
+    fn residue_mod_mass_is_correct() {
+        const OX: f64 = 15.994915;
+        let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], 0.0, 0.0).unwrap();
+        let expected = unmod_mass(b"MPEPTIDE") + OX;
+        // Exact: Peptide::new sums aa.mass + mod_.mass_delta, so the delta is
+        // added with the same arithmetic as the reference.
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert!(p.residues[0].is_modified(), "residue 1 should carry the mod");
+        assert_eq!(p.residues[0].mod_.as_ref().unwrap().mass_delta, OX);
+    }
+
+    /// N-terminal Acetyl folds onto the first residue's mass-delta.
+    #[test]
+    fn nterm_mod_mass_is_correct() {
+        const ACETYL: f64 = 42.010565;
+        let p = build_msnet_peptide("PEPTIDEK", &[], &[], ACETYL, 0.0).unwrap();
+        let expected = unmod_mass(b"PEPTIDEK") + ACETYL;
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert!(p.residues[0].is_modified());
+    }
+
+    /// A residue mod and a terminal mod on the SAME residue must sum (not
+    /// clobber) so the total mass stays correct.
+    #[test]
+    fn overlapping_residue_and_nterm_mods_sum() {
+        const OX: f64 = 15.994915;
+        const ACETYL: f64 = 42.010565;
+        // Oxidation on residue 1 (M) AND N-term acetyl on the same first residue.
+        let p = build_msnet_peptide("MPEPTIDE", &[1], &[OX], ACETYL, 0.0).unwrap();
+        let expected = unmod_mass(b"MPEPTIDE") + OX + ACETYL;
+        assert_eq!(p.mass().to_bits(), expected.to_bits());
+        assert_eq!(p.residues[0].mod_.as_ref().unwrap().mass_delta, OX + ACETYL);
+    }
+
+    #[test]
+    fn mismatched_mod_arrays_error() {
+        let r = build_msnet_peptide("PEPTIDE", &[1, 2], &[1.0], 0.0, 0.0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn nonstandard_residue_errors() {
+        let r = build_msnet_peptide("PEPTBDE", &[], &[], 0.0, 0.0);
+        assert!(r.is_err());
     }
 }

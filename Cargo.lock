@@ -58,6 +58,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "andes"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "clap",
+ "input",
+ "model",
+ "model-train",
+ "num_cpus",
+ "output",
+ "parquet",
+ "rayon",
+ "rustc-hash",
+ "scoring",
+ "search",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1591,23 +1611,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "msgf-rust"
-version = "0.1.0"
-dependencies = [
- "clap",
- "input",
- "model",
- "model-train",
- "num_cpus",
- "output",
- "rayon",
- "scoring",
- "search",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "netcorehost"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2083,9 +2086,11 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "scoring"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "byteorder",
  "input",
  "model",
+ "parquet",
  "rustc-hash",
  "tempfile",
  "thiserror 2.0.18",

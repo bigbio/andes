@@ -19,6 +19,78 @@ use model_train::accumulate::StatsAccumulator;
 use model_train::counts::CountStats;
 use model_train::estimate::{Estimator, EstimatorConfig};
 
+use rustc_hash::FxHashMap;
+use scoring_crate::param_model::{FragmentOffsetFrequency, SpecDataType};
+use model::activation::ActivationMethod;
+use model::instrument::InstrumentType;
+use model::protocol::Protocol;
+use model::tolerance::Tolerance;
+
+/// Minimal single-partition template with a configurable `max_rank` and one
+/// prefix ion, used to probe rank-distribution smoothing in isolation.
+fn one_partition_template(max_rank: i32) -> Param {
+    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let mut frag_off_table = FxHashMap::default();
+    frag_off_table.insert(
+        part,
+        vec![FragmentOffsetFrequency { ion_type: prefix1, frequency: 0.7 }],
+    );
+    let mut p = Param {
+        version: 10001,
+        data_type: SpecDataType {
+            activation: ActivationMethod::CID,
+            instrument: InstrumentType::LowRes,
+            enzyme: None,
+            protocol: Protocol::Automatic,
+        },
+        mme: Tolerance::Da(0.5),
+        apply_deconvolution: false,
+        deconvolution_error_tolerance: 0.0,
+        charge_hist: vec![(2, 100)],
+        min_charge: 2,
+        max_charge: 2,
+        num_segments: 1,
+        partitions: vec![part],
+        num_precursor_off: 0,
+        precursor_off_map: FxHashMap::default(),
+        frag_off_table,
+        max_rank,
+        rank_dist_table: FxHashMap::default(),
+        error_scaling_factor: 0,
+        ion_err_dist_table: FxHashMap::default(),
+        noise_err_dist_table: FxHashMap::default(),
+        ion_existence_table: FxHashMap::default(),
+        partition_ion_types_cache: FxHashMap::default(),
+    };
+    p.rebuild_cache();
+    p
+}
+
+/// Estimator-dilution regression: a strongly-peaked empirical NOISE rank
+/// distribution must NOT be flattened by Laplace smoothing. With `max_rank=150`
+/// (151 slots) the legacy add-1 over noise collapsed the peak to ~0.67, which
+/// inflated `noise_freq[r]` at signal ranks and compressed `ln(ion/noise)`
+/// node scores (the diagnosed −4.3% dilution). The noise model must stay sharp.
+#[test]
+fn noise_rank_dist_stays_sharp_not_flattened_by_smoothing() {
+    let max_rank = 150;
+    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let template = one_partition_template(max_rank);
+
+    let mut counts = CountStats::new();
+    for _ in 0..300 {
+        counts.bump_rank(part, prefix1, 0);
+        counts.bump_rank(part, IonType::Noise, 0); // all noise mass on slot 0
+    }
+
+    let param = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
+    let noise = &param.rank_dist_table[&part][&IonType::Noise];
+    let peak = noise.iter().cloned().fold(0.0_f32, f32::max);
+    assert!(peak > 0.9, "noise peak should stay sharp (>0.9), got {peak}");
+}
+
 // ---------------------------------------------------------------------------
 // Shared fixtures
 // ---------------------------------------------------------------------------

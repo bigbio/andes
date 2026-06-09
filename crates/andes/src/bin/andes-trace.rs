@@ -85,22 +85,19 @@ fn escape_json(s: &str) -> String {
 
 use clap::Parser;
 use input::{FastaReader, MgfReader, MzMLReader};
-use model::enzyme::Enzyme;
 use model::{
     AminoAcid, AminoAcidSetBuilder, ModLocation, Modification, PrecursorTolerance,
     ResidueSpec, Tolerance,
 };
 use model::mass::{nominal_from, H2O, PROTON};
 use model::peptide::Peptide;
-use scoring_crate::gf::generating_function::GeneratingFunction;
-use scoring_crate::gf::primitive_graph::PrimitiveAaGraph;
 use scoring_crate::{Param, RankScorer};
 use scoring_crate::scoring::{score_psm, ScoredSpectrum};
 use scoring_crate::scoring::fragment_ions::ions_for_node;
 use search::{enumerate_candidates, match_spectra, SearchIndex, SearchParams};
 
 #[derive(Parser, Debug)]
-#[command(name = "msgf-trace", about = "Single-scan parity diagnostic for msgf-rust")]
+#[command(name = "andes-trace", about = "Single-scan parity diagnostic for andes")]
 struct Cli {
     /// Spectrum file (MGF or mzML — format auto-detected by extension).
     #[arg(long)]
@@ -154,16 +151,6 @@ struct Cli {
     /// Max peptide length.
     #[arg(long, default_value = "40")]
     max_length: u32,
-    /// Bare residue sequence (no flanking, no mod annotations) of the peptide
-    /// to dump GF score distributions for. Required when --print-score-dist
-    /// is set; matched against Rust's PSM list for this scan to recover the
-    /// raw score, charge, and nominal mass used to build the trace graph.
-    #[arg(long)]
-    peptide: Option<String>,
-    /// Dump per-node ScoreDist arrays from compute_inner for the matched peptide
-    /// (diagnostic; gated to avoid spam in normal trace runs).
-    #[arg(long)]
-    print_score_dist: bool,
     /// Output structured per-PSM per-ion JSON to this path. Additive: the
     /// existing human-readable stderr trace is unaffected.
     #[arg(long)]
@@ -180,7 +167,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("msgf-trace: {e}");
+            eprintln!("andes-trace: {e}");
             ExitCode::from(1)
         }
     }
@@ -489,8 +476,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .map(|aa| aa.residue as char)
             .collect();
         println!(
-            "  #{}: peptide={} charge={} score={:.2} spec_e_val={:.4e} iso_off={} prot_idx={} prot={} is_decoy={}",
-            i + 1, pep_str, psm.charge_used, psm.score, psm.spec_e_value,
+            "  #{}: peptide={} charge={} score={:.2} rank_score={:.2} iso_off={} prot_idx={} prot={} is_decoy={}",
+            i + 1, pep_str, psm.charge_used, psm.score, psm.rank_score,
             psm.isotope_offset, cand.protein_index, prot_acc, is_decoy
         );
     }
@@ -610,157 +597,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Diagnostic: per-node GF ScoreDist dump for a specified peptide.
-    // ---------------------------------------------------------------------
-    if cli.print_score_dist {
-        let pep_target = cli
-            .peptide
-            .as_deref()
-            .ok_or("--print-score-dist requires --peptide")?;
-        let target_residues: Vec<u8> = pep_target.bytes().filter(|b| b.is_ascii_uppercase()).collect();
-
-        // Locate a PSM whose residue sequence matches --peptide.
-        let matched_psm = psms.iter().find(|psm| {
-            let cand = &run_candidates[psm.primary_candidate_idx() as usize];
-            let r: Vec<u8> = cand.peptide.residues.iter().map(|a| a.residue).collect();
-            r == target_residues
-        });
-
-        let matched_psm = match matched_psm {
-            Some(p) => p,
-            None => {
-                println!(
-                    "\n  --print-score-dist: peptide {} not found in Rust PSMs for scan {} — skipping GF dump",
-                    pep_target, cli.scan
-                );
-                return Ok(());
-            }
-        };
-
-        let charge_used = matched_psm.charge_used;
-        // GF score threshold: use `rank_score` (= node + cleavage + edge), the
-        // Java-aligned key the production SpecEValue path uses
-        // (`compute_spec_e_values_for_spectrum` seeds `min_score` from
-        // `rank_score.round()`), NOT the pin-only `score` (= node + cleavage).
-        // Using `score` here would seed the threshold ~+20 below production and
-        // produce a misleadingly wide score distribution in the dump.
-        //
-        // NOTE: this dump still differs from production SpecEValue in two ways
-        // that are intentionally NOT changed here (the dump's purpose is a
-        // per-node distribution trace, which the production merged group does
-        // not retain):
-        //   1. It builds a SINGLE-BIN graph for this peptide's nominal mass via
-        //      `with_score_threshold_retain_node_dists`, whereas production
-        //      merges a `GeneratingFunctionGroup` across the full nominal-mass
-        //      bin range (with SinkUnreachable retry).
-        //   2. Protein-terminal flags are hardcoded false/false below, whereas
-        //      production ORs `use_protein_n_term`/`use_protein_c_term` across
-        //      all PSMs in the queue.
-        // So absolute SpecEValue from this dump may differ from the production
-        // value; the per-node score distribution shape is the intended output.
-        let matched_score = matched_psm.rank_score.round() as i32;
-        let matched_cand = &run_candidates[matched_psm.primary_candidate_idx() as usize];
-        let pep_nominal = matched_cand.peptide.nominal_residue_mass();
-
-        // Build aa_set with enzyme registered (mirrors match_engine.rs:60-67).
-        // Rebuild the same aa_set we constructed at the top (cam + ox) and register
-        // the enzyme on it — match_engine does the equivalent internally.
-        let cam_d = Modification {
-            name: "Carbamidomethyl".into(),
-            mass_delta: 57.02146,
-            residue: ResidueSpec::Specific(b'C'),
-            location: ModLocation::Anywhere,
-            fixed: true,
-            accession: None,
-        };
-        let ox_d = Modification {
-            name: "Oxidation".into(),
-            mass_delta: 15.99491,
-            residue: ResidueSpec::Specific(b'M'),
-            location: ModLocation::Anywhere,
-            fixed: false,
-            accession: None,
-        };
-        let mut aa_set_for_gf = AminoAcidSetBuilder::new_standard()
-            .add_fixed_mod(cam_d)
-            .add_variable_mod(ox_d)
-            .build()?;
-        let enzyme = Enzyme::Trypsin;
-        aa_set_for_gf.register_enzyme(enzyme, 0.95, 0.95);
-
-        let parent_mass = (spec.precursor_mz - PROTON) * charge_used as f64;
-        let scored = ScoredSpectrum::new(spec, &scorer, charge_used);
-        let fragment_tolerance_da = 0.5_f64;
-
-        // Protein-terminal flags — for trace simplicity, OFF (matches the
-        // common case for internal tryptic peptides like KVPQVSTPTLVEVSR).
-        let graph = PrimitiveAaGraph::new(
-            &aa_set_for_gf,
-            pep_nominal,
-            Some(enzyme),
-            &scored,
-            &scorer,
-            charge_used,
-            parent_mass,
-            fragment_tolerance_da,
-            false,
-            false,
-        );
-
-        let gf = match GeneratingFunction::with_score_threshold_retain_node_dists(
-            &graph,
-            matched_score,
-            &aa_set_for_gf,
-        ) {
-            Ok(g) => g,
-            Err(e) => {
-                println!(
-                    "\n  --print-score-dist: GF compute failed for peptide={} nominal={} charge={}: {:?}",
-                    pep_target, pep_nominal, charge_used, e
-                );
-                return Ok(());
-            }
-        };
-
-        println!(
-            "\n--- GF score-dist dump: scan={} peptide={} charge={} nominal_mass={} matched_score={} ---",
-            cli.scan, pep_target, charge_used, pep_nominal, matched_score
-        );
-
-        let mut node_count = 0_usize;
-        let mut prob_count = 0_usize;
-        for (node_idx, node_mass, dist) in gf.iter_node_dists() {
-            node_count += 1;
-            println!(
-                "GF_NODE: scan={} pep={} node_idx={} mass={} min_score={} max_score={}",
-                cli.scan, pep_target, node_idx, node_mass, dist.min_score(), dist.max_score()
-            );
-            // dist.max_score() is exclusive; iterate [min, max).
-            for s in dist.min_score()..dist.max_score() {
-                let p = dist.get_probability(s);
-                if p == 0.0 { continue; }
-                prob_count += 1;
-                println!(
-                    "GF_PROB: scan={} pep={} node_idx={} score={} prob={:.6e}",
-                    cli.scan, pep_target, node_idx, s, p
-                );
-            }
-        }
-
-        let final_max = gf.max_score();
-        let sp = gf.spectral_probability(matched_score);
-        let final_dist = gf.score_dist();
-        let tail: f64 = (matched_score..final_max)
-            .map(|s| final_dist.get_probability(s))
-            .sum();
-        println!(
-            "GF_TAIL: scan={} pep={} matched_score={} spec_prob={:.6e} tail_sum={:.6e} final_min={} final_max={} node_dump_count={} prob_dump_count={}",
-            cli.scan, pep_target, matched_score, sp, tail,
-            gf.min_score(), final_max, node_count, prob_count
-        );
-    }
-
     // Quick view of the spectrum's top-10 peaks by intensity.
     println!("\n--- Spectrum top-10 peaks by intensity ---");
     let mut peaks_by_int: Vec<_> = spec.peaks.iter().enumerate().collect();
@@ -795,8 +631,10 @@ fn parse_flanking(s: &str) -> Result<Peptide, Box<dyn std::error::Error>> {
     if parts.len() != 3 {
         return Err(format!("expected K.PEPTIDE.D form, got: {s}").into());
     }
-    let pre = parts[0].as_bytes()[0];
-    let post = parts[2].as_bytes()[0];
+    // Empty flanking residues (e.g. ".PEPTIDE.") fall back to the "no flank"
+    // marker `b'-'` instead of indexing an empty slice (which would panic).
+    let pre = parts[0].bytes().next().unwrap_or(b'-');
+    let post = parts[2].bytes().next().unwrap_or(b'-');
     let body = parts[1];
     // Strip mod annotations like "C+57.021" → "C". Simple heuristic: keep only A-Z.
     let residues: Vec<AminoAcid> = body

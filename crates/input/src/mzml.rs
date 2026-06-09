@@ -318,6 +318,14 @@ impl<R: BufRead> MzMLReader<R> {
             (None, None) => return Ok(None),
         };
 
+        // Reject a non-finite or non-positive precursor m/z (garbage from a
+        // malformed file) — it would produce nonsense search windows. The
+        // Thermo and timsTOF readers already gate on `precursor_mz > 0`; do the
+        // same here so all formats behave consistently.
+        if !precursor_mz.is_finite() || precursor_mz <= 0.0 {
+            return Ok(None);
+        }
+
         let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array)?;
         let scan = extract_scan_from_id(&sb.id);
 
@@ -351,10 +359,14 @@ impl<R: BufRead> MzMLReader<R> {
             });
         }
 
+        // Drop non-finite or non-positive-m/z / negative-intensity points
+        // before they can reach the scorer (matches the timsTOF reader, which
+        // already filters; mzML previously passed NaN/Inf/garbage through).
         let mut peaks: Vec<(f64, f32)> = mz_vals
             .into_iter()
             .zip(int_vals)
             .map(|(mz, inten)| (mz, inten as f32))
+            .filter(|&(mz, inten)| mz.is_finite() && mz > 0.0 && inten.is_finite() && inten >= 0.0)
             .collect();
 
         // Enforce ascending-by-m/z invariant required by downstream consumers.
@@ -411,7 +423,10 @@ impl<R: BufRead> MzMLReader<R> {
             CV_CHARGE_STATE if self.state == State::SelectedIon => {
                 if let Ok(z) = cv.value.parse::<i32>() {
                     if let Some(sb) = self.current.as_mut() {
-                        sb.precursor_charge = Some(z);
+                        // A charge state of 0 means "unknown" — store it as
+                        // absent (None) rather than Some(0), which would later
+                        // be treated as a real charge.
+                        sb.precursor_charge = (z != 0).then_some(z);
                     }
                 }
             }
@@ -897,12 +912,29 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
         if self.done {
             return None;
         }
-        match self.pump() {
-            Ok(Some(s)) => Some(Ok(s)),
-            Ok(None) => None,
-            Err(e) => {
-                self.done = true;
-                Some(Err(e))
+        loop {
+            match self.pump() {
+                Ok(Some(s)) => return Some(Ok(s)),
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
+                Err(_e) => {
+                    // Resync past the malformed spectrum and keep parsing (skip the
+                    // bad scan, not the rest of the file). Only an unreadable XML
+                    // stream stops us — mirrors `read_with_ms1` / chunked paths.
+                    match self.resync_to_next_spectrum() {
+                        Ok(true) => continue,
+                        Ok(false) => {
+                            self.done = true;
+                            return None;
+                        }
+                        Err(e) => {
+                            self.done = true;
+                            return Some(Err(e));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1505,6 +1537,61 @@ mod tests {
         assert_eq!(spectra.len(), 1);
         assert!((spectra[0].precursor_mz - 500.5).abs() < 1e-6);
         assert_eq!(spectra[0].precursor_charge, Some(2));
+    }
+
+    #[test]
+    fn charge_state_zero_is_treated_as_absent() {
+        // A `charge state` of 0 means "unknown" and must be stored as None, not
+        // Some(0), which downstream code would treat as a real charge.
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=10",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            500.5,
+            Some(0),
+        );
+        let spectra = collect_ok(&wrap_spectra(&spec));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].precursor_charge, None);
+    }
+
+    #[test]
+    fn non_finite_and_nonpositive_peaks_are_filtered() {
+        // NaN / Inf / negative-m/z points must be dropped before reaching the
+        // scorer (the timsTOF reader already does this; mzML used to pass them
+        // through). Only the two finite, positive-m/z peaks should survive.
+        let mz_b64 = encode_f64_b64(&[f64::NAN, 100.0, -50.0, f64::INFINITY, 200.0]);
+        let int_b64 = encode_f64_b64(&[10.0, 1000.0, 10.0, 10.0, 500.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=11",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            500.5,
+            Some(2),
+        );
+        let spectra = collect_ok(&wrap_spectra(&spec));
+        assert_eq!(spectra.len(), 1);
+        let mzs: Vec<f64> = spectra[0].peaks.iter().map(|&(mz, _)| mz).collect();
+        assert_eq!(mzs, vec![100.0, 200.0], "only finite positive-m/z peaks survive");
+    }
+
+    #[test]
+    fn nonpositive_precursor_mz_is_skipped() {
+        // A precursor m/z <= 0 is garbage and would yield nonsense search
+        // windows; the spectrum must be dropped (Ok(None)).
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let spec = ms2_spectrum_xml(
+            "scan=12",
+            &bda_plain("MS:1000514", &mz_b64),
+            &bda_plain("MS:1000515", &int_b64),
+            0.0,
+            Some(2),
+        );
+        let spectra = collect_ok(&wrap_spectra(&spec));
+        assert!(spectra.is_empty(), "spectrum with precursor m/z 0 must be skipped");
     }
 
     // ── Test 7 ────────────────────────────────────────────────────────────────
@@ -2298,6 +2385,44 @@ mod tests {
         // Sanity: MS2 #2 (chunk-2 first) carried over MS1#a; MS2 #3 linked to MS1#b.
         assert_eq!(chunked_resolved[2].as_ref().map(|v| v.len()), Some(2)); // a has 2 peaks
         assert_eq!(chunked_resolved[3].as_ref().map(|v| v.len()), Some(1)); // b has 1 peak
+    }
+
+    #[test]
+    fn iterator_resyncs_past_a_malformed_spectrum() {
+        // The default Iterator path must skip a bad scan and still yield the next
+        // good spectrum — same resync semantics as `read_with_ms1` / chunked.
+        let good1 = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            350.0,
+            Some(2),
+        );
+        let bad = ms2_spectrum_xml(
+            "scan=2",
+            &bda_plain("MS:1000514", "@@@not-valid-base64@@@"),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            450.0,
+            Some(2),
+        );
+        let good2 = ms2_spectrum_xml(
+            "scan=3",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[500.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1.0])),
+            550.0,
+            Some(2),
+        );
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml"><run><spectrumList count="3" defaultDataProcessingRef="dp">
+{good1}{bad}{good2}
+</spectrumList></run></mzML>"#
+        );
+
+        let got = collect_ok(&xml);
+        assert_eq!(got.len(), 2, "both good spectra must survive the resync (no truncation)");
+        assert_eq!(got[0].scan, Some(1));
+        assert_eq!(got[1].scan, Some(3), "the post-error spectrum must still be parsed");
     }
 
     #[test]

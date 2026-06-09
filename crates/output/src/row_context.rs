@@ -52,17 +52,25 @@ pub(crate) fn resolve_accession(cand: &Candidate, search_index: &SearchIndex) ->
     }
 }
 
-/// Iterate a slice of PSMs (pre-sorted best-first) yielding `(rank, psm)`.
-///
-/// Rank is 1-based and increments only when `spec_e_value` changes — ties
-/// share the same rank.
-pub(crate) fn iter_ranked(queue_sorted: &[PsmMatch]) -> impl Iterator<Item = (u32, &PsmMatch)> {
+/// Iterate a slice of PSMs (pre-sorted best-first by `rank_score` descending)
+/// yielding `(rank, psm)`. Rank is 1-based and increments when `rank_score`
+/// changes — ties share the same rank. `rank_score` (RawScore) is the sole
+/// ranking signal now that the generating function is removed.
+pub(crate) fn iter_ranked_by_rank_score(
+    queue_sorted: &[PsmMatch],
+) -> impl Iterator<Item = (u32, &PsmMatch)> {
     let mut rank = 0u32;
-    let mut prev_sev = f64::NAN;
+    let mut prev_rs: Option<f32> = None;
     queue_sorted.iter().map(move |psm| {
-        if psm.spec_e_value != prev_sev {
+        // Two NaN scores tie (NaNs collapse into one worst-score bucket in the
+        // training/gate paths), so a run of NaN-scored PSMs must share one rank
+        // rather than each starting a new one as `!= f32::NAN` would do.
+        let ties_prev = prev_rs.is_some_and(|prev| {
+            psm.rank_score == prev || (psm.rank_score.is_nan() && prev.is_nan())
+        });
+        if !ties_prev {
             rank += 1;
-            prev_sev = psm.spec_e_value;
+            prev_rs = Some(psm.rank_score);
         }
         (rank, psm)
     })

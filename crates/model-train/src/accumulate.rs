@@ -12,6 +12,7 @@
 use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use scoring_crate::param_model::IonType;
+use scoring_crate::scoring::psm_edge_existence_facts;
 use scoring_crate::scoring::rank_scorer::RankScorer;
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 
@@ -51,6 +52,11 @@ impl<'a> StatsAccumulator<'a> {
     ///   ion_type, max_rank_slot)` — the "missing ion" slot at index `max_rank`
     ///   (the last entry of the rank-distribution array, matching the semantics
     ///   of [`RankScorer::missing_ion_score`]).
+    ///
+    /// Records ion-existence (edge) counts via `psm_edge_existence_facts`,
+    /// walking the dominant ion series exactly as `psm_edge_score` does so the
+    /// learned `ion_existence_table` is keyed by the partition/index the scorer
+    /// later reads.
     ///
     /// Also increments `stats.bump_charge(charge as i32)` once per PSM.
     pub fn accumulate(
@@ -97,7 +103,17 @@ impl<'a> StatsAccumulator<'a> {
         // by the "missing" slot) calibrates the ion-vs-noise likelihood ratio.
         // Without this the missing-ion penalty inverts and the model scores
         // target and decoy alike (0 PSMs at 1% FDR).
-        for (partition, rank, error_bin) in scored_spec.noise_match_facts(peptide, self.scorer) {
+        // Noise model: default = reversed-peptide decoy ions; opt-in env
+        // MSGF_DENSE_NOISE=<n> = MS-GF+-style dense random-position sampling
+        // (sharper, missing-slot-dominated noise — see dense_noise_facts).
+        let noise_facts = match std::env::var("MSGF_DENSE_NOISE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            Some(n) if n > 0 => scored_spec.dense_noise_facts(peptide, self.scorer, n),
+            _ => scored_spec.noise_match_facts(peptide, self.scorer),
+        };
+        for (partition, rank, error_bin) in noise_facts {
             let rank_idx = match rank {
                 Some(r) => r.min(max_rank).max(1) - 1,
                 None => max_rank,
@@ -111,6 +127,18 @@ impl<'a> StatsAccumulator<'a> {
             if let (Some(_), Some(bin)) = (rank, error_bin) {
                 stats.bump_noise_error(partition, bin);
             }
+        }
+
+        // Ion-existence (edge) statistics: walk the dominant ion series exactly
+        // as `psm_edge_score` does at scoring time and record, per cleavage
+        // edge, the existence index (cur observed + 2*prev observed) under the
+        // last-segment partition. Without this the estimator falls back to a
+        // uniform 0.25 existence prior, which neutralizes the entire edge term
+        // in the trained model (the bundled MS-GF+ models learn a sharply
+        // peaked distribution here, e.g. ~0.95 for "both observed").
+        for (partition, idx) in psm_edge_existence_facts(&scored_spec, peptide, self.scorer, charge)
+        {
+            stats.bump_existence(partition, idx);
         }
 
         // Charge histogram: one bump per PSM.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bisect oracle for the score_psm under-scoring regression.
 #
-# - Builds msgf-rust at the current commit
+# - Builds cimas at the current commit
 # - Runs it on PXD001819 single-threaded with --max-spectra 30000
 # - Greps scan=28787's RawScore from the pin (column 7)
 # - Appends <sha>,<rawscore> to /tmp/bisect-trace.csv (cumulative log)
@@ -31,13 +31,13 @@ fi
 
 # Build. Use full build (not --quiet) so cargo errors are visible in
 # `git bisect run` logs.
-if ! cargo build --release --bin msgf-rust 2>&1 | tail -5; then
+if ! cargo build --release --bin cimas 2>&1 | tail -5; then
     echo "[$SHA] build failed — skip"
     echo "$SHA,BUILD_FAIL" >> "$TRACE_CSV"
     exit 125
 fi
 
-BIN="$REPO_ROOT/rust/target/release/msgf-rust"
+BIN="$REPO_ROOT/rust/target/release/cimas"
 rm -f "$PIN_OUT"
 
 if ! "$BIN" \
@@ -51,7 +51,7 @@ if ! "$BIN" \
         --threads 1 \
         --max-spectra 30000 \
         > /tmp/bisect.log 2>&1; then
-    echo "[$SHA] msgf-rust run failed — skip"
+    echo "[$SHA] cimas run failed — skip"
     echo "$SHA,RUN_FAIL" >> "$TRACE_CSV"
     exit 125
 fi

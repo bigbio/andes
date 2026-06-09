@@ -1,49 +1,60 @@
-//! PSM scoring integration.
+//! Peptide-spectrum match scoring.
 //!
-//! `score_psm` sums `ScoredSpectrum::node_score(prefix, suffix)` across each
-//! peptide split position. The result is on the same score scale used by the
-//! GF DP, so `GeneratingFunctionGroup::spectral_probability(psm.score)` is
-//! calibrated.
+//! A peptide of length `n` has `n - 1` internal cleavage sites; fragmenting at
+//! site `s` yields a prefix (residues `0..s`) and a complementary suffix
+//! (residues `s..n`). The match score is the sum over those sites of the
+//! prefix and suffix node scores from the intensity-rank LLR model:
 //!
-//! Per-split node score: `round(getNodeScore(prm, true) + getNodeScore(srm, false))`
-//! where `prm` is the nominal prefix mass and `srm = peptideMass - prm`.
+//! ```text
+//!   raw_score = Σ_s round( prefix_node(prefix_mass_s) + suffix_node(suffix_mass_s) )
+//! ```
+//!
+//! where `prefix_mass_s` is the nominal mass of the prefix residues and
+//! `suffix_mass_s = peptide_nominal_mass − prefix_mass_s`. The summed integer
+//! is the RawScore used to rank candidate PSMs.
 
 use std::sync::OnceLock;
 
 use model::mass::nominal_from;
 use model::peptide::Peptide;
+use crate::param_model::Partition;
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
-/// Cache the `MSGF_TRACE_PEP` env var once at first read instead
-/// of calling `std::env::var` per `score_psm` invocation. Each `env::var`
-/// call acquires the global environment lock; on Astral runs `score_psm`
-/// is invoked ~3.1 billion times, so the lock acquisition is non-trivial.
+/// Diagnostic peptide-trace filter, read once from the `Andes_TRACE_PEP`
+/// environment variable and memoized.
 ///
-/// Returns `Some(filter)` if the env var is set to a non-empty string,
-/// else `None`. The OnceLock initialization is racy-safe and reads from the
-/// process environment at the first call from any thread.
+/// Reading the variable on every `score_psm` call would acquire the global
+/// environment lock each time, and `score_psm` runs on the order of billions
+/// of times in a large search — so the value is captured once via `OnceLock`
+/// (thread-safe, first-call-wins) and reused.
+///
+/// Returns `Some(filter)` when the variable holds a non-empty string, else
+/// `None`. When `None`, tracing is fully inert and the scoring path is
+/// unchanged.
 fn trace_pep_filter() -> Option<&'static String> {
     static CELL: OnceLock<Option<String>> = OnceLock::new();
-    CELL.get_or_init(|| match std::env::var("MSGF_TRACE_PEP") {
+    CELL.get_or_init(|| match std::env::var("Andes_TRACE_PEP") {
         Ok(s) if !s.is_empty() => Some(s),
         _ => None,
     })
     .as_ref()
 }
 
-/// Compute the per-bond edge-score sum for a PSM, mirroring Java's
-/// `DBScanScorer.getScore` edge loop (reverse direction for suffix-main
-/// HCD/Trypsin, forward direction for prefix-main).
+/// Sum the per-cleavage *edge* (bond) scores for a PSM.
 ///
-/// This is intended as an ADDITIVE feature for Percolator: emit it as a
-/// SEPARATE PIN column alongside the unchanged `RawScore`. It must not be
-/// blended into `RawScore`; kept separate, it lets Percolator learn its
-/// weight without disturbing the existing RawScore distribution.
+/// Where [`score_psm`] scores the prefix/suffix *nodes* at each cleavage site,
+/// this sums the complementary edge credit: the score of the bond between two
+/// adjacent fragment masses, walked along the spectrum's dominant ion series.
+/// The series direction is set by `main_ion_direction()` — suffix-dominant
+/// spectra (e.g. tryptic HCD) are traversed from the C-terminal end inward,
+/// prefix-dominant spectra from the N-terminal end. Both visit all `n - 1`
+/// internal sites; the direction only fixes which neighbor supplies the
+/// "previous" mass for each edge.
 ///
-/// Java parity: fromIndex=1, toIndex=n+1 →
-/// reverse loop iterates `i` from n-1 down to 1, forward loop iterates
-/// `i` from 1 to n-1.
+/// The result is meant as an ADDITIVE rescoring feature: emit it as its own
+/// PIN column next to the unchanged `RawScore` so Percolator can weight it
+/// independently. It must not be folded into `RawScore`.
 pub fn psm_edge_score(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -85,8 +96,11 @@ pub fn psm_edge_score(
     let is_prefix_main = scored_spec.main_ion_direction();
     let mut edge_total: i32 = 0;
     if !is_prefix_main {
+        // Suffix-dominant: walk the suffix-ion series from the C-terminus
+        // inward. Each edge runs between suffix mass at site `i+1` (previous)
+        // and site `i` (current); the suffix mass at site `i` is the total
+        // nominal mass minus the prefix nominal up to `i`.
         let nominal_peptide_mass = prefix_nominal_arr[n];
-        // Java reverse loop: i from n-1 down to 1.
         for i in (1..n).rev() {
             let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
             let prev_nominal = nominal_peptide_mass - prefix_nominal_arr[i + 1];
@@ -101,7 +115,9 @@ pub fn psm_edge_score(
             );
         }
     } else {
-        // Java forward loop: i from 1 to n-1.
+        // Prefix-dominant: walk the prefix-ion series from the N-terminus
+        // outward. Each edge runs between prefix mass at site `i-1` (previous)
+        // and site `i` (current).
         for i in 1..n {
             let cur_nominal = prefix_nominal_arr[i];
             let prev_nominal = prefix_nominal_arr[i - 1];
@@ -119,10 +135,93 @@ pub fn psm_edge_score(
     edge_total
 }
 
+/// Collect the per-edge `(partition, ion_existence_index)` facts for a PSM,
+/// walking the cleavage sites in the **exact same order and direction** as
+/// [`psm_edge_score`] (so the training accumulator learns the
+/// `ion_existence_table` under the partition/index the scorer later reads).
+///
+/// Unlike [`psm_edge_score`], this does not consult the existence table or the
+/// `error_scaling_factor`/empty-table guards — it is meant to be called while
+/// *training* a model whose existence table is still empty. The caller feeds
+/// each `(partition, idx)` to `CountStats::bump_existence`.
+///
+/// Returns an empty vec for `charge == 0` or peptides shorter than 2 residues
+/// (no internal cleavage sites), mirroring `psm_edge_score`'s early returns.
+pub fn psm_edge_existence_facts(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+) -> Vec<(Partition, u32)> {
+    if charge == 0 {
+        return Vec::new();
+    }
+    let n = peptide.length();
+    if n < 2 {
+        return Vec::new();
+    }
+
+    let spectrum_parent_mass = scored_spec.parent_mass();
+    let peptide_nominal = peptide.nominal_residue_mass();
+
+    // Per-position prefix mass arrays (length n+1; [0]=0, [n]=total) — built
+    // identically to psm_edge_score.
+    let mut prefix_mass_arr: Vec<f64> = Vec::with_capacity(n + 1);
+    let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
+    prefix_mass_arr.push(0.0);
+    prefix_nominal_arr.push(0);
+    let mut prefix_mass_acc = 0.0_f64;
+    for s in 1..=n {
+        let aa = &peptide.residues[s - 1];
+        let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        prefix_mass_acc += residue_mass;
+        if s < n {
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(nominal_from(prefix_mass_acc));
+        } else {
+            prefix_mass_arr.push(prefix_mass_acc);
+            prefix_nominal_arr.push(peptide_nominal);
+        }
+    }
+
+    let is_prefix_main = scored_spec.main_ion_direction();
+    let mut facts: Vec<(Partition, u32)> = Vec::with_capacity(n - 1);
+    if !is_prefix_main {
+        // Suffix-dominant: walk the suffix-ion series from the C-terminus inward.
+        let nominal_peptide_mass = prefix_nominal_arr[n];
+        for i in (1..n).rev() {
+            let cur_nominal = nominal_peptide_mass - prefix_nominal_arr[i];
+            let prev_nominal = nominal_peptide_mass - prefix_nominal_arr[i + 1];
+            let (part, idx, _, _) = scored_spec.edge_existence_facts(
+                cur_nominal,
+                prev_nominal,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+            facts.push((part, idx as u32));
+        }
+    } else {
+        // Prefix-dominant: walk the prefix-ion series from the N-terminus outward.
+        for i in 1..n {
+            let cur_nominal = prefix_nominal_arr[i];
+            let prev_nominal = prefix_nominal_arr[i - 1];
+            let (part, idx, _, _) = scored_spec.edge_existence_facts(
+                cur_nominal,
+                prev_nominal,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+            );
+            facts.push((part, idx as u32));
+        }
+    }
+    facts
+}
+
 /// Score a PSM as the sum of `ScoredSpectrum::node_score(prefix, suffix)`
-/// across each peptide split position.  This produces a raw score on the
-/// same scale as the GF distribution so that `GeneratingFunctionGroup::
-/// spectral_probability(psm.score.round() as i32)` is calibrated.
+/// across each peptide split position. This produces the integer RawScore
+/// used to rank PSMs.
 ///
 /// For each split `i` in `1..n`:
 /// - `nominal_prefix_mass[i] = nominal_from(sum of residues 0..i)`
@@ -160,16 +259,12 @@ pub fn score_psm(
     // Used to compute suffix_nominal = peptide_nominal - prefix_nominal.
     let peptide_nominal = peptide.nominal_residue_mass();
 
-    // ── Score-traceability instrumentation ─────────────────────────────────
-    // Gated by the `MSGF_TRACE_PEP` env var: if the peptide's unmodified
-    // residue sequence contains the filter string, emit per-split trace
-    // lines on stderr. Mirrors `FastScorer.getScoreWithTrace`, so the two
-    // dumps line up split-by-split.
-    //
-    // env::var is called once at startup via OnceLock and cached;
-    // the prior per-call `std::env::var("MSGF_TRACE_PEP")` fired on every
-    // one of ~3.1G `score_psm` invocations per Astral run. Each call acquires
-    // the global env lock; hoisting saves a few percent of total wall.
+    // ── Optional per-split score tracing ───────────────────────────────────
+    // When `Andes_TRACE_PEP` is set and the peptide's bare residue sequence
+    // contains the filter substring, dump one trace line per cleavage site to
+    // stderr (prefix/suffix masses, the cached node scores, the running sum).
+    // The filter is read once and memoized; when unset this block is inert
+    // and adds nothing to the scoring path.
     let trace = match trace_pep_filter() {
         Some(filter) => {
             // Only build the per-residue String when the env var is set.

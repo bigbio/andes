@@ -78,6 +78,143 @@ pub struct PsmFeatures {
     /// where the runner-up is otherwise evicted — and without perturbing the
     /// GF `min_score` / SpecEValue of any emitted PSM (purely additive).
     pub delta_raw_score: f32,
+
+    /// Tailor per-spectrum score calibration (Yang et al., JPR 2020):
+    /// `RawScore / denom`, where `denom` is this spectrum's RawScore at the
+    /// top-1% quantile of its candidate-score distribution (the score at rank
+    /// `ceil(0.01 * N)` from the top). Dividing each PSM's RawScore by its own
+    /// spectrum's high-quantile score makes RawScores comparable across spectra
+    /// — the role the removed generating function used to play. Emitted as the
+    /// additive `TailorScore` PIN column. Falls back to `denom = 1.0`
+    /// (TailorScore = RawScore) when the spectrum has too few candidates
+    /// (< 100) or the quantile score is `<= 0`, so it never divides by zero or
+    /// amplifies noise on tiny candidate sets. Purely additive: the histogram
+    /// it is computed from never alters which candidates are scored or kept.
+    pub tailor_score: f32,
+
+    // ── Strong-score Stage-1 additive bolt-ons (new PIN columns) ───────────
+    /// `Σ exp(-½ (ppmᵢ/σ)²)` over all matched b/y ions (σ = 7 ppm). A
+    /// Gaussian-kernel "tight-match evidence" sum: a fragment matched at a few
+    /// ppm contributes ~1, one scattered near the tolerance edge contributes
+    /// ~0. Turns fragment mass accuracy into evidence (the rank model discards
+    /// it), so a real high-res PSM whose ions cluster at low ppm scores far
+    /// above a coincidental match whose ions scatter. ~0 for all low-res PSMs
+    /// (every ppm is huge), so Percolator simply down-weights it there.
+    pub ppm_gaussian_score: f32,
+    /// Longest consecutive run of complementary cleavage sites (both `b_i`
+    /// and `y_{n-i}` matched). A contiguous ladder is stronger evidence than
+    /// scattered complementary pairs.
+    pub longest_complementary_ladder: u32,
+    /// Count of matched b/y ions that also have a neutral-loss partner peak at
+    /// −H2O (−18.0106 Da) or −NH3 (−17.0265 Da) within feature tolerance.
+    /// Strong CID/TMT signal that the intensity-rank model underuses.
+    pub neutral_loss_ion_count: u32,
+    /// Mean intensity-rank of matched b/y ions (rank 1 = most intense peak).
+    /// Real PSMs match dominant peaks; coincidental matches hit weak peaks.
+    pub mean_matched_intensity_rank: f32,
+    /// Count of matched charge-2 b/y fragment ions (high-charge precursors
+    /// produce +2 fragments the charge-1 path ignores).
+    pub doubly_charged_matched_ion_count: u32,
+
+    // ── Strong-score Stage-2: competition/null denominator (the moat) ──────
+    /// `Σ max(0, -ln(ρᵢ·Δᵢ))` over matched ions — the per-peak Poisson
+    /// chance-match "surprise". `ρᵢ` = local peak density (peaks/Da) around the
+    /// matched peak, `Δᵢ` = the match window (Da). A match in a sparse region at
+    /// tight tolerance is improbable by chance (large surprise = strong
+    /// evidence); a match in a crowded region within a wide window is nearly
+    /// free (≈0). This is the deterministic null no ML rescorer computes — it
+    /// weighs each match by how *non-coincidental* it is.
+    pub chance_match_surprise: f32,
+    /// Within-peptide alternative-mass competition: mean per-ion
+    /// `1/(1+ambiguity)` over matched charge-1 ions, where `ambiguity` counts
+    /// how many OTHER theoretical ions (b/y + neutral-loss offsets) also claim
+    /// the same peak. 1.0 = every matched peak uniquely explained; lower =
+    /// contested/coincidental matches.
+    pub unique_match_fraction: f32,
+
+    // ── Strong-score S1: intensity-model signal numerator ───────────────────
+    /// Cosine similarity between IntensityModel-predicted and observed relative
+    /// intensities over b/y ions. 0.0 when no intensity model is loaded.
+    pub intensity_signal: f32,
+
+    // ── Strong-score S2: null denominator terms (additive PIN columns) ────
+    /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
+    /// alternative-mass ambiguity + local peak density (S2 term 2).
+    pub mass_competition_evidence: f32,
+    /// Shannon entropy of a softmax over retained top-K candidate RawScores
+    /// (S2 listwise term; spectrum-level, identical on all retained rows).
+    pub candidate_rank_entropy: f32,
+    /// RawScore gap between the top two retained candidates in the queue
+    /// (S2 listwise term; distinct from `delta_raw_score` which uses all scored
+    /// distinct peptides, not only the retained top-K).
+    pub listwise_score_gap: f32,
+
+    // ── Strong-score S3: fused signal − null ────────────────────────────────
+    /// `intensity_signal − null` where `null` combines chance-match surprise,
+    /// mass-competition penalty, and listwise ambiguity. Always computed;
+    /// drives ranking and PIN `RawScore` only under `ScoreMode::Strong`.
+    pub strong_score: f32,
+
+    // ── Strong-score S4: per-spectrum significance calibration ──────────────
+    /// Z-scored `strong_score` for cross-spectrum comparability: leave-one-out
+    /// among retained top-N strong scores when N ≥ 2, else z-score against the
+    /// per-spectrum scored-candidate null pool. Uncalibrated `strong_score` when
+    /// the spectrum has too few scored candidates.
+    pub strong_score_cal: f32,
+}
+
+/// Number of candidates below which Tailor calibration is skipped (denom = 1.0).
+/// On tiny candidate sets the top-1% quantile is noisy / undefined, so we fall
+/// back to the uncalibrated RawScore rather than amplify noise.
+pub const TAILOR_MIN_CANDIDATES: u32 = 100;
+
+/// Tailor top-quantile fraction (q): the denominator is the RawScore at the
+/// top `q` of the candidate-score distribution (Yang et al. use q = 0.01).
+pub const TAILOR_QUANTILE: f64 = 0.01;
+
+/// Compute the Tailor calibration denominator for one spectrum from a histogram
+/// of its candidate RawScores.
+///
+/// `hist` maps a (rounded, integer) RawScore to the number of candidates that
+/// achieved it; `total` is the total candidate count (== sum of histogram
+/// counts). Returns the RawScore `s` at the top-`TAILOR_QUANTILE` of the
+/// distribution: the smallest `s` such that
+/// `count(candidates with RawScore >= s) <= ceil(q * total)` — i.e. the score
+/// at rank `ceil(q * total)` counting from the highest score down.
+///
+/// Returns the fallback `1.0` (no calibration) when `total < TAILOR_MIN_CANDIDATES`
+/// or when the resolved quantile score is `<= 0`, so `RawScore / denom` never
+/// divides by zero and never amplifies noise on tiny candidate sets.
+pub fn tailor_denominator<S: std::hash::BuildHasher>(
+    hist: &std::collections::HashMap<i32, u32, S>,
+    total: u32,
+) -> f64 {
+    if total < TAILOR_MIN_CANDIDATES {
+        return 1.0;
+    }
+    // Number of candidates that define the "top" tail. ceil(q * total), at least 1.
+    let top_k = (TAILOR_QUANTILE * total as f64).ceil() as u64;
+    let top_k = top_k.max(1);
+
+    // Walk scores from highest to lowest, accumulating counts. The quantile
+    // score is the lowest score still inside the top-`top_k` candidates: the
+    // first score at which the running count (candidates with RawScore >= s)
+    // reaches/exceeds `top_k`.
+    let mut scores: Vec<i32> = hist.keys().copied().collect();
+    scores.sort_unstable_by(|a, b| b.cmp(a)); // descending
+    let mut cum: u64 = 0;
+    let mut quantile_score: Option<i32> = None;
+    for s in scores {
+        cum += hist[&s] as u64;
+        if cum >= top_k {
+            quantile_score = Some(s);
+            break;
+        }
+    }
+    match quantile_score {
+        Some(s) if s > 0 => s as f64,
+        _ => 1.0, // <= 0 quantile score → fall back (avoids div-by-zero / sign flip)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,23 +264,9 @@ pub struct PsmMatch {
     /// (avoids the recompute). Default 0 — features extraction will compute
     /// it on the fly if it remains 0 (e.g. for test fixtures).
     pub edge_score: i32,
-    /// SpecEValue: lower is better. Default 1.0 = "not yet computed"
-    /// / "no signal". Set by `compute_spec_e_values_for_spectrum` after the
-    /// per-candidate scoring loop.
-    pub spec_e_value: f64,
-    /// De-novo score: `gf_group.max_score() - 1` for the GF that scored
-    /// this peptide. Set during `compute_spec_e_values_for_spectrum`.
-    /// Sentinel: `i32::MIN` if not yet computed.
-    pub de_novo_score: i32,
     /// Activation method captured from `param.data_type.activation` at scoring
     /// time. `None` if unknown or not yet set.
     pub activation_method: Option<model::activation::ActivationMethod>,
-    /// `spec_e_value * num_distinct_peptides_at_length`. Set in
-    /// `compute_spec_e_values_for_spectrum` using
-    /// `SearchIndex::num_distinct_peptides_at_length` (counts distinct bare
-    /// residue sequences at that length over the enumerated candidate set).
-    /// Sentinel before enrichment: `1.0`.
-    pub e_value: f64,
     /// Fragment-ion feature columns computed after `score_psm`.
     /// Defaults to all-zero until `compute_psm_features` runs.
     pub features: PsmFeatures,
@@ -172,13 +295,16 @@ impl PsmMatch {
 impl PartialEq for PsmMatch {
     fn eq(&self, other: &Self) -> bool {
         // PartialEq MUST agree with `Ord::cmp` (Rust contract
-        // a == b ⇒ a.cmp(b) == Equal). Ord uses (spec_e_value, rank_score),
-        // so PartialEq must compare the same fields. Comparing `score`
+        // a == b ⇒ a.cmp(b) == Equal). Ord ranks by `rank_score` alone,
+        // so PartialEq compares the same field. Comparing `score`
         // (= node + cleavage) would violate the contract for any pair of
         // PSMs with equal `score` but different `rank_score`
         // (= `score + edge`), leaving BinaryHeap behavior undefined for
-        // those pairs.
-        self.spec_e_value == other.spec_e_value && self.rank_score == other.rank_score
+        // those pairs. Delegate to `cmp` (rather than a raw `==`) so the two
+        // agree on NaN: `cmp` maps NaN `rank_score` to NEG_INFINITY, making
+        // two NaN-ranked PSMs compare Equal — a raw float `==` would report
+        // them unequal and break the Eq/Ord contract.
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 
@@ -190,12 +316,13 @@ impl PartialOrd for PsmMatch {
     }
 }
 
-/// Primary: `spec_e_value` ascending (lower = better).
-/// Secondary: `rank_score` descending (higher = better).
+/// `rank_score` descending (higher = better).
 ///
 /// `rank_score` is the Java-aligned queue-ordering key `node +
 /// cleavage + edge`, so the queue selects Java-equivalent top-1 PSMs even
 /// though the PIN RawScore distribution stays unchanged at `node + cleavage`.
+/// With the generating function removed, `rank_score` is the sole ranking
+/// signal for both queue retention and output ordering.
 ///
 /// For callers / test fixtures that never set `rank_score`, the
 /// default of 0.0 means an unset `rank_score` would lose to a set one. The
@@ -204,23 +331,16 @@ impl PartialOrd for PsmMatch {
 /// to preserve old behavior.
 ///
 /// This ordering is used by `TopNQueue`'s min-heap (via `Reverse<PsmMatch>`):
-/// the heap's "minimum" element is the one with the *largest* spec_e_value
+/// the heap's "minimum" element is the one with the *smallest* rank_score
 /// (worst), so `push` evicts it when over capacity.
 impl Ord for PsmMatch {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-        // "Better" PSM = smaller spec_e_value, then larger rank_score.
+        // "Better" PSM = larger rank_score.
         // NaN values are treated as worst (sort last / lose to finite).
-        let self_sev  = if self.spec_e_value.is_nan()  { f64::INFINITY }      else { self.spec_e_value };
-        let other_sev = if other.spec_e_value.is_nan() { f64::INFINITY }      else { other.spec_e_value };
-        match other_sev.partial_cmp(&self_sev).unwrap_or(Ordering::Equal) {
-            Ordering::Equal => {
-                let self_rank  = if self.rank_score.is_nan()  { f32::NEG_INFINITY } else { self.rank_score };
-                let other_rank = if other.rank_score.is_nan() { f32::NEG_INFINITY } else { other.rank_score };
-                self_rank.partial_cmp(&other_rank).unwrap_or(Ordering::Equal)
-            }
-            ord => ord,
-        }
+        let self_rank  = if self.rank_score.is_nan()  { f32::NEG_INFINITY } else { self.rank_score };
+        let other_rank = if other.rank_score.is_nan() { f32::NEG_INFINITY } else { other.rank_score };
+        self_rank.partial_cmp(&other_rank).unwrap_or(Ordering::Equal)
     }
 }
 
@@ -240,12 +360,9 @@ impl TopNQueue {
     /// Insert a PSM. The queue keeps **at least** `capacity` of the *best*
     /// PSMs, plus any additional PSMs tied with the current worst.
     ///
-    /// "Best" = smallest `spec_e_value` first (then largest `score` for ties).
-    /// The min-heap (via `Reverse<PsmMatch>`) puts the *worst* PSM at the top
-    /// so it can be evicted when a strictly-better PSM arrives.
-    ///
-    /// Before `compute_spec_e_values_for_spectrum` runs, all PSMs have
-    /// `spec_e_value = 1.0` and the secondary `score` key governs eviction.
+    /// "Best" = largest `rank_score` first. The min-heap (via
+    /// `Reverse<PsmMatch>`) puts the *worst* PSM at the top so it can be
+    /// evicted when a strictly-better PSM arrives.
     ///
     /// **Tie handling:** when the queue is at capacity and
     /// a new PSM is `Equal` (in `Ord` terms) to the worst retained PSM, the
@@ -333,10 +450,6 @@ impl TopNQueue {
     /// (it would let callers break the heap invariant). Since features do
     /// not participate in ordering, the re-push is logically a no-op for
     /// retention.
-    ///
-    /// This is distinct from `update_psm_enrichment` only in intent
-    /// (post-top-N feature fill vs score/e-value enrichment) — the
-    /// mechanism is identical.
     pub fn fill_post_topn<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
@@ -347,8 +460,51 @@ impl TopNQueue {
         }
     }
 
-    /// Return the best PSM (smallest `spec_e_value`, then largest `score`)
-    /// without removing it. Returns `None` if the queue is empty.
+    /// Re-rank retained PSMs by `features.strong_score` and mirror it into
+    /// `score` / `rank_score` for queue ordering and PIN `RawScore` emission.
+    /// Called only under `ScoreMode::Strong` after `fill_post_topn`.
+    pub fn reorder_by_strong_score(&mut self) {
+        let cap = self.capacity as usize;
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        for psm in &mut psms {
+            let s = psm.features.strong_score;
+            psm.score = s;
+            psm.rank_score = s;
+        }
+        psms.sort_by(|a, b| b.cmp(a));
+        Self::retain_top_with_ties(&mut psms, cap);
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
+    /// Drop PSMs strictly worse than the Nth-best, keeping ties at the cutoff
+    /// (Java / `TopNQueue::push` parity).
+    fn retain_top_with_ties(psms: &mut Vec<PsmMatch>, cap: usize) {
+        if psms.len() <= cap {
+            return;
+        }
+        let cutoff = psms[cap - 1].clone();
+        psms.retain(|p| p.cmp(&cutoff) != std::cmp::Ordering::Less);
+    }
+
+    /// Trim to at most `cap` best PSMs (plus ties at the cutoff). Used after
+    /// strong re-rank to restore user `top_n` PIN row count.
+    pub fn trim_to_capacity(&mut self, cap: u32) {
+        let cap = cap as usize;
+        if self.heap.len() <= cap {
+            return;
+        }
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        psms.sort_by(|a, b| b.cmp(a));
+        Self::retain_top_with_ties(&mut psms, cap);
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
+    /// Return the best PSM (largest `rank_score`) without removing it.
+    /// Returns `None` if the queue is empty.
     ///
     /// The heap is a min-heap on `Reverse<PsmMatch>` so the *worst* entry sits
     /// at the top (for cheap eviction). To find the *best* entry we iterate
@@ -358,39 +514,30 @@ impl TopNQueue {
         self.heap.iter().map(|Reverse(m)| m).max_by(|a, b| a.cmp(b))
     }
 
-    /// Apply `f` to each PSM to compute its `spec_e_value`, then rebuild
-    /// the heap so the ordering invariant holds.
-    ///
-    /// Draining + re-inserting is O(N log N) — cheap for small N (top-10).
-    pub fn update_spec_e_values<F: Fn(&PsmMatch) -> f64>(&mut self, f: F) {
-        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
-        for psm in &mut psms {
-            psm.spec_e_value = f(psm);
-        }
-        for psm in psms {
-            self.heap.push(Reverse(psm));
-        }
-    }
-
-    /// Apply `f` to each PSM in-place (mutable borrow), then rebuild the heap.
-    ///
-    /// Used by enrichment to set `de_novo_score`, `e_value`, and other
-    /// fields that don't affect ordering. The heap is rebuilt after all mutations
-    /// (O(N) heapify) to maintain the invariant.
-    pub fn update_psm_enrichment<F: FnMut(&mut PsmMatch)>(&mut self, mut f: F) {
-        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
-        for psm in &mut psms {
-            f(psm);
-        }
-        for psm in psms {
-            self.heap.push(Reverse(psm));
-        }
-    }
-
-    /// Drain into a Vec sorted best-first (smallest spec_e_value, then largest score).
+    /// Drain into a Vec sorted best-first (largest `rank_score`).
     pub fn into_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
         v.sort_by(|a, b| b.cmp(a));
+        v
+    }
+
+    /// Drain into a Vec sorted best-first by `rank_score` DESCENDING (the
+    /// larger RawScore = better), then by `score` descending as a stable
+    /// tiebreak. This is the canonical output ordering: `rank_score` is the
+    /// sole ranking signal now that the generating function is removed.
+    pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
+        let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
+        v.sort_by(|a, b| {
+            let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+            let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+            br.partial_cmp(&ar)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let asc = if a.score.is_nan() { f32::NEG_INFINITY } else { a.score };
+                    let bsc = if b.score.is_nan() { f32::NEG_INFINITY } else { b.score };
+                    bsc.partial_cmp(&asc).unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
         v
     }
 }
@@ -411,19 +558,17 @@ mod tests {
             score,
             rank_score: score,  // fixture default: rank_score = score
             edge_score: 0,
-            spec_e_value: 1.0,  // default sentinel: "not yet computed"
-            de_novo_score: i32::MIN,  // sentinel: not yet computed
             activation_method: None,
-            e_value: 1.0,  // sentinel: not yet computed
             features: PsmFeatures::default(),
             isotope_offset: 0,
             precursor_mz_override: None,
         }
     }
 
-    fn make_match_with_evalue(spectrum_idx: usize, score: f32, spec_e_value: f64) -> PsmMatch {
+    /// Build a fixture PSM whose `rank_score` is set independently of `score`.
+    fn make_match_with_rank(spectrum_idx: usize, score: f32, rank_score: f32) -> PsmMatch {
         let mut m = make_match(spectrum_idx, score);
-        m.spec_e_value = spec_e_value;
+        m.rank_score = rank_score;
         m
     }
 
@@ -440,7 +585,7 @@ mod tests {
         for s in [1.0, 2.0, 3.0] { q.push(make_match(0, s)); }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
-        // All spec_e_value = 1.0 (default) → secondary sort by score descending.
+        // rank_score = score (fixture default) → sort by score descending.
         assert_eq!(sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
                    vec![3.0, 2.0, 1.0]);
     }
@@ -451,7 +596,7 @@ mod tests {
         for s in [1.0, 5.0, 2.0, 4.0, 3.0] { q.push(make_match(0, s)); }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
-        // All spec_e_value = 1.0 → secondary score keeps top-3 by score.
+        // rank_score = score → keeps top-3 by score.
         assert_eq!(sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
                    vec![5.0, 4.0, 3.0]);
     }
@@ -566,62 +711,38 @@ mod tests {
         let cloned = m.clone();
         assert_eq!(cloned.spectrum_idx, 7);
         assert_eq!(cloned.score, 4.2);
-        assert_eq!(cloned.spec_e_value, 1.0);
+        assert_eq!(cloned.rank_score, 4.2);
     }
 
     // -----------------------------------------------------------------------
-    // SpecEValue ordering tests
+    // rank_score ordering tests
     // -----------------------------------------------------------------------
 
     #[test]
-    fn psm_match_orders_by_spec_e_value_ascending_then_score_descending() {
-        // Lower spec_e_value means "better" → should sort before (greater in
-        // natural Ord so the min-heap can evict the worst).
-        let better = make_match_with_evalue(0, 5.0, 0.001);
-        let worse  = make_match_with_evalue(0, 5.0, 0.5);
-        // "better" is greater in natural order (because lower e-value wins).
+    fn psm_match_orders_by_rank_score_descending() {
+        // Higher rank_score means "better" → Ord-greater so the min-heap can
+        // evict the worst.
+        let better = make_match_with_rank(0, 5.0, 10.0);
+        let worse  = make_match_with_rank(0, 5.0, 1.0);
         assert!(better > worse,
-            "PSM with lower spec_e_value should be Ord-greater (better in the min-heap)");
-
-        // Tie-break by score descending.
-        let high_score = make_match_with_evalue(0, 10.0, 0.01);
-        let low_score  = make_match_with_evalue(0, 3.0,  0.01);
-        assert!(high_score > low_score,
-            "when spec_e_value equal, higher score should be Ord-greater");
+            "PSM with higher rank_score should be Ord-greater (better in the min-heap)");
     }
 
     #[test]
-    fn queue_keeps_best_spec_e_value_psms_when_full() {
-        // Three PSMs with same score but different spec_e_values; capacity = 2.
+    fn queue_keeps_best_rank_score_psms_when_full() {
+        // Three PSMs with same score but different rank_scores; capacity = 2.
         let mut q = TopNQueue::new(2);
-        q.push(make_match_with_evalue(0, 5.0, 0.5));   // worst
-        q.push(make_match_with_evalue(0, 5.0, 0.001)); // best
+        q.push(make_match_with_rank(0, 5.0, 1.0));   // worst
+        q.push(make_match_with_rank(0, 5.0, 100.0)); // best
         assert_eq!(q.len(), 2);
-        // Push a medium one; it should evict the worst (0.5).
-        q.push(make_match_with_evalue(0, 5.0, 0.1));
+        // Push a medium one; it should evict the worst (rank 1.0).
+        q.push(make_match_with_rank(0, 5.0, 50.0));
         assert_eq!(q.len(), 2);
         let sorted = q.into_sorted_vec();
-        // Should keep 0.001 and 0.1 (best two).
-        let evalues: Vec<f64> = sorted.iter().map(|m| m.spec_e_value).collect();
-        assert!(evalues.contains(&0.001), "best e-value 0.001 should be retained");
-        assert!(evalues.contains(&0.1),   "medium e-value 0.1 should be retained");
-        assert!(!evalues.contains(&0.5),  "worst e-value 0.5 should be evicted");
-    }
-
-    #[test]
-    fn update_spec_e_values_applies_to_all_psms() {
-        let mut q = TopNQueue::new(5);
-        for s in [1.0_f32, 2.0, 3.0] {
-            q.push(make_match(0, s));
-        }
-        // Set spec_e_value = 1.0 / score for each PSM.
-        q.update_spec_e_values(|psm| 1.0 / psm.score as f64);
-        let sorted = q.into_sorted_vec();
-        // After update: score 3.0 → e=0.333, score 2.0 → e=0.5, score 1.0 → e=1.0.
-        // Best e-value first.
-        assert!((sorted[0].spec_e_value - 1.0 / 3.0).abs() < 1e-9);
-        assert!((sorted[1].spec_e_value - 0.5).abs() < 1e-9);
-        assert!((sorted[2].spec_e_value - 1.0).abs() < 1e-9);
+        let ranks: Vec<f32> = sorted.iter().map(|m| m.rank_score).collect();
+        assert!(ranks.contains(&100.0), "best rank 100.0 should be retained");
+        assert!(ranks.contains(&50.0),  "medium rank 50.0 should be retained");
+        assert!(!ranks.contains(&1.0),  "worst rank 1.0 should be evicted");
     }
 
     #[test]
@@ -648,24 +769,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Enrichment field sentinel defaults
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn psm_match_default_de_novo_score_is_min() {
-        let m = make_match(0, 1.0);
-        assert_eq!(m.de_novo_score, i32::MIN,
-            "de_novo_score sentinel should be i32::MIN before enrichment");
-    }
-
-    #[test]
-    fn psm_match_default_e_value_is_one() {
-        let m = make_match(0, 1.0);
-        assert_eq!(m.e_value, 1.0,
-            "e_value sentinel should be 1.0 before enrichment");
-    }
-
-    // -----------------------------------------------------------------------
     // PsmFeatures struct and default initialization
     // -----------------------------------------------------------------------
 
@@ -687,6 +790,52 @@ mod tests {
         assert_eq!(f.stdev_error_top7, 0.0);
         assert_eq!(f.mean_rel_error_top7, 0.0);
         assert_eq!(f.stdev_rel_error_top7, 0.0);
+        assert_eq!(f.strong_score, 0.0);
+        assert_eq!(f.strong_score_cal, 0.0);
+    }
+
+    #[test]
+    fn trim_to_capacity_keeps_ties_at_cutoff() {
+        let mut q = TopNQueue::new(10);
+        for s in [5.0, 4.0, 3.0, 3.0, 2.0] {
+            q.push(make_match(0, s));
+        }
+        q.trim_to_capacity(3);
+        let scores: Vec<f32> = q.into_sorted_vec().iter().map(|m| m.score).collect();
+        assert_eq!(scores, vec![5.0, 4.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn reorder_by_strong_score_updates_ranking_fields() {
+        let mut q = TopNQueue::new(2);
+        let low = PsmMatch {
+            spectrum_idx: 0,
+            candidate_idxs: vec![0],
+            charge_used: 2,
+            mass_error_ppm: 0.0,
+            score: 50.0,
+            rank_score: 50.0,
+            edge_score: 0,
+            activation_method: None,
+            features: PsmFeatures {
+                strong_score: 1.0,
+                ..Default::default()
+            },
+            isotope_offset: 0,
+            precursor_mz_override: None,
+        };
+        let mut high = low.clone();
+        high.candidate_idxs = vec![1];
+        high.score = 100.0;
+        high.rank_score = 100.0;
+        high.features.strong_score = 5.0;
+        q.push(low);
+        q.push(high);
+        q.reorder_by_strong_score();
+        let top = q.peek_top().unwrap();
+        assert!((top.features.strong_score - 5.0).abs() < f32::EPSILON);
+        assert!((top.score - 5.0).abs() < f32::EPSILON);
+        assert!((top.rank_score - 5.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -728,39 +877,95 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn psm_match_with_nan_spec_evalue_orders_as_worst() {
-        // NaN spec_e_value should sort as WORSE than any finite value.
+    fn psm_match_with_nan_rank_score_orders_as_worst() {
+        // NaN rank_score should sort as WORSE than any finite value.
         // "Better" = greater in natural Ord (used by the min-heap via Reverse).
-        let nan_sev = make_match_with_evalue(0, 5.0, f64::NAN);
-        let finite  = make_match_with_evalue(0, 0.0, 1.0);
+        let nan_rank = make_match_with_rank(0, 5.0, f32::NAN);
+        let finite   = make_match_with_rank(0, 0.0, 1.0);
         assert_eq!(
-            nan_sev.cmp(&finite),
+            nan_rank.cmp(&finite),
             std::cmp::Ordering::Less,
-            "NaN spec_e_value should sort as worse (Less) than a finite value"
+            "NaN rank_score should sort as worse (Less) than a finite value"
         );
     }
 
-    #[test]
-    fn psm_match_with_nan_score_orders_as_worst() {
-        // When spec_e_value ties, NaN score should sort as worse than any finite score.
-        let nan_score     = make_match_with_evalue(0, f32::NAN, 0.01);
-        let finite_score  = make_match_with_evalue(0, 0.0,      0.01);
-        assert_eq!(
-            nan_score.cmp(&finite_score),
-            std::cmp::Ordering::Less,
-            "NaN score should sort as worse (Less) than a finite score at equal spec_e_value"
-        );
+    // -----------------------------------------------------------------------
+    // Tailor per-spectrum calibration
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+
+    /// Build a histogram with `score` repeated `count` times, summing total.
+    fn hist_from(pairs: &[(i32, u32)]) -> (HashMap<i32, u32>, u32) {
+        let mut h = HashMap::new();
+        let mut total = 0u32;
+        for &(s, c) in pairs {
+            *h.entry(s).or_insert(0) += c;
+            total += c;
+        }
+        (h, total)
     }
 
     #[test]
-    fn psm_match_two_nan_spec_evalues_compare_equal() {
-        // Two PSMs both with NaN spec_e_value and same score → Equal.
-        let a = make_match_with_evalue(0, 5.0, f64::NAN);
-        let b = make_match_with_evalue(0, 5.0, f64::NAN);
+    fn tailor_denom_top1pct_quantile_basic() {
+        // 1000 candidates: 990 at score 5, 10 at score 50 (the top 1%).
+        // top_k = ceil(0.01 * 1000) = 10. Walking from highest: 10 candidates
+        // at score 50 reach top_k exactly → quantile score = 50.
+        let (h, total) = hist_from(&[(5, 990), (50, 10)]);
+        assert_eq!(total, 1000);
+        assert_eq!(tailor_denominator(&h, total), 50.0);
+        // TailorScore for a RawScore-50 PSM = 50 / 50 = 1.0.
+        assert!(((50.0f64 / tailor_denominator(&h, total)) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tailor_denom_ceil_rounds_up() {
+        // 150 candidates → ceil(0.01 * 150) = ceil(1.5) = 2 candidates in the
+        // top tail. 1 candidate at 100, 1 at 90, rest at 10. Walking down:
+        // 100 (cum 1) < 2, then 90 (cum 2) >= 2 → quantile score = 90.
+        let (h, total) = hist_from(&[(100, 1), (90, 1), (10, 148)]);
+        assert_eq!(total, 150);
+        assert_eq!(tailor_denominator(&h, total), 90.0);
+    }
+
+    #[test]
+    fn tailor_denom_small_n_falls_back_to_one() {
+        // < TAILOR_MIN_CANDIDATES (100): no calibration → denom 1.0, so
+        // TailorScore == RawScore.
+        let (h, total) = hist_from(&[(5, 50), (50, 5)]);
+        assert_eq!(total, 55);
+        assert!(total < TAILOR_MIN_CANDIDATES);
+        assert_eq!(tailor_denominator(&h, total), 1.0);
+    }
+
+    #[test]
+    fn tailor_denom_nonpositive_quantile_falls_back_to_one() {
+        // Enough candidates but the top-1% quantile score is <= 0 (all negative
+        // RawScores). Must fall back to 1.0 to avoid div-by-zero / sign flip.
+        let (h, total) = hist_from(&[(-10, 990), (-1, 10)]);
+        assert_eq!(total, 1000);
+        // top tail is the 10 candidates at -1, which is <= 0 → fallback.
+        assert_eq!(tailor_denominator(&h, total), 1.0);
+    }
+
+    #[test]
+    fn tailor_denom_exactly_min_candidates_calibrates() {
+        // Exactly TAILOR_MIN_CANDIDATES → calibrates (>= threshold).
+        // 100 candidates, top_k = ceil(0.01*100) = 1. Highest score = 40.
+        let (h, total) = hist_from(&[(10, 99), (40, 1)]);
+        assert_eq!(total, 100);
+        assert_eq!(tailor_denominator(&h, total), 40.0);
+    }
+
+    #[test]
+    fn psm_match_two_nan_rank_scores_compare_equal() {
+        // Two PSMs both with NaN rank_score → Equal.
+        let a = make_match_with_rank(0, 5.0, f32::NAN);
+        let b = make_match_with_rank(0, 5.0, f32::NAN);
         assert_eq!(
             a.cmp(&b),
             std::cmp::Ordering::Equal,
-            "Two PSMs with NaN spec_e_value and equal score should compare Equal"
+            "Two PSMs with NaN rank_score should compare Equal"
         );
     }
 }

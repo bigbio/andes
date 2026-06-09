@@ -200,10 +200,10 @@ fn diagnose_peptide_mismatches() {
             scoring_gap_count += 1;
             match rank_in_queue {
                 Some(rank) => format!(
-                    "generated, ranked {} in queue (top-1 target was '{}', spec_e_value {:.2e})",
+                    "generated, ranked {} in queue (top-1 target was '{}', rank_score {:.2})",
                     rank + 1,
                     rust_top_pep,
-                    top_target.spec_e_value
+                    top_target.rank_score
                 ),
                 None => format!(
                     "generated globally but NOT in top-N for this spectrum \

@@ -60,11 +60,17 @@ pub(crate) fn iter_ranked_by_rank_score(
     queue_sorted: &[PsmMatch],
 ) -> impl Iterator<Item = (u32, &PsmMatch)> {
     let mut rank = 0u32;
-    let mut prev_rs = f32::NAN;
+    let mut prev_rs: Option<f32> = None;
     queue_sorted.iter().map(move |psm| {
-        if psm.rank_score != prev_rs {
+        // Two NaN scores tie (NaNs collapse into one worst-score bucket in the
+        // training/gate paths), so a run of NaN-scored PSMs must share one rank
+        // rather than each starting a new one as `!= f32::NAN` would do.
+        let ties_prev = prev_rs.is_some_and(|prev| {
+            psm.rank_score == prev || (psm.rank_score.is_nan() && prev.is_nan())
+        });
+        if !ties_prev {
             rank += 1;
-            prev_rs = psm.rank_score;
+            prev_rs = Some(psm.rank_score);
         }
         (rank, psm)
     })

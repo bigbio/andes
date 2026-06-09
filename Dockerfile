@@ -61,6 +61,12 @@ COPY LICENSE NOTICE README.md /opt/andes/
 # so the resources lookup resolves correctly.
 RUN ln -s /opt/andes/andes /usr/local/bin/andes
 
+# Run as a non-root user (security hardening). A mounted /data must be writable
+# by this uid; if the host directory is owned by another user, override with
+# `docker run --user "$(id -u):$(id -g)"`.
+RUN useradd --create-home --uid 10001 andes && mkdir -p /data && chown andes:andes /data
+USER andes
+
 WORKDIR /data
 ENTRYPOINT ["andes"]
 CMD ["--help"]

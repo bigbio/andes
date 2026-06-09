@@ -149,7 +149,13 @@ impl IntensityModel {
                 };
                 let flank_n = flank_n_col.value(i).as_bytes().first().copied().unwrap_or(b'X');
                 let flank_c = flank_c_col.value(i).as_bytes().first().copied().unwrap_or(b'X');
-                let count = count_col.value(i) as u64;
+                let count_raw = count_col.value(i);
+                if count_raw < 0 {
+                    // A negative count is corrupt; `as u64` would wrap it to a huge
+                    // weight. Skip the row rather than poison the backoff totals.
+                    continue;
+                }
+                let count = count_raw as u64;
                 let mean = mean_col.value(i);
                 let var = var_col.value(i);
                 let key = IntensityKey {

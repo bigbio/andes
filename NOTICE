@@ -26,18 +26,37 @@ published works; users citing Andes should also cite these:
   universal database search tool for proteomics." Nature
   Communications 5:5277.
 
-Derivation status
------------------
+Origin and derivation status
+----------------------------
 
-Andes is a derivative work of MS-GF+. It is distributed under the
-same UC Regents non-commercial license terms as the upstream software;
-no broader rights are granted by the Andes authors. Commercial use
-requires a separate license from UC San Diego's Technology Transfer
-Office (contact details in ./LICENSE).
+Andes began as a Rust reimplementation of MS-GF+ and we acknowledge that
+heritage explicitly. The project is being made independent of MS-GF+ in
+stages, and this NOTICE tracks the honest current status:
 
-Andes adds Rust-specific architecture, performance optimizations,
-and a parallelized search pipeline. These contributions are made under
-the same UC Regents non-commercial terms.
+  * Scoring engine (code) — INDEPENDENT. The patented generating-function
+    code has been removed (ranking uses an empirical RawScore calibration),
+    and the rank/intensity scoring has been clean-room reimplemented from the
+    published intensity-rank log-likelihood idea (Frank 2005; Kim et al.) —
+    not ported line-by-line.
+
+  * Trained statistical models (resources/ionstat/models.parquet) — STILL
+    DERIVED. These rank/error/noise tables are, for now, derived from
+    MS-GF+'s released `.param` files. They are being retrained from public
+    and reanalysed data via the bundled `train` engine; until every shipped
+    model is independently trained, Andes remains a derivative work for
+    licensing purposes.
+
+Because MS-GF+-derived models are still bundled, Andes is distributed under
+the same UC Regents non-commercial license terms as upstream (see ./LICENSE);
+no broader rights are granted by the Andes authors, and commercial use
+requires a separate license from UC San Diego's Technology Transfer Office.
+When all bundled models are independently trained, the Andes authors intend
+to relicense the project under permissive terms; this NOTICE will be updated
+at that point.
+
+The Rust architecture, performance work, parallel search pipeline, training
+engine, and own-trained models contributed by the Andes authors are original
+work.
 
 This NOTICE file must be preserved in all distributions, in source or
 binary form, in accordance with the upstream license requirement that

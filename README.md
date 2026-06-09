@@ -8,11 +8,11 @@ _The data-driven peptide search engine of the quantms ecosystem. Built and maint
 [![Release](https://img.shields.io/github/v/release/bigbio/andes)](https://github.com/bigbio/andes/releases)
 [![License: UCSD-Noncommercial](https://img.shields.io/badge/license-UCSD--Noncommercial-blue)](LICENSE)
 
-> **A Rust port of MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Matches or beats Java MS-GF+ PSM counts at 1% FDR while running **10-28× faster**.
+> **A data-driven peptide search engine, originally ported from MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Matches or beats Java MS-GF+ PSM counts at 1% FDR while running **10-28× faster**.
 
 ## What is this?
 
-Andes originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical generating-function peptide-identification engine, and remains a derivative work of it (see [`NOTICE`](NOTICE)). It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring. The original Java implementation is preserved on the `java-legacy` branch.
+Andes originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical peptide-identification engine, and we acknowledge that heritage. It is now being made independent: the patented generating function has been removed and the scoring code clean-room reauthored, while the bundled statistical models are being retrained from public data. Until every shipped model is independently trained it remains, for licensing purposes, a derivative work (see [`NOTICE`](NOTICE) for the component-by-component status). It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring. The original Java implementation is preserved on the `java-legacy` branch.
 
 ## Why andes?
 

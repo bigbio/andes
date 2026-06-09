@@ -1,8 +1,13 @@
-Andes is a Rust port of MS-GF+ and is distributed under the same terms
-as the upstream MS-GF+ software (The Regents of the University of California).
-The full upstream license text is reproduced verbatim below.
+Andes originated as a Rust port of MS-GF+. Its scoring code has since been
+clean-room reauthored and the generating function removed, but the bundled
+statistical models (resources/ionstat/models.parquet) are still derived from
+MS-GF+'s released parameter files. While those models ship, Andes remains a
+derivative work and is distributed under the same terms as the upstream MS-GF+
+software (The Regents of the University of California). The full upstream
+license text is reproduced verbatim below.
 
-See ./NOTICE for attribution and the derivation history of this port.
+See ./NOTICE for the precise, component-by-component derivation status and the
+intent to relicense once all bundled models are independently trained.
 
 ================================================================================
                           UPSTREAM MS-GF+ LICENSE

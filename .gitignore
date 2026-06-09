@@ -107,3 +107,6 @@ references/
 .cargo/*
 !.cargo/config.toml
 *.rs.bk
+
+# Planning/research/specs live in workspace internal-docs/, not the public repo
+docs/research/

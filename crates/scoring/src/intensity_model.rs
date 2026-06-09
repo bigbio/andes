@@ -292,7 +292,10 @@ mod tests {
     use parquet::arrow::ArrowWriter;
     use tempfile::NamedTempFile;
 
-    fn write_fixture(path: &Path, rows: &[(&str, &str, &str, i32, i32, &str, i64, f64, f64)]) {
+    /// (ion_type, flank_n, flank_c, pos_bin, charge, nce_bin, count, mean, var)
+    type FixtureRow<'a> = (&'a str, &'a str, &'a str, i32, i32, &'a str, i64, f64, f64);
+
+    fn write_fixture(path: &Path, rows: &[FixtureRow]) {
         let schema = Schema::new(vec![
             Field::new("ion_type", DataType::Utf8, false),
             Field::new("flank_n", DataType::Utf8, false),

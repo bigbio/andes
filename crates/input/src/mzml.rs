@@ -322,7 +322,7 @@ impl<R: BufRead> MzMLReader<R> {
         // malformed file) — it would produce nonsense search windows. The
         // Thermo and timsTOF readers already gate on `precursor_mz > 0`; do the
         // same here so all formats behave consistently.
-        if !(precursor_mz > 0.0) {
+        if !precursor_mz.is_finite() || precursor_mz <= 0.0 {
             return Ok(None);
         }
 

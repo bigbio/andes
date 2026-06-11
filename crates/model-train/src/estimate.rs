@@ -70,6 +70,9 @@ pub struct EstimatorConfig {
     /// If `Some(esf)`, override the template's `error_scaling_factor`; if
     /// `None`, copy from the template.  Default: `None`.
     pub error_scaling_factor_override: Option<i32>,
+    /// Apply MS-GF+-style widening rank-window smoothing to SIGNAL rank
+    /// distributions (not noise). Default: `false` (byte-identical to before).
+    pub rank_smoothing: bool,
 }
 
 impl Default for EstimatorConfig {
@@ -80,6 +83,7 @@ impl Default for EstimatorConfig {
             min_count: 50,
             backoff_weight: 20.0,
             error_scaling_factor_override: None,
+            rank_smoothing: false,
         }
     }
 }
@@ -209,6 +213,7 @@ impl Estimator {
         let noise_pseudo = self.cfg.noise_pseudo;
         let min_count = self.cfg.min_count;
         let w = self.cfg.backoff_weight;
+        let rank_smoothing = self.cfg.rank_smoothing;
 
         // Universe of partitions: union of template's frag_off_table and
         // partitions present in counts.
@@ -295,7 +300,12 @@ impl Estimator {
                 } else {
                     emp
                 };
-                ion_table.insert(ion, blended);
+                let final_dist = if rank_smoothing {
+                    smooth_rank_window(&blended, n_slots - 1)
+                } else {
+                    blended
+                };
+                ion_table.insert(ion, final_dist);
             }
 
             // Noise is required by RankScorer::new. It uses a much smaller

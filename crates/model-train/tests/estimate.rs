@@ -441,6 +441,36 @@ fn rank_window_smoothing_preserves_head_smooths_tail() {
     assert!(out[39] > 0.0 && out[41] > 0.0, "tail neighbors must receive mass");
 }
 
+/// With rank_smoothing enabled, a signal ion's trained rank distribution is
+/// smoother (lower peak) than with it disabled; the NOISE distribution is
+/// unchanged (smoothing must not touch noise).
+#[test]
+fn rank_smoothing_softens_signal_not_noise() {
+    let max_rank = 150;
+    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let template = one_partition_template(max_rank);
+
+    let mut counts = CountStats::new();
+    for _ in 0..2000 {
+        counts.bump_rank(part, prefix1, 25);
+        counts.bump_rank(part, IonType::Noise, 0);
+    }
+
+    let mut cfg_on = EstimatorConfig::default();
+    cfg_on.rank_smoothing = true;
+    let on = Estimator::new(cfg_on).estimate(&counts, &template);
+    let off = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
+
+    let sig_on = on.rank_dist_table[&part][&prefix1][25];
+    let sig_off = off.rank_dist_table[&part][&prefix1][25];
+    assert!(sig_on < sig_off, "smoothing must lower the signal peak: on={sig_on} off={sig_off}");
+
+    let noise_on = &on.rank_dist_table[&part][&IonType::Noise];
+    let noise_off = &off.rank_dist_table[&part][&IonType::Noise];
+    assert_eq!(noise_on, noise_off, "noise dist must be unchanged by rank smoothing");
+}
+
 /// Coverage for the error-table prior path: with a non-zero `error_scaling_factor`
 /// (so `build_error_tables` actually runs) and an empty corpus, a sparse partition's
 /// ion-error distribution must follow the independent prior, not the global pool.

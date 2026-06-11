@@ -1308,7 +1308,19 @@ fn visit_directional_node_ion_matches<F>(
             if param.segment_num(theo_mz, parent_mass) != seg {
                 continue;
             }
-            let tol_da = mme.as_da(theo_mz);
+            // High-res-aware peak-matching tolerance, mirroring the PIN-feature
+            // path (`match_engine::compute_psm_features`): high-res instruments
+            // (HighRes/TOF/QExactive/OrbitrapAstral/TimsTOF) match within 20 ppm;
+            // low-res (LTQ) keeps the coarse `param.mme` (0.5 Da). The model's
+            // `param.mme` is the coarse rank-binning tolerance — ~50× too wide
+            // for fragment peak selection at high resolution, which made the
+            // trained ion mass-error table broad and mis-centered. Only the
+            // match tolerance changes here; `mme` / `prob_peak` are untouched.
+            let tol_da = if param.data_type.instrument.is_high_resolution() {
+                theo_mz * 20.0e-6 // 20 ppm for high-res
+            } else {
+                mme.as_da(theo_mz) // low-res keeps the param mme (0.5 Da)
+            };
             let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
             visit(partition, *ion, rank, logs, theo_mz, tol_da);
         }
@@ -2446,6 +2458,92 @@ mod precursor_filter_tests {
             with_bin > 0,
             "dense_noise_facts must emit at least one error_bin = Some for matched probes \
              (was always None before the fix); matched={matched}"
+        );
+    }
+
+    /// Regression: the shared node-score/training matcher
+    /// (`visit_directional_node_ion_matches`) must select the matched fragment
+    /// peak using a HIGH-RES-aware tolerance (20 ppm), NOT the coarse
+    /// `param.mme` (0.5 Da) for high-res instruments — mirroring the PIN-feature
+    /// path in `match_engine::compute_psm_features`.
+    ///
+    /// Before the fix the matcher used `mme.as_da(theo_mz)` (0.5 Da for a
+    /// high-res QExactive model), so it grabbed the most-intense peak within
+    /// ±0.5 Da — a co-eluting/noise peak 0.2 Da away — instead of the true
+    /// few-ppm fragment. That made the trained ion mass-error table broad and
+    /// mis-centered and was the dominant cause of the high-res scoring deficit.
+    ///
+    /// Setup: one TRUE fragment peak ~5 ppm off the theoretical m/z (low
+    /// intensity, rank 2) PLUS a more-intense DECOY peak 0.2 Da away (rank 1).
+    /// At 0.5 Da the intensity-max matcher picks the rank-1 decoy; at 20 ppm
+    /// only the true peak is in range, so it picks the rank-2 true peak.
+    #[test]
+    fn high_res_node_matcher_uses_20ppm_not_mme() {
+        use model::mass::INTEGER_MASS_SCALER;
+        use crate::testutil::tiny_param_with_ions;
+        use crate::scoring::rank_scorer::RankScorer;
+
+        // High-res QExactive param, mme = 0.5 Da (Tolerance::Da(0.5)).
+        let param = tiny_param_with_ions();
+        assert!(
+            param.data_type.instrument.is_high_resolution(),
+            "fixture must be a high-res instrument"
+        );
+        assert!(
+            param.mme.as_da(500.0) > 0.4,
+            "fixture mme must be the coarse ~0.5 Da tolerance for this test to be meaningful"
+        );
+        let scorer = RankScorer::new(&param);
+
+        // The prefix ion is charge=1, offset=0 → theo_mz = nominal / SCALER.
+        let nominal_mass = 500.0_f64;
+        let theo_mz = nominal_mass / INTEGER_MASS_SCALER as f64;
+
+        // TRUE peak ~5 ppm above theo_mz (low intensity), DECOY peak 0.2 Da
+        // above theo_mz (high intensity). Peaks sorted ascending by m/z.
+        let true_mz = theo_mz * (1.0 + 5.0e-6);
+        let decoy_mz = theo_mz + 0.2;
+        let true_intensity = 10.0_f32;
+        let decoy_intensity = 100.0_f32;
+        let peaks: Vec<(f64, f32)> = vec![(true_mz, true_intensity), (decoy_mz, decoy_intensity)];
+        // ranks aligned with peaks: rank 1 = most intense (decoy), rank 2 = true.
+        let ranks: Vec<u32> = vec![2, 1];
+
+        let charge: u8 = 2;
+        let parent_mass = 1000.0_f64;
+
+        // Capture what the matcher selected.
+        let mut matched_rank: Option<u32> = None;
+        let mut matched_mz: Option<f64> = None;
+        let mut visited = false;
+        visit_directional_node_ion_matches(
+            &peaks,
+            &ranks,
+            &[], // empty cache → builds partition + ion logs from param
+            &scorer,
+            nominal_mass,
+            true, // is_prefix
+            charge,
+            parent_mass,
+            |_partition, _ion, rank, _logs, t_mz, tol_da| {
+                visited = true;
+                matched_rank = rank;
+                matched_mz = matched_peak_mz(&peaks, &ranks, t_mz, tol_da);
+            },
+        );
+
+        assert!(visited, "matcher must visit the prefix ion");
+        assert_eq!(
+            matched_rank,
+            Some(2),
+            "high-res matcher must select the TRUE ~5 ppm peak (rank 2), NOT the more-intense \
+             decoy 0.2 Da away (rank 1); selecting rank 1 means the 0.5 Da mme tolerance is \
+             still in effect"
+        );
+        let mz = matched_mz.expect("a peak must be matched");
+        assert!(
+            (mz - true_mz).abs() < 1e-9,
+            "matched peak must be the true peak at {true_mz}, got {mz} (decoy was at {decoy_mz})"
         );
     }
 }

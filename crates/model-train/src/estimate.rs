@@ -122,6 +122,13 @@ impl Estimator {
     /// `(partition, ion)` is used as **Level 0** of the backoff hierarchy — it
     /// is consulted before segment-collapse (Level 1) and the global pool
     /// (Level 2).  Passing `None` is identical to calling [`estimate`].
+    ///
+    /// **Invariant:** every distribution vector in `prior.rank_dist_table` must
+    /// be strictly positive in every slot (the same requirement
+    /// [`RankScorer::new`] places on the trained model). A prior produced by
+    /// [`estimate`] always satisfies this; a hand-crafted prior with zero
+    /// entries can yield `-inf`/`NaN` node scores when a partition has zero
+    /// observed counts (the blend collapses to the prior verbatim).
     pub fn estimate_with_prior(
         &self,
         counts: &CountStats,
@@ -254,6 +261,9 @@ impl Estimator {
                 if let Some(pr) = prior {
                     if let Some(dist) = pr.rank_dist_table.get(&part).and_then(|m| m.get(&ion)) {
                         if dist.len() == n_slots {
+                            // Returned as-is: the prior is already normalized;
+                            // `ps` only applies to Levels 1/2 where raw counts
+                            // still need Laplace smoothing.
                             return dist.clone();
                         }
                     }

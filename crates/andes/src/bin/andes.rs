@@ -486,6 +486,11 @@ struct TrainFromMsnetArgs {
     /// model id when omitted).
     #[arg(long)]
     prior_model: Option<String>,
+
+    /// Apply MS-GF+-style rank-window smoothing to signal rank distributions
+    /// (improves generalization of own-trained high-res models).
+    #[arg(long)]
+    rank_smoothing: bool,
 }
 
 /// Training arguments for `andes train-intensity`.
@@ -2514,6 +2519,7 @@ fn run_train_from_msnet(
         min_count: args.train_min_count,
         backoff_weight: args.train_backoff_weight,
         error_scaling_factor_override: None,
+        rank_smoothing: args.rank_smoothing,
     };
     eprintln!(
         "train-from-msnet: estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",

@@ -356,6 +356,31 @@ fn train_from_msnet_accepts_prior_model_flags() {
     );
 }
 
+/// `--rank-smoothing` is accepted and a model is still written.
+/// Smoke-tests that the flag reaches EstimatorConfig.rank_smoothing without panicking.
+#[test]
+fn train_from_msnet_accepts_rank_smoothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let in_parquet = dir.path().join("psms.parquet");
+    let store = dir.path().join("models.parquet");
+    write_flat_parquet(&in_parquet, &synthetic_rows());
+
+    run_train(&in_parquet, &store, &["--fragment-tol-ppm", "20", "--rank-smoothing"]);
+
+    assert!(store.exists(), "store should be written");
+    let ms = ModelStore::open(&store).expect("open store");
+    assert!(
+        ms.model_ids().contains(&"default".to_string()),
+        "store should contain model 'default'; got {:?}",
+        ms.model_ids()
+    );
+    let param = ms.load_param("default").expect("load default param");
+    assert!(
+        !param.rank_dist_table.is_empty(),
+        "trained rank_dist_table should be non-empty"
+    );
+}
+
 /// Multiple `--in` files accumulate into one model.
 #[test]
 fn multiple_inputs_accumulate() {

@@ -419,3 +419,26 @@ fn sparse_partition_shrinks_toward_independent_prior() {
         "prior must pull mass toward slot 5: with={p5_with} without={p5_without}"
     );
 }
+
+/// Coverage for the error-table prior path: with a non-zero `error_scaling_factor`
+/// (so `build_error_tables` actually runs) and an empty corpus, a sparse partition's
+/// ion-error distribution must follow the independent prior, not the global pool.
+#[test]
+fn sparse_error_table_shrinks_toward_independent_prior() {
+    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+    let mut template = one_partition_template(150);
+    template.error_scaling_factor = 2; // dist_len = 2*2 + 1 = 5
+
+    let mut prior = one_partition_template(150);
+    prior.error_scaling_factor = 2;
+    prior.ion_err_dist_table.insert(part, vec![0.0, 0.0, 0.0, 0.0, 1.0]); // mass on last bin
+
+    // No error counts → n = 0 < min_count → blend collapses to the prior.
+    let counts = CountStats::new();
+    let est = Estimator::new(EstimatorConfig::default());
+    let trained = est.estimate_with_prior(&counts, &template, Some(&prior));
+
+    let ie = &trained.ion_err_dist_table[&part];
+    assert_eq!(ie.len(), 5);
+    assert!(ie[4] > 0.5, "ion error dist should follow the prior's last-bin peak, got {ie:?}");
+}

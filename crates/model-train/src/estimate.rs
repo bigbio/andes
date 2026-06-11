@@ -111,6 +111,23 @@ impl Estimator {
     /// `noise_err_dist_table`, `ion_existence_table`, `charge_hist`,
     /// `partitions` — are built from `counts`.
     pub fn estimate(&self, counts: &CountStats, template: &Param) -> Param {
+        self.estimate_with_prior(counts, template, None)
+    }
+
+    /// Like [`estimate`], but also accepts an optional independent prior model.
+    ///
+    /// When `prior` is `Some(p)`, sparse partitions (total rank-count below
+    /// `cfg.min_count`) shrink toward the prior's rank distribution rather than
+    /// (only) the corpus-internal pool.  The prior's distribution for a given
+    /// `(partition, ion)` is used as **Level 0** of the backoff hierarchy — it
+    /// is consulted before segment-collapse (Level 1) and the global pool
+    /// (Level 2).  Passing `None` is identical to calling [`estimate`].
+    pub fn estimate_with_prior(
+        &self,
+        counts: &CountStats,
+        template: &Param,
+        prior: Option<&Param>,
+    ) -> Param {
         // `pseudo` must be > 0: it is the Laplace smoothing mass that guarantees
         // every distribution slot is strictly positive. With `pseudo == 0` an
         // all-zero raw count would normalize to all-zero probabilities, and
@@ -129,7 +146,7 @@ impl Estimator {
         let esf = self.cfg.error_scaling_factor_override
             .unwrap_or(template.error_scaling_factor);
 
-        let rank_dist_table = self.build_rank_dist_table(counts, template, max_rank);
+        let rank_dist_table = self.build_rank_dist_table(counts, template, max_rank, prior);
         let (ion_err_dist_table, noise_err_dist_table) =
             self.build_error_tables(counts, template, esf);
         let ion_existence_table = self.build_existence_table(counts, template);
@@ -177,6 +194,7 @@ impl Estimator {
         counts: &CountStats,
         template: &Param,
         max_rank: i32,
+        prior: Option<&Param>,
     ) -> FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> {
         // Array length: max_rank observed-rank slots + 1 missing-ion slot.
         let n_slots = (max_rank + 1) as usize;
@@ -232,6 +250,14 @@ impl Estimator {
             // Helper: compute a normalised parent vector for `ion` using the
             // given pseudo-count (signal vs noise differ — see `noise_pseudo`).
             let parent_vec = |ion: IonType, ps: f32| -> Vec<f32> {
+                // Level 0: independent prior model (own-data broad prior).
+                if let Some(pr) = prior {
+                    if let Some(dist) = pr.rank_dist_table.get(&part).and_then(|m| m.get(&ion)) {
+                        if dist.len() == n_slots {
+                            return dist.clone();
+                        }
+                    }
+                }
                 // Level 1: segment-collapse.
                 if let Some(seg_map) = seg_parent {
                     if let Some(raw) = seg_map.get(&ion) {

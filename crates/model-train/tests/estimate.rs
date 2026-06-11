@@ -359,3 +359,43 @@ fn dense_counts_recover_empirical_within_tolerance() {
         best_part, best_ion
     );
 }
+
+/// A sparse partition (n < min_count) must shrink toward the INDEPENDENT PRIOR's
+/// distribution, not the corpus-internal pool. Here the corpus empirical mass is
+/// all on slot 0, but the prior is peaked on slot 5; the blended result must
+/// carry materially more mass on slot 5 than the no-prior estimate does.
+#[test]
+fn sparse_partition_shrinks_toward_independent_prior() {
+    let max_rank = 150;
+    let n_slots = (max_rank + 1) as usize;
+    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let template = one_partition_template(max_rank);
+
+    let mut prior = one_partition_template(max_rank);
+    let mut prior_dist = vec![0.0_f32; n_slots];
+    prior_dist[5] = 1.0;
+    let mut ion_map = FxHashMap::default();
+    ion_map.insert(prefix1, prior_dist);
+    let mut noise_dist = vec![0.0_f32; n_slots];
+    noise_dist[0] = 1.0;
+    ion_map.insert(IonType::Noise, noise_dist);
+    prior.rank_dist_table.insert(part, ion_map);
+
+    let mut counts = CountStats::new();
+    for _ in 0..10 {
+        counts.bump_rank(part, prefix1, 0);
+        counts.bump_rank(part, IonType::Noise, 0);
+    }
+
+    let est = Estimator::new(EstimatorConfig::default());
+    let with_prior = est.estimate_with_prior(&counts, &template, Some(&prior));
+    let no_prior = est.estimate_with_prior(&counts, &template, None);
+
+    let p5_with = with_prior.rank_dist_table[&part][&prefix1][5];
+    let p5_without = no_prior.rank_dist_table[&part][&prefix1][5];
+    assert!(
+        p5_with > p5_without + 0.05,
+        "prior must pull mass toward slot 5: with={p5_with} without={p5_without}"
+    );
+}

@@ -1188,8 +1188,11 @@ impl<'a> ScoredSpectrum<'a> {
     /// missing-slot-dominated — unlike `noise_match_facts` (reversed peptide),
     /// which samples noise at signal density and over-flattens it. Routes
     /// through the same `visit_directional_node_ion_matches` as scoring, so
-    /// partitions/segments/ranks are consistent. `error_bin` is left `None`
-    /// (noise error tables are not the lever — the edge term is esf-gated).
+    /// partitions/segments/ranks are consistent. Matched dense-noise probes
+    /// DO carry an `error_bin` (computed exactly as `ion_match_facts` does) so
+    /// the noise mass-error distribution is learned during training; leaving it
+    /// `None` was a bug that left the noise error table uniform and collapsed
+    /// the high-res mass-error LLR.
     pub fn dense_noise_facts(
         &self,
         peptide: &Peptide,
@@ -1197,6 +1200,7 @@ impl<'a> ScoredSpectrum<'a> {
         n_samples: usize,
     ) -> Vec<(Partition, Option<u32>, Option<u32>)> {
         let max_rank = scorer.max_rank();
+        let esf = scorer.param().error_scaling_factor;
         if n_samples == 0 {
             return Vec::new();
         }
@@ -1218,9 +1222,30 @@ impl<'a> ScoredSpectrum<'a> {
                     is_prefix,
                     self.charge,
                     self.parent_mass,
-                    |partition, _ion, rank, _logs, _theo_mz, _tol| {
-                        let r = rank.map(|r| r.min(max_rank).max(1));
-                        out.push((partition, r, None));
+                    |partition, _ion, rank, _logs, theo_mz, tol_da| {
+                        let (r, ebin) = match rank {
+                            Some(rk) => {
+                                let clamped = rk.min(max_rank).max(1);
+                                let ebin = if esf > 0 {
+                                    let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
+                                        .map(|peak_mz| (peak_mz - theo_mz) as f32)
+                                        .unwrap_or(0.0);
+                                    let mut idx = (error_da * esf as f32).round() as i32;
+                                    if idx > esf {
+                                        idx = esf;
+                                    } else if idx < -esf {
+                                        idx = -esf;
+                                    }
+                                    idx += esf;
+                                    Some(idx as u32)
+                                } else {
+                                    None
+                                };
+                                (Some(clamped), ebin)
+                            }
+                            None => (None, None),
+                        };
+                        out.push((partition, r, ebin));
                     },
                 );
             }
@@ -2373,5 +2398,54 @@ mod precursor_filter_tests {
         let ss = ScoredSpectrum::new(&s, &scorer, 2);
         // No filtering occurred (c <= 0 was skipped) → both peaks kept.
         assert_eq!(ss.peak_count_after_filtering(), 2);
+    }
+
+    /// Regression: `dense_noise_facts` must emit a mass-error bin for every
+    /// matched noise probe (just like `ion_match_facts`), so the noise
+    /// mass-error histogram can be learned during training. Before the fix the
+    /// closure pushed `error_bin = None` unconditionally, leaving the noise
+    /// error table uniform and cratering high-res scoring.
+    #[test]
+    fn dense_noise_facts_emits_error_bins_for_matched_probes() {
+        use model::amino_acid::AminoAcid;
+        use crate::param_model::Param;
+        use std::path::PathBuf;
+
+        // High-res fixture has error_scaling_factor = 100 (> 0), so matched
+        // probes MUST carry an error bin.
+        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("tests/fixtures/CID_HighRes_Tryp.param");
+        let param = Param::load_from_file(&path).expect("param loads");
+        assert!(param.error_scaling_factor > 0, "fixture must have esf > 0");
+        let scorer = RankScorer::new(&param);
+
+        let charge: u8 = 2;
+        let residues: Vec<AminoAcid> =
+            b"PEPTIDEK".iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+        let peptide = Peptide::new(residues, b'K', b'A');
+
+        // Dense comb of peaks across the full fragment m/z range so that the
+        // evenly-spaced dense-noise probes are guaranteed to match some peak
+        // (mme = 0.5 Da, comb spacing 0.4 Da → every probe has a peak within
+        // tolerance).
+        let peaks: Vec<(f64, f32)> = (0..3000)
+            .map(|i| (50.0 + i as f64 * 0.4, 100.0 - (i % 50) as f32))
+            .collect();
+        // precursor m/z for the peptide at this charge.
+        let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
+        let s = make_spec(precursor_mz, &peaks);
+
+        let ss = ScoredSpectrum::new(&s, &scorer, charge);
+        let facts = ss.dense_noise_facts(&peptide, &scorer, 64);
+
+        assert!(!facts.is_empty(), "dense_noise_facts must return facts");
+        let matched = facts.iter().filter(|(_, r, _)| r.is_some()).count();
+        assert!(matched > 0, "dense comb must produce at least one matched probe");
+        let with_bin = facts.iter().filter(|(_, _, ebin)| ebin.is_some()).count();
+        assert!(
+            with_bin > 0,
+            "dense_noise_facts must emit at least one error_bin = Some for matched probes \
+             (was always None before the fix); matched={matched}"
+        );
     }
 }

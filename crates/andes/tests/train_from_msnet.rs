@@ -270,6 +270,47 @@ fn fragment_tolerance_override_changes_model() {
     );
 }
 
+/// `--activation/--instrument/--enzyme/--protocol` override the trained model's
+/// `data_type` columns (which drive model selection), independent of the seed.
+/// Without these flags the model would inherit the seed's data_type
+/// (default seed `hcd_qexactive_tryp` => HCD/QExactive/Tryp/Automatic), so
+/// selection could never route e.g. a low-res CID-TMT query to the new model.
+#[test]
+fn data_type_override_sets_selection_columns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let in_parquet = dir.path().join("psms.parquet");
+    let store = dir.path().join("models.parquet");
+    write_flat_parquet(&in_parquet, &synthetic_rows());
+
+    // Mint a low-res CID-TMT model from a (non-TMT) seed.
+    run_train(
+        &in_parquet,
+        &store,
+        &[
+            "--fragment-tol-da", "0.5",
+            "--activation", "CID",
+            "--instrument", "LowRes",
+            "--enzyme", "Trypsin",
+            "--protocol", "TMT",
+        ],
+    );
+
+    let ms = ModelStore::open(&store).expect("open store");
+    let entry = ms
+        .manifest_entries()
+        .iter()
+        .find(|e| e.model_id == "default")
+        .expect("manifest entry for 'default'");
+
+    assert_eq!(entry.activation, "CID", "activation column must reflect --activation");
+    assert_eq!(entry.instrument, "LowRes", "instrument column must reflect --instrument");
+    assert_eq!(entry.enzyme, "Trypsin", "enzyme column must reflect --enzyme");
+    assert_eq!(
+        entry.protocol, "TMT",
+        "protocol column must reflect --protocol (drives experiment_class=tmt selection)"
+    );
+}
+
 /// Multiple `--in` files accumulate into one model.
 #[test]
 fn multiple_inputs_accumulate() {

@@ -419,6 +419,29 @@ struct TrainFromMsnetArgs {
     #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
     seed_model: String,
 
+    /// Override the trained model's activation in the store `data_type`
+    /// (e.g. `CID`, `HCD`, `ETD`, `UVPD`). Defaults to the seed's value.
+    /// Together with `--instrument/--enzyme/--protocol` this lets a new slug
+    /// carry the correct selection columns even when seeded from a related model.
+    #[arg(long = "activation")]
+    activation: Option<String>,
+
+    /// Override the trained model's instrument in the store `data_type`
+    /// (e.g. `LowRes`, `HighRes`, `QExactive`, `TOF`). Defaults to the seed's value.
+    #[arg(long = "instrument")]
+    instrument: Option<String>,
+
+    /// Override the trained model's enzyme in the store `data_type`
+    /// (e.g. `Trypsin`, `LysC`, `LysN`). Defaults to the seed's value.
+    #[arg(long = "enzyme")]
+    enzyme: Option<String>,
+
+    /// Override the trained model's protocol in the store `data_type`
+    /// (e.g. `TMT`, `iTRAQ`, `Phosphorylation`, `Automatic`). Drives
+    /// `experiment_class` model selection. Defaults to the seed's value.
+    #[arg(long = "protocol")]
+    protocol: Option<String>,
+
     /// Fragment match tolerance in ppm. Overwrites the seed model's `mme`
     /// before training. Mutually exclusive with `--fragment-tol-da`. When
     /// neither is given, the seed model's `mme` is kept.
@@ -2485,9 +2508,40 @@ fn run_train_from_msnet(
         cfg.pseudo, cfg.noise_pseudo, cfg.backoff_weight, cfg.min_count
     );
     let estimator = Estimator::new(cfg);
-    let trained_param = estimator.estimate(&stats, &seed_param);
+    let mut trained_param = estimator.estimate(&stats, &seed_param);
     let n_partitions = trained_param.partitions.len();
     eprintln!("train-from-msnet: trained model has {n_partitions} partitions");
+
+    // ── 5b. Override the selection-relevant data_type from flags ──────────────
+    // The trained model inherits the seed's data_type; minting a NEW slug whose
+    // (activation, instrument, enzyme, protocol) differs from the seed requires
+    // overriding those columns explicitly, otherwise model selection (which keys
+    // on these columns, not the model_id string) would never route to it.
+    if let Some(act) = &args.activation {
+        trained_param.data_type.activation = ActivationMethod::from_name(act)
+            .ok_or_else(|| format!("unknown --activation '{act}' (expected CID/HCD/ETD/UVPD/PQD)"))?;
+    }
+    if let Some(inst) = &args.instrument {
+        trained_param.data_type.instrument = InstrumentType::from_name(inst)
+            .ok_or_else(|| format!("unknown --instrument '{inst}' (expected LowRes/HighRes/QExactive/TOF)"))?;
+    }
+    if let Some(enz) = &args.enzyme {
+        trained_param.data_type.enzyme = Some(
+            model::enzyme::Enzyme::from_name(enz)
+                .ok_or_else(|| format!("unknown --enzyme '{enz}' (e.g. Trypsin/LysC/LysN/AspN/GluC/ArgC)"))?,
+        );
+    }
+    if let Some(prot) = &args.protocol {
+        trained_param.data_type.protocol = model::protocol::Protocol::from_name(prot)
+            .ok_or_else(|| format!("unknown --protocol '{prot}' (expected Automatic/TMT/iTRAQ/iTRAQPhospho/Phosphorylation/Standard)"))?;
+    }
+    eprintln!(
+        "train-from-msnet: model data_type = {:?}/{:?}/{:?}/{:?}",
+        trained_param.data_type.activation,
+        trained_param.data_type.instrument,
+        trained_param.data_type.enzyme,
+        trained_param.data_type.protocol,
+    );
 
     // ── 6. Build the source ledger (sentinel train_fdr; pre-labeled input) ────
     let dataset = args
@@ -2503,8 +2557,8 @@ fn run_train_from_msnet(
         date: format_today_iso8601(),
         weight: 1.0,
         train_fdr: 1.0, // sentinel: input is pre-labeled, no q-value filtering here
-        instrument: String::new(),
-        experiment_class: String::new(),
+        instrument: trained_param.data_type.instrument.name().to_string(),
+        experiment_class: trained_param.data_type.protocol.name().to_string(),
     };
 
     // ── 7. Write to store, preserving any other existing models ───────────────

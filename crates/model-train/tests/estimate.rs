@@ -17,7 +17,7 @@ use scoring_crate::scoring::rank_scorer::RankScorer;
 
 use model_train::accumulate::StatsAccumulator;
 use model_train::counts::CountStats;
-use model_train::estimate::{Estimator, EstimatorConfig};
+use model_train::estimate::{smooth_rank_window, Estimator, EstimatorConfig};
 
 use rustc_hash::FxHashMap;
 use scoring_crate::param_model::{FragmentOffsetFrequency, SpecDataType};
@@ -418,6 +418,27 @@ fn sparse_partition_shrinks_toward_independent_prior() {
         p5_with > p5_without + 0.05,
         "prior must pull mass toward slot 5: with={p5_with} without={p5_without}"
     );
+}
+
+/// Widening rank-window smoothing must (a) leave ranks 1-3 (indices 0..3) and the
+/// missing-ion sentinel (last index) untouched, (b) smooth the tail (reduce a lone
+/// spike at a high rank by averaging neighbors), and (c) renormalize to sum 1.
+#[test]
+fn rank_window_smoothing_preserves_head_smooths_tail() {
+    let max_rank = 150usize;
+    let n = max_rank + 1;
+    let mut d = vec![0.0f32; n];
+    d[0] = 0.50;
+    d[40] = 0.40;
+    d[150] = 0.10;
+    let out = smooth_rank_window(&d, max_rank);
+
+    let s: f32 = out.iter().sum();
+    assert!((s - 1.0).abs() < 1e-4, "must renormalize, sum={s}");
+    assert!(out[0] > 0.45, "rank-1 head must stay sharp, got {}", out[0]);
+    assert!(out[150] > 0.08, "missing slot must be preserved, got {}", out[150]);
+    assert!(out[40] < 0.40, "tail spike must be smoothed down, got {}", out[40]);
+    assert!(out[39] > 0.0 && out[41] > 0.0, "tail neighbors must receive mass");
 }
 
 /// Coverage for the error-table prior path: with a non-zero `error_scaling_factor`

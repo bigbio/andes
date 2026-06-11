@@ -447,6 +447,41 @@ impl Estimator {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// MS-GF+-style widening rank-window smoothing of a rank-distribution vector.
+///
+/// `dist` has length `max_rank + 1`: indices `0..max_rank` are observed ranks
+/// 1..max_rank, index `max_rank` is the missing-ion sentinel. The half-width of
+/// the moving average widens with rank — the discriminative head (ranks 1-3) and
+/// the missing-ion sentinel are left untouched; the noisy tail is averaged with
+/// neighbors. The result is renormalized to sum 1.0.
+///
+/// Window schedule (published method, smoothingRanks {3,5,10,20,50}):
+/// rank<3 -> hw 0 (no smoothing), <5 -> 1, <10 -> 2, <20 -> 3, <50 -> 4, else -> 5.
+pub fn smooth_rank_window(dist: &[f32], max_rank: usize) -> Vec<f32> {
+    let n = dist.len();
+    let last = max_rank.min(n.saturating_sub(1));
+    let mut out = dist.to_vec();
+    let halfwidth = |r: usize| -> usize {
+        if r < 3 { 0 } else if r < 5 { 1 } else if r < 10 { 2 }
+        else if r < 20 { 3 } else if r < 50 { 4 } else { 5 }
+    };
+    for (i, slot) in out.iter_mut().enumerate().take(last) {
+        let hw = halfwidth(i);
+        if hw == 0 { continue; }
+        let lo = i.saturating_sub(hw);
+        let hi = (i + hw + 1).min(last);
+        let mut s = 0.0f32;
+        let mut c = 0usize;
+        for v in dist.iter().take(hi).skip(lo) { s += *v; c += 1; }
+        if c > 0 { *slot = s / c as f32; }
+    }
+    let tot: f32 = out.iter().sum();
+    if tot > 0.0 {
+        for x in &mut out { *x /= tot; }
+    }
+    out
+}
+
 /// Normalise a raw-count slice into a probability vector of length `n_slots`
 /// with Laplace smoothing (`pseudo` added to every bin before dividing).
 ///

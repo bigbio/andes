@@ -245,26 +245,9 @@ fn fragment_tolerance_override_changes_model() {
     let in_parquet = dir.path().join("psms.parquet");
     write_flat_parquet(&in_parquet, &synthetic_rows());
 
-    // NOTE: this test seeds from a LOW-RES model (`--seed-model cid_lowres_tryp`).
-    // The `--fragment-tol-*` overrides set `seed_param.mme`, which the
-    // node-score / training matcher (`visit_directional_node_ion_matches`)
-    // consults *only for low-res instruments*. For HIGH-RES instruments the
-    // matcher now uses a fixed 20 ppm window (mirroring the PIN-feature path),
-    // so `mme` — and therefore these flags — no longer change the matched-peak
-    // selection there. The default seed (`hcd_qexactive_tryp`) is high-res, so
-    // with it both tolerances would collapse to the same 20 ppm matching and
-    // produce identical tables. (`--instrument` only relabels the OUTPUT model's
-    // selection column; the *training matcher* keys off the SEED's instrument,
-    // so we must change the seed, not `--instrument`, to exercise the low-res
-    // matching path where `mme` still governs.)
-
     // Tight tolerance.
     let store_tight = dir.path().join("tight.parquet");
-    run_train(
-        &in_parquet,
-        &store_tight,
-        &["--seed-model", "cid_lowres_tryp", "--fragment-tol-ppm", "1"],
-    );
+    run_train(&in_parquet, &store_tight, &["--fragment-tol-ppm", "1"]);
     let tight = ModelStore::open(&store_tight)
         .unwrap()
         .load_param("default")
@@ -272,11 +255,7 @@ fn fragment_tolerance_override_changes_model() {
 
     // Wide tolerance (Da-based, large window).
     let store_wide = dir.path().join("wide.parquet");
-    run_train(
-        &in_parquet,
-        &store_wide,
-        &["--seed-model", "cid_lowres_tryp", "--fragment-tol-da", "1.0"],
-    );
+    run_train(&in_parquet, &store_wide, &["--fragment-tol-da", "1.0"]);
     let wide = ModelStore::open(&store_wide)
         .unwrap()
         .load_param("default")

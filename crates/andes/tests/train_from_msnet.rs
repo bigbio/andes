@@ -311,6 +311,51 @@ fn data_type_override_sets_selection_columns() {
     );
 }
 
+/// `--prior-model-store`/`--prior-model` are accepted and a model is still
+/// written. Smoke test for the mechanism: train a prior into one store, then
+/// re-run pointing `--prior-model-store` at that store with a valid `--prior-model`
+/// slug. Sparse partitions shrink toward the prior, but the run must still
+/// produce a model in the out-store.
+#[test]
+fn train_from_msnet_accepts_prior_model_flags() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let in_parquet = dir.path().join("psms.parquet");
+    write_flat_parquet(&in_parquet, &synthetic_rows());
+
+    // Build a prior store (a valid model named "default") to point at.
+    let prior_store = dir.path().join("prior.parquet");
+    run_train(&in_parquet, &prior_store, &["--fragment-tol-ppm", "20"]);
+    assert!(prior_store.exists(), "prior store should be written");
+
+    // Train again, shrinking toward the prior model loaded from `prior_store`.
+    let store = dir.path().join("models.parquet");
+    run_train(
+        &in_parquet,
+        &store,
+        &[
+            "--fragment-tol-ppm",
+            "20",
+            "--prior-model-store",
+            prior_store.to_str().unwrap(),
+            "--prior-model",
+            "default",
+        ],
+    );
+
+    assert!(store.exists(), "store should be written");
+    let ms = ModelStore::open(&store).expect("open store");
+    assert!(
+        ms.model_ids().contains(&"default".to_string()),
+        "store should contain model 'default'; got {:?}",
+        ms.model_ids()
+    );
+    let param = ms.load_param("default").expect("load default param");
+    assert!(
+        !param.partitions.is_empty(),
+        "trained model should have partitions"
+    );
+}
+
 /// Multiple `--in` files accumulate into one model.
 #[test]
 fn multiple_inputs_accumulate() {

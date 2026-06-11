@@ -474,6 +474,18 @@ struct TrainFromMsnetArgs {
     /// Minimum partition count before backoff blending (default 50).
     #[arg(long = "train-min-count", default_value_t = 50)]
     train_min_count: u64,
+
+    /// Optional path to an independent prior model store. Sparse partitions in
+    /// the trained model shrink toward the matching prior model instead of the
+    /// corpus-internal pool. Must be own-data (NOT the MS-GF+ seed) to stay
+    /// relicense-safe.
+    #[arg(long)]
+    prior_model_store: Option<PathBuf>,
+
+    /// Model id to load from `--prior-model-store` (defaults to the trained
+    /// model id when omitted).
+    #[arg(long)]
+    prior_model: Option<String>,
 }
 
 /// Training arguments for `andes train-intensity`.
@@ -2508,7 +2520,35 @@ fn run_train_from_msnet(
         cfg.pseudo, cfg.noise_pseudo, cfg.backoff_weight, cfg.min_count
     );
     let estimator = Estimator::new(cfg);
-    let mut trained_param = estimator.estimate(&stats, &seed_param);
+
+    // Optional independent prior: sparse partitions shrink toward this model
+    // (Level 0 of the backoff hierarchy) instead of the corpus-internal pool.
+    // When `--prior-model` is omitted, default to the trained model id. The
+    // selection columns passed to `load_param_from_store` are inert here because
+    // `model_id_override` is `Some` (it loads that exact id).
+    let prior_param: Option<Param> = match &args.prior_model_store {
+        Some(store_path) => {
+            let prior_id = args.prior_model.clone().unwrap_or_else(|| args.model_id.clone());
+            // `load_param_from_store`'s activation/instrument/protocol are only
+            // consulted for automatic selection; passing an explicit
+            // `model_id_override` makes them inert, so `Protocol::Auto` (the CLI
+            // enum the signature expects) is a harmless placeholder.
+            let (_pid, p) = load_param_from_store(
+                seed_param.data_type.activation,
+                Some(seed_param.data_type.instrument),
+                Protocol::Auto,
+                Some(store_path.as_path()),
+                Some(&prior_id),
+            )
+            .map_err(|e| format!("loading --prior-model '{prior_id}': {e}"))?;
+            eprintln!("train-from-msnet: prior model = {prior_id} (from {})", store_path.display());
+            Some(p)
+        }
+        None => None,
+    };
+
+    let mut trained_param =
+        estimator.estimate_with_prior(&stats, &seed_param, prior_param.as_ref());
     let n_partitions = trained_param.partitions.len();
     eprintln!("train-from-msnet: trained model has {n_partitions} partitions");
 

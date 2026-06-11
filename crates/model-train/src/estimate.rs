@@ -155,8 +155,8 @@ impl Estimator {
 
         let rank_dist_table = self.build_rank_dist_table(counts, template, max_rank, prior);
         let (ion_err_dist_table, noise_err_dist_table) =
-            self.build_error_tables(counts, template, esf);
-        let ion_existence_table = self.build_existence_table(counts, template);
+            self.build_error_tables(counts, template, esf, prior);
+        let ion_existence_table = self.build_existence_table(counts, template, prior);
         let charge_hist = build_charge_hist(&counts.charge);
         let (min_charge, max_charge) = charge_range(&charge_hist, template);
 
@@ -328,6 +328,7 @@ impl Estimator {
         counts: &CountStats,
         template: &Param,
         esf: i32,
+        prior: Option<&Param>,
     ) -> (FxHashMap<Partition, Vec<f32>>, FxHashMap<Partition, Vec<f32>>) {
         if esf <= 0 {
             return (FxHashMap::default(), FxHashMap::default());
@@ -364,8 +365,13 @@ impl Estimator {
             let ion_raw = counts.error.get(&part).map(|v| v.as_slice()).unwrap_or(&[]);
             let ion_n: u64 = ion_raw.iter().sum();
             let ion_emp = normalize_with_pseudo(ion_raw, dist_len, pseudo);
+            let ion_parent: Vec<f32> = prior
+                .and_then(|p| p.ion_err_dist_table.get(&part))
+                .filter(|d| d.len() == dist_len)
+                .cloned()
+                .unwrap_or_else(|| global_ion_norm.clone());
             let ion_dist = if ion_n < min_count {
-                blend(&ion_emp, &global_ion_norm, ion_n as f32, w)
+                blend(&ion_emp, &ion_parent, ion_n as f32, w)
             } else {
                 ion_emp
             };
@@ -374,8 +380,13 @@ impl Estimator {
             let noise_raw = counts.noise_error.get(&part).map(|v| v.as_slice()).unwrap_or(&[]);
             let noise_n: u64 = noise_raw.iter().sum();
             let noise_emp = normalize_with_pseudo(noise_raw, dist_len, pseudo);
+            let noise_parent: Vec<f32> = prior
+                .and_then(|p| p.noise_err_dist_table.get(&part))
+                .filter(|d| d.len() == dist_len)
+                .cloned()
+                .unwrap_or_else(|| global_noise_norm.clone());
             let noise_dist = if noise_n < min_count {
-                blend(&noise_emp, &global_noise_norm, noise_n as f32, w)
+                blend(&noise_emp, &noise_parent, noise_n as f32, w)
             } else {
                 noise_emp
             };
@@ -393,6 +404,7 @@ impl Estimator {
         &self,
         counts: &CountStats,
         template: &Param,
+        prior: Option<&Param>,
     ) -> FxHashMap<Partition, Vec<f32>> {
         const N_EX: usize = 4;
         let pseudo = self.cfg.pseudo;
@@ -415,8 +427,13 @@ impl Estimator {
                 .collect();
             let n: u64 = raw.iter().sum();
             let emp = normalize_with_pseudo(&raw, N_EX, pseudo);
+            let parent: Vec<f32> = prior
+                .and_then(|p| p.ion_existence_table.get(&part))
+                .filter(|d| d.len() == N_EX)
+                .cloned()
+                .unwrap_or_else(|| global_norm.clone());
             let dist = if n < min_count {
-                blend(&emp, &global_norm, n as f32, w)
+                blend(&emp, &parent, n as f32, w)
             } else {
                 emp
             };

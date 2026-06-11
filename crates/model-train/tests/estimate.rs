@@ -360,6 +360,26 @@ fn dense_counts_recover_empirical_within_tolerance() {
     );
 }
 
+/// The independent prior must also drive the existence-table backoff for a
+/// sparse partition. The prior puts existence mass on index 3; the (empty)
+/// corpus would otherwise back off to a flat/global existence shape.
+#[test]
+fn sparse_existence_shrinks_toward_independent_prior() {
+    let template = one_partition_template(150);
+    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+
+    let mut prior = one_partition_template(150);
+    prior.ion_existence_table.insert(part, vec![0.0, 0.0, 0.0, 1.0]); // mass on idx 3
+
+    // No existence counts at all → n=0 < min_count → must use the prior.
+    let counts = CountStats::new();
+    let est = Estimator::new(EstimatorConfig::default());
+    let with_prior = est.estimate_with_prior(&counts, &template, Some(&prior));
+
+    let ex = &with_prior.ion_existence_table[&part];
+    assert!(ex[3] > 0.5, "existence should follow the prior's idx-3 peak, got {ex:?}");
+}
+
 /// A sparse partition (n < min_count) must shrink toward the INDEPENDENT PRIOR's
 /// distribution, not the corpus-internal pool. Here the corpus empirical mass is
 /// all on slot 0, but the prior is peaked on slot 5; the blended result must

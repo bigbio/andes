@@ -1,0 +1,20 @@
+[package]
+name = "model-train"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+model = { path = "../model" }
+scoring_crate = { path = "../scoring", package = "scoring" }
+input = { path = "../input" }
+search = { path = "../search" }
+rustc-hash = "2"
+rayon = "1.10"
+thiserror = { workspace = true }
+arrow = "53"
+parquet = "53"
+
+[dev-dependencies]
+tempfile = "3.10"

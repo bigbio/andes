@@ -1,0 +1,13 @@
+# Keep Docker build context small (image only needs pom.xml + src/)
+target/
+.git/
+.github/
+.idea/
+.cursor/
+.codacy/
+.claude/
+benchmark/
+extlib/
+*.iml
+*.log
+docs/

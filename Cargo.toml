@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["The andes authors"]
+
+# Release profile: enable LTO + single codegen unit so LLVM sees the whole
+# binary. Hot paths cross crate boundaries (e.g. search → scoring → model),
+# so default codegen-units=16 leaves cross-crate inlining on the table.
+# (These two flags scope to `--release` only; the workspace-wide CPU
+# baseline is set unconditionally in `.cargo/config.toml`, so `cargo test`
+# and `cargo build` also get the same SIMD codegen — this is intentional,
+# so any bit-identity regression surfaces in CI under the same flags.)
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[workspace.dependencies]
+# Core deps — used across many crates.
+clap = { version = "4.5", features = ["derive"] }
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+byteorder = "1.5"
+
+# Sage-pattern spectrum readers (Phase 3) — declared at the workspace level so
+# the spectra crate can pull them in without re-pinning. Decision recorded
+# 2026-05-03 after surveying sage-cloudpath; see the M0 plan + design spec.
+# We vendor Sage's mzML + MGF reader patterns (~650 + 550 LOC) rather than
+# depending on sage-cloudpath directly (heavier deps, pre-1.0 maintenance).
+quick-xml = { version = "0.31", features = ["async-tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib"] }
+base64 = "0.22"
+bytes = "1"
+flate2 = "1"
+futures = "0.3"
+regex = "1"

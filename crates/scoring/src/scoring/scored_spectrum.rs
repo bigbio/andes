@@ -1123,21 +1123,28 @@ impl<'a> ScoredSpectrum<'a> {
                                 let clamped = r.min(max_rank).max(1);
                                 let ebin = if esf > 0 {
                                     let err_peak = if high_res {
-                                        closest_peak_mz(peaks, ranks, theo_mz, tol_da)
+                                        // Tight ppm window: only TRUE few-ppm fragments
+                                        // populate the error histogram (sharp, seed-like).
+                                        // An ion that matched only via a noise peak in the
+                                        // wide 0.5 Da window has no peak here -> no error bin.
+                                        closest_peak_mz(peaks, ranks, theo_mz, theo_mz * HIGHRES_ERR_PPM * 1e-6)
                                     } else {
                                         matched_peak_mz(peaks, ranks, theo_mz, tol_da)
                                     };
-                                    let error_da = err_peak
-                                        .map(|peak_mz| (peak_mz - theo_mz) as f32)
-                                        .unwrap_or(0.0);
-                                    let mut idx = (error_da * esf as f32).round() as i32;
-                                    if idx > esf {
-                                        idx = esf;
-                                    } else if idx < -esf {
-                                        idx = -esf;
+                                    match err_peak {
+                                        Some(peak_mz) => {
+                                            let error_da = (peak_mz - theo_mz) as f32;
+                                            let mut idx = (error_da * esf as f32).round() as i32;
+                                            if idx > esf {
+                                                idx = esf;
+                                            } else if idx < -esf {
+                                                idx = -esf;
+                                            }
+                                            idx += esf;
+                                            Some(idx as u32)
+                                        }
+                                        None => None,
                                     }
-                                    idx += esf;
-                                    Some(idx as u32)
                                 } else {
                                     None
                                 };
@@ -1238,21 +1245,28 @@ impl<'a> ScoredSpectrum<'a> {
                                 let clamped = rk.min(max_rank).max(1);
                                 let ebin = if esf > 0 {
                                     let err_peak = if high_res {
-                                        closest_peak_mz(peaks, ranks, theo_mz, tol_da)
+                                        // Tight ppm window: only TRUE few-ppm fragments
+                                        // populate the error histogram (sharp, seed-like).
+                                        // An ion that matched only via a noise peak in the
+                                        // wide 0.5 Da window has no peak here -> no error bin.
+                                        closest_peak_mz(peaks, ranks, theo_mz, theo_mz * HIGHRES_ERR_PPM * 1e-6)
                                     } else {
                                         matched_peak_mz(peaks, ranks, theo_mz, tol_da)
                                     };
-                                    let error_da = err_peak
-                                        .map(|peak_mz| (peak_mz - theo_mz) as f32)
-                                        .unwrap_or(0.0);
-                                    let mut idx = (error_da * esf as f32).round() as i32;
-                                    if idx > esf {
-                                        idx = esf;
-                                    } else if idx < -esf {
-                                        idx = -esf;
+                                    match err_peak {
+                                        Some(peak_mz) => {
+                                            let error_da = (peak_mz - theo_mz) as f32;
+                                            let mut idx = (error_da * esf as f32).round() as i32;
+                                            if idx > esf {
+                                                idx = esf;
+                                            } else if idx < -esf {
+                                                idx = -esf;
+                                            }
+                                            idx += esf;
+                                            Some(idx as u32)
+                                        }
+                                        None => None,
                                     }
-                                    idx += esf;
-                                    Some(idx as u32)
                                 } else {
                                     None
                                 };
@@ -1334,6 +1348,12 @@ fn visit_directional_node_ion_matches<F>(
 /// `target_mz`, or `None` if no such peak exists.  Mirrors the selection
 /// semantics of `nearest_peak_rank_in` (intensity-max, not nearest-m/z).
 /// Used by `ion_match_facts` to compute the mass error for each matched ion.
+/// Tight ppm window for the high-res mass-error histogram. Peak SELECTION (rank /
+/// existence) and node scoring keep the model's wide `mme` (0.5 Da); only the `ion_err`
+/// / `noise_err` BIN is computed within this tight window so the histogram stays sharp
+/// (seed-like) and excludes coincidental noise matches.
+const HIGHRES_ERR_PPM: f64 = 20.0;
+
 fn matched_peak_mz(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<f64> {
     if peaks.is_empty() {
         return None;

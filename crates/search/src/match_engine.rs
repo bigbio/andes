@@ -1,12 +1,11 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
-use std::collections::{BTreeMap, HashMap};
-use std::hash::Hasher;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{smallvec, SmallVec};
 
 use model::aa_set::AminoAcidSet;
@@ -112,8 +111,8 @@ fn candidate_nominal_bounds(
 
 impl<'a> PreparedSearch<'a> {
     /// Build the per-search state once. Enumerates candidates, builds the
-    /// mass-bucket index, seeds the `SearchIndex` distinct-peptide counts,
-    /// and clones+registers the aa_set for GF cleavage scoring.
+    /// mass-bucket index, and clones+registers the aa_set for GF cleavage
+    /// scoring.
     pub fn prepare(
         idx: &'a SearchIndex,
         params: &'a SearchParams,
@@ -121,29 +120,9 @@ impl<'a> PreparedSearch<'a> {
         fragment_tolerance_da: f64,
         decoy_prefix: &str,
     ) -> Self {
-        // Collect the production candidate list AND seed the per-length
-        // distinct-peptide counts in a single pass. This avoids a second full
-        // `enumerate_candidates(...)` walk just to populate the E-value
-        // denominator map.
-        let mut candidates: Vec<Candidate> = Vec::new();
-        let mut seen_per_length: HashMap<usize, FxHashSet<u64>> = HashMap::new();
-        for cand in enumerate_candidates(idx, params, decoy_prefix) {
-            let residues = &cand.peptide.residues;
-            let mut h = FxHasher::default();
-            for aa in residues {
-                h.write_u8(aa.residue);
-            }
-            seen_per_length
-                .entry(residues.len())
-                .or_default()
-                .insert(h.finish());
-            candidates.push(cand);
-        }
-        let distinct_counts: HashMap<usize, usize> = seen_per_length
-            .into_iter()
-            .map(|(len, set)| (len, set.len()))
-            .collect();
-        idx.set_distinct_peptide_counts_if_absent(distinct_counts);
+        // Collect the production candidate list.
+        let candidates: Vec<Candidate> =
+            enumerate_candidates(idx, params, decoy_prefix).collect();
 
         // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
         //

@@ -1,24 +1,21 @@
 //! Peptide database search engine: candidate enumeration, precursor matching,
 //! scoring, and PSM aggregation.
 //!
-//! Contains candidate generation, suffix array, search index, precursor
-//! matching, PSM structures, and the match engine.
+//! Contains candidate generation, search index, precursor matching, PSM
+//! structures, and the match engine.
 //! Depends on `model` and `scoring` crates.
 
 pub mod candidate_gen;
 mod chimeric_features;
 pub(crate) mod coisolation;
 pub mod decoy;
-pub mod distinct_peptide;
 pub mod match_engine;
 pub mod mass_calibrator;
 pub mod precursor_cal;
 pub mod precursor_matching;
 pub mod psm;
-pub mod sa_walk;
 pub mod search_index;
 pub mod search_params;
-pub mod suffix_array;
 
 // Convenience re-exports.
 pub use candidate_gen::enumerate_candidates;
@@ -35,4 +32,3 @@ pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
 pub use search_index::SearchIndex;
 pub use search_params::{ScoreMode, SearchParams};
-pub use suffix_array::SuffixArray;

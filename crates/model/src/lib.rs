@@ -2,12 +2,11 @@
 //!
 //! Pure types: amino acids, modifications, peptides, enzymes,
 //! tolerances, spectra, proteins, masses, activation, instrument,
-//! protocol, compact FASTA. No I/O, no scoring.
+//! protocol. No I/O, no scoring.
 
 pub mod aa_set;
 pub mod activation;
 pub mod amino_acid;
-pub mod compact_fasta;
 pub mod enzyme;
 pub mod instrument;
 pub mod isotope;
@@ -23,7 +22,6 @@ pub mod tolerance;
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};
 pub use activation::ActivationMethod;
 pub use amino_acid::AminoAcid;
-pub use compact_fasta::{CompactFastaError, CompactFastaSequence, ProteinAnnotation};
 pub use enzyme::Enzyme;
 pub use instrument::InstrumentType;
 pub use mass::{nominal_from, H2O, PROTON};

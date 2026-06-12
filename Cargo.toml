@@ -23,7 +23,6 @@ codegen-units = 1
 [workspace.dependencies]
 # Core deps — used across many crates.
 clap = { version = "4.5", features = ["derive"] }
-suffix = "1.3"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

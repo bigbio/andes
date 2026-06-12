@@ -1,0 +1,6 @@
+NumMods=2
+57.02146,C,fix,any,Carbamidomethyl
+229.16293,K,fix,any,TMT6plex
+229.16293,*,fix,N-term,TMT6plex
+15.99491,M,opt,any,Oxidation
+42.01057,*,opt,Prot-N-term,Acetyl

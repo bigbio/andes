@@ -1,0 +1,887 @@
+//! Heavyweight residue-and-modification set. Built via
+//! `AminoAcidSetBuilder`; queried by the candidate generator.
+
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
+
+use crate::amino_acid::AminoAcid;
+use crate::enzyme::Enzyme;
+use crate::modification::{ModLocation, ModParseError, Modification, ResidueSpec};
+
+const STANDARD_RESIDUES: &[u8] = b"ACDEFGHIKLMNPQRSTVWY";
+const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 1000.0;
+
+#[derive(Debug, Clone)]
+pub struct AminoAcidSet {
+    /// (residue, location) → all variants (unmodified + modified) at that position.
+    ///
+    /// Uses `FxHashMap` rather than the std `HashMap`: `variants_for` is a
+    /// hot lookup, and profiling showed SipHash (std's default hasher)
+    /// dominating its cost. Same hashbrown internals, faster hasher.
+    table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>>,
+    /// Per-location flattened AA lists, precomputed at build time. Avoids
+    /// per-call rebuild in the GF DP hot path (PrimitiveAaGraph::new).
+    aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>>,
+    has_cterm_mods: bool,
+    min_aa_mass: f64,
+    max_aa_mass: f64,
+    max_residue_mod_mass: f64,
+    max_fixed_term_mod_mass: f64,
+    /// Cleavage score fields, set by `register_enzyme`. All default to 0.
+    peptide_cleavage_credit:      i32,
+    peptide_cleavage_penalty:     i32,
+    neighboring_aa_cleavage_credit:  i32,
+    neighboring_aa_cleavage_penalty: i32,
+}
+
+impl AminoAcidSet {
+    /// All variants of `residue` valid at the given `location`.
+    pub fn variants_for(&self, residue: u8, location: ModLocation) -> &[AminoAcid] {
+        self.table
+            .get(&(residue, location))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn standard(&self, residue: u8) -> Option<&AminoAcid> {
+        self.variants_for(residue, ModLocation::Anywhere)
+            .iter()
+            .find(|aa| !aa.is_modified())
+    }
+
+    pub fn contains_cterm_mods(&self) -> bool { self.has_cterm_mods }
+    pub fn min_aa_mass(&self) -> f64           { self.min_aa_mass }
+    pub fn max_aa_mass(&self) -> f64           { self.max_aa_mass }
+    pub fn max_residue_mod_mass(&self) -> f64  { self.max_residue_mod_mass }
+    pub fn max_fixed_term_mod_mass(&self) -> f64 { self.max_fixed_term_mod_mass }
+
+    pub fn iter_variants(&self) -> impl Iterator<Item = &AminoAcid> {
+        self.table.values().flat_map(|v| v.iter())
+    }
+
+    // -----------------------------------------------------------------------
+    // GF helpers
+    // -----------------------------------------------------------------------
+
+    /// All amino acid variants valid at `location`.
+    ///
+    /// - `Anywhere`: returns the 20 standard AAs (with Anywhere-fixed mods applied
+    ///   and Anywhere-variable mod variants included).
+    /// - Terminal locations (`NTerm`, `CTerm`, `ProtNTerm`, `ProtCTerm`):
+    ///   returns the Anywhere AA list PLUS any variants registered specifically
+    ///   for that terminal location (the `Anywhere` AAs are inserted into all
+    ///   terminal lists at build time).
+    pub fn aa_list_for(&self, location: ModLocation) -> Vec<&AminoAcid> {
+        // Borrow from the precomputed cache (built once in
+        // `AminoAcidSetBuilder::build`). Empty Vec when the location is
+        // missing — should not happen for the 5 standard locations.
+        self.aa_lists_cache
+            .get(&location)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Borrow the precomputed AA list for `location` as a slice. Avoids
+    /// the per-call Vec allocation that `aa_list_for` performs. Used in the
+    /// GF DP hot path (`PrimitiveAaGraph::new`).
+    pub fn cached_aa_list(&self, location: ModLocation) -> &[AminoAcid] {
+        self.aa_lists_cache
+            .get(&location)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Score credit added to a peptide edge when the adjacent residue IS a
+    /// cleavage site.
+    ///
+    /// Computed as `round(log(efficiency / probCleavageSites))`. The default
+    /// when no enzyme is registered is 0 (both efficiency and
+    /// probCleavageSites are 0). Callers that have a real enzyme should use
+    /// `register_enzyme` first; for graph construction where credit/penalty
+    /// are used directly, we expose the stored values set by `register_enzyme`.
+    ///
+    /// Default: `0` (no enzyme registered).
+    pub fn peptide_cleavage_credit(&self) -> i32 {
+        self.peptide_cleavage_credit
+    }
+
+    /// Score penalty added to a peptide edge when the adjacent residue is NOT a
+    /// cleavage site. Default: `0`.
+    pub fn peptide_cleavage_penalty(&self) -> i32 {
+        self.peptide_cleavage_penalty
+    }
+
+    /// Score credit for a neighboring AA that IS a cleavage site. Default: `0`.
+    pub fn neighboring_aa_cleavage_credit(&self) -> i32 {
+        self.neighboring_aa_cleavage_credit
+    }
+
+    /// Score penalty for a neighboring AA that is NOT a cleavage site. Default: `0`.
+    pub fn neighboring_aa_cleavage_penalty(&self) -> i32 {
+        self.neighboring_aa_cleavage_penalty
+    }
+
+    /// Probability that a random peptide generated by `enzyme` ends (or begins)
+    /// at a cleavage site.
+    ///
+    /// Computed as the sum of `aa.probability` for each residue in
+    /// `enzyme.residues()`. Standard AA probability is uniform `1/20 = 0.05`.
+    ///
+    /// Returns `0.0` if `enzyme` has no specific residues (NoCleavage /
+    /// NonSpecific / AlphaLP).
+    pub fn prob_cleavage_sites(&self, enzyme: Enzyme) -> f32 {
+        let residues = enzyme.residues();
+        if residues.is_empty() {
+            return 0.0;
+        }
+        let prob_per_aa = 1.0_f32 / STANDARD_RESIDUES.len() as f32; // 0.05 uniform
+        residues
+            .iter()
+            .filter(|&&r| STANDARD_RESIDUES.contains(&r))
+            .count() as f32
+            * prob_per_aa
+    }
+
+    /// Compute and store cleavage credits/penalties from the given enzyme's
+    /// efficiency values.
+    ///
+    /// Formula:
+    /// ```text
+    /// peptideCleavageCredit = round(log(efficiency / probCleavageSites))
+    /// peptideCleavagePenalty = round(log((1-efficiency) / (1-probCleavageSites)))
+    /// neighboringAACleavageCredit = round(log(neighEfficiency / probCleavageSites))
+    /// neighboringAACleavagePenalty = round(log((1-neighEfficiency) / (1-probCleavageSites)))
+    /// ```
+    ///
+    /// Both efficiencies of `0.0` (no enzyme) → all fields stay `0`.
+    pub fn register_enzyme(
+        &mut self,
+        enzyme: Enzyme,
+        peptide_efficiency: f32,
+        neighboring_efficiency: f32,
+    ) {
+        let prob = self.prob_cleavage_sites(enzyme);
+        if prob <= 0.0 || prob >= 1.0 || peptide_efficiency == 0.0 {
+            return;
+        }
+        let credit = |eff: f32| -> i32 {
+            ((eff as f64 / prob as f64).ln()).round() as i32
+        };
+        let penalty = |eff: f32| -> i32 {
+            (((1.0 - eff) as f64 / (1.0 - prob) as f64).ln()).round() as i32
+        };
+        self.peptide_cleavage_credit = credit(peptide_efficiency);
+        self.peptide_cleavage_penalty = penalty(peptide_efficiency);
+        self.neighboring_aa_cleavage_credit = credit(neighboring_efficiency);
+        self.neighboring_aa_cleavage_penalty = penalty(neighboring_efficiency);
+    }
+}
+
+/// Accumulator. Each `add_*` call validates lazily; `build()` does final
+/// checks and produces the immutable `AminoAcidSet`.
+#[derive(Debug, Clone)]
+pub struct AminoAcidSetBuilder {
+    fixed_mods:    Vec<Modification>,
+    variable_mods: Vec<Modification>,
+}
+
+impl AminoAcidSetBuilder {
+    pub fn new_standard() -> Self {
+        Self { fixed_mods: vec![], variable_mods: vec![] }
+    }
+
+    pub fn new_standard_with_carbamidomethyl_c() -> Self {
+        let cam = Modification {
+            name: "Carbamidomethyl".to_string(),
+            mass_delta: 57.02146,
+            residue: ResidueSpec::Specific(b'C'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: Some("UNIMOD:4".to_string()),
+        };
+        Self {
+            fixed_mods: vec![cam],
+            variable_mods: vec![],
+        }
+    }
+
+    pub fn add_fixed_mod(mut self, m: Modification) -> Self {
+        self.fixed_mods.push(m);
+        self
+    }
+
+    pub fn add_variable_mod(mut self, m: Modification) -> Self {
+        self.variable_mods.push(m);
+        self
+    }
+
+    pub fn add_mods_from_file(mut self, path: &Path) -> Result<Self, AaSetError> {
+        let text = fs::read_to_string(path)?;
+        for (line_no, raw) in text.lines().enumerate() {
+            // Strip an inline `#` comment (mods.txt convention).
+            let no_comment = match raw.find('#') {
+                Some(i) => &raw[..i],
+                None    => raw,
+            };
+            let line = no_comment.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // `NumMods=N` header line — recognized for mods.txt compatibility
+            // but not stored on the builder. The CLI parses it separately via
+            // `parse_num_mods_from_file` and routes it to
+            // `SearchParams.max_variable_mods_per_peptide`.
+            if line.to_ascii_lowercase().starts_with("nummods=") {
+                continue;
+            }
+            let m = Modification::from_mods_txt_line(line)
+                .map_err(|source| AaSetError::ModsTxtParse { line_no: line_no + 1, source })?;
+            if m.fixed {
+                self.fixed_mods.push(m);
+            } else {
+                self.variable_mods.push(m);
+            }
+        }
+        Ok(self)
+    }
+
+    /// Read just the `NumMods=N` header from a mods.txt file.
+    ///
+    /// Returns:
+    /// - `Ok(Some(n))` when the file contains a single `NumMods=N` line with a valid integer.
+    /// - `Ok(None)` when no `NumMods=` line is present.
+    /// - `Err(...)` if the file cannot be read or the value cannot be parsed.
+    ///
+    /// The mods.txt `NumMods=N` header overrides the default variable-mod cap.
+    /// This sibling function lets the CLI binary apply that override to
+    /// `SearchParams.max_variable_mods_per_peptide`
+    /// without changing the public API of `add_mods_from_file`.
+    pub fn parse_num_mods_from_file(path: &Path) -> Result<Option<u32>, AaSetError> {
+        let text = fs::read_to_string(path)?;
+        for raw in text.lines() {
+            let no_comment = match raw.find('#') {
+                Some(i) => &raw[..i],
+                None    => raw,
+            };
+            let line = no_comment.trim();
+            if !line.to_ascii_lowercase().starts_with("nummods=") {
+                continue;
+            }
+            // Take everything after the first `=`. Whitespace around the value is ignored.
+            let value = line.split_once('=').map(|x| x.1).unwrap_or("").trim();
+            let n: u32 = value.parse().map_err(|_| AaSetError::BadNumMods {
+                value: value.to_string(),
+            })?;
+            return Ok(Some(n));
+        }
+        Ok(None)
+    }
+
+    pub fn build(self) -> Result<AminoAcidSet, AaSetError> {
+        // 1. Reject implausible mod masses.
+        for m in self.fixed_mods.iter().chain(self.variable_mods.iter()) {
+            if m.mass_delta.abs() > IMPLAUSIBLE_MASS_THRESHOLD {
+                return Err(AaSetError::ImplausibleMassDelta {
+                    name: m.name.clone(),
+                    delta: m.mass_delta,
+                });
+            }
+        }
+
+        // 2. Detect (residue, location) overlap between fixed and variable.
+        for fm in &self.fixed_mods {
+            for vm in &self.variable_mods {
+                if mods_target_same_slot(fm, vm) {
+                    let res_char = match fm.residue {
+                        ResidueSpec::Specific(r) => r as char,
+                        ResidueSpec::Wildcard    => '*',
+                    };
+                    return Err(AaSetError::ConflictingMods {
+                        residue: res_char,
+                        location: fm.location,
+                    });
+                }
+            }
+        }
+
+        // 3. Build the table.
+        //
+        // Wrap every distinct `Modification` declaration in a single shared
+        // `Arc<Modification>` up front. All `AminoAcid` variants that carry
+        // a given mod will reference the same allocation. At Astral scale
+        // this is the difference between cloning a 24-byte struct (Arc
+        // refcount bump) and cloning a 96-byte struct plus the
+        // `Modification`'s `String name` heap allocation per cloned
+        // residue — the latter blew up `PreparedSearch::prepare` to ~27 GB
+        // RSS. The intermediate fixed/variable match `Vec<Modification>`
+        // copies below are gone; we hand out `Arc::clone(...)` calls
+        // instead.
+        let fixed_mods_arc: Vec<Arc<Modification>> = self
+            .fixed_mods
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect();
+        let variable_mods_arc: Vec<Arc<Modification>> = self
+            .variable_mods
+            .iter()
+            .cloned()
+            .map(Arc::new)
+            .collect();
+
+        let mut table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>> = FxHashMap::default();
+        let locations = [
+            ModLocation::Anywhere, ModLocation::NTerm, ModLocation::CTerm,
+            ModLocation::ProtNTerm, ModLocation::ProtCTerm,
+        ];
+
+        for &r in STANDARD_RESIDUES {
+            let std_aa = AminoAcid::standard(r).expect("STANDARD_RESIDUES has only valid residues");
+
+            for &loc in &locations {
+                let fixed_match: Option<&Arc<Modification>> = fixed_mods_arc
+                    .iter()
+                    .find(|m| m.applies_to(r, loc));
+
+                let variable_matches: Vec<&Arc<Modification>> = variable_mods_arc
+                    .iter()
+                    .filter(|m| m.applies_to(r, loc))
+                    .collect();
+
+                let mut variants = Vec::new();
+                if loc == ModLocation::Anywhere {
+                    if let Some(fm) = fixed_match {
+                        variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
+                    } else {
+                        variants.push(std_aa.clone());
+                    }
+                    for vm in &variable_matches {
+                        variants.push(std_aa.clone().with_mod(Arc::clone(vm)));
+                    }
+                } else {
+                    if let Some(fm) = fixed_match {
+                        if fm.location == loc {
+                            variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
+                        }
+                    }
+                    for vm in &variable_matches {
+                        if vm.location == loc {
+                            variants.push(std_aa.clone().with_mod(Arc::clone(vm)));
+                        }
+                    }
+                }
+
+                if !variants.is_empty() {
+                    table.insert((r, loc), variants);
+                }
+            }
+        }
+
+        // 4. Aggregates.
+        let standard_masses: Vec<f64> = STANDARD_RESIDUES.iter()
+            .filter_map(|&r| AminoAcid::standard(r).map(|aa| aa.mass))
+            .collect();
+        let min_aa_mass = standard_masses.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_aa_mass = standard_masses.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+
+        let mut max_mod_delta = 0.0_f64;
+        for m in self.fixed_mods.iter().chain(self.variable_mods.iter()) {
+            if m.mass_delta > max_mod_delta {
+                max_mod_delta = m.mass_delta;
+            }
+        }
+        let max_residue_mod_mass = max_aa_mass + max_mod_delta;
+
+        let max_fixed_term_mod_mass = self.fixed_mods
+            .iter()
+            .filter(|m| matches!(m.location,
+                ModLocation::NTerm | ModLocation::CTerm |
+                ModLocation::ProtNTerm | ModLocation::ProtCTerm))
+            .map(|m| m.mass_delta)
+            .fold(0.0_f64, f64::max);
+
+        let has_cterm_mods = self.fixed_mods.iter().chain(self.variable_mods.iter())
+            .any(|m| matches!(m.location, ModLocation::CTerm | ModLocation::ProtCTerm));
+
+        // 5. Precompute the per-location AA lists used by `aa_list_for` and
+        // `cached_aa_list`. Runs once at build time so the GF DP hot path
+        // can borrow a slice.
+        let mut aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>> = FxHashMap::default();
+        let anywhere_list: Vec<AminoAcid> = STANDARD_RESIDUES
+            .iter()
+            .flat_map(|&r| {
+                table
+                    .get(&(r, ModLocation::Anywhere))
+                    .map(|v| v.iter().cloned())
+                    .into_iter()
+                    .flatten()
+            })
+            .collect();
+        aa_lists_cache.insert(ModLocation::Anywhere, anywhere_list.clone());
+        for &loc in &[
+            ModLocation::NTerm, ModLocation::CTerm,
+            ModLocation::ProtNTerm, ModLocation::ProtCTerm,
+        ] {
+            let mut list = anywhere_list.clone();
+            for &r in STANDARD_RESIDUES {
+                if let Some(variants) = table.get(&(r, loc)) {
+                    list.extend(variants.iter().cloned());
+                }
+            }
+            aa_lists_cache.insert(loc, list);
+        }
+
+        Ok(AminoAcidSet {
+            table,
+            aa_lists_cache,
+            has_cterm_mods,
+            min_aa_mass,
+            max_aa_mass,
+            max_residue_mod_mass,
+            max_fixed_term_mod_mass,
+            peptide_cleavage_credit: 0,
+            peptide_cleavage_penalty: 0,
+            neighboring_aa_cleavage_credit: 0,
+            neighboring_aa_cleavage_penalty: 0,
+        })
+    }
+}
+
+/// Two mods target the same slot iff they have exactly the same `(residue,
+/// location)` specifier — fixed-vs-variable ambiguity is only a true
+/// conflict when both mods would compete for the identical declaration
+/// slot (e.g. fixed `CAM C Anywhere` + variable `CAM C Anywhere`).
+///
+/// Overlapping-but-distinct slots are NOT conflicts. For example, a TMT
+/// labelling config carries both fixed `* N-term` and a variable `M
+/// Anywhere`: their slots overlap at "M at N-term" but the two mods
+/// stack cleanly (fixed always applied, variable optionally added on
+/// top) and the candidate-peptide expansion enumerates the right
+/// combinations. Flagging these as conflicts would block every standard
+/// TMT/iTRAQ/phospho parameter sheet.
+fn mods_target_same_slot(a: &Modification, b: &Modification) -> bool {
+    a.residue == b.residue && a.location == b.location
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum AaSetError {
+    #[error("conflicting fixed and variable mod for residue {residue:?} at {location:?}")]
+    ConflictingMods { residue: char, location: ModLocation },
+    #[error("mod {name:?} mass delta {delta} is implausible (>1000 Da)")]
+    ImplausibleMassDelta { name: String, delta: f64 },
+    #[error("malformed Mods.txt line {line_no}: {source}")]
+    ModsTxtParse { line_no: usize, #[source] source: ModParseError },
+    #[error("invalid NumMods value {value:?} (expected non-negative integer)")]
+    BadNumMods { value: String },
+    #[error("Mods.txt I/O error: {source}")]
+    Io { #[from] source: std::io::Error },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::amino_acid::AminoAcid;
+    use crate::enzyme::Enzyme;
+    use crate::modification::{Modification, ModLocation, ResidueSpec};
+
+    fn carbamidomethyl_c() -> Modification {
+        Modification {
+            name: "Carbamidomethyl".to_string(),
+            mass_delta: 57.02146,
+            residue: ResidueSpec::Specific(b'C'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+        }
+    }
+
+    fn oxidation_m() -> Modification {
+        Modification {
+            name: "Oxidation".to_string(),
+            mass_delta: 15.99491,
+            residue: ResidueSpec::Specific(b'M'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+        }
+    }
+
+    #[test]
+    fn standard_set_has_20_residues() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for aa in set.iter_variants() {
+            seen.insert(aa.residue);
+        }
+        assert_eq!(seen.len(), 20);
+    }
+
+    #[test]
+    fn standard_set_no_mods() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        for aa in set.iter_variants() {
+            assert!(!aa.is_modified());
+        }
+    }
+
+    #[test]
+    fn fixed_mod_replaces_residue() {
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(carbamidomethyl_c())
+            .build().unwrap();
+        let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
+        assert_eq!(c_variants.len(), 1);
+        assert!(c_variants[0].is_modified());
+    }
+
+    #[test]
+    fn variable_mod_adds_residue_variant() {
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(oxidation_m())
+            .build().unwrap();
+        let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
+        assert_eq!(m_variants.len(), 2);
+        assert!(m_variants.iter().any(|aa| !aa.is_modified()));
+        assert!(m_variants.iter().any(|aa| aa.is_modified()));
+    }
+
+    #[test]
+    fn conflicting_fixed_and_variable_errors() {
+        let cam_fixed = carbamidomethyl_c();
+        let mut cam_variable = carbamidomethyl_c();
+        cam_variable.fixed = false;
+
+        let err = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(cam_fixed)
+            .add_variable_mod(cam_variable)
+            .build()
+            .unwrap_err();
+        assert!(matches!(err, AaSetError::ConflictingMods { residue: 'C', location: ModLocation::Anywhere }));
+    }
+
+    #[test]
+    fn implausible_mass_errors() {
+        let bad = Modification {
+            name: "Bad".to_string(),
+            mass_delta: 1500.0,
+            residue: ResidueSpec::Specific(b'C'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+        };
+        let err = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(bad)
+            .build().unwrap_err();
+        assert!(matches!(err, AaSetError::ImplausibleMassDelta { .. }));
+    }
+
+    #[test]
+    fn standard_lookup() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let g = set.standard(b'G').unwrap();
+        assert_eq!(g.residue, b'G');
+        assert!(set.standard(b'!').is_none());
+    }
+
+    #[test]
+    fn min_max_aa_mass() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        // Min: G ≈ 57.02, Max: W ≈ 186.08
+        let g = AminoAcid::standard(b'G').unwrap().mass;
+        let w = AminoAcid::standard(b'W').unwrap().mass;
+        assert_eq!(set.min_aa_mass(), g);
+        assert_eq!(set.max_aa_mass(), w);
+    }
+
+    #[test]
+    fn max_residue_mod_mass_includes_mods() {
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(oxidation_m())
+            .build().unwrap();
+        let w = AminoAcid::standard(b'W').unwrap().mass;
+        let expected = w + 15.99491;
+        assert!((set.max_residue_mod_mass() - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn contains_cterm_mods_default_false() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        assert!(!set.contains_cterm_mods());
+    }
+
+    #[test]
+    fn contains_cterm_mods_when_added() {
+        let cterm_mod = Modification {
+            name: "Amide".to_string(),
+            mass_delta: -0.984016,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::CTerm,
+            fixed: false,
+            accession: None,
+        };
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(cterm_mod)
+            .build().unwrap();
+        assert!(set.contains_cterm_mods());
+    }
+
+    #[test]
+    fn standard_with_carbamidomethyl_c_convenience() {
+        let set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c().build().unwrap();
+        let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
+        assert_eq!(c_variants.len(), 1);
+        assert!(c_variants[0].is_modified());
+    }
+
+    #[test]
+    fn add_mods_from_file_parses_real_format() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "# comment line\n\
+             \n\
+             57.021464,C,fix,any,Carbamidomethyl\n\
+             15.994915,M,opt,any,Oxidation\n").unwrap();
+
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path()).unwrap()
+            .build().unwrap();
+
+        assert_eq!(set.variants_for(b'C', ModLocation::Anywhere).len(), 1);
+        assert!(set.variants_for(b'C', ModLocation::Anywhere)[0].is_modified());
+        assert_eq!(set.variants_for(b'M', ModLocation::Anywhere).len(), 2);
+    }
+
+    // GF helper tests
+
+    #[test]
+    fn peptide_cleavage_credit_default_is_zero() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        // Default before register_enzyme is 0, not 1.
+        assert_eq!(set.peptide_cleavage_credit(), 0);
+    }
+
+    #[test]
+    fn prob_cleavage_sites_for_trypsin_is_approximately_0_1() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        // K + R → 2 residues × 0.05 = 0.10
+        let prob = set.prob_cleavage_sites(Enzyme::Trypsin);
+        assert!(
+            (prob - 0.1_f32).abs() < 1e-5,
+            "expected ~0.1, got {prob}"
+        );
+    }
+
+    #[test]
+    fn aa_list_for_anywhere_returns_20_residues() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let list = set.aa_list_for(ModLocation::Anywhere);
+        assert_eq!(list.len(), 20, "standard set should have exactly 20 standard residues");
+        // Every standard residue must appear
+        for &r in STANDARD_RESIDUES {
+            assert!(
+                list.iter().any(|aa| aa.residue == r),
+                "residue {} missing from aa_list_for(Anywhere)",
+                r as char
+            );
+        }
+    }
+
+    #[test]
+    fn aa_list_for_nterm_returns_at_least_20_residues() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let list = set.aa_list_for(ModLocation::NTerm);
+        // No NTerm-specific mods → same 20 AAs as Anywhere.
+        assert_eq!(list.len(), 20);
+    }
+
+    #[test]
+    fn aa_list_for_nterm_includes_terminal_mods() {
+        let nterm_mod = Modification {
+            name: "TMT6plex".to_string(),
+            mass_delta: 229.16293,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::NTerm,
+            fixed: false,
+            accession: None,
+        };
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(nterm_mod)
+            .build()
+            .unwrap();
+        let list = set.aa_list_for(ModLocation::NTerm);
+        // Each of the 20 standard residues gets an NTerm variant → 20 anywhere + 20 nterm = 40.
+        assert_eq!(list.len(), 40, "expected 20 standard + 20 NTerm-mod variants, got {}", list.len());
+    }
+
+    #[test]
+    fn prob_cleavage_sites_for_lysc_is_0_05() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let prob = set.prob_cleavage_sites(Enzyme::LysC);
+        assert!((prob - 0.05_f32).abs() < 1e-5, "expected ~0.05, got {prob}");
+    }
+
+    #[test]
+    fn prob_cleavage_sites_for_nocleavage_is_zero() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let prob = set.prob_cleavage_sites(Enzyme::NoCleavage);
+        assert_eq!(prob, 0.0);
+    }
+
+    #[test]
+    fn register_enzyme_sets_cleavage_scores() {
+        let mut set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        // Trypsin: efficiency=0.99999, probCleavageSites=0.1
+        set.register_enzyme(Enzyme::Trypsin, 0.99999, 0.99999);
+        // credit = round(log(0.99999 / 0.1)) ≈ round(log(9.9999)) ≈ round(2.302) = 2
+        assert_eq!(set.peptide_cleavage_credit(), 2);
+        // penalty = round(log((1-0.99999)/(1-0.1))) = round(log(0.00001/0.9)) ≈ round(-11.4) = -11
+        assert_eq!(set.peptide_cleavage_penalty(), -11);
+    }
+
+    #[test]
+    fn add_mods_from_file_reports_line_number() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "57.021464,C,fix,any,Carbamidomethyl\n\
+             garbage_line\n").unwrap();
+
+        let err = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path()).unwrap_err();
+        match err {
+            AaSetError::ModsTxtParse { line_no, .. } => assert_eq!(line_no, 2),
+            other => panic!("expected ModsTxtParse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tmt_style_mods_file_parses() {
+        // Real-world TMT 6-plex mods file: TMT6plex fixed on K + peptide
+        // N-term, CAM fixed on C, Oxidation variable on M, NumMods=3.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "# TMT 6-plex labelling, tryptic + CAM + Met-oxidation\n\
+             NumMods=3\n\
+             229.162932,K,fix,any,TMT6plex\n\
+             229.162932,*,fix,N-term,TMT6plex\n\
+             57.021464,C,fix,any,Carbamidomethyl\n\
+             15.994915,M,opt,any,Oxidation\n").unwrap();
+
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // K must have a fixed TMT label folded into its Anywhere variant
+        // (1 variant, modified).
+        let k_variants = set.variants_for(b'K', ModLocation::Anywhere);
+        assert_eq!(k_variants.len(), 1, "K should have exactly one variant (TMT-modified)");
+        assert!(k_variants[0].is_modified(), "K's Anywhere variant must carry the TMT mod");
+
+        // Wildcard N-term TMT applies to every residue at NTerm location.
+        // Pick A (no other mod competing) and assert there is an NTerm variant.
+        let a_nterm = set.variants_for(b'A', ModLocation::NTerm);
+        assert!(
+            a_nterm.iter().any(|aa| aa.is_modified()),
+            "A at N-term should have a TMT variant"
+        );
+
+        // C fixed CAM — single modified variant.
+        let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
+        assert_eq!(c_variants.len(), 1);
+        assert!(c_variants[0].is_modified());
+
+        // M variable Oxidation — 2 variants (unmod + ox).
+        let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
+        assert_eq!(m_variants.len(), 2);
+        assert!(m_variants.iter().any(|aa|  aa.is_modified()));
+        assert!(m_variants.iter().any(|aa| !aa.is_modified()));
+
+        // NumMods=3 is parsed via the sibling helper.
+        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
+        assert_eq!(n, Some(3));
+    }
+
+    #[test]
+    fn acetyl_prot_n_term_appears_in_source_aas_for_gf() {
+        // GF DP source AAs at Prot-N-term must include
+        // both unmodified residues AND wildcard-Acetyl variants for each
+        // residue. Prot-N-term source AAs must include the Anywhere list
+        // (locMap propagation) plus Prot-N-term-specific variants.
+        // Verify Rust's cached_aa_list(ProtNTerm) does the same.
+        let acetyl = Modification {
+            name: "Acetyl".to_string(),
+            mass_delta: 42.010565,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::ProtNTerm,
+            fixed: false,
+            accession: None,
+        };
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(carbamidomethyl_c())
+            .add_variable_mod(oxidation_m())
+            .add_variable_mod(acetyl)
+            .build().unwrap();
+
+        let anywhere = set.cached_aa_list(ModLocation::Anywhere);
+        let prot_n = set.cached_aa_list(ModLocation::ProtNTerm);
+
+        // Anywhere: 20 standard residues (C fixed-modified, M with 2 variants
+        // unmod+ox, K+R get acetyl-only-at-ProtNTerm so NOT in Anywhere) = 21
+        let n_any_modified = anywhere.iter().filter(|aa| aa.is_modified()).count();
+        let n_any_acetyl   = anywhere.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
+        assert_eq!(n_any_acetyl, 0, "Acetyl Prot-N-term must NOT appear in Anywhere AA list");
+
+        // Prot-N-term: starts from Anywhere list + Acetyl variants per residue
+        // (wildcard residue → 20 acetyl variants added at Prot-N-term).
+        let n_pn_acetyl = prot_n.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
+        assert_eq!(n_pn_acetyl, 20, "Prot-N-term AA list must include 20 acetyl variants (one per residue)");
+
+        // Total Prot-N-term list = Anywhere list + 20 acetyl variants.
+        assert_eq!(
+            prot_n.len(),
+            anywhere.len() + 20,
+            "Prot-N-term list = Anywhere list + 20 acetyl variants; \
+             actual Anywhere len = {}, Prot-N-term len = {}, Anywhere modified = {}",
+            anywhere.len(), prot_n.len(), n_any_modified
+        );
+    }
+
+    #[test]
+    fn parse_num_mods_returns_none_when_absent() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "57.021464,C,fix,any,Carbamidomethyl\n").unwrap();
+        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
+        assert_eq!(n, None);
+    }
+
+    #[test]
+    fn parse_num_mods_rejects_bad_value() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "NumMods=garbage\n").unwrap();
+        let err = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap_err();
+        match err {
+            AaSetError::BadNumMods { value } => assert_eq!(value, "garbage"),
+            other => panic!("expected BadNumMods, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn add_mods_from_file_strips_inline_comments() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(),
+            "57.021464,C,fix,any,Carbamidomethyl  # alkylation\n\
+             NumMods=3 # max variable mods per peptide\n").unwrap();
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_mods_from_file(tmp.path()).unwrap()
+            .build().unwrap();
+        assert_eq!(set.variants_for(b'C', ModLocation::Anywhere).len(), 1);
+        let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
+        assert_eq!(n, Some(3));
+    }
+}

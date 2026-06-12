@@ -81,14 +81,17 @@ fn quantile_mass_bins_are_equal_population_and_monotonic() {
 
 ---
 
-## Phase 3 — Clean-room code finalization (copyright)
+## Phase 3 — Clean-room finalization + MAXIMAL code reduction (copyright)
 
-**Gated review. Files: across `crates/`, plus `LICENSE`, `NOTICE`, `README.md`.**
+**Gated review + simplification. Smaller, clearly-own code = the strongest clean-room defense (less surface resembling the Java) and better maintainability. Files: across `crates/`, plus `LICENSE`, `NOTICE`, `README.md`. Invariant: every reduction preserves behavior — tests + the benchmark board stay green; one reduction per commit.**
 
-- [ ] **Step 3.1 — Scrub stale MS-GF+ doc-comments** (the `GF`/`SpecEValue`/`DeNovo` descriptive comments the audit flagged in `match_engine.rs`, `coisolation.rs`, `pin.rs`). They describe logic that no longer exists.
-- [ ] **Step 3.2 — Comment/identifier sweep:** grep for variable names, comments, or struct layouts that mirror the MS-GF+ Java too closely; rename/rewrite to independent expression. Document anything intentionally parallel (functional necessity) in the dossier.
-- [ ] **Step 3.3 — Remove `java-legacy*` / `primitives-gf*` branches from the release remote**; confirm the release branch descends only from clean-room commits.
-- [ ] **Step 3.4 — Clean-room attestation:** write `docs/independence/clean-room-attestation.md` — who authored the Rust, from what sources (papers/specs, NOT the Java), and that no Java was translated line-by-line.
+- [ ] **Step 3.1 — Scrub stale MS-GF+ doc-comments** (`GF`/`SpecEValue`/`DeNovo` descriptive comments in `match_engine.rs`, `coisolation.rs`, `pin.rs`) — they describe logic that no longer exists.
+- [ ] **Step 3.2 — Delete ABANDONED-EXPERIMENT code.** The history accumulated refuted/parked features; if a path is no longer wired into the shipped search, remove it: fragment-index candidate generator ("speed v2", refuted), EM-labels, TMT fragmentation-overlay, rank-smoothing (if unused), pooled-prior, isotonic/temperature noise experiments, the Sanov significance branch (if not shipped), the `intensity_model`/`strong_score` path **iff** it isn't in the live `rank_score = score_psm + edge_score` ranking path. **Gate each removal:** confirm zero live callers first (grep + the audit map), then delete, then re-run tests + benchmark to prove no PSM drift.
+- [ ] **Step 3.3 — Dead-code + feature-flag sweep.** `cargo +nightly udeps` / `-W dead_code` / `cargo machete` for unused deps; remove unused CLI flags, structs, fns, and `#[allow(...)]` that no longer apply. Collapse single-use indirection. Remove any vestigial GF/SpecEValue scaffolding (output columns, plumbing).
+- [ ] **Step 3.4 — Simplify (code-simplifier pass).** Run the `code-simplifier` agent over the core crates (scoring, search, model-train, input) to flatten over-engineering, unify duplicated logic, and shrink hot paths — **preserving the perf invariants** in CLAUDE.md (no `Map.copyOf` in hot path; flag-off must be bit-identical; no shared-state mutation in pre-passes). Verify the benchmark board unchanged after.
+- [ ] **Step 3.5 — Comment/identifier sweep:** rename any variable names, comments, or struct layouts that mirror the MS-GF+ Java too closely; document intentional functional parallels in the dossier.
+- [ ] **Step 3.6 — Remove `java-legacy*` / `primitives-gf*` branches from the release remote**; confirm the release branch descends only from clean-room commits.
+- [ ] **Step 3.7 — Clean-room attestation:** write `docs/independence/clean-room-attestation.md` — who authored the Rust, from what sources (papers/specs, NOT the Java), and that no Java was translated line-by-line. Record the LOC before/after reduction as evidence of an independent, minimal codebase.
 
 ---
 

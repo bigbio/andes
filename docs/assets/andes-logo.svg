@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 180" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="back" x1="0" y1="40" x2="0" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#93C5FD"/>
+      <stop offset="1" stop-color="#60A5FA"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="44" x2="0" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <clipPath id="frontClip">
+      <polygon points="18,140 44,96 58,108 84,52 98,72 112,58 132,86 150,70 168,108 178,140"/>
+    </clipPath>
+    <clipPath id="backClip">
+      <polygon points="14,140 40,100 60,80 78,94 104,60 124,82 150,96 172,84 186,140"/>
+    </clipPath>
+  </defs>
+
+  <!-- back range (lighter, atmospheric depth) -->
+  <polygon points="14,140 40,100 60,80 78,94 104,60 124,82 150,96 172,84 186,140" fill="url(#back)"/>
+  <!-- snow cap on back peak -->
+  <polygon points="96,74 104,60 112,74 107,72 104,66 100,73" fill="#EFF6FF" clip-path="url(#backClip)"/>
+
+  <!-- front range (darker, sharp alpine peaks) -->
+  <polygon points="18,140 44,96 58,108 84,52 98,72 112,58 132,86 150,70 168,108 178,140" fill="url(#front)"/>
+
+  <!-- snow caps on the two dominant front peaks (jagged snow line) -->
+  <g fill="#F8FAFC">
+    <polygon points="74,68 79,62 84,52 89,63 95,69 90,66 87,70 84,64 81,69 77,65" clip-path="url(#frontClip)"/>
+    <polygon points="143,80 150,70 158,82 153,78 150,74 147,79" clip-path="url(#frontClip)"/>
+  </g>
+
+  <!-- ground / m/z baseline -->
+  <line x1="12" y1="140" x2="188" y2="140" stroke="#1E293B" stroke-width="2.2" stroke-linecap="round"/>
+
+  <!-- wordmark -->
+  <text x="210" y="100" font-size="68" font-weight="700" letter-spacing="-1.5" fill="#0F172A">Andes</text>
+  <text x="212" y="129" font-size="15.5" font-weight="500" letter-spacing="0.2" fill="#475569">data-driven peptide search · quantms ecosystem</text>
+</svg>

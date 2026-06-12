@@ -1,0 +1,30 @@
+{
+  "database": {
+    "bucket_size": 8192,
+    "enzyme": { "missed_cleavages": 2, "min_len": 6, "max_len": 40, "cleave_at": "KR", "restrict": "P" },
+    "fragment_min_mz": 150.0,
+    "fragment_max_mz": 2000.0,
+    "peptide_min_mass": 500.0,
+    "peptide_max_mass": 5000.0,
+    "ion_kinds": ["b", "y"],
+    "min_ion_index": 2,
+    "static_mods": { "C": 57.02146, "K": 229.16293, "^": 229.16293 },
+    "variable_mods": { "M": [15.99491], "[": [42.01057] },
+    "max_variable_mods": 3,
+    "decoy_tag": "rev_",
+    "generate_decoys": true,
+    "fasta": "$BENCH/pxd016999/human_sp.fasta"
+  },
+  "precursor_tol": { "ppm": [-20.0, 20.0] },
+  "fragment_tol": { "da": [-0.4, 0.4] },
+  "isotope_errors": [-1, 2],
+  "deisotope": false,
+  "chimera": false,
+  "wide_window": false,
+  "predict_rt": true,
+  "min_peaks": 10,
+  "max_peaks": 150,
+  "min_matched_peaks": 4,
+  "report_psms": 1,
+  "output_directory": "SAGE_OUT_PLACEHOLDER"
+}

@@ -1,0 +1,29 @@
+[package]
+name = "input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+model = { path = "../model" }
+quick-xml = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }
+byteorder = { workspace = true }
+thermorawfilereader = { version = "0.7.0", optional = true }
+timsrust = { version = "0.4.2", optional = true }
+
+[features]
+# Native Thermo .raw reading via the official RawFileReader (hosted .NET 8
+# runtime, FlatBuffers). Optional + off-by-default at the crate level; the
+# andes binary turns it on by default. Builds without the .NET SDK
+# (assemblies are vendored); only opening a `.raw` needs the .NET 8 runtime.
+thermo = ["dep:thermorawfilereader"]
+# Native Bruker timsTOF `.d` reading via the pure-Rust `timsrust` crate (the
+# same reader Sage uses). Optional + off-by-default. NO vendor runtime and NO
+# bundling — a `.d` is read natively (TDF SQLite + binary blob). Default builds
+# stay pure and read mzML/MGF only; the optional dep tree only compiles under
+# this feature.
+timstof = ["dep:timsrust"]

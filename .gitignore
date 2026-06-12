@@ -1,0 +1,115 @@
+# Compiled source #
+###################
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Packages #
+############
+# it's better to unpack these files and commit the raw source
+# git has its own built in compression methods
+*.7z
+*.dmg
+*.gz
+*.iso
+# *.jar   still have some libraries in the repo, un-comment when they are in own maven or something
+*.rar
+*.tar
+*.zip
+
+# Logs and databases #
+######################
+*.log*
+*.sql
+*.sqlite
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Intellij generated files #
+#####################
+*.iml
+
+# Eclipse generated files #
+###########################
+/.settings
+.classpath
+.project
+
+# Directory to ignore #
+#####################
+log/
+logs/
+target/
+.idea/
+.settings
+.metadata
+
+# Python bytecode cache (benchmark helper scripts)
+__pycache__/
+*.pyc
+
+# Benchmark: keep only CI scaffold, ignore heavy local artifacts.
+# Parity scripts + fixtures are local-only context; not part of the tool code.
+benchmark/*
+!benchmark/README.md
+!benchmark/ci/
+!benchmark/capture-references.sh
+
+# Parity-analysis docs (iter-by-iter notes + diff CSVs) are local-only
+# development context, not part of the shipped repo.
+docs/parity-analysis/*
+!docs/parity-analysis/notes/
+!docs/parity-analysis/notes/2026-05-25-precursor-cal-ship-gates.md
+!docs/parity-analysis/notes/2026-05-25-spece-tail-exploration.md
+!docs/parity-analysis/notes/2026-05-28-phase2-peak-rank-parity.md
+!docs/parity-analysis/notes/2026-05-26-score-psm-trace-findings.md
+!docs/parity-analysis/notes/score-psm-trace-artifacts/
+!docs/parity-analysis/notes/score-psm-trace-artifacts/*
+!docs/parity-analysis/snapshots/
+!docs/parity-analysis/snapshots/cal-shifts-2026-05-25.json
+
+# Java reference outputs from `mvn -Pcapture-references` — large; not committed.
+references/
+
+# Generated suffix-array index files (large; reproducible)
+*.revCat.canno
+*.revCat.cnlcp
+*.revCat.csarr
+*.revCat.cseq
+*.revCat.fasta
+
+# Cursor / Codacy (local tooling)
+.cursor/
+.codacy/
+
+.claude/investigations/msgfplus_research_report.md
+
+
+#Ignore vscode AI rules
+.github/instructions/codacy.instructions.md
+
+# Session-local state
+.claude/SESSION_STATUS.md
+.claude/scheduled_tasks.lock
+
+# Rust workspace local state (moved from rust/.gitignore during root restructure)
+.cargo/*
+!.cargo/config.toml
+*.rs.bk
+
+# Planning/research/specs live in workspace internal-docs/, not the public repo
+docs/research/
+
+# AI assistant config (local only)
+.claude/

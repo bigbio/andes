@@ -1,0 +1,6 @@
+# Modifications used by simas and Java MS-GF+ in the 2026-06-01 benchmark.
+# Format: <mass>,<residue>,<fix|opt>,<location>,<name>
+NumMods=3
+57.02146,C,fix,any,Carbamidomethyl
+15.99491,M,opt,any,Oxidation
+42.01057,*,opt,Prot-N-term,Acetyl

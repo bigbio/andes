@@ -852,6 +852,7 @@ impl<'a> ScoredSpectrum<'a> {
             is_prefix,
             charge,
             parent_mass,
+            false, // scoring: keep the model's wide mme (0.5 Da)
             |_, _, rank, logs, _, _| {
                 let score = match rank {
                     Some(rank) => {
@@ -1063,10 +1064,6 @@ impl<'a> ScoredSpectrum<'a> {
         let param = scorer.param();
         let max_rank = scorer.max_rank();
         let esf = param.error_scaling_factor;
-        // High-res mass-error binning uses the CLOSEST-mass peak (not the most-intense
-        // matched peak) so `ion_err` stays sharp (seed-like); low-res keeps the matched
-        // peak so the broad histogram matches the genuine low-res fragment scatter.
-        let high_res = param.data_type.instrument.is_high_resolution();
 
         // Use the active (possibly deconvoluted) peaks + ranks — identical to
         // `directional_node_score_inner`.
@@ -1117,34 +1114,23 @@ impl<'a> ScoredSpectrum<'a> {
                     is_prefix,
                     self.charge,
                     self.parent_mass,
+                    true, // training: tight high-res match -> consistent sharp tables
                     |partition, ion, rank, _logs, theo_mz, tol_da| {
                         let (rank, error_bin) = match rank {
                             Some(r) => {
                                 let clamped = r.min(max_rank).max(1);
                                 let ebin = if esf > 0 {
-                                    let err_peak = if high_res {
-                                        // Tight ppm window: only TRUE few-ppm fragments
-                                        // populate the error histogram (sharp, seed-like).
-                                        // An ion that matched only via a noise peak in the
-                                        // wide 0.5 Da window has no peak here -> no error bin.
-                                        closest_peak_mz(peaks, ranks, theo_mz, theo_mz * HIGHRES_ERR_PPM * 1e-6)
-                                    } else {
-                                        matched_peak_mz(peaks, ranks, theo_mz, tol_da)
-                                    };
-                                    match err_peak {
-                                        Some(peak_mz) => {
-                                            let error_da = (peak_mz - theo_mz) as f32;
-                                            let mut idx = (error_da * esf as f32).round() as i32;
-                                            if idx > esf {
-                                                idx = esf;
-                                            } else if idx < -esf {
-                                                idx = -esf;
-                                            }
-                                            idx += esf;
-                                            Some(idx as u32)
-                                        }
-                                        None => None,
+                                    let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
+                                        .map(|peak_mz| (peak_mz - theo_mz) as f32)
+                                        .unwrap_or(0.0);
+                                    let mut idx = (error_da * esf as f32).round() as i32;
+                                    if idx > esf {
+                                        idx = esf;
+                                    } else if idx < -esf {
+                                        idx = -esf;
                                     }
+                                    idx += esf;
+                                    Some(idx as u32)
                                 } else {
                                     None
                                 };
@@ -1217,7 +1203,6 @@ impl<'a> ScoredSpectrum<'a> {
     ) -> Vec<(Partition, Option<u32>, Option<u32>)> {
         let max_rank = scorer.max_rank();
         let esf = scorer.param().error_scaling_factor;
-        let high_res = scorer.param().data_type.instrument.is_high_resolution();
         if n_samples == 0 {
             return Vec::new();
         }
@@ -1239,34 +1224,23 @@ impl<'a> ScoredSpectrum<'a> {
                     is_prefix,
                     self.charge,
                     self.parent_mass,
+                    true, // training: tight high-res match -> consistent sharp tables
                     |partition, _ion, rank, _logs, theo_mz, tol_da| {
                         let (r, ebin) = match rank {
                             Some(rk) => {
                                 let clamped = rk.min(max_rank).max(1);
                                 let ebin = if esf > 0 {
-                                    let err_peak = if high_res {
-                                        // Tight ppm window: only TRUE few-ppm fragments
-                                        // populate the error histogram (sharp, seed-like).
-                                        // An ion that matched only via a noise peak in the
-                                        // wide 0.5 Da window has no peak here -> no error bin.
-                                        closest_peak_mz(peaks, ranks, theo_mz, theo_mz * HIGHRES_ERR_PPM * 1e-6)
-                                    } else {
-                                        matched_peak_mz(peaks, ranks, theo_mz, tol_da)
-                                    };
-                                    match err_peak {
-                                        Some(peak_mz) => {
-                                            let error_da = (peak_mz - theo_mz) as f32;
-                                            let mut idx = (error_da * esf as f32).round() as i32;
-                                            if idx > esf {
-                                                idx = esf;
-                                            } else if idx < -esf {
-                                                idx = -esf;
-                                            }
-                                            idx += esf;
-                                            Some(idx as u32)
-                                        }
-                                        None => None,
+                                    let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
+                                        .map(|peak_mz| (peak_mz - theo_mz) as f32)
+                                        .unwrap_or(0.0);
+                                    let mut idx = (error_da * esf as f32).round() as i32;
+                                    if idx > esf {
+                                        idx = esf;
+                                    } else if idx < -esf {
+                                        idx = -esf;
                                     }
+                                    idx += esf;
+                                    Some(idx as u32)
                                 } else {
                                     None
                                 };
@@ -1296,6 +1270,12 @@ fn visit_directional_node_ion_matches<F>(
     is_prefix: bool,
     charge: u8,
     parent_mass: f64,
+    // TRAINING passes true: high-res instruments match within a tight ppm window so every
+    // learned table (rank/ion_err/noise_err/existence) is built from consistent few-ppm
+    // matches (sharp, seed-like). SCORING passes false: it keeps the model's wide `mme`
+    // (0.5 Da) and looks those sharp tables up against the 0.5 Da match — penalising
+    // off-centre peaks exactly as the seed does. (Bug-#2 wrongly tightened scoring too.)
+    tight_high_res: bool,
     mut visit: F,
 ) where
     F: FnMut(Partition, IonType, Option<u32>, &[f32], f64, f64),
@@ -1337,7 +1317,11 @@ fn visit_directional_node_ion_matches<F>(
             if param.segment_num(theo_mz, parent_mass) != seg {
                 continue;
             }
-            let tol_da = mme.as_da(theo_mz);
+            let tol_da = if tight_high_res && param.data_type.instrument.is_high_resolution() {
+                theo_mz * HIGHRES_ERR_PPM * 1e-6
+            } else {
+                mme.as_da(theo_mz)
+            };
             let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
             visit(partition, *ion, rank, logs, theo_mz, tol_da);
         }
@@ -1348,10 +1332,8 @@ fn visit_directional_node_ion_matches<F>(
 /// `target_mz`, or `None` if no such peak exists.  Mirrors the selection
 /// semantics of `nearest_peak_rank_in` (intensity-max, not nearest-m/z).
 /// Used by `ion_match_facts` to compute the mass error for each matched ion.
-/// Tight ppm window for the high-res mass-error histogram. Peak SELECTION (rank /
-/// existence) and node scoring keep the model's wide `mme` (0.5 Da); only the `ion_err`
-/// / `noise_err` BIN is computed within this tight window so the histogram stays sharp
-/// (seed-like) and excludes coincidental noise matches.
+/// Tight ppm window the TRAINING matcher uses for high-res instruments (see the
+/// `tight_high_res` parameter on `visit_directional_node_ion_matches`).
 const HIGHRES_ERR_PPM: f64 = 20.0;
 
 fn matched_peak_mz(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<f64> {
@@ -1375,34 +1357,6 @@ fn matched_peak_mz(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, toleranc
         }
     }
     best.map(|(mz, _)| mz)
-}
-
-/// Returns the m/z of the peak CLOSEST in mass to `target_mz` within `tolerance_da`
-/// (ignoring intensity). Used for the mass-error histogram at HIGH resolution: the true
-/// few-ppm fragment is the closest peak even when a co-eluting noise peak is more
-/// intense, so binning the error from the closest peak keeps `ion_err` sharp (seed-like)
-/// without changing which peak drives rank/existence scoring or the matching tolerance.
-fn closest_peak_mz(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<f64> {
-    if peaks.is_empty() {
-        return None;
-    }
-    let lo_mz = target_mz - tolerance_da;
-    let hi_mz = target_mz + tolerance_da;
-    let start = peaks.partition_point(|&(mz, _)| mz < lo_mz);
-    let mut best: Option<f64> = None;
-    for i in start..peaks.len() {
-        let (mz, _) = peaks[i];
-        if mz > hi_mz {
-            break;
-        }
-        if ranks[i] == u32::MAX {
-            continue;
-        }
-        if best.is_none_or(|b| (mz - target_mz).abs() < (b - target_mz).abs()) {
-            best = Some(mz);
-        }
-    }
-    best
 }
 
 fn nearest_peak_rank_in(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<u32> {
@@ -2509,25 +2463,6 @@ mod precursor_filter_tests {
             with_bin > 0,
             "dense_noise_facts must emit at least one error_bin = Some for matched probes \
              (was always None before the fix); matched={matched}"
-        );
-    }
-
-    #[test]
-    fn closest_peak_mz_picks_nearest_not_most_intense() {
-        // The high-res error-bin fix hinges on closest_peak_mz selecting the peak
-        // NEAREST in mass (the true few-ppm fragment), while matched_peak_mz keeps
-        // selecting the most intense peak (which drives rank/existence scoring).
-        let peaks = vec![(499.7_f64, 100.0_f32), (500.002, 5.0), (500.5, 80.0)];
-        let ranks = vec![0u32, 1, 2];
-        assert_eq!(
-            super::closest_peak_mz(&peaks, &ranks, 500.0, 0.5),
-            Some(500.002),
-            "closest_peak_mz must return the nearest-in-mass peak (true fragment)"
-        );
-        assert_eq!(
-            super::matched_peak_mz(&peaks, &ranks, 500.0, 0.5),
-            Some(499.7),
-            "matched_peak_mz must still return the most-intense peak (for rank)"
         );
     }
 }

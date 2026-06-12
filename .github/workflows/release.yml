@@ -1,0 +1,164 @@
+name: Release
+
+# Builds the andes binary for the desktop/server platforms and attaches each
+# archive to a GitHub Release. Triggered by pushing a `v*` tag
+# (e.g. `git tag v0.1.0 && git push origin v0.1.0`).
+#
+# The mainstream targets (linux-x64, macOS x64 + arm64, windows-x64) are built
+# with `--features "thermo timstof"`: native Thermo `.raw` (ships a
+# **self-contained .NET 8 runtime** next to the binary in `dotnet/`, so `.raw`
+# works with nothing to install — the binary auto-points `DOTNET_ROOT` at it) AND
+# native Bruker timsTOF `.d` (pure Rust, no runtime). The linux-arm64 archive is
+# a plain build without either native format (timsrust's zstd C dependency
+# complicates the cross build).
+#
+# Each archive contains:
+#   - the `andes` binary (or `andes.exe` on Windows)
+#   - `dotnet/` — bundled .NET 8 runtime (thermo targets only)
+#   - the `resources/` tree (resources/ionstat/models.parquet — single parquet model store)
+#   - LICENSE, NOTICE, README.md, and THERMO_LICENSE.txt (thermo targets)
+#
+# Thermo's RawFileReader is redistributed under Thermo's license (see the crate
+# `dotnetrawfilereader-sys`); using the .raw feature constitutes acceptance.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            thermo: true
+            dotnet_arch: x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            thermo: false
+            linker_pkg: gcc-aarch64-linux-gnu
+            cargo_linker: aarch64-linux-gnu-gcc
+          - target: x86_64-apple-darwin
+            os: macos-13
+            thermo: true
+            dotnet_arch: x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            thermo: true
+            dotnet_arch: arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            thermo: true
+            dotnet_arch: x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # `--features thermo` pulls deps that require rustc >= 1.88; the repo's
+      # rust-toolchain.toml pins an older channel for the pure-Rust path, so the
+      # thermo targets install + use `stable` (RUSTUP_TOOLCHAIN overrides the
+      # pin at build time). The no-thermo target keeps the repo toolchain.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install aarch64-linux cross linker
+        if: matrix.linker_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.linker_pkg }}
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=${{ matrix.cargo_linker }}" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          # The native-format targets bundle BOTH backends: Thermo `.raw` (.NET 8,
+          # bundled below) and Bruker timsTOF `.d` (pure Rust, no runtime). The
+          # no-thermo cross target (linux-arm64) ships without either, since
+          # timsrust's zstd C dependency complicates the cross build.
+          if [ "${{ matrix.thermo }}" = "true" ]; then
+            export RUSTUP_TOOLCHAIN=stable
+            cargo build --release --target ${{ matrix.target }} -p andes --features "thermo timstof"
+          else
+            cargo build --release --target ${{ matrix.target }} --bin andes
+          fi
+
+      # Download the .NET 8 runtime matching the TARGET architecture (the
+      # dotnet-install scripts fetch the requested RID regardless of host arch).
+      - name: Bundle .NET 8 runtime (Unix)
+        if: ${{ matrix.thermo && matrix.os != 'windows-latest' }}
+        shell: bash
+        run: |
+          curl -fsSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+          bash dotnet-install.sh --channel 8.0 --runtime dotnet \
+            --architecture ${{ matrix.dotnet_arch }} --install-dir dotnet-bundle
+
+      - name: Bundle .NET 8 runtime (Windows)
+        if: ${{ matrix.thermo && matrix.os == 'windows-latest' }}
+        shell: pwsh
+        run: |
+          & ([scriptblock]::Create((Invoke-RestMethod https://dot.net/v1/dotnet-install.ps1))) `
+            -Channel 8.0 -Runtime dotnet -Architecture ${{ matrix.dotnet_arch }} -InstallDir dotnet-bundle
+
+      - name: Stage release archive (Unix)
+        id: stage_unix
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          STAGE="andes-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}"
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/andes" "$STAGE/"
+          cp -r resources                                    "$STAGE/"
+          cp LICENSE NOTICE README.md                        "$STAGE/" 2>/dev/null || true
+          if [ "${{ matrix.thermo }}" = "true" ]; then
+            cp -r dotnet-bundle "$STAGE/dotnet"
+            cp crates/input/THERMO_LICENSE.txt "$STAGE/" 2>/dev/null || true
+          fi
+          tar -czf "${STAGE}.tar.gz" "$STAGE"
+          echo "archive=${STAGE}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Stage release archive (Windows)
+        id: stage_windows
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $stage = "andes-${{ steps.version.outputs.VERSION }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/andes.exe" $stage
+          Copy-Item resources $stage -Recurse
+          Copy-Item LICENSE,NOTICE,README.md $stage -ErrorAction SilentlyContinue
+          if ("${{ matrix.thermo }}" -eq "true") {
+            Copy-Item dotnet-bundle $stage/dotnet -Recurse
+            Copy-Item crates/input/THERMO_LICENSE.txt $stage -ErrorAction SilentlyContinue
+          }
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          "archive=$stage.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload archive to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          name: andes ${{ steps.version.outputs.VERSION }}
+          generate_release_notes: true
+          files: ${{ steps.stage_unix.outputs.archive || steps.stage_windows.outputs.archive }}

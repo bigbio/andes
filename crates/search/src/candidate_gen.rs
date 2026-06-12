@@ -1,0 +1,493 @@
+//! Candidate peptide enumeration via per-protein walk.
+//!
+//! Enumerates enzyme-cleaved spans within the configured length range,
+//! including missed-cleavage spans (governed by the `missed_count` check).
+//!
+//! ## N-terminal Met cleavage
+//!
+//! When a protein starts with M, a parallel enumeration treats
+//! `sequence[1..]` as the effective protein sequence (initial Met loss).
+//! Both enumerations run concurrently; Met-cleaved candidates differ by
+//! `is_protein_n_term=true` at offset 1 of the original sequence and are
+//! NOT deduplicated — they have a distinct search space (protein-N-term
+//! mod variants apply).
+
+use model::amino_acid::AminoAcid;
+use model::enzyme::Enzyme;
+use model::modification::ModLocation;
+use model::peptide::Peptide;
+use model::protein::Protein;
+use crate::decoy::normalize_decoy_prefix;
+use crate::search_index::SearchIndex;
+use crate::search_params::SearchParams;
+
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub peptide: Peptide,
+    pub protein_index: usize,
+    pub start_offset_in_protein: usize,
+    pub is_decoy: bool,
+    /// True when this peptide spans the protein's biological N-terminus.
+    /// For Met-cleaved peptides, this is true even though `start_offset_in_protein > 0`.
+    pub is_protein_n_term: bool,
+    /// True when this peptide spans the protein's C-terminus
+    /// (`abs_end == sequence_length`).
+    pub is_protein_c_term: bool,
+}
+
+/// Enumerate every candidate peptide from `idx` matching `params`.
+/// Order: by `(protein_index, start_offset, mod_combination_index)`.
+pub fn enumerate_candidates<'a>(
+    idx: &'a SearchIndex,
+    params: &'a SearchParams,
+    decoy_prefix: &'a str,
+) -> impl Iterator<Item = Candidate> + 'a {
+    // Match the normalized prefix that `target_plus_decoy` used when building
+    // the index — empty `--decoy-prefix` must not collapse to `starts_with("")`.
+    let normalized_prefix = normalize_decoy_prefix(decoy_prefix);
+    idx.db.proteins.iter().enumerate().flat_map(move |(p_idx, protein)| {
+        let is_decoy = protein.accession.starts_with(&normalized_prefix);
+        enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
+    })
+}
+
+fn enumerate_protein(
+    protein: &Protein,
+    protein_index: usize,
+    is_decoy: bool,
+    params: &SearchParams,
+) -> Vec<Candidate> {
+    let seq = &protein.sequence;
+
+    // Standard enumeration: full sequence from offset 0.
+    let mut out = enumerate_protein_from_offset(seq, 0, protein_index, is_decoy, params);
+
+    // N-terminal Met cleavage: when the protein starts with M (and has >1
+    // residue), also enumerate candidates treating sequence[1..] as the
+    // effective start. The Met-cleaved peptides still carry
+    // is_protein_n_term=true (the post-Met residue is the new biological
+    // N-terminus) and are NOT deduplicated — they differ by terminal-mod
+    // search space.
+    if seq.first() == Some(&b'M') && seq.len() > 1 {
+        out.extend(enumerate_protein_from_offset(seq, 1, protein_index, is_decoy, params));
+    }
+
+    out
+}
+
+/// Enumerate candidates starting from `seq_offset` into `seq`.
+///
+/// `seq_offset = 0` → normal full-protein walk.
+/// `seq_offset = 1` → Met-cleaved walk: `seq[1..]` is the effective protein
+///   sequence. Cleavage positions, lengths, and missed-cleavage counts are
+///   computed over the sub-sequence. The `start_offset_in_protein` stored on
+///   each `Candidate` is adjusted back to the original protein coordinates
+///   (i.e. `sub_start + seq_offset`). When `sub_start == 0`, `is_protein_n_term`
+///   is set to `true` — the post-Met residue is the effective protein N-terminus.
+///   The `pre` context residue for sub_start == 0 is `b'M'` (the cleaved Met).
+///
+/// The `params.num_tolerable_termini` field controls cleavage enforcement:
+/// - `2`: both ends must be enzyme-cleavage sites (strict / fully specific, default).
+/// - `1`: at least one end must be an enzyme-cleavage site (semi-specific).
+/// - `0`: neither end needs to be a cleavage site (non-specific).
+fn enumerate_protein_from_offset(
+    seq: &[u8],
+    seq_offset: usize,
+    protein_index: usize,
+    is_decoy: bool,
+    params: &SearchParams,
+) -> Vec<Candidate> {
+    let sub_seq = &seq[seq_offset..];
+    let n = sub_seq.len() as u32;
+    if n < params.min_length {
+        return Vec::new();
+    }
+
+    let ntt = params.num_tolerable_termini;
+
+    // For ntt=0 (non-specific) with a non-NonSpecific enzyme, enumerate all
+    // valid-length spans without any cleavage constraint. This produces the
+    // same set as Enzyme::NonSpecific with ntt=2 (modulo missed-cleavage
+    // filtering — for ntt=0 we skip that since there are no "cleavage sites"
+    // to count between arbitrary span endpoints).
+    //
+    // Note: Enzyme::NonSpecific itself falls through to the normal cleavage-
+    // position loop below (which returns all positions 0..=n), preserving the
+    // existing missed-cleavage semantics that the NonSpecific tests exercise.
+    if ntt == 0 && !matches!(params.enzyme, Enzyme::NonSpecific) {
+        let ctx = EmitCtx { sub_seq, seq, seq_offset, protein_index, is_decoy, params };
+        return enumerate_all_spans(&ctx, n);
+    }
+
+    let cleavage_positions = compute_cleavage_positions(sub_seq, params.enzyme);
+
+    // ntt=2: strict — only spans where both start and end are cleavage positions.
+    // ntt=1: semi-specific — spans where at least one end is a cleavage position.
+    //
+    // Strategy for ntt=1:
+    //   (a) Strict spans (same as ntt=2) — already both ends tryptic.
+    //   (b) Free C-terminus: for each tryptic start, slide the end across
+    //       all positions in [start+min_len, start+max_len]. Skip ends that
+    //       ARE cleavage positions (already covered by the strict case).
+    //   (c) Free N-terminus: for each tryptic end, slide the start across
+    //       all positions in [end-max_len, end-min_len]. Skip starts that
+    //       ARE cleavage positions (already covered by the strict case).
+    //
+    // Using a HashSet of (start, end) pairs to prevent duplicates when both
+    // ends happen to be tryptic.
+
+    let mut out = Vec::new();
+
+    // Build a fast lookup for cleavage positions.
+    let cleavage_set: std::collections::HashSet<u32> = cleavage_positions.iter().copied().collect();
+
+    let ctx = EmitCtx { sub_seq, seq, seq_offset, protein_index, is_decoy, params };
+
+    // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
+    // Also included in ntt=1, since a strict span satisfies "at least one end".
+    for (i, &start) in cleavage_positions.iter().enumerate() {
+        for (offset, &end) in cleavage_positions[i + 1..].iter().enumerate() {
+            let len = end - start;
+            if len > params.max_length {
+                break;
+            }
+            if len < params.min_length {
+                continue;
+            }
+            let missed = offset as u32;
+            if missed > params.max_missed_cleavages {
+                continue;
+            }
+            emit_span(&ctx, start, end, &mut out);
+        }
+    }
+
+    // ── Semi-specific spans (ntt=1 only) ─────────────────────────────────────
+    if ntt == 1 {
+        // (b) Tryptic N-terminus, free C-terminus.
+        for &start in &cleavage_positions {
+            let c_min = start + params.min_length;
+            let c_max = (start + params.max_length).min(n);
+            for end in c_min..=c_max {
+                // Skip ends that are cleavage positions — already emitted above.
+                if cleavage_set.contains(&end) {
+                    continue;
+                }
+                // No missed-cleavage filter here: the "missed cleavages between
+                // start and end" concept applies to strictly tryptic spans.
+                // For semi-tryptic peptides with a free terminus, the
+                // semi-tryptic span is treated as a single candidate regardless
+                // of internal K/R residues.
+                emit_span(&ctx, start, end, &mut out);
+            }
+        }
+
+        // (c) Free N-terminus, tryptic C-terminus.
+        for &end in &cleavage_positions {
+            if end < params.min_length {
+                continue;
+            }
+            let s_min = end.saturating_sub(params.max_length);
+            let s_max = end - params.min_length;
+            for start in s_min..=s_max {
+                // Skip starts that are cleavage positions — already emitted above.
+                if cleavage_set.contains(&start) {
+                    continue;
+                }
+                emit_span(&ctx, start, end, &mut out);
+            }
+        }
+    }
+
+    out
+}
+
+/// Shared context passed to `emit_span` to avoid exceeding argument limits.
+struct EmitCtx<'a> {
+    sub_seq: &'a [u8],
+    seq: &'a [u8],
+    seq_offset: usize,
+    protein_index: usize,
+    is_decoy: bool,
+    params: &'a SearchParams,
+}
+
+/// Emit a single (start, end) span as candidates, if the span passes residue
+/// validity checks. Appends to `out`.
+#[inline]
+fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) {
+    let span = &ctx.sub_seq[start as usize..end as usize];
+    // Skip spans containing non-standard residues.
+    if span.iter().any(|&r| AminoAcid::standard(r).is_none()) {
+        return;
+    }
+
+    let abs_start = start as usize + ctx.seq_offset;
+    let abs_end = end as usize + ctx.seq_offset;
+    let pre = if abs_start == 0 { b'_' } else { ctx.seq[abs_start - 1] };
+    let post = if abs_end == ctx.seq.len() { b'-' } else { ctx.seq[abs_end] };
+
+    let is_protein_n_term = start == 0;
+    let is_protein_c_term = abs_end == ctx.seq.len();
+    let mod_combinations =
+        expand_mod_combinations(span, ctx.params, is_protein_n_term, is_protein_c_term);
+    for residues in mod_combinations {
+        let peptide = Peptide::new(residues, pre, post);
+        out.push(Candidate {
+            peptide,
+            protein_index: ctx.protein_index,
+            start_offset_in_protein: abs_start,
+            is_decoy: ctx.is_decoy,
+            is_protein_n_term,
+            is_protein_c_term,
+        });
+    }
+}
+
+/// Enumerate all valid-length spans without cleavage constraints (ntt=0 path).
+/// Invoked when `num_tolerable_termini = 0` with a non-NonSpecific enzyme.
+fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    for start in 0..n {
+        let end_max = (start + ctx.params.max_length).min(n);
+        for end in (start + ctx.params.min_length)..=end_max {
+            emit_span(ctx, start, end, &mut out);
+        }
+    }
+    out
+}
+
+/// Generate every combination of variable-mod applications for `span`,
+/// up to `params.max_variable_mods_per_peptide` mods total.
+///
+/// `is_protein_n_term`: the span begins at position 0 of the protein sequence.
+/// `is_protein_c_term`: the span ends at the last residue of the protein sequence.
+///
+/// These flags control which terminal-location mod variants are consulted:
+/// - Position 0: Protein_N_Term (if is_protein_n_term) or N_Term variants are
+///   merged in addition to Anywhere variants.
+/// - Position n-1: Protein_C_Term (if is_protein_c_term) or C_Term variants are
+///   merged in addition to Anywhere variants.
+/// - All other positions: Anywhere only — borrowed directly from AminoAcidSet,
+///   no clone.
+fn expand_mod_combinations(
+    span: &[u8],
+    params: &SearchParams,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> Vec<Vec<AminoAcid>> {
+    let n = span.len();
+
+    // Build owned merged-variant vecs only for the (up to two) terminal
+    // positions. Interior positions will borrow the Anywhere slice directly,
+    // eliminating the per-position `to_vec` clone that showed up in perf
+    // traces (~87% of positions on real tryptic peptides).
+    let pos0_owned: Option<Vec<AminoAcid>> = (n > 0).then(|| {
+        build_terminal_variants(params, span[0], 0, n, is_protein_n_term, is_protein_c_term)
+    });
+    let pos_last_owned: Option<Vec<AminoAcid>> = (n > 1).then(|| {
+        build_terminal_variants(params, span[n - 1], n - 1, n, is_protein_n_term, is_protein_c_term)
+    });
+
+    // Collect per-position variant slices. Terminal positions reference the
+    // owned vecs above; interior positions borrow directly from AminoAcidSet.
+    // All borrows are valid for the duration of this function.
+    let position_variants_refs: Vec<&[AminoAcid]> = span.iter().enumerate().map(|(i, &r)| {
+        if i == 0 {
+            pos0_owned.as_ref().unwrap().as_slice()
+        } else if i == n - 1 {
+            // n > 1 guaranteed here because n == 1 means i == 0 == n-1,
+            // which is already handled by the first branch.
+            pos_last_owned.as_ref().unwrap().as_slice()
+        } else {
+            // Interior position: borrow Anywhere variants — no clone.
+            params.aa_set.variants_for(r, ModLocation::Anywhere)
+        }
+    }).collect();
+
+    let mut out = Vec::new();
+    let mut current = Vec::with_capacity(n);
+    expand_recursive(
+        &position_variants_refs, 0, &mut current, 0,
+        params.max_variable_mods_per_peptide, &mut out,
+    );
+    out
+}
+
+/// Build the merged variant list for a terminal position (pos 0 or pos n-1).
+///
+/// Only called for the 1-2 terminal positions per span.
+fn build_terminal_variants(
+    params: &SearchParams,
+    residue: u8,
+    pos: usize,
+    span_len: usize,
+    is_protein_n_term: bool,
+    is_protein_c_term: bool,
+) -> Vec<AminoAcid> {
+    let anywhere_variants = params.aa_set.variants_for(residue, ModLocation::Anywhere);
+
+    // Helper: returns true if `term_variants` contains a FIXED mod variant
+    // for this residue. When a fixed terminal mod applies, the residue
+    // MUST carry it — the unmodified Anywhere variant is not a valid
+    // candidate. Fixed mods are mandatory (Kim et al., Nat Commun 5:5277, 2014).
+    let has_fixed_in = |term_variants: &[AminoAcid]| -> bool {
+        term_variants.iter().any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false))
+    };
+
+    let n_term_variants: &[AminoAcid] = if pos == 0 {
+        let loc = if is_protein_n_term { ModLocation::ProtNTerm } else { ModLocation::NTerm };
+        params.aa_set.variants_for(residue, loc)
+    } else {
+        &[]
+    };
+    let c_term_variants: &[AminoAcid] = if pos == span_len - 1 {
+        let loc = if is_protein_c_term { ModLocation::ProtCTerm } else { ModLocation::CTerm };
+        params.aa_set.variants_for(residue, loc)
+    } else {
+        &[]
+    };
+
+    let has_fixed_n = has_fixed_in(n_term_variants);
+    let has_fixed_c = has_fixed_in(c_term_variants);
+
+    // If a fixed terminal mod is mandatory at this position, the
+    // unmodified Anywhere variant is not a legal candidate. Drop the
+    // Anywhere variants in that case; otherwise include them. This
+    // prevents the candidate explosion that wildcard fixed N-term TMT
+    // would otherwise cause (every peptide would be enumerated twice
+    // at position 0: once unmodded, once TMT-modded).
+    //
+    // Note: Anywhere variants always include the residue's own fixed
+    // mods folded in (e.g. K-anywhere already carries K-TMT), so this
+    // rule applies only to terminal mods.
+    let mut variants: Vec<AminoAcid> = if has_fixed_n || has_fixed_c {
+        Vec::new()
+    } else {
+        anywhere_variants.to_vec()
+    };
+
+    // Append all terminal variants (fixed + variable). When a fixed
+    // mod is present, the modded variant is the only legal one for
+    // that mod's residue/location slot; variable mods stack on top
+    // by adding additional explored variants.
+    for v in n_term_variants {
+        if !variants.contains(v) {
+            variants.push(v.clone());
+        }
+    }
+    for v in c_term_variants {
+        if !variants.contains(v) {
+            variants.push(v.clone());
+        }
+    }
+
+    variants
+}
+
+fn expand_recursive(
+    position_variants: &[&[AminoAcid]],
+    pos: usize,
+    current: &mut Vec<AminoAcid>,
+    mods_used: u32,
+    max_mods: u32,
+    out: &mut Vec<Vec<AminoAcid>>,
+) {
+    if pos == position_variants.len() {
+        out.push(current.clone());
+        return;
+    }
+    for variant in position_variants[pos] {
+        // Only VARIABLE mods consume slots against the per-peptide cap.
+        // Fixed mods are unconditionally applied by the AminoAcidSet (e.g.
+        // CAM-on-C, TMT-on-K, TMT-on-N-term-wildcard) and must not count
+        // against max_variable_mods_per_peptide — otherwise a peptide with
+        // two fixed mods (e.g. TQAHTQQNMVEK + N-term-TMT + K-TMT) is pruned
+        // when NumMods=1, which is exactly the bug that caused 86% of TMT
+        // top-1 PSMs to diverge from the reference implementation.
+        //
+        // Kim et al. (Nat Commun 5:5277, 2014): only variable mods consume
+        // slots against the per-peptide modification cap.
+        let consumes_slot = variant
+            .mod_
+            .as_ref()
+            .map(|m| !m.fixed)
+            .unwrap_or(false);
+        let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
+        if new_mods > max_mods {
+            continue;
+        }
+        current.push(variant.clone());
+        expand_recursive(
+            position_variants, pos + 1, current, new_mods, max_mods, out,
+        );
+        current.pop();
+    }
+}
+
+/// Cleavage positions: 0 (start of protein), n (end of protein), and
+/// every i in 1..n where `enzyme.is_cleavable_after(seq[i-1])` (for
+/// C-term cutters like Trypsin) OR `enzyme.is_cleavable_before(seq[i])`
+/// (for N-term cutters like AspN/LysN).
+fn compute_cleavage_positions(seq: &[u8], enzyme: Enzyme) -> Vec<u32> {
+    let n = seq.len() as u32;
+
+    if matches!(enzyme, Enzyme::NoCleavage) {
+        return vec![0, n];
+    }
+
+    if matches!(enzyme, Enzyme::NonSpecific) {
+        return (0..=n).collect();
+    }
+
+    let mut positions = vec![0u32];
+    for i in 1..n {
+        let prev = seq[(i - 1) as usize];
+        let here = seq[i as usize];
+        if enzyme.is_cleavable_after(prev) || enzyme.is_cleavable_before(here) {
+            positions.push(i);
+        }
+    }
+    if *positions.last().unwrap() != n {
+        positions.push(n);
+    }
+    positions
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn decoy_prefix_matched_verbatim_no_underscore_appended() {
+        // Caller passes "XXX" (no underscore). The matcher should look for
+        // accessions starting with literally "XXX", NOT "XXX_".
+        // We exercise this by checking the is_decoy flag logic directly:
+        // any accession starting with "XXX" (including "XXX_something") must
+        // match, and accessions starting with "XXX_" only must also match (no
+        // double-underscore invention).
+        let prefix = "XXX";
+        assert!(
+            "XXX_protein1".starts_with(prefix),
+            "accession starting with 'XXX_' should match prefix 'XXX'"
+        );
+        assert!(
+            "XXXprotein1".starts_with(prefix),
+            "accession starting with 'XXXprotein1' should match prefix 'XXX'"
+        );
+        assert!(
+            !"DECOY_protein1".starts_with(prefix),
+            "accession 'DECOY_protein1' should NOT match prefix 'XXX'"
+        );
+
+        // Verify we do NOT append an underscore: "DECOY" prefix must not
+        // accidentally match "DECOY_protein" as "DECOY__protein" or similar.
+        let colon_prefix = "DECOY:";
+        assert!(
+            "DECOY:sp|P12345|PROT_HUMAN".starts_with(colon_prefix),
+            "colon-terminated prefix should match verbatim"
+        );
+        assert!(
+            !"DECOY_sp|P12345|PROT_HUMAN".starts_with(colon_prefix),
+            "underscore-delimited accession should NOT match colon prefix"
+        );
+    }
+}

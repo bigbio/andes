@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#162a52"/>
+    </linearGradient>
+    <linearGradient id="bk" x1="0" y1="70" x2="0" y2="206" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#93C5FD"/>
+      <stop offset="1" stop-color="#3B82F6"/>
+    </linearGradient>
+    <linearGradient id="fr" x1="0" y1="74" x2="0" y2="206" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#60A5FA"/>
+      <stop offset="1" stop-color="#1E3A8A"/>
+    </linearGradient>
+    <clipPath id="fc">
+      <polygon points="36,206 74,150 92,166 128,80 148,112 168,92 196,142 214,120 230,206"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="58" fill="url(#sky)"/>
+
+  <!-- back range -->
+  <polygon points="26,206 64,156 92,124 116,144 150,96 176,128 206,150 230,132 240,206" fill="url(#bk)" opacity="0.85"/>
+  <!-- front range, sharp peaks -->
+  <polygon points="36,206 74,150 92,166 128,80 148,112 168,92 196,142 214,120 230,206" fill="url(#fr)"/>
+
+  <!-- snow caps -->
+  <g fill="#F8FAFC" clip-path="url(#fc)">
+    <polygon points="114,104 121,94 128,80 135,96 143,106 137,102 133,108 128,98 123,107 118,101"/>
+    <polygon points="160,104 168,92 178,106 172,102 168,97 164,103"/>
+  </g>
+</svg>

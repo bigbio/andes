@@ -1,0 +1,4 @@
+NumMods=3
+C2H3N1O1,C,fix,any,Carbamidomethyl
+O1,M,opt,any,Oxidation
+C2H2O1,*,opt,Prot-N-term,Acetyl

@@ -27,6 +27,21 @@ The realistic story: **win TMT, hold Astral/UPS, keep speed competitive, shed pa
 > zero MS-GF+ heritage.** Stripped of that heritage and retrained from scratch,
 > andes most likely **starts ~10% behind** MSFragger (the user's expected baseline).
 > So the headline below is the gap to close, not the current borrowed lead.
+>
+> **⇒ The per-dataset "standing" + "target" columns above are PROVISIONAL** — they
+> come from inherited-model benchmarks and may not survive the switch to own-data
+> models (andes could lose the Astral/UPS lead too, not only trail on TMT).
+> **Experiment #0 re-establishes the real per-dataset standing; the actual targets
+> are set from that table, not assumed here.**
+>
+> **Methodology note (fair-benchmark risk):** training andes on MSFragger→Percolator
+> gold PSMs and then benchmarking andes *vs MSFragger* is mildly circular — the
+> labels encode MSFragger's notion of "correct," which can cap andes at "match
+> MSFragger." andes still applies its own model to all spectra and can ID ones
+> MSFragger missed, so it is not strictly circular, but to keep the comparison
+> honest prefer **multi-engine/consensus gold PSMs** (e.g. MSFragger ∪ another
+> engine, or Percolator-consensus) for the training labels where feasible, and
+> always report **entrapment-FDP** (engine-independent) alongside the head-to-head.
 
 ## Experiment #0 — the independence baseline table (run FIRST, it's the scoreboard)
 
@@ -36,7 +51,7 @@ gating prerequisite, not an afterthought.
 
 **Prerequisite — own-data models. This GATES the baseline table** (chosen
 approach: independence-valid, train-from-public-data first — not a current-models
-snapshot). Two stages across two hosts:
+snapshot). Two stages, Codon → VM:
 1. **Codon — gold-standard PSMs:** run MSFragger → Percolator on the public
    training corpus (the ~29 experiment-class slugs) to produce confident
    gold-standard PSMs. Needs the flats + PRIDE-curated corpus staged at
@@ -133,9 +148,11 @@ The loop spans three hosts, each with a distinct job:
   conclusion, the actual andes **source changes** are made and committed here,
   then pushed for the VM to re-benchmark. (Where the `/loop` that edits code runs;
   it dispatches compute to Codon/VM and reads results back.)
-- **Datasets:** Astral (high-res), UPS1, TMT — low-res CID-TMT (e.g. PXD016999
-  4-engine TMT set; PXD014502 ion-trap CID-TMT). Pin exact accessions/paths on
-  first run and record them here.
+- **Datasets (the actual staged VM benchmark set, per `reference_andes_infra_layout`):**
+  `astral-data/LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.mzML` (high-res),
+  `data/UPS1_5000amol_R1.mzML` (low-res CID LFQ), `tmt-data/a05058.mzML` (low-res
+  CID-TMT) — each with its FASTA + numeric mods under `/srv/data/msgf-bench/`.
+  (Held-out: `qe-holdout/` PXD048603 HeLa.) Use these, not ad-hoc PRIDE pulls.
 
 ## Loop protocol (per iteration)
 
@@ -150,12 +167,12 @@ The loop spans three hosts, each with a distinct job:
 7. COMMIT a milestone if kept; revert if refuted. Then loop.
 ```
 
-Pacing: each iteration is real compute (search + Percolator = minutes–tens of minutes, model training on Codon = longer). Use long/dynamic `/loop` intervals tied to benchmark completion, not tight polling.
+Pacing: each iteration is real compute (search + Percolator = minutes–tens of minutes; gold-PSM generation on Codon + andes training on the VM = longer). Use long/dynamic `/loop` intervals tied to job completion, not tight polling.
 
 ## Starter backlog (across all three axes)
 
 **PSMs — TMT/low-res (the lever: the model):**
-- Train per-protocol models on Codon: a dedicated **low-res CID-TMT** model (the known divergence) — vary peak-rank distribution, noise-model shape, segment count, training corpus. Benchmark each variant; keep the FDP-clean winner. (Model store + `andes train` machinery already exist; loss-table serialization too.)
+- Train per-protocol models **on the VM from Codon-generated gold PSMs**: a dedicated **low-res CID-TMT** model (the known divergence) — vary peak-rank distribution, noise-model shape, segment count, training corpus. Benchmark each variant; keep the FDP-clean winner. (Model store + `andes train` machinery already exist; loss-table serialization too.)
 - Additive Percolator features (must be *additive* — modifying existing features regresses, per parity-tuning lessons): e.g. a per-ion CID node-score trace, DeltaRawScore, complementary-ion features. Top-1-preserving only.
 - Revisit the noise/rank prior shape for low-res (the dilution diagnosis: the noise rank model was over-smoothed/2.5× too flat).
 

@@ -28,16 +28,17 @@
 3. **#3 — PSMs: Train a dedicated low-res CID-TMT model** *(PSMs, high, large).*
    The **structural** root cause of the TMT gap: there is literally no `(CID, LowRes, tmt)` model — a
    low-res TMT search falls back to `cid_lowres_tryp` (Standard, esf=0, unlabeled-tryptic tables). This
-   is the highest-ceiling PSM lever, but it is **large** (Codon corpus curation + retrain) so it is
-   kicked off third in parallel with the cheap wins above; experiments #6/#9/#11 are sweeps that ride
-   on the seed this produces. Start the Codon corpus curation as soon as #1 confirms TMT is being
+   is the highest-ceiling PSM lever, but it is **large** (Codon: MSFragger→Percolator gold-PSM
+   generation on a public CID-TMT corpus → VM: `andes train` on those labels) so it is kicked off
+   third in parallel with the cheap wins above; experiments #6/#9/#11 are sweeps that ride on the
+   seed this produces. Start the Codon gold-PSM generation as soon as #1 confirms TMT is being
    routed correctly.
 
 **Shape:** #1 unlocks the existing TMT gain for free; #2 banks a no-risk speed win; #3 is the
 long-pole model that lifts the TMT ceiling and feeds the four sweeps (#6, #9, #11, #13). Cheap
-byte-identical speed/param wins (#2, #4, #5, #7, #8) keep the loop productive while #3's corpus is
-curated on Codon. Additive Percolator features (#10, #12) and the speculative param/measure-first
-items (#13, #14, #15) tail the list.
+byte-identical speed/param wins (#2, #4, #5, #7, #8) keep the loop productive while #3's gold PSMs
+are generated on Codon and andes is trained on the VM. Additive Percolator features (#10, #12) and
+the speculative param/measure-first items (#13, #14, #15) tail the list.
 
 ## Ranked backlog
 

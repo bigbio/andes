@@ -95,6 +95,19 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 Only tryptic enzyme models are in the store; other enzymes require `--param-file` with a binary `.param` file.
 
+**Protocol values** (`--protocol`): selects a protocol-specific scoring model and, for isobaric labels, engages the dense-spectrum windowed peak filter. It does **not** add modifications — supply the label's fixed/variable mods in `mods.txt` (§2, §7).
+
+| Value | Numeric | Model experiment class | Effect | Companion mods (in `mods.txt`) |
+|---|---|---|---|---|
+| `auto` *(default)* | `0` | Automatic | No protocol suffix; selects the generic model. Identical model selection to `standard`. | — |
+| `phospho` | `1` | Phosphorylation | Prefers a phospho-specific model (e.g. `hcd_qexactive_tryp_phosphorylation`) when present; else falls back to the generic model. | Phospho variable mod (`+79.96633` on S/T/Y) |
+| `iTRAQ` | `2` | iTRAQ | Prefers an iTRAQ-specific model; engages the dense-spectrum peak filter for crowded reporter-ion spectra. | iTRAQ fixed mods on K and peptide N-term |
+| `iTRAQ-phospho` | `3` | iTRAQPhospho | Prefers a combined iTRAQ+phospho model; engages the dense-spectrum peak filter. | iTRAQ fixed mods + phospho variable mod |
+| `TMT` | `4` | TMT | Prefers a TMT-specific model (e.g. `hcd_qexactive_tryp_tmt`); engages the dense-spectrum peak filter. | TMT fixed mods on K and peptide N-term |
+| `standard` | `5` | Automatic | Explicit "no special protocol" — identical model selection to `auto`. | — |
+
+When no protocol-specific model exists for the resolved `(fragmentation, instrument)` key, selection falls back to the generic model but the requested isobaric protocol is still stamped onto it so the dense-spectrum filter engages (e.g. `--protocol TMT` with no CID-TMT model resolves to `cid_lowres_tryp` with TMT filtering applied).
+
 ### Calibration
 
 | Flag | Type | Default | Description | Legacy form |

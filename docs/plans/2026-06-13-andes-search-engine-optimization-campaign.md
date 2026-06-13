@@ -34,14 +34,17 @@ The realistic story: **win TMT, hold Astral/UPS, keep speed competitive, shed pa
 > **Experiment #0 re-establishes the real per-dataset standing; the actual targets
 > are set from that table, not assumed here.**
 >
-> **Methodology note (fair-benchmark risk):** training andes on MSFragger→Percolator
-> gold PSMs and then benchmarking andes *vs MSFragger* is mildly circular — the
-> labels encode MSFragger's notion of "correct," which can cap andes at "match
-> MSFragger." andes still applies its own model to all spectra and can ID ones
-> MSFragger missed, so it is not strictly circular, but to keep the comparison
-> honest prefer **multi-engine/consensus gold PSMs** (e.g. MSFragger ∪ another
-> engine, or Percolator-consensus) for the training labels where feasible, and
-> always report **entrapment-FDP** (engine-independent) alongside the head-to-head.
+> **Methodology note (NOT circular — clarified).** Training andes on
+> MSFragger→Percolator gold PSMs then benchmarking vs MSFragger is **not**
+> circular: andes's scoring is fundamentally different — it learns the
+> intensity-rank **fragmentation model** from the *(spectrum → true peptide)*
+> pairs, which is engine-independent physics (any true-PSM source teaches the
+> same; this is how MS-GF+ and all ML rescorers are trained). andes applies that
+> model to *all* spectra and can exceed MSFragger on ones it scores better — the
+> labels do not cap it. The only residual is minor **training-set selection bias**
+> (labels drawn from the regime one engine is confident on); remove it by sourcing
+> gold PSMs from **MSFragger ∪ Comet** (consensus, per the user) and report
+> **entrapment-FDP** (engine-independent) as the arbiter alongside the head-to-head.
 
 ## Experiment #0 — the independence baseline table (run FIRST, it's the scoreboard)
 
@@ -130,9 +133,10 @@ The prior record is littered with plausible ideas that **entrapment-FDP refuted*
 The loop spans three hosts, each with a distinct job:
 
 - **Codon cluster = gold-standard PSM generation (training labels).** Run
-  **MSFragger → Percolator** on big *public* datasets, fast, to produce
-  high-confidence gold-standard PSMs. These are the **training labels** handed to
-  the VM. (Independence-clean: andes's model is learned from public spectra with
+  **MSFragger (∪ Comet for consensus) → Percolator** on big *public* datasets,
+  fast, to produce high-confidence gold-standard PSMs. These are the **training
+  labels** handed to the VM. (Consensus across two engines removes single-engine
+  selection bias; see the methodology note.) (Independence-clean: andes's model is learned from public spectra with
   externally-validated labels — no MS-GF+ parameters; MSFragger only supplies the
   label set, not any andes code/model.) Access via the `codon-cluster` skill;
   staging at `/hps/.../andes-training`.

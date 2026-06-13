@@ -72,9 +72,9 @@ Per glyco-flagged MS2 (oxonium-triggered):
    `score_psm` UNCHANGED. The sequon (N-X-S/T) restricts candidates to those
    with a glycosite. This is an ordinary andes search window; the GF mass-indexed
    DP works as-is because the backbone is a normal peptide.
-3. **Glycan assignment** — `glycan_mass = precursor − backbone`; match against a
-   curated N-glycan composition list (~150–200 common human N-glycans, shipped
-   under `resources/glycans/`), disambiguated by Y-ladder consistency.
+3. **Glycan assignment** — `glycan_mass = precursor − backbone`; match against the
+   curated N-glycan composition list (~182 human N-glycans; see "Glycan database
+   & decoy strategy"), disambiguated by Y-ladder consistency.
 4. **Glycan-fragment scoring** — reuse the **neutral-loss primitive**: the Y-ion
    ladder rungs and glycan-retaining backbone ions ARE the loss-shifted b/y ions
    that `predict_by_ions_with_losses` emits and `score_psm` scores against the
@@ -97,8 +97,31 @@ O-Pair/MetaMorpheus (MIT) + Glyco-Decipher (Apache-2.0) freely; papers-only for
 pGlyco3 / MSFragger-Glyco / Byonic / StrucGP. Steer clear of Protein Metrics'
 wildcard-modification patent — the curated-composition MVP does.
 
+## Glycan database & decoy strategy (resolved from SOTA)
+
+Every leading tool follows the same pattern — **a curated default composition
+list + a user-overridable custom file, searching glycan *compositions* (not
+structures), with mass-based glycan decoys.** Sizes: Byonic ships 57 / 182 / 309
+human N-glycan lists; MSFragger-Glyco's default is a **182-mass** N-glycan list
+(loads Byonic/MetaMorpheus/pGlyco files for custom); pGlyco3 ships 1,234
+compositions. So the MVP adopts that consensus:
+
+- **Default DB:** ship a curated **~182 human N-glycan composition list** under
+  `resources/glycans/human_nglycan_182.txt` (the de-facto-standard size — broad
+  enough to cover most serum/tissue N-glycans, small enough to stay fast). Each
+  entry = composition (`HexNAc(n)Hex(m)NeuAc(k)Fuc(j)…`) + its monoisotopic mass.
+- **Override:** `--glycan-db <file>`; accept a simple composition/mass format and
+  (stretch) Byonic-style composition strings for interoperability.
+- **Search unit:** glycan **composition** (mass + monosaccharide counts), matched
+  by `precursor − backbone` mass + Y-ladder consistency. Not glycan structure/linkage.
+- **Glycan decoys (glycan-level FDR):** **mass-based**, à la MSFragger-Glyco /
+  PTM-Shepherd (a decoy glycan whose mass sits within the match tolerance of a
+  target glycan but is not a real composition). Orthogonal to andes's existing
+  reverse-peptide decoy → the two compose into the 2D FDR. Simplest effective
+  strategy and matches SOTA. (pGlyco's "Y-complementary mass" = precursor − Y is
+  the same backbone-mass idea as our Y0/Y1 reader.)
+
 ## Open questions (resolve during planning)
-- Composition list source/size for the MVP (curated human N-glycan set vs configurable).
-- Glycan decoy strategy for the glycan-level FDR (shuffled compositions vs decoy masses).
 - Exact oxonium floor + count and Y0/Y1 tolerances — set empirically from Phase 0.
 - Stepped-HCD only, or also single-energy HCD (Y-ladder may be sparser)?
+- Whether to support O-glyco composition files later (the DB format should not preclude it).

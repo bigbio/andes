@@ -1,0 +1,6 @@
+# andes glyco example mods.txt — collagen Glc-Gal-hydroxylysine (Unimod 393)
+# Fixed: Carbamidomethyl on C. Variable: Glucosylgalactosyl on K with stepwise
+# sugar losses (-Hex 162.0528, -Hex2 324.1056), glyco loss-class, Unimod accession.
+NumMods=2
+57.02146,C,fix,any,Carbamidomethyl,accession=UNIMOD:4
+340.100562,K,opt,any,Glucosylgalactosyl,loss=162.0528;324.1056,class=glyco,accession=UNIMOD:393

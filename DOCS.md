@@ -202,6 +202,55 @@ NumMods=3
 
 Pair with `--protocol phospho` to prefer a phosphorylation-specific model (e.g. `hcd_qexactive_tryp_phosphorylation`) from the store when one is available.
 
+### `key=value` attribute tail (v1 — neutral-loss / glyco support)
+
+A modification line may carry optional `key=value` attributes after the five positional fields. The comma delimiter is shared, so **the mod name (field 5) must not contain a comma** — a comma immediately after the name is interpreted as the start of the attribute tail, and any token there that is not `key=value` form is rejected with `BadModAttr`.
+
+**Grammar:**
+
+```text
+<mass>,<residue>,<fix|opt>,<location>,<name>[,<key>=<value>[,<key>=<value>…]]
+```
+
+Five-field lines (no attributes) are parsed identically to the legacy format and are unaffected by this extension.
+
+#### Supported keys
+
+| Key | Syntax | Description |
+|---|---|---|
+| `loss=` | `loss=<m1;m2;…>` | Semicolon-separated neutral-loss masses in Da. Each value must be > 0 and < 2000 (`BadNeutralLoss` otherwise). Multiple `loss=` entries on the same line accumulate. |
+| `class=` | `class=<glyco\|phospho\|sulfo\|generic>` | Loss-class pool for this modification's neutral-loss ions. Ions of the same class share one trained per-class distribution. When `loss=` is present but `class=` is absent, the class defaults to `generic` (id 255). When neither key is present, `loss_class` is 0 and no loss ions are predicted (`UnknownLossClass` if an unrecognised name is supplied). |
+| `accession=` | `accession=<CURIE>` | Ontology accession (e.g. `UNIMOD:393`). Emitted in the TSV `Modifications` column for quantms / SDRF workflows. **Not written to the PIN** — the PIN `Proteins` column is rest-of-line and carries protein accessions only. |
+
+Attributes are orthogonal to the `fix|opt` / `location` / `NumMods` fields and can be combined freely.
+
+#### Common neutral-loss reference
+
+| Sugar / group | Neutral-loss mass (Da) | Notes |
+|---|---|---|
+| Hex (glucose, galactose, …) | `162.0528` | Hexose −H₂O |
+| HexNAc (GlcNAc, GalNAc, …) | `203.0794` | N-acetylhexosamine −H₂O |
+| NeuAc (sialic acid) | `291.0954` | N-acetylneuraminic acid −H₂O |
+| Phospho (H₃PO₄) — pS/pT | `97.9769` | Loss of phosphoric acid |
+| Phospho (HPO₃) — pY | `79.9663` | Loss of metaphosphoric acid |
+| Sulfo (SO₃) | `79.9568` | Loss of sulfur trioxide |
+
+> **Phosphotyrosine guidance:** declare pY's neutral loss as `79.9663` (HPO₃, metaphosphoric acid), **not** `97.9769` (H₃PO₄, phosphoric acid). Phosphotyrosine rarely undergoes the H₃PO₄ elimination that is characteristic of pS/pT — using the wrong loss mass for pY is a known false-localization trap in phosphoproteomics. Use `97.9769` for pS and pT; use `79.9663` for pY only.
+
+#### Copy-paste example — Unimod 393 (Glucosylgalactosyl on K)
+
+```text
+340.100562,K,opt,any,Glucosylgalactosyl,loss=162.0528;324.1056,class=glyco,accession=UNIMOD:393
+```
+
+The two stepwise sugar losses (−Hex `162.0528`, −Hex₂ `324.1056`) are declared in one `loss=` field, separated by `;`. The `class=glyco` tag routes them through the glyco-class loss-ion distribution. The `accession=UNIMOD:393` value is written to the TSV `Modifications` column but does not appear in the PIN.
+
+#### How loss ions are scored
+
+- Loss ions are predicted **only for collisional activation** (CID, HCD, PQD). ETD preserves labile modifications intact and its scoring path suppresses neutral-loss ion prediction entirely.
+- Scoring uses **per-class pooled distributions**: all modifications tagged with the same `class=` value share one trained distribution of loss-ion intensities across bond positions.
+- **v1 trains and validates the `glyco` class only.** The `phospho` and `sulfo` classes are configurable (the parser accepts them and the `class=` attribute is stored), but no trained distributions exist for them yet. Until dedicated models are trained, phospho/sulfo loss ions score as absent — they neither help nor hurt relative to not declaring them. Declaring `class=phospho` or `class=sulfo` now future-proofs the mods.txt for when those models ship.
+
 ---
 
 ## 3. Output formats

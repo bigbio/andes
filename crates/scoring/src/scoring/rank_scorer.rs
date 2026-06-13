@@ -49,6 +49,10 @@ pub struct RankScorer {
     /// Highest observed rank the model distinguishes; ranks beyond this are
     /// clamped down to it before indexing.
     max_rank: u32,
+    /// Optional CLI override for the fragment-matching tolerance (MGF input).
+    /// `None` ⇒ derive from the model's instrument resolution class (the
+    /// historical 20 ppm high-res / 0.5 Da low-res default).
+    fragment_tol_override: Option<model::tolerance::Tolerance>,
 }
 
 impl RankScorer {
@@ -110,6 +114,7 @@ impl RankScorer {
             log_table,
             partition_ion_logs,
             max_rank: param.max_rank as u32,
+            fragment_tol_override: None,
         }
     }
 
@@ -132,6 +137,28 @@ impl RankScorer {
     /// Return the `Param` this scorer was built from.
     pub fn param(&self) -> &Param {
         &self.param
+    }
+
+    /// Set (or clear) the CLI fragment-tolerance override. Used by the search
+    /// binary for metadata-less (MGF) input; metadata-bearing input leaves it
+    /// `None` so behavior is byte-identical to auto-detection.
+    pub fn set_fragment_tol_override(&mut self, tol: Option<model::tolerance::Tolerance>) {
+        self.fragment_tol_override = tol;
+    }
+
+    /// Effective fragment-matching tolerance for Percolator-feature and
+    /// peak-match counting. Returns the CLI override when set, else the
+    /// instrument-derived default: 20 ppm for high-resolution analyzers
+    /// (Kim et al., Nat Commun 5:5277, 2014), 0.5 Da for ion-trap low-res.
+    pub fn feature_match_tolerance(&self) -> model::tolerance::Tolerance {
+        use model::tolerance::Tolerance;
+        self.fragment_tol_override.unwrap_or_else(|| {
+            if self.param.data_type.instrument.is_high_resolution() {
+                Tolerance::Ppm(20.0)
+            } else {
+                Tolerance::Da(0.5)
+            }
+        })
     }
 
     /// LLR for a matched ion observed at intensity `rank` (1-based; rank 1 is
@@ -255,6 +282,37 @@ impl RankScorer {
 mod tests {
     use super::*;
     use crate::testutil::tiny_param;
+
+    /// Build a minimal low-resolution `Param` (LowRes instrument) for
+    /// `feature_match_tolerance` tests. Reuses `tiny_param()` and patches
+    /// `data_type.instrument` to `InstrumentType::LowRes`.
+    fn low_res_param() -> Param {
+        use model::instrument::InstrumentType;
+        let mut p = tiny_param();
+        p.data_type.instrument = InstrumentType::LowRes;
+        p
+    }
+
+    #[test]
+    fn feature_match_tolerance_defaults_by_resolution() {
+        use model::tolerance::Tolerance;
+        // tiny_param() uses QExactive → high-resolution → 20 ppm
+        let hi = RankScorer::new(&tiny_param());
+        assert_eq!(hi.feature_match_tolerance(), Tolerance::Ppm(20.0));
+        // low_res_param() uses LowRes → 0.5 Da
+        let lo = RankScorer::new(&low_res_param());
+        assert_eq!(lo.feature_match_tolerance(), Tolerance::Da(0.5));
+    }
+
+    #[test]
+    fn feature_match_tolerance_honors_override() {
+        use model::tolerance::Tolerance;
+        let mut s = RankScorer::new(&low_res_param());
+        s.set_fragment_tol_override(Some(Tolerance::Da(0.6)));
+        assert_eq!(s.feature_match_tolerance(), Tolerance::Da(0.6));
+        s.set_fragment_tol_override(None);
+        assert_eq!(s.feature_match_tolerance(), Tolerance::Da(0.5));
+    }
 
     #[test]
     fn node_score_log_formula() {

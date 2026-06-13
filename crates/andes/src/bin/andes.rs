@@ -3107,7 +3107,7 @@ fn bundled_store_path() -> PathBuf {
 
 /// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying
 /// all old-ladder normalizations. This is the new entry point used by the
-/// search binary in place of `resolve_bundled_param*`.
+/// search binary, replacing the former filename-based resolution ladder.
 ///
 /// `activation`: the detected or explicitly set `ActivationMethod`.
 /// `instrument`: the detected or explicitly set `InstrumentType` (None = undetected → LowRes).
@@ -3171,8 +3171,8 @@ fn build_selection_key(
 /// Load the scoring [`Param`] from the bundled Parquet store for the given
 /// `(activation, instrument, protocol)` combination.
 ///
-/// This is the new model-resolution path that replaces
-/// `Param::load_from_file(resolve_bundled_param*(...))`. The `model_id`
+/// This is the new model-resolution path, replacing the former
+/// filename-based resolution ladder. The `model_id`
 /// selected from the store will be identical to the lowercased filename
 /// stem of the old `.param` path (guaranteed by the equivalence gate test
 /// `store_selection_matches_old_ladder_for_all_combos`).

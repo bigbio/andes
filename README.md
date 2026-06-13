@@ -85,7 +85,7 @@ andes \
   --fragment-tol-ppm 20
 ```
 
-This runs a tryptic search at 20 ppm precursor tolerance with the bundled **hcd_qexactive_tryp** scoring model (selected via `--fragmentation HCD` + `--fragment-tol-ppm 20`), writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
+This runs a tryptic search at the default 20 ppm precursor tolerance (`--precursor-tol-ppm`, default 20.0), with 20 ppm fragment-matching tolerance and the bundled **hcd_qexactive_tryp** scoring model (both selected via `--fragmentation HCD` + `--fragment-tol-ppm 20`), writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
 
 A row in `out.pin` is one peptide–spectrum match, with the Java-parity Percolator features plus Rust-only additive columns (`EdgeScore`, …) before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`). Full column reference: `DOCS.md` §3a.
 

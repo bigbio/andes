@@ -13,7 +13,8 @@
 //! Scope: DDA-PASEF, MS2 only. `timsrust`'s [`SpectrumReader`] already groups
 //! the TIMS frames into centroided MS2 fragment spectra, each carrying the DDA
 //! precursor it was selected from — exactly the unit the search needs. The ion
-//! mobility dimension is extra metadata MS-GF+ scoring does not use; RT and
+//! mobility dimension is extra metadata the rank-based scorer (Kim et al.,
+//! Nat Commun 5:5277, 2014) does not use; RT and
 //! precursor are carried as usual and mobility is ignored for the base search
 //! (a future Percolator-feature idea, not implemented here). There is no MS1
 //! stream here, so `--chimeric` on `.d` degrades gracefully to a normal search

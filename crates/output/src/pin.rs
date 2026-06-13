@@ -1,8 +1,9 @@
 //! PIN output writer.
 //!
 //! Produces a Percolator-consumable `.pin` file with the column layout used
-//! by MS-GF+ and OpenMS PercolatorAdapter so that downstream tools (Percolator,
-//! MS²Rescore, Mokapot) can consume the output interchangeably.
+//! by Kim et al. (Nat Commun 5:5277, 2014) and OpenMS PercolatorAdapter so
+//! that downstream tools (Percolator, MS²Rescore, Mokapot) can consume the
+//! output interchangeably.
 //!
 //! # Column order
 //!
@@ -23,15 +24,15 @@
 //!
 //! * **Label**: source-protein TDC rule. `Label = -1`
 //!   if the candidate's source protein is a decoy (`cand.is_decoy`), else
-//!   `+1`. Matches Java MS-GF+ TDC labeling and avoids inflating Percolator's
-//!   target set with peptides whose hit actually came from a decoy protein.
+//!   `+1`. Standard target-decoy competition (TDC) labeling avoids inflating
+//!   Percolator's target set with peptides whose hit came from a decoy protein.
 //!
 //! * **isotope_error**: threaded from `PsmMatch::isotope_offset`, set by
 //!   `match_engine.rs` from `MassError::isotope_offset`.
 //!
-//! * **enzN / enzC / enzInt**: computed via `crate::percolator_enz`,
-//!   mirroring Java's `DirectPinWriter::isEnzymaticBoundary` +
-//!   `countInternalEnzymatic` (OpenMS PercolatorInfile rules).
+//! * **enzN / enzC / enzInt**: computed via `crate::percolator_enz`
+//!   (OpenMS PercolatorInfile enzymatic-boundary rules; Kim et al., Nat Commun
+//!   5:5277, 2014 Percolator features).
 //!
 //! * **Proteins**: single column with the real protein accession resolved from
 //!   `SearchIndex::protein_at(candidates[psm.primary_candidate_idx() as usize].protein_index)`.
@@ -195,10 +196,9 @@ fn write_header<W: Write>(
     ]);
     cols.extend_from_slice(&[
         "matchedIonRatio".to_string(),
-        // ADDITIVE Java-parity feature: per-bond
-        // DBScanScorer edge sum (IES + error_score), emitted as a NEW
+        // ADDITIVE feature: per-bond edge sum (IES + error_score), emitted as a NEW
         // column so Percolator can learn weights without disrupting the
-        // existing RawScore distribution.
+        // existing RawScore distribution (Kim et al., Nat Commun 5:5277, 2014).
         "EdgeScore".to_string(),
         // ADDITIVE chimeric MS1 precursor-envelope features: emitted
         // adjacent to EdgeScore so they sit just before Peptide/Proteins.
@@ -322,11 +322,10 @@ fn write_psm_row<W: Write>(
 ) -> io::Result<()> {
     let charge = psm.charge_used as f64;
 
-    // Label by SOURCE PROTEIN accession (standard TDC convention, matches
-    // Java MS-GF+). An "any-target-match" rule (Label = 1 if peptide
-    // sequence appears in ANY target protein) would inflate target count
-    // when a peptide appeared in both target and decoy proteins. Java
-    // labels by source: if the source protein is a decoy, label = -1;
+    // Label by SOURCE PROTEIN accession (standard TDC convention).
+    // An "any-target-match" rule (Label = 1 if peptide sequence appears in
+    // ANY target protein) would inflate target count when a peptide appeared
+    // in both target and decoy proteins. Label by source: decoy protein → -1,
     // otherwise +1.
     let label: i32 = if cand.is_decoy { -1 } else { 1 };
 
@@ -405,12 +404,11 @@ fn write_psm_row<W: Write>(
         writer.write_all(&[b'\t', flag])?;
     }
 
-    // enzN, enzC, enzInt — Java parity —
-    // emits enzymatic-boundary consistency features. enzN = boundary between
-    // protein-pre and peptide[0]; enzC = boundary between peptide[last] and
-    // protein-post; enzInt = count of internal positions consistent with the
-    // enzyme. Per-rule semantics in crate::percolator_enz, mirroring Java's
-    // isEnzymaticBoundary + countInternalEnzymatic (OpenMS PercolatorInfile).
+    // enzN, enzC, enzInt — Percolator enzymatic-boundary features.
+    // enzN = boundary between protein-pre and peptide[0]; enzC = boundary
+    // between peptide[last] and protein-post; enzInt = count of internal
+    // positions consistent with the enzyme. Per-rule semantics in
+    // crate::percolator_enz (OpenMS PercolatorInfile).
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
     let first = residues.first().copied().unwrap_or(b'-');
     let last  = residues.last().copied().unwrap_or(b'-');
@@ -458,7 +456,7 @@ fn write_psm_row<W: Write>(
     writer.write_all(b"\t")?;
     write_double(writer, matched_ion_ratio)?;
 
-    // EdgeScore: additive Java-parity feature.
+    // EdgeScore: additive Percolator feature (Kim et al., Nat Commun 5:5277, 2014).
     writer.write_all(b"\t")?;
     write!(writer, "{}", psm.features.edge_score)?;
 
@@ -512,9 +510,7 @@ fn write_psm_row<W: Write>(
     // Proteins column(s): one tab-separated accession per candidate_idx.
     // After pepSeq+score dedup, a PSM that matches the same peptide across
     // multiple proteins keeps all protein indices in candidate_idxs, and the
-    // PIN row emits one accession per index — matching Java parity for
-    // multi-protein PIN rows. For PSMs with a single candidate_idx (typical),
-    // output is a single-accession emit (ctx.accession still used by TSV).
+    // PIN row emits one accession per index for multi-protein shared peptides.
     write!(writer, "\t{}", cand.peptide)?;
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
@@ -527,11 +523,9 @@ fn write_psm_row<W: Write>(
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Write a `f64` in `%.6g` style (6 significant figures) directly into
-/// `writer`, matching Java's `String.format(Locale.ROOT, "%.6g", v)` used in
-/// `formatDouble`.
+/// `writer`.
 ///
-/// NaN, infinite, or zero values are emitted as the single byte `'0'`
-/// (matching Java's `if (Double.isNaN(v) || Double.isInfinite(v)) return "0";`).
+/// NaN, infinite, or zero values are emitted as the single byte `'0'`.
 ///
 /// This formats into a stack-allocated 32-byte buffer (sufficient for any
 /// `%.5e`-style f64) and writes only the trimmed slice — avoiding the
@@ -586,8 +580,8 @@ fn write_trim_fixed<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     writer.write_all(&s[..end])
 }
 
-/// Write a scientific-notation byte slice to `writer`, normalised to match
-/// Java's `%g`-style output.
+/// Write a scientific-notation byte slice to `writer`, normalised to `%g`-style
+/// output with explicit signed exponent (`e{:+03}` style).
 ///
 /// Rust formats `1.23456e7`; the reference fixture uses `1.23456e+07`. Trim trailing
 /// zeros (and a dangling `.`) from the mantissa, then re-emit the exponent

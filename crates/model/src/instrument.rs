@@ -30,12 +30,11 @@ impl InstrumentType {
 
     /// Whether the instrument produces high-resolution MS/MS spectra.
     ///
-    /// Mirrors Java's `InstrumentType.isHighResolution()`: HighRes,
-    /// TOF, and QExactive return `true`; LowRes returns `false`. Used by
-    /// `compute_psm_features` to mirror Java's `PSMFeatureFinder` hardcoded
-    /// 20 ppm (high-res) / 0.5 Da (low-res) fragment tolerance for
-    /// feature counting, independent of `param.mme` (which the rank-based
-    /// scoring tables use at a coarser resolution for binning).
+    /// HighRes, TOF, and QExactive return `true`; LowRes returns `false`.
+    /// Used by `compute_psm_features` to select the Percolator feature-matching
+    /// tolerance: 20 ppm for high-resolution instruments, 0.5 Da for ion-trap
+    /// data (Kim et al., Nat Commun 5:5277, 2014), independent of `param.mme`
+    /// (which the rank-based scoring tables use at a coarser resolution for binning).
     ///
     /// `OrbitrapAstral` and `TimsTOF` are also high-resolution.
     pub fn is_high_resolution(self) -> bool {

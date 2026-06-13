@@ -181,10 +181,10 @@ pub struct ScoredSpectrum<'a> {
     observed_mass_cache: std::cell::RefCell<Vec<f64>>,
 }
 
-/// Parsed `MSGF_PEAK_WINDOW` / `MSGF_PEAK_PER_WINDOW` override for the windowed
+/// Parsed `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` override for the windowed
 /// peak filter (see `ScoredSpectrum::new`).
 enum PeakFilterEnv {
-    /// `MSGF_PEAK_WINDOW=0` (or ≤0): force the filter off regardless of protocol.
+    /// `ANDES_PEAK_WINDOW=0` (or ≤0): force the filter off regardless of protocol.
     Disabled,
     /// Both env vars set: use this window/K for every spectrum.
     Override(f64, usize),
@@ -198,8 +198,14 @@ enum PeakFilterEnv {
 fn peak_filter_env() -> &'static PeakFilterEnv {
     static CACHE: OnceLock<PeakFilterEnv> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let w = std::env::var("MSGF_PEAK_WINDOW").ok().and_then(|s| s.parse::<f64>().ok());
-        let k = std::env::var("MSGF_PEAK_PER_WINDOW").ok().and_then(|s| s.parse::<usize>().ok());
+        let w = std::env::var("ANDES_PEAK_WINDOW")
+            .or_else(|_| std::env::var("MSGF_PEAK_WINDOW"))
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok());
+        let k = std::env::var("ANDES_PEAK_PER_WINDOW")
+            .or_else(|_| std::env::var("MSGF_PEAK_PER_WINDOW"))
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
         match (w, k) {
             (Some(w), _) if w <= 0.0 => PeakFilterEnv::Disabled,
             (Some(w), Some(k)) => PeakFilterEnv::Override(w, k),
@@ -267,13 +273,14 @@ impl<'a> ScoredSpectrum<'a> {
         // local density: it trims the dense, noisy ion-trap tails of isobaric
         // (TMT/iTRAQ) low-res CID-MS2 spectra while preserving signal spread
         // across m/z. Applies to BOTH training and scoring (shared
-        // ScoredSpectrum). MS-GF+ uses this style of filter.
+        // ScoredSpectrum). Kim et al. (Nat Commun 5:5277, 2014) use this style
+        // of windowed peak filter for isobaric low-res CID-MS2 spectra.
         //
         // Gating: auto-ON for isobaric protocols (validated +~3.5% PSMs@1% on
         // PXD007683 TMT a05058; ~neutral on LFQ; OFF for everything else because
-        // it regresses high-res Astral ~14%). `MSGF_PEAK_WINDOW` /
-        // `MSGF_PEAK_PER_WINDOW` env vars override the window/K for tuning;
-        // `MSGF_PEAK_WINDOW=0` force-disables.
+        // it regresses high-res Astral ~14%). `ANDES_PEAK_WINDOW` /
+        // `ANDES_PEAK_PER_WINDOW` env vars override the window/K for tuning;
+        // `ANDES_PEAK_WINDOW=0` force-disables.
         let window_kk: Option<(f64, usize)> = match peak_filter_env() {
             PeakFilterEnv::Disabled => None,
             PeakFilterEnv::Override(w, k) => Some((*w, *k)),
@@ -1182,7 +1189,8 @@ impl<'a> ScoredSpectrum<'a> {
             .collect()
     }
 
-    /// MS-GF+-style **dense** noise sampling: probe `n_samples` evenly-spaced
+    /// **Dense** noise sampling (Kim et al., Nat Commun 5:5277, 2014): probe
+    /// `n_samples` evenly-spaced
     /// theoretical nominal masses across this peptide's fragment range (both
     /// prefix and suffix orientation) and record, per partition, the
     /// nearest-peak rank or the missing-ion slot. Random positions are almost

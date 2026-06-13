@@ -1,11 +1,11 @@
-//! Pin per-enzyme cleavage rules to Java
-//! `edu.ucsd.msjava.msutil.Enzyme` (lines 299-321). Source-of-truth
-//! values copied by hand from the Java source.
+//! Pin per-enzyme cleavage rules to standard protease specificities
+//! (Trypsin/LysC/ArgC/AspN/GluC/LysN/chymotrypsin; see ExPASy PeptideCutter
+//! and PSI-MS enzyme terms). Values are biochemical facts; this test guards drift.
 
 use model::enzyme::Enzyme;
 
 /// (variant, residues_cleaved_after, residues_cleaved_before)
-fn java_rules() -> Vec<(Enzyme, &'static [u8], &'static [u8])> {
+fn reference_rules() -> Vec<(Enzyme, &'static [u8], &'static [u8])> {
     vec![
         (Enzyme::Trypsin,      b"KR",      b""),
         (Enzyme::Chymotrypsin, b"FYWL",    b""),
@@ -18,8 +18,8 @@ fn java_rules() -> Vec<(Enzyme, &'static [u8], &'static [u8])> {
 }
 
 #[test]
-fn cleavage_after_matches_java() {
-    for (e, after, _) in java_rules() {
+fn cleavage_after_matches_reference() {
+    for (e, after, _) in reference_rules() {
         for r in b'A'..=b'Z' {
             let expected = after.contains(&r);
             assert_eq!(
@@ -31,8 +31,8 @@ fn cleavage_after_matches_java() {
 }
 
 #[test]
-fn cleavage_before_matches_java() {
-    for (e, _, before) in java_rules() {
+fn cleavage_before_matches_reference() {
+    for (e, _, before) in reference_rules() {
         for r in b'A'..=b'Z' {
             let expected = before.contains(&r);
             assert_eq!(

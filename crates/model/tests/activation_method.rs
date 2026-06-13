@@ -1,19 +1,19 @@
-//! Pin `ActivationMethod` variants to Java
-//! `edu.ucsd.msjava.msutil.ActivationMethod` (lines 125-131).
-//! Source-of-truth strings copied by hand.
+//! Pin `ActivationMethod` variants to PSI-MS activation method terms
+//! (MS:1000133 CID, MS:1000599 ETD, MS:1000422 HCD, MS:1000598 PQD,
+//! MS:1000776 UVPD).
 
 use model::ActivationMethod;
 
 #[test]
-fn java_canonical_names_resolve() {
-    let java: &[(ActivationMethod, &str)] = &[
+fn canonical_names_resolve() {
+    let reference: &[(ActivationMethod, &str)] = &[
         (ActivationMethod::CID,  "CID"),
         (ActivationMethod::ETD,  "ETD"),
         (ActivationMethod::HCD,  "HCD"),
         (ActivationMethod::PQD,  "PQD"),
         (ActivationMethod::UVPD, "UVPD"),
     ];
-    for &(variant, name) in java {
+    for &(variant, name) in reference {
         assert_eq!(variant.name(), name);
         assert_eq!(ActivationMethod::from_name(name), Some(variant));
     }

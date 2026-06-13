@@ -18,10 +18,10 @@ use model::{ActivationMethod, InstrumentType, Spectrum};
 // ── CV accessions we care about ─────────────────────────────────────────────
 
 // Mass-analyzer cvParams used by `detect_instrument_type`. Sourced from the
-// PSI-MS ontology. Java MS-GF+ doesn't auto-detect these — it just defaults
-// to LOW_RESOLUTION_LTQ when no `-inst` flag is given — but for the Rust
-// port's per-file auto-routing we read them to pick a sensible bundled
-// `.param` file (LTQ Velos data → CID_LowRes; Orbitrap CID → CID_HighRes).
+// PSI-MS controlled vocabulary (HUPO-PSI MS ontology). When no `--instrument`
+// flag is given, the CLI defaults to low-resolution ion-trap routing; per-file
+// auto-detection reads these terms to pick a sensible bundled `.param` file
+// (LTQ Velos data → CID_LowRes; Orbitrap CID → CID_HighRes).
 //
 // Ion-trap family → InstrumentType::LowRes.
 const CV_ANALYZER_ION_TRAP:           &str = "MS:1000264"; // ion trap (generic)
@@ -66,19 +66,18 @@ const CV_32BIT: &str = "MS:1000521";
 const CV_ZLIB: &str = "MS:1000574";
 
 // Activation-method CV accessions (inside <precursor><activation>).
-// These mirror Java MS-GF+'s `ActivationMethod.cvTable` (Java parity)
-// — we map each to one of our five
-// canonical ActivationMethod variants. Unknown / unhandled child terms
-// fall through and the spectrum's activation_method stays None.
+// Mapped to the five canonical ActivationMethod variants per PSI-MS
+// (HUPO-PSI MS ontology). Unknown / unhandled child terms fall through
+// and the spectrum's activation_method stays None.
 const CV_CID: &str  = "MS:1000133"; // collision-induced dissociation
 const CV_HCD: &str  = "MS:1000422"; // beam-type CID = HCD
 const CV_ETD: &str  = "MS:1000598"; // electron transfer dissociation
 const CV_PQD: &str  = "MS:1000599"; // pulsed Q dissociation
-const CV_UVPD: &str = "MS:1000435"; // photodissociation (Java uses this for UVPD)
+const CV_UVPD: &str = "MS:1000435"; // photodissociation (PSI-MS UVPD term)
 // ECD is MS:1000250; we don't have a dedicated variant for it — callers
 // that need ECD usually look up either ETD or treat as electron-based.
-// We map ECD → ETD to mirror Java's electron-based grouping when ECD is
-// the only signal (Java only registers ETD/CID/HCD/PQD/UVPD in cvTable).
+// We map ECD → ETD for electron-based activation grouping when ECD is
+// the only signal (canonical table covers ETD/CID/HCD/PQD/UVPD).
 const CV_ECD: &str  = "MS:1000250"; // electron capture dissociation
 
 /// Unit: minutes → multiply by 60 to get seconds.
@@ -166,7 +165,8 @@ struct SpectrumBuilder {
     ///   `<userParam name="[Thermo Trailer Extra]Monoisotopic M/Z:" value="..."/>`
     /// When present, this is preferred over `selectedIon.MS:1000744` because
     /// the raw isolation m/z may be off-by-one-or-more C13 isotopes for
-    /// Orbitrap-style data — matching Java MS-GF+'s precursor handling.
+    /// Orbitrap-style data — Thermo firmware deisotoping is preferred over
+    /// the raw isolation m/z when the trailer userParam is present.
     monoisotopic_mz_override: Option<f64>,
     precursor_charge: Option<i32>,
     precursor_intensity: Option<f32>,
@@ -310,7 +310,8 @@ impl<R: BufRead> MzMLReader<R> {
         // the instrument firmware's deisotoping is more accurate than the
         // raw isolation m/z (selectedIon.MS:1000744) for Orbitrap-class
         // data. Falls back to the selected ion when the trailer is absent.
-        // Matches Java MS-GF+'s behavior.
+        // Kim et al. (Nat Commun 5:5277, 2014) use the deisotoped precursor
+        // mass for Orbitrap-class data when available.
         let precursor_mz = match (sb.monoisotopic_mz_override, sb.precursor_mz) {
             (Some(m), _) => m,
             (None, Some(v)) => v,
@@ -458,23 +459,18 @@ impl<R: BufRead> MzMLReader<R> {
             }
 
             // Activation-method cvParams under <precursor><activation>.
-            // Java's `ActivationMethod.cvTable` maps the same five
-            // accessions. ECD (MS:1000250) is not in Java's table; we
-            // mirror Java's electron-based grouping by mapping ECD → ETD
-            // here, so downstream param routing picks an ETD-trained
-            // model when ECD is the only signal.
+            // PSI-MS accessions map to the five canonical variants. ECD
+            // (MS:1000250) is grouped with ETD for electron-based param routing.
             //
-            // Selection rule (Java parity for activation-method selection):
-            //   - ETD always wins (set unconditionally; matches Java's
-            //     `isETD` short-circuit).
+            // Selection rule:
+            //   - ETD always wins (unconditional override).
             //   - Other methods: first-wins. A spectrum with multiple
             //     `<precursor><activation>` blocks (MS3 SPS, supplementary
             //     activation) records the first activation we see.
             //
             // Why first-wins matters: TMT SPS-MS3 mzMLs chain CID (MS2
-            // isolation) → HCD (MS3 fragmentation). Java's first-wins
-            // routes those to a CID-trained model, which is the
-            // historical behaviour we must mirror.
+            // isolation) → HCD (MS3 fragmentation). First-wins routes those
+            // to a CID-trained model.
             CV_CID  if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     if sb.activation_method.is_none() {
@@ -490,7 +486,7 @@ impl<R: BufRead> MzMLReader<R> {
                 }
             }
             CV_ETD  if self.state == State::Activation => {
-                // ETD wins unconditionally to mirror Java's `isETD` flag.
+                // ETD wins unconditionally over other activation methods.
                 if let Some(sb) = self.current.as_mut() {
                     sb.activation_method = Some(ActivationMethod::ETD);
                 }
@@ -623,8 +619,7 @@ impl<R: BufRead> MzMLReader<R> {
                         // monoisotopic-correction recorded by the instrument
                         // firmware. It lives under <scan> and is preferred
                         // over selectedIon.MS:1000744 (raw isolation m/z) when
-                        // present. See Java MS-GF+'s mzML reader for the same
-                        // behavior — Orbitrap precursors are routinely
+                        // present. Orbitrap precursors are routinely
                         // mis-isotoped by the isolation logic, and the
                         // Trailer Extra value carries the deisotoped C0 peak.
                         if let (Some(name), Some(val)) =
@@ -1071,9 +1066,8 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                                 _ => None,
                             };
                             if let Some(t) = typ {
-                                // First analyzer wins for a given IC (matches
-                                // Java's "first mass analyzer" assumption when
-                                // mzMLs declare more than one).
+                                // First analyzer wins for a given IC when
+                                // mzMLs declare more than one (PSI-MS practice).
                                 if current_ic_type.is_none() {
                                     current_ic_type = Some(t);
                                 }
@@ -1671,10 +1665,9 @@ mod tests {
     }
 
     /// Thermo Trailer Extra `Monoisotopic M/Z` userParam under `<scan>`
-    /// overrides the raw isolation m/z (`selectedIon.MS:1000744`). This
-    /// matches Java MS-GF+'s precursor-mass handling for Thermo data and is
-    /// load-bearing for TMT / Orbitrap recall (without it, Rust reads
-    /// off-by-isotope precursor masses and misses real peptide matches).
+    /// overrides the raw isolation m/z (`selectedIon.MS:1000744`). Kim et al.
+    /// (Nat Commun 5:5277, 2014) prefer the firmware-deisotoped precursor for
+    /// Thermo Orbitrap data; load-bearing for TMT / Orbitrap recall.
     #[test]
     fn thermo_trailer_monoisotopic_overrides_selected_ion_mz() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -1872,9 +1865,8 @@ mod tests {
     }
 
     /// SPS-MS3 mzMLs chain `<precursor><activation>` blocks (CID then HCD).
-    /// Java's `StaxMzMLParser` uses first-wins (modulo ETD precedence).
-    /// We mirror that so TMT SPS data routes to a CID-trained model the
-    /// same way Java does.
+    /// First-wins selection (modulo ETD precedence) routes TMT SPS data to a
+    /// CID-trained model.
     #[test]
     fn multiple_activations_first_wins() {
         let mz_b64 = encode_f64_b64(&[100.0]);
@@ -1936,7 +1928,7 @@ mod tests {
     }
 
     /// ETD has unconditional precedence over CID/HCD within a single
-    /// `<activation>` block (mirrors Java's `isETD` short-circuit).
+    /// `<activation>` block (PSI-MS activation precedence rule).
     #[test]
     fn etd_precedence_over_other_methods() {
         let mz_b64 = encode_f64_b64(&[100.0]);

@@ -1,10 +1,7 @@
-//! Percolator-style enzymatic-boundary helpers.
-//!
-//! Verbatim port of Java's `DirectPinWriter.isEnzymaticBoundary` +
-//! `countInternalEnzymatic` (which themselves mirror OpenMS's
-//! `PercolatorInfile::isEnz_`). These compute the `enzN`, `enzC`, and
-//! `enzInt` PIN columns that feed Percolator as enzymatic-cleavage
-//! consistency features.
+//! Percolator-style enzymatic-boundary helpers (OpenMS PercolatorInfile rules).
+//! These compute the `enzN`, `enzC`, and `enzInt` PIN columns that feed
+//! Percolator as enzymatic-cleavage consistency features (Kim et al., Nat
+//! Commun 5:5277, 2014).
 //!
 //! ## Conventions
 //!
@@ -12,10 +9,10 @@
 //!   (n = the residue immediately N-terminal, c = the residue immediately
 //!   C-terminal of the boundary).
 //! - Protein-boundary flanking characters always count as enzymatic
-//!   (matching Java's `n == '-' || c == '-'` short-circuit). Rust's
-//!   `Peptide::pre` uses `_` for the protein N-terminal boundary and `-`
-//!   for the protein C-terminal boundary, so both bytes are normalised
-//!   to the same "boundary" semantics here.
+//!   (OpenMS `n == '-' || c == '-'` short-circuit). Rust's `Peptide::pre`
+//!   uses `_` for the protein N-terminal boundary and `-` for the protein
+//!   C-terminal boundary, so both bytes are normalised to the same "boundary"
+//!   semantics here.
 //! - Unknown / non-builtin enzymes return `true` for any boundary —
 //!   matching OpenMS's default "else" branch and Percolator's
 //!   unspecific-cleavage semantics.
@@ -28,12 +25,10 @@ fn is_protein_boundary(c: u8) -> bool {
 }
 
 /// Returns `true` when the boundary between residues `n` and `c` is
-/// consistent with the enzyme's cleavage rule. Mirrors Java
-/// `DirectPinWriter.isEnzymaticBoundary`.
+/// consistent with the enzyme's cleavage rule (OpenMS PercolatorInfile).
 pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
-    // Protein boundaries are always enzymatic — Java's
-    // `n == '-' || c == '-'` short-circuit, generalised to Rust's
-    // `_`/`-` boundary-byte convention.
+    // Protein boundaries are always enzymatic (OpenMS short-circuit),
+    // generalised to Rust's `_`/`-` boundary-byte convention.
     if is_protein_boundary(n) || is_protein_boundary(c) {
         return true;
     }
@@ -45,17 +40,14 @@ pub(crate) fn is_enzymatic_boundary(n: u8, c: u8, enzyme: Enzyme) -> bool {
         Enzyme::GluC => n == b'E' && c != b'P',
         Enzyme::ArgC => n == b'R' && c != b'P',
         Enzyme::AspN => c == b'D',
-        // ALP / NoCleavage / NonSpecific have no OpenMS counterpart in
-        // Java's enzyme name map; Java's default "unknown enzyme" branch
-        // returns true. Mirror that here so unspecific searches don't
-        // penalise every PSM as non-enzymatic.
+        // Unknown enzymes: OpenMS default "else" branch returns true so
+        // unspecific searches don't penalise every PSM as non-enzymatic.
         Enzyme::AlphaLP | Enzyme::NoCleavage | Enzyme::NonSpecific => true,
     }
 }
 
-/// Count internal boundaries `i ∈ [1, len)` where
-/// `is_enzymatic_boundary(residues[i-1], residues[i], enzyme)` is true.
-/// Mirrors Java `DirectPinWriter.countInternalEnzymatic`.
+/// Count internal boundaries consistent with the enzyme cleavage rule
+/// (OpenMS PercolatorInfile).
 ///
 /// For an empty / single-residue peptide returns `0` (no internal
 /// boundaries to evaluate). For an "unknown" enzyme (universal-true
@@ -129,7 +121,7 @@ mod tests {
     fn unspecific_enzymes_always_cleavable() {
         assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::AlphaLP));
         assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::NonSpecific));
-        // NoCleavage follows Java's "unknown enzyme name" → true convention.
+        // NoCleavage follows the unknown-enzyme → true convention (OpenMS default).
         assert!(is_enzymatic_boundary(b'A', b'A', Enzyme::NoCleavage));
     }
 

@@ -162,9 +162,9 @@ struct SearchArgs {
 
     /// Number of Tolerable Termini (enzymatic-cleavage enforcement at span
     /// boundaries). `fully`: both termini must be cleavage sites (strict,
-    /// equivalent to Java -ntt 2). `semi`: at least one terminus must be a
-    /// cleavage site (Java -ntt 1). `non-specific`: neither terminus needs
-    /// to be a cleavage site (Java -ntt 0). Legacy numeric 0/1/2 still accepted.
+    /// equivalent to legacy `-ntt 2`). `semi`: at least one terminus must be a
+    /// cleavage site (legacy `-ntt 1`). `non-specific`: neither terminus needs
+    /// to be a cleavage site (legacy `-ntt 0`). Legacy numeric 0/1/2 still accepted.
     #[arg(long = "enzyme-specificity", alias = "ntt",
           default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
@@ -214,17 +214,17 @@ struct SearchArgs {
     mods: Option<PathBuf>,
 
     /// Fragmentation method. Named values: auto, CID, ETD, HCD, UVPD.
-    /// Legacy numeric (Java MS-GF+ `-m`): 0=auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD.
+    /// Legacy numeric CLI indices: 0=auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD.
     #[arg(long, default_value = "auto", value_parser = parse_fragmentation)]
     fragmentation: Fragmentation,
 
     /// Instrument class. Named values: low-res, high-res, TOF, QExactive.
-    /// Legacy numeric (Java MS-GF+ `-inst`): 0=low-res, 1=high-res, 2=TOF, 3=QExactive.
+    /// Legacy numeric CLI indices: 0=low-res, 1=high-res, 2=TOF, 3=QExactive.
     #[arg(long, default_value = "low-res", value_parser = parse_instrument)]
     instrument: Instrument,
 
     /// Search protocol. Named values: auto, phospho, iTRAQ, iTRAQ-phospho, TMT, standard.
-    /// Legacy numeric (Java MS-GF+ `-protocol`): 0=auto, 1=phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=standard.
+    /// Legacy numeric CLI indices: 0=auto, 1=phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=standard.
     #[arg(long, default_value = "auto", value_parser = parse_protocol)]
     protocol: Protocol,
 
@@ -477,7 +477,7 @@ struct TrainFromMsnetArgs {
 
     /// Optional path to an independent prior model store. Sparse partitions in
     /// the trained model shrink toward the matching prior model instead of the
-    /// corpus-internal pool. Must be own-data (NOT the MS-GF+ seed) to stay
+    /// corpus-internal pool. Must be own-data (NOT a bundled seed model) to stay
     /// relicense-safe.
     #[arg(long)]
     prior_model_store: Option<PathBuf>,
@@ -487,8 +487,8 @@ struct TrainFromMsnetArgs {
     #[arg(long)]
     prior_model: Option<String>,
 
-    /// Apply MS-GF+-style rank-window smoothing to signal rank distributions
-    /// (improves generalization of own-trained high-res models).
+    /// Apply widening rank-window smoothing to signal rank distributions
+    /// (Kim et al., Nat Commun 5:5277, 2014).
     #[arg(long)]
     rank_smoothing: bool,
 }
@@ -620,27 +620,16 @@ fn configure_bundled_dotnet() {
     }
 }
 
-/// Print VmRSS for the current process under MSGF_RSS_PROBE=1. No-op
+/// Print VmRSS for the current process when `ANDES_RSS_PROBE=1`. No-op
 /// otherwise and a no-op on non-Linux platforms regardless of the env var.
-/// (Legacy name MSGFRUST_RSS_PROBE is accepted with a deprecation warning.)
 ///
 /// We gate behind an env var so production runs stay quiet; flip the var on
 /// when debugging memory regressions.
 fn log_rss(tag: &str) {
-    // Accept both new and legacy env var names. Legacy emits the
-    // deprecation warning once per process (sync::Once guard).
-    let new_set = std::env::var_os("MSGF_RSS_PROBE").is_some();
-    let legacy_set = std::env::var_os("MSGFRUST_RSS_PROBE").is_some();
-    if legacy_set && !new_set {
-        static LEGACY_WARN_ONCE: std::sync::Once = std::sync::Once::new();
-        LEGACY_WARN_ONCE.call_once(|| {
-            eprintln!(
-                "WARN: MSGFRUST_RSS_PROBE is deprecated; use MSGF_RSS_PROBE \
-                 (legacy name accepted in this release, will be removed next)"
-            );
-        });
-    }
-    if !new_set && !legacy_set {
+    let probe_set = std::env::var_os("ANDES_RSS_PROBE").is_some()
+        || std::env::var_os("MSGF_RSS_PROBE").is_some()
+        || std::env::var_os("MSGFRUST_RSS_PROBE").is_some();
+    if !probe_set {
         return;
     }
     #[cfg(target_os = "linux")]
@@ -983,7 +972,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 3. Build AminoAcidSet ────────────────────────────────────────────────
     //
-    // If --mod is given, parse the Java-format mods.txt file. Otherwise
+    // If --mod is given, parse the mods.txt file. Otherwise
     // fall back to andes's historical defaults (CAM fixed on C,
     // Oxidation variable on M) so existing tests keep their behaviour.
     //
@@ -2983,7 +2972,7 @@ fn cli_flags_to_activation_instrument(
 /// `.param` filename and resolve it under
 /// `resources/ionstat/` relative to the cargo manifest dir.
 ///
-/// CLI indices match Java's:
+/// CLI indices for legacy numeric flags:
 /// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
 /// - instrument:    0=LowRes,   1=HighRes, 2=TOF, 3=QExactive
 /// - protocol:      0=Automatic,1=Phosphorylation, 2=iTRAQ,
@@ -2994,7 +2983,7 @@ fn cli_flags_to_activation_instrument(
 /// behaviour). Only Tryp is supported as the enzyme component for now;
 /// other enzymes require the user to pass `--param-file` directly.
 ///
-/// Walks Java's `NewScorerFactory.get(...)` fallback ladder: try the exact
+/// Bundled `.param` resolution ladder: try the exact
 /// `{frag}_{inst}_Tryp{protocol}.param` first; if that doesn't resolve, drop
 /// the protocol suffix; if that also doesn't resolve, use the final
 /// `(frag, inst)`-keyed ladder. Returns an error only if even the
@@ -3021,9 +3010,9 @@ fn resolve_bundled_param(
         return canonicalize_bundled("HCD_QExactive_Tryp.param");
     }
 
-    // Step 1: Normalize. Java's normalization rules mirrored here:
-    //   - Auto fragmentation → CID (Java's "null/PQD → CID")
-    //   - HCD with low-res inst → upgrade to QExactive (Java's HCD-upgrade rule)
+    // Step 1: Normalize.
+    //   - Auto fragmentation → CID
+    //   - HCD with low-res inst → upgrade to QExactive
     let frag = match fragmentation {
         Fragmentation::Auto => "CID",
         Fragmentation::Cid  => "CID",
@@ -3059,26 +3048,23 @@ fn resolve_bundled_param(
     }
 
     // Step 2: Drop protocol — try `{frag}_{inst}_Tryp.param`.
-    // This mirrors Java parity: `return get(method, instType, enzyme)` fallback
-    // (drop protocol suffix when exact match is missing). For (CID, HighRes, Tryp, TMT) this
-    // lands on `CID_HighRes_Tryp.param`, which IS what Java would pick when
-    // the protocol-specific file is missing.
+    // For (CID, HighRes, Tryp, TMT) this lands on `CID_HighRes_Tryp.param`
+    // when the protocol-specific file is missing.
     if !prot_suffix.is_empty() {
         let no_protocol = format!("{frag}_{inst}_Tryp.param");
         if let Ok(path) = canonicalize_bundled(&no_protocol) {
             eprintln!(
                 "Param resolver: `{exact}` not bundled; falling back to `{no_protocol}` \
-                 (Java NewScorerFactory drops protocol suffix when exact match missing)",
+                 (protocol suffix dropped when exact match missing)",
             );
             return Ok(path);
         }
     }
 
-    // Step 3: Alternate enzyme — Java tries Trypsin (for C-term enzymes) or
-    // LysN (for N-term enzymes). We always use Tryp here, so this step is
-    // a no-op for now. If/when N-term enzyme support lands, replicate this.
+    // Step 3: Alternate enzyme — try Trypsin (for C-term enzymes) or LysN
+    // (for N-term enzymes). We always use Tryp here for now.
 
-    // Step 4: Final fallback ladder (Java parity for scorer factory fallback).
+    // Step 4: Final fallback ladder by (fragmentation, instrument).
     //   - HCD + (TOF|HighRes) + C-term → CID_TOF_Tryp
     //   - ETD + C-term                  → ETD_LowRes_Tryp
     //   - Non-electron + N-term         → CID_LowRes_LysN  (skipped; N-term TBD)
@@ -3092,7 +3078,7 @@ fn resolve_bundled_param(
     };
     eprintln!(
         "Param resolver: `{exact}` not bundled and protocol-less drop also missing; \
-         using final fallback `{final_fallback}` (Java NewScorerFactory final ladder)",
+         using final fallback `{final_fallback}` (final resolution ladder)",
     );
     canonicalize_bundled(final_fallback)
 }
@@ -3183,28 +3169,20 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 
 /// Resolve a bundled `.param` file for the given activation method.
 ///
-/// This is the auto-detect path: we already know the activation, and we
-/// pick the bundled instrument+enzyme pair that best matches the dataset.
-/// Mirrors Java parity for per-spectrum param dispatch when the user passes `-m 0`
-/// (ASWRITTEN), but applied at file-wide granularity here.
+/// Auto-detect path: pick the bundled instrument+enzyme pair that best matches
+/// the dataset when the user passes fragmentation `auto` (per-spectrum param
+/// dispatch at file-wide granularity).
 ///
 /// The `detected_instrument` argument is the instrument type detected by
 /// scanning the mzML's `<instrumentConfiguration>` blocks (see
 /// `input::detect_instrument_type`). `None` means we couldn't detect it
-/// (older mzML, MGF, etc.) — in that case we mirror Java's
-/// `NewScorerFactory.get` default of `LOW_RESOLUTION_LTQ`.
+/// (older mzML, MGF, etc.) — defaults to low-resolution ion-trap routing.
 ///
 /// Mapping (Tryp / no-protocol unless protocol overrides):
 ///   - CID  → frag=1, inst=detected (LowRes when none).
-///     LowRes for LTQ Velos / ion-trap data; HighRes / QExactive
-///     for Orbitrap data. Matches Java's default + the user-supplied
-///     `-inst` path.
-///   - HCD  → frag=3, inst=detected. `resolve_bundled_param`'s Java-mirror
-///     normalization upgrades HCD with non-(HighRes|QExactive) to
-///     QExactive, so HCD on LTQ data still routes to a QExactive
-///     model (Java does the same).
+///   - HCD  → frag=3, inst=detected (HCD + low-res upgrades to QExactive).
 ///   - ETD  → frag=2, inst=detected.
-///   - PQD  → CID (Java collapses PQD → CID in `NewScorerFactory.get`).
+///   - PQD  → CID (PQD collapsed to CID for model routing).
 ///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
 ///
 /// Reference implementation of the historical activation-aware resolution ladder
@@ -3221,7 +3199,7 @@ fn resolve_bundled_param_for_activation(
         ActivationMethod::ETD  => Fragmentation::Etd,
         ActivationMethod::HCD  => Fragmentation::Hcd,
         ActivationMethod::UVPD => Fragmentation::Uvpd,
-        // PQD → CID (Java's NewScorerFactory rule: "PQD or null → CID").
+        // PQD → CID for model routing.
         ActivationMethod::PQD  => Fragmentation::Cid,
     };
     // New instrument classes fall back to their family for model resolution
@@ -3310,7 +3288,7 @@ fn build_selection_key(
 ) -> SelectionKey {
     use std::collections::BTreeSet;
 
-    // 1. PQD → CID (Java's NewScorerFactory rule).
+    // 1. PQD → CID for model routing.
     let act_str: &str = match activation {
         ActivationMethod::PQD => "CID",
         other                 => other.name(),

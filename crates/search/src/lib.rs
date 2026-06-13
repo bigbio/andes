@@ -19,7 +19,7 @@ pub mod search_params;
 
 // Convenience re-exports.
 pub use candidate_gen::enumerate_candidates;
-pub use decoy::{reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
+pub use decoy::{normalize_decoy_prefix, reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
 pub use match_engine::{match_spectra, run_pass2_coisolation, PreparedSearch};
 pub use mass_calibrator::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,

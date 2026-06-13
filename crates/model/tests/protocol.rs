@@ -1,11 +1,10 @@
-//! Pin `Protocol` variants to Java `edu.ucsd.msjava.msutil.Protocol`
-//! (lines 56-61).
+//! Pin `Protocol` variant names to the andes search-protocol enum.
 
 use model::Protocol;
 
 #[test]
-fn java_canonical_names_resolve() {
-    let java: &[(Protocol, &str)] = &[
+fn canonical_names_resolve() {
+    let reference: &[(Protocol, &str)] = &[
         (Protocol::Automatic,       "Automatic"),
         (Protocol::Phosphorylation, "Phosphorylation"),
         (Protocol::ITRAQ,           "iTRAQ"),
@@ -13,7 +12,7 @@ fn java_canonical_names_resolve() {
         (Protocol::TMT,             "TMT"),
         (Protocol::Standard,        "Standard"),
     ];
-    for &(variant, name) in java {
+    for &(variant, name) in reference {
         assert_eq!(variant.name(), name);
         assert_eq!(Protocol::from_name(name), Some(variant));
     }

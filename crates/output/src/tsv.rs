@@ -5,7 +5,7 @@
 //! ```text
 //! #SpecFile  SpecID  ScanNum  [Title — only when is_mgf]  FragMethod
 //! Precursor  IsotopeError  PrecursorError(ppm|Da)  Charge
-//! Peptide  Protein  MSGFScore
+//! Peptide  Protein  RawScore
 //! ```
 //!
 //! # Column semantics
@@ -41,7 +41,7 @@ use model::tolerance::Tolerance;
 /// `#SpecFile` column.
 ///
 /// `is_mgf` controls whether a `Title` column is emitted in the header and
-/// rows, matching Java's behaviour for MGF vs mzML input.
+/// rows, matching MGF vs mzML output conventions.
 #[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
 pub fn write_tsv(
     output_path: &std::path::Path,
@@ -107,9 +107,8 @@ fn write_header<W: Write>(
         "Peptide",
         "Protein",
     ]);
-    // MSGFScore (the integer RawScore) is the sole score column. The GF-derived
-    // DeNovoScore / SpecEValue / EValue columns are no longer emitted.
-    cols.push("MSGFScore");
+    // RawScore (integer-rounded rank score) is the sole score column.
+    cols.push("RawScore");
 
     writeln!(writer, "{}", cols.join("\t"))
 }
@@ -199,9 +198,8 @@ fn write_psm_row<W: Write>(
     let peptide = &cand.peptide;
     let protein = &ctx.accession;
 
-    // MSGFScore: integer-rounded raw score (the sole score column now that the
-    // GF-derived DeNovoScore / SpecEValue / EValue are no longer emitted).
-    let msgf_score = psm.score.round() as i32;
+    // RawScore: integer-rounded rank score (sole score column).
+    let raw_score = psm.score.round() as i32;
 
     let lead = if is_mgf {
         format!(
@@ -233,7 +231,7 @@ fn write_psm_row<W: Write>(
             protein,
         )
     };
-    writeln!(writer, "{}\t{}", lead, msgf_score)
+    writeln!(writer, "{}\t{}", lead, raw_score)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -381,7 +379,7 @@ mod tests {
                 "Charge",
                 "Peptide",
                 "Protein",
-                "MSGFScore",
+                "RawScore",
             ],
             "Header columns must match expected order when is_mgf=true"
         );
@@ -445,9 +443,9 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 3, "should have 3 data rows");
 
-        // MSGFScore column (index 11 when is_mgf=true: 0=#SpecFile 1=SpecID
+        // RawScore column (index 11 when is_mgf=true: 0=#SpecFile 1=SpecID
         // 2=ScanNum 3=Title 4=FragMethod 5=Precursor 6=IsotopeError 7=PrecursorError
-        // 8=Charge 9=Peptide 10=Protein 11=MSGFScore)
+        // 8=Charge 9=Peptide 10=Protein 11=RawScore)
         let scores: Vec<&str> = rows.iter().map(|r| r[11].as_str()).collect();
 
         // Highest RawScore should come first, lowest last.

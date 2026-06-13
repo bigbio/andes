@@ -262,7 +262,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     for ((c, s), n) in &partition_counts {
         println!("    charge={} seg={}: {} partitions", c, s, n);
     }
-    if std::env::var_os("MSGF_TRACE_DUMP_PARTITIONS").is_some() {
+    if std::env::var_os("ANDES_TRACE_DUMP_PARTITIONS").is_some()
+        || std::env::var_os("MSGF_TRACE_DUMP_PARTITIONS").is_some()
+    {
         println!("  ALL partitions (idx, c, pm, seg):");
         for (i, part) in param.partitions.iter().enumerate() {
             println!("    [{}] c={} pm={} seg={}", i, part.charge, part.parent_mass, part.seg_num);

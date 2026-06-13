@@ -52,10 +52,9 @@ pub struct PsmFeatures {
     /// Population standard deviation of signed relative errors (ppm) for top-7 ions.
     pub stdev_rel_error_top7: f32,
 
-    // ── Additive Java-parity features ──────────────────────────────────────
-    /// Per-bond edge score sum, mirroring Java's `DBScanScorer.getScore`
-    /// edge loop (IES + error_score per bond). Emitted as a NEW `EdgeScore`
-    /// PIN column alongside the unchanged `RawScore`, so Percolator can
+    // ── Additive Percolator features ──────────────────────────────────────
+    /// Per-bond edge score sum (IES + error_score per bond; Kim et al.,
+    /// Nat Commun 5:5277, 2014). Emitted as the `EdgeScore` PIN column alongside the unchanged `RawScore`, so Percolator can
     /// learn weights without disrupting the existing RawScore distribution.
     /// Kept separate from `RawScore` rather than blended into it.
     /// Computed via `psm_edge_score` in `score_psm.rs`.
@@ -228,8 +227,8 @@ pub struct PsmMatch {
     /// share the same peptide sequence and rounded score (typically the same
     /// peptide matched against multiple proteins, e.g. shared tryptic
     /// peptides in target+decoy concat). The PIN writer iterates this Vec to
-    /// emit one tab-separated `Proteins` column per row, matching Java parity
-    /// for the Proteins column in PIN output.
+    /// emit one tab-separated `Proteins` column per row for multi-protein
+    /// shared peptides in the PIN output.
     ///
     /// Every real PSM has length ≥ 1 with valid indices into
     /// `PreparedSearch.candidates`. Test fixtures that don't need to resolve
@@ -243,14 +242,11 @@ pub struct PsmMatch {
     /// This is what gets emitted in the `RawScore` PIN column. Used by
     /// Percolator as one of many features.
     pub score: f32,
-    /// Queue-ordering score = `node + cleavage + edge`. Java's
-    /// `DBScanScorer.getScore` returns `node + edge` and Java parity adds
-    /// cleavage, so Java's `match.score` (used by its `PriorityQueue`
-    /// ordering) is `node + cleavage + edge`. Rust's pin RawScore stays at
-    /// `node + cleavage` for Percolator distribution stability; the
-    /// SEPARATE `EdgeScore` PIN column carries the `+edge` contribution.
-    /// `rank_score` mirrors Java's queue-ordering key without changing the
-    /// pin RawScore distribution.
+    /// Queue-ordering score = `node + cleavage + edge` (Kim et al., Nat Commun
+    /// 5:5277, 2014). Pin RawScore stays at `node + cleavage` for Percolator
+    /// distribution stability; the separate `EdgeScore` PIN column carries
+    /// the edge contribution. `rank_score` is the queue-ordering key without
+    /// changing the pin RawScore distribution.
     ///
     /// **No automatic default**: PsmMatch does not implement `Default`, and
     /// callers MUST set `rank_score` explicitly. Test fixtures that build
@@ -318,11 +314,9 @@ impl PartialOrd for PsmMatch {
 
 /// `rank_score` descending (higher = better).
 ///
-/// `rank_score` is the Java-aligned queue-ordering key `node +
-/// cleavage + edge`, so the queue selects Java-equivalent top-1 PSMs even
-/// though the PIN RawScore distribution stays unchanged at `node + cleavage`.
-/// With the generating function removed, `rank_score` is the sole ranking
-/// signal for both queue retention and output ordering.
+/// `rank_score` = `node + cleavage + edge` (Kim et al., Nat Commun 5:5277,
+/// 2014) is the sole ranking signal for queue retention and output ordering.
+/// Pin RawScore (`node + cleavage`) is unchanged for Percolator compatibility.
 ///
 /// For callers / test fixtures that never set `rank_score`, the
 /// default of 0.0 means an unset `rank_score` would lose to a set one. The
@@ -364,10 +358,9 @@ impl TopNQueue {
     /// `Reverse<PsmMatch>`) puts the *worst* PSM at the top so it can be
     /// evicted when a strictly-better PSM arrives.
     ///
-    /// **Tie handling:** when the queue is at capacity and
-    /// a new PSM is `Equal` (in `Ord` terms) to the worst retained PSM, the
-    /// new PSM is inserted WITHOUT evicting the tied one. This matches
-    /// Java parity: `size < n OR score == worst → add`.
+    /// Tie handling: when at capacity and a new PSM is Equal to the worst
+    /// retained PSM, insert without evicting (Kim et al., Nat Commun 5:5277,
+    /// 2014: `size < n OR score == worst → add`).
     /// As a result, the queue can grow beyond `capacity` when ties exist;
     /// `capacity` becomes a *minimum* top-N, not a hard cap.
     pub fn push(&mut self, m: PsmMatch) {
@@ -382,8 +375,8 @@ impl TopNQueue {
                     self.heap.push(Reverse(m));
                 }
                 std::cmp::Ordering::Equal => {
-                    // Java parity keeps tied PSMs at capacity (and SpecE
-                    // ties on the per-spectrum merge).
+                    // Kim et al. (Nat Commun 5:5277, 2014): keep tied PSMs at
+                    // capacity on the per-spectrum merge.
                     // The queue may exceed `capacity` when ties exist —
                     // `capacity` becomes a *minimum* top-N, not a hard cap.
                     self.heap.push(Reverse(m));
@@ -479,7 +472,7 @@ impl TopNQueue {
     }
 
     /// Drop PSMs strictly worse than the Nth-best, keeping ties at the cutoff
-    /// (Java / `TopNQueue::push` parity).
+    /// (same tie-retention rule as `TopNQueue::push`).
     fn retain_top_with_ties(psms: &mut Vec<PsmMatch>, cap: usize) {
         if psms.len() <= cap {
             return;
@@ -615,9 +608,8 @@ mod tests {
 
     #[test]
     fn topn_queue_keeps_ties_at_capacity() {
-        // Java parity keeps tied PSMs at capacity (raw-score retention and
-        // SpecE merge). Rust's TopNQueue must mirror this — strict-greater
-        // eviction would drop ties Java keeps.
+        // Kim et al. (Nat Commun 5:5277, 2014): keep tied PSMs at capacity.
+        // Strict-greater eviction would drop score ties that should be retained.
         let mut q = TopNQueue::new(1);
         q.push(make_match(0, 100.0));
         q.push(make_match(0, 100.0));
@@ -625,7 +617,7 @@ mod tests {
         assert_eq!(
             q.len(),
             3,
-            "all three tied PSMs should be retained at capacity=1 (Java parity, R-1)"
+            "all three tied PSMs should be retained at capacity=1 (tie retention, R-1)"
         );
     }
 

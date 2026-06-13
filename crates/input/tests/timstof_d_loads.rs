@@ -2,22 +2,26 @@
 //!
 //! Built only under `--features timstof`. Reading a real `.d` needs a Bruker
 //! dataset on disk (each `.d` is ~1-3.5 GB), so this test is a no-op unless the
-//! `MSGF_TEST_D` env var points at a `.d` directory — keeping CI green on
+//! `ANDES_TEST_D` env var points at a `.d` directory — keeping CI green on
 //! machines without one. With the var set it opens the `.d`, streams the MS2
 //! spectra, and asserts the model invariants the search path relies on.
 //!
 //! Example:
-//!   MSGF_TEST_D=/data/HeLa_IAA_F51_1.d \
+//!   ANDES_TEST_D=/data/HeLa_IAA_F51_1.d \
 //!     cargo test -p input --features timstof --test timstof_d_loads
 
 #![cfg(feature = "timstof")]
 
 use input::TimsTofReader;
 
+fn test_d_path() -> Option<std::ffi::OsString> {
+    std::env::var_os("ANDES_TEST_D").or_else(|| std::env::var_os("MSGF_TEST_D"))
+}
+
 #[test]
 fn reads_real_d_when_env_set() {
-    let Some(path) = std::env::var_os("MSGF_TEST_D") else {
-        eprintln!("MSGF_TEST_D not set — skipping real .d read test");
+    let Some(path) = test_d_path() else {
+        eprintln!("ANDES_TEST_D not set — skipping real .d read test");
         return;
     };
 

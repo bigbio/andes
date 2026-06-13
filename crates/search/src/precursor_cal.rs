@@ -1,10 +1,10 @@
-//! Two-pass precursor mass calibration (Java P2-cal / `MassCalibrator`).
+//! Two-pass precursor mass calibration.
 //!
 //! The pre-pass calibrator learns a file-wide ppm shift; the main pass
 //! applies it to observed neutral masses without mutating
 //! [`model::Spectrum`] objects.
 
-/// Java `-precursorCal` modes.
+/// Precursor calibration modes (`auto`, `on`, `off`).
 ///
 /// `Default` is `Off` (opt-in) — matches the CLI default
 /// and `SearchParams::default_tryptic`, so library consumers that derive
@@ -21,8 +21,7 @@ pub enum PrecursorCalMode {
     Off,
 }
 
-/// Sample every `stride`-th element, capped at `cap`. Mirrors Java
-/// `MassCalibrator.sampleEveryNth`.
+/// Sample every `stride`-th element, capped at `cap`.
 pub fn sample_every_nth<T: Clone>(source: &[T], stride: usize, cap: usize) -> Vec<T> {
     if source.is_empty() || stride == 0 || cap == 0 {
         return Vec::new();
@@ -45,7 +44,7 @@ pub fn residual_ppm(observed_mass: f64, theoretical_mass: f64) -> f64 {
     (observed_mass - theoretical_mass) / theoretical_mass * 1e6
 }
 
-/// Median of `values`. Empty input returns 0.0 (Java "no shift" contract).
+/// Median of `values`. Empty input returns 0.0 (no-shift contract).
 pub fn median(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -72,12 +71,12 @@ pub fn adjusted_observed_neutral_mass(raw_neutral: f64, shift_ppm: f64) -> f64 {
     }
 }
 
-/// Pre-pass tuning constants (Java `MassCalibrator`).
+/// Pre-pass tuning constants.
 pub mod constants {
     pub const SAMPLING_STRIDE: usize = 10;
     pub const MAX_SAMPLED: usize = 500;
-    /// Upper bound on the number of best-SpecEValue residuals fed to the median
-    /// shift estimate. Java's `MassCalibrator` uses the top 200. Decoupled from
+    /// Upper bound on the number of best-residual PSMs fed to the median
+    /// shift estimate (top 200). Decoupled from
     /// the firing minimum below so high-yield datasets (Astral/TMT) keep using a
     /// full 200-residual estimate unchanged.
     pub const RESIDUAL_CAP: usize = 200;
@@ -89,7 +88,7 @@ pub mod constants {
     pub const MIN_CONFIDENT_PSMS: usize = 150;
     pub const MIN_SPECKEYS_FOR_PREPASS: usize = 10_000;
 
-    /// Java `DEFAULT_TIGHTENED_WINDOW_*` — post-cal main-pass tolerance tightening.
+    /// Post-cal main-pass tolerance tightening defaults.
     pub const TIGHTENED_WINDOW_FLOOR_PPM: f64 = 2.0;
     pub const TIGHTENED_WINDOW_MARGIN_PPM: f64 = 0.5;
     pub const TIGHTENED_WINDOW_SIGMA_MULTIPLIER: f64 = 3.0;
@@ -170,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn robust_sigma_matches_java_mad_scale() {
+    fn robust_sigma_matches_mad_scale() {
         let residuals = vec![9.0, 10.0, 11.0];
         assert!((robust_sigma_ppm(&residuals, 10.0) - 1.4826).abs() < 1e-6);
     }

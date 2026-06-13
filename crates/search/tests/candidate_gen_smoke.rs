@@ -836,3 +836,30 @@ fn met_alone_does_not_trigger_cleavage() {
     // Only 1 candidate: "M" at offset 0. Met-cleavage guard `len > 1` prevents empty sub_seq.
     assert_eq!(target_count, 1, "expected 1 candidate for M-only protein, got {}", target_count);
 }
+
+#[test]
+fn empty_decoy_prefix_labels_only_normalized_decoys() {
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "".into(),
+            sequence: b"MKWVTFISLLR".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "");
+    let p = params(6, 40, 0);
+    let candidates: Vec<_> = enumerate_candidates(&idx, &p, "").collect();
+
+    assert!(
+        candidates.iter().any(|c| !c.is_decoy),
+        "target proteins must not be labeled decoy when --decoy-prefix is empty"
+    );
+    assert!(
+        candidates.iter().any(|c| c.is_decoy),
+        "decoy proteins must still be labeled decoy when --decoy-prefix is empty"
+    );
+    assert!(
+        candidates.iter().all(|c| !c.is_decoy || c.protein_index >= target.proteins.len()),
+        "only decoy half of the index may carry is_decoy=true"
+    );
+}

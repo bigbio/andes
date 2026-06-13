@@ -1,11 +1,11 @@
 //! `.pin` schema test for Andes's GF-free output.
 //!
 //! NOTE: Andes removed the generating function entirely, so its `.pin` schema
-//! INTENTIONALLY diverges from the historical Java MS-GF+ schema: the
+//! INTENTIONALLY diverges from the historical GF-heavy Percolator schema: the
 //! GF-derived columns (`DeNovoScore`, `lnSpecEValue`, `lnEValue`,
 //! `lnDeltaSpecEValue`) are no longer emitted, and `RawScore` is the sole score
-//! column. This test no longer compares against the Java reference fixture
-//! (that parity goal is obsolete); instead it asserts the GF-free schema:
+//! column. This test asserts the GF-free schema rather than comparing against
+//! a legacy reference fixture:
 //!   - `RawScore` is present, the GF columns are absent.
 //!   - The additive feature columns (`EdgeScore`, `PrecursorIsotopeKL`,
 //!     `PrecursorSNR`, `DeltaRawScore`) are present, between `matchedIonRatio`
@@ -90,7 +90,7 @@ fn rust_pin_header_is_gf_free_schema() {
 fn rust_pin_rows_have_at_least_header_column_count() {
     // Run a real search and assert each data row has at least as many columns
     // as the header (trailing Proteins columns may add more). Schema-only; no
-    // value comparison against any Java reference.
+    // value comparison against any external reference fixture.
 
     let target_db = FastaReader::load_all(BufReader::new(File::open(fixture("test-fixtures/BSA.fasta")).unwrap())).unwrap();
     let idx = SearchIndex::from_target_db(&target_db, "XXX_");

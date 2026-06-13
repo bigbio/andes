@@ -9,7 +9,7 @@ pub const DEFAULT_DECOY_PREFIX: &str = "XXX";
 /// accession. `prefix` is normalized: trailing `_`s stripped; empty
 /// prefix → `DEFAULT_DECOY_PREFIX`.
 pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
-    let normalized = normalize_prefix(prefix);
+    let normalized = normalize_decoy_prefix(prefix);
     let proteins = db.proteins.iter().map(|p| Protein {
         accession: format!("{}_{}", normalized, p.accession),
         description: p.description.clone(),
@@ -26,7 +26,9 @@ pub fn target_plus_decoy(target: &ProteinDb, prefix: &str) -> ProteinDb {
     ProteinDb { proteins }
 }
 
-fn normalize_prefix(prefix: &str) -> String {
+/// Normalize a user-supplied decoy accession prefix: trim whitespace,
+/// strip trailing `_`, and fall back to [`DEFAULT_DECOY_PREFIX`] when empty.
+pub fn normalize_decoy_prefix(prefix: &str) -> String {
     let trimmed = prefix.trim().trim_end_matches('_');
     if trimmed.is_empty() {
         DEFAULT_DECOY_PREFIX.to_string()

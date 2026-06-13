@@ -64,7 +64,7 @@ pub struct SearchParams {
     /// Spectra with fewer peaks than this threshold are skipped entirely.
     /// Default 10.
     pub min_peaks: u32,
-    /// Precursor mass calibration mode (Java `-precursorCal`). Default `Off`
+    /// Precursor mass calibration mode (`auto`, `on`, `off`). Default `Off`
     /// (opt-in).
     pub precursor_cal_mode: PrecursorCalMode,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
@@ -80,17 +80,17 @@ pub struct SearchParams {
 }
 
 impl SearchParams {
-    /// Defaults matching MS-GF+ tryptic search:
+    /// Defaults for a standard tryptic search (Kim et al., Nat Commun 5:5277, 2014):
     /// - enzyme: Trypsin
     /// - length: 6-40
     /// - missed cleavages: 1
     /// - variable mods per peptide: 3
     /// - precursor tolerance: 20 ppm symmetric
     /// - charge range: 2..=3
-    /// - isotope error range: -1..=2 (matches Java's `-ti -1,2` default)
+    /// - isotope error range: -1..=2
     /// - top-N PSMs: 10
     /// - num_tolerable_termini: 2 (strict tryptic)
-    /// - min_peaks: 10 (matches Java's `-minNumPeaks 10` default)
+    /// - min_peaks: 10
     pub fn default_tryptic(aa_set: AminoAcidSet) -> Self {
         Self {
             aa_set,

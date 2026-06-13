@@ -1,4 +1,4 @@
-//! Sampled pre-pass precursor mass calibration (Java `MassCalibrator`).
+//! Sampled pre-pass precursor mass calibration.
 //!
 //! Runs a lightweight top-1 search on ~500 sampled `(spectrum, charge)` keys,
 //! filters to high-confidence PSMs, and returns the median ppm residual as the
@@ -19,7 +19,7 @@ use crate::precursor_cal::{
 };
 use crate::search_params::SearchParams;
 
-/// One searchable `(spectrum index, charge)` pair — mirrors Java `SpecKey`.
+/// One searchable `(spectrum index, charge)` pair for the calibration pre-pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpecKey {
     pub spectrum_idx: usize,
@@ -65,10 +65,10 @@ impl CalibrationStats {
     }
 }
 
-/// Build the SpecKey list for a parsed MS2 file slice.
+/// Build the searchable spectrum/charge key list for a parsed MS2 file slice.
 ///
-/// Mirrors Java `SpecKey.getSpecKeyList`: spectra below `min_peaks` are
-/// skipped; charge-missing spectra expand across `charge_range`.
+/// Spectra below `min_peaks` are skipped; charge-missing spectra expand across
+/// `charge_range`.
 pub fn build_spec_keys(
     spectra: &[Spectrum],
     charge_range: &RangeInclusive<u8>,
@@ -185,9 +185,8 @@ pub fn learn_calibration_stats(
     }
 }
 
-/// Tighten ppm precursor tolerance after a successful cal pass (matching
-/// Java's post-cal block). No-op when stats are unreliable or
-/// tolerance is not ppm-based.
+/// Tighten ppm precursor tolerance after a successful cal pass. No-op when
+/// stats are unreliable or tolerance is not ppm-based.
 pub fn apply_tightened_precursor_tolerance(params: &mut SearchParams, stats: CalibrationStats) {
     if !stats.has_reliable_stats() {
         return;

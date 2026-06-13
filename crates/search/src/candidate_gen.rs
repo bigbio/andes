@@ -17,6 +17,7 @@ use model::enzyme::Enzyme;
 use model::modification::ModLocation;
 use model::peptide::Peptide;
 use model::protein::Protein;
+use crate::decoy::normalize_decoy_prefix;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 
@@ -41,10 +42,11 @@ pub fn enumerate_candidates<'a>(
     params: &'a SearchParams,
     decoy_prefix: &'a str,
 ) -> impl Iterator<Item = Candidate> + 'a {
-    // Use the prefix verbatim — match exactly what the caller (and the SearchIndex)
-    // stored. Don't invent formatting; require callers to pass the real prefix.
+    // Match the normalized prefix that `target_plus_decoy` used when building
+    // the index — empty `--decoy-prefix` must not collapse to `starts_with("")`.
+    let normalized_prefix = normalize_decoy_prefix(decoy_prefix);
     idx.db.proteins.iter().enumerate().flat_map(move |(p_idx, protein)| {
-        let is_decoy = protein.accession.starts_with(decoy_prefix);
+        let is_decoy = protein.accession.starts_with(&normalized_prefix);
         enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
     })
 }
@@ -328,7 +330,7 @@ fn build_terminal_variants(
     // Helper: returns true if `term_variants` contains a FIXED mod variant
     // for this residue. When a fixed terminal mod applies, the residue
     // MUST carry it — the unmodified Anywhere variant is not a valid
-    // candidate. (Matches Java MS-GF+: fixed mods are mandatory.)
+    // candidate. Fixed mods are mandatory (Kim et al., Nat Commun 5:5277, 2014).
     let has_fixed_in = |term_variants: &[AminoAcid]| -> bool {
         term_variants.iter().any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false))
     };
@@ -402,10 +404,10 @@ fn expand_recursive(
         // against max_variable_mods_per_peptide — otherwise a peptide with
         // two fixed mods (e.g. TQAHTQQNMVEK + N-term-TMT + K-TMT) is pruned
         // when NumMods=1, which is exactly the bug that caused 86% of TMT
-        // top-1 PSMs to diverge from Java.
+        // top-1 PSMs to diverge from the reference implementation.
         //
-        // Matches Java MS-GF+'s `CandidatePeptideGrid.processCandidate`
-        // logic where `numMods` counts only optional/variable mods.
+        // Kim et al. (Nat Commun 5:5277, 2014): only variable mods consume
+        // slots against the per-peptide modification cap.
         let consumes_slot = variant
             .mod_
             .as_ref()

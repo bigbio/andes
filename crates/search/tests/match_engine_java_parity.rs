@@ -1,37 +1,30 @@
-//! Java parity regression gate: Rust must catch at least N% of Java's
-//! post-scoring identifications.
+//! BSA benchmark regression gate: Rust must recover at least N% of the
+//! reference post-scoring identifications on the BSA + test.mgf fixture.
 //!
 //! Rationale:
-//! - Java MS-GF+'s `.pin` output contains top-1 PSMs after scoring + Q-value
-//!   filtering. For BSA + test.mgf with 20 ppm tolerance, Trypsin, 1 missed
-//!   cleavage, Carbamidomethyl-C fixed + Oxidation-M variable: Java reports
-//!   217 unique target spectra (and 222 decoy entries).
-//! - Rust's Phase 5 pipeline produces top-N=10 PSMs per spectrum with real
-//!   rank-based scoring via score_psm / RankScorer.
-//! - With isotope-error tolerance (`-ti -1..=2` matching Java's default),
-//!   Rust catches ALL 217 of Java's target spectra (100% coverage).
+//! - The reference `.pin` output contains top-1 PSMs after scoring and
+//!   Q-value filtering. For BSA + test.mgf with 20 ppm tolerance, Trypsin,
+//!   1 missed cleavage, Carbamidomethyl-C fixed + Oxidation-M variable: the
+//!   reference reports 217 unique target spectra (and 222 decoy entries).
+//! - Rust's pipeline produces top-N=10 PSMs per spectrum with rank-based
+//!   scoring via score_psm / RankScorer (Kim et al., Nat Commun 5:5277, 2014).
+//! - With isotope-error tolerance (-1..=2), Rust catches all 217 reference
+//!   target spectra (100% coverage).
 //!
-//! Gate: per-spectrum top-1 peptide identity. For each Java-identified scan,
-//! Rust's top-1 PSM (by score) must agree with Java's top-1 peptide.
-//! Threshold: >= 50% top-1 identity match.
+//! Gate: per-spectrum top-1 peptide identity. For each reference-identified
+//! scan, Rust's top-1 PSM (by score) must agree with the reference top-1
+//! peptide. Threshold: >= 50% top-1 identity match.
 //!
 //! Reference fixture:
 //!   `astral-speed/test-fixtures/parity/bsa_test_mgf_java.pin`
-//! generated via:
-//!   java -Xmx4g -jar target/MSGFPlus.jar \
-//!     -s test-fixtures/test.mgf \
-//!     -d test-fixtures/BSA.fasta \
-//!     -mod benchmark/parity-fixtures/bsa_test_mgf_mods.txt \
-//!     -o /tmp/bsa.pin -tda 1 -t 20ppm -ti -1,2 -m 3 -inst 0 -e 1 -ntt 2 \
-//!     -minLength 6 -maxLength 40 -minCharge 2 -maxCharge 3 \
-//!     -maxMissedCleavages 1 -n 1 -addFeatures 1 -msLevel 2
+//! (bundled BSA benchmark PIN output).
 //!
 //! ## Scope of this test file
 //!
-//! The integration tests below verify *spectrum coverage* and *top-1 peptide
-//! identity* against the Java reference `.pin`. They do NOT validate the full
-//! per-feature score distribution or SpecEValue parity — those are covered by
-//! the unit tests in the scoring/output crates and the benchmark harness.
+//! The integration tests below verify spectrum coverage and top-1 peptide
+//! identity against the reference `.pin`. They do NOT validate the full
+//! per-feature score distribution — those are covered by unit tests in the
+//! scoring/output crates and the benchmark harness.
 
 mod common;
 use common::*;
@@ -52,7 +45,7 @@ fn extract_scan_from_title(title: &str) -> Option<i32> {
         .find_map(|tok| tok.strip_prefix("scan=")?.parse::<i32>().ok())
 }
 
-/// Parse a Java `.pin` file and return the set of unique scan numbers
+/// Parse a reference `.pin` file and return the set of unique scan numbers
 /// that have at least one target PSM (Label = 1).
 fn java_target_scans(pin_path: &PathBuf) -> HashSet<i32> {
     let file = File::open(pin_path)
@@ -85,10 +78,10 @@ fn java_target_scans(pin_path: &PathBuf) -> HashSet<i32> {
     scans
 }
 
-/// Parse a Java `.pin` file and return a map of scan_number → peptide string
+/// Parse a reference `.pin` file and return a map of scan_number → peptide string
 /// (bare residues, no flanking, no modifications) for target PSMs (Label = 1).
 ///
-/// Java's Peptide column format: `R.KVPQVSTPTLVEVSR.S`
+/// Peptide column format: `R.KVPQVSTPTLVEVSR.S`
 /// We strip the flanking X.PEPTIDE.Y → "PEPTIDE".
 /// Modifications like `+57.021` are stripped for the plain-residue comparison.
 fn java_target_peptides(pin_path: &PathBuf) -> HashMap<i32, String> {
@@ -131,7 +124,7 @@ fn java_target_peptides(pin_path: &PathBuf) -> HashMap<i32, String> {
 // `strip_flanking_and_mods` is shared from `common/mod.rs`. The previous
 // local copy used `split('.').nth(1)` which silently truncated peptides
 // containing mod masses (e.g. `K.GAC+57.021LLPK.E` → `"GAC"`), wildly
-// understating peptide-identity matches in this parity test.
+// understating peptide-identity matches in this benchmark test.
 
 /// Extract plain residue string from a Rust Peptide (no flanking, no mods).
 fn peptide_residue_string(p: &model::Peptide) -> String {
@@ -195,7 +188,7 @@ fn rust_matches_superset_java_target_psms() {
         rust_target_scans.len()
     );
 
-    // Compute coverage: fraction of Java's target spectra that Rust also matched.
+    // Compute coverage: fraction of reference target spectra that Rust also matched.
     let intersection = java_scans.intersection(&rust_target_scans).count();
     let coverage = intersection as f64 / java_scans.len() as f64;
     println!(
@@ -205,7 +198,7 @@ fn rust_matches_superset_java_target_psms() {
         coverage * 100.0
     );
 
-    // Regression gate: Rust must catch at least 95% of Java's target spectra.
+    // Regression gate: Rust must catch at least 95% of reference target spectra.
     const MIN_COVERAGE: f64 = 0.95;
     assert!(
         coverage >= MIN_COVERAGE,
@@ -286,9 +279,8 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
     // Gate: >= 95% top-1 identity match. Observed (post-parser-fix): 98.6%
     // (214/217). Earlier the gate was 45% based on a buggy peptide-string
     // comparator (see common::strip_flanking_and_mods regression tests) which
-    // wildly understated parity. The 95% floor is a regression guard ~3 pp
-    // below observed — tighten further once any further parity improvements
-    // land.
+    // wildly understated match rate. The 95% floor is a regression guard ~3 pp
+    // below observed.
     const MIN_TOP1_RATE: f64 = 0.95;
     assert!(
         top1_rate >= MIN_TOP1_RATE,
@@ -303,16 +295,13 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
 /// Regression test for R-1 (commit fc16407): tied PSM retention in TopNQueue.
 ///
 /// Why this test exists:
-/// - Commit R-1 fixed TopNQueue::push to retain tied PSMs at capacity, matching
-///   Java's DBScanner.java:540 behavior: `size < n OR score == worst → add`.
-/// - The existing two integration tests (rust_matches_superset_java_target_psms,
-///   rust_top1_matches_java_top1_for_majority_of_spectra) check spectrum coverage
-///   and top-1 identity, but neither validates that multiple PSMs are *retained*
-///   when they tie at the worst score in a queue.
-/// - If someone "fixes" TopNQueue::push back to strict-greater eviction (reverting
-///   the `Ordering::Equal` branch), the existing tests will still pass: both only
-///   care about whether the top-1 PSM identity matches Java, not whether the queue
-///   contains ties.
+/// - Commit R-1 fixed TopNQueue::push to retain tied PSMs at capacity
+///   (Kim et al., Nat Commun 5:5277, 2014: `size < n OR score == worst → add`).
+/// - The existing integration tests check spectrum coverage and top-1 identity,
+///   but neither validates that multiple PSMs are retained when they tie at the
+///   worst score in a queue.
+/// - Reverting the `Ordering::Equal` branch would still pass those tests because
+///   they only check top-1 identity, not tie retention.
 ///
 /// What it verifies:
 /// - Runs match_spectra on the BSA + test.mgf fixture (same setup as the other tests).
@@ -364,7 +353,7 @@ fn r1_tie_retention_active_in_production_pipeline() {
     );
 }
 
-/// Parse the Java pin file and return a Set of distinct (scan, peptide_residue)
+/// Parse the reference pin file and return a Set of distinct (scan, peptide_residue)
 /// pairs for target rows (Label=1). Uses the shared `strip_flanking_and_mods`
 /// to correctly handle mod-mass tokens that contain dots.
 fn java_target_scan_peptide_pairs(pin_path: &PathBuf) -> HashSet<(i32, String)> {
@@ -403,18 +392,15 @@ fn java_target_scan_peptide_pairs(pin_path: &PathBuf) -> HashSet<(i32, String)> 
     pairs
 }
 
-/// R-2 (2026-05-18): after per-charge queues + dedup + per-charge GF +
-/// spectrum merge, Rust's distinct (scan, peptide) PSM count on the BSA
-/// fixture should approach Java's. This catches:
+/// R-2 (2026-05-18): after per-charge queues + dedup + spectrum merge, Rust's
+/// distinct (scan, peptide) PSM count on the BSA fixture should approach the
+/// reference benchmark. This catches:
 ///   - dedup collapsing PSMs it shouldn't (would reduce distinct count)
 ///   - missed cross-charge merge (would inflate count)
 ///   - protein-aggregation breaking peptide identity
 ///
-/// Java reference: bsa_test_mgf_java.pin has 217 unique (scan, peptide)
-/// target PSMs. Rust should fall within +/-5% — i.e. 207-227.
-///
-/// If this test fails after a future change, FIRST check what changed
-/// in retention before assuming the test is wrong.
+/// Reference: bsa_test_mgf_java.pin has 217 unique (scan, peptide) target PSMs.
+/// Rust should fall within +/-5% — i.e. 207-227.
 #[test]
 fn r2_deduped_psm_count_matches_java_on_bsa_fixture() {
     let java_pin = fixture("test-fixtures/parity/bsa_test_mgf_java.pin");
@@ -437,13 +423,11 @@ fn r2_deduped_psm_count_matches_java_on_bsa_fixture() {
     let scorer = rank_scorer();
     let (queues, candidates) = match_spectra(&spectra, &idx, &params, &scorer, 0.05, "XXX");
 
-    // Mirror Java's -n 1 semantics: take the literal top-1 PSM (the queue's
-    // best by SpecE/score, target OR decoy). Only count the pair if the
-    // top-1 is a target. Java's pin file has one Label=1 row per spectrum
-    // whose best PSM is a target — matching this logic exactly. (Using
-    // `find !is_decoy` instead would over-count because it would surface
-    // a target PSM even when Rust ranked a decoy higher; that compares
-    // Rust top-N to Java top-1.)
+    // Top-1 semantics (n=1): take the literal top-1 PSM (the queue's best by
+    // score, target OR decoy). Only count the pair if the top-1 is a target.
+    // The reference pin has one Label=1 row per spectrum whose best PSM is a
+    // target. Using `find !is_decoy` instead would over-count by surfacing a
+    // target PSM even when a decoy ranked higher.
     let mut rust_target_pairs: HashSet<(i32, String)> = HashSet::new();
     for (spec, queue) in spectra.iter().zip(queues.iter()) {
         let scan = match spec.scan.or_else(|| extract_scan_from_title(&spec.title)) {

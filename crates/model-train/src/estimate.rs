@@ -70,8 +70,8 @@ pub struct EstimatorConfig {
     /// If `Some(esf)`, override the template's `error_scaling_factor`; if
     /// `None`, copy from the template.  Default: `None`.
     pub error_scaling_factor_override: Option<i32>,
-    /// Apply MS-GF+-style widening rank-window smoothing to SIGNAL rank
-    /// distributions (not noise). Default: `false` (byte-identical to before).
+    /// Apply widening rank-window smoothing to SIGNAL rank distributions
+    /// (Kim et al., Nat Commun 5:5277, 2014). Default: `false`.
     pub rank_smoothing: bool,
 }
 
@@ -457,7 +457,8 @@ impl Estimator {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// MS-GF+-style widening rank-window smoothing of a rank-distribution vector.
+/// Widening rank-window smoothing of a rank-distribution vector
+/// (Kim et al., Nat Commun 5:5277, 2014).
 ///
 /// `dist` has length `max_rank + 1`: indices `0..max_rank` are observed ranks
 /// 1..max_rank, index `max_rank` is the missing-ion sentinel. The half-width of

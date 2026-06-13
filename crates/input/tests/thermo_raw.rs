@@ -1,23 +1,31 @@
 //! Integration test for the native Thermo `.raw` reader.
 //!
 //! Requires the `thermo` feature, the .NET 8 runtime, and a real `.raw` file
-//! pointed to by the `MSGF_TEST_RAW` environment variable. The `.raw` format is
+//! pointed to by the `ANDES_TEST_RAW` environment variable. The `.raw` format is
 //! proprietary and the files are large, so no fixture is committed; the test
-//! skips (passes) when `MSGF_TEST_RAW` is unset, and runs in environments that
+//! skips (passes) when `ANDES_TEST_RAW` is unset, and runs in environments that
 //! have a `.raw` available (e.g. the benchmark host).
 //!
-//! Run with:  `MSGF_TEST_RAW=/path/sample.raw cargo test -p input --features thermo`
+//! Run with:  `ANDES_TEST_RAW=/path/sample.raw cargo test -p input --features thermo`
 
 #![cfg(feature = "thermo")]
 
 use input::ThermoRawReader;
 
+fn test_raw_path() -> Option<String> {
+    std::env::var("ANDES_TEST_RAW")
+        .ok()
+        .or_else(|| std::env::var("MSGF_TEST_RAW").ok())
+}
+
 #[test]
 fn thermo_raw_reads_ms2_spectra() {
-    let path = match std::env::var("MSGF_TEST_RAW") {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("skipping thermo_raw_reads_ms2_spectra: set MSGF_TEST_RAW to a .raw to run");
+    let path = match test_raw_path() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "skipping thermo_raw_reads_ms2_spectra: set ANDES_TEST_RAW to a .raw to run"
+            );
             return;
         }
     };
@@ -56,10 +64,12 @@ fn thermo_raw_reads_ms2_spectra() {
 /// keep `ms2_to_ms1` aligned 1:1 with the emitted spectra in each chunk.
 #[test]
 fn thermo_raw_chunked_ms1_link_is_consistent() {
-    let path = match std::env::var("MSGF_TEST_RAW") {
-        Ok(p) => p,
-        Err(_) => {
-            eprintln!("skipping thermo_raw_chunked_ms1_link_is_consistent: set MSGF_TEST_RAW");
+    let path = match test_raw_path() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "skipping thermo_raw_chunked_ms1_link_is_consistent: set ANDES_TEST_RAW"
+            );
             return;
         }
     };

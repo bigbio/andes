@@ -8,27 +8,22 @@
 //! Why `CID_LowRes_Tryp.param`, not `CID_HighRes_Tryp.param`: PXD001819
 //! is LTQ Velos data, where MS1 lives in the orbitrap but MS2 lives in
 //! the linear ion trap (IC2 in the mzML's
-//! `<instrumentConfigurationList>`). Java's `NewScorerFactory.get`
-//! defaults `instType` to `LOW_RESOLUTION_LTQ` when no `-inst` flag is
-//! given, so Java picks `CID_LowRes_Tryp.param` for this dataset. The
-//! Rust port's new `detect_instrument_type` helper reads the MS2-
-//! referenced `<analyzer>` cvParam and arrives at the same answer.
+//! `<instrumentConfigurationList>`). PSI-MS instrument-configuration
+//! auto-detection reads the MS2-referenced `<analyzer>` cvParam and routes
+//! to `CID_LowRes_Tryp.param` for ion-trap MS2 data.
 //!
 //! The two load-bearing assertions are:
 //!   1. The mzML parser sets `spec.activation_method == ActivationMethod::CID`
 //!      from the `<activation>` cvParam `MS:1000133`. This is what triggers
 //!      auto-routing in `bin/andes` — losing the cvParam in extraction
 //!      or in the parser breaks the fix silently.
-//!   2. The resulting score is stable around the locked Rust value (no
-//!      Java baseline exists for scan=28787 under CID_LowRes — diagnostic
-//!      runs were captured with `-inst 1`). We treat this as a "score
-//!      stability" test: changes in the scoring path must not silently
-//!      drift this value.
+//!   2. The resulting score is stable around the locked Rust value. We treat
+//!      this as a score-stability test: changes in the scoring path must not
+//!      silently drift this value.
 //!
 //! **Scope**: only scan=28787 is locked in here. Sister scans (28825, 33606,
-//! 32395) referenced in the original fix plan need fresh Java baselines —
-//! their published numbers were captured under the wrong-param config —
-//! so they're deferred until those baselines are re-verified.
+//! 32395) referenced in the original fix plan need fresh baselines before
+//! they can be locked.
 
 use std::fs::File;
 use std::io::BufReader;
@@ -41,15 +36,11 @@ use model::peptide::Peptide;
 use scoring::scoring::score_psm;
 use scoring::{Param, RankScorer, ScoredSpectrum};
 
-/// Rust-side score for this PSM under `CID_LowRes_Tryp.param` (the
-/// param that auto-detection picks for PXD001819 LTQ-Velos MS2 data and
-/// the param Java's `NewScorerFactory` defaults to). Locked at 293 on
+/// Rust-side score for this PSM under `CID_LowRes_Tryp.param` (the param
+/// auto-detection picks for PXD001819 LTQ-Velos MS2 data). Locked at 293 on
 /// `rust-implement` after the instrument-detection landing (2026-05-14).
 ///
-/// This is a Rust-vs-Rust stability test, not a Java parity test —
-/// scan=28787's Java baseline was captured with `-inst 1` (HighRes),
-/// so it can't be reused here. If you change the scoring path and this
-/// drifts, investigate the divergence before adjusting the constant.
+/// Rust-vs-Rust stability test — investigate any drift before adjusting.
 const EXPECTED_RAWSCORE: i32 = 293;
 
 /// Tolerance covers float-precision and prefix-mass rounding drift.
@@ -116,7 +107,7 @@ fn score_psm_scan_28787_ivneefdqleedtpvyk_matches_java_baseline() {
          would fall back to HCD and the score would regress"
     );
 
-    // ── 3. Build scorer with the param Java would pick ─────────────────
+    // ── 3. Build scorer with the auto-detected param ─────────────────
     let param_path = param_path();
     let param = Param::load_from_file(&param_path)
         .unwrap_or_else(|e| panic!("load {param_path:?}: {e}"));
@@ -124,8 +115,7 @@ fn score_psm_scan_28787_ivneefdqleedtpvyk_matches_java_baseline() {
 
     // ── 4. Build the peptide and ScoredSpectrum ────────────────────────
     let peptide = build_peptide_ivneefdqleedtpvyk();
-    // Charge 2+ matches the PSM's reported charge in Java's output and
-    // the `<cvParam … MS:1000041 … 2>` in the fixture's selectedIon.
+    // Charge 2+ matches the fixture's `<cvParam … MS:1000041 … 2>` selectedIon.
     let charge: u8 = 2;
     let scored_spec = ScoredSpectrum::new(&spec, &scorer, charge);
 

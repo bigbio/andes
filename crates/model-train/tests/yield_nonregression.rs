@@ -1,11 +1,11 @@
 //! ENV-gated yield non-regression test for the model-training pipeline.
 //!
-//! This test SKIPS (passes as a no-op) when `MSGF_TRAIN_BENCH` is unset or
+//! This test SKIPS (passes as a no-op) when `ANDES_TRAIN_BENCH` is unset or
 //! empty, so CI and local runs without datasets pass unconditionally.
 //!
 //! # Dataset directory convention
 //!
-//! Set `MSGF_TRAIN_BENCH` to a directory containing:
+//! Set `ANDES_TRAIN_BENCH` to a directory containing:
 //!
 //!   - `train.mzML`    — training spectra (required)
 //!   - `db.fasta`      — target protein database (required)
@@ -29,7 +29,7 @@
 //! 6. Assert `trained_count >= fallback_count`.
 //!
 //! Run with:
-//!   `MSGF_TRAIN_BENCH=/path/to/dataset cargo test -p model-train --test yield_nonregression`
+//!   `ANDES_TRAIN_BENCH=/path/to/dataset cargo test -p model-train --test yield_nonregression`
 
 use std::fs::File;
 use std::io::BufReader;
@@ -100,12 +100,14 @@ fn load_mzml(path: &Path) -> Vec<model::Spectrum> {
 #[test]
 fn trained_model_yield_not_worse_than_fallback() {
     // ── Skip guard ────────────────────────────────────────────────────────────
-    let bench_dir = match std::env::var("MSGF_TRAIN_BENCH") {
+    let bench_dir = match std::env::var("ANDES_TRAIN_BENCH")
+        .or_else(|_| std::env::var("MSGF_TRAIN_BENCH"))
+    {
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
         _ => {
             eprintln!(
                 "skipping trained_model_yield_not_worse_than_fallback: \
-                 set MSGF_TRAIN_BENCH to a directory containing \
+                 set ANDES_TRAIN_BENCH to a directory containing \
                  train.mzML + db.fasta (+ optional validate.mzML) to run"
             );
             return;

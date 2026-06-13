@@ -1,18 +1,12 @@
-//! Pin ~10 commonly-used modification monoisotopic mass deltas to the
-//! values used by Java MS-GF+'s default `MSGFPlus_Mods.txt` and
-//! `Modification.java` factory methods. Source-of-truth values copied
-//! from those files. Each value is verifiable against UniMod
-//! (https://www.unimod.org).
+//! Pin commonly-used modification monoisotopic mass deltas to UniMod
+//! (https://www.unimod.org) reference values.
 
 use model::modification::{Modification, ModLocation, ResidueSpec};
 
 fn bit_eq(a: f64, b: f64) -> bool { a.to_bits() == b.to_bits() }
 
 /// (mods_txt_line, expected_name, expected_mass_delta).
-/// Lines are mass-based (not composition-based) since the parser only
-/// accepts numeric mass deltas. Multi-residue mods like Phospho are
-/// tested with a single-residue substitute.
-fn java_common_mods() -> Vec<(&'static str, &'static str, f64)> {
+fn unimod_reference_mods() -> Vec<(&'static str, &'static str, f64)> {
     vec![
         ("57.021464,C,fix,any,Carbamidomethyl",      "Carbamidomethyl",  57.021464),
         ("15.994915,M,opt,any,Oxidation",            "Oxidation",        15.994915),
@@ -30,7 +24,7 @@ fn java_common_mods() -> Vec<(&'static str, &'static str, f64)> {
 
 #[test]
 fn parses_to_expected_name_and_mass() {
-    for (line, expected_name, expected_mass) in java_common_mods() {
+    for (line, expected_name, expected_mass) in unimod_reference_mods() {
         let m = Modification::from_mods_txt_line(line)
             .unwrap_or_else(|e| panic!("parse failed for {line:?}: {e:?}"));
         assert_eq!(m.name, expected_name, "name drift on {line:?}");

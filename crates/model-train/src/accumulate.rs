@@ -104,9 +104,11 @@ impl<'a> StatsAccumulator<'a> {
         // Without this the missing-ion penalty inverts and the model scores
         // target and decoy alike (0 PSMs at 1% FDR).
         // Noise model: default = reversed-peptide decoy ions; opt-in env
-        // MSGF_DENSE_NOISE=<n> = MS-GF+-style dense random-position sampling
-        // (sharper, missing-slot-dominated noise — see dense_noise_facts).
-        let noise_facts = match std::env::var("MSGF_DENSE_NOISE")
+        // ANDES_DENSE_NOISE=<n> = dense random-position noise sampling
+        // (Kim et al., Nat Commun 5:5277, 2014 — sharper missing-slot-dominated
+        // noise; see dense_noise_facts).
+        let noise_facts = match std::env::var("ANDES_DENSE_NOISE")
+            .or_else(|_| std::env::var("MSGF_DENSE_NOISE"))
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
         {
@@ -134,7 +136,7 @@ impl<'a> StatsAccumulator<'a> {
         // edge, the existence index (cur observed + 2*prev observed) under the
         // last-segment partition. Without this the estimator falls back to a
         // uniform 0.25 existence prior, which neutralizes the entire edge term
-        // in the trained model (the bundled MS-GF+ models learn a sharply
+        // in the trained model (bundled reference models learn a sharply
         // peaked distribution here, e.g. ~0.95 for "both observed").
         for (partition, idx) in psm_edge_existence_facts(&scored_spec, peptide, self.scorer, charge)
         {

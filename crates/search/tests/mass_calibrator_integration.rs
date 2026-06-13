@@ -5,7 +5,7 @@
 //!
 //! Asserts the contracts of each calibrator helper layer (threshold skip,
 //! mode-aware shift application, mass-correction round-trip, tightening
-//! bounds, SpecKey expansion). End-to-end Java parity remains the bench
+//! bounds, SpecKey expansion). End-to-end benchmark validation remains the
 //! harness's responsibility.
 
 use std::collections::HashMap;

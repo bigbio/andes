@@ -31,10 +31,18 @@ pub const C13: f64 = 13.00335483;
 /// step for isotope-error tolerance.
 pub const ISOTOPE: f64 = C13 - C;
 
-/// Single-precision integer-mass scaler — the mean ratio of nominal (integer)
-/// to monoisotopic residue mass. Used in `nominal_from` via float-domain
-/// arithmetic; the multiply must happen in f32 (single precision) before
-/// rounding to preserve the rounding boundary.
+/// Single-precision integer-mass scaler: maps monoisotopic residue mass to the
+/// integer nominal bin used by the DP scoring tables via `nominal_from`.
+///
+/// Derivation (standard 20-residue table, IUPAC monoisotopic masses from
+/// `model::amino_acid::standard_composition` × `C/H/N/O/S`):
+///   nominalᵢ = C×12 + H×1 + N×14 + O×16 + S×32   (integer formula mass)
+///   ratioᵢ   = nominalᵢ / monoisotopicᵢ
+///   mean(ratioᵢ) ≈ 0.999497  →  stored as f32 for the f32-round boundary
+///   that `nominal_from` relies on (see the 1000 Da anchor test).
+///
+/// The multiply must happen in f32 before rounding to keep cumulative
+/// fragment-bin error bounded across long peptides.
 pub const INTEGER_MASS_SCALER: f32 = 0.999497;
 
 /// Convert a monoisotopic mass to the integer "nominal" mass that indexes

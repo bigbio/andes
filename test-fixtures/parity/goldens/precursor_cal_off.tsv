@@ -1,4 +1,4 @@
-#SpecFile	SpecID	ScanNum	Title	FragMethod	Precursor	IsotopeError	PrecursorError(ppm)	Charge	Peptide	Protein	MSGFScore
+#SpecFile	SpecID	ScanNum	Title	FragMethod	Precursor	IsotopeError	PrecursorError(ppm)	Charge	Peptide	Protein	RawScore
 test.mgf	id=PXD002047;TCGA-AA-A02O-01A-23_W_VU_20130205_A0218_10A_R_FR05.mzML;controllerType=0 controllerNumber=1 scan=701	0	id=PXD002047;TCGA-AA-A02O-01A-23_W_VU_20130205_A0218_10A_R_FR05.mzML;controllerType=0 controllerNumber=1 scan=701	HCD	376.5346	0	4.5309	3	K.DDSPDLPKLK.P	sp|P02769|ALBU_BOVIN	-10
 test.mgf	id=PXD002047;TCGA-AA-A02O-01A-23_W_VU_20130205_A0218_10A_R_FR05.mzML;controllerType=0 controllerNumber=1 scan=701	0	id=PXD002047;TCGA-AA-A02O-01A-23_W_VU_20130205_A0218_10A_R_FR05.mzML;controllerType=0 controllerNumber=1 scan=701	HCD	376.5346	0	4.5309	3	K.LKPLDPSDDK.H	XXX_sp|P02769|ALBU_BOVIN	-14
 test.mgf	id=PXD002047;TCGA-AA-A02O-01A-23_W_VU_20130205_A0218_10A_R_FR05.mzML;controllerType=0 controllerNumber=1 scan=781	0	id=PXD002047;TCGA-AA-A02O-01A-23_W_VU_20130205_A0218_10A_R_FR05.mzML;controllerType=0 controllerNumber=1 scan=781	HCD	376.5343	0	5.1810	3	K.DDSPDLPKLK.P	sp|P02769|ALBU_BOVIN	-8

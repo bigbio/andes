@@ -221,7 +221,7 @@ impl AminoAcidSetBuilder {
     pub fn add_mods_from_file(mut self, path: &Path) -> Result<Self, AaSetError> {
         let text = fs::read_to_string(path)?;
         for (line_no, raw) in text.lines().enumerate() {
-            // Strip an inline `#` comment (matches Java's `MSGFPlusOptions.stripComment`).
+            // Strip an inline `#` comment (mods.txt convention).
             let no_comment = match raw.find('#') {
                 Some(i) => &raw[..i],
                 None    => raw,
@@ -230,7 +230,7 @@ impl AminoAcidSetBuilder {
             if line.is_empty() {
                 continue;
             }
-            // `NumMods=N` header line — recognized for Java mods.txt compatibility
+            // `NumMods=N` header line — recognized for mods.txt compatibility
             // but not stored on the builder. The CLI parses it separately via
             // `parse_num_mods_from_file` and routes it to
             // `SearchParams.max_variable_mods_per_peptide`.
@@ -248,16 +248,16 @@ impl AminoAcidSetBuilder {
         Ok(self)
     }
 
-    /// Read just the `NumMods=N` header from a Java-format mods.txt file.
+    /// Read just the `NumMods=N` header from a mods.txt file.
     ///
     /// Returns:
     /// - `Ok(Some(n))` when the file contains a single `NumMods=N` line with a valid integer.
     /// - `Ok(None)` when no `NumMods=` line is present.
     /// - `Err(...)` if the file cannot be read or the value cannot be parsed.
     ///
-    /// Java's `getAminoAcidSetFromModFile` uses this value to override
-    /// `MSGFPlusOptions.effectiveMaxNumMods()`. This sibling function lets the
-    /// CLI binary perform the same override on `SearchParams.max_variable_mods_per_peptide`
+    /// The mods.txt `NumMods=N` header overrides the default variable-mod cap.
+    /// This sibling function lets the CLI binary apply that override to
+    /// `SearchParams.max_variable_mods_per_peptide`
     /// without changing the public API of `add_mods_from_file`.
     pub fn parse_num_mods_from_file(path: &Path) -> Result<Option<u32>, AaSetError> {
         let text = fs::read_to_string(path)?;
@@ -270,7 +270,7 @@ impl AminoAcidSetBuilder {
             if !line.to_ascii_lowercase().starts_with("nummods=") {
                 continue;
             }
-            // Take everything after the first `=`. Java accepts whitespace around the value.
+            // Take everything after the first `=`. Whitespace around the value is ignored.
             let value = line.split_once('=').map(|x| x.1).unwrap_or("").trim();
             let n: u32 = value.parse().map_err(|_| AaSetError::BadNumMods {
                 value: value.to_string(),
@@ -809,8 +809,8 @@ mod tests {
     fn acetyl_prot_n_term_appears_in_source_aas_for_gf() {
         // GF DP source AAs at Prot-N-term must include
         // both unmodified residues AND wildcard-Acetyl variants for each
-        // residue. Java's getAAList(Protein_N_Term) returns the Anywhere
-        // list (locMap propagation) PLUS Prot-N-term-specific variants.
+        // residue. Prot-N-term source AAs must include the Anywhere list
+        // (locMap propagation) plus Prot-N-term-specific variants.
         // Verify Rust's cached_aa_list(ProtNTerm) does the same.
         let acetyl = Modification {
             name: "Acetyl".to_string(),

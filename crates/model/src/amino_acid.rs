@@ -1,7 +1,7 @@
 //! Amino acid residue with optional modification. Standard residue masses
 //! are computed from atomic composition (C/H/N/O/S counts) so they are
 //! bit-equal to the canonical composition-based mass. Pinned by
-//! `tests/standard_aa_masses_match_java.rs`.
+//! `tests/standard_aa_masses.rs`.
 //!
 //! The `mod_` field stores an `Option<Arc<Modification>>` rather than an
 //! inline `Option<Modification>`. Candidate enumeration clones an
@@ -10,7 +10,7 @@
 //! cloned the `Modification`'s `String` `name` (and optional accession),
 //! producing one heap allocation per modified residue per candidate. At
 //! Astral scale that drives `PreparedSearch::prepare` to ~27 GB RSS on a
-//! 31 GB VM (verified by the `MSGF_RSS_PROBE=1` probe in
+//! 31 GB VM (verified by the `ANDES_RSS_PROBE=1` probe in
 //! `andes.rs`). Wrapping `Modification` in `Arc` makes clones a
 //! refcount bump and shrinks `AminoAcid` from ~96 B to 24 B.
 

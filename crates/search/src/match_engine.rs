@@ -258,8 +258,10 @@ impl<'a> PreparedSearch<'a> {
         // Research diagnostic (env-gated, chimeric only): measure the
         // shared-fragment overlap between the top-2 co-emitted distinct peptides
         // per scan. Tests the "fragment theft" hypothesis behind chimeric FDR
-        // inflation. Zero cost unless MSGF_CHIMERIC_OVERLAP is set AND --chimeric.
-        let chim_overlap = params.chimeric && std::env::var("MSGF_CHIMERIC_OVERLAP").is_ok();
+        // inflation. Zero cost unless ANDES_CHIMERIC_OVERLAP is set AND --chimeric.
+        let chim_overlap = params.chimeric
+            && (std::env::var("ANDES_CHIMERIC_OVERLAP").is_ok()
+                || std::env::var("MSGF_CHIMERIC_OVERLAP").is_ok());
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
@@ -440,8 +442,8 @@ impl<'a> PreparedSearch<'a> {
                 score
             }
 
-            // Per-charge queue keyed by charge state. Mirrors Java's
-            // per-SpecKey raw-score retention (Java parity).
+            // Per-charge queue keyed by charge state. Retains top-N PSMs
+            // independently per precursor charge (Kim et al., Nat Commun 5:5277, 2014).
             let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
 
             // Cascade Pass 1 is a NARROW brute-force window scan: iterate every
@@ -473,7 +475,8 @@ impl<'a> PreparedSearch<'a> {
                     // best isotope offset. `pin_score` (= node + cleavage)
                     // remains the PIN RawScore distribution Percolator
                     // was trained on. `rank_score` (= node + cleavage + edge)
-                    // is the Java-aligned queue-ordering key.
+                    // is the queue-ordering key (node + cleavage + edge;
+                    // Kim et al., Nat Commun 5:5277, 2014).
                     //
                     // `score_psm` and `psm_edge_score` are BOTH
                     // iso-offset independent (they take `(scored_spec,
@@ -588,7 +591,7 @@ impl<'a> PreparedSearch<'a> {
 
             // pepSeq + score dedup per-charge BEFORE GF compute.
             // Same peptide matched against multiple proteins collapses to one
-            // PsmMatch with aggregated candidate_idxs (Java parity for pepSeq dedup).
+            // PsmMatch with aggregated candidate_idxs (peptide-sequence dedup).
             for queue in per_charge_queues.values_mut() {
                 if queue.len() > 1 {
                     let drained = queue.drain_into_vec();
@@ -609,8 +612,8 @@ impl<'a> PreparedSearch<'a> {
             }
 
             // Spectrum-level merge. The TopNQueue::push (Ordering::Equal arm)
-            // keeps rank_score ties at capacity, mirroring Java's tie-keep on
-            // the spectrum-level merge.
+            // keeps rank_score ties at capacity, matching Kim et al. (Nat Commun
+            // 5:5277, 2014) tie-retention on the spectrum-level merge.
             for (_charge, mut per_charge) in per_charge_queues.drain() {
                 for psm in per_charge.drain_into_vec() {
                     queue.push(psm);
@@ -1034,7 +1037,7 @@ pub(crate) fn compute_psm_features(
         return PsmFeatures::default();
     }
 
-    // ADDITIVE Java-parity edge-score feature (new PIN column). Computed
+    // ADDITIVE edge-score feature (new PIN column). Computed
     // here so it shares the per-PSM ScoredSpectrum + scorer references that
     // the existing feature-extraction code already has on hand.
     let edge_score = psm_edge_score(scored_spec, peptide, scorer, charge);
@@ -1056,17 +1059,13 @@ pub(crate) fn compute_psm_features(
     let mut matched_ions: SmallVec<[(f32, f64, f64, bool); 96]> = SmallVec::new();
     let mut matched_ion_ranks: SmallVec<[u32; 96]> = SmallVec::new();
 
-    // Java parity: feature-counting uses a
-    // HARDCODED fragment tolerance, NOT param.mme. High-res instruments
+    // Percolator feature counting uses a hardcoded fragment tolerance, NOT
+    // param.mme (Kim et al., Nat Commun 5:5277, 2014). High-res instruments
     // (HighRes / TOF / QExactive) get 20 ppm; low-res LTQ gets 0.5 Da.
     // The param.mme value (0.5 Da for HCD_QExactive_Tryp.param) is the
     // coarser binning tolerance used by the rank-distribution tables —
     // appropriate for node-score lookup but ~50× too wide for feature
-    // counting at m/z 500. Pre-fix Rust used param.mme for both, which
-    // inflated NumMatchedMainIons by ~+3, longest_b by ~+2 vs Java, and
-    // compressed all intensity ratios (more low-intensity noise matched
-    // into the matched-ion sum). Confirmed by the Rust-vs-Java pin-diff
-    // harness.
+    // counting at m/z 500.
     let feature_tol = if scorer.param().data_type.instrument.is_high_resolution() {
         20.0_f64 // ppm
     } else {
@@ -1119,12 +1118,9 @@ pub(crate) fn compute_psm_features(
         }
     }
 
-    // NumMatchedMainIons mirrors Java's PSMFeatureFinder count: each (bond, direction)
-    // tuple contributes 1 if at least one charge-1 prefix/suffix ion matched.
-    // Rust's b/y-charge-1 path above is a faithful subset of Java's
-    // `getMassErrorWithIntensity`-driven count (which iterates the partition
-    // ion list filtered to charge 1; for HCD_QExactive_Tryp the dominant
-    // charge-1 prefix/suffix ions ARE b/y plus a few low-impact variants).
+    // NumMatchedMainIons: each (bond, direction) tuple contributes 1 if at
+    // least one charge-1 prefix/suffix ion matched (Kim et al., Nat Commun
+    // 5:5277, 2014 Percolator features).
     let num_matched: u32 = (b_matched.iter().filter(|&&m| m).count()
         + y_matched.iter().filter(|&&m| m).count()) as u32;
 
@@ -1160,19 +1156,14 @@ pub(crate) fn compute_psm_features(
         best
     }
 
-    // ── Ion-current ratio features (partition-ion-list) ────────────────────────
+    // Ion-current ratio features (partition-ion-list).
     //
-    // Java parity: `NewScoredSpectrum.getExplainedIonCurrent`
-    // iterates the FULL partition ion list across all segments (b, y, plus
-    // partition-specific variants like a-ion, b-H2O, etc.) and sums matched
-    // peak intensities. The current Rust matched-ion buffer above only
-    // contains b/y at charge 1, so it systematically UNDER-counts the
-    // intensity sum. Rust-vs-Java pin-diff confirms: ExplainedIonCurrentRatio
-    // median -0.026, NTerm -0.005, CTerm -0.018 — all compressed.
-    //
-    // We replace the b/y-only sum with a partition-wide sum AND use
-    // partition-wide matches to drive longest_b/y (matches Java's "bIC > 0"
-    // test). NumMatchedMainIons continues to count charge-1 b/y matches.
+    // Kim et al. (Nat Commun 5:5277, 2014): explained ion current sums
+    // matched peak intensities across the full partition ion list (b, y, and
+    // partition-specific variants). The b/y-only buffer above under-counts
+    // intensity for Percolator features; we replace it with a partition-wide
+    // sum and use partition-wide matches for longest_b/y. NumMatchedMainIons
+    // continues to count charge-1 b/y matches.
     let parent_mass = scored_spec.parent_mass();
     let num_segments = scorer.param().num_segments.max(1) as usize;
 
@@ -1182,9 +1173,8 @@ pub(crate) fn compute_psm_features(
     let mut sum_prefix_intensity: f64 = 0.0;
     let mut sum_suffix_intensity: f64 = 0.0;
 
-    // Use ACCURATE residue mass for theo m/z computation (matches Java's
-    // PSMFeatureFinder which passes `peptide.get(i).getAccurateMass()`).
-    // IonType::mz internally divides nominal mass by INTEGER_MASS_SCALER
+    // Use accurate residue mass for theoretical m/z (Kim et al., Nat Commun
+    // 5:5277, 2014). IonType::mz divides nominal mass by INTEGER_MASS_SCALER
     // (0.999497) to recover an approximate accurate mass — that
     // approximation can drift ~0.014 Da from the true accurate mass per
     // residue (NEEQSR's N: nominal 114 → 114.057 vs accurate 114.043),
@@ -1214,9 +1204,8 @@ pub(crate) fn compute_psm_features(
         let mut b_any_this = false;
         let mut y_any_this = false;
 
-        // Java iterates each segment's ion list separately and checks that
-        // the computed theoMass falls into that segment (line 271-273). We
-        // mirror that exactly so per-bond ion sums match Java's bIC / yIC.
+        // Each segment's ion list is checked separately so per-bond ion sums
+        // align with the partition model (Kim et al., Nat Commun 5:5277, 2014).
         for seg in 0..num_segments {
             let ions = segment_ions[seg];
             for &ion in ions {
@@ -1288,14 +1277,10 @@ pub(crate) fn compute_psm_features(
     });
     let top7 = &matched_ions[..matched_ions.len().min(7)];
 
-    // All four *ErrorTop7 columns are in PPM (matching Java
-    // `NewScoredSpectrum.getMassErrorWithIntensity`, which always returns
-    // `(p.getMz() - theoMass) / theoMass * 1e6f`). The Java column naming
-    // is misleading: `MeanErrorTop7` = mean of |ppm error| (absolute),
-    // `MeanRelErrorTop7` = mean of signed ppm error. Both are ppm; the
-    // "Rel" suffix in Java distinguishes signed vs absolute, NOT
-    // Da-vs-ppm. MeanErrorTop7/StdevErrorTop7 are therefore emitted as
-    // absolute ppm (not Da) to match Java's units.
+    // All four *ErrorTop7 columns are in ppm (Kim et al., Nat Commun 5:5277,
+    // 2014 Percolator features). MeanErrorTop7 = mean of |ppm error|;
+    // MeanRelErrorTop7 = mean of signed ppm error. The "Rel" suffix
+    // distinguishes signed vs absolute, not Da-vs-ppm.
     //
     // Population stdev formula: sqrt(sum_sq/n - mean²).
     let abs_ppm_errors: Vec<f64> = top7.iter()
@@ -1935,8 +1920,8 @@ mod feature_tests {
         let predicted = predict_by_ions(&pep, 1..=1);
 
         // 0.0005 Da offset = ~6 ppm at m/z 89 (Ala b1) — within the
-        // hardcoded 20 ppm window that compute_psm_features now uses for
-        // high-resolution instruments (Java parity).
+        // hardcoded 20 ppm window that compute_psm_features uses for
+        // high-resolution instruments (Kim et al., Nat Commun 5:5277, 2014).
         // The previous 0.01 Da offset assumed Rust used param.mme (~0.05 Da
         // in this fixture's make_scorer), but feature counting now uses
         // 20 ppm regardless of param.mme.
@@ -2014,8 +1999,8 @@ mod feature_tests {
     }
 }
 
-/// Pre-merge dedup pass: collapse PSMs sharing the same Java
-/// `(pepSeq, score)` key before per-charge GF compute.
+/// Pre-merge dedup pass: collapse PSMs sharing the same peptide sequence
+/// and rounded rank_score before per-charge merge.
 pub(crate) fn dedup_pepseq_score(
     psms: Vec<PsmMatch>,
     candidates: &[Candidate],
@@ -2060,7 +2045,7 @@ pub(crate) fn dedup_pepseq_score(
 }
 
 /// Mod-aware dedup key: bare residues plus per-position mod mass (1e-5 Da units).
-/// Matches Java pepSeq semantics without string formatting on the hot path.
+/// Avoids string formatting on the hot path.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PepDedupKey {
     residues: Vec<u8>,

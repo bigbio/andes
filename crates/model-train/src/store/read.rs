@@ -345,9 +345,33 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                                     format!("frag_off flat length {} not multiple of 4", len),
                                 ));
                             }
+
+                            // Read the parallel frag_off_loss_classes column if present.
+                            // Old stores (without this column) yield all loss_class=0.
+                            let loss_classes_vec: Vec<i32> = match batch.column_by_name("frag_off_loss_classes") {
+                                Some(col) => {
+                                    if let Some(list) = col.as_any().downcast_ref::<ListArray>() {
+                                        if list.is_null(i) {
+                                            Vec::new()
+                                        } else {
+                                            let item = list.value(i);
+                                            if let Some(arr) = item.as_any().downcast_ref::<Int32Array>() {
+                                                (0..arr.len()).map(|k| arr.value(k)).collect()
+                                            } else {
+                                                Vec::new()
+                                            }
+                                        }
+                                    } else {
+                                        Vec::new()
+                                    }
+                                }
+                                None => Vec::new(),
+                            };
+
                             let mut frags: Vec<FragmentOffsetFrequency> =
                                 Vec::with_capacity(len / 4);
                             let mut j = 0;
+                            let mut entry_idx = 0usize;
                             while j + 3 < len {
                                 let is_prefix_f = flat.value(j);
                                 let ion_charge = flat.value(j + 1) as i32;
@@ -357,15 +381,21 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                                 // round-trips without precision loss.
                                 let offset_bits = offset_bits_f.to_bits();
                                 let frequency = flat.value(j + 3);
+                                // Read per-entry loss_class from parallel column; default 0.
+                                let lc: u8 = loss_classes_vec
+                                    .get(entry_idx)
+                                    .map(|&v| v.clamp(0, 255) as u8)
+                                    .unwrap_or(0);
                                 let ion_type = if is_prefix_f > 0.5 {
-                                    IonType::Prefix { charge: ion_charge, offset_bits, loss_class: 0 }
+                                    IonType::Prefix { charge: ion_charge, offset_bits, loss_class: lc }
                                 } else if is_prefix_f < -0.5 {
                                     IonType::Noise
                                 } else {
-                                    IonType::Suffix { charge: ion_charge, offset_bits, loss_class: 0 }
+                                    IonType::Suffix { charge: ion_charge, offset_bits, loss_class: lc }
                                 };
                                 frags.push(FragmentOffsetFrequency { ion_type, frequency });
                                 j += 4;
+                                entry_idx += 1;
                             }
                             frag_off_table.insert(part, frags);
                         }
@@ -382,7 +412,15 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                             let kind = ik_col.value(i);
                             let ic = ic_col.value(i);
                             let iob = iob_col.value(i) as u32;
-                            let ion_type = decode_ion_type(kind, ic, iob)?;
+                            // Read ion_loss_class; default 0 for old stores (column absent).
+                            let lc: u8 = match batch.column_by_name("ion_loss_class") {
+                                Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
+                                    Some(arr) if !arr.is_null(i) => arr.value(i).clamp(0, 255) as u8,
+                                    _ => 0,
+                                },
+                                None => 0,
+                            };
+                            let ion_type = decode_ion_type(kind, ic, iob, lc)?;
 
                             let values_arr = list_col(&batch, "values")?;
                             if values_arr.is_null(i) { continue; }
@@ -549,10 +587,14 @@ fn parse_manifest_row(
     })
 }
 
-fn decode_ion_type(kind: &str, charge: i32, offset_bits: u32) -> Result<IonType, TrainError> {
+/// Reconstruct an [`IonType`] from the stored kind/charge/offset_bits/loss_class fields.
+///
+/// `loss_class` defaults to `0` for stores written before the `ion_loss_class` column
+/// was added (backward-compatible: old files simply omit the column).
+fn decode_ion_type(kind: &str, charge: i32, offset_bits: u32, loss_class: u8) -> Result<IonType, TrainError> {
     match kind {
-        "prefix" => Ok(IonType::Prefix { charge, offset_bits, loss_class: 0 }),
-        "suffix" => Ok(IonType::Suffix { charge, offset_bits, loss_class: 0 }),
+        "prefix" => Ok(IonType::Prefix { charge, offset_bits, loss_class }),
+        "suffix" => Ok(IonType::Suffix { charge, offset_bits, loss_class }),
         "noise" => Ok(IonType::Noise),
         other => Err(TrainError::Other(format!("unknown ion_kind: {other}"))),
     }
@@ -854,7 +896,15 @@ fn read_ion_type(
     let kind = ik_col.value(i);
     let ic = ic_col.value(i);
     let iob = iob_col.value(i) as u32;
-    decode_ion_type(kind, ic, iob)
+    // Read ion_loss_class if present; default to 0 for old stores that lack this column.
+    let loss_class: u8 = match batch.column_by_name("ion_loss_class") {
+        Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
+            Some(arr) if !arr.is_null(i) => arr.value(i).clamp(0, 255) as u8,
+            _ => 0,
+        },
+        None => 0,
+    };
+    decode_ion_type(kind, ic, iob, loss_class)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────

@@ -34,11 +34,23 @@ Everything else in this campaign is measured against this table. It is also the
 **independence milestone** (it requires andes on its own models), so it is the
 gating prerequisite, not an afterthought.
 
-**Prerequisite — own-data models (Codon).** Retrain the bundled models on
-public/quantms data so the benchmark uses **zero MS-GF+-derived models**
-(`andes train` on Codon; the per-protocol low-res CID-TMT model = experiment #3
-is part of this). Until done, also record a *current-models* snapshot row,
-clearly tagged "MS-GF+-heritage models — not independence-valid."
+**Prerequisite — own-data models (Codon). This GATES the baseline table** (chosen
+approach: independence-valid, retrain first — not a current-models snapshot).
+Resume the **already-staged Phase-3 retraining campaign on EBI Codon** rather
+than starting cold:
+- Location: `/hps/.../andes-training` — `andes-bin` built, manifest + driver +
+  SLURM array ready. Access via the **`codon-cluster` skill**.
+- Still needed before it can run: the training **flats** + the **PRIDE-curated
+  public training corpus** (the ~29 experiment-class slugs), so every retrained
+  model derives from public/quantms data with **zero MS-GF+ heritage**.
+- The per-protocol **low-res CID-TMT model (= backlog experiment #3)** is built in
+  this same campaign and feeds the sweeps (#6/#9/#11).
+- Output: a new `models.parquet` with no MS-GF+-derived entries → this is what the
+  baseline table (and the whole `/loop`) benchmarks. Update NOTICE/independence
+  status when 39/39 are retrained.
+
+(A current-MS-GF+-heritage-models snapshot is optional reference only — explicitly
+**not** the independence baseline; the user chose to gate on the retrained table.)
 
 **Protocol (VM).** Matched target+decoy FASTA + foreign-proteome **entrapment**,
 matched **1% FDR** (+ glycan-free here), Percolator (grep the mode — Concatenated
@@ -58,6 +70,21 @@ entrapment-FDP, wall-clock):**
 WIN = andes ≥ MSFragger on IDs at matched 1% FDR with entrapment-FDP in
 tolerance, on **own-data models**. The campaign drives every Δ% from negative
 (the ~10% honest start) toward ≥ 0, axis by axis.
+
+### Launch sequence (for the VM/Codon `/loop` session)
+0. **Codon:** resume the staged Phase-3 retraining (above) → produce an own-data
+   `models.parquet` with zero MS-GF+ heritage. *(Gates everything; the long pole.)*
+1. **VM:** run experiment #0 → fill the baseline table (andes own-models vs
+   MSFragger, 3 datasets, matched 1% FDR + entrapment-FDP). Record Δ% per dataset.
+2. **Loop:** round-robin the ranked backlog
+   (`2026-06-13-andes-opt-experiment-backlog.md`), one atomic FDP-gated experiment
+   per iteration, re-running the relevant baseline row after each kept change so
+   Δ% is always current. Astral is the mandatory high-res canary on every change.
+3. Stop when Δ% ≥ 0 on all three (or the backlog is exhausted); log refutations.
+
+Note: backlog #1 (auto-detect isobaric protocol → the +3.5% TMT win) is a
+**peak-filtering** change, independent of the models, so it applies on the
+own-data models too — it is not borrowed from MS-GF+ heritage.
 
 ## Objective function
 

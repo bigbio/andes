@@ -8,11 +8,11 @@ _The data-driven peptide search engine of the quantms ecosystem. Built and maint
 [![Release](https://img.shields.io/github/v/release/bigbio/andes)](https://github.com/bigbio/andes/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-> **A data-driven peptide search engine** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Fast (10-28× faster than the MS-GF+ Java baseline) and competitive with leading engines at 1% FDR.
+> **A data-driven peptide search engine** — takes raw/mzml spectra + FASTA in, produces Percolator-ready `.pin` out. Use internal data generated with quantms project to boot peptide/protein identficiations. 
 
 ## What is this?
 
-andes began as an effort to improve [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical peptide-identification engine, and has since become an independent project: the generating-function scoring was removed, the scoring code was clean-room reauthored, and the bundled statistical models are trained on our own data (see [`NOTICE`](NOTICE) and [`HERITAGE.md`](HERITAGE.md)). It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring.
+andes began as an effort to improve [MS-GF+](https://github.com/MSGFPlus/msgfplus); read [`HERITAGE.md`](HERITAGE.md)); and has been trasnformed into a clean/fast data-driven search engine. It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring.
 
 ## Why andes?
 

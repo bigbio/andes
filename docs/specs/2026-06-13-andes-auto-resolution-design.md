@@ -114,14 +114,39 @@ those consumers.
 
 ### 4. Documentation (decision F)
 
-- **README:** the options table must label `--fragmentation` and
-  `--fragment-tol-ppm` / `--fragment-tol-da` as **MGF-only** extended
-  parameters, with a one-line note that mzML/`.raw`/`.d` are fully auto-detected
-  and ignore them.
+The README must **physically separate** the standard (always-applicable)
+parameters from the MGF-only extended parameters, and give explicit "if you have
+an MGF, pass this" guidance. Intended layout:
+
+```
+## Parameters
+
+<table of standard params: input, fasta, mods, precursor tol, fdr, threads,
+ chimeric, output, model-store/--model, etc. — applicable to all input formats>
+
+mzML, Thermo .raw, and Bruker .d are fully auto-detected: andes reads the
+activation method and analyzer resolution from the file. You do not pass any
+fragmentation/instrument parameter for these formats.
+
+### MGF input (extended parameters)
+
+MGF files carry no activation or analyzer metadata, so you must describe the
+acquisition yourself:
+
+| Parameter | When to pass | Example |
+|---|---|---|
+| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | the activation method used | `--fragmentation HCD` |
+| `--fragment-tol-ppm <X>` | high-resolution MS/MS (Orbitrap/TOF) | `--fragment-tol-ppm 20` |
+| `--fragment-tol-da <X>`  | low-resolution MS/MS (ion trap)      | `--fragment-tol-da 0.5` |
+
+If you pass none of these for an MGF file, andes assumes CID / low-res / 0.5 Da
+and prints a warning. These parameters have no effect on mzML/.raw/.d (metadata
+auto-detection always wins).
+```
+
 - **DOCS.md:** update §1 (remove `--instrument`; mark the two params MGF-only),
-  §4 Auto-detection (state metadata formats are zero-config; MGF is described by
-  the extended params or gets the warned default), and any `--instrument`
-  references.
+  §4 Auto-detection (metadata formats are zero-config; MGF is described by the
+  extended params or gets the warned default), and any `--instrument` references.
 
 ## Behavior matrix
 

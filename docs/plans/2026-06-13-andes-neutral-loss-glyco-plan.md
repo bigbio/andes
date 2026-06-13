@@ -153,7 +153,19 @@ git commit -m "feat(model): mods.txt key=value tail — loss= + accession= attri
 
 ---
 
-## Task 2: `IonType` loss discriminant (pooled key)
+## Task 1b: `class=` attribute + `loss_class` on `Modification`  *(NEW — added after the phospho/generality review)*
+
+**Files:** Modify `crates/model/src/modification.rs` (struct; parser attr loop; tests). Task 1 already shipped `neutral_losses` + `loss=`/`accession=`; this adds the loss-class.
+
+- [ ] **Step 1: Failing test** — `Modification::from_mods_txt_line("340.1,K,opt,any,Glyco,loss=162.0;324.1,class=glyco")` yields `loss_class == 1`; default (no `class=` but `loss=` present) yields `loss_class == 255` (Generic); unknown class name → `ModParseError::UnknownLossClass { name }`.
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3:** Add `pub loss_class: u8` to `Modification` (default `0`). Add a registry in `model` (e.g. `pub fn loss_class_id(name: &str) -> Option<u8>` mapping `glyco`→1, `phospho`→2, `sulfo`→3, `generic`→255). In the parser attr loop, handle `class=<name>` → `loss_class = loss_class_id(name).ok_or(UnknownLossClass{..})?`; after the loop, if `!neutral_losses.is_empty() && loss_class == 0 { loss_class = 255; }` (Generic default when losses declared without a class). Add `loss_class: 0` to all `Modification {…}` literals the compiler flags (the same set Task 1 touched).
+- [ ] **Step 4: Run → PASS; build workspace.**
+- [ ] **Step 5: Commit** — `git commit -m "feat(model): mods.txt class= attribute + Modification.loss_class registry"`.
+
+---
+
+## Task 2: `IonType` `loss_class` discriminant (per-class pooled key)
 
 **Files:** Modify `crates/scoring/src/param_model.rs` (`IonType` enum ~L494-499; accessors `offset`/`charge`/`is_prefix` ~L500-525). Ripple: ~58 construction sites across the workspace (compiler-driven).
 
@@ -161,47 +173,54 @@ git commit -m "feat(model): mods.txt key=value tail — loss= + accession= attri
 
 ```rust
 #[test]
-fn loss_ion_is_distinct_key_from_intact() {
+fn loss_class_is_distinct_key_from_intact() {
     use std::collections::HashMap;
-    let intact = IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss: false };
-    let lost   = IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss: true };
+    let intact = IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss_class: 0 };
+    let glyco  = IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss_class: 1 };
+    let phospho= IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss_class: 2 };
     let mut m = HashMap::new();
-    m.insert(intact, "a"); m.insert(lost, "b");
-    assert_eq!(m.len(), 2);
+    m.insert(intact, "i"); m.insert(glyco, "g"); m.insert(phospho, "p");
+    assert_eq!(m.len(), 3);
     assert!(!intact.is_loss());
-    assert!(lost.is_loss());
+    assert!(glyco.is_loss() && phospho.is_loss());
+    assert_eq!(glyco.loss_class(), 1);
 }
 ```
 
-- [ ] **Step 2: Run to verify fail** — `cargo test -p scoring loss_ion_is_distinct 2>&1 | tail` → FAIL (no `loss` field / `is_loss`).
+- [ ] **Step 2: Run to verify fail** — `cargo test -p scoring loss_class_is_distinct 2>&1 | tail` → FAIL (no `loss_class` field / accessors).
 
-- [ ] **Step 3: Add the field + accessor.** Change the variants:
+- [ ] **Step 3: Add the field + accessors.** Change the variants:
 
 ```rust
-    Prefix { charge: i32, offset_bits: u32, loss: bool },
-    Suffix { charge: i32, offset_bits: u32, loss: bool },
+    Prefix { charge: i32, offset_bits: u32, loss_class: u8 },
+    Suffix { charge: i32, offset_bits: u32, loss_class: u8 },
     Noise,
 ```
 
-Add accessor in `impl IonType`:
+Add accessors in `impl IonType`:
 
 ```rust
-    /// True if this is a neutral-loss-shifted fragment ion (pooled loss key).
-    pub fn is_loss(&self) -> bool {
-        matches!(self, IonType::Prefix { loss: true, .. } | IonType::Suffix { loss: true, .. })
+    /// Loss-class id of this ion: 0 = intact; 1.. = a per-mod-class loss pool.
+    pub fn loss_class(&self) -> u8 {
+        match self {
+            IonType::Prefix { loss_class, .. } | IonType::Suffix { loss_class, .. } => *loss_class,
+            IonType::Noise => 0,
+        }
     }
+    /// True if this is a neutral-loss-shifted fragment ion (any loss class).
+    pub fn is_loss(&self) -> bool { self.loss_class() != 0 }
 ```
 
 Update `offset()`/`charge()`/`is_prefix()`/`is_suffix()` patterns to add `, ..` if they don't already use it (the `{ offset_bits, .. }` form is forward-compatible).
 
-- [ ] **Step 4: Compiler-driven ripple.** Run `cargo build --workspace 2>&1 | tee /tmp/build.txt | tail -30`. For EVERY flagged `IonType::Prefix { … }` / `IonType::Suffix { … }` **construction** literal (≈58 across `model-train/src/{counts,store/read}.rs`, `scoring/src/{param_model,testutil,scoring/*}.rs`, `search/src/{match_engine,coisolation}.rs`, tests, examples), add `loss: false`. **Do NOT** touch `{ .. }` match patterns (forward-compatible). Loss-`true` is produced ONLY in Task 3. Re-run build until clean.
+- [ ] **Step 4: Compiler-driven ripple.** Run `cargo build --workspace 2>&1 | tee /tmp/build.txt | tail -30`. For EVERY flagged `IonType::Prefix { … }` / `IonType::Suffix { … }` **construction** literal (≈58 across `model-train/src/{counts,store/read}.rs`, `scoring/src/{param_model,testutil,scoring/*}.rs`, `search/src/{match_engine,coisolation}.rs`, tests, examples), add `loss_class: 0`. **Do NOT** touch `{ .. }` match patterns (forward-compatible). Non-zero `loss_class` is produced ONLY in Task 3. Re-run build until clean.
 
 - [ ] **Step 5: Run + commit**
 
-Run: `cargo test -p scoring 2>&1 | tail -15` (existing pass — intact keys unchanged, `loss:false` ≡ old).
+Run: `cargo test -p scoring 2>&1 | tail -15` (existing pass — intact keys unchanged, `loss_class:0` ≡ old).
 ```bash
 git add -A
-git commit -m "feat(scoring): IonType pooled loss discriminant (loss:false ≡ prior behavior)"
+git commit -m "feat(scoring): IonType per-class loss discriminant (loss_class:0 ≡ prior behavior)"
 ```
 
 ---
@@ -240,19 +259,19 @@ fn no_loss_ions_when_no_loss_mod() {
 
 - [ ] **Step 2: Run to verify fail** — `cargo test -p scoring emits_loss_ions 2>&1 | tail` → FAIL.
 
-- [ ] **Step 3: Implement.** In `predict_by_ions`, while walking fragment positions, track whether the current prefix/suffix span includes a residue whose `mod_` has non-empty `neutral_losses`; collect the union of those loss masses for the span. After pushing the intact ion `(ion_type, mz)` at charge `z`, for each loss `L` in the span's loss set, also push a loss ion:
+- [ ] **Step 3: Implement.** Gate on activation first: loss ions are emitted only for collisional methods. Add `pub fn predicts_neutral_losses(self) -> bool` to `ActivationMethod` (`crates/model/src/activation.rs`) returning `false` for `ETD` (and any electron-based variant), `true` for CID/HCD/PQD/UVPD. The caller (which holds the scorer) passes a `predict_losses: bool` into the prediction path, computed as `scorer.param().data_type.activation.predicts_neutral_losses()`; when `false`, skip all loss-ion emission (inert ⇒ byte-identical, same as no-loss).
+
+  In `predict_by_ions` (when `predict_losses`), while walking fragment positions, track for the current prefix/suffix span the set of `(loss_mass, loss_class)` contributed by residues whose `mod_` has non-empty `neutral_losses` (each such mod carries `loss_class` and a `neutral_losses` list). After pushing the intact ion `(ion_type, mz)` at charge `z`, for each `(L, cls)` in the span set, also push a loss ion:
 
 ```rust
-        // After the intact ion is pushed for this (series, position, charge z):
-        if !span_losses.is_empty() {
-            let base_offset_bits = /* same offset_bits as the intact ion */;
-            for &loss in &span_losses {
+        if predict_losses {
+            for &(loss, cls) in &span_losses {   // span_losses: SmallVec<[(f64, u8); _]>
                 let loss_mz = mz - loss / z as f64;
                 let loss_ion_type = match intact_ion_type {
                     IonType::Prefix { charge, offset_bits, .. } =>
-                        IonType::Prefix { charge, offset_bits, loss: true },
+                        IonType::Prefix { charge, offset_bits, loss_class: cls },
                     IonType::Suffix { charge, offset_bits, .. } =>
-                        IonType::Suffix { charge, offset_bits, loss: true },
+                        IonType::Suffix { charge, offset_bits, loss_class: cls },
                     IonType::Noise => continue,
                 };
                 out.push(PredictedIon { ion_type: loss_ion_type, mz: loss_mz /* + other fields copied from intact */ });
@@ -260,7 +279,7 @@ fn no_loss_ions_when_no_loss_mod() {
         }
 ```
 
-`span_losses` is built incrementally: for a prefix ion ending at residue `i`, it is the union of `neutral_losses` over residues `0..=i` that carry a mod with losses (v1: union, no cross-products). For suffix ions, the mirror span. Update the module header L3 from "no neutral losses" to "b/y plus user-declared neutral-loss ions (pooled loss IonType)."
+`span_losses` is built incrementally: for a prefix ion ending at residue `i`, the `(loss_mass, loss_class)` pairs over residues `0..=i` whose mod declares losses (v1: independent per residue, no cross-products). For suffix ions, the mirror span. Update the module header L3 from "no neutral losses" to "b/y plus user-declared, per-class, activation-gated neutral-loss ions." Add a test that ETD activation (or `predict_losses=false`) emits zero loss ions.
 
 - [ ] **Step 4: Run to verify pass** — `cargo test -p scoring fragment 2>&1 | tail` → PASS, existing fragment tests unchanged.
 
@@ -326,7 +345,7 @@ git commit -m "docs: mods.txt loss=/accession= attributes, common-loss table, gl
 
 - [ ] **Step 2: Run to verify fail.**
 
-- [ ] **Step 3: Implement.** The flat ion-type encoding currently stores `(is_prefix_f, ion_charge, offset_bits_f, …)` and the reader reconstructs at [read.rs:352-362](../../crates/model-train/src/store/read.rs). Add a loss flag to the per-ion-type encoding (an extra trailing value, e.g. `loss_f` 1.0/0.0). Reader: when the loss value is present read it; when absent (older files) default `false`. Construct `IonType::Prefix { charge, offset_bits, loss: loss_f > 0.5 }` (and Suffix). Keep `is_prefix_f` semantics (>0.5 Prefix, <-0.5 Noise, else Suffix).
+- [ ] **Step 3: Implement.** The flat ion-type encoding currently stores `(is_prefix_f, ion_charge, offset_bits_f, …)` and the reader reconstructs at [read.rs:352-362](../../crates/model-train/src/store/read.rs). Add a `loss_class` value to the per-ion-type encoding (an extra trailing float carrying the `u8`, e.g. `loss_class_f = loss_class as f32`). Reader: when present, `loss_class = loss_class_f.round() as u8`; when absent (older files) default `0`. Construct `IonType::Prefix { charge, offset_bits, loss_class }` (and Suffix). Keep `is_prefix_f` semantics (>0.5 Prefix, <-0.5 Noise, else Suffix).
 
 - [ ] **Step 4: Run round-trip + the bundled-store load test** — `cargo test -p model-train 2>&1 | tail -15` and `cargo test --workspace param_loads_all_bundled 2>&1 | tail` (the existing 39 bundled models must still load — they have no loss entries → all intact, unchanged).
 
@@ -346,7 +365,7 @@ git commit -m "feat(model-train): serialize IonType loss bit in parquet store (b
 
 - [ ] **Step 2: Run to verify fail.**
 
-- [ ] **Step 3: Implement.** `RankScorer::new` already builds `log_table`/`partition_ion_logs` from `param.rank_dist_table` keyed by `IonType` — a `loss:true` key flows through automatically (no special-casing needed for table build). In the node-score lookup, a `loss:true` ion whose `(partition, ion_type)` is absent must fall to the missing-ion/absent path exactly as an unknown intact ion does today (verify the existing lookup already returns the absent score for a missing key; if it panics/unwraps, guard it). Ensure `partition_ion_types_cache`/`ion_types_for_partition_slice` include `loss:true` types when present so the DP iterates them.
+- [ ] **Step 3: Implement.** `RankScorer::new` already builds `log_table`/`partition_ion_logs` from `param.rank_dist_table` keyed by `IonType` — a `loss_class != 0` key flows through automatically (no special-casing needed for table build). In the node-score lookup, a `loss_class != 0` ion whose `(partition, ion_type)` is absent (e.g. a phospho-class ion against a glyco-only model) must fall to the missing-ion/absent path exactly as an unknown intact ion does today (verify the existing lookup already returns the absent score for a missing key; if it panics/unwraps, guard it). Ensure `partition_ion_types_cache`/`ion_types_for_partition_slice` include `loss_class != 0` types when present so the DP iterates them.
 
 - [ ] **Step 4: Run + byte-identical guard** — `cargo test -p scoring 2>&1 | tail` and `cargo test --workspace score_psm 2>&1 | tail` (no-loss scoring unchanged).
 

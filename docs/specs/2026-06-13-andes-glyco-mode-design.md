@@ -1,5 +1,13 @@
 # andes `--glyco` Mode — Design Spec (N-glyco, stepped-HCD MVP)
 
+> **⛔ PARKED (2026-06-13, user decision).** Do NOT start glyco implementation
+> until andes **beats MSFragger on all three benchmark datasets (TMT, Astral,
+> UPS1)** — i.e. the search-engine optimization campaign's WIN condition is met
+> (`docs/plans/2026-06-13-andes-search-engine-optimization-campaign.md`). Until
+> then, all glyco docs (this spec, the v2 addendum, the research plan, the
+> neutral-loss handoff) are parked references. The neutral-loss scoring primitive
+> already shipped stays; no further glyco work proceeds.
+
 **Status:** design. Built on the feasibility analysis in
 `docs/specs/2026-06-13-andes-glycopeptide-search-research-plan.md` and the
 neutral-loss scoring primitive shipped on `feat/enzyme-support`

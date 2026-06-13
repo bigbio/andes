@@ -17,7 +17,7 @@ use model::peptide::Peptide;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
-use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
+use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions, predict_by_ions_with_losses};
 use crate::search_index::SearchIndex;
 use crate::search_params::{ScoreMode, SearchParams};
 use scoring_crate::intensity_model::IntensityModel;
@@ -1047,7 +1047,12 @@ pub(crate) fn compute_psm_features(
     // peptide length is 40 → n-1 ≤ 39). The prior `vec![false; n-1]` heap
     // allocations fired ~150k × 4 / PSM batch and were a measurable hot-path
     // cost. SmallVec inlines for n ≤ 64.
-    let predicted = predict_by_ions(peptide, 1..=1);
+    // Activation-gated neutral-loss prediction. ETD preserves labile mods
+    // (no loss ions); collisional/photon activation predicts them. Inert
+    // unless a residue's mod declares `neutral_losses`, so output is
+    // byte-identical to the canonical b/y set for every non-loss peptide.
+    let predict_losses = scorer.param().data_type.activation.predicts_neutral_losses();
+    let predicted = predict_by_ions_with_losses(peptide, 1..=1, predict_losses);
     let mut b_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
     let mut y_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
 
@@ -1123,7 +1128,7 @@ pub(crate) fn compute_psm_features(
     // ── Strong-score Stage-1: charge-2 matched-ion count ─────────────────────
     // High-charge precursors fragment into +2 ions ignored by the charge-1
     // loop above. Separate probe — does not alter existing feature values.
-    let predicted_z2 = predict_by_ions(peptide, 2..=2);
+    let predicted_z2 = predict_by_ions_with_losses(peptide, 2..=2, predict_losses);
     let mut doubly_charged_matched_ion_count: u32 = 0;
     for p in &predicted_z2 {
         let tol_da = if feature_tol_is_ppm {

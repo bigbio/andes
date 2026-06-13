@@ -22,6 +22,26 @@ impl ActivationMethod {
         }
     }
 
+    /// Whether fragment prediction should emit neutral-loss-shifted ions for
+    /// this activation method.
+    ///
+    /// Collisional / vibrational and photon-based activation (CID, HCD, PQD,
+    /// UVPD) cleave labile groups, so neutral-loss fragment ions are expected
+    /// and should be predicted. Electron-based dissociation (ETD, and any
+    /// electron-transfer/-capture variant) preserves labile modifications on
+    /// the backbone fragments, so loss ions are NOT predicted.
+    pub fn predicts_neutral_losses(self) -> bool {
+        match self {
+            // Electron-based: labile mods survive → no loss ions.
+            ActivationMethod::ETD => false,
+            // Collisional / photon-based: labile mods fragment → loss ions.
+            ActivationMethod::CID
+            | ActivationMethod::HCD
+            | ActivationMethod::PQD
+            | ActivationMethod::UVPD => true,
+        }
+    }
+
     /// Case-sensitive lookup. Returns `None` for unknown names, including the
     /// runtime sentinels `ASWRITTEN` and `FUSION` which never appear in
     /// stored `.param` files.
@@ -80,5 +100,19 @@ mod tests {
     fn from_name_unknown() {
         assert_eq!(ActivationMethod::from_name("garbage"), None);
         assert_eq!(ActivationMethod::from_name(""), None);
+    }
+
+    #[test]
+    fn etd_does_not_predict_neutral_losses() {
+        // Electron-based dissociation preserves labile mods on fragments.
+        assert!(!ActivationMethod::ETD.predicts_neutral_losses());
+    }
+
+    #[test]
+    fn collisional_and_photon_methods_predict_neutral_losses() {
+        assert!(ActivationMethod::CID.predicts_neutral_losses());
+        assert!(ActivationMethod::HCD.predicts_neutral_losses());
+        assert!(ActivationMethod::PQD.predicts_neutral_losses());
+        assert!(ActivationMethod::UVPD.predicts_neutral_losses());
     }
 }

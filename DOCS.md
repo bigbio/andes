@@ -497,10 +497,6 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 | `--fragmentation` *(MGF-only)* | `2` | `ETD` | |
 | `--fragmentation` *(MGF-only)* | `3` | `HCD` | |
 | `--fragmentation` *(MGF-only)* | `4` | `UVPD` | |
-| `--instrument` *(MGF-only, hidden)* | `0` | `low-res` | Legacy alias for `--fragment-tol-da 0.5` model key |
-| `--instrument` *(MGF-only, hidden)* | `1` | `high-res` | Legacy alias for `--fragment-tol-ppm` model key |
-| `--instrument` *(MGF-only, hidden)* | `2` | `TOF` | Legacy alias for TOF model key |
-| `--instrument` *(MGF-only, hidden)* | `3` | `QExactive` | Legacy alias for QExactive model key |
 | `--protocol` | `0` | `auto` | |
 | `--protocol` | `1` | `phospho` | |
 | `--protocol` | `2` | `iTRAQ` | |
@@ -510,6 +506,8 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 | `--enzyme-specificity` (alias `--ntt`) | `0` | `non-specific` | |
 | `--enzyme-specificity` (alias `--ntt`) | `1` | `semi` | |
 | `--enzyme-specificity` (alias `--ntt`) | `2` | `fully` | |
+
+> **Note:** The legacy `--instrument` flag was removed; for MGF input use `--fragment-tol-ppm`/`--fragment-tol-da` instead (mzML/.raw/.d auto-detect the analyzer).
 
 ### Behavior notes
 

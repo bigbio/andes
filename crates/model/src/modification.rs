@@ -58,7 +58,7 @@ impl Modification {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ModParseError {
-    #[error("expected 5 comma-separated fields, got {got}")]
+    #[error("expected at least 5 comma-separated fields, got {got}")]
     WrongFieldCount { got: usize },
     #[error("invalid mass delta {field:?}: {source}")]
     BadMass { field: String, #[source] source: std::num::ParseFloatError },
@@ -80,6 +80,29 @@ impl Modification {
     /// Parse a single non-empty, non-comment line from a Mods.txt file.
     /// Empty lines and `# ...` comment lines should be filtered by the
     /// caller (see `aa_set::AminoAcidSetBuilder::add_mods_from_file`).
+    ///
+    /// # Format
+    ///
+    /// ```text
+    /// <mass>,<residue>,<fix|opt>,<location>,<name>[,<key>=<value>...]
+    /// ```
+    ///
+    /// The 5 positional core fields are:
+    /// 1. `mass`     — floating-point mass delta in Da (may be negative)
+    /// 2. `residue`  — single uppercase ASCII letter or `*` for wildcard
+    /// 3. `fix|opt`  — `fix` for a fixed mod, `opt` for a variable mod (case-insensitive)
+    /// 4. `location` — one of `any`, `N-term`, `C-term`, `Prot-N-term`, `Prot-C-term` (case-insensitive)
+    /// 5. `name`     — human-readable mod name (**must not contain a comma**)
+    ///
+    /// Optional `key=value` attribute fields may follow, separated by commas:
+    /// - `loss=<m1;m2;…>` — semicolon-separated neutral-loss masses in Da (positive, < 2000).
+    ///   Multiple `loss=` attributes accumulate into a single list.
+    /// - `accession=<CURIE>` — ontology accession, e.g. `UNIMOD:393`.
+    ///   If repeated, the last value wins.
+    ///
+    /// **Caveat:** the mod name must not contain a comma. A comma after the name
+    /// is parsed as the start of attribute fields; a token there that is not
+    /// `key=value` form is rejected as [`ModParseError::BadModAttr`].
     pub fn from_mods_txt_line(line: &str) -> Result<Self, ModParseError> {
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() < 5 {
@@ -352,5 +375,19 @@ mod tests {
         assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,frobnicate=7"), Err(ModParseError::UnknownModAttr { .. })));
         assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=abc"), Err(ModParseError::BadNeutralLoss { .. })));
         assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,nokey"), Err(ModParseError::BadModAttr { .. })));
+    }
+
+    #[test]
+    fn rejects_loss_boundary_values() {
+        // 0 and the 2000 upper bound are both excluded (strict).
+        assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=0.0"), Err(ModParseError::BadNeutralLoss { .. })));
+        assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=2000.0"), Err(ModParseError::BadNeutralLoss { .. })));
+    }
+
+    #[test]
+    fn tolerates_whitespace_in_attributes() {
+        let m = Modification::from_mods_txt_line("1.0,K,opt,any,X, loss = 98.0 ; 18.0 , accession = UNIMOD:21 ").unwrap();
+        assert_eq!(m.neutral_losses, vec![98.0, 18.0]);
+        assert_eq!(m.accession.as_deref(), Some("UNIMOD:21"));
     }
 }

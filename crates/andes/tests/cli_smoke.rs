@@ -458,6 +458,7 @@ fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
     .unwrap();
 
     let err = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "andes exited non-zero; stderr: {err}");
     assert!(err.to_lowercase().contains("cid_lowres"), "stderr: {err}");
     assert!(
         err.to_lowercase().contains("assuming") || err.to_lowercase().contains("warn"),
@@ -484,6 +485,7 @@ fn mgf_fragment_tol_ppm_selects_high_res_model() {
     .unwrap();
 
     let err = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "andes exited non-zero; stderr: {err}");
     assert!(err.to_lowercase().contains("qexactive"), "stderr: {err}");
 }
 

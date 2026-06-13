@@ -413,8 +413,8 @@ fn metadataless_no_flags_default_selects_cid_lowres() {
         instrument_family,
         Some("hcd_qexactive_tryp"),
     )
-    .map(|s| s.to_string())
-    .unwrap_or_else(|| "hcd_qexactive_tryp".to_string());
+    .expect("cid_lowres_tryp must be present in the bundled store")
+    .to_string();
 
     assert_eq!(
         new_id, "cid_lowres_tryp",

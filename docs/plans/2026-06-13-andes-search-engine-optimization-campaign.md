@@ -218,6 +218,6 @@ Pacing: each iteration is real compute (search + Percolator = minutes–tens of 
 
 | # | Axis | Hypothesis | Dataset(s) | PSM Δ (FDP) | Speed Δ | Verdict | Commit |
 |---|---|---|---|---|---|---|---|
-| — | — | (loop appends rows here) | | | | | |
+| 1 | PARAMS+PSMs | auto-detect TMT/iTRAQ from MS2 reporters → engage isobaric filter zero-config | TMT (a05058) | *await VM* | — | **impl done, byte-identical verified locally** (golden parity + real high-res-glyco negative control no-false-positive); FDP-gain pending VM | `b49228b6` |
 
 **Known dead ends (do not re-try):** chimeric-TMT (FDP-flat), fragmentation overlay (all 3 adjustments fail), rank-model "ceiling" via data/recal (no lever), fragment-index speed-v2 (recall/speed tension). See the project memory for details.

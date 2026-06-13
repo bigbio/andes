@@ -18,6 +18,24 @@
 
 ---
 
+## STATUS (2026-06-13) — Tasks 1–6 DONE (byte-identical milestone); Task 7 deferred
+
+**Done, reviewed, byte-identical, on `feat/enzyme-support` (unpushed):**
+- Task 1 (`77ec73a0`) + 1b (`cf4eec23`): mods.txt `loss=`/`class=`/`accession=` grammar; `Modification.neutral_losses` + `loss_class` + registry.
+- Task 2 (`e4210430`): `IonType.loss_class:u8` model-format key (loss_class:0 ≡ prior).
+- Task 3 (`2af55f70`): per-class, **activation-gated** loss-ion **prediction** (`PredictedIon.loss_class`; `predict_by_ions` is a gate-off wrapper; only `compute_psm_features` wired). Design pivot to per-class key + activation gating came from the phospho/generality review.
+- Task 4 (`ca20ec34`→`451fc830`): accession is **TSV-only** (`Modifications` column). PIN omitted — its `Proteins` column is rest-of-line; a trailing column would be parsed by Percolator as a phantom protein. PIN byte-identical.
+- Task 5 (`267684ad`): DOCS §2 grammar + common-loss table + **pY guidance** (declare HPO₃ −79.9663 for pY, not H₃PO₄) + glyco template `resources/mods/glyco_example.txt`.
+- Task 6 (`67bae079`): parquet store serializes `loss_class` via **new nullable columns** (`ion_loss_class`, `frag_off_loss_classes`); old files default 0; 39 bundled models round-trip unchanged.
+
+**DEFERRED (do together when the glyco dataset is available):**
+- **Task 7 (EXPANDED — node-score integration):** the score-side GF DP iterates the *model's* ion types, so scoring a loss ion requires **coupling the per-peptide loss mass (from the mod) with the model's pooled per-class rank table at each node** — and switching `matched_peak_keys`/`intensity_signal` (and the DP) off the intact-only path. Bigger than the one-liner above. Byte-identical until a model has loss tables.
+- **SP3 (train glyco model)** + **SP4 (benchmark)** — gated on the user's glyco corpus + the VM.
+
+**Carry-forward minor cleanup:** Task-2's `IonType::loss_class()` doc returns 0 for `Noise` too — tighten the doc + add a `Noise.is_loss()==false` test assertion when Task 7 next touches `param_model.rs`.
+
+---
+
 ## File structure
 
 | File | Responsibility | Phase |

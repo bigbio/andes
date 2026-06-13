@@ -143,6 +143,35 @@ Primary, in priority order (from the andes objective: own data / no patent / bea
 
 A change is an **improvement only if** it raises (1) with FDP held ≤ target, OR improves (2)/(3) at byte-identical (1). Everything else is a refutation — log it and revert.
 
+## Model experimentation inside andes (standing design principle)
+
+New scoring models are **tested in-engine** — A/B'd inside andes against the
+baseline table — not bolted on externally. "Multiple models based on peak ranks"
+generalizes to *any* new model family (retrained rank tables, alternative
+rank/noise parameterizations, and later small learned models), under **three
+standing requirements**:
+
+1. **Native Rust inference.** A model's *inference path in andes* must be pure
+   native Rust — no external runtime (Python/ONNX/JVM), no vendor FFI. This keeps
+   the single static binary, the MS-GF+-independence, and "deployable anywhere"
+   intact, and keeps the model fully owned. Training may happen anywhere (the VM,
+   on Codon gold PSMs); only **inference** must be native Rust. Today that's the
+   parquet rank tables + the GF scorer; a future learned model ships its weights +
+   a hand-written Rust forward pass, loaded through the same model store.
+2. **Percolator-complementary.** A model's output feeds the existing
+   PIN → Percolator rescoring step — either as the primary ranking score
+   (RawScore) or as **additive feature columns** Percolator weights. New models
+   are "next steps into Percolator"; they do **not** replace the rescoring / FDR
+   layer. (Additive features must be top-1-preserving and `--`-gated so the
+   standard-3 PIN stays byte-identical — parity-tuning lessons.)
+3. **Fast enough.** Inference must not regress the speed axis: native Rust + a
+   bounded per-spectrum cost (the GF DP is the budget). A model that lifts PSMs
+   but tanks throughput **fails** the objective (speed is axis #2) — measure wall
+   on every model swap.
+
+This is the rule the model-lever backlog items (#3/#6/#11 + any future learned
+model) run under: **native Rust, Percolator-complementary, fast.**
+
 ## Hard guardrails (learned the expensive way)
 
 The prior record is littered with plausible ideas that **entrapment-FDP refuted**: chimeric-TMT, the fragmentation overlay, the rank-model ceiling, the speed-v2 fragment index. So:

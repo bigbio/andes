@@ -76,7 +76,7 @@ pub enum ModParseError {
     UnknownModAttr { key: String },
     #[error("malformed mod attribute {field:?} (expected key=value)")]
     BadModAttr { field: String },
-    #[error("invalid neutral-loss value {value:?} (expected positive number < 2000)")]
+    #[error("invalid neutral-loss value {value:?} (expected positive number < 5000)")]
     BadNeutralLoss { value: String },
     #[error("unknown loss class {name:?} (expected glyco|phospho|sulfo|generic)")]
     UnknownLossClass { name: String },
@@ -122,7 +122,8 @@ impl Modification {
     /// 5. `name`     — human-readable mod name (**must not contain a comma**)
     ///
     /// Optional `key=value` attribute fields may follow, separated by commas:
-    /// - `loss=<m1;m2;…>` — semicolon-separated neutral-loss masses in Da (positive, < 2000).
+    /// - `loss=<m1;m2;…>` — semicolon-separated neutral-loss masses in Da (positive, < 5000;
+    ///   the upper bound admits full intact-glycan losses, e.g. A2G2S2 −2204.77).
     ///   Multiple `loss=` attributes accumulate into a single list.
     /// - `accession=<CURIE>` — ontology accession, e.g. `UNIMOD:393`.
     ///   If repeated, the last value wins.
@@ -185,7 +186,7 @@ impl Modification {
                         if tok.is_empty() { continue; }
                         let v: f64 = tok.parse()
                             .map_err(|_| ModParseError::BadNeutralLoss { value: tok.to_string() })?;
-                        if !(v > 0.0 && v < 2000.0) {
+                        if !(v > 0.0 && v < 5000.0) {
                             return Err(ModParseError::BadNeutralLoss { value: tok.to_string() });
                         }
                         neutral_losses.push(v);
@@ -425,9 +426,11 @@ mod tests {
 
     #[test]
     fn rejects_loss_boundary_values() {
-        // 0 and the 2000 upper bound are both excluded (strict).
+        // 0 and the 5000 upper bound are both excluded (strict); a full
+        // intact-glycan loss (e.g. 2204.77) is now within range.
         assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=0.0"), Err(ModParseError::BadNeutralLoss { .. })));
-        assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=2000.0"), Err(ModParseError::BadNeutralLoss { .. })));
+        assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=5000.0"), Err(ModParseError::BadNeutralLoss { .. })));
+        assert!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=2204.772446").is_ok());
     }
 
     #[test]

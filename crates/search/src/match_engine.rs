@@ -1055,6 +1055,10 @@ pub(crate) fn compute_psm_features(
     let predicted = predict_by_ions_with_losses(peptide, 1..=1, predict_losses);
     let mut b_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
     let mut y_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    // Per-position charge-1 INTACT ion intensity-ranks (u32::MAX = unmatched),
+    // backing the additive complementary-ion-balance feature below.
+    let mut b_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
+    let mut y_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
 
     // Collect matched-ion details for ion-current ratio and error-stat features.
     // Each entry: (intensity, observed_mz, predicted_mz, is_b_ion).
@@ -1098,11 +1102,19 @@ pub(crate) fn compute_psm_features(
                 IonKind::B => {
                     if pos < b_matched.len() {
                         b_matched[pos] = true;
+                        // Record the best (lowest) INTACT-ion rank per position
+                        // for the complementary-balance feature; skip loss ions.
+                        if !p.is_loss() && rank < b_rank[pos] {
+                            b_rank[pos] = rank;
+                        }
                     }
                 }
                 IonKind::Y => {
                     if pos < y_matched.len() {
                         y_matched[pos] = true;
+                        if !p.is_loss() && rank < y_rank[pos] {
+                            y_rank[pos] = rank;
+                        }
                     }
                 }
             }
@@ -1351,6 +1363,21 @@ pub(crate) fn compute_psm_features(
     }
     let longest_complementary_ladder = longest_run(&complementary_sites);
 
+    // ADDITIVE complementary-ion BALANCE: Σ over bonds where both the charge-1
+    // intact b_i and complementary y_{n-i} matched, weighted by intensity-rank
+    // agreement 1/(1+|rank_b − rank_y|). Orthogonal to the longest-RUN ladder
+    // (no intensity) — captures whether the two halves of a bond appear at
+    // correlated ranks (true peptide) vs lopsided one-series matches (decoy).
+    let mut complementary_ion_balance = 0.0_f32;
+    for i in 1..n {
+        let rb = b_rank[i - 1];
+        let ry = y_rank[n - i - 1];
+        if rb != u32::MAX && ry != u32::MAX {
+            let diff = (rb as i64 - ry as i64).unsigned_abs() as f32;
+            complementary_ion_balance += 1.0 / (1.0 + diff);
+        }
+    }
+
     // ── Strong-score Stage-1: mean matched intensity rank ──────────────────
     // Average intensity-rank of matched b/y ions (1 = most intense). Lower =
     // better — real PSMs explain dominant peaks.
@@ -1440,6 +1467,7 @@ pub(crate) fn compute_psm_features(
         tailor_score: 0.0,
         ppm_gaussian_score,
         longest_complementary_ladder,
+        complementary_ion_balance,
         neutral_loss_ion_count,
         mean_matched_intensity_rank,
         doubly_charged_matched_ion_count,
@@ -1826,6 +1854,49 @@ mod feature_tests {
             f_split.longest_complementary_ladder < f_all.longest_complementary_ladder,
             "split ladder ({}) should be shorter than full ({})",
             f_split.longest_complementary_ladder, f_all.longest_complementary_ladder
+        );
+    }
+
+    // ── Test: complementary-ion balance (additive feature #campaign-10) ──────
+
+    #[test]
+    fn compute_psm_features_complementary_ion_balance() {
+        let pep = ala_peptide(5);
+        let predicted = predict_by_ions(&pep, 1..=1);
+
+        // (a) All ions matched → bonds have both b_i and y_{n-i} → balance > 0.
+        let mut all: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_all = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(all)),
+            &pep, &make_scorer(0.01), 2, None,
+        );
+        assert!(
+            f_all.complementary_ion_balance > 0.0,
+            "all ions matched → balance should be > 0, got {}",
+            f_all.complementary_ion_balance
+        );
+
+        // (b) Only b ions matched (no y) → no complementary pair → balance == 0.
+        let mut b_only: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p.kind, IonKind::B))
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        b_only.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_b = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(b_only)),
+            &pep, &make_scorer(0.01), 2, None,
+        );
+        assert_eq!(
+            f_b.complementary_ion_balance, 0.0,
+            "b-only spectrum → no complementary pair → balance 0, got {}",
+            f_b.complementary_ion_balance
         );
     }
 

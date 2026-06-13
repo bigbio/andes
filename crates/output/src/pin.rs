@@ -226,6 +226,10 @@ fn write_header<W: Write>(
         // LongestComplementaryLadder = longest consecutive run of complementary
         // cleavage sites (both b and y matched).
         "LongestComplementaryLadder".to_string(),
+        // ComplementaryIonBalance = Σ over bonds where both b_i and y_{n-i}
+        // matched, weighted by intensity-rank agreement 1/(1+|rank_b−rank_y|)
+        // (ADDITIVE; orthogonal to the run-length ladder above).
+        "ComplementaryIonBalance".to_string(),
         // MeanMatchedIntensityRank = mean intensity-rank of matched ions (lower
         // = matched dominant peaks).
         "MeanMatchedIntensityRank".to_string(),
@@ -486,6 +490,8 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.ppm_gaussian_score as f64)?;
     write!(writer, "\t{}", psm.features.neutral_loss_ion_count)?;
     write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.complementary_ion_balance as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.mean_matched_intensity_rank as f64)?;
     write!(writer, "\t{}", psm.features.doubly_charged_matched_ion_count)?;
@@ -768,6 +774,7 @@ mod tests {
             "PpmGaussianScore",
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
+            "ComplementaryIonBalance",
             "MeanMatchedIntensityRank",
             "DoublyChargedMatchedIonCount",
             "UniqueMatchFraction",

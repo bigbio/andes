@@ -876,6 +876,90 @@ impl<'a> ScoredSpectrum<'a> {
         total
     }
 
+    /// Additive **neutral-loss** node score for a peptide split, peptide-aware.
+    ///
+    /// `prefix_losses` / `suffix_losses` are the `(loss_mass, loss_class)` pairs
+    /// active for fragments spanning the prefix (resp. suffix) at this split —
+    /// i.e. contributed by loss-declaring mods on residues inside that span.
+    /// For each active loss, the model's trained loss-ion tables of the matching
+    /// class are probed at the loss-shifted m/z (`intact_mz − loss/z`) and their
+    /// per-rank LLR summed, exactly mirroring the intact node-score formula.
+    ///
+    /// Returns `round(loss_prefix + loss_suffix) as i32`, and **0** when both
+    /// loss sets are empty OR the model has no loss tables — so a standard
+    /// search adds nothing and stays byte-identical to the pre-feature engine.
+    /// This is summed on top of (not folded into) the intact split score in
+    /// `score_psm`, so the intact contribution is bit-for-bit unchanged.
+    #[allow(clippy::too_many_arguments, reason = "mirrors node_score's split-scoring signature")]
+    pub fn loss_node_score(
+        &self,
+        prefix_nominal: f64,
+        suffix_nominal: f64,
+        scorer: &RankScorer,
+        charge: u8,
+        parent_mass: f64,
+        prefix_losses: &[(f64, u8)],
+        suffix_losses: &[(f64, u8)],
+    ) -> i32 {
+        if prefix_losses.is_empty() && suffix_losses.is_empty() {
+            return 0;
+        }
+        let pref = self.directional_loss_node_score(
+            prefix_nominal, true, scorer, charge, parent_mass, prefix_losses,
+        );
+        let suff = self.directional_loss_node_score(
+            suffix_nominal, false, scorer, charge, parent_mass, suffix_losses,
+        );
+        (pref + suff).round() as i32
+    }
+
+    /// Score for a single directional (prefix or suffix) node's neutral-loss
+    /// ions at `nominal_mass`, given the `(loss_mass, loss_class)` pairs active
+    /// for that span. Sums the trained loss-ion LLR (observed-rank entry, or the
+    /// `max_rank` "absent" slot when no peak matches), identically to
+    /// `directional_node_score_inner` but over the loss-shifted m/z.
+    fn directional_loss_node_score(
+        &self,
+        nominal_mass: f64,
+        is_prefix: bool,
+        scorer: &RankScorer,
+        charge: u8,
+        parent_mass: f64,
+        active_losses: &[(f64, u8)],
+    ) -> f32 {
+        if active_losses.is_empty() {
+            return 0.0;
+        }
+        let (peaks, ranks) = self.active_peaks_and_ranks();
+        let max_rank = scorer.max_rank();
+        let max_rank_idx = max_rank as usize;
+        let mut total = 0.0_f32;
+        visit_directional_loss_ion_matches(
+            peaks,
+            ranks,
+            &self.segment_partition_cache,
+            scorer,
+            nominal_mass,
+            is_prefix,
+            charge,
+            parent_mass,
+            active_losses,
+            |_, _, rank, logs, _, _| {
+                let score = match rank {
+                    Some(rank) => {
+                        let idx = rank.min(max_rank).max(1) as usize - 1;
+                        if idx < logs.len() { logs[idx] } else { 0.0 }
+                    }
+                    None => {
+                        if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 }
+                    }
+                };
+                total += score;
+            },
+        );
+        total
+    }
+
     /// Return the observed node mass for `node_nominal`, or `None` if no
     /// peak is near the theoretical m/z of the main ion.
     ///
@@ -1336,6 +1420,76 @@ fn visit_directional_node_ion_matches<F>(
     }
 }
 
+/// Peptide-aware companion to [`visit_directional_node_ion_matches`] for
+/// **neutral-loss** ions. For each model loss-ion type in the node's partition
+/// whose `loss_class` matches an active loss, probe the loss-shifted m/z
+/// (`ion.mz(nominal) − loss/z`) and report the matched peak rank.
+///
+/// Unlike the intact visitor (driven purely by the model's mass-indexed ion
+/// vocabulary), the loss shift comes from the matched peptide's mod, so this
+/// path is only reached for peptides that actually declare losses. It iterates
+/// `scorer.partition_loss_ion_logs` (empty for every standard model), so it is
+/// a no-op — and the surrounding scoring byte-identical — unless a glyco/labile
+/// model has trained loss tables. Segment selection and tolerance are computed
+/// from the shifted `theo_mz`, exactly as the intact visitor does.
+#[allow(clippy::too_many_arguments, reason = "mirrors visit_directional_node_ion_matches plus the active-loss slice")]
+fn visit_directional_loss_ion_matches<F>(
+    peaks: &[(f64, f32)],
+    ranks: &[u32],
+    segment_partition_cache: SegmentPartitionSlice<'_>,
+    scorer: &RankScorer,
+    nominal_mass: f64,
+    is_prefix: bool,
+    charge: u8,
+    parent_mass: f64,
+    active_losses: &[(f64, u8)],
+    mut visit: F,
+) where
+    F: FnMut(Partition, IonType, Option<u32>, &[f32], f64, f64),
+{
+    use crate::param_model::IonType;
+    if active_losses.is_empty() {
+        return;
+    }
+    let param = scorer.param();
+    let mme = &param.mme;
+    let num_segs = param.num_segments as usize;
+    let use_cache = !segment_partition_cache.is_empty();
+    for seg in 0..num_segs {
+        let partition = if use_cache {
+            segment_partition_cache[seg].0
+        } else {
+            param.partition_for(charge, parent_mass, seg)
+        };
+        let loss_logs = scorer.partition_loss_ion_logs(&partition);
+        if loss_logs.is_empty() {
+            continue;
+        }
+        for (ion, logs) in loss_logs {
+            // Direction filter — prefix node scores prefix ions only, etc.
+            match (is_prefix, ion) {
+                (true, IonType::Prefix { .. }) | (false, IonType::Suffix { .. }) => {}
+                _ => continue,
+            }
+            let cls = ion.loss_class();
+            let ion_charge = ion.charge().unwrap_or(1).max(1) as f64;
+            let base_mz = ion.mz(nominal_mass);
+            for &(loss, lcls) in active_losses {
+                if lcls != cls {
+                    continue;
+                }
+                let theo_mz = base_mz - loss / ion_charge;
+                if theo_mz <= 0.0 || param.segment_num(theo_mz, parent_mass) != seg {
+                    continue;
+                }
+                let tol_da = mme.as_da(theo_mz);
+                let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
+                visit(partition, *ion, rank, logs, theo_mz, tol_da);
+            }
+        }
+    }
+}
+
 /// Return the m/z of the **highest-intensity** peak within `tolerance_da` of
 /// `target_mz`, or `None` if no such peak exists.  Mirrors the selection
 /// semantics of `nearest_peak_rank_in` (intensity-max, not nearest-m/z).
@@ -1601,6 +1755,50 @@ mod tests {
         assert_eq!(kept.len(), 20, "TMT must cap to top-20 per 100-Da window");
         let min_kept = kept.iter().map(|&(_, _, it)| it).fold(f32::INFINITY, f32::min);
         assert!(min_kept >= 81.0, "kept peaks must be the most intense (got min {min_kept})");
+    }
+
+    /// Peptide-aware loss scoring: a model carrying a trained loss-ion table
+    /// scores a loss-shifted peak through that table; with no active losses, or
+    /// against a model with no loss table, the contribution is exactly 0
+    /// (byte-identical no-loss path).
+    #[test]
+    fn loss_node_score_scores_loss_shifted_peak_via_trained_table() {
+        let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+        let loss_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
+
+        // Glyco-style model: tiny_param_with_ions + a peaky loss rank table
+        // (rank-1 dominant → positive LLR vs the noise denominator).
+        let mut p = tiny_param_with_ions();
+        p.rank_dist_table
+            .get_mut(&part)
+            .unwrap()
+            .insert(loss_ion, vec![0.6_f32, 0.3, 0.05, 0.001]);
+
+        let nominal = 500.0_f64;
+        let loss_mass = 162.0528_f64; // -Hex
+        let theo_mz = loss_ion.mz(nominal) - loss_mass; // charge 1
+
+        let s = spec(&[(theo_mz, 100.0)]); // single dominant peak at the loss m/z
+        let scorer = RankScorer::new(&p);
+        let ss = ScoredSpectrum::new(&s, &scorer, 2);
+
+        let active = [(loss_mass, 1u8)];
+        let with_loss = ss.loss_node_score(nominal, 0.0, &scorer, 2, 1000.0, &active, &[]);
+        assert!(with_loss > 0, "loss ion at rank 1 should score positive, got {with_loss}");
+
+        // No active losses → 0 (byte-identical).
+        assert_eq!(ss.loss_node_score(nominal, 0.0, &scorer, 2, 1000.0, &[], &[]), 0);
+
+        // Wrong loss class → no matching loss-ion table → 0.
+        assert_eq!(
+            ss.loss_node_score(nominal, 0.0, &scorer, 2, 1000.0, &[(loss_mass, 2u8)], &[]),
+            0
+        );
+
+        // Model without loss tables → 0 even with active losses.
+        let plain = RankScorer::new(&tiny_param_with_ions());
+        let ss2 = ScoredSpectrum::new(&s, &plain, 2);
+        assert_eq!(ss2.loss_node_score(nominal, 0.0, &plain, 2, 1000.0, &active, &[]), 0);
     }
 
     // --- prob_peak uses raw mme value ---

@@ -296,25 +296,6 @@ pub fn score_psm(
                 .as_ref()
                 .is_some_and(|m| m.loss_class != 0 && !m.neutral_losses.is_empty())
         });
-    // Collect the DISTINCT `(loss_mass, loss_class)` pairs declared by mods on
-    // residues in `range` (one loss ion per distinct pair per node; no
-    // cross-products — v1 semantics matching the prediction path).
-    let collect_span_losses = |range: std::ops::Range<usize>| -> Vec<(f64, u8)> {
-        let mut v: Vec<(f64, u8)> = Vec::new();
-        for i in range {
-            if let Some(m) = peptide.residues[i].mod_.as_ref() {
-                if m.loss_class != 0 {
-                    for &l in &m.neutral_losses {
-                        if !v.iter().any(|&(el, ec)| ec == m.loss_class && (el - l).abs() < 1e-9) {
-                            v.push((l, m.loss_class));
-                        }
-                    }
-                }
-            }
-        }
-        v
-    };
-
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
     // Split positions 1..n: after split s, prefix = residues[0..s], suffix = residues[s..n].
@@ -346,8 +327,8 @@ pub fn score_psm(
         // a loss-bearing residue, scored via the model's pooled per-class loss
         // tables. Zero (no allocation) for standard peptides via the gate above.
         if score_losses {
-            let prefix_losses = collect_span_losses(0..s);
-            let suffix_losses = collect_span_losses(s..n);
+            let prefix_losses = crate::scoring::scored_spectrum::span_losses(peptide, 0..s);
+            let suffix_losses = crate::scoring::scored_spectrum::span_losses(peptide, s..n);
             total += scored_spec.loss_node_score(
                 prefix_nominal as f64,
                 suffix_nominal as f64,

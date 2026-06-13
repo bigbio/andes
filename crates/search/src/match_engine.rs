@@ -993,10 +993,9 @@ pub(crate) fn matched_peak_keys(
         return keys;
     }
     let predicted = predict_by_ions(peptide, 1..=1);
-    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
-    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
+    let feat_tol = scorer.feature_match_tolerance();
     for p in &predicted {
-        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        let tol_da = feat_tol.as_da(p.mz);
         if let Some((_rank, _intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
             keys.insert((peak_mz * 1000.0).round() as i64);
         }
@@ -1066,12 +1065,9 @@ pub(crate) fn compute_psm_features(
     // coarser binning tolerance used by the rank-distribution tables —
     // appropriate for node-score lookup but ~50× too wide for feature
     // counting at m/z 500.
-    let feature_tol = if scorer.param().data_type.instrument.is_high_resolution() {
-        20.0_f64 // ppm
-    } else {
-        0.5_f64 // Da
-    };
-    let feature_tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
+    let feat_tol = scorer.feature_match_tolerance();
+    let feature_tol_is_ppm = matches!(feat_tol, model::tolerance::Tolerance::Ppm(_));
+    let feature_tol = feat_tol.raw_value(); // numeric value in the unit (ppm or Da)
 
     // Neutral-loss masses (charge-1 fragment partners at −H2O / −NH3).
     const H2O_LOSS_DA: f64 = 18.0106;

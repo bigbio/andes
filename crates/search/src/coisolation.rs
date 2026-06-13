@@ -120,10 +120,9 @@ fn primary_matched_peak_keys(
         return keys;
     }
     let predicted = predict_by_ions(peptide, 1..=1);
-    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
-    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
+    let feat_tol = scorer.feature_match_tolerance();
     for p in &predicted {
-        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        let tol_da = feat_tol.as_da(p.mz);
         let lo_mz = p.mz - tol_da;
         let hi_mz = p.mz + tol_da;
         // `spec.peaks` is m/z-sorted; binary-search the window start, scan to `hi_mz`.

@@ -248,5 +248,7 @@ Pacing: each iteration is real compute (search + Percolator = minutes–tens of 
 | # | Axis | Hypothesis | Dataset(s) | PSM Δ (FDP) | Speed Δ | Verdict | Commit |
 |---|---|---|---|---|---|---|---|
 | 1 | PARAMS+PSMs | auto-detect TMT/iTRAQ from MS2 reporters → engage isobaric filter zero-config | TMT (a05058) | *await VM* | — | **impl done, byte-identical verified locally** (golden parity + real high-res-glyco negative control no-false-positive); FDP-gain pending VM | `b49228b6` |
+| 2 | SPEED | single-segment fast path | — | — | — | **REJECTED** — verified all 39 models `num_segments==2`; never triggers | — |
+| 10 | PSMs | additive `ComplementaryIonBalance` PIN feature (rank-agreement-weighted complementary b/y) | TMT | *await VM* | — | **impl done, additive byte-identical** (52 existing cols + RawScore + 633 rows unchanged, golden regen, unit test); Percolator gain pending VM A/B | `bf2d1e4e` |
 
 **Known dead ends (do not re-try):** chimeric-TMT (FDP-flat), fragmentation overlay (all 3 adjustments fail), rank-model "ceiling" via data/recal (no lever), fragment-index speed-v2 (recall/speed tension). See the project memory for details.

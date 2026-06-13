@@ -72,14 +72,15 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--fragmentation` | enum | `auto` | Fragmentation method for bundled model resolution. Named: `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` on mzML triggers activation detection (§4); on MGF falls back to bundled defaults. | Java `-m`; numeric `0`=auto, `1`=CID, `2`=ETD, `3`=HCD, `4`=UVPD |
-| `--instrument` | enum | `low-res` | Instrument class for bundled model resolution. Named: `low-res`, `high-res`, `TOF`, `QExactive`. | Java `-inst`; numeric `0`=low-res, `1`=high-res, `2`=TOF, `3`=QExactive |
+| `--fragmentation` | enum | *(none)* | **MGF-only.** Activation method for bundled model resolution: `CID`, `ETD`, `HCD`, `UVPD`. Auto-detected from file metadata for mzML/`.raw`/`.d`; has no effect on those formats. | Java `-m`; numeric `1`=CID, `2`=ETD, `3`=HCD, `4`=UVPD |
+| `--fragment-tol-ppm` | float | *(none)* | **MGF-only.** Fragment-matching tolerance in ppm for high-resolution MS/MS (Orbitrap/TOF). No effect on mzML/`.raw`/`.d`. | *(no Java equivalent)* |
+| `--fragment-tol-da` | float | *(none)* | **MGF-only.** Fragment-matching tolerance in Da for low-resolution MS/MS (ion trap). No effect on mzML/`.raw`/`.d`. | *(no Java equivalent)* |
 | `--protocol` | enum | `auto` | Search protocol suffix for bundled model resolution. Named: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
 | `--param-file` | path | *(auto)* | Explicit path to a `.param` scoring model file. When set, overrides all auto-detection and bundled resolution. Required when running a release binary outside the source tree if bundled resources are not present. | Java `-conf` / model path |
 | `--model-store` | path | *(bundled)* | Path to a Parquet model store to use instead of the bundled `resources/ionstat/models.parquet`. Model selection reads from this store when set. | *(no Java equivalent)* |
-| `--model` | string | *(auto-select)* | Exact model ID to load from the model store, skipping automatic selection by `(--fragmentation, --instrument, --protocol)`. Useful for searching with a freshly-trained model (see `andes train`). | *(no Java equivalent)* |
+| `--model` | string | *(auto-select)* | Exact model ID to load from the model store, skipping automatic selection by `(--fragmentation, --protocol)`. Useful for searching with a freshly-trained model (see `andes train`). | *(no Java equivalent)* |
 
-**Bundled default when all scoring flags are at their defaults** (`--fragmentation auto --instrument low-res --protocol auto`): `hcd_qexactive_tryp` (from the parquet model store). This preserves pre-auto-detect behaviour for MGF inputs and mzML files without activation metadata.
+**Bundled default:** mzML/`.raw`/`.d` inputs auto-detect activation and analyzer from file metadata (§4). For MGF inputs with no `--fragmentation` / `--fragment-tol-*` flags, andes defaults to `cid_lowres_tryp` (CID / low-res / 0.5 Da) and prints a warning.
 
 **Model selection** (when `--param-file` is not set, resolved from `resources/ionstat/models.parquet`):
 
@@ -90,8 +91,8 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 **Normalisation rules** (mirrors Java `NewScorerFactory`):
 
-- `auto` fragmentation → treated as `CID` for model selection (except mzML auto-detect path, §4).
-- HCD + `low-res` instrument → upgraded to `QExactive`.
+- MGF with no `--fragmentation` flag → treated as `CID` / `low-res` for model selection.
+- HCD + low-res analyzer (auto-detected or defaulted) → upgraded to `QExactive`.
 
 Only tryptic enzyme models are in the store; other enzymes require `--param-file` with a binary `.param` file.
 
@@ -187,7 +188,7 @@ NumMods=2
 229.162932,*,fix,N-term,TMT10plex
 ```
 
-Pair with `--protocol TMT --fragmentation HCD --instrument QExactive` to select the `hcd_qexactive_tryp_tmt` model from the store (§4, §7).
+Pair with `--protocol TMT` to select the `hcd_qexactive_tryp_tmt` model from the store (activation and analyzer are auto-detected from mzML/`.raw`; see §4, §7).
 
 ### Example (c) — Phosphorylation on S, T, Y
 
@@ -292,15 +293,13 @@ For **mzML** inputs when `--fragmentation auto` (the default), andes peeks the i
 1. **Activation method** — histogram of `<activation>` cvParams across the first 64 MS2 spectra; dominant method wins. Mixed methods trigger an stderr warning but the dominant method is still used file-wide.
 2. **Instrument class** — scans `<instrumentConfiguration>` / analyzer cvParams via `input::detect_instrument_type`; dominant analyzer among MS2 spectra wins. `None` → `low-res` (Java `LOW_RESOLUTION_LTQ` default).
 
-Precedence: whether auto-detection runs is gated **only** by `--fragmentation auto` (the default) on an mzML/`.raw`/`.d` input — *not* by `--instrument`. When it runs and the peek succeeds, the **detected** instrument is used and any `--instrument` value on the command line is **ignored** for model selection; to force an instrument, set an explicit `--fragmentation` (e.g. `HCD`) so the auto path is disabled and the flags drive resolution (§1). `--protocol` from the CLI is always applied to pick protocol-specific models from the parquet store (e.g. the `tmt` experiment-class entry).
+mzML/`.raw`/`.d` inputs are **zero-config**: andes reads the activation method and analyzer resolution directly from file metadata. `--fragmentation` and `--fragment-tol-*` are **MGF-only** parameters and have no effect on these formats. `--protocol` from the CLI is always applied to pick protocol-specific models from the parquet store (e.g. the `tmt` experiment-class entry).
 
-MGF files carry no activation or instrument metadata → auto-detect returns `None` → bundled default `hcd_qexactive_tryp` model (from the parquet store) unless explicit `--fragmentation` / `--instrument` flags override the store selection key.
-
-Non-auto `--fragmentation` (e.g. `HCD`, `3`) disables the activation peek and uses flag-based resolution directly (§1), including `--instrument` and `--protocol` from the CLI.
+MGF files carry no activation or analyzer metadata. Supply `--fragmentation <method>` (e.g. `HCD`, `CID`) and, for high-resolution MS/MS, `--fragment-tol-ppm <X>`, or for low-resolution MS/MS, `--fragment-tol-da <X>`. If none of these flags are provided for an MGF file, andes defaults to CID / low-res / 0.5 Da and prints a warning to stderr.
 
 ### Native Thermo `.raw`
 
-A `.raw` file carries the activation method and analyzer in vendor metadata, so andes reads them directly (no mzML peek) and routes through the same parquet-store selection as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `hcd_qexactive_tryp`. `--protocol` from the CLI still selects protocol-specific models (`tmt`, `itraq`); explicit `--fragmentation`/`--instrument` are not required.
+A `.raw` file carries the activation method and analyzer in vendor metadata, so andes reads them directly (no mzML peek) and routes through the same parquet-store selection as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `hcd_qexactive_tryp`. `--protocol` from the CLI still selects protocol-specific models (`tmt`, `itraq`). No fragmentation or instrument parameters are required or have any effect.
 
 ### Native Bruker timsTOF `.d`
 
@@ -455,9 +454,7 @@ andes \
   --database hsapiens.fasta \
   --output-pin out.pin \
   --mods tmt_10plex_mods.txt \
-  --protocol TMT \
-  --fragmentation HCD \
-  --instrument QExactive
+  --protocol TMT
 ```
 
 ### iTRAQ (8-plex example)
@@ -481,9 +478,7 @@ andes \
   --database hsapiens.fasta \
   --output-pin out.pin \
   --mods itraq_8plex_mods.txt \
-  --protocol iTRAQ \
-  --fragmentation HCD \
-  --instrument QExactive
+  --protocol iTRAQ
 ```
 
 For phospho-enriched isobaric data use `--protocol iTRAQ-phospho` (legacy `--protocol 3`) and include phospho variable mods in `mods.txt` (§2 example c).
@@ -496,26 +491,25 @@ For backward compatibility, the routing flags accept legacy 0…N numeric values
 addition to their canonical named values; clap parses named values
 case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 
-| Flag | Numeric | Named |
-|---|---|---|
-| `--fragmentation` | `0` | `auto` |
-| `--fragmentation` | `1` | `CID` |
-| `--fragmentation` | `2` | `ETD` |
-| `--fragmentation` | `3` | `HCD` |
-| `--fragmentation` | `4` | `UVPD` |
-| `--instrument` | `0` | `low-res` |
-| `--instrument` | `1` | `high-res` |
-| `--instrument` | `2` | `TOF` |
-| `--instrument` | `3` | `QExactive` |
-| `--protocol` | `0` | `auto` |
-| `--protocol` | `1` | `phospho` |
-| `--protocol` | `2` | `iTRAQ` |
-| `--protocol` | `3` | `iTRAQ-phospho` |
-| `--protocol` | `4` | `TMT` |
-| `--protocol` | `5` | `standard` |
-| `--enzyme-specificity` (alias `--ntt`) | `0` | `non-specific` |
-| `--enzyme-specificity` (alias `--ntt`) | `1` | `semi` |
-| `--enzyme-specificity` (alias `--ntt`) | `2` | `fully` |
+| Flag | Numeric | Named | Notes |
+|---|---|---|---|
+| `--fragmentation` *(MGF-only)* | `1` | `CID` | |
+| `--fragmentation` *(MGF-only)* | `2` | `ETD` | |
+| `--fragmentation` *(MGF-only)* | `3` | `HCD` | |
+| `--fragmentation` *(MGF-only)* | `4` | `UVPD` | |
+| `--instrument` *(MGF-only, hidden)* | `0` | `low-res` | Legacy alias for `--fragment-tol-da 0.5` model key |
+| `--instrument` *(MGF-only, hidden)* | `1` | `high-res` | Legacy alias for `--fragment-tol-ppm` model key |
+| `--instrument` *(MGF-only, hidden)* | `2` | `TOF` | Legacy alias for TOF model key |
+| `--instrument` *(MGF-only, hidden)* | `3` | `QExactive` | Legacy alias for QExactive model key |
+| `--protocol` | `0` | `auto` | |
+| `--protocol` | `1` | `phospho` | |
+| `--protocol` | `2` | `iTRAQ` | |
+| `--protocol` | `3` | `iTRAQ-phospho` | |
+| `--protocol` | `4` | `TMT` | |
+| `--protocol` | `5` | `standard` | |
+| `--enzyme-specificity` (alias `--ntt`) | `0` | `non-specific` | |
+| `--enzyme-specificity` (alias `--ntt`) | `1` | `semi` | |
+| `--enzyme-specificity` (alias `--ntt`) | `2` | `fully` | |
 
 ### Behavior notes
 

@@ -30,7 +30,7 @@ What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the spe
 <summary>Bench methodology</summary>
 
 - **Hardware:** 8-thread Intel Xeon Gold 6238 VM, AVX exposed (no AVX2/FMA), Linux x86_64.
-- **Java baseline:** `MSGFPlus.jar` from the [MSGFPlus/msgfplus v2024.03.26 release](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), run with `-Xmx8192m -thread 8 -tda 1 -addFeatures 1`. Per-dataset args match `--precursor-tol-ppm`/`--isotope-error`/`--instrument`/`--protocol` of the Rust runs.
+- **Java baseline:** `MSGFPlus.jar` from the [MSGFPlus/msgfplus v2024.03.26 release](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), run with `-Xmx8192m -thread 8 -tda 1 -addFeatures 1`. Per-dataset args match `--precursor-tol-ppm`/`--isotope-error`/`--protocol` of the Rust runs.
 - **andes:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1` (precursor calibration off — the default).
 - **Java → PIN:** `msgf2pin` from the percolator `3.6.5--h6351f2a_0` container (single-arg mode for concatenated-TDA mzid; the `3.7.1` container's msgf2pin has a known parser crash on this mzid output).
 - **Percolator:** `percolator 3.7.1` in `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` with `--seed 42 --only-psms`. Same parser script for both Java and Rust PINs.
@@ -105,9 +105,7 @@ andes \
   --database hsapiens.fasta \
   --output-pin out.pin \
   --mods tmt_10plex_mods.txt \
-  --protocol TMT \
-  --fragmentation HCD \
-  --instrument QExactive
+  --protocol TMT
 ```
 
 **Direct TSV output (skip Percolator):**
@@ -119,7 +117,7 @@ andes --spectrum spectra.mzML --database db.fasta \
 
 **[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
-Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --instrument 3 --protocol 4`) keep working without modification (the legacy numeric flag values are documented in [`DOCS.md`](DOCS.md)).
+Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --protocol 4`) keep working without modification (the legacy numeric flag values are documented in [`DOCS.md`](DOCS.md)).
 
 ## CLI summary
 
@@ -148,8 +146,7 @@ Optional (default in **bold**):
 | `--min-length/-max-length <INT>` | Peptide length range | **6, 40** |
 | `--min-peaks <INT>` | Min peaks per spectrum to score | **10** |
 | `--top-n <INT>` | PSMs retained per spectrum | **10** |
-| `--fragmentation <auto\|CID\|ETD\|HCD\|UVPD>` | Fragmentation (auto-detected from mzML) | **auto** |
-| `--instrument <low-res\|high-res\|TOF\|QExactive>` | Instrument class | **low-res** |
+| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | Fragmentation/activation method — **MGF input only** (auto-detected for mzML/`.raw`/`.d`) | *(see below)* |
 | `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
 | `--param-file <FILE>` | Override the bundled scoring model | **auto-pick** |
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
@@ -158,6 +155,24 @@ Optional (default in **bold**):
 | `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
 
 Run `andes --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
+
+mzML, Thermo `.raw`, and Bruker `.d` are fully auto-detected — andes reads the
+activation method and analyzer resolution from the file, so you pass no
+fragmentation/instrument parameter for these formats.
+
+### MGF input (extended parameters)
+
+MGF files carry no activation or analyzer metadata, so you describe the
+acquisition yourself:
+
+| Parameter | When to pass | Example |
+|---|---|---|
+| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | the activation method used | `--fragmentation HCD` |
+| `--fragment-tol-ppm <X>` | high-resolution MS/MS (Orbitrap/TOF) | `--fragment-tol-ppm 20` |
+| `--fragment-tol-da <X>`  | low-resolution MS/MS (ion trap)      | `--fragment-tol-da 0.5` |
+
+If you pass none of these for an MGF file, andes assumes CID / low-res / 0.5 Da
+and prints a warning. These parameters have no effect on mzML/`.raw`/`.d`.
 
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
@@ -201,7 +216,7 @@ Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is
 
 ## Auto-detection
 
-For mzML inputs with `--fragmentation auto` (the default), andes peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a scoring model from the bundled `models.parquet` store based on the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when selecting the model. MGF files have no activation metadata, so they use flag-based selection (defaulting to `hcd_qexactive_tryp`). Full resolution table: `DOCS.md` §4.
+For mzML, Thermo `.raw`, and Bruker `.d` inputs, andes auto-detects the activation method and analyzer type from file metadata — no fragmentation or instrument parameters are needed. `--protocol` from the CLI is still applied to select protocol-specific models (e.g. TMT, iTRAQ). MGF files carry no activation or analyzer metadata; use `--fragmentation` / `--fragment-tol-ppm` / `--fragment-tol-da` to describe the acquisition (see the MGF section above), or andes defaults to CID / low-res / 0.5 Da and prints a warning. Full resolution table: `DOCS.md` §4.
 
 ## Training your own models
 

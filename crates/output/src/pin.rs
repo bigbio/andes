@@ -72,7 +72,6 @@
 use std::io::{self, BufWriter, Write};
 
 use model::mass::{ISOTOPE, PROTON};
-use model::peptide::Peptide;
 use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
 use crate::row_context::{iter_ranked_by_rank_score, RowContext};
 use search::candidate_gen::Candidate;
@@ -256,9 +255,6 @@ fn write_header<W: Write>(
         // Peptide / Proteins
         "Peptide".to_string(),
         "Proteins".to_string(),
-        // ADDITIVE: CV accession-based modification annotation for downstream
-        // quantms/SDRF mapping. Appended last so all prior columns are byte-identical.
-        "Modifications".to_string(),
     ]);
 
     writeln!(writer, "{}", cols.join("\t"))
@@ -521,9 +517,6 @@ fn write_psm_row<W: Write>(
         let accession = crate::row_context::resolve_accession(cand_for_acc, search_index);
         write!(writer, "\t{}", accession)?;
     }
-    // Modifications: additive last column — ';'-joined "{1-based-pos}:{CURIE}"
-    // for each residue with a CV accession. Empty string when none present.
-    write!(writer, "\t{}", modifications_field(&cand.peptide))?;
     writeln!(writer)
 }
 
@@ -625,40 +618,12 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
 }
 
 
-// ── modifications helper ──────────────────────────────────────────────────────
-
-/// Build the `Modifications` column value for a peptide.
-///
-/// Returns a `;`-joined list of `"{1-based-position}:{accession}"` entries for
-/// every residue whose `mod_.accession` is `Some`, in ascending position order.
-/// Returns an empty string when no residue carries a CV accession.
-pub(crate) fn modifications_field(peptide: &Peptide) -> String {
-    let mut parts: Vec<String> = peptide
-        .residues
-        .iter()
-        .enumerate()
-        .filter_map(|(i, aa)| {
-            aa.mod_
-                .as_ref()
-                .and_then(|m| m.accession.as_deref())
-                .map(|acc| format!("{}:{}", i + 1, acc))
-        })
-        .collect();
-    // residues are iterated in index order so ascending is guaranteed, but
-    // sort defensively in case the caller ever reorders.
-    parts.sort_by_key(|s| {
-        s.split(':').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0)
-    });
-    parts.join(";")
-}
-
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use model::amino_acid::AminoAcid;
-    use model::modification::{Modification, ModLocation, ResidueSpec};
     use search::candidate_gen::Candidate;
     use model::peptide::Peptide;
     use model::protein::{Protein, ProteinDb};
@@ -814,8 +779,6 @@ mod tests {
             "StrongScore",
             "StrongScoreCal",
             "Peptide", "Proteins",
-            // Additive: CV accession-based modification annotation (last column).
-            "Modifications",
         ];
 
         let params = make_params(2..=3);
@@ -1098,234 +1061,6 @@ mod tests {
         let r2: f64 = rows[1][col_idx].parse().expect("rank-2 DeltaRawScore numeric");
         assert!((r1 - 7.0).abs() < 1e-6, "rank-1 DeltaRawScore should be 7.0, got {r1}");
         assert_eq!(r2, 0.0, "rank-2 DeltaRawScore should be gated to 0.0, got {r2}");
-    }
-
-    // ── Modifications column helpers ──────────────────────────────────────────
-
-    fn make_mod(accession: Option<&str>) -> Modification {
-        Modification {
-            name: "TestMod".to_string(),
-            mass_delta: 1.0,
-            residue: ResidueSpec::Specific(b'A'),
-            location: ModLocation::Anywhere,
-            fixed: false,
-            accession: accession.map(|s| s.to_string()),
-            neutral_losses: Vec::new(),
-            loss_class: 0,
-        }
-    }
-
-    fn make_candidate_with_peptide(peptide: Peptide, is_decoy: bool) -> Candidate {
-        Candidate {
-            peptide,
-            protein_index: 0,
-            start_offset_in_protein: 0,
-            is_decoy,
-            is_protein_n_term: false,
-            is_protein_c_term: false,
-        }
-    }
-
-    // ── Test: Modifications column is LAST in the header ─────────────────────
-
-    #[test]
-    fn pin_modifications_column_is_last() {
-        let params = make_params(2..=3);
-        let spectra: Vec<Spectrum> = vec![];
-        let queues: Vec<TopNQueue> = vec![];
-        let idx = make_empty_search_index();
-
-        let mut buf = Vec::<u8>::new();
-        let cands: Vec<Candidate> = vec![];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
-
-        let cols = parse_header(&buf);
-        assert_eq!(
-            cols.last().map(|s| s.as_str()),
-            Some("Modifications"),
-            "Modifications must be the last column in the header"
-        );
-    }
-
-    // ── Test: single mod with accession emits 1-based position:CURIE ─────────
-
-    #[test]
-    fn pin_modifications_field_single_accession_mod() {
-        let params = make_params(2..=3);
-        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
-
-        // Build peptide with 7 residues; residue at 0-based index 5 has UNIMOD:393.
-        // 0-based 5 → 1-based 6.
-        let plain_aa = AminoAcid::standard(b'A').unwrap();
-        let mod_aa = AminoAcid {
-            residue: b'A',
-            mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
-        };
-        let residues = vec![
-            plain_aa.clone(), plain_aa.clone(), plain_aa.clone(),
-            plain_aa.clone(), plain_aa.clone(),
-            mod_aa,           // index 5
-            plain_aa.clone(),
-        ];
-        let peptide = Peptide::new(residues, b'K', b'S');
-        let cand = make_candidate_with_peptide(peptide, false);
-
-        let psm = make_psm(0, 10.0, 10.0, 0, 2);
-        let mut queue = TopNQueue::new(10);
-        queue.push(psm);
-        let queues = vec![queue];
-        let idx = make_empty_search_index();
-
-        let mut buf = Vec::<u8>::new();
-        let cands = vec![cand];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
-
-        let cols = parse_header(&buf);
-        let rows = parse_rows(&buf);
-        assert_eq!(rows.len(), 1);
-
-        let mod_col = cols.iter().position(|c| c == "Modifications").expect("Modifications column missing");
-        assert_eq!(
-            rows[0][mod_col], "6:UNIMOD:393",
-            "single mod at 0-based 5 should emit 1-based '6:UNIMOD:393', got: {}",
-            rows[0][mod_col]
-        );
-    }
-
-    // ── Test: no accession-bearing mods → empty Modifications field ──────────
-
-    #[test]
-    fn pin_modifications_field_empty_when_no_accession_mod() {
-        let params = make_params(2..=3);
-        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
-
-        // Mod with accession = None (mass-shift mod, no CV term).
-        let plain_aa = AminoAcid::standard(b'A').unwrap();
-        let noaccession_aa = AminoAcid {
-            residue: b'A',
-            mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(None))),
-        };
-        let residues = vec![plain_aa.clone(), noaccession_aa, plain_aa];
-        let peptide = Peptide::new(residues, b'K', b'S');
-        let cand = make_candidate_with_peptide(peptide, false);
-
-        let psm = make_psm(0, 10.0, 10.0, 0, 2);
-        let mut queue = TopNQueue::new(10);
-        queue.push(psm);
-        let queues = vec![queue];
-        let idx = make_empty_search_index();
-
-        let mut buf = Vec::<u8>::new();
-        let cands = vec![cand];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
-
-        let cols = parse_header(&buf);
-        let rows = parse_rows(&buf);
-        assert_eq!(rows.len(), 1);
-
-        let mod_col = cols.iter().position(|c| c == "Modifications").expect("Modifications column missing");
-        assert_eq!(
-            rows[0][mod_col], "",
-            "no-accession mod should emit empty Modifications field, got: {:?}",
-            rows[0][mod_col]
-        );
-    }
-
-    // ── Test: multiple accession mods join with ';' in ascending position ─────
-
-    #[test]
-    fn pin_modifications_field_multiple_mods_ascending_order() {
-        let params = make_params(2..=3);
-        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
-
-        // Residues: indices 1 (0-based) → UNIMOD:4, index 5 → UNIMOD:393.
-        // Expected: "2:UNIMOD:4;6:UNIMOD:393"
-        let plain_aa = AminoAcid::standard(b'A').unwrap();
-        let mod1 = AminoAcid {
-            residue: b'A',
-            mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:4")))),
-        };
-        let mod2 = AminoAcid {
-            residue: b'A',
-            mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:393")))),
-        };
-        let residues = vec![
-            plain_aa.clone(),
-            mod1,             // index 1 → 1-based 2
-            plain_aa.clone(),
-            plain_aa.clone(),
-            plain_aa.clone(),
-            mod2,             // index 5 → 1-based 6
-            plain_aa.clone(),
-        ];
-        let peptide = Peptide::new(residues, b'K', b'S');
-        let cand = make_candidate_with_peptide(peptide, false);
-
-        let psm = make_psm(0, 10.0, 10.0, 0, 2);
-        let mut queue = TopNQueue::new(10);
-        queue.push(psm);
-        let queues = vec![queue];
-        let idx = make_empty_search_index();
-
-        let mut buf = Vec::<u8>::new();
-        let cands = vec![cand];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
-
-        let cols = parse_header(&buf);
-        let rows = parse_rows(&buf);
-        assert_eq!(rows.len(), 1);
-
-        let mod_col = cols.iter().position(|c| c == "Modifications").expect("Modifications column missing");
-        assert_eq!(
-            rows[0][mod_col], "2:UNIMOD:4;6:UNIMOD:393",
-            "multiple mods should be joined with ';' in ascending position order, got: {}",
-            rows[0][mod_col]
-        );
-    }
-
-    // ── Test: Peptide column is unchanged (mods in inline mass-delta form) ────
-
-    #[test]
-    fn pin_peptide_column_unchanged_by_modifications_column() {
-        let params = make_params(2..=3);
-        let spectra = vec![make_spectrum("Scan 1", 1, 500.0)];
-
-        let plain_aa = AminoAcid::standard(b'A').unwrap();
-        let mod_aa = AminoAcid {
-            residue: b'A',
-            mass: plain_aa.mass,
-            mod_: Some(std::sync::Arc::new(make_mod(Some("UNIMOD:4")))),
-        };
-        let residues = vec![plain_aa.clone(), mod_aa, plain_aa.clone()];
-        let peptide = Peptide::new(residues, b'K', b'S');
-
-        // Capture the expected peptide Display string before handing over.
-        let peptide_display = format!("{}", peptide);
-        let cand = make_candidate_with_peptide(peptide, false);
-
-        let psm = make_psm(0, 10.0, 10.0, 0, 2);
-        let mut queue = TopNQueue::new(10);
-        queue.push(psm);
-        let queues = vec![queue];
-        let idx = make_empty_search_index();
-
-        let mut buf = Vec::<u8>::new();
-        let cands = vec![cand];
-        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
-
-        let cols = parse_header(&buf);
-        let rows = parse_rows(&buf);
-        assert_eq!(rows.len(), 1);
-
-        let pep_col = cols.iter().position(|c| c == "Peptide").expect("Peptide column missing");
-        assert_eq!(
-            rows[0][pep_col], peptide_display,
-            "Peptide column must be byte-identical to its Display form"
-        );
     }
 
     /// Verify that `longest_y_pct` is formatted with 6 decimal places.

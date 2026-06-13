@@ -43,9 +43,6 @@ const GF_COLUMNS: [&str; 4] = ["DeNovoScore", "lnSpecEValue", "lnEValue", "lnDel
 const ADDITIVE_COLUMNS: [&str; 4] =
     ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore"];
 
-/// The Modifications column must be the very last column (after Proteins).
-const MODIFICATIONS_COLUMN: &str = "Modifications";
-
 #[test]
 fn rust_pin_header_is_gf_free_schema() {
     let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
@@ -88,25 +85,20 @@ fn rust_pin_header_is_gf_free_schema() {
         );
     }
 
-    // Modifications column: present and must be the very last column (after Proteins).
-    let mods_pos = cols
-        .iter()
-        .position(|c| *c == MODIFICATIONS_COLUMN)
-        .expect("Modifications column missing from PIN header");
-    assert_eq!(
-        mods_pos,
-        cols.len() - 1,
-        "Modifications must be the last column (after Proteins); found at {mods_pos}, last is {}",
-        cols.len() - 1
-    );
-    // Peptide and Proteins must still be present and precede Modifications.
+    // Proteins must be the very last column (after Peptide).
     let proteins_pos = cols
         .iter()
         .rposition(|c| *c == "Proteins")
         .expect("Proteins column missing");
+    assert_eq!(
+        proteins_pos,
+        cols.len() - 1,
+        "Proteins must be the last column in the PIN header; PIN Proteins is rest-of-line and \
+         cannot be followed by additional columns without corrupting Percolator's protein parsing"
+    );
     assert!(
-        peptide_pos < proteins_pos && proteins_pos < mods_pos,
-        "column order must be ... Peptide ... Proteins ... Modifications"
+        peptide_pos < proteins_pos,
+        "column order must be ... Peptide ... Proteins (last)"
     );
 }
 

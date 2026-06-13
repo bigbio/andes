@@ -18,14 +18,48 @@
 
 use std::io::{self, BufWriter, Write};
 
-use crate::pin::modifications_field;
 use crate::row_context::{iter_ranked_by_rank_score, RowContext};
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
+use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use model::tolerance::Tolerance;
+
+// ── modifications helper ──────────────────────────────────────────────────────
+
+/// Build the `Modifications` column value for a peptide.
+///
+/// Returns a `;`-joined list of `"{1-based-position}:{accession}"` entries for
+/// every residue whose `mod_.accession` is `Some`, in ascending position order.
+/// Returns an empty string when no residue carries a CV accession.
+///
+/// Used in TSV output only. PIN omits this column because PIN's `Proteins`
+/// column is rest-of-line (the row writer emits one tab-separated accession
+/// per protein in a loop), so a trailing `Modifications` field would be parsed
+/// by Percolator as a phantom extra protein. Percolator already receives
+/// modification positions via the `Peptide` inline mass-delta column; the CURIE
+/// accession column is emitted in andes's TSV only for quantms/SDRF interop.
+pub(crate) fn modifications_field(peptide: &Peptide) -> String {
+    let mut parts: Vec<String> = peptide
+        .residues
+        .iter()
+        .enumerate()
+        .filter_map(|(i, aa)| {
+            aa.mod_
+                .as_ref()
+                .and_then(|m| m.accession.as_deref())
+                .map(|acc| format!("{}:{}", i + 1, acc))
+        })
+        .collect();
+    // residues are iterated in index order so ascending is guaranteed, but
+    // sort defensively in case the caller ever reorders.
+    parts.sort_by_key(|s| {
+        s.split(':').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0)
+    });
+    parts.join(";")
+}
 
 // ── public API ──────────────────────────────────────────────────────────────
 

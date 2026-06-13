@@ -47,7 +47,7 @@ characteristic stepwise sugar losses.
 | H | **Activation-gated loss prediction**: electron-based dissociation (ETD/EThcD) *preserves* labile mods, so loss-shifted ions are suppressed for ETD spectra; predicted only for collisional activation (CID/HCD/PQD). andes already detects activation (`SpecDataType.activation`). |
 | E | One unified design; **phased implementation** SP1→SP4 as milestone commits. |
 | F | **Configuration must be easy** (mods.txt is hand-edited): clear grammar, validation errors, common-loss reference, copy-paste glyco example, shipped template. Optional mod attributes use an **extensible `key=value` tail** (not positional fields). |
-| G | **Unimod accession interop**: parse `accession=UNIMOD:393` into `Modification.accession` and emit it in a NEW **additive** PIN/TSV column (standard CURIE). Existing mass-delta `Peptide` column unchanged; ProForma notation deferred. |
+| G | **Unimod accession interop**: parse `accession=UNIMOD:393` into `Modification.accession` and emit it in a NEW **additive TSV-only** column (standard CURIE). PIN omits the column: PIN's `Proteins` is rest-of-line, so a trailing `Modifications` field is parsed by Percolator as a phantom extra protein — Percolator already receives modification positions via the `Peptide` inline mass-delta column; the CURIE accession column is emitted in andes's **TSV only** for quantms/SDRF interop. Existing mass-delta `Peptide` column unchanged; ProForma notation deferred. |
 
 ## Phase SP1 — Loss-aware representation
 
@@ -107,19 +107,27 @@ self-documenting, and extensible without further grammar changes.
     `location`, and `NumMods` — they describe *fragment* behavior / identity,
     not residue placement; they work with any of those settings unchanged.
 
-### Interoperability — Unimod accession (decision: capture + additive output)
+### Interoperability — Unimod accession (decision: capture + TSV-only additive column)
 Today mods reach the PIN/TSV output only as **inline mass deltas** in the
 `Peptide` column (`Peptide`'s `Display`, [peptide.rs:105](../../crates/model/src/peptide.rs);
-emitted at [pin.rs:514](../../crates/output/src/pin.rs)), so downstream tools map
+emitted at [pin.rs:510](../../crates/output/src/pin.rs)), so downstream tools map
 mods by mass — ambiguous for isobaric mods. To improve quantms / SDRF / PSI
 interoperability:
 - Parse `accession=` into the existing `Modification.accession` field (currently
   always `None`).
-- **Emit it in a NEW additive column** in PIN and TSV — e.g. `Modifications`
+- **Emit it in a NEW additive column in TSV only** — `Modifications`,
   listing `pos:CURIE` entries (`6:UNIMOD:393`) in standard CV form. **Additive
   only** — the existing mass-delta `Peptide` column is unchanged, so current
   quantms scripts keep working and accession-aware tools gain unambiguous
   mapping.
+- **PIN does NOT get this column.** PIN's `Proteins` column is
+  **rest-of-line**: the row writer emits one tab-separated accession per protein
+  in a loop, and the line ends only with `writeln!` after the last protein.
+  Appending any field after the proteins loop would be parsed by Percolator as
+  an additional protein accession (a phantom protein), corrupting FDR
+  computation. Percolator already receives modification positions via the
+  `Peptide` inline mass-delta column, so no information is lost; the CURIE
+  accession column is emitted in andes's **TSV only** for quantms/SDRF interop.
 - ProForma notation (`K[UNIMOD:393]`) in the `Peptide` column is **deferred**
   (out of scope): it would modify an existing column, risking parser breakage
   and violating the additive-only rule.
@@ -208,9 +216,12 @@ glyco site per peptide). **Inert guard:** a peptide with no loss-bearing residue
   `BadNeutralLoss`; out-of-range loss rejected; attribute without `=` →
   `BadModAttr`; comma-in-name caveat covered.
 - **Unit/Integration (accession):** `accession=UNIMOD:393` reaches
-  `Modification.accession`; the additive PIN/TSV `Modifications` column emits
+  `Modification.accession`; the additive **TSV** `Modifications` column emits
   `pos:UNIMOD:393`; the existing `Peptide` column is byte-identical (additive
-  guard); a mod with no `accession=` emits an empty entry.
+  guard); a mod with no `accession=` emits an empty entry. **PIN is unchanged**
+  (the Modifications column is TSV-only; PIN's Proteins column is rest-of-line
+  and cannot be followed by a trailing column without corrupting Percolator's
+  protein parsing).
 - **Unit (prediction):** a loss-bearing residue emits intact + one ion per loss
   at `mz − L/z` tagged with the mod's `loss_class`; no loss-bearing residue ⇒
   zero loss ions (inert); **ETD activation ⇒ zero loss ions (gate, decision H)**;
@@ -245,7 +256,7 @@ glyco site per peptide). **Inert guard:** a peptide with no loss-bearing residue
 
 ## File-touch summary
 
-- SP1: `crates/model/src/modification.rs` (struct + grammar + `accession=`), `crates/scoring/src/param_model.rs` (IonType), `crates/scoring/src/scoring/fragment_ions.rs`, `crates/output/src/{pin.rs,tsv.rs}` (additive `Modifications` accession column), `DOCS.md` §2 + glyco template.
+- SP1: `crates/model/src/modification.rs` (struct + grammar + `accession=`), `crates/scoring/src/param_model.rs` (IonType), `crates/scoring/src/scoring/fragment_ions.rs`, `crates/output/src/tsv.rs` (additive `Modifications` accession column — **TSV only**; PIN unchanged because `Proteins` is rest-of-line), `DOCS.md` §2 + glyco template.
 - SP2: `param_model.rs` (store schema), the model-store read/write, `crates/scoring/src/scoring/rank_scorer.rs`.
 - SP3: `crates/model-train/src/estimate.rs`, `catalog.rs`.
 - SP4: benchmark scripts/docs; `andes` search (no code change beyond SP1–SP3 — it just loads the glyco model + glyco mods.txt).

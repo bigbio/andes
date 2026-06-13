@@ -84,7 +84,7 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 **Model selection** (when `--param-file` is not set, resolved from `resources/ionstat/models.parquet`):
 
-1. Build a selection key: `{Frag}_{Inst}_Trypsin` with optional protocol experiment class (e.g. `tmt`).
+1. Build a selection key: `{Frag}_{Inst}_Trypsin` (where `Inst` is auto-detected for mzML/`.raw`/`.d`, or derived from `--fragment-tol-ppm`→high-res / `--fragment-tol-da`→low-res for MGF) with optional protocol experiment class (e.g. `tmt`).
 2. Exact match on the key → use that model.
 3. If protocol-specific model absent, retry without the protocol class.
 4. Final fallback: `cid_tof_tryp` (HCD + TOF/HighRes), `etd_lowres_tryp` (ETD), or `cid_lowres_tryp` (everything else).
@@ -288,7 +288,7 @@ Use **PIN** when the goal is FDR calibration or rescoring: Percolator, MS²Resco
 
 ## 4. Auto-detection
 
-For **mzML** inputs when `--fragmentation auto` (the default), andes peeks the input file before loading the full dataset:
+For **mzML** inputs, andes peeks the input file before loading the full dataset:
 
 1. **Activation method** — histogram of `<activation>` cvParams across the first 64 MS2 spectra; dominant method wins. Mixed methods trigger an stderr warning but the dominant method is still used file-wide.
 2. **Instrument class** — scans `<instrumentConfiguration>` / analyzer cvParams via `input::detect_instrument_type`; dominant analyzer among MS2 spectra wins. `None` → `low-res` (Java `LOW_RESOLUTION_LTQ` default).
@@ -335,7 +335,7 @@ protocol variants for Phospho, TMT, iTRAQ, iTRAQPhospho). The individual binary
 `.param` files are no longer shipped on disk; git history preserves them if the
 store needs to be regenerated via `cargo run --example gen_bundled_store`.
 
-**When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): andes falls back to the `hcd_qexactive_tryp` model for default-flag runs, or to the resolution ladder in §1 for explicit flags. If no model resolves in the store, the process exits with an error instructing you to pass `--param-file <PATH>` with an external binary `.param` file.
+**When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): andes falls back to the `hcd_qexactive_tryp` model for **mzML inputs whose activation cannot be resolved**; **MGF inputs with no `--fragmentation`/`--fragment-tol-*` flags default to `cid_lowres_tryp` (CID/low-res/0.5 Da) with a warning**. For explicit flags, the resolution ladder in §1 is used instead. If no model resolves in the store, the process exits with an error instructing you to pass `--param-file <PATH>` with an external binary `.param` file.
 
 ---
 

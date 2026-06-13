@@ -80,10 +80,12 @@ Requires Rust 1.85+ (see `rust-toolchain.toml`).
 andes \
   --spectrum BSA.mgf \
   --database BSA.fasta \
-  --output-pin out.pin
+  --output-pin out.pin \
+  --fragmentation HCD \
+  --fragment-tol-ppm 20
 ```
 
-This runs a tryptic search at 20 ppm precursor tolerance with the bundled HCD_QExactive_Tryp scoring model, writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
+This runs a tryptic search at 20 ppm precursor tolerance with the bundled **hcd_qexactive_tryp** scoring model (selected via `--fragmentation HCD` + `--fragment-tol-ppm 20`), writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
 
 A row in `out.pin` is one peptide–spectrum match, with the Java-parity Percolator features plus Rust-only additive columns (`EdgeScore`, …) before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`). Full column reference: `DOCS.md` §3a.
 
@@ -146,7 +148,7 @@ Optional (default in **bold**):
 | `--min-length/-max-length <INT>` | Peptide length range | **6, 40** |
 | `--min-peaks <INT>` | Min peaks per spectrum to score | **10** |
 | `--top-n <INT>` | PSMs retained per spectrum | **10** |
-| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | Fragmentation/activation method — **MGF input only** (auto-detected for mzML/`.raw`/`.d`) | *(see below)* |
+| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | Fragmentation/activation method — **MGF-only** (auto-detected for mzML/`.raw`/`.d`) | *(see below)* |
 | `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
 | `--param-file <FILE>` | Override the bundled scoring model | **auto-pick** |
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
@@ -158,7 +160,7 @@ Run `andes --help` for the auto-generated help with full descriptions and the le
 
 mzML, Thermo `.raw`, and Bruker `.d` are fully auto-detected — andes reads the
 activation method and analyzer resolution from the file, so you pass no
-fragmentation/instrument parameter for these formats.
+fragmentation parameters for these formats.
 
 ### MGF input (extended parameters)
 

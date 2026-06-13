@@ -18,7 +18,39 @@
 
 ---
 
-## STATUS (2026-06-13) — Tasks 1–6 DONE (byte-identical milestone); Task 7 deferred
+## STATUS (2026-06-13) — Tasks 1–7 + SP3 + SP4-mechanism DONE; real-corpus SP3/SP4 handed off
+
+**UPDATE (later 2026-06-13): Task 7 + SP3 + the SP4 *mechanism* are now complete**
+(branch `feat/enzyme-support`, unpushed). The real-corpus glyco training + the
+real PSM-gain benchmark are the only remaining work and are gated on the
+user's glyco dataset — captured in `docs/plans/2026-06-13-andes-glyco-training-benchmark-handoff.md`.
+
+- **Task 7 (node-score integration) — DONE, byte-identical.** The DP cache is
+  mass-indexed/peptide-agnostic and the loss shift `−L/z` is peptide-specific, so
+  loss scoring CANNOT flow through the cache — it is a **peptide-aware additive**
+  pass instead (corrected from the original plan text below, which assumed
+  flow-through). `RankScorer` split into intact-only `partition_ion_logs` (hot
+  path, filtered `!is_loss`) + a new `partition_loss_ion_logs`; `ScoredSpectrum::
+  loss_node_score` probes the model's pooled per-class loss tables at
+  `intact_mz − L/z`; `score_psm` adds it per split for spans crossing a loss
+  residue, gated on activation + `has_loss_tables` + a declared loss mod. Zero
+  allocation / byte-identical for standard peptides. Commits `d3eea06c`,
+  `28ac9290`, `162dcd78`; golden regen `dec08272`.
+- **SP3 (training) — DONE (code + synthetic).** `ion_match_facts` derives loss
+  facts from the intact vocab × active losses; `build_rank_dist_table` picks up
+  loss-classed keys from the counts (absent from `frag_off_table`). Commit
+  `<SP3>`. Standard training byte-identical.
+- **SP4 (validation) — mechanism DONE; magnitude gated on dataset.** Synthetic
+  end-to-end test `crates/model-train/tests/neutral_loss_glyco.rs`: glyco PSMs →
+  learned `loss_class=1` table → scoring lifts RawScore → survives parquet
+  round-trip. Byte-identical guard: full suite (only the pre-existing
+  `fragment_tolerance_override_changes_model` failure) + `precursor_cal_off`
+  golden + `score_psm` parity. Real-corpus training + PSM-gain benchmark →
+  handoff doc.
+
+**Original Tasks 1–6 milestone (still accurate for those tasks):**
+
+## (historical) STATUS — Tasks 1–6 DONE (byte-identical milestone); Task 7 deferred
 
 **Done, reviewed, byte-identical, on `feat/enzyme-support` (unpushed):**
 - Task 1 (`77ec73a0`) + 1b (`cf4eec23`): mods.txt `loss=`/`class=`/`accession=` grammar; `Modification.neutral_losses` + `loss_class` + registry.

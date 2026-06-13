@@ -423,8 +423,8 @@ mod tests {
     /// non-trivial prefix/suffix rank tables so b/y matches earn positive score.
     fn tiny_scorer() -> RankScorer {
         let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let noise = IonType::Noise;
 
         let mut ion_table = FxHashMap::default();

@@ -367,8 +367,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 selected.charge, selected.parent_mass, selected.seg_num,
                 ion_list.len(),
                 ion_list.iter().map(|i| match i {
-                    scoring_crate::param_model::IonType::Prefix { charge, offset_bits } => format!("P(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
-                    scoring_crate::param_model::IonType::Suffix { charge, offset_bits } => format!("S(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
+                    scoring_crate::param_model::IonType::Prefix { charge, offset_bits, .. } => format!("P(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
+                    scoring_crate::param_model::IonType::Suffix { charge, offset_bits, .. } => format!("S(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
                     scoring_crate::param_model::IonType::Noise => "Noise".to_string(),
                 }).collect::<Vec<_>>()
             );

@@ -379,7 +379,7 @@ mod tests {
         use model::protocol::Protocol;
 
         let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-        let prefix_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let prefix_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let noise_ion = IonType::Noise;
 
         let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
@@ -449,7 +449,7 @@ mod tests {
         let param = any_mass_param();
 
         // Compute b-ion m/z for each split position of AGR.
-        let b_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let b_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let mut prefix_acc = 0.0_f64;
         let mut peaks = Vec::new();
         for s in 1..peptide.length() {
@@ -485,7 +485,7 @@ mod tests {
         let peptide = pep(b"AGR");
         let param = any_mass_param();
 
-        let b_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let b_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let mut prefix_acc = 0.0_f64;
         let mut match_peaks = Vec::new();
         for s in 1..peptide.length() {

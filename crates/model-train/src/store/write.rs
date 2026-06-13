@@ -388,8 +388,8 @@ fn build_table_batch(
                     .iter()
                     .flat_map(|f| {
                         let (is_prefix, charge, off_f32) = match f.ion_type {
-                            IonType::Prefix { charge, offset_bits } => (1.0f32, charge as f32, f32::from_bits(offset_bits)),
-                            IonType::Suffix { charge, offset_bits } => (0.0f32, charge as f32, f32::from_bits(offset_bits)),
+                            IonType::Prefix { charge, offset_bits, .. } => (1.0f32, charge as f32, f32::from_bits(offset_bits)),
+                            IonType::Suffix { charge, offset_bits, .. } => (0.0f32, charge as f32, f32::from_bits(offset_bits)),
                             IonType::Noise => (-1.0f32, 0.0f32, 0.0f32),
                         };
                         [is_prefix, charge, off_f32, f.frequency]
@@ -596,8 +596,8 @@ fn emit_dist_row<'a>(
 
 fn encode_ion_type(ion: &IonType) -> (&'static str, i32, i32) {
     match ion {
-        IonType::Prefix { charge, offset_bits } => ("prefix", *charge, *offset_bits as i32),
-        IonType::Suffix { charge, offset_bits } => ("suffix", *charge, *offset_bits as i32),
+        IonType::Prefix { charge, offset_bits, .. } => ("prefix", *charge, *offset_bits as i32),
+        IonType::Suffix { charge, offset_bits, .. } => ("suffix", *charge, *offset_bits as i32),
         IonType::Noise => ("noise", 0, 0),
     }
 }
@@ -1153,8 +1153,8 @@ fn push_partition_stat_row(
 
 fn encode_ion_type_str(ion: &IonType) -> (&'static str, i32, i32) {
     match ion {
-        IonType::Prefix { charge, offset_bits } => ("prefix", *charge, *offset_bits as i32),
-        IonType::Suffix { charge, offset_bits } => ("suffix", *charge, *offset_bits as i32),
+        IonType::Prefix { charge, offset_bits, .. } => ("prefix", *charge, *offset_bits as i32),
+        IonType::Suffix { charge, offset_bits, .. } => ("suffix", *charge, *offset_bits as i32),
         IonType::Noise => ("noise", 0, 0),
     }
 }

@@ -33,7 +33,7 @@ fn fixture_param() -> Param {
 fn make_stats_s0() -> CountStats {
     use scoring_crate::param_model::{IonType, Partition};
     let pa = Partition { charge: 2, parent_mass: 800.0_f32, seg_num: 0 };
-    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits() };
+    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 };
 
     let mut s = CountStats::new();
     s.bump_rank(pa, ion, 0);
@@ -53,7 +53,7 @@ fn make_stats_s0() -> CountStats {
 fn make_stats_s1() -> CountStats {
     use scoring_crate::param_model::{IonType, Partition};
     let pa = Partition { charge: 2, parent_mass: 800.0_f32, seg_num: 0 };
-    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits() };
+    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 };
 
     let mut s = CountStats::new();
     s.bump_rank(pa, ion, 0);

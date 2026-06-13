@@ -358,11 +358,11 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                                 let offset_bits = offset_bits_f.to_bits();
                                 let frequency = flat.value(j + 3);
                                 let ion_type = if is_prefix_f > 0.5 {
-                                    IonType::Prefix { charge: ion_charge, offset_bits }
+                                    IonType::Prefix { charge: ion_charge, offset_bits, loss_class: 0 }
                                 } else if is_prefix_f < -0.5 {
                                     IonType::Noise
                                 } else {
-                                    IonType::Suffix { charge: ion_charge, offset_bits }
+                                    IonType::Suffix { charge: ion_charge, offset_bits, loss_class: 0 }
                                 };
                                 frags.push(FragmentOffsetFrequency { ion_type, frequency });
                                 j += 4;
@@ -551,8 +551,8 @@ fn parse_manifest_row(
 
 fn decode_ion_type(kind: &str, charge: i32, offset_bits: u32) -> Result<IonType, TrainError> {
     match kind {
-        "prefix" => Ok(IonType::Prefix { charge, offset_bits }),
-        "suffix" => Ok(IonType::Suffix { charge, offset_bits }),
+        "prefix" => Ok(IonType::Prefix { charge, offset_bits, loss_class: 0 }),
+        "suffix" => Ok(IonType::Suffix { charge, offset_bits, loss_class: 0 }),
         "noise" => Ok(IonType::Noise),
         other => Err(TrainError::Other(format!("unknown ion_kind: {other}"))),
     }

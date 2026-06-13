@@ -319,7 +319,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
 
         // Rank 1 → index 0. chargeOrSeg = min(1, 1) = 1. log(0.6 / (0.1 * 1)) = log(6.0).
         let s1 = scorer.node_score(part, ion, 1);
@@ -335,7 +335,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
 
         // rank > max_rank clamps to rank_index = max_rank - 1.
         // max_rank = 3 → rank_index = 2 → log(0.05 / 0.3).
@@ -349,7 +349,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
 
         // missing slot = index `maxRank` = 3 (the last entry in length-4 array).
         // log(0.001 / 0.4) = log(0.0025).
@@ -365,7 +365,7 @@ mod tests {
         // Verify the log score uses 1 (not 3).
         let mut param = tiny_param();
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion3 = IonType::Prefix { charge: 3, offset_bits: 0.0_f32.to_bits() };
+        let ion3 = IonType::Prefix { charge: 3, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
         param.rank_dist_table.get_mut(&part).unwrap().insert(ion3, ion_freqs);
 
@@ -380,7 +380,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let unknown = Partition { charge: 99, parent_mass: 0.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         // Out-of-table partition → return 0 (neutral score).
         assert_eq!(scorer.node_score(unknown, ion, 1), 0.0);
         assert_eq!(scorer.missing_ion_score(unknown, ion), 0.0);
@@ -391,7 +391,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let unknown_ion = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let unknown_ion = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         // Suffix isn't in the table → return 0.
         assert_eq!(scorer.node_score(part, unknown_ion, 1), 0.0);
     }

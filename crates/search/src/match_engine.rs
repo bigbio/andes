@@ -1206,12 +1206,12 @@ pub(crate) fn compute_psm_features(
             let ions = segment_ions[seg];
             for &ion in ions {
                 let (is_prefix, residue_mass) = match ion {
-                    scoring_crate::param_model::IonType::Prefix { charge: ic, offset_bits } => {
+                    scoring_crate::param_model::IonType::Prefix { charge: ic, offset_bits, .. } => {
                         let offset = f32::from_bits(offset_bits) as f64;
                         let z = ic as f64;
                         (true, (prm_accurate / z + offset, ion))
                     }
-                    scoring_crate::param_model::IonType::Suffix { charge: ic, offset_bits } => {
+                    scoring_crate::param_model::IonType::Suffix { charge: ic, offset_bits, .. } => {
                         let offset = f32::from_bits(offset_bits) as f64;
                         let z = ic as f64;
                         (false, (srm_accurate / z + offset, ion))
@@ -1477,8 +1477,8 @@ mod feature_tests {
     fn make_scorer(tol_da: f64) -> RankScorer {
         use model::mass::{H2O, PROTON};
         let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits() };
-        let suffix1 = IonType::Suffix { charge: 1, offset_bits: ((H2O + PROTON) as f32).to_bits() };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits(), loss_class: 0 };
+        let suffix1 = IonType::Suffix { charge: 1, offset_bits: ((H2O + PROTON) as f32).to_bits(), loss_class: 0 };
         let noise = IonType::Noise;
         let mut ion_table = FxHashMap::default();
         ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);

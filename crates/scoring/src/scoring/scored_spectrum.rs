@@ -478,7 +478,7 @@ impl<'a> ScoredSpectrum<'a> {
         let kept_count = kept.len();
         let ranks = vec![u32::MAX; n];
         let prob_peak = 1.0_f32;
-        let main_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let main_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         // Sentinel: derive parent_mass from spec.precursor_mz with charge defaulted to
         // spec.precursor_charge or 2. Tests using this constructor are typically
         // not sensitive to partition selection.
@@ -1521,7 +1521,7 @@ fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) 
     // prefix ions: restricting to prefix ions would force the reference
     // direction to "prefix" even for y-ion-dominated HCD spectra, which
     // mislabels observed node masses and corrupts edge scores.
-    let fallback = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let fallback = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
     let num_segments = param.num_segments.max(1) as usize;
     let mut ion_freq: std::collections::HashMap<IonType, f32> = std::collections::HashMap::new();
     for seg in 0..num_segments {
@@ -2014,7 +2014,7 @@ mod tests {
         use rustc_hash::FxHashMap;
 
         let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let noise = IonType::Noise;
 
         let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];

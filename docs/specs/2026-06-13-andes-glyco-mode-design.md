@@ -5,6 +5,22 @@
 neutral-loss scoring primitive shipped on `feat/enzyme-support`
 (`docs/specs/2026-06-13-andes-neutral-loss-glyco-design.md`).
 
+> **⚠ READ ALONGSIDE — v2 addendum is authoritative where they differ:**
+> `docs/specs/2026-06-13-andes-glyco-mode-design-v2-improvements.md` (from a
+> 6-agent SOTA research + synthesis pass) supersedes specific decisions below.
+> Key replacements: oxonium trigger → calibrated two-part AND gate (not
+> count-only); backbone solver → Y-complementary voting + core-Y quorum + bounded
+> top-K fallback + backbone-b/y arbiter (not a fragile direct Y0/Y1 read); 2D FDR
+> → **sequential TDC** with `max(q_pep,q_gly)≤α` (not inclusion-exclusion);
+> scoring → the neutral-loss primitive scores only **glycosite-spanning,
+> partial-glycan-retaining** backbone b/y with **per-rung trim masses** (NOT the
+> full glycan — a full-glycan loss goes `theo_mz≤0` and is silently dropped on
+> singly-charged ions), with the Y0/Y1/Y2 whole-backbone ladder + oxonium as a
+> separate cheap matcher feeding **additive PIN features** (numeric, `--glyco`-
+> gated; strings TSV-only); Phase-0 adds a precision arm + a *searchable-backbone*
+> gate + a DB-coverage check, and a precondition (the Byonic per-scan truth must
+> be obtained/verified, with a pGlyco3/MSFragger fallback). Plan from the addendum.
+
 **Goal:** add an intact-N-glycopeptide search mode to andes for stepped-HCD/HCD
 data — reusing the existing peptide engine — that identifies the peptide
 backbone AND its N-glycan composition with glyco-aware FDR. Gated on a

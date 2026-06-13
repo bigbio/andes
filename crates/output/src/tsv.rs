@@ -470,6 +470,7 @@ mod tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let m_ox = AminoAcid {
             residue: b'M',

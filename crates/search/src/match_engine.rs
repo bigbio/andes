@@ -2172,6 +2172,7 @@ mod dedup_tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         }));
         let cands = vec![
             cand_with_peptide(seq_peptide(b"PEPMK")),

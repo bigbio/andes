@@ -36,6 +36,10 @@ pub struct Modification {
     /// User-declared neutral-loss masses (Da) for this mod's fragment ions.
     /// Empty ⇒ no loss ions predicted (default; byte-identical to pre-feature).
     pub neutral_losses: Vec<f64>,
+    /// Loss-class pool id for this mod's neutral-loss ions: 0 = none/intact,
+    /// 1.. = a per-mod-class pool (glyco=1, phospho=2, sulfo=3, generic=255).
+    /// Loss ions of the same class share one trained distribution.
+    pub loss_class: u8,
 }
 
 impl Modification {
@@ -68,12 +72,35 @@ pub enum ModParseError {
     BadLocation { field: String },
     #[error("invalid fixed/variable flag {field:?} (expected `fix|opt`)")]
     BadFixedFlag { field: String },
-    #[error("unknown mod attribute key {key:?} (expected loss|accession)")]
+    #[error("unknown mod attribute key {key:?} (expected loss|accession|class)")]
     UnknownModAttr { key: String },
     #[error("malformed mod attribute {field:?} (expected key=value)")]
     BadModAttr { field: String },
     #[error("invalid neutral-loss value {value:?} (expected positive number < 2000)")]
     BadNeutralLoss { value: String },
+    #[error("unknown loss class {name:?} (expected glyco|phospho|sulfo|generic)")]
+    UnknownLossClass { name: String },
+}
+
+/// Return the stable loss-class id for a recognised class name, or `None`.
+///
+/// Loss ions are pooled within a class so that a shared trained distribution
+/// can be learned across mods of the same biochemical type.
+///
+/// | name      | id  |
+/// |-----------|-----|
+/// | `glyco`   |   1 |
+/// | `phospho` |   2 |
+/// | `sulfo`   |   3 |
+/// | `generic` | 255 |
+pub fn loss_class_id(name: &str) -> Option<u8> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "glyco"   => Some(1),
+        "phospho" => Some(2),
+        "sulfo"   => Some(3),
+        "generic" => Some(255),
+        _ => None,
+    }
 }
 
 impl Modification {
@@ -99,6 +126,10 @@ impl Modification {
     ///   Multiple `loss=` attributes accumulate into a single list.
     /// - `accession=<CURIE>` — ontology accession, e.g. `UNIMOD:393`.
     ///   If repeated, the last value wins.
+    /// - `class=<glyco|phospho|sulfo|generic>` — loss-class pool for this mod's neutral-loss
+    ///   ions. Loss ions of the same class share one trained distribution. If `loss=` is
+    ///   present but `class=` is omitted, the class defaults to `generic` (id 255). If
+    ///   neither `loss=` nor `class=` is present, `loss_class` is 0 (no loss ions).
     ///
     /// **Caveat:** the mod name must not contain a comma. A comma after the name
     /// is parsed as the start of attribute fields; a token there that is not
@@ -141,6 +172,7 @@ impl Modification {
 
         let mut neutral_losses: Vec<f64> = Vec::new();
         let mut accession: Option<String> = None;
+        let mut loss_class: u8 = 0;
         for attr in &parts[5..] {
             let attr = attr.trim();
             if attr.is_empty() { continue; }
@@ -160,8 +192,16 @@ impl Modification {
                     }
                 }
                 "accession" => accession = Some(value.trim().to_string()),
+                "class" => {
+                    loss_class = loss_class_id(value)
+                        .ok_or_else(|| ModParseError::UnknownLossClass { name: value.trim().to_string() })?;
+                }
                 other => return Err(ModParseError::UnknownModAttr { key: other.to_string() }),
             }
+        }
+        // If losses are declared but no explicit class, default to Generic (255).
+        if !neutral_losses.is_empty() && loss_class == 0 {
+            loss_class = 255;
         }
 
         Ok(Modification {
@@ -172,6 +212,7 @@ impl Modification {
             fixed,
             accession,
             neutral_losses,
+            loss_class,
         })
     }
 }
@@ -189,6 +230,7 @@ mod tests {
             fixed: true,
             accession: Some("UNIMOD:4".to_string()),
             neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -202,6 +244,7 @@ mod tests {
             fixed: false,
             accession: Some("UNIMOD:35".to_string()),
             neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -229,6 +272,7 @@ mod tests {
             fixed: false,
             accession: Some("UNIMOD:1".to_string()),
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         // Wildcard matches any residue at the specified location only.
         assert!(m.applies_to(b'A', ModLocation::ProtNTerm));
@@ -248,6 +292,7 @@ mod tests {
             fixed: true,
             accession: Some("UNIMOD:737".to_string()),
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         assert!(m.applies_to(b'K', ModLocation::Anywhere));
         assert!(!m.applies_to(b'R', ModLocation::Anywhere));
@@ -263,6 +308,7 @@ mod tests {
             fixed: true,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         assert!(m.applies_to(b'A', ModLocation::NTerm));
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
@@ -389,5 +435,31 @@ mod tests {
         let m = Modification::from_mods_txt_line("1.0,K,opt,any,X, loss = 98.0 ; 18.0 , accession = UNIMOD:21 ").unwrap();
         assert_eq!(m.neutral_losses, vec![98.0, 18.0]);
         assert_eq!(m.accession.as_deref(), Some("UNIMOD:21"));
+    }
+
+    #[test]
+    fn parses_loss_class_attribute() {
+        let m = Modification::from_mods_txt_line(
+            "340.1,K,opt,any,Glyco,loss=162.0;324.1,class=glyco").unwrap();
+        assert_eq!(m.loss_class, 1); // glyco = 1
+    }
+
+    #[test]
+    fn loss_without_class_defaults_generic() {
+        let m = Modification::from_mods_txt_line("98.0,S,opt,any,P,loss=98.0").unwrap();
+        assert_eq!(m.loss_class, 255); // Generic default when losses present but no class
+    }
+
+    #[test]
+    fn no_loss_no_class_is_zero() {
+        let m = Modification::from_mods_txt_line("57.0,C,fix,any,Cam").unwrap();
+        assert_eq!(m.loss_class, 0);
+    }
+
+    #[test]
+    fn rejects_unknown_loss_class() {
+        assert!(matches!(
+            Modification::from_mods_txt_line("1.0,K,opt,any,X,class=bogus"),
+            Err(ModParseError::UnknownLossClass { .. })));
     }
 }

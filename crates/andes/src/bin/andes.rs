@@ -1003,6 +1003,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fixed: true,
                 accession: None,
                 neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             let ox = Modification {
                 name: "Oxidation".into(),
@@ -1012,6 +1013,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 fixed: false,
                 accession: None,
                 neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             let set = AminoAcidSetBuilder::new_standard()
                 .add_fixed_mod(cam)
@@ -2022,6 +2024,7 @@ fn build_msnet_peptide(
                 fixed: false,
                 accession: None,
                 neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             residues.push(aa.with_mod(Arc::new(m)));
         } else {
@@ -2879,6 +2882,7 @@ fn build_aa_set(
                 fixed: true,
                 accession: None,
                 neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             let ox = Modification {
                 name: "Oxidation".into(),
@@ -2888,6 +2892,7 @@ fn build_aa_set(
                 fixed: false,
                 accession: None,
                 neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             Ok(AminoAcidSetBuilder::new_standard()
                 .add_fixed_mod(cam)

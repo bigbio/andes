@@ -182,6 +182,7 @@ mod tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation.clone());
         assert!(m.is_modified());
@@ -198,6 +199,7 @@ mod tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation);
         // M (131) + Ox (16) = 147 nominal

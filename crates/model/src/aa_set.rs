@@ -202,6 +202,7 @@ impl AminoAcidSetBuilder {
             fixed: true,
             accession: Some("UNIMOD:4".to_string()),
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         Self {
             fixed_mods: vec![cam],
@@ -497,6 +498,7 @@ mod tests {
             fixed: true,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -509,6 +511,7 @@ mod tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -575,6 +578,7 @@ mod tests {
             fixed: true,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let err = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(bad)
@@ -626,6 +630,7 @@ mod tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(cterm_mod)
@@ -712,6 +717,7 @@ mod tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(nterm_mod)
@@ -826,6 +832,7 @@ mod tests {
             fixed: false,
             accession: None,
             neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())

@@ -199,6 +199,7 @@ fn aa_set_with_oxidation() -> model::AminoAcidSet {
         fixed: false,
         accession: None,
         neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     model::AminoAcidSetBuilder::new_standard()
         .add_variable_mod(ox)
@@ -297,6 +298,7 @@ fn aa_set_with_protein_nterm_acetyl() -> AminoAcidSet {
         fixed: false,
         accession: None,
         neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(acetyl)
@@ -314,6 +316,7 @@ fn aa_set_with_nterm_acetyl() -> AminoAcidSet {
         fixed: false,
         accession: None,
         neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(acetyl)
@@ -331,6 +334,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         fixed: false,
         accession: None,
         neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let prot_cterm = Modification {
         name: "GlyGly_PCT".into(),
@@ -340,6 +344,7 @@ fn aa_set_with_both_cterm_mods() -> AminoAcidSet {
         fixed: false,
         accession: None,
         neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     AminoAcidSetBuilder::new_standard()
         .add_variable_mod(cterm)

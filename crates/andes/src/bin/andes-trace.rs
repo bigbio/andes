@@ -192,6 +192,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         fixed: true,
         accession: None,
         neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -201,6 +202,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         fixed: false,
         accession: None,
         neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

@@ -469,6 +469,7 @@ mod tests {
             location: model::modification::ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
         };
         let m_ox = AminoAcid {
             residue: b'M',

@@ -33,6 +33,9 @@ pub struct Modification {
     pub location:   ModLocation,
     pub fixed:      bool,
     pub accession:  Option<String>,
+    /// User-declared neutral-loss masses (Da) for this mod's fragment ions.
+    /// Empty ⇒ no loss ions predicted (default; byte-identical to pre-feature).
+    pub neutral_losses: Vec<f64>,
 }
 
 impl Modification {
@@ -65,6 +68,12 @@ pub enum ModParseError {
     BadLocation { field: String },
     #[error("invalid fixed/variable flag {field:?} (expected `fix|opt`)")]
     BadFixedFlag { field: String },
+    #[error("unknown mod attribute key {key:?} (expected loss|accession)")]
+    UnknownModAttr { key: String },
+    #[error("malformed mod attribute {field:?} (expected key=value)")]
+    BadModAttr { field: String },
+    #[error("invalid neutral-loss value {value:?} (expected positive number < 2000)")]
+    BadNeutralLoss { value: String },
 }
 
 impl Modification {
@@ -72,14 +81,14 @@ impl Modification {
     /// Empty lines and `# ...` comment lines should be filtered by the
     /// caller (see `aa_set::AminoAcidSetBuilder::add_mods_from_file`).
     pub fn from_mods_txt_line(line: &str) -> Result<Self, ModParseError> {
-        let fields: Vec<&str> = line.splitn(5, ',').collect();
-        if fields.len() != 5 {
-            return Err(ModParseError::WrongFieldCount { got: fields.len() });
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() < 5 {
+            return Err(ModParseError::WrongFieldCount { got: parts.len() });
         }
-        let [mass_s, residues_s, fixity_s, location_s, name_s] = [
-            fields[0].trim(), fields[1].trim(), fields[2].trim(),
-            fields[3].trim(), fields[4].trim(),
-        ];
+        let (mass_s, residues_s, fixity_s, location_s, name_s) = (
+            parts[0].trim(), parts[1].trim(), parts[2].trim(),
+            parts[3].trim(), parts[4].trim(),
+        );
 
         let mass_delta: f64 = mass_s.parse()
             .map_err(|source| ModParseError::BadMass { field: mass_s.to_string(), source })?;
@@ -107,13 +116,39 @@ impl Modification {
             _ => return Err(ModParseError::BadLocation { field: location_s.to_string() }),
         };
 
+        let mut neutral_losses: Vec<f64> = Vec::new();
+        let mut accession: Option<String> = None;
+        for attr in &parts[5..] {
+            let attr = attr.trim();
+            if attr.is_empty() { continue; }
+            let (key, value) = attr.split_once('=')
+                .ok_or_else(|| ModParseError::BadModAttr { field: attr.to_string() })?;
+            match key.trim().to_ascii_lowercase().as_str() {
+                "loss" => {
+                    for tok in value.split(';') {
+                        let tok = tok.trim();
+                        if tok.is_empty() { continue; }
+                        let v: f64 = tok.parse()
+                            .map_err(|_| ModParseError::BadNeutralLoss { value: tok.to_string() })?;
+                        if !(v > 0.0 && v < 2000.0) {
+                            return Err(ModParseError::BadNeutralLoss { value: tok.to_string() });
+                        }
+                        neutral_losses.push(v);
+                    }
+                }
+                "accession" => accession = Some(value.trim().to_string()),
+                other => return Err(ModParseError::UnknownModAttr { key: other.to_string() }),
+            }
+        }
+
         Ok(Modification {
             name: name_s.to_string(),
             mass_delta,
             residue,
             location,
             fixed,
-            accession: None,
+            accession,
+            neutral_losses,
         })
     }
 }
@@ -130,6 +165,7 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: true,
             accession: Some("UNIMOD:4".to_string()),
+            neutral_losses: Vec::new(),
         }
     }
 
@@ -142,6 +178,7 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: Some("UNIMOD:35".to_string()),
+            neutral_losses: Vec::new(),
         }
     }
 
@@ -168,6 +205,7 @@ mod tests {
             location: ModLocation::ProtNTerm,
             fixed: false,
             accession: Some("UNIMOD:1".to_string()),
+            neutral_losses: Vec::new(),
         };
         // Wildcard matches any residue at the specified location only.
         assert!(m.applies_to(b'A', ModLocation::ProtNTerm));
@@ -186,6 +224,7 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: true,
             accession: Some("UNIMOD:737".to_string()),
+            neutral_losses: Vec::new(),
         };
         assert!(m.applies_to(b'K', ModLocation::Anywhere));
         assert!(!m.applies_to(b'R', ModLocation::Anywhere));
@@ -200,6 +239,7 @@ mod tests {
             location: ModLocation::NTerm,
             fixed: true,
             accession: None,
+            neutral_losses: Vec::new(),
         };
         assert!(m.applies_to(b'A', ModLocation::NTerm));
         assert!(!m.applies_to(b'A', ModLocation::Anywhere));
@@ -287,5 +327,30 @@ mod tests {
         let line = "229.162932,*,fix,n-term,TMT";
         let m = Modification::from_mods_txt_line(line).unwrap();
         assert_eq!(m.location, ModLocation::NTerm);
+    }
+
+    #[test]
+    fn parses_loss_and_accession_attributes() {
+        let m = Modification::from_mods_txt_line(
+            "340.100562,K,opt,any,Glucosylgalactosyl,loss=162.0528;324.1056,accession=UNIMOD:393"
+        ).unwrap();
+        assert_eq!(m.residue, ResidueSpec::Specific(b'K'));
+        assert!(!m.fixed);
+        assert_eq!(m.neutral_losses, vec![162.0528, 324.1056]);
+        assert_eq!(m.accession.as_deref(), Some("UNIMOD:393"));
+    }
+
+    #[test]
+    fn five_field_line_has_no_losses_or_accession() {
+        let m = Modification::from_mods_txt_line("57.02146,C,fix,any,Carbamidomethyl").unwrap();
+        assert!(m.neutral_losses.is_empty());
+        assert_eq!(m.accession, None);
+    }
+
+    #[test]
+    fn rejects_unknown_attr_and_bad_loss() {
+        assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,frobnicate=7"), Err(ModParseError::UnknownModAttr { .. })));
+        assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,loss=abc"), Err(ModParseError::BadNeutralLoss { .. })));
+        assert!(matches!(Modification::from_mods_txt_line("1.0,K,opt,any,X,nokey"), Err(ModParseError::BadModAttr { .. })));
     }
 }

@@ -18,6 +18,7 @@ fn corpus_aa_set() -> AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
     };
     let ox = Modification {
         name: "Oxidation".to_string(),
@@ -26,6 +27,7 @@ fn corpus_aa_set() -> AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
     };
     let pyro_glu = Modification {
         name: "Pyro-glu".to_string(),
@@ -34,6 +36,7 @@ fn corpus_aa_set() -> AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
     };
     AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

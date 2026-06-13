@@ -306,6 +306,7 @@ fn acceptance_gate_same_model_is_accepted() {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -314,6 +315,7 @@ fn acceptance_gate_same_model_is_accepted() {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

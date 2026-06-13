@@ -242,6 +242,7 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation);
         let g = AminoAcid::standard(b'G').unwrap();
@@ -299,6 +300,7 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
         };
         aa.with_mod(m)
     }
@@ -388,6 +390,7 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: true,
             accession: None,
+            neutral_losses: Vec::new(),
         };
         let ox = Modification {
             name: "Oxidation".to_string(),
@@ -396,6 +399,7 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
         };
         AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(cam)

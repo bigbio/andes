@@ -22,9 +22,11 @@ use model_train::{
 
 fn standard_aa_set() -> model::AminoAcidSet {
     let cam = Modification { name: "Carbamidomethyl".into(), mass_delta: 57.02146,
-        residue: ResidueSpec::Specific(b'C'), location: ModLocation::Anywhere, fixed: true, accession: None };
+        residue: ResidueSpec::Specific(b'C'), location: ModLocation::Anywhere, fixed: true, accession: None,
+        neutral_losses: Vec::new() };
     let ox = Modification { name: "Oxidation".into(), mass_delta: 15.99491,
-        residue: ResidueSpec::Specific(b'M'), location: ModLocation::Anywhere, fixed: false, accession: None };
+        residue: ResidueSpec::Specific(b'M'), location: ModLocation::Anywhere, fixed: false, accession: None,
+        neutral_losses: Vec::new() };
     AminoAcidSetBuilder::new_standard().add_fixed_mod(cam).add_variable_mod(ox).build().unwrap()
 }
 

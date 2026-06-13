@@ -870,6 +870,32 @@ fn load_spectra_by_index(
     Ok(loaded)
 }
 
+/// Auto-detect an isobaric label (TMT/iTRAQ) by sampling the first `SAMPLE_N`
+/// MS2 spectra and inspecting their reporter-ion region. Used only when
+/// `--protocol auto` is left at its default, to engage the isobaric windowed
+/// peak filter with zero config.
+///
+/// Returns `None` for `.raw`/`.d` (the sampling reader here is mzML/MGF only —
+/// the protocol then stays as-is, byte-identical) and for label-free data, so
+/// non-isobaric runs are unchanged. The mzML benchmark datasets (Astral, UPS1,
+/// TMT) all flow through the mzML branch.
+fn detect_isobaric_sampled(
+    path: &Path,
+    is_mzml: bool,
+    is_mgf: bool,
+    ms_level: u32,
+    high_res: bool,
+) -> Option<input::IsobaricLabel> {
+    const SAMPLE_N: usize = 1000;
+    if !(is_mzml || is_mgf) {
+        return None;
+    }
+    let indices: HashSet<usize> = (0..SAMPLE_N).collect();
+    let loaded = load_spectra_by_index(path, is_mzml, ms_level, &indices, usize::MAX).ok()?;
+    let sample: Vec<Spectrum> = loaded.into_values().collect();
+    input::detect_isobaric(&sample, high_res)
+}
+
 fn tolerance_ppm_display(t: Tolerance) -> Option<f64> {
     match t {
         Tolerance::Ppm(v) => Some(v),
@@ -1118,10 +1144,29 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // searches even when model selection fell back to a non-isobaric table
     // (there is no bundled CID-TMT model, so `--protocol TMT` resolves to
     // `cid_lowres_tryp`, whose stored protocol is Standard).
+    // An explicit `--protocol` wins outright. When left at `auto` (the default),
+    // auto-detect TMT/iTRAQ from MS2 reporter ions (mzML/MGF) so the dense-peak
+    // windowed filter engages with zero config — the same path `--protocol TMT`
+    // takes today. Detection returns None for label-free data, so non-isobaric
+    // runs stay byte-identical.
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
         Protocol::ItraqPhospho => param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho,
+        Protocol::Auto => {
+            let high_res = param.data_type.instrument.is_high_resolution();
+            match detect_isobaric_sampled(&spectrum_path, is_mzml, is_mgf, cli.ms_level as u32, high_res) {
+                Some(input::IsobaricLabel::Tmt) => {
+                    eprintln!("Protocol resolver: auto-detected TMT reporter ions → engaging isobaric windowed peak filter");
+                    param.data_type.protocol = model::protocol::Protocol::TMT;
+                }
+                Some(input::IsobaricLabel::Itraq) => {
+                    eprintln!("Protocol resolver: auto-detected iTRAQ reporter ions → engaging isobaric windowed peak filter");
+                    param.data_type.protocol = model::protocol::Protocol::ITRAQ;
+                }
+                None => {}
+            }
+        }
         _ => {}
     }
     let mut scorer = RankScorer::new(&param);

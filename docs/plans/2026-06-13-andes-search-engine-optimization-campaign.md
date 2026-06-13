@@ -34,23 +34,22 @@ Everything else in this campaign is measured against this table. It is also the
 **independence milestone** (it requires andes on its own models), so it is the
 gating prerequisite, not an afterthought.
 
-**Prerequisite — own-data models (Codon). This GATES the baseline table** (chosen
-approach: independence-valid, retrain first — not a current-models snapshot).
-Resume the **already-staged Phase-3 retraining campaign on EBI Codon** rather
-than starting cold:
-- Location: `/hps/.../andes-training` — `andes-bin` built, manifest + driver +
-  SLURM array ready. Access via the **`codon-cluster` skill**.
-- Still needed before it can run: the training **flats** + the **PRIDE-curated
-  public training corpus** (the ~29 experiment-class slugs), so every retrained
-  model derives from public/quantms data with **zero MS-GF+ heritage**.
-- The per-protocol **low-res CID-TMT model (= backlog experiment #3)** is built in
-  this same campaign and feeds the sweeps (#6/#9/#11).
-- Output: a new `models.parquet` with no MS-GF+-derived entries → this is what the
-  baseline table (and the whole `/loop`) benchmarks. Update NOTICE/independence
-  status when 39/39 are retrained.
+**Prerequisite — own-data models. This GATES the baseline table** (chosen
+approach: independence-valid, train-from-public-data first — not a current-models
+snapshot). Two stages across two hosts:
+1. **Codon — gold-standard PSMs:** run MSFragger → Percolator on the public
+   training corpus (the ~29 experiment-class slugs) to produce confident
+   gold-standard PSMs. Needs the flats + PRIDE-curated corpus staged at
+   `/hps/.../andes-training`. Access via the **`codon-cluster` skill**. Hand the
+   gold PSMs to the VM.
+2. **VM — train andes on those labels:** `andes train` with the Codon gold PSMs as
+   the confident-label set → an own-data `models.parquet` with **zero MS-GF+
+   heritage** (incl. the per-protocol low-res CID-TMT model = backlog experiment
+   #3, which feeds sweeps #6/#9/#11). This is what the baseline table benchmarks.
+   Update NOTICE / independence status when 39/39 are own-data.
 
 (A current-MS-GF+-heritage-models snapshot is optional reference only — explicitly
-**not** the independence baseline; the user chose to gate on the retrained table.)
+**not** the independence baseline; the user chose to gate on the trained table.)
 
 **Protocol (VM).** Matched target+decoy FASTA + foreign-proteome **entrapment**,
 matched **1% FDR** (+ glycan-free here), Percolator (grep the mode — Concatenated
@@ -71,15 +70,19 @@ WIN = andes ≥ MSFragger on IDs at matched 1% FDR with entrapment-FDP in
 tolerance, on **own-data models**. The campaign drives every Δ% from negative
 (the ~10% honest start) toward ≥ 0, axis by axis.
 
-### Launch sequence (for the VM/Codon `/loop` session)
-0. **Codon:** resume the staged Phase-3 retraining (above) → produce an own-data
-   `models.parquet` with zero MS-GF+ heritage. *(Gates everything; the long pole.)*
+### Launch sequence (three hosts)
+0a. **Codon:** MSFragger → Percolator on the public corpus → gold-standard PSMs
+    (training labels). *(Long pole; gates everything.)* Hand off to the VM.
+0b. **VM:** `andes train` on the Codon gold PSMs → own-data `models.parquet`
+    (zero MS-GF+ heritage), incl. the low-res CID-TMT model.
 1. **VM:** run experiment #0 → fill the baseline table (andes own-models vs
    MSFragger, 3 datasets, matched 1% FDR + entrapment-FDP). Record Δ% per dataset.
-2. **Loop:** round-robin the ranked backlog
+2. **Loop (local code ↔ VM benchmark):** round-robin the ranked backlog
    (`2026-06-13-andes-opt-experiment-backlog.md`), one atomic FDP-gated experiment
-   per iteration, re-running the relevant baseline row after each kept change so
-   Δ% is always current. Astral is the mandatory high-res canary on every change.
+   per iteration — implement the change **on this machine**, benchmark on the VM,
+   re-run the affected baseline row so Δ% stays current. Astral is the mandatory
+   high-res canary on every change. (Model-variant experiments loop back through
+   0a/0b.)
 3. Stop when Δ% ≥ 0 on all three (or the backlog is exhausted); log refutations.
 
 Note: backlog #1 (auto-detect isobaric protocol → the +3.5% TMT win) is a
@@ -107,11 +110,32 @@ The prior record is littered with plausible ideas that **entrapment-FDP refuted*
 6. **Percolator mode parity.** Grep the Percolator mode (Concatenated vs Separate) before comparing counts — cross-mode counts aren't comparable.
 7. **Record refutations** in this doc's log so the loop never re-tries a dead end.
 
-## Harness & infrastructure (two-host split)
+## Harness & infrastructure (THREE-host split — authoritative)
 
-- **VM = benchmark only.** Runs andes + MSFragger (+ Sage/Comet as references) and Percolator. 3-arm scripts already exist (gitignored under `benchmark/`): `run_{astral,tmt,pxd001819}_3arm.sh` + `compare_*_3arm_percolator.sh`. Gotchas: MSFragger/Sage have no native `.raw` here (pre-convert to mzML); msgf2pin crashes → use `build_pins.py`; target-only FASTA + entrapment for FDP. Access via the VM per `reference_andes_infra_layout`.
-- **Codon cluster = generate data + train models.** Phase-3 retraining is staged at `/hps/.../andes-training` (manifest + driver + array ready; needs flats + PRIDE-curated training corpus). Access via the `codon-cluster` skill. This is where "multiple models based on peak ranks" get built.
-- **Datasets:** Astral (high-res), UPS1, TMT — low-res CID-TMT (e.g. PXD016999 4-engine TMT set; PXD014502 ion-trap CID-TMT). Pin exact accessions/paths on first run and record them here.
+The loop spans three hosts, each with a distinct job:
+
+- **Codon cluster = gold-standard PSM generation (training labels).** Run
+  **MSFragger → Percolator** on big *public* datasets, fast, to produce
+  high-confidence gold-standard PSMs. These are the **training labels** handed to
+  the VM. (Independence-clean: andes's model is learned from public spectra with
+  externally-validated labels — no MS-GF+ parameters; MSFragger only supplies the
+  label set, not any andes code/model.) Access via the `codon-cluster` skill;
+  staging at `/hps/.../andes-training`.
+- **VM = training + benchmarking.** (a) **Train** andes models with `andes train`
+  using the Codon gold-standard PSMs as the confident-label set → an own-data
+  `models.parquet` with zero MS-GF+ heritage. (b) **Benchmark** andes vs MSFragger
+  (+ Sage/Comet refs) with Percolator + entrapment-FDP. 3-arm scripts exist
+  (gitignored under `benchmark/`): `run_{astral,tmt,pxd001819}_3arm.sh` +
+  `compare_*_3arm_percolator.sh`. Gotchas: pre-convert `.raw`→mzML for
+  MSFragger/Sage; msgf2pin crashes → `build_pins.py`; target-only FASTA +
+  entrapment for FDP; grep the Percolator mode before comparing counts.
+- **This machine (local) = code improvements.** After a VM benchmark yields a
+  conclusion, the actual andes **source changes** are made and committed here,
+  then pushed for the VM to re-benchmark. (Where the `/loop` that edits code runs;
+  it dispatches compute to Codon/VM and reads results back.)
+- **Datasets:** Astral (high-res), UPS1, TMT — low-res CID-TMT (e.g. PXD016999
+  4-engine TMT set; PXD014502 ion-trap CID-TMT). Pin exact accessions/paths on
+  first run and record them here.
 
 ## Loop protocol (per iteration)
 

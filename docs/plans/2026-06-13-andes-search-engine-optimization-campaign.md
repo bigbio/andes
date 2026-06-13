@@ -55,9 +55,11 @@ gating prerequisite, not an afterthought.
 **Prerequisite — own-data models. This GATES the baseline table** (chosen
 approach: independence-valid, train-from-public-data first — not a current-models
 snapshot). Two stages, Codon → VM:
-1. **Codon — gold-standard PSMs:** run MSFragger → Percolator on the public
-   training corpus (the ~29 experiment-class slugs) to produce confident
-   gold-standard PSMs. Needs the flats + PRIDE-curated corpus staged at
+1. **Codon — gold-standard PSMs:** run **MSFragger ∪ Comet → Percolator
+   (consensus)** on the public training corpus (the ~29 experiment-class slugs)
+   to produce confident gold-standard PSMs — consensus across the two engines
+   removes single-engine selection bias (user-confirmed). Needs the flats +
+   PRIDE-curated corpus staged at
    `/hps/.../andes-training`. Access via the **`codon-cluster` skill**. Hand the
    gold PSMs to the VM.
 2. **VM — train andes on those labels:** `andes train` with the Codon gold PSMs as
@@ -133,10 +135,10 @@ The prior record is littered with plausible ideas that **entrapment-FDP refuted*
 The loop spans three hosts, each with a distinct job:
 
 - **Codon cluster = gold-standard PSM generation (training labels).** Run
-  **MSFragger (∪ Comet for consensus) → Percolator** on big *public* datasets,
-  fast, to produce high-confidence gold-standard PSMs. These are the **training
-  labels** handed to the VM. (Consensus across two engines removes single-engine
-  selection bias; see the methodology note.) (Independence-clean: andes's model is learned from public spectra with
+  **MSFragger ∪ Comet → Percolator (consensus)** on big *public* datasets, fast,
+  to produce high-confidence gold-standard PSMs. These are the **training labels**
+  handed to the VM. Consensus across the two engines removes single-engine
+  selection bias (user-confirmed); see the methodology note. (Independence-clean: andes's model is learned from public spectra with
   externally-validated labels — no MS-GF+ parameters; MSFragger only supplies the
   label set, not any andes code/model.) Access via the `codon-cluster` skill;
   staging at `/hps/.../andes-training`.

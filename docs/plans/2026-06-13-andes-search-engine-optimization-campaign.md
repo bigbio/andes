@@ -71,6 +71,31 @@ snapshot). Two stages, Codon → VM:
 (A current-MS-GF+-heritage-models snapshot is optional reference only — explicitly
 **not** the independence baseline; the user chose to gate on the trained table.)
 
+**Training-set cleanliness — signal vs noise have different needs (open Q answered).**
+andes scores `LLR = ln(ion_freq[rank] / (noise_freq[rank]·norm))`. The two halves
+are learned differently and tolerate dirt differently:
+- **Signal (`ion_freq`) is FRAGILE to false PSMs.** A wrong training PSM contributes
+  *coincidental* matches as if they were real fragments → flattens/poisons the
+  signal distribution → worse discrimination. ⇒ the gold set must be **stringent**
+  (≤1% FDR; the **MSFragger ∪ Comet** members each already pass an engine's FDR
+  gate, so the union is ~1%-clean *and* large — best clean-and-big balance.
+  Intersection is purer but small and re-adds a selection bias).
+- **Noise (`noise_freq`) is ROBUST to label dirt.** It is sampled from
+  **decoy/background positions** (reversed-peptide decoy ions — `noise_match_facts`
+  — or dense random positions — `dense_noise_facts`), which are background
+  *regardless of whether the PSM label is right*. So the noise model does **not**
+  need an ultra-clean set. Its real limiters are: **(1) corpus SIZE** (too few
+  PSMs → noise under-sampled → Laplace smoothing flattens it → the diagnosed
+  −4.3% "dilution"), and **(2) over-smoothing** (`noise_pseudo` must stay small so
+  the noise stays sharply peaked at the missing-ion slot — guarded by
+  `noise_rank_dist_stays_sharp_not_flattened_by_smoothing`).
+- **Practical answer:** ~1% FDR consensus gold PSMs are **plenty clean for the
+  noise**; what the noise needs is a **large** corpus + minimal smoothing. The
+  signal is what demands the stringency. The exact FDR (0.1 / 1 / 5%), union-vs-
+  intersection, and noise-smoothing are an **empirical sweep** in the loop (backlog
+  noise-shape experiments) — watch the trained noise distribution's peak as the
+  canary: if it flattens, the corpus is too small or smoothing too aggressive.
+
 **Protocol (VM).** Matched target+decoy FASTA + foreign-proteome **entrapment**,
 matched **1% FDR** (+ glycan-free here), Percolator (grep the mode — Concatenated
 vs Separate counts aren't comparable), uniform peptide→protein parsimony

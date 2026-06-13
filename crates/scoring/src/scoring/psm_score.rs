@@ -283,6 +283,38 @@ pub fn score_psm(
         None => None,
     };
 
+    // ── Neutral-loss contribution gate (peptide-aware, additive) ─────────────
+    // Loss ions are scored only when (a) the activation method preserves them
+    // (ETD strips no labile mods → no loss ions), (b) the model carries trained
+    // loss tables, and (c) the peptide actually declares a loss-bearing mod.
+    // For every standard peptide this is false, so the split loop adds nothing
+    // and the integer RawScore is byte-identical to the pre-feature engine.
+    let score_losses = scorer.param().data_type.activation.predicts_neutral_losses()
+        && scorer.has_loss_tables()
+        && peptide.residues.iter().any(|aa| {
+            aa.mod_
+                .as_ref()
+                .is_some_and(|m| m.loss_class != 0 && !m.neutral_losses.is_empty())
+        });
+    // Collect the DISTINCT `(loss_mass, loss_class)` pairs declared by mods on
+    // residues in `range` (one loss ion per distinct pair per node; no
+    // cross-products — v1 semantics matching the prediction path).
+    let collect_span_losses = |range: std::ops::Range<usize>| -> Vec<(f64, u8)> {
+        let mut v: Vec<(f64, u8)> = Vec::new();
+        for i in range {
+            if let Some(m) = peptide.residues[i].mod_.as_ref() {
+                if m.loss_class != 0 {
+                    for &l in &m.neutral_losses {
+                        if !v.iter().any(|&(el, ec)| ec == m.loss_class && (el - l).abs() < 1e-9) {
+                            v.push((l, m.loss_class));
+                        }
+                    }
+                }
+            }
+        }
+        v
+    };
+
     let mut total: i32 = 0;
     let mut prefix_mass_acc = 0.0_f64;
     // Split positions 1..n: after split s, prefix = residues[0..s], suffix = residues[s..n].
@@ -309,6 +341,23 @@ pub fn score_psm(
                 )
             });
         total += contribution;
+
+        // Additive neutral-loss contribution: loss ions for fragments spanning
+        // a loss-bearing residue, scored via the model's pooled per-class loss
+        // tables. Zero (no allocation) for standard peptides via the gate above.
+        if score_losses {
+            let prefix_losses = collect_span_losses(0..s);
+            let suffix_losses = collect_span_losses(s..n);
+            total += scored_spec.loss_node_score(
+                prefix_nominal as f64,
+                suffix_nominal as f64,
+                scorer,
+                charge,
+                spectrum_parent_mass,
+                &prefix_losses,
+                &suffix_losses,
+            );
+        }
 
         if let Some(pep_seq_string) = &trace {
             let cached_pref = scored_spec.cached_prefix_score(prefix_nominal);
@@ -424,6 +473,103 @@ mod tests {
         };
         p.rebuild_cache();
         p
+    }
+
+    /// A param like `any_mass_param` but additionally carrying a trained
+    /// loss-class-1 ion table (rank-1 dominant → positive LLR).
+    fn loss_table_param() -> Param {
+        let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
+        let loss_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
+        let mut p = any_mass_param();
+        p.rank_dist_table
+            .get_mut(&part)
+            .unwrap()
+            .insert(loss_ion, vec![0.6_f32, 0.3, 0.05, 0.001]);
+        p
+    }
+
+    /// `T*WW`: loss-bearing T at index 0, then two heavy W residues so that the
+    /// prefix `T*W` (~287 Da) at split s=2 is heavy enough for `intact_mz − Hex`
+    /// to be a positive m/z (a single-residue T prefix would go negative).
+    fn loss_peptide_twoheavy() -> Peptide {
+        use model::modification::{ModLocation, Modification, ResidueSpec};
+        use std::sync::Arc;
+        let m = Modification {
+            name: "L".into(),
+            mass_delta: 0.0,
+            residue: ResidueSpec::Specific(b'T'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: vec![162.0528],
+            loss_class: 1,
+        };
+        let t = AminoAcid::standard(b'T').unwrap().with_mod(Arc::new(m));
+        let w1 = AminoAcid::standard(b'W').unwrap();
+        let w2 = AminoAcid::standard(b'W').unwrap();
+        Peptide::new(vec![t, w1, w2], b'_', b'-')
+    }
+
+    /// Task 7.3: `score_psm` adds the peptide-aware neutral-loss contribution
+    /// for loss-bearing peptides, and is byte-identical for non-loss peptides.
+    #[test]
+    fn score_psm_adds_neutral_loss_contribution_and_is_inert_otherwise() {
+        let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
+        let loss_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
+
+        // Loss peptide T*WW: at split s=2 the prefix {T*,W} spans the loss
+        // residue and is heavy enough for a positive loss m/z. (At s=1 the
+        // prefix {T*} would go negative and is skipped — no missing penalty.)
+        let loss_pep = loss_peptide_twoheavy();
+        let prefix_nominal =
+            nominal_from(loss_pep.residues[0].mass + loss_pep.residues[1].mass); // T*+W
+        let loss_mz = loss_ion.mz(prefix_nominal as f64) - 162.0528;
+        assert!(loss_mz > 0.0, "test setup: loss m/z must be positive, got {loss_mz}");
+
+        // Spectrum with a single peak exactly at the loss m/z (away from precursor).
+        let s = Spectrum {
+            title: "loss".into(),
+            precursor_mz: 800.0,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks: vec![(loss_mz, 100.0)],
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+
+        let loss_scorer = RankScorer::new(&loss_table_param());
+        let plain_scorer = RankScorer::new(&any_mass_param());
+        let ss_loss = ScoredSpectrum::new(&s, &loss_scorer, 2);
+        let ss_plain = ScoredSpectrum::new(&s, &plain_scorer, 2);
+
+        let with_loss = score_psm(&ss_loss, &loss_pep, &loss_scorer, 2, 0.5);
+        let without = score_psm(&ss_plain, &loss_pep, &plain_scorer, 2, 0.5);
+        assert!(
+            with_loss > without,
+            "loss model must add positive loss-ion score: with={with_loss} without={without}"
+        );
+
+        // Byte-identical guard: a non-loss peptide scores identically under a
+        // loss-table model and a no-loss model (loss path gated off).
+        let plain_pep = pep(b"AAA");
+        let sp = Spectrum {
+            title: "plain".into(),
+            precursor_mz: 800.0,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks: vec![(200.0, 50.0), (300.0, 80.0)],
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+        let a = score_psm(&ScoredSpectrum::new(&sp, &loss_scorer, 2), &plain_pep, &loss_scorer, 2, 0.5);
+        let b = score_psm(&ScoredSpectrum::new(&sp, &plain_scorer, 2), &plain_pep, &plain_scorer, 2, 0.5);
+        assert_eq!(a, b, "non-loss peptide must be byte-identical across loss/no-loss models");
     }
 
     #[test]

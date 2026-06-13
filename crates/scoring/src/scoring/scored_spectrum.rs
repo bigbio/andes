@@ -1455,6 +1455,10 @@ fn visit_directional_loss_ion_matches<F>(
     let mme = &param.mme;
     let num_segs = param.num_segments as usize;
     let use_cache = !segment_partition_cache.is_empty();
+    // `seg` indexes the cache AND feeds `partition_for`/`segment_num`, so the
+    // range loop is not replaceable by a plain iterator (same as the intact
+    // visitor).
+    #[allow(clippy::needless_range_loop)]
     for seg in 0..num_segs {
         let partition = if use_cache {
             segment_partition_cache[seg].0

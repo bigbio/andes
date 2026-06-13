@@ -381,3 +381,44 @@ fn store_selection_matches_old_ladder_for_all_combos() {
         );
     }
 }
+
+// ── Decision E: metadata-less CLI default ─────────────────────────────────────
+//
+// The equivalence matrix above exercises the *activation-aware* ladder
+// (`resolve_for_activation_old`), which always receives a concrete activation
+// method, so it never hits the historical all-defaults short-circuit
+// (`Fragmentation::Auto && Instrument::LowRes && Protocol::Auto → hcd_qexactive`)
+// that the removed `--instrument` CLI flag used to reach. That short-circuit
+// was a CLI-flag artifact, not a property of the store, so dropping it does not
+// affect the matrix above.
+//
+// Decision E changes that metadata-less, no-flags CLI default from
+// `hcd_qexactive` to `cid_lowres`: with no analyzer metadata and no
+// `--fragmentation`/`--fragment-tol-*`, the binary's
+// `resolve_metadataless_selection` now yields `(CID, None)` → `cid_lowres_tryp`.
+// This test pins that new default against the store directly (mirroring the
+// binary's resolver), so the behavior change is asserted, not merely implied.
+#[test]
+fn metadataless_no_flags_default_selects_cid_lowres() {
+    let entries = bundled_selection_entries();
+
+    // Mirror the binary's `resolve_metadataless_selection` for the no-flags
+    // case: no detected activation, Fragmentation::Auto, no fragment-tol.
+    // → activation = CID, instrument = None (→ LowRes via the empty-instrument
+    //   normalization), protocol = Auto.
+    let key = build_key(ActivationMethod::CID, InstrumentType::LowRes, Protocol::Auto);
+    let new_id = select(
+        &entries,
+        &key,
+        instrument_family,
+        Some("hcd_qexactive_tryp"),
+    )
+    .map(|s| s.to_string())
+    .unwrap_or_else(|| "hcd_qexactive_tryp".to_string());
+
+    assert_eq!(
+        new_id, "cid_lowres_tryp",
+        "decision E: metadata-less no-flags default must resolve to cid_lowres_tryp \
+         (not the old hcd_qexactive)"
+    );
+}

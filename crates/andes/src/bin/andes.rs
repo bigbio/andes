@@ -60,16 +60,6 @@ pub enum Fragmentation {
     #[clap(name = "UVPD")] Uvpd,
 }
 
-/// Instrument class. Drives the `LowRes`/`HighRes`/`TOF`/`QExactive`
-/// classification used to pick the bundled param file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Instrument {
-    #[clap(name = "low-res")]   LowRes,
-    #[clap(name = "high-res")]  HighRes,
-    #[clap(name = "TOF")]       Tof,
-    #[clap(name = "QExactive")] QExactive,
-}
-
 /// Search protocol: sample labeling or enrichment strategy applied during the experiment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
@@ -188,12 +178,13 @@ struct SearchArgs {
 
     /// Path to the .param scoring model file.
     ///
-    /// If not supplied, a bundled file under
-    /// `resources/ionstat/` is selected from
-    /// `(--fragmentation, --instrument, --protocol)` (default
-    /// `HCD_QExactive_Tryp.param`). When running the binary outside the source
-    /// tree this path may not exist; supply --param-file explicitly in that
-    /// case.
+    /// If not supplied, a scoring model is selected from the bundled
+    /// `models.parquet` store. For mzML/.raw/.d the activation method and
+    /// analyzer resolution are auto-detected from metadata; for MGF the
+    /// `--fragmentation` and `--fragment-tol-ppm/-da` flags drive selection
+    /// (default: CID / low-res). When running the binary outside the source
+    /// tree the bundled store may not exist; supply --param-file explicitly
+    /// in that case.
     #[arg(long)]
     param_file: Option<PathBuf>,
 
@@ -213,15 +204,11 @@ struct SearchArgs {
     #[arg(long = "mods", alias = "mod", value_name = "MODFILE")]
     mods: Option<PathBuf>,
 
-    /// Fragmentation method. Named values: auto, CID, ETD, HCD, UVPD.
+    /// Fragmentation/activation method for MGF input only. mzML/.raw/.d
+    /// auto-detect this. Named values: auto, CID, ETD, HCD, UVPD.
     /// Legacy numeric CLI indices: 0=auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD.
-    #[arg(long, default_value = "auto", value_parser = parse_fragmentation)]
+    #[arg(long, hide = true, default_value = "auto", value_parser = parse_fragmentation)]
     fragmentation: Fragmentation,
-
-    /// Instrument class. Named values: low-res, high-res, TOF, QExactive.
-    /// Legacy numeric CLI indices: 0=low-res, 1=high-res, 2=TOF, 3=QExactive.
-    #[arg(long, default_value = "low-res", value_parser = parse_instrument)]
-    instrument: Instrument,
 
     /// Search protocol. Named values: auto, phospho, iTRAQ, iTRAQ-phospho, TMT, standard.
     /// Legacy numeric CLI indices: 0=auto, 1=phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=standard.
@@ -237,7 +224,7 @@ struct SearchArgs {
     /// Fragment-matching tolerance in Da for **MGF input only** (low-resolution
     /// ion-trap MS/MS). Has no effect on mzML/.raw/.d. Mutually exclusive with
     /// `--fragment-tol-ppm`.
-    #[arg(long = "fragment-tol-da", hide = true)]
+    #[arg(long = "fragment-tol-da", hide = true, conflicts_with = "fragment_tol_ppm")]
     fragment_tol_da: Option<f64>,
 
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
@@ -277,8 +264,8 @@ struct SearchArgs {
     model_store: Option<PathBuf>,
 
     /// Exact model ID to load from the model store (bundled or `--model-store`).
-    /// When set, skips automatic selection by `(--fragmentation, --instrument,
-    /// --protocol)` and loads this ID directly. Useful after `andes train`
+    /// When set, skips automatic selection (metadata detection / `--fragmentation`
+    /// / `--protocol`) and loads this ID directly. Useful after `andes train`
     /// to search with the freshly-trained model.
     #[arg(long = "model")]
     model_id_override: Option<String>,
@@ -1034,9 +1021,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
     //
-    // `--param-file` wins outright. Otherwise, for mzML with `--fragmentation auto`,
-    // peek the file's dominant activation method and pick the bundled `.param`.
-    // MGF and explicit fragmentation/instrument flags use `resolve_bundled_param`.
+    // `--param-file` wins outright. Otherwise the model is selected from the
+    // Parquet store: for mzML/.raw/.d the activation+analyzer are auto-detected
+    // from metadata; for MGF (metadata-less) the `--fragmentation` /
+    // `--fragment-tol-*` flags drive `resolve_metadataless_selection`.
     let spectrum_ext = spectrum_path
         .extension()
         .and_then(|e| e.to_str())
@@ -1052,9 +1040,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
-    // is always CID/TimsTOF (DDA-PASEF). Detection only runs when
-    // `--fragmentation auto` is set (otherwise the CLI flags override).
-    let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
+    // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
+    // bearing format and always wins over the MGF-only `--fragmentation` /
+    // `--fragment-tol-*` flags (which carry no metadata of their own).
+    let auto_route_eligible = is_mzml || is_raw || is_d;
     let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
         if !auto_route_eligible {
             None
@@ -1086,40 +1075,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Param::load_from_file(override_path)
             .map_err(|e| format!("loading param file {}: {e}", override_path.display()))?
     } else {
-        // ── Auto / explicit flags: resolve from the Parquet model store. ──────
+        // ── Resolve (activation, instrument) for the Parquet model store. ─────
         //
-        // For `--fragmentation auto` with a detectable input the detected
-        // (activation, instrument) is used; for explicit flags or MGF (no
-        // detection) the CLI enum values are converted to ActivationMethod /
-        // InstrumentType for the store lookup.
+        // Metadata-first precedence: a fully detected (activation, instrument)
+        // wins outright. When only the activation method is detected (analyzer
+        // unknown), or nothing is detected (MGF / metadata-less mzML/.raw), the
+        // metadata-less resolver folds in the MGF-only `--fragmentation` and
+        // `--fragment-tol-*` flags (decision E default: CID / low-res).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
-            if auto_route_eligible {
-                match detected_activation_instrument {
-                    Some((method, inst)) => {
-                        eprintln!(
-                            "Param resolver: auto-detected dominant activation \
-                             method = {} (instrument = {}) from {}",
-                            method.name(),
-                            inst.map(|i| i.name()).unwrap_or("unknown/default"),
-                            spectrum_path.display()
-                        );
-                        (method, inst)
-                    }
-                    None => {
-                        // No detectable activation — fall back to CLI flags.
-                        // For the all-defaults case (Auto+LowRes+Auto) this
-                        // returns HCD/QExactive to match the historical default.
-                        cli_flags_to_activation_instrument(
-                            cli.fragmentation, cli.instrument, cli.protocol,
-                        )
-                    }
+            match detected_activation_instrument {
+                Some((method, Some(inst))) => {
+                    eprintln!(
+                        "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
+                        method.name(), inst.name(), spectrum_path.display()
+                    );
+                    (method, Some(inst))
                 }
-            } else {
-                // Explicit `--fragmentation` / `--instrument` flags (or MGF
-                // where auto-detection is not eligible).
-                cli_flags_to_activation_instrument(
-                    cli.fragmentation, cli.instrument, cli.protocol,
-                )
+                Some((method, None)) => resolve_metadataless_selection(
+                    Some(method), cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
+                ),
+                None => resolve_metadataless_selection(
+                    None, cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
+                ),
             };
 
         let (model_id, p) = load_param_from_store(
@@ -1149,7 +1126,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
     if frag_tol_override.is_some() {
         if instrument_was_detected {
-            eprintln!("WARN: --fragment-tol-* ignored — instrument auto-detected from metadata");
+            eprintln!("WARN: --fragment-tol-* ignored — instrument auto-detected from metadata (use --fragment-tol-ppm/-da with MGF input only)");
         } else {
             scorer.set_fragment_tol_override(frag_tol_override);
         }
@@ -2942,29 +2919,19 @@ fn unix_days_to_iso8601(days: u64) -> String {
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
-/// Convert the CLI `Fragmentation` enum to `ActivationMethod`.
+/// Convert the CLI `Fragmentation` enum to `Option<ActivationMethod>`.
 ///
-/// `Fragmentation::Auto` is treated as `ActivationMethod::CID` here because
-/// the old ladder normalised `Auto → CID` when explicit flags were used
-/// (without mzML peek). When `--fragmentation auto` is combined with mzML/raw
-/// input the detection path is taken instead of this function.
-fn cli_fragmentation_to_activation(f: Fragmentation) -> ActivationMethod {
+/// `Fragmentation::Auto` returns `None` (no activation explicitly requested);
+/// every concrete variant maps to its `ActivationMethod`. Used by
+/// [`resolve_metadataless_selection`] so that an unset `--fragmentation`
+/// defers to detection or the class-consistent default.
+fn cli_fragmentation_to_activation_opt(f: Fragmentation) -> Option<ActivationMethod> {
     match f {
-        Fragmentation::Auto => ActivationMethod::CID,
-        Fragmentation::Cid  => ActivationMethod::CID,
-        Fragmentation::Etd  => ActivationMethod::ETD,
-        Fragmentation::Hcd  => ActivationMethod::HCD,
-        Fragmentation::Uvpd => ActivationMethod::UVPD,
-    }
-}
-
-/// Convert the CLI `Instrument` enum to `InstrumentType`.
-fn cli_instrument_to_instrument_type(i: Instrument) -> InstrumentType {
-    match i {
-        Instrument::LowRes    => InstrumentType::LowRes,
-        Instrument::HighRes   => InstrumentType::HighRes,
-        Instrument::Tof       => InstrumentType::TOF,
-        Instrument::QExactive => InstrumentType::QExactive,
+        Fragmentation::Auto => None,
+        Fragmentation::Cid  => Some(ActivationMethod::CID),
+        Fragmentation::Etd  => Some(ActivationMethod::ETD),
+        Fragmentation::Hcd  => Some(ActivationMethod::HCD),
+        Fragmentation::Uvpd => Some(ActivationMethod::UVPD),
     }
 }
 
@@ -2980,145 +2947,42 @@ fn cli_fragment_tol_override(
         .or_else(|| fragment_tol_da.map(Tolerance::Da))
 }
 
-/// Resolve `(Fragmentation, Instrument, Protocol)` from CLI flags to
-/// `(ActivationMethod, InstrumentType, Protocol)` for store lookup.
-///
-/// Handles the historical all-defaults short-circuit: when the user omits
-/// all scoring-model flags (`--fragmentation auto`, `--instrument low-res`,
-/// `--protocol auto`) the old ladder returned `HCD_QExactive_Tryp.param`.
-/// We replicate this by returning `(HCD, QExactive, Auto)` for that case
-/// instead of `(CID, LowRes, Auto)` (which would resolve to `cid_lowres_tryp`).
-fn cli_flags_to_activation_instrument(
+/// Resolve (activation, instrument) for model selection on metadata-less input
+/// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
+/// the `--fragment-tol-*` unit; activation from detected method, else
+/// `--fragmentation`, else the class-consistent default. When nothing
+/// disambiguates, decision E: CID / LowRes (→ `cid_lowres_tryp`) + a warning.
+fn resolve_metadataless_selection(
+    detected_activation: Option<ActivationMethod>,
     fragmentation: Fragmentation,
-    instrument: Instrument,
-    protocol: Protocol,
+    fragment_tol_ppm: Option<f64>,
+    fragment_tol_da: Option<f64>,
 ) -> (ActivationMethod, Option<InstrumentType>) {
-    // Historical all-defaults short-circuit (mirrors resolve_bundled_param step 0).
-    if fragmentation == Fragmentation::Auto
-        && instrument == Instrument::LowRes
-        && protocol == Protocol::Auto
-    {
-        return (ActivationMethod::HCD, Some(InstrumentType::QExactive));
-    }
-    (
-        cli_fragmentation_to_activation(fragmentation),
-        Some(cli_instrument_to_instrument_type(instrument)),
-    )
-}
-
-/// Translate `(--fragmentation, --instrument, --protocol)` into a bundled
-/// `.param` filename and resolve it under
-/// `resources/ionstat/` relative to the cargo manifest dir.
-///
-/// CLI indices for legacy numeric flags:
-/// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
-/// - instrument:    0=LowRes,   1=HighRes, 2=TOF, 3=QExactive
-/// - protocol:      0=Automatic,1=Phosphorylation, 2=iTRAQ,
-///   3=iTRAQPhospho, 4=TMT, 5=Standard
-///
-/// When all three are `None`, the historical default
-/// `HCD_QExactive_Tryp.param` is returned (preserving existing tests'
-/// behaviour). Only Tryp is supported as the enzyme component for now;
-/// other enzymes require the user to pass `--param-file` directly.
-///
-/// Bundled `.param` resolution ladder: try the exact
-/// `{frag}_{inst}_Tryp{protocol}.param` first; if that doesn't resolve, drop
-/// the protocol suffix; if that also doesn't resolve, use the final
-/// `(frag, inst)`-keyed ladder. Returns an error only if even the
-/// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
-/// resources (a packaging defect, not a CLI input error).
-///
-/// Reference implementation of the historical filename-based resolution ladder.
-/// The search path now goes through [`load_param_from_store`]; the store-selection
-/// equivalence test validates the store-based selection against an independent
-/// copy of this logic.
-#[allow(dead_code)]
-fn resolve_bundled_param(
-    fragmentation: Fragmentation,
-    instrument:    Instrument,
-    protocol:      Protocol,
-) -> Result<PathBuf, String> {
-    // Step 0: default-to-bundled short-circuit. When the caller passes all
-    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto),
-    // fall back to the bundled HCD_QExactive_Tryp.param — the behavior of
-    // omitting all three flags.
-    if fragmentation == Fragmentation::Auto
-        && instrument == Instrument::LowRes
-        && protocol == Protocol::Auto {
-        return canonicalize_bundled("HCD_QExactive_Tryp.param");
-    }
-
-    // Step 1: Normalize.
-    //   - Auto fragmentation → CID
-    //   - HCD with low-res inst → upgrade to QExactive
-    let frag = match fragmentation {
-        Fragmentation::Auto => "CID",
-        Fragmentation::Cid  => "CID",
-        Fragmentation::Etd  => "ETD",
-        Fragmentation::Hcd  => "HCD",
-        Fragmentation::Uvpd => "UVPD",
+    let instrument: Option<InstrumentType> = if fragment_tol_ppm.is_some() {
+        Some(InstrumentType::QExactive)
+    } else if fragment_tol_da.is_some() {
+        Some(InstrumentType::LowRes)
+    } else {
+        None
     };
-    let mut inst = match instrument {
-        Instrument::LowRes    => "LowRes",
-        Instrument::HighRes   => "HighRes",
-        Instrument::Tof       => "TOF",
-        Instrument::QExactive => "QExactive",
+    let explicit = cli_fragmentation_to_activation_opt(fragmentation);
+    // Class-consistent default when neither detection nor `--fragmentation`
+    // names an activation: high-res classes imply HCD, otherwise CID.
+    let class_default = match instrument {
+        Some(InstrumentType::QExactive)
+        | Some(InstrumentType::HighRes)
+        | Some(InstrumentType::TOF) => ActivationMethod::HCD,
+        _ => ActivationMethod::CID,
     };
-    // HCD-upgrade rule: HCD with low-res inst → upgrade to QExactive.
-    if frag == "HCD" && inst == "LowRes" {
-        inst = "QExactive";
+    let activation = detected_activation.or(explicit).unwrap_or(class_default);
+    if detected_activation.is_none() && explicit.is_none() && instrument.is_none() {
+        eprintln!(
+            "WARN: MGF input with no --fragmentation/--fragment-tol; assuming \
+             CID / low-res / 0.5 Da. Pass --fragmentation and --fragment-tol-ppm/-da \
+             to override."
+        );
     }
-
-    let prot_suffix: &str = match protocol {
-        Protocol::Auto         => "",          // empty: no protocol suffix
-        Protocol::Phospho      => "_Phosphorylation",
-        Protocol::Itraq        => "_iTRAQ",
-        Protocol::ItraqPhospho => "_iTRAQPhospho",
-        Protocol::Tmt          => "_TMT",
-        Protocol::Standard     => "",          // standard = no suffix
-    };
-
-    // Step 1: Try the exact requested combination first.
-    //   `{frag}_{inst}_Tryp{prot_suffix}.param`
-    let exact = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
-    if let Ok(path) = canonicalize_bundled(&exact) {
-        return Ok(path);
-    }
-
-    // Step 2: Drop protocol — try `{frag}_{inst}_Tryp.param`.
-    // For (CID, HighRes, Tryp, TMT) this lands on `CID_HighRes_Tryp.param`
-    // when the protocol-specific file is missing.
-    if !prot_suffix.is_empty() {
-        let no_protocol = format!("{frag}_{inst}_Tryp.param");
-        if let Ok(path) = canonicalize_bundled(&no_protocol) {
-            eprintln!(
-                "Param resolver: `{exact}` not bundled; falling back to `{no_protocol}` \
-                 (protocol suffix dropped when exact match missing)",
-            );
-            return Ok(path);
-        }
-    }
-
-    // Step 3: Alternate enzyme — try Trypsin (for C-term enzymes) or LysN
-    // (for N-term enzymes). We always use Tryp here for now.
-
-    // Step 4: Final fallback ladder by (fragmentation, instrument).
-    //   - HCD + (TOF|HighRes) + C-term → CID_TOF_Tryp
-    //   - ETD + C-term                  → ETD_LowRes_Tryp
-    //   - Non-electron + N-term         → CID_LowRes_LysN  (skipped; N-term TBD)
-    //   - default                        → CID_LowRes_Tryp
-    //
-    // For our currently-supported (frag, inst) combos:
-    let final_fallback = match (frag, inst) {
-        ("HCD", "TOF") | ("HCD", "HighRes") => "CID_TOF_Tryp.param",
-        ("ETD", _) => "ETD_LowRes_Tryp.param",
-        _ => "CID_LowRes_Tryp.param",
-    };
-    eprintln!(
-        "Param resolver: `{exact}` not bundled and protocol-less drop also missing; \
-         using final fallback `{final_fallback}` (final resolution ladder)",
-    );
-    canonicalize_bundled(final_fallback)
+    (activation, instrument)
 }
 
 /// Peek the spectrum file and return the dominant
@@ -3205,57 +3069,6 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
     Some(dominant)
 }
 
-/// Resolve a bundled `.param` file for the given activation method.
-///
-/// Auto-detect path: pick the bundled instrument+enzyme pair that best matches
-/// the dataset when the user passes fragmentation `auto` (per-spectrum param
-/// dispatch at file-wide granularity).
-///
-/// The `detected_instrument` argument is the instrument type detected by
-/// scanning the mzML's `<instrumentConfiguration>` blocks (see
-/// `input::detect_instrument_type`). `None` means we couldn't detect it
-/// (older mzML, MGF, etc.) — defaults to low-resolution ion-trap routing.
-///
-/// Mapping (Tryp / no-protocol unless protocol overrides):
-///   - CID  → frag=1, inst=detected (LowRes when none).
-///   - HCD  → frag=3, inst=detected (HCD + low-res upgrades to QExactive).
-///   - ETD  → frag=2, inst=detected.
-///   - PQD  → CID (PQD collapsed to CID for model routing).
-///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
-///
-/// Reference implementation of the historical activation-aware resolution ladder
-/// (kept alongside [`resolve_bundled_param`]); the search path now uses
-/// [`load_param_from_store`].
-#[allow(dead_code)]
-fn resolve_bundled_param_for_activation(
-    method:               ActivationMethod,
-    detected_instrument:  Option<InstrumentType>,
-    protocol:             Protocol,
-) -> Result<PathBuf, String> {
-    let frag = match method {
-        ActivationMethod::CID  => Fragmentation::Cid,
-        ActivationMethod::ETD  => Fragmentation::Etd,
-        ActivationMethod::HCD  => Fragmentation::Hcd,
-        ActivationMethod::UVPD => Fragmentation::Uvpd,
-        // PQD → CID for model routing.
-        ActivationMethod::PQD  => Fragmentation::Cid,
-    };
-    // New instrument classes fall back to their family for model resolution
-    // (no Astral-specific or TimsTOF-specific .param file bundled yet).
-    let inst = match detected_instrument.map(|i| i.family_fallback()) {
-        Some(InstrumentType::LowRes)    => Instrument::LowRes,
-        Some(InstrumentType::HighRes)   => Instrument::HighRes,
-        Some(InstrumentType::TOF)       => Instrument::Tof,
-        Some(InstrumentType::QExactive) => Instrument::QExactive,
-        // OrbitrapAstral → QExactive and TimsTOF → TOF via family_fallback above;
-        // these arms are unreachable after fallback but keep the match exhaustive.
-        Some(InstrumentType::OrbitrapAstral) => Instrument::QExactive,
-        Some(InstrumentType::TimsTOF)        => Instrument::Tof,
-        None                                 => Instrument::LowRes,
-    };
-    resolve_bundled_param(frag, inst, protocol)
-}
-
 /// Helper to call `input::detect_instrument_type` on an mzML path.
 ///
 /// Mirrors the structure of `detect_dominant_activation` so the two
@@ -3272,26 +3085,6 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 
     let file = File::open(spectrum_path).ok()?;
     detect_instrument_type(BufReader::new(file))
-}
-
-/// Resolve a bundled `.param` filename under
-/// `resources/ionstat/` relative to the crate's cargo manifest
-/// dir (set at compile time). Returns a helpful error if the file does
-/// not exist.
-#[allow(dead_code)]
-fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("resources/ionstat")
-        .join(filename);
-    candidate.canonicalize().map_err(|e| format!(
-        "bundled param file not found at `{}`: {e}\n\
-         Hint: not every (fragmentation, instrument, protocol) combination \
-         has a bundled .param file. Supply --param-file <PATH> to specify \
-         the scoring model explicitly, or list available files under \
-         `resources/ionstat/`.",
-        candidate.display()
-    ))
 }
 
 /// Resolve the path to the bundled `models.parquet` store.
@@ -3463,22 +3256,6 @@ fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
     }
 }
 
-/// Parse `--instrument` value. Accepts named (low-res, high-res, TOF,
-/// QExactive) or legacy numeric (0=LowRes, 1=HighRes, 2=TOF, 3=QExactive).
-fn parse_instrument(s: &str) -> Result<Instrument, String> {
-    if let Ok(v) = <Instrument as ValueEnum>::from_str(s, true) { return Ok(v); }
-    match s.parse::<u8>() {
-        Ok(0) => Ok(Instrument::LowRes),
-        Ok(1) => Ok(Instrument::HighRes),
-        Ok(2) => Ok(Instrument::Tof),
-        Ok(3) => Ok(Instrument::QExactive),
-        _ => Err(format!(
-            "invalid instrument `{s}`: expected low-res|high-res|TOF|QExactive \
-             (or legacy 0..=3)"
-        )),
-    }
-}
-
 /// Parse `--protocol` value. Accepts named or legacy numeric
 /// (0=Auto, 1=Phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=Standard).
 fn parse_protocol(s: &str) -> Result<Protocol, String> {
@@ -3540,12 +3317,6 @@ mod param_resolver_tests {
     fn parse_fragmentation_rejects_out_of_range_numeric() {
         let err = parse_fragmentation("99").unwrap_err();
         assert!(err.contains("0..=4"), "error message should mention range, got: {err}");
-    }
-
-    #[test]
-    fn parse_instrument_rejects_out_of_range_numeric() {
-        let err = parse_instrument("99").unwrap_err();
-        assert!(err.contains("0..=3"), "got: {err}");
     }
 
     #[test]

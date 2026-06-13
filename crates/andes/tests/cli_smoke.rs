@@ -441,3 +441,30 @@ fn cli_accepts_both_named_and_numeric_param_values() {
     assert_eq!(lines_a, lines_b,
         "legacy and named CLI forms must produce equivalent PIN output");
 }
+
+// ── Fragment-tolerance CLI flag tests ─────────────────────────────────────────
+
+#[test]
+fn fragment_tol_flags_are_mutually_exclusive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let output = base_cmd(
+        "test-fixtures/test.mgf",
+        "test-fixtures/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--fragment-tol-ppm")
+    .arg("20")
+    .arg("--fragment-tol-da")
+    .arg("0.5")
+    .output()
+    .expect("run andes");
+
+    assert!(!output.status.success(), "both flags together must fail");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("cannot be used with") || err.contains("conflicts"),
+        "expected conflict error in stderr, got: {err}"
+    );
+}

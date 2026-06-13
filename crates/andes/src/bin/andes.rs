@@ -228,6 +228,18 @@ struct SearchArgs {
     #[arg(long, default_value = "auto", value_parser = parse_protocol)]
     protocol: Protocol,
 
+    /// Fragment-matching tolerance in ppm for **MGF input only** (high-resolution
+    /// MS/MS). Has no effect on mzML/.raw/.d (analyzer auto-detected). Mutually
+    /// exclusive with `--fragment-tol-da`.
+    #[arg(long = "fragment-tol-ppm", hide = true, conflicts_with = "fragment_tol_da")]
+    fragment_tol_ppm: Option<f64>,
+
+    /// Fragment-matching tolerance in Da for **MGF input only** (low-resolution
+    /// ion-trap MS/MS). Has no effect on mzML/.raw/.d. Mutually exclusive with
+    /// `--fragment-tol-ppm`.
+    #[arg(long = "fragment-tol-da", hide = true)]
+    fragment_tol_da: Option<f64>,
+
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
     threads: usize,
@@ -1062,6 +1074,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // is_d — timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
             Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
         };
+    // Pre-compute before the routing match consumes `detected_activation_instrument`.
+    let instrument_was_detected = detected_activation_instrument
+        .map(|(_, inst)| inst.is_some())
+        .unwrap_or(false);
 
     let t_phase = std::time::Instant::now();
     let mut param = if let Some(ref override_path) = cli.param_file {
@@ -1127,7 +1143,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Protocol::ItraqPhospho => param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho,
         _ => {}
     }
-    let scorer = RankScorer::new(&param);
+    let mut scorer = RankScorer::new(&param);
+    // Fragment-tol override applies to metadata-less (MGF) input only. For
+    // mzML/.raw/.d the analyzer is auto-detected, so the override is ignored.
+    let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
+    if frag_tol_override.is_some() {
+        if instrument_was_detected {
+            eprintln!("WARN: --fragment-tol-* ignored — instrument auto-detected from metadata");
+        } else {
+            scorer.set_fragment_tol_override(frag_tol_override);
+        }
+    }
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
@@ -2940,6 +2966,18 @@ fn cli_instrument_to_instrument_type(i: Instrument) -> InstrumentType {
         Instrument::Tof       => InstrumentType::TOF,
         Instrument::QExactive => InstrumentType::QExactive,
     }
+}
+
+/// Resolve the CLI fragment-tolerance override (MGF only) into a `Tolerance`.
+/// `--fragment-tol-ppm` ⇒ `Ppm`; `--fragment-tol-da` ⇒ `Da`; none ⇒ `None`.
+fn cli_fragment_tol_override(
+    fragment_tol_ppm: Option<f64>,
+    fragment_tol_da: Option<f64>,
+) -> Option<model::tolerance::Tolerance> {
+    use model::tolerance::Tolerance;
+    fragment_tol_ppm
+        .map(Tolerance::Ppm)
+        .or_else(|| fragment_tol_da.map(Tolerance::Da))
 }
 
 /// Resolve `(Fragmentation, Instrument, Protocol)` from CLI flags to

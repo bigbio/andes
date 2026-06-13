@@ -19,6 +19,46 @@ Beat **MSFragger** where there's room, hold the lead where andes already has it 
 
 The realistic story: **win TMT, hold Astral/UPS, keep speed competitive, shed params.** Don't over-promise "beat everywhere."
 
+> **⚠ Independence caveat (reframes the "standing" column above).** Those prior
+> "andes leads" numbers used the **MS-GF+-derived** models — 38 of 39 bundled
+> models in `resources/ionstat/models.parquet` are still MS-GF+ heritage (NOTICE:
+> *scoring code independent, models in transition*). The campaign's North Star is
+> **beat MSFragger with models andes trained itself, on public/quantms data —
+> zero MS-GF+ heritage.** Stripped of that heritage and retrained from scratch,
+> andes most likely **starts ~10% behind** MSFragger (the user's expected baseline).
+> So the headline below is the gap to close, not the current borrowed lead.
+
+## Experiment #0 — the independence baseline table (run FIRST, it's the scoreboard)
+
+Everything else in this campaign is measured against this table. It is also the
+**independence milestone** (it requires andes on its own models), so it is the
+gating prerequisite, not an afterthought.
+
+**Prerequisite — own-data models (Codon).** Retrain the bundled models on
+public/quantms data so the benchmark uses **zero MS-GF+-derived models**
+(`andes train` on Codon; the per-protocol low-res CID-TMT model = experiment #3
+is part of this). Until done, also record a *current-models* snapshot row,
+clearly tagged "MS-GF+-heritage models — not independence-valid."
+
+**Protocol (VM).** Matched target+decoy FASTA + foreign-proteome **entrapment**,
+matched **1% FDR** (+ glycan-free here), Percolator (grep the mode — Concatenated
+vs Separate counts aren't comparable), uniform peptide→protein parsimony
+(`protgroups.py`) to avoid the counting-artifact class. MSFragger via FragPipe;
+andes native. Same datasets, same DB, same FDR.
+
+**The table the loop fills (per dataset: PSMs / peptides / proteins @1% FDR,
+entrapment-FDP, wall-clock):**
+
+| Dataset | MSFragger | andes (own-data models) | Δ% (andes vs MSFragger) | FDP andes / MSFragger | andes speed vs MSFragger |
+|---|---|---|---|---|---|
+| Astral (high-res) | — | — | — | — | — |
+| UPS1 | — | — | — | — | — |
+| TMT (low-res CID) | — | — | — | — | — |
+
+WIN = andes ≥ MSFragger on IDs at matched 1% FDR with entrapment-FDP in
+tolerance, on **own-data models**. The campaign drives every Δ% from negative
+(the ~10% honest start) toward ≥ 0, axis by axis.
+
 ## Objective function
 
 Primary, in priority order (from the andes objective: own data / no patent / beat all tools on PSMs / max speed):

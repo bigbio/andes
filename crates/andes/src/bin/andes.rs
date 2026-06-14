@@ -179,6 +179,11 @@ struct SearchArgs {
     /// (default), chymotrypsin, lysc, aspn, gluc, lysn, argc, alphalp,
     /// nocleavage, nonspecific. A wrong enzyme yields ~no PSMs (fails loud,
     /// not silent). Previously hardcoded to trypsin with no override.
+    ///
+    /// Multi-protease digest: pass a comma-separated list (e.g.
+    /// `--enzyme gluc,trypsin`) to accept peptides cleaved by ANY listed
+    /// protease (the union of their cleavage rules). The FIRST entry is the
+    /// primary — it drives model selection and the cleavage-credit feature.
     #[arg(long, default_value = "trypsin")]
     enzyme: String,
 
@@ -993,14 +998,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
-    // Parse the digestion enzyme once — drives BOTH model selection
-    // (build_selection_key) and digestion (params.enzyme). Previously trypsin
-    // was hardcoded in both places.
-    let search_enzyme = model::enzyme::Enzyme::from_name(&cli.enzyme)
-        .ok_or_else(|| format!(
+    // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
+    // list for a multi-protease digest; the FIRST entry is the primary (drives
+    // model selection via build_selection_key + the cleavage-credit feature),
+    // the rest widen candidate enumeration (params.extra_enzymes). The common
+    // single-enzyme case yields an empty extras list ⇒ digestion bit-identical.
+    let parse_enz = |tok: &str| {
+        model::enzyme::Enzyme::from_name(tok.trim()).ok_or_else(|| format!(
             "unknown --enzyme '{}' (expected trypsin/chymotrypsin/lysc/aspn/gluc/lysn/argc/alphalp/nocleavage/nonspecific)",
-            cli.enzyme
-        ))?;
+            tok.trim()
+        ))
+    };
+    let enzyme_tokens: Vec<&str> =
+        cli.enzyme.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if enzyme_tokens.is_empty() {
+        return Err("empty --enzyme".into());
+    }
+    let search_enzyme = parse_enz(enzyme_tokens[0])?;
+    let extra_enzymes: Vec<model::enzyme::Enzyme> = enzyme_tokens[1..]
+        .iter()
+        .map(|t| parse_enz(t))
+        .collect::<Result<_, _>>()?;
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
@@ -1274,6 +1292,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // blind multi-emission per scan = inflated FDR.
     params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
     params.enzyme = search_enzyme;
+    params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,
@@ -1307,8 +1326,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  activation     : {:?} [detected]", param.data_type.activation);
     eprintln!("  instrument     : {:?} [detected]", param.data_type.instrument);
     eprintln!("  protocol       : {:?}", param.data_type.protocol);
-    eprintln!("  enzyme         : {} ({:?} termini, <={} missed cleavages)",
-              search_enzyme.name(), cli.enzyme_specificity, params.max_missed_cleavages);
+    if extra_enzymes.is_empty() {
+        eprintln!("  enzyme         : {} ({:?} termini, <={} missed cleavages)",
+                  search_enzyme.name(), cli.enzyme_specificity, params.max_missed_cleavages);
+    } else {
+        let extras: Vec<&str> = extra_enzymes.iter().map(|e| e.name()).collect();
+        eprintln!("  enzyme         : {} (primary) + {} (multi-protease union) ({:?} termini, <={} missed cleavages)",
+                  search_enzyme.name(), extras.join(","), cli.enzyme_specificity, params.max_missed_cleavages);
+    }
     eprintln!("  mods           : {}",
               if cli.mods.is_some() { "from --mods file" }
               else { "defaults (Cam-C fixed, Ox-M variable) + isobaric tag if detected" });

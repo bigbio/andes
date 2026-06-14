@@ -711,6 +711,7 @@ mod tests {
         SearchParams {
             aa_set,
             enzyme: model::enzyme::Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
             min_length: 6,
             max_length: 40,
             max_missed_cleavages: 1,

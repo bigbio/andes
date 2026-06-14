@@ -33,6 +33,13 @@ pub enum ScoreMode {
 pub struct SearchParams {
     pub aa_set: AminoAcidSet,
     pub enzyme: Enzyme,
+    /// Additional proteases for a multi-protease digest (default empty). A
+    /// span is accepted as a cleavage site if `enzyme` OR any of these cut
+    /// there — the union of all configured proteases' rules. `enzyme` remains
+    /// the primary (drives model selection and the cleavage-credit PIN
+    /// feature); these only widen candidate enumeration. Empty ⇒ behaviour is
+    /// bit-identical to the single-enzyme path.
+    pub extra_enzymes: Vec<Enzyme>,
     pub min_length: u32,
     pub max_length: u32,
     pub max_missed_cleavages: u32,
@@ -95,6 +102,7 @@ impl SearchParams {
         Self {
             aa_set,
             enzyme: Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
             min_length: 6,
             max_length: 50,
             max_missed_cleavages: 1,

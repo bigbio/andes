@@ -281,7 +281,16 @@ Pacing: each iteration is real compute (search + Percolator = minutes–tens of 
 | **TMT** a05058 | low-res CID | **10,520** | 9,369 | **+12.3%** | andes 2.32% / MF ~1% |
 | **UPS1** PXD001819 | low-res CID | **16,132** | 14,282 | **+13%** | andes 1.26% / MF 1.43% |
 | **Astral** (LFQ 15min 50ng) | **high-res** | **30,077** | 27,760 | **+8.3%** | andes 1.14% / MF 1.56% |
-| **Astral — chimeric** | high-res | 59,069 | *re-running (dt=3 was wrong)* | *pending* | — |
+| **Astral — chimeric** | high-res | **56,243** | 52,073 (dt=3) / 27,722 (dt=0,topN2) | **~+8% vs MF chimeric** | — |
+
+> **Chimeric nuance (2026-06-14, hardened binary):** andes `--chimeric` = 56,243 (its two-pass
+> strips the primary's peaks and re-searches the residual → ~2× its top-1 of 30,259). MSFragger's
+> chimeric number is **mode-dependent**: its wide-window/chimeric mode `data_type=3` = 52,073
+> (andes **+8%**, the fair chimeric-capability comparison), while `data_type=0 + output_report_topN=2`
+> (correct narrow-DDA primary mode) = 27,722 — i.e. narrow-mode MSFragger barely recovers
+> co-isolated peptides (andes +103% there, but that's not MF's chimeric mode). Honest takeaway:
+> andes's co-isolation deconvolution modestly beats MSFragger's chimeric mode and dramatically
+> beats its narrow-DDA mode.
 
 **Re-bench with the hardened binary (2026-06-14)** — after Phase 1–3 (enzyme digestion+model-selection,
 C1 TMT-mod inject, C2 dedup-is_decoy, CodeRabbit ×3, max_length 40→50, --max-mods, cal=auto default,

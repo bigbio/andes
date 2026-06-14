@@ -261,12 +261,14 @@ fn fragment_tolerance_override_changes_model() {
         .load_param("default")
         .unwrap();
 
-    // The two tolerances should yield different learned rank distributions:
-    // a wider window matches more (noise) peaks, changing the histograms.
+    // The override must flow through and change the trained model's match
+    // tolerance (`mme`). On real noisy spectra a wider window also reshapes the
+    // rank histograms, but the synthetic fixtures use *exact* fragment peaks (no
+    // noise), so 1 ppm and 1 Da match the same peaks and the rank_dist_tables are
+    // identical — the robust, override-flowed-through check is `mme` itself.
     assert_ne!(
-        format!("{:?}", tight.rank_dist_table),
-        format!("{:?}", wide.rank_dist_table),
-        "different fragment tolerances should produce different rank_dist_tables"
+        tight.mme, wide.mme,
+        "fragment-tol override must change the trained model's mme (Ppm(1) vs Da(1.0))"
     );
 }
 

@@ -86,7 +86,8 @@ fn known_peptide_appears_in_top_n() {
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-    let params = SearchParams::default_tryptic(aa_set);
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR".iter()
         .map(|&r| AminoAcid::standard(r).unwrap()).collect();
@@ -145,7 +146,8 @@ fn spectrum_without_charge_tries_charge_range() {
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-    let params = SearchParams::default_tryptic(aa_set);
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR".iter()
         .map(|&r| AminoAcid::standard(r).unwrap()).collect();
@@ -184,6 +186,7 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let mut params = SearchParams::default_tryptic(aa_set);
     // charge_range 2..=3; spectrum has no charge.
     params.charge_range = 2..=3;
+    params.min_peaks = 0; // peakless smoke spectrum; not exercising the min-peaks filter
 
     let target_residues: Vec<AminoAcid> = b"WVTFISLLR".iter()
         .map(|&r| AminoAcid::standard(r).unwrap()).collect();

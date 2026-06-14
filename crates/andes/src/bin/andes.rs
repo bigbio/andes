@@ -3406,16 +3406,23 @@ fn load_param_from_store(
         };
 
         exact_id.unwrap_or_else(|| {
-            select(
-                &entries,
-                &key,
-                // `build_selection_key` already applies family fallback + all
-                // normalizations, so the family_fn here is the identity.
-                |i| i.to_string(),
-                Some("hcd_qexactive_tryp"),
-            )
-            .unwrap_or("hcd_qexactive_tryp")
-            .to_string()
+            // `build_selection_key` already applies family fallback + all
+            // normalizations, so the family_fn here is the identity. (L6) Pass
+            // `None` for the generic so a true no-match returns `None`, letting us
+            // WARN that the chosen model is a last-resort fallback rather than
+            // silently emitting `hcd_qexactive_tryp` for mis-detected data.
+            match select(&entries, &key, |i| i.to_string(), None) {
+                Some(id) => id.to_string(),
+                None => {
+                    eprintln!(
+                        "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
+                         — falling back to the generic 'hcd_qexactive_tryp'; scores may be \
+                         mis-calibrated for this data. Pin a model with --model if this is wrong.",
+                        key.activation, key.instrument, key.enzyme, key.experiment_class
+                    );
+                    "hcd_qexactive_tryp".to_string()
+                }
+            }
         })
     };
 

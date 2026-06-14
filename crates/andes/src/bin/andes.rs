@@ -1019,7 +1019,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `num_mods_from_file` is populated only when --mod is given and the
     // file contains a `NumMods=N` line; it overrides the default
     // `max_variable_mods_per_peptide` (3) below.
-    let (aa, num_mods_from_file) = match &cli.mods {
+    let (mut aa, num_mods_from_file) = match &cli.mods {
         Some(path) => {
             let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
                 .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
@@ -1035,33 +1035,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
             (set, n)
         }
-        None => {
-            let cam = Modification {
-                name: "Carbamidomethyl".into(),
-                mass_delta: 57.02146,
-                residue: ResidueSpec::Specific(b'C'),
-                location: ModLocation::Anywhere,
-                fixed: true,
-                accession: None,
-                neutral_losses: Vec::new(),
-                loss_class: 0,
-            };
-            let ox = Modification {
-                name: "Oxidation".into(),
-                mass_delta: 15.99491,
-                residue: ResidueSpec::Specific(b'M'),
-                location: ModLocation::Anywhere,
-                fixed: false,
-                accession: None,
-                neutral_losses: Vec::new(),
-                loss_class: 0,
-            };
-            let set = AminoAcidSetBuilder::new_standard()
-                .add_fixed_mod(cam)
-                .add_variable_mod(ox)
-                .build()?;
-            (set, None)
-        }
+        // No --mods: andes defaults (CAM-C fixed, Ox-M variable). The isobaric
+        // tag (TMT/iTRAQ) is injected later, after protocol detection (C1).
+        None => (default_aa_set_with_tag(None)?, None),
     };
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
@@ -1184,6 +1160,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ => {}
+    }
+    // C1: parameter-free path only (no explicit --mods). When the protocol
+    // resolves to TMT/iTRAQ, inject the tag as a fixed mod on K + peptide
+    // N-term so labeled peptides match their precursor mass — otherwise the
+    // reporter filter engages but every labeled candidate is +tag Da off and
+    // misses. With explicit --mods the user owns the mod set (they may already
+    // supply the tag), so those runs stay byte-identical.
+    if cli.mods.is_none() {
+        let tag = match param.data_type.protocol {
+            model::protocol::Protocol::TMT => Some(("TMT6plex", 229.162932_f64)),
+            model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho => {
+                Some(("iTRAQ4plex", 144.102063_f64))
+            }
+            _ => None,
+        };
+        if let Some((name, mass)) = tag {
+            aa = default_aa_set_with_tag(Some((name, mass)))?;
+            eprintln!(
+                "Protocol resolver: injected {name} fixed mod (+{mass:.4} on K + peptide N-term) \
+                 into the candidate set (no --mods given)"
+            );
+        }
     }
     let mut scorer = RankScorer::new(&param);
     // Fragment-tol override applies to metadata-less (MGF) input only. For
@@ -2963,6 +2961,64 @@ fn build_aa_set(
                 .build()?)
         }
     }
+}
+
+/// Build the default `AminoAcidSet` (CAM-C fixed + Ox-M variable), optionally
+/// with an isobaric tag (TMT/iTRAQ) as a FIXED mod on K + peptide N-term.
+///
+/// Used by the no-`--mods` (parameter-free) path: when the protocol resolves to
+/// TMT/iTRAQ the tag MUST be in the candidate set, or every labeled peptide is
+/// `+tag·(nK+1)` Da off at the precursor and silently misses (C1).
+fn default_aa_set_with_tag(
+    tag: Option<(&str, f64)>,
+) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
+    let cam = Modification {
+        name: "Carbamidomethyl".into(),
+        mass_delta: 57.02146,
+        residue: ResidueSpec::Specific(b'C'),
+        location: ModLocation::Anywhere,
+        fixed: true,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let ox = Modification {
+        name: "Oxidation".into(),
+        mass_delta: 15.99491,
+        residue: ResidueSpec::Specific(b'M'),
+        location: ModLocation::Anywhere,
+        fixed: false,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let mut b = AminoAcidSetBuilder::new_standard()
+        .add_fixed_mod(cam)
+        .add_variable_mod(ox);
+    if let Some((name, mass)) = tag {
+        let tag_k = Modification {
+            name: name.into(),
+            mass_delta: mass,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let tag_nterm = Modification {
+            name: name.into(),
+            mass_delta: mass,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::NTerm,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        b = b.add_fixed_mod(tag_k).add_fixed_mod(tag_nterm);
+    }
+    Ok(b.build()?)
 }
 
 /// Format today's date as `YYYY-MM-DD` using `std::time::SystemTime`.

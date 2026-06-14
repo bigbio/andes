@@ -200,10 +200,13 @@ struct SearchArgs {
     /// nocleavage, nonspecific. A wrong enzyme yields ~no PSMs (fails loud,
     /// not silent). Previously hardcoded to trypsin with no override.
     ///
-    /// Multi-protease digest: pass a comma-separated list (e.g.
+    /// Multi-protease digest: pass a `,`- or `+`-separated list (e.g.
     /// `--enzyme gluc,trypsin`) to accept peptides cleaved by ANY listed
     /// protease (the union of their cleavage rules). The FIRST entry is the
-    /// primary — it drives model selection and the cleavage-credit feature.
+    /// primary — it drives model selection and the cleavage-credit feature; if
+    /// no model matches that enzyme for the data, andes WARNs and you should
+    /// pass `--model`. Combining a universal protease (nonspecific/alphalp)
+    /// with specific ones makes the whole digest non-specific (warned).
     #[arg(long, default_value = "trypsin")]
     enzyme: String,
 
@@ -1024,22 +1027,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // model selection via build_selection_key + the cleavage-credit feature),
     // the rest widen candidate enumeration (params.extra_enzymes). The common
     // single-enzyme case yields an empty extras list ⇒ digestion bit-identical.
-    let parse_enz = |tok: &str| {
-        model::enzyme::Enzyme::from_name(tok.trim()).ok_or_else(|| format!(
-            "unknown --enzyme '{}' (expected trypsin/chymotrypsin/lysc/aspn/gluc/lysn/argc/alphalp/nocleavage/nonspecific)",
-            tok.trim()
-        ))
-    };
-    let enzyme_tokens: Vec<&str> =
-        cli.enzyme.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    if enzyme_tokens.is_empty() {
-        return Err("empty --enzyme".into());
-    }
-    let search_enzyme = parse_enz(enzyme_tokens[0])?;
-    let extra_enzymes: Vec<model::enzyme::Enzyme> = enzyme_tokens[1..]
-        .iter()
-        .map(|t| parse_enz(t))
-        .collect::<Result<_, _>>()?;
+    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
+    warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
@@ -1200,6 +1189,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cli.model_id_override.as_deref(),
         )?;
         eprintln!("Param model: {model_id} (from store)");
+        // E5/E12: loud-fail the silent enzyme fallback. If the user explicitly
+        // chose a non-Trypsin enzyme but no enzyme-matching model exists for the
+        // detected activation/instrument, selection backs off to a Trypsin/generic
+        // model whose cleavage prior + PIN enzymatic features are for the wrong
+        // protease. Warn unmissably (skip when --model pins the choice on purpose).
+        if cli.model_id_override.is_none() && search_enzyme != model::enzyme::Enzyme::Trypsin {
+            if let Some(selected) = p.data_type.enzyme {
+                if selected != search_enzyme {
+                    eprintln!(
+                        "WARN: --enzyme {} has no matching model for the detected \
+                         activation/instrument; fell back to '{model_id}' (enzyme {:?}). \
+                         Scores will use the wrong protease's cleavage prior + PIN features. \
+                         Train a matching model or pass --model to choose explicitly.",
+                        search_enzyme.name(), selected
+                    );
+                }
+            }
+        }
         p
     };
     // Stamp the requested isobaric protocol onto the loaded model so the dense-
@@ -3189,6 +3196,54 @@ fn cli_fragment_tol_override(
         .or_else(|| fragment_tol_da.map(Tolerance::Da))
 }
 
+/// Parse the `--enzyme` value into `(primary, extras)`.
+///
+/// Accepts `,` or `+` separators (the latter matching MaxQuant/MSFragger
+/// docs), trims whitespace, drops empty tokens, and de-duplicates by enzyme
+/// while preserving order. The first surviving entry is the primary (drives
+/// model selection and the cleavage-credit PIN feature); the rest only widen
+/// candidate enumeration. Errors on an unknown name or empty input.
+fn parse_enzymes(
+    spec: &str,
+) -> Result<(model::enzyme::Enzyme, Vec<model::enzyme::Enzyme>), Box<dyn std::error::Error>> {
+    use model::enzyme::Enzyme;
+    let mut all: Vec<Enzyme> = Vec::new();
+    for tok in spec.split([',', '+']).map(str::trim).filter(|s| !s.is_empty()) {
+        let e = Enzyme::from_name(tok).ok_or_else(|| format!(
+            "unknown --enzyme '{tok}' (expected trypsin/chymotrypsin/lysc/aspn/gluc/lysn/argc/\
+             alphalp/nocleavage/nonspecific/elastase)"
+        ))?;
+        if !all.contains(&e) {
+            all.push(e); // dedup, keep order (first = primary)
+        }
+    }
+    let (primary, extras) = all.split_first().ok_or("empty --enzyme")?;
+    Ok((*primary, extras.to_vec()))
+}
+
+/// Warn when a universal protease (NonSpecific, or AlphaLP which cleaves every
+/// bond) is combined with specific protease(s): the cleavage-site union then
+/// covers EVERY position, so the digest is effectively non-specific — usually
+/// not what a user adding it to a specific list intends.
+fn warn_if_universal_protease_combo(
+    primary: model::enzyme::Enzyme,
+    extras: &[model::enzyme::Enzyme],
+) {
+    use model::enzyme::Enzyme;
+    let is_universal = |e: &Enzyme| matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP);
+    let is_specific =
+        |e: &Enzyme| !matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP | Enzyme::NoCleavage);
+    let all: Vec<Enzyme> = std::iter::once(primary).chain(extras.iter().copied()).collect();
+    if all.len() > 1 && all.iter().any(is_universal) && all.iter().any(is_specific) {
+        eprintln!(
+            "WARN: --enzyme combines a universal protease (NonSpecific/AlphaLP) with specific \
+             one(s); their union cleaves at EVERY position, so this is effectively a \
+             non-specific digest (much larger search space). Drop the universal protease to \
+             keep the specific cleavage rules."
+        );
+    }
+}
+
 /// Resolve (activation, instrument) for model selection on metadata-less input
 /// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
 /// the `--fragment-tol-*` unit; activation from detected method, else
@@ -3563,6 +3618,60 @@ fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
             "invalid enzyme specificity `{s}`: expected non-specific|semi|fully \
              (or legacy 0..=2)"
         )),
+    }
+}
+
+#[cfg(test)]
+mod enzyme_cli_tests {
+    use super::parse_enzymes;
+    use model::enzyme::Enzyme;
+
+    #[test]
+    fn single_enzyme_has_no_extras() {
+        let (primary, extras) = parse_enzymes("trypsin").unwrap();
+        assert_eq!(primary, Enzyme::Trypsin);
+        assert!(extras.is_empty(), "single enzyme ⇒ empty extras (bit-identical path)");
+    }
+
+    #[test]
+    fn comma_and_plus_separators_both_parse() {
+        let (p1, e1) = parse_enzymes("gluc,trypsin").unwrap();
+        let (p2, e2) = parse_enzymes("gluc+trypsin").unwrap();
+        assert_eq!((p1, e1.as_slice()), (Enzyme::GluC, [Enzyme::Trypsin].as_slice()));
+        assert_eq!((p2, e2.as_slice()), (Enzyme::GluC, [Enzyme::Trypsin].as_slice()));
+    }
+
+    #[test]
+    fn first_token_is_primary_order_matters_for_selection() {
+        assert_eq!(parse_enzymes("trypsin,gluc").unwrap().0, Enzyme::Trypsin);
+        assert_eq!(parse_enzymes("gluc,trypsin").unwrap().0, Enzyme::GluC);
+    }
+
+    #[test]
+    fn duplicate_tokens_are_deduped_preserving_order() {
+        // "trypsin,trypsin,gluc" and the alias "tryp" collapse to [Trypsin, GluC].
+        let (primary, extras) = parse_enzymes("trypsin, tryp , gluc, gluc").unwrap();
+        assert_eq!(primary, Enzyme::Trypsin);
+        assert_eq!(extras, vec![Enzyme::GluC]);
+    }
+
+    #[test]
+    fn whitespace_and_empties_tolerated() {
+        let (primary, extras) = parse_enzymes("  lysc , , trypsin ").unwrap();
+        assert_eq!(primary, Enzyme::LysC);
+        assert_eq!(extras, vec![Enzyme::Trypsin]);
+    }
+
+    #[test]
+    fn unknown_enzyme_errors_and_empty_errors() {
+        assert!(parse_enzymes("bogus").is_err());
+        assert!(parse_enzymes("").is_err());
+        assert!(parse_enzymes("  , ").is_err());
+    }
+
+    #[test]
+    fn elastase_aliases_to_nonspecific() {
+        assert_eq!(parse_enzymes("elastase").unwrap().0, Enzyme::NonSpecific);
     }
 }
 

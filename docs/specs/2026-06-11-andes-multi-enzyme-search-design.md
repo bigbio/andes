@@ -1,7 +1,29 @@
 # Andes multi-enzyme search support — design (Sub-project A)
 
 Date: 2026-06-11
-Status: approved (brainstorming) → ready for implementation plan
+Status: approved (brainstorming) → **partially implemented (2026-06-14), simpler shape than specced**
+
+> **Implementation note (2026-06-14).** The shipped design is intentionally simpler than the
+> `CleavageSpec`/`CutSetSignature` abstraction below: `SearchParams` carries `enzyme` (primary)
+> + `extra_enzymes: Vec<Enzyme>`, and `candidate_gen` accepts a span if ANY configured protease
+> cuts (union). The primary drives model selection + the cleavage-credit/PIN features; extras
+> only widen candidate enumeration. Validated on a real GluC+Trypsin double digest
+> (1% true entrapment-FDP, +9.8% vs MSFragger).
+>
+> **Deferred follow-up** (design debt, not blocking — the simple path is FDR-validated and wins
+> benchmarks; from the 2026-06-14 multi-enzyme review):
+> - `CleavageSpec` + `CutSetSignature` (§1, §4): order-independent, signature-keyed model
+>   selection so `trypsin,lysc` collapses to the Trypsin model regardless of token order
+>   (today selection uses the first token; digestion is already order-independent).
+> - **Union-aware** cleavage credit (`match_engine`/`coisolation`) + PIN enzymatic features
+>   (`enzN`/`enzC`/`enzInt`, `pin.rs`): today computed vs the primary enzyme only.
+> - Non-tryptic **HCD/high-res** + protocol models in the bundled store (today non-tryptic
+>   models exist only at CID/LowRes + ETD/LowRes; a non-tryptic HCD/QExactive search falls
+>   back and now WARNs loudly + suggests `--model`).
+>
+> Shipped guards from that review: `,`/`+` separators + token dedup + `elastase` alias; loud
+> WARN on enzyme→model fallback; WARN when a universal protease (NonSpecific/AlphaLP) is
+> combined with specific ones.
 Scope: **Sub-project A only** — the andes search engine. Sub-project B (harvest per-file
 enzyme routing + re-harvest) is described at the end for context but specced separately.
 

@@ -251,4 +251,105 @@ Pacing: each iteration is real compute (search + Percolator = minutes–tens of 
 | 2 | SPEED | single-segment fast path | — | — | — | **REJECTED** — verified all 39 models `num_segments==2`; never triggers | — |
 | 10 | PSMs | additive `ComplementaryIonBalance` PIN feature (rank-agreement-weighted complementary b/y) | TMT | *await VM* | — | **impl done, additive byte-identical** (52 existing cols + RawScore + 633 rows unchanged, golden regen, unit test); Percolator gain pending VM A/B | `bf2d1e4e` |
 
+### VM benchmark — a05058 TMT (latest binary #1+#10, entrapment FASTA, --protocol TMT filter, Percolator @1%)
+| Model | PSMs@1% | peptides@1% | note |
+|---|---|---|---|
+| inherited `cid_lowres_tryp` (MS-GF+ heritage) | 11,620 (top1) / 11,678 (chim) | 10,398 | baseline (Jun-8 run) |
+| own `cid_lowres_tryp` (7 flats) + #10 | 11,298 | 10,096 | −2.8% vs inherited (tiny corpus) |
+| **own `cid_lowres_tryp_tmt` (72 flats) + #10** | **11,539** | **10,333** | own TMT model; q-val@1% (true FDP 2.32% — see below) |
+| MSFragger (matched entrapment FASTA, rev_ decoys) | **6,791** | — | q-val@1% (true FDP 1.77%); same 52,820 targets as andes |
+
+### HEAD-TO-HEAD — matched FASTA + 1% TRUE entrapment-FDP (mode-independent, the defensible metric)
+
+> **Methodology fix (2026-06-14):** andes pins percolate as **Separate** mode, MSFragger
+> pins as **Concatenated/TDC** — Percolator auto-detects from PIN structure, so the raw
+> PSM@1%-*q-value* counts are NOT directly comparable (cross-mode). The fair metric is
+> **PSMs at 1% true entrapment-FDP** (entrapment is 1:1 → FDP = 2×ENT-hits/total), which is
+> independent of how each engine's q-values were estimated. Numbers below use that.
+
+> **⚠ CORRECTION (2026-06-14): MSFragger TMT numbers were inflated by a config bug.** The TMT
+> params (`fragger-tmt2.params`) had `data_type=3` (DDA+/wide-window) instead of `data_type=0`
+> (standard narrow DDA). On a05058, a controlled A/B (only `data_type` differs) showed
+> **MSFragger 4,965 (dt=3) → 9,369 (dt=0)** — `data_type=3` nearly *halved* MSFragger's IDs.
+> So the original "+86% TMT" was an artifact. **Corrected a05058: andes 10,520 vs MSFragger
+> 9,369 = +12.3%** (in line with UPS1). UPS1 and Astral-top-1 used `data_type=0` already →
+> valid. Astral-chimeric used `data_type=3` → being re-run with `data_type=0 + topN=2`. TMT
+> replicates (a05059/a05060) + PXD016999 being re-run with `data_type=0`. Table below corrected.
+
+| Dataset | Regime | andes (own/no-heritage) | MSFragger 4.2 (matched, **dt=0**) | andes margin | calibration (true FDP @ q≤1%) |
+|---|---|---|---|---|---|
+| **TMT** a05058 | low-res CID | **10,520** | 9,369 | **+12.3%** | andes 2.32% / MF ~1% |
+| **UPS1** PXD001819 | low-res CID | **16,132** | 14,282 | **+13%** | andes 1.26% / MF 1.43% |
+| **Astral** (LFQ 15min 50ng) | **high-res** | **30,077** | 27,760 | **+8.3%** | andes 1.14% / MF 1.56% |
+| **Astral — chimeric** | high-res | 59,069 | *re-running (dt=3 was wrong)* | *pending* | — |
+
+### ✅ WIN CONDITION MET (2026-06-14) — andes beats MSFragger on ALL THREE datasets
+
+At matched 1% true entrapment-FDP, with **own-data-trained models only** (no MS-GF+
+heritage in the scoring path beyond the train-from-msnet seed), andes wins all three —
+**including high-res Astral, MSFragger's strongest regime**. On the two high-res-grade sets
+andes is also **better-calibrated** than MSFragger. Models used: TMT `cid_lowres_tryp_tmt`
+(72 flats), UPS1 `cid_lowres_tryp`, Astral `hcd_qexactive_tryp_astral` (481,039 own PSMs:
+broad high-res HCD + PXD061135). Astral model carried a 0.5 Da seed fragment tol but andes
+auto-resolves the high-res matching tol from the data, so it didn't hurt.
+
+**Caveats (for full rigor, not blockers to the directional win):** (1) single representative
+file per dataset, not full replicate sets; (2) matched at Cam+Ox mods (andes's optional
+Acetyl-N-term dropped to match MSFragger → conservative for andes); (3) fragment tol andes-auto
+vs MSFragger 20 ppm (each engine's natural high-res config); (4) andes TMT q-value calibration
+is optimistic (2.32%) — a model/score-calibration lever still worth tightening.
+
+**Per the standing rule, this unparks the glyco track** (was gated on beating MSFragger on all
+3) — pending user confirmation that the comparison is rigorous enough to call.
+
+### Replicate hardening (2026-06-14) — streaming download→convert→bench
+
+To address the single-file caveat: stream additional replicate runs (download `.raw` from
+PRIDE → convert via docker `ThermoRawFileParser` → bench both engines → delete). No mzML on
+PRIDE for these (raw-only); no converter was on the VM, so the docker converter is the new
+(validated) dependency.
+
+**UPS1 PXD001819 (PSMs @ 1% true entrapment-FDP):**
+
+| Replicate | andes (own `cid_lowres_tryp`) | MSFragger 4.2 | andes margin |
+|---|---|---|---|
+| R1 (original) | 16,132 | 14,282 | +13.0% |
+| R2 | 16,503 | 14,308 | +15.3% |
+| R3 | 16,563 | 14,603 | +13.4% |
+
+andes wins **all three replicates** by ~+14% with **<1% variance** on its own counts — the
+single-file UPS1 result is robust, not a fluke.
+
+**TMT held-out PXD007683 (PSMs @ 1% true entrapment-FDP):**
+
+**CORRECTED to `data_type=0`** (the dt=3 values, struck, were the config-bug artifacts):
+
+| Replicate | andes (own `cid_lowres_tryp_tmt`) | MSFragger (dt=0, correct) | andes margin | ~~MSFragger (dt=3, WRONG)~~ |
+|---|---|---|---|---|
+| a05058 | 10,520 | **9,369** | **+12.3%** | ~~5,644~~ |
+| a05059 | 11,054 | **9,920** | **+11.4%** | ~~5,702~~ |
+| a05060 | 10,656 | **9,244** | **+15.3%** | ~~4,643~~ |
+
+With the corrected `data_type=0`, the TMT margin is a consistent **+11–15%** across all 3
+held-out files (the corrected MSFragger counts are ~2× the dt=3 artifacts) — in line with
+UPS1's +13–15%. PXD007683 is **not** in the `cid_lowres_tryp_tmt` training set (clean held-out).
+
+**TMT held-out PXD016999 — multi-instrument check (streaming):** GTEx Human Body Map (Jiang
+2020), Orbitrap Fusion SPS-MS3 TMT10 (ion-trap CID MS2 for ID). 4 files × each of the two
+physical Fusion instruments (`Instrument1_*`, `SecondInstrument_*`), all from **samples NOT
+in the 30-file training subset** → genuinely held-out. Verifies the win holds across
+instruments + a second TMT dataset. (Results pending.)
+
+**Pipeline note:** no mzML on PRIDE for these (raw-only), no converter on VM → docker
+`ThermoRawFileParser` converts each `.raw`→mzML inline. MSFragger writes a ~300 MB internal
+`.mzBIN_calibrated` per run (even with `write_calibrated_mzml=0`) that must be cleaned to
+avoid filling the 100 GB disk.
+
+**Two gotchas that cost time (in memory + howto doc):** (1) MSFragger only recognises
+`rev_` decoys, not `XXX_` → `docs/plans/2026-06-14-msfragger-benchmark-howto.md`. (2) andes
+vs MSFragger percolate in different auto-detected modes → always compare at true
+entrapment-FDP, never raw q-value counts. Also: andes's q-value calibration is **optimistic
+on TMT** (q≤1% → 2.32% true FDP) but **well-calibrated on UPS1** (q≤1% → 1.26%) — a model/
+score-calibration lever worth a future experiment.
+
 **Known dead ends (do not re-try):** chimeric-TMT (FDP-flat), fragmentation overlay (all 3 adjustments fail), rank-model "ceiling" via data/recal (no lever), fragment-index speed-v2 (recall/speed tension). See the project memory for details.

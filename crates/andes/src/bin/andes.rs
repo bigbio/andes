@@ -119,6 +119,19 @@ struct SearchArgs {
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
 
+    /// How to generate decoys: `reverse` (default; reverse each sequence),
+    /// `shuffle` (seeded reproducible shuffle), or `none` (no decoys — for a
+    /// FASTA that already contains decoys, or external FDR). `none` with a
+    /// target-only FASTA leaves the search without decoys (FDR can't be
+    /// estimated) and warns.
+    #[arg(long = "decoy-strategy", default_value = "reverse")]
+    decoy_strategy: String,
+
+    /// Seed for `--decoy-strategy shuffle` (reproducible decoys). Ignored by
+    /// reverse/none.
+    #[arg(long = "decoy-seed", default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
+    decoy_seed: u64,
+
     /// Minimum isotope-error offset to try.
     #[arg(long, default_value = "-1")]
     isotope_error_min: i8,
@@ -1044,9 +1057,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     log_rss("after_fasta_load");
 
-    // ── 2. Build SearchIndex (target + reversed decoys) ───────────────────────
+    // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
+    let decoy_strategy = search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy)
+        .ok_or_else(|| format!(
+            "unknown --decoy-strategy '{}' (expected reverse/shuffle/none)",
+            cli.decoy_strategy
+        ))?;
     let t_phase = std::time::Instant::now();
-    let idx = SearchIndex::from_target_db(&target_db, &cli.decoy_prefix);
+    let idx = SearchIndex::from_target_db_with_strategy(
+        &target_db,
+        &cli.decoy_prefix,
+        decoy_strategy,
+        cli.decoy_seed,
+    );
     eprintln!("[PHASE search_index_build: {:.2}s]", t_phase.elapsed().as_secs_f64());
     log_rss("after_search_index_build");
 
@@ -1342,7 +1365,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  precursor tol  : {:?} (calibration: {:?})", params.precursor_tolerance, params.precursor_cal_mode);
     eprintln!("  charge range   : {}-{}", params.charge_range.start(), params.charge_range.end());
     eprintln!("  isotope errors : {}..={}", params.isotope_error_range.start(), params.isotope_error_range.end());
-    eprintln!("  decoy prefix   : {}   chimeric: {}", cli.decoy_prefix, params.chimeric);
+    eprintln!("  decoy          : {:?} (prefix {})   chimeric: {}",
+              decoy_strategy, cli.decoy_prefix, params.chimeric);
     eprintln!("───────────────────────────────────────────");
 
     // ── 6+7. Stream-load + chunked search ─────────────────────────────────

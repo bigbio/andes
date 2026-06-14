@@ -1,39 +1,82 @@
 //! Bundled search database: target+decoy ProteinDb. Consumed by candidate
 //! generation.
 
-use crate::decoy::target_plus_decoy;
+use crate::decoy::{build_search_db, normalize_decoy_prefix, DecoyStrategy, DEFAULT_DECOY_SEED};
 use model::protein::ProteinDb;
 
 #[derive(Debug, Clone)]
 pub struct SearchIndex {
     pub db: ProteinDb,
+    /// Normalized decoy-accession prefix (no trailing `_`). A protein is a decoy
+    /// iff its accession starts with `"<decoy_prefix>_"` — the single source of
+    /// truth for target/decoy membership, shared with candidate generation. This
+    /// replaces the old positional `len()/2` invariant so target-only and
+    /// shuffle decoy modes work without a hardcoded 1:1 layout assumption.
+    pub decoy_prefix: String,
 }
 
 impl SearchIndex {
-    /// Pipeline: target ProteinDb → reverse for decoys → concat target+decoy.
+    /// Pipeline: target ProteinDb → reversed decoys → concat target+decoy.
+    /// Convenience wrapper for the default (Reverse) strategy.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
-        // Footgun guard: if the input FASTA ALREADY contains decoys (accessions
-        // carrying the decoy prefix), generating more here doubles the decoys and
-        // breaks the 1:1 target:decoy ratio that FDR relies on. Warn loudly — this
-        // is a silent FDR-corruption trap in unattended reanalysis.
-        let norm = crate::decoy::normalize_decoy_prefix(decoy_prefix);
+        Self::from_target_db_with_strategy(
+            target,
+            decoy_prefix,
+            DecoyStrategy::Reverse,
+            DEFAULT_DECOY_SEED,
+        )
+    }
+
+    /// Build the search index for a given decoy `strategy`. `seed` is only used
+    /// by [`DecoyStrategy::Shuffle`]. The combined db is target+decoy for
+    /// Reverse/Shuffle and the input verbatim for None.
+    pub fn from_target_db_with_strategy(
+        target: &ProteinDb,
+        decoy_prefix: &str,
+        strategy: DecoyStrategy,
+        seed: u64,
+    ) -> Self {
+        let norm = normalize_decoy_prefix(decoy_prefix);
         let needle = format!("{norm}_");
         let pre = target
             .proteins
             .iter()
             .filter(|p| p.accession.starts_with(&needle))
             .count();
-        if pre > 0 {
-            eprintln!(
-                "WARN: {pre}/{} input proteins already carry the '{norm}_' decoy prefix — the \
-                 FASTA appears to already contain decoys. andes generates its own reversed decoys, \
-                 so this DOUBLES decoys and biases FDR. Use a target-only FASTA or a different \
-                 --decoy-prefix.",
-                target.proteins.len()
-            );
+        match strategy {
+            DecoyStrategy::None => {
+                // Target-only / externally-decoyed mode: we generate nothing.
+                if pre == 0 {
+                    eprintln!(
+                        "WARN: --decoy-strategy none and no input proteins carry the '{norm}_' \
+                         prefix — the search will have NO decoys, so target/decoy FDR cannot be \
+                         estimated. Supply a FASTA that already contains decoys, or use \
+                         --decoy-strategy reverse/shuffle."
+                    );
+                } else {
+                    eprintln!(
+                        "INFO: --decoy-strategy none — using the input FASTA verbatim; \
+                         {pre}/{} proteins carry the '{norm}_' decoy prefix.",
+                        target.proteins.len()
+                    );
+                }
+            }
+            _ => {
+                // Reverse/Shuffle GENERATE a 1:1 decoy per target. If the FASTA
+                // ALREADY contains decoys, this doubles them and biases FDR.
+                if pre > 0 {
+                    eprintln!(
+                        "WARN: {pre}/{} input proteins already carry the '{norm}_' decoy prefix — \
+                         the FASTA appears to already contain decoys. andes generates its own \
+                         decoys, so this DOUBLES decoys and biases FDR. Use --decoy-strategy none, \
+                         a target-only FASTA, or a different --decoy-prefix.",
+                        target.proteins.len()
+                    );
+                }
+            }
         }
-        let db = target_plus_decoy(target, decoy_prefix);
-        Self { db }
+        let db = build_search_db(target, decoy_prefix, strategy, seed);
+        Self { db, decoy_prefix: norm }
     }
 
     /// Look up the `Protein` at the given index in the combined target+decoy
@@ -47,13 +90,18 @@ impl SearchIndex {
         self.db.proteins.get(idx)
     }
 
-    /// Iterate over target proteins only (the first half of the combined db).
-    ///
-    /// `target_plus_decoy` always appends decoys after targets, so target
-    /// proteins occupy `[0, total/2)` in `self.db.proteins`.
+    /// Iterate over target proteins only — every protein whose accession does
+    /// NOT carry the decoy prefix. This matches the target/decoy test used in
+    /// candidate generation exactly, and (unlike the old positional `len()/2`
+    /// split) stays correct under shuffle decoys and target-only/pre-decoyed
+    /// inputs. For the default Reverse strategy on a clean target FASTA it is
+    /// equivalent to the first half of the combined db.
     pub fn iter_target_proteins(&self) -> impl Iterator<Item = &model::protein::Protein> {
-        let target_count = self.db.proteins.len() / 2;
-        self.db.proteins[..target_count].iter()
+        let needle = format!("{}_", self.decoy_prefix);
+        self.db
+            .proteins
+            .iter()
+            .filter(move |p| !p.accession.starts_with(&needle))
     }
 
     /// Returns `true` iff `residues` (peptide sequence, no flanking) appears as

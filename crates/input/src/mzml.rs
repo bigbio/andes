@@ -50,6 +50,10 @@ const CV_MODEL_ORBITRAP_ASTRAL:       &str = "MS:1003378";
 
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_SCAN_TIME: &str = "MS:1000016";
+/// Spectrum representation: profile (`MS:1000128`) vs centroided
+/// (`MS:1000127`). Profile spectra carry the raw peak shape; their shoulders
+/// flood the intensity-rank scorer, so we centroid them in `build_peaks`.
+const CV_PROFILE: &str = "MS:1000128";
 const CV_SELECTED_ION_MZ: &str = "MS:1000744";
 /// Isolation-window lower offset in Da (selected m/z − lower = window start).
 const CV_ISOLATION_LOWER_OFFSET: &str = "MS:1000828";
@@ -170,6 +174,73 @@ fn log_ethcd_once() {
     }
 }
 
+/// Emit the profile-centroiding notice at most once per process.
+fn log_profile_centroid_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        eprintln!(
+            "INFO: profile-mode spectra detected (MS:1000128) — centroiding peaks on the fly \
+             (local-max + intensity-weighted m/z). For best results pre-centroid during \
+             conversion (e.g. ThermoRawFileParser default, or msconvert peakPicking)."
+        );
+    }
+}
+
+/// Centroid a profile-mode peak list (ascending by m/z). Each profile peak
+/// spans many sample points; we collapse it to a single point: the
+/// intensity-weighted mean m/z over the peak's flanks, with the apex intensity.
+///
+/// A point is a peak apex when it is `>=` its left neighbour and `>` its right
+/// neighbour (the right-strict rule keeps flat plateaus from emitting twice).
+/// From each apex we walk down both flanks until the signal stops descending
+/// (a valley, the next peak, or a zero) and integrate that window. Boundary
+/// apexes at index 0 / n-1 are not emitted; real profile peaks are interior.
+fn centroid_profile(profile: &[(f64, f32)]) -> Vec<(f64, f32)> {
+    let n = profile.len();
+    if n < 3 {
+        return profile.to_vec();
+    }
+    let mut out: Vec<(f64, f32)> = Vec::new();
+    let mut i = 1usize;
+    while i < n - 1 {
+        let (prev, cur, next) = (profile[i - 1].1, profile[i].1, profile[i + 1].1);
+        if cur > 0.0 && cur >= prev && cur > next {
+            // Descend the left flank: include l-1 while moving left keeps the
+            // intensity non-increasing and above baseline.
+            let mut l = i;
+            while l > 0 && profile[l - 1].1 <= profile[l].1 && profile[l - 1].1 > 0.0 {
+                l -= 1;
+            }
+            // Descend the right flank symmetrically.
+            let mut r = i;
+            while r + 1 < n && profile[r + 1].1 <= profile[r].1 && profile[r + 1].1 > 0.0 {
+                r += 1;
+            }
+            let mut wsum = 0f64;
+            let mut msum = 0f64;
+            let mut apex = 0f32;
+            for &(m, it) in &profile[l..=r] {
+                wsum += it as f64;
+                msum += m * it as f64;
+                if it > apex {
+                    apex = it;
+                }
+            }
+            if wsum > 0.0 {
+                out.push((msum / wsum, apex));
+            }
+            i = r + 1; // resume past this peak
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 #[derive(Debug, Default)]
 struct SpectrumBuilder {
     id: String,
@@ -199,6 +270,10 @@ struct SpectrumBuilder {
     /// Whether the current `<activation>` block carried a collisional term
     /// (HCD or CID) — the supplemental half of EThcD/ETciD.
     act_saw_collisional: bool,
+    /// Whether this spectrum is profile-mode (`MS:1000128`). Profile spectra are
+    /// centroided in `build_peaks` so their peak-shoulders don't flood the
+    /// intensity-rank scorer (common for un-centroided Orbitrap/Astral mzMLs).
+    is_profile: bool,
     /// Isolation-window lower offset in Da, from `<isolationWindow>`
     /// `MS:1000828`. `None` when the mzML omits the isolation window.
     isolation_lower_offset: Option<f64>,
@@ -351,7 +426,7 @@ impl<R: BufRead> MzMLReader<R> {
             return Ok(None);
         }
 
-        let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array)?;
+        let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array, sb.is_profile)?;
         let scan = extract_scan_from_id(&sb.id);
 
         // H6: EThcD/ETciD — an electron-transfer term AND a supplemental
@@ -387,6 +462,7 @@ impl<R: BufRead> MzMLReader<R> {
     fn build_peaks(
         mz_array: Option<Vec<f64>>,
         intensity_array: Option<Vec<f64>>,
+        is_profile: bool,
     ) -> Result<Vec<(f64, f32)>, MzMLParseError> {
         let mz_vals = mz_array.unwrap_or_default();
         let int_vals = intensity_array.unwrap_or_default();
@@ -413,6 +489,15 @@ impl<R: BufRead> MzMLReader<R> {
             peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         }
 
+        // H1: centroid profile-mode spectra. Profile peaks span many sample
+        // points; left raw, their shoulders dominate the intensity-rank scorer
+        // and the spectrum is near-unscorable. Collapse each peak to one
+        // intensity-weighted centroid.
+        if is_profile {
+            log_profile_centroid_once();
+            peaks = centroid_profile(&peaks);
+        }
+
         Ok(peaks)
     }
 
@@ -425,6 +510,13 @@ impl<R: BufRead> MzMLReader<R> {
                     if let Some(sb) = self.current.as_mut() {
                         sb.ms_level = Some(lvl);
                     }
+                }
+            }
+
+            // Profile-mode spectrum: flag it so build_peaks centroids the peaks.
+            CV_PROFILE => {
+                if let Some(sb) = self.current.as_mut() {
+                    sb.is_profile = true;
                 }
             }
 
@@ -714,7 +806,7 @@ impl<R: BufRead> MzMLReader<R> {
                                 // false (default), keeping that path byte-exact.
                                 if self.capture_ms1 && sb.ms_level == Some(1) {
                                     let peaks =
-                                        Self::build_peaks(sb.mz_array, sb.intensity_array)?;
+                                        Self::build_peaks(sb.mz_array, sb.intensity_array, sb.is_profile)?;
                                     self.captured_ms1.push(peaks);
                                     self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
                                     continue;
@@ -1969,6 +2061,85 @@ mod tests {
         )));
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+    }
+
+    // ── H1: profile-mode centroiding ─────────────────────────────────────────
+
+    #[test]
+    fn centroid_profile_collapses_one_peak_to_intensity_weighted_centroid() {
+        // A single symmetric profile peak sampled at 5 points around m/z 100.2.
+        let prof = [
+            (100.0, 1.0f32),
+            (100.1, 4.0),
+            (100.2, 9.0), // apex
+            (100.3, 4.0),
+            (100.4, 1.0),
+        ];
+        let c = centroid_profile(&prof);
+        assert_eq!(c.len(), 1, "one peak ⇒ one centroid");
+        // Symmetric ⇒ centroid m/z == apex m/z; intensity == apex.
+        assert!((c[0].0 - 100.2).abs() < 1e-9, "centroid m/z {} != 100.2", c[0].0);
+        assert_eq!(c[0].1, 9.0, "centroid intensity is the apex");
+    }
+
+    #[test]
+    fn centroid_profile_separates_two_peaks() {
+        // Two peaks separated by a baseline (zero) point ⇒ two centroids.
+        let prof = [
+            (200.0, 1.0f32),
+            (200.1, 5.0), // apex 1
+            (200.2, 1.0),
+            (200.3, 0.0), // valley/baseline
+            (200.4, 2.0),
+            (200.5, 8.0), // apex 2
+            (200.6, 2.0),
+        ];
+        let c = centroid_profile(&prof);
+        assert_eq!(c.len(), 2, "two peaks ⇒ two centroids");
+        assert!((c[0].0 - 200.1).abs() < 1e-9);
+        assert!((c[1].0 - 200.5).abs() < 1e-9);
+    }
+
+    /// Profile spectrum (MS:1000128) with a 3-point peak is centroided down to
+    /// a single peak on parse; without the profile flag the 3 points pass
+    /// through verbatim. Exercises the is_profile flag wiring end-to-end.
+    fn profile_spectrum_xml(profile: bool) -> String {
+        let mz_b64 = encode_f64_b64(&[150.0, 150.1, 150.2]);
+        let int_b64 = encode_f64_b64(&[2.0, 9.0, 2.0]);
+        let rep = if profile {
+            r#"<cvParam accession="MS:1000128" name="profile spectrum" value=""/>"#
+        } else {
+            r#"<cvParam accession="MS:1000127" name="centroid spectrum" value=""/>"#
+        };
+        format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="3">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              {rep}
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1"><precursor><selectedIonList count="1"><selectedIon>
+                <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                <cvParam accession="MS:1000041" name="charge state" value="2"/>
+              </selectedIon></selectedIonList></precursor></precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        )
+    }
+
+    #[test]
+    fn profile_mode_spectrum_is_centroided_on_parse() {
+        let prof = collect_ok(&wrap_spectra(&profile_spectrum_xml(true)));
+        assert_eq!(prof.len(), 1);
+        assert_eq!(prof[0].peaks.len(), 1, "profile 3-point peak ⇒ 1 centroid");
+        assert!((prof[0].peaks[0].0 - 150.1).abs() < 1e-9);
+
+        // Centroided spectrum (MS:1000127): the 3 points pass through unchanged.
+        let cent = collect_ok(&wrap_spectra(&profile_spectrum_xml(false)));
+        assert_eq!(cent[0].peaks.len(), 3, "centroided spectrum is not re-centroided");
     }
 
     /// SPS-MS3 mzMLs chain `<precursor><activation>` blocks (CID then HCD).

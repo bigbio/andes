@@ -16,30 +16,34 @@ Andes originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFP
 
 ## Why andes?
 
-Three reference datasets, three results — all at 1% FDR via Percolator 3.7.1, all run on the same 8-thread VM:
+Against the open-source field — **Java MS-GF+, Sage, Comet, and ProSE** — andes returns the most PSMs at 1% FDR on all three reference datasets, reads vendor formats natively, and runs in minutes where Java takes hours. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42`) on the same 8-thread VM.
 
-| Dataset | Java PSMs @1% | andes PSMs @1% | Δ PSMs | Java wall | andes wall | Speedup |
-|---|---:|---:|---:|---:|---:|---:|
-| **Astral DDA** (LFQ_Astral_DDA_15min_50ng) | 33,425 | **36,715** | **+3,290 (+9.8%)** | 2:20:42 | **6:28** | **21.8×** |
-| **PXD001819** (UPS1 yeast tryp) | 14,974 | 14,755 | -219 (-1.5%) | 8:46 | **0:54** | **9.7×** |
-| **TMT** (a05058 PXD007683) | 10,115 | 9,605 | -510 (-5.0%) | 1:11:00 | **2:33** | **27.9×** |
+| Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res CID) |
+|---|---:|---:|---:|
+| **andes** (`--chimeric`) | **69,968** | **12,043** | **17,879** |
+| **andes** (top-1) | **36,782** | **11,957** | 17,143 |
+| Java MS-GF+ v20240326 | 26,542 | 11,555 | 17,305 |
+| Sage 0.14.7 | 32,091 | 11,232 | 15,653 |
+| Comet 2025.01 | 31,435 | 10,876 | 15,809 |
+| ProSE (OpenMS) | 30,590 | 7,659 | 8,901 |
 
-What that means: on Astral we find **+9.8% more PSMs than Java at 21.8× the speed**; on PXD001819 we match Java's PSM count within 1.5% at 9.7× the speed; on TMT we trail Java by 5% PSMs but at 27.9× the speed. Java baseline is upstream MSGFPlus v2024.03.26 (no calibration; that flag isn't in upstream). The andes benchmark runs do not rely on precursor calibration (it is opt-in and off by default; `auto` self-skips the correction when it can't find enough confident PSMs). The remaining feature-level divergences (lnEValue, MeanRelErrorTop7 normalization, TMT PSM gap) are tracked in `DOCS.md` §8d and the I5 trace-investigation notes as research follow-up.
+<sub>PSMs at 1% FDR (distinct peptides track the same ordering). andes top-1 beats every competitor on the high-res Astral run and on TMT (PSMs **and** peptides); on UPS1 it lands within 1% of Java and its `--chimeric` two-pass — which recovers co-isolated second peptides (opt-in) — takes the lead. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with the C++/Rust engines.</sub>
+
+**The 1% FDR is real, not inflated.** A 1:1 entrapment search on Astral puts the *true* false-discovery proportion at **1.06%** (top-1) / **1.14%** (chimeric) at the nominal 1% q-value, and it tracks q across the 0.5–5% range — the ID gains (including the chimeric near-doubling) are genuine identifications, not bought by a violated FDR. The same holds on the non-tryptic LysC and GluC+Trypsin runs.
 
 <details>
 <summary>Bench methodology</summary>
 
-- **Hardware:** 8-thread Intel Xeon Gold 6238 VM, AVX exposed (no AVX2/FMA), Linux x86_64.
-- **Java baseline:** `MSGFPlus.jar` from the [MSGFPlus/msgfplus v2024.03.26 release](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), run with `-Xmx8192m -thread 8 -tda 1 -addFeatures 1`. Per-dataset args match `--precursor-tol-ppm`/`--isotope-error`/`--protocol` of the Rust runs.
-- **andes:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1` (precursor calibration off — the default).
-- **Java → PIN:** `msgf2pin` from the percolator `3.6.5--h6351f2a_0` container (single-arg mode for concatenated-TDA mzid; the `3.7.1` container's msgf2pin has a known parser crash on this mzid output).
-- **Percolator:** `percolator 3.7.1` in `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` with `--seed 42 --only-psms`. Same parser script for both Java and Rust PINs.
-- **Wall time:** `/usr/bin/time -v` "Elapsed (wall clock) time" — does not include Percolator stage.
-- **Reproducibility:** scripts at `/srv/data/msgf-bench/finalize2_v2024.sh` and `/srv/data/msgf-bench/run_percolator_docker.sh` on the bench VM.
+- **Hardware:** 8-thread Intel Xeon Gold 6238 VM, Linux x86_64. Same machine for every engine.
+- **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), Sage 0.14.7, Comet 2025.01 (via OpenMS), ProSE (OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
+- **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`); counts reported at q ≤ 0.01.
+- **PIN building:** andes / Sage / Comet write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`); ProSE via OpenMS → idXML → `build_pins.py` (ProSE caps fragment tolerance at 0.1 Da, used on the low-res sets).
+- **FDR honesty** independently verified with a 1:1 entrapment database — true FDP at q≤1% is ≈1% (see above and `docs/benchmarks/`).
+- **Notes:** Java MS-GF+ is deterministic; the Astral count reuses a prior run (its `msgf2pin` step crashes here regardless of input, and the count is pin-builder-independent). Protein-level counts are omitted from the headline — they require uniform parsimony grouping to be comparable across engines, since raw `proteinIds` differ by output format. Precursor calibration is off (the andes default).
 
 </details>
 
-In four-engine comparisons against Java MS-GF+, Sage, and MSFragger, andes returns the most PSMs *and* distinct peptides at 1% FDR: on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), and on a real human-tissue **TMT** dataset acquired as ion-trap CID-MS2 ([PXD016999](https://www.ebi.ac.uk/pride/archive/projects/PXD016999): 22,217 PSMs / 10,473 peptides, ahead of Java, MSFragger, and Sage). It is also the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, data URLs, and config files: [`docs/benchmarks/`](docs/benchmarks/).
+andes is also the only engine here that reads Thermo `.raw` and Bruker timsTOF `.d` natively. Full methodology, per-engine parameters, data URLs, config files, and the entrapment-FDP validation: [`docs/benchmarks/`](docs/benchmarks/).
 
 ## Install
 

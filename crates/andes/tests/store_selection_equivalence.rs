@@ -61,16 +61,17 @@ fn resolve_bundled_param_old(
         Fragmentation::Hcd  => "HCD",
         Fragmentation::Uvpd => "UVPD",
     };
-    let mut inst = match instrument {
+    let inst = match instrument {
         Instrument::LowRes    => "LowRes",
         Instrument::HighRes   => "HighRes",
         Instrument::Tof       => "TOF",
         Instrument::QExactive => "QExactive",
     };
-    // HCD-upgrade rule.
-    if frag == "HCD" && inst == "LowRes" {
-        inst = "QExactive";
-    }
+    // H5: the MS-GF+ HCD/LowRes → QExactive "upgrade" rule is intentionally
+    // removed (it silently scored ion-trap HCD with the high-res model). With
+    // no upgrade, frag="HCD"/inst="LowRes" finds no HCD_LowRes_Tryp model and
+    // falls through to the CID_LowRes_Tryp final-fallback below — the correct
+    // low-res b/y model. (No `inst = "QExactive"` reassignment.)
 
     let prot_suffix = protocol_suffix(protocol);
     let exact = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
@@ -202,9 +203,12 @@ fn protocol_to_experiment_class(p: Protocol) -> BTreeSet<String> {
 /// family, different instrument slug only), where the protocol IS preserved.
 fn normalize_activation_instrument(act: &str, inst: &str) -> (String, String, bool) {
     match (act, inst) {
-        // HCD + LowRes → HCD + QExactive (Java's instrument-upgrade rule).
-        // Protocol is preserved: HCD_QExactive_Tryp_TMT etc. exist.
-        ("HCD", "LowRes") => ("HCD".into(), "QExactive".into(), false),
+        // H5: HCD + LowRes → CID + LowRes. The MS-GF+ instrument-upgrade rule
+        // (→ HCD/QExactive) silently scored ion-trap HCD at high-res tolerance;
+        // there is no hcd_lowres model, so route to the low-res b/y model
+        // (cid_lowres_tryp). Protocol dropped (final-fallback base model).
+        // Intentional divergence from MS-GF+, mirrored in build_selection_key.
+        ("HCD", "LowRes") => ("CID".into(), "LowRes".into(), true),
         // HCD + TOF → CID + TOF (HCD_TOF_Tryp.param not bundled; old
         // final fallback maps (HCD, TOF|HighRes) → CID_TOF_Tryp).
         // Protocol dropped: final fallback returns base model only.

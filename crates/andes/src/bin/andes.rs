@@ -3346,7 +3346,20 @@ fn build_selection_key(
     //    inline here.
     let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
         match (act_str, inst_after_family) {
-            ("HCD", "LowRes")    => ("HCD", "QExactive", false),
+            // H5: low-res (ion-trap) HCD. MS-GF+ "upgraded" this to the high-res
+            // QExactive model, which then matched 0.5-Da peaks at 20 ppm and lost
+            // ~18% of PSMs silently. No hcd_lowres model exists, so route to the
+            // low-res b/y model (cid_lowres_tryp) instead — correct fragment
+            // tolerance and ion series. Intentional divergence from MS-GF+'s
+            // ladder, pinned by store_selection_equivalence.rs.
+            ("HCD", "LowRes")    => {
+                eprintln!(
+                    "WARN: low-res (ion-trap) HCD detected — no hcd_lowres model exists; \
+                     routing to cid_lowres_tryp (low-res b/y, 0.5-Da tolerance) rather than \
+                     the high-res QExactive model. Pass --model to override."
+                );
+                ("CID", "LowRes", true)
+            }
             ("HCD", "TOF")       => ("CID", "TOF",       true),
             ("CID", "QExactive") => ("CID", "LowRes",    true),
             ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),

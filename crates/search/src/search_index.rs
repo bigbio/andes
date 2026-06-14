@@ -12,6 +12,26 @@ pub struct SearchIndex {
 impl SearchIndex {
     /// Pipeline: target ProteinDb → reverse for decoys → concat target+decoy.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
+        // Footgun guard: if the input FASTA ALREADY contains decoys (accessions
+        // carrying the decoy prefix), generating more here doubles the decoys and
+        // breaks the 1:1 target:decoy ratio that FDR relies on. Warn loudly — this
+        // is a silent FDR-corruption trap in unattended reanalysis.
+        let norm = crate::decoy::normalize_decoy_prefix(decoy_prefix);
+        let needle = format!("{norm}_");
+        let pre = target
+            .proteins
+            .iter()
+            .filter(|p| p.accession.starts_with(&needle))
+            .count();
+        if pre > 0 {
+            eprintln!(
+                "WARN: {pre}/{} input proteins already carry the '{norm}_' decoy prefix — the \
+                 FASTA appears to already contain decoys. andes generates its own reversed decoys, \
+                 so this DOUBLES decoys and biases FDR. Use a target-only FASTA or a different \
+                 --decoy-prefix.",
+                target.proteins.len()
+            );
+        }
         let db = target_plus_decoy(target, decoy_prefix);
         Self { db }
     }

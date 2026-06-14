@@ -138,6 +138,22 @@ struct SearchArgs {
     #[arg(long, default_value = "20.0")]
     precursor_tol_ppm: f64,
 
+    /// Precursor tolerance in Da (overrides --precursor-tol-ppm; for low-res
+    /// precursor selection). The asymmetric ppm flags below take precedence.
+    #[arg(long = "precursor-tol-da")]
+    precursor_tol_da: Option<f64>,
+
+    /// Asymmetric precursor tolerance, left (lower) window in ppm. Requires
+    /// --precursor-tol-right-ppm; together they override the symmetric forms
+    /// (for a known systematic precursor offset).
+    #[arg(long = "precursor-tol-left-ppm")]
+    precursor_tol_left_ppm: Option<f64>,
+
+    /// Asymmetric precursor tolerance, right (upper) window in ppm. Requires
+    /// --precursor-tol-left-ppm.
+    #[arg(long = "precursor-tol-right-ppm")]
+    precursor_tol_right_ppm: Option<f64>,
+
     /// Minimum precursor charge to try when not specified in the spectrum.
     #[arg(long, default_value = "2")]
     charge_min: u8,
@@ -1205,7 +1221,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance =
-        PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm));
+        match (cli.precursor_tol_left_ppm, cli.precursor_tol_right_ppm, cli.precursor_tol_da) {
+            (Some(l), Some(r), _) => {
+                PrecursorTolerance::asymmetric(Tolerance::Ppm(l), Tolerance::Ppm(r))
+            }
+            (Some(_), None, _) | (None, Some(_), _) => {
+                return Err("--precursor-tol-left-ppm and --precursor-tol-right-ppm must be given together".into());
+            }
+            (None, None, Some(da)) => PrecursorTolerance::symmetric(Tolerance::Da(da)),
+            (None, None, None) => PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm)),
+        };
     params.charge_range = cli.charge_min..=cli.charge_max;
     if cli.charge_min > cli.charge_max {
         return Err(format!(
@@ -1271,6 +1296,29 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if params.score_mode == search::ScoreMode::Strong {
         eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
+
+    // ── Resolved-parameter banner (reanalysis auditability) ───────────────────
+    // One consolidated record of every resolved search parameter, so a
+    // (zero-config) run is fully reproducible/auditable from its log. Values that
+    // were auto-detected from the data/store are tagged [detected].
+    eprintln!("──────── andes resolved parameters ────────");
+    eprintln!("  spectra        : {}", spectrum_path.display());
+    eprintln!("  model          : (see 'Param model:' line above) [detected]");
+    eprintln!("  activation     : {:?} [detected]", param.data_type.activation);
+    eprintln!("  instrument     : {:?} [detected]", param.data_type.instrument);
+    eprintln!("  protocol       : {:?}", param.data_type.protocol);
+    eprintln!("  enzyme         : {} ({:?} termini, <={} missed cleavages)",
+              search_enzyme.name(), cli.enzyme_specificity, params.max_missed_cleavages);
+    eprintln!("  mods           : {}",
+              if cli.mods.is_some() { "from --mods file" }
+              else { "defaults (Cam-C fixed, Ox-M variable) + isobaric tag if detected" });
+    eprintln!("  max var-mods   : {} per peptide", params.max_variable_mods_per_peptide);
+    eprintln!("  peptide length : {}-{}", params.min_length, params.max_length);
+    eprintln!("  precursor tol  : {:?} (calibration: {:?})", params.precursor_tolerance, params.precursor_cal_mode);
+    eprintln!("  charge range   : {}-{}", params.charge_range.start(), params.charge_range.end());
+    eprintln!("  isotope errors : {}..={}", params.isotope_error_range.start(), params.isotope_error_range.end());
+    eprintln!("  decoy prefix   : {}   chimeric: {}", cli.decoy_prefix, params.chimeric);
+    eprintln!("───────────────────────────────────────────");
 
     // ── 6+7. Stream-load + chunked search ─────────────────────────────────
     //

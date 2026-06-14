@@ -159,6 +159,13 @@ struct SearchArgs {
           default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
 
+    /// Proteolytic enzyme for in-silico digestion. Named values: trypsin
+    /// (default), chymotrypsin, lysc, aspn, gluc, lysn, argc, alphalp,
+    /// nocleavage, nonspecific. A wrong enzyme yields ~no PSMs (fails loud,
+    /// not silent). Previously hardcoded to trypsin with no override.
+    #[arg(long, default_value = "trypsin")]
+    enzyme: String,
+
     /// Maximum number of missed cleavages per peptide.
     #[arg(long, default_value = "1")]
     max_missed_cleavages: u32,
@@ -964,6 +971,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
+    // Parse the digestion enzyme once — drives BOTH model selection
+    // (build_selection_key) and digestion (params.enzyme). Previously trypsin
+    // was hardcoded in both places.
+    let search_enzyme = model::enzyme::Enzyme::from_name(&cli.enzyme)
+        .ok_or_else(|| format!(
+            "unknown --enzyme '{}' (expected trypsin/chymotrypsin/lysc/aspn/gluc/lysn/argc/alphalp/nocleavage/nonspecific)",
+            cli.enzyme
+        ))?;
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
@@ -1133,6 +1148,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             activation,
             instrument_opt,
             cli.protocol,
+            search_enzyme,
             cli.model_store.as_deref(),
             cli.model_id_override.as_deref(),
         )?;
@@ -1228,6 +1244,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
     // blind multi-emission per scan = inflated FDR.
     params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
+    params.enzyme = search_enzyme;
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,
@@ -2586,6 +2603,7 @@ fn run_train_from_msnet(
                 seed_param.data_type.activation,
                 Some(seed_param.data_type.instrument),
                 Protocol::Auto,
+                model::enzyme::Enzyme::Trypsin, // inert (model_id_override below makes selection columns unused)
                 Some(store_path.as_path()),
                 Some(&prior_id),
             )
@@ -3171,6 +3189,7 @@ fn build_selection_key(
     activation: ActivationMethod,
     instrument: Option<InstrumentType>,
     protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
 ) -> SelectionKey {
     use std::collections::BTreeSet;
 
@@ -3217,8 +3236,8 @@ fn build_selection_key(
     SelectionKey {
         activation: final_act.to_string(),
         instrument: final_inst.to_string(),
-        // Parquet stores enzyme as "Trypsin" for the tryptic models.
-        enzyme: "Trypsin".to_string(),
+        // Parquet stores the enzyme as its `Enzyme::name()` ("Trypsin", "LysC", ...).
+        enzyme: enzyme.name().to_string(),
         experiment_class,
     }
 }
@@ -3241,6 +3260,7 @@ fn load_param_from_store(
     activation: ActivationMethod,
     instrument: Option<InstrumentType>,
     protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
     custom_store_path: Option<&Path>,
     model_id_override: Option<&str>,
 ) -> Result<(String, Param), Box<dyn std::error::Error>> {
@@ -3254,7 +3274,7 @@ fn load_param_from_store(
         id.to_string()
     } else {
         let entries = store.selection_entries();
-        let key = build_selection_key(activation, instrument, protocol);
+        let key = build_selection_key(activation, instrument, protocol, enzyme);
 
         // Forward-compat: `build_selection_key` collapses instruments with a real
         // family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF) so the

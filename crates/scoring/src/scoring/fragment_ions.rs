@@ -261,11 +261,19 @@ fn emit_loss_ions(
             continue;
         }
         for &loss in losses {
+            let mz = intact_mz - loss / z;
+            // Skip non-physical ions (e.g. a full-glycan loss on a singly-charged
+            // ion drives m/z <= 0). The scoring visitors in `scored_spectrum.rs`
+            // already skip mz <= 0, so emitting them here only creates a
+            // predictor/scorer mismatch.
+            if mz <= 0.0 {
+                continue;
+            }
             out.push(PredictedIon {
                 kind,
                 position,
                 charge,
-                mz: intact_mz - loss / z,
+                mz,
                 loss_class,
             });
         }

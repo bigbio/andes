@@ -139,6 +139,18 @@ impl RankScorer {
                     .push((ion, table.clone()));
             }
         }
+        // `log_table` is a HashMap, so the push order above is non-deterministic.
+        // `loss_node_score` sums these f32 tables and rounds to i32; non-associative
+        // float addition means insertion order can flip the result across runs.
+        // Sort each partition's loss-ion list by a stable IonType key for
+        // reproducible scores.
+        for logs in partition_loss_ion_logs.values_mut() {
+            logs.sort_by_key(|(ion, _)| match *ion {
+                IonType::Prefix { charge, offset_bits, loss_class } => (0u8, charge, offset_bits, loss_class),
+                IonType::Suffix { charge, offset_bits, loss_class } => (1u8, charge, offset_bits, loss_class),
+                IonType::Noise => (2u8, 0, 0, 0),
+            });
+        }
 
         Self {
             param: param.clone(),

@@ -2092,6 +2092,11 @@ pub(crate) fn dedup_pepseq_score(
         let key = DedupMapKey {
             pep: pep_key,
             score: psm.rank_score.round() as i32,
+            // Never merge a target with a reversed-decoy that coincidentally shares
+            // residues+rounded score (palindromic / reversal-coincident peptides):
+            // a merged row would take a +1/-1 Label by heap order, silently
+            // corrupting Percolator's target-decoy competition.
+            is_decoy: candidates[primary as usize].is_decoy,
         };
 
         match groups.entry(key) {
@@ -2146,6 +2151,7 @@ impl PepDedupKey {
 struct DedupMapKey {
     pep: Arc<PepDedupKey>,
     score: i32,
+    is_decoy: bool,
 }
 
 impl PartialOrd for DedupMapKey {
@@ -2161,6 +2167,7 @@ impl Ord for DedupMapKey {
             .cmp(&other.pep.residues)
             .then_with(|| self.pep.mod_units.cmp(&other.pep.mod_units))
             .then(self.score.cmp(&other.score))
+            .then(self.is_decoy.cmp(&other.is_decoy))
     }
 }
 

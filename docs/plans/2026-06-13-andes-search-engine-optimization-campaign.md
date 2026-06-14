@@ -283,6 +283,15 @@ Pacing: each iteration is real compute (search + Percolator = minutes–tens of 
 | **Astral** (LFQ 15min 50ng) | **high-res** | **30,077** | 27,760 | **+8.3%** | andes 1.14% / MF 1.56% |
 | **Astral — chimeric** | high-res | 59,069 | *re-running (dt=3 was wrong)* | *pending* | — |
 
+**Re-bench with the hardened binary (2026-06-14)** — after Phase 1–3 (enzyme digestion+model-selection,
+C1 TMT-mod inject, C2 dedup-is_decoy, CodeRabbit ×3, max_length 40→50, --max-mods, cal=auto default,
+MGF multi-charge), at the fair `max_length 50` vs unchanged MSFragger (dt=0): **andes still wins all
+three, regression-free** — TMT **10,789** vs 9,369 (+15.2%), UPS1 **16,160** vs 14,282 (+13.1%),
+Astral top-1 **30,259** vs 27,760 (+9.0%). Notes: cal-auto **self-gated** (skipped — ~220 confident
+PSMs < threshold, so no effect; the small gains are C2 + max_length); `max_length→50` is regime-split
+(slightly −1.5% on low-res TMT from FDP pressure, +0.6% on high-res Astral) but is the fair MSFragger
+match. The hardening's value is **usability + correctness for zero-config reanalysis**, not raw PSM gain.
+
 ### ✅ WIN CONDITION MET (2026-06-14) — andes beats MSFragger on ALL THREE datasets
 
 At matched 1% true entrapment-FDP, with **own-data-trained models only** (no MS-GF+

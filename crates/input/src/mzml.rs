@@ -429,19 +429,8 @@ impl<R: BufRead> MzMLReader<R> {
         let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array, sb.is_profile)?;
         let scan = extract_scan_from_id(&sb.id);
 
-        // H6: EThcD/ETciD — an electron-transfer term AND a supplemental
-        // collisional term in the SAME activation block. MS-GF+ (and the raw
-        // first-wins logic above) folds these into pure ETD, whose c/z-only
-        // model systematically under-scores the b/y ions that the supplemental
-        // HCD/CID produces. No EThcD model exists, so route to HCD (b/y); the
-        // instrument fallback then picks the right resolution tier
-        // (HCD/LowRes→cid_lowres, HCD/QExactive→hcd_qexactive). Logged once.
-        let activation_method = if sb.act_saw_electron && sb.act_saw_collisional {
-            log_ethcd_once();
-            Some(ActivationMethod::HCD)
-        } else {
-            sb.activation_method
-        };
+        // H6 EThcD/ETciD resolution happens per-`<activation>`-block (on the
+        // block's closing tag), so `sb.activation_method` is already correct here.
 
         Ok(Some(Spectrum {
             title: sb.id,
@@ -451,7 +440,7 @@ impl<R: BufRead> MzMLReader<R> {
             rt_seconds: sb.rt_seconds,
             scan,
             peaks,
-            activation_method,
+            activation_method: sb.activation_method,
             isolation_lower_offset: sb.isolation_lower_offset,
             isolation_upper_offset: sb.isolation_upper_offset,
         }))
@@ -726,6 +715,15 @@ impl<R: BufRead> MzMLReader<R> {
                             // from Spectrum here. The closing tag pops us
                             // back to Spectrum.
                             self.state = State::Activation;
+                            // H6: EThcD/ETciD detection is per-block — an electron AND a
+                            // collisional term must co-occur in the SAME <activation>
+                            // block (supplemental activation), not merely somewhere in the
+                            // spectrum. Reset the flags here so separate activation blocks
+                            // (e.g. CID then ETD across MS stages) don't falsely combine.
+                            if let Some(sb) = self.current.as_mut() {
+                                sb.act_saw_electron = false;
+                                sb.act_saw_collisional = false;
+                            }
                         }
                         b"binaryDataArray" if self.state == State::Spectrum => {
                             self.binary_ctx = Some(BinaryArrayCtx::new());
@@ -826,6 +824,17 @@ impl<R: BufRead> MzMLReader<R> {
                             self.state = State::Spectrum;
                         }
                         b"activation" if self.state == State::Activation => {
+                            // H6: if THIS block carried both an electron-transfer/capture
+                            // term and a supplemental collisional term, it is EThcD/ETciD.
+                            // No EThcD model exists, so route to HCD (b/y) rather than the
+                            // pure-ETD c/z model; the instrument fallback then picks the
+                            // resolution tier. Logged once.
+                            if let Some(sb) = self.current.as_mut() {
+                                if sb.act_saw_electron && sb.act_saw_collisional {
+                                    log_ethcd_once();
+                                    sb.activation_method = Some(ActivationMethod::HCD);
+                                }
+                            }
                             self.state = State::Spectrum;
                         }
                         b"binary" if self.state == State::Binary => {
@@ -2203,6 +2212,61 @@ mod tests {
             .collect();
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::CID));
+    }
+
+    /// H6 regression: an electron term and a collisional term in SEPARATE
+    /// `<activation>` blocks (here CID in precursor 1, ETD in precursor 2) is
+    /// NOT supplemental activation and must NOT be mis-detected as EThcD → HCD.
+    /// Per-block scoping keeps the flags from combining across blocks; the
+    /// result follows the per-cvParam rules (ETD's unconditional precedence),
+    /// never the false-positive HCD.
+    #[test]
+    fn separate_activation_blocks_do_not_falsely_trigger_ethcd() {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        let xml = format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="3"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="2">
+                <precursor>
+                  <selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                  </selectedIon></selectedIonList>
+                  <activation><cvParam accession="MS:1000133" name="CID" value=""/></activation>
+                </precursor>
+                <precursor>
+                  <selectedIonList count="1"><selectedIon>
+                    <cvParam accession="MS:1000744" name="selected ion m/z" value="350.0"/>
+                  </selectedIon></selectedIonList>
+                  <activation><cvParam accession="MS:1000598" name="ETD" value=""/></activation>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        );
+        let wrapped = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <run><spectrumList count="1" defaultDataProcessingRef="dp">
+      {xml}
+  </spectrumList></run>
+</mzML>"#
+        );
+        let spectra: Vec<Spectrum> = MzMLReader::new(Cursor::new(wrapped))
+            .with_ms_level_range(2, 3)
+            .map(|r| r.expect("parse error"))
+            .collect();
+        assert_eq!(spectra.len(), 1);
+        // Must NOT be the false-positive EThcD→HCD; ETD wins per its precedence.
+        assert_ne!(spectra[0].activation_method, Some(ActivationMethod::HCD),
+                   "separate CID + ETD blocks must not be mis-detected as EThcD");
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
     }
 
     /// H6: an electron-transfer term + a collisional term within a SINGLE

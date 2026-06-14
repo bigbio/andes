@@ -153,6 +153,23 @@ impl BinaryArrayCtx {
     }
 }
 
+/// Emit the EThcD→HCD routing notice at most once per process (the detection
+/// fires per-spectrum and would otherwise spam thousands of identical lines).
+fn log_ethcd_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        eprintln!(
+            "INFO: EThcD/ETciD detected (electron-transfer + supplemental collisional \
+             activation) — no EThcD model exists, routing these spectra to the HCD (b/y) \
+             model rather than pure ETD. Pass --fragmentation to override."
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 struct SpectrumBuilder {
     id: String,
@@ -175,6 +192,13 @@ struct SpectrumBuilder {
     /// `None` when no `<activation>` block is present or the term is
     /// unknown.
     activation_method: Option<ActivationMethod>,
+    /// Whether the current `<activation>` block carried an electron-transfer/
+    /// capture term (ETD or ECD). Combined with `act_saw_collisional` this
+    /// detects EThcD/ETciD (supplemental activation) order-independently.
+    act_saw_electron: bool,
+    /// Whether the current `<activation>` block carried a collisional term
+    /// (HCD or CID) — the supplemental half of EThcD/ETciD.
+    act_saw_collisional: bool,
     /// Isolation-window lower offset in Da, from `<isolationWindow>`
     /// `MS:1000828`. `None` when the mzML omits the isolation window.
     isolation_lower_offset: Option<f64>,
@@ -330,6 +354,20 @@ impl<R: BufRead> MzMLReader<R> {
         let peaks = Self::build_peaks(sb.mz_array, sb.intensity_array)?;
         let scan = extract_scan_from_id(&sb.id);
 
+        // H6: EThcD/ETciD — an electron-transfer term AND a supplemental
+        // collisional term in the SAME activation block. MS-GF+ (and the raw
+        // first-wins logic above) folds these into pure ETD, whose c/z-only
+        // model systematically under-scores the b/y ions that the supplemental
+        // HCD/CID produces. No EThcD model exists, so route to HCD (b/y); the
+        // instrument fallback then picks the right resolution tier
+        // (HCD/LowRes→cid_lowres, HCD/QExactive→hcd_qexactive). Logged once.
+        let activation_method = if sb.act_saw_electron && sb.act_saw_collisional {
+            log_ethcd_once();
+            Some(ActivationMethod::HCD)
+        } else {
+            sb.activation_method
+        };
+
         Ok(Some(Spectrum {
             title: sb.id,
             precursor_mz,
@@ -338,7 +376,7 @@ impl<R: BufRead> MzMLReader<R> {
             rt_seconds: sb.rt_seconds,
             scan,
             peaks,
-            activation_method: sb.activation_method,
+            activation_method,
             isolation_lower_offset: sb.isolation_lower_offset,
             isolation_upper_offset: sb.isolation_upper_offset,
         }))
@@ -473,6 +511,7 @@ impl<R: BufRead> MzMLReader<R> {
             // to a CID-trained model.
             CV_CID  if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
+                    sb.act_saw_collisional = true;
                     if sb.activation_method.is_none() {
                         sb.activation_method = Some(ActivationMethod::CID);
                     }
@@ -480,6 +519,7 @@ impl<R: BufRead> MzMLReader<R> {
             }
             CV_HCD  if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
+                    sb.act_saw_collisional = true;
                     if sb.activation_method.is_none() {
                         sb.activation_method = Some(ActivationMethod::HCD);
                     }
@@ -488,12 +528,14 @@ impl<R: BufRead> MzMLReader<R> {
             CV_ETD  if self.state == State::Activation => {
                 // ETD wins unconditionally over other activation methods.
                 if let Some(sb) = self.current.as_mut() {
+                    sb.act_saw_electron = true;
                     sb.activation_method = Some(ActivationMethod::ETD);
                 }
             }
             CV_ECD  if self.state == State::Activation => {
                 // ECD is electron-based — group with ETD for param routing.
                 if let Some(sb) = self.current.as_mut() {
+                    sb.act_saw_electron = true;
                     if sb.activation_method.is_none() {
                         sb.activation_method = Some(ActivationMethod::ETD);
                     }
@@ -1864,6 +1906,71 @@ mod tests {
         assert_eq!(spectra[0].activation_method, None);
     }
 
+    /// Build a spectrum whose single `<activation>` block carries TWO cvParams
+    /// (e.g. ETD + supplemental HCD) — the EThcD/ETciD shape.
+    fn spectrum_xml_with_two_activations(cv1: &str, cv2: &str) -> String {
+        let mz_b64 = encode_f64_b64(&[100.0]);
+        let int_b64 = encode_f64_b64(&[1000.0]);
+        format!(
+            r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
+              <cvParam accession="MS:1000511" name="ms level" value="2"/>
+              <scanList count="1"><scan/></scanList>
+              <precursorList count="1">
+                <precursor>
+                  <selectedIonList count="1">
+                    <selectedIon>
+                      <cvParam accession="MS:1000744" name="selected ion m/z" value="500.5"/>
+                      <cvParam accession="MS:1000041" name="charge state" value="2"/>
+                    </selectedIon>
+                  </selectedIonList>
+                  <activation>
+                    <cvParam accession="{cv1}" name="" value=""/>
+                    <cvParam accession="{cv2}" name="" value=""/>
+                  </activation>
+                </precursor>
+              </precursorList>
+              <binaryDataArrayList count="2">
+                {mz}
+                {int}
+              </binaryDataArrayList>
+            </spectrum>"#,
+            mz  = bda_plain("MS:1000514", &mz_b64),
+            int = bda_plain("MS:1000515", &int_b64),
+        )
+    }
+
+    #[test]
+    fn ethcd_etd_plus_hcd_routes_to_hcd() {
+        // ETD (MS:1000598) + supplemental HCD (MS:1000422) in one block = EThcD.
+        // Order ETD-then-HCD: pure-ETD precedence would mis-route to ETD; the
+        // EThcD detector must override to HCD (b/y model).
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
+            "MS:1000598", "MS:1000422",
+        )));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+    }
+
+    #[test]
+    fn ethcd_detection_is_order_independent() {
+        // HCD-then-ETD: same EThcD shape, reversed cvParam order → still HCD.
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
+            "MS:1000422", "MS:1000598",
+        )));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+    }
+
+    #[test]
+    fn etcid_etd_plus_cid_routes_to_hcd() {
+        // ETciD: ETD (MS:1000598) + supplemental CID (MS:1000133) → HCD (b/y).
+        let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
+            "MS:1000598", "MS:1000133",
+        )));
+        assert_eq!(spectra.len(), 1);
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
+    }
+
     /// SPS-MS3 mzMLs chain `<precursor><activation>` blocks (CID then HCD).
     /// First-wins selection (modulo ETD precedence) routes TMT SPS data to a
     /// CID-trained model.
@@ -1927,13 +2034,17 @@ mod tests {
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::CID));
     }
 
-    /// ETD has unconditional precedence over CID/HCD within a single
-    /// `<activation>` block (PSI-MS activation precedence rule).
+    /// H6: an electron-transfer term + a collisional term within a SINGLE
+    /// `<activation>` block is supplemental activation (EThcD/ETciD), NOT pure
+    /// ETD. MS-GF+ gave ETD unconditional precedence here, which under-scored
+    /// the b/y ions the supplemental collision produces. The detector now
+    /// routes such blocks to HCD (b/y). (CID-then-ETD order; mirror of the
+    /// ETD-then-CID `etcid_*` test → confirms order-independence.)
     #[test]
-    fn etd_precedence_over_other_methods() {
+    fn etd_plus_supplemental_collisional_routes_to_hcd() {
         let mz_b64 = encode_f64_b64(&[100.0]);
         let int_b64 = encode_f64_b64(&[1000.0]);
-        // Activation has CID first, then ETD. ETD must win.
+        // Activation has CID first, then ETD → EThcD/ETciD → HCD.
         let xml = format!(
             r#"<spectrum index="0" id="scan=1" defaultArrayLength="1">
               <cvParam accession="MS:1000511" name="ms level" value="2"/>
@@ -1961,7 +2072,7 @@ mod tests {
         );
         let spectra = collect_ok(&wrap_spectra(&xml));
         assert_eq!(spectra.len(), 1);
-        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
+        assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
     }
 
     // ── Isolation-window parsing ─────────────────────────────────────────────

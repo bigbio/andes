@@ -74,6 +74,13 @@ pub struct SearchParams {
     /// Precursor mass calibration mode (`auto`, `on`, `off`). Default `Off`
     /// (opt-in).
     pub precursor_cal_mode: PrecursorCalMode,
+    /// Minimum number of SpecKeys before the precursor-calibration pre-pass
+    /// runs. Below this, calibration is skipped (a small/targeted run can't
+    /// learn a robust file-wide shift). Default
+    /// [`crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS`] (10_000);
+    /// exposed via `--cal-min-spec-keys` so targeted runs can opt in to
+    /// calibrating with fewer spectra.
+    pub cal_min_spec_keys: usize,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -114,6 +121,7 @@ impl SearchParams {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,
+            cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

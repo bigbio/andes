@@ -147,6 +147,13 @@ struct SearchArgs {
     #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
 
+    /// Minimum SpecKeys before precursor calibration runs (default 10000).
+    /// Lower it to calibrate small/targeted runs that would otherwise be
+    /// skipped; raising it is more conservative. Only consulted when
+    /// `--precursor-cal` is `auto`/`on`.
+    #[arg(long = "cal-min-spec-keys", default_value_t = search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS)]
+    cal_min_spec_keys: usize,
+
     /// Precursor mass tolerance in ppm.
     #[arg(long, default_value = "20.0")]
     precursor_tol_ppm: f64,
@@ -966,11 +973,12 @@ fn run_precursor_calibration(
     let meta = scan_spectrum_metadata(spectrum_path, is_mzml, ms_level, bench_cap)?;
     let spec_keys = build_spec_keys_from_metadata(&meta, params.charge_range.clone(), params.min_peaks);
 
-    if spec_keys.len() < cal_constants::MIN_SPECKEYS_FOR_PREPASS {
+    if spec_keys.len() < params.cal_min_spec_keys {
         eprintln!(
-            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s)",
+            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
+             Lower --cal-min-spec-keys to calibrate smaller/targeted runs.",
             spec_keys.len(),
-            cal_constants::MIN_SPECKEYS_FOR_PREPASS,
+            params.cal_min_spec_keys,
             t_cal.elapsed().as_secs_f64()
         );
         return Ok(CalibrationStats::default());
@@ -1330,6 +1338,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
+    params.cal_min_spec_keys = cli.cal_min_spec_keys;
     params.precursor_mass_shift_ppm = 0.0;
     params.score_mode = match cli.score {
         ScoreFlag::Rank => search::ScoreMode::Rank,

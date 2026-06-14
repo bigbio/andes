@@ -129,7 +129,7 @@ pub fn learn_calibration_stats(
     prepared: &PreparedSearch<'_>,
     main_params: &SearchParams,
 ) -> CalibrationStats {
-    if spec_keys.len() < constants::MIN_SPECKEYS_FOR_PREPASS {
+    if spec_keys.len() < main_params.cal_min_spec_keys {
         return CalibrationStats::default();
     }
 
@@ -432,6 +432,7 @@ mod tests {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Auto,
+            cal_min_spec_keys: constants::MIN_SPECKEYS_FOR_PREPASS,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,

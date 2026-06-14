@@ -41,12 +41,18 @@ fn all_20_match_iupac_compositions() {
 
 #[test]
 fn exotic_residues_absent() {
-    for r in [b'U', b'O', b'B', b'Z', b'J', b'X'] {
+    // Note: `U` (selenocysteine) IS supported — it's a real co-translationally
+    // inserted residue and selenoprotein peptides would otherwise be dropped
+    // (see amino_acid::tests::selenocysteine_u_is_supported). The ambiguity
+    // codes and pyrrolysine (O) remain unsupported.
+    for r in [b'O', b'B', b'Z', b'J', b'X'] {
         assert!(
             AminoAcid::standard(r).is_none(),
             "exotic residue {} unexpectedly present", r as char
         );
     }
+    // U is now a recognized standard residue.
+    assert!(AminoAcid::standard(b'U').is_some(), "selenocysteine (U) must be supported");
 }
 
 #[test]

@@ -96,7 +96,7 @@ impl SearchParams {
             aa_set,
             enzyme: Enzyme::Trypsin,
             min_length: 6,
-            max_length: 40,
+            max_length: 50,
             max_missed_cleavages: 1,
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
@@ -154,7 +154,7 @@ mod tests {
         let params = SearchParams::default_tryptic(aa_set);
         assert_eq!(params.enzyme, Enzyme::Trypsin);
         assert_eq!(params.min_length, 6);
-        assert_eq!(params.max_length, 40);
+        assert_eq!(params.max_length, 50);
         assert_eq!(params.max_missed_cleavages, 1);
         assert_eq!(params.max_variable_mods_per_peptide, 3);
         assert_eq!(*params.charge_range.start(), 2);

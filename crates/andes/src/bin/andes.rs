@@ -131,7 +131,7 @@ struct SearchArgs {
     /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
     /// precursor tolerance for the main search; `auto` skips the correction when
     /// the sample is too small to be reliable.
-    #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
+    #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
 
     /// Precursor mass tolerance in ppm.
@@ -179,9 +179,15 @@ struct SearchArgs {
     #[arg(long, default_value = "6")]
     min_length: u32,
 
-    /// Maximum peptide length, in residues.
-    #[arg(long, default_value = "40")]
+    /// Maximum peptide length, in residues. (50 matches MSFragger/Comet defaults;
+    /// 40 dropped long tryptic peptides.)
+    #[arg(long, default_value = "50")]
     max_length: u32,
+
+    /// Maximum number of variable modifications per peptide. A `NumMods=N` line
+    /// in a --mods file overrides this.
+    #[arg(long = "max-mods", default_value = "3")]
+    max_mods: u32,
 
     /// Path to the .param scoring model file.
     ///
@@ -1252,8 +1258,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.min_peaks = cli.min_peaks;
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;
+    params.max_variable_mods_per_peptide = cli.max_mods;
     if let Some(n) = num_mods_from_file {
-        params.max_variable_mods_per_peptide = n;
+        params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
     params.precursor_mass_shift_ppm = 0.0;

@@ -2098,6 +2098,7 @@ mod tests {
             noise_err_dist_table: FxHashMap::default(),
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
         };
 
         let scorer = RankScorer::new(&param);
@@ -2162,6 +2163,7 @@ mod tests {
             noise_err_dist_table: FxHashMap::default(),
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
         }
     }
 
@@ -2511,6 +2513,7 @@ mod tests {
             noise_err_dist_table,
             ion_existence_table,
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
         };
         param.rebuild_cache();
 
@@ -2728,6 +2731,7 @@ mod precursor_filter_tests {
             noise_err_dist_table: FxHashMap::default(),
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
         }
     }
 
@@ -2794,6 +2798,7 @@ mod precursor_filter_tests {
             noise_err_dist_table: FxHashMap::default(),
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
         }
     }
 

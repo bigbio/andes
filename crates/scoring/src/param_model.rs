@@ -10,6 +10,7 @@ use std::path::Path;
 
 use byteorder::{BigEndian, ReadBytesExt};
 
+use crate::gbdt_eval::GbdtPeakModel;
 use model::activation::ActivationMethod;
 use model::enzyme::Enzyme;
 use model::instrument::InstrumentType;
@@ -43,6 +44,11 @@ pub struct Param {
     /// Call `rebuild_cache()` after manually constructing a `Param` in tests
     /// or any context where the cache was not populated during `load_from_bytes`.
     pub partition_ion_types_cache: FxHashMap<Partition, Vec<IonType>>,
+    /// Optional peptide-agnostic GBDT per-peak signal/noise model. Populated by
+    /// the store reader from the manifest row's `gbdt_model_bytes` blob; `None`
+    /// for legacy stores and for any slug without a trained GBDT (scoring is
+    /// then byte-identical to the pre-GBDT engine).
+    pub gbdt_peak_model: Option<GbdtPeakModel>,
 }
 
 /// Build the per-partition ion-type cache (Noise excluded). Single source of
@@ -436,6 +442,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         noise_err_dist_table,
         ion_existence_table,
         partition_ion_types_cache,
+        gbdt_peak_model: None,
     })
 }
 
@@ -1016,6 +1023,7 @@ mod tests {
             noise_err_dist_table: FxHashMap::default(),
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
         }
     }
 
@@ -1148,6 +1156,12 @@ mod tests {
     }
 
     #[test]
+    fn param_defaults_gbdt_model_to_none() {
+        let p = crate::testutil::tiny_param();
+        assert!(p.gbdt_peak_model.is_none(), "fresh param must carry no GBDT model");
+    }
+
+    #[test]
     fn ion_types_for_segment_returns_unique() {
         use model::activation::ActivationMethod;
         use model::instrument::InstrumentType;
@@ -1191,6 +1205,7 @@ mod tests {
             noise_err_dist_table: FxHashMap::default(),
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
         };
         param.rebuild_cache();
 

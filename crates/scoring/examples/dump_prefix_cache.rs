@@ -28,10 +28,10 @@ const CHARGE: u8 = 2;
 
 fn ion_label(ion: &IonType) -> String {
     match ion {
-        IonType::Prefix { charge, offset_bits } => {
+        IonType::Prefix { charge, offset_bits, .. } => {
             format!("Prefix(c={},off={:.5})", charge, f32::from_bits(*offset_bits))
         }
-        IonType::Suffix { charge, offset_bits } => {
+        IonType::Suffix { charge, offset_bits, .. } => {
             format!("Suffix(c={},off={:.5})", charge, f32::from_bits(*offset_bits))
         }
         IonType::Noise => "Noise".into(),

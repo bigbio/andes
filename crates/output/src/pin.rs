@@ -226,6 +226,10 @@ fn write_header<W: Write>(
         // LongestComplementaryLadder = longest consecutive run of complementary
         // cleavage sites (both b and y matched).
         "LongestComplementaryLadder".to_string(),
+        // ComplementaryIonBalance = Σ over bonds where both b_i and y_{n-i}
+        // matched, weighted by intensity-rank agreement 1/(1+|rank_b−rank_y|)
+        // (ADDITIVE; orthogonal to the run-length ladder above).
+        "ComplementaryIonBalance".to_string(),
         // MeanMatchedIntensityRank = mean intensity-rank of matched ions (lower
         // = matched dominant peaks).
         "MeanMatchedIntensityRank".to_string(),
@@ -487,6 +491,8 @@ fn write_psm_row<W: Write>(
     write!(writer, "\t{}", psm.features.neutral_loss_ion_count)?;
     write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
     writer.write_all(b"\t")?;
+    write_double(writer, psm.features.complementary_ion_balance as f64)?;
+    writer.write_all(b"\t")?;
     write_double(writer, psm.features.mean_matched_intensity_rank as f64)?;
     write!(writer, "\t{}", psm.features.doubly_charged_matched_ion_count)?;
     writer.write_all(b"\t")?;
@@ -705,6 +711,7 @@ mod tests {
         SearchParams {
             aa_set,
             enzyme: model::enzyme::Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
             min_length: 6,
             max_length: 40,
             max_missed_cleavages: 1,
@@ -716,6 +723,7 @@ mod tests {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
+            cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
@@ -768,6 +776,7 @@ mod tests {
             "PpmGaussianScore",
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
+            "ComplementaryIonBalance",
             "MeanMatchedIntensityRank",
             "DoublyChargedMatchedIonCount",
             "UniqueMatchFraction",

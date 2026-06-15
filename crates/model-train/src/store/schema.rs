@@ -197,11 +197,18 @@ pub fn combined_schema() -> SchemaRef {
         nf("ion_kind", DataType::Utf8),        // "prefix"|"suffix"|"noise"|"-"
         nf("ion_charge", DataType::Int32),
         nf("ion_offset_bits", DataType::Int32), // f32::to_bits() as i32; 0 for noise/dist rows
+        // loss_class for rank_dist/stat rows: 0=intact, 1=glyco, 2=phospho, 255=generic.
+        // Absent (null) in old stores → reader defaults to 0 (backward-compatible).
+        nf("ion_loss_class", DataType::Int32),
         nf("table_kind", DataType::Utf8),
         // "rank_dist", "ion_err", "noise_err", "ion_existence", "frag_off" → values
         nf("values", list_of(DataType::Float32)),
         // "precursor_off" → precursor_offsets (full struct)
         nf("precursor_offsets", precursor_off_dt),
+        // Per-entry loss_class list for "frag_off" rows (parallel to the flat values list).
+        // Each entry in the frag_off flat list (stride-4) has a corresponding loss_class here.
+        // Absent/null in old stores → all entries default to loss_class=0 (backward-compatible).
+        nf("frag_off_loss_classes", list_of(DataType::Int32)),
         // ── source-only ─────────────────────────────────────────────────────
         nf("source_id", DataType::Utf8),
         nf("dataset", DataType::Utf8),

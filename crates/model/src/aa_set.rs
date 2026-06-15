@@ -12,7 +12,10 @@ use crate::enzyme::Enzyme;
 use crate::modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 
 const STANDARD_RESIDUES: &[u8] = b"ACDEFGHIKLMNPQRSTVWY";
-const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 1000.0;
+// Upper bound for a single mod's mass delta. Raised from 1000 to 5000 Da to
+// admit intact-glycan mods (common N-glycans run ~900–3500 Da; e.g. A2G2S2 is
+// 2204.77) while still catching gross typos / composition-string mistakes.
+const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 5000.0;
 
 #[derive(Debug, Clone)]
 pub struct AminoAcidSet {
@@ -201,6 +204,8 @@ impl AminoAcidSetBuilder {
             location: ModLocation::Anywhere,
             fixed: true,
             accession: Some("UNIMOD:4".to_string()),
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         Self {
             fixed_mods: vec![cam],
@@ -470,7 +475,7 @@ fn mods_target_same_slot(a: &Modification, b: &Modification) -> bool {
 pub enum AaSetError {
     #[error("conflicting fixed and variable mod for residue {residue:?} at {location:?}")]
     ConflictingMods { residue: char, location: ModLocation },
-    #[error("mod {name:?} mass delta {delta} is implausible (>1000 Da)")]
+    #[error("mod {name:?} mass delta {delta} is implausible (>5000 Da)")]
     ImplausibleMassDelta { name: String, delta: f64 },
     #[error("malformed Mods.txt line {line_no}: {source}")]
     ModsTxtParse { line_no: usize, #[source] source: ModParseError },
@@ -495,6 +500,8 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: true,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -506,6 +513,8 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -566,11 +575,13 @@ mod tests {
     fn implausible_mass_errors() {
         let bad = Modification {
             name: "Bad".to_string(),
-            mass_delta: 1500.0,
+            mass_delta: 8000.0,
             residue: ResidueSpec::Specific(b'C'),
             location: ModLocation::Anywhere,
             fixed: true,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let err = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(bad)
@@ -621,6 +632,8 @@ mod tests {
             location: ModLocation::CTerm,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(cterm_mod)
@@ -706,6 +719,8 @@ mod tests {
             location: ModLocation::NTerm,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(nterm_mod)
@@ -819,6 +834,8 @@ mod tests {
             location: ModLocation::ProtNTerm,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())

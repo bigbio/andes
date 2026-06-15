@@ -46,9 +46,23 @@ pub struct RankScorer {
     /// `(partition, ion)` hash lookup per ion with a plain array walk — on a
     /// PXD001819 search that removes on the order of 200M map probes.
     pub(crate) partition_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>>,
+    /// Per-partition LLR tables for **neutral-loss** ion types only
+    /// (`IonType::is_loss()`), keyed exactly like `partition_ion_logs`. The
+    /// mass-indexed DP hot path (`partition_ion_logs`) is intentionally
+    /// intact-only because a loss ion's m/z shift (`−L/z`) is peptide-specific
+    /// (it comes from the matched peptide's mod, not the model), so loss ions
+    /// must be scored in a peptide-aware pass (`ScoredSpectrum::loss_node_score`)
+    /// rather than the peptide-agnostic cache. Empty for every model without a
+    /// trained loss table (all 39 bundled models) ⇒ no-loss scoring is
+    /// byte-identical to the pre-feature engine.
+    pub(crate) partition_loss_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>>,
     /// Highest observed rank the model distinguishes; ranks beyond this are
     /// clamped down to it before indexing.
     max_rank: u32,
+    /// Optional CLI override for the fragment-matching tolerance (MGF input).
+    /// `None` ⇒ derive from the model's instrument resolution class (the
+    /// historical 20 ppm high-res / 0.5 Da low-res default).
+    fragment_tol_override: Option<model::tolerance::Tolerance>,
 }
 
 impl RankScorer {
@@ -96,6 +110,11 @@ impl RankScorer {
         for (&partition, ions) in &param.partition_ion_types_cache {
             let paired: Vec<(IonType, Vec<f32>)> = ions
                 .iter()
+                // INTACT ONLY: loss ions are excluded from the mass-indexed hot
+                // path (their m/z shift is peptide-specific). This filter makes
+                // the hot path byte-identical even for a model that does carry
+                // loss ion types in its frag-offset cache.
+                .filter(|ion| !ion.is_loss())
                 .filter_map(|&ion| {
                     log_table
                         .get(&(partition, ion))
@@ -105,11 +124,41 @@ impl RankScorer {
             partition_ion_logs.insert(partition, paired);
         }
 
+        // Loss-ion tables, gathered directly from `log_table` (i.e. from
+        // `rank_dist_table`) so a trained loss table is visible to the
+        // peptide-aware loss pass even when no `FragmentOffsetFrequency` entry
+        // exists for it. Keyed by partition; values are the loss `IonType`s with
+        // their per-rank LLR tables.
+        let mut partition_loss_ion_logs: HashMap<Partition, Vec<(IonType, Vec<f32>)>> =
+            HashMap::new();
+        for (&(partition, ion), table) in &log_table {
+            if ion.is_loss() {
+                partition_loss_ion_logs
+                    .entry(partition)
+                    .or_default()
+                    .push((ion, table.clone()));
+            }
+        }
+        // `log_table` is a HashMap, so the push order above is non-deterministic.
+        // `loss_node_score` sums these f32 tables and rounds to i32; non-associative
+        // float addition means insertion order can flip the result across runs.
+        // Sort each partition's loss-ion list by a stable IonType key for
+        // reproducible scores.
+        for logs in partition_loss_ion_logs.values_mut() {
+            logs.sort_by_key(|(ion, _)| match *ion {
+                IonType::Prefix { charge, offset_bits, loss_class } => (0u8, charge, offset_bits, loss_class),
+                IonType::Suffix { charge, offset_bits, loss_class } => (1u8, charge, offset_bits, loss_class),
+                IonType::Noise => (2u8, 0, 0, 0),
+            });
+        }
+
         Self {
             param: param.clone(),
             log_table,
             partition_ion_logs,
+            partition_loss_ion_logs,
             max_rank: param.max_rank as u32,
+            fragment_tol_override: None,
         }
     }
 
@@ -123,6 +172,23 @@ impl RankScorer {
             .unwrap_or(&[])
     }
 
+    /// Borrow the `(IonType, log_table)` pairs for **neutral-loss** ion types in
+    /// `partition`. Used by the peptide-aware loss-scoring pass
+    /// (`ScoredSpectrum::loss_node_score`). Returns an empty slice for any model
+    /// without a trained loss table — i.e. for every standard search.
+    pub fn partition_loss_ion_logs(&self, partition: &Partition) -> &[(IonType, Vec<f32>)] {
+        self.partition_loss_ion_logs
+            .get(partition)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// True if this model carries any trained neutral-loss ion table. When
+    /// false, the peptide-aware loss pass is a no-op (byte-identical scoring).
+    pub fn has_loss_tables(&self) -> bool {
+        !self.partition_loss_ion_logs.is_empty()
+    }
+
     /// Maximum rank used for clamping. Exposed so callers can apply
     /// rank-clamp / missing-ion semantics without going through `node_score`.
     pub fn max_rank(&self) -> u32 {
@@ -132,6 +198,28 @@ impl RankScorer {
     /// Return the `Param` this scorer was built from.
     pub fn param(&self) -> &Param {
         &self.param
+    }
+
+    /// Set (or clear) the CLI fragment-tolerance override. Used by the search
+    /// binary for metadata-less (MGF) input; metadata-bearing input leaves it
+    /// `None` so behavior is byte-identical to auto-detection.
+    pub fn set_fragment_tol_override(&mut self, tol: Option<model::tolerance::Tolerance>) {
+        self.fragment_tol_override = tol;
+    }
+
+    /// Effective fragment-matching tolerance for Percolator-feature and
+    /// peak-match counting. Returns the CLI override when set, else the
+    /// instrument-derived default: 20 ppm for high-resolution analyzers
+    /// (Kim et al., Nat Commun 5:5277, 2014), 0.5 Da for ion-trap low-res.
+    pub fn feature_match_tolerance(&self) -> model::tolerance::Tolerance {
+        use model::tolerance::Tolerance;
+        self.fragment_tol_override.unwrap_or_else(|| {
+            if self.param.data_type.instrument.is_high_resolution() {
+                Tolerance::Ppm(20.0)
+            } else {
+                Tolerance::Da(0.5)
+            }
+        })
     }
 
     /// LLR for a matched ion observed at intensity `rank` (1-based; rank 1 is
@@ -256,12 +344,43 @@ mod tests {
     use super::*;
     use crate::testutil::tiny_param;
 
+    /// Build a minimal low-resolution `Param` (LowRes instrument) for
+    /// `feature_match_tolerance` tests. Reuses `tiny_param()` and patches
+    /// `data_type.instrument` to `InstrumentType::LowRes`.
+    fn low_res_param() -> Param {
+        use model::instrument::InstrumentType;
+        let mut p = tiny_param();
+        p.data_type.instrument = InstrumentType::LowRes;
+        p
+    }
+
+    #[test]
+    fn feature_match_tolerance_defaults_by_resolution() {
+        use model::tolerance::Tolerance;
+        // tiny_param() uses QExactive → high-resolution → 20 ppm
+        let hi = RankScorer::new(&tiny_param());
+        assert_eq!(hi.feature_match_tolerance(), Tolerance::Ppm(20.0));
+        // low_res_param() uses LowRes → 0.5 Da
+        let lo = RankScorer::new(&low_res_param());
+        assert_eq!(lo.feature_match_tolerance(), Tolerance::Da(0.5));
+    }
+
+    #[test]
+    fn feature_match_tolerance_honors_override() {
+        use model::tolerance::Tolerance;
+        let mut s = RankScorer::new(&low_res_param());
+        s.set_fragment_tol_override(Some(Tolerance::Da(0.6)));
+        assert_eq!(s.feature_match_tolerance(), Tolerance::Da(0.6));
+        s.set_fragment_tol_override(None);
+        assert_eq!(s.feature_match_tolerance(), Tolerance::Da(0.5));
+    }
+
     #[test]
     fn node_score_log_formula() {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
 
         // Rank 1 → index 0. chargeOrSeg = min(1, 1) = 1. log(0.6 / (0.1 * 1)) = log(6.0).
         let s1 = scorer.node_score(part, ion, 1);
@@ -277,7 +396,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
 
         // rank > max_rank clamps to rank_index = max_rank - 1.
         // max_rank = 3 → rank_index = 2 → log(0.05 / 0.3).
@@ -291,7 +410,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
 
         // missing slot = index `maxRank` = 3 (the last entry in length-4 array).
         // log(0.001 / 0.4) = log(0.0025).
@@ -307,7 +426,7 @@ mod tests {
         // Verify the log score uses 1 (not 3).
         let mut param = tiny_param();
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion3 = IonType::Prefix { charge: 3, offset_bits: 0.0_f32.to_bits() };
+        let ion3 = IonType::Prefix { charge: 3, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
         param.rank_dist_table.get_mut(&part).unwrap().insert(ion3, ion_freqs);
 
@@ -322,10 +441,41 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let unknown = Partition { charge: 99, parent_mass: 0.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         // Out-of-table partition → return 0 (neutral score).
         assert_eq!(scorer.node_score(unknown, ion, 1), 0.0);
         assert_eq!(scorer.missing_ion_score(unknown, ion), 0.0);
+    }
+
+    #[test]
+    fn loss_ions_routed_to_loss_logs_not_intact_path() {
+        // A model carrying a loss-class ion type must expose it ONLY through
+        // partition_loss_ion_logs; the intact hot path must filter it out so
+        // the mass-indexed DP stays peptide-agnostic and intact-only.
+        let mut param = tiny_param();
+        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+        let intact = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let loss = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
+        // Give the loss ion a rank distribution (so it gets an LLR table).
+        param
+            .rank_dist_table
+            .get_mut(&part)
+            .unwrap()
+            .insert(loss, vec![0.6_f32, 0.3, 0.05, 0.001]);
+        // Populate the ion-type cache with BOTH so we can prove the intact path
+        // filters the loss ion out (an empty cache would pass trivially).
+        param.partition_ion_types_cache.insert(part, vec![intact, loss]);
+
+        let scorer = RankScorer::new(&param);
+
+        // Hot path: intact only.
+        assert!(scorer.partition_ion_logs(&part).iter().all(|(ion, _)| !ion.is_loss()));
+        assert!(scorer.partition_ion_logs(&part).iter().any(|(ion, _)| *ion == intact));
+        // Loss path: carries the loss ion.
+        assert!(scorer.has_loss_tables());
+        assert!(scorer.partition_loss_ion_logs(&part).iter().any(|(ion, _)| *ion == loss));
+        // A standard model has no loss tables.
+        assert!(!RankScorer::new(&tiny_param()).has_loss_tables());
     }
 
     #[test]
@@ -333,7 +483,7 @@ mod tests {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
         let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let unknown_ion = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let unknown_ion = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         // Suffix isn't in the table → return 0.
         assert_eq!(scorer.node_score(part, unknown_ion, 1), 0.0);
     }

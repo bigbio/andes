@@ -62,6 +62,7 @@ fn one_partition_template(max_rank: i32) -> Param {
         noise_err_dist_table: FxHashMap::default(),
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
     };
     p.rebuild_cache();
     p

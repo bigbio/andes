@@ -55,7 +55,7 @@ pub struct Tree {
 
 impl Tree {
     /// Sum of the leaf value reached for `x`.
-    fn eval(&self, x: &[f32]) -> f32 {
+    pub fn eval(&self, x: &[f32]) -> f32 {
         // Assumes a structurally-validated tree (see `Tree::validate`, enforced
         // by `from_bytes`): feature/child arrays are consistent and internal
         // children are valid in-range indices, so direct indexing cannot panic

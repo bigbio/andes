@@ -76,12 +76,12 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | `--instrument` | enum | `low-res` | Instrument class for bundled model resolution. Named: `low-res`, `high-res`, `TOF`, `QExactive`. | Java `-inst`; numeric `0`=low-res, `1`=high-res, `2`=TOF, `3`=QExactive |
 | `--protocol` | enum | `auto` | Search protocol suffix for bundled model resolution. Named: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
 | `--param-file` | path | *(auto)* | Explicit path to a `.param` scoring model file. When set, overrides all auto-detection and bundled resolution. Required when running a release binary outside the source tree if bundled resources are not present. | Java `-conf` / model path |
-| `--model-store` | path | *(bundled)* | Path to a Parquet model store to use instead of the bundled `resources/ionstat/models.parquet`. Model selection reads from this store when set. | *(no Java equivalent)* |
+| `--model-store` | path | *(bundled)* | Path to a Parquet model store to use instead of the bundled `resources/models.parquet`. Model selection reads from this store when set. | *(no Java equivalent)* |
 | `--model` | string | *(auto-select)* | Exact model ID to load from the model store, skipping automatic selection by `(--fragmentation, --instrument, --protocol)`. Useful for searching with a freshly-trained model (see `andes train`). | *(no Java equivalent)* |
 
 **Bundled default when all scoring flags are at their defaults** (`--fragmentation auto --instrument low-res --protocol auto`): `hcd_qexactive_tryp` (from the parquet model store). This preserves pre-auto-detect behaviour for MGF inputs and mzML files without activation metadata.
 
-**Model selection** (when `--param-file` is not set, resolved from `resources/ionstat/models.parquet`):
+**Model selection** (when `--param-file` is not set, resolved from `resources/models.parquet`):
 
 1. Build a selection key: `{Frag}_{Inst}_Trypsin` with optional protocol experiment class (e.g. `tmt`).
 2. Exact match on the key → use that model.
@@ -313,10 +313,10 @@ timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes 
 | FT-ICR | `MS:1000480` (FT) | `high-res` |
 | TOF | `MS:1000128` | `TOF` |
 
-### Bundled model store (`resources/ionstat/models.parquet`)
+### Bundled model store (`resources/models.parquet`)
 
 All 39 scoring models ship with the binary as a single Parquet model store
-(`resources/ionstat/models.parquet`). The store covers the full
+(`resources/models.parquet`). The store covers the full
 fragmentation × instrument × protocol matrix (CID/ETD/HCD/UVPD ×
 LowRes/HighRes/TOF/QExactive × Trypsin, with protocol variants for Phospho, TMT,
 iTRAQ, iTRAQPhospho).
@@ -411,7 +411,7 @@ andes --spectrum more.mzML --database mydata.fasta --output-pin out.pin \
 
 See **[`TRAIN.md`](TRAIN.md)** for the full guide: where to get training data, the experiment-class catalog, incremental training (`--update --add` / `--remove-source` / `--reweight` / `--decay`), and how to evaluate a candidate model on held-out data before committing it.
 
-andes ships its own model store at `resources/ionstat/models.parquet`, containing all 39 bundled scoring models. The `--param-file` flag can additionally load an external binary model file directly for custom or externally supplied models.
+andes ships its own model store at `resources/models.parquet`, containing all 39 bundled scoring models. The `--param-file` flag can additionally load an external binary model file directly for custom or externally supplied models.
 
 ---
 

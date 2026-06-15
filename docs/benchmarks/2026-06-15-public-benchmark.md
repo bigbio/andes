@@ -83,7 +83,7 @@ charge 2–4; isotope error −1…+2; FDR 1% via Percolator 3.7.1 (`--seed 42 -
   protein-level comparison needs uniform parsimony grouping, since raw
   `proteinIds` lists differ by engine output format (e.g. ungrouped accession
   lists inflate the unique count well past the peptide count).
-- **Models:** the bundled `resources/ionstat/models.parquet`, which is MS-GF+-derived and **in transition** to independent retraining (see `NOTICE`). The numbers here are the in-transition-models numbers.
+- **Models:** the bundled `resources/models.parquet`, which is MS-GF+-derived and **in transition** to independent retraining (see `NOTICE`). The numbers here are the in-transition-models numbers.
 - **Precursor calibration** is off (the andes default).
 
 ## Reproduce

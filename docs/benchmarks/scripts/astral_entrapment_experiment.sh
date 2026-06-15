@@ -8,7 +8,7 @@
 set -uo pipefail
 B=/srv/data/msgf-bench
 A=$B/repo/msgf-rust/target/release/andes
-SMODEL=$B/repo/msgf-rust/resources/ionstat/models.parquet
+SMODEL=$B/repo/msgf-rust/resources/models.parquet
 MODS=$B/astral_mods_rust.txt
 MZ=$B/astral-data/LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.mzML
 ENTDB=$B/astral-data/ASTRAL_entrapment.fasta

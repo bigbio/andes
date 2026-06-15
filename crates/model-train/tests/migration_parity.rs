@@ -8,7 +8,7 @@ fn every_bundled_model_round_trips_via_store() {
     let store_path = dir.path().join("models.parquet");
 
     // Migrate the local test fixtures (3 representative .param files) instead of
-    // the full resources/ionstat directory (which no longer ships .param files —
+    // the full legacy param directory (which no longer ships .param files —
     // models are now bundled in a single resources/models.parquet store).
     let fixtures = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
 

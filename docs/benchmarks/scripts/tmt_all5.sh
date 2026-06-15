@@ -8,7 +8,7 @@ REPO=$BENCH/repo/msgf-rust
 # Binary renamed to andes; fall back to the old cimas/simas names on pre-rename checkouts.
 ANDES="${ANDES:-$REPO/target/release/andes}"; [ -x "$ANDES" ] || ANDES="$REPO/target/release/cimas"; [ -x "$ANDES" ] || ANDES="$REPO/target/release/simas"
 SIMAS=$ANDES
-SMODEL=$BENCH/repo/msgf-rust/resources/ionstat/models.parquet
+SMODEL=$BENCH/repo/msgf-rust/resources/models.parquet
 JAR=$BENCH/MSGFPlus_v20240326.jar
 FRAGGER=$BENCH/engines/the reference engine-env/share/the reference engine-4.2-0/the reference engine-4.2/the reference engine-4.2.jar
 a comparison search engine=$BENCH/engines/a comparison search engine-v0.14.7-x86_64-unknown-linux-gnu/a comparison search engine

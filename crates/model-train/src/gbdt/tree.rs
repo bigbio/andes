@@ -281,7 +281,7 @@ mod tests {
         let hess = vec![1.0_f32; n];
         for r in 0..n {
             let hi = r % 2 == 0;
-            binned[r * n_features + 0] = if hi { 3 } else { 0 }; // feature 0 separates
+            binned[r * n_features] = if hi { 3 } else { 0 }; // feature 0 separates
             binned[r * n_features + 1] = (r % n_bins) as u8; // feature 1 noise
             grad[r] = if hi { -1.0 } else { 1.0 }; // opposite gradients
         }

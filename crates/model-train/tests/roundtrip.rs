@@ -1,4 +1,6 @@
-use model_train::store::{write_models, write_models_with_gbdt, ModelStore};
+use model_train::store::{write_models, write_models_with_gbdt, write_all_models_with_sources_and_gbdt_pub, ModelStore};
+use model_train::store::SourceLedger;
+use model_train::counts::CountStats;
 use rustc_hash::FxHashMap;
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
 use model::activation::ActivationMethod;
@@ -257,4 +259,96 @@ fn old_store_without_loss_class_reads_as_zero() {
             }
         }
     }
+}
+
+/// Multi-model write with per-model GBDT blobs must round-trip correctly:
+/// - model A has a GBDT blob → loaded param has Some(gbdt_peak_model)
+/// - model B has no blob → loaded param has None
+/// - both models' source ledgers are preserved
+/// - both models can be loaded after write
+#[test]
+fn multi_model_write_preserves_blobs_and_sources() {
+    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+
+    // Build a minimal GbdtPeakModel and serialise it to bytes (same as A2.4 test).
+    let model = GbdtPeakModel {
+        n_features: 1,
+        apply_sigmoid: true,
+        trees: vec![Tree {
+            feature: vec![0, -1, -1],
+            threshold: vec![0.5, 0.0, 0.0],
+            left: vec![1, -1, -1],
+            right: vec![2, -1, -1],
+            value: vec![0.0, -1.0, 2.0],
+            default_left: vec![1, 1, 1],
+        }],
+        iso_x: vec![0.0, 1.0],
+        iso_y: vec![0.0, 1.0],
+    };
+    let blob_a = model.to_bytes();
+
+    let param_a = param_with_loss_ions(); // model A: will get GBDT blob
+    let param_b = fixture();              // model B: no GBDT blob
+
+    // Build a minimal SourceLedger + empty CountStats for each model.
+    let make_ledger = |id: &str| SourceLedger {
+        source_id: id.to_string(),
+        dataset: format!("dataset_{id}"),
+        n_psms: 42,
+        date: "2026-01-01".to_string(),
+        weight: 1.0,
+        train_fdr: 0.01,
+        instrument: "QExactive".to_string(),
+        experiment_class: "standard".to_string(),
+    };
+    let sources_a: Vec<(SourceLedger, CountStats)> = vec![(make_ledger("src_a"), CountStats::new())];
+    let sources_b: Vec<(SourceLedger, CountStats)> = vec![(make_ledger("src_b"), CountStats::new())];
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("multi_blob.parquet");
+
+    // Write both models in one call via the new function.
+    let models = &[
+        ("model_a", &param_a, sources_a.as_slice()),
+        ("model_b", &param_b, sources_b.as_slice()),
+    ];
+    let blobs: &[Option<Vec<u8>>] = &[
+        Some(blob_a.clone()), // model A has a GBDT blob
+        None,                 // model B has no blob
+    ];
+    write_all_models_with_sources_and_gbdt_pub(&store_path, models, blobs)
+        .expect("write_all_models_with_sources_and_gbdt_pub failed");
+
+    // --- Round-trip assertions ---
+    let store = ModelStore::open(&store_path).unwrap();
+    let ids = store.model_ids();
+    assert_eq!(ids.len(), 2, "must have 2 models; got {:?}", ids);
+    assert!(ids.contains(&"model_a".to_string()), "model_a missing");
+    assert!(ids.contains(&"model_b".to_string()), "model_b missing");
+
+    // model A: blob present + correct prediction
+    let loaded_a = store.load_param("model_a").expect("load model_a");
+    let gm_a = loaded_a.gbdt_peak_model
+        .expect("model_a must have gbdt_peak_model after round-trip");
+    let logit = gm_a.predict_logit(&[1.0]);
+    assert!(
+        (logit - 2.0).abs() < 1e-4,
+        "model_a: predict_logit([1.0]) expected ≈ 2.0, got {logit}"
+    );
+
+    // model B: no blob
+    let loaded_b = store.load_param("model_b").expect("load model_b");
+    assert!(
+        loaded_b.gbdt_peak_model.is_none(),
+        "model_b must have no gbdt_peak_model"
+    );
+
+    // Both models' source ledgers survived.
+    let ledgers_a = store.load_sources("model_a").expect("load_sources model_a");
+    assert_eq!(ledgers_a.len(), 1, "model_a must have 1 source ledger");
+    assert_eq!(ledgers_a[0].source_id, "src_a");
+
+    let ledgers_b = store.load_sources("model_b").expect("load_sources model_b");
+    assert_eq!(ledgers_b.len(), 1, "model_b must have 1 source ledger");
+    assert_eq!(ledgers_b[0].source_id, "src_b");
 }

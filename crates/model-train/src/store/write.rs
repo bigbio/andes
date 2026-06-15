@@ -148,17 +148,21 @@ fn write_models_inner(
 /// Writes manifest + table rows for `param` (same as [`write_models`] for one
 /// model) plus `"source"` (ledger) and `"stat"` (CountStats) rows for each
 /// entry in `sources`.  `sources` may be empty.
+///
+/// `gbdt_blob` is an optional GBDT model blob (`AGBD` bytes) to embed on the
+/// manifest row. Pass `None` to omit (legacy/rank-core-only models).
 pub fn write_model_with_sources(
     path: &Path,
     model_id: &str,
     param: &Param,
     sources: &[(SourceLedger, CountStats)],
+    gbdt_blob: Option<Vec<u8>>,
 ) -> Result<(), TrainError> {
     let schema = combined_schema();
     let sorted: Vec<(&str, &Param)> = vec![(model_id, param)];
-    let no_blobs: Vec<Option<Vec<u8>>> = vec![None];
+    let blobs: Vec<Option<Vec<u8>>> = vec![gbdt_blob];
 
-    let manifest_batch = build_manifest_batch(&schema, &sorted, &no_blobs)?;
+    let manifest_batch = build_manifest_batch(&schema, &sorted, &blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
     let props = WriterProperties::builder().build();

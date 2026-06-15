@@ -179,6 +179,11 @@ pub struct ScoredSpectrum<'a> {
     ///   per edge × 9 edges × 16M candidates ≈ 290M times per Astral spectrum,
     ///   repeatedly for the same `node_nominal` values.
     observed_mass_cache: std::cell::RefCell<Vec<f64>>,
+    /// Per-rank GBDT signal/noise LLR term `log(s/(1-s))`. Index = intensity
+    /// rank (1-based); `gbdt_logit_by_rank[r]` is the term for the active peak
+    /// whose rank is `r`. Empty when the model carries no GBDT (then the term
+    /// is never added and scoring is byte-identical). Index 0 is unused.
+    gbdt_logit_by_rank: Vec<f32>,
 }
 
 /// Parsed `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` override for the windowed
@@ -411,6 +416,37 @@ impl<'a> ScoredSpectrum<'a> {
                 (Some(dp), Some(dr)) => (dp.as_slice(), dr.as_slice()),
                 _ => (spec.peaks.as_slice(), ranks.as_slice()),
             };
+
+        // Per-peak GBDT signal/noise logit, computed ONCE over the active peak
+        // list and indexed by intensity rank so the cache-fill loop and the
+        // fallback path can add it per matched ion. Empty (no-op) when the
+        // model has no GBDT — preserving byte-identical scoring.
+        let gbdt_logit_by_rank: Vec<f32> = match param.gbdt_peak_model.as_ref() {
+            None => Vec::new(),
+            Some(model) => {
+                use crate::peak_features::{extract_peak_features, PeakFeatureCtx};
+                let max_r = cache_ranks.iter().copied().filter(|&r| r != u32::MAX).max().unwrap_or(0);
+                let mut by_rank = vec![0.0_f32; (max_r as usize) + 1];
+                let base_peak_intensity = cache_peaks.iter().map(|&(_, i)| i).fold(0.0_f32, f32::max);
+                let ctx = PeakFeatureCtx {
+                    precursor_mz: spec.precursor_mz,
+                    charge,
+                    parent_neutral_mass: parent_mass,
+                    total_intensity,
+                    base_peak_intensity,
+                    window_da: crate::peak_features::FEATURE_WINDOW_DA,
+                    match_tol_da: param.mme.as_da(parent_mass.max(1.0)),
+                };
+                let feats = extract_peak_features(cache_peaks, cache_ranks, &ctx);
+                for (i, &r) in cache_ranks.iter().enumerate() {
+                    if r != u32::MAX && (r as usize) < by_rank.len() {
+                        by_rank[r as usize] = model.predict_logit(&feats[i]);
+                    }
+                }
+                by_rank
+            }
+        };
+
         for nominal_mass in 1..cache_len {
             let node_nominal = nominal_mass as f64;
             prefix_score_cache[nominal_mass] = Self::directional_node_score_inner(
@@ -422,6 +458,7 @@ impl<'a> ScoredSpectrum<'a> {
                 true,
                 charge,
                 parent_mass,
+                &gbdt_logit_by_rank,
             );
             suffix_score_cache[nominal_mass] = Self::directional_node_score_inner(
                 cache_peaks,
@@ -432,6 +469,7 @@ impl<'a> ScoredSpectrum<'a> {
                 false,
                 charge,
                 parent_mass,
+                &gbdt_logit_by_rank,
             );
         }
 
@@ -459,6 +497,7 @@ impl<'a> ScoredSpectrum<'a> {
             deconv_peaks,
             deconv_ranks,
             observed_mass_cache,
+            gbdt_logit_by_rank,
         }
     }
 
@@ -542,6 +581,9 @@ impl<'a> ScoredSpectrum<'a> {
             // Empty cache for test fixtures (rank_kept path). All
             // observed_node_mass queries fall through to compute on every call.
             observed_mass_cache: std::cell::RefCell::new(Vec::new()),
+            // No GBDT term in the rank_kept / new_without_filtering path
+            // (no scorer in scope). Empty vec → byte-identical no-model scoring.
+            gbdt_logit_by_rank: Vec::new(),
         }
     }
 
@@ -833,6 +875,7 @@ impl<'a> ScoredSpectrum<'a> {
             is_prefix,
             charge,
             parent_mass,
+            &self.gbdt_logit_by_rank,
         )
     }
 
@@ -846,6 +889,7 @@ impl<'a> ScoredSpectrum<'a> {
         is_prefix: bool,
         charge: u8,
         parent_mass: f64,
+        gbdt_logit_by_rank: &[f32],
     ) -> f32 {
         let max_rank = scorer.max_rank();
         let max_rank_idx = max_rank as usize;
@@ -864,7 +908,11 @@ impl<'a> ScoredSpectrum<'a> {
                 let score = match rank {
                     Some(rank) => {
                         let idx = rank.min(max_rank).max(1) as usize - 1;
-                        if idx < logs.len() { logs[idx] } else { 0.0 }
+                        let base = if idx < logs.len() { logs[idx] } else { 0.0 };
+                        // Additive per-peak GBDT term for the MATCHED peak.
+                        // Empty slice (no model) adds nothing → byte-identical.
+                        let gbdt = gbdt_logit_by_rank.get(rank as usize).copied().unwrap_or(0.0);
+                        base + gbdt
                     }
                     None => {
                         if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 }
@@ -2678,6 +2726,99 @@ mod tests {
                 "binary search and linear scan differ at target {target}"
             );
         }
+    }
+
+    /// Additive GBDT term: when a `GbdtPeakModel` is present in `Param`, the
+    /// per-rank logit is summed into matched-ion scores. With a single-leaf
+    /// tree that returns +4.0 for every peak and `apply_sigmoid=true`,
+    /// `sigmoid(4) ≈ 0.982 → logit ≈ 4.0`, so a matched peak scores ~4 higher
+    /// than with no model. The parity side: same spectrum + no model → unchanged.
+    #[test]
+    fn gbdt_term_raises_node_score_for_signal_peak() {
+        use crate::gbdt_eval::{GbdtPeakModel, Tree};
+        use model::mass::INTEGER_MASS_SCALER;
+
+        // Build a GbdtPeakModel with a single constant-output leaf (value=4.0)
+        // and no isotonic calibration (empty iso_x/iso_y → identity).
+        // apply_sigmoid=true: sigmoid(4) ≈ 0.982 → logit ≈ 4.0 → bump ≈ +4.0.
+        let gbdt = GbdtPeakModel {
+            n_features: 1,
+            apply_sigmoid: true,
+            trees: vec![Tree {
+                feature: vec![-1],      // leaf — no split needed
+                threshold: vec![0.0],
+                left: vec![-1],
+                right: vec![-1],
+                value: vec![4.0],
+                default_left: vec![1],
+            }],
+            iso_x: vec![],
+            iso_y: vec![],
+        };
+
+        // Use tiny_param_with_ions: partition (charge=2, parent_mass=1000.0).
+        // Construct precursor_mz so parent_mass ≈ 1000.0.
+        // precursor_mz = (1000.0 + 2*PROTON) / 2
+        const PROTON_F64: f64 = 1.007_276_49;
+        let nominal = 100.0_f64;
+        // b1 ion: IonType::Prefix(charge=1, offset=0) → mz = nominal / INTEGER_MASS_SCALER
+        let b1_mz = nominal / INTEGER_MASS_SCALER as f64;
+        let precursor_mz = (1000.0 + 2.0 * PROTON_F64) / 2.0;
+
+        // Single peak exactly at the b1 m/z so it matches under Da(0.5) tolerance.
+        let peaks_vec = vec![(b1_mz, 1000.0_f32)];
+        let spec_plain = Spectrum {
+            title: "gbdt_test".into(),
+            precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks: peaks_vec.clone(),
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+
+        // --- Baseline: no GBDT model ---
+        let param_plain = tiny_param_with_ions();
+        let scorer_plain = RankScorer::new(&param_plain);
+        let s_plain = ScoredSpectrum::new(&spec_plain, &scorer_plain, 2);
+        let parent_mass_plain = s_plain.parent_mass;
+        let base = s_plain.directional_node_score(
+            nominal, true, &scorer_plain, 2, parent_mass_plain, 0.5,
+        );
+
+        // --- With GBDT model (+4 logit for every peak) ---
+        let mut param_gbdt = tiny_param_with_ions();
+        param_gbdt.gbdt_peak_model = Some(gbdt);
+        let scorer_gbdt = RankScorer::new(&param_gbdt);
+        let spec_gbdt = Spectrum {
+            title: "gbdt_test".into(),
+            precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks: peaks_vec,
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+        let s_gbdt = ScoredSpectrum::new(&spec_gbdt, &scorer_gbdt, 2);
+        let parent_mass_gbdt = s_gbdt.parent_mass;
+        let with = s_gbdt.directional_node_score(
+            nominal, true, &scorer_gbdt, 2, parent_mass_gbdt, 0.5,
+        );
+
+        // The GBDT logit for sigmoid(4) ≈ 0.982 → logit(0.982) ≈ 4.0.
+        // So `with` must exceed `base` by at least 3.0 (generous, accounts for
+        // clamping/sigmoid rounding). If the peak did NOT match, `with == base`
+        // and the assertion fails — which catches a broken matching setup.
+        assert!(
+            with > base + 3.0,
+            "expected GBDT bump ≥ 3.0: base={base}, with={with}"
+        );
     }
 }
 

@@ -59,7 +59,7 @@ fn integer_mass_scaler_matches_residue_table_mean() {
     ];
     let mut sum = 0.0f64;
     for &(c, h, n, o, s, mono) in compositions {
-        let nominal = (c * 12 + h * 1 + n * 14 + o * 16 + s * 32) as f64;
+        let nominal = (c * 12 + h + n * 14 + o * 16 + s * 32) as f64;
         sum += nominal / mono;
     }
     let mean = sum / compositions.len() as f64;

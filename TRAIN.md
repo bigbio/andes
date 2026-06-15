@@ -1,7 +1,7 @@
 # Training scoring models with andes
 
 andes can **generate its own scoring models** from your data and store them in a single
-Parquet model store (`resources/ionstat/models.parquet` by default). This guide covers training a
+Parquet model store (`resources/models.parquet` by default). This guide covers training a
 model from scratch, where to get training data, the experiment-class catalog, incremental
 updates, and how a model is selected at search time.
 

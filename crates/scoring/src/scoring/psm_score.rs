@@ -496,7 +496,7 @@ mod tests {
     /// for loss-bearing peptides, and is byte-identical for non-loss peptides.
     #[test]
     fn score_psm_adds_neutral_loss_contribution_and_is_inert_otherwise() {
-        let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
+        let _part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
         let loss_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
 
         // Loss peptide T*WW: at split s=2 the prefix {T*,W} spans the loss

@@ -12,13 +12,13 @@ use scoring_crate::param_model::Param;
 use crate::store::write::write_models;
 use crate::TrainError;
 
-/// Migrate all `*.param` files in `ionstat` into a single Parquet store at
-/// `out`.  Returns a `Vec<(model_id, source_path)>` for every migrated file.
+/// Migrate a directory of legacy `.param` files into a combined Parquet store
+/// at `out`.  Returns a `Vec<(model_id, source_path)>` for every migrated file.
 ///
 /// The files are processed in sorted (by filename) order for determinism.
-pub fn migrate_dir(ionstat: &Path, out: &Path) -> Result<Vec<(String, PathBuf)>, TrainError> {
+pub fn migrate_dir(param_dir: &Path, out: &Path) -> Result<Vec<(String, PathBuf)>, TrainError> {
     // Collect all *.param files, sorted by file name for determinism.
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(ionstat)?
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(param_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("param"))
@@ -28,7 +28,7 @@ pub fn migrate_dir(ionstat: &Path, out: &Path) -> Result<Vec<(String, PathBuf)>,
     if entries.is_empty() {
         return Err(TrainError::Other(format!(
             "no *.param files found in {}",
-            ionstat.display()
+            param_dir.display()
         )));
     }
 

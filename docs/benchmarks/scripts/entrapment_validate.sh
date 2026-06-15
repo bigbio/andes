@@ -7,7 +7,7 @@ MODS=/srv/data/msgf-bench/astral_mods_rust.txt
 # Binary renamed to andes; fall back to the old cimas/simas names on pre-rename checkouts.
 REPO=/srv/data/msgf-bench/repo/msgf-rust
 B="${ANDES:-$REPO/target/release/andes}"; [ -x "$B" ] || B="$REPO/target/release/cimas"; [ -x "$B" ] || B="$REPO/target/release/simas"
-M=/srv/data/msgf-bench/repo/msgf-rust/resources/ionstat/models.parquet
+M=/srv/data/msgf-bench/repo/msgf-rust/resources/models.parquet
 RES=/srv/data/msgf-bench/repo/bench-entrapment; mkdir -p $RES
 PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
 export DOTNET_ROOT=/opt/dotnet8; export PATH=/opt/dotnet8:$PATH

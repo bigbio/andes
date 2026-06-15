@@ -116,13 +116,13 @@ fn resolve_for_activation_old(
     resolve_bundled_param_old(frag, inst, protocol)
 }
 
-/// Build a path under resources/ionstat for a given filename WITHOUT requiring
+/// Build a path under resources/legacy-params for a given filename WITHOUT requiring
 /// the file to exist on disk. Used only to derive the lowercased stem for
 /// comparison with the parquet store's model IDs — the .param files themselves
 /// are no longer shipped on disk (they live in models.parquet).
 fn canonicalize_bundled(filename: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/ionstat")
+        .join("../../resources/legacy-params")
         .join(filename)
 }
 

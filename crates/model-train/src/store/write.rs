@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanBuilder, Float32Builder, Int32Builder, Int64Builder,
+    ArrayRef, BinaryBuilder, BooleanBuilder, Float32Builder, Int32Builder, Int64Builder,
     ListBuilder, StringArray, StringBuilder,
     StructBuilder,
 };
@@ -71,6 +71,28 @@ fn f32_to_i32_bits(v: f32) -> i32 {
 /// Rows are sorted by `model_id` within each record kind (manifest first,
 /// then table rows).
 pub fn write_models(path: &Path, models: &[(String, &Param)]) -> Result<(), TrainError> {
+    let plain: Vec<(&str, &Param)> = models.iter().map(|(id, p)| (id.as_str(), *p)).collect();
+    let blobs: Vec<Option<Vec<u8>>> = vec![None; models.len()];
+    write_models_inner(path, &plain, &blobs)
+}
+
+/// Like [`write_models`], but each model may carry a transcoded GBDT blob
+/// (`AGBD` bytes) stored on its manifest row. `None` ⇒ null column (legacy).
+pub fn write_models_with_gbdt(
+    path: &Path,
+    models: &[(&str, &Param, Option<Vec<u8>>)],
+) -> Result<(), TrainError> {
+    let plain: Vec<(&str, &Param)> = models.iter().map(|(id, p, _)| (*id, *p)).collect();
+    let blobs: Vec<Option<Vec<u8>>> = models.iter().map(|(_, _, b)| b.clone()).collect();
+    write_models_inner(path, &plain, &blobs)
+}
+
+fn write_models_inner(
+    path: &Path,
+    models: &[(&str, &Param)],
+    blobs: &[Option<Vec<u8>>],
+) -> Result<(), TrainError> {
+    debug_assert_eq!(blobs.len(), models.len(), "blobs slice must be 1:1 with models");
     // Delegate to write_model_with_sources with no source data.
     if models.is_empty() {
         let schema = combined_schema();
@@ -84,12 +106,21 @@ pub fn write_models(path: &Path, models: &[(String, &Param)]) -> Result<(), Trai
 
     let schema = combined_schema();
 
-    // Sort by model_id for deterministic output.
-    let mut sorted: Vec<(&str, &Param)> = models.iter().map(|(id, p)| (id.as_str(), *p)).collect();
-    sorted.sort_by_key(|(id, _)| *id);
+    // Sort by model_id for deterministic output, keeping blobs aligned.
+    let mut indexed: Vec<(usize, &str, &Param)> = models
+        .iter()
+        .enumerate()
+        .map(|(i, (id, p))| (i, *id, *p))
+        .collect();
+    indexed.sort_by_key(|(_, id, _)| *id);
+    let sorted: Vec<(&str, &Param)> = indexed.iter().map(|(_, id, p)| (*id, *p)).collect();
+    let sorted_blobs: Vec<Option<Vec<u8>>> = indexed
+        .iter()
+        .map(|(i, _, _)| blobs.get(*i).cloned().flatten())
+        .collect();
 
     // Build manifest rows + table rows.
-    let manifest_batch = build_manifest_batch(&schema, &sorted)?;
+    let manifest_batch = build_manifest_batch(&schema, &sorted, &sorted_blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
     let props = WriterProperties::builder().build();
@@ -125,8 +156,9 @@ pub fn write_model_with_sources(
 ) -> Result<(), TrainError> {
     let schema = combined_schema();
     let sorted: Vec<(&str, &Param)> = vec![(model_id, param)];
+    let no_blobs: Vec<Option<Vec<u8>>> = vec![None];
 
-    let manifest_batch = build_manifest_batch(&schema, &sorted)?;
+    let manifest_batch = build_manifest_batch(&schema, &sorted, &no_blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
     let props = WriterProperties::builder().build();
@@ -161,6 +193,7 @@ pub fn write_model_with_sources(
 fn build_manifest_batch(
     schema: &Arc<Schema>,
     models: &[(&str, &Param)],
+    gbdt_blobs: &[Option<Vec<u8>>],
 ) -> Result<RecordBatch, TrainError> {
     let n = models.len();
 
@@ -210,7 +243,10 @@ fn build_manifest_batch(
     let mut charge_hist = ListBuilder::new(charge_hist_builder)
         .with_field(charge_item_field);
 
-    for (_, param) in models {
+    // gbdt_model_bytes: manifest-only binary column; null when no blob supplied.
+    let mut gbdt_b = BinaryBuilder::new();
+
+    for (i, (_, param)) in models.iter().enumerate() {
         activation.append_value(param.data_type.activation.name());
         instrument.append_value(param.data_type.instrument.name());
         match param.data_type.enzyme {
@@ -242,6 +278,12 @@ fn build_manifest_batch(
             sb.append(true);
         }
         charge_hist.append(true);
+
+        // gbdt_model_bytes: manifest-only Binary column; None => null cell (legacy store).
+        match gbdt_blobs.get(i).and_then(|b| b.as_ref()) {
+            Some(bytes) => gbdt_b.append_value(bytes),
+            None => gbdt_b.append_null(),
+        }
     }
 
     // Table-only and source/stat-only columns: null for manifest rows.
@@ -282,6 +324,7 @@ fn build_manifest_batch(
         Arc::new(max_charge.finish()),
         Arc::new(num_precursor_off.finish()),
         Arc::new(charge_hist.finish()),
+        Arc::new(gbdt_b.finish()),            // gbdt_model_bytes
         // table-only → null
         null_i32.clone(),     // part_charge
         null_i32.clone(),     // part_mass_bits
@@ -558,6 +601,7 @@ fn build_table_batch(
         null_i32.clone(),    // max_charge
         null_i32.clone(),    // num_precursor_off
         null_charge_hist,    // charge_hist
+        null_binary_array(nrows), // gbdt_model_bytes
         // table columns
         part_charge_arr,
         part_mass_bits_arr,
@@ -761,6 +805,12 @@ fn null_struct_list_array(n: usize, fields: Vec<Field>) -> ArrayRef {
     Arc::new(lb.finish())
 }
 
+fn null_binary_array(n: usize) -> ArrayRef {
+    let mut b = BinaryBuilder::new();
+    for _ in 0..n { b.append_null(); }
+    Arc::new(b.finish())
+}
+
 fn null_i64_array(n: usize) -> ArrayRef {
     let mut b = Int64Builder::new();
     for _ in 0..n { b.append_null(); }
@@ -861,6 +911,7 @@ fn build_source_batch(
         null_i32.clone(),    // max_charge
         null_i32.clone(),    // num_precursor_off
         null_charge_hist,    // charge_hist
+        null_binary_array(n), // gbdt_model_bytes
         // table-only → null
         null_i32s.clone(),   // part_charge
         null_i32s.clone(),   // part_mass_bits
@@ -1109,6 +1160,7 @@ fn build_stat_batch(
         null_i32.clone(),    // max_charge
         null_i32.clone(),    // num_precursor_off
         null_charge_hist,    // charge_hist
+        null_binary_array(nrows), // gbdt_model_bytes
         // table-only → use the stat row partition/ion/table columns (populated above)
         part_charge_arr,
         part_mass_bits_arr,
@@ -1154,6 +1206,7 @@ fn build_stat_batch_empty(schema: &Arc<Schema>) -> Result<RecordBatch, TrainErro
                 DataType::Int64 => null_i64_array(n),
                 DataType::Float32 => null_f32_array(n),
                 DataType::Boolean => null_bool_array(n),
+                DataType::Binary => null_binary_array(n),
                 DataType::List(item) => match item.data_type() {
                     DataType::Float32 => null_float_list_array(n),
                     DataType::Int64 => null_int64_list_array(n),

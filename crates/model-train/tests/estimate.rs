@@ -458,8 +458,7 @@ fn rank_smoothing_softens_signal_not_noise() {
         counts.bump_rank(part, IonType::Noise, 0);
     }
 
-    let mut cfg_on = EstimatorConfig::default();
-    cfg_on.rank_smoothing = true;
+    let cfg_on = EstimatorConfig { rank_smoothing: true, ..Default::default() };
     let on = Estimator::new(cfg_on).estimate(&counts, &template);
     let off = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
 

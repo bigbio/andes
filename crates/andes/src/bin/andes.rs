@@ -34,7 +34,7 @@ use model_train::{
     store::{
         SourceLedger,
         update_add, update_remove, update_reweight, update_decay, commit_update,
-        write_all_models_with_sources_pub,
+        write_all_models_with_sources_pub, write_all_models_with_sources_and_gbdt_pub,
     },
 };
 use scoring_crate::{Param, RankScorer};
@@ -2847,20 +2847,17 @@ fn run_train(
     };
 
     // ── 7. Write to store, preserving any other existing models ───────────────
+    // Unified path: ALWAYS reads existing models from the store, builds the
+    // combined entries list (new model + existing others), and writes once via
+    // write_all_models_with_sources_and_gbdt_pub.  The GBDT blob (Some or None)
+    // flows through for the new model; existing models' blobs are re-serialised
+    // from their loaded gbdt_peak_model so no blob is ever lost on re-write.
     let store_path = &args.out_store;
     let model_id = args.model_id.clone();
 
-    if gbdt_blob.is_some() {
-        // GBDT path: write manifest only (no source ledgers in this pass).
-        use model_train::store::write::write_models_with_gbdt;
-        write_models_with_gbdt(
-            store_path,
-            &[(&model_id, &trained_param, gbdt_blob)],
-        )
-        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
-    } else {
-        // Off path: full source-ledger write (byte-identical to pre-GBDT).
+    {
         let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
         if store_path.exists() {
             let store = ModelStore::open(store_path)
                 .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
@@ -2871,6 +2868,8 @@ fn run_train(
                 }
                 let p = store.load_param(&id)
                     .map_err(|e| format!("reading model '{id}': {e}"))?;
+                // Preserve the GBDT blob (if any) for the existing model.
+                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
                 let src_ledgers = store.load_sources(&id).unwrap_or_default();
                 let mut src = Vec::new();
                 for l in src_ledgers {
@@ -2879,20 +2878,28 @@ fn run_train(
                     }
                 }
                 existing_other.push((id, p, src));
+                existing_blobs.push(blob);
             }
         }
 
+        // Build the combined entries list: new model first, then existing others.
         let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
         all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
         for (id, p, src) in existing_other {
             all_entries.push((id, p, src));
         }
 
-        write_all_models_with_sources_pub(
+        // Parallel blobs: new model gets gbdt_blob (Some or None); existing models
+        // get their preserved blobs.
+        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![gbdt_blob];
+        all_blobs.extend(existing_blobs);
+
+        write_all_models_with_sources_and_gbdt_pub(
             store_path,
             &all_entries.iter()
                 .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
                 .collect::<Vec<_>>(),
+            &all_blobs,
         )
         .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
     }

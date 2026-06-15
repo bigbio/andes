@@ -597,7 +597,7 @@ impl<'a> ScoredSpectrum<'a> {
     /// charge-reduced peak list. Otherwise it returns the original spectrum's
     /// peaks and their ranks.
     #[inline]
-    fn active_peaks_and_ranks(&self) -> (&[(f64, f32)], &[u32]) {
+    pub fn active_peaks_and_ranks(&self) -> (&[(f64, f32)], &[u32]) {
         match (&self.deconv_peaks, &self.deconv_ranks) {
             (Some(peaks), Some(ranks)) => (peaks.as_slice(), ranks.as_slice()),
             _ => (self.spec.peaks.as_slice(), self.ranks.as_slice()),

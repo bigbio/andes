@@ -120,10 +120,12 @@ fn primary_matched_peak_keys(
         return keys;
     }
     let predicted = predict_by_ions(peptide, 1..=1);
-    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
-    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
     for p in &predicted {
-        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        // Use the SAME tolerance the scoring phase matched the primary's peaks
+        // with (`param().mme`), NOT the PIN feature tolerance — otherwise pass-2
+        // strips a different peak set than pass-1 actually scored, leaving stray
+        // primary peaks in (or pulling extra peaks out of) the residual.
+        let tol_da = scorer.param().mme.as_da(p.mz);
         let lo_mz = p.mz - tol_da;
         let hi_mz = p.mz + tol_da;
         // `spec.peaks` is m/z-sorted; binary-search the window start, scan to `hi_mz`.
@@ -424,8 +426,8 @@ mod tests {
     /// non-trivial prefix/suffix rank tables so b/y matches earn positive score.
     fn tiny_scorer() -> RankScorer {
         let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let noise = IonType::Noise;
 
         let mut ion_table = FxHashMap::default();

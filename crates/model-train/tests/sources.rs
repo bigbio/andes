@@ -20,11 +20,11 @@ fn test_partition_b() -> Partition {
 }
 
 fn test_ion_prefix() -> IonType {
-    IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits() }
+    IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 }
 }
 
 fn test_ion_suffix() -> IonType {
-    IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() }
+    IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 }
 }
 
 fn make_count_stats_0() -> CountStats {

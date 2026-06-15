@@ -104,6 +104,15 @@ pub struct PsmFeatures {
     /// and `y_{n-i}` matched). A contiguous ladder is stronger evidence than
     /// scattered complementary pairs.
     pub longest_complementary_ladder: u32,
+    /// ADDITIVE: complementary-ion intensity-rank BALANCE. Σ over cleavage bonds
+    /// where both the charge-1 prefix `b_i` and complementary suffix `y_{n-i}`
+    /// matched, weighted by their intensity-rank agreement `1/(1+|rank_b−rank_y|)`.
+    /// Orthogonal to `longest_complementary_ladder` (run length, no intensity)
+    /// and `num_matched_main_ions` (no pairing): a true peptide produces both
+    /// halves of a bond at correlated ranks; a decoy matching a few peaks on one
+    /// series does not. Targets low-res CID/TMT discrimination. 0.0 when no
+    /// complementary pair matched.
+    pub complementary_ion_balance: f32,
     /// Count of matched b/y ions that also have a neutral-loss partner peak at
     /// −H2O (−18.0106 Da) or −NH3 (−17.0265 Da) within feature tolerance.
     /// Strong CID/TMT signal that the intensity-rank model underuses.

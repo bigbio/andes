@@ -17,7 +17,7 @@ use model::peptide::Peptide;
 use crate::precursor_cal::adjusted_observed_neutral_mass;
 use crate::precursor_matching::{matches_precursor, MassError};
 use crate::psm::{PsmFeatures, PsmMatch, TopNQueue};
-use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions};
+use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions, predict_by_ions_with_losses};
 use crate::search_index::SearchIndex;
 use crate::search_params::{ScoreMode, SearchParams};
 use scoring_crate::intensity_model::IntensityModel;
@@ -993,10 +993,9 @@ pub(crate) fn matched_peak_keys(
         return keys;
     }
     let predicted = predict_by_ions(peptide, 1..=1);
-    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
-    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
+    let feat_tol = scorer.feature_match_tolerance();
     for p in &predicted {
-        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        let tol_da = feat_tol.as_da(p.mz);
         if let Some((_rank, _intensity, peak_mz)) = scored_spec.nearest_peak_full(p.mz, tol_da) {
             keys.insert((peak_mz * 1000.0).round() as i64);
         }
@@ -1048,9 +1047,18 @@ pub(crate) fn compute_psm_features(
     // peptide length is 40 → n-1 ≤ 39). The prior `vec![false; n-1]` heap
     // allocations fired ~150k × 4 / PSM batch and were a measurable hot-path
     // cost. SmallVec inlines for n ≤ 64.
-    let predicted = predict_by_ions(peptide, 1..=1);
+    // Activation-gated neutral-loss prediction. ETD preserves labile mods
+    // (no loss ions); collisional/photon activation predicts them. Inert
+    // unless a residue's mod declares `neutral_losses`, so output is
+    // byte-identical to the canonical b/y set for every non-loss peptide.
+    let predict_losses = scorer.param().data_type.activation.predicts_neutral_losses();
+    let predicted = predict_by_ions_with_losses(peptide, 1..=1, predict_losses);
     let mut b_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
     let mut y_matched: SmallVec<[bool; 64]> = smallvec![false; n - 1];
+    // Per-position charge-1 INTACT ion intensity-ranks (u32::MAX = unmatched),
+    // backing the additive complementary-ion-balance feature below.
+    let mut b_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
+    let mut y_rank: SmallVec<[u32; 64]> = smallvec![u32::MAX; n - 1];
 
     // Collect matched-ion details for ion-current ratio and error-stat features.
     // Each entry: (intensity, observed_mz, predicted_mz, is_b_ion).
@@ -1066,12 +1074,9 @@ pub(crate) fn compute_psm_features(
     // coarser binning tolerance used by the rank-distribution tables —
     // appropriate for node-score lookup but ~50× too wide for feature
     // counting at m/z 500.
-    let feature_tol = if scorer.param().data_type.instrument.is_high_resolution() {
-        20.0_f64 // ppm
-    } else {
-        0.5_f64 // Da
-    };
-    let feature_tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
+    let feat_tol = scorer.feature_match_tolerance();
+    let feature_tol_is_ppm = matches!(feat_tol, model::tolerance::Tolerance::Ppm(_));
+    let feature_tol = feat_tol.raw_value(); // numeric value in the unit (ppm or Da)
 
     // Neutral-loss masses (charge-1 fragment partners at −H2O / −NH3).
     const H2O_LOSS_DA: f64 = 18.0106;
@@ -1097,11 +1102,19 @@ pub(crate) fn compute_psm_features(
                 IonKind::B => {
                     if pos < b_matched.len() {
                         b_matched[pos] = true;
+                        // Record the best (lowest) INTACT-ion rank per position
+                        // for the complementary-balance feature; skip loss ions.
+                        if !p.is_loss() && rank < b_rank[pos] {
+                            b_rank[pos] = rank;
+                        }
                     }
                 }
                 IonKind::Y => {
                     if pos < y_matched.len() {
                         y_matched[pos] = true;
+                        if !p.is_loss() && rank < y_rank[pos] {
+                            y_rank[pos] = rank;
+                        }
                     }
                 }
             }
@@ -1127,7 +1140,7 @@ pub(crate) fn compute_psm_features(
     // ── Strong-score Stage-1: charge-2 matched-ion count ─────────────────────
     // High-charge precursors fragment into +2 ions ignored by the charge-1
     // loop above. Separate probe — does not alter existing feature values.
-    let predicted_z2 = predict_by_ions(peptide, 2..=2);
+    let predicted_z2 = predict_by_ions_with_losses(peptide, 2..=2, predict_losses);
     let mut doubly_charged_matched_ion_count: u32 = 0;
     for p in &predicted_z2 {
         let tol_da = if feature_tol_is_ppm {
@@ -1210,12 +1223,12 @@ pub(crate) fn compute_psm_features(
             let ions = segment_ions[seg];
             for &ion in ions {
                 let (is_prefix, residue_mass) = match ion {
-                    scoring_crate::param_model::IonType::Prefix { charge: ic, offset_bits } => {
+                    scoring_crate::param_model::IonType::Prefix { charge: ic, offset_bits, .. } => {
                         let offset = f32::from_bits(offset_bits) as f64;
                         let z = ic as f64;
                         (true, (prm_accurate / z + offset, ion))
                     }
-                    scoring_crate::param_model::IonType::Suffix { charge: ic, offset_bits } => {
+                    scoring_crate::param_model::IonType::Suffix { charge: ic, offset_bits, .. } => {
                         let offset = f32::from_bits(offset_bits) as f64;
                         let z = ic as f64;
                         (false, (srm_accurate / z + offset, ion))
@@ -1350,6 +1363,21 @@ pub(crate) fn compute_psm_features(
     }
     let longest_complementary_ladder = longest_run(&complementary_sites);
 
+    // ADDITIVE complementary-ion BALANCE: Σ over bonds where both the charge-1
+    // intact b_i and complementary y_{n-i} matched, weighted by intensity-rank
+    // agreement 1/(1+|rank_b − rank_y|). Orthogonal to the longest-RUN ladder
+    // (no intensity) — captures whether the two halves of a bond appear at
+    // correlated ranks (true peptide) vs lopsided one-series matches (decoy).
+    let mut complementary_ion_balance = 0.0_f32;
+    for i in 1..n {
+        let rb = b_rank[i - 1];
+        let ry = y_rank[n - i - 1];
+        if rb != u32::MAX && ry != u32::MAX {
+            let diff = (rb as i64 - ry as i64).unsigned_abs() as f32;
+            complementary_ion_balance += 1.0 / (1.0 + diff);
+        }
+    }
+
     // ── Strong-score Stage-1: mean matched intensity rank ──────────────────
     // Average intensity-rank of matched b/y ions (1 = most intense). Lower =
     // better — real PSMs explain dominant peaks.
@@ -1439,6 +1467,7 @@ pub(crate) fn compute_psm_features(
         tailor_score: 0.0,
         ppm_gaussian_score,
         longest_complementary_ladder,
+        complementary_ion_balance,
         neutral_loss_ion_count,
         mean_matched_intensity_rank,
         doubly_charged_matched_ion_count,
@@ -1481,8 +1510,8 @@ mod feature_tests {
     fn make_scorer(tol_da: f64) -> RankScorer {
         use model::mass::{H2O, PROTON};
         let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits() };
-        let suffix1 = IonType::Suffix { charge: 1, offset_bits: ((H2O + PROTON) as f32).to_bits() };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits(), loss_class: 0 };
+        let suffix1 = IonType::Suffix { charge: 1, offset_bits: ((H2O + PROTON) as f32).to_bits(), loss_class: 0 };
         let noise = IonType::Noise;
         let mut ion_table = FxHashMap::default();
         ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
@@ -1828,6 +1857,49 @@ mod feature_tests {
         );
     }
 
+    // ── Test: complementary-ion balance (additive feature #campaign-10) ──────
+
+    #[test]
+    fn compute_psm_features_complementary_ion_balance() {
+        let pep = ala_peptide(5);
+        let predicted = predict_by_ions(&pep, 1..=1);
+
+        // (a) All ions matched → bonds have both b_i and y_{n-i} → balance > 0.
+        let mut all: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_all = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(all)),
+            &pep, &make_scorer(0.01), 2, None,
+        );
+        assert!(
+            f_all.complementary_ion_balance > 0.0,
+            "all ions matched → balance should be > 0, got {}",
+            f_all.complementary_ion_balance
+        );
+
+        // (b) Only b ions matched (no y) → no complementary pair → balance == 0.
+        let mut b_only: Vec<(f64, f32)> = predicted
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| matches!(p.kind, IonKind::B))
+            .map(|(i, p)| (p.mz, (i + 1) as f32 * 10.0))
+            .collect();
+        b_only.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let f_b = compute_psm_features(
+            &ScoredSpectrum::new_without_filtering(&make_spectrum(b_only)),
+            &pep, &make_scorer(0.01), 2, None,
+        );
+        assert_eq!(
+            f_b.complementary_ion_balance, 0.0,
+            "b-only spectrum → no complementary pair → balance 0, got {}",
+            f_b.complementary_ion_balance
+        );
+    }
+
     // ── Test: neutral-loss ion count ─────────────────────────────────────────
 
     #[test]
@@ -2020,6 +2092,11 @@ pub(crate) fn dedup_pepseq_score(
         let key = DedupMapKey {
             pep: pep_key,
             score: psm.rank_score.round() as i32,
+            // Never merge a target with a reversed-decoy that coincidentally shares
+            // residues+rounded score (palindromic / reversal-coincident peptides):
+            // a merged row would take a +1/-1 Label by heap order, silently
+            // corrupting Percolator's target-decoy competition.
+            is_decoy: candidates[primary as usize].is_decoy,
         };
 
         match groups.entry(key) {
@@ -2074,6 +2151,7 @@ impl PepDedupKey {
 struct DedupMapKey {
     pep: Arc<PepDedupKey>,
     score: i32,
+    is_decoy: bool,
 }
 
 impl PartialOrd for DedupMapKey {
@@ -2089,6 +2167,7 @@ impl Ord for DedupMapKey {
             .cmp(&other.pep.residues)
             .then_with(|| self.pep.mod_units.cmp(&other.pep.mod_units))
             .then(self.score.cmp(&other.score))
+            .then(self.is_decoy.cmp(&other.is_decoy))
     }
 }
 
@@ -2175,6 +2254,8 @@ mod dedup_tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         }));
         let cands = vec![
             cand_with_peptide(seq_peptide(b"PEPMK")),

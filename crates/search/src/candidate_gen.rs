@@ -119,7 +119,8 @@ fn enumerate_protein_from_offset(
         return enumerate_all_spans(&ctx, n);
     }
 
-    let cleavage_positions = compute_cleavage_positions(sub_seq, params.enzyme);
+    let cleavage_positions =
+        compute_cleavage_positions(sub_seq, params.enzyme, &params.extra_enzymes);
 
     // ntt=2: strict — only spans where both start and end are cleavage positions.
     // ntt=1: semi-specific — spans where at least one end is a cleavage position.
@@ -426,25 +427,38 @@ fn expand_recursive(
 }
 
 /// Cleavage positions: 0 (start of protein), n (end of protein), and
-/// every i in 1..n where `enzyme.is_cleavable_after(seq[i-1])` (for
-/// C-term cutters like Trypsin) OR `enzyme.is_cleavable_before(seq[i])`
-/// (for N-term cutters like AspN/LysN).
-fn compute_cleavage_positions(seq: &[u8], enzyme: Enzyme) -> Vec<u32> {
+/// every i in 1..n where any configured protease cuts — `is_cleavable_after(seq[i-1])`
+/// (for C-term cutters like Trypsin) OR `is_cleavable_before(seq[i])` (for
+/// N-term cutters like AspN/LysN).
+///
+/// `primary` is the configured `enzyme`; `extras` are additional proteases for
+/// a multi-protease digest. A position is a cleavage site if the union of all
+/// proteases cuts there. With `extras` empty this is the single-enzyme path
+/// (bit-identical to before multi-enzyme support).
+///
+/// NonSpecific/NoCleavage are whole-protease modes, so they only short-circuit
+/// when they apply to *every* configured protease — a NonSpecific extra makes
+/// the whole digest non-specific; a NoCleavage extra contributes no cut sites
+/// (it never short-circuits unless it's the only protease).
+fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) -> Vec<u32> {
     let n = seq.len() as u32;
 
-    if matches!(enzyme, Enzyme::NoCleavage) {
-        return vec![0, n];
-    }
+    let all = || std::iter::once(primary).chain(extras.iter().copied());
 
-    if matches!(enzyme, Enzyme::NonSpecific) {
+    // Any non-specific protease makes the whole digest non-specific.
+    if all().any(|e| matches!(e, Enzyme::NonSpecific)) {
         return (0..=n).collect();
+    }
+    // Only when *every* protease is NoCleavage are there no internal cut sites.
+    if all().all(|e| matches!(e, Enzyme::NoCleavage)) {
+        return vec![0, n];
     }
 
     let mut positions = vec![0u32];
     for i in 1..n {
         let prev = seq[(i - 1) as usize];
         let here = seq[i as usize];
-        if enzyme.is_cleavable_after(prev) || enzyme.is_cleavable_before(here) {
+        if all().any(|e| e.is_cleavable_after(prev) || e.is_cleavable_before(here)) {
             positions.push(i);
         }
     }
@@ -489,5 +503,45 @@ mod tests {
             !"DECOY_sp|P12345|PROT_HUMAN".starts_with(colon_prefix),
             "underscore-delimited accession should NOT match colon prefix"
         );
+    }
+
+    #[test]
+    fn multi_enzyme_cleavage_is_union_of_rules() {
+        use super::compute_cleavage_positions;
+        use model::enzyme::Enzyme;
+        // M K A E S R P E  (n=8). Trypsin cuts after K,R; GluC cuts after E.
+        let seq = b"MKAESRPE";
+
+        let trypsin = compute_cleavage_positions(seq, Enzyme::Trypsin, &[]);
+        assert_eq!(trypsin, vec![0, 2, 6, 8], "Trypsin alone: after K(2), R(6)");
+
+        let gluc = compute_cleavage_positions(seq, Enzyme::GluC, &[]);
+        assert_eq!(gluc, vec![0, 4, 8], "GluC alone: after first E(4)");
+
+        // Union: every Trypsin site AND every GluC site is a cut point.
+        let both = compute_cleavage_positions(seq, Enzyme::GluC, &[Enzyme::Trypsin]);
+        assert_eq!(both, vec![0, 2, 4, 6, 8], "GluC+Trypsin = union of cut sites");
+        // Order of primary vs extra must not matter for the cut-site set.
+        let both_rev = compute_cleavage_positions(seq, Enzyme::Trypsin, &[Enzyme::GluC]);
+        assert_eq!(both, both_rev, "union is order-independent");
+    }
+
+    #[test]
+    fn single_enzyme_path_unchanged_with_empty_extras() {
+        use super::compute_cleavage_positions;
+        use model::enzyme::Enzyme;
+        // Empty extras must be bit-identical to the legacy single-enzyme result
+        // for every protease mode, including the NonSpecific/NoCleavage cases.
+        let seq = b"MKAESRPEDK";
+        for e in [Enzyme::Trypsin, Enzyme::LysC, Enzyme::GluC, Enzyme::AspN,
+                  Enzyme::NonSpecific, Enzyme::NoCleavage] {
+            let single = compute_cleavage_positions(seq, e, &[]);
+            // NoCleavage extras contribute no sites; result must equal the primary alone.
+            let with_nocleave = compute_cleavage_positions(seq, e, &[Enzyme::NoCleavage]);
+            assert_eq!(single, with_nocleave, "{e:?}: NoCleavage extra adds no sites");
+        }
+        // A NonSpecific protease anywhere in the set makes the whole digest non-specific.
+        let ns = compute_cleavage_positions(seq, Enzyme::Trypsin, &[Enzyme::NonSpecific]);
+        assert_eq!(ns, (0..=seq.len() as u32).collect::<Vec<_>>());
     }
 }

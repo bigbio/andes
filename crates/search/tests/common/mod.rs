@@ -32,6 +32,8 @@ pub fn aa_set() -> model::AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -40,6 +42,8 @@ pub fn aa_set() -> model::AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

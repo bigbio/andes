@@ -33,6 +33,13 @@ pub enum ScoreMode {
 pub struct SearchParams {
     pub aa_set: AminoAcidSet,
     pub enzyme: Enzyme,
+    /// Additional proteases for a multi-protease digest (default empty). A
+    /// span is accepted as a cleavage site if `enzyme` OR any of these cut
+    /// there — the union of all configured proteases' rules. `enzyme` remains
+    /// the primary (drives model selection and the cleavage-credit PIN
+    /// feature); these only widen candidate enumeration. Empty ⇒ behaviour is
+    /// bit-identical to the single-enzyme path.
+    pub extra_enzymes: Vec<Enzyme>,
     pub min_length: u32,
     pub max_length: u32,
     pub max_missed_cleavages: u32,
@@ -67,6 +74,13 @@ pub struct SearchParams {
     /// Precursor mass calibration mode (`auto`, `on`, `off`). Default `Off`
     /// (opt-in).
     pub precursor_cal_mode: PrecursorCalMode,
+    /// Minimum number of SpecKeys before the precursor-calibration pre-pass
+    /// runs. Below this, calibration is skipped (a small/targeted run can't
+    /// learn a robust file-wide shift). Default
+    /// [`crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS`] (10_000);
+    /// exposed via `--cal-min-spec-keys` so targeted runs can opt in to
+    /// calibrating with fewer spectra.
+    pub cal_min_spec_keys: usize,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -95,8 +109,9 @@ impl SearchParams {
         Self {
             aa_set,
             enzyme: Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
             min_length: 6,
-            max_length: 40,
+            max_length: 50,
             max_missed_cleavages: 1,
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
@@ -106,6 +121,7 @@ impl SearchParams {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,
+            cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
@@ -154,7 +170,7 @@ mod tests {
         let params = SearchParams::default_tryptic(aa_set);
         assert_eq!(params.enzyme, Enzyme::Trypsin);
         assert_eq!(params.min_length, 6);
-        assert_eq!(params.max_length, 40);
+        assert_eq!(params.max_length, 50);
         assert_eq!(params.max_missed_cleavages, 1);
         assert_eq!(params.max_variable_mods_per_peptide, 3);
         assert_eq!(*params.charge_range.start(), 2);

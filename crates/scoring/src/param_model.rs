@@ -358,9 +358,9 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
             let offset = read_f32(cursor)?;
             let frequency = read_f32(cursor)?;
             let ion_type = if is_prefix {
-                IonType::Prefix { charge, offset_bits: offset.to_bits() }
+                IonType::Prefix { charge, offset_bits: offset.to_bits(), loss_class: 0 }
             } else {
-                IonType::Suffix { charge, offset_bits: offset.to_bits() }
+                IonType::Suffix { charge, offset_bits: offset.to_bits(), loss_class: 0 }
             };
             frags.push(FragmentOffsetFrequency { ion_type, frequency });
         }
@@ -495,8 +495,9 @@ impl PartialOrd for Partition {
 pub enum IonType {
     /// `offset_bits` is `f32::to_bits` so the type can derive Eq/Hash;
     /// recover the float via `offset()`.
-    Prefix { charge: i32, offset_bits: u32 },
-    Suffix { charge: i32, offset_bits: u32 },
+    /// `loss_class`: 0 = intact (no neutral loss); 1.. = per-mod-class loss pool.
+    Prefix { charge: i32, offset_bits: u32, loss_class: u8 },
+    Suffix { charge: i32, offset_bits: u32, loss_class: u8 },
     Noise,
 }
 
@@ -521,6 +522,16 @@ impl IonType {
     pub fn is_suffix(&self) -> bool { matches!(self, IonType::Suffix { .. }) }
     pub fn is_noise(&self) -> bool { matches!(self, IonType::Noise) }
 
+    /// Loss-class id: 0 = intact; 1.. = a per-mod-class neutral-loss pool.
+    pub fn loss_class(&self) -> u8 {
+        match self {
+            IonType::Prefix { loss_class, .. } | IonType::Suffix { loss_class, .. } => *loss_class,
+            IonType::Noise => 0,
+        }
+    }
+    /// True if this is a neutral-loss-shifted fragment ion (any loss class).
+    pub fn is_loss(&self) -> bool { self.loss_class() != 0 }
+
     /// Compute the predicted m/z for this ion type given a **nominal** node mass.
     ///
     /// Formula:
@@ -535,7 +546,7 @@ impl IonType {
     /// For `Noise`, returns 0.0.
     pub fn mz(&self, node_nominal: f64) -> f64 {
         match self {
-            IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
+            IonType::Prefix { charge, offset_bits, .. } | IonType::Suffix { charge, offset_bits, .. } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
                 // real_mass = node_nominal / INTEGER_MASS_SCALER
@@ -555,7 +566,7 @@ impl IonType {
     /// For `Noise`: returns 0.0.
     pub fn mass_from_mz(&self, mz: f64) -> f64 {
         match self {
-            IonType::Prefix { charge, offset_bits } | IonType::Suffix { charge, offset_bits } => {
+            IonType::Prefix { charge, offset_bits, .. } | IonType::Suffix { charge, offset_bits, .. } => {
                 let offset = f32::from_bits(*offset_bits) as f64;
                 let c = *charge as f64;
                 (mz - offset) * c
@@ -665,6 +676,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn loss_class_is_distinct_key_from_intact() {
+        use std::collections::HashMap;
+        let intact  = IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss_class: 0 };
+        let glyco   = IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss_class: 1 };
+        let phospho = IonType::Prefix { charge: 1, offset_bits: 1.0f32.to_bits(), loss_class: 2 };
+        let mut m = HashMap::new();
+        m.insert(intact, "i"); m.insert(glyco, "g"); m.insert(phospho, "p");
+        assert_eq!(m.len(), 3);
+        assert!(!intact.is_loss());
+        assert!(glyco.is_loss() && phospho.is_loss());
+        assert_eq!(glyco.loss_class(), 1);
+        assert_eq!(intact.loss_class(), 0);
+    }
+
+    #[test]
     fn partition_eq_via_to_bits() {
         let a = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
         let b = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
@@ -693,8 +719,8 @@ mod tests {
 
     #[test]
     fn ion_type_helpers() {
-        let p = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let s = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let p = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let s = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let n = IonType::Noise;
         assert!(p.is_prefix());  assert!(!p.is_suffix()); assert!(!p.is_noise());
         assert!(!s.is_prefix()); assert!(s.is_suffix());  assert!(!s.is_noise());
@@ -705,7 +731,7 @@ mod tests {
 
     #[test]
     fn ion_type_offset_round_trip() {
-        let i = IonType::Prefix { charge: 2, offset_bits: 1.5_f32.to_bits() };
+        let i = IonType::Prefix { charge: 2, offset_bits: 1.5_f32.to_bits(), loss_class: 0 };
         assert_eq!(i.offset(), Some(1.5));
     }
 
@@ -1060,7 +1086,7 @@ mod tests {
         // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
         // For Prefix(charge=1, offset=0): mz = (node_nominal / 0.999497) / 1 + 0
         use model::mass::INTEGER_MASS_SCALER;
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let node_nominal = 100.0_f64;
         let expected = (node_nominal / INTEGER_MASS_SCALER as f64) / 1.0;
         assert!((ion.mz(node_nominal) - expected).abs() < 1e-9);
@@ -1071,7 +1097,7 @@ mod tests {
         // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + offset
         // For Prefix(charge=2, offset=0): mz = (node_nominal / 0.999497) / 2
         use model::mass::INTEGER_MASS_SCALER;
-        let ion = IonType::Prefix { charge: 2, offset_bits: 0.0_f32.to_bits() };
+        let ion = IonType::Prefix { charge: 2, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let node_nominal = 200.0_f64;
         let expected = (node_nominal / INTEGER_MASS_SCALER as f64) / 2.0;
         assert!((ion.mz(node_nominal) - expected).abs() < 1e-9);
@@ -1082,7 +1108,7 @@ mod tests {
         // Realistic b-ion case: offset = PROTON (≈1.00728).
         // mz = (node_nominal / INTEGER_MASS_SCALER) / charge + PROTON
         use model::mass::{PROTON, INTEGER_MASS_SCALER};
-        let b_ion = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits() };
+        let b_ion = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits(), loss_class: 0 };
         let node_nominal = 100.0_f64;
         let expected = (node_nominal / INTEGER_MASS_SCALER as f64) / 1.0 + PROTON;
         assert!((b_ion.mz(node_nominal) - expected).abs() < 1e-4);
@@ -1092,8 +1118,8 @@ mod tests {
     fn ion_type_mz_suffix_same_formula_as_prefix() {
         // Suffix uses the same mz formula as prefix.
         let offset = 18.01_f32;
-        let prefix = IonType::Prefix { charge: 1, offset_bits: offset.to_bits() };
-        let suffix = IonType::Suffix { charge: 1, offset_bits: offset.to_bits() };
+        let prefix = IonType::Prefix { charge: 1, offset_bits: offset.to_bits(), loss_class: 0 };
+        let suffix = IonType::Suffix { charge: 1, offset_bits: offset.to_bits(), loss_class: 0 };
         let node_nominal = 150.0_f64;
         assert!((prefix.mz(node_nominal) - suffix.mz(node_nominal)).abs() < 1e-9);
     }
@@ -1111,7 +1137,7 @@ mod tests {
         //           = (nominal / scaler) = real_mass  (NOT the original nominal input).
         use model::mass::INTEGER_MASS_SCALER;
         let offset = 1.00782_f32; // realistic b-ion offset
-        let ion = IonType::Prefix { charge: 1, offset_bits: offset.to_bits() };
+        let ion = IonType::Prefix { charge: 1, offset_bits: offset.to_bits(), loss_class: 0 };
         let node_nominal = 100.0_f64;
         let mz = ion.mz(node_nominal);
         let recovered_real_mass = ion.mass_from_mz(mz);
@@ -1129,8 +1155,8 @@ mod tests {
         use model::tolerance::Tolerance;
 
         let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-        let prefix = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let suffix = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let prefix = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let suffix = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
 
         // Populate frag_off_table (the source of truth for ion_types_for_segment).
         let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = FxHashMap::default();

@@ -1,14 +1,14 @@
 # Benchmarks
 
-Reproducible engine comparisons for andes. Each benchmark documents the
-datasets, the exact per-engine parameters, and the FDR methodology so the
-numbers can be regenerated.
+Reproducible engine comparisons for andes against the open-source field. Each
+benchmark documents the datasets, the exact per-engine parameters, and the FDR
+methodology so the numbers can be regenerated.
 
 | Benchmark | Date | Engines | Datasets |
 |---|---|---|---|
-| [4-engine native-format](2026-06-01-4engine-native-format.md) | 2026-06-01 | Java MS-GF+, Sage, MSFragger, andes | Orbitrap Astral (`.raw`), Bruker timsTOF (`.d`) |
-| [PXD016999 TMT tissue (4-engine)](2026-06-03-pxd016999-tmt-4engine.md) | 2026-06-03 | Java MS-GF+, MSFragger, Sage, andes | PXD016999 human tissue TMT, ion-trap CID-MS2 (`.raw`) |
-| [Astral (7-engine, uniform Percolator)](2026-06-04-astral-7engine.md) | 2026-06-04 | andes (top-1 + `--chimeric`), MSFragger, Sage, Comet, Java MS-GF+, ProSE | Orbitrap Astral (`.raw` / mzML) |
-| [TMT a05058 (6-engine, low-res CID)](2026-06-04-tmt-a05058-6engine.md) | 2026-06-04 | andes (top-1 + `--chimeric`), MSFragger, Java MS-GF+, Comet, Sage, ProSE | a05058 low-res CID/TMT (mzML) |
+| [Public benchmark](2026-06-15-public-benchmark.md) | 2026-06-15 | andes (top-1 + `--chimeric`), Java MS-GF+, Sage, Comet, ProSE | Astral (HCD high-res), TMT a05058 (CID low-res), UPS1/PXD001819 (CID low-res) |
 
-Configuration files used by each benchmark live under [`configs/`](configs/).
+Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`),
+and FDR honesty is verified independently with a 1:1 entrapment search (true FDP
+≈ 1% at the nominal 1% q-value). Per-engine configuration files live under
+[`configs/`](configs/); reproducibility scripts under [`scripts/`](scripts/).

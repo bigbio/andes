@@ -1,9 +1,9 @@
 #!/bin/bash
 set -uo pipefail
-TD=$BENCH/tmt-data
+TD=/srv/data/msgf-bench/tmt-data
 MZML=a05058.mzML
 FASTA=PXD007683_UP000005640_UP000002311_reviewed.fasta
-RES=$BENCH/repo/bench-tmt; mkdir -p $RES
+RES=/srv/data/msgf-bench/repo/bench-tmt; mkdir -p $RES
 OIMG=ghcr.io/openms/openms-tools-thirdparty:latest
 PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
 echo "################ COMET TMT a05058 $(date -Is) ################"

@@ -9,7 +9,7 @@
     "variable_mods": { "M": [15.994915] },
     "max_variable_mods": 3,
     "decoy_tag": "rev_", "generate_decoys": true,
-    "fasta": "$BENCH/tmt-data/PXD007683_UP000005640_UP000002311_reviewed.fasta"
+    "fasta": "/srv/data/msgf-bench/tmt-data/PXD007683_UP000005640_UP000002311_reviewed.fasta"
   },
   "precursor_tol": { "ppm": [-20.0, 20.0] },
   "fragment_tol": { "da": [-0.4, 0.4] },

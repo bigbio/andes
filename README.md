@@ -6,40 +6,45 @@ _The data-driven peptide search engine of the quantms ecosystem. Built and maint
 
 [![CI](https://github.com/bigbio/andes/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/andes/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/bigbio/andes)](https://github.com/bigbio/andes/releases)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![License: UCSD-Noncommercial](https://img.shields.io/badge/license-UCSD--Noncommercial-blue)](LICENSE)
 
-> **A data-driven peptide search engine** — takes raw/mzml spectra + FASTA in, produces Percolator-ready `.pin` out. Use internal data generated with quantms project to boot peptide/protein identficiations. 
+> **A data-driven peptide search engine, originally ported from MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Matches or beats Java MS-GF+ PSM counts at 1% FDR while running **10-28× faster**.
 
 ## What is this?
 
-andes began as an effort to improve [MS-GF+](https://github.com/MSGFPlus/msgfplus); read [`HERITAGE.md`](HERITAGE.md)); and has been trasnformed into a clean/fast data-driven search engine. It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring.
+Andes originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical peptide-identification engine, and we acknowledge that heritage. It is now being made independent: the patented generating function has been removed and the scoring code clean-room reauthored, while the bundled statistical models are being retrained from public data. Until every shipped model is independently trained it remains, for licensing purposes, a derivative work (see [`NOTICE`](NOTICE) for the component-by-component status). It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring. The original Java implementation is preserved on the `java-legacy` branch.
 
 ## Why andes?
 
-Three reference datasets, three results — all at 1% FDR via Percolator 3.7.1, all run on the same 8-thread VM:
+Against the open-source field — **Java MS-GF+, Sage, Comet, and ProSE** — andes returns the most PSMs at 1% FDR on all three reference datasets, reads vendor formats natively, and runs in minutes where Java takes hours. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42`) on the same 8-thread VM.
 
-| Dataset | Java PSMs @1% | andes PSMs @1% | Δ PSMs | Java wall | andes wall | Speedup |
-|---|---:|---:|---:|---:|---:|---:|
-| **Astral DDA** (LFQ_Astral_DDA_15min_50ng) | 33,425 | **36,715** | **+3,290 (+9.8%)** | 2:20:42 | **6:28** | **21.8×** |
-| **PXD001819** (UPS1 yeast tryp) | 14,974 | 14,755 | -219 (-1.5%) | 8:46 | **0:54** | **9.7×** |
-| **TMT** (a05058 PXD007683) | 10,115 | 9,605 | -510 (-5.0%) | 1:11:00 | **2:33** | **27.9×** |
+| Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res CID) |
+|---|---:|---:|---:|
+| **andes** (`--chimeric`) | **69,968** | **12,043** | **17,879** |
+| **andes** (top-1) | **36,782** | **11,957** | 17,143 |
+| Java MS-GF+ v20240326 | 26,542 | 11,555 | 17,305 |
+| Sage 0.14.7 | 32,091 | 11,232 | 15,653 |
+| Comet 2025.01 | 31,435 | 10,876 | 15,809 |
+| ProSE (OpenMS) | 30,590 | 7,659 | 8,901 |
 
-What that means: on Astral we find **+9.8% more PSMs at 21.8× the speed**; on PXD001819 we match the MS-GF+ PSM count within 1.5% at 9.7× the speed; on TMT we trail by 5% PSMs but at 27.9× the speed. The MS-GF+ baseline is upstream MSGFPlus v2024.03.26 (no calibration; that flag isn't in upstream). The andes benchmark runs do not rely on precursor calibration (it is opt-in and off by default; `auto` self-skips the correction when it can't find enough confident PSMs).
+<sub>PSMs at 1% FDR (distinct peptides track the same ordering). andes top-1 beats every competitor on the high-res Astral run and on TMT (PSMs **and** peptides); on UPS1 it lands within 1% of Java and its `--chimeric` two-pass — which recovers co-isolated second peptides (opt-in) — takes the lead. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with the C++/Rust engines.</sub>
+
+**The 1% FDR is real, not inflated.** A 1:1 entrapment search on Astral puts the *true* false-discovery proportion at **1.06%** (top-1) / **1.14%** (chimeric) at the nominal 1% q-value, and it tracks q across the 0.5–5% range — the ID gains (including the chimeric near-doubling) are genuine identifications, not bought by a violated FDR. The same holds on the non-tryptic LysC and GluC+Trypsin runs.
 
 <details>
 <summary>Bench methodology</summary>
 
-- **Hardware:** 8-thread Intel Xeon Gold 6238 VM, AVX exposed (no AVX2/FMA), Linux x86_64.
-- **Java baseline:** `MSGFPlus.jar` from the [MSGFPlus/msgfplus v2024.03.26 release](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), run with `-Xmx8192m -thread 8 -tda 1 -addFeatures 1`. Per-dataset args match `--precursor-tol-ppm`/`--isotope-error`/`--instrument`/`--protocol` of the Rust runs.
-- **andes:** master branch, release build with `target-cpu=sandybridge` (AVX, no FMA), `--threads 8 --top-n 1` (precursor calibration off — the default).
-- **Java → PIN:** `msgf2pin` from the percolator `3.6.5--h6351f2a_0` container (single-arg mode for concatenated-TDA mzid; the `3.7.1` container's msgf2pin has a known parser crash on this mzid output).
-- **Percolator:** `percolator 3.7.1` in `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2` with `--seed 42 --only-psms`. Same parser script for both Java and Rust PINs.
-- **Wall time:** `/usr/bin/time -v` "Elapsed (wall clock) time" — does not include Percolator stage.
-- **Reproducibility:** scripts at `$BENCH/finalize2_v2024.sh` and `$BENCH/run_percolator_docker.sh` on the bench VM.
+- **Hardware:** 8-thread Intel Xeon Gold 6238 VM, Linux x86_64. Same machine for every engine.
+- **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), Sage 0.14.7, Comet 2025.01 (via OpenMS), ProSE (OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
+- **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`); counts reported at q ≤ 0.01.
+- **PIN building:** andes / Sage / Comet write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`); ProSE via OpenMS → idXML → `build_pins.py` (ProSE caps fragment tolerance at 0.1 Da, used on the low-res sets).
+- **Models:** all andes runs use the bundled `resources/ionstat/models.parquet` — currently **MS-GF+-derived and in transition** to independent retraining (see [`NOTICE`](NOTICE)); the numbers are the in-transition-models numbers.
+- **FDR honesty** independently verified with a 1:1 entrapment database — true FDP at q≤1% is ≈1% (see above and `docs/benchmarks/`).
+- **Notes:** Java MS-GF+ is deterministic; the Astral count reuses a prior run (its `msgf2pin` step crashes here regardless of input, and the count is pin-builder-independent). Protein-level counts are omitted from the headline — they require uniform parsimony grouping to be comparable across engines, since raw `proteinIds` differ by output format. Precursor calibration is off (the andes default).
 
 </details>
 
-In four-engine comparisons against MS-GF+, Sage, and MSFragger, andes returns the most PSMs *and* distinct peptides at 1% FDR: on vendor-native data (Orbitrap Astral `.raw` + Bruker timsTOF `.d`), and on a real human-tissue **TMT** dataset acquired as ion-trap CID-MS2 ([PXD016999](https://www.ebi.ac.uk/pride/archive/projects/PXD016999): 22,217 PSMs / 10,473 peptides, ahead of MS-GF+, MSFragger, and Sage). It is also the only engine that reads Thermo `.raw` natively. Full methodology, per-engine parameters, data URLs, and config files: [`docs/benchmarks/`](docs/benchmarks/).
+andes is also the only engine here that reads Thermo `.raw` and Bruker timsTOF `.d` natively. Full methodology, per-engine parameters, data URLs, config files, and the entrapment-FDP validation: [`docs/benchmarks/`](docs/benchmarks/).
 
 ## Install
 
@@ -80,12 +85,14 @@ Requires Rust 1.85+ (see `rust-toolchain.toml`).
 andes \
   --spectrum BSA.mgf \
   --database BSA.fasta \
-  --output-pin out.pin
+  --output-pin out.pin \
+  --fragmentation HCD \
+  --fragment-tol-ppm 20
 ```
 
-This runs a tryptic search at 20 ppm precursor tolerance with the bundled HCD_QExactive_Tryp scoring model, writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
+This runs a tryptic search at the default 20 ppm precursor tolerance (`--precursor-tol-ppm`, default 20.0), with 20 ppm fragment-matching tolerance and the bundled **hcd_qexactive_tryp** scoring model (both selected via `--fragmentation HCD` + `--fragment-tol-ppm 20`), writes Percolator-format PSMs to `out.pin`, and prints per-phase timings to stderr. Feed `out.pin` directly into Percolator (Docker or native) to compute q-values.
 
-A row in `out.pin` is one peptide–spectrum match, with the Percolator features plus additive columns (`EdgeScore`, …) before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`). Full column reference: `DOCS.md` §3a.
+A row in `out.pin` is one peptide–spectrum match, with the Java-parity Percolator features plus Rust-only additive columns (`EdgeScore`, …) before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`). Full column reference: `DOCS.md` §3a.
 
 ## Common workflows
 
@@ -105,9 +112,7 @@ andes \
   --database hsapiens.fasta \
   --output-pin out.pin \
   --mods tmt_10plex_mods.txt \
-  --protocol TMT \
-  --fragmentation HCD \
-  --instrument QExactive
+  --protocol TMT
 ```
 
 **Direct TSV output (skip Percolator):**
@@ -119,7 +124,7 @@ andes --spectrum spectra.mzML --database db.fasta \
 
 **[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
-Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --instrument 3 --protocol 4`) keep working without modification (the legacy numeric flag values are documented in [`DOCS.md`](DOCS.md)).
+Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --protocol 4`) keep working without modification (the legacy numeric flag values are documented in [`DOCS.md`](DOCS.md)).
 
 ## CLI summary
 
@@ -148,8 +153,7 @@ Optional (default in **bold**):
 | `--min-length/-max-length <INT>` | Peptide length range | **6, 40** |
 | `--min-peaks <INT>` | Min peaks per spectrum to score | **10** |
 | `--top-n <INT>` | PSMs retained per spectrum | **10** |
-| `--fragmentation <auto\|CID\|ETD\|HCD\|UVPD>` | Fragmentation (auto-detected from mzML) | **auto** |
-| `--instrument <low-res\|high-res\|TOF\|QExactive>` | Instrument class | **low-res** |
+| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | Fragmentation/activation method — **MGF-only** (auto-detected for mzML/`.raw`/`.d`) | *(see below)* |
 | `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
 | `--param-file <FILE>` | Override the bundled scoring model | **auto-pick** |
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
@@ -159,13 +163,31 @@ Optional (default in **bold**):
 
 Run `andes --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
 
+mzML, Thermo `.raw`, and Bruker `.d` are fully auto-detected — andes reads the
+activation method and analyzer resolution from the file, so you pass no
+fragmentation parameters for these formats.
+
+### MGF input (extended parameters)
+
+MGF files carry no activation or analyzer metadata, so you describe the
+acquisition yourself:
+
+| Parameter | When to pass | Example |
+|---|---|---|
+| `--fragmentation <CID\|ETD\|HCD\|UVPD>` | the activation method used | `--fragmentation HCD` |
+| `--fragment-tol-ppm <X>` | high-resolution MS/MS (Orbitrap/TOF) | `--fragment-tol-ppm 20` |
+| `--fragment-tol-da <X>`  | low-resolution MS/MS (ion trap)      | `--fragment-tol-da 0.5` |
+
+If you pass none of these for an MGF file, andes assumes CID / low-res / 0.5 Da
+and prints a warning. These parameters have no effect on mzML/`.raw`/`.d`.
+
 ## Chimeric / co-isolated peptides (`--chimeric`, experimental)
 
 DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), andes runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
 
 ## Reading Thermo `.raw` files
 
-andes reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).
+andes reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is parity-identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).
 
 There are two ways to use it:
 
@@ -201,27 +223,31 @@ Scope: **MS2 only**, the non-chimeric search path. The ion-mobility dimension is
 
 ## Auto-detection
 
-For mzML inputs with `--fragmentation auto` (the default), andes peeks the first 64 MS2 spectra, histograms activation methods and analyzer types, and selects a scoring model from the bundled `models.parquet` store based on the dominant values. The `--instrument` CLI flag is **not** required for this path — instrument class is read from the mzML when possible. `--protocol` from the CLI is still applied when selecting the model. MGF files have no activation metadata, so they use flag-based selection (defaulting to `hcd_qexactive_tryp`). Full resolution table: `DOCS.md` §4.
+For mzML, Thermo `.raw`, and Bruker `.d` inputs, andes auto-detects the activation method and analyzer type from file metadata — no fragmentation or instrument parameters are needed. `--protocol` from the CLI is still applied to select protocol-specific models (e.g. TMT, iTRAQ). MGF files carry no activation or analyzer metadata; use `--fragmentation` / `--fragment-tol-ppm` / `--fragment-tol-da` to describe the acquisition (see the MGF section above), or andes defaults to CID / low-res / 0.5 Da and prints a warning. Full resolution table: `DOCS.md` §4.
 
 ## Training your own models
 
 andes can generate scoring models from your own data (`andes train`) and select them automatically by instrument at search time — useful for instruments or experiment classes the bundled models don't cover well (Orbitrap Astral, timsTOF, TMT/phospho/immunopeptidomics, …). Models live in a single Parquet store and support incremental add/remove/reweight updates with a held-out acceptance gate. See [`TRAIN.md`](TRAIN.md).
 
+## Parity vs Java MS-GF+
+
+PIN output columns are bit-exact with Java MS-GF+ on the agreement bucket (same scan + same top-1 peptide) for most features. Three residual divergences exist as deferred research: `lnEValue` (num_distinct semantics), `MeanRelErrorTop7` (error-stat normalization), and the BSA charge-3 SEV gap from deconvolution-implementation differences. None gate cutover; aggregate 1% FDR PSM counts beat Java on all three benchmark datasets. Full detail: `DOCS.md` §8d.
+
 ## Citation
 
-If you use andes in published work, please cite andes:
-
-> bigbio (2026). andes: a data-driven peptide search engine for the quantms ecosystem. https://github.com/bigbio/andes
-
-andes began as an effort to improve MS-GF+; if relevant, please also cite the foundational paper:
+If you use andes in published work, please cite the original MS-GF+ paper:
 
 > Kim, S. and Pevzner, P.A. (2014). MS-GF+ makes progress towards a universal database search tool for proteomics. *Nature Communications*, 5:5277.
 
+And optionally this Rust port:
+
+> bigbio (2026). andes: a Rust port of MS-GF+ for the quantms pipeline. https://github.com/bigbio/andes
+
 ## License
 
-andes is licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE) for the full text, [`NOTICE`](NOTICE) for attribution, and [`HERITAGE.md`](HERITAGE.md) for the project's origin in MS-GF+.
+andes inherits the upstream MS-GF+ UCSD-Noncommercial license. The license restricts redistribution and commercial use; see `LICENSE` for the full text and `NOTICE` for attribution. The original Java implementation is preserved on the `java-legacy` branch (frozen at the bigbio-optimized version) and `java-legacy-original` branch (synced to upstream `MSGFPlus/msgfplus/master`).
 
 ## Acknowledgments
 
-- Sangtae Kim, Pavel Pevzner, and the team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine that inspired this work.
+- Sangtae Kim, Pavel Pevzner, and the PNNL Proteomics team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine and the bundled scoring models.
 - The [bigbio](https://github.com/bigbio) maintainers and the [quantms](https://github.com/bigbio/quantms) team.

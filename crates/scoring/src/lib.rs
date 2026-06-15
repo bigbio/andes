@@ -3,6 +3,7 @@
 //! Contains the parameter model, rank-based node scoring, and fragment ion
 //! prediction. Depends only on the `model` crate.
 
+pub mod gbdt_eval;
 pub mod intensity_model;
 pub mod param_model;
 pub mod peak_features;

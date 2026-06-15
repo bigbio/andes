@@ -513,6 +513,7 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
         noise_err_dist_table,
         ion_existence_table,
         partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
     };
     param.rebuild_cache();
     Ok(param)

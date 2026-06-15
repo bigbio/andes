@@ -84,6 +84,22 @@ fn rust_pin_header_is_gf_free_schema() {
             "additive column {name} must sit between matchedIonRatio and Peptide"
         );
     }
+
+    // Proteins must be the very last column (after Peptide).
+    let proteins_pos = cols
+        .iter()
+        .rposition(|c| *c == "Proteins")
+        .expect("Proteins column missing");
+    assert_eq!(
+        proteins_pos,
+        cols.len() - 1,
+        "Proteins must be the last column in the PIN header; PIN Proteins is rest-of-line and \
+         cannot be followed by additional columns without corrupting Percolator's protein parsing"
+    );
+    assert!(
+        peptide_pos < proteins_pos,
+        "column order must be ... Peptide ... Proteins (last)"
+    );
 }
 
 #[test]
@@ -102,6 +118,8 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -110,6 +128,8 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

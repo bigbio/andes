@@ -304,7 +304,7 @@ mod tests {
     }
 
     fn test_prefix_ion() -> IonType {
-        IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits() }
+        IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 }
     }
 
     #[test]

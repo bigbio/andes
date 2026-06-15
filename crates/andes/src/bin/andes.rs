@@ -60,16 +60,6 @@ pub enum Fragmentation {
     #[clap(name = "UVPD")] Uvpd,
 }
 
-/// Instrument class. Drives the `LowRes`/`HighRes`/`TOF`/`QExactive`
-/// classification used to pick the bundled param file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Instrument {
-    #[clap(name = "low-res")]   LowRes,
-    #[clap(name = "high-res")]  HighRes,
-    #[clap(name = "TOF")]       Tof,
-    #[clap(name = "QExactive")] QExactive,
-}
-
 /// Search protocol: sample labeling or enrichment strategy applied during the experiment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Protocol {
@@ -129,6 +119,19 @@ struct SearchArgs {
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
 
+    /// How to generate decoys: `reverse` (default; reverse each sequence),
+    /// `shuffle` (seeded reproducible shuffle), or `none` (no decoys — for a
+    /// FASTA that already contains decoys, or external FDR). `none` with a
+    /// target-only FASTA leaves the search without decoys (FDR can't be
+    /// estimated) and warns.
+    #[arg(long = "decoy-strategy", default_value = "reverse")]
+    decoy_strategy: String,
+
+    /// Seed for `--decoy-strategy shuffle` (reproducible decoys). Ignored by
+    /// reverse/none.
+    #[arg(long = "decoy-seed", default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
+    decoy_seed: u64,
+
     /// Minimum isotope-error offset to try.
     #[arg(long, default_value = "-1")]
     isotope_error_min: i8,
@@ -141,12 +144,35 @@ struct SearchArgs {
     /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
     /// precursor tolerance for the main search; `auto` skips the correction when
     /// the sample is too small to be reliable.
-    #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
+    #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
+
+    /// Minimum SpecKeys before precursor calibration runs (default 10000).
+    /// Lower it to calibrate small/targeted runs that would otherwise be
+    /// skipped; raising it is more conservative. Only consulted when
+    /// `--precursor-cal` is `auto`/`on`.
+    #[arg(long = "cal-min-spec-keys", default_value_t = search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS)]
+    cal_min_spec_keys: usize,
 
     /// Precursor mass tolerance in ppm.
     #[arg(long, default_value = "20.0")]
     precursor_tol_ppm: f64,
+
+    /// Precursor tolerance in Da (overrides --precursor-tol-ppm; for low-res
+    /// precursor selection). The asymmetric ppm flags below take precedence.
+    #[arg(long = "precursor-tol-da")]
+    precursor_tol_da: Option<f64>,
+
+    /// Asymmetric precursor tolerance, left (lower) window in ppm. Requires
+    /// --precursor-tol-right-ppm; together they override the symmetric forms
+    /// (for a known systematic precursor offset).
+    #[arg(long = "precursor-tol-left-ppm")]
+    precursor_tol_left_ppm: Option<f64>,
+
+    /// Asymmetric precursor tolerance, right (upper) window in ppm. Requires
+    /// --precursor-tol-left-ppm.
+    #[arg(long = "precursor-tol-right-ppm")]
+    precursor_tol_right_ppm: Option<f64>,
 
     /// Minimum precursor charge to try when not specified in the spectrum.
     #[arg(long, default_value = "2")]
@@ -169,6 +195,21 @@ struct SearchArgs {
           default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
 
+    /// Proteolytic enzyme for in-silico digestion. Named values: trypsin
+    /// (default), chymotrypsin, lysc, aspn, gluc, lysn, argc, alphalp,
+    /// nocleavage, nonspecific. A wrong enzyme yields ~no PSMs (fails loud,
+    /// not silent). Previously hardcoded to trypsin with no override.
+    ///
+    /// Multi-protease digest: pass a `,`- or `+`-separated list (e.g.
+    /// `--enzyme gluc,trypsin`) to accept peptides cleaved by ANY listed
+    /// protease (the union of their cleavage rules). The FIRST entry is the
+    /// primary — it drives model selection and the cleavage-credit feature; if
+    /// no model matches that enzyme for the data, andes WARNs and you should
+    /// pass `--model`. Combining a universal protease (nonspecific/alphalp)
+    /// with specific ones makes the whole digest non-specific (warned).
+    #[arg(long, default_value = "trypsin")]
+    enzyme: String,
+
     /// Maximum number of missed cleavages per peptide.
     #[arg(long, default_value = "1")]
     max_missed_cleavages: u32,
@@ -182,18 +223,25 @@ struct SearchArgs {
     #[arg(long, default_value = "6")]
     min_length: u32,
 
-    /// Maximum peptide length, in residues.
-    #[arg(long, default_value = "40")]
+    /// Maximum peptide length, in residues. (50 matches MSFragger/Comet defaults;
+    /// 40 dropped long tryptic peptides.)
+    #[arg(long, default_value = "50")]
     max_length: u32,
+
+    /// Maximum number of variable modifications per peptide. A `NumMods=N` line
+    /// in a --mods file overrides this.
+    #[arg(long = "max-mods", default_value = "3")]
+    max_mods: u32,
 
     /// Path to the .param scoring model file.
     ///
-    /// If not supplied, a bundled file under
-    /// `resources/ionstat/` is selected from
-    /// `(--fragmentation, --instrument, --protocol)` (default
-    /// `HCD_QExactive_Tryp.param`). When running the binary outside the source
-    /// tree this path may not exist; supply --param-file explicitly in that
-    /// case.
+    /// If not supplied, a scoring model is selected from the bundled
+    /// `models.parquet` store. For mzML/.raw/.d the activation method and
+    /// analyzer resolution are auto-detected from metadata; for MGF the
+    /// `--fragmentation` and `--fragment-tol-ppm/-da` flags drive selection
+    /// (default: CID / low-res). When running the binary outside the source
+    /// tree the bundled store may not exist; supply --param-file explicitly
+    /// in that case.
     #[arg(long)]
     param_file: Option<PathBuf>,
 
@@ -213,20 +261,28 @@ struct SearchArgs {
     #[arg(long = "mods", alias = "mod", value_name = "MODFILE")]
     mods: Option<PathBuf>,
 
-    /// Fragmentation method. Named values: auto, CID, ETD, HCD, UVPD.
+    /// Fragmentation/activation method for MGF input only. mzML/.raw/.d
+    /// auto-detect this. Named values: auto, CID, ETD, HCD, UVPD.
     /// Legacy numeric CLI indices: 0=auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD.
-    #[arg(long, default_value = "auto", value_parser = parse_fragmentation)]
+    #[arg(long, hide = true, default_value = "auto", value_parser = parse_fragmentation)]
     fragmentation: Fragmentation,
-
-    /// Instrument class. Named values: low-res, high-res, TOF, QExactive.
-    /// Legacy numeric CLI indices: 0=low-res, 1=high-res, 2=TOF, 3=QExactive.
-    #[arg(long, default_value = "low-res", value_parser = parse_instrument)]
-    instrument: Instrument,
 
     /// Search protocol. Named values: auto, phospho, iTRAQ, iTRAQ-phospho, TMT, standard.
     /// Legacy numeric CLI indices: 0=auto, 1=phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=standard.
     #[arg(long, default_value = "auto", value_parser = parse_protocol)]
     protocol: Protocol,
+
+    /// Fragment-matching tolerance in ppm for **MGF input only** (high-resolution
+    /// MS/MS). Has no effect on mzML/.raw/.d (analyzer auto-detected). Mutually
+    /// exclusive with `--fragment-tol-da`.
+    #[arg(long = "fragment-tol-ppm", hide = true, conflicts_with = "fragment_tol_da")]
+    fragment_tol_ppm: Option<f64>,
+
+    /// Fragment-matching tolerance in Da for **MGF input only** (low-resolution
+    /// ion-trap MS/MS). Has no effect on mzML/.raw/.d. Mutually exclusive with
+    /// `--fragment-tol-ppm`.
+    #[arg(long = "fragment-tol-da", hide = true, conflicts_with = "fragment_tol_ppm")]
+    fragment_tol_da: Option<f64>,
 
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
@@ -265,8 +321,8 @@ struct SearchArgs {
     model_store: Option<PathBuf>,
 
     /// Exact model ID to load from the model store (bundled or `--model-store`).
-    /// When set, skips automatic selection by `(--fragmentation, --instrument,
-    /// --protocol)` and loads this ID directly. Useful after `andes train`
+    /// When set, skips automatic selection (metadata detection / `--fragmentation`
+    /// / `--protocol`) and loads this ID directly. Useful after `andes train`
     /// to search with the freshly-trained model.
     #[arg(long = "model")]
     model_id_override: Option<String>,
@@ -871,6 +927,32 @@ fn load_spectra_by_index(
     Ok(loaded)
 }
 
+/// Auto-detect an isobaric label (TMT/iTRAQ) by sampling the first `SAMPLE_N`
+/// MS2 spectra and inspecting their reporter-ion region. Used only when
+/// `--protocol auto` is left at its default, to engage the isobaric windowed
+/// peak filter with zero config.
+///
+/// Returns `None` for `.raw`/`.d` (the sampling reader here is mzML/MGF only —
+/// the protocol then stays as-is, byte-identical) and for label-free data, so
+/// non-isobaric runs are unchanged. The mzML benchmark datasets (Astral, UPS1,
+/// TMT) all flow through the mzML branch.
+fn detect_isobaric_sampled(
+    path: &Path,
+    is_mzml: bool,
+    is_mgf: bool,
+    ms_level: u32,
+    high_res: bool,
+) -> Option<input::IsobaricLabel> {
+    const SAMPLE_N: usize = 1000;
+    if !(is_mzml || is_mgf) {
+        return None;
+    }
+    let indices: HashSet<usize> = (0..SAMPLE_N).collect();
+    let loaded = load_spectra_by_index(path, is_mzml, ms_level, &indices, usize::MAX).ok()?;
+    let sample: Vec<Spectrum> = loaded.into_values().collect();
+    input::detect_isobaric(&sample, high_res)
+}
+
 fn tolerance_ppm_display(t: Tolerance) -> Option<f64> {
     match t {
         Tolerance::Ppm(v) => Some(v),
@@ -894,11 +976,12 @@ fn run_precursor_calibration(
     let meta = scan_spectrum_metadata(spectrum_path, is_mzml, ms_level, bench_cap)?;
     let spec_keys = build_spec_keys_from_metadata(&meta, params.charge_range.clone(), params.min_peaks);
 
-    if spec_keys.len() < cal_constants::MIN_SPECKEYS_FOR_PREPASS {
+    if spec_keys.len() < params.cal_min_spec_keys {
         eprintln!(
-            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s)",
+            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
+             Lower --cal-min-spec-keys to calibrate smaller/targeted runs.",
             spec_keys.len(),
-            cal_constants::MIN_SPECKEYS_FOR_PREPASS,
+            params.cal_min_spec_keys,
             t_cal.elapsed().as_secs_f64()
         );
         return Ok(CalibrationStats::default());
@@ -939,6 +1022,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
+    // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
+    // list for a multi-protease digest; the FIRST entry is the primary (drives
+    // model selection via build_selection_key + the cleavage-credit feature),
+    // the rest widen candidate enumeration (params.extra_enzymes). The common
+    // single-enzyme case yields an empty extras list ⇒ digestion bit-identical.
+    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
+    warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
@@ -964,9 +1054,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     log_rss("after_fasta_load");
 
-    // ── 2. Build SearchIndex (target + reversed decoys) ───────────────────────
+    // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
+    let decoy_strategy = search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy)
+        .ok_or_else(|| format!(
+            "unknown --decoy-strategy '{}' (expected reverse/shuffle/none)",
+            cli.decoy_strategy
+        ))?;
     let t_phase = std::time::Instant::now();
-    let idx = SearchIndex::from_target_db(&target_db, &cli.decoy_prefix);
+    let idx = SearchIndex::from_target_db_with_strategy(
+        &target_db,
+        &cli.decoy_prefix,
+        decoy_strategy,
+        cli.decoy_seed,
+    );
     eprintln!("[PHASE search_index_build: {:.2}s]", t_phase.elapsed().as_secs_f64());
     log_rss("after_search_index_build");
 
@@ -979,7 +1079,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `num_mods_from_file` is populated only when --mod is given and the
     // file contains a `NumMods=N` line; it overrides the default
     // `max_variable_mods_per_peptide` (3) below.
-    let (aa, num_mods_from_file) = match &cli.mods {
+    let (mut aa, num_mods_from_file) = match &cli.mods {
         Some(path) => {
             let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
                 .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
@@ -995,36 +1095,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
             (set, n)
         }
-        None => {
-            let cam = Modification {
-                name: "Carbamidomethyl".into(),
-                mass_delta: 57.02146,
-                residue: ResidueSpec::Specific(b'C'),
-                location: ModLocation::Anywhere,
-                fixed: true,
-                accession: None,
-            };
-            let ox = Modification {
-                name: "Oxidation".into(),
-                mass_delta: 15.99491,
-                residue: ResidueSpec::Specific(b'M'),
-                location: ModLocation::Anywhere,
-                fixed: false,
-                accession: None,
-            };
-            let set = AminoAcidSetBuilder::new_standard()
-                .add_fixed_mod(cam)
-                .add_variable_mod(ox)
-                .build()?;
-            (set, None)
-        }
+        // No --mods: andes defaults (CAM-C fixed, Ox-M variable). The isobaric
+        // tag (TMT/iTRAQ) is injected later, after protocol detection (C1).
+        None => (default_aa_set_with_tag(None)?, None),
     };
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
     //
-    // `--param-file` wins outright. Otherwise, for mzML with `--fragmentation auto`,
-    // peek the file's dominant activation method and pick the bundled `.param`.
-    // MGF and explicit fragmentation/instrument flags use `resolve_bundled_param`.
+    // `--param-file` wins outright. Otherwise the model is selected from the
+    // Parquet store: for mzML/.raw/.d the activation+analyzer are auto-detected
+    // from metadata; for MGF (metadata-less) the `--fragmentation` /
+    // `--fragment-tol-*` flags drive `resolve_metadataless_selection`.
     let spectrum_ext = spectrum_path
         .extension()
         .and_then(|e| e.to_str())
@@ -1040,9 +1121,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
-    // is always CID/TimsTOF (DDA-PASEF). Detection only runs when
-    // `--fragmentation auto` is set (otherwise the CLI flags override).
-    let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
+    // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
+    // bearing format and always wins over the MGF-only `--fragmentation` /
+    // `--fragment-tol-*` flags (which carry no metadata of their own).
+    let auto_route_eligible = is_mzml || is_raw || is_d;
     let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
         if !auto_route_eligible {
             None
@@ -1062,6 +1144,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // is_d — timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
             Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
         };
+    // Pre-compute before the routing match consumes `detected_activation_instrument`.
+    let instrument_was_detected = detected_activation_instrument
+        .map(|(_, inst)| inst.is_some())
+        .unwrap_or(false);
 
     let t_phase = std::time::Instant::now();
     let mut param = if let Some(ref override_path) = cli.param_file {
@@ -1070,50 +1156,57 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Param::load_from_file(override_path)
             .map_err(|e| format!("loading param file {}: {e}", override_path.display()))?
     } else {
-        // ── Auto / explicit flags: resolve from the Parquet model store. ──────
+        // ── Resolve (activation, instrument) for the Parquet model store. ─────
         //
-        // For `--fragmentation auto` with a detectable input the detected
-        // (activation, instrument) is used; for explicit flags or MGF (no
-        // detection) the CLI enum values are converted to ActivationMethod /
-        // InstrumentType for the store lookup.
+        // Metadata-first precedence: a fully detected (activation, instrument)
+        // wins outright. When only the activation method is detected (analyzer
+        // unknown), or nothing is detected (MGF / metadata-less mzML/.raw), the
+        // metadata-less resolver folds in the MGF-only `--fragmentation` and
+        // `--fragment-tol-*` flags (decision E default: CID / low-res).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
-            if auto_route_eligible {
-                match detected_activation_instrument {
-                    Some((method, inst)) => {
-                        eprintln!(
-                            "Param resolver: auto-detected dominant activation \
-                             method = {} (instrument = {}) from {}",
-                            method.name(),
-                            inst.map(|i| i.name()).unwrap_or("unknown/default"),
-                            spectrum_path.display()
-                        );
-                        (method, inst)
-                    }
-                    None => {
-                        // No detectable activation — fall back to CLI flags.
-                        // For the all-defaults case (Auto+LowRes+Auto) this
-                        // returns HCD/QExactive to match the historical default.
-                        cli_flags_to_activation_instrument(
-                            cli.fragmentation, cli.instrument, cli.protocol,
-                        )
-                    }
+            match detected_activation_instrument {
+                Some((method, Some(inst))) => {
+                    eprintln!(
+                        "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
+                        method.name(), inst.name(), spectrum_path.display()
+                    );
+                    (method, Some(inst))
                 }
-            } else {
-                // Explicit `--fragmentation` / `--instrument` flags (or MGF
-                // where auto-detection is not eligible).
-                cli_flags_to_activation_instrument(
-                    cli.fragmentation, cli.instrument, cli.protocol,
-                )
+                Some((method, None)) => resolve_metadataless_selection(
+                    Some(method), cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
+                ),
+                None => resolve_metadataless_selection(
+                    None, cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
+                ),
             };
 
         let (model_id, p) = load_param_from_store(
             activation,
             instrument_opt,
             cli.protocol,
+            search_enzyme,
             cli.model_store.as_deref(),
             cli.model_id_override.as_deref(),
         )?;
         eprintln!("Param model: {model_id} (from store)");
+        // E5/E12: loud-fail the silent enzyme fallback. If the user explicitly
+        // chose a non-Trypsin enzyme but no enzyme-matching model exists for the
+        // detected activation/instrument, selection backs off to a Trypsin/generic
+        // model whose cleavage prior + PIN enzymatic features are for the wrong
+        // protease. Warn unmissably (skip when --model pins the choice on purpose).
+        if cli.model_id_override.is_none() && search_enzyme != model::enzyme::Enzyme::Trypsin {
+            if let Some(selected) = p.data_type.enzyme {
+                if selected != search_enzyme {
+                    eprintln!(
+                        "WARN: --enzyme {} has no matching model for the detected \
+                         activation/instrument; fell back to '{model_id}' (enzyme {:?}). \
+                         Scores will use the wrong protease's cleavage prior + PIN features. \
+                         Train a matching model or pass --model to choose explicitly.",
+                        search_enzyme.name(), selected
+                    );
+                }
+            }
+        }
         p
     };
     // Stamp the requested isobaric protocol onto the loaded model so the dense-
@@ -1121,19 +1214,79 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // searches even when model selection fell back to a non-isobaric table
     // (there is no bundled CID-TMT model, so `--protocol TMT` resolves to
     // `cid_lowres_tryp`, whose stored protocol is Standard).
+    // An explicit `--protocol` wins outright. When left at `auto` (the default),
+    // auto-detect TMT/iTRAQ from MS2 reporter ions (mzML/MGF) so the dense-peak
+    // windowed filter engages with zero config — the same path `--protocol TMT`
+    // takes today. Detection returns None for label-free data, so non-isobaric
+    // runs stay byte-identical.
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
         Protocol::ItraqPhospho => param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho,
+        Protocol::Auto => {
+            let high_res = param.data_type.instrument.is_high_resolution();
+            match detect_isobaric_sampled(&spectrum_path, is_mzml, is_mgf, cli.ms_level as u32, high_res) {
+                Some(input::IsobaricLabel::Tmt) => {
+                    eprintln!("Protocol resolver: auto-detected TMT reporter ions → engaging isobaric windowed peak filter");
+                    param.data_type.protocol = model::protocol::Protocol::TMT;
+                }
+                Some(input::IsobaricLabel::Itraq) => {
+                    eprintln!("Protocol resolver: auto-detected iTRAQ reporter ions → engaging isobaric windowed peak filter");
+                    param.data_type.protocol = model::protocol::Protocol::ITRAQ;
+                }
+                None => {}
+            }
+        }
         _ => {}
     }
-    let scorer = RankScorer::new(&param);
+    // C1: parameter-free path only (no explicit --mods). When the protocol
+    // resolves to TMT/iTRAQ, inject the tag as a fixed mod on K + peptide
+    // N-term so labeled peptides match their precursor mass — otherwise the
+    // reporter filter engages but every labeled candidate is +tag Da off and
+    // misses. With explicit --mods the user owns the mod set (they may already
+    // supply the tag), so those runs stay byte-identical.
+    if cli.mods.is_none() {
+        let tag = match param.data_type.protocol {
+            model::protocol::Protocol::TMT => Some(("TMT6plex", 229.162932_f64)),
+            model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho => {
+                Some(("iTRAQ4plex", 144.102063_f64))
+            }
+            _ => None,
+        };
+        if let Some((name, mass)) = tag {
+            aa = default_aa_set_with_tag(Some((name, mass)))?;
+            eprintln!(
+                "Protocol resolver: injected {name} fixed mod (+{mass:.4} on K + peptide N-term) \
+                 into the candidate set (no --mods given)"
+            );
+        }
+    }
+    let mut scorer = RankScorer::new(&param);
+    // Fragment-tol override applies to metadata-less (MGF) input only. For
+    // mzML/.raw/.d the analyzer is auto-detected, so the override is ignored.
+    let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
+    if frag_tol_override.is_some() {
+        if instrument_was_detected {
+            eprintln!("WARN: --fragment-tol-* ignored — instrument auto-detected from metadata (use --fragment-tol-ppm/-da with MGF input only)");
+        } else {
+            scorer.set_fragment_tol_override(frag_tol_override);
+        }
+    }
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance =
-        PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm));
+        match (cli.precursor_tol_left_ppm, cli.precursor_tol_right_ppm, cli.precursor_tol_da) {
+            (Some(l), Some(r), _) => {
+                PrecursorTolerance::asymmetric(Tolerance::Ppm(l), Tolerance::Ppm(r))
+            }
+            (Some(_), None, _) | (None, Some(_), _) => {
+                return Err("--precursor-tol-left-ppm and --precursor-tol-right-ppm must be given together".into());
+            }
+            (None, None, Some(da)) => PrecursorTolerance::symmetric(Tolerance::Da(da)),
+            (None, None, None) => PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm)),
+        };
     params.charge_range = cli.charge_min..=cli.charge_max;
     if cli.charge_min > cli.charge_max {
         return Err(format!(
@@ -1176,6 +1329,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
     // blind multi-emission per scan = inflated FDR.
     params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
+    params.enzyme = search_enzyme;
+    params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,
@@ -1185,10 +1340,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.min_peaks = cli.min_peaks;
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;
+    params.max_variable_mods_per_peptide = cli.max_mods;
     if let Some(n) = num_mods_from_file {
-        params.max_variable_mods_per_peptide = n;
+        params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
+    params.cal_min_spec_keys = cli.cal_min_spec_keys;
     params.precursor_mass_shift_ppm = 0.0;
     params.score_mode = match cli.score {
         ScoreFlag::Rank => search::ScoreMode::Rank,
@@ -1197,6 +1354,36 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if params.score_mode == search::ScoreMode::Strong {
         eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
+
+    // ── Resolved-parameter banner (reanalysis auditability) ───────────────────
+    // One consolidated record of every resolved search parameter, so a
+    // (zero-config) run is fully reproducible/auditable from its log. Values that
+    // were auto-detected from the data/store are tagged [detected].
+    eprintln!("──────── andes resolved parameters ────────");
+    eprintln!("  spectra        : {}", spectrum_path.display());
+    eprintln!("  model          : (see 'Param model:' line above) [detected]");
+    eprintln!("  activation     : {:?} [detected]", param.data_type.activation);
+    eprintln!("  instrument     : {:?} [detected]", param.data_type.instrument);
+    eprintln!("  protocol       : {:?}", param.data_type.protocol);
+    if extra_enzymes.is_empty() {
+        eprintln!("  enzyme         : {} ({:?} termini, <={} missed cleavages)",
+                  search_enzyme.name(), cli.enzyme_specificity, params.max_missed_cleavages);
+    } else {
+        let extras: Vec<&str> = extra_enzymes.iter().map(|e| e.name()).collect();
+        eprintln!("  enzyme         : {} (primary) + {} (multi-protease union) ({:?} termini, <={} missed cleavages)",
+                  search_enzyme.name(), extras.join(","), cli.enzyme_specificity, params.max_missed_cleavages);
+    }
+    eprintln!("  mods           : {}",
+              if cli.mods.is_some() { "from --mods file" }
+              else { "defaults (Cam-C fixed, Ox-M variable) + isobaric tag if detected" });
+    eprintln!("  max var-mods   : {} per peptide", params.max_variable_mods_per_peptide);
+    eprintln!("  peptide length : {}-{}", params.min_length, params.max_length);
+    eprintln!("  precursor tol  : {:?} (calibration: {:?})", params.precursor_tolerance, params.precursor_cal_mode);
+    eprintln!("  charge range   : {}-{}", params.charge_range.start(), params.charge_range.end());
+    eprintln!("  isotope errors : {}..={}", params.isotope_error_range.start(), params.isotope_error_range.end());
+    eprintln!("  decoy          : {:?} (prefix {})   chimeric: {}",
+              decoy_strategy, cli.decoy_prefix, params.chimeric);
+    eprintln!("───────────────────────────────────────────");
 
     // ── 6+7. Stream-load + chunked search ─────────────────────────────────
     //
@@ -2016,6 +2203,8 @@ fn build_msnet_peptide(
                 location: ModLocation::Anywhere,
                 fixed: false,
                 accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             residues.push(aa.with_mod(Arc::new(m)));
         } else {
@@ -2532,6 +2721,7 @@ fn run_train_from_msnet(
                 seed_param.data_type.activation,
                 Some(seed_param.data_type.instrument),
                 Protocol::Auto,
+                model::enzyme::Enzyme::Trypsin, // inert (model_id_override below makes selection columns unused)
                 Some(store_path.as_path()),
                 Some(&prior_id),
             )
@@ -2872,6 +3062,8 @@ fn build_aa_set(
                 location: ModLocation::Anywhere,
                 fixed: true,
                 accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             let ox = Modification {
                 name: "Oxidation".into(),
@@ -2880,6 +3072,8 @@ fn build_aa_set(
                 location: ModLocation::Anywhere,
                 fixed: false,
                 accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             Ok(AminoAcidSetBuilder::new_standard()
                 .add_fixed_mod(cam)
@@ -2887,6 +3081,64 @@ fn build_aa_set(
                 .build()?)
         }
     }
+}
+
+/// Build the default `AminoAcidSet` (CAM-C fixed + Ox-M variable), optionally
+/// with an isobaric tag (TMT/iTRAQ) as a FIXED mod on K + peptide N-term.
+///
+/// Used by the no-`--mods` (parameter-free) path: when the protocol resolves to
+/// TMT/iTRAQ the tag MUST be in the candidate set, or every labeled peptide is
+/// `+tag·(nK+1)` Da off at the precursor and silently misses (C1).
+fn default_aa_set_with_tag(
+    tag: Option<(&str, f64)>,
+) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
+    let cam = Modification {
+        name: "Carbamidomethyl".into(),
+        mass_delta: 57.02146,
+        residue: ResidueSpec::Specific(b'C'),
+        location: ModLocation::Anywhere,
+        fixed: true,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let ox = Modification {
+        name: "Oxidation".into(),
+        mass_delta: 15.99491,
+        residue: ResidueSpec::Specific(b'M'),
+        location: ModLocation::Anywhere,
+        fixed: false,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let mut b = AminoAcidSetBuilder::new_standard()
+        .add_fixed_mod(cam)
+        .add_variable_mod(ox);
+    if let Some((name, mass)) = tag {
+        let tag_k = Modification {
+            name: name.into(),
+            mass_delta: mass,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let tag_nterm = Modification {
+            name: name.into(),
+            mass_delta: mass,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::NTerm,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        b = b.add_fixed_mod(tag_k).add_fixed_mod(tag_nterm);
+    }
+    Ok(b.build()?)
 }
 
 /// Format today's date as `YYYY-MM-DD` using `std::time::SystemTime`.
@@ -2916,171 +3168,118 @@ fn unix_days_to_iso8601(days: u64) -> String {
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
-/// Convert the CLI `Fragmentation` enum to `ActivationMethod`.
+/// Convert the CLI `Fragmentation` enum to `Option<ActivationMethod>`.
 ///
-/// `Fragmentation::Auto` is treated as `ActivationMethod::CID` here because
-/// the old ladder normalised `Auto → CID` when explicit flags were used
-/// (without mzML peek). When `--fragmentation auto` is combined with mzML/raw
-/// input the detection path is taken instead of this function.
-fn cli_fragmentation_to_activation(f: Fragmentation) -> ActivationMethod {
+/// `Fragmentation::Auto` returns `None` (no activation explicitly requested);
+/// every concrete variant maps to its `ActivationMethod`. Used by
+/// [`resolve_metadataless_selection`] so that an unset `--fragmentation`
+/// defers to detection or the class-consistent default.
+fn cli_fragmentation_to_activation_opt(f: Fragmentation) -> Option<ActivationMethod> {
     match f {
-        Fragmentation::Auto => ActivationMethod::CID,
-        Fragmentation::Cid  => ActivationMethod::CID,
-        Fragmentation::Etd  => ActivationMethod::ETD,
-        Fragmentation::Hcd  => ActivationMethod::HCD,
-        Fragmentation::Uvpd => ActivationMethod::UVPD,
+        Fragmentation::Auto => None,
+        Fragmentation::Cid  => Some(ActivationMethod::CID),
+        Fragmentation::Etd  => Some(ActivationMethod::ETD),
+        Fragmentation::Hcd  => Some(ActivationMethod::HCD),
+        Fragmentation::Uvpd => Some(ActivationMethod::UVPD),
     }
 }
 
-/// Convert the CLI `Instrument` enum to `InstrumentType`.
-fn cli_instrument_to_instrument_type(i: Instrument) -> InstrumentType {
-    match i {
-        Instrument::LowRes    => InstrumentType::LowRes,
-        Instrument::HighRes   => InstrumentType::HighRes,
-        Instrument::Tof       => InstrumentType::TOF,
-        Instrument::QExactive => InstrumentType::QExactive,
-    }
+/// Resolve the CLI fragment-tolerance override (MGF only) into a `Tolerance`.
+/// `--fragment-tol-ppm` ⇒ `Ppm`; `--fragment-tol-da` ⇒ `Da`; none ⇒ `None`.
+fn cli_fragment_tol_override(
+    fragment_tol_ppm: Option<f64>,
+    fragment_tol_da: Option<f64>,
+) -> Option<model::tolerance::Tolerance> {
+    use model::tolerance::Tolerance;
+    fragment_tol_ppm
+        .map(Tolerance::Ppm)
+        .or_else(|| fragment_tol_da.map(Tolerance::Da))
 }
 
-/// Resolve `(Fragmentation, Instrument, Protocol)` from CLI flags to
-/// `(ActivationMethod, InstrumentType, Protocol)` for store lookup.
+/// Parse the `--enzyme` value into `(primary, extras)`.
 ///
-/// Handles the historical all-defaults short-circuit: when the user omits
-/// all scoring-model flags (`--fragmentation auto`, `--instrument low-res`,
-/// `--protocol auto`) the old ladder returned `HCD_QExactive_Tryp.param`.
-/// We replicate this by returning `(HCD, QExactive, Auto)` for that case
-/// instead of `(CID, LowRes, Auto)` (which would resolve to `cid_lowres_tryp`).
-fn cli_flags_to_activation_instrument(
-    fragmentation: Fragmentation,
-    instrument: Instrument,
-    protocol: Protocol,
-) -> (ActivationMethod, Option<InstrumentType>) {
-    // Historical all-defaults short-circuit (mirrors resolve_bundled_param step 0).
-    if fragmentation == Fragmentation::Auto
-        && instrument == Instrument::LowRes
-        && protocol == Protocol::Auto
-    {
-        return (ActivationMethod::HCD, Some(InstrumentType::QExactive));
-    }
-    (
-        cli_fragmentation_to_activation(fragmentation),
-        Some(cli_instrument_to_instrument_type(instrument)),
-    )
-}
-
-/// Translate `(--fragmentation, --instrument, --protocol)` into a bundled
-/// `.param` filename and resolve it under
-/// `resources/ionstat/` relative to the cargo manifest dir.
-///
-/// CLI indices for legacy numeric flags:
-/// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
-/// - instrument:    0=LowRes,   1=HighRes, 2=TOF, 3=QExactive
-/// - protocol:      0=Automatic,1=Phosphorylation, 2=iTRAQ,
-///   3=iTRAQPhospho, 4=TMT, 5=Standard
-///
-/// When all three are `None`, the historical default
-/// `HCD_QExactive_Tryp.param` is returned (preserving existing tests'
-/// behaviour). Only Tryp is supported as the enzyme component for now;
-/// other enzymes require the user to pass `--param-file` directly.
-///
-/// Bundled `.param` resolution ladder: try the exact
-/// `{frag}_{inst}_Tryp{protocol}.param` first; if that doesn't resolve, drop
-/// the protocol suffix; if that also doesn't resolve, use the final
-/// `(frag, inst)`-keyed ladder. Returns an error only if even the
-/// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
-/// resources (a packaging defect, not a CLI input error).
-///
-/// Reference implementation of the historical filename-based resolution ladder.
-/// The search path now goes through [`load_param_from_store`]; the store-selection
-/// equivalence test validates the store-based selection against an independent
-/// copy of this logic.
-#[allow(dead_code)]
-fn resolve_bundled_param(
-    fragmentation: Fragmentation,
-    instrument:    Instrument,
-    protocol:      Protocol,
-) -> Result<PathBuf, String> {
-    // Step 0: default-to-bundled short-circuit. When the caller passes all
-    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto),
-    // fall back to the bundled HCD_QExactive_Tryp.param — the behavior of
-    // omitting all three flags.
-    if fragmentation == Fragmentation::Auto
-        && instrument == Instrument::LowRes
-        && protocol == Protocol::Auto {
-        return canonicalize_bundled("HCD_QExactive_Tryp.param");
-    }
-
-    // Step 1: Normalize.
-    //   - Auto fragmentation → CID
-    //   - HCD with low-res inst → upgrade to QExactive
-    let frag = match fragmentation {
-        Fragmentation::Auto => "CID",
-        Fragmentation::Cid  => "CID",
-        Fragmentation::Etd  => "ETD",
-        Fragmentation::Hcd  => "HCD",
-        Fragmentation::Uvpd => "UVPD",
-    };
-    let mut inst = match instrument {
-        Instrument::LowRes    => "LowRes",
-        Instrument::HighRes   => "HighRes",
-        Instrument::Tof       => "TOF",
-        Instrument::QExactive => "QExactive",
-    };
-    // HCD-upgrade rule: HCD with low-res inst → upgrade to QExactive.
-    if frag == "HCD" && inst == "LowRes" {
-        inst = "QExactive";
-    }
-
-    let prot_suffix: &str = match protocol {
-        Protocol::Auto         => "",          // empty: no protocol suffix
-        Protocol::Phospho      => "_Phosphorylation",
-        Protocol::Itraq        => "_iTRAQ",
-        Protocol::ItraqPhospho => "_iTRAQPhospho",
-        Protocol::Tmt          => "_TMT",
-        Protocol::Standard     => "",          // standard = no suffix
-    };
-
-    // Step 1: Try the exact requested combination first.
-    //   `{frag}_{inst}_Tryp{prot_suffix}.param`
-    let exact = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
-    if let Ok(path) = canonicalize_bundled(&exact) {
-        return Ok(path);
-    }
-
-    // Step 2: Drop protocol — try `{frag}_{inst}_Tryp.param`.
-    // For (CID, HighRes, Tryp, TMT) this lands on `CID_HighRes_Tryp.param`
-    // when the protocol-specific file is missing.
-    if !prot_suffix.is_empty() {
-        let no_protocol = format!("{frag}_{inst}_Tryp.param");
-        if let Ok(path) = canonicalize_bundled(&no_protocol) {
-            eprintln!(
-                "Param resolver: `{exact}` not bundled; falling back to `{no_protocol}` \
-                 (protocol suffix dropped when exact match missing)",
-            );
-            return Ok(path);
+/// Accepts `,` or `+` separators (the latter matching MaxQuant/MSFragger
+/// docs), trims whitespace, drops empty tokens, and de-duplicates by enzyme
+/// while preserving order. The first surviving entry is the primary (drives
+/// model selection and the cleavage-credit PIN feature); the rest only widen
+/// candidate enumeration. Errors on an unknown name or empty input.
+fn parse_enzymes(
+    spec: &str,
+) -> Result<(model::enzyme::Enzyme, Vec<model::enzyme::Enzyme>), Box<dyn std::error::Error>> {
+    use model::enzyme::Enzyme;
+    let mut all: Vec<Enzyme> = Vec::new();
+    for tok in spec.split([',', '+']).map(str::trim).filter(|s| !s.is_empty()) {
+        let e = Enzyme::from_name(tok).ok_or_else(|| format!(
+            "unknown --enzyme '{tok}' (expected trypsin/chymotrypsin/lysc/aspn/gluc/lysn/argc/\
+             alphalp/nocleavage/nonspecific/elastase)"
+        ))?;
+        if !all.contains(&e) {
+            all.push(e); // dedup, keep order (first = primary)
         }
     }
+    let (primary, extras) = all.split_first().ok_or("empty --enzyme")?;
+    Ok((*primary, extras.to_vec()))
+}
 
-    // Step 3: Alternate enzyme — try Trypsin (for C-term enzymes) or LysN
-    // (for N-term enzymes). We always use Tryp here for now.
+/// Warn when a universal protease (NonSpecific, or AlphaLP which cleaves every
+/// bond) is combined with specific protease(s): the cleavage-site union then
+/// covers EVERY position, so the digest is effectively non-specific — usually
+/// not what a user adding it to a specific list intends.
+fn warn_if_universal_protease_combo(
+    primary: model::enzyme::Enzyme,
+    extras: &[model::enzyme::Enzyme],
+) {
+    use model::enzyme::Enzyme;
+    let is_universal = |e: &Enzyme| matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP);
+    let is_specific =
+        |e: &Enzyme| !matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP | Enzyme::NoCleavage);
+    let all: Vec<Enzyme> = std::iter::once(primary).chain(extras.iter().copied()).collect();
+    if all.len() > 1 && all.iter().any(is_universal) && all.iter().any(is_specific) {
+        eprintln!(
+            "WARN: --enzyme combines a universal protease (NonSpecific/AlphaLP) with specific \
+             one(s); their union cleaves at EVERY position, so this is effectively a \
+             non-specific digest (much larger search space). Drop the universal protease to \
+             keep the specific cleavage rules."
+        );
+    }
+}
 
-    // Step 4: Final fallback ladder by (fragmentation, instrument).
-    //   - HCD + (TOF|HighRes) + C-term → CID_TOF_Tryp
-    //   - ETD + C-term                  → ETD_LowRes_Tryp
-    //   - Non-electron + N-term         → CID_LowRes_LysN  (skipped; N-term TBD)
-    //   - default                        → CID_LowRes_Tryp
-    //
-    // For our currently-supported (frag, inst) combos:
-    let final_fallback = match (frag, inst) {
-        ("HCD", "TOF") | ("HCD", "HighRes") => "CID_TOF_Tryp.param",
-        ("ETD", _) => "ETD_LowRes_Tryp.param",
-        _ => "CID_LowRes_Tryp.param",
+/// Resolve (activation, instrument) for model selection on metadata-less input
+/// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
+/// the `--fragment-tol-*` unit; activation from detected method, else
+/// `--fragmentation`, else the class-consistent default. When nothing
+/// disambiguates, decision E: CID / LowRes (→ `cid_lowres_tryp`) + a warning.
+fn resolve_metadataless_selection(
+    detected_activation: Option<ActivationMethod>,
+    fragmentation: Fragmentation,
+    fragment_tol_ppm: Option<f64>,
+    fragment_tol_da: Option<f64>,
+) -> (ActivationMethod, Option<InstrumentType>) {
+    let instrument: Option<InstrumentType> = if fragment_tol_ppm.is_some() {
+        Some(InstrumentType::QExactive)
+    } else if fragment_tol_da.is_some() {
+        Some(InstrumentType::LowRes)
+    } else {
+        None
     };
-    eprintln!(
-        "Param resolver: `{exact}` not bundled and protocol-less drop also missing; \
-         using final fallback `{final_fallback}` (final resolution ladder)",
-    );
-    canonicalize_bundled(final_fallback)
+    let explicit = cli_fragmentation_to_activation_opt(fragmentation);
+    // Class-consistent default when neither detection nor `--fragmentation`
+    // names an activation: high-res classes imply HCD, otherwise CID.
+    let class_default = match instrument {
+        Some(InstrumentType::QExactive)
+        | Some(InstrumentType::HighRes)
+        | Some(InstrumentType::TOF) => ActivationMethod::HCD,
+        _ => ActivationMethod::CID,
+    };
+    let activation = detected_activation.or(explicit).unwrap_or(class_default);
+    if detected_activation.is_none() && explicit.is_none() && instrument.is_none() {
+        eprintln!(
+            "WARN: MGF input with no --fragmentation/--fragment-tol; assuming \
+             CID / low-res / 0.5 Da. Pass --fragmentation and --fragment-tol-ppm/-da \
+             to override."
+        );
+    }
+    (activation, instrument)
 }
 
 /// Peek the spectrum file and return the dominant
@@ -3167,57 +3366,6 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
     Some(dominant)
 }
 
-/// Resolve a bundled `.param` file for the given activation method.
-///
-/// Auto-detect path: pick the bundled instrument+enzyme pair that best matches
-/// the dataset when the user passes fragmentation `auto` (per-spectrum param
-/// dispatch at file-wide granularity).
-///
-/// The `detected_instrument` argument is the instrument type detected by
-/// scanning the mzML's `<instrumentConfiguration>` blocks (see
-/// `input::detect_instrument_type`). `None` means we couldn't detect it
-/// (older mzML, MGF, etc.) — defaults to low-resolution ion-trap routing.
-///
-/// Mapping (Tryp / no-protocol unless protocol overrides):
-///   - CID  → frag=1, inst=detected (LowRes when none).
-///   - HCD  → frag=3, inst=detected (HCD + low-res upgrades to QExactive).
-///   - ETD  → frag=2, inst=detected.
-///   - PQD  → CID (PQD collapsed to CID for model routing).
-///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
-///
-/// Reference implementation of the historical activation-aware resolution ladder
-/// (kept alongside [`resolve_bundled_param`]); the search path now uses
-/// [`load_param_from_store`].
-#[allow(dead_code)]
-fn resolve_bundled_param_for_activation(
-    method:               ActivationMethod,
-    detected_instrument:  Option<InstrumentType>,
-    protocol:             Protocol,
-) -> Result<PathBuf, String> {
-    let frag = match method {
-        ActivationMethod::CID  => Fragmentation::Cid,
-        ActivationMethod::ETD  => Fragmentation::Etd,
-        ActivationMethod::HCD  => Fragmentation::Hcd,
-        ActivationMethod::UVPD => Fragmentation::Uvpd,
-        // PQD → CID for model routing.
-        ActivationMethod::PQD  => Fragmentation::Cid,
-    };
-    // New instrument classes fall back to their family for model resolution
-    // (no Astral-specific or TimsTOF-specific .param file bundled yet).
-    let inst = match detected_instrument.map(|i| i.family_fallback()) {
-        Some(InstrumentType::LowRes)    => Instrument::LowRes,
-        Some(InstrumentType::HighRes)   => Instrument::HighRes,
-        Some(InstrumentType::TOF)       => Instrument::Tof,
-        Some(InstrumentType::QExactive) => Instrument::QExactive,
-        // OrbitrapAstral → QExactive and TimsTOF → TOF via family_fallback above;
-        // these arms are unreachable after fallback but keep the match exhaustive.
-        Some(InstrumentType::OrbitrapAstral) => Instrument::QExactive,
-        Some(InstrumentType::TimsTOF)        => Instrument::Tof,
-        None                                 => Instrument::LowRes,
-    };
-    resolve_bundled_param(frag, inst, protocol)
-}
-
 /// Helper to call `input::detect_instrument_type` on an mzML path.
 ///
 /// Mirrors the structure of `detect_dominant_activation` so the two
@@ -3234,26 +3382,6 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 
     let file = File::open(spectrum_path).ok()?;
     detect_instrument_type(BufReader::new(file))
-}
-
-/// Resolve a bundled `.param` filename under
-/// `resources/ionstat/` relative to the crate's cargo manifest
-/// dir (set at compile time). Returns a helpful error if the file does
-/// not exist.
-#[allow(dead_code)]
-fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("resources/ionstat")
-        .join(filename);
-    candidate.canonicalize().map_err(|e| format!(
-        "bundled param file not found at `{}`: {e}\n\
-         Hint: not every (fragmentation, instrument, protocol) combination \
-         has a bundled .param file. Supply --param-file <PATH> to specify \
-         the scoring model explicitly, or list available files under \
-         `resources/ionstat/`.",
-        candidate.display()
-    ))
 }
 
 /// Resolve the path to the bundled `models.parquet` store.
@@ -3276,7 +3404,7 @@ fn bundled_store_path() -> PathBuf {
 
 /// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying
 /// all old-ladder normalizations. This is the new entry point used by the
-/// search binary in place of `resolve_bundled_param*`.
+/// search binary, replacing the former filename-based resolution ladder.
 ///
 /// `activation`: the detected or explicitly set `ActivationMethod`.
 /// `instrument`: the detected or explicitly set `InstrumentType` (None = undetected → LowRes).
@@ -3285,6 +3413,7 @@ fn build_selection_key(
     activation: ActivationMethod,
     instrument: Option<InstrumentType>,
     protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
 ) -> SelectionKey {
     use std::collections::BTreeSet;
 
@@ -3305,7 +3434,20 @@ fn build_selection_key(
     //    inline here.
     let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
         match (act_str, inst_after_family) {
-            ("HCD", "LowRes")    => ("HCD", "QExactive", false),
+            // H5: low-res (ion-trap) HCD. MS-GF+ "upgraded" this to the high-res
+            // QExactive model, which then matched 0.5-Da peaks at 20 ppm and lost
+            // ~18% of PSMs silently. No hcd_lowres model exists, so route to the
+            // low-res b/y model (cid_lowres_tryp) instead — correct fragment
+            // tolerance and ion series. Intentional divergence from MS-GF+'s
+            // ladder, pinned by store_selection_equivalence.rs.
+            ("HCD", "LowRes")    => {
+                eprintln!(
+                    "WARN: low-res (ion-trap) HCD detected — no hcd_lowres model exists; \
+                     routing to cid_lowres_tryp (low-res b/y, 0.5-Da tolerance) rather than \
+                     the high-res QExactive model. Pass --model to override."
+                );
+                ("CID", "LowRes", true)
+            }
             ("HCD", "TOF")       => ("CID", "TOF",       true),
             ("CID", "QExactive") => ("CID", "LowRes",    true),
             ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),
@@ -3331,8 +3473,8 @@ fn build_selection_key(
     SelectionKey {
         activation: final_act.to_string(),
         instrument: final_inst.to_string(),
-        // Parquet stores enzyme as "Trypsin" for the tryptic models.
-        enzyme: "Trypsin".to_string(),
+        // Parquet stores the enzyme as its `Enzyme::name()` ("Trypsin", "LysC", ...).
+        enzyme: enzyme.name().to_string(),
         experiment_class,
     }
 }
@@ -3340,8 +3482,8 @@ fn build_selection_key(
 /// Load the scoring [`Param`] from the bundled Parquet store for the given
 /// `(activation, instrument, protocol)` combination.
 ///
-/// This is the new model-resolution path that replaces
-/// `Param::load_from_file(resolve_bundled_param*(...))`. The `model_id`
+/// This is the new model-resolution path, replacing the former
+/// filename-based resolution ladder. The `model_id`
 /// selected from the store will be identical to the lowercased filename
 /// stem of the old `.param` path (guaranteed by the equivalence gate test
 /// `store_selection_matches_old_ladder_for_all_combos`).
@@ -3355,6 +3497,7 @@ fn load_param_from_store(
     activation: ActivationMethod,
     instrument: Option<InstrumentType>,
     protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
     custom_store_path: Option<&Path>,
     model_id_override: Option<&str>,
 ) -> Result<(String, Param), Box<dyn std::error::Error>> {
@@ -3368,7 +3511,7 @@ fn load_param_from_store(
         id.to_string()
     } else {
         let entries = store.selection_entries();
-        let key = build_selection_key(activation, instrument, protocol);
+        let key = build_selection_key(activation, instrument, protocol, enzyme);
 
         // Forward-compat: `build_selection_key` collapses instruments with a real
         // family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF) so the
@@ -3389,16 +3532,23 @@ fn load_param_from_store(
         };
 
         exact_id.unwrap_or_else(|| {
-            select(
-                &entries,
-                &key,
-                // `build_selection_key` already applies family fallback + all
-                // normalizations, so the family_fn here is the identity.
-                |i| i.to_string(),
-                Some("hcd_qexactive_tryp"),
-            )
-            .unwrap_or("hcd_qexactive_tryp")
-            .to_string()
+            // `build_selection_key` already applies family fallback + all
+            // normalizations, so the family_fn here is the identity. (L6) Pass
+            // `None` for the generic so a true no-match returns `None`, letting us
+            // WARN that the chosen model is a last-resort fallback rather than
+            // silently emitting `hcd_qexactive_tryp` for mis-detected data.
+            match select(&entries, &key, |i| i.to_string(), None) {
+                Some(id) => id.to_string(),
+                None => {
+                    eprintln!(
+                        "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
+                         — falling back to the generic 'hcd_qexactive_tryp'; scores may be \
+                         mis-calibrated for this data. Pin a model with --model if this is wrong.",
+                        key.activation, key.instrument, key.enzyme, key.experiment_class
+                    );
+                    "hcd_qexactive_tryp".to_string()
+                }
+            }
         })
     };
 
@@ -3421,22 +3571,6 @@ fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
         _ => Err(format!(
             "invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD \
              (or legacy 0..=4)"
-        )),
-    }
-}
-
-/// Parse `--instrument` value. Accepts named (low-res, high-res, TOF,
-/// QExactive) or legacy numeric (0=LowRes, 1=HighRes, 2=TOF, 3=QExactive).
-fn parse_instrument(s: &str) -> Result<Instrument, String> {
-    if let Ok(v) = <Instrument as ValueEnum>::from_str(s, true) { return Ok(v); }
-    match s.parse::<u8>() {
-        Ok(0) => Ok(Instrument::LowRes),
-        Ok(1) => Ok(Instrument::HighRes),
-        Ok(2) => Ok(Instrument::Tof),
-        Ok(3) => Ok(Instrument::QExactive),
-        _ => Err(format!(
-            "invalid instrument `{s}`: expected low-res|high-res|TOF|QExactive \
-             (or legacy 0..=3)"
         )),
     }
 }
@@ -3488,6 +3622,60 @@ fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
 }
 
 #[cfg(test)]
+mod enzyme_cli_tests {
+    use super::parse_enzymes;
+    use model::enzyme::Enzyme;
+
+    #[test]
+    fn single_enzyme_has_no_extras() {
+        let (primary, extras) = parse_enzymes("trypsin").unwrap();
+        assert_eq!(primary, Enzyme::Trypsin);
+        assert!(extras.is_empty(), "single enzyme ⇒ empty extras (bit-identical path)");
+    }
+
+    #[test]
+    fn comma_and_plus_separators_both_parse() {
+        let (p1, e1) = parse_enzymes("gluc,trypsin").unwrap();
+        let (p2, e2) = parse_enzymes("gluc+trypsin").unwrap();
+        assert_eq!((p1, e1.as_slice()), (Enzyme::GluC, [Enzyme::Trypsin].as_slice()));
+        assert_eq!((p2, e2.as_slice()), (Enzyme::GluC, [Enzyme::Trypsin].as_slice()));
+    }
+
+    #[test]
+    fn first_token_is_primary_order_matters_for_selection() {
+        assert_eq!(parse_enzymes("trypsin,gluc").unwrap().0, Enzyme::Trypsin);
+        assert_eq!(parse_enzymes("gluc,trypsin").unwrap().0, Enzyme::GluC);
+    }
+
+    #[test]
+    fn duplicate_tokens_are_deduped_preserving_order() {
+        // "trypsin,trypsin,gluc" and the alias "tryp" collapse to [Trypsin, GluC].
+        let (primary, extras) = parse_enzymes("trypsin, tryp , gluc, gluc").unwrap();
+        assert_eq!(primary, Enzyme::Trypsin);
+        assert_eq!(extras, vec![Enzyme::GluC]);
+    }
+
+    #[test]
+    fn whitespace_and_empties_tolerated() {
+        let (primary, extras) = parse_enzymes("  lysc , , trypsin ").unwrap();
+        assert_eq!(primary, Enzyme::LysC);
+        assert_eq!(extras, vec![Enzyme::Trypsin]);
+    }
+
+    #[test]
+    fn unknown_enzyme_errors_and_empty_errors() {
+        assert!(parse_enzymes("bogus").is_err());
+        assert!(parse_enzymes("").is_err());
+        assert!(parse_enzymes("  , ").is_err());
+    }
+
+    #[test]
+    fn elastase_aliases_to_nonspecific() {
+        assert_eq!(parse_enzymes("elastase").unwrap().0, Enzyme::NonSpecific);
+    }
+}
+
+#[cfg(test)]
 mod param_resolver_tests {
     use super::*;
 
@@ -3502,12 +3690,6 @@ mod param_resolver_tests {
     fn parse_fragmentation_rejects_out_of_range_numeric() {
         let err = parse_fragmentation("99").unwrap_err();
         assert!(err.contains("0..=4"), "error message should mention range, got: {err}");
-    }
-
-    #[test]
-    fn parse_instrument_rejects_out_of_range_numeric() {
-        let err = parse_instrument("99").unwrap_err();
-        assert!(err.contains("0..=3"), "got: {err}");
     }
 
     #[test]

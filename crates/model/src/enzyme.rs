@@ -71,7 +71,9 @@ impl Enzyme {
             "argc" | "arg-c"          => Some(Enzyme::ArgC),
             "alp" | "alpha-lp" | "alphalp" => Some(Enzyme::AlphaLP),
             "nocleavage" | "none"     => Some(Enzyme::NoCleavage),
-            "nonspecific" | "all"     => Some(Enzyme::NonSpecific),
+            // Elastase has broad, low-specificity cleavage; treat it as a
+            // non-specific digest (matches the multi-enzyme spec §5).
+            "nonspecific" | "all" | "elastase" => Some(Enzyme::NonSpecific),
             _                         => None,
         }
     }
@@ -214,6 +216,8 @@ mod tests {
         assert_eq!(Enzyme::from_name("Tryp"),    Some(Enzyme::Trypsin));
         assert_eq!(Enzyme::from_name("Asp-N"),   Some(Enzyme::AspN));
         assert_eq!(Enzyme::from_name("AspN"),    Some(Enzyme::AspN));
+        // Elastase is broad/low-specificity → mapped to NonSpecific.
+        assert_eq!(Enzyme::from_name("elastase"), Some(Enzyme::NonSpecific));
         assert_eq!(Enzyme::from_name("garbage"), None);
     }
 

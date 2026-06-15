@@ -5,6 +5,7 @@
 
 pub mod intensity_model;
 pub mod param_model;
+pub mod peak_features;
 pub mod scoring;
 
 #[cfg(test)]

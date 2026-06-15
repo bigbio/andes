@@ -170,7 +170,7 @@ fn loss_class_survives_store_round_trip() {
 fn old_store_without_loss_class_reads_as_zero() {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/ionstat/models.parquet"
+        "/../../resources/models.parquet"
     ));
     let store = ModelStore::open(bundled).expect("open bundled models.parquet");
     let ids = store.model_ids();

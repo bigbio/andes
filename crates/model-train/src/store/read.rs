@@ -917,7 +917,7 @@ mod tests {
     /// manifest dir (same convention the binary uses via `CARGO_MANIFEST_DIR`).
     fn bundled_store_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/ionstat/models.parquet")
+            .join("../../resources/models.parquet")
     }
 
     #[test]

@@ -40,7 +40,7 @@ fn main() {
         MgfReader::new(BufReader::new(f)).filter_map(|r| r.ok()).collect();
     eprintln!("loaded {} spectra", spectra.len());
 
-    let store = ModelStore::open(&root.join("resources/ionstat/models.parquet")).expect("store");
+    let store = ModelStore::open(&root.join("resources/models.parquet")).expect("store");
     let seed_param: Param = store.load_param("hcd_qexactive_tryp").expect("seed");
     let seed_scorer = RankScorer::new(&seed_param);
 

@@ -1,6 +1,6 @@
 //! Binary `.param` reader gate: load the representative `.param` fixtures and
 //! assert structural invariants. The 39 production models now ship as a single
-//! `resources/ionstat/models.parquet` store (see the `model-train` crate); a
+//! `resources/models.parquet` store (see the `model-train` crate); a
 //! diverse subset is kept under `tests/fixtures/` to exercise the binary reader
 //! across activations, resolutions, and protocols.
 

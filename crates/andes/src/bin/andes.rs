@@ -315,7 +315,7 @@ struct SearchArgs {
     isolation_halfwidth: f64,
 
     /// Path to a Parquet model store to use instead of the bundled
-    /// `resources/ionstat/models.parquet`. When set, model selection reads from
+    /// `resources/models.parquet`. When set, model selection reads from
     /// this store; when unset, the bundled store is used.
     #[arg(long = "model-store")]
     model_store: Option<PathBuf>,
@@ -3387,19 +3387,19 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 /// Resolve the path to the bundled `models.parquet` store.
 ///
 /// A packaged release ships `resources/` next to the binary, so prefer
-/// `<exe_dir>/resources/ionstat/models.parquet` when it exists — that makes an
+/// `<exe_dir>/resources/models.parquet` when it exists — that makes an
 /// installed binary self-contained regardless of where it runs. Fall back to the
 /// compile-time source tree (`CARGO_MANIFEST_DIR`) for `cargo run` / tests.
 fn bundled_store_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let next_to_binary = dir.join("resources/ionstat/models.parquet");
+            let next_to_binary = dir.join("resources/models.parquet");
             if next_to_binary.exists() {
                 return next_to_binary;
             }
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/ionstat/models.parquet")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet")
 }
 
 /// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying
@@ -3489,7 +3489,7 @@ fn build_selection_key(
 /// `store_selection_matches_old_ladder_for_all_combos`).
 ///
 /// `custom_store_path`: when `Some`, use that Parquet file instead of the
-/// bundled `resources/ionstat/models.parquet` (honours `--model-store`).
+/// bundled `resources/models.parquet` (honours `--model-store`).
 ///
 /// `model_id_override`: when `Some`, skip automatic selection and load this
 /// exact model ID (honours `--model`).
@@ -3682,7 +3682,7 @@ mod param_resolver_tests {
     // ── Tests of the resolve_bundled_param / resolve_bundled_param_for_activation
     //    ladder were removed in the model-store migration: those functions are now
     //    dead code (#[cfg_attr(not(test), allow(dead_code))]) and the bundled .param
-    //    files no longer ship on disk (they live in resources/ionstat/models.parquet).
+    //    files no longer ship on disk (they live in resources/models.parquet).
     //    The store_selection_equivalence integration test covers the same
     //    correctness invariant without requiring physical .param files.
 

@@ -1,7 +1,7 @@
 //! Regenerate the bundled Parquet model store from binary `.param` files.
 //!
 //! NOTE: the 39 source `.param` files were migrated into
-//! `resources/ionstat/models.parquet` and **removed from the tree**. To
+//! `resources/models.parquet` and **removed from the tree**. To
 //! regenerate the store you must first restore the `.param` files into a
 //! directory — e.g. from git history:
 //!   git checkout <pre-migration-rev> -- resources/ionstat
@@ -10,7 +10,7 @@
 //! Usage (from the workspace root):
 //!   cargo run -p model-train --example gen_bundled_store -- [PARAM_DIR] [OUT_PARQUET]
 //!
-//! Defaults: PARAM_DIR = resources/ionstat, OUT_PARQUET = resources/ionstat/models.parquet
+//! Defaults: PARAM_DIR = resources/ionstat, OUT_PARQUET = resources/models.parquet
 use std::path::{Path, PathBuf};
 
 fn main() {

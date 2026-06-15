@@ -339,9 +339,9 @@ struct SearchArgs {
     score: ScoreFlag,
 }
 
-/// Training arguments for `andes train`.
+/// Training arguments for `andes train-from-search`.
 #[derive(Args, Debug)]
-struct TrainArgs {
+struct TrainFromSearchArgs {
     /// Input spectrum file (training data). Same format dispatch as for search:
     /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
     ///
@@ -445,7 +445,7 @@ struct TrainArgs {
     force: bool,
 }
 
-/// Training arguments for `andes train-from-msnet`.
+/// Training arguments for `andes train`.
 ///
 /// Trains a scoring model directly from externally-labeled, high-confidence
 /// PSMs supplied as a "flat training parquet" (one row per PSM, each carrying
@@ -455,7 +455,7 @@ struct TrainArgs {
 /// deconvolution, segments, frag/precursor offset tables, max_rank); all
 /// learned distributions come from the input data.
 #[derive(Args, Debug)]
-struct TrainFromMsnetArgs {
+struct TrainArgs {
     /// Input flat training parquet(s). Repeatable; stats accumulate across all
     /// inputs into a single model.
     #[arg(long = "in", required = true)]
@@ -547,6 +547,16 @@ struct TrainFromMsnetArgs {
     /// (Kim et al., Nat Commun 5:5277, 2014).
     #[arg(long)]
     rank_smoothing: bool,
+
+    /// Source identifier for the source ledger. Defaults to "msnet".
+    #[arg(long, default_value = "msnet")]
+    source: String,
+
+    /// Whether to also train and embed a GBDT peak model. `on` (default) and
+    /// `auto` train GBDT and write the blob; `off` writes rank-core only
+    /// (byte-identical to the pre-GBDT path).
+    #[arg(long, default_value = "on")]
+    gbdt: GbdtMode,
 }
 
 /// Training arguments for `andes train-intensity`.
@@ -566,23 +576,38 @@ struct TrainIntensityArgs {
     out: PathBuf,
 }
 
+/// GBDT training mode for `andes train`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum GbdtMode {
+    /// Train and embed a GBDT peak model (default).
+    #[default]
+    #[clap(name = "on")]
+    On,
+    /// Same as `on` (reserved for future heuristic auto-detection).
+    #[clap(name = "auto")]
+    Auto,
+    /// Skip GBDT; write rank-core only (byte-identical to pre-GBDT path).
+    #[clap(name = "off")]
+    Off,
+}
+
 /// Available subcommands.
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Train a scoring model directly from externally-labeled, high-confidence
+    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
+    /// search. This is the primary training path for the Phase-3 "own models".
+    ///
+    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
+    #[command(alias = "train-from-msnet")]
+    Train(Box<TrainArgs>),
+
     /// Train a scoring model from spectra and a FASTA database, writing the
     /// result to a Parquet model store.
     ///
-    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
-    Train(Box<TrainArgs>),
-
-    /// Train a scoring model directly from externally-labeled, high-confidence
-    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
-    /// search. Used for the Phase-3 "own models" path.
-    ///
-    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`):
-    /// the largest variant (`Train`) dominates the size otherwise.
-    #[command(name = "train-from-msnet")]
-    TrainFromMsnet(Box<TrainFromMsnetArgs>),
+    /// Boxed to keep the `Command` enum compact.
+    #[command(name = "train-from-search")]
+    TrainFromSearch(Box<TrainFromSearchArgs>),
 
     /// Merge MSNet intensity aggregation parquets into a finalized intensity
     /// model for the strong-score numerator.
@@ -616,7 +641,7 @@ fn main() -> ExitCode {
     let top = TopCli::parse();
     let result = match top.command {
         Some(Command::Train(args)) => run_train(*args),
-        Some(Command::TrainFromMsnet(args)) => run_train_from_msnet(*args),
+        Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
         None => {
             // Validate required search args that are Option<> at the clap level.
@@ -1952,7 +1977,7 @@ fn build_train_search_params(
 ///
 /// When `args.update_model` is set, runs in incremental update mode (Part D).
 /// Otherwise runs the standard initial-training pipeline (Part A).
-fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = std::time::Instant::now();
 
     // ── 1. Configure Rayon thread pool ────────────────────────────────────────
@@ -2622,11 +2647,11 @@ fn run_train_intensity(args: TrainIntensityArgs) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// `andes train-from-msnet`: train a scoring model directly from
-/// externally-labeled PSM parquets, reusing the existing
-/// accumulate → estimate → store machinery but bypassing the bootstrap search.
-fn run_train_from_msnet(
-    args: TrainFromMsnetArgs,
+/// `andes train`: train a scoring model directly from externally-labeled PSM
+/// parquets, reusing the existing accumulate → estimate → store machinery but
+/// bypassing the bootstrap search.
+fn run_train(
+    args: TrainArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use rayon::prelude::*;
 
@@ -2645,36 +2670,36 @@ fn run_train_from_msnet(
     let mut psms: Vec<MsnetPsm> = Vec::new();
     let mut rows_read = 0usize;
     for input in &args.inputs {
-        eprintln!("train-from-msnet: reading {} ...", input.display());
+        eprintln!("train: reading {} ...", input.display());
         let part = read_msnet_parquet(input)?;
         rows_read += part.len();
-        eprintln!("train-from-msnet:   {} PSM rows", part.len());
+        eprintln!("train:   {} PSM rows", part.len());
         psms.extend(part);
     }
     if psms.is_empty() {
         return Err("no PSM rows read from any --in parquet".into());
     }
-    eprintln!("train-from-msnet: {rows_read} total PSM rows across {} file(s)", args.inputs.len());
+    eprintln!("train: {rows_read} total PSM rows across {} file(s)", args.inputs.len());
 
     // ── 3. Load seed Param and apply the fragment-tolerance override ──────────
     let (seed_model_id, mut seed_param): (String, Param) =
         load_seed_param(&Some(args.seed_model.clone()))?;
-    eprintln!("train-from-msnet: seed model = {seed_model_id}");
+    eprintln!("train: seed model = {seed_model_id}");
     if let Some(ppm) = args.fragment_tol_ppm {
         seed_param.mme = Tolerance::Ppm(ppm);
-        eprintln!("train-from-msnet: fragment tolerance overridden to {ppm} ppm");
+        eprintln!("train: fragment tolerance overridden to {ppm} ppm");
     } else if let Some(da) = args.fragment_tol_da {
         seed_param.mme = Tolerance::Da(da);
-        eprintln!("train-from-msnet: fragment tolerance overridden to {da} Da");
+        eprintln!("train: fragment tolerance overridden to {da} Da");
     } else {
-        eprintln!("train-from-msnet: using seed fragment tolerance {:?}", seed_param.mme);
+        eprintln!("train: using seed fragment tolerance {:?}", seed_param.mme);
     }
 
     // Build the scorer AFTER the tolerance override so accumulation uses it.
     let seed_scorer = RankScorer::new(&seed_param);
 
     // ── 4. Accumulate ion-match statistics (parallel; per-worker CountStats) ──
-    eprintln!("train-from-msnet: accumulating ion-match statistics ...");
+    eprintln!("train: accumulating ion-match statistics ...");
     let stats = psms
         .par_iter()
         .fold(
@@ -2687,10 +2712,10 @@ fn run_train_from_msnet(
         )
         .collect::<Vec<_>>();
     let stats = merge(stats);
-    eprintln!("train-from-msnet: accumulated {} PSMs", psms.len());
+    eprintln!("train: accumulated {} PSMs", psms.len());
 
     // ── 5. Estimate the model (replaces all learned tables in the seed) ───────
-    eprintln!("train-from-msnet: estimating model parameters ...");
+    eprintln!("train: estimating model parameters ...");
     let cfg = EstimatorConfig {
         pseudo: args.train_pseudo,
         noise_pseudo: args.train_noise_pseudo,
@@ -2700,7 +2725,7 @@ fn run_train_from_msnet(
         rank_smoothing: args.rank_smoothing,
     };
     eprintln!(
-        "train-from-msnet: estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
+        "train: estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
         cfg.pseudo, cfg.noise_pseudo, cfg.backoff_weight, cfg.min_count
     );
     let estimator = Estimator::new(cfg);
@@ -2726,7 +2751,7 @@ fn run_train_from_msnet(
                 Some(&prior_id),
             )
             .map_err(|e| format!("loading --prior-model '{prior_id}': {e}"))?;
-            eprintln!("train-from-msnet: prior model = {prior_id} (from {})", store_path.display());
+            eprintln!("train: prior model = {prior_id} (from {})", store_path.display());
             Some(p)
         }
         None => None,
@@ -2735,7 +2760,7 @@ fn run_train_from_msnet(
     let mut trained_param =
         estimator.estimate_with_prior(&stats, &seed_param, prior_param.as_ref());
     let n_partitions = trained_param.partitions.len();
-    eprintln!("train-from-msnet: trained model has {n_partitions} partitions");
+    eprintln!("train: trained model has {n_partitions} partitions");
 
     // ── 5b. Override the selection-relevant data_type from flags ──────────────
     // The trained model inherits the seed's data_type; minting a NEW slug whose
@@ -2761,7 +2786,7 @@ fn run_train_from_msnet(
             .ok_or_else(|| format!("unknown --protocol '{prot}' (expected Automatic/TMT/iTRAQ/iTRAQPhospho/Phosphorylation/Standard)"))?;
     }
     eprintln!(
-        "train-from-msnet: model data_type = {:?}/{:?}/{:?}/{:?}",
+        "train: model data_type = {:?}/{:?}/{:?}/{:?}",
         trained_param.data_type.activation,
         trained_param.data_type.instrument,
         trained_param.data_type.enzyme,
@@ -2776,7 +2801,7 @@ fn run_train_from_msnet(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "msnet".to_string());
     let ledger = SourceLedger {
-        source_id: "msnet".to_string(),
+        source_id: args.source.clone(),
         dataset,
         n_psms: psms.len() as i64,
         date: format_today_iso8601(),
@@ -2786,48 +2811,96 @@ fn run_train_from_msnet(
         experiment_class: trained_param.data_type.protocol.name().to_string(),
     };
 
+    // ── 6b. Optionally train a GBDT peak model ────────────────────────────────
+    let gbdt_blob: Option<Vec<u8>> = if args.gbdt != GbdtMode::Off {
+        use model_train::gbdt::dataset::{build_dataset, PsmRow};
+        use model_train::gbdt::train::{train_gbdt, TrainParams};
+
+        eprintln!("train: building GBDT dataset from {} PSMs ...", psms.len());
+        let gbdt_rows: Vec<PsmRow<'_>> = psms.iter().map(|psm| {
+            let peptide_seq = psm.peptide.residues.iter()
+                .map(|aa| aa.residue as char)
+                .collect::<String>();
+            PsmRow {
+                spectrum: &psm.spectrum,
+                peptide_seq,
+                charge: psm.charge,
+            }
+        }).collect();
+
+        let gbdt_dataset = build_dataset(&gbdt_rows, &seed_scorer);
+        eprintln!(
+            "train: GBDT dataset: {} peak rows, {} positives",
+            gbdt_dataset.y.len(),
+            gbdt_dataset.y.iter().filter(|&&l| l == 1).count(),
+        );
+
+        let gbdt_params = TrainParams::default();
+        let trained_gbdt = train_gbdt(&gbdt_dataset, &gbdt_params, 42);
+        eprintln!(
+            "train: GBDT trained: {} trees",
+            trained_gbdt.trees.len(),
+        );
+        Some(trained_gbdt.to_bytes())
+    } else {
+        None
+    };
+
     // ── 7. Write to store, preserving any other existing models ───────────────
     let store_path = &args.out_store;
     let model_id = args.model_id.clone();
-    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
-    if store_path.exists() {
-        let store = ModelStore::open(store_path)
-            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
-        for id in store.model_ids() {
-            if id == model_id {
-                eprintln!("train-from-msnet: overwriting existing model '{id}' in store");
-                continue;
-            }
-            let p = store.load_param(&id)
-                .map_err(|e| format!("reading model '{id}': {e}"))?;
-            let src_ledgers = store.load_sources(&id).unwrap_or_default();
-            let mut src = Vec::new();
-            for l in src_ledgers {
-                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
-                    src.push((l, s));
+
+    if gbdt_blob.is_some() {
+        // GBDT path: write manifest only (no source ledgers in this pass).
+        use model_train::store::write::write_models_with_gbdt;
+        write_models_with_gbdt(
+            store_path,
+            &[(&model_id, &trained_param, gbdt_blob)],
+        )
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    } else {
+        // Off path: full source-ledger write (byte-identical to pre-GBDT).
+        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+        if store_path.exists() {
+            let store = ModelStore::open(store_path)
+                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+            for id in store.model_ids() {
+                if id == model_id {
+                    eprintln!("train: overwriting existing model '{id}' in store");
+                    continue;
                 }
+                let p = store.load_param(&id)
+                    .map_err(|e| format!("reading model '{id}': {e}"))?;
+                let src_ledgers = store.load_sources(&id).unwrap_or_default();
+                let mut src = Vec::new();
+                for l in src_ledgers {
+                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                        src.push((l, s));
+                    }
+                }
+                existing_other.push((id, p, src));
             }
-            existing_other.push((id, p, src));
         }
-    }
 
-    let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
-    all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
-    for (id, p, src) in existing_other {
-        all_entries.push((id, p, src));
-    }
+        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+        all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
+        for (id, p, src) in existing_other {
+            all_entries.push((id, p, src));
+        }
 
-    write_all_models_with_sources_pub(
-        store_path,
-        &all_entries.iter()
-            .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+        write_all_models_with_sources_pub(
+            store_path,
+            &all_entries.iter()
+                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    }
 
     eprintln!(
-        "train-from-msnet: wrote model '{model_id}' to {} (source 'msnet', {} PSMs, {n_partitions} partitions) [{:.2}s]",
+        "train: wrote model '{model_id}' to {} (source '{}', {} PSMs, {n_partitions} partitions) [{:.2}s]",
         store_path.display(),
+        args.source,
         psms.len(),
         t0.elapsed().as_secs_f64(),
     );
@@ -2838,7 +2911,7 @@ fn run_train_from_msnet(
 /// Incremental update mode (Part D): `--update <MODEL_ID>` plus one of
 /// `--add`, `--remove-source`, `--reweight`, `--decay`.
 fn run_train_update(
-    args: TrainArgs,
+    args: TrainFromSearchArgs,
     model_id: &str,
     t0: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {

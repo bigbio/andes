@@ -98,7 +98,7 @@ fn add_then_remove_source_restores_model() {
     let estimator = model_train::estimate::Estimator::new(cfg.clone());
     let p0 = estimator.estimate(&s0, &param);
 
-    write_model_with_sources(&path, "m", &p0, &[(ledger0.clone(), s0.clone())]).unwrap();
+    write_model_with_sources(&path, "m", &p0, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
     // Verify P0 round-trips.
     let store = ModelStore::open(&path).unwrap();
@@ -141,7 +141,7 @@ fn remove_nonexistent_source_errors() {
     let param = fixture_param();
     let s0 = make_stats_s0();
     let ledger0 = make_ledger("s0");
-    write_model_with_sources(&path, "m", &param, &[(ledger0, s0)]).unwrap();
+    write_model_with_sources(&path, "m", &param, &[(ledger0, s0)], None).unwrap();
 
     let cfg = EstimatorConfig::default();
     let result = update_remove(&path, "m", "nonexistent", cfg);
@@ -164,6 +164,7 @@ fn reweight_source_changes_param() {
         "m",
         &param,
         &[(ledger0, s0), (ledger1, s1)],
+        None,
     )
     .unwrap();
 
@@ -192,7 +193,7 @@ fn decay_with_empty_date_unchanged() {
     let s0 = make_stats_s0();
     let mut ledger0 = make_ledger("s0");
     ledger0.date = String::new(); // empty date
-    write_model_with_sources(&path, "m", &param, &[(ledger0.clone(), s0)]).unwrap();
+    write_model_with_sources(&path, "m", &param, &[(ledger0.clone(), s0)], None).unwrap();
 
     let cfg = EstimatorConfig::default();
     let (_, sources) = update_decay(&path, "m", 365.0, cfg).unwrap();
@@ -228,7 +229,7 @@ fn commit_update_preserves_other_models() {
     }
     // Write "m" with sources into a fresh store (overwrite).
     let path2 = dir.path().join("m2.parquet");
-    write_model_with_sources(&path2, "m", &param, &[(ledger0.clone(), s0.clone())]).unwrap();
+    write_model_with_sources(&path2, "m", &param, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
     let cfg = EstimatorConfig::default();
     let s1 = make_stats_s1();

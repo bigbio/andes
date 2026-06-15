@@ -1,4 +1,4 @@
-use model_train::store::{write_models, ModelStore};
+use model_train::store::{write_models, write_models_with_gbdt, ModelStore};
 use rustc_hash::FxHashMap;
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
 use model::activation::ActivationMethod;
@@ -79,6 +79,7 @@ fn param_with_loss_ions() -> Param {
         noise_err_dist_table: FxHashMap::default(),
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
     };
     p.rebuild_cache();
     p
@@ -162,6 +163,61 @@ fn loss_class_survives_store_round_trip() {
         "frag_off_table must contain an entry with loss_class=2; got {:?}", all_loss_classes);
     assert!(all_loss_classes.contains(&255),
         "frag_off_table must contain an entry with loss_class=255; got {:?}", all_loss_classes);
+}
+
+/// A GBDT blob stored via `write_models_with_gbdt` must survive a round-trip:
+/// `load_param` should return a `Param` whose `gbdt_peak_model` is `Some(…)`
+/// and whose `predict_logit` produces the expected value.
+#[test]
+fn gbdt_blob_roundtrips_through_store() {
+    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+
+    // Minimal one-split tree: feature[0] <= 0.5 → leaf -1.0; else → leaf +2.0
+    // apply_sigmoid=true, isotonic=identity ([0,1]→[0,1]).
+    // predict_logit([1.0]) → sigmoid(2.0) ≈ 0.8808 → logit ≈ 2.0
+    let model = GbdtPeakModel {
+        n_features: 1,
+        apply_sigmoid: true,
+        trees: vec![Tree {
+            feature: vec![0, -1, -1],
+            threshold: vec![0.5, 0.0, 0.0],
+            left: vec![1, -1, -1],
+            right: vec![2, -1, -1],
+            value: vec![0.0, -1.0, 2.0],
+            default_left: vec![1, 1, 1],
+        }],
+        iso_x: vec![0.0, 1.0],
+        iso_y: vec![0.0, 1.0],
+    };
+    let blob = model.to_bytes();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("with_gbdt.parquet");
+
+    // Re-use param_with_loss_ions() as a structurally valid Param; the GBDT
+    // blob is passed separately via write_models_with_gbdt.
+    let param = param_with_loss_ions();
+
+    write_models_with_gbdt(
+        &store_path,
+        &[("toy", &param, Some(blob.clone()))],
+    )
+    .expect("write_models_with_gbdt failed");
+
+    let loaded = ModelStore::open(&store_path)
+        .unwrap()
+        .load_param("toy")
+        .expect("load 'toy' model");
+
+    let gm = loaded
+        .gbdt_peak_model
+        .expect("gbdt_peak_model must be Some after round-trip");
+
+    let logit = gm.predict_logit(&[1.0]);
+    assert!(
+        (logit - 2.0).abs() < 1e-4,
+        "predict_logit([1.0]) expected ≈ 2.0, got {logit}"
+    );
 }
 
 /// Reading the existing bundled store (written without the loss_class column)

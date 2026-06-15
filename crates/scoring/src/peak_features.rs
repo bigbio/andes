@@ -43,6 +43,7 @@ pub const SPACING_SENTINEL: f32 = 1000.0;
 pub const FEATURE_WINDOW_DA: f64 = 50.0;
 
 use model::mass::{ISOTOPE, PROTON};
+use model::tolerance::Tolerance;
 
 // H2O kept as a local literal (NOT model::mass::H2O): the model crate computes
 // H2O as H*2+O which is NOT bit-equal to this literal, and the Python feature
@@ -65,6 +66,42 @@ pub struct PeakFeatureCtx {
     pub window_da: f64,
     /// Tolerance (Da) for partner-peak existence flags (isotope/complement/loss).
     pub match_tol_da: f64,
+}
+
+impl PeakFeatureCtx {
+    /// THE single source of truth for the per-spectrum feature context. Both the
+    /// scoring path (`ScoredSpectrum::new`) and the training dataset builder MUST
+    /// build the context through this constructor, so train-time and inference-time
+    /// features are identical by construction.
+    ///
+    /// `active_peaks` is the peak list features are extracted from (post precursor
+    /// filter / post deconvolution). `base_peak_intensity` and `total_intensity`
+    /// are BOTH measured on this same list so the intensity-normalized features
+    /// share one population. `match_tol_da` is a per-spectrum SCALAR tolerance
+    /// (not per-peak adaptive): `mme.as_da(parent_neutral_mass)`, evaluated once at
+    /// the precursor mass — the partner-peak existence flags (isotope/complement/
+    /// loss) use this single tolerance for every peak. This is a deliberate
+    /// definition of the feature contract; if it is ever changed, it changes for
+    /// BOTH training and inference because they share this function.
+    pub fn for_spectrum(
+        precursor_mz: f64,
+        charge: u8,
+        parent_neutral_mass: f64,
+        active_peaks: &[(f64, f32)],
+        mme: &Tolerance,
+    ) -> Self {
+        let base_peak_intensity = active_peaks.iter().map(|&(_, i)| i).fold(0.0_f32, f32::max);
+        let total_intensity: f64 = active_peaks.iter().map(|&(_, i)| i as f64).sum();
+        PeakFeatureCtx {
+            precursor_mz,
+            charge,
+            parent_neutral_mass,
+            total_intensity,
+            base_peak_intensity,
+            window_da: FEATURE_WINDOW_DA,
+            match_tol_da: mme.as_da(parent_neutral_mass.max(1.0)),
+        }
+    }
 }
 
 /// Compute one feature vector per peak. `peaks` MUST be ascending by m/z and
@@ -228,6 +265,19 @@ mod tests {
         let f = extract_peak_features(&peaks, &ranks, &ctx);
         let gi = FEATURE_NAMES.iter().position(|&n| n == "global_rank_frac").unwrap();
         assert!((f[0][gi] - 1.0).abs() < 1e-6, "filtered peak must get rank_frac 1.0");
+    }
+
+    #[test]
+    fn for_spectrum_uses_active_list_for_both_denominators() {
+        use model::tolerance::Tolerance;
+        let peaks = vec![(100.0_f64, 10.0_f32), (200.0, 40.0), (300.0, 50.0)];
+        let ctx = PeakFeatureCtx::for_spectrum(
+            500.0, 2, (500.0 - 1.00727649) * 2.0, &peaks, &Tolerance::Da(0.5),
+        );
+        assert!((ctx.base_peak_intensity - 50.0).abs() < 1e-6);
+        assert!((ctx.total_intensity - 100.0).abs() < 1e-9);
+        assert!((ctx.window_da - FEATURE_WINDOW_DA).abs() < 1e-9);
+        assert!((ctx.match_tol_da - 0.5).abs() < 1e-9); // Da tolerance is m/z-independent
     }
 
     // Test-only helper to look up a feature column by name.

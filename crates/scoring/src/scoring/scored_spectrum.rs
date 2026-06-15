@@ -427,16 +427,13 @@ impl<'a> ScoredSpectrum<'a> {
                 use crate::peak_features::{extract_peak_features, PeakFeatureCtx};
                 let max_r = cache_ranks.iter().copied().filter(|&r| r != u32::MAX).max().unwrap_or(0);
                 let mut by_rank = vec![0.0_f32; (max_r as usize) + 1];
-                let base_peak_intensity = cache_peaks.iter().map(|&(_, i)| i).fold(0.0_f32, f32::max);
-                let ctx = PeakFeatureCtx {
-                    precursor_mz: spec.precursor_mz,
+                let ctx = PeakFeatureCtx::for_spectrum(
+                    spec.precursor_mz,
                     charge,
-                    parent_neutral_mass: parent_mass,
-                    total_intensity,
-                    base_peak_intensity,
-                    window_da: crate::peak_features::FEATURE_WINDOW_DA,
-                    match_tol_da: param.mme.as_da(parent_mass.max(1.0)),
-                };
+                    parent_mass,
+                    cache_peaks,
+                    &param.mme,
+                );
                 let feats = extract_peak_features(cache_peaks, cache_ranks, &ctx);
                 for (i, &r) in cache_ranks.iter().enumerate() {
                     if r != u32::MAX && (r as usize) < by_rank.len() {

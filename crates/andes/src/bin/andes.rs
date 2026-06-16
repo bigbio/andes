@@ -591,6 +591,38 @@ enum GbdtMode {
     Off,
 }
 
+/// Training arguments for `andes train-intensity-gbdt`.
+///
+/// Reads flat training parquets (same schema as `train-from-msnet`) and fits a
+/// GBDT fragment-intensity regressor (`v3 frag model`).  The trained model is
+/// written into `--out-store` alongside any existing models under `--model-id`.
+#[derive(Args, Debug)]
+struct TrainIntensityGbdtArgs {
+    /// Input flat training parquet(s). Repeatable; data accumulate across all
+    /// inputs into a single frag-intensity model.
+    #[arg(long = "in", required = true)]
+    inputs: Vec<PathBuf>,
+
+    /// Path to the Parquet model store to write (created if absent; existing
+    /// models are preserved and re-written alongside the new one). REQUIRED.
+    #[arg(long = "out-store", required = true)]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `default`.
+    #[arg(long = "model-id", default_value = "default")]
+    model_id: String,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
+    /// a path to a binary `.param` file.  Supplies structural hyperparameters
+    /// (fragment tolerance, charge range) used when building the frag dataset.
+    #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
+    seed_model: String,
+
+    /// Number of worker threads (Rayon). Default: 8.
+    #[arg(long, default_value_t = 8usize)]
+    threads: usize,
+}
+
 /// Available subcommands.
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -613,6 +645,14 @@ enum Command {
     /// model for the strong-score numerator.
     #[command(name = "train-intensity")]
     TrainIntensity(Box<TrainIntensityArgs>),
+
+    /// Train a v3 GBDT fragment-intensity regressor from flat training
+    /// parquets and embed it in a Parquet model store alongside existing
+    /// rank-core models.
+    ///
+    /// Boxed to keep the `Command` enum compact.
+    #[command(name = "train-intensity-gbdt")]
+    TrainIntensityGbdt(Box<TrainIntensityGbdtArgs>),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -643,6 +683,7 @@ fn main() -> ExitCode {
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
+        Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         None => {
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
@@ -2722,6 +2763,155 @@ fn run_train_intensity(args: TrainIntensityArgs) -> Result<(), Box<dyn std::erro
     let model = IntensityModel::load(&args.out)?;
     sanity_check_intensity_model(&model)?;
     eprintln!("train-intensity: done in {:.1}s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// `andes train-intensity-gbdt`: fit a v3 GBDT fragment-intensity regressor
+/// from externally-labeled PSM parquets and embed it in a Parquet model store.
+///
+/// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
+/// from the `run_train` path and delegates the store write to
+/// `write_all_models_with_sources_and_gbdt_pub`, preserving all other models.
+fn run_train_intensity_gbdt(
+    args: TrainIntensityGbdtArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use model_train::gbdt::dataset::PsmRow;
+    use model_train::gbdt::frag_dataset::build_frag_dataset;
+    use model_train::gbdt::train::{train_gbdt_regression, TrainParams};
+
+    let n_files = args.inputs.len();
+    let model_id = args.model_id.clone();
+    let seed = args.seed_model.clone();
+    let t = args.threads;
+    eprintln!("train-intensity-gbdt: in={n_files} model_id={model_id} seed={seed} threads={t}");
+
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT_FRAG: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT_FRAG.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    // ── 2. Read all input parquets ────────────────────────────────────────────
+    let mut psms: Vec<MsnetPsm> = Vec::new();
+    for input in &args.inputs {
+        eprintln!("train-intensity-gbdt: reading {} ...", input.display());
+        let part = read_msnet_parquet(input)?;
+        eprintln!("train-intensity-gbdt:   {} PSM rows", part.len());
+        psms.extend(part);
+    }
+    if psms.is_empty() {
+        return Err("no PSM rows read from any --in parquet".into());
+    }
+    eprintln!(
+        "train-intensity-gbdt: {} total PSM rows across {} file(s)",
+        psms.len(),
+        args.inputs.len()
+    );
+
+    // ── 3. Load seed Param and build the scorer ───────────────────────────────
+    let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
+    eprintln!("train-intensity-gbdt: seed model = {seed_model_id}");
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4. Build frag-intensity regression dataset ────────────────────────────
+    eprintln!(
+        "train-intensity-gbdt: building frag dataset from {} PSMs ...",
+        psms.len()
+    );
+    let rows: Vec<PsmRow<'_>> = psms
+        .iter()
+        .map(|psm| PsmRow {
+            spectrum: &psm.spectrum,
+            peptide: &psm.peptide,
+            charge: psm.charge,
+        })
+        .collect();
+    let ds = build_frag_dataset(&rows, &seed_scorer);
+    eprintln!(
+        "train-intensity-gbdt: dataset: {} ion rows, {} features",
+        ds.y.len(),
+        ds.n_features,
+    );
+
+    // ── 5. Train the GBDT regressor ───────────────────────────────────────────
+    let trained_frag = train_gbdt_regression(&ds, &TrainParams::default(), 42);
+    eprintln!(
+        "train-intensity-gbdt: trained frag model: {} trees",
+        trained_frag.trees.len()
+    );
+
+    // ── 6. Embed the trained model in the seed Param ──────────────────────────
+    // The seed Param supplies selection columns (activation/instrument/enzyme/
+    // protocol) so model routing works; we stamp the frag model onto it.
+    let mut out_param = seed_param;
+    out_param.frag_intensity_model = Some(Arc::new(trained_frag));
+
+    // ── 7. Write to store, preserving existing models ─────────────────────────
+    let store_path = &args.out_store;
+
+    {
+        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
+        if store_path.exists() {
+            let store = ModelStore::open(store_path)
+                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+            for id in store.model_ids() {
+                if id == args.model_id {
+                    eprintln!("train-intensity-gbdt: overwriting existing model '{id}' in store");
+                    continue;
+                }
+                let p = store
+                    .load_param(&id)
+                    .map_err(|e| format!("reading model '{id}': {e}"))?;
+                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
+                let src_ledgers = store.load_sources(&id).unwrap_or_default();
+                let mut src = Vec::new();
+                for l in src_ledgers {
+                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                        src.push((l, s));
+                    }
+                }
+                existing_other.push((id, p, src));
+                existing_blobs.push(blob);
+            }
+        }
+
+        // New model has no rank-core sources; sources slice is empty.
+        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+        all_entries.push((args.model_id.clone(), out_param, vec![]));
+        for (id, p, src) in existing_other {
+            all_entries.push((id, p, src));
+        }
+
+        // New model carries no separate GBDT peak-model blob (the frag-intensity
+        // model is embedded directly on Param.frag_intensity_model, not in the
+        // gbdt_model_bytes column).  Existing models' blobs are preserved.
+        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![None];
+        all_blobs.extend(existing_blobs);
+
+        write_all_models_with_sources_and_gbdt_pub(
+            store_path,
+            &all_entries
+                .iter()
+                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+                .collect::<Vec<_>>(),
+            &all_blobs,
+        )
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    }
+
+    eprintln!(
+        "train-intensity-gbdt: wrote model '{model_id}' to {} [{:.2}s]",
+        store_path.display(),
+        t0.elapsed().as_secs_f64(),
+    );
+
     Ok(())
 }
 

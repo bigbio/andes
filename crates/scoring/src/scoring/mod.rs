@@ -11,7 +11,7 @@ pub use psm_score::{psm_edge_existence_facts, psm_edge_score, score_psm};
 pub use rank_scorer::RankScorer;
 pub use scored_spectrum::{IonMatchFact, ScoredSpectrum};
 pub use strong_score::{
-    candidate_rank_entropy, fuse_strong_score, intensity_signal, listwise_score_gap,
+    candidate_rank_entropy, frag_llr_battery, fuse_strong_score, intensity_signal, listwise_score_gap,
     mass_competition_evidence, strong_score_calibrated, strong_score_calibrated_loo,
     strong_score_zscore, OnlineStats, StrongScoreInputs, DENSITY_HW, STRONG_CAL_MIN_CANDIDATES,
 };

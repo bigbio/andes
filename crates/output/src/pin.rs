@@ -246,6 +246,12 @@ fn write_header<W: Write>(
         // IntensitySignal = strong-score S1 numerator: cosine similarity between
         // IntensityModel predictions and observed relative intensities (0 without model).
         "IntensitySignal".to_string(),
+        // Tier-2 frag-intensity LLR battery (0 without a frag-intensity model).
+        // FragPredExplained = Σ(matched·pred)/Σpred; FragPredChanceLLR =
+        // Σ matched·pred·max(0,−ln p_chance); FragTopKObserved = top-K hit rate.
+        "FragPredExplained".to_string(),
+        "FragPredChanceLLR".to_string(),
+        "FragTopKObserved".to_string(),
         // MassCompetitionEvidence = S2 null term 2: Σ 1/(1+ambiguity+ρ).
         "MassCompetitionEvidence".to_string(),
         // CandidateRankEntropy = S2 listwise: softmax entropy over retained top-K.
@@ -505,6 +511,12 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.chance_match_surprise as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.intensity_signal as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.frag_pred_explained as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.frag_pred_chance_llr as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.frag_topk_observed as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.mass_competition_evidence as f64)?;
     writer.write_all(b"\t")?;
@@ -786,6 +798,9 @@ mod tests {
             "UniqueMatchFraction",
             "ChanceMatchSurprise",
             "IntensitySignal",
+            "FragPredExplained",
+            "FragPredChanceLLR",
+            "FragTopKObserved",
             "MassCompetitionEvidence",
             "CandidateRankEntropy",
             "ListwiseScoreGap",

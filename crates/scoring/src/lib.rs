@@ -4,6 +4,7 @@
 //! prediction. Depends only on the `model` crate.
 
 pub mod frag_features;
+pub mod ion_features;
 pub mod gbdt_eval;
 pub mod intensity_model;
 pub mod param_model;

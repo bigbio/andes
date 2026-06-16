@@ -66,7 +66,7 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
                     ((obs_intensity as f64 / base_peak).max(1e-12)).ln() as f32;
 
                 let feats =
-                    extract_frag_features(row.peptide, ion.kind, ion.position, 1, 0.0);
+                    extract_frag_features(row.peptide, ion.kind, ion.position, row.charge, 0.0);
                 x.extend_from_slice(&feats);
                 y.push(log_rel);
                 groups.push(gid);

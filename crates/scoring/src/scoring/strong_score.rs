@@ -98,8 +98,8 @@ pub fn intensity_signal(
 
     for ion in &predicted {
         let log_rel = if let Some(g) = frag_model {
-            // v3 frag-intensity regressor path (charge=1, nce=0.0 matches training).
-            let feats = extract_frag_features(peptide, ion.kind, ion.position, 1, 0.0);
+            // v3 frag-intensity regressor path (precursor charge, nce=0.0 matches training).
+            let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, 0.0);
             g.predict_value(&feats)
         } else {
             // Existing coarse table path (fallback; model is Some here).

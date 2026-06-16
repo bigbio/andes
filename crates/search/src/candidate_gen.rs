@@ -17,7 +17,7 @@ use model::enzyme::Enzyme;
 use model::modification::ModLocation;
 use model::peptide::Peptide;
 use model::protein::Protein;
-use crate::decoy::normalize_decoy_prefix;
+use crate::decoy::decoy_accession_needle;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 
@@ -42,11 +42,14 @@ pub fn enumerate_candidates<'a>(
     params: &'a SearchParams,
     decoy_prefix: &'a str,
 ) -> impl Iterator<Item = Candidate> + 'a {
-    // Match the normalized prefix that `target_plus_decoy` used when building
-    // the index — empty `--decoy-prefix` must not collapse to `starts_with("")`.
-    let normalized_prefix = normalize_decoy_prefix(decoy_prefix);
+    // Decoy membership uses the SHARED needle "<prefix>_" (decoy_accession_needle)
+    // — the SAME test SearchIndex uses — so candidate generation and the index
+    // can never diverge. Decoys are built as "<prefix>_<orig>", so the "_"
+    // delimiter is required: a target accession starting with the bare prefix
+    // (e.g. "XXXfoo", or any accession under a short custom prefix) is NOT a decoy.
+    let needle = decoy_accession_needle(decoy_prefix);
     idx.db.proteins.iter().enumerate().flat_map(move |(p_idx, protein)| {
-        let is_decoy = protein.accession.starts_with(&normalized_prefix);
+        let is_decoy = protein.accession.starts_with(&needle);
         enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
     })
 }
@@ -471,38 +474,22 @@ fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) ->
 #[cfg(test)]
 mod tests {
     #[test]
-    fn decoy_prefix_matched_verbatim_no_underscore_appended() {
-        // Caller passes "XXX" (no underscore). The matcher should look for
-        // accessions starting with literally "XXX", NOT "XXX_".
-        // We exercise this by checking the is_decoy flag logic directly:
-        // any accession starting with "XXX" (including "XXX_something") must
-        // match, and accessions starting with "XXX_" only must also match (no
-        // double-underscore invention).
-        let prefix = "XXX";
+    fn decoy_membership_requires_underscore_delimiter() {
+        use crate::decoy::is_decoy_accession;
+        // Decoys are built as "<prefix>_<orig>" (reverse_db/shuffle_db), so
+        // membership requires the "_" delimiter, and candidate generation MUST
+        // use the SAME needle as SearchIndex (they share decoy_accession_needle)
+        // so they cannot diverge. A target accession that merely starts with the
+        // bare prefix (e.g. a real protein "XXXfoo") is NOT a decoy.
+        assert!(is_decoy_accession("XXX_protein1", "XXX"));
         assert!(
-            "XXX_protein1".starts_with(prefix),
-            "accession starting with 'XXX_' should match prefix 'XXX'"
+            !is_decoy_accession("XXXprotein1", "XXX"),
+            "no '_' delimiter ⇒ a real 'XXX...' target must NOT be read as decoy"
         );
-        assert!(
-            "XXXprotein1".starts_with(prefix),
-            "accession starting with 'XXXprotein1' should match prefix 'XXX'"
-        );
-        assert!(
-            !"DECOY_protein1".starts_with(prefix),
-            "accession 'DECOY_protein1' should NOT match prefix 'XXX'"
-        );
-
-        // Verify we do NOT append an underscore: "DECOY" prefix must not
-        // accidentally match "DECOY_protein" as "DECOY__protein" or similar.
-        let colon_prefix = "DECOY:";
-        assert!(
-            "DECOY:sp|P12345|PROT_HUMAN".starts_with(colon_prefix),
-            "colon-terminated prefix should match verbatim"
-        );
-        assert!(
-            !"DECOY_sp|P12345|PROT_HUMAN".starts_with(colon_prefix),
-            "underscore-delimited accession should NOT match colon prefix"
-        );
+        assert!(!is_decoy_accession("DECOY_protein1", "XXX"));
+        // Short custom prefix: a genuine "rev..." target is not a decoy.
+        assert!(is_decoy_accession("rev_sp|P1", "rev"));
+        assert!(!is_decoy_accession("reverse_kinase", "rev"));
     }
 
     #[test]

@@ -43,7 +43,7 @@ fn fnv1a_32(data: &[u8]) -> u32 {
 /// Rows from the same (peptide, charge) pair share one group id, which
 /// prevents leakage across the group-disjoint train/validation split in
 /// [`super::train::train_gbdt`].
-fn group_id(peptide_seq: &str, charge: u8) -> u32 {
+pub(crate) fn group_id(peptide_seq: &str, charge: u8) -> u32 {
     let mut buf = Vec::with_capacity(peptide_seq.len() + 1);
     buf.extend_from_slice(peptide_seq.as_bytes());
     buf.push(charge);

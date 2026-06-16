@@ -63,7 +63,8 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
             .collect();
         let gid = group_id(&seq, row.charge);
 
-        let predicted = predict_by_ions(row.peptide, 1..=1);
+        // 1+ AND 2+ fragments — MUST match the serve range in strong_score.rs.
+        let predicted = predict_by_ions(row.peptide, 1..=2);
 
         for ion in &predicted {
             let tol_da = feat_tol.as_da(ion.mz);
@@ -72,7 +73,7 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
                     ((obs_intensity as f64 / base_peak).max(1e-12)).ln() as f32;
 
                 let feats =
-                    extract_frag_features(row.peptide, ion.kind, ion.position, row.charge, 0.0);
+                    extract_frag_features(row.peptide, ion.kind, ion.position, row.charge, ion.charge, 0.0);
                 x.extend_from_slice(&feats);
                 y.push(log_rel);
                 groups.push(gid);

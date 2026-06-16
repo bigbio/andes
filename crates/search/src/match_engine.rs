@@ -1428,8 +1428,12 @@ pub(crate) fn compute_psm_features(
 
     // ── Strong-score S1: intensity-model signal (additive PIN column) ───────
     // NCE is not carried on Spectrum today; use "unknown" (model backs off).
+    // When a v3 frag-intensity regressor is present on the param it takes
+    // precedence; the coarse IntensityModel table is the fallback.
+    let frag_intensity_model = scorer.param().frag_intensity_model.as_deref();
     let intensity_signal_val = intensity_signal(
         intensity_model,
+        frag_intensity_model,
         scored_spec,
         peptide,
         charge,

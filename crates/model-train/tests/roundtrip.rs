@@ -83,6 +83,7 @@ fn param_with_loss_ions() -> Param {
         partition_ion_types_cache: FxHashMap::default(),
         gbdt_peak_model: None,
         frag_intensity_model: None,
+        rich_ion_model: None,
     };
     p.rebuild_cache();
     p
@@ -408,6 +409,84 @@ fn frag_intensity_model_roundtrips_through_store() {
 
     // Verify the blob byte-matches.
     assert_eq!(fim.to_bytes(), blob, "round-tripped blob must be byte-identical");
+}
+
+/// A `rich_ion_model_bytes` blob stored alongside a manifest row must
+/// survive a write→read round-trip: `load_param` returns a `Param` whose
+/// `rich_ion_model` is `Some(…)` and whose `predict_value` gives the
+/// expected raw tree sum.
+#[test]
+fn rich_ion_model_round_trips_through_store() {
+    use std::sync::Arc;
+    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+
+    // Minimal model: single leaf → constant 2.71.
+    let model = GbdtPeakModel {
+        n_features: 1,
+        apply_sigmoid: false,
+        trees: vec![Tree {
+            feature: vec![-1],
+            threshold: vec![0.0],
+            left: vec![-1],
+            right: vec![-1],
+            value: vec![2.71],
+            default_left: vec![1],
+        }],
+        iso_x: vec![],
+        iso_y: vec![],
+    };
+    let blob = model.to_bytes();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("rich_ion.parquet");
+
+    let mut param = param_with_loss_ions();
+    // Attach the model to the Param before writing, so the writer can read it from the field.
+    param.rich_ion_model = Some(Arc::new(model));
+
+    // The write path reads rich_ion_model from the Param and persists the blob.
+    model_train::store::write_models(&store_path, &[("toy".to_string(), &param)])
+        .expect("write_models failed");
+
+    let loaded = ModelStore::open(&store_path)
+        .unwrap()
+        .load_param("toy")
+        .expect("load 'toy' model");
+
+    let rim = loaded
+        .rich_ion_model
+        .expect("rich_ion_model must be Some after round-trip");
+
+    let v = rim.predict_value(&[0.0]);
+    assert!(
+        (v - 2.71).abs() < 1e-5,
+        "predict_value expected 2.71, got {v}"
+    );
+
+    // Verify the blob byte-matches.
+    assert_eq!(rim.to_bytes(), blob, "round-tripped blob must be byte-identical");
+}
+
+/// A model written WITHOUT `rich_ion_model` (None) must load with
+/// `rich_ion_model == None` — back-compat with old stores.
+#[test]
+fn missing_rich_ion_model_column_loads_as_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("no_rich_ion.parquet");
+
+    let param = param_with_loss_ions(); // rich_ion_model is None
+    model_train::store::write_models(&store_path, &[("m".to_string(), &param)])
+        .expect("write_models failed");
+
+    let loaded = ModelStore::open(&store_path)
+        .unwrap()
+        .load_param("m")
+        .expect("load 'm' model");
+
+    assert!(
+        loaded.rich_ion_model.is_none(),
+        "rich_ion_model must be None when not stored"
+    );
 }
 
 /// A model written WITHOUT `frag_intensity_model` (None) must load with

@@ -2145,6 +2145,7 @@ mod tests {
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
             frag_intensity_model: None,
+            rich_ion_model: None,
         };
 
         let scorer = RankScorer::new(&param);
@@ -2211,6 +2212,7 @@ mod tests {
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
             frag_intensity_model: None,
+            rich_ion_model: None,
         }
     }
 
@@ -2562,6 +2564,7 @@ mod tests {
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
             frag_intensity_model: None,
+            rich_ion_model: None,
         };
         param.rebuild_cache();
 
@@ -2874,6 +2877,7 @@ mod precursor_filter_tests {
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
             frag_intensity_model: None,
+            rich_ion_model: None,
         }
     }
 
@@ -2942,6 +2946,7 @@ mod precursor_filter_tests {
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
             frag_intensity_model: None,
+            rich_ion_model: None,
         }
     }
 

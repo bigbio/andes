@@ -623,6 +623,38 @@ struct TrainIntensityGbdtArgs {
     threads: usize,
 }
 
+/// Training arguments for `andes train-rich-ion-llr`.
+///
+/// Reads flat training parquets (same schema as `train-from-msnet`) and fits a
+/// GBDT rich-ion LLR classifier (logistic; decoy-aware).  The trained model is
+/// written into `--out-store` alongside any existing models under `--model-id`.
+#[derive(Args, Debug)]
+struct TrainRichIonLlrArgs {
+    /// Input flat training parquet(s). Repeatable; data accumulate across all
+    /// inputs into a single rich-ion model.
+    #[arg(long = "in", required = true)]
+    inputs: Vec<PathBuf>,
+
+    /// Path to the Parquet model store to write (created if absent; existing
+    /// models are preserved and re-written alongside the new one). REQUIRED.
+    #[arg(long = "out-store", required = true)]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `default`.
+    #[arg(long = "model-id", default_value = "default")]
+    model_id: String,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
+    /// a path to a binary `.param` file.  Supplies structural hyperparameters
+    /// (fragment tolerance, charge range) used when building the ion dataset.
+    #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
+    seed_model: String,
+
+    /// Number of worker threads (Rayon). Default: 8.
+    #[arg(long, default_value_t = 8usize)]
+    threads: usize,
+}
+
 /// Available subcommands.
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -653,6 +685,14 @@ enum Command {
     /// Boxed to keep the `Command` enum compact.
     #[command(name = "train-intensity-gbdt")]
     TrainIntensityGbdt(Box<TrainIntensityGbdtArgs>),
+
+    /// Train a GBDT rich-ion LLR classifier (logistic; decoy-aware) from flat
+    /// training parquets and embed it in a Parquet model store alongside
+    /// existing rank-core models.
+    ///
+    /// Boxed to keep the `Command` enum compact.
+    #[command(name = "train-rich-ion-llr")]
+    TrainRichIonLlr(Box<TrainRichIonLlrArgs>),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -684,6 +724,7 @@ fn main() -> ExitCode {
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
+        Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
         None => {
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
@@ -2908,6 +2949,156 @@ fn run_train_intensity_gbdt(
 
     eprintln!(
         "train-intensity-gbdt: wrote model '{model_id}' to {} [{:.2}s]",
+        store_path.display(),
+        t0.elapsed().as_secs_f64(),
+    );
+
+    Ok(())
+}
+
+/// `andes train-rich-ion-llr`: fit a GBDT rich-ion LLR classifier (logistic;
+/// decoy-aware) from externally-labeled PSM parquets and embed it in a Parquet
+/// model store.
+///
+/// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
+/// from the `run_train` path and delegates the store write to
+/// `write_all_models_with_sources_and_gbdt_pub`, preserving all other models.
+fn run_train_rich_ion_llr(
+    args: TrainRichIonLlrArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use model_train::gbdt::dataset::PsmRow;
+    use model_train::gbdt::ion_dataset::build_ion_dataset;
+    use model_train::gbdt::train::{train_gbdt, TrainParams};
+
+    let n_files = args.inputs.len();
+    let model_id = args.model_id.clone();
+    let seed = args.seed_model.clone();
+    let t = args.threads;
+    eprintln!("train-rich-ion-llr: in={n_files} model_id={model_id} seed={seed} threads={t}");
+
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT_RICH_ION: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT_RICH_ION.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    // ── 2. Read all input parquets ────────────────────────────────────────────
+    let mut psms: Vec<MsnetPsm> = Vec::new();
+    for input in &args.inputs {
+        eprintln!("train-rich-ion-llr: reading {} ...", input.display());
+        let part = read_msnet_parquet(input)?;
+        eprintln!("train-rich-ion-llr:   {} PSM rows", part.len());
+        psms.extend(part);
+    }
+    if psms.is_empty() {
+        return Err("no PSM rows read from any --in parquet".into());
+    }
+    eprintln!(
+        "train-rich-ion-llr: {} total PSM rows across {} file(s)",
+        psms.len(),
+        args.inputs.len()
+    );
+
+    // ── 3. Load seed Param and build the scorer ───────────────────────────────
+    let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
+    eprintln!("train-rich-ion-llr: seed model = {seed_model_id}");
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4. Build rich-ion classification dataset ──────────────────────────────
+    eprintln!(
+        "train-rich-ion-llr: building ion dataset from {} PSMs ...",
+        psms.len()
+    );
+    let rows: Vec<PsmRow<'_>> = psms
+        .iter()
+        .map(|psm| PsmRow {
+            spectrum: &psm.spectrum,
+            peptide: &psm.peptide,
+            charge: psm.charge,
+        })
+        .collect();
+    let ds = build_ion_dataset(&rows, &seed_scorer);
+    eprintln!(
+        "train-rich-ion-llr: dataset: {} ion rows, {} features",
+        ds.y.len(),
+        ds.n_features,
+    );
+
+    // ── 5. Train the GBDT classifier (logits held-out AUC) ────────────────────
+    let trained_rich_ion = train_gbdt(&ds, &TrainParams::default(), 42);
+    eprintln!(
+        "train-rich-ion-llr: trained rich-ion model: {} trees",
+        trained_rich_ion.trees.len()
+    );
+
+    // ── 6. Embed the trained model in the seed Param ──────────────────────────
+    // The seed Param supplies selection columns (activation/instrument/enzyme/
+    // protocol) so model routing works; we stamp the rich-ion model onto it.
+    let mut out_param = seed_param;
+    out_param.rich_ion_model = Some(Arc::new(trained_rich_ion));
+
+    // ── 7. Write to store, preserving existing models ─────────────────────────
+    let store_path = &args.out_store;
+
+    {
+        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
+        if store_path.exists() {
+            let store = ModelStore::open(store_path)
+                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+            for id in store.model_ids() {
+                if id == args.model_id {
+                    eprintln!("train-rich-ion-llr: overwriting existing model '{id}' in store");
+                    continue;
+                }
+                let p = store
+                    .load_param(&id)
+                    .map_err(|e| format!("reading model '{id}': {e}"))?;
+                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
+                let src_ledgers = store.load_sources(&id).unwrap_or_default();
+                let mut src = Vec::new();
+                for l in src_ledgers {
+                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                        src.push((l, s));
+                    }
+                }
+                existing_other.push((id, p, src));
+                existing_blobs.push(blob);
+            }
+        }
+
+        // New model has no rank-core sources; sources slice is empty.
+        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+        all_entries.push((args.model_id.clone(), out_param, vec![]));
+        for (id, p, src) in existing_other {
+            all_entries.push((id, p, src));
+        }
+
+        // New model carries no separate GBDT peak-model blob (the rich-ion
+        // model is embedded directly on Param.rich_ion_model, not in the
+        // gbdt_model_bytes column).  Existing models' blobs are preserved.
+        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![None];
+        all_blobs.extend(existing_blobs);
+
+        write_all_models_with_sources_and_gbdt_pub(
+            store_path,
+            &all_entries
+                .iter()
+                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+                .collect::<Vec<_>>(),
+            &all_blobs,
+        )
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    }
+
+    eprintln!(
+        "train-rich-ion-llr: wrote model '{model_id}' to {} [{:.2}s]",
         store_path.display(),
         t0.elapsed().as_secs_f64(),
     );

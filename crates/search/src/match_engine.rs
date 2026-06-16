@@ -122,8 +122,16 @@ impl<'a> PreparedSearch<'a> {
         decoy_prefix: &str,
     ) -> Self {
         // Collect the production candidate list.
-        let candidates: Vec<Candidate> =
+        let mut candidates: Vec<Candidate> =
             enumerate_candidates(idx, params, decoy_prefix).collect();
+
+        // Decoy↔target peptide-collision removal: a decoy peptide whose bare
+        // sequence coincides with a real target peptide (palindromes, reversal-
+        // coincident, short peptides) is not a valid decoy — it IS a true target
+        // sequence. Relabel it as target so per-spectrum dedup merges it with its
+        // target twin instead of inflating the decoy count (which biases TDC
+        // conservative and injects label noise into decoy-aware training).
+        relabel_collision_decoys(&mut candidates);
 
         // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
         //
@@ -2142,6 +2150,38 @@ pub(crate) fn dedup_pepseq_score(
     out
 }
 
+/// Bare residue sequence (no mods, no flanks) of a candidate's peptide.
+fn bare_residues(cand: &Candidate) -> Box<[u8]> {
+    cand.peptide.residues.iter().map(|aa| aa.residue).collect()
+}
+
+/// Relabel decoy candidates whose bare peptide sequence is ALSO a target peptide
+/// as targets. Such "decoys" are reversal/shuffle coincidences (or palindromes /
+/// short peptides) that reproduce a real target sequence; counting them as decoys
+/// over-counts the decoy space (TDC conservative) and, for decoy-aware training,
+/// mislabels true-sequence ions as negatives. Relabeling to target lets the
+/// per-spectrum dedup merge the collision with its target twin — no EXTRA target
+/// is created, because the sequence is a real target peptide so the twin already
+/// exists. Bare residues only (mods don't change sequence identity).
+///
+/// Cost: one HashSet of target peptide sequences, built once at index setup.
+fn relabel_collision_decoys(candidates: &mut [Candidate]) {
+    use std::collections::HashSet;
+    let target_seqs: HashSet<Box<[u8]>> = candidates
+        .iter()
+        .filter(|c| !c.is_decoy)
+        .map(bare_residues)
+        .collect();
+    if target_seqs.is_empty() {
+        return;
+    }
+    for cand in candidates.iter_mut().filter(|c| c.is_decoy) {
+        if target_seqs.contains(&bare_residues(cand)) {
+            cand.is_decoy = false;
+        }
+    }
+}
+
 /// Mod-aware dedup key: bare residues plus per-position mod mass (1e-5 Da units).
 /// Avoids string formatting on the hot path.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2251,6 +2291,27 @@ mod dedup_tests {
             isotope_offset: 0,
             precursor_mz_override: None,
         }
+    }
+
+    #[test]
+    fn collision_decoy_relabeled_as_target_genuine_decoy_kept() {
+        let cand = |seq: &[u8], is_decoy: bool| Candidate {
+            peptide: seq_peptide(seq),
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        };
+        let mut cands = vec![
+            cand(b"PEPTIDEK", false), // a target peptide
+            cand(b"PEPTIDEK", true),  // a decoy that coincidentally equals the target
+            cand(b"EDITPEPK", true),  // a genuine decoy (no target twin)
+        ];
+        relabel_collision_decoys(&mut cands);
+        assert!(!cands[0].is_decoy, "target unchanged");
+        assert!(!cands[1].is_decoy, "collision decoy relabeled to target");
+        assert!(cands[2].is_decoy, "genuine decoy left as decoy");
     }
 
     #[test]

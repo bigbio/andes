@@ -92,14 +92,17 @@ pub fn intensity_signal(
     }
 
     let seq: Vec<u8> = peptide.residues.iter().map(|aa| aa.residue).collect();
-    let predicted = predict_by_ions(peptide, 1..=1);
+    // Predict 1+ AND 2+ fragments: high-charge precursors put real signal in 2+
+    // ions, which a 1+-only prediction is blind to. Training (frag_dataset) uses
+    // the SAME 1..=2 range and the same frag-charge feature.
+    let predicted = predict_by_ions(peptide, 1..=2);
     let mut pred_vec = Vec::with_capacity(predicted.len());
     let mut obs_vec = Vec::with_capacity(predicted.len());
 
     for ion in &predicted {
         let log_rel = if let Some(g) = frag_model {
             // v3 frag-intensity regressor path (precursor charge, nce=0.0 matches training).
-            let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, 0.0);
+            let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, ion.charge, 0.0);
             g.predict_value(&feats)
         } else {
             // Existing coarse table path (fallback; model is Some here).

@@ -23,7 +23,7 @@ use crate::search_params::{ScoreMode, SearchParams};
 use scoring_crate::intensity_model::IntensityModel;
 use scoring_crate::scoring::{
     frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
-    psm_edge_score, score_psm,
+    psm_edge_score, rich_ion_llr, score_psm,
     strong_score_calibrated, RankScorer, OnlineStats, ScoredSpectrum, StrongScoreInputs,
     DENSITY_HW,
 };
@@ -1462,6 +1462,16 @@ pub(crate) fn compute_psm_features(
         feature_tol_is_ppm,
     );
 
+    // Decoy-aware rich-ion LLR (additive PIN feature; 0.0 when no rich-ion model).
+    let rich_ion_llr_val = rich_ion_llr(
+        scorer.param().rich_ion_model.as_deref(),
+        scored_spec,
+        peptide,
+        charge,
+        feature_tol,
+        feature_tol_is_ppm,
+    );
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
@@ -1501,6 +1511,7 @@ pub(crate) fn compute_psm_features(
         frag_pred_explained,
         frag_pred_chance_llr,
         frag_topk_observed,
+        rich_ion_llr: rich_ion_llr_val,
         mass_competition_evidence: mass_competition_evidence_val,
         candidate_rank_entropy: 0.0,
         listwise_score_gap: 0.0,

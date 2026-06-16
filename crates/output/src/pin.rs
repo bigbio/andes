@@ -252,6 +252,8 @@ fn write_header<W: Write>(
         "FragPredExplained".to_string(),
         "FragPredChanceLLR".to_string(),
         "FragTopKObserved".to_string(),
+        // RichIonLLR = decoy-aware per-annotated-ion LLR sum (0 without a rich-ion model).
+        "RichIonLLR".to_string(),
         // MassCompetitionEvidence = S2 null term 2: Σ 1/(1+ambiguity+ρ).
         "MassCompetitionEvidence".to_string(),
         // CandidateRankEntropy = S2 listwise: softmax entropy over retained top-K.
@@ -517,6 +519,8 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.frag_pred_chance_llr as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.frag_topk_observed as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.rich_ion_llr as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.mass_competition_evidence as f64)?;
     writer.write_all(b"\t")?;
@@ -801,6 +805,7 @@ mod tests {
             "FragPredExplained",
             "FragPredChanceLLR",
             "FragTopKObserved",
+            "RichIonLLR",
             "MassCompetitionEvidence",
             "CandidateRankEntropy",
             "ListwiseScoreGap",

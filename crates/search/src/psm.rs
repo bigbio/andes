@@ -145,6 +145,18 @@ pub struct PsmFeatures {
     /// intensities over b/y ions. 0.0 when no intensity model is loaded.
     pub intensity_signal: f32,
 
+    // ── Strong-score S1b: frag-intensity LLR battery (additive PIN columns) ──
+    // Discriminative likelihood-ratio features from the v3 frag-intensity GBDT,
+    // deployed instead of a cosine (the cosine normalizes both vectors and smears
+    // target/decoy separation). All 0.0 when no frag-intensity model is loaded.
+    /// Predicted-intensity-weighted explained fraction: `Σ(matched·pred)/Σpred`.
+    pub frag_pred_explained: f32,
+    /// Predicted-intensity-weighted chance-match surprise:
+    /// `Σ matched·pred·max(0,−ln p_chance)` — fuses prediction with the noise denom.
+    pub frag_pred_chance_llr: f32,
+    /// Fraction of the top-K predicted-most-intense ions that are observed.
+    pub frag_topk_observed: f32,
+
     // ── Strong-score S2: null denominator terms (additive PIN columns) ────
     /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
     /// alternative-mass ambiguity + local peak density (S2 term 2).

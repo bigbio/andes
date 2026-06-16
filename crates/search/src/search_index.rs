@@ -1,7 +1,10 @@
 //! Bundled search database: target+decoy ProteinDb. Consumed by candidate
 //! generation.
 
-use crate::decoy::{build_search_db, normalize_decoy_prefix, DecoyStrategy, DEFAULT_DECOY_SEED};
+use crate::decoy::{
+    build_search_db, decoy_accession_needle, normalize_decoy_prefix, DecoyStrategy,
+    DEFAULT_DECOY_SEED,
+};
 use model::protein::ProteinDb;
 
 #[derive(Debug, Clone)]
@@ -37,7 +40,7 @@ impl SearchIndex {
         seed: u64,
     ) -> Self {
         let norm = normalize_decoy_prefix(decoy_prefix);
-        let needle = format!("{norm}_");
+        let needle = decoy_accession_needle(decoy_prefix);
         let pre = target
             .proteins
             .iter()
@@ -97,7 +100,7 @@ impl SearchIndex {
     /// inputs. For the default Reverse strategy on a clean target FASTA it is
     /// equivalent to the first half of the combined db.
     pub fn iter_target_proteins(&self) -> impl Iterator<Item = &model::protein::Protein> {
-        let needle = format!("{}_", self.decoy_prefix);
+        let needle = decoy_accession_needle(&self.decoy_prefix);
         self.db
             .proteins
             .iter()

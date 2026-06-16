@@ -197,6 +197,10 @@ pub fn combined_schema() -> SchemaRef {
         // Null for models without a trained intensity regressor.
         // Absent in old stores → reader defaults to frag_intensity_model = None (backward-compatible).
         nf("frag_intensity_model_bytes", DataType::Binary),
+        // Serialized rich-ion GBDT blob (logistic LLR classifier, raw predict_value output).
+        // Null for models without a trained rich-ion classifier.
+        // Absent in old stores → reader defaults to rich_ion_model = None (backward-compatible).
+        nf("rich_ion_model_bytes", DataType::Binary),
         // ── table-only ──────────────────────────────────────────────────────
         nf("part_charge", DataType::Int32),
         nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 for bit-exact round-trip

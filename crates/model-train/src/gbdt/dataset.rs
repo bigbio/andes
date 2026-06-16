@@ -11,6 +11,7 @@
 use scoring_crate::peak_features::{extract_peak_features, PeakFeatureCtx, N_FEATURES};
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
+use model::peptide::Peptide;
 use model::spectrum::Spectrum;
 use crate::gbdt::labels::label_peaks;
 use crate::gbdt::train::Dataset;
@@ -19,14 +20,13 @@ use crate::gbdt::train::Dataset;
 pub struct PsmRow<'a> {
     /// The spectrum associated with this PSM.
     pub spectrum: &'a Spectrum,
-    /// Identified peptide sequence (unmodified one-letter codes, uppercase).
-    pub peptide_seq: String,
+    /// The identified peptide, INCLUDING modifications. The mods are used only
+    /// for mod-aware theoretical-ion labeling (signal vs. noise ground truth);
+    /// feature extraction stays peptide-agnostic.
+    pub peptide: &'a Peptide,
     /// Precursor charge state.
     pub charge: u8,
 }
-
-/// Fragment-match tolerance (Da) used for signal/noise labeling.
-const DEFAULT_LABEL_TOL_DA: f64 = 0.5;
 
 /// FNV-1a 32-bit hash for deterministic group-id generation.
 fn fnv1a_32(data: &[u8]) -> u32 {
@@ -86,14 +86,14 @@ pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
         );
 
         let features = extract_peak_features(active_peaks, active_ranks, &ctx);
-        let labels = label_peaks(
-            active_peaks,
-            &[row.peptide_seq.as_str()],
-            row.charge,
-            DEFAULT_LABEL_TOL_DA,
-        );
+        // Mod-aware labels at the SAME fragment tolerance the matcher uses
+        // (param.mme), not the old hardcoded 0.5 Da.
+        let labels = label_peaks(active_peaks, &[row.peptide], row.charge, &param.mme);
 
-        let gid = group_id(&row.peptide_seq, row.charge);
+        // Group by unmodified sequence + charge (prevents train/val leakage of
+        // the same backbone; conservative across peptidoforms).
+        let seq: String = row.peptide.residues.iter().map(|aa| aa.residue as char).collect();
+        let gid = group_id(&seq, row.charge);
 
         for (feat, &label) in features.iter().zip(labels.iter()) {
             x.extend_from_slice(feat);
@@ -109,9 +109,16 @@ pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
 mod tests {
     use std::path::PathBuf;
     use super::*;
+    use model::amino_acid::AminoAcid;
     use model::spectrum::Spectrum;
     use scoring_crate::RankScorer;
     use crate::ModelStore;
+
+    fn pep(seq: &str) -> Peptide {
+        let residues: Vec<AminoAcid> =
+            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect();
+        Peptide::new(residues, b'K', b'R')
+    }
 
     fn bundled_store_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -163,9 +170,10 @@ mod tests {
         ];
         let spec = tiny_spectrum(peaks, 600.0, 2);
 
+        let peptide = pep("PEPTIDE");
         let row = PsmRow {
             spectrum: &spec,
-            peptide_seq: "PEPTIDE".to_string(),
+            peptide: &peptide,
             charge: 2,
         };
 
@@ -186,9 +194,10 @@ mod tests {
         let peaks = vec![(200.0_f64, 100.0_f32), (999.0, 5.0)];
         let spec = tiny_spectrum(peaks, 500.0, 2);
 
+        let peptide = pep("PEPTIDE");
         let row = PsmRow {
             spectrum: &spec,
-            peptide_seq: "PEPTIDE".to_string(),
+            peptide: &peptide,
             charge: 2,
         };
 

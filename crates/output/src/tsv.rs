@@ -142,8 +142,9 @@ fn write_header<W: Write>(
         "Peptide",
         "Protein",
     ]);
-    // RawScore (integer-rounded rank score) is the sole score column.
-    cols.push("RawScore");
+    // RankScore (integer-rounded rank score) is the sole score column
+    // (formerly "RawScore"; renamed for parity with the PIN schema).
+    cols.push("RankScore");
     // Modifications: additive last column — CV accession-based annotations.
     cols.push("Modifications");
 
@@ -420,7 +421,7 @@ mod tests {
                 "Charge",
                 "Peptide",
                 "Protein",
-                "RawScore",
+                "RankScore",
                 // Additive: CV accession-based modification annotation (last column).
                 "Modifications",
             ],

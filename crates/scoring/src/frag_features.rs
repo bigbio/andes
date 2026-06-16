@@ -26,7 +26,11 @@ pub const FEAT_HYDRO_NFLANK: usize = 14;
 pub const FEAT_HYDRO_CFLANK: usize = 15;
 pub const FEAT_TOTAL_MODS: usize = 16;
 pub const FEAT_NEAREST_MOD_DIST: usize = 17;
-pub const N_FRAG_FEATURES: usize = 18;
+/// Fragment charge state (1+ vs 2+). 2+ fragments have distinct intensity
+/// behavior, so the model must be able to condition on it. MUST be computed
+/// identically in training (frag_dataset) and serving (strong_score).
+pub const FEAT_FRAG_CHARGE: usize = 18;
+pub const N_FRAG_FEATURES: usize = 19;
 
 /// Resolve the (N-side index, C-side index) of the two residues flanking
 /// the cleavage site for a b/y ion at 1-based `position` in a peptide of
@@ -101,6 +105,7 @@ pub fn extract_frag_features(
     kind: IonKind,
     position: u32,
     precursor_charge: u8,
+    frag_charge: u8,
     nce: f32,
 ) -> [f32; N_FRAG_FEATURES] {
     let n = p.residues.len();
@@ -163,6 +168,10 @@ pub fn extract_frag_features(
     };
     f[FEAT_NEAREST_MOD_DIST] = nearest_mod_dist;
 
+    // Fragment charge state (1+ / 2+). Lets the model learn that 2+ fragments
+    // carry different relative intensity than their 1+ counterparts.
+    f[FEAT_FRAG_CHARGE] = frag_charge as f32;
+
     f
 }
 
@@ -205,7 +214,7 @@ mod tests {
     fn frag_features_stable_shape_and_context() {
         // n=7; b2 cleaves after residue 2 (flanks E|P), P is C-flank of PEPTIDE.
         let p = pep("PEPTIDE");
-        let f = extract_frag_features(&p, IonKind::B, 2, 2, 0.0);
+        let f = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         assert_eq!(f.len(), N_FRAG_FEATURES);
         assert_eq!(f[FEAT_ION_TYPE], 0.0);
         assert!((f[FEAT_POS_FRAC] - 2.0 / 7.0).abs() < 1e-6);
@@ -215,16 +224,16 @@ mod tests {
 
     #[test]
     fn frag_features_reflect_modification() {
-        let plain = extract_frag_features(&pep("PEACDEK"), IonKind::B, 3, 2, 0.0);
+        let plain = extract_frag_features(&pep("PEACDEK"), IonKind::B, 3, 2, 1, 0.0);
         let modded =
-            extract_frag_features(&pep_mod("PEACDEK", 3, 57.02146), IonKind::B, 3, 2, 0.0);
+            extract_frag_features(&pep_mod("PEACDEK", 3, 57.02146), IonKind::B, 3, 2, 1, 0.0);
         assert_ne!(plain[FEAT_NFLANK_MOD], modded[FEAT_NFLANK_MOD]);
     }
 
     #[test]
     fn frag_features_chemistry_and_ptm() {
         let p = pep("PEPTIDER"); // R is basic, at C-term
-        let f = extract_frag_features(&p, IonKind::B, 2, 2, 0.0);
+        let f = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         assert_eq!(f[FEAT_PRECURSOR_CHARGE], 2.0);
         assert_eq!(f[FEAT_N_BASIC], 1.0);                 // one R
         assert!((f[FEAT_PROTON_MOBILITY] - (1.0 - 2.0)).abs() < 1e-6); // 1 basic - charge 2 = -1
@@ -242,8 +251,24 @@ mod tests {
         // Cam-C on residue 3 of "PEPCDEK": at b2 (cleavage index ni=1, 0-based),
         // nearest mod is residue index 2 → distance 1; total mods 1.
         let p = pep_mod("PEPCDEK", 3, 57.02146);
-        let f = extract_frag_features(&p, IonKind::B, 2, 2, 0.0);
+        let f = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         assert_eq!(f[FEAT_TOTAL_MODS], 1.0);
         assert!((f[FEAT_NEAREST_MOD_DIST] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn frag_charge_feature_distinguishes_1plus_from_2plus() {
+        // Same ion, different fragment charge → only FEAT_FRAG_CHARGE differs.
+        let p = pep("PEPTIDE");
+        let f1 = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
+        let f2 = extract_frag_features(&p, IonKind::B, 2, 2, 2, 0.0);
+        assert_eq!(f1[FEAT_FRAG_CHARGE], 1.0);
+        assert_eq!(f2[FEAT_FRAG_CHARGE], 2.0);
+        // Every OTHER feature must be identical (charge is the only difference).
+        for i in 0..N_FRAG_FEATURES {
+            if i != FEAT_FRAG_CHARGE {
+                assert_eq!(f1[i], f2[i], "feature {i} should not depend on frag charge");
+            }
+        }
     }
 }

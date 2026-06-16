@@ -2896,12 +2896,11 @@ fn run_train(
 
         eprintln!("train: building GBDT dataset from {} PSMs ...", psms.len());
         let gbdt_rows: Vec<PsmRow<'_>> = psms.iter().map(|psm| {
-            let peptide_seq = psm.peptide.residues.iter()
-                .map(|aa| aa.residue as char)
-                .collect::<String>();
+            // Pass the full mod-carrying peptide: labels are mod-aware so b/y
+            // ions over Cam-C/TMT/Ox-M land at the correct (shifted) m/z.
             PsmRow {
                 spectrum: &psm.spectrum,
-                peptide_seq,
+                peptide: &psm.peptide,
                 charge: psm.charge,
             }
         }).collect();

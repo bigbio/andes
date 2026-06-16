@@ -422,6 +422,263 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
 }
 
 // ---------------------------------------------------------------------------
+// Regression dataset and trainer
+// ---------------------------------------------------------------------------
+
+/// Row-major continuous feature matrix `x` (n × n_features), continuous labels
+/// `y` (e.g., log-relative intensities), and a `groups` id per row for
+/// leakage-free validation splitting.
+pub struct RegressionDataset {
+    pub x: Vec<f32>,
+    pub y: Vec<f32>,
+    pub groups: Vec<u32>,
+    pub n_features: usize,
+}
+
+/// Pearson correlation `r` and coefficient of determination `R² = 1 − SS_res/SS_tot`.
+///
+/// Returns `(0.0, 0.0)` when `y` has zero variance or the slices are empty.
+pub fn pearson_r2(pred: &[f32], y: &[f32]) -> (f64, f64) {
+    let n = pred.len().min(y.len());
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let mean_y: f64 = y[..n].iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+    let mean_p: f64 = pred[..n].iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+
+    let mut cov = 0.0f64;
+    let mut var_y = 0.0f64;
+    let mut var_p = 0.0f64;
+    let mut ss_res = 0.0f64;
+
+    for i in 0..n {
+        let dy = y[i] as f64 - mean_y;
+        let dp = pred[i] as f64 - mean_p;
+        cov += dy * dp;
+        var_y += dy * dy;
+        var_p += dp * dp;
+        let res = pred[i] as f64 - y[i] as f64;
+        ss_res += res * res;
+    }
+
+    if var_y < f64::EPSILON || var_p < f64::EPSILON {
+        // Zero variance in y or pred: R² = 1 - SS_res/SS_tot is degenerate.
+        return (0.0, 0.0);
+    }
+
+    let r = cov / (var_y.sqrt() * var_p.sqrt());
+    let r2 = 1.0 - ss_res / var_y;
+    (r, r2)
+}
+
+/// Validation MSE over continuous targets.
+fn mse(raw_val: &[f32], val_y: &[f32]) -> f32 {
+    if val_y.is_empty() {
+        return f32::INFINITY;
+    }
+    let sum: f64 = raw_val
+        .iter()
+        .zip(val_y)
+        .map(|(&p, &y)| {
+            let d = (p - y) as f64;
+            d * d
+        })
+        .sum();
+    (sum / val_y.len() as f64) as f32
+}
+
+/// Fit a GBDT regressor with squared-error (OLS) loss and return a
+/// [`GbdtPeakModel`] with `apply_sigmoid = false` and empty isotonic
+/// calibration. The raw sum of tree outputs is the prediction.
+///
+/// The boosting gradient is the ordinary residual: `grad_i = pred_i − y_i`;
+/// hessian is constant 1.0 (so the leaf weight `−G/(H+λ)` is the mean
+/// negative residual, i.e. the OLS step direction).
+///
+/// All randomness is seeded from `seed`; two calls with identical arguments
+/// and seed produce byte-for-byte identical models.
+///
+/// # Differences from `train_gbdt` (classification)
+/// - Continuous `y` in [`RegressionDataset`]; no negative undersampling.
+/// - Early stopping on validation MSE (lower = better).
+/// - No PAVA isotonic calibration; `apply_sigmoid = false`.
+///
+/// // TODO(v3): factor the shared boosting loop with the classification path.
+pub fn train_gbdt_regression(
+    ds: &RegressionDataset,
+    p: &TrainParams,
+    seed: u64,
+) -> GbdtPeakModel {
+    let n_rows = ds.y.len();
+    let nf = ds.n_features;
+
+    // Guard: degenerate input → empty model.
+    if n_rows == 0 || nf == 0 {
+        return GbdtPeakModel {
+            n_features: nf as u32,
+            apply_sigmoid: false,
+            trees: vec![],
+            iso_x: vec![],
+            iso_y: vec![],
+        };
+    }
+
+    let n_bins = p.n_bins.min(256);
+
+    // --- Step 1: Quantile-bin each feature ------------------------------------
+    let bin_uppers: Vec<Vec<f32>> = (0..nf)
+        .map(|f| {
+            let col: Vec<f32> = (0..n_rows).map(|r| ds.x[r * nf + f]).collect();
+            compute_bin_uppers(&col, n_bins)
+        })
+        .collect();
+
+    let mut binned_all = vec![0u8; n_rows * nf];
+    for r in 0..n_rows {
+        for f in 0..nf {
+            binned_all[r * nf + f] = bin_of(ds.x[r * nf + f], &bin_uppers[f]);
+        }
+    }
+
+    // --- Step 2: Group-disjoint validation split (seeded) ---------------------
+    let mut distinct_groups: Vec<u32> = ds.groups.clone();
+    distinct_groups.sort_unstable();
+    distinct_groups.dedup();
+
+    let val_set: std::collections::BTreeSet<u32> = distinct_groups
+        .iter()
+        .filter(|&&g| {
+            let mut state = seed ^ (g as u64).wrapping_mul(0x9e3779b97f4a7c15);
+            let h = splitmix64(&mut state);
+            to_unit(h) < p.val_fraction as f64
+        })
+        .copied()
+        .collect();
+
+    let mut train_rows: Vec<usize> = Vec::new();
+    let mut val_rows: Vec<usize> = Vec::new();
+    for r in 0..n_rows {
+        if val_set.contains(&ds.groups[r]) {
+            val_rows.push(r);
+        } else {
+            train_rows.push(r);
+        }
+    }
+
+    // Guard: no validation rows → empty model.
+    if val_rows.is_empty() || train_rows.is_empty() {
+        return GbdtPeakModel {
+            n_features: nf as u32,
+            apply_sigmoid: false,
+            trees: vec![],
+            iso_x: vec![],
+            iso_y: vec![],
+        };
+    }
+
+    // --- Step 3: Build compact train/val arrays (NO undersampling) -----------
+    let n_active = train_rows.len();
+    let mut train_binned = vec![0u8; n_active * nf];
+    let mut train_y = vec![0.0f32; n_active];
+    for (i, &r) in train_rows.iter().enumerate() {
+        train_y[i] = ds.y[r];
+        for f in 0..nf {
+            train_binned[i * nf + f] = binned_all[r * nf + f];
+        }
+    }
+
+    let val_n = val_rows.len();
+    let val_y: Vec<f32> = val_rows.iter().map(|&r| ds.y[r]).collect();
+
+    // --- Step 4: Boosting loop (OLS) -----------------------------------------
+    // Init predictions at 0 (a reasonable default; could use mean_y but 0 is
+    // fine for early-stopped boosting).
+    let mut raw_train = vec![0.0f32; n_active];
+    let mut raw_val = vec![0.0f32; val_n];
+
+    let tree_params = TreeParams {
+        max_depth: p.max_depth,
+        n_bins,
+        lambda: p.lambda,
+        min_hessian: p.min_hessian,
+        n_features: nf,
+    };
+
+    let mut trees: Vec<scoring_crate::gbdt_eval::Tree> = Vec::new();
+    let mut best_loss = f32::INFINITY;
+    let mut best_round: usize = 0;
+    let mut no_improve = 0u32;
+
+    for _round in 0..p.n_rounds {
+        // OLS gradient: pred − y; hessian: constant 1.0.
+        let grad: Vec<f32> = (0..n_active).map(|i| raw_train[i] - train_y[i]).collect();
+        let hess: Vec<f32> = vec![1.0f32; n_active];
+
+        let mut tree = fit_tree(&train_binned, &grad, &hess, &tree_params, &bin_uppers);
+
+        // Apply learning rate shrinkage.
+        for v in tree.value.iter_mut() {
+            *v *= p.learning_rate;
+        }
+
+        // Update train predictions (use compact index, continuous x).
+        for i in 0..n_active {
+            let r = train_rows[i];
+            let row = &ds.x[r * nf..(r + 1) * nf];
+            raw_train[i] += tree.eval(row);
+        }
+
+        // Update val predictions.
+        for (j, &r) in val_rows.iter().enumerate() {
+            let row = &ds.x[r * nf..(r + 1) * nf];
+            raw_val[j] += tree.eval(row);
+        }
+
+        trees.push(tree);
+
+        // Evaluate validation MSE; early-stop on non-improvement.
+        let vloss = mse(&raw_val, &val_y);
+        if vloss < best_loss - 1e-8 {
+            best_loss = vloss;
+            best_round = trees.len();
+            no_improve = 0;
+        } else {
+            no_improve += 1;
+            if no_improve >= p.early_stop_rounds {
+                break;
+            }
+        }
+    }
+
+    // Truncate to best round.
+    trees.truncate(best_round);
+
+    // --- Step 5: Recompute val predictions and log gate metric ---------------
+    let mut raw_val_final = vec![0.0f32; val_n];
+    for (j, &r) in val_rows.iter().enumerate() {
+        let row = &ds.x[r * nf..(r + 1) * nf];
+        for t in &trees {
+            raw_val_final[j] += t.eval(row);
+        }
+    }
+
+    let (r, r2) = pearson_r2(&raw_val_final, &val_y);
+    let n = val_n;
+    eprintln!(
+        "train-gbdt: regression val Pearson r = {r:.4}  R2 = {r2:.4}  (n_val={n})"
+    );
+
+    // --- Return (no sigmoid, no isotonic) ------------------------------------
+    GbdtPeakModel {
+        n_features: nf as u32,
+        apply_sigmoid: false,
+        trees,
+        iso_x: vec![],
+        iso_y: vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -509,5 +766,39 @@ mod tests {
         };
         let m = train_gbdt(&ds, &TrainParams::default(), 1);
         assert!(m.trees.is_empty());
+    }
+
+    #[test]
+    fn pearson_r2_perfect_and_constant() {
+        let y = [1.0_f32, 2.0, 3.0, 4.0];
+        let (r, r2) = pearson_r2(&y, &y);
+        assert!((r - 1.0).abs() < 1e-6 && (r2 - 1.0).abs() < 1e-6);
+        // constant prediction → R2 <= 0
+        let (_, r2c) = pearson_r2(&[2.5_f32; 4], &y);
+        assert!(r2c <= 1e-6);
+    }
+
+    #[test]
+    fn regression_fits_linear_target_monotone() {
+        // y = 2*x0 - 1; regression GBDT must be monotone increasing in x0.
+        let mut st = 0x1234u64;
+        let (n, nf) = (4000usize, 2usize);
+        let (mut x, mut y, mut g) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..n {
+            let x0 = lcg(&mut st);
+            let x1 = lcg(&mut st);
+            x.push(x0);
+            x.push(x1);
+            y.push(2.0 * x0 - 1.0);
+            g.push(i as u32); // each row its own group
+        }
+        let ds = RegressionDataset { x, y, groups: g, n_features: nf };
+        let p = TrainParams::default();
+        let model = train_gbdt_regression(&ds, &p, 42);
+        let lo: f32 = model.trees.iter().map(|t| t.eval(&[0.0, 0.5])).sum();
+        let hi: f32 = model.trees.iter().map(|t| t.eval(&[1.0, 0.5])).sum();
+        assert!(hi > lo + 0.5, "must be monotone in x0: lo={lo} hi={hi}");
+        assert!(!model.apply_sigmoid, "regression model must not apply sigmoid");
+        assert!(model.iso_x.is_empty(), "regression model must have no isotonic calibration");
     }
 }

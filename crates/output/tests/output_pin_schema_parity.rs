@@ -41,7 +41,7 @@ const GF_COLUMNS: [&str; 4] = ["DeNovoScore", "lnSpecEValue", "lnEValue", "lnDel
 
 /// Additive feature columns Andes emits between matchedIonRatio and Peptide.
 const ADDITIVE_COLUMNS: [&str; 4] =
-    ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore"];
+    ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRankScore"];
 
 #[test]
 fn rust_pin_header_is_gf_free_schema() {
@@ -59,7 +59,9 @@ fn rust_pin_header_is_gf_free_schema() {
     let header = first_line(&rust_pin_path);
     let cols: Vec<&str> = header.split('\t').collect();
 
-    // RawScore present; GF columns absent.
+    // RankScore (rank-LLR, formerly "RawScore") + RawScore (fused, formerly
+    // "StrongScore") present; GF columns absent.
+    assert!(cols.contains(&"RankScore"), "RankScore column must be present:\n{header}");
     assert!(cols.contains(&"RawScore"), "RawScore column must be present:\n{header}");
     for gf in GF_COLUMNS {
         assert!(

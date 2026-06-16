@@ -157,6 +157,12 @@ pub struct PsmFeatures {
     /// Fraction of the top-K predicted-most-intense ions that are observed.
     pub frag_topk_observed: f32,
 
+    /// Decoy-aware rich-ion LLR: Σ over matched b/y ions of the per-ion
+    /// `predict_logit(P(signal))` from the rich-ion GBDT (chemistry + complement
+    /// coherence features; trained target-matched vs decoy-matched). Additive PIN
+    /// column; 0.0 when no rich-ion model is loaded. RankScore is unaffected.
+    pub rich_ion_llr: f32,
+
     // ── Strong-score S2: null denominator terms (additive PIN columns) ────
     /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
     /// alternative-mass ambiguity + local peak density (S2 term 2).

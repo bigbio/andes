@@ -11,6 +11,7 @@ use model::peptide::Peptide;
 pub const DENSITY_HW: f64 = 50.0;
 
 use crate::frag_features::extract_frag_features;
+use crate::ion_features::extract_ion_features;
 use crate::gbdt_eval::GbdtPeakModel;
 use crate::intensity_model::{IntensityIonType, IntensityModel};
 use crate::scoring::fragment_ions::{predict_by_ions, IonKind};
@@ -403,6 +404,53 @@ pub fn strong_score_calibrated(
     }
 }
 
+/// Decoy-aware rich-ion LLR: `Σ` over matched b/y ions of the per-ion
+/// `predict_logit(P(signal | features))` from the rich-ion GBDT. The model is
+/// trained on target-matched (positive) vs decoy-matched (negative) ions, so a
+/// true peptide's matched ions score high and a decoy's chance-matched ions
+/// score low — the SUM separates target from decoy (assignment-aware, NOT the
+/// isotropic per-peak quality that sank the intensity cosine). Returns 0.0 when
+/// no rich-ion model is loaded (neutral additive feature; RankScore untouched).
+/// Enumerates `1..=2` to match the trainer (`ion_dataset`).
+pub fn rich_ion_llr(
+    model: Option<&GbdtPeakModel>,
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    precursor_charge: u8,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> f32 {
+    let g = match model {
+        Some(g) => g,
+        None => return 0.0,
+    };
+    if peptide.length() < 2 {
+        return 0.0;
+    }
+    let mut sum = 0.0f64;
+    for ion in predict_by_ions(peptide, 1..=2) {
+        let tol_da = if feature_tol_is_ppm {
+            ion.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
+        if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
+            let feats = extract_ion_features(
+                peptide,
+                scored_spec,
+                ion.kind,
+                ion.position,
+                precursor_charge,
+                ion.charge,
+                feature_tol,
+                feature_tol_is_ppm,
+            );
+            sum += f64::from(g.predict_logit(&feats));
+        }
+    }
+    sum as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +761,17 @@ mod tests {
         // Same call was already exercised in `missing_observed_ions_reduce_signal`;
         // just verify it's > 0 (table path active, not early-return).
         assert!(with_table > 0.0, "table fallback expected > 0, got {with_table}");
+    }
+
+    #[test]
+    fn rich_ion_llr_zero_without_model() {
+        // No rich-ion model loaded ⇒ neutral additive feature (0.0), RankScore untouched.
+        let peptide = pep(b"ARCDE");
+        let predicted = predict_by_ions(&peptide, 1..=1);
+        let y3 = predicted.iter().find(|p| p.kind == IonKind::Y && p.position == 3).unwrap();
+        let spec = Spectrum { peaks: vec![(y3.mz, 1000.0)], ..Default::default() };
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        assert_eq!(rich_ion_llr(None, &ss, &peptide, 2, 20.0, true), 0.0);
     }
 
     #[test]

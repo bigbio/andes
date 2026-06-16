@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use std::io::Cursor;
@@ -49,6 +50,14 @@ pub struct Param {
     /// for legacy stores and for any slug without a trained GBDT (scoring is
     /// then byte-identical to the pre-GBDT engine).
     pub gbdt_peak_model: Option<GbdtPeakModel>,
+    /// Optional GBDT fragment-intensity model (regressor, raw `predict_value`
+    /// output). Populated from the `frag_intensity_model_bytes` manifest column;
+    /// `None` for any store written before this column existed or for slugs
+    /// without a trained intensity regressor.
+    ///
+    /// Wrapped in `Arc` so callers can share one model across parallel search
+    /// threads without cloning the tree arrays.
+    pub frag_intensity_model: Option<Arc<GbdtPeakModel>>,
 }
 
 /// Build the per-partition ion-type cache (Noise excluded). Single source of
@@ -443,6 +452,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         ion_existence_table,
         partition_ion_types_cache,
         gbdt_peak_model: None,
+        frag_intensity_model: None,
     })
 }
 
@@ -1024,6 +1034,7 @@ mod tests {
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
+            frag_intensity_model: None,
         }
     }
 
@@ -1162,6 +1173,39 @@ mod tests {
     }
 
     #[test]
+    fn param_defaults_frag_intensity_model_to_none() {
+        let p = crate::testutil::tiny_param();
+        assert!(
+            p.frag_intensity_model.is_none(),
+            "fresh param must carry no frag_intensity_model"
+        );
+    }
+
+    #[test]
+    fn frag_intensity_model_can_be_set_and_read() {
+        use std::sync::Arc;
+        use crate::gbdt_eval::{GbdtPeakModel, Tree};
+        let model = Arc::new(GbdtPeakModel {
+            n_features: 1,
+            apply_sigmoid: false,
+            trees: vec![Tree {
+                feature: vec![-1],
+                threshold: vec![0.0],
+                left: vec![-1],
+                right: vec![-1],
+                value: vec![3.14],
+                default_left: vec![1],
+            }],
+            iso_x: vec![],
+            iso_y: vec![],
+        });
+        let mut p = crate::testutil::tiny_param();
+        p.frag_intensity_model = Some(Arc::clone(&model));
+        let v = p.frag_intensity_model.as_ref().unwrap().predict_value(&[]);
+        assert!((v - 3.14).abs() < 1e-5, "expected 3.14, got {v}");
+    }
+
+    #[test]
     fn ion_types_for_segment_returns_unique() {
         use model::activation::ActivationMethod;
         use model::instrument::InstrumentType;
@@ -1206,6 +1250,7 @@ mod tests {
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
+            frag_intensity_model: None,
         };
         param.rebuild_cache();
 

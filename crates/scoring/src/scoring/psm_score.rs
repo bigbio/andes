@@ -452,6 +452,7 @@ mod tests {
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
+            frag_intensity_model: None,
         };
         p.rebuild_cache();
         p

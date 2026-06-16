@@ -220,6 +220,10 @@ struct ManifestRow {
     /// Serialized GBDT blob, if present. `None` for models written before this
     /// column was added (backward-compatible: column absent ⇒ `gbdt_peak_model = None`).
     gbdt_bytes: Option<Vec<u8>>,
+    /// Serialized fragment-intensity GBDT blob, if present. `None` for models
+    /// written before this column existed (backward-compatible: column absent ⇒
+    /// `frag_intensity_model = None`).
+    frag_intensity_bytes: Option<Vec<u8>>,
 }
 
 fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
@@ -518,15 +522,25 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
         ion_existence_table,
         partition_ion_types_cache: FxHashMap::default(),
         gbdt_peak_model: None,
+        frag_intensity_model: None,
     };
     param.rebuild_cache();
 
-    // Decode and attach the GBDT model if a blob was stored.
+    // Decode and attach the GBDT signal/noise model if a blob was stored.
     if let Some(bytes) = manifest.gbdt_bytes.as_ref() {
         param.gbdt_peak_model = Some(
             scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
                 .map_err(|e| TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}")))?,
         );
+    }
+
+    // Decode and attach the fragment-intensity regressor if a blob was stored.
+    if let Some(bytes) = manifest.frag_intensity_bytes.as_ref() {
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
+            .map_err(|e| TrainError::Other(
+                format!("decode frag_intensity_model_bytes for '{model_id}': {e}")
+            ))?;
+        param.frag_intensity_model = Some(std::sync::Arc::new(model));
     }
 
     Ok(param)
@@ -592,6 +606,18 @@ fn parse_manifest_row(
         }
     };
 
+    // Read the optional fragment-intensity model blob (backward-compatible: column absent → None).
+    let frag_intensity_bytes: Option<Vec<u8>> = match batch.column_by_name("frag_intensity_model_bytes") {
+        None => None, // backward-compat: old store without the column
+        Some(col) => {
+            let arr = col.as_any().downcast_ref::<BinaryArray>()
+                .ok_or_else(|| TrainError::Other(
+                    "frag_intensity_model_bytes column is not BinaryArray".into()
+                ))?;
+            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
+        }
+    };
+
     Ok(ManifestRow {
         activation,
         instrument,
@@ -610,6 +636,7 @@ fn parse_manifest_row(
         num_precursor_off,
         charge_hist,
         gbdt_bytes,
+        frag_intensity_bytes,
     })
 }
 

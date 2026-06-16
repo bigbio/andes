@@ -193,6 +193,10 @@ pub fn combined_schema() -> SchemaRef {
         // Serialized GBDT blob (`AGBD` bytes). Null for models without a GBDT.
         // Absent in old stores → reader defaults to gbdt_peak_model = None (backward-compatible).
         nf("gbdt_model_bytes", DataType::Binary),
+        // Serialized fragment-intensity GBDT blob (regressor, raw predict_value output).
+        // Null for models without a trained intensity regressor.
+        // Absent in old stores → reader defaults to frag_intensity_model = None (backward-compatible).
+        nf("frag_intensity_model_bytes", DataType::Binary),
         // ── table-only ──────────────────────────────────────────────────────
         nf("part_charge", DataType::Int32),
         nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 for bit-exact round-trip

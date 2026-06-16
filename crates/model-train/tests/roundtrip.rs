@@ -82,6 +82,7 @@ fn param_with_loss_ions() -> Param {
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
         gbdt_peak_model: None,
+        frag_intensity_model: None,
     };
     p.rebuild_cache();
     p
@@ -351,4 +352,82 @@ fn multi_model_write_preserves_blobs_and_sources() {
     let ledgers_b = store.load_sources("model_b").expect("load_sources model_b");
     assert_eq!(ledgers_b.len(), 1, "model_b must have 1 source ledger");
     assert_eq!(ledgers_b[0].source_id, "src_b");
+}
+
+/// A `frag_intensity_model_bytes` blob stored alongside a manifest row must
+/// survive a write→read round-trip: `load_param` returns a `Param` whose
+/// `frag_intensity_model` is `Some(…)` and whose `predict_value` gives the
+/// expected raw tree sum.
+#[test]
+fn frag_intensity_model_roundtrips_through_store() {
+    use std::sync::Arc;
+    use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+
+    // Minimal model: single leaf → constant 3.14.
+    let model = GbdtPeakModel {
+        n_features: 1,
+        apply_sigmoid: false,
+        trees: vec![Tree {
+            feature: vec![-1],
+            threshold: vec![0.0],
+            left: vec![-1],
+            right: vec![-1],
+            value: vec![3.14],
+            default_left: vec![1],
+        }],
+        iso_x: vec![],
+        iso_y: vec![],
+    };
+    let blob = model.to_bytes();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("frag_intensity.parquet");
+
+    let mut param = param_with_loss_ions();
+    // Attach the model to the Param before writing, so the writer can read it from the field.
+    param.frag_intensity_model = Some(Arc::new(model));
+
+    // The write path reads frag_intensity_model from the Param and persists the blob.
+    model_train::store::write_models(&store_path, &[("toy".to_string(), &param)])
+        .expect("write_models failed");
+
+    let loaded = ModelStore::open(&store_path)
+        .unwrap()
+        .load_param("toy")
+        .expect("load 'toy' model");
+
+    let fim = loaded
+        .frag_intensity_model
+        .expect("frag_intensity_model must be Some after round-trip");
+
+    let v = fim.predict_value(&[0.0]);
+    assert!(
+        (v - 3.14).abs() < 1e-5,
+        "predict_value expected 3.14, got {v}"
+    );
+
+    // Verify the blob byte-matches.
+    assert_eq!(fim.to_bytes(), blob, "round-tripped blob must be byte-identical");
+}
+
+/// A model written WITHOUT `frag_intensity_model` (None) must load with
+/// `frag_intensity_model == None` — back-compat with old stores.
+#[test]
+fn missing_frag_intensity_model_column_loads_as_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("no_frag_intensity.parquet");
+
+    let param = param_with_loss_ions(); // frag_intensity_model is None
+    model_train::store::write_models(&store_path, &[("m".to_string(), &param)])
+        .expect("write_models failed");
+
+    let loaded = ModelStore::open(&store_path)
+        .unwrap()
+        .load_param("m")
+        .expect("load 'm' model");
+
+    assert!(
+        loaded.frag_intensity_model.is_none(),
+        "frag_intensity_model must be None when not stored"
+    );
 }

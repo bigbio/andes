@@ -2516,6 +2516,75 @@ fn finalize_intensity_stats(sum_log_rel: f64, sum_log_rel_sq: f64, count: i64) -
     Some((mean, var))
 }
 
+/// Sentinel flank residue for flank-marginalized backoff rows (matches the
+/// `b'*'` key built by `IntensityModel::predict_log_rel`'s backoff).
+const ANY_FLANK: &str = "*";
+/// Sentinel nce bin for nce-marginalized backoff rows (matches `"__any__"`).
+const ANY_NCE: &str = "__any__";
+
+/// Emit backoff marginal rows so `IntensityModel::predict_log_rel`'s documented
+/// sparse-key backoff (drop `nce_bin`, then flank residues) actually finds rows.
+///
+/// The aggregator only writes exact `(ion, flank_n, flank_c, pos_bin, charge,
+/// nce_bin)` cells with real flanks and a real (numeric/`"unknown"`) nce bin.
+/// The backoff probes `nce_bin="__any__"` and `flank=b'*'` keys that the
+/// aggregator never produces, so without these marginals every lookup whose
+/// exact key is absent falls through to the single global mean — making the
+/// trained per-context intensities unused. In particular the inference path
+/// (`compute_psm_features`) passes `nce_bin="unknown"`, which matches no trained
+/// numeric bin, so *every* inference lookup hit the global mean and the
+/// `IntensitySignal` cosine became model-value-independent.
+///
+/// We accumulate each real cell into three marginals: drop nce, drop flanks,
+/// and drop both. Marginal keys are disjoint from real keys (real flanks are
+/// residues, real nce bins are numeric or `"unknown"`), so snapshotting the
+/// real cells first avoids double-counting.
+fn add_backoff_marginals(merged: &mut rustc_hash::FxHashMap<IntensityAggKey, IntensityAggStats>) {
+    let base: Vec<(IntensityAggKey, IntensityAggStats)> =
+        merged.iter().map(|(k, s)| (k.clone(), s.clone())).collect();
+
+    fn bump(
+        merged: &mut rustc_hash::FxHashMap<IntensityAggKey, IntensityAggStats>,
+        key: IntensityAggKey,
+        s: &IntensityAggStats,
+    ) {
+        let slot = merged.entry(key).or_default();
+        slot.count += s.count;
+        slot.sum_log_rel += s.sum_log_rel;
+        slot.sum_log_rel_sq += s.sum_log_rel_sq;
+    }
+
+    for (k, s) in &base {
+        // Drop nce: keep flank/pos/charge structure, marginalize over collision energy.
+        bump(
+            merged,
+            IntensityAggKey { nce_bin: ANY_NCE.to_string(), ..k.clone() },
+            s,
+        );
+        // Drop flanks: keep pos/charge/nce, marginalize over the residue pair.
+        bump(
+            merged,
+            IntensityAggKey {
+                flank_n: ANY_FLANK.to_string(),
+                flank_c: ANY_FLANK.to_string(),
+                ..k.clone()
+            },
+            s,
+        );
+        // Drop both flanks and nce.
+        bump(
+            merged,
+            IntensityAggKey {
+                flank_n: ANY_FLANK.to_string(),
+                flank_c: ANY_FLANK.to_string(),
+                nce_bin: ANY_NCE.to_string(),
+                ..k.clone()
+            },
+            s,
+        );
+    }
+}
+
 fn write_intensity_model(
     path: &Path,
     merged: &rustc_hash::FxHashMap<IntensityAggKey, IntensityAggStats>,
@@ -2633,6 +2702,15 @@ fn run_train_intensity(args: TrainIntensityArgs) -> Result<(), Box<dyn std::erro
     if merged.is_empty() {
         return Err("no intensity key rows read from any --in parquet".into());
     }
+
+    let exact_keys = merged.len();
+    add_backoff_marginals(&mut merged);
+    eprintln!(
+        "train-intensity: {} exact keys + {} backoff marginals = {} total",
+        exact_keys,
+        merged.len() - exact_keys,
+        merged.len()
+    );
 
     write_intensity_model(&args.out, &merged)?;
     eprintln!(
@@ -3884,5 +3962,58 @@ mod train_from_msnet_tests {
     fn nonstandard_residue_errors() {
         let r = build_msnet_peptide("PEPTBDE", &[], &[], 0.0, 0.0);
         assert!(r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod intensity_marginal_tests {
+    use super::*;
+    use rustc_hash::FxHashMap;
+
+    fn cell(ion: &str, fn_: &str, fc: &str, nce: &str, count: i64, sum: f64) -> (IntensityAggKey, IntensityAggStats) {
+        (
+            IntensityAggKey {
+                ion_type: ion.to_string(),
+                flank_n: fn_.to_string(),
+                flank_c: fc.to_string(),
+                pos_bin: 5,
+                charge: 2,
+                nce_bin: nce.to_string(),
+            },
+            IntensityAggStats { count, sum_log_rel: sum, sum_log_rel_sq: sum * sum / count as f64 },
+        )
+    }
+
+    /// The finalizer must emit the backoff marginals that `predict_log_rel`
+    /// probes, or the trained per-context intensities go unused at inference
+    /// (which passes `nce_bin="unknown"`).
+    #[test]
+    fn backoff_marginals_are_emitted_with_summed_stats() {
+        let mut merged: FxHashMap<IntensityAggKey, IntensityAggStats> = FxHashMap::default();
+        // Two real cells: same flank/pos/charge, different numeric nce bins.
+        for (k, s) in [
+            cell("y", "K", "R", "30", 100, -20.0),
+            cell("y", "K", "R", "40", 50, -15.0),
+        ] {
+            merged.insert(k, s);
+        }
+        let exact = merged.len();
+        add_backoff_marginals(&mut merged);
+
+        // nce-marginal (`__any__`) keeps flanks, sums across both nce bins.
+        let any_nce = merged
+            .get(&cell("y", "K", "R", ANY_NCE, 0, 0.0).0)
+            .expect("nce-marginal must exist");
+        assert_eq!(any_nce.count, 150, "summed over the two nce bins");
+        assert!((any_nce.sum_log_rel - (-35.0)).abs() < 1e-9);
+
+        // flank-marginal (`*`/`*`) keeps each nce bin separately.
+        assert!(merged.contains_key(&cell("y", ANY_FLANK, ANY_FLANK, "30", 0, 0.0).0));
+        // both-marginal exists too.
+        assert!(merged.contains_key(&cell("y", ANY_FLANK, ANY_FLANK, ANY_NCE, 0, 0.0).0));
+
+        // Real cells are untouched (no double counting).
+        assert_eq!(merged.get(&cell("y", "K", "R", "30", 0, 0.0).0).unwrap().count, 100);
+        assert!(merged.len() > exact, "marginals added new keys");
     }
 }

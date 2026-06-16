@@ -22,7 +22,8 @@ use crate::search_index::SearchIndex;
 use crate::search_params::{ScoreMode, SearchParams};
 use scoring_crate::intensity_model::IntensityModel;
 use scoring_crate::scoring::{
-    fuse_strong_score, intensity_signal, mass_competition_evidence, psm_edge_score, score_psm,
+    frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
+    psm_edge_score, score_psm,
     strong_score_calibrated, RankScorer, OnlineStats, ScoredSpectrum, StrongScoreInputs,
     DENSITY_HW,
 };
@@ -1442,6 +1443,17 @@ pub(crate) fn compute_psm_features(
         feature_tol_is_ppm,
     );
 
+    // Tier-2 frag-intensity LLR battery (additive PIN features; 0.0 when no
+    // frag model). Discriminative alternative to the cosine intensity_signal.
+    let (frag_pred_explained, frag_pred_chance_llr, frag_topk_observed) = frag_llr_battery(
+        frag_intensity_model,
+        scored_spec,
+        peptide,
+        charge,
+        feature_tol,
+        feature_tol_is_ppm,
+    );
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
@@ -1478,6 +1490,9 @@ pub(crate) fn compute_psm_features(
         chance_match_surprise,
         unique_match_fraction,
         intensity_signal: intensity_signal_val,
+        frag_pred_explained,
+        frag_pred_chance_llr,
+        frag_topk_observed,
         mass_competition_evidence: mass_competition_evidence_val,
         candidate_rank_entropy: 0.0,
         listwise_score_gap: 0.0,

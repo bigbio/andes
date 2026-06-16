@@ -143,6 +143,95 @@ pub fn intensity_signal(
     spectral_cosine_similarity(&pred_vec, &obs_vec) as f32
 }
 
+/// Frag-intensity LLR battery: three additive discriminative PIN features
+/// derived from the v3 frag-intensity GBDT's per-fragment predicted intensity,
+/// deployed as likelihood-ratio signals instead of a single cosine (the cosine
+/// normalizes both vectors and smears target/decoy separation, so a more
+/// accurate intensity model gives no PSM lift — confirmed 3× on Astral).
+///
+/// Returns `(explained, chance_llr, topk_observed)`:
+/// - `explained` = `Σ(matched·pred) / Σpred` — of the intensity the model
+///   predicts, the fraction actually observed. Asymmetric (NOT normalized by the
+///   observed vector like cosine) → true peptides explain their predicted-bright
+///   ions; decoys don't.
+/// - `chance_llr` = `Σ matched·pred·max(0, −ln p_chance)` — predicted-intensity-
+///   weighted chance-match surprise. Fuses the prediction with the local-noise
+///   denominator (rewards a predicted-bright match in a sparse region); the
+///   cosine ignores chance entirely.
+/// - `topk_observed` = fraction of the top-`FRAG_TOPK` predicted-most-intense
+///   ions that are observed — rank-based, intensity-scale-free, robust.
+///
+/// All `0.0` when `frag_model` is `None` (neutral additive features). Enumerates
+/// `1..=2` to match the serve cosine + the trainer.
+pub fn frag_llr_battery(
+    frag_model: Option<&GbdtPeakModel>,
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    precursor_charge: u8,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> (f32, f32, f32) {
+    const FRAG_TOPK: usize = 6;
+    let g = match frag_model {
+        Some(g) => g,
+        None => return (0.0, 0.0, 0.0),
+    };
+    if peptide.length() < 2 {
+        return (0.0, 0.0, 0.0);
+    }
+    let predicted = predict_by_ions(peptide, 1..=2);
+    let mut sum_p = 0.0f64;
+    let mut sum_matched_p = 0.0f64;
+    let mut sum_chance_llr = 0.0f64;
+    // (predicted intensity, matched?) for the top-K observed-fraction feature.
+    let mut pred_matched: Vec<(f64, bool)> = Vec::with_capacity(predicted.len());
+
+    for ion in &predicted {
+        let feats = extract_frag_features(
+            peptide,
+            ion.kind,
+            ion.position,
+            precursor_charge,
+            ion.charge,
+            0.0,
+        );
+        let p = f64::from(g.predict_value(&feats)).exp();
+        let tol_da = if feature_tol_is_ppm {
+            ion.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
+        let matched = scored_spec.nearest_peak_full(ion.mz, tol_da).is_some();
+        sum_p += p;
+        if matched {
+            sum_matched_p += p;
+            let rho = scored_spec.local_peak_density(ion.mz, DENSITY_HW);
+            // p_chance = probability of a random peak in the match window.
+            let p_chance = (rho * 2.0 * tol_da).clamp(1e-12, 1.0);
+            let surprise = (-p_chance.ln()).max(0.0);
+            sum_chance_llr += p * surprise;
+        }
+        pred_matched.push((p, matched));
+    }
+
+    let explained = if sum_p > 0.0 {
+        (sum_matched_p / sum_p) as f32
+    } else {
+        0.0
+    };
+
+    // Fraction of the top-K predicted-most-intense ions that were observed.
+    pred_matched.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let k = pred_matched.len().min(FRAG_TOPK);
+    let topk_observed = if k > 0 {
+        pred_matched[..k].iter().filter(|(_, m)| *m).count() as f32 / k as f32
+    } else {
+        0.0
+    };
+
+    (explained, sum_chance_llr as f32, topk_observed)
+}
+
 /// Matched-ion tuple: (intensity, observed_mz, predicted_mz, is_b_ion).
 pub type MatchedIon = (f32, f64, f64, bool);
 

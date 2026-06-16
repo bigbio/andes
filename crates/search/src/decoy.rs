@@ -131,6 +131,25 @@ pub fn normalize_decoy_prefix(prefix: &str) -> String {
     }
 }
 
+/// The decoy-membership needle for `prefix`: `"<normalized_prefix>_"`.
+///
+/// SINGLE SOURCE OF TRUTH for target/decoy membership. Decoy accessions are
+/// built as `"<prefix>_<orig>"` (see [`reverse_db`]/[`shuffle_db`]), so a protein
+/// is a decoy iff its accession starts with this needle. Both candidate
+/// generation and [`crate::SearchIndex`] MUST use this helper so the two paths
+/// can never diverge: a target accession that merely starts with the BARE prefix
+/// (e.g. a real protein named `"XXXfoo"`, or any accession under a short custom
+/// prefix like `rev`) is NOT a decoy — the `_` delimiter is required.
+pub fn decoy_accession_needle(prefix: &str) -> String {
+    format!("{}_", normalize_decoy_prefix(prefix))
+}
+
+/// Returns `true` iff `accession` is a decoy accession under `prefix`
+/// (i.e. starts with [`decoy_accession_needle`]).
+pub fn is_decoy_accession(accession: &str, prefix: &str) -> bool {
+    accession.starts_with(&decoy_accession_needle(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +252,20 @@ mod tests {
         assert_eq!(built.len(), 2, "None appends no decoys");
         assert_eq!(built.proteins[0].accession, "P1");
         assert_eq!(built.proteins[1].accession, "P2");
+    }
+
+    #[test]
+    fn decoy_accession_needle_requires_underscore_delimiter() {
+        // Decoys are built as "<prefix>_<orig>", so detection requires the "_".
+        assert_eq!(decoy_accession_needle("XXX"), "XXX_");
+        assert_eq!(decoy_accession_needle("XXX_"), "XXX_"); // normalize is idempotent
+        assert_eq!(decoy_accession_needle(""), "XXX_"); // empty → default prefix
+        assert!(is_decoy_accession("XXX_P12345", "XXX"));
+        assert!(!is_decoy_accession("XXXP12345", "XXX"), "no '_' delimiter ⇒ target, not decoy");
+        assert!(!is_decoy_accession("P12345", "XXX"));
+        // Short custom prefix: a real "rev..." target must NOT be misread as decoy.
+        assert!(is_decoy_accession("rev_sp|P1", "rev"));
+        assert!(!is_decoy_accession("reverse_kinase", "rev"));
     }
 
     #[test]

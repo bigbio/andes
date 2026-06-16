@@ -183,6 +183,17 @@ impl GbdtPeakModel {
         b
     }
 
+    /// Raw regression output: sum of all tree leaf values, with NO sigmoid
+    /// activation and NO isotonic calibration applied.
+    ///
+    /// Use this when the model was trained as a pure regressor (e.g. for
+    /// fragment intensity prediction) and the caller wants the uncalibrated
+    /// score directly. For the classifier path (signal/noise scoring) use
+    /// [`predict_logit`] or [`predict_proba`] instead.
+    pub fn predict_value(&self, x: &[f32]) -> f32 {
+        self.trees.iter().map(|t| t.eval(x)).sum()
+    }
+
     /// Calibrated P(signal) in [0,1].
     pub fn predict_proba(&self, x: &[f32]) -> f32 {
         let raw: f32 = self.trees.iter().map(|t| t.eval(x)).sum();
@@ -307,6 +318,32 @@ mod tests {
         m.iso_y.clear();
         let s = m.predict_proba(&[1.0]);
         assert!((s - 0.8807971).abs() < 1e-5);
+    }
+
+    #[test]
+    fn predict_value_returns_raw_tree_sum() {
+        // toy_model: x0 <= 0.5 → leaf -1.0; else → leaf +2.0
+        // predict_value must return the raw tree sum without sigmoid or isotonic.
+        let m = toy_model();
+        // x0 = 0.0 → leaf -1.0; raw sum = -1.0 (no sigmoid/iso applied)
+        let v_lo = m.predict_value(&[0.0]);
+        assert!((v_lo - (-1.0)).abs() < 1e-6, "predict_value([0.0]) expected -1.0, got {v_lo}");
+        // x0 = 1.0 → leaf +2.0; raw sum = 2.0
+        let v_hi = m.predict_value(&[1.0]);
+        assert!((v_hi - 2.0).abs() < 1e-6, "predict_value([1.0]) expected 2.0, got {v_hi}");
+    }
+
+    #[test]
+    fn predict_value_ignores_sigmoid_flag() {
+        // Even when apply_sigmoid=false, predict_value must still return raw sum (not apply isotonic).
+        let mut m = toy_model();
+        m.apply_sigmoid = false;
+        // Set a non-identity isotonic map so we can verify it's NOT applied.
+        m.iso_x = vec![0.0, 1.0];
+        m.iso_y = vec![0.5, 0.5]; // constant 0.5 — if applied, predict_value would be 0.5
+        let v = m.predict_value(&[1.0]);
+        assert!((v - 2.0).abs() < 1e-6,
+            "predict_value must not apply isotonic map; expected 2.0, got {v}");
     }
 
     #[test]

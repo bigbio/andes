@@ -249,6 +249,8 @@ fn build_manifest_batch(
 
     // gbdt_model_bytes: manifest-only binary column; null when no blob supplied.
     let mut gbdt_b = BinaryBuilder::new();
+    // frag_intensity_model_bytes: read from Param.frag_intensity_model if set.
+    let mut fim_b = BinaryBuilder::new();
 
     for (i, (_, param)) in models.iter().enumerate() {
         activation.append_value(param.data_type.activation.name());
@@ -287,6 +289,12 @@ fn build_manifest_batch(
         match gbdt_blobs.get(i).and_then(|b| b.as_ref()) {
             Some(bytes) => gbdt_b.append_value(bytes),
             None => gbdt_b.append_null(),
+        }
+
+        // frag_intensity_model_bytes: serialise from Param.frag_intensity_model if set.
+        match param.frag_intensity_model.as_ref() {
+            Some(model) => fim_b.append_value(model.to_bytes()),
+            None => fim_b.append_null(),
         }
     }
 
@@ -329,6 +337,7 @@ fn build_manifest_batch(
         Arc::new(num_precursor_off.finish()),
         Arc::new(charge_hist.finish()),
         Arc::new(gbdt_b.finish()),            // gbdt_model_bytes
+        Arc::new(fim_b.finish()),             // frag_intensity_model_bytes
         // table-only → null
         null_i32.clone(),     // part_charge
         null_i32.clone(),     // part_mass_bits
@@ -606,6 +615,7 @@ fn build_table_batch(
         null_i32.clone(),    // num_precursor_off
         null_charge_hist,    // charge_hist
         null_binary_array(nrows), // gbdt_model_bytes
+        null_binary_array(nrows), // frag_intensity_model_bytes
         // table columns
         part_charge_arr,
         part_mass_bits_arr,
@@ -916,6 +926,7 @@ fn build_source_batch(
         null_i32.clone(),    // num_precursor_off
         null_charge_hist,    // charge_hist
         null_binary_array(n), // gbdt_model_bytes
+        null_binary_array(n), // frag_intensity_model_bytes
         // table-only → null
         null_i32s.clone(),   // part_charge
         null_i32s.clone(),   // part_mass_bits
@@ -1165,6 +1176,7 @@ fn build_stat_batch(
         null_i32.clone(),    // num_precursor_off
         null_charge_hist,    // charge_hist
         null_binary_array(nrows), // gbdt_model_bytes
+        null_binary_array(nrows), // frag_intensity_model_bytes
         // table-only → use the stat row partition/ion/table columns (populated above)
         part_charge_arr,
         part_mass_bits_arr,

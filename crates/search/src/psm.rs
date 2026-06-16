@@ -159,8 +159,12 @@ pub struct PsmFeatures {
 
     // ── Strong-score S3: fused signal − null ────────────────────────────────
     /// `intensity_signal − null` where `null` combines chance-match surprise,
-    /// mass-competition penalty, and listwise ambiguity. Always computed;
-    /// drives ranking and PIN `RawScore` only under `ScoreMode::Strong`.
+    /// mass-competition penalty, and listwise ambiguity. Always computed and
+    /// emitted as the `RawScore` PIN column (the headline/fused score). Under
+    /// `ScoreMode::Strong` it ALSO drives ranking — top-1 selection via
+    /// `rank_score` — but `psm.score` (the `RankScore` column) stays the
+    /// rank-LLR in BOTH modes, so `RankScore` always reports the b/y-ion-rank
+    /// model score.
     pub strong_score: f32,
 
     // ── Strong-score S4: per-spectrum significance calibration ──────────────
@@ -469,9 +473,13 @@ impl TopNQueue {
         let cap = self.capacity as usize;
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
-            let s = psm.features.strong_score;
-            psm.score = s;
-            psm.rank_score = s;
+            // Re-rank / select top-1 by the fused strong score, but DO NOT touch
+            // `psm.score`: it stays the rank-LLR so the `RankScore` PIN column
+            // always reports the b/y-ion-rank-model score (the fused score is
+            // emitted separately as the `RawScore` column = features.strong_score).
+            // The queue Ord ranks by `rank_score` alone, so setting only it
+            // reorders the queue without losing the rank-LLR.
+            psm.rank_score = psm.features.strong_score;
         }
         psms.sort_by(|a, b| b.cmp(a));
         Self::retain_top_with_ties(&mut psms, cap);
@@ -835,7 +843,10 @@ mod tests {
         q.reorder_by_strong_score();
         let top = q.peek_top().unwrap();
         assert!((top.features.strong_score - 5.0).abs() < f32::EPSILON);
-        assert!((top.score - 5.0).abs() < f32::EPSILON);
+        // psm.score stays the rank-LLR (NOT clobbered with the strong score), so
+        // the RankScore column always reports the b/y-ion-rank-model score.
+        assert!((top.score - 100.0).abs() < f32::EPSILON);
+        // rank_score IS set to the strong score so top-1 selection ranks by it.
         assert!((top.rank_score - 5.0).abs() < f32::EPSILON);
     }
 

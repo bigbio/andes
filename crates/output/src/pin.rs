@@ -162,7 +162,10 @@ fn write_header<W: Write>(
         "ExpMass".to_string(),
         "CalcMass".to_string(),
         "mass".to_string(),
-        "RawScore".to_string(),
+        // RankScore = the rank-LLR ranking score (formerly "RawScore"; value is
+        // `psm.score`). Renamed so the headline/primary column is "RawScore"
+        // (the fused score, formerly "StrongScore").
+        "RankScore".to_string(),
     ];
     cols.extend_from_slice(&[
         "isotope_error".to_string(),
@@ -211,7 +214,7 @@ fn write_header<W: Write>(
         // orthogonal "lead over the runner-up" signal without touching any
         // existing column. Populated only when a distinct runner-up was scored
         // (i.e. effectively needs internal retention ≥ 2 candidates per scan).
-        "DeltaRawScore".to_string(),
+        "DeltaRankScore".to_string(),
         // ADDITIVE Tailor per-spectrum calibration (Yang et al., JPR 2020):
         // RawScore / (spectrum's top-1% quantile RawScore). Makes RawScores
         // comparable across spectra — the role the removed generating function
@@ -249,10 +252,11 @@ fn write_header<W: Write>(
         "CandidateRankEntropy".to_string(),
         // ListwiseScoreGap = S2 listwise: top-1 − top-2 RawScore in retained queue.
         "ListwiseScoreGap".to_string(),
-        // StrongScore = S3 fused signal − null (always emitted; ranks when --score strong).
-        "StrongScore".to_string(),
-        // StrongScoreCal = S4 per-spectrum z-scored significance.
-        "StrongScoreCal".to_string(),
+        // RawScore = S3 fused signal − null (formerly "StrongScore"; the
+        // headline/primary score, always emitted; ranks when --score strong).
+        "RawScore".to_string(),
+        // RawScoreCal = S4 per-spectrum z-scored significance (formerly "StrongScoreCal").
+        "RawScoreCal".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -762,7 +766,7 @@ mod tests {
         // matchedIonRatio and Peptide.
         let expected: Vec<&str> = vec![
             "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "mass",
-            "RawScore", "isotope_error",
+            "RankScore", "isotope_error",
             "peplen", "dm", "absdm",
             "charge2", "charge3",
             "enzN", "enzC", "enzInt",
@@ -772,7 +776,7 @@ mod tests {
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
             "matchedIonRatio",
             "EdgeScore",
-            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore", "TailorScore",
+            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRankScore", "TailorScore",
             "PpmGaussianScore",
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
@@ -785,8 +789,8 @@ mod tests {
             "MassCompetitionEvidence",
             "CandidateRankEntropy",
             "ListwiseScoreGap",
-            "StrongScore",
-            "StrongScoreCal",
+            "RawScore",
+            "RawScoreCal",
             "Peptide", "Proteins",
         ];
 
@@ -1063,13 +1067,13 @@ mod tests {
 
         let col_idx = cols
             .iter()
-            .position(|c| c == "DeltaRawScore")
-            .expect("DeltaRawScore column missing");
+            .position(|c| c == "DeltaRankScore")
+            .expect("DeltaRankScore column missing");
 
-        let r1: f64 = rows[0][col_idx].parse().expect("rank-1 DeltaRawScore numeric");
-        let r2: f64 = rows[1][col_idx].parse().expect("rank-2 DeltaRawScore numeric");
-        assert!((r1 - 7.0).abs() < 1e-6, "rank-1 DeltaRawScore should be 7.0, got {r1}");
-        assert_eq!(r2, 0.0, "rank-2 DeltaRawScore should be gated to 0.0, got {r2}");
+        let r1: f64 = rows[0][col_idx].parse().expect("rank-1 DeltaRankScore numeric");
+        let r2: f64 = rows[1][col_idx].parse().expect("rank-2 DeltaRankScore numeric");
+        assert!((r1 - 7.0).abs() < 1e-6, "rank-1 DeltaRankScore should be 7.0, got {r1}");
+        assert_eq!(r2, 0.0, "rank-2 DeltaRankScore should be gated to 0.0, got {r2}");
     }
 
     /// Verify that `longest_y_pct` is formatted with 6 decimal places.

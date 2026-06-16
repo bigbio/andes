@@ -92,6 +92,37 @@ fn logloss(raw_val: &[f32], val_y: &[u8]) -> f32 {
     if val_y.is_empty() { f32::INFINITY } else { (sum / val_y.len() as f64) as f32 }
 }
 
+/// ROC AUC of `scores` vs binary `labels` (Mann-Whitney U; ties get average
+/// rank). Rank-based, so AUC of the raw GBDT scores equals AUC of the
+/// calibrated P(signal). Returns 0.5 when either class is empty. This is the
+/// offline gate metric: AUC ≈ 0.5 ⇒ the peptide-agnostic peak model has no
+/// discriminative signal; higher ⇒ worth wiring as an additive feature.
+fn auc(scores: &[f32], labels: &[u8]) -> f64 {
+    let n = scores.len();
+    let n_pos = labels.iter().filter(|&&y| y == 1).count();
+    let n_neg = n - n_pos;
+    if n_pos == 0 || n_neg == 0 {
+        return 0.5;
+    }
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by(|&a, &b| scores[a].partial_cmp(&scores[b]).unwrap());
+    let mut ranks = vec![0.0f64; n];
+    let mut i = 0;
+    while i < n {
+        let mut j = i;
+        while j + 1 < n && scores[idx[j + 1]] == scores[idx[i]] {
+            j += 1;
+        }
+        let avg_rank = ((i + 1) + (j + 1)) as f64 / 2.0; // 1-based average rank for ties
+        for &row in &idx[i..=j] {
+            ranks[row] = avg_rank;
+        }
+        i = j + 1;
+    }
+    let sum_pos_ranks: f64 = (0..n).filter(|&r| labels[r] == 1).map(|r| ranks[r]).sum();
+    (sum_pos_ranks - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos as f64 * n_neg as f64)
+}
+
 /// Build quantile bin upper edges for one feature column.
 ///
 /// Returns up to `n_bins` distinct upper edges at evenly-spaced quantiles.
@@ -357,6 +388,17 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
         }
     }
 
+    // OFFLINE GATE METRIC: held-out AUC of P(signal) on the group-disjoint
+    // validation set. This is the review's free gate — AUC ≈ 0.5 means the
+    // peptide-agnostic peak model does not discriminate signal from noise and
+    // is not worth wiring (jump to the per-ion v3 design instead).
+    let n_pos_val = val_y.iter().filter(|&&y| y == 1).count();
+    let val_auc = auc(&raw_val_final, &val_y);
+    eprintln!(
+        "train-gbdt: validation AUC = {val_auc:.4}  (n_val={val_n}, pos={n_pos_val}, neg={})",
+        val_n - n_pos_val
+    );
+
     // Build (p_sigmoid, y) pairs sorted by p_sigmoid.
     let mut cal_pairs: Vec<(f32, f32)> = raw_val_final
         .iter()
@@ -386,6 +428,22 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auc_perfect_reversed_tied_and_empty() {
+        // Perfect separation: all positives score above all negatives → 1.0.
+        let scores = [0.1_f32, 0.2, 0.8, 0.9];
+        let labels = [0u8, 0, 1, 1];
+        assert!((auc(&scores, &labels) - 1.0).abs() < 1e-9);
+        // Reversed labels (positives score lowest) → 0.0.
+        let labels_rev = [1u8, 1, 0, 0];
+        assert!((auc(&scores, &labels_rev) - 0.0).abs() < 1e-9);
+        // All-tied scores → 0.5 (no separation).
+        let tied = [0.5_f32, 0.5, 0.5, 0.5];
+        assert!((auc(&tied, &labels) - 0.5).abs() < 1e-9);
+        // One class empty → 0.5 by convention.
+        assert!((auc(&scores, &[0u8, 0, 0, 0]) - 0.5).abs() < 1e-9);
+    }
 
     fn lcg(state: &mut u64) -> f32 {
         *state = state

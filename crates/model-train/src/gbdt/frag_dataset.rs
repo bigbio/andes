@@ -23,9 +23,10 @@ use crate::gbdt::train::RegressionDataset;
 /// 1. Build a [`ScoredSpectrum`] and compute the base peak (max active-peak
 ///    intensity). Skip if base_peak ≤ 0 or peptide length < 2.
 /// 2. Enumerate charge-1 b/y ions via [`predict_by_ions`].
-/// 3. For each ion with an observed peak within `param.mme.as_da(ion.mz)`,
-///    push one regression row: features from [`extract_frag_features`] and
-///    target `y = ln(obs_intensity / base_peak)`.
+/// 3. For each ion with an observed peak within `scorer.feature_match_tolerance()`
+///    (the SAME tolerance the strong-score cosine uses at serve), push one
+///    regression row: features from [`extract_frag_features`] and target
+///    `y = ln(obs_intensity / base_peak)`.
 /// 4. Unmatched ions contribute no row.
 pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> RegressionDataset {
     let n_features = N_FRAG_FEATURES;
@@ -48,7 +49,12 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
             continue;
         }
 
-        let param = scorer.param();
+        // Match observed peaks at the SAME tolerance the strong-score cosine
+        // uses at serve time (feature_match_tolerance: 20 ppm high-res / 0.5 Da
+        // low-res), NOT the coarse param.mme rank-binning tolerance. On high-res
+        // data a 0.5 Da window pairs spurious junk peaks to non-fragmenting
+        // ions, corrupting the intensity targets and skewing train vs serve.
+        let feat_tol = scorer.feature_match_tolerance();
         let seq: String = row
             .peptide
             .residues
@@ -60,7 +66,7 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
         let predicted = predict_by_ions(row.peptide, 1..=1);
 
         for ion in &predicted {
-            let tol_da = param.mme.as_da(ion.mz);
+            let tol_da = feat_tol.as_da(ion.mz);
             if let Some((_, obs_intensity, _)) = ss.nearest_peak_full(ion.mz, tol_da) {
                 let log_rel =
                     ((obs_intensity as f64 / base_peak).max(1e-12)).ln() as f32;

@@ -58,6 +58,14 @@ pub struct Param {
     /// Wrapped in `Arc` so callers can share one model across parallel search
     /// threads without cloning the tree arrays.
     pub frag_intensity_model: Option<Arc<GbdtPeakModel>>,
+    /// Optional GBDT rich-ion LLR classifier (logistic, raw `predict_value`
+    /// output). Populated from the `rich_ion_model_bytes` manifest column;
+    /// `None` for any store written before this column existed or for slugs
+    /// without a trained rich-ion classifier.
+    ///
+    /// Wrapped in `Arc` so callers can share one model across parallel search
+    /// threads without cloning the tree arrays.
+    pub rich_ion_model: Option<Arc<GbdtPeakModel>>,
 }
 
 /// Build the per-partition ion-type cache (Noise excluded). Single source of
@@ -453,6 +461,7 @@ fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
         partition_ion_types_cache,
         gbdt_peak_model: None,
         frag_intensity_model: None,
+        rich_ion_model: None,
     })
 }
 
@@ -1035,6 +1044,7 @@ mod tests {
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
             frag_intensity_model: None,
+            rich_ion_model: None,
         }
     }
 
@@ -1251,6 +1261,7 @@ mod tests {
             partition_ion_types_cache: FxHashMap::default(),
             gbdt_peak_model: None,
             frag_intensity_model: None,
+            rich_ion_model: None,
         };
         param.rebuild_cache();
 

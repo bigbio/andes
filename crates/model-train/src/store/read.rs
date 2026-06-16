@@ -224,6 +224,10 @@ struct ManifestRow {
     /// written before this column existed (backward-compatible: column absent ⇒
     /// `frag_intensity_model = None`).
     frag_intensity_bytes: Option<Vec<u8>>,
+    /// Serialized rich-ion GBDT blob, if present. `None` for models
+    /// written before this column existed (backward-compatible: column absent ⇒
+    /// `rich_ion_model = None`).
+    rich_ion_bytes: Option<Vec<u8>>,
 }
 
 fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
@@ -523,6 +527,7 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
         partition_ion_types_cache: FxHashMap::default(),
         gbdt_peak_model: None,
         frag_intensity_model: None,
+        rich_ion_model: None,
     };
     param.rebuild_cache();
 
@@ -541,6 +546,15 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                 format!("decode frag_intensity_model_bytes for '{model_id}': {e}")
             ))?;
         param.frag_intensity_model = Some(std::sync::Arc::new(model));
+    }
+
+    // Decode and attach the rich-ion classifier if a blob was stored.
+    if let Some(bytes) = manifest.rich_ion_bytes.as_ref() {
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
+            .map_err(|e| TrainError::Other(
+                format!("decode rich_ion_model_bytes for '{model_id}': {e}")
+            ))?;
+        param.rich_ion_model = Some(std::sync::Arc::new(model));
     }
 
     Ok(param)
@@ -618,6 +632,18 @@ fn parse_manifest_row(
         }
     };
 
+    // Read the optional rich-ion model blob (backward-compatible: column absent → None).
+    let rich_ion_bytes: Option<Vec<u8>> = match batch.column_by_name("rich_ion_model_bytes") {
+        None => None, // backward-compat: old store without the column
+        Some(col) => {
+            let arr = col.as_any().downcast_ref::<BinaryArray>()
+                .ok_or_else(|| TrainError::Other(
+                    "rich_ion_model_bytes column is not BinaryArray".into()
+                ))?;
+            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
+        }
+    };
+
     Ok(ManifestRow {
         activation,
         instrument,
@@ -637,6 +663,7 @@ fn parse_manifest_row(
         charge_hist,
         gbdt_bytes,
         frag_intensity_bytes,
+        rich_ion_bytes,
     })
 }
 

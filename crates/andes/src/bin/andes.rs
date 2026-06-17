@@ -1997,6 +1997,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &params,
                 &scorer,
                 &cfg,
+                0.01, // report_q = 1% FDR report threshold (spec)
                 high_res,
                 fragment_tol_da,
                 &cli.decoy_prefix,

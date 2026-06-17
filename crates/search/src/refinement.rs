@@ -85,22 +85,41 @@ pub fn confident_protein_indices(
 // (b) unidentified_spectrum_indices
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Indices of spectra with NO retained TARGET PSM (decoy-only or empty queues).
-/// These are the spectra Pass-2 attempts to rescue with the refinement mod tier.
+/// Spectra Pass-1 did NOT confidently identify at `report_q` (the report FDR
+/// threshold, e.g. 0.01). A spectrum is "identified" iff its best PSM (max
+/// rank_score across the queue) is a TARGET whose TDC q-value <= report_q; all
+/// other spectra (best PSM is a decoy, best target above q, or no PSM at all)
+/// are returned for refinement. Uses the same best-per-spectrum TDC walk as
+/// `confident_protein_indices`.
 pub fn unidentified_spectrum_indices(
     queues: &[TopNQueue],
     candidates: &[Candidate],
+    report_q: f64,
 ) -> Vec<usize> {
-    queues
-        .iter()
-        .enumerate()
-        .filter(|(_, queue)| {
-            !queue
-                .iter_psms()
-                .any(|p| !candidates[p.primary_candidate_idx() as usize].is_decoy)
-        })
-        .map(|(i, _)| i)
-        .collect()
+    // One best-PSM (label, spectrum) per spectrum that produced a PSM, using
+    // that spectrum's max-`rank_score` PSM (target OR decoy). Empty-queue spectra
+    // contribute no label — they are unconditionally unidentified below.
+    let mut labels: Vec<ScoredLabel> = Vec::new();
+    let mut label_spectrum: Vec<usize> = Vec::new();
+    for (s, queue) in queues.iter().enumerate() {
+        if let Some(best) = queue.peek_top() {
+            let cand_idx = best.primary_candidate_idx() as usize;
+            labels.push(ScoredLabel {
+                score: best.rank_score,
+                is_decoy: candidates[cand_idx].is_decoy,
+            });
+            label_spectrum.push(s);
+        }
+    }
+
+    // TDC walk over the best-per-spectrum labels → indices (into `labels`) of
+    // confident TARGETs; map those back to their global spectrum indices.
+    let confident = confident_target_indices(&labels, report_q);
+    let identified: HashSet<usize> = confident.iter().map(|&i| label_spectrum[i]).collect();
+
+    // Every spectrum NOT confidently identified (best-is-decoy, best target
+    // above q, or empty queue) is returned for refinement.
+    (0..queues.len()).filter(|s| !identified.contains(s)).collect()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -328,7 +347,8 @@ pub struct RefinementOutput {
 /// Steps (each an early-return — `None` — when its input is empty, so the cheap
 /// no-op cases never build a Pass-2 search):
 ///   1. `confident_protein_indices` over the Pass-1 queues — `None` if empty.
-///   2. `unidentified_spectrum_indices` over the Pass-1 queues — `None` if empty.
+///   2. `unidentified_spectrum_indices` over the Pass-1 queues (spectra whose
+///      best Pass-1 target PSM is above `report_q`) — `None` if empty.
 ///   3. `build_refinement_index` scoped to the confident proteins.
 ///   4. A Pass-2 `SearchParams` clone whose `aa_set` is the refinement tier
 ///      ([`refinement_aa_set`]) and whose `max_variable_mods_per_peptide` is
@@ -351,6 +371,7 @@ pub fn run_refinement(
     base_params: &SearchParams,
     scorer: &RankScorer,
     cfg: &RefineConfig,
+    report_q: f64,
     high_res: bool,
     fragment_tol_da: f64,
     decoy_prefix: &str,
@@ -379,8 +400,9 @@ pub fn run_refinement(
         return None;
     }
 
-    // 2. Spectra still without a target PSM. Empty ⇒ nothing to rescue.
-    let unident = unidentified_spectrum_indices(pass1_queues, pass1_candidates);
+    // 2. Spectra Pass-1 did not confidently identify at the report FDR
+    //    threshold. Empty ⇒ nothing to rescue.
+    let unident = unidentified_spectrum_indices(pass1_queues, pass1_candidates, report_q);
     if unident.is_empty() {
         return None;
     }
@@ -560,23 +582,82 @@ mod tests {
     // ── (b) unidentified_spectrum_indices ──────────────────────────────────
 
     #[test]
-    fn unidentified_spectrum_indices_flags_empty_and_decoy_only() {
-        let candidates = vec![cand(0, false), cand(1, true)];
-        let queues = vec![
-            queue_with(vec![psm(0, 0, 20.0)]), // target PSM → identified
-            queue_with(vec![psm(1, 1, 20.0)]), // decoy-only → unidentified
-            TopNQueue::new(10),                // empty → unidentified
-        ];
-        let unident = unidentified_spectrum_indices(&queues, &candidates);
-        assert_eq!(unident, vec![1, 2]);
+    fn unidentified_spectrum_indices_returns_decoy_above_q_and_empty() {
+        // 50 clearly-confident target spectra (high scores, no decoy competition
+        // → q ≈ 0) plus a low-scoring decoy-best spectrum and an empty queue. The
+        // confident targets are identified; the decoy-best and empty are returned.
+        let mut candidates: Vec<Candidate> = (0..50).map(|i| cand(i, false)).collect();
+        candidates.push(cand(999, true)); // index 50, a decoy at a low score
+
+        let mut queues = Vec::new();
+        for i in 0..50 {
+            // High target scores, gently descending; well above the decoy tail.
+            queues.push(queue_with(vec![psm(i, i as u32, 80.0 - i as f32 * 0.1)]));
+        }
+        // Spectrum 50: best PSM is a decoy (low score) → unidentified.
+        queues.push(queue_with(vec![psm(50, 50, 1.0)]));
+        // Spectrum 51: empty queue → unidentified.
+        queues.push(TopNQueue::new(10));
+
+        let unident = unidentified_spectrum_indices(&queues, &candidates, 0.01);
+        // The 50 confident targets are NOT returned.
+        for s in 0..50 {
+            assert!(!unident.contains(&s), "confident target spectrum {s} must be identified");
+        }
+        // The decoy-best (50) and empty-queue (51) spectra ARE returned.
+        assert!(unident.contains(&50), "decoy-best spectrum must be unidentified");
+        assert!(unident.contains(&51), "empty-queue spectrum must be unidentified");
+        assert_eq!(unident.len(), 2);
     }
 
     #[test]
-    fn unidentified_spectrum_indices_mixed_queue_with_one_target_is_identified() {
-        // A queue holding BOTH a target and a decoy PSM counts as identified.
-        let candidates = vec![cand(0, true), cand(1, false)];
-        let queues = vec![queue_with(vec![psm(0, 0, 30.0), psm(0, 1, 10.0)])];
-        assert!(unidentified_spectrum_indices(&queues, &candidates).is_empty());
+    fn unidentified_spectrum_indices_returns_poorly_scoring_target_above_q() {
+        // A field of confident high-scoring targets establishes the q-walk, then a
+        // band of interleaved low-scoring decoys drives q above the threshold for
+        // a low-scoring target — which must therefore be returned for refinement.
+        let mut candidates: Vec<Candidate> = (0..40).map(|i| cand(i, false)).collect();
+        // 39 low-scoring decoys forming the tail above which q explodes.
+        for _ in 0..39 {
+            candidates.push(cand(999, true));
+        }
+        // One low-scoring TARGET buried in the decoy tail (the spectrum under test).
+        candidates.push(cand(40, false)); // candidate index 79
+
+        let mut queues = Vec::new();
+        // 40 confident targets at high scores (no decoy competition above → q≈0).
+        for i in 0..40 {
+            queues.push(queue_with(vec![psm(i, i as u32, 90.0 - i as f32 * 0.1)]));
+        }
+        // 39 decoys at a LOW score band (spectra 40..79).
+        for k in 0..39 {
+            queues.push(queue_with(vec![psm(40 + k, (40 + k) as u32, 5.0)]));
+        }
+        // A poorly-scoring TARGET at spectrum 79, score below/among the decoy tail
+        // → its TDC q-value > report_q → unidentified.
+        queues.push(queue_with(vec![psm(79, 79, 4.0)]));
+
+        let unident = unidentified_spectrum_indices(&queues, &candidates, 0.01);
+        // The 40 high-scoring confident targets are identified.
+        for s in 0..40 {
+            assert!(!unident.contains(&s), "confident target spectrum {s} must be identified");
+        }
+        // The poorly-scoring target (q above threshold) is returned.
+        assert!(unident.contains(&79), "low-scoring target above report_q must be unidentified");
+    }
+
+    #[test]
+    fn unidentified_spectrum_indices_identifies_best_target_in_mixed_queue() {
+        // A queue's BEST PSM (max rank_score) is the target → identified, even if a
+        // lower-scoring decoy PSM is also present. One confident target spectrum
+        // plus a second high target so the q-walk cleanly separates.
+        let candidates = vec![cand(0, false), cand(1, true), cand(2, false)];
+        let queues = vec![
+            // Best PSM is the target (50.0) over the decoy (10.0) → identified.
+            queue_with(vec![psm(0, 0, 50.0), psm(0, 1, 10.0)]),
+            queue_with(vec![psm(1, 2, 49.0)]),
+        ];
+        let unident = unidentified_spectrum_indices(&queues, &candidates, 0.5);
+        assert!(unident.is_empty(), "both best-target spectra are identified");
     }
 
     // ── (c) build_refinement_index ─────────────────────────────────────────
@@ -938,6 +1019,7 @@ mod tests {
             &params,
             &scorer,
             &RefineConfig::default_tier(),
+            0.01,
             true,
             0.5,
             "XXX",
@@ -969,6 +1051,7 @@ mod tests {
             &params,
             &scorer,
             &RefineConfig::default_tier(),
+            0.01,
             true,
             0.5,
             "XXX",
@@ -1025,6 +1108,7 @@ mod tests {
             &params,
             &scorer,
             &RefineConfig::default_tier(),
+            0.01,
             true,
             0.5,
             "XXX",

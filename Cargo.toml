@@ -27,6 +27,8 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 byteorder = "1.5"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 
 # Sage-pattern spectrum readers (Phase 3) — declared at the workspace level so
 # the spectra crate can pull them in without re-pinning. Decision recorded

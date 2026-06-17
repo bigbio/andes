@@ -89,6 +89,16 @@ pub struct SearchParams {
     /// Fallback isolation half-width (Da) used when the mzML lacks
     /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.
     pub chimeric_isolation_halfwidth_da: f64,
+    /// Max co-isolated SECONDARY peptides to search per chimeric spectrum
+    /// (the chimeric-N lever). The proven default is 2 (one secondary, the
+    /// +101%-Astral setting); higher N searches deeper co-fragments on the
+    /// residual (Astral wide windows co-isolate 3-5+). Only consulted when
+    /// `chimeric` is true.
+    pub chimeric_max_coisolated: usize,
+    /// Averagine-envelope KL gate for accepting a co-isolated MS1 envelope as a
+    /// secondary precursor — lower = stricter/cleaner → fewer spurious
+    /// secondaries. Default 0.3. Only consulted when `chimeric` is true.
+    pub chimeric_max_kl: f32,
     /// Ranking / RawScore source: `Rank` (default) or `Strong` (S3 fused score).
     pub score_mode: ScoreMode,
 }
@@ -125,6 +135,8 @@ impl SearchParams {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            chimeric_max_coisolated: 2,
+            chimeric_max_kl: 0.3,
             score_mode: ScoreMode::Rank,
         }
     }
@@ -187,6 +199,11 @@ mod tests {
         assert_eq!(params.precursor_mass_shift_ppm, 0.0);
         assert!(!params.chimeric);
         assert_eq!(params.chimeric_isolation_halfwidth_da, 1.5);
+        // chimeric-N defaults MUST preserve the proven +101%-Astral behavior
+        // (max_n=2, KL gate 0.3) — the engine path is byte-identical until a
+        // user opts into deeper N via --chimeric-max-coisolated.
+        assert_eq!(params.chimeric_max_coisolated, 2);
+        assert_eq!(params.chimeric_max_kl, 0.3);
         assert_eq!(params.score_mode, ScoreMode::Rank);
     }
 }

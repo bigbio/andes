@@ -254,6 +254,12 @@ fn write_header<W: Write>(
         "FragTopKObserved".to_string(),
         // RichIonLLR = decoy-aware per-annotated-ion LLR sum (0 without a rich-ion model).
         "RichIonLLR".to_string(),
+        // Refinement-cascade additive columns (0 without --refine):
+        // IsRefinement = from Pass-2 search; NumMods = variable-mod count;
+        // RefinementModClass = mod-class id for subgroup-FDR grouping.
+        "IsRefinement".to_string(),
+        "NumMods".to_string(),
+        "RefinementModClass".to_string(),
         // MassCompetitionEvidence = S2 null term 2: Σ 1/(1+ambiguity+ρ).
         "MassCompetitionEvidence".to_string(),
         // CandidateRankEntropy = S2 listwise: softmax entropy over retained top-K.
@@ -521,6 +527,12 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.frag_topk_observed as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.rich_ion_llr as f64)?;
+    // Refinement-cascade additive columns (0 without --refine); same order as header.
+    write!(
+        writer,
+        "\t{}\t{}\t{}",
+        psm.features.is_refinement, psm.features.num_mods, psm.features.refine_mod_class
+    )?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.mass_competition_evidence as f64)?;
     writer.write_all(b"\t")?;
@@ -808,6 +820,9 @@ mod tests {
             "FragPredChanceLLR",
             "FragTopKObserved",
             "RichIonLLR",
+            "IsRefinement",
+            "NumMods",
+            "RefinementModClass",
             "MassCompetitionEvidence",
             "CandidateRankEntropy",
             "ListwiseScoreGap",
@@ -830,6 +845,25 @@ mod tests {
             cols, expected,
             "PIN header columns must match the reference fixture column order exactly"
         );
+    }
+
+    /// Additive refinement-cascade columns are always present in the header
+    /// (they carry 0 without `--refine`). Guards Task 2 of the PTM cascade.
+    #[test]
+    fn pin_header_has_refinement_columns() {
+        let params = make_params(2..=3);
+        let spectra: Vec<Spectrum> = vec![];
+        let queues: Vec<TopNQueue> = vec![];
+        let idx = make_empty_search_index();
+
+        let mut buf = Vec::<u8>::new();
+        let cands: Vec<Candidate> = vec![];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let cols = parse_header(&buf);
+        for col in ["IsRefinement", "NumMods", "RefinementModClass"] {
+            assert!(cols.iter().any(|c| c == col), "header missing column {col}");
+        }
     }
 
     // ── Test 2: decoy PSM gets Label = -1 ────────────────────────────────────

@@ -27,6 +27,21 @@ impl ProteinDb {
     pub fn len(&self) -> usize { self.proteins.len() }
     pub fn is_empty(&self) -> bool { self.proteins.is_empty() }
     pub fn iter(&self) -> std::slice::Iter<'_, Protein> { self.proteins.iter() }
+
+    /// Return a new `ProteinDb` containing only the proteins whose positional
+    /// index is in `keep`, preserving the original order. Indices in `keep`
+    /// that are out of range are ignored. Used by the PTM-refinement cascade to
+    /// scope the Pass-2 search to the subset of confidently-identified proteins.
+    pub fn subset_by_index(&self, keep: &std::collections::HashSet<usize>) -> ProteinDb {
+        let proteins = self
+            .proteins
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep.contains(i))
+            .map(|(_, p)| p.clone())
+            .collect();
+        ProteinDb { proteins }
+    }
 }
 
 #[cfg(test)]
@@ -79,5 +94,34 @@ mod tests {
         assert_eq!(db.len(), 2);
         let count = db.iter().count();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn subset_by_index_keeps_selected_in_order() {
+        use std::collections::HashSet;
+        let p = |acc: &str, seq: &[u8]| Protein {
+            accession: acc.into(),
+            description: String::new(),
+            sequence: seq.to_vec(),
+        };
+        let db = ProteinDb {
+            proteins: vec![p("A", b"AA"), p("B", b"BB"), p("C", b"CC")],
+        };
+        let keep: HashSet<usize> = [0usize, 2].into_iter().collect();
+        let sub = db.subset_by_index(&keep);
+        assert_eq!(sub.len(), 2);
+        assert_eq!(sub.proteins[0].accession, "A");
+        assert_eq!(sub.proteins[1].accession, "C");
+    }
+
+    #[test]
+    fn subset_by_index_ignores_out_of_range_and_empty() {
+        use std::collections::HashSet;
+        let db = ProteinDb { proteins: vec![make_protein()] };
+        // Index 5 is out of range → ignored, leaving only the in-range pick.
+        let keep: HashSet<usize> = [0usize, 5].into_iter().collect();
+        assert_eq!(db.subset_by_index(&keep).len(), 1);
+        // Empty keep → empty db.
+        assert!(db.subset_by_index(&HashSet::new()).is_empty());
     }
 }

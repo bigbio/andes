@@ -163,6 +163,15 @@ pub struct PsmFeatures {
     /// column; 0.0 when no rich-ion model is loaded. RankScore is unaffected.
     pub rich_ion_llr: f32,
 
+    /// Refinement-cascade tags (additive PIN columns). All 0 on the default
+    /// (non-`--refine`) path. 1 if this PSM came from the Pass-2 refinement search.
+    pub is_refinement: u32,
+    /// Count of variable modifications on the matched peptide (0 = unmodified).
+    pub num_mods: u32,
+    /// Mod-class id for subgroup-FDR grouping: 0=none, 1=oxidation, 2=deamidation,
+    /// 3=nterm_acetyl, 4=nterm_loss(pyro-Glu), 5=alkyl, 99=other.
+    pub refine_mod_class: u32,
+
     // ── Strong-score S2: null denominator terms (additive PIN columns) ────
     /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
     /// alternative-mass ambiguity + local peak density (S2 term 2).

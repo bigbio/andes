@@ -104,8 +104,9 @@ pub fn unidentified_spectrum_indices(
 /// Build a SMALL target+decoy search index scoped to the confident proteins.
 ///
 /// Subsets `full_target_db` (the TARGET-ONLY db) to the confident protein
-/// indices, then regenerates a fresh 1:1 Reverse decoy per kept target so the
-/// scoped search has its own decoys for TDC. `confident_target_proteins` carries
+/// indices, then regenerates a fresh 1:1 decoy per kept target (using
+/// `decoy_strategy`, matching the Pass-1 search) so the scoped search has its
+/// own decoys for TDC. `confident_target_proteins` carries
 /// `Candidate.protein_index` values (combined-db positions; see
 /// [`confident_protein_indices`]); any index ≥ `full_target_db.len()` would be a
 /// decoy position and is filtered out before subsetting the target db.
@@ -113,11 +114,14 @@ pub fn build_refinement_index(
     full_target_db: &ProteinDb,
     confident_target_proteins: &HashSet<usize>,
     decoy_prefix: &str,
+    decoy_strategy: DecoyStrategy,
     seed: u64,
 ) -> SearchIndex {
     // Keep only indices that address a TARGET protein in `full_target_db`.
     // Indices that point past the target range belong to the combined db's decoy
-    // half (Reverse strategy) and must never be subset into a target db.
+    // half (e.g. the Reverse strategy) and must never be subset into a target db.
+    //
+    // INVARIANT: build_search_db places targets at [0, target_count) then decoys; a confident TARGET's protein_index is therefore always < full_target_db.len(). Re-check if a future DecoyStrategy interleaves proteins.
     let keep: HashSet<usize> = confident_target_proteins
         .iter()
         .copied()
@@ -125,7 +129,7 @@ pub fn build_refinement_index(
         .collect();
 
     let subset = full_target_db.subset_by_index(&keep);
-    let db = build_search_db(&subset, decoy_prefix, DecoyStrategy::Reverse, seed);
+    let db = build_search_db(&subset, decoy_prefix, decoy_strategy, seed);
     SearchIndex {
         db,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
@@ -156,6 +160,26 @@ fn parse_residue_spec(res: &str) -> ResidueSpec {
     } else {
         ResidueSpec::Wildcard
     }
+}
+
+/// The standard Carbamidomethyl-C fixed-mod delta (Cys, Anywhere). This is the
+/// ONLY fixed mod the refinement cascade reconstructs ([`refinement_aa_set`]).
+const CAM_C_DELTA: f64 = 57.02146;
+
+/// True iff the only fixed modification on `base` is the standard
+/// Carbamidomethyl-C (Cys, +57.02146), or there are no fixed mods at all.
+///
+/// Returns FALSE if `base` carries any OTHER fixed mod (TMT, iTRAQ, a fixed mod
+/// on a non-Cys residue, or a non-CAM delta on Cys). [`refinement_aa_set`]
+/// reconstructs only the standard CAM-C baseline, so any other fixed chemistry
+/// would be silently dropped from the Pass-2 candidate masses; `run_refinement`
+/// uses this to skip refinement entirely rather than run a silently-broken
+/// Pass-2. The fixed-mod inventory comes from
+/// [`AminoAcidSet::fixed_mod_deltas`].
+fn has_only_standard_fixed_mods(base: &AminoAcidSet) -> bool {
+    base.fixed_mod_deltas()
+        .iter()
+        .all(|&(residue, delta)| residue == b'C' && (delta - CAM_C_DELTA).abs() < 1e-4)
 }
 
 /// Build the Pass-2 [`AminoAcidSet`]: the base set's FIXED mods (e.g.
@@ -305,8 +329,21 @@ pub fn run_refinement(
     high_res: bool,
     fragment_tol_da: f64,
     decoy_prefix: &str,
+    decoy_strategy: DecoyStrategy,
     seed: u64,
 ) {
+    // 0. Guard: the refinement tier rebuilds only the standard Carbamidomethyl-C
+    //    fixed baseline (see `refinement_aa_set`). If the base set carries OTHER
+    //    fixed mods (TMT +229.163, iTRAQ, ...), those deltas would be silently
+    //    dropped from the Pass-2 candidate masses → zero precursor matches → a
+    //    silently empty Pass-2. Skipping is the correct/safe outcome (no Pass-2
+    //    rather than a silently-broken one); carrying the fixed mods is out of
+    //    scope for this guard.
+    if !has_only_standard_fixed_mods(&base_params.aa_set) {
+        eprintln!("WARN: --refine does not yet support non-standard fixed modifications (e.g. TMT/iTRAQ); Pass-2 refinement is skipped for this run.");
+        return;
+    }
+
     // 1. Confident proteins from Pass-1 (scoping gate). Empty ⇒ nothing to refine.
     let confident =
         confident_protein_indices(queues, pass1_candidates, base_params.refine_select_psm_fdr);
@@ -321,7 +358,8 @@ pub fn run_refinement(
     }
 
     // 3. Scoped target+decoy index over the confident proteins.
-    let refine_idx = build_refinement_index(full_target_db, &confident, decoy_prefix, seed);
+    let refine_idx =
+        build_refinement_index(full_target_db, &confident, decoy_prefix, decoy_strategy, seed);
 
     // 4. Pass-2 params: refinement variable-mod tier + the tier's mod cap.
     let mut refine_params = base_params.clone();
@@ -496,7 +534,7 @@ mod tests {
             ],
         };
         let keep: HashSet<usize> = [0usize, 2].into_iter().collect();
-        let idx = build_refinement_index(&full_target, &keep, "XXX", 42);
+        let idx = build_refinement_index(&full_target, &keep, "XXX", DecoyStrategy::Reverse, 42);
 
         // 2 kept targets + 2 paired Reverse decoys.
         assert_eq!(idx.db.len(), 4);
@@ -516,7 +554,7 @@ mod tests {
         let full_target = ProteinDb { proteins: vec![protein("P0", b"MKWVR")] };
         // keep {0 (valid target), 5 (out of range / decoy half)}.
         let keep: HashSet<usize> = [0usize, 5].into_iter().collect();
-        let idx = build_refinement_index(&full_target, &keep, "XXX", 42);
+        let idx = build_refinement_index(&full_target, &keep, "XXX", DecoyStrategy::Reverse, 42);
         // Only P0 + its decoy.
         assert_eq!(idx.db.len(), 2);
         assert_eq!(idx.db.proteins[0].accession, "P0");
@@ -577,6 +615,42 @@ mod tests {
         assert!(m_variants.iter().any(|aa| {
             aa.mod_.as_ref().map(|m| m.name == "Oxidation").unwrap_or(false)
         }));
+    }
+
+    // ── (d') has_only_standard_fixed_mods ──────────────────────────────────
+
+    #[test]
+    fn has_only_standard_fixed_mods_true_for_cam_c_baseline() {
+        // The standard refinement baseline: lone fixed Carbamidomethyl-C.
+        let base = base_set_with_cam_c();
+        assert!(has_only_standard_fixed_mods(&base));
+    }
+
+    #[test]
+    fn has_only_standard_fixed_mods_true_for_no_fixed_mods() {
+        let base = AminoAcidSetBuilder::new_standard().build().unwrap();
+        assert!(has_only_standard_fixed_mods(&base));
+    }
+
+    #[test]
+    fn has_only_standard_fixed_mods_false_for_extra_fixed_tmt() {
+        // A fixed TMT-on-K added on top of CAM-C: a non-standard fixed mod the
+        // refinement tier cannot reconstruct → guard must return false.
+        let tmt_k = Modification {
+            name: "TMT6plex".into(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .add_fixed_mod(tmt_k)
+            .build()
+            .unwrap();
+        assert!(!has_only_standard_fixed_mods(&base));
     }
 
     // ── (e) mod_count_and_class ────────────────────────────────────────────
@@ -810,6 +884,7 @@ mod tests {
             true,
             0.5,
             "XXX",
+            DecoyStrategy::Reverse,
             42,
         );
         // Untouched.
@@ -839,9 +914,67 @@ mod tests {
             true,
             0.5,
             "XXX",
+            DecoyStrategy::Reverse,
             42,
         );
         assert_eq!(queues[0].len(), 1);
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
+    }
+
+    #[test]
+    fn run_refinement_skips_when_non_standard_fixed_mods_present() {
+        // Base set carries a fixed TMT-on-K beyond the CAM-C baseline. The W1
+        // guard must skip Pass-2 entirely (warn + return) BEFORE building any
+        // refinement search, even though a confident protein and an
+        // unidentified spectrum exist (so steps 1/2 would otherwise proceed).
+        let tmt_k = Modification {
+            name: "TMT6plex".into(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let aa_set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .add_fixed_mod(tmt_k)
+            .build()
+            .unwrap();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = tiny_scorer();
+        let target = ProteinDb { proteins: vec![protein("P0", b"MKWVTFISLLR")] };
+
+        // Spectrum 0: confident target (gives a confident protein). Spectrum 1:
+        // empty queue (an unidentified spectrum). Both guards (a)/(b) would pass.
+        let pass1_cands = vec![cand(0, false)];
+        let mut queues = vec![
+            queue_with(vec![psm(0, 0, 50.0)]),
+            TopNQueue::new(10),
+        ];
+        let spectra: Vec<model::spectrum::Spectrum> = vec![
+            model::spectrum::Spectrum::default(),
+            model::spectrum::Spectrum::default(),
+        ];
+
+        run_refinement(
+            &mut queues,
+            &spectra,
+            &pass1_cands,
+            &target,
+            &params,
+            &scorer,
+            &RefineConfig::default_tier(),
+            true,
+            0.5,
+            "XXX",
+            DecoyStrategy::Reverse,
+            42,
+        );
+
+        // Skipped: the Pass-1 queues are untouched (no Pass-2 merged in).
+        assert_eq!(queues[0].len(), 1);
+        assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
+        assert_eq!(queues[1].len(), 0, "Pass-2 must be skipped, queue stays empty");
     }
 }

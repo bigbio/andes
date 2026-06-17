@@ -16,6 +16,7 @@ pub mod precursor_matching;
 pub mod psm;
 pub mod search_index;
 pub mod search_params;
+pub mod tdc;
 
 // Convenience re-exports.
 pub use candidate_gen::enumerate_candidates;
@@ -32,3 +33,4 @@ pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
 pub use search_index::SearchIndex;
 pub use search_params::{ScoreMode, SearchParams};
+pub use tdc::{confident_target_indices, ScoredLabel};

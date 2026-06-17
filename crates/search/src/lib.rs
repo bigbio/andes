@@ -14,6 +14,7 @@ pub mod mass_calibrator;
 pub mod precursor_cal;
 pub mod precursor_matching;
 pub mod psm;
+pub mod refine_config;
 pub mod search_index;
 pub mod search_params;
 pub mod tdc;
@@ -31,6 +32,7 @@ pub use precursor_cal::{
 };
 pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
+pub use refine_config::{RefineConfig, RefineMod};
 pub use search_index::SearchIndex;
 pub use search_params::{ScoreMode, SearchParams};
 pub use tdc::{confident_target_indices, ScoredLabel};

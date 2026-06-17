@@ -314,6 +314,17 @@ struct SearchArgs {
     #[arg(long, default_value = "1.5")]
     isolation_halfwidth: f64,
 
+    /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
+    /// chimeric-N lever). 2 = the proven +101%-Astral default; raise to 3-5 on
+    /// wide-window instruments (Astral) to recover deeper co-fragments.
+    #[arg(long = "chimeric-max-coisolated", default_value = "2")]
+    chimeric_max_coisolated: usize,
+
+    /// Chimeric mode: averagine-envelope KL gate for accepting a co-isolated MS1
+    /// envelope (lower = stricter/cleaner; fewer spurious secondaries).
+    #[arg(long = "chimeric-max-kl", default_value = "0.3")]
+    chimeric_max_kl: f32,
+
     /// Path to a Parquet model store to use instead of the bundled
     /// `resources/models.parquet`. When set, model selection reads from
     /// this store; when unset, the bundled store is used.
@@ -1432,6 +1443,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.chimeric = chimeric_active;
     params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
+    params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
+    params.chimeric_max_kl = cli.chimeric_max_kl;
     // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
     // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
     // blind multi-emission per scan = inflated FDR.

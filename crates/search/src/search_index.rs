@@ -107,6 +107,17 @@ impl SearchIndex {
             .filter(move |p| !p.accession.starts_with(&needle))
     }
 
+    /// Clone the TARGET-only proteins into a fresh `ProteinDb` — every protein
+    /// whose accession does NOT carry the decoy prefix (the same membership test
+    /// as [`Self::iter_target_proteins`]). The PTM-refinement cascade uses this
+    /// to recover the target-only db from the combined Pass-1 index, then
+    /// generates fresh decoys for the scoped Pass-2 search.
+    pub fn target_db(&self) -> ProteinDb {
+        ProteinDb {
+            proteins: self.iter_target_proteins().cloned().collect(),
+        }
+    }
+
     /// Returns `true` iff `residues` (peptide sequence, no flanking) appears as
     /// a substring in ANY target protein. Used by the PIN writer to compute
     /// Label semantics: Label=-1 only when ALL explaining proteins are decoy.
@@ -157,6 +168,27 @@ mod tests {
         assert_eq!(idx.db.proteins[0].accession, "P1");
         assert_eq!(idx.db.proteins[1].accession, "XXX_P1");
         assert_eq!(idx.db.proteins[1].sequence, b"BA");
+    }
+
+    #[test]
+    fn target_db_returns_only_non_decoy_proteins() {
+        // Combined db = 2 targets + 2 reverse decoys; target_db() recovers the
+        // 2 targets with their original accessions, dropping the prefixed decoys.
+        let target = ProteinDb {
+            proteins: vec![
+                Protein { accession: "P1".into(), description: "".into(), sequence: b"MKWV".to_vec() },
+                Protein { accession: "P2".into(), description: "".into(), sequence: b"AGCT".to_vec() },
+            ],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+        assert_eq!(idx.db.len(), 4, "2 targets + 2 decoys in the combined db");
+
+        let recovered = idx.target_db();
+        assert_eq!(recovered.len(), 2, "only the 2 target proteins survive");
+        let accs: Vec<&str> = recovered.proteins.iter().map(|p| p.accession.as_str()).collect();
+        assert_eq!(accs, vec!["P1", "P2"]);
+        // Sequences are preserved verbatim (not reversed).
+        assert_eq!(recovered.proteins[0].sequence, b"MKWV");
     }
 
     // -----------------------------------------------------------------------

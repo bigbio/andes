@@ -260,6 +260,16 @@ fn write_header<W: Write>(
         "IsRefinement".to_string(),
         "NumMods".to_string(),
         "RefinementModClass".to_string(),
+        // Mod-localization site-determining-ion columns (0 for unmodified
+        // peptides). ModSiteShiftedMatched = matched mod-bearing b/y ions;
+        // ModSiteShiftedFrac = matched/total shifted; ModSiteIntensFrac =
+        // shifted/all matched intensity; ModSiteLocalized = 1 if a bracketing
+        // ion pair localizes the mod; ModSiteDetCount = # site-determining ions.
+        "ModSiteShiftedMatched".to_string(),
+        "ModSiteShiftedFrac".to_string(),
+        "ModSiteIntensFrac".to_string(),
+        "ModSiteLocalized".to_string(),
+        "ModSiteDetCount".to_string(),
         // MassCompetitionEvidence = S2 null term 2: Σ 1/(1+ambiguity+ρ).
         "MassCompetitionEvidence".to_string(),
         // CandidateRankEntropy = S2 listwise: softmax entropy over retained top-K.
@@ -533,6 +543,18 @@ fn write_psm_row<W: Write>(
         "\t{}\t{}\t{}",
         psm.features.is_refinement, psm.features.num_mods, psm.features.refine_mod_class
     )?;
+    // Mod-localization site-determining-ion columns (0.0 without a var mod);
+    // same order as the header.
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_shifted_matched as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_shifted_frac as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_intens_frac as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_localized as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_det_count as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.mass_competition_evidence as f64)?;
     writer.write_all(b"\t")?;
@@ -824,6 +846,11 @@ mod tests {
             "IsRefinement",
             "NumMods",
             "RefinementModClass",
+            "ModSiteShiftedMatched",
+            "ModSiteShiftedFrac",
+            "ModSiteIntensFrac",
+            "ModSiteLocalized",
+            "ModSiteDetCount",
             "MassCompetitionEvidence",
             "CandidateRankEntropy",
             "ListwiseScoreGap",

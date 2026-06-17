@@ -172,6 +172,25 @@ pub struct PsmFeatures {
     /// 3=nterm_acetyl, 4=nterm_loss(pyro-Glu), 5=alkyl, 99=other.
     pub refine_mod_class: u32,
 
+    // ── Mod-localization site-determining-ion features (additive PIN columns) ──
+    // All 0.0 for an unmodified peptide. Orthogonal to RankScore: they measure
+    // whether the spectrum LOCALIZES a variable mod via its site-determining
+    // (b/y mass-shift-bracketing) ions. Computed by `mod_site_features` in the
+    // scoring crate. See `crates/scoring/src/mod_site_features.rs`.
+    /// Count of matched SHIFTED b/y ions (fragments carrying the mod's mass
+    /// shift) — confirms the mod is present.
+    pub mod_site_shifted_matched: f32,
+    /// Matched shifted ions / total theoretical shifted ions.
+    pub mod_site_shifted_frac: f32,
+    /// Summed intensity of matched shifted ions / summed intensity of ALL
+    /// matched ions (0.0 if none matched).
+    pub mod_site_intens_frac: f32,
+    /// 1.0 if ANY mod site has a matched bracketing (site-determining) ion pair
+    /// that localizes the mod (e.g. `b_{p-1}` + `b_p` both matched), else 0.0.
+    pub mod_site_localized: f32,
+    /// Number of bracketing (site-determining) matched ions summed over mod sites.
+    pub mod_site_det_count: f32,
+
     // ── Strong-score S2: null denominator terms (additive PIN columns) ────
     /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
     /// alternative-mass ambiguity + local peak density (S2 term 2).

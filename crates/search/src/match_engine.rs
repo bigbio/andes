@@ -21,6 +21,10 @@ use scoring_crate::scoring::fragment_ions::{IonKind, predict_by_ions, predict_by
 use crate::search_index::SearchIndex;
 use crate::search_params::{ScoreMode, SearchParams};
 use scoring_crate::intensity_model::IntensityModel;
+use scoring_crate::mod_site_features::{
+    mod_site_features, FEAT_SITE_DET_COUNT, FEAT_SITE_INTENS_FRAC, FEAT_SITE_LOCALIZED,
+    FEAT_SITE_SHIFTED_FRAC, FEAT_SITE_SHIFTED_MATCHED,
+};
 use scoring_crate::scoring::{
     frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
     psm_edge_score, rich_ion_llr, score_psm,
@@ -1473,6 +1477,11 @@ pub(crate) fn compute_psm_features(
         feature_tol_is_ppm,
     );
 
+    // Mod-localization site-determining-ion features (additive PIN columns; all
+    // 0.0 for an unmodified peptide). Uses the SAME feature tolerance as the
+    // RichIonLLR / ion-feature path above (train/serve parity).
+    let mod_site = mod_site_features(peptide, scored_spec, feature_tol, feature_tol_is_ppm);
+
     PsmFeatures {
         num_matched_main_ions: num_matched,
         longest_b,
@@ -1516,6 +1525,11 @@ pub(crate) fn compute_psm_features(
         is_refinement: 0,
         num_mods: 0,
         refine_mod_class: 0,
+        mod_site_shifted_matched: mod_site[FEAT_SITE_SHIFTED_MATCHED],
+        mod_site_shifted_frac: mod_site[FEAT_SITE_SHIFTED_FRAC],
+        mod_site_intens_frac: mod_site[FEAT_SITE_INTENS_FRAC],
+        mod_site_localized: mod_site[FEAT_SITE_LOCALIZED],
+        mod_site_det_count: mod_site[FEAT_SITE_DET_COUNT],
         mass_competition_evidence: mass_competition_evidence_val,
         candidate_rank_entropy: 0.0,
         listwise_score_gap: 0.0,

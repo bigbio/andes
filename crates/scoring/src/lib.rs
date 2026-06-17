@@ -7,6 +7,7 @@ pub mod frag_features;
 pub mod ion_features;
 pub mod gbdt_eval;
 pub mod intensity_model;
+pub mod mod_site_features;
 pub mod param_model;
 pub mod peak_features;
 pub mod scoring;

@@ -747,6 +747,8 @@ mod tests {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            chimeric_max_coisolated: 2,
+            chimeric_max_kl: 0.3,
             score_mode: search::ScoreMode::Rank,
         }
     }

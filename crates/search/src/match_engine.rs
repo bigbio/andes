@@ -884,10 +884,11 @@ pub fn run_pass2_coisolation(
             spec.precursor_mz,
             *params.charge_range.start()..=*params.charge_range.end(),
             tol,
-            // max_kl: averagine-envelope KL gate. 0.3 requires a clean MS1 envelope
-            // → fewer spurious secondaries → FDP toward nominal (small PSM cost).
-            0.3,
-            2,
+            // max_kl + max_n: the chimeric-N lever (params; default 0.3 / 2 = the
+            // proven +101%-Astral setting). Raising max_coisolated searches deeper
+            // co-fragments on the residual; the KL gate keeps secondaries clean.
+            params.chimeric_max_kl,
+            params.chimeric_max_coisolated,
         );
         if cos.is_empty() {
             return;

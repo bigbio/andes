@@ -348,6 +348,29 @@ struct SearchArgs {
     /// (fused intensity + competition score from S1–S3).
     #[arg(long = "score", default_value = "rank")]
     score: ScoreFlag,
+
+    /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
+    #[arg(long = "refine", default_value_t = false)]
+    refine: bool,
+
+    /// YAML refinement config; omit to use the built-in 5-mod DEFAULT tier.
+    #[arg(long = "refine-config")]
+    refine_config: Option<std::path::PathBuf>,
+
+    /// Confident-protein SCOPING FDR (not a reported FDR). Default 0.10.
+    #[arg(long = "refine-select-psm-fdr", default_value_t = 0.10)]
+    refine_select_psm_fdr: f64,
+
+    /// Max variable mods per refined peptide. Default 2.
+    #[arg(long = "refine-max-mods", default_value_t = 2)]
+    refine_max_mods: u32,
+
+    /// Require high-res data for refinement; on low-res, skip refine. Default true.
+    /// Pass an explicit value to override, e.g. `--refine-high-res-only false` to
+    /// force the cascade on low-res data (otherwise it is a default-on switch that
+    /// can't be disabled).
+    #[arg(long = "refine-high-res-only", default_value_t = true, action = clap::ArgAction::Set)]
+    refine_high_res_only: bool,
 }
 
 /// Training arguments for `andes train-from-search`.
@@ -1467,6 +1490,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.precursor_cal_mode = cli.precursor_cal;
     params.cal_min_spec_keys = cli.cal_min_spec_keys;
     params.precursor_mass_shift_ppm = 0.0;
+    params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {
         ScoreFlag::Rank => search::ScoreMode::Rank,
         ScoreFlag::Strong => search::ScoreMode::Strong,
@@ -1773,7 +1797,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ms1_linked += chunk_link.ms1_peaks.len();
                 all_queues.extend(queues);
                 for mut spec in chunk_spectra.into_iter() {
-                    spec.peaks = Vec::new();
+                    // Peaks are normally dropped post-scoring to bound memory
+                    // (only the metadata is needed downstream). Under `--refine`
+                    // we RETAIN them: the Pass-2 cascade re-scores the
+                    // unidentified spectra and needs their peak lists. Memory
+                    // cost: the full peak buffer for every spectrum stays
+                    // resident through the refinement pass (acceptable; --refine
+                    // is opt-in and scoped to one search).
+                    if !cli.refine {
+                        spec.peaks = Vec::new();
+                    }
                     all_spectra.push(spec);
                 }
             }
@@ -1851,7 +1884,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let queues = prepared.run_chunk(&chunk, offset);
                 all_queues.extend(queues);
                 for mut spec in chunk.into_iter() {
-                    spec.peaks = Vec::new();
+                    // See the chimeric-loop note above: normally peaks are
+                    // dropped post-scoring to bound memory, but `--refine` needs
+                    // them for the Pass-2 re-scoring of unidentified spectra.
+                    if !cli.refine {
+                        spec.peaks = Vec::new();
+                    }
                     all_spectra.push(spec);
                 }
                 log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
@@ -1920,6 +1958,58 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         search_elapsed.as_secs_f64()
     );
 
+    // ── 7b. PTM-refinement cascade (Pass-2) ───────────────────────────────────
+    // Opt-in (`--refine`). Runs a scoped Pass-2 over the unidentified spectra
+    // against the confidently-identified proteins, with the refinement
+    // variable-mod tier applied. Computed BEFORE the Pass-1 PIN write (it reads
+    // `&queues`/`&spectra` immutably). The Pass-2 winners are NOT merged into
+    // `queues`; they are returned and written to a SEPARATE "refine" PIN — the
+    // merged report is the disjoint union Pass-1 PIN ⊎ refine PIN (combine
+    // downstream with mokapot's --group-column on IsRefinement/RefinementModClass).
+    let refine_output = if cli.refine {
+        // Refinement config: explicit YAML or the built-in 5-mod default tier.
+        let base_cfg = match &cli.refine_config {
+            Some(p) => search::RefineConfig::from_yaml_str(&std::fs::read_to_string(p)?)
+                .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
+            None => search::RefineConfig::default_tier(),
+        };
+        let cfg = search::RefineConfig { max_mods: cli.refine_max_mods, ..base_cfg };
+
+        // High-res signal: the resolved model's instrument class. High-res
+        // instruments fragment-match in ppm (20 ppm vs 0.5 Da ion-trap), which is
+        // exactly the regime where the near-isobaric refinement deltas (e.g.
+        // deamidation +0.984 vs a C13 isotope error) are resolvable.
+        let high_res = param.data_type.instrument.is_high_resolution();
+
+        if cli.refine_high_res_only && !high_res {
+            eprintln!("WARN: --refine-high-res-only: data is low-res; skipping refinement.");
+            None
+        } else {
+            // Target-only db recovered from the Pass-1 combined index; the
+            // cascade regenerates its own decoys for the scoped Pass-2.
+            let target_db = idx.target_db();
+            let t_refine = std::time::Instant::now();
+            let out = search::refinement::run_refinement(
+                &queues,
+                &spectra,
+                &prepared.candidates,
+                &target_db,
+                &params,
+                &scorer,
+                &cfg,
+                high_res,
+                fragment_tol_da,
+                &cli.decoy_prefix,
+                decoy_strategy,
+                1,
+            );
+            eprintln!("[PHASE refinement: {:.2}s]", t_refine.elapsed().as_secs_f64());
+            out
+        }
+    } else {
+        None
+    };
+
     // ── 8. Write PIN ─────────────────────────────────────────────────────────
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
@@ -1932,6 +2022,39 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_total.elapsed().as_secs_f64()
     );
     log_rss("after_pin_write");
+
+    // ── 8b. Write the refine PIN (disjoint union with the Pass-1 PIN) ──────────
+    if let Some(out) = refine_output {
+        // Derive `<main_out>.refine.pin`: insert `.refine` before the extension
+        // (e.g. `out.pin` → `out.refine.pin`); fall back to appending if the
+        // path has no extension.
+        let refine_out_path = refine_pin_path(&output_pin_path);
+        // Subset spectra parallel (1:1) to `out.queues`.
+        let subset_spectra: Vec<Spectrum> = out
+            .global_spectrum_indices
+            .iter()
+            .map(|&i| spectra[i].clone())
+            .collect();
+        let refine_psms: usize = out.queues.iter().map(|q| q.len()).sum();
+        output::write_pin(
+            &refine_out_path,
+            &subset_spectra,
+            &out.queues,
+            &out.candidates,
+            &params,
+            &out.index,
+        )?;
+        eprintln!(
+            "Wrote refine PIN: {} ({} refinement PSMs over {} spectra). The two PINs are \
+             the disjoint union (Pass-1 ⊎ refine); combine downstream with mokapot \
+             --group-column on IsRefinement/RefinementModClass.",
+            refine_out_path.display(),
+            refine_psms,
+            out.queues.len(),
+        );
+    } else if cli.refine {
+        eprintln!("Refinement produced no Pass-2 PSMs; no refine PIN written.");
+    }
 
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");
@@ -4107,6 +4230,20 @@ fn load_param_from_store(
         .map_err(|e| format!("loading model '{model_id}' from store: {e}"))?;
 
     Ok((model_id, param))
+}
+
+/// Derive the refine-PIN path from the main PIN path: insert `.refine` before
+/// the extension (`out.pin` → `out.refine.pin`). If the path has no extension,
+/// append `.refine.pin` (`out` → `out.refine.pin`).
+fn refine_pin_path(main: &std::path::Path) -> PathBuf {
+    match main.extension().and_then(|e| e.to_str()) {
+        Some(ext) => main.with_extension(format!("refine.{ext}")),
+        None => {
+            let mut s = main.as_os_str().to_owned();
+            s.push(".refine.pin");
+            PathBuf::from(s)
+        }
+    }
 }
 
 /// Parse `--fragmentation` value. Accepts named (case-insensitive: auto, CID,

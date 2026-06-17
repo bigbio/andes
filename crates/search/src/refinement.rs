@@ -7,12 +7,18 @@
 //!      proteins (`build_refinement_index`),
 //!   4. searches the unidentified spectra against that small index with the
 //!      refinement variable-mod tier applied (`refinement_aa_set`), and
-//!   5. merges every Pass-2 winner back into the per-spectrum queue, tagging it
-//!      as a refinement PSM (`run_refinement`).
+//!   5. RETURNS every Pass-2 winner (tagged as a refinement PSM) as a
+//!      [`RefinementOutput`] so the caller can write it as a SEPARATE PIN
+//!      (`run_refinement`).
 //!
 //! The cascade is OPT-IN (`--refine`) and additive: nothing here runs on the
-//! default path, and the merged Pass-2 PSMs are `force_push`ed so they never
-//! evict a Pass-1 winner.
+//! default path. Pass-2 winners are NOT merged into the Pass-1 queues — a merged
+//! Pass-2 `PsmMatch::candidate_idxs` indexes the PASS-2 candidate list, which is
+//! a different slice than the Pass-1 `candidates` the PIN writer resolves
+//! peptide/accession against (a merge would alias the indices → wrong protein or
+//! OOB). Instead the Pass-2 artifacts (index + candidates + tagged queues +
+//! global spectrum indices) are returned, and the caller emits a second PIN: the
+//! merged report is the disjoint union Pass-1 PIN ⊎ refine PIN.
 
 use std::collections::HashSet;
 
@@ -296,30 +302,49 @@ pub fn mod_count_and_class(peptide: &Peptide, cfg: &RefineConfig) -> (u32, u32) 
 // (f) run_refinement
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Orchestrate the Pass-2 PTM-refinement search and merge its winners back into
-/// `queues`.
+/// Pass-2 refinement results, ready to write as a SEPARATE PIN (the merged
+/// report is the disjoint union: Pass-1 PIN ⊎ this). `queues[i]` corresponds to
+/// the spectrum at `all_spectra[global_spectrum_indices[i]]`; resolve peptide/
+/// accession against `candidates` + `index` (NOT the Pass-1 candidates).
+pub struct RefinementOutput {
+    /// The scoped Pass-2 target+decoy `SearchIndex`. The PIN writer resolves
+    /// accessions through this — NOT the Pass-1 index.
+    pub index: SearchIndex,
+    /// The Pass-2 candidate pool. Every returned PSM's `candidate_idxs` index
+    /// into THIS slice (not the Pass-1 candidates).
+    pub candidates: Vec<Candidate>,
+    /// One tagged Pass-2 queue per refined spectrum, in `global_spectrum_indices`
+    /// order. Each PSM has `is_refinement = 1`, `(num_mods, refine_mod_class)`
+    /// filled, and `spectrum_idx` set to the GLOBAL stream index.
+    pub queues: Vec<TopNQueue>,
+    /// Global stream index of each refined spectrum; `queues[i]` is the Pass-2
+    /// result for `all_spectra[global_spectrum_indices[i]]`. 1:1 with `queues`.
+    pub global_spectrum_indices: Vec<usize>,
+}
+
+/// Orchestrate the Pass-2 PTM-refinement search and RETURN its tagged winners as
+/// a [`RefinementOutput`] (the caller writes them as a separate "refine" PIN).
 ///
-/// Steps (each an early-return when its input is empty, so the cheap no-op cases
-/// never build a Pass-2 search):
-///   1. `confident_protein_indices` over the Pass-1 queues — return if empty.
-///   2. `unidentified_spectrum_indices` over the Pass-1 queues — return if empty.
+/// Steps (each an early-return — `None` — when its input is empty, so the cheap
+/// no-op cases never build a Pass-2 search):
+///   1. `confident_protein_indices` over the Pass-1 queues — `None` if empty.
+///   2. `unidentified_spectrum_indices` over the Pass-1 queues — `None` if empty.
 ///   3. `build_refinement_index` scoped to the confident proteins.
 ///   4. A Pass-2 `SearchParams` clone whose `aa_set` is the refinement tier
 ///      ([`refinement_aa_set`]) and whose `max_variable_mods_per_peptide` is
 ///      `cfg.max_mods`, prepared via `PreparedSearch::prepare`.
 ///   5. `run_chunk` over the (cloned) unidentified spectra; each winner is tagged
 ///      `is_refinement = 1`, has `(num_mods, refine_mod_class)` filled from its
-///      Pass-2 peptide, has its `spectrum_idx` fixed back to the GLOBAL index,
-///      and is `force_push`ed into the corresponding Pass-1 queue.
+///      Pass-2 peptide, and has its `spectrum_idx` fixed to the GLOBAL index.
 ///
-/// CAVEAT (per Task 5 spec): a merged Pass-2 PSM's `candidate_idxs` index into
-/// the PASS-2 `PreparedSearch::candidates`, which is a DIFFERENT slice than the
-/// Pass-1 candidate list these queues were built from. This function only
-/// merges + tags; downstream PIN emission (Task 6) must resolve a refinement
-/// PSM's peptide/protein against the Pass-2 candidate list, not the Pass-1 one.
+/// `pass1_queues` is READ-ONLY: it drives the confident-protein / unidentified-
+/// spectrum detection only. The Pass-2 winners are NOT merged into it — see the
+/// module doc for why (candidate-index aliasing). The returned
+/// [`RefinementOutput`] carries the Pass-2 index + candidates + tagged queues so
+/// the PIN writer resolves peptide/protein against the PASS-2 slice.
 #[allow(clippy::too_many_arguments)]
 pub fn run_refinement(
-    queues: &mut [TopNQueue],
+    pass1_queues: &[TopNQueue],
     all_spectra: &[model::spectrum::Spectrum],
     pass1_candidates: &[Candidate],
     full_target_db: &ProteinDb,
@@ -331,7 +356,7 @@ pub fn run_refinement(
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
-) {
+) -> Option<RefinementOutput> {
     // 0. Guard: the refinement tier rebuilds only the standard Carbamidomethyl-C
     //    fixed baseline (see `refinement_aa_set`). If the base set carries OTHER
     //    fixed mods (TMT +229.163, iTRAQ, ...), those deltas would be silently
@@ -341,23 +366,28 @@ pub fn run_refinement(
     //    scope for this guard.
     if !has_only_standard_fixed_mods(&base_params.aa_set) {
         eprintln!("WARN: --refine does not yet support non-standard fixed modifications (e.g. TMT/iTRAQ); Pass-2 refinement is skipped for this run.");
-        return;
+        return None;
     }
 
     // 1. Confident proteins from Pass-1 (scoping gate). Empty ⇒ nothing to refine.
-    let confident =
-        confident_protein_indices(queues, pass1_candidates, base_params.refine_select_psm_fdr);
+    let confident = confident_protein_indices(
+        pass1_queues,
+        pass1_candidates,
+        base_params.refine_select_psm_fdr,
+    );
     if confident.is_empty() {
-        return;
+        return None;
     }
 
     // 2. Spectra still without a target PSM. Empty ⇒ nothing to rescue.
-    let unident = unidentified_spectrum_indices(queues, pass1_candidates);
+    let unident = unidentified_spectrum_indices(pass1_queues, pass1_candidates);
     if unident.is_empty() {
-        return;
+        return None;
     }
 
-    // 3. Scoped target+decoy index over the confident proteins.
+    // 3. Scoped target+decoy index over the confident proteins. Built as an owned
+    //    local so it can be MOVED into the returned `RefinementOutput` once the
+    //    `PreparedSearch` borrow of it ends (see below).
     let refine_idx =
         build_refinement_index(full_target_db, &confident, decoy_prefix, decoy_strategy, seed);
 
@@ -366,32 +396,59 @@ pub fn run_refinement(
     refine_params.aa_set = refinement_aa_set(&base_params.aa_set, cfg, high_res);
     refine_params.max_variable_mods_per_peptide = cfg.max_mods;
 
-    let refine_prepared =
-        PreparedSearch::prepare(&refine_idx, &refine_params, scorer, fragment_tol_da, decoy_prefix);
-
     // 5. Search ONLY the unidentified spectra. We clone them into a contiguous
     //    sub-vec (run_chunk takes a &[Spectrum]); `spectrum_idx_offset = 0` is
     //    fine because we remap to the GLOBAL index ourselves below.
-    let subset: Vec<model::spectrum::Spectrum> =
-        unident.iter().map(|&i| all_spectra[i].clone()).collect();
-    let pass2_queues = refine_prepared.run_chunk(&subset, 0);
+    //
+    //    `PreparedSearch` borrows `&refine_idx`/`&refine_params`/`scorer`. We
+    //    must return `refine_idx` (owned) AND have used it to build the prepared
+    //    search, so we extract the Pass-2 candidate pool into an owned Vec and
+    //    DROP `refine_prepared` (ending the borrow) before moving `refine_idx`
+    //    into the output below.
+    let (pass2_queues, refine_candidates) = {
+        let refine_prepared = PreparedSearch::prepare(
+            &refine_idx,
+            &refine_params,
+            scorer,
+            fragment_tol_da,
+            decoy_prefix,
+        );
+        let subset: Vec<model::spectrum::Spectrum> =
+            unident.iter().map(|&i| all_spectra[i].clone()).collect();
+        let queues = refine_prepared.run_chunk(&subset, 0);
+        // `PreparedSearch.candidates` is an owned `Vec<Candidate>`; move it out so
+        // the prepared search (and its `&refine_idx` borrow) can be dropped.
+        (queues, refine_prepared.candidates)
+    };
 
-    // Merge each Pass-2 winner back into its GLOBAL queue, tagged as refinement.
+    // Tag each Pass-2 winner; collect into one queue per refined spectrum. The
+    // queues are returned (NOT merged into the Pass-1 queues) so the PIN writer
+    // resolves `candidate_idxs` against `refine_candidates`, not the Pass-1 list.
+    let mut out_queues: Vec<TopNQueue> = Vec::with_capacity(unident.len());
     for (local_idx, pass2_queue) in pass2_queues.into_iter().enumerate() {
         let global_idx = unident[local_idx];
+        let mut tagged = TopNQueue::new(refine_params.top_n_psms_per_spectrum);
         for mut psm in pass2_queue.into_rank_sorted_vec() {
             psm.features.is_refinement = 1;
             let (num_mods, class) = mod_count_and_class(
-                &refine_prepared.candidates[psm.primary_candidate_idx() as usize].peptide,
+                &refine_candidates[psm.primary_candidate_idx() as usize].peptide,
                 cfg,
             );
             psm.features.num_mods = num_mods;
             psm.features.refine_mod_class = class;
             // Fix the spectrum index back to the global stream position.
             psm.spectrum_idx = global_idx;
-            queues[global_idx].force_push(psm);
+            tagged.force_push(psm);
         }
+        out_queues.push(tagged);
     }
+
+    Some(RefinementOutput {
+        index: refine_idx,
+        candidates: refine_candidates,
+        queues: out_queues,
+        global_spectrum_indices: unident,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -867,14 +924,14 @@ mod tests {
         let scorer = tiny_scorer();
         let target = ProteinDb { proteins: vec![protein("P0", b"MKWVTFISLLR")] };
 
-        // All-decoy Pass-1 → no confident proteins → early return.
+        // All-decoy Pass-1 → no confident proteins → early return (None).
         let pass1_cands = vec![cand(0, true)];
-        let mut queues = vec![queue_with(vec![psm(0, 0, 10.0)])];
+        let queues = vec![queue_with(vec![psm(0, 0, 10.0)])];
         let before_len = queues[0].len();
         let spectra: Vec<model::spectrum::Spectrum> = vec![model::spectrum::Spectrum::default()];
 
-        run_refinement(
-            &mut queues,
+        let out = run_refinement(
+            &queues,
             &spectra,
             &pass1_cands,
             &target,
@@ -887,7 +944,8 @@ mod tests {
             DecoyStrategy::Reverse,
             42,
         );
-        // Untouched.
+        // No confident proteins ⇒ no Pass-2 output; Pass-1 queues untouched.
+        assert!(out.is_none());
         assert_eq!(queues[0].len(), before_len);
     }
 
@@ -900,11 +958,11 @@ mod tests {
 
         // Confident target Pass-1 AND every spectrum identified → early return at (b).
         let pass1_cands = vec![cand(0, false)];
-        let mut queues = vec![queue_with(vec![psm(0, 0, 50.0)])];
+        let queues = vec![queue_with(vec![psm(0, 0, 50.0)])];
         let spectra: Vec<model::spectrum::Spectrum> = vec![model::spectrum::Spectrum::default()];
 
-        run_refinement(
-            &mut queues,
+        let out = run_refinement(
+            &queues,
             &spectra,
             &pass1_cands,
             &target,
@@ -917,6 +975,8 @@ mod tests {
             DecoyStrategy::Reverse,
             42,
         );
+        // No unidentified spectra ⇒ no Pass-2 output; Pass-1 queues untouched.
+        assert!(out.is_none());
         assert_eq!(queues[0].len(), 1);
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
     }
@@ -948,7 +1008,7 @@ mod tests {
         // Spectrum 0: confident target (gives a confident protein). Spectrum 1:
         // empty queue (an unidentified spectrum). Both guards (a)/(b) would pass.
         let pass1_cands = vec![cand(0, false)];
-        let mut queues = vec![
+        let queues = vec![
             queue_with(vec![psm(0, 0, 50.0)]),
             TopNQueue::new(10),
         ];
@@ -957,8 +1017,8 @@ mod tests {
             model::spectrum::Spectrum::default(),
         ];
 
-        run_refinement(
-            &mut queues,
+        let out = run_refinement(
+            &queues,
             &spectra,
             &pass1_cands,
             &target,
@@ -972,7 +1032,8 @@ mod tests {
             42,
         );
 
-        // Skipped: the Pass-1 queues are untouched (no Pass-2 merged in).
+        // Skipped at the W1 guard: no Pass-2 output, Pass-1 queues untouched.
+        assert!(out.is_none(), "non-standard fixed mods must skip Pass-2");
         assert_eq!(queues[0].len(), 1);
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
         assert_eq!(queues[1].len(), 0, "Pass-2 must be skipped, queue stays empty");

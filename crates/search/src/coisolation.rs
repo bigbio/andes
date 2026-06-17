@@ -54,6 +54,11 @@ pub(crate) fn detect_coisolated(
 
     let mut out: Vec<CoIsolated> = Vec::new();
     for &(mz, _inten) in &cands {
+        // Cap check BEFORE accepting any candidate, so `max_n == 0` is a hard
+        // disable (zero secondaries), not "one then stop".
+        if out.len() >= max_n {
+            break;
+        }
         if (mz - selected_mz).abs() <= tol_da {
             continue; // skip the selected precursor (monoisotope)
         }
@@ -97,9 +102,6 @@ pub(crate) fn detect_coisolated(
         }
         if let Some((_, c)) = best {
             out.push(c);
-        }
-        if out.len() >= max_n {
-            break;
         }
     }
     out
@@ -398,6 +400,26 @@ mod tests {
         assert_eq!(got.len(), 1, "exactly one co-isolated (selected excluded)");
         assert!((got[0].mono_mz - co_mz).abs() < 0.02);
         assert_eq!(got[0].charge, z);
+    }
+
+    #[test]
+    fn max_n_zero_is_a_hard_disable() {
+        // Same setup as above, but max_n=0 must emit ZERO secondaries (the cap is
+        // checked BEFORE pushing — not "one then stop").
+        let z = 2u8;
+        let selected_mz = 600.0;
+        let sel_neutral = (selected_mz - PROTON) * z as f64;
+        let co_mz = 600.7;
+        let co_neutral = (co_mz - PROTON) * z as f64;
+        let mut peaks = envelope(selected_mz, z, sel_neutral, 1000.0);
+        peaks.extend(envelope(co_mz, z, co_neutral, 500.0));
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let got = detect_coisolated(&peaks, 599.0, 601.5, selected_mz, 2..=3, 0.02, 0.5, 0);
+        assert!(got.is_empty(), "max_n=0 must emit zero secondaries, got {}", got.len());
+        // And max_n=1 still caps at exactly one.
+        let one = detect_coisolated(&peaks, 599.0, 601.5, selected_mz, 2..=3, 0.02, 0.5, 1);
+        assert_eq!(one.len(), 1, "max_n=1 caps at one");
     }
 
     #[test]

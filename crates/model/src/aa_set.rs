@@ -65,6 +65,32 @@ impl AminoAcidSet {
         self.table.values().flat_map(|v| v.iter())
     }
 
+    /// Enumerate the FIXED modifications carried by this set as
+    /// `(residue, mass_delta)` pairs.
+    ///
+    /// Fixed mods are folded into the per-`(residue, location)` variant table
+    /// at build time, so a single fixed `Modification` (e.g. Carbamidomethyl-C)
+    /// is referenced by several `AminoAcid` variants (its Anywhere slot plus the
+    /// terminal lists). This walks `iter_variants`, keeps only fixed mods, and
+    /// de-duplicates by `(residue, mass_delta.to_bits())` so each distinct fixed
+    /// mod is reported exactly once. Order is unspecified (table iteration).
+    ///
+    /// Read-only; intended for callers that must inspect which fixed chemistry
+    /// is active (e.g. the refinement cascade, which only supports the standard
+    /// Carbamidomethyl-C baseline).
+    pub fn fixed_mod_deltas(&self) -> Vec<(u8, f64)> {
+        let mut seen: std::collections::HashSet<(u8, u64)> = std::collections::HashSet::new();
+        let mut out: Vec<(u8, f64)> = Vec::new();
+        for aa in self.iter_variants() {
+            if let Some(m) = aa.mod_.as_ref() {
+                if m.fixed && seen.insert((aa.residue, m.mass_delta.to_bits())) {
+                    out.push((aa.residue, m.mass_delta));
+                }
+            }
+        }
+        out
+    }
+
     // -----------------------------------------------------------------------
     // GF helpers
     // -----------------------------------------------------------------------
@@ -647,6 +673,54 @@ mod tests {
         let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
         assert_eq!(c_variants.len(), 1);
         assert!(c_variants[0].is_modified());
+    }
+
+    #[test]
+    fn fixed_mod_deltas_empty_for_standard_set() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        assert!(set.fixed_mod_deltas().is_empty());
+    }
+
+    #[test]
+    fn fixed_mod_deltas_reports_cam_c_once() {
+        // Carbamidomethyl-C is the lone fixed mod; it must be reported exactly
+        // once as (C, +57.02146) even though it is folded into several slots.
+        let set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c().build().unwrap();
+        let deltas = set.fixed_mod_deltas();
+        assert_eq!(deltas.len(), 1, "exactly one distinct fixed mod, got {deltas:?}");
+        let (res, delta) = deltas[0];
+        assert_eq!(res, b'C');
+        assert!((delta - 57.02146).abs() < 1e-6, "expected CAM-C delta, got {delta}");
+    }
+
+    #[test]
+    fn fixed_mod_deltas_reports_each_distinct_fixed_mod() {
+        // A TMT-style set: fixed TMT on K AND fixed CAM on C → two distinct
+        // fixed mods, one entry per (residue, delta). Variable Oxidation-M
+        // must NOT appear (it is not fixed).
+        let tmt_k = Modification {
+            name: "TMT6plex".to_string(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(carbamidomethyl_c())
+            .add_fixed_mod(tmt_k)
+            .add_variable_mod(oxidation_m())
+            .build()
+            .unwrap();
+        let mut deltas = set.fixed_mod_deltas();
+        deltas.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(deltas.len(), 2, "two distinct fixed mods, got {deltas:?}");
+        assert_eq!(deltas[0].0, b'C');
+        assert!((deltas[0].1 - 57.02146).abs() < 1e-6);
+        assert_eq!(deltas[1].0, b'K');
+        assert!((deltas[1].1 - 229.162932).abs() < 1e-6);
     }
 
     #[test]

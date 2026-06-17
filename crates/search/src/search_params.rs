@@ -135,7 +135,11 @@ impl SearchParams {
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
-            chimeric_max_coisolated: 2,
+            // N=4 is the measured sweet spot on Astral entrapment: +726 PSMs
+            // (+1.4%) over N=2 at flat true-FDP (1.18→1.19%); N=6 adds only +62
+            // more and FDP creeps. N=2 was the original (+101%-vs-no-chimeric)
+            // setting; deeper co-fragments are the diminishing tail.
+            chimeric_max_coisolated: 4,
             chimeric_max_kl: 0.3,
             score_mode: ScoreMode::Rank,
         }
@@ -199,10 +203,10 @@ mod tests {
         assert_eq!(params.precursor_mass_shift_ppm, 0.0);
         assert!(!params.chimeric);
         assert_eq!(params.chimeric_isolation_halfwidth_da, 1.5);
-        // chimeric-N defaults MUST preserve the proven +101%-Astral behavior
-        // (max_n=2, KL gate 0.3) — the engine path is byte-identical until a
-        // user opts into deeper N via --chimeric-max-coisolated.
-        assert_eq!(params.chimeric_max_coisolated, 2);
+        // chimeric-N default = 4, the measured Astral sweet spot (+726 PSMs vs
+        // N=2 at flat true-FDP). N=2 was the original setting; --chimeric-max-
+        // coisolated overrides. KL gate stays 0.3.
+        assert_eq!(params.chimeric_max_coisolated, 4);
         assert_eq!(params.chimeric_max_kl, 0.3);
         assert_eq!(params.score_mode, ScoreMode::Rank);
     }

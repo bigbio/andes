@@ -315,9 +315,9 @@ struct SearchArgs {
     isolation_halfwidth: f64,
 
     /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
-    /// chimeric-N lever). 2 = the proven +101%-Astral default; raise to 3-5 on
-    /// wide-window instruments (Astral) to recover deeper co-fragments.
-    #[arg(long = "chimeric-max-coisolated", default_value = "2")]
+    /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
+    /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.
+    #[arg(long = "chimeric-max-coisolated", default_value = "4")]
     chimeric_max_coisolated: usize,
 
     /// Chimeric mode: averagine-envelope KL gate for accepting a co-isolated MS1

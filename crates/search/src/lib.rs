@@ -15,6 +15,7 @@ pub mod precursor_cal;
 pub mod precursor_matching;
 pub mod psm;
 pub mod refine_config;
+pub mod refinement;
 pub mod search_index;
 pub mod search_params;
 pub mod tdc;

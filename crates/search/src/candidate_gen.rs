@@ -681,6 +681,128 @@ pub fn lazy_candidates_for_precursor(
     out
 }
 
+/// Lazily enumerate the modified candidate set whose **nominal residue mass**
+/// falls in the inclusive integer-bucket window `[min_nominal, max_nominal]`,
+/// reproducing the in-RAM `bucket_index.range(candidate_nominal_bounds(..))`
+/// membership predicate BIT-FOR-BIT.
+///
+/// The in-RAM (`Ram`) backing scores exactly the candidates whose
+/// `peptide.nominal_residue_mass()` (= `nominal_from(peptide.mass() − H2O)`)
+/// lands in the coarse integer bucket window. That window is LOSSY at bucket
+/// boundaries: the f64-milli-Da directional window used by
+/// [`lazy_candidates_for_precursor`] is a DIFFERENT set at the edges, so the two
+/// backings diverge on boundary candidates (proven on scan 33203). To keep the
+/// `Mmap` backing result-identical to `Ram`, the per-spectrum scored set must be
+/// gated on the SAME nominal-bucket predicate, NOT the f64 window.
+///
+/// ## Algorithm
+/// Identical to [`lazy_candidates_for_precursor`] (per-Δ base-record fetch →
+/// `expand_mod_combinations`) EXCEPT:
+/// - The base-record fetch window is derived from the nominal bounds, converted
+///   back to a conservative milli-Da mass window that is WIDE ENOUGH to cover
+///   every base mass that could expand to an in-window peptidoform (over-fetch
+///   is fine — surplus records are filtered out by the acceptance predicate).
+/// - Each expanded peptidoform is accepted iff
+///   `nominal_from(peptide.mass() − H2O) ∈ [min_nominal, max_nominal]` — the
+///   EXACT RAM membership test — replacing the directional f64 final gate.
+///
+/// The lazy per-Δ enumeration is retained for bounded-RSS (O(window), not full
+/// materialization); only the per-candidate ACCEPTANCE predicate changes.
+pub fn lazy_candidates_for_nominal_window(
+    mi: &crate::candidate_index::MmapCandidateIndex,
+    db: &SearchIndex,
+    params: &SearchParams,
+    min_nominal: i32,
+    max_nominal: i32,
+) -> Vec<Candidate> {
+    use crate::candidate_index::{flags, IndexRecord};
+    use model::mass::{H2O, INTEGER_MASS_SCALER};
+
+    if min_nominal > max_nominal {
+        return Vec::new();
+    }
+
+    // (1) Distinct mod-mass offsets, including Δ = 0 (same superset as the
+    //     precursor-window path).
+    let offsets = distinct_mod_mass_offsets(params);
+
+    // (2) Conservative full-peptide (incl. H2O) mass window covering the nominal
+    //     bounds. A peptidoform with bucket key `k = round(SCALER * residue_mass)`
+    //     has `residue_mass ∈ ((k − 0.5)/SCALER, (k + 0.5)/SCALER)`. Pad by one
+    //     extra bucket-width on each side to be safe against float rounding, then
+    //     add H2O to move from residue-mass space to full-peptide mass space.
+    let scaler = INTEGER_MASS_SCALER as f64;
+    // One nominal unit spans ~1/SCALER Da of real mass; pad generously.
+    let bucket_da = 1.0 / scaler;
+    let residue_lo = (min_nominal as f64 - 0.5) / scaler - bucket_da;
+    let residue_hi = (max_nominal as f64 + 0.5) / scaler + bucket_da;
+    let full_lo = residue_lo + H2O;
+    let full_hi = residue_hi + H2O;
+
+    // (3) Union of base records across all Δ windows, de-duplicated. Base mass =
+    //     full_peptide_mass − Δ, so the base-mass fetch window is
+    //     `[full_lo − Δ, full_hi − Δ]`.
+    let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
+        std::collections::HashSet::new();
+    let mut base_records: Vec<IndexRecord> = Vec::new();
+    for (_, delta) in &offsets {
+        let lo = ((full_lo - delta) * 1000.0).floor() as i64;
+        let hi = ((full_hi - delta) * 1000.0).ceil() as i64;
+        if hi < 0 {
+            continue;
+        }
+        let lo_milli = lo.max(0) as u64;
+        let hi_milli = hi as u64;
+        for rec in mi.mass_window(lo_milli, hi_milli) {
+            let key = (rec.protein_index, rec.start_offset, rec.length, rec.flags);
+            if seen_records.insert(key) {
+                base_records.push(rec);
+            }
+        }
+    }
+
+    // (4) Reconstruct + place mods exactly as the precursor-window path, but gate
+    //     acceptance on the RAM nominal-bucket predicate.
+    let mut out: Vec<Candidate> = Vec::new();
+    for rec in &base_records {
+        let protein = &db.db.proteins[rec.protein_index as usize];
+        let seq = &protein.sequence;
+        let abs_start = rec.start_offset as usize;
+        let abs_end = abs_start + rec.length as usize;
+        if abs_end > seq.len() {
+            continue;
+        }
+        let span = &seq[abs_start..abs_end];
+
+        let is_protein_n_term = rec.flags & flags::IS_PROTEIN_N_TERM != 0;
+        let is_protein_c_term = rec.flags & flags::IS_PROTEIN_C_TERM != 0;
+        let is_decoy = rec.flags & flags::IS_DECOY != 0;
+
+        let pre = if abs_start == 0 { b'_' } else { seq[abs_start - 1] };
+        let post = if abs_end == seq.len() { b'-' } else { seq[abs_end] };
+
+        let mod_combinations =
+            expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
+        for residues in mod_combinations {
+            let peptide = Peptide::new(residues, pre, post);
+            // RAM membership: nominal_from(peptide.mass() − H2O) in bounds.
+            // `Peptide::nominal_residue_mass()` caches exactly this value.
+            let key = peptide.nominal_residue_mass();
+            if key >= min_nominal && key <= max_nominal {
+                out.push(Candidate {
+                    peptide,
+                    protein_index: rec.protein_index as usize,
+                    start_offset_in_protein: abs_start,
+                    is_decoy,
+                    is_protein_n_term,
+                    is_protein_c_term,
+                });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -749,7 +871,10 @@ mod tests {
     // from the out-of-core index and places mods lazily) must EXACTLY equal the
     // mass-filtered subset of the in-RAM `enumerate_candidates`.
 
-    use super::{enumerate_candidates, lazy_candidates_for_precursor, Candidate};
+    use super::{
+        enumerate_candidates, lazy_candidates_for_nominal_window, lazy_candidates_for_precursor,
+        Candidate,
+    };
     use crate::candidate_index::{build_base_peptide_index, MmapCandidateIndex};
     use crate::search_index::SearchIndex;
     use crate::search_params::SearchParams;
@@ -878,6 +1003,133 @@ mod tests {
              only-in-lazy: {:?}\n only-in-inram: {:?}",
             lazy.difference(&inram).collect::<Vec<_>>(),
             inram.difference(&lazy).collect::<Vec<_>>(),
+        );
+    }
+
+    // ───────── Task 4 fix: mmap nominal window == RAM bucket window ──────────
+    //
+    // RESULT-IDENTITY regression guard. The in-RAM (`Ram`) backing scores
+    // exactly `{ c : nominal_from(c.mass − H2O) ∈ candidate_nominal_bounds(spec,z) }`
+    // (its `bucket_index.range(min..=max)` set). The `Mmap` backing previously
+    // gated on an f64 directional milli-Da window, which is a DIFFERENT set at
+    // integer-bucket boundaries — the proven scan-33203 divergence. This test
+    // asserts the new `lazy_candidates_for_nominal_window` reproduces RAM's
+    // bucket-window membership BIT-FOR-BIT, and (fail-before proof) that the OLD
+    // f64-window path diverged from RAM on a boundary fixture.
+
+    /// RAM membership set for a spectrum at charge `z`: every `enumerate_candidates`
+    /// candidate whose nominal residue mass is in `candidate_nominal_bounds`.
+    /// This is precisely what `bucket_index.range(min..=max)` selects.
+    fn ram_window_keys(
+        db: &SearchIndex,
+        params: &SearchParams,
+        spec: &model::Spectrum,
+        z: u8,
+    ) -> std::collections::HashSet<(bool, usize, usize, String, u64)> {
+        let (min_nominal, max_nominal) =
+            crate::match_engine::candidate_nominal_bounds(spec, z, params, 0.0);
+        enumerate_candidates(db, params, "XXX")
+            .filter(|c| {
+                let k = c.peptide.nominal_residue_mass();
+                k >= min_nominal && k <= max_nominal
+            })
+            .map(|c| canonical_key(&c))
+            .collect()
+    }
+
+    /// A spectrum whose precursor m/z corresponds (at the given charge, iso 0) to
+    /// the supplied neutral peptide mass.
+    fn spectrum_at_mass(neutral_mass: f64, z: u8) -> model::Spectrum {
+        let mz = (neutral_mass + z as f64 * model::mass::PROTON) / z as f64;
+        model::Spectrum {
+            title: "boundary".into(),
+            precursor_mz: mz,
+            precursor_intensity: None,
+            precursor_charge: Some(z as i32),
+            rt_seconds: None,
+            scan: None,
+            peaks: Vec::new(),
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        }
+    }
+
+    #[test]
+    fn mmap_nominal_window_equals_ram_bucket_window_on_boundary() {
+        use model::tolerance::{PrecursorTolerance, Tolerance};
+        use std::collections::HashSet;
+
+        let (db, mut params) = oxm_fixture();
+        // No isotope offsets: isolate the window-breadth divergence at a single
+        // bucket edge (offsets only shift the bounds; the boundary effect is the
+        // integer-vs-f64 widening at the edge).
+        params.isotope_error_range = 0..=0;
+        // A fractional Da tolerance whose `round(tol − 0.4999)` widening differs
+        // from the exact f64 window at bucket boundaries. 0.5 Da → widen by 0,
+        // so the nominal window is a single bucket while the f64 window spans
+        // ±0.5 Da and can dip into the neighboring bucket.
+        params.precursor_tolerance =
+            PrecursorTolerance::symmetric(Tolerance::Da(0.5));
+        let (_tmp, mi) = build_and_open(&db, &params);
+
+        let z = 1u8;
+
+        // Collect every candidate's true neutral mass so we can place precursors
+        // on bucket boundaries (where exact f64 mass crosses an integer edge).
+        let masses: Vec<f64> = enumerate_candidates(&db, &params, "XXX")
+            .map(|c| c.peptide.mass())
+            .collect();
+        assert!(!masses.is_empty(), "fixture produced no candidates");
+
+        // Scan a fine grid of precursor masses straddling each candidate's mass.
+        // We assert (1) the NEW nominal-window path always equals RAM's bucket
+        // window, and (2) detect at least one precursor where the OLD f64 window
+        // DIVERGED from RAM — proving the boundary case is exercised (fail-before).
+        let mut boundary_seen = false;
+        for &m in &masses {
+            for step in -8i32..=8 {
+                let precursor = m + (step as f64) * 0.125; // 0.125 Da grid
+                let spec = spectrum_at_mass(precursor, z);
+
+                let ram = ram_window_keys(&db, &params, &spec, z);
+
+                // NEW path: nominal-bucket gated mmap window.
+                let (min_nominal, max_nominal) =
+                    crate::match_engine::candidate_nominal_bounds(&spec, z, &params, 0.0);
+                let mmap_nominal: HashSet<_> =
+                    lazy_candidates_for_nominal_window(&mi, &db, &params, min_nominal, max_nominal)
+                        .iter()
+                        .map(canonical_key)
+                        .collect();
+                assert_eq!(
+                    mmap_nominal, ram,
+                    "NEW mmap nominal window must equal RAM bucket window \
+                     (precursor={precursor})\n only-in-mmap: {:?}\n only-in-ram: {:?}",
+                    mmap_nominal.difference(&ram).collect::<Vec<_>>(),
+                    ram.difference(&mmap_nominal).collect::<Vec<_>>(),
+                );
+
+                // OLD path: f64 directional milli-Da window (what shipped before
+                // this fix). Reproduce exactly how the mmap loop called it.
+                let neutral_obs = precursor; // shift_ppm = 0, iso 0
+                let tol_left = params.precursor_tolerance.left.as_da(neutral_obs);
+                let tol_right = params.precursor_tolerance.right.as_da(neutral_obs);
+                let old_f64: HashSet<_> = lazy_candidates_for_precursor(
+                    &mi, &db, &params, neutral_obs, tol_left, tol_right,
+                )
+                .iter()
+                .map(canonical_key)
+                .collect();
+                if old_f64 != ram {
+                    boundary_seen = true;
+                }
+            }
+        }
+        assert!(
+            boundary_seen,
+            "fixture never exercised a bucket boundary where the OLD f64 window \
+             diverged from RAM — the regression guard would not have caught the bug"
         );
     }
 

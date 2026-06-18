@@ -42,6 +42,15 @@ impl ProteinDb {
             .collect();
         ProteinDb { proteins }
     }
+
+    /// Append `other`'s proteins after `self`'s, preserving order. `other`'s
+    /// local protein index `j` maps to `self.len() + j` in the result — callers
+    /// offset `protein_index` by `self.len()` when merging `other`'s candidates.
+    pub fn concat(&self, other: &ProteinDb) -> ProteinDb {
+        let mut proteins = self.proteins.clone();
+        proteins.extend(other.proteins.iter().cloned());
+        ProteinDb { proteins }
+    }
 }
 
 #[cfg(test)]
@@ -123,5 +132,20 @@ mod tests {
         assert_eq!(db.subset_by_index(&keep).len(), 1);
         // Empty keep → empty db.
         assert!(db.subset_by_index(&HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn concat_appends_proteins_preserving_order() {
+        let a = ProteinDb { proteins: vec![
+            Protein { accession: "A0".into(), description: String::new(), sequence: b"AK".to_vec() },
+            Protein { accession: "A1".into(), description: String::new(), sequence: b"BK".to_vec() },
+        ]};
+        let b = ProteinDb { proteins: vec![
+            Protein { accession: "B0".into(), description: String::new(), sequence: b"CK".to_vec() },
+        ]};
+        let c = a.concat(&b);
+        assert_eq!(c.len(), 3);
+        assert_eq!(c.proteins[0].accession, "A0");
+        assert_eq!(c.proteins[2].accession, "B0"); // b's index 0 → a.len()+0 = 2
     }
 }

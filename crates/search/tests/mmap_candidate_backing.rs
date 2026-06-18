@@ -249,6 +249,93 @@ fn psm_signature(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Stri
         .collect()
 }
 
+/// Canonical, order-independent set of accepted PSMs per scan.
+///
+/// Unlike `psm_signature` (which compares sorted rows — still sensitive to ordering
+/// within the heap since `candidate_idxs` order affects the signature), this
+/// function builds a per-scan **multiset** of `(peptide-residues+mods, charge,
+/// score-rounded, rank-score-rounded, isotope_offset, is_decoy)` tuples and
+/// sorts them.  The protein column is deliberately excluded: for semi-tryptic
+/// searches the multi-protein `Proteins` order may differ between `Ram` and
+/// `Mmap` (cosmetic, FDR-neutral), and this test asserts only result-identity.
+fn psm_result_set(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<String>> {
+    queues
+        .iter()
+        .map(|q| {
+            let mut rows: Vec<String> = q
+                .iter_psms()
+                .map(|psm| {
+                    let cand = &candidates[psm.primary_candidate_idx() as usize];
+                    let pep: String = cand
+                        .peptide
+                        .residues
+                        .iter()
+                        .map(|aa| {
+                            let m = aa
+                                .mod_
+                                .as_ref()
+                                .map(|m| (m.mass_delta * 1e5).round() as i64)
+                                .unwrap_or(0);
+                            format!("{}[{}]", aa.residue as char, m)
+                        })
+                        .collect();
+                    // Round scores to 4 decimal places to tolerate any
+                    // float-formatting noise while still catching real divergence.
+                    format!(
+                        "pep={pep} z={} score={:.4} rank={:.4} iso={} decoy={}",
+                        psm.charge_used,
+                        psm.score,
+                        psm.rank_score,
+                        psm.isotope_offset,
+                        cand.is_decoy,
+                    )
+                })
+                .collect();
+            rows.sort();
+            rows
+        })
+        .collect()
+}
+
+/// Semi-tryptic result-identity test.
+///
+/// For `num_tolerable_termini = 1` the `Mmap` per-spectrum candidate order
+/// (coordinate/mod-mass sort) can differ from `Ram` (strict spans → free-C →
+/// free-N), so byte-identity of the full PIN is not guaranteed. This test asserts
+/// the weaker but essential property: the **order-independent set** of accepted
+/// PSMs (peptide residues+mods, charge, score, isotope offset, decoy flag) is
+/// identical between `Ram` and `Mmap`. Protein column order is excluded (see
+/// `psm_result_set`).
+#[test]
+fn mmap_result_identical_semitryptic() {
+    let (spectra, idx, mut params) = small_search_fixture();
+    // Switch to semi-tryptic: at least one terminus must be a cleavage site.
+    params.num_tolerable_termini = 1;
+    let scorer = make_scorer(0.05);
+
+    let (ram_q, ram_c) =
+        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (mmap_q, mmap_c) =
+        run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
+
+    let ram_set = psm_result_set(&ram_q, &ram_c);
+    let mmap_set = psm_result_set(&mmap_q, &mmap_c);
+
+    // Sanity: the fixture must actually produce PSMs (else the test is vacuous).
+    assert!(
+        ram_set.iter().any(|scan| !scan.is_empty()),
+        "semi-tryptic fixture produced no PSMs on the Ram path — test would be vacuous"
+    );
+
+    assert_eq!(
+        ram_set, mmap_set,
+        "mmap semi-tryptic: accepted PSM sets must be result-identical to the in-RAM path\n\
+         (order-independent: candidate SET, scores, and accepted-PSM identities must match;\n\
+         Proteins-column order and candidate_idxs[0] for shared peptides may legitimately differ)\n\
+         RAM : {ram_set:#?}\nMMAP: {mmap_set:#?}"
+    );
+}
+
 #[test]
 fn mmap_path_bit_identical_to_ram_on_fixture() {
     let (spectra, idx, params) = small_search_fixture();

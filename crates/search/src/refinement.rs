@@ -1396,6 +1396,48 @@ mod tests {
     }
 
     #[test]
+    fn merge_offsets_every_entry_of_multi_candidate_psms() {
+        // A refine PSM aggregating a SHARED peptide across two refine candidates
+        // (candidate_idxs = [0, 1]) must have EVERY entry offset by the Pass-1
+        // candidate count, not just the primary — the multi-protein shared-peptide
+        // path the PIN writer iterates to emit one accession per candidate_idx.
+        let p1_cands = vec![cand(0, false), cand(1, false)]; // cand_offset = 2
+        let p1_index = SearchIndex {
+            db: ProteinDb { proteins: vec![protein("P0", b"AAAK"), protein("P1", b"BBBK")] }, // prot_offset = 2
+            decoy_prefix: "XXX".into(),
+        };
+        let mut p1_queues = vec![queue_with(vec![psm(0, 0, 40.0)])];
+
+        // One refine PSM on spectrum 0 whose candidate_idxs spans two refine candidates.
+        let mut shared = psm(0, 0, 22.0);
+        shared.candidate_idxs = vec![0, 1];
+        let refine = RefinementOutput {
+            index: SearchIndex {
+                db: ProteinDb { proteins: vec![protein("BASEPEP_0", b"PEPTIDEK"), protein("BASEPEP_1", b"SAMPLEK")] },
+                decoy_prefix: "XXX".into(),
+            },
+            candidates: vec![cand(0, false), cand(1, false)],
+            queues: vec![queue_with(vec![shared])],
+            global_spectrum_indices: vec![0],
+        };
+
+        let merged = merge_into_pass1(&mut p1_queues, &p1_cands, &p1_index, refine);
+
+        // Combined: 2 pass1 + 2 refine; refine protein_index offset by 2.
+        assert_eq!(merged.candidates.len(), 4);
+        assert_eq!(merged.candidates[2].protein_index, 2);
+        assert_eq!(merged.candidates[3].protein_index, 3);
+        // The merged refine PSM's BOTH candidate_idxs offset by cand_offset=2 → [2, 3].
+        let refine_psm = p1_queues[0]
+            .iter_psms()
+            .find(|m| m.candidate_idxs.len() == 2)
+            .expect("the multi-candidate refine PSM was force_pushed");
+        let mut idxs = refine_psm.candidate_idxs.clone();
+        idxs.sort();
+        assert_eq!(idxs, vec![2, 3], "every candidate_idx entry offset, not just the primary");
+    }
+
+    #[test]
     fn run_refinement_skips_when_non_standard_fixed_mods_present() {
         // Base set carries a fixed TMT-on-K beyond the CAM-C baseline. The W1
         // guard must skip Pass-2 entirely (warn + return) BEFORE building any

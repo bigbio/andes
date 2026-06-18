@@ -125,6 +125,17 @@ pub struct PreparedSearch<'a> {
     /// (`IntensitySignal` PIN column). `None` unless the binary supplied
     /// `--intensity-model`; when absent the column is 0.0 and ranking is unchanged.
     pub intensity_model: Option<Arc<IntensityModel>>,
+    /// `Mmap`-mode ONLY: the GLOBAL set of target bare-peptide sequences (every
+    /// non-decoy base record in the index), built once at `prepare_mmap`. The
+    /// per-spectrum collision-decoy relabel uses THIS set so a decoy is relabeled
+    /// iff its bare sequence matches ANY DB target — identical to the in-RAM path,
+    /// which runs `relabel_collision_decoys` once globally over all candidates.
+    /// Relabeling per-spectrum from only the window candidates is WRONG: a decoy
+    /// whose target twin is absent from the current precursor window would keep its
+    /// `is_decoy` flag and diverge the TDC label from RAM. Bare sequences only, so
+    /// this is bounded (far smaller than the full candidate `Vec` we avoid in
+    /// out-of-core mode). `None` in `Ram` mode.
+    mmap_target_bare_seqs: Option<std::collections::HashSet<Box<[u8]>>>,
 }
 
 /// Global candidate identity for the `Mmap`-mode accumulator: enough to dedup a
@@ -292,6 +303,7 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf,
             ms1_link: None,
             intensity_model: None,
+            mmap_target_bare_seqs: None,
         }
     }
 
@@ -345,6 +357,15 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
+        // RC1 fix: build the GLOBAL target bare-sequence set ONCE from the full
+        // base-peptide index (mirrors the in-RAM `relabel_collision_decoys`, which
+        // runs once globally over all candidates). Per-spectrum relabel from only
+        // the window candidates is WRONG (a collision decoy whose target twin is
+        // outside the current window would keep its decoy flag → TDC label
+        // diverges from RAM). Bare residues are reconstructed from each non-decoy
+        // record's protein span — bounded, far smaller than the candidate Vec.
+        let target_bare_seqs = build_target_bare_seqs(&mmap_index, idx);
+
         Ok(PreparedSearch {
             idx,
             params,
@@ -358,6 +379,7 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf,
             ms1_link: None,
             intensity_model: None,
+            mmap_target_bare_seqs: Some(target_bare_seqs),
         })
     }
 
@@ -407,6 +429,7 @@ impl<'a> PreparedSearch<'a> {
             aa_set_for_gf: parts.aa_set_for_gf,
             ms1_link: None,
             intensity_model: None,
+            mmap_target_bare_seqs: None,
         }
     }
 
@@ -638,12 +661,15 @@ impl<'a> PreparedSearch<'a> {
                             spec.precursor_mz * charge_f - charge_f * PROTON,
                             shift_ppm,
                         );
-                        // Widest one-sided precursor tolerance, in Da at this mass.
-                        let tol_da = params
-                            .precursor_tolerance
-                            .left
-                            .as_da(neutral_obs)
-                            .max(params.precursor_tolerance.right.as_da(neutral_obs));
+                        // DIRECTIONAL precursor tolerance, in Da at this mass —
+                        // mirrors `matches_precursor` (left bound for lighter,
+                        // right bound for heavier). A symmetric `max(left,right)`
+                        // would fetch+score extra candidates on the wider side and
+                        // diverge the per-spectrum scored set (tailor/null-pool)
+                        // from the in-RAM path. The tolerance evaluates against the
+                        // per-offset `center` (matching `matches_precursor`, which
+                        // computes `as_da(spectrum_neutral)` AFTER the isotope
+                        // correction), so it is computed inside the offset loop.
                         for offset in *params.isotope_error_range.start()
                             ..=*params.isotope_error_range.end()
                         {
@@ -651,9 +677,11 @@ impl<'a> PreparedSearch<'a> {
                             // the exact center `matches_precursor` compares against.
                             let center = neutral_obs
                                 - (offset as f64) * model::mass::ISOTOPE;
-                            for cand in
-                                lazy_candidates_for_precursor(mi, self.idx, params, center, tol_da)
-                            {
+                            let tol_left = params.precursor_tolerance.left.as_da(center);
+                            let tol_right = params.precursor_tolerance.right.as_da(center);
+                            for cand in lazy_candidates_for_precursor(
+                                mi, self.idx, params, center, tol_left, tol_right,
+                            ) {
                                 if seen.insert(GlobalCandKey::from_candidate(&cand)) {
                                     deduped.push(cand);
                                 }
@@ -673,10 +701,19 @@ impl<'a> PreparedSearch<'a> {
                             mmap_cands.push(cand.clone());
                         }
                     }
-                    // Per-spectrum collision-decoy relabeling (matches the once-at-
-                    // prepare relabel on the `Ram` path; equivalent because twins
-                    // co-occur in the same mass window).
-                    relabel_collision_decoys(&mut mmap_cands);
+                    // Collision-decoy relabeling against the GLOBAL target
+                    // bare-sequence set (built once at `prepare_mmap` from the full
+                    // index). This is IDENTICAL to the in-RAM path, which relabels
+                    // once globally over all candidates: a decoy is relabeled iff
+                    // its bare sequence matches ANY DB target. Relabeling against
+                    // only this window's targets would be WRONG — a collision decoy
+                    // whose target twin is outside the current precursor window
+                    // would keep its decoy flag and diverge the TDC label from RAM.
+                    let target_bare_seqs = self
+                        .mmap_target_bare_seqs
+                        .as_ref()
+                        .expect("Mmap backing requires the global target bare-seq set");
+                    relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
                     // Canonical enumeration order: protein, then start offset, then
                     // mod placement (peptidoform identity). Stable so equal keys keep
                     // `lazy`'s per-span `expand_mod_combinations` order.
@@ -2605,6 +2642,22 @@ fn relabel_collision_decoys(candidates: &mut [Candidate]) {
         .filter(|c| !c.is_decoy)
         .map(bare_residues)
         .collect();
+    relabel_collision_decoys_with(candidates, &target_seqs);
+}
+
+/// Relabel collision decoys against a PRE-COMPUTED target bare-sequence set.
+///
+/// Used by the out-of-core (`Mmap`) path, where the target set must be the GLOBAL
+/// set of all DB targets (built once from the full index), NOT the targets that
+/// happen to land in the current precursor window. This makes the relabel decision
+/// identical to the in-RAM path, which relabels once globally over all candidates.
+/// (`relabel_collision_decoys` is the in-RAM convenience wrapper that derives the
+/// set from the candidate slice itself — correct only when that slice IS the full
+/// candidate list.)
+fn relabel_collision_decoys_with(
+    candidates: &mut [Candidate],
+    target_seqs: &std::collections::HashSet<Box<[u8]>>,
+) {
     if target_seqs.is_empty() {
         return;
     }
@@ -2613,6 +2666,41 @@ fn relabel_collision_decoys(candidates: &mut [Candidate]) {
             cand.is_decoy = false;
         }
     }
+}
+
+/// Build the GLOBAL set of target bare-peptide sequences from the full mmap
+/// base-peptide index. For every NON-decoy record, reconstruct the residue span
+/// from the protein sequence (`protein.sequence[start..start+length]`). This is
+/// the set the in-RAM `relabel_collision_decoys` derives from the complete
+/// candidate enumeration — built here directly from the index so the `Mmap` path
+/// makes the SAME global relabel decision without materializing all candidates.
+///
+/// Bare residues only (no mods, no flanks) → bounded memory: one `Box<[u8]>` per
+/// distinct target backbone, far smaller than the candidate `Vec` the out-of-core
+/// mode exists to avoid.
+fn build_target_bare_seqs(
+    mi: &MmapCandidateIndex,
+    db: &SearchIndex,
+) -> std::collections::HashSet<Box<[u8]>> {
+    use crate::candidate_index::flags as rec_flags;
+    let mut set: std::collections::HashSet<Box<[u8]>> = std::collections::HashSet::new();
+    for rec in mi.records() {
+        if rec.flags & rec_flags::IS_DECOY != 0 {
+            continue;
+        }
+        let pidx = rec.protein_index as usize;
+        if pidx >= db.db.proteins.len() {
+            continue;
+        }
+        let seq = &db.db.proteins[pidx].sequence;
+        let start = rec.start_offset as usize;
+        let end = start + rec.length as usize;
+        if end > seq.len() {
+            continue;
+        }
+        set.insert(seq[start..end].to_vec().into_boxed_slice());
+    }
+    set
 }
 
 /// Mod-aware dedup key: bare residues plus per-position mod mass (1e-5 Da units).

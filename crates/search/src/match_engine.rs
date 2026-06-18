@@ -47,6 +47,7 @@ use model::spectrum::Spectrum;
 /// no algorithmic change. Pre-existing single-call callers can still use
 /// `match_spectra(...)` which is now a thin wrapper around
 /// `prepare` + a single `run_chunk` call.
+
 /// Selects how `PreparedSearch` resolves the per-spectrum candidate set.
 ///
 /// `Ram` (default) materializes the full `Vec<Candidate>` + mass-bucket index at
@@ -62,6 +63,25 @@ pub enum CandidateBacking {
     #[default]
     Ram,
     /// Out-of-core mmap'd base-peptide index + lazy per-spectrum mod enumeration.
+    ///
+    /// # Byte-identity guarantee
+    ///
+    /// The output PIN is **byte-identical** to `Ram` for searches that are:
+    ///   - **Fully tryptic** (`num_tolerable_termini = 2`), AND
+    ///   - **At most one variable mod per residue** (`max_variable_mods_per_peptide ≤ 1`
+    ///     with no residue carrying more than one variable mod placement).
+    ///
+    /// For **semi-tryptic** (`num_tolerable_termini = 1`) or searches with
+    /// **multiple variable mods on a single residue**, the `Mmap` per-spectrum
+    /// candidate order uses a coordinate/mod-mass sort that may differ from the
+    /// `Ram` emission order (`enumerate_candidates` emits strict spans → free-C
+    /// → free-N for ntt=1). The candidate **set**, **scores**, and **accepted-PSM
+    /// identities** (scan IDs, peptide sequences, FDR decisions) are identical,
+    /// but the PIN `candidate_idxs[0]` (primary peptide for shared peptides) and
+    /// the multi-protein `Proteins` column order may differ — a cosmetic
+    /// difference that is FDR-neutral.
+    ///
+    /// General order-matching for semi-tryptic / multi-mod-per-residue is deferred.
     Mmap,
 }
 
@@ -287,6 +307,15 @@ impl<'a> PreparedSearch<'a> {
     ///
     /// `decoy_prefix` MUST match the prefix the `SearchIndex` was built with so
     /// the index's per-record decoy flags align with the in-RAM enumeration.
+    ///
+    /// # Byte-identity scope
+    ///
+    /// The resulting PIN is byte-identical to [`Self::prepare`] (Ram mode) **only**
+    /// for fully-tryptic searches (`num_tolerable_termini = 2`) with at most one
+    /// variable mod per residue. For semi-tryptic or multi-mod-per-residue searches
+    /// the candidate set and scores are identical but the per-scan candidate order
+    /// (and therefore PIN row order / primary-peptide / Proteins-column order) may
+    /// differ — see [`CandidateBacking::Mmap`] for details.
     pub fn prepare_mmap(
         idx: &'a SearchIndex,
         params: &'a SearchParams,

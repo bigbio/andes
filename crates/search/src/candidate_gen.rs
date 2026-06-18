@@ -592,7 +592,8 @@ pub fn lazy_candidates_for_precursor(
     db: &SearchIndex,
     params: &SearchParams,
     precursor_mass: f64,
-    tol_da: f64,
+    tol_left_da: f64,
+    tol_right_da: f64,
 ) -> Vec<Candidate> {
     use crate::candidate_index::{flags, IndexRecord};
 
@@ -600,15 +601,25 @@ pub fn lazy_candidates_for_precursor(
     let offsets = distinct_mod_mass_offsets(params);
 
     // (2) Union of base records across all Δ windows, de-duplicated.
-    let tol_milli = (tol_da * 1000.0).round() as u64;
+    //
+    // DIRECTIONAL tolerance (mirrors `matches_precursor`): a candidate of mass
+    // `m` has signed error `m − precursor`; when LIGHTER (error < 0) the bound is
+    // `tol_left`, when HEAVIER (error ≥ 0) the bound is `tol_right`. So the base
+    // window is `[center − tol_left, center + tol_right]`, NOT a symmetric `±max`.
+    // Using `max(left,right)` would pre-fetch extra candidates on the wider side
+    // which — even though re-gated by the final mass filter below — perturb the
+    // per-spectrum scored-candidate set (tailor histogram / null-pool) and diverge
+    // from the in-RAM path's scored set.
+    let tol_left_milli = (tol_left_da * 1000.0).round() as u64;
+    let tol_right_milli = (tol_right_da * 1000.0).round() as u64;
     let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
         std::collections::HashSet::new();
     let mut base_records: Vec<IndexRecord> = Vec::new();
     for (_, delta) in &offsets {
-        // Base mass = precursor − Δ. Center the window there, ± tol.
+        // Base mass = precursor − Δ. Window asymmetric: −tol_left .. +tol_right.
         let center = precursor_mass - delta;
-        let lo = (center * 1000.0).round() as i64 - tol_milli as i64;
-        let hi = (center * 1000.0).round() as i64 + tol_milli as i64;
+        let lo = (center * 1000.0).round() as i64 - tol_left_milli as i64;
+        let hi = (center * 1000.0).round() as i64 + tol_right_milli as i64;
         // A base mass is always positive; clamp the lower bound at 0.
         let lo_milli = (lo - 1).max(0) as u64;
         if hi < 0 {
@@ -650,7 +661,12 @@ pub fn lazy_candidates_for_precursor(
             expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
         for residues in mod_combinations {
             let peptide = Peptide::new(residues, pre, post);
-            if (peptide.mass() - precursor_mass).abs() <= tol_da {
+            // DIRECTIONAL final gate, mirroring `matches_precursor`: lighter →
+            // tol_left, heavier → tol_right. Keeps the lazily-materialized set
+            // EXACTLY the set the in-RAM `matches_precursor` admits per spectrum.
+            let err = peptide.mass() - precursor_mass;
+            let allowed = if err < 0.0 { tol_left_da } else { tol_right_da };
+            if err.abs() <= allowed {
                 out.push(Candidate {
                     peptide,
                     protein_index: rec.protein_index as usize,
@@ -848,7 +864,7 @@ mod tests {
         tol: f64,
     ) {
         use std::collections::HashSet;
-        let lazy: HashSet<_> = lazy_candidates_for_precursor(mi, db, params, precursor, tol)
+        let lazy: HashSet<_> = lazy_candidates_for_precursor(mi, db, params, precursor, tol, tol)
             .iter()
             .map(canonical_key)
             .collect();
@@ -878,7 +894,7 @@ mod tests {
         assert_lazy_matches_inram(&db, &params, &mi, p_oxm, 0.01);
 
         // Spot-check: the Ox-M peptidoform is actually present.
-        let lazy = lazy_candidates_for_precursor(&mi, &db, &params, p_oxm, 0.01);
+        let lazy = lazy_candidates_for_precursor(&mi, &db, &params, p_oxm, 0.01, 0.01);
         assert!(
             lazy.iter().any(|c| {
                 !c.is_decoy
@@ -890,7 +906,7 @@ mod tests {
 
         // (b) Base (unmodified) precursor: the unmodified PEPTMK must appear.
         assert_lazy_matches_inram(&db, &params, &mi, base, 0.01);
-        let lazy_base = lazy_candidates_for_precursor(&mi, &db, &params, base, 0.01);
+        let lazy_base = lazy_candidates_for_precursor(&mi, &db, &params, base, 0.01, 0.01);
         assert!(
             lazy_base.iter().any(|c| {
                 !c.is_decoy

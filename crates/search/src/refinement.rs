@@ -585,6 +585,60 @@ pub fn run_refinement(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// (g) merge_into_pass1
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The result of merging a Pass-2 [`RefinementOutput`] into the Pass-1 candidate
+/// index space: a single combined candidate list and the concatenated
+/// target+decoy index. Pass to the single `write_pin` call so unmodified and
+/// modified PSMs for every scan compete in ONE PIN.
+pub struct MergedSearch {
+    /// Pass-1 candidates followed by offset-corrected Pass-2 candidates.
+    /// Every `PsmMatch::candidate_idxs` in both passes index into this slice.
+    pub candidates: Vec<Candidate>,
+    /// Pass-1 index concatenated with the Pass-2 index. Accession resolution
+    /// for all candidates uses this combined db.
+    pub index: SearchIndex,
+}
+
+/// Merge the Pass-2 refinement winners into the Pass-1 per-scan queues under one
+/// candidate-index space, so unmodified and modified PSMs for a scan compete in
+/// a SINGLE PIN. Offsets `protein_index` by the Pass-1 db length and
+/// `candidate_idxs` by the Pass-1 candidate count, then `force_push`es each
+/// refine PSM into `pass1_queues[global_spectrum]` (legitimate extra emission,
+/// like a chimeric secondary). Returns the combined candidates + index for the
+/// single `write_pin` call.
+pub fn merge_into_pass1(
+    pass1_queues: &mut [TopNQueue],
+    pass1_candidates: &[Candidate],
+    pass1_index: &SearchIndex,
+    refine: RefinementOutput,
+) -> MergedSearch {
+    let cand_offset = pass1_candidates.len() as u32;
+    let prot_offset = pass1_index.db.len();
+
+    let mut combined: Vec<Candidate> = pass1_candidates.to_vec();
+    let RefinementOutput { index: refine_index, candidates: refine_cands, queues, global_spectrum_indices } = refine;
+
+    for mut c in refine_cands {
+        c.protein_index += prot_offset;
+        combined.push(c);
+    }
+
+    for (local_i, mut q) in queues.into_iter().enumerate() {
+        let global = global_spectrum_indices[local_i];
+        for mut psm in q.drain_into_vec() {
+            for idx in &mut psm.candidate_idxs {
+                *idx += cand_offset;
+            }
+            pass1_queues[global].force_push(psm);
+        }
+    }
+
+    MergedSearch { candidates: combined, index: pass1_index.concat(&refine_index) }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1305,6 +1359,40 @@ mod tests {
         assert!(out.is_none());
         assert_eq!(queues[0].len(), 1);
         assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
+    }
+
+    // ── (g) merge_into_pass1 ───────────────────────────────────────────────
+
+    #[test]
+    fn merge_offsets_indices_and_force_pushes_into_pass1() {
+        // Pass-1: 1 candidate (protein 0), 1 spectrum with one unmod PSM (rank 40).
+        let p1_cands = vec![cand(0, false)];
+        let p1_index = SearchIndex {
+            db: ProteinDb { proteins: vec![protein("P0", b"PEPTIDEK")] },
+            decoy_prefix: "XXX".into(),
+        };
+        let mut p1_queues = vec![queue_with(vec![psm(0, 0, 40.0)])];
+
+        // Refine: 1 modified candidate (its OWN protein 0 = BASEPEP_0), one PSM (rank 22) on spectrum 0.
+        let refine = RefinementOutput {
+            index: SearchIndex { db: ProteinDb { proteins: vec![protein("BASEPEP_0", b"PEPTIDEK")] }, decoy_prefix: "XXX".into() },
+            candidates: vec![cand(0, false)],   // protein_index 0 in the refine db
+            queues: vec![queue_with(vec![psm(0, 0, 22.0)])], // candidate_idxs=[0], spectrum 0
+            global_spectrum_indices: vec![0],
+        };
+
+        let merged = merge_into_pass1(&mut p1_queues, &p1_cands, &p1_index, refine);
+
+        // Combined candidates: pass1 (1) + refine (1) = 2; refine candidate's protein_index offset by 1.
+        assert_eq!(merged.candidates.len(), 2);
+        assert_eq!(merged.candidates[1].protein_index, 1, "refine protein_index offset by pass1 db len");
+        // Combined index: 2 proteins, refine accession resolvable at offset 1.
+        assert_eq!(merged.index.db.len(), 2);
+        assert_eq!(merged.index.db.proteins[1].accession, "BASEPEP_0");
+        // Spectrum 0's queue now holds BOTH the unmod (cand 0) and the modified (cand 1) PSM.
+        let mut idxs: Vec<u32> = p1_queues[0].iter_psms().map(|m| m.primary_candidate_idx()).collect();
+        idxs.sort();
+        assert_eq!(idxs, vec![0, 1], "refine PSM candidate_idx offset to 1 and force_pushed into pass1 queue");
     }
 
     #[test]

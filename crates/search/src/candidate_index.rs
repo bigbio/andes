@@ -335,9 +335,17 @@ impl MmapCandidateIndex {
         // The temp file lives in the same directory as `path` so the rename is
         // always within the same filesystem (avoiding cross-device link errors).
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        // Unique temp name per call: PID alone collides when several searches (or
+        // tests) build distinct indexes concurrently in the SAME directory (e.g.
+        // multiple `NamedTempFile`s under `/tmp`), racing on one tmp path and
+        // corrupting each other's partial writes. Append a process-global atomic
+        // counter so concurrent builds never share a tmp file.
+        static BUILD_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = BUILD_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_path = parent.join(format!(
-            ".andes-candidx-build-{}.tmp",
+            ".andes-candidx-build-{}-{}.tmp",
             std::process::id(),
+            seq,
         ));
         {
             use std::io::BufWriter;

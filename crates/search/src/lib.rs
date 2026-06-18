@@ -24,7 +24,7 @@ pub mod tdc;
 // Convenience re-exports.
 pub use candidate_gen::enumerate_candidates;
 pub use decoy::{normalize_decoy_prefix, reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
-pub use match_engine::{match_spectra, run_pass2_coisolation, PreparedSearch};
+pub use match_engine::{match_spectra, run_pass2_coisolation, CandidateBacking, PreparedSearch};
 pub use mass_calibrator::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
     learn_calibration_stats, prepass_search_params, CalibrationStats, SpecKey,
@@ -36,5 +36,5 @@ pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};
 pub use refine_config::{RefineConfig, RefineMod};
 pub use search_index::SearchIndex;
-pub use search_params::{ScoreMode, SearchParams};
+pub use search_params::{CandidateIndexMode, ScoreMode, SearchParams};
 pub use tdc::{confident_target_indices, ScoredLabel};

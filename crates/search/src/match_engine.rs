@@ -10,7 +10,9 @@ use smallvec::{smallvec, SmallVec};
 
 use model::aa_set::AminoAcidSet;
 use input::Ms1Link;
-use crate::candidate_gen::{enumerate_candidates, lazy_candidates_for_precursor, Candidate};
+use crate::candidate_gen::{
+    enumerate_candidates, lazy_candidates_for_nominal_window, Candidate,
+};
 use crate::candidate_index::MmapCandidateIndex;
 use model::enzyme::Enzyme;
 use model::mass::{nominal_from, H2O, PROTON};
@@ -54,7 +56,8 @@ use model::spectrum::Spectrum;
 /// `prepare` time and resolves each spectrum's window through `bucket_index`
 /// (the original, byte-for-byte unchanged path). `Mmap` keeps only the
 /// out-of-core base-peptide index resident and resolves each spectrum's
-/// candidates lazily via [`lazy_candidates_for_precursor`]; the materialized
+/// candidates lazily via [`crate::candidate_gen::lazy_candidates_for_nominal_window`]
+/// (the RAM nominal-bucket predicate, applied per lazily-fetched candidate); the materialized
 /// candidates are accumulated into `self.candidates` during the scan so the
 /// PIN/TSV writers resolve `candidate_idxs` exactly as in `Ram` mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -222,7 +225,7 @@ pub struct PreparedParts {
 /// tolerance plus the isotope-error range. This is the original, byte-for-byte
 /// unchanged derivation used by both the standard search and the cascade's
 /// NARROW Pass 1.
-fn candidate_nominal_bounds(
+pub(crate) fn candidate_nominal_bounds(
     spec: &Spectrum,
     z: u8,
     params: &SearchParams,
@@ -649,42 +652,30 @@ impl<'a> PreparedSearch<'a> {
                     let mut seen: FxHashSet<GlobalCandKey> = FxHashSet::default();
                     let mut deduped: Vec<Candidate> = Vec::new();
                     for &z in &charges_to_try {
-                        let charge_f = z as f64;
-                        // Full peptide NEUTRAL mass (incl. water) the precursor
-                        // implies at this charge — the exact quantity
-                        // `matches_precursor` and `lazy_candidates_for_precursor`
-                        // (which compares against `peptide.mass()`) use. NOTE: this
-                        // is `mz*z − z*PROTON`, NOT the residue-mass-space center
-                        // `candidate_nominal_bounds` derives (that subtracts H2O for
-                        // the nominal bucket key).
-                        let neutral_obs = adjusted_observed_neutral_mass(
-                            spec.precursor_mz * charge_f - charge_f * PROTON,
-                            shift_ppm,
-                        );
-                        // DIRECTIONAL precursor tolerance, in Da at this mass —
-                        // mirrors `matches_precursor` (left bound for lighter,
-                        // right bound for heavier). A symmetric `max(left,right)`
-                        // would fetch+score extra candidates on the wider side and
-                        // diverge the per-spectrum scored set (tailor/null-pool)
-                        // from the in-RAM path. The tolerance evaluates against the
-                        // per-offset `center` (matching `matches_precursor`, which
-                        // computes `as_da(spectrum_neutral)` AFTER the isotope
-                        // correction), so it is computed inside the offset loop.
-                        for offset in *params.isotope_error_range.start()
-                            ..=*params.isotope_error_range.end()
-                        {
-                            // Spectrum neutral mass after the isotope correction —
-                            // the exact center `matches_precursor` compares against.
-                            let center = neutral_obs
-                                - (offset as f64) * model::mass::ISOTOPE;
-                            let tol_left = params.precursor_tolerance.left.as_da(center);
-                            let tol_right = params.precursor_tolerance.right.as_da(center);
-                            for cand in lazy_candidates_for_precursor(
-                                mi, self.idx, params, center, tol_left, tol_right,
-                            ) {
-                                if seen.insert(GlobalCandKey::from_candidate(&cand)) {
-                                    deduped.push(cand);
-                                }
+                        // RESULT-IDENTITY: the in-RAM (`Ram`) backing scores
+                        // exactly the candidates whose nominal residue mass lands
+                        // in the coarse integer bucket window
+                        // `candidate_nominal_bounds(spec, z, ..)` (via
+                        // `bucket_index.range(min..=max)`). The earlier f64
+                        // directional milli-Da window used here was a DIFFERENT set
+                        // at bucket boundaries (proven divergence on scan 33203:
+                        // RAM kept an iso=+2 candidate, mmap an iso=−1). To stay
+                        // result-identical to RAM we derive the SAME nominal bounds
+                        // (reusing `candidate_nominal_bounds`, the single source of
+                        // truth) and gate per-candidate ACCEPTANCE on the EXACT RAM
+                        // nominal-bucket predicate
+                        // `nominal_from(peptide.mass() − H2O) ∈ [min, max]`.
+                        // `lazy_candidates_for_nominal_window` over-fetches base
+                        // records over a padded mass window (bounded-RSS preserved)
+                        // and applies that predicate — making the scored multiset
+                        // identical to RAM's `bucket_index.range(..)` set.
+                        let (min_nominal, max_nominal) =
+                            candidate_nominal_bounds(spec, z, params, shift_ppm);
+                        for cand in lazy_candidates_for_nominal_window(
+                            mi, self.idx, params, min_nominal, max_nominal,
+                        ) {
+                            if seen.insert(GlobalCandKey::from_candidate(&cand)) {
+                                deduped.push(cand);
                             }
                         }
                     }

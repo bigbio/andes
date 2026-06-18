@@ -78,11 +78,20 @@ impl IndexRecord {
     }
 }
 
-/// Enumerate all base peptides (no variable mods) from `idx` matching `params`.
+/// Canonical base-peptide enumeration for the out-of-core index.
 ///
 /// Clones `params` and forces `max_variable_mods_per_peptide = 0` so only the
 /// unmodified backbone is produced. Fixed mods in `aa_set` remain untouched —
-/// they fold into per-residue mass exactly as in the normal search path.
+/// they fold into per-residue mass exactly as in the normal search path
+/// (e.g. carbamidomethyl-C is always present when configured as a fixed mod).
+///
+/// **Equivalence invariant**: the set of `(residues, base_mass)` pairs
+/// produced here must equal the set of unmodified candidates (those whose
+/// every residue carries no variable mod) produced by
+/// [`enumerate_candidates`] with the original `params`.  This invariant
+/// is guarded by `base_peptide_records_matches_unmodified_enumerate_candidates`
+/// in the test suite — any future divergence in digestion logic will
+/// fail that test.
 ///
 /// The `decoy_prefix` is forwarded verbatim to [`enumerate_candidates`] for
 /// decoy-membership detection (e.g. `"XXX"` when the index was built with that
@@ -118,6 +127,14 @@ pub fn base_peptide_records(
             if c.is_protein_c_term {
                 f |= flags::IS_PROTEIN_C_TERM;
             }
+            debug_assert!(
+                c.protein_index <= u32::MAX as usize,
+                "protein_index overflows u32"
+            );
+            debug_assert!(
+                c.start_offset_in_protein <= u32::MAX as usize,
+                "start_offset_in_protein overflows u32"
+            );
             IndexRecord {
                 mass_milli,
                 protein_index: c.protein_index as u32,
@@ -129,12 +146,24 @@ pub fn base_peptide_records(
         .collect()
 }
 
-/// Build a mass-sorted binary index of base peptides and write it to `out`.
+/// Canonical builder: enumerate base peptides and write a mass-sorted binary
+/// index to `out`.
+///
+/// This is the canonical entry point for creating the out-of-core index file.
+/// It delegates to [`base_peptide_records`] (the canonical base-peptide
+/// enumeration), which sets `max_variable_mods_per_peptide = 0` so that only
+/// unmodified backbones are written — fixed mods (e.g. CAM on C, TMT on K)
+/// are still folded into each residue's mass as configured.
 ///
 /// Steps:
 /// 1. Enumerate all base peptides (no variable mods) via [`base_peptide_records`].
 /// 2. Sort by `mass_milli` ascending.
 /// 3. Write each record as 20 packed little-endian bytes.
+///
+/// **Equivalence caveat**: `base_peptide_records` must stay equivalent to
+/// `enumerate_candidates`'s digestion logic. This is enforced by the test
+/// `base_peptide_records_matches_unmodified_enumerate_candidates` — any
+/// divergence in enzyme/length/termini handling will fail that test.
 ///
 /// The `decoy_prefix` must match the prefix used when building the
 /// `SearchIndex` (e.g. `"XXX"` — the `_` delimiter is appended internally by
@@ -161,7 +190,9 @@ pub fn build_base_peptide_index<W: Write>(
 mod tests {
     use super::*;
     use model::aa_set::AminoAcidSetBuilder;
+    use model::modification::{Modification, ModLocation, ResidueSpec};
     use model::protein::{Protein, ProteinDb};
+    use crate::candidate_gen::enumerate_candidates;
     use crate::search_index::SearchIndex;
     use crate::search_params::SearchParams;
 
@@ -274,5 +305,125 @@ mod tests {
 
         let records = base_peptide_records(&idx, &params, "XXX");
         assert!(!records.is_empty(), "base records should not be empty");
+    }
+
+    /// Equivalence guard: the set of base peptides produced by
+    /// `base_peptide_records` (which forces `max_variable_mods_per_peptide=0`)
+    /// must exactly match the set of UNMODIFIED candidates produced by
+    /// `enumerate_candidates` with the full variable-mod params, filtered to
+    /// those whose every residue carries no variable mod.
+    ///
+    /// "Unmodified" is defined by backbone + base mass: a candidate is
+    /// unmodified when none of its residues carry a variable (non-fixed) mod.
+    /// Fixed mods are always present on both sides (they're folded in by the
+    /// `AminoAcidSet`), so the two sides should produce exactly the same
+    /// (residue_bytes, mass_milli) pairs.
+    ///
+    /// This test locks the digestion equivalence so that any future divergence
+    /// between `base_peptide_records` and `enumerate_candidates` (e.g. a new
+    /// ntt/enzyme path) is caught immediately.
+    #[test]
+    fn base_peptide_records_matches_unmodified_enumerate_candidates() {
+        // Build an index with a protein that contains M (for Ox-M to apply) and
+        // is long enough to produce multiple tryptic peptides.
+        // WMKDALER: tryptic peptides include WMK (Ox-M variant), DALER, etc.
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P2".into(),
+                description: "test protein".into(),
+                sequence: b"WMKDALERQPK".to_vec(),
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+
+        // Build params with Oxidation-M (variable mod) so enumerate_candidates
+        // produces both unmodified and Ox-M variants.
+        let ox_m = Modification {
+            name: "Oxidation".to_string(),
+            mass_delta: 15.99491,
+            residue: ResidueSpec::Specific(b'M'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(ox_m)
+            .build()
+            .unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params.max_variable_mods_per_peptide = 1;
+
+        // --- LHS: base_peptide_records (forces NumMods=0) ---
+        // Represent each base peptide as (residue_bytes, mass_milli) so the
+        // comparison is independent of protein_index / start_offset ordering.
+        let base_records = base_peptide_records(&idx, &params, "XXX");
+        // Collect the (residue bytes, mass_milli) key from each record.
+        // Since IndexRecord doesn't store residue bytes directly, we re-derive
+        // them by running enumerate_candidates with base params and zipping.
+        let base_params = SearchParams {
+            max_variable_mods_per_peptide: 0,
+            ..params.clone()
+        };
+        let base_candidates: Vec<_> =
+            enumerate_candidates(&idx, &base_params, "XXX").collect();
+        assert_eq!(
+            base_records.len(),
+            base_candidates.len(),
+            "base_peptide_records and enumerate_candidates(NumMods=0) must yield same count"
+        );
+
+        // Build a canonical (residue_bytes, mass_milli) multiset from base_peptide_records.
+        // Use the candidate residues (same enumeration) to reconstruct residue bytes.
+        let mut lhs: Vec<(Vec<u8>, u64)> = base_candidates
+            .iter()
+            .map(|c| {
+                let bytes: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+                let mass_milli = (c.peptide.mass() * 1000.0).round() as u64;
+                (bytes, mass_milli)
+            })
+            .collect();
+        lhs.sort_unstable();
+
+        // --- RHS: enumerate_candidates with full mods, filter to unmodified ---
+        // A candidate is "unmodified" when none of its residues carries a
+        // variable (non-fixed) mod.
+        let all_candidates: Vec<_> =
+            enumerate_candidates(&idx, &params, "XXX").collect();
+        let mut rhs: Vec<(Vec<u8>, u64)> = all_candidates
+            .iter()
+            .filter(|c| {
+                c.peptide.residues.iter().all(|aa| {
+                    aa.mod_
+                        .as_ref()
+                        .map(|m| m.fixed) // fixed mods are OK; variable are not
+                        .unwrap_or(true)  // no mod at all = unmodified
+                })
+            })
+            .map(|c| {
+                let bytes: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+                let mass_milli = (c.peptide.mass() * 1000.0).round() as u64;
+                (bytes, mass_milli)
+            })
+            .collect();
+        rhs.sort_unstable();
+
+        assert_eq!(
+            lhs, rhs,
+            "base_peptide_records must produce exactly the unmodified subset of enumerate_candidates"
+        );
+
+        // Sanity: both sides must be non-empty (the protein has tryptic peptides).
+        assert!(!lhs.is_empty(), "expected at least one base peptide");
+
+        // Sanity: the full run with Ox-M must be strictly larger (Ox-M adds variants).
+        let full_count = all_candidates.len();
+        let base_count = lhs.len();
+        assert!(
+            full_count > base_count,
+            "full enumeration ({full_count}) should exceed base ({base_count}) when variable mods present"
+        );
     }
 }

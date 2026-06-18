@@ -1704,7 +1704,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut _mmap_index_file: Option<TempIndexFile> = None;
     let mut prepared = match (reuse_parts, params.candidate_index) {
         // Calibration reuse always takes the in-RAM parts (calibration is RAM-only).
+        // Warn if the user explicitly requested mmap so they know it was not applied.
         (Some(parts), _) => {
+            if cli.candidate_index == CandidateIndexFlag::Mmap {
+                eprintln!(
+                    "WARN: --candidate-index mmap is ignored when precursor calibration \
+                     reuse is active; running in-RAM for this search."
+                );
+            }
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
         (None, search::CandidateIndexMode::Mmap) => {

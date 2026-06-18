@@ -761,6 +761,14 @@ pub fn lazy_candidates_for_nominal_window(
         }
     }
 
+    // Sort base_records to match enumerate_candidates order (protein_index ASC,
+    // start_offset ASC, flags ASC) before expanding mod combinations. This is
+    // required for the MMAP path to visit candidates in the same order as the
+    // RAM path (which iterates candidates in enumerate_candidates order via
+    // ascending global indices). A HashSet was used for dedup in step (3), so
+    // the vec order is non-deterministic without this sort.
+    base_records.sort_unstable_by_key(|r| (r.protein_index, r.start_offset, r.flags));
+
     // (4) Reconstruct + place mods exactly as the precursor-window path, but gate
     //     acceptance on the RAM nominal-bucket predicate.
     let mut out: Vec<Candidate> = Vec::new();

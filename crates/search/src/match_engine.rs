@@ -705,23 +705,22 @@ impl<'a> PreparedSearch<'a> {
                         .as_ref()
                         .expect("Mmap backing requires the global target bare-seq set");
                     relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
-                    // Canonical enumeration order: protein, then start offset, then
-                    // mod placement (peptidoform identity). Stable so equal keys keep
-                    // `lazy`'s per-span `expand_mod_combinations` order.
+                    // Canonical enumeration order: protein_index ASC, then start
+                    // offset ASC.  Within each (protein, offset) group, candidates
+                    // retain the order produced by `lazy_candidates_for_nominal_window`
+                    // → `expand_mod_combinations`, which is the SAME order
+                    // `enumerate_candidates` uses.  `sort_by` is stable, so the
+                    // within-group ordering from `lazy_candidates_for_nominal_window`
+                    // is preserved — reproducing the RAM path's ascending global-index
+                    // iteration order exactly.
+                    //
+                    // DO NOT add residues/mod_units tie-breaking here: lexicographic
+                    // residue order diverges from `expand_mod_combinations` recursive
+                    // output order and causes tie-breaking differences vs RAM.
                     mmap_cands.sort_by(|a, b| {
                         a.protein_index
                             .cmp(&b.protein_index)
                             .then(a.start_offset_in_protein.cmp(&b.start_offset_in_protein))
-                            .then_with(|| {
-                                let ka = GlobalCandKey::from_candidate(a);
-                                let kb = GlobalCandKey::from_candidate(b);
-                                ka.residues
-                                    .cmp(&kb.residues)
-                                    .then(ka.mod_units.cmp(&kb.mod_units))
-                                    .then(ka.is_protein_n_term.cmp(&kb.is_protein_n_term))
-                                    .then(ka.is_protein_c_term.cmp(&kb.is_protein_c_term))
-                                    .then(ka.is_decoy.cmp(&kb.is_decoy))
-                            })
                     });
                     window_cand_indices = (0..mmap_cands.len()).collect();
                 }

@@ -139,6 +139,11 @@ impl SearchIndex {
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
+    /// Append `other`'s proteins after `self`'s into one index space, keeping
+    /// `self`'s `decoy_prefix` (`other`'s is dropped). Mirrors
+    /// [`ProteinDb::concat`]: `other`'s protein at local index `j` lands at
+    /// `self.db.len() + j`, so callers must offset `other`'s `protein_index`
+    /// values by `self.db.len()` when merging its candidates.
     pub fn concat(&self, other: &SearchIndex) -> SearchIndex {
         SearchIndex { db: self.db.concat(&other.db), decoy_prefix: self.decoy_prefix.clone() }
     }

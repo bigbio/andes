@@ -274,7 +274,7 @@ fn enumerate_all_spans(ctx: &EmitCtx<'_>, n: u32) -> Vec<Candidate> {
 ///   merged in addition to Anywhere variants.
 /// - All other positions: Anywhere only — borrowed directly from AminoAcidSet,
 ///   no clone.
-fn expand_mod_combinations(
+pub(crate) fn expand_mod_combinations(
     span: &[u8],
     params: &SearchParams,
     is_protein_n_term: bool,
@@ -471,6 +471,200 @@ fn compute_cleavage_positions(seq: &[u8], primary: Enzyme, extras: &[Enzyme]) ->
     positions
 }
 
+/// Distinct variable-mod mass deltas configured in `params.aa_set`.
+///
+/// Walks every variant in the set, keeps the non-fixed (variable) mods, and
+/// de-duplicates by `mass_delta.to_bits()`. Fixed mods are excluded — they are
+/// already folded into each residue's mass (and into the base-peptide index),
+/// so they never contribute to the lazy mod-mass offset `Δ`.
+fn variable_mod_deltas(params: &SearchParams) -> Vec<f64> {
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut out: Vec<f64> = Vec::new();
+    for aa in params.aa_set.iter_variants() {
+        if let Some(m) = aa.mod_.as_ref() {
+            if !m.fixed && seen.insert(m.mass_delta.to_bits()) {
+                out.push(m.mass_delta);
+            }
+        }
+    }
+    out
+}
+
+/// Enumerate the distinct total mod-mass offsets `Δ` reachable by applying up
+/// to `max_variable_mods_per_peptide` variable mods (with repetition — the same
+/// mod can apply at multiple residues).
+///
+/// Returns a list of `(delta_milli, delta)` pairs, including `Δ = 0` (the
+/// unmodified backbone), de-duplicated by rounded milli-Dalton so two mods that
+/// sum to the same shift collapse to one window probe.
+///
+/// This is intentionally a **superset** of the offsets any single base peptide
+/// can actually achieve: a peptide may lack the target residue for a given mod,
+/// in which case that `Δ` simply yields no surviving peptidoform after the
+/// per-record mass filter. Over-generating `Δ` only costs extra (filtered-out)
+/// window probes; it can never drop a candidate. The decisive correctness
+/// guarantee comes from re-running [`expand_mod_combinations`] per base record
+/// and filtering on the resulting peptidoform mass — not from `Δ` precision.
+fn distinct_mod_mass_offsets(params: &SearchParams) -> Vec<(u64, f64)> {
+    let deltas = variable_mod_deltas(params);
+    let max_mods = params.max_variable_mods_per_peptide as usize;
+
+    // BFS over multisets of mod deltas: level k = applying exactly k variable
+    // mods. We track each combination's summed delta and de-dup by milli-Da.
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut out: Vec<(u64, f64)> = Vec::new();
+
+    // Δ = 0 (no variable mods) is always present.
+    let zero_milli = (0.0_f64 * 1000.0).round() as i64 as u64;
+    seen.insert(zero_milli);
+    out.push((zero_milli, 0.0));
+
+    if deltas.is_empty() || max_mods == 0 {
+        return out;
+    }
+
+    // `frontier` holds (summed_delta, start_index) where start_index enforces a
+    // non-decreasing choice of mod indices so each multiset is generated once.
+    let mut frontier: Vec<(f64, usize)> = vec![(0.0, 0)];
+    for _ in 0..max_mods {
+        let mut next: Vec<(f64, usize)> = Vec::new();
+        for &(sum, start) in &frontier {
+            for (i, &d) in deltas.iter().enumerate().skip(start) {
+                let new_sum = sum + d;
+                next.push((new_sum, i));
+                let key = milli_of(new_sum);
+                if seen.insert(key) {
+                    out.push((key, new_sum));
+                }
+            }
+        }
+        frontier = next;
+        if frontier.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// Round a neutral mass (Da) to milli-Daltons, consistent with Task 1's
+/// `(mass * 1000.0).round()` index key. Uses `i64` intermediately so negative
+/// offsets (e.g. pyro-glu) round correctly before the `u64` window arithmetic.
+#[inline]
+fn milli_of(mass: f64) -> u64 {
+    (mass * 1000.0).round() as i64 as u64
+}
+
+/// Lazily enumerate the modified candidate set for a precursor mass window,
+/// reading base peptides from the out-of-core index `mi` and placing variable
+/// mods on the fly.
+///
+/// **Decisive correctness property** (guarded by
+/// `lazy_enum_matches_inram_candidate_set_for_window`): the SET of `Candidate`s
+/// returned here equals
+/// `{ c ∈ enumerate_candidates(db, params, decoy_prefix) : |c.peptide.mass() − precursor_mass| ≤ tol_da }`,
+/// compared at the peptidoform level (residues + mods, mass, protein_index,
+/// start_offset, decoy).
+///
+/// ## Algorithm
+/// 1. Enumerate the distinct mod-mass offsets `Δ` (incl. 0) reachable with up
+///    to `params.max_variable_mods_per_peptide` variable mods
+///    ([`distinct_mod_mass_offsets`]).
+/// 2. For each `Δ`, binary-search the index for base peptides whose **base**
+///    mass lands in `[precursor − Δ − tol, precursor − Δ + tol]`. Collect the
+///    union of base records across all `Δ`, de-duplicated by
+///    `(protein_index, start_offset, length, flags)` so a record reached via
+///    several `Δ` windows is expanded only once.
+/// 3. For each unique base record, reconstruct the residue span from
+///    `db.proteins[protein_index].sequence[start_offset..start_offset+length]`
+///    and the terminal context (`pre`/`post` from absolute coordinates;
+///    `is_protein_n_term`/`is_protein_c_term` from the stored flags — these are
+///    NOT derivable from coordinates alone for Met-cleaved peptides). Then call
+///    the SAME [`expand_mod_combinations`] enumerate_candidates uses, yielding
+///    every legal peptidoform, and keep those whose actual
+///    `peptide.mass()` is within `tol_da` of `precursor_mass`.
+///
+/// Step 3 is why the result is bit-identical to the in-RAM set: mod placement
+/// and mass computation flow through the exact same code path. The per-`Δ`
+/// windows in step 2 are purely an out-of-core retrieval optimisation — they
+/// only decide which base records to *look at*, never which peptidoforms survive.
+pub fn lazy_candidates_for_precursor(
+    mi: &crate::candidate_index::MmapCandidateIndex,
+    db: &SearchIndex,
+    params: &SearchParams,
+    precursor_mass: f64,
+    tol_da: f64,
+) -> Vec<Candidate> {
+    use crate::candidate_index::{flags, IndexRecord};
+
+    // (1) Distinct mod-mass offsets, including Δ = 0.
+    let offsets = distinct_mod_mass_offsets(params);
+
+    // (2) Union of base records across all Δ windows, de-duplicated.
+    let tol_milli = (tol_da * 1000.0).round() as u64;
+    let mut seen_records: std::collections::HashSet<(u32, u32, u16, u16)> =
+        std::collections::HashSet::new();
+    let mut base_records: Vec<IndexRecord> = Vec::new();
+    for (_, delta) in &offsets {
+        // Base mass = precursor − Δ. Center the window there, ± tol.
+        let center = precursor_mass - delta;
+        let lo = (center * 1000.0).round() as i64 - tol_milli as i64;
+        let hi = (center * 1000.0).round() as i64 + tol_milli as i64;
+        // A base mass is always positive; clamp the lower bound at 0.
+        let lo_milli = lo.max(0) as u64;
+        if hi < 0 {
+            continue;
+        }
+        let hi_milli = hi as u64;
+        for rec in mi.mass_window(lo_milli, hi_milli) {
+            let key = (rec.protein_index, rec.start_offset, rec.length, rec.flags);
+            if seen_records.insert(key) {
+                base_records.push(rec);
+            }
+        }
+    }
+
+    // (3) Reconstruct each base peptide span + terminal context, place mods via
+    //     the SAME expand_mod_combinations path, keep peptidoforms in window.
+    let mut out: Vec<Candidate> = Vec::new();
+    for rec in &base_records {
+        let protein = &db.db.proteins[rec.protein_index as usize];
+        let seq = &protein.sequence;
+        let abs_start = rec.start_offset as usize;
+        let abs_end = abs_start + rec.length as usize;
+        // Defensive: a corrupt record could point past the sequence.
+        if abs_end > seq.len() {
+            continue;
+        }
+        let span = &seq[abs_start..abs_end];
+
+        let is_protein_n_term = rec.flags & flags::IS_PROTEIN_N_TERM != 0;
+        let is_protein_c_term = rec.flags & flags::IS_PROTEIN_C_TERM != 0;
+        let is_decoy = rec.flags & flags::IS_DECOY != 0;
+
+        // pre/post are determined by absolute coordinates exactly as emit_span
+        // computes them (the N-term-Met case: abs_start==1 ⇒ pre = seq[0] = 'M').
+        let pre = if abs_start == 0 { b'_' } else { seq[abs_start - 1] };
+        let post = if abs_end == seq.len() { b'-' } else { seq[abs_end] };
+
+        let mod_combinations =
+            expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
+        for residues in mod_combinations {
+            let peptide = Peptide::new(residues, pre, post);
+            if (peptide.mass() - precursor_mass).abs() <= tol_da {
+                out.push(Candidate {
+                    peptide,
+                    protein_index: rec.protein_index as usize,
+                    start_offset_in_protein: abs_start,
+                    is_decoy,
+                    is_protein_n_term,
+                    is_protein_c_term,
+                });
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -530,5 +724,230 @@ mod tests {
         // A NonSpecific protease anywhere in the set makes the whole digest non-specific.
         let ns = compute_cleavage_positions(seq, Enzyme::Trypsin, &[Enzyme::NonSpecific]);
         assert_eq!(ns, (0..=seq.len() as u32).collect::<Vec<_>>());
+    }
+
+    // ───────────────────────── Task 3: lazy modified enumeration ─────────────
+    //
+    // Decisive correctness property: for a precursor window, the SET of
+    // Candidates from `lazy_candidates_for_precursor` (which reads BASE peptides
+    // from the out-of-core index and places mods lazily) must EXACTLY equal the
+    // mass-filtered subset of the in-RAM `enumerate_candidates`.
+
+    use super::{enumerate_candidates, lazy_candidates_for_precursor, Candidate};
+    use crate::candidate_index::{build_base_peptide_index, MmapCandidateIndex};
+    use crate::search_index::SearchIndex;
+    use crate::search_params::SearchParams;
+    use model::aa_set::AminoAcidSetBuilder;
+    use model::modification::{ModLocation, Modification, ResidueSpec};
+    use model::protein::{Protein, ProteinDb};
+
+    /// Canonical identity of a candidate peptidoform — independent of any
+    /// enumeration order. Captures decoy, protein coordinates, the residue+mod
+    /// signature (via the Display form `pre.SEQ±delta.post`), and the rounded
+    /// mass. Two candidates with this key equal are the same peptidoform.
+    fn canonical_key(c: &Candidate) -> (bool, usize, usize, String, u64) {
+        (
+            c.is_decoy,
+            c.protein_index,
+            c.start_offset_in_protein,
+            c.peptide.to_string(),
+            (c.peptide.mass() * 1000.0).round() as u64,
+        )
+    }
+
+    fn base_mass_of(db: &SearchIndex, params: &SearchParams, seq: &[u8]) -> f64 {
+        // Find the unmodified candidate whose residues spell `seq` and return
+        // its base mass (Δ = 0). Uses enumerate_candidates with NumMods forced
+        // to 0 so we get exactly the unmodified backbone.
+        let base_params = SearchParams {
+            max_variable_mods_per_peptide: 0,
+            ..params.clone()
+        };
+        let cands: Vec<_> = enumerate_candidates(db, &base_params, "XXX").collect();
+        cands
+            .into_iter()
+            .filter(|c| !c.is_decoy)
+            .find(|c| {
+                c.peptide.residues.iter().map(|aa| aa.residue).eq(seq.iter().copied())
+            })
+            .unwrap_or_else(|| panic!("no unmodified candidate spelling {:?}", std::str::from_utf8(seq)))
+            .peptide
+            .mass()
+    }
+
+    fn build_and_open(
+        db: &SearchIndex,
+        params: &SearchParams,
+    ) -> (tempfile::NamedTempFile, MmapCandidateIndex) {
+        use std::io::BufWriter;
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let mut bw = BufWriter::new(tmp.as_file());
+            build_base_peptide_index(db, params, "XXX", &mut bw)
+                .expect("build_base_peptide_index failed");
+        }
+        let mi = MmapCandidateIndex::open(tmp.path()).expect("open index");
+        (tmp, mi)
+    }
+
+    fn oxidation_m() -> Modification {
+        Modification {
+            name: "Oxidation".to_string(),
+            mass_delta: 15.994915,
+            residue: ResidueSpec::Specific(b'M'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        }
+    }
+
+    fn deamidation_n() -> Modification {
+        Modification {
+            name: "Deamidation".to_string(),
+            mass_delta: 0.984016,
+            residue: ResidueSpec::Specific(b'N'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        }
+    }
+
+    /// SearchIndex + params with Oxidation-M as the only variable mod, NumMods=1.
+    /// Protein contains M (PEPTMK has one M) plus other tryptic peptides.
+    fn oxm_fixture() -> (SearchIndex, SearchParams) {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "ox-m fixture".into(),
+                // PEPTMK | DALMR | QPK  → tryptic peptides with M present.
+                sequence: b"PEPTMKDALMRQPK".to_vec(),
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(oxidation_m())
+            .build()
+            .unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params.max_variable_mods_per_peptide = 1;
+        (db, params)
+    }
+
+    /// Set-equality assertion shared by both tests: the lazy candidate set for
+    /// `(precursor, tol)` must equal the mass-filtered in-RAM set.
+    fn assert_lazy_matches_inram(
+        db: &SearchIndex,
+        params: &SearchParams,
+        mi: &MmapCandidateIndex,
+        precursor: f64,
+        tol: f64,
+    ) {
+        use std::collections::HashSet;
+        let lazy: HashSet<_> = lazy_candidates_for_precursor(mi, db, params, precursor, tol)
+            .iter()
+            .map(canonical_key)
+            .collect();
+        let inram: HashSet<_> = enumerate_candidates(db, params, "XXX")
+            .filter(|c| (c.peptide.mass() - precursor).abs() <= tol)
+            .map(|c| canonical_key(&c))
+            .collect();
+        assert_eq!(
+            lazy, inram,
+            "lazy enumeration must match the in-RAM candidate set\n\
+             only-in-lazy: {:?}\n only-in-inram: {:?}",
+            lazy.difference(&inram).collect::<Vec<_>>(),
+            inram.difference(&lazy).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn lazy_enum_matches_inram_candidate_set_for_window() {
+        let (db, params) = oxm_fixture();
+        let (_tmp, mi) = build_and_open(&db, &params);
+
+        // (a) Ox-M precursor: base mass of PEPTMK + one oxidation. The Ox-M
+        //     peptidoform must appear (and the unmodified form must NOT, since
+        //     its base mass is 15.99 Da lighter and outside a 0.01 window).
+        let base = base_mass_of(&db, &params, b"PEPTMK");
+        let p_oxm = base + 15.994915;
+        assert_lazy_matches_inram(&db, &params, &mi, p_oxm, 0.01);
+
+        // Spot-check: the Ox-M peptidoform is actually present.
+        let lazy = lazy_candidates_for_precursor(&mi, &db, &params, p_oxm, 0.01);
+        assert!(
+            lazy.iter().any(|c| {
+                !c.is_decoy
+                    && c.peptide.residues.iter().map(|aa| aa.residue).eq(b"PEPTMK".iter().copied())
+                    && c.peptide.residues.iter().any(|aa| aa.is_modified())
+            }),
+            "expected the Ox-M PEPTMK peptidoform"
+        );
+
+        // (b) Base (unmodified) precursor: the unmodified PEPTMK must appear.
+        assert_lazy_matches_inram(&db, &params, &mi, base, 0.01);
+        let lazy_base = lazy_candidates_for_precursor(&mi, &db, &params, base, 0.01);
+        assert!(
+            lazy_base.iter().any(|c| {
+                !c.is_decoy
+                    && c.peptide.residues.iter().map(|aa| aa.residue).eq(b"PEPTMK".iter().copied())
+                    && c.peptide.residues.iter().all(|aa| !aa.is_modified())
+            }),
+            "expected the unmodified PEPTMK peptidoform"
+        );
+
+        // (c) A wide window covering many masses — stresses the union/dedup of
+        //     base records across Δ windows.
+        assert_lazy_matches_inram(&db, &params, &mi, base, 200.0);
+    }
+
+    #[test]
+    fn lazy_enum_matches_inram_two_variable_mods() {
+        // Ox-M + Deamidation-N, NumMods=2 — stresses multi-Δ combination logic
+        // (Δ ∈ {0, Ox, Deam, 2·Ox, Ox+Deam, 2·Deam}).
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P2".into(),
+                description: "two-mod fixture".into(),
+                // Tryptic peptides containing M and N (sometimes both).
+                sequence: b"MNPEMTKNMDALERQNMPK".to_vec(),
+            }],
+        };
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_variable_mod(oxidation_m())
+            .add_variable_mod(deamidation_n())
+            .build()
+            .unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params.max_variable_mods_per_peptide = 2;
+
+        let (_tmp, mi) = build_and_open(&db, &params);
+
+        // Sweep a series of precursor masses across the full enumerated range so
+        // every Δ combination (incl. 2 mods on different/same residues, decoys)
+        // is exercised. For each enumerated candidate mass, assert set-equality
+        // of the lazy vs in-RAM window centred there.
+        let all: Vec<_> = enumerate_candidates(&db, &params, "XXX").collect();
+        assert!(!all.is_empty(), "fixture must enumerate candidates");
+        // Distinct rounded masses to probe.
+        let mut masses: Vec<f64> = all.iter().map(|c| c.peptide.mass()).collect();
+        masses.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        masses.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        for &m in &masses {
+            assert_lazy_matches_inram(&db, &params, &mi, m, 0.01);
+        }
+
+        // And one wide window covering everything (max stress on dedup).
+        let max_mass = masses.last().copied().unwrap();
+        let min_mass = masses.first().copied().unwrap();
+        let mid = (min_mass + max_mass) / 2.0;
+        let half = (max_mass - min_mass) / 2.0 + 1.0;
+        assert_lazy_matches_inram(&db, &params, &mi, mid, half);
     }
 }

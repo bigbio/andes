@@ -336,6 +336,186 @@ fn mmap_result_identical_semitryptic() {
     );
 }
 
+/// RC2 (directional precursor tolerance) result-identity gate.
+///
+/// Builds a search with a STRONGLY ASYMMETRIC precursor tolerance (wide on the
+/// `left` = "peptide lighter than precursor" side, tight on the `right`) plus a
+/// `cam_only` style FIXED carbamidomethyl-C mod and NO variable mods — the exact
+/// configuration that diverged in the b1931 benchmark. Several near-isobaric
+/// tryptic peptides sit on the WIDE (left) side of the precursor mass, where a
+/// symmetric `max(left,right)` lazy fetch + symmetric final filter would admit a
+/// candidate set DIFFERENT from the directional `matches_precursor` gate the RAM
+/// path uses, perturbing the per-spectrum scored set (and, when a wrongly-admitted
+/// candidate scores into the top-N, the accepted-PSM set itself).
+///
+/// Asserts the order-independent accepted-PSM set is identical RAM vs Mmap.
+#[test]
+fn mmap_result_identical_asymmetric_tol_cam_only() {
+    use std::sync::Arc;
+
+    // One protein with several tryptic peptides whose neutral masses are close
+    // together, so the asymmetric window's two sides admit different sets.
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "cam-only asymmetric".into(),
+            // Tryptic peptides (cut after K/R): ELVISCLIVEK, SAMPLERPEPTIDEK,
+            // DAVIDCMENGEK, GASLYCDEFGHIK, ... several Cys-bearing peptides so the
+            // fixed CAM mass shifts each, and several near-mass neighbours.
+            sequence: b"ELVISCLIVEKSAMPLERPEPTIDEKDAVIDCMENGEKGASLYCDEFGHIKWANDACEDFGHIK"
+                .to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+
+    // Fixed carbamidomethyl on C (cam_only): NOT a variable mod.
+    let cam = Modification {
+        name: "Carbamidomethyl".to_string(),
+        mass_delta: 57.02146,
+        residue: ResidueSpec::Specific(b'C'),
+        location: ModLocation::Anywhere,
+        fixed: true,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let aa_set = AminoAcidSetBuilder::new_standard()
+        .add_fixed_mod(cam)
+        .build()
+        .unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_length = 3;
+    params.max_variable_mods_per_peptide = 0; // cam_only: no variable mods
+    params.top_n_psms_per_spectrum = 10;
+    params.min_peaks = 0;
+    // STRONGLY ASYMMETRIC precursor tolerance: wide left, tight right. Da units so
+    // the window is mass-independent and the directional asymmetry is stark. The
+    // wide left side reaches peptides up to ~0.6 Da LIGHTER than the precursor;
+    // the tight right side admits almost nothing heavier.
+    params.precursor_tolerance =
+        model::PrecursorTolerance::asymmetric(Tolerance::Da(0.6), Tolerance::Da(0.02));
+    // Multiple isotope offsets exercise the per-offset directional window.
+    params.isotope_error_range = -1..=2;
+
+    let scorer = make_scorer(0.05);
+
+    // Build spectra: for EACH tryptic Cys-bearing peptide, place a precursor a
+    // little HEAVIER than the peptide so the peptide falls on the WIDE (left)
+    // side, and nearby lighter neighbours land in/out of the asymmetric window
+    // differently than a symmetric one would.
+    let build_pep = |seq: &[u8], pre: u8, post: u8| -> Peptide {
+        let mut r = residues(seq);
+        // Apply the fixed CAM to every C so the spectrum's precursor matches the
+        // CAM-modified candidate the search will score.
+        let cam_mod = Modification {
+            name: "Carbamidomethyl".to_string(),
+            mass_delta: 57.02146,
+            residue: ResidueSpec::Specific(b'C'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        for aa in r.iter_mut() {
+            if aa.residue == b'C' {
+                aa.mod_ = Some(Arc::new(cam_mod.clone()));
+            }
+        }
+        Peptide::new(r, pre, post)
+    };
+
+    let peps = [
+        build_pep(b"ELVISCLIVEK", b'_', b'S'),
+        build_pep(b"DAVIDCMENGEK", b'R', b'G'),
+        build_pep(b"GASLYCDEFGHIK", b'K', b'W'),
+        build_pep(b"WANDACEDFGHIK", b'K', b'-'),
+    ];
+    let mut spectra = Vec::new();
+    for (i, pep) in peps.iter().enumerate() {
+        // Nudge the precursor +0.3 Da heavier (within wide left, outside tight
+        // right) so the matching peptide sits on the asymmetric WIDE side.
+        let charge = 2u8;
+        let mz = (pep.mass() + 0.3 + charge as f64 * PROTON) / charge as f64;
+        let mut s = spectrum_for(pep, charge, &format!("scan=asym{i}"));
+        s.precursor_mz = mz;
+        spectra.push(s);
+    }
+
+    let (ram_q, ram_c) =
+        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (mmap_q, mmap_c) =
+        run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
+
+    let ram_set = psm_result_set(&ram_q, &ram_c);
+    let mmap_set = psm_result_set(&mmap_q, &mmap_c);
+
+    assert!(
+        ram_set.iter().any(|scan| !scan.is_empty()),
+        "asymmetric cam_only fixture produced no PSMs on the Ram path — test would be vacuous"
+    );
+    assert_eq!(
+        ram_set, mmap_set,
+        "mmap asymmetric-tolerance cam_only: accepted PSM sets must be result-identical to RAM\n\
+         (directional precursor tolerance must admit the SAME per-spectrum candidate set)\n\
+         RAM : {ram_set:#?}\nMMAP: {mmap_set:#?}"
+    );
+}
+
+/// RC1 (global collision-decoy relabel) result-identity gate.
+///
+/// A palindromic tryptic peptide reverses to ITSELF, so the reverse-decoy's bare
+/// sequence equals a real target's bare sequence — a collision decoy. The in-RAM
+/// path relabels it to target ONCE GLOBALLY at prepare; the Mmap path must reach
+/// the SAME decision using the GLOBAL target bare-sequence set built once from the
+/// full index (NOT a per-spectrum relabel from only the window candidates). This
+/// test asserts the accepted-PSM set — including the decoy flag — is identical, so
+/// a collision decoy is labeled the same way in both backings.
+#[test]
+fn mmap_result_identical_collision_decoy_relabel() {
+    // Protein "MAEKKEAM" is a palindrome (reverse == itself), so its tryptic
+    // peptide "MAEK" (cut after K) collides with its own reverse-decoy "MAEK".
+    let target = ProteinDb {
+        proteins: vec![Protein {
+            accession: "P1".into(),
+            description: "palindrome collision".into(),
+            sequence: b"MAEKKEAM".to_vec(),
+        }],
+    };
+    let idx = SearchIndex::from_target_db(&target, "XXX");
+
+    let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+    let mut params = SearchParams::default_tryptic(aa_set);
+    params.min_length = 3;
+    params.max_variable_mods_per_peptide = 0;
+    params.top_n_psms_per_spectrum = 10;
+    params.min_peaks = 0;
+
+    // Spectrum targeting MAEK (the collision peptide).
+    let maek = Peptide::new(residues(b"MAEK"), b'_', b'K');
+    let spectra = vec![spectrum_for(&maek, 2, "scan=collision")];
+    let scorer = make_scorer(0.05);
+
+    let (ram_q, ram_c) =
+        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (mmap_q, mmap_c) =
+        run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
+
+    let ram_set = psm_result_set(&ram_q, &ram_c);
+    let mmap_set = psm_result_set(&mmap_q, &mmap_c);
+
+    assert!(
+        ram_set.iter().any(|scan| !scan.is_empty()),
+        "collision fixture produced no PSMs on the Ram path — test would be vacuous"
+    );
+    // The collision MAEK candidate must carry the SAME decoy flag in both paths.
+    assert_eq!(
+        ram_set, mmap_set,
+        "mmap collision-decoy relabel: accepted PSM sets (incl. decoy flag) must match RAM\n\
+         RAM : {ram_set:#?}\nMMAP: {mmap_set:#?}"
+    );
+}
+
 #[test]
 fn mmap_path_bit_identical_to_ram_on_fixture() {
     let (spectra, idx, params) = small_search_fixture();

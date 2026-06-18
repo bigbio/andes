@@ -17,6 +17,7 @@
 //! uses it as an mmapped / seekable lookup for precursor-mass-windowed retrieval.
 
 use std::io::{self, Write};
+use std::path::Path;
 
 use crate::candidate_gen::enumerate_candidates;
 use crate::search_index::SearchIndex;
@@ -186,6 +187,133 @@ pub fn build_base_peptide_index<W: Write>(
     Ok(n)
 }
 
+/// Memory-mapped reader for the flat binary candidate index produced by
+/// [`build_base_peptide_index`].
+///
+/// The file is a sequence of 20-byte little-endian [`IndexRecord`]s sorted
+/// ascending by `mass_milli`.  Records are decoded on read via
+/// [`IndexRecord::from_bytes`] — this avoids any `repr(C)` / alignment
+/// requirements on the 20-byte format.
+///
+/// # Mass-window lookup
+///
+/// [`MmapCandidateIndex::mass_window`] uses two `partition_point` binary
+/// searches over the sorted `mass_milli` key to find the half-open bounds
+/// `[lo_idx, hi_idx)` and returns a `Vec` of the decoded records in that
+/// range.  The overall complexity is O(log n) probes + O(k) decode where k
+/// is the number of returned records.
+pub struct MmapCandidateIndex {
+    mmap: memmap2::Mmap,
+    len: usize,
+}
+
+impl MmapCandidateIndex {
+    /// Open a binary index file and memory-map it.
+    ///
+    /// Returns an error if the file length is not a multiple of
+    /// [`INDEX_RECORD_SIZE`] (20 bytes), which would indicate a truncated or
+    /// corrupt write.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let meta = file.metadata()?;
+        let byte_len = meta.len() as usize;
+        if byte_len % INDEX_RECORD_SIZE != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "index file size {byte_len} is not a multiple of {INDEX_RECORD_SIZE} bytes"
+                ),
+            ));
+        }
+        // SAFETY: The file is opened read-only and its contents are valid for
+        // the lifetime of `mmap`.  No other process is expected to modify the
+        // file while the search is running.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let len = byte_len / INDEX_RECORD_SIZE;
+        Ok(Self { mmap, len })
+    }
+
+    /// Number of records in the index.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns `true` if the index contains no records.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Decode and return the record at position `i`.
+    ///
+    /// # Panics
+    /// Panics if `i >= self.len()`.
+    pub fn record_at(&self, i: usize) -> IndexRecord {
+        assert!(i < self.len, "record_at index {i} out of bounds (len={})", self.len);
+        let start = i * INDEX_RECORD_SIZE;
+        let chunk: &[u8; INDEX_RECORD_SIZE] = self.mmap[start..start + INDEX_RECORD_SIZE]
+            .try_into()
+            .expect("slice length is always INDEX_RECORD_SIZE");
+        IndexRecord::from_bytes(chunk)
+    }
+
+    /// Return all decoded records.
+    ///
+    /// Allocates a `Vec` of length `self.len()`.  For large indexes, prefer
+    /// [`mass_window`](Self::mass_window) to avoid decoding the entire file.
+    pub fn records(&self) -> Vec<IndexRecord> {
+        (0..self.len).map(|i| self.record_at(i)).collect()
+    }
+
+    /// Return all records whose `mass_milli` lies in the inclusive range
+    /// `[lo_milli, hi_milli]`.
+    ///
+    /// Uses two `partition_point` binary searches (O(log n)) over the
+    /// mass-sorted index, then decodes the matching slice (O(k)).
+    pub fn mass_window(&self, lo_milli: u64, hi_milli: u64) -> Vec<IndexRecord> {
+        if self.len == 0 || lo_milli > hi_milli {
+            return Vec::new();
+        }
+        // Lower bound: first index where mass_milli >= lo_milli.
+        let lo_idx = self.partition_point(|mass| mass < lo_milli);
+        // Upper bound: first index where mass_milli > hi_milli.
+        let hi_idx = self.partition_point(|mass| mass <= hi_milli);
+        (lo_idx..hi_idx).map(|i| self.record_at(i)).collect()
+    }
+
+    /// Binary search helper: returns the first index `i` in `[0, self.len]`
+    /// where `predicate(mass_milli_at(i))` is `false`.
+    ///
+    /// Equivalent to `slice::partition_point` but decodes only the `mass_milli`
+    /// field of each probed record.
+    fn partition_point<F>(&self, predicate: F) -> usize
+    where
+        F: Fn(u64) -> bool,
+    {
+        let mut lo = 0usize;
+        let mut hi = self.len;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let mass = self.mass_milli_at(mid);
+            if predicate(mass) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    /// Decode only the `mass_milli` field (first 8 bytes) of record `i`.
+    fn mass_milli_at(&self, i: usize) -> u64 {
+        let start = i * INDEX_RECORD_SIZE;
+        u64::from_le_bytes(
+            self.mmap[start..start + 8]
+                .try_into()
+                .expect("always 8 bytes"),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +323,49 @@ mod tests {
     use crate::candidate_gen::enumerate_candidates;
     use crate::search_index::SearchIndex;
     use crate::search_params::SearchParams;
+
+    /// Build a fixture index file containing base peptides from the toy protein.
+    /// Returns the path wrapped in a `tempfile::NamedTempFile` (dropped = deleted).
+    fn build_fixture_index() -> tempfile::NamedTempFile {
+        use std::io::BufWriter;
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let mut bw = BufWriter::new(tmp.as_file());
+            build_base_peptide_index(&idx, &params, "XXX", &mut bw)
+                .expect("build_base_peptide_index failed");
+        }
+        tmp
+    }
+
+    #[test]
+    fn mmap_window_returns_in_range_records() {
+        let tmp = build_fixture_index();
+        let mi = MmapCandidateIndex::open(tmp.path()).unwrap();
+        let all = mi.records();
+        // Pick the median record's mass as a stable target.
+        let target = all[all.len() / 2].mass_milli;
+        let win = mi.mass_window(target - 5, target + 5);
+        // Every returned record must lie within [target-5, target+5].
+        assert!(
+            win.iter().all(|r| r.mass_milli >= target - 5 && r.mass_milli <= target + 5),
+            "mass_window returned out-of-range records"
+        );
+        // At least one record must have exactly the target mass.
+        assert!(
+            win.iter().any(|r| r.mass_milli == target),
+            "target mass not found in window"
+        );
+        // A window entirely below the minimum mass must be empty.
+        assert!(
+            mi.mass_window(0, all[0].mass_milli - 1).is_empty(),
+            "expected empty window below minimum mass"
+        );
+    }
 
     /// Read all records back from a binary blob.
     fn read_records(data: &[u8]) -> Vec<IndexRecord> {

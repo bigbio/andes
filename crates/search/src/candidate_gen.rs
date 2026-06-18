@@ -610,11 +610,11 @@ pub fn lazy_candidates_for_precursor(
         let lo = (center * 1000.0).round() as i64 - tol_milli as i64;
         let hi = (center * 1000.0).round() as i64 + tol_milli as i64;
         // A base mass is always positive; clamp the lower bound at 0.
-        let lo_milli = lo.max(0) as u64;
+        let lo_milli = (lo - 1).max(0) as u64;
         if hi < 0 {
             continue;
         }
-        let hi_milli = hi as u64;
+        let hi_milli = (hi + 1) as u64;
         for rec in mi.mass_window(lo_milli, hi_milli) {
             let key = (rec.protein_index, rec.start_offset, rec.length, rec.flags);
             if seen_records.insert(key) {
@@ -949,5 +949,109 @@ mod tests {
         let mid = (min_mass + max_mass) / 2.0;
         let half = (max_mass - min_mass) / 2.0 + 1.0;
         assert_lazy_matches_inram(&db, &params, &mi, mid, half);
+    }
+    /// Regression test for the tolerance-boundary set-equality gap:
+    ///
+    /// `lazy_candidates_for_precursor` silently drops genuine candidates when a
+    /// base peptide's milli key falls just outside the integer-rounded fetch
+    /// window even though the peptidoform mass satisfies the float filter.
+    ///
+    /// ## Root cause
+    ///
+    /// The FETCH window bounds are computed as:
+    ///
+    /// ```text
+    /// lo = round(center × 1000) − round(tol × 1000)
+    /// hi = round(center × 1000) + round(tol × 1000)
+    /// ```
+    ///
+    /// A base record is stored at key K = round(base_mass × 1000). When the
+    /// fractional parts of `center × 1000` and `tol × 1000` combine adversely,
+    /// K can land 1 milli-Da outside [lo, hi] even though |base_mass − center|
+    /// ≤ tol.
+    ///
+    /// ## Concrete construction (hi-boundary failure)
+    ///
+    /// PEPTMK has base mass B where frac(B × 1000) ≈ 0.812.  With Ox-M delta
+    /// (Δ = 15.994915 Da) and tol constructed so that:
+    ///
+    /// ```text
+    /// frac(tol × 1000) ∈ (frac(B × 1000) − 0.5, 0.5)   →   tol rounds DOWN
+    /// center = B − tol * 0.999   (B is near the high edge of the Δ=Ox window)
+    /// frac(center × 1000)  =  frac(B × 1000) − frac(tol × 1000) * 0.999 < 0.5
+    ///                                                              → rounds DOWN
+    /// ```
+    ///
+    /// Under these conditions:
+    ///
+    /// ```text
+    /// hi      = round(center × 1000) + round(tol × 1000)
+    ///         = (floor(B × 1000) − 1) + round(tol × 1000)    (both round DOWN)
+    ///         = K − 1                                          ← K > hi
+    /// K       = round(B × 1000)                               ← MISSED by integer fetch
+    /// ```
+    ///
+    /// The float filter still passes: |B − center| = tol × 0.999 < tol.
+    ///
+    /// ## Fix
+    ///
+    /// Widen the fetch window by ±1 milli-Da:
+    ///
+    /// ```text
+    /// lo_milli = (lo − 1).max(0) as u64
+    /// hi_milli = (hi + 1)        as u64
+    /// ```
+    ///
+    /// The extra milli is benign: the float filter in step 3 discards any false
+    /// positives introduced by the wider window.
+    #[test]
+    fn lazy_enum_matches_inram_at_tolerance_edge() {
+        // Use the oxm_fixture (PEPTMKDALMRQPK, Oxidation-M variable, NumMods=1).
+        let (db, params) = oxm_fixture();
+        let (_tmp, mi) = build_and_open(&db, &params);
+
+        // Actual monoisotopic base mass of PEPTMK (no variable mods).
+        let base = base_mass_of(&db, &params, b"PEPTMK");
+
+        // frac(base × 1000) for PEPTMK is ≈ 0.812.  The hi-boundary bug fires
+        // when frac(tol × 1000) ∈ (frac(base × 1000) − 0.5, 0.5), i.e., when
+        // frac(base × 1000) − frac(tol × 1000) < 0.5 so that center (= base − tol)
+        // rounds DOWN and hi = round(center×1000) + round(tol×1000) < round(base×1000).
+        //
+        // Pick frac_tol = 0.40, which satisfies (0.812 − 0.5, 0.5) = (0.312, 0.5).
+        let frac_tol = 0.40_f64; // ∈ (frac_base − 0.5, 0.5); verified analytically.
+        let tol = (10.0 + frac_tol) / 1000.0; // 0.0104 — frac_tol < 0.5 → rounds DOWN
+
+        // Place center so PEPTMK sits just inside the high edge of the Δ=Ox window.
+        // Using 0.999 × tol keeps the float distance < tol (avoids float-equality
+        // hazards at the exact boundary with PEPTMK+Ox peptidoform mass).
+        let ox_delta = 15.994915_f64;
+        let center = base - tol * 0.999;
+        let precursor = center + ox_delta;
+
+        // Verify hi-boundary mismatch holds (documents that the bug is real here).
+        {
+            let tol_milli = (tol * 1000.0).round() as i64;
+            let center_milli = (center * 1000.0).round() as i64;
+            let base_key = (base * 1000.0).round() as i64;
+            let hi = center_milli + tol_milli;
+            assert!(
+                base_key > hi,
+                "expected hi-boundary mismatch (base_key={base_key} > hi={hi})                  — rounding conditions may not hold for this mass; verify frac_tol"
+            );
+        }
+
+        // Sanity: the in-RAM candidate set must be non-empty (PEPTMK+Ox is within tol).
+        let inram_count: usize = enumerate_candidates(&db, &params, "XXX")
+            .filter(|c| (c.peptide.mass() - precursor).abs() <= tol)
+            .count();
+        assert!(
+            inram_count > 0,
+            "fixture must yield at least one in-RAM candidate at the engineered precursor              (base={base:.6}, tol={tol:.6}, center={center:.6}, precursor={precursor:.6})"
+        );
+
+        // Decisive assertion — must match in-RAM exactly.
+        // FAILS before the ±1 milli fetch-window fix; PASSES after.
+        assert_lazy_matches_inram(&db, &params, &mi, precursor, tol);
     }
 }

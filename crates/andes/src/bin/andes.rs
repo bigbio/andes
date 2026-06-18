@@ -43,6 +43,7 @@ use search::{
     learn_calibration_stats, CalibrationStats,
     PreparedSearch, PrecursorCalMode, SearchIndex, SearchParams, SpecKey, TopNQueue,
 };
+use search::candidate_index::index_cache_path;
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
 
@@ -1692,16 +1693,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
 
-    // The out-of-core (`Mmap`) candidate index needs a backing file that lives
-    // for the whole search; build it under the system temp dir and remove it on
-    // drop via this guard.
-    struct TempIndexFile(std::path::PathBuf);
-    impl Drop for TempIndexFile {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let mut _mmap_index_file: Option<TempIndexFile> = None;
     let mut prepared = match (reuse_parts, params.candidate_index) {
         // Calibration reuse always takes the in-RAM parts (calibration is RAM-only).
         // Warn if the user explicitly requested mmap so they know it was not applied.
@@ -1715,21 +1706,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
         (None, search::CandidateIndexMode::Mmap) => {
-            let unique = format!(
-                "andes-candidate-index-{}-{}.idx",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
-            );
-            let path = std::env::temp_dir().join(unique);
-            let prepared = PreparedSearch::prepare_mmap(
+            // Use a content-addressed cache path so repeated searches over the
+            // same FASTA + params reuse the index without rebuilding.
+            let path = index_cache_path(&idx, &params);
+            PreparedSearch::prepare_mmap(
                 &idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix, &path,
             )
-            .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
-            _mmap_index_file = Some(TempIndexFile(path));
-            prepared
+            .map_err(|e| format!("build out-of-core candidate index: {e}"))?
         }
         (None, search::CandidateIndexMode::Ram) => {
             PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix)

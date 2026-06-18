@@ -88,6 +88,15 @@ enum ScoreFlag {
     Strong,
 }
 
+/// Candidate-resolution backing: in-RAM (`ram`, default) or out-of-core mmap
+/// base-peptide index with lazy mod enumeration (`mmap`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum CandidateIndexFlag {
+    #[default]
+    Ram,
+    Mmap,
+}
+
 /// Search arguments (shared by the default search path and exposed as a
 /// flat arg group so that `andes --spectrum X --database Y --output-pin Z`
 /// keeps working unchanged).
@@ -348,6 +357,12 @@ struct SearchArgs {
     /// (fused intensity + competition score from S1–S3).
     #[arg(long = "score", default_value = "rank")]
     score: ScoreFlag,
+
+    /// Candidate-index backing: `ram` (default — in-RAM candidate Vec, byte-identical
+    /// to prior releases) or `mmap` (out-of-core mmap'd base-peptide index with lazy
+    /// per-spectrum mod enumeration; lower peak RAM, identical PSMs).
+    #[arg(long = "candidate-index", default_value = "ram")]
+    candidate_index: CandidateIndexFlag,
 
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
     #[arg(long = "refine", default_value_t = false)]
@@ -1499,6 +1514,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ScoreFlag::Rank => search::ScoreMode::Rank,
         ScoreFlag::Strong => search::ScoreMode::Strong,
     };
+    params.candidate_index = match cli.candidate_index {
+        CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
+        CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
+    };
+    // The out-of-core (`Mmap`) candidate path materializes candidates lazily and
+    // only syncs them into `prepared.candidates` AFTER the scan. The chimeric
+    // Pass 2 and the refinement cascade both read `prepared.candidates` /
+    // `bucket_index` DURING scanning, so they are not supported together with
+    // `--candidate-index mmap` in this phase (fail loud rather than silently
+    // produce wrong results).
+    if params.candidate_index == search::CandidateIndexMode::Mmap {
+        if params.chimeric {
+            return Err("--candidate-index mmap is not yet compatible with --chimeric \
+                        (the chimeric Pass 2 needs the in-RAM candidate index)"
+                .into());
+        }
+        if cli.refine {
+            return Err("--candidate-index mmap is not yet compatible with --refine \
+                        (the refinement cascade needs the in-RAM candidate index)"
+                .into());
+        }
+    }
     if params.score_mode == search::ScoreMode::Strong {
         eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
@@ -1655,19 +1692,55 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
 
-    let prepared = match reuse_parts {
-        Some(parts) => {
+    // The out-of-core (`Mmap`) candidate index needs a backing file that lives
+    // for the whole search; build it under the system temp dir and remove it on
+    // drop via this guard.
+    struct TempIndexFile(std::path::PathBuf);
+    impl Drop for TempIndexFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let mut _mmap_index_file: Option<TempIndexFile> = None;
+    let mut prepared = match (reuse_parts, params.candidate_index) {
+        // Calibration reuse always takes the in-RAM parts (calibration is RAM-only).
+        (Some(parts), _) => {
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
-        None => PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix),
+        (None, search::CandidateIndexMode::Mmap) => {
+            let unique = format!(
+                "andes-candidate-index-{}-{}.idx",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            );
+            let path = std::env::temp_dir().join(unique);
+            let prepared = PreparedSearch::prepare_mmap(
+                &idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix, &path,
+            )
+            .map_err(|e| format!("build out-of-core candidate index: {e}"))?;
+            _mmap_index_file = Some(TempIndexFile(path));
+            prepared
+        }
+        (None, search::CandidateIndexMode::Ram) => {
+            PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix)
+        }
     }
     .with_intensity_model(intensity_model);
     log_rss("after_prepared_search");
-    eprintln!(
-        "PreparedSearch: {} candidates, {} mass buckets",
-        prepared.candidates.len(),
-        prepared.bucket_index.len(),
-    );
+    match params.candidate_index {
+        search::CandidateIndexMode::Ram => eprintln!(
+            "PreparedSearch: {} candidates, {} mass buckets (candidate-index: ram)",
+            prepared.candidates.len(),
+            prepared.bucket_index.len(),
+        ),
+        search::CandidateIndexMode::Mmap => eprintln!(
+            "PreparedSearch: out-of-core candidate-index: mmap \
+             (base peptides resolved lazily per spectrum)"
+        ),
+    }
 
     let bench_mode = cli.max_spectra > 0;
 
@@ -1950,6 +2023,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if bench_mode {
         eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
     }
+
+    // `Mmap` mode: drain the per-spectrum materialized candidates accumulated
+    // during the scan into `prepared.candidates` so the PIN/TSV writers resolve
+    // every PSM's `candidate_idxs` against a real candidate slice (no-op + cheap
+    // in the default `Ram` mode, where candidates already live there).
+    prepared.sync_materialized_candidates();
 
     // Downstream code uses these names.
     let spectra = all_spectra;

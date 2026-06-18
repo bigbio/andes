@@ -512,6 +512,24 @@ impl TopNQueue {
         }
     }
 
+    /// Rewrite every retained PSM's `candidate_idxs` through `remap`, preserving
+    /// per-PSM order. Used by the out-of-core (`Mmap`) candidate backing to turn
+    /// per-spectrum LOCAL candidate-slot indices into the GLOBAL indices the
+    /// PIN/TSV writers resolve against the materialized `candidates` slice. The
+    /// queue ordering keys (`score` / `rank_score`) are untouched, so this never
+    /// reorders the queue.
+    pub fn remap_candidate_idxs<F: FnMut(u32) -> u32>(&mut self, mut remap: F) {
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        for psm in &mut psms {
+            for idx in &mut psm.candidate_idxs {
+                *idx = remap(*idx);
+            }
+        }
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
     /// Re-rank retained PSMs by `features.strong_score` and mirror it into
     /// `score` / `rank_score` for queue ordering and PIN `RawScore` emission.
     /// Called only under `ScoreMode::Strong` after `fill_post_topn`.

@@ -105,6 +105,24 @@ pub struct SearchParams {
     /// proteins with a Pass-1 target PSM at internal-TDC-q <= this are refined.
     /// Default 0.10. Only consulted when `--refine` is set.
     pub refine_select_psm_fdr: f64,
+    /// Candidate-resolution backing: `Ram` (default, in-RAM `Vec<Candidate>` +
+    /// bucket index — byte-identical to the historic path) or `Mmap` (out-of-core
+    /// mmap'd base-peptide index + lazy per-spectrum mod enumeration). Exposed via
+    /// `--candidate-index {ram,mmap}`. Carries the user selection into
+    /// `PreparedSearch`; `Ram` leaves every code path unchanged.
+    pub candidate_index: CandidateIndexMode,
+}
+
+/// Candidate-resolution backing selected by `--candidate-index`. Mirrors
+/// [`crate::match_engine::CandidateBacking`] at the params layer so the binary
+/// can carry the user choice without depending on the engine type directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CandidateIndexMode {
+    /// In-RAM candidate Vec + mass-bucket index. Default; byte-identical path.
+    #[default]
+    Ram,
+    /// Out-of-core mmap'd base-peptide index + lazy mod enumeration.
+    Mmap,
 }
 
 impl SearchParams {
@@ -147,6 +165,7 @@ impl SearchParams {
             chimeric_max_kl: 0.3,
             score_mode: ScoreMode::Rank,
             refine_select_psm_fdr: 0.10,
+            candidate_index: CandidateIndexMode::Ram,
         }
     }
 

@@ -138,6 +138,10 @@ impl SearchIndex {
         if needle.len() > haystack.len() { return false; }
         haystack.windows(needle.len()).any(|w| w == needle)
     }
+
+    pub fn concat(&self, other: &SearchIndex) -> SearchIndex {
+        SearchIndex { db: self.db.concat(&other.db), decoy_prefix: self.decoy_prefix.clone() }
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +257,16 @@ mod tests {
             idx.peptide_has_target_match(b""),
             "empty peptide is trivially a substring of any target protein"
         );
+    }
+
+    #[test]
+    fn searchindex_concat_keeps_self_decoy_prefix_and_appends_db() {
+        let a = SearchIndex { db: ProteinDb { proteins: vec![] }, decoy_prefix: "XXX".into() };
+        let b = SearchIndex { db: ProteinDb { proteins: vec![
+            model::protein::Protein { accession: "P".into(), description: String::new(), sequence: b"AK".to_vec() }
+        ]}, decoy_prefix: "ZZZ".into() };
+        let c = a.concat(&b);
+        assert_eq!(c.db.len(), 1);
+        assert_eq!(c.decoy_prefix, "XXX");
     }
 }

@@ -2101,6 +2101,7 @@ name = "search"
 version = "0.1.0"
 dependencies = [
  "input",
+ "memmap2",
  "model",
  "rayon",
  "rustc-hash",

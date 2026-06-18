@@ -371,6 +371,10 @@ struct SearchArgs {
     /// can't be disabled).
     #[arg(long = "refine-high-res-only", default_value_t = true, action = clap::ArgAction::Set)]
     refine_high_res_only: bool,
+
+    /// DEBUG ONLY: also emit the legacy separate <out>.refine.pin (disjoint-union A/B).
+    #[arg(long = "refine-debug-split-pin", default_value_t = false, hide = true)]
+    refine_debug_split_pin: bool,
 }
 
 /// Training arguments for `andes train-from-search`.
@@ -1949,7 +1953,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Downstream code uses these names.
     let spectra = all_spectra;
-    let queues = all_queues;
+    let mut queues = all_queues;
 
     let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
     eprintln!(
@@ -2011,11 +2015,48 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // ── 8. Write PIN ─────────────────────────────────────────────────────────
+    // ── 8. Write PIN — single unified list (Pass-1 ⊕ merged refine) ──────────
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    output::write_pin(&output_pin_path, &spectra, &queues, &prepared.candidates, &params, &idx)?;
+    // `merged_storage` holds the combined candidate list + index when --refine
+    // is active; must outlive the `write_pin` borrow below.
+    let merged_storage: Option<search::refinement::MergedSearch>;
+    if let Some(out) = refine_output {
+        if cli.refine_debug_split_pin {
+            // Legacy A/B: emit the separate refine PIN exactly as before, from out.*.
+            // Must run BEFORE merge_into_pass1 because that call consumes `out`.
+            let refine_out_path = refine_pin_path(&output_pin_path);
+            let subset_spectra: Vec<Spectrum> = out
+                .global_spectrum_indices
+                .iter()
+                .map(|&i| spectra[i].clone())
+                .collect();
+            output::write_pin(
+                &refine_out_path,
+                &subset_spectra,
+                &out.queues,
+                &out.candidates,
+                &params,
+                &out.index,
+            )?;
+            eprintln!(
+                "DEBUG split PIN: wrote legacy refine PIN {} ({} PSMs over {} spectra).",
+                refine_out_path.display(),
+                out.queues.iter().map(|q| q.len()).sum::<usize>(),
+                out.queues.len(),
+            );
+        }
+        let merged = search::refinement::merge_into_pass1(&mut queues, &prepared.candidates, &idx, out);
+        merged_storage = Some(merged);
+    } else {
+        merged_storage = None;
+    }
+    let (pin_candidates, pin_index) = match &merged_storage {
+        Some(m) => (&m.candidates, &m.index),
+        None => (&prepared.candidates, &idx),
+    };
+    output::write_pin(&output_pin_path, &spectra, &queues, pin_candidates, &params, pin_index)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
         output_pin_path.display(),
@@ -2023,38 +2064,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_total.elapsed().as_secs_f64()
     );
     log_rss("after_pin_write");
-
-    // ── 8b. Write the refine PIN (disjoint union with the Pass-1 PIN) ──────────
-    if let Some(out) = refine_output {
-        // Derive `<main_out>.refine.pin`: insert `.refine` before the extension
-        // (e.g. `out.pin` → `out.refine.pin`); fall back to appending if the
-        // path has no extension.
-        let refine_out_path = refine_pin_path(&output_pin_path);
-        // Subset spectra parallel (1:1) to `out.queues`.
-        let subset_spectra: Vec<Spectrum> = out
-            .global_spectrum_indices
-            .iter()
-            .map(|&i| spectra[i].clone())
-            .collect();
-        let refine_psms: usize = out.queues.iter().map(|q| q.len()).sum();
-        output::write_pin(
-            &refine_out_path,
-            &subset_spectra,
-            &out.queues,
-            &out.candidates,
-            &params,
-            &out.index,
-        )?;
-        eprintln!(
-            "Wrote refine PIN: {} ({} refinement PSMs over {} spectra). The two PINs are \
-             the disjoint union (Pass-1 ⊎ refine); combine downstream with mokapot \
-             --group-column on IsRefinement/RefinementModClass.",
-            refine_out_path.display(),
-            refine_psms,
-            out.queues.len(),
-        );
-    } else if cli.refine {
-        eprintln!("Refinement produced no Pass-2 PSMs; no refine PIN written.");
+    if cli.refine {
+        if merged_storage.is_some() {
+            eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
+        } else {
+            eprintln!("Refinement produced no Pass-2 PSMs; unified PIN contains Pass-1 only.");
+        }
     }
 
     if bench_mode {

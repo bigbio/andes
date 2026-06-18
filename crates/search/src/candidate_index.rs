@@ -15,9 +15,21 @@
 //! `build_base_peptide_index()` collects all base peptides from a `SearchIndex`,
 //! sorts them by `mass_milli`, and writes the packed binary file. The caller then
 //! uses it as an mmapped / seekable lookup for precursor-mass-windowed retrieval.
+//!
+//! ## Build-once cache
+//!
+//! [`index_cache_path`] derives a stable file path under the system temp dir from
+//! a content-addressed key: the FASTA content (all target accessions + sequences),
+//! the enzyme, missed cleavages, length bounds, and decoy prefix.  Callers may
+//! pass this path to `prepare_mmap` (via [`MmapCandidateIndex::open_or_build`]);
+//! when the file already exists at the key path the build step is skipped entirely
+//! and the existing file is re-opened.  This makes repeated searches over the same
+//! database pay the build cost only once.
 
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::candidate_gen::enumerate_candidates;
 use crate::search_index::SearchIndex;
@@ -187,6 +199,57 @@ pub fn build_base_peptide_index<W: Write>(
     Ok(n)
 }
 
+/// Derive a stable, content-addressed cache path for the base-peptide index.
+///
+/// The path is placed in the system temp directory and named
+/// `andes-candidx-<hex16>.bin`, where `<hex16>` is a 16-character hex string
+/// derived by hashing:
+///
+/// 1. Every **target** protein's accession and sequence (in iteration order from
+///    [`SearchIndex::iter_target_proteins`]).  Decoy sequences are derived from
+///    targets deterministically, so they need not be hashed separately.
+/// 2. The search parameters that affect which base peptides are produced:
+///    `enzyme`, `extra_enzymes`, `max_missed_cleavages`, `min_length`,
+///    `max_length`, and `decoy_prefix`.
+///
+/// The hash uses Rust's stable [`DefaultHasher`].  It is **not** a
+/// cryptographic hash — collisions are possible (though extremely unlikely in
+/// practice).  The intent is cache correctness for a single machine / session,
+/// not cross-machine portability.
+///
+/// # When to pass this path to `PreparedSearch::prepare_mmap`
+///
+/// Always.  `prepare_mmap` calls [`MmapCandidateIndex::open_or_build`], which
+/// skips the (potentially slow) build step when the cache file already exists
+/// and re-opens it directly.  The first call builds and caches; every
+/// subsequent call with the same parameters opens the cached file.
+pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
+    let mut h = DefaultHasher::new();
+
+    // Hash target protein content: accession + sequence bytes.
+    for protein in idx.iter_target_proteins() {
+        protein.accession.hash(&mut h);
+        protein.sequence.hash(&mut h);
+    }
+
+    // Hash the decoy prefix (affects the decoy flag in each IndexRecord).
+    idx.decoy_prefix.hash(&mut h);
+
+    // Hash all search params that affect base-peptide enumeration.
+    // `enzyme` and `Enzyme` must impl `Hash` — confirmed by the model crate.
+    params.enzyme.hash(&mut h);
+    for extra in &params.extra_enzymes {
+        extra.hash(&mut h);
+    }
+    params.max_missed_cleavages.hash(&mut h);
+    params.min_length.hash(&mut h);
+    params.max_length.hash(&mut h);
+    params.num_tolerable_termini.hash(&mut h);
+
+    let digest = h.finish();
+    std::env::temp_dir().join(format!("andes-candidx-{digest:016x}.bin"))
+}
+
 /// Memory-mapped reader for the flat binary candidate index produced by
 /// [`build_base_peptide_index`].
 ///
@@ -231,6 +294,61 @@ impl MmapCandidateIndex {
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         let len = byte_len / INDEX_RECORD_SIZE;
         Ok(Self { mmap, len })
+    }
+
+    /// Open the index from `path` if it already exists, or build it and then
+    /// open it.
+    ///
+    /// This is the build-once-cache entry point.  Pass the path returned by
+    /// [`index_cache_path`] to skip the build step on repeated invocations with
+    /// the same parameters:
+    ///
+    /// - **Cache hit** (`path` exists and has a valid size): opens and mmaps
+    ///   the existing file.  The build step is skipped entirely.
+    /// - **Cache miss** (`path` does not exist): builds the index via
+    ///   [`build_base_peptide_index`] and then opens the resulting file.
+    ///
+    /// Returns `(mmap_index, was_built)` where `was_built` is `true` when the
+    /// index was freshly constructed and `false` when the existing cache was
+    /// reused.  Callers may use `was_built` for diagnostic logging.
+    pub fn open_or_build(
+        path: &Path,
+        idx: &SearchIndex,
+        params: &SearchParams,
+        decoy_prefix: &str,
+    ) -> io::Result<(Self, bool)> {
+        // Check whether a valid cache file already exists at this path.
+        // A "valid" file has a non-zero length that is a multiple of
+        // INDEX_RECORD_SIZE — the same invariant checked by `open`.
+        let cache_hit = std::fs::metadata(path)
+            .map(|m| m.len() > 0 && m.len() as usize % INDEX_RECORD_SIZE == 0)
+            .unwrap_or(false);
+
+        if cache_hit {
+            // Re-open and mmap the existing file without rebuilding.
+            let mmap_index = Self::open(path)?;
+            return Ok((mmap_index, false));
+        }
+
+        // Build the index to a temp file alongside the target path, then rename
+        // atomically so a partial write never leaves a corrupt cache entry.
+        // The temp file lives in the same directory as `path` so the rename is
+        // always within the same filesystem (avoiding cross-device link errors).
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let tmp_path = parent.join(format!(
+            ".andes-candidx-build-{}.tmp",
+            std::process::id(),
+        ));
+        {
+            use std::io::BufWriter;
+            let file = std::fs::File::create(&tmp_path)?;
+            let mut bw = BufWriter::new(file);
+            build_base_peptide_index(idx, params, decoy_prefix, &mut bw)?;
+        }
+        std::fs::rename(&tmp_path, path)?;
+
+        let mmap_index = Self::open(path)?;
+        Ok((mmap_index, true))
     }
 
     /// Number of records in the index.
@@ -595,6 +713,121 @@ mod tests {
         assert!(
             full_count > base_count,
             "full enumeration ({full_count}) should exceed base ({base_count}) when variable mods present"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Build-once cache: `open_or_build` / `index_cache_path`
+    // -----------------------------------------------------------------------
+
+    /// `open_or_build` reuses the existing file on the second call (cache hit).
+    ///
+    /// Strategy: call `open_or_build` with an explicit temp path twice with
+    /// the same inputs.  The first call must report `was_built = true`; the
+    /// second must report `was_built = false` and must return a record set that
+    /// is byte-identical to the first call's result.  The file's modification
+    /// time must not change on the second call (proving the builder was not
+    /// re-invoked).
+    #[test]
+    fn open_or_build_reuses_existing_cache_file() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+
+        // Use a fresh named temp file as the cache path.  We keep the handle so
+        // the file is not deleted between calls.
+        let tmp = tempfile::NamedTempFile::new().expect("NamedTempFile");
+        let cache_path = tmp.path();
+
+        // First call: cache miss — must build.
+        // We delete the content but keep the path alive by truncating, then
+        // let open_or_build create a fresh file.  Actually `NamedTempFile::new`
+        // creates a zero-byte file; `open_or_build` treats 0-byte files as a
+        // cache miss (size % 20 == 0 but len == 0 fails the `len > 0` guard).
+        let (mi1, was_built1) =
+            MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
+                .expect("first open_or_build failed");
+        assert!(was_built1, "first call must build the index (cache miss)");
+        assert!(mi1.len() > 0, "built index must be non-empty");
+
+        // Record the modification time after the first build.
+        let mtime_after_build = std::fs::metadata(cache_path)
+            .expect("metadata after build")
+            .modified()
+            .expect("mtime after build");
+
+        // Second call with identical inputs: cache hit — must NOT rebuild.
+        let (mi2, was_built2) =
+            MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
+                .expect("second open_or_build failed");
+        assert!(!was_built2, "second call must reuse the cache (cache hit)");
+
+        // File must not have been rewritten (mtime unchanged).
+        let mtime_after_reuse = std::fs::metadata(cache_path)
+            .expect("metadata after reuse")
+            .modified()
+            .expect("mtime after reuse");
+        assert_eq!(
+            mtime_after_build, mtime_after_reuse,
+            "cache file mtime changed on reuse — index was rebuilt unnecessarily"
+        );
+
+        // Record set must be byte-identical between build and reuse.
+        let records1 = mi1.records();
+        let records2 = mi2.records();
+        assert_eq!(
+            records1, records2,
+            "cached records must be identical to freshly-built records"
+        );
+    }
+
+    /// `index_cache_path` returns distinct paths for different parameter sets.
+    ///
+    /// Two parameter sets that differ in a meaningful way (here: min_length)
+    /// must produce different cache paths so a cached index built with the
+    /// narrower set is not mistakenly reused for the wider set.
+    #[test]
+    fn index_cache_path_distinguishes_different_params() {
+        let idx = make_toy_index();
+        let aa_set_a = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let aa_set_b = AminoAcidSetBuilder::new_standard().build().unwrap();
+
+        let mut params_a = SearchParams::default_tryptic(aa_set_a);
+        params_a.min_length = 3;
+
+        let mut params_b = SearchParams::default_tryptic(aa_set_b);
+        params_b.min_length = 6; // different min_length
+
+        let path_a = index_cache_path(&idx, &params_a);
+        let path_b = index_cache_path(&idx, &params_b);
+
+        assert_ne!(
+            path_a, path_b,
+            "cache paths must differ when min_length differs ({} vs {})",
+            path_a.display(),
+            path_b.display()
+        );
+    }
+
+    /// `index_cache_path` returns the same path when params are identical.
+    #[test]
+    fn index_cache_path_is_stable_for_identical_params() {
+        let idx = make_toy_index();
+        let aa_set_a = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let aa_set_b = AminoAcidSetBuilder::new_standard().build().unwrap();
+
+        let mut params_a = SearchParams::default_tryptic(aa_set_a);
+        params_a.min_length = 4;
+        let mut params_b = SearchParams::default_tryptic(aa_set_b);
+        params_b.min_length = 4; // same
+
+        let path_a = index_cache_path(&idx, &params_a);
+        let path_b = index_cache_path(&idx, &params_b);
+
+        assert_eq!(
+            path_a, path_b,
+            "cache paths must be identical for identical params"
         );
     }
 }

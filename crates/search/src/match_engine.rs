@@ -324,15 +324,21 @@ impl<'a> PreparedSearch<'a> {
         decoy_prefix: &str,
         index_path: &std::path::Path,
     ) -> std::io::Result<Self> {
-        use std::io::BufWriter;
-        {
-            let file = std::fs::File::create(index_path)?;
-            let mut bw = BufWriter::new(file);
-            crate::candidate_index::build_base_peptide_index(
-                idx, params, decoy_prefix, &mut bw,
-            )?;
+        let (mmap_index, was_built) =
+            MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
+        if was_built {
+            eprintln!(
+                "candidate-index: built and cached {} records → {}",
+                mmap_index.len(),
+                index_path.display()
+            );
+        } else {
+            eprintln!(
+                "candidate-index: reusing cached index ({} records) from {}",
+                mmap_index.len(),
+                index_path.display()
+            );
         }
-        let mmap_index = MmapCandidateIndex::open(index_path)?;
 
         let mut aa_set_for_gf: AminoAcidSet = params.aa_set.clone();
         if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {

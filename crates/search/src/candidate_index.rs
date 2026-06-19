@@ -241,14 +241,16 @@ pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
     // different fixed-mod set (e.g. label-free vs +TMT) MUST get different cache
     // keys — otherwise the second run reuses the first run's mass-shifted index and
-    // silently loses IDs. (Variable mods are applied lazily at serve time and do
-    // NOT affect the cached base index, so they are intentionally excluded.) Sort
-    // for a deterministic key (`fixed_mod_deltas` order is not guaranteed).
-    let mut fixed = params.aa_set.fixed_mod_deltas();
-    fixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.to_bits().cmp(&b.1.to_bits())));
-    for (res, delta) in fixed {
+    // silently loses IDs. Use the LOCATION-AWARE fingerprint, not `fixed_mod_deltas`
+    // (residue+delta only): a fixed `*` +229 at N-term vs Anywhere fold different
+    // base masses but share the same (residue, delta) set, so a delta-only key would
+    // collide and reuse a stale index. (Variable mods are applied lazily at serve
+    // time and do NOT affect the cached base index, so they are excluded.) The
+    // fingerprint is already sorted + deduped → deterministic key.
+    for (res, loc_rank, delta_bits) in params.aa_set.fixed_mod_fingerprint() {
         res.hash(&mut h);
-        delta.to_bits().hash(&mut h);
+        loc_rank.hash(&mut h);
+        delta_bits.hash(&mut h);
     }
 
     // Hash all search params that affect base-peptide enumeration.

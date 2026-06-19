@@ -580,6 +580,18 @@ pub fn run_refinement(
         out_queues.push(tagged);
     }
 
+    // Transparency + cost visibility: the Pass-2 candidate pool is the dominant
+    // refine memory driver (NOT the cloned peaks — measured ~45 MB). These counts
+    // let a user/operator see why --refine costs what it costs, and feed the
+    // streaming/drain optimization decision.
+    eprintln!(
+        "[REFINE] anchors={} unident={}/{} pass2_candidates={}",
+        base_seqs.len(),
+        unident.len(),
+        all_spectra.len(),
+        refine_candidates.len(),
+    );
+
     Some(RefinementOutput {
         index: refine_idx,
         candidates: refine_candidates,

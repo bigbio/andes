@@ -290,24 +290,28 @@ fn parse_residue_spec(res: &str) -> ResidueSpec {
     }
 }
 
-/// The standard Carbamidomethyl-C fixed-mod delta (Cys, Anywhere). This is the
-/// ONLY fixed mod the refinement cascade reconstructs ([`refinement_aa_set`]).
-const CAM_C_DELTA: f64 = 57.02146;
-
-/// True iff the only fixed modification on `base` is the standard
-/// Carbamidomethyl-C (Cys, +57.02146), or there are no fixed mods at all.
+/// True iff `base`'s fixed-mod chemistry is exactly what [`refinement_aa_set`]
+/// reconstructs — the standard anywhere Carbamidomethyl-C baseline, or no fixed
+/// mods at all.
 ///
-/// Returns FALSE if `base` carries any OTHER fixed mod (TMT, iTRAQ, a fixed mod
-/// on a non-Cys residue, or a non-CAM delta on Cys). [`refinement_aa_set`]
-/// reconstructs only the standard CAM-C baseline, so any other fixed chemistry
-/// would be silently dropped from the Pass-2 candidate masses; `run_refinement`
-/// uses this to skip refinement entirely rather than run a silently-broken
-/// Pass-2. The fixed-mod inventory comes from
-/// [`AminoAcidSet::fixed_mod_deltas`].
+/// Returns FALSE for any other fixed chemistry (TMT, iTRAQ, a fixed mod on a
+/// non-Cys residue, a non-CAM delta on Cys, OR a CAM-C pinned to a non-Anywhere
+/// location). `refinement_aa_set` rebuilds only the standard anywhere CAM-C, so
+/// anything else would fold different base masses into the Pass-2 candidates;
+/// `run_refinement` uses this to skip refinement rather than run a
+/// silently-broken Pass-2. Compares the full LOCATION-AWARE
+/// [`AminoAcidSet::fixed_mod_fingerprint`] (not just residue+delta) so an
+/// N-term-only CAM-C is correctly rejected, not mistaken for the anywhere form.
 fn has_only_standard_fixed_mods(base: &AminoAcidSet) -> bool {
-    base.fixed_mod_deltas()
-        .iter()
-        .all(|&(residue, delta)| residue == b'C' && (delta - CAM_C_DELTA).abs() < 1e-4)
+    let base_fp = base.fixed_mod_fingerprint();
+    if base_fp.is_empty() {
+        return true;
+    }
+    let standard_fp = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+        .build()
+        .expect("standard CAM-C baseline is a fixed construction and must build")
+        .fixed_mod_fingerprint();
+    base_fp == standard_fp
 }
 
 /// Build the Pass-2 [`AminoAcidSet`]: the base set's FIXED mods (e.g.
@@ -328,7 +332,11 @@ fn has_only_standard_fixed_mods(base: &AminoAcidSet) -> bool {
 /// `base` are NOT reconstructed — the refinement tier is the X!Tandem always-on
 /// chemistry layered on the standard CAM-C baseline; richer fixed-mod schemes
 /// (TMT, etc.) would be supplied via the normal mods file, not the refine path.
-pub fn refinement_aa_set(base: &AminoAcidSet, cfg: &RefineConfig, high_res: bool) -> AminoAcidSet {
+pub fn refinement_aa_set(
+    base: &AminoAcidSet,
+    cfg: &RefineConfig,
+    high_res: bool,
+) -> Result<AminoAcidSet, String> {
     // Seed the builder with the standard fixed Carbamidomethyl-C baseline iff
     // `base` carries it (a single fixed modified C-Anywhere variant).
     let base_has_fixed_cam_c = base
@@ -362,9 +370,12 @@ pub fn refinement_aa_set(base: &AminoAcidSet, cfg: &RefineConfig, high_res: bool
         }
     }
 
+    // Propagate build errors (implausible mass, conflicting fixed+variable on a
+    // residue, …) instead of panicking — a bad `--refine-config` must degrade to
+    // "skip Pass-2 with a WARN", never crash the whole search.
     builder
         .build()
-        .expect("refinement_aa_set: standard fixed + variable refinement mods must build")
+        .map_err(|e| format!("refinement_aa_set: {e}"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -529,9 +540,29 @@ pub fn run_refinement(
         build_peptide_anchored_index(&base_seqs, decoy_prefix, decoy_strategy, seed);
 
     // 4. Pass-2 params: refinement variable-mod tier + the tier's mod cap.
+    //    Bound the per-peptide mod cap: the candidate count grows combinatorially
+    //    in (mods × sites), so a large `--refine-max-mods` over wildcard mods can
+    //    blow up CPU/RAM. Clamp to a sane ceiling and WARN rather than letting a
+    //    misconfiguration exhaust the machine.
+    const MAX_REFINE_MODS_PER_PEPTIDE: u32 = 5;
+    let capped_max_mods = if cfg.max_mods > MAX_REFINE_MODS_PER_PEPTIDE {
+        eprintln!(
+            "WARN: --refine-max-mods {} exceeds the safe ceiling {}; clamping (combinatorial blowup guard).",
+            cfg.max_mods, MAX_REFINE_MODS_PER_PEPTIDE
+        );
+        MAX_REFINE_MODS_PER_PEPTIDE
+    } else {
+        cfg.max_mods
+    };
     let mut refine_params = base_params.clone();
-    refine_params.aa_set = refinement_aa_set(&base_params.aa_set, cfg, high_res);
-    refine_params.max_variable_mods_per_peptide = cfg.max_mods;
+    refine_params.aa_set = match refinement_aa_set(&base_params.aa_set, cfg, high_res) {
+        Ok(set) => set,
+        Err(e) => {
+            eprintln!("WARN: --refine could not build the Pass-2 modification set ({e}); skipping refinement for this run.");
+            return None;
+        }
+    };
+    refine_params.max_variable_mods_per_peptide = capped_max_mods;
 
     // 5. Search ONLY the unidentified spectra. We clone them into a contiguous
     //    sub-vec (run_chunk takes a &[Spectrum]); `spectrum_idx_offset = 0` is
@@ -575,12 +606,20 @@ pub fn run_refinement(
         let global_idx = unident[local_idx];
         let mut tagged = TopNQueue::new(refine_params.top_n_psms_per_spectrum);
         for mut psm in pass2_queue.into_rank_sorted_vec() {
-            psm.features.is_refinement = 1;
             // mod_count uses the OLD index into the full pool — compute before remap.
             let (num_mods, class) = mod_count_and_class(
                 &refine_candidates[psm.primary_candidate_idx() as usize].peptide,
                 cfg,
             );
+            // The anchored Pass-2 DB also contains the UNMODIFIED base peptide, so a
+            // Pass-2 winner can carry zero refinement mods. Those are NOT discoveries
+            // — they duplicate what Pass-1 already searched (same peptide, same
+            // spectrum) and must not be emitted as refinement rows (`is_refinement=1`)
+            // or they inflate the modified count and double-count per scan.
+            if num_mods == 0 {
+                continue;
+            }
+            psm.features.is_refinement = 1;
             psm.features.num_mods = num_mods;
             psm.features.refine_mod_class = class;
             // Fix the spectrum index back to the global stream position.
@@ -1048,7 +1087,7 @@ mod tests {
     #[test]
     fn refinement_aa_set_high_res_exposes_five_variable_mods() {
         let base = base_set_with_cam_c();
-        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true);
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
 
         // Count DISTINCT variable mods across all locations by name.
         let mut names: HashSet<String> = HashSet::new();
@@ -1075,7 +1114,7 @@ mod tests {
     #[test]
     fn refinement_aa_set_low_res_drops_deamidation() {
         let base = base_set_with_cam_c();
-        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), false);
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), false).unwrap();
         let mut names: HashSet<String> = HashSet::new();
         for aa in set.iter_variants() {
             if let Some(m) = &aa.mod_ {
@@ -1094,7 +1133,7 @@ mod tests {
     #[test]
     fn refinement_aa_set_oxidation_m_has_modified_variant() {
         let base = base_set_with_cam_c();
-        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true);
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
         // M-Anywhere should now carry an Oxidation variable variant (unmod + ox).
         let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
         assert!(m_variants.iter().any(|aa| {

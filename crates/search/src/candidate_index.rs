@@ -226,14 +226,30 @@ pub fn build_base_peptide_index<W: Write>(
 pub fn index_cache_path(idx: &SearchIndex, params: &SearchParams) -> PathBuf {
     let mut h = DefaultHasher::new();
 
-    // Hash target protein content: accession + sequence bytes.
-    for protein in idx.iter_target_proteins() {
+    // Hash ALL protein content (targets AND decoys): accession + sequence bytes.
+    // Hashing the decoy sequences directly (not just `decoy_prefix`) captures the
+    // decoy strategy and shuffle seed — a prefix-only key would let a
+    // reverse-vs-shuffle (or reseeded shuffle) run silently reuse a stale decoy
+    // index and corrupt FDR.
+    for protein in &idx.db.proteins {
         protein.accession.hash(&mut h);
         protein.sequence.hash(&mut h);
     }
-
-    // Hash the decoy prefix (affects the decoy flag in each IndexRecord).
     idx.decoy_prefix.hash(&mut h);
+
+    // Hash the FIXED modifications. Base-peptide masses fold fixed mods in (e.g.
+    // Carbamidomethyl-C), so two runs with the same FASTA/enzyme/lengths but a
+    // different fixed-mod set (e.g. label-free vs +TMT) MUST get different cache
+    // keys — otherwise the second run reuses the first run's mass-shifted index and
+    // silently loses IDs. (Variable mods are applied lazily at serve time and do
+    // NOT affect the cached base index, so they are intentionally excluded.) Sort
+    // for a deterministic key (`fixed_mod_deltas` order is not guaranteed).
+    let mut fixed = params.aa_set.fixed_mod_deltas();
+    fixed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.to_bits().cmp(&b.1.to_bits())));
+    for (res, delta) in fixed {
+        res.hash(&mut h);
+        delta.to_bits().hash(&mut h);
+    }
 
     // Hash all search params that affect base-peptide enumeration.
     // `enzyme` and `Enzyme` must impl `Hash` — confirmed by the model crate.
@@ -815,6 +831,27 @@ mod tests {
             "cache paths must differ when min_length differs ({} vs {})",
             path_a.display(),
             path_b.display()
+        );
+    }
+
+    /// `index_cache_path` distinguishes different FIXED-mod sets. Base masses fold
+    /// fixed mods in, so a label-free vs +CAM-C run on the same FASTA/enzyme must
+    /// NOT collide on one cache file (else the second run reuses a mass-shifted
+    /// index and silently loses IDs).
+    #[test]
+    fn index_cache_path_distinguishes_fixed_mods() {
+        let idx = make_toy_index();
+        let mut p_nomod =
+            SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
+        p_nomod.min_length = 3;
+        let mut p_cam = SearchParams::default_tryptic(
+            AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c().build().unwrap(),
+        );
+        p_cam.min_length = 3;
+        assert_ne!(
+            index_cache_path(&idx, &p_nomod),
+            index_cache_path(&idx, &p_cam),
+            "cache key must differ when the fixed-mod set differs"
         );
     }
 

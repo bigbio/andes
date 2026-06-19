@@ -558,15 +558,25 @@ pub fn run_refinement(
         (queues, refine_prepared.candidates)
     };
 
-    // Tag each Pass-2 winner; collect into one queue per refined spectrum. The
-    // queues are returned (NOT merged into the Pass-1 queues) so the PIN writer
-    // resolves `candidate_idxs` against `refine_candidates`, not the Pass-1 list.
+    // Tag each Pass-2 winner; collect into one queue per refined spectrum, AND
+    // PRUNE the candidate pool to just the winners. The Pass-2 search visits an
+    // enormous pool (mod permutations over every anchored peptide — millions of
+    // candidates), but only the few thousand referenced by a surviving PSM are
+    // ever needed downstream: the PIN resolves peptide/accession through
+    // `candidate_idxs`. We copy those into a compact pool, remap indices, and drop
+    // the full pool — it is the dominant refine memory driver (the cloned peaks
+    // are ~45 MB by comparison). Output is unchanged: each PSM still resolves to
+    // the same peptide/candidate, only the internal index numbering differs.
+    let pass2_total = refine_candidates.len();
+    let mut compact: Vec<Candidate> = Vec::new();
+    let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     let mut out_queues: Vec<TopNQueue> = Vec::with_capacity(unident.len());
     for (local_idx, pass2_queue) in pass2_queues.into_iter().enumerate() {
         let global_idx = unident[local_idx];
         let mut tagged = TopNQueue::new(refine_params.top_n_psms_per_spectrum);
         for mut psm in pass2_queue.into_rank_sorted_vec() {
             psm.features.is_refinement = 1;
+            // mod_count uses the OLD index into the full pool — compute before remap.
             let (num_mods, class) = mod_count_and_class(
                 &refine_candidates[psm.primary_candidate_idx() as usize].peptide,
                 cfg,
@@ -575,26 +585,40 @@ pub fn run_refinement(
             psm.features.refine_mod_class = class;
             // Fix the spectrum index back to the global stream position.
             psm.spectrum_idx = global_idx;
+            // Remap every candidate index into the compact winners-only pool.
+            for idx in &mut psm.candidate_idxs {
+                let old = *idx;
+                *idx = match remap.get(&old) {
+                    Some(&n) => n,
+                    None => {
+                        let n = compact.len() as u32;
+                        compact.push(refine_candidates[old as usize].clone());
+                        remap.insert(old, n);
+                        n
+                    }
+                };
+            }
             tagged.force_push(psm);
         }
         out_queues.push(tagged);
     }
+    drop(refine_candidates); // free the full Pass-2 pool now; `compact` replaces it
 
-    // Transparency + cost visibility: the Pass-2 candidate pool is the dominant
-    // refine memory driver (NOT the cloned peaks — measured ~45 MB). These counts
-    // let a user/operator see why --refine costs what it costs, and feed the
-    // streaming/drain optimization decision.
+    // Transparency + cost visibility: show the full Pass-2 pool size and the
+    // pruned winners-only count so a user/operator sees both the search cost and
+    // what survives into the merged PIN.
     eprintln!(
-        "[REFINE] anchors={} unident={}/{} pass2_candidates={}",
+        "[REFINE] anchors={} unident={}/{} pass2_candidates={} (pruned to {} winners)",
         base_seqs.len(),
         unident.len(),
         all_spectra.len(),
-        refine_candidates.len(),
+        pass2_total,
+        compact.len(),
     );
 
     Some(RefinementOutput {
         index: refine_idx,
-        candidates: refine_candidates,
+        candidates: compact,
         queues: out_queues,
         global_spectrum_indices: unident,
     })

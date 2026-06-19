@@ -400,8 +400,12 @@ pub fn mod_count_and_class(peptide: &Peptide, cfg: &RefineConfig) -> (u32, u32) 
     for aa in &peptide.residues {
         let Some(m) = aa.mod_.as_ref() else { continue };
         // Find the refinement mod that this residue's modification matches.
+        // Match on delta + residue + LOCATION so two tiers with the same
+        // mass/residue but a different location/class are not conflated
+        // (e.g. an anywhere mod vs an N-term mod of the same Δ).
         let matched = cfg.mods.iter().find(|rm| {
             (rm.delta - m.mass_delta).abs() < 1e-4
+                && parse_location(&rm.location) == m.location
                 && rm.residues.iter().any(|r| {
                     r == "*" || (r.len() == 1 && r.as_bytes()[0] == aa.residue)
                 })

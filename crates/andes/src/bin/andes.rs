@@ -266,7 +266,7 @@ struct SearchArgs {
     /// A single `NumMods=N` line sets the max variable mods per peptide.
     /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
     /// are ignored. When omitted, the binary uses its built-in defaults
-    /// (Carbamidomethyl-C fixed, Oxidation-M variable). The deprecated
+    /// (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl variable). The deprecated
     /// `--mod` form (singular) is still accepted as a hidden alias.
     #[arg(long = "mods", alias = "mod", value_name = "MODFILE")]
     mods: Option<PathBuf>,
@@ -442,7 +442,7 @@ struct TrainFromSearchArgs {
     model_id: Option<String>,
 
     /// Path to a mods.txt file (same format as `--mods` for search). When
-    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M
+    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl
     /// variable).
     #[arg(long)]
     mods: Option<PathBuf>,
@@ -1235,7 +1235,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     //
     // If --mod is given, parse the mods.txt file. Otherwise
     // fall back to andes's historical defaults (CAM fixed on C,
-    // Oxidation variable on M) so existing tests keep their behaviour.
+    // Oxidation variable on M + protein-N-term Acetyl variable).
     //
     // `num_mods_from_file` is populated only when --mod is given and the
     // file contains a `NumMods=N` line; it overrides the default
@@ -3800,7 +3800,7 @@ fn load_seed_param(seed_model: &Option<String>) -> Result<(String, Param), Box<d
 }
 
 /// Build an `AminoAcidSet` from an optional mods file, defaulting to
-/// Carbamidomethyl-C fixed + Oxidation-M variable.
+/// Carbamidomethyl-C fixed + Oxidation-M variable + protein-N-term Acetyl variable.
 fn build_aa_set(
     mods: &Option<PathBuf>,
 ) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
@@ -3871,9 +3871,24 @@ fn default_aa_set_with_tag(
         neutral_losses: Vec::new(),
         loss_class: 0,
     };
+    // Protein N-terminal acetylation (+42.010565) — a near-universal default in
+    // the field (MSFragger / Comet / MaxQuant). Restricted to the PROTEIN N-term
+    // (one site per protein, after Met cleavage), so it is combinatorially cheap
+    // (not every peptide N-term) and biologically correct.
+    let acetyl = Modification {
+        name: "Acetyl".into(),
+        mass_delta: 42.010565,
+        residue: ResidueSpec::Wildcard,
+        location: ModLocation::ProtNTerm,
+        fixed: false,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
     let mut b = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
-        .add_variable_mod(ox);
+        .add_variable_mod(ox)
+        .add_variable_mod(acetyl);
     if let Some((name, mass)) = tag {
         let tag_k = Modification {
             name: name.into(),

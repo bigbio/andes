@@ -377,16 +377,17 @@ struct SearchArgs {
     #[arg(long = "refine-select-psm-fdr", default_value_t = 0.10)]
     refine_select_psm_fdr: f64,
 
-    /// Max variable mods per refined peptide. Default 2.
-    #[arg(long = "refine-max-mods", default_value_t = 2)]
-    refine_max_mods: u32,
+    /// Max variable mods per refined peptide. Overrides the value from
+    /// `--refine-config` YAML; when neither is given, the built-in tier's value (2).
+    #[arg(long = "refine-max-mods")]
+    refine_max_mods: Option<u32>,
 
-    /// Require high-res data for refinement; on low-res, skip refine. Default true.
-    /// Pass an explicit value to override, e.g. `--refine-high-res-only false` to
-    /// force the cascade on low-res data (otherwise it is a default-on switch that
-    /// can't be disabled).
-    #[arg(long = "refine-high-res-only", default_value_t = true, action = clap::ArgAction::Set)]
-    refine_high_res_only: bool,
+    /// Require high-res data for refinement; on low-res, skip refine. Overrides the
+    /// `--refine-config` YAML `high_res_only`; when neither is given, the tier
+    /// default (true). e.g. `--refine-high-res-only false` forces the cascade on
+    /// low-res data.
+    #[arg(long = "refine-high-res-only", action = clap::ArgAction::Set)]
+    refine_high_res_only: Option<bool>,
 
     /// DEBUG ONLY: also emit the legacy separate <out>.refine.pin (disjoint-union A/B).
     #[arg(long = "refine-debug-split-pin", default_value_t = false, hide = true)]
@@ -2046,7 +2047,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
             None => search::RefineConfig::default_tier(),
         };
-        let cfg = search::RefineConfig { max_mods: cli.refine_max_mods, ..base_cfg };
+        // CLI `--refine-max-mods` overrides the YAML/tier value only when explicitly
+        // passed; otherwise the config's own `max_mods` is honored.
+        let cfg = search::RefineConfig {
+            max_mods: cli.refine_max_mods.unwrap_or(base_cfg.max_mods),
+            ..base_cfg
+        };
 
         // High-res signal: the resolved model's instrument class. High-res
         // instruments fragment-match in ppm (20 ppm vs 0.5 Da ion-trap), which is
@@ -2054,7 +2060,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // deamidation +0.984 vs a C13 isotope error) are resolvable.
         let high_res = param.data_type.instrument.is_high_resolution();
 
-        if cli.refine_high_res_only && !high_res {
+        // CLI `--refine-high-res-only` overrides the YAML/tier value only when
+        // explicitly passed; otherwise the config's own `high_res_only` is honored.
+        let high_res_only = cli.refine_high_res_only.unwrap_or(cfg.high_res_only);
+        if high_res_only && !high_res {
             eprintln!("WARN: --refine-high-res-only: data is low-res; skipping refinement.");
             None
         } else {
@@ -2160,7 +2169,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>()
                 .join("+")
         };
-        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, is_mgf)?;
+        // Use the SAME merged candidate/index pair the PIN write used: after
+        // `merge_into_pass1`, `queues` holds candidate indices into the merged
+        // candidate list (Pass-1 ⊕ offset Pass-2), so resolving them against the
+        // un-merged `prepared.candidates`/`idx` would be wrong/out-of-bounds.
+        output::write_tsv(tsv_path, &spectra, &queues, pin_candidates, &params, pin_index, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 

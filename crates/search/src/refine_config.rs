@@ -57,7 +57,50 @@ impl RefineConfig {
     }
 
     pub fn from_yaml_str(s: &str) -> Result<Self, String> {
-        serde_yaml::from_str(s).map_err(|e| format!("refine-config parse: {e}"))
+        let cfg: RefineConfig =
+            serde_yaml::from_str(s).map_err(|e| format!("refine-config parse: {e}"))?;
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Reject invalid residue/location tokens that would otherwise SILENTLY become
+    /// broad defaults (a residue typo → wildcard = every residue; an unknown
+    /// location → Anywhere), massively (and wrongly) expanding the candidate space.
+    /// A residue must be `"*"` or a single uppercase amino-acid letter; a location
+    /// must be one of the accepted spellings (those `refinement::parse_location`
+    /// recognizes). Fails fast with a clear message.
+    pub fn validate(&self) -> Result<(), String> {
+        // Accepted location spellings (lowercased), matching parse_location +
+        // the `anywhere` default.
+        const VALID_LOCATIONS: &[&str] = &[
+            "anywhere",
+            "n_term", "n-term", "nterm",
+            "c_term", "c-term", "cterm",
+            "protein_n_term", "prot-n-term", "prot_n_term",
+            "protein_c_term", "prot-c-term", "prot_c_term",
+        ];
+        for m in &self.mods {
+            for r in &m.residues {
+                let ok = r == "*"
+                    || (r.len() == 1 && r.as_bytes()[0].is_ascii_uppercase());
+                if !ok {
+                    return Err(format!(
+                        "refine-config mod '{}': invalid residue token {:?} \
+                         (expected \"*\" or a single uppercase amino-acid letter)",
+                        m.name, r
+                    ));
+                }
+            }
+            let loc = m.location.trim().to_ascii_lowercase();
+            if !VALID_LOCATIONS.contains(&loc.as_str()) {
+                return Err(format!(
+                    "refine-config mod '{}': unknown location {:?} (expected one of \
+                     anywhere | n_term | c_term | protein_n_term | protein_c_term)",
+                    m.name, m.location
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Map a class string to the PIN `refine_mod_class` id (Task 2 encoding).
@@ -98,5 +141,30 @@ mod tests {
     fn class_ids() {
         assert_eq!(RefineConfig::class_id("deamidation"), 2);
         assert_eq!(RefineConfig::class_id("unknown"), 99);
+    }
+
+    #[test]
+    fn default_tier_validates() {
+        assert!(RefineConfig::default_tier().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_bad_residue_token() {
+        let y = "mods:\n  - {name: Oxidation, delta: 15.994915, residues: [Met], location: anywhere, class: oxidation}\n";
+        let err = RefineConfig::from_yaml_str(y).unwrap_err();
+        assert!(err.contains("invalid residue token"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_location() {
+        let y = "mods:\n  - {name: Acetyl, delta: 42.010565, residues: [\"*\"], location: ProteinNTerm, class: nterm_acetyl}\n";
+        let err = RefineConfig::from_yaml_str(y).unwrap_err();
+        assert!(err.contains("unknown location"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_star_and_single_letter() {
+        let y = "mods:\n  - {name: Acetyl, delta: 42.010565, residues: [\"*\"], location: protein_n_term, class: nterm_acetyl}\n  - {name: Oxidation, delta: 15.994915, residues: [M], location: anywhere, class: oxidation}\n";
+        assert!(RefineConfig::from_yaml_str(y).is_ok());
     }
 }

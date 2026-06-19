@@ -439,7 +439,7 @@ mod tests {
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
             score_mode: crate::search_params::ScoreMode::Rank,
-            refine_select_psm_fdr: 0.10,
+            refine_select_psm_fdr: 0.01,
             candidate_index: crate::search_params::CandidateIndexMode::Ram,
         }
     }

@@ -252,9 +252,14 @@ pub(crate) fn candidate_nominal_bounds(
     let tol_da_right = params.precursor_tolerance.right.as_da(neutral_mass);
     let widen_left = (tol_da_left - 0.4999_f64).round() as i32;
     let widen_right = (tol_da_right - 0.4999_f64).round() as i32;
-    // Convention: max widens by tol_da_left, min widens by tol_da_right.
-    let min_nominal = nominal_center - iso_max - widen_right;
-    let max_nominal = nominal_center - iso_min + widen_left;
+    // `matches_precursor` uses `tolerance.left` when the peptide is LIGHTER than
+    // the observed mass and `tolerance.right` when HEAVIER. So the lower nominal
+    // bound (lightest acceptable peptide) widens by `left`, and the upper bound
+    // (heaviest) by `right`. (Inert when left == right; matters for the
+    // calibrator's asymmetric tolerance and any Da-asymmetric config — using the
+    // wrong side there prunes real candidates before the exact filter.)
+    let min_nominal = nominal_center - iso_max - widen_left;
+    let max_nominal = nominal_center - iso_min + widen_right;
     (min_nominal, max_nominal)
 }
 

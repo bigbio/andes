@@ -2040,10 +2040,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Opt-in (`--refine`). Runs a scoped Pass-2 over the unidentified spectra
     // against the confidently-identified proteins, with the refinement
     // variable-mod tier applied. Computed BEFORE the Pass-1 PIN write (it reads
-    // `&queues`/`&spectra` immutably). The Pass-2 winners are NOT merged into
-    // `queues`; they are returned and written to a SEPARATE "refine" PIN — the
-    // merged report is the disjoint union Pass-1 PIN ⊎ refine PIN (combine
-    // downstream with mokapot's --group-column on IsRefinement/RefinementModClass).
+    // `&queues`/`&spectra` immutably). The Pass-2 winners ARE merged into
+    // `queues` (force_pushed per scan by `merge_into_pass1`) and written to a
+    // SINGLE unified PIN, so a scan's unmodified Pass-1 and modified Pass-2 PSMs
+    // compete in one report. Collapse best-per-scan downstream; optionally split
+    // by mokapot --group-column on IsRefinement/RefinementModClass. (Legacy
+    // separate-PIN A/B is still available behind --refine-debug-split-pin.)
     let refine_output = if cli.refine {
         // Refinement config: explicit YAML or the built-in 5-mod default tier.
         let base_cfg = match &cli.refine_config {

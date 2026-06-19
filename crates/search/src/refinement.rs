@@ -536,6 +536,37 @@ pub fn run_refinement(
         return None;
     }
 
+    // Announce the cascade + the discovery chemistry it will search, splitting
+    // active vs. the mods skipped on this resolution (deamidation is high-res
+    // only). Mirrors the filter `refinement_aa_set` applies, so the banner always
+    // matches what is actually searched.
+    let fmt_mod = |m: &crate::refine_config::RefineMod| {
+        format!("{} ({} {:+.3})", m.name, m.residues.join(","), m.delta)
+    };
+    let active: Vec<String> = cfg
+        .mods
+        .iter()
+        .filter(|m| high_res || m.class != "deamidation")
+        .map(&fmt_mod)
+        .collect();
+    let skipped: Vec<String> = cfg
+        .mods
+        .iter()
+        .filter(|m| !high_res && m.class == "deamidation")
+        .map(&fmt_mod)
+        .collect();
+    eprintln!(
+        "[refine] Starting PTM-refinement search over {} confident-protein anchor peptides \
+         ({} unidentified spectra, max {} mods/peptide)",
+        base_seqs.len(),
+        unident.len(),
+        cfg.max_mods,
+    );
+    eprintln!("[refine]   discovery mods: {}", active.join(", "));
+    if !skipped.is_empty() {
+        eprintln!("[refine]   skipped (low-res): {}", skipped.join(", "));
+    }
+
     // 3. Peptide-anchored target+decoy index: one mini-protein per confident base
     //    peptide + a 1:1 decoy each. Built as an owned local so it can be MOVED
     //    into the returned `RefinementOutput` once the `PreparedSearch` borrow of

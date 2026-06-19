@@ -103,7 +103,9 @@ pub struct SearchParams {
     pub score_mode: ScoreMode,
     /// Refinement-cascade selection FDR (SCOPING only, NOT a reported FDR):
     /// proteins with a Pass-1 target PSM at internal-TDC-q <= this are refined.
-    /// Default 0.10. Only consulted when `--refine` is set.
+    /// Default 0.01 (same internal TDC q as calibration/report). A looser gate
+    /// leaks low-confidence anchors into the entrapment-FDP. Only consulted when
+    /// `--refine` is set.
     pub refine_select_psm_fdr: f64,
     /// Candidate-resolution backing: `Ram` (default, in-RAM `Vec<Candidate>` +
     /// bucket index — byte-identical to the historic path) or `Mmap` (out-of-core
@@ -164,7 +166,7 @@ impl SearchParams {
             chimeric_max_coisolated: 4,
             chimeric_max_kl: 0.3,
             score_mode: ScoreMode::Rank,
-            refine_select_psm_fdr: 0.10,
+            refine_select_psm_fdr: 0.01,
             candidate_index: CandidateIndexMode::Ram,
         }
     }
@@ -233,6 +235,6 @@ mod tests {
         assert_eq!(params.chimeric_max_coisolated, 4);
         assert_eq!(params.chimeric_max_kl, 0.3);
         assert_eq!(params.score_mode, ScoreMode::Rank);
-        assert_eq!(params.refine_select_psm_fdr, 0.10);
+        assert_eq!(params.refine_select_psm_fdr, 0.01);
     }
 }

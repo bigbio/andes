@@ -373,8 +373,12 @@ struct SearchArgs {
     #[arg(long = "refine-config")]
     refine_config: Option<std::path::PathBuf>,
 
-    /// Confident-protein SCOPING FDR (not a reported FDR). Default 0.10.
-    #[arg(long = "refine-select-psm-fdr", default_value_t = 0.10)]
+    /// Confident-anchor SCOPING FDR (not a reported FDR). Default 0.01 — the same
+    /// internal TDC q used for calibration/training/report. A looser gate (e.g.
+    /// 0.10) admits low-confidence anchors that leak into the entrapment-FDP
+    /// (b1931: 0.10 → 4.86% vs 0.01 → 0.29% true FDP). Hidden power-user knob;
+    /// leave at the default unless you have a measured reason to widen it.
+    #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true)]
     refine_select_psm_fdr: f64,
 
     /// Max variable mods per refined peptide. Overrides the value from

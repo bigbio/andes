@@ -398,9 +398,37 @@ impl AminoAcidSetBuilder {
                             variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
                         }
                     }
+                    // A residue carrying a fixed ANYWHERE mod (e.g. Carbamidomethyl-C)
+                    // keeps it at EVERY position, including the termini. A terminal
+                    // VARIABLE mod (e.g. protein-N-term Acetyl) must therefore STACK on
+                    // top of that fixed mass — emitting variable-alone would drop the
+                    // mandatory fixed mod (e.g. an N-terminal Cys would become Acetyl-only
+                    // +42 instead of CAM+Acetyl +99, a wrong-mass candidate). Fold the
+                    // fixed-anywhere mass into a combined mod so the stacked form is
+                    // enumerated. (The fixed-anywhere-only form is already present via the
+                    // Anywhere list propagated into this terminal cache.)
+                    let fixed_anywhere: Option<&Arc<Modification>> = fixed_mods_arc
+                        .iter()
+                        .find(|m| m.location == ModLocation::Anywhere && m.applies_to(r, ModLocation::Anywhere));
                     for vm in &variable_matches {
                         if vm.location == loc {
-                            variants.push(std_aa.clone().with_mod(Arc::clone(vm)));
+                            let aa = match fixed_anywhere {
+                                Some(fm) => {
+                                    let combined = Modification {
+                                        name: format!("{}+{}", fm.name, vm.name),
+                                        mass_delta: fm.mass_delta + vm.mass_delta,
+                                        residue: vm.residue,
+                                        location: vm.location,
+                                        fixed: false, // stacked variant still consumes a variable slot
+                                        accession: None,
+                                        neutral_losses: vm.neutral_losses.clone(),
+                                        loss_class: vm.loss_class,
+                                    };
+                                    std_aa.clone().with_mod(Arc::new(combined))
+                                }
+                                None => std_aa.clone().with_mod(Arc::clone(vm)),
+                            };
+                            variants.push(aa);
                         }
                     }
                 }
@@ -926,16 +954,34 @@ mod tests {
         let n_any_acetyl   = anywhere.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
         assert_eq!(n_any_acetyl, 0, "Acetyl Prot-N-term must NOT appear in Anywhere AA list");
 
-        // Prot-N-term: starts from Anywhere list + Acetyl variants per residue
-        // (wildcard residue → 20 acetyl variants added at Prot-N-term).
-        let n_pn_acetyl = prot_n.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
-        assert_eq!(n_pn_acetyl, 20, "Prot-N-term AA list must include 20 acetyl variants (one per residue)");
+        // Prot-N-term: starts from Anywhere list + one acetyl-bearing variant per
+        // residue (wildcard residue → 20 acetyl variants added at Prot-N-term).
+        // For Cys, the fixed Carbamidomethyl STACKS under the variable Acetyl, so
+        // its variant is the combined "Carbamidomethyl+Acetyl" (not Acetyl-alone).
+        let n_pn_acetyl = prot_n
+            .iter()
+            .filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
+            .count();
+        assert_eq!(n_pn_acetyl, 20, "Prot-N-term AA list must include 20 acetyl-bearing variants (one per residue)");
 
-        // Total Prot-N-term list = Anywhere list + 20 acetyl variants.
+        // P1b regression: protein-N-term Cys must carry CAM+Acetyl (+99.032590),
+        // NOT Acetyl-alone (+42.010565). The fixed CAM (+57.02146) is mandatory.
+        let c_pn = prot_n
+            .iter()
+            .find(|aa| aa.residue == b'C' && aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
+            .expect("Cys must have an acetyl-bearing Prot-N-term variant");
+        let c_delta = c_pn.mod_.as_ref().unwrap().mass_delta;
+        assert!(
+            (c_delta - (57.02146 + 42.010565)).abs() < 1e-4,
+            "Prot-N-term Cys acetyl variant must be CAM+Acetyl (+99.032), got +{c_delta} \
+             (Acetyl-alone +42.01 would drop the mandatory fixed CAM)"
+        );
+
+        // Total Prot-N-term list = Anywhere list + 20 acetyl-bearing variants.
         assert_eq!(
             prot_n.len(),
             anywhere.len() + 20,
-            "Prot-N-term list = Anywhere list + 20 acetyl variants; \
+            "Prot-N-term list = Anywhere list + 20 acetyl-bearing variants; \
              actual Anywhere len = {}, Prot-N-term len = {}, Anywhere modified = {}",
             anywhere.len(), prot_n.len(), n_any_modified
         );

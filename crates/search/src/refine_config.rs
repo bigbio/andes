@@ -47,7 +47,12 @@ impl RefineConfig {
             max_mods: 2,
             high_res_only: true,
             mods: vec![
-                m("Oxidation", 15.994915, &["M"], "anywhere", "oxidation"),
+                // Oxidation/hydroxylation (+15.995, Unimod 35). M is the common
+                // artifact; P and K cover collagen/ECM hydroxyproline &
+                // hydroxylysine — heavily-modified proteins whose peptides never
+                // match unmodified, so a closed search loses the whole protein.
+                // (P+K widen the oxidation candidate space ~3-5× vs M-only.)
+                m("Oxidation", 15.994915, &["M", "P", "K"], "anywhere", "oxidation"),
                 m("Deamidation", 0.984016, &["N", "Q"], "anywhere", "deamidation"),
                 m("Gln->pyro-Glu", -17.026549, &["Q"], "n_term", "nterm_loss"),
                 m("Glu->pyro-Glu", -18.010565, &["E"], "n_term", "nterm_loss"),

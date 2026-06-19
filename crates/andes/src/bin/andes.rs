@@ -122,6 +122,16 @@ fn available_memory_bytes() -> Option<u64> {
     None
 }
 
+/// Emit a one-line search-progress update after each scored chunk: cumulative
+/// spectra scored, throughput, and elapsed time. The streaming search has no
+/// upfront total for mzML/MGF, so this reports a running count + rate rather than
+/// a percentage (use it to see the search is live and how fast it is going).
+fn report_search_progress(scored: usize, start: std::time::Instant) {
+    let secs = start.elapsed().as_secs_f64();
+    let rate = if secs > 0.0 { scored as f64 / secs } else { 0.0 };
+    eprintln!("[search] {scored} spectra scored (~{rate:.0}/s, {secs:.0}s elapsed)");
+}
+
 /// Search arguments (shared by the default search path and exposed as a
 /// flat arg group so that `andes --spectrum X --database Y --output-pin Z`
 /// keeps working unchanged).
@@ -1940,6 +1950,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     all_spectra.push(spec);
                 }
+                report_search_progress(all_spectra.len(), t_search_start);
             }
             let (err_count, first_errors) = parser_handle
                 .join()
@@ -2023,6 +2034,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     all_spectra.push(spec);
                 }
+                report_search_progress(all_spectra.len(), t_search_start);
                 log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
             }
 

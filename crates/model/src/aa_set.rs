@@ -91,6 +91,46 @@ impl AminoAcidSet {
         out
     }
 
+    /// Canonical, order-independent fingerprint of the FIXED modifications that
+    /// ALSO distinguishes them by `ModLocation`.
+    ///
+    /// [`fixed_mod_deltas`] collapses fixed mods to `(residue, delta)`, which is
+    /// insufficient for cache keys: a fixed `*` +229 at `NTerm` and a fixed `*`
+    /// +229 `Anywhere` yield the SAME `(residue, delta)` set yet fold very
+    /// different base masses into a peptide (N-term once vs every residue). Any
+    /// cache keyed on `fixed_mod_deltas` would treat them as identical and reuse
+    /// a stale, mass-shifted candidate index. This fingerprint keys on the
+    /// `(residue, location)` table entries — which differ between those two
+    /// configs — so it tells them apart. Returns sorted `(residue,
+    /// location_rank, mass_delta_bits)`, deduplicated.
+    pub fn fixed_mod_fingerprint(&self) -> Vec<(u8, u8, u64)> {
+        fn loc_rank(l: ModLocation) -> u8 {
+            match l {
+                ModLocation::Anywhere => 0,
+                ModLocation::NTerm => 1,
+                ModLocation::CTerm => 2,
+                ModLocation::ProtNTerm => 3,
+                ModLocation::ProtCTerm => 4,
+            }
+        }
+        let mut seen: std::collections::HashSet<(u8, u8, u64)> = std::collections::HashSet::new();
+        let mut out: Vec<(u8, u8, u64)> = Vec::new();
+        for ((residue, location), variants) in &self.table {
+            for aa in variants {
+                if let Some(m) = aa.mod_.as_ref() {
+                    if m.fixed {
+                        let key = (*residue, loc_rank(*location), m.mass_delta.to_bits());
+                        if seen.insert(key) {
+                            out.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
+    }
+
     // -----------------------------------------------------------------------
     // GF helpers
     // -----------------------------------------------------------------------
@@ -749,6 +789,45 @@ mod tests {
         assert!((deltas[0].1 - 57.02146).abs() < 1e-6);
         assert_eq!(deltas[1].0, b'K');
         assert!((deltas[1].1 - 229.162932).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fixed_mod_fingerprint_distinguishes_location_where_deltas_collide() {
+        // A fixed +229 on K Anywhere vs at the N-term fold DIFFERENT base masses
+        // (every K vs the N-terminal residue only) yet produce the SAME
+        // (residue, delta) set. `fixed_mod_deltas` can't tell them apart; the
+        // location-aware fingerprint MUST — else the mmap index cache key
+        // collides and silently reuses a mass-shifted candidate index.
+        let mk = |loc: ModLocation| Modification {
+            name: "TMT6plex".to_string(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Specific(b'K'),
+            location: loc,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let anywhere = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(mk(ModLocation::Anywhere))
+            .build()
+            .unwrap();
+        let nterm = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(mk(ModLocation::NTerm))
+            .build()
+            .unwrap();
+        // The delta-only view collides (that IS the bug being guarded against)...
+        assert_eq!(
+            anywhere.fixed_mod_deltas(),
+            nterm.fixed_mod_deltas(),
+            "fixed_mod_deltas is expected to collide on location"
+        );
+        // ...but the location-aware fingerprint must differ.
+        assert_ne!(
+            anywhere.fixed_mod_fingerprint(),
+            nterm.fixed_mod_fingerprint(),
+            "fingerprint must distinguish Anywhere vs NTerm fixed mod"
+        );
     }
 
     #[test]

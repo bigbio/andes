@@ -168,6 +168,43 @@ pub fn base_peptide_records(
         .collect()
 }
 
+/// Estimate whether the in-RAM candidate index (the `Vec<Candidate>` the default
+/// `Ram` backing materializes) would fit within `budget_bytes`.
+///
+/// Used by `--candidate-index auto` to choose RAM vs out-of-core mmap WITHOUT
+/// risking an OOM: the in-RAM path `.collect()`s every modified candidate (each
+/// owning a `Peptide` residue `Vec`), which for large mod searches is the term
+/// that blows up. We accumulate a per-candidate byte estimate over
+/// [`enumerate_candidates`] and **bail early** the moment it crosses the budget,
+/// so the cost is bounded by the budget (not by the — possibly enormous — total
+/// candidate count). Returns `true` if the full set fits, `false` if it would
+/// exceed `budget_bytes`.
+///
+/// The per-candidate cost is intentionally a slight OVER-estimate (so we err
+/// toward mmap near the limit and never under-predict into an OOM): the
+/// `Candidate` struct + its heap `Peptide` residues (the dominant term; each
+/// `AminoAcid` carries an `Arc<Modification>`) + the mass-bucket index entry.
+pub fn ram_candidate_index_fits(
+    idx: &SearchIndex,
+    params: &SearchParams,
+    decoy_prefix: &str,
+    budget_bytes: u64,
+) -> bool {
+    // Conservative per-residue / per-candidate constants (bytes).
+    const PER_RESIDUE: u64 = 32; // AminoAcid + Arc refcount slot + slack
+    const PER_CANDIDATE_OVERHEAD: u64 = 120; // struct + Vec header + bucket-idx entry + alloc overhead
+    let mut acc: u64 = 0;
+    for c in enumerate_candidates(idx, params, decoy_prefix) {
+        acc = acc.saturating_add(
+            PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE,
+        );
+        if acc > budget_bytes {
+            return false;
+        }
+    }
+    true
+}
+
 /// Canonical builder: enumerate base peptides and write a mass-sorted binary
 /// index to `out`.
 ///
@@ -582,6 +619,23 @@ mod tests {
             }],
         };
         SearchIndex::from_target_db(&target, "XXX")
+    }
+
+    #[test]
+    fn ram_candidate_index_fits_respects_budget() {
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        // A generous budget fits the toy index; a zero budget never does.
+        assert!(
+            ram_candidate_index_fits(&idx, &params, "XXX", u64::MAX),
+            "toy index must fit an unbounded budget"
+        );
+        assert!(
+            !ram_candidate_index_fits(&idx, &params, "XXX", 0),
+            "no candidate set fits a zero budget"
+        );
     }
 
     #[test]

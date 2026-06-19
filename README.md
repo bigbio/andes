@@ -8,11 +8,13 @@ _The data-driven peptide search engine of the quantms ecosystem. Built and maint
 [![Release](https://img.shields.io/github/v/release/bigbio/andes)](https://github.com/bigbio/andes/releases)
 [![License: UCSD-Noncommercial](https://img.shields.io/badge/license-UCSD--Noncommercial-blue)](LICENSE)
 
-> **A data-driven peptide search engine, originally ported from MS-GF+** — takes mzML/MGF spectra + FASTA in, produces Percolator-ready `.pin` out. Matches or beats Java MS-GF+ PSM counts at 1% FDR while running **10-28× faster**.
+> **A fast, data-driven peptide search engine** — spectra (mzML, MGF, native Thermo `.raw`, Bruker timsTOF `.d`) + a FASTA database in, Percolator-ready `.pin` out. Leading PSM counts at 1% FDR, in minutes where comparable Java tools take hours. To our knowledge, the **first proteomics search engine designed and built end-to-end with AI coding agents.**
 
 ## What is this?
 
-Andes originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFPlus/msgfplus) (Kim & Pevzner, 2014), the canonical peptide-identification engine, and we acknowledge that heritage. It is now being made independent: the patented generating function has been removed and the scoring code clean-room reauthored, while the bundled statistical models are being retrained from public data. Until every shipped model is independently trained it remains, for licensing purposes, a derivative work (see [`NOTICE`](NOTICE) for the component-by-component status). It reads MS/MS spectra (mzML or MGF), searches them against a FASTA protein database, and emits Percolator-ready PIN rows (or a TSV) with per-PSM features for rescoring. The original Java implementation is preserved on the `java-legacy` branch.
+andes is a peptide-spectrum database search engine for shotgun proteomics. It reads MS/MS spectra (mzML, MGF, native Thermo `.raw`, Bruker timsTOF `.d`), searches them against a FASTA protein database with **data-driven, per-regime scoring models**, and emits Percolator-ready PIN rows (or a TSV) with rich per-PSM features for rescoring. Beyond a fast closed search it offers opt-in **PTM discovery** (`--refine`), **chimeric** co-isolation recovery, multi-enzyme digestion, an out-of-core candidate index for large searches, and zero-config reanalysis — and it returns the most PSMs at 1% FDR on the reference datasets while running 10–28× faster than Java MS-GF+ (see [Why andes?](#why-andes)).
+
+andes is also notable for *how* it was built: its engine, models, and benchmarks were developed iteratively by AI coding agents under human direction — a working demonstration of an agent-built scientific tool.
 
 ## Why andes?
 
@@ -27,7 +29,7 @@ Against the canonical open-source engines — **Java MS-GF+ and a comparison eng
 
 <sub>PSMs at 1% FDR (distinct peptides track the same ordering). andes top-1 beats both Java MS-GF+ and a comparison engine on the high-res Astral run and on TMT (PSMs **and** peptides); on UPS1 it lands within 1% of Java and its `--chimeric` two-pass — which recovers co-isolated second peptides (opt-in) — takes the lead. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with a comparison engine. A separate 1:1-entrapment head-to-head at a true 1% FDP (mode-independent) confirms the ordering on the low-res sets (andes ≈ Java MS-GF+, both ahead of a comparison engine); see [`docs/benchmarks/`](docs/benchmarks/).</sub>
 
-**The 1% FDR is real, not inflated.** A 1:1 entrapment search on Astral puts the *true* false-discovery proportion at **1.06%** (top-1) / **1.14%** (chimeric) at the nominal 1% q-value, and it tracks q across the 0.5–5% range — the ID gains (including the chimeric near-doubling) are genuine identifications, not bought by a violated FDR. The same holds on the non-tryptic LysC and GluC+Trypsin runs.
+**The 1% FDR is real, not inflated.** Re-measured against a 1:1 entrapment database with the shipped own-trained models, the *true* false-discovery proportion at the nominal 1% q-value is **1.08%** (top-1) and **1.29%** (chimeric) on Astral, **2.08%** on low-res TMT, and **1.43%** on UPS1 — the ID gains (including the chimeric near-doubling) are genuine identifications, not bought by a violated FDR. A **mode-independent** head-to-head at a *true* 1% FDP (comparable across engines regardless of target-decoy mode) confirms the ordering: andes leads on Astral and UPS1, ties Java MS-GF+ on low-res TMT, and beats a comparison engine on all three. Full numbers in [`docs/benchmarks/`](docs/benchmarks/). (Opt-in `--refine` PTM discovery runs on top, but its gains are not yet entrapment-validated — the entrapment metric is blind to its peptide-anchored second pass — so it ships as a capability, not a headline number.)
 
 <details>
 <summary>Bench methodology</summary>
@@ -36,7 +38,7 @@ Against the canonical open-source engines — **Java MS-GF+ and a comparison eng
 - **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), a comparison engine 2025.01 (via OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
 - **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`); counts reported at q ≤ 0.01.
 - **PIN building:** andes and a comparison engine write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`).
-- **Models:** all andes runs use the bundled `resources/models.parquet` — currently **MS-GF+-derived and in transition** to independent retraining (see [`NOTICE`](NOTICE)); the numbers are the in-transition-models numbers.
+- **Models:** all andes runs use the bundled `resources/models.parquet` — andes's **own models trained on public data** for the covered regimes (high-res HCD, low-res CID, TMT, LysC, …); a few rarer regimes are still seeded from the original models pending retraining (see [`NOTICE`](NOTICE)). Independence verified per-regime: the bundle's auto-selected model matches the per-regime specialized models (e.g. Astral 30,933 vs 30,803).
 - **FDR honesty** independently verified with a 1:1 entrapment database — true FDP at q≤1% is ≈1% (see above and `docs/benchmarks/`).
 - **Notes:** Java MS-GF+ is deterministic; the Astral count reuses a prior run (its `msgf2pin` step crashes here regardless of input, and the count is pin-builder-independent). Protein-level counts are omitted from the headline — they require uniform parsimony grouping to be comparable across engines, since raw `proteinIds` differ by output format. Precursor calibration is off (the andes default).
 

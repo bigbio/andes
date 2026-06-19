@@ -93,9 +93,33 @@ enum ScoreFlag {
 /// base-peptide index with lazy mod enumeration (`mmap`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum CandidateIndexFlag {
+    /// Pick automatically: estimate the in-RAM candidate index size against
+    /// available memory and use out-of-core mmap only if it would not fit
+    /// (default). Errs toward RAM (byte-identical to prior releases) and only
+    /// falls back to mmap when RAM would risk an OOM.
     #[default]
+    Auto,
+    /// Force the in-RAM candidate index (advanced; may OOM on very large mod
+    /// searches — that is what `auto` protects against).
     Ram,
+    /// Force the out-of-core mmap'd base-peptide index (advanced; lower peak RAM,
+    /// result-equivalent but not byte-identical to `ram`).
     Mmap,
+}
+
+/// Available system memory in bytes, from Linux `/proc/meminfo` (`MemAvailable`).
+/// Returns `None` when it cannot be determined (non-Linux, restricted sandbox);
+/// callers should then keep the conservative RAM default.
+fn available_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            // e.g. "MemAvailable:   12345678 kB"
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
 }
 
 /// Search arguments (shared by the default search path and exposed as a
@@ -359,10 +383,12 @@ struct SearchArgs {
     #[arg(long = "score", default_value = "rank")]
     score: ScoreFlag,
 
-    /// Candidate-index backing: `ram` (default — in-RAM candidate Vec, byte-identical
-    /// to prior releases) or `mmap` (out-of-core mmap'd base-peptide index with lazy
-    /// per-spectrum mod enumeration; lower peak RAM, identical PSMs).
-    #[arg(long = "candidate-index", default_value = "ram")]
+    /// Candidate-index backing: `auto` (default — automatically use out-of-core
+    /// mmap only when the in-RAM candidate index would not fit available memory;
+    /// otherwise RAM, byte-identical to prior releases), or force `ram` / `mmap`
+    /// (advanced overrides). `mmap` lowers peak RAM with lazy per-spectrum mod
+    /// enumeration (result-equivalent PSMs, not byte-identical).
+    #[arg(long = "candidate-index", default_value = "auto")]
     candidate_index: CandidateIndexFlag,
 
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
@@ -1523,6 +1549,39 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.candidate_index = match cli.candidate_index {
         CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
         CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
+        CandidateIndexFlag::Auto => {
+            // mmap is not compatible with the chimeric / refine in-RAM passes
+            // (handled below); those are not the OOM-prone giant-mod-space case,
+            // so `auto` simply keeps them on RAM.
+            if params.chimeric || cli.refine {
+                search::CandidateIndexMode::Ram
+            } else {
+                match available_memory_bytes() {
+                    Some(avail) => {
+                        // Budget 60% of available memory for the candidate index;
+                        // the rest covers spectra, the model, scoring scratch, etc.
+                        let budget = (avail as f64 * 0.60) as u64;
+                        if search::candidate_index::ram_candidate_index_fits(
+                            &idx, &params, &cli.decoy_prefix, budget,
+                        ) {
+                            search::CandidateIndexMode::Ram
+                        } else {
+                            eprintln!(
+                                "[auto] in-RAM candidate index would exceed the ~{} GiB budget \
+                                 (60% of {} GiB available) → using out-of-core mmap \
+                                 (force with --candidate-index ram)",
+                                budget >> 30,
+                                avail >> 30
+                            );
+                            search::CandidateIndexMode::Mmap
+                        }
+                    }
+                    // Can't read available memory: keep the byte-identical RAM
+                    // default; the user can force --candidate-index mmap.
+                    None => search::CandidateIndexMode::Ram,
+                }
+            }
+        }
     };
     // The out-of-core (`Mmap`) candidate path materializes candidates lazily and
     // only syncs them into `prepared.candidates` AFTER the scan. The chimeric

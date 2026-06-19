@@ -91,6 +91,44 @@ impl AminoAcidSet {
         out
     }
 
+    /// All DISTINCT modifications carried by this set — FIXED and VARIABLE — as
+    /// the original `Arc<Modification>` records (location, `ResidueSpec`, and the
+    /// `fixed` flag preserved).
+    ///
+    /// The builder shares ONE `Arc<Modification>` per registered mod across every
+    /// `(residue, location)` variant it folds into (a wildcard or anywhere mod is
+    /// referenced from many slots), so de-duplicating by `Arc` identity returns
+    /// each registered mod exactly once. Order is unspecified (table iteration).
+    ///
+    /// Used by the refinement cascade to seed Pass-2 with the base search's FULL
+    /// chemistry (Cam-C, TMT, iTRAQ, Ox-M, …) before layering the discovery tier —
+    /// so labeled/non-standard fixed mods are no longer silently dropped.
+    ///
+    /// EXCLUDES the builder's synthesized "stacked" terminal variants — when a
+    /// residue carries a fixed Anywhere mod AND a variable terminal mod, `build`
+    /// folds them into a combined `"<fixed>+<variable>"` `Modification` (see the
+    /// terminal-cache logic) with a distinct Arc. That combined entry is a build
+    /// artifact, NOT an independently-declared mod (its primitive components are
+    /// each enumerated separately), so re-adding it to a fresh builder would
+    /// inject a spurious summed-mass variable mod. The `+` in the name is the
+    /// builder's own stacking marker (also relied on elsewhere); we filter on it.
+    pub fn distinct_mods(&self) -> Vec<Arc<Modification>> {
+        let mut seen: std::collections::HashSet<*const Modification> =
+            std::collections::HashSet::new();
+        let mut out: Vec<Arc<Modification>> = Vec::new();
+        for aa in self.iter_variants() {
+            if let Some(m) = aa.mod_.as_ref() {
+                if m.name.contains('+') {
+                    continue; // synthesized fixed+variable stacked variant
+                }
+                if seen.insert(Arc::as_ptr(m)) {
+                    out.push(Arc::clone(m));
+                }
+            }
+        }
+        out
+    }
+
     /// Canonical, order-independent fingerprint of the FIXED modifications that
     /// ALSO distinguishes them by `ModLocation`.
     ///

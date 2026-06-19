@@ -2101,9 +2101,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    // `merged_storage` holds the combined candidate list + index when --refine
-    // is active; must outlive the `write_pin` borrow below.
-    let merged_storage: Option<search::refinement::MergedSearch>;
+    // `pin_candidates`/`pin_index` own the list written to PIN/TSV: the merged
+    // Pass-1 ⊕ Pass-2 candidates when --refine is active, else the Pass-1 pool
+    // moved straight through. Owned (not borrowed) so they outlive the writes.
+    // Owned PIN candidate list + index. In the refine arm we MOVE
+    // `prepared.candidates` into the merge (which extends it in place); in the
+    // non-refine arm we move it straight into the tuple. Either way the Pass-1
+    // pool is never duplicated. `prepared.candidates`/`idx` are not used past this
+    // point (verified), so the move is safe.
+    let refine_merged = refine_output.is_some();
+    let pin_candidates;
+    let pin_index;
     if let Some(out) = refine_output {
         if cli.refine_debug_split_pin {
             // Legacy A/B: emit the separate refine PIN exactly as before, from out.*.
@@ -2129,16 +2137,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 out.queues.len(),
             );
         }
-        let merged = search::refinement::merge_into_pass1(&mut queues, &prepared.candidates, &idx, out);
-        merged_storage = Some(merged);
+        let merged =
+            search::refinement::merge_into_pass1(&mut queues, prepared.candidates, &idx, out);
+        pin_candidates = merged.candidates;
+        pin_index = merged.index;
     } else {
-        merged_storage = None;
+        pin_candidates = prepared.candidates;
+        pin_index = idx;
     }
-    let (pin_candidates, pin_index) = match &merged_storage {
-        Some(m) => (&m.candidates, &m.index),
-        None => (&prepared.candidates, &idx),
-    };
-    output::write_pin(&output_pin_path, &spectra, &queues, pin_candidates, &params, pin_index)?;
+    output::write_pin(&output_pin_path, &spectra, &queues, &pin_candidates, &params, &pin_index)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
         output_pin_path.display(),
@@ -2147,7 +2154,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     log_rss("after_pin_write");
     if cli.refine {
-        if merged_storage.is_some() {
+        if refine_merged {
             eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
         } else {
             eprintln!("Refinement produced no Pass-2 PSMs; unified PIN contains Pass-1 only.");
@@ -2177,7 +2184,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // `merge_into_pass1`, `queues` holds candidate indices into the merged
         // candidate list (Pass-1 ⊕ offset Pass-2), so resolving them against the
         // un-merged `prepared.candidates`/`idx` would be wrong/out-of-bounds.
-        output::write_tsv(tsv_path, &spectra, &queues, pin_candidates, &params, pin_index, &spec_file_name, is_mgf)?;
+        output::write_tsv(tsv_path, &spectra, &queues, &pin_candidates, &params, &pin_index, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 

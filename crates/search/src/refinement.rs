@@ -626,14 +626,18 @@ pub struct MergedSearch {
 /// single `write_pin` call.
 pub fn merge_into_pass1(
     pass1_queues: &mut [TopNQueue],
-    pass1_candidates: &[Candidate],
+    pass1_candidates: Vec<Candidate>,
     pass1_index: &SearchIndex,
     refine: RefinementOutput,
 ) -> MergedSearch {
     let cand_offset = pass1_candidates.len() as u32;
     let prot_offset = pass1_index.db.len();
 
-    let mut combined: Vec<Candidate> = pass1_candidates.to_vec();
+    // Take ownership and EXTEND in place — never `to_vec()` the Pass-1 pool. On a
+    // refine run Pass-1 holds millions of candidates; copying them here doubled the
+    // pool in RAM (the original + the copy) for the rest of the run. Moving costs
+    // nothing and frees the duplicate.
+    let mut combined: Vec<Candidate> = pass1_candidates;
     let RefinementOutput { index: refine_index, candidates: refine_cands, queues, global_spectrum_indices } = refine;
 
     for mut c in refine_cands {
@@ -1403,7 +1407,7 @@ mod tests {
             global_spectrum_indices: vec![0],
         };
 
-        let merged = merge_into_pass1(&mut p1_queues, &p1_cands, &p1_index, refine);
+        let merged = merge_into_pass1(&mut p1_queues, p1_cands, &p1_index, refine);
 
         // Combined candidates: pass1 (1) + refine (1) = 2; refine candidate's protein_index offset by 1.
         assert_eq!(merged.candidates.len(), 2);
@@ -1443,7 +1447,7 @@ mod tests {
             global_spectrum_indices: vec![0],
         };
 
-        let merged = merge_into_pass1(&mut p1_queues, &p1_cands, &p1_index, refine);
+        let merged = merge_into_pass1(&mut p1_queues, p1_cands, &p1_index, refine);
 
         // Combined: 2 pass1 + 2 refine; refine protein_index offset by 2.
         assert_eq!(merged.candidates.len(), 4);

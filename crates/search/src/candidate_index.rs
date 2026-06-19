@@ -38,6 +38,15 @@ use crate::search_params::SearchParams;
 /// Serialised byte size of one `IndexRecord`.
 pub const INDEX_RECORD_SIZE: usize = 20;
 
+/// Magic bytes at the start of a candidate-index cache file. Lets the reader
+/// reject foreign / corrupt files instead of trusting any 20-byte-aligned blob.
+const INDEX_MAGIC: &[u8; 8] = b"ANDESCI\x00";
+/// On-disk format version. BUMP whenever `IndexRecord`'s layout or the file
+/// structure changes so a stale-format cache is rebuilt rather than misread.
+const INDEX_FORMAT_VERSION: u32 = 1;
+/// Header = 8 magic bytes + 4 version bytes (LE); records follow at this offset.
+const INDEX_HEADER_SIZE: usize = INDEX_MAGIC.len() + 4;
+
 /// Flags bits inside `IndexRecord::flags`.
 pub mod flags {
     pub const IS_DECOY: u16 = 1 << 0;
@@ -192,6 +201,11 @@ pub fn build_base_peptide_index<W: Write>(
     let mut records = base_peptide_records(idx, params, decoy_prefix);
     records.sort_by_key(|r| r.mass_milli);
 
+    // Header: magic + format version, so a reader can reject a foreign/corrupt or
+    // stale-format file (see `MmapCandidateIndex::open`).
+    out.write_all(INDEX_MAGIC)?;
+    out.write_all(&INDEX_FORMAT_VERSION.to_le_bytes())?;
+
     let n = records.len();
     for rec in &records {
         out.write_all(&rec.to_bytes())?;
@@ -291,26 +305,50 @@ pub struct MmapCandidateIndex {
 impl MmapCandidateIndex {
     /// Open a binary index file and memory-map it.
     ///
-    /// Returns an error if the file length is not a multiple of
-    /// [`INDEX_RECORD_SIZE`] (20 bytes), which would indicate a truncated or
-    /// corrupt write.
+    /// Validates the magic + format-version header and that the remaining bytes
+    /// are a whole multiple of [`INDEX_RECORD_SIZE`]. Returns an error (treated
+    /// upstream as a cache miss → rebuild) for a missing/foreign/truncated file
+    /// or a format-version mismatch, rather than trusting any 20-byte-aligned
+    /// blob as a valid index.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
         let meta = file.metadata()?;
         let byte_len = meta.len() as usize;
-        if byte_len % INDEX_RECORD_SIZE != 0 {
+        if byte_len < INDEX_HEADER_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "index file size {byte_len} is not a multiple of {INDEX_RECORD_SIZE} bytes"
-                ),
+                format!("index file size {byte_len} is smaller than the {INDEX_HEADER_SIZE}-byte header"),
             ));
         }
         // SAFETY: The file is opened read-only and its contents are valid for
         // the lifetime of `mmap`.  No other process is expected to modify the
         // file while the search is running.
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        let len = byte_len / INDEX_RECORD_SIZE;
+        if &mmap[..INDEX_MAGIC.len()] != INDEX_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index file is not an andes candidate index (bad magic)",
+            ));
+        }
+        let version = u32::from_le_bytes(
+            mmap[INDEX_MAGIC.len()..INDEX_HEADER_SIZE]
+                .try_into()
+                .expect("4 version bytes"),
+        );
+        if version != INDEX_FORMAT_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("index file format version {version} != expected {INDEX_FORMAT_VERSION}"),
+            ));
+        }
+        let data_len = byte_len - INDEX_HEADER_SIZE;
+        if data_len % INDEX_RECORD_SIZE != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("index payload {data_len} is not a multiple of {INDEX_RECORD_SIZE} bytes"),
+            ));
+        }
+        let len = data_len / INDEX_RECORD_SIZE;
         Ok(Self { mmap, len })
     }
 
@@ -335,16 +373,11 @@ impl MmapCandidateIndex {
         params: &SearchParams,
         decoy_prefix: &str,
     ) -> io::Result<(Self, bool)> {
-        // Check whether a valid cache file already exists at this path.
-        // A "valid" file has a non-zero length that is a multiple of
-        // INDEX_RECORD_SIZE — the same invariant checked by `open`.
-        let cache_hit = std::fs::metadata(path)
-            .map(|m| m.len() > 0 && m.len() as usize % INDEX_RECORD_SIZE == 0)
-            .unwrap_or(false);
-
-        if cache_hit {
-            // Re-open and mmap the existing file without rebuilding.
-            let mmap_index = Self::open(path)?;
+        // Cache hit iff the file opens AND passes full validation (magic +
+        // format version + payload alignment) — not just "exists and is
+        // 20-byte-aligned". A foreign/corrupt/stale-format file fails `open` and
+        // falls through to a rebuild rather than being trusted as an index.
+        if let Ok(mmap_index) = Self::open(path) {
             return Ok((mmap_index, false));
         }
 
@@ -393,7 +426,7 @@ impl MmapCandidateIndex {
     /// Panics if `i >= self.len()`.
     pub fn record_at(&self, i: usize) -> IndexRecord {
         assert!(i < self.len, "record_at index {i} out of bounds (len={})", self.len);
-        let start = i * INDEX_RECORD_SIZE;
+        let start = INDEX_HEADER_SIZE + i * INDEX_RECORD_SIZE;
         let chunk: &[u8; INDEX_RECORD_SIZE] = self.mmap[start..start + INDEX_RECORD_SIZE]
             .try_into()
             .expect("slice length is always INDEX_RECORD_SIZE");
@@ -449,7 +482,7 @@ impl MmapCandidateIndex {
 
     /// Decode only the `mass_milli` field (first 8 bytes) of record `i`.
     fn mass_milli_at(&self, i: usize) -> u64 {
-        let start = i * INDEX_RECORD_SIZE;
+        let start = INDEX_HEADER_SIZE + i * INDEX_RECORD_SIZE;
         u64::from_le_bytes(
             self.mmap[start..start + 8]
                 .try_into()
@@ -513,12 +546,19 @@ mod tests {
 
     /// Read all records back from a binary blob.
     fn read_records(data: &[u8]) -> Vec<IndexRecord> {
-        assert_eq!(
-            data.len() % INDEX_RECORD_SIZE,
-            0,
-            "binary blob is not a multiple of {INDEX_RECORD_SIZE} bytes"
+        // Skip + validate the magic/version header the builder now writes.
+        assert!(
+            data.len() >= INDEX_HEADER_SIZE && &data[..INDEX_MAGIC.len()] == INDEX_MAGIC,
+            "binary blob missing the index header"
         );
-        data.chunks_exact(INDEX_RECORD_SIZE)
+        let payload = &data[INDEX_HEADER_SIZE..];
+        assert_eq!(
+            payload.len() % INDEX_RECORD_SIZE,
+            0,
+            "payload is not a multiple of {INDEX_RECORD_SIZE} bytes"
+        );
+        payload
+            .chunks_exact(INDEX_RECORD_SIZE)
             .map(|chunk| {
                 let arr: &[u8; INDEX_RECORD_SIZE] = chunk.try_into().unwrap();
                 IndexRecord::from_bytes(arr)
@@ -557,7 +597,7 @@ mod tests {
             .expect("write failed");
 
         assert!(n > 0, "expected at least one record, got 0");
-        assert_eq!(buf.len(), n * INDEX_RECORD_SIZE, "buffer size mismatch");
+        assert_eq!(buf.len(), INDEX_HEADER_SIZE + n * INDEX_RECORD_SIZE, "buffer size mismatch");
 
         let records = read_records(&buf);
         assert_eq!(records.len(), n);
@@ -806,6 +846,35 @@ mod tests {
             records1, records2,
             "cached records must be identical to freshly-built records"
         );
+    }
+
+    /// A foreign / header-less file (even one that is 20-byte-aligned) must be
+    /// REJECTED by `open` and treated as a cache miss by `open_or_build`, not
+    /// trusted as a valid index.
+    #[test]
+    fn open_rejects_header_less_file_and_rebuilds() {
+        use std::io::Write;
+        let idx = make_toy_index();
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+
+        // A 40-byte blob (two 20-byte "records") with NO magic header.
+        let tmp = tempfile::NamedTempFile::new().expect("NamedTempFile");
+        tmp.as_file().write_all(&[0u8; 2 * INDEX_RECORD_SIZE]).unwrap();
+        tmp.as_file().sync_all().unwrap();
+
+        // `open` rejects it outright.
+        assert!(
+            MmapCandidateIndex::open(tmp.path()).is_err(),
+            "open must reject a file with no magic header"
+        );
+        // `open_or_build` treats it as a miss and rebuilds a valid index.
+        let (mi, was_built) =
+            MmapCandidateIndex::open_or_build(tmp.path(), &idx, &params, "XXX")
+                .expect("open_or_build");
+        assert!(was_built, "header-less file must force a rebuild");
+        assert!(mi.len() > 0, "rebuilt index must be non-empty");
     }
 
     /// `index_cache_path` returns distinct paths for different parameter sets.

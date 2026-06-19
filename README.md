@@ -16,18 +16,16 @@ Andes originated as a Rust reimplementation of [MS-GF+](https://github.com/MSGFP
 
 ## Why andes?
 
-Against the open-source field — **Java MS-GF+, Sage, Comet, and ProSE** — andes returns the most PSMs at 1% FDR on all three reference datasets, reads vendor formats natively, and runs in minutes where Java takes hours. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42`) on the same 8-thread VM.
+Against the canonical open-source engines — **Java MS-GF+ and Comet** — andes returns the most PSMs at 1% FDR on all three reference datasets, reads vendor formats natively, and runs in minutes where Java takes hours. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42`) on the same 8-thread VM.
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res CID) |
 |---|---:|---:|---:|
 | **andes** (`--chimeric`) | **69,968** | **12,043** | **17,879** |
 | **andes** (top-1) | **36,782** | **11,957** | 17,143 |
 | Java MS-GF+ v20240326 | 26,542 | 11,555 | 17,305 |
-| Sage 0.14.7 | 32,091 | 11,232 | 15,653 |
 | Comet 2025.01 | 31,435 | 10,876 | 15,809 |
-| ProSE (OpenMS) | 30,590 | 7,659 | 8,901 |
 
-<sub>PSMs at 1% FDR (distinct peptides track the same ordering). andes top-1 beats every competitor on the high-res Astral run and on TMT (PSMs **and** peptides); on UPS1 it lands within 1% of Java and its `--chimeric` two-pass — which recovers co-isolated second peptides (opt-in) — takes the lead. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with the C++/Rust engines.</sub>
+<sub>PSMs at 1% FDR (distinct peptides track the same ordering). andes top-1 beats both Java MS-GF+ and Comet on the high-res Astral run and on TMT (PSMs **and** peptides); on UPS1 it lands within 1% of Java and its `--chimeric` two-pass — which recovers co-isolated second peptides (opt-in) — takes the lead. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with Comet. A separate 1:1-entrapment head-to-head at a true 1% FDP (mode-independent) confirms the ordering on the low-res sets (andes ≈ Java MS-GF+, both ahead of Comet); see [`docs/benchmarks/`](docs/benchmarks/).</sub>
 
 **The 1% FDR is real, not inflated.** A 1:1 entrapment search on Astral puts the *true* false-discovery proportion at **1.06%** (top-1) / **1.14%** (chimeric) at the nominal 1% q-value, and it tracks q across the 0.5–5% range — the ID gains (including the chimeric near-doubling) are genuine identifications, not bought by a violated FDR. The same holds on the non-tryptic LysC and GluC+Trypsin runs.
 
@@ -35,9 +33,9 @@ Against the open-source field — **Java MS-GF+, Sage, Comet, and ProSE** — an
 <summary>Bench methodology</summary>
 
 - **Hardware:** 8-thread Intel Xeon Gold 6238 VM, Linux x86_64. Same machine for every engine.
-- **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), Sage 0.14.7, Comet 2025.01 (via OpenMS), ProSE (OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
+- **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), Comet 2025.01 (via OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
 - **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`); counts reported at q ≤ 0.01.
-- **PIN building:** andes / Sage / Comet write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`); ProSE via OpenMS → idXML → `build_pins.py` (ProSE caps fragment tolerance at 0.1 Da, used on the low-res sets).
+- **PIN building:** andes and Comet write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`).
 - **Models:** all andes runs use the bundled `resources/models.parquet` — currently **MS-GF+-derived and in transition** to independent retraining (see [`NOTICE`](NOTICE)); the numbers are the in-transition-models numbers.
 - **FDR honesty** independently verified with a 1:1 entrapment database — true FDP at q≤1% is ≈1% (see above and `docs/benchmarks/`).
 - **Notes:** Java MS-GF+ is deterministic; the Astral count reuses a prior run (its `msgf2pin` step crashes here regardless of input, and the count is pin-builder-independent). Protein-level counts are omitted from the headline — they require uniform parsimony grouping to be comparable across engines, since raw `proteinIds` differ by output format. Precursor calibration is off (the andes default).

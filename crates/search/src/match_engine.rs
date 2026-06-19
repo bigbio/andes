@@ -67,24 +67,32 @@ pub enum CandidateBacking {
     Ram,
     /// Out-of-core mmap'd base-peptide index + lazy per-spectrum mod enumeration.
     ///
-    /// # Byte-identity guarantee
+    /// # Identity guarantee (result-equivalent, not byte-identical at scale)
     ///
-    /// The output PIN is **byte-identical** to `Ram` for searches that are:
-    ///   - **Fully tryptic** (`num_tolerable_termini = 2`), AND
-    ///   - **At most one variable mod per residue** (`max_variable_mods_per_peptide ≤ 1`
-    ///     with no residue carrying more than one variable mod placement).
+    /// `Mmap` is verified **identification-equivalent** to `Ram`: the scored
+    /// candidate **set** per spectrum is identical (it reproduces `Ram`'s exact
+    /// `candidate_nominal_bounds` window via `lazy_candidates_for_nominal_window`),
+    /// and on real data (PXD001468 b1931 + human_entrap, cam_only) the **top-1
+    /// peptide matches on 99.97% of scans** with identical `RankScore` and FDR
+    /// decisions.
     ///
-    /// For **semi-tryptic** (`num_tolerable_termini = 1`) or searches with
-    /// **multiple variable mods on a single residue**, the `Mmap` per-spectrum
-    /// candidate order uses a coordinate/mod-mass sort that may differ from the
-    /// `Ram` emission order (`enumerate_candidates` emits strict spans → free-C
-    /// → free-N for ntt=1). The candidate **set**, **scores**, and **accepted-PSM
-    /// identities** (scan IDs, peptide sequences, FDR decisions) are identical,
-    /// but the PIN `candidate_idxs[0]` (primary peptide for shared peptides) and
-    /// the multi-protein `Proteins` column order may differ — a cosmetic
-    /// difference that is FDR-neutral.
+    /// It is **NOT byte-identical at scale.** `Ram`'s `strong_score` (the
+    /// `RawScore` PIN column) depends on **order-dependent listwise features**
+    /// (`CandidateRankEntropy`, `listwise_score_gap`) computed over a
+    /// capacity-limited top-K queue whose `could_win` pruning depends on the
+    /// candidate *visitation order* — an `enumerate_candidates` emission-order
+    /// artifact, not a spectral property. `Mmap` visits candidates in a different
+    /// (lazy, mass-window) order, so on a minority of scans it retains a slightly
+    /// different top-K → `strong_score` can differ by ≤~0.2, occasionally flipping
+    /// a shared-peptide primary or a near-tie. This is **FDR-neutral in practice**
+    /// (primary identification is preserved). Cosmetic PIN-order diffs
+    /// (SpecId row index, `Proteins` column order) also occur.
     ///
-    /// General order-matching for semi-tryptic / multi-mod-per-residue is deferred.
+    /// Byte-identity holds on small DBs / fixtures where the orders coincide. Full
+    /// bit-identity at scale would require either reproducing `Ram`'s exact
+    /// visitation order in the lazy path OR making the listwise features /
+    /// `could_win` pruning order-independent in BOTH backings (the latter removes
+    /// the latent `Ram` order-dependence) — both deferred follow-ups.
     Mmap,
 }
 

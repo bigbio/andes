@@ -290,30 +290,6 @@ fn parse_residue_spec(res: &str) -> ResidueSpec {
     }
 }
 
-/// True iff `base`'s fixed-mod chemistry is exactly what [`refinement_aa_set`]
-/// reconstructs — the standard anywhere Carbamidomethyl-C baseline, or no fixed
-/// mods at all.
-///
-/// Returns FALSE for any other fixed chemistry (TMT, iTRAQ, a fixed mod on a
-/// non-Cys residue, a non-CAM delta on Cys, OR a CAM-C pinned to a non-Anywhere
-/// location). `refinement_aa_set` rebuilds only the standard anywhere CAM-C, so
-/// anything else would fold different base masses into the Pass-2 candidates;
-/// `run_refinement` uses this to skip refinement rather than run a
-/// silently-broken Pass-2. Compares the full LOCATION-AWARE
-/// [`AminoAcidSet::fixed_mod_fingerprint`] (not just residue+delta) so an
-/// N-term-only CAM-C is correctly rejected, not mistaken for the anywhere form.
-fn has_only_standard_fixed_mods(base: &AminoAcidSet) -> bool {
-    let base_fp = base.fixed_mod_fingerprint();
-    if base_fp.is_empty() {
-        return true;
-    }
-    let standard_fp = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
-        .build()
-        .expect("standard CAM-C baseline is a fixed construction and must build")
-        .fixed_mod_fingerprint();
-    base_fp == standard_fp
-}
-
 /// Build the Pass-2 [`AminoAcidSet`]: the base set's FIXED mods (e.g.
 /// Carbamidomethyl-C) PLUS the refinement tier's VARIABLE mods.
 ///
@@ -324,42 +300,81 @@ fn has_only_standard_fixed_mods(base: &AminoAcidSet) -> bool {
 /// deamidation +0.984 Da delta is near-isobaric with a C13 isotope error at low
 /// resolution, so it is high-res-only).
 ///
-/// **Fixed-mod handling.** The `AminoAcidSetBuilder` cannot start from an
-/// existing `AminoAcidSet`'s fixed mods (it only accepts fresh `Modification`s),
-/// so we reconstruct the standard fixed-mod baseline: if `base` carries a fixed
-/// Carbamidomethyl-C variant (the standard alkylation, and the only fixed mod on
-/// the default tier), we seed the builder with it. Other custom fixed mods on
-/// `base` are NOT reconstructed — the refinement tier is the the classic hyperscore engine always-on
-/// chemistry layered on the standard CAM-C baseline; richer fixed-mod schemes
-/// (TMT, etc.) would be supplied via the normal mods file, not the refine path.
+/// **Fixed/variable-mod handling.** Pass-2 INHERITS the base search's FULL
+/// chemistry: every fixed mod (Carbamidomethyl-C, TMT/iTRAQ labels, …) and every
+/// variable mod (Ox-M, Acetyl, …) the user declared, recovered from
+/// [`AminoAcidSet::distinct_mods`]. The discovery tier is then layered on top as
+/// VARIABLE mods, DE-DUPLICATED against the base (a base variable Oxidation-M and
+/// the tier's Oxidation-M are the same chemistry → added once). This is what lets
+/// `--refine` work on labeled data: previously only the standard CAM-C baseline
+/// was reconstructed, so TMT/iTRAQ deltas were dropped and every Pass-2 candidate
+/// mass-mismatched its precursor (a silent no-op).
 pub fn refinement_aa_set(
     base: &AminoAcidSet,
     cfg: &RefineConfig,
     high_res: bool,
 ) -> Result<AminoAcidSet, String> {
-    // Seed the builder with the standard fixed Carbamidomethyl-C baseline iff
-    // `base` carries it (a single fixed modified C-Anywhere variant).
-    let base_has_fixed_cam_c = base
-        .variants_for(b'C', ModLocation::Anywhere)
-        .iter()
-        .any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false));
+    let mut builder = AminoAcidSetBuilder::new_standard();
 
-    let mut builder = if base_has_fixed_cam_c {
-        AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
-    } else {
-        AminoAcidSetBuilder::new_standard()
+    // De-dup key: (residue, location, delta rounded to 1e-4 Da). Rounding (rather
+    // than raw f64 bits) folds trivially-different literals onto one entry — e.g.
+    // Cam-C 57.02146 vs 57.021464, or Ox-M 15.99491 vs 15.994915.
+    let mod_key = |residue: ResidueSpec, location: ModLocation, delta: f64| {
+        (residue, location, (delta * 1e4).round() as i64)
+    };
+    let mut present: HashSet<(ResidueSpec, ModLocation, i64)> = HashSet::new();
+    // (residue, location) slots occupied by a base FIXED mod. The builder forbids
+    // a fixed AND a variable mod on the same residue+location, so a tier variable
+    // mod landing on a fixed slot (e.g. tier Oxidation-K on a TMT-fixed K) must be
+    // skipped — the fixed label owns that position.
+    let mut fixed_slots: Vec<(ResidueSpec, ModLocation)> = Vec::new();
+
+    // 1. Inherit the base search's full mod set (fixed AND variable).
+    for m in base.distinct_mods() {
+        present.insert(mod_key(m.residue, m.location, m.mass_delta));
+        if m.fixed {
+            fixed_slots.push((m.residue, m.location));
+            builder = builder.add_fixed_mod((*m).clone());
+        } else {
+            builder = builder.add_variable_mod((*m).clone());
+        }
+    }
+
+    // Residues overlap when either side is a wildcard or they are the same letter.
+    // Intentionally BROADER than the builder's exact-`(residue, location)`
+    // conflict rule: wildcard on either side counts as overlap. This may
+    // over-skip a custom-tier wildcard-Anywhere variable mod when the base has a
+    // specific fixed mod at Anywhere (the builder would accept that pair) — but
+    // over-skipping a tier mod is safe (it is just not searched), whereas the
+    // alternative risks a builder hard-error. The built-in default tier has no
+    // wildcard-Anywhere mod, so it is unaffected.
+    let residue_overlaps = |a: ResidueSpec, b: ResidueSpec| {
+        a == ResidueSpec::Wildcard || b == ResidueSpec::Wildcard || a == b
     };
 
+    // 2. Layer the discovery tier on top as variable mods, skipping (a) low-res
+    //    deamidation, (b) chemistry the base already provides, and (c) a tier mod
+    //    that lands on a base FIXED slot (would conflict in the builder).
     for rm in &cfg.mods {
         if !high_res && rm.class == "deamidation" {
             continue;
         }
         let location = parse_location(&rm.location);
         for res in &rm.residues {
+            let residue = parse_residue_spec(res);
+            if fixed_slots
+                .iter()
+                .any(|&(fr, fl)| fl == location && residue_overlaps(fr, residue))
+            {
+                continue; // a base fixed mod owns this residue/location slot
+            }
+            if !present.insert(mod_key(residue, location, rm.delta)) {
+                continue; // keep the provided PTM; don't double-add the overlap
+            }
             let m = Modification {
                 name: rm.name.clone(),
                 mass_delta: rm.delta,
-                residue: parse_residue_spec(res),
+                residue,
                 location,
                 fixed: false,
                 accession: None,
@@ -399,11 +414,12 @@ pub fn refinement_aa_set(
 /// residue letter against `rm.residues` (`"*"` matches any residue).
 ///
 /// NOTE: a `Peptide` does not record whether a given mod was fixed or variable,
-/// so this counts every modified residue. On the refinement path the base set's
-/// only fixed mod is Carbamidomethyl-C, which is not part of any refinement
-/// `cfg.mods` class; it would therefore inflate `num_mods` by 1 per modified C.
-/// To keep `num_mods` aligned with the REFINEMENT tier, we count a residue only
-/// when its mod matches one of `cfg.mods` (i.e. a refinement chemistry).
+/// so this would otherwise count every modified residue. The base search's fixed
+/// mods (Carbamidomethyl-C, and — since Pass-2 now inherits the full base mod set
+/// — any labels such as TMT/iTRAQ) are NOT part of any refinement `cfg.mods`
+/// class; counting them would inflate `num_mods`. To keep `num_mods` aligned with
+/// the REFINEMENT tier, we count a residue only when its mod matches one of
+/// `cfg.mods` (i.e. a refinement chemistry), so base fixed labels are excluded.
 pub fn mod_count_and_class(peptide: &Peptide, cfg: &RefineConfig) -> (u32, u32) {
     let mut num_mods = 0u32;
     let mut class_id = 0u32; // 0 = none until a refinement mod matches
@@ -497,18 +513,6 @@ pub fn run_refinement(
     decoy_strategy: DecoyStrategy,
     seed: u64,
 ) -> Option<RefinementOutput> {
-    // 0. Guard: the refinement tier rebuilds only the standard Carbamidomethyl-C
-    //    fixed baseline (see `refinement_aa_set`). If the base set carries OTHER
-    //    fixed mods (TMT +229.163, iTRAQ, ...), those deltas would be silently
-    //    dropped from the Pass-2 candidate masses → zero precursor matches → a
-    //    silently empty Pass-2. Skipping is the correct/safe outcome (no Pass-2
-    //    rather than a silently-broken one); carrying the fixed mods is out of
-    //    scope for this guard.
-    if !has_only_standard_fixed_mods(&base_params.aa_set) {
-        eprintln!("WARN: --refine does not yet support non-standard fixed modifications (e.g. TMT/iTRAQ); Pass-2 refinement is skipped for this run.");
-        return None;
-    }
-
     // `full_target_db` is no longer consulted (the refinement db is anchored on
     // confident PEPTIDES, not a protein subset); keep the param so the andes call
     // site is untouched.
@@ -1141,25 +1145,54 @@ mod tests {
         }));
     }
 
-    // ── (d') has_only_standard_fixed_mods ──────────────────────────────────
-
     #[test]
-    fn has_only_standard_fixed_mods_true_for_cam_c_baseline() {
-        // The standard refinement baseline: lone fixed Carbamidomethyl-C.
-        let base = base_set_with_cam_c();
-        assert!(has_only_standard_fixed_mods(&base));
+    fn refinement_aa_set_excludes_stacked_combined_base_variant() {
+        // Base = fixed Cam-C + variable Acetyl on protein-N-term (a common LFQ
+        // config — UPS/Astral both use it). The builder synthesizes a stacked
+        // "Carbamidomethyl+Acetyl" (~99 Da) variant on N-term Cys; that build
+        // artifact must NOT be re-injected into Pass-2 as a phantom variable mod.
+        let acetyl = Modification {
+            name: "Acetyl".into(),
+            mass_delta: 42.010565,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::ProtNTerm,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .add_variable_mod(acetyl)
+            .build()
+            .unwrap();
+        // distinct_mods must not surface the synthesized "+"-named stacked mod.
+        assert!(
+            base.distinct_mods().iter().all(|m| !m.name.contains('+')),
+            "distinct_mods leaked a synthesized stacked (fixed+variable) variant"
+        );
+        // The refined set legitimately re-synthesizes the Cam+Acetyl (~99 Da) stack
+        // on N-term CYS (a fixed-Cam residue) — that is correct, same as Pass-1.
+        // The bug would instead inject +99 as a WILDCARD variable mod, leaking it
+        // onto NON-Cys N-term residues. Assert Ala-ProtNTerm carries Acetyl (+42)
+        // but NOT a ~99 Da variant.
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        let a_nterm = set.variants_for(b'A', ModLocation::ProtNTerm);
+        assert!(
+            a_nterm.iter().all(|aa| aa
+                .mod_
+                .as_ref()
+                .map(|m| (m.mass_delta - 99.032).abs() >= 1e-2)
+                .unwrap_or(true)),
+            "phantom ~99 Da stacked mod leaked onto non-Cys N-term residue"
+        );
     }
 
-    #[test]
-    fn has_only_standard_fixed_mods_true_for_no_fixed_mods() {
-        let base = AminoAcidSetBuilder::new_standard().build().unwrap();
-        assert!(has_only_standard_fixed_mods(&base));
-    }
+    // ── (d') Pass-2 inherits the base search's full chemistry ──────────────
 
     #[test]
-    fn has_only_standard_fixed_mods_false_for_extra_fixed_tmt() {
-        // A fixed TMT-on-K added on top of CAM-C: a non-standard fixed mod the
-        // refinement tier cannot reconstruct → guard must return false.
+    fn refinement_aa_set_inherits_nonstandard_fixed_tmt() {
+        // A labeled search: fixed CAM-C + fixed TMT6plex-on-K. Pass-2 MUST carry
+        // the TMT delta forward (previously it was dropped → silent no-op on TMT).
         let tmt_k = Modification {
             name: "TMT6plex".into(),
             mass_delta: 229.162932,
@@ -1174,7 +1207,54 @@ mod tests {
             .add_fixed_mod(tmt_k)
             .build()
             .unwrap();
-        assert!(!has_only_standard_fixed_mods(&base));
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        // K-Anywhere carries the fixed TMT (~229.16) in the refined set.
+        let k_anywhere = set.variants_for(b'K', ModLocation::Anywhere);
+        assert!(
+            k_anywhere.iter().any(|aa| aa
+                .mod_
+                .as_ref()
+                .map(|m| m.fixed && (m.mass_delta - 229.162932).abs() < 1e-3)
+                .unwrap_or(false)),
+            "refined set must carry the base's fixed TMT6plex-on-K"
+        );
+        // …and the fixed CAM-C baseline is still present.
+        let c_anywhere = set.variants_for(b'C', ModLocation::Anywhere);
+        assert!(c_anywhere
+            .iter()
+            .any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false)));
+    }
+
+    #[test]
+    fn refinement_aa_set_dedups_base_variable_against_tier() {
+        // Base already declares variable Oxidation-M; the default tier also has
+        // Oxidation-M. The refined set must expose it ONCE, not twice.
+        let ox_m = Modification {
+            name: "Oxidation".into(),
+            mass_delta: 15.994915,
+            residue: ResidueSpec::Specific(b'M'),
+            location: ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let base = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .add_variable_mod(ox_m)
+            .build()
+            .unwrap();
+        let set = refinement_aa_set(&base, &RefineConfig::default_tier(), true).unwrap();
+        let ox_count = set
+            .variants_for(b'M', ModLocation::Anywhere)
+            .iter()
+            .filter(|aa| {
+                aa.mod_
+                    .as_ref()
+                    .map(|m| !m.fixed && (m.mass_delta - 15.994915).abs() < 1e-3)
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(ox_count, 1, "Oxidation-M must not be double-added; got {ox_count}");
     }
 
     // ── (e) mod_count_and_class ────────────────────────────────────────────
@@ -1526,62 +1606,4 @@ mod tests {
         assert_eq!(idxs, vec![2, 3], "every candidate_idx entry offset, not just the primary");
     }
 
-    #[test]
-    fn run_refinement_skips_when_non_standard_fixed_mods_present() {
-        // Base set carries a fixed TMT-on-K beyond the CAM-C baseline. The W1
-        // guard must skip Pass-2 entirely (warn + return) BEFORE building any
-        // refinement search, even though a confident protein and an
-        // unidentified spectrum exist (so steps 1/2 would otherwise proceed).
-        let tmt_k = Modification {
-            name: "TMT6plex".into(),
-            mass_delta: 229.162932,
-            residue: ResidueSpec::Specific(b'K'),
-            location: ModLocation::Anywhere,
-            fixed: true,
-            accession: None,
-            neutral_losses: Vec::new(),
-            loss_class: 0,
-        };
-        let aa_set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
-            .add_fixed_mod(tmt_k)
-            .build()
-            .unwrap();
-        let params = SearchParams::default_tryptic(aa_set);
-        let scorer = tiny_scorer();
-        let target = ProteinDb { proteins: vec![protein("P0", b"MKWVTFISLLR")] };
-
-        // Spectrum 0: confident target (gives a confident protein). Spectrum 1:
-        // empty queue (an unidentified spectrum). Both guards (a)/(b) would pass.
-        let pass1_cands = vec![cand(0, false)];
-        let queues = vec![
-            queue_with(vec![psm(0, 0, 50.0)]),
-            TopNQueue::new(10),
-        ];
-        let spectra: Vec<model::spectrum::Spectrum> = vec![
-            model::spectrum::Spectrum::default(),
-            model::spectrum::Spectrum::default(),
-        ];
-
-        let out = run_refinement(
-            &queues,
-            &spectra,
-            &pass1_cands,
-            &target,
-            &params,
-            &scorer,
-            &RefineConfig::default_tier(),
-            0.01,
-            true,
-            0.5,
-            "XXX",
-            DecoyStrategy::Reverse,
-            42,
-        );
-
-        // Skipped at the W1 guard: no Pass-2 output, Pass-1 queues untouched.
-        assert!(out.is_none(), "non-standard fixed mods must skip Pass-2");
-        assert_eq!(queues[0].len(), 1);
-        assert_eq!(queues[0].peek_top().unwrap().features.is_refinement, 0);
-        assert_eq!(queues[1].len(), 0, "Pass-2 must be skipped, queue stays empty");
-    }
 }

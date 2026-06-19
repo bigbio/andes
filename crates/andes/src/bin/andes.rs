@@ -1611,6 +1611,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into());
         }
     }
+    // --refine + --chimeric run together correctly but do NOT currently STACK:
+    // the chimeric secondary (co-isolated) PSMs collapse the refinement's
+    // confident-anchor set, so refinement adds little on top of chimeric. Warn so
+    // the user isn't surprised that the combination ≈ chimeric alone.
+    if params.chimeric && cli.refine {
+        eprintln!(
+            "WARN: --refine + --chimeric do not stack in this release — the chimeric \
+             secondary PSMs shrink the refinement's confident-anchor set, so refinement \
+             contributes little on top of chimeric. Consider running them separately."
+        );
+    }
     if params.score_mode == search::ScoreMode::Strong {
         eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }

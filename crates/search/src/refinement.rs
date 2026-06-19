@@ -1011,7 +1011,10 @@ mod tests {
         for aa in set.iter_variants() {
             if let Some(m) = &aa.mod_ {
                 if !m.fixed {
-                    names.insert(m.name.clone());
+                    // A stacked fixed+variable combined variant (e.g.
+                    // "Carbamidomethyl+Acetyl" on protein-N-term Cys) counts as
+                    // its variable component (the part after the last '+').
+                    names.insert(m.name.rsplit('+').next().unwrap_or(&m.name).to_string());
                 }
             }
         }
@@ -1033,7 +1036,10 @@ mod tests {
         for aa in set.iter_variants() {
             if let Some(m) = &aa.mod_ {
                 if !m.fixed {
-                    names.insert(m.name.clone());
+                    // A stacked fixed+variable combined variant (e.g.
+                    // "Carbamidomethyl+Acetyl" on protein-N-term Cys) counts as
+                    // its variable component (the part after the last '+').
+                    names.insert(m.name.rsplit('+').next().unwrap_or(&m.name).to_string());
                 }
             }
         }

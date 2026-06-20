@@ -270,7 +270,6 @@ fn acceptance_gate_rule() {
 #[cfg(test)]
 #[test]
 fn acceptance_gate_same_model_is_accepted() {
-    use std::fs::File;
     use std::io::BufReader;
     use input::MgfReader;
     use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};

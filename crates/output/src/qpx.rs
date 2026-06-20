@@ -29,6 +29,7 @@
 //! Rows are emitted rank-1-first per spectrum (same ordering as the PIN: each
 //! queue is `into_rank_sorted_vec()`), one row per retained PSM.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -49,7 +50,9 @@ use search::psm::TopNQueue;
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
-use crate::row_context::resolve_accession;
+use crate::percolator::PercolatorPsm;
+use crate::pin::format_spec_id;
+use crate::row_context::{iter_ranked_by_rank_score, resolve_accession};
 
 /// QPX format version string written into every file's schema metadata.
 const QPX_VERSION: &str = "1.0";
@@ -68,6 +71,14 @@ const CREATOR: &str = "andes";
 /// `param.mme`). `run_id` is a stable identifier for this run, written into the
 /// `run_identifier` column of every row. `primary_ms_run_paths` are the input
 /// spectrum file paths.
+///
+/// `rescore` is an optional `SpecId → PercolatorPsm` map (from a `--rescore`
+/// Percolator run). When `Some`, each row's `posterior_error_probability` is
+/// filled from the matched PEP and a `("q-value", q, false)` entry is appended
+/// to `additional_scores`. When `None` (rescore off) the bundle is byte-schema-
+/// identical to the pre-rescore output (PEP null, no q-value entry). The join key
+/// is reconstructed via [`crate::pin::format_spec_id`] so it matches the PIN's
+/// `SpecId` exactly.
 #[allow(clippy::too_many_arguments)]
 pub fn write_qpx(
     out_dir: &Path,
@@ -79,6 +90,7 @@ pub fn write_qpx(
     fragment_tol: &Tolerance,
     run_id: &str,
     primary_ms_run_paths: &[String],
+    rescore: Option<&HashMap<String, PercolatorPsm>>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(out_dir)?;
 
@@ -91,6 +103,7 @@ pub fn write_qpx(
         search_index,
         run_id,
         &reference_file,
+        rescore,
     )?;
     write_parquet(&out_dir.join("psms.parquet"), "psms", psm_batch)?;
 
@@ -306,6 +319,7 @@ fn build_psms_batch(
     search_index: &SearchIndex,
     run_id: &str,
     reference_file: &str,
+    rescore: Option<&HashMap<String, PercolatorPsm>>,
 ) -> std::io::Result<RecordBatch> {
     let schema = psms_schema();
 
@@ -355,6 +369,16 @@ fn build_psms_batch(
         }
         let spec = &spectra[spec_idx];
         let psms = queue.clone().into_rank_sorted_vec();
+        // Reproduce the PIN's SpecId derivation EXACTLY so the Percolator join
+        // key matches: `rank` from iter_ranked_by_rank_score, `row_idx` = the
+        // per-scan emission index (== `hit`), `multi_row` = scan emits >1 row.
+        let ranks: Vec<u32> = iter_ranked_by_rank_score(&psms).map(|(r, _)| r).collect();
+        let multi_row = psms.len() > 1;
+        let spec_id_str = if spec.title.is_empty() {
+            format!("scan={}", spec.scan.unwrap_or(0))
+        } else {
+            spec.title.clone()
+        };
         for (hit, psm) in psms.iter().enumerate() {
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let z = psm.charge_used as f64;
@@ -364,15 +388,27 @@ fn build_psms_batch(
             let adj_observed_mz = precursor_mz - ISOTOPE * (psm.isotope_offset as f64) / z;
             let scan_num = spec.scan.unwrap_or(0);
 
+            // Percolator join: reconstruct this row's SpecId and look up the
+            // matched target-PSM result (PEP + q-value). `None` when rescore is
+            // off, or when a row had no matching Percolator output (e.g. a decoy,
+            // which Percolator writes to the decoy file we do not load here).
+            let matched = rescore.and_then(|m| {
+                let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
+                m.get(&spec_id)
+            });
+
             sequence.append_value(bare_sequence(cand));
             peptidoform.append_value(peptidoform_string(cand));
             append_modifications(&mut modifications, cand);
             precursor_charge.append_value(psm.charge_used as i32);
-            pep.append_null();
+            match matched {
+                Some(p) => pep.append_value(p.pep),
+                None => pep.append_null(),
+            }
             is_decoy.append_value(cand.is_decoy);
             calculated_mz.append_value(calc_mz);
             observed_mz.append_value(adj_observed_mz);
-            append_additional_scores(&mut additional_scores, psm);
+            append_additional_scores(&mut additional_scores, psm, matched.map(|p| p.q_value));
             append_protein_accessions(&mut protein_accessions, psm, candidates, search_index);
             predicted_rt.append_null();
             reference_file_name.append_value(reference_file);
@@ -506,10 +542,16 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
 }
 
 /// Append the `additional_scores` list cell: the informative per-PSM andes
-/// scores beyond the headline RawScore. All are higher-is-better.
+/// scores beyond the headline RawScore. All andes scores are higher-is-better.
+///
+/// When `q_value` is `Some` (a `--rescore` Percolator result matched this row), a
+/// trailing `("q-value", q, higher_better=false)` entry is appended. When `None`
+/// (rescore off, or no match) no such entry is written, so the default bundle
+/// stays byte-identical to the pre-rescore output.
 fn append_additional_scores(
     builder: &mut ListBuilder<StructBuilder>,
     psm: &search::psm::PsmMatch,
+    q_value: Option<f64>,
 ) {
     let f = &psm.features;
     let entries: [(&str, f64); 9] = [
@@ -528,6 +570,13 @@ fn append_additional_scores(
         sb.field_builder::<StringBuilder>(0).unwrap().append_value(name);
         sb.field_builder::<Float64Builder>(1).unwrap().append_value(value);
         sb.field_builder::<BooleanBuilder>(2).unwrap().append_value(true);
+        sb.append(true);
+    }
+    // Percolator q-value (lower is better) — only when rescore matched this row.
+    if let Some(q) = q_value {
+        sb.field_builder::<StringBuilder>(0).unwrap().append_value("q-value");
+        sb.field_builder::<Float64Builder>(1).unwrap().append_value(q);
+        sb.field_builder::<BooleanBuilder>(2).unwrap().append_value(false);
         sb.append(true);
     }
     builder.append(true);

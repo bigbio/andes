@@ -1782,9 +1782,12 @@ dependencies = [
 name = "output"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "chrono",
  "input",
  "memchr",
  "model",
+ "parquet",
  "scoring",
  "search",
  "smallvec",

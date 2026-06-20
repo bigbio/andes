@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use model::{AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ProteinDb, ResidueSpec, Tolerance};
 use model::tolerance::PrecursorTolerance;
-use scoring_crate::{Param, RankScorer};
+use scoring_crate::RankScorer;
 use search::{match_spectra, SearchIndex, SearchParams};
 use input::{FastaReader, MgfReader};
 
@@ -139,8 +139,12 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         .build()
         .unwrap();
 
-    let param_path = fixture("test-fixtures/HCD_QExactive_Tryp.param");
-    let param = Param::load_from_file(&param_path).unwrap();
+    // hcd_qexactive_tryp from the canonical Parquet store (byte-identical to
+    // the migrated HCD_QExactive_Tryp.param).
+    let store = model_train::store::ModelStore::open(
+        &fixture("resources/models.parquet"),
+    ).unwrap();
+    let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);
 
     let mut params = SearchParams::default_tryptic(aa.clone());

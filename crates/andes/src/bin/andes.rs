@@ -281,18 +281,6 @@ struct SearchArgs {
     #[arg(long = "max-mods", default_value = "3")]
     max_mods: u32,
 
-    /// Path to the .param scoring model file.
-    ///
-    /// If not supplied, a scoring model is selected from the bundled
-    /// `models.parquet` store. For mzML/.raw/.d the activation method and
-    /// analyzer resolution are auto-detected from metadata; for MGF the
-    /// `--fragmentation` and `--fragment-tol-ppm/-da` flags drive selection
-    /// (default: CID / low-res). When running the binary outside the source
-    /// tree the bundled store may not exist; supply --param-file explicitly
-    /// in that case.
-    #[arg(long)]
-    param_file: Option<PathBuf>,
-
     /// Path to a mods.txt file describing fixed and variable modifications.
     /// Format: each non-comment line is
     /// `<mass>,<aa>,<fix|opt>,<location>,<name>`, where:
@@ -1370,10 +1358,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
     //
-    // `--param-file` wins outright. Otherwise the model is selected from the
-    // Parquet store: for mzML/.raw/.d the activation+analyzer are auto-detected
-    // from metadata; for MGF (metadata-less) the `--fragmentation` /
-    // `--fragment-tol-*` flags drive `resolve_metadataless_selection`.
+    // The model is selected from the canonical Parquet store: for mzML/.raw/.d
+    // the activation+analyzer are auto-detected from metadata; for MGF
+    // (metadata-less) the `--fragmentation` / `--fragment-tol-*` flags drive
+    // `resolve_metadataless_selection`.
     let spectrum_ext = spectrum_path
         .extension()
         .and_then(|e| e.to_str())
@@ -1418,12 +1406,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(false);
 
     let t_phase = std::time::Instant::now();
-    let mut param = if let Some(ref override_path) = cli.param_file {
-        // ── Override path: load binary .param directly (unchanged behaviour). ──
-        eprintln!("Param file (override): {}", override_path.display());
-        Param::load_from_file(override_path)
-            .map_err(|e| format!("loading param file {}: {e}", override_path.display()))?
-    } else {
+    let mut param = {
         // ── Resolve (activation, instrument) for the Parquet model store. ─────
         //
         // Metadata-first precedence: a fully detected (activation, instrument)
@@ -4078,19 +4061,24 @@ fn load_seed_param(seed_model: &Option<String>) -> Result<(String, Param), Box<d
             Ok(("hcd_qexactive_tryp".to_string(), p))
         }
         Some(seed) => {
-            let as_path = Path::new(seed);
-            if as_path.is_file() {
-                let p = Param::load_from_file(as_path)
-                    .map_err(|e| format!("loading seed param file {}: {e}", as_path.display()))?;
-                Ok((seed.clone(), p))
-            } else {
-                let store_path = bundled_store_path();
-                let store = ModelStore::open(&store_path)
-                    .map_err(|e| format!("opening bundled store: {e}"))?;
-                let p = store.load_param(seed)
-                    .map_err(|e| format!("loading seed model '{seed}': {e}"))?;
-                Ok((seed.clone(), p))
+            // A `.param` seed file is only honored with the offline
+            // `legacy-param-migrate` feature; the default build seeds from the
+            // canonical Parquet store by slug only.
+            #[cfg(feature = "legacy-param-migrate")]
+            {
+                let as_path = Path::new(seed);
+                if as_path.is_file() {
+                    let p = Param::load_from_file(as_path)
+                        .map_err(|e| format!("loading seed param file {}: {e}", as_path.display()))?;
+                    return Ok((seed.clone(), p));
+                }
             }
+            let store_path = bundled_store_path();
+            let store = ModelStore::open(&store_path)
+                .map_err(|e| format!("opening bundled store: {e}"))?;
+            let p = store.load_param(seed)
+                .map_err(|e| format!("loading seed model '{seed}': {e}"))?;
+            Ok((seed.clone(), p))
         }
     }
 }

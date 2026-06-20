@@ -2578,6 +2578,9 @@ mod tests {
         assert_ne!(e, 0, "edge_score should be nonzero with populated existence table");
     }
 
+    // Loads a real `.param` fixture: gated to the offline legacy-migration
+    // feature so the default test tree references no `.param` file.
+    #[cfg(feature = "legacy-param-migrate")]
     #[test]
     fn directional_node_score_segment_cache_sanity() {
         use crate::param_model::Param;
@@ -3017,6 +3020,9 @@ mod precursor_filter_tests {
     /// mass-error histogram can be learned during training. Before the fix the
     /// closure pushed `error_bin = None` unconditionally, leaving the noise
     /// error table uniform and cratering high-res scoring.
+    // Loads a real `.param` fixture: gated to the offline legacy-migration
+    // feature so the default test tree references no `.param` file.
+    #[cfg(feature = "legacy-param-migrate")]
     #[test]
     fn dense_noise_facts_emits_error_bins_for_matched_probes() {
         use model::amino_acid::AminoAcid;

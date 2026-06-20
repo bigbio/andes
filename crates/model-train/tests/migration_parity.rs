@@ -1,9 +1,14 @@
-use model_train::store::{migrate_dir, write_models, ModelStore};
+use model_train::store::{write_models, ModelStore};
 use scoring_crate::param_model::Param;
 use std::path::Path;
 
+/// Validates the legacy `.param` -> Parquet migration is byte-faithful.
+/// Gated to the offline `legacy-param-migrate` feature (the default build has
+/// no `.param` reader). Run with `--features legacy-param-migrate`.
+#[cfg(feature = "legacy-param-migrate")]
 #[test]
 fn every_bundled_model_round_trips_via_store() {
+    use model_train::store::migrate_dir;
     let dir = tempfile::tempdir().unwrap();
     let store_path = dir.path().join("models.parquet");
 

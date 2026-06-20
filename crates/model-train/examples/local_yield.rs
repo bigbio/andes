@@ -32,10 +32,10 @@ fn standard_aa_set() -> model::AminoAcidSet {
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mgf = root.join("test-fixtures/test.mgf");
+    let mgf = root.join("test-fixtures/test.mgf.gz");
     let fasta = root.join("test-fixtures/BSA.fasta");
 
-    let f = File::open(&mgf).expect("open BSA.mgf");
+    let f = input::open_buf_maybe_gz(&mgf).expect("open BSA.mgf");
     let spectra: Vec<model::Spectrum> =
         MgfReader::new(BufReader::new(f)).filter_map(|r| r.ok()).collect();
     eprintln!("loaded {} spectra", spectra.len());

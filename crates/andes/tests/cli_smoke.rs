@@ -35,7 +35,7 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     let tsv_path = dir.path().join("rust.tsv");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -106,7 +106,7 @@ fn cli_accepts_max_missed_cleavages_flag() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -124,7 +124,7 @@ fn cli_accepts_min_peaks_flag() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -142,7 +142,7 @@ fn cli_accepts_min_length_max_length_flags() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -180,7 +180,7 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
     ).unwrap();
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -209,7 +209,7 @@ fn cli_rejects_invalid_protocol_index() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -267,7 +267,7 @@ fn bench_mode_max_spectra_produces_nonempty_pin() {
     let pin_path = dir.path().join("bench.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -292,7 +292,7 @@ fn cli_rejects_inverted_charge_range() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -312,7 +312,7 @@ fn cli_rejects_inverted_isotope_error_range() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -332,7 +332,7 @@ fn cli_accepts_isotope_error_min_negative_one() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -355,7 +355,7 @@ fn cli_accepts_precursor_cal_off() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -377,7 +377,7 @@ fn cli_accepts_precursor_cal_off() {
 #[test]
 fn cli_accepts_both_named_and_numeric_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
-    let test_mgf = fixture("test-fixtures/test.mgf");
+    let test_mgf = fixture("test-fixtures/test.mgf.gz");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mods_path = dir.path().join("mods.txt");
@@ -450,7 +450,7 @@ fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
     let pin_path = dir.path().join("out.pin");
 
     let output = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -475,7 +475,7 @@ fn mgf_fragment_tol_ppm_selects_high_res_model() {
     let pin_path = dir.path().join("out.pin");
 
     let output = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -497,7 +497,7 @@ fn fragment_tol_flags_are_mutually_exclusive() {
     let pin_path = dir.path().join("out.pin");
 
     let output = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )

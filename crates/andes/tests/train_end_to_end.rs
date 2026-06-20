@@ -27,7 +27,7 @@ fn train_writes_model_and_search_uses_it() {
     let store_path = dir.path().join("m.parquet");
     let pin_path = dir.path().join("out.pin");
 
-    let bsa_mgf = fixture("test-fixtures/test.mgf");
+    let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
     // ── Step 1: run `andes train` ────────────────────────────────────────

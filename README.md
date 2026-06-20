@@ -156,7 +156,46 @@ This runs a tryptic search with **zero configuration**: for mzML, Thermo `.raw`,
 
 > **MGF has no instrument metadata**, so for `.mgf` inputs pass the activation explicitly with `--fragmentation <CID\|ETD\|HCD\|UVPD>` (plus `--fragment-tol-ppm`/`--fragment-tol-da`). See [Selecting the scoring model](#selecting-the-scoring-model) for `--protocol` (labeled/enriched samples) and `--model` (pick a model directly).
 
-A row in `out.pin` is one peptide–spectrum match, with the Java-parity Percolator features plus Rust-only additive columns (`EdgeScore`, …) before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`). Full column reference: `DOCS.md` §3a.
+A row in `out.pin` is one peptide–spectrum match, with rich per-PSM features plus Rust-only additive columns before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`).
+
+### Output scores
+
+Each PSM row carries two scores plus a battery of additive discriminative features for Percolator. The most important columns (full **65-column** reference with per-column value ranges in [`DOCS.md` §3a](DOCS.md)):
+
+| Column | Type | Range | What it is |
+|---|---|---|---|
+| `RankScore` | int | unbounded | **Ranking** score (rank-LLR) — orders candidates within a spectrum. |
+| `RawScore` | float | unbounded | **Headline discriminative** score (fused `signal − null`) — the feature Percolator weights most. |
+| `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore` (significance). |
+| `TailorScore` | float | ≥0 | `RankScore` ÷ spectrum top-1% quantile — cross-spectrum comparability. |
+| `DeltaRankScore` | float | ≥0 | Lead of the best peptide over the runner-up. |
+| `NumMatchedMainIons`, `longest_b/y` | int | ≥0 | Fragment-coverage counts. |
+| `ExplainedIonCurrentRatio`, `matchedIonRatio`, `UniqueMatchFraction` | float | [0, 1] | Fraction-of-signal / fraction-of-peptide explained. |
+| `dm`, `absdm`, `MeanErrorTop7` | float | Da / ppm | Precursor & fragment mass-accuracy. |
+| `EdgeScore`, `PpmGaussianScore`, `ComplementaryIonBalance`, `ChanceMatchSurprise` | float | varies | Additive evidence features (orthogonal to the core score). |
+| `RichIonLLR`, `IntensitySignal`, `FragPred*` | float | model-gated | Intensity-/rich-ion-model features (`0.0` without the model). |
+| `PrecursorIsotopeKL`, `PrecursorSNR` | float | ≥0 | MS1 precursor-envelope features (`0.0` without `--chimeric`). |
+| `IsRefinement`, `NumMods`, `ModSite*` | int/0-1 | ≥0 | PTM-refinement & mod-localization features (`0` without `--refine`). |
+
+### Run summary & `statistics.log`
+
+Because andes **auto-resolves the model and tolerances from the data**, a run can *end* with different parameters than it started with (precursor calibration tightens the window; a high-res model carries a 20 ppm fragment tolerance even when none was given). At the end of every search andes therefore prints a summary to stderr **and** writes a `statistics.log` next to the PIN, recording the **final** tolerances and a per-modification PSM tally:
+
+```text
+──────── andes run summary ────────
+  Final precursor tolerance : Symmetric(10.0 ppm) (calibration: Auto)
+  Final fragment tolerance  : 0.5 Da
+  Spectra with a match      : 48210
+  Rank-1 PSMs (pre-FDR)     : 31204 target, 17006 decoy
+  PTM report (rank-1 target PSMs carrying each modification):
+    Carbamidomethyl : 28933
+    Oxidation       :  6120
+    Acetyl          :   341
+    (unmodified)    :  2150
+  ───────────────────────────────────
+```
+
+(PTM counts are pre-FDR, over each spectrum's best candidate; Percolator applies FDR downstream.)
 
 ## Common workflows
 

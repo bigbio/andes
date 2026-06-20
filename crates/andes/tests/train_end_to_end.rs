@@ -94,6 +94,15 @@ fn train_writes_model_and_search_uses_it() {
     );
     assert!(pin_path.exists(), "PIN file should be written");
 
+    // The run summary is written next to the PIN as `statistics.log`.
+    let stats_path = dir.path().join("statistics.log");
+    assert!(stats_path.exists(), "statistics.log should be written next to the PIN");
+    let stats = std::fs::read_to_string(&stats_path).expect("read statistics.log");
+    assert!(
+        stats.contains("Final precursor tolerance") && stats.contains("PTM report"),
+        "statistics.log should contain the run summary; got:\n{stats}"
+    );
+
     // Verify PIN has a header + at least one data row.
     let pin_content = std::fs::read_to_string(&pin_path).expect("read PIN");
     let line_count = pin_content.lines().count();

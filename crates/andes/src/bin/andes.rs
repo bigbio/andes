@@ -10,7 +10,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -918,7 +917,20 @@ struct ParseStats {
 }
 
 fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
-    let ext = path
+    // Strip a trailing `.gz` so the format is detected from the underlying
+    // extension (`spectra.mzML.gz` → mzML, `spectra.mgf.gz` → MGF). `.raw`/`.d`
+    // are binary/directory and never gzipped, so this only affects mzML/MGF.
+    let is_gz = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+    let effective: std::path::PathBuf = if is_gz {
+        path.file_stem().map(std::path::PathBuf::from).unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let ext = effective
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
@@ -1028,8 +1040,8 @@ fn scan_spectrum_metadata(
 ) -> Result<Vec<SpectrumMeta>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     if is_mzml {
-        let f = File::open(path)?;
-        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(ms_level, ms_level);
+        let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
+            .with_ms_level_range(ms_level, ms_level);
         for result in reader {
             if out.len() >= bench_cap {
                 break;
@@ -1042,8 +1054,7 @@ fn scan_spectrum_metadata(
             });
         }
     } else {
-        let f = File::open(path)?;
-        let reader = MgfReader::new(BufReader::new(f));
+        let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
         for result in reader {
             if out.len() >= bench_cap {
                 break;
@@ -1094,8 +1105,8 @@ fn load_spectra_by_index(
         return Ok(loaded);
     }
     if is_mzml {
-        let f = File::open(path)?;
-        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(ms_level, ms_level);
+        let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
+            .with_ms_level_range(ms_level, ms_level);
         for (idx, result) in reader.enumerate() {
             if idx >= bench_cap {
                 break;
@@ -1110,8 +1121,7 @@ fn load_spectra_by_index(
             }
         }
     } else {
-        let f = File::open(path)?;
-        let reader = MgfReader::new(BufReader::new(f));
+        let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
         for (idx, result) in reader.enumerate() {
             if idx >= bench_cap {
                 break;
@@ -1247,7 +1257,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_phase = std::time::Instant::now();
     // ── 1. Load FASTA target database ────────────────────────────────────────
     let target_db =
-        FastaReader::load_all(BufReader::new(File::open(&database_path)?))?;
+        FastaReader::load_all(input::open_buf_maybe_gz(&database_path)?)?;
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
@@ -1900,8 +1910,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let mslevel = 2;
             let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
                 if file_is_mzml {
-                    let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
-                    let reader = MzMLReader::new(BufReader::new(f))
+                    let reader = MzMLReader::new(
+                        input::open_buf_maybe_gz(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?,
+                    )
                         .with_ms_level_range(mslevel, mslevel)
                         .with_ms1_capture(true);
                     let (errc, errs) =
@@ -1981,10 +1992,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let parser_handle = thread::spawn(
                 move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
                     if file_is_mzml {
-                        let f = File::open(&spectrum_path)
-                            .map_err(|e| format!("open mzML: {e}"))?;
-                        let reader = MzMLReader::new(BufReader::new(f))
-                            .with_ms_level_range(ms_level_u32, ms_level_u32);
+                        let reader = MzMLReader::new(
+                            input::open_buf_maybe_gz(&spectrum_path)
+                                .map_err(|e| format!("open mzML: {e}"))?,
+                        )
+                        .with_ms_level_range(ms_level_u32, ms_level_u32);
                         Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
                     } else if file_is_raw {
                         #[cfg(feature = "thermo")]
@@ -2016,9 +2028,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 .into())
                         }
                     } else {
-                        let f = File::open(&spectrum_path)
-                            .map_err(|e| format!("open MGF: {e}"))?;
-                        let reader = MgfReader::new(BufReader::new(f));
+                        let reader = MgfReader::new(
+                            input::open_buf_maybe_gz(&spectrum_path)
+                                .map_err(|e| format!("open MGF: {e}"))?,
+                        );
                         Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
                     }
                 },
@@ -2289,8 +2302,8 @@ fn load_spectra_for_train(
     let mut spectra = Vec::new();
     match ext_lower.as_deref() {
         Some("mzml") => {
-            let f = File::open(path)?;
-            let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(2, 2);
+            let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
+                .with_ms_level_range(2, 2);
             for item in reader {
                 match item {
                     Ok(s) => spectra.push(s),
@@ -2348,8 +2361,7 @@ fn load_spectra_for_train(
         }
         // MGF (default / backwards-compatible).
         _ => {
-            let f = File::open(path)?;
-            let reader = MgfReader::new(BufReader::new(f));
+            let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
             for item in reader {
                 match item {
                     Ok(s) => spectra.push(s),
@@ -4189,8 +4201,7 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 
     const MAX_PEEK: usize = 64;
 
-    let file = File::open(spectrum_path).ok()?;
-    let reader = MzMLReader::new(BufReader::new(file));
+    let reader = MzMLReader::new(input::open_buf_maybe_gz(spectrum_path).ok()?);
 
     // Tally counts keyed by ActivationMethod variant.
     let mut counts: std::collections::HashMap<ActivationMethod, usize> =
@@ -4262,8 +4273,7 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
         return None;
     }
 
-    let file = File::open(spectrum_path).ok()?;
-    detect_instrument_type(BufReader::new(file))
+    detect_instrument_type(input::open_buf_maybe_gz(spectrum_path).ok()?)
 }
 
 /// Resolve the path to the bundled `models.parquet` store.

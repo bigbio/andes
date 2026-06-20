@@ -364,7 +364,7 @@ fn frag_intensity_model_roundtrips_through_store() {
     use std::sync::Arc;
     use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
 
-    // Minimal model: single leaf → constant 3.14.
+    // Minimal model: single leaf → constant 3.5.
     let model = GbdtPeakModel {
         n_features: 1,
         apply_sigmoid: false,
@@ -373,7 +373,7 @@ fn frag_intensity_model_roundtrips_through_store() {
             threshold: vec![0.0],
             left: vec![-1],
             right: vec![-1],
-            value: vec![3.14],
+            value: vec![3.5],
             default_left: vec![1],
         }],
         iso_x: vec![],
@@ -403,8 +403,8 @@ fn frag_intensity_model_roundtrips_through_store() {
 
     let v = fim.predict_value(&[0.0]);
     assert!(
-        (v - 3.14).abs() < 1e-5,
-        "predict_value expected 3.14, got {v}"
+        (v - 3.5).abs() < 1e-5,
+        "predict_value expected 3.5, got {v}"
     );
 
     // Verify the blob byte-matches.

@@ -869,7 +869,7 @@ mod tests {
             MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
                 .expect("first open_or_build failed");
         assert!(was_built1, "first call must build the index (cache miss)");
-        assert!(mi1.len() > 0, "built index must be non-empty");
+        assert!(!mi1.is_empty(), "built index must be non-empty");
 
         // Record the modification time after the first build.
         let mtime_after_build = std::fs::metadata(cache_path)
@@ -928,7 +928,7 @@ mod tests {
             MmapCandidateIndex::open_or_build(tmp.path(), &idx, &params, "XXX")
                 .expect("open_or_build");
         assert!(was_built, "header-less file must force a rebuild");
-        assert!(mi.len() > 0, "rebuilt index must be non-empty");
+        assert!(!mi.is_empty(), "rebuilt index must be non-empty");
     }
 
     /// `index_cache_path` returns distinct paths for different parameter sets.

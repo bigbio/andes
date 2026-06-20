@@ -2258,6 +2258,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // ── Run summary: final tolerances + per-modification PSM tally ────────────
+    // andes auto-resolves the scoring model and the precursor/fragment
+    // tolerances from the data, so the FINAL search parameters differ from
+    // whatever the user passed on the CLI. Emit a summary to stderr and write a
+    // `statistics.log` next to the PIN so a run's true parameters (and which
+    // PTMs were identified, with PSM counts) are always recoverable.
+    let run_stats =
+        output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
+    eprint!("{}", run_stats.render());
+    let stats_path = output_pin_path
+        .parent()
+        .map(|d| d.join("statistics.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("statistics.log"));
+    match output::write_statistics_log(&run_stats, &stats_path) {
+        Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
+        Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
+    }
+
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");
         return Ok(());

@@ -1203,7 +1203,7 @@ mod tests {
                 threshold: vec![0.0],
                 left: vec![-1],
                 right: vec![-1],
-                value: vec![3.14],
+                value: vec![3.5],
                 default_left: vec![1],
             }],
             iso_x: vec![],
@@ -1212,7 +1212,7 @@ mod tests {
         let mut p = crate::testutil::tiny_param();
         p.frag_intensity_model = Some(Arc::clone(&model));
         let v = p.frag_intensity_model.as_ref().unwrap().predict_value(&[]);
-        assert!((v - 3.14).abs() < 1e-5, "expected 3.14, got {v}");
+        assert!((v - 3.5).abs() < 1e-5, "expected 3.5, got {v}");
     }
 
     #[test]

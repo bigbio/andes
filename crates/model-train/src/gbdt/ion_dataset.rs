@@ -137,8 +137,8 @@ mod tests {
 
         let ds = build_ion_dataset(&[row], &scorer);
         assert_eq!(ds.n_features, N_ION_FEATURES);
-        assert!(ds.y.iter().any(|&l| l == 1), "target-matched positives present");
-        assert!(ds.y.iter().any(|&l| l == 0), "decoy-matched negatives present");
+        assert!(ds.y.contains(&1), "target-matched positives present");
+        assert!(ds.y.contains(&0), "decoy-matched negatives present");
         assert_eq!(ds.x.len(), ds.y.len() * ds.n_features);
         assert_eq!(ds.groups.len(), ds.y.len());
     }

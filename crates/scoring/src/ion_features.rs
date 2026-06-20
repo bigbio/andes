@@ -69,6 +69,7 @@ fn complement(kind: IonKind, position: u32, n: usize) -> Option<(IonKind, u32)> 
 ///   charge) also matches a peak, else 0.0.
 /// - [`FEAT_COMPLEMENT_PPM_DELTA`]: `|ppm_self − ppm_complement|` when both
 ///   match, else [`COMPLEMENT_PPM_SENTINEL`].
+#[allow(clippy::too_many_arguments)]
 pub fn extract_ion_features(
     peptide: &Peptide,
     scored_spec: &ScoredSpectrum<'_>,

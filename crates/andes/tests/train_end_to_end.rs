@@ -32,7 +32,7 @@ fn train_writes_model_and_search_uses_it() {
 
     // ── Step 1: run `andes train` ────────────────────────────────────────
     let train_status = Command::new(env!("CARGO_BIN_EXE_andes"))
-        .arg("train")
+        .arg("train-from-search")
         .arg("--spectra")
         .arg(&bsa_mgf)
         .arg("--database")

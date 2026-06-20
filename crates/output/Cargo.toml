@@ -11,6 +11,11 @@ scoring_crate = { path = "../scoring", package = "scoring" }
 search = { path = "../search" }
 thiserror = { workspace = true }
 memchr = "2"
+# QPX `.idparquet` writer (OpenMS-compatible). Versions pinned to the ones
+# already in the workspace lockfile (see crates/model-train) so no lockfile bump.
+arrow = "53"
+parquet = "53"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3.10"

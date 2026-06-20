@@ -22,12 +22,3 @@ legacy-param-migrate = []
 [dev-dependencies]
 tempfile = "3.10"
 input = { path = "../input" }
-
-# Diagnostic examples that read the legacy binary `.param` format.
-[[example]]
-name = "dump_main_ion"
-required-features = ["legacy-param-migrate"]
-
-[[example]]
-name = "dump_prefix_cache"
-required-features = ["legacy-param-migrate"]

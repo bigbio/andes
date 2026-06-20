@@ -24,11 +24,7 @@ legacy-param-migrate = ["scoring_crate/legacy-param-migrate"]
 [dev-dependencies]
 tempfile = "3.10"
 
-# Examples that read/migrate the legacy binary `.param` format.
-[[example]]
-name = "dump_model"
-required-features = ["legacy-param-migrate"]
-
+# Offline tool that migrates the legacy binary `.param` format to Parquet.
 [[example]]
 name = "gen_bundled_store"
 required-features = ["legacy-param-migrate"]

@@ -218,12 +218,15 @@ andes \
   --protocol TMT
 ```
 
-**Direct TSV output (skip Percolator):**
+**Direct TSV / Parquet output:**
 
 ```bash
+# TSV for inspection; OpenMS-compatible QPX .idparquet bundle for quantms/OpenMS
 andes --spectrum spectra.mzML --database db.fasta \
-  --output-pin out.pin --output-tsv out.tsv
+  --output-pin out.pin --output-tsv out.tsv --output-parquet out.idparquet
 ```
+
+`--output-parquet` writes an OpenMS `QPXFile`-schema bundle (`psms`/`proteins`/`search_params` parquet) — see [`DOCS.md` §3e](DOCS.md). andes can emit `.pin`, `.tsv`, and `.parquet` in one run.
 
 **[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
@@ -256,6 +259,7 @@ Optional (default in **bold**):
 | Flag | Purpose | Default |
 |---|---|---|
 | `--output-tsv <FILE>` | Also write a TSV | **none** |
+| `--output-parquet <DIR>` | Also write an OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`) | **none** |
 | `--mods <FILE>` | mods.txt file | **Cam-C fixed + Ox-M variable** |
 | `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance (ppm) | **20.0** |
 | `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift | **off** |

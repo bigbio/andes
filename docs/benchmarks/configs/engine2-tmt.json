@@ -13,7 +13,7 @@
     "max_variable_mods": 3,
     "decoy_tag": "rev_",
     "generate_decoys": true,
-    "fasta": "$BENCH/pxd016999/human_sp.fasta"
+    "fasta": "/srv/data/msgf-bench/pxd016999/human_sp.fasta"
   },
   "precursor_tol": { "ppm": [-20.0, 20.0] },
   "fragment_tol": { "da": [-0.4, 0.4] },

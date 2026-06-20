@@ -1,7 +1,6 @@
 //! Local proof: train a model on the tiny BSA fixture and compare its 1% FDR
 //! yield vs the seed (fallback), plus dump the trained Noise distribution shape.
 //! Run: cargo run -p model-train --example local_yield
-use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
@@ -22,23 +21,25 @@ use model_train::{
 
 fn standard_aa_set() -> model::AminoAcidSet {
     let cam = Modification { name: "Carbamidomethyl".into(), mass_delta: 57.02146,
-        residue: ResidueSpec::Specific(b'C'), location: ModLocation::Anywhere, fixed: true, accession: None };
+        residue: ResidueSpec::Specific(b'C'), location: ModLocation::Anywhere, fixed: true, accession: None,
+        neutral_losses: Vec::new(), loss_class: 0 };
     let ox = Modification { name: "Oxidation".into(), mass_delta: 15.99491,
-        residue: ResidueSpec::Specific(b'M'), location: ModLocation::Anywhere, fixed: false, accession: None };
+        residue: ResidueSpec::Specific(b'M'), location: ModLocation::Anywhere, fixed: false, accession: None,
+        neutral_losses: Vec::new(), loss_class: 0 };
     AminoAcidSetBuilder::new_standard().add_fixed_mod(cam).add_variable_mod(ox).build().unwrap()
 }
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mgf = root.join("test-fixtures/test.mgf");
+    let mgf = root.join("test-fixtures/test.mgf.gz");
     let fasta = root.join("test-fixtures/BSA.fasta");
 
-    let f = File::open(&mgf).expect("open BSA.mgf");
+    let f = input::open_buf_maybe_gz(&mgf).expect("open BSA.mgf");
     let spectra: Vec<model::Spectrum> =
         MgfReader::new(BufReader::new(f)).filter_map(|r| r.ok()).collect();
     eprintln!("loaded {} spectra", spectra.len());
 
-    let store = ModelStore::open(&root.join("resources/ionstat/models.parquet")).expect("store");
+    let store = ModelStore::open(&root.join("resources/models.parquet")).expect("store");
     let seed_param: Param = store.load_param("hcd_qexactive_tryp").expect("seed");
     let seed_scorer = RankScorer::new(&seed_param);
 

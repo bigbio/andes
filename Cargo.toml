@@ -6,8 +6,8 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-license = "Apache-2.0"
-authors = ["The andes authors"]
+license = "LicenseRef-UCSD-Noncommercial"
+authors = ["bigbio MS-GF+ contributors"]
 
 # Release profile: enable LTO + single codegen unit so LLVM sees the whole
 # binary. Hot paths cross crate boundaries (e.g. search → scoring → model),
@@ -27,6 +27,8 @@ thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 byteorder = "1.5"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 
 # a comparison search engine-pattern spectrum readers (Phase 3) — declared at the workspace level so
 # the spectra crate can pull them in without re-pinning. Decision recorded

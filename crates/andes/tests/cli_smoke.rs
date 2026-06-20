@@ -35,7 +35,7 @@ fn cli_runs_end_to_end_on_bsa_test_mgf() {
     let tsv_path = dir.path().join("rust.tsv");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -106,7 +106,7 @@ fn cli_accepts_max_missed_cleavages_flag() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -124,7 +124,7 @@ fn cli_accepts_min_peaks_flag() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -142,7 +142,7 @@ fn cli_accepts_min_length_max_length_flags() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -158,15 +158,15 @@ fn cli_accepts_min_length_max_length_flags() {
 
 // ── mzML integration smoke test: format dispatch + non-empty PIN ─────────────
 
-// ── New flag smoke tests: --mod, --fragmentation, --instrument, --protocol ────
+// ── New flag smoke tests: --mod, --fragmentation, --protocol ──────────────────
 
 #[test]
-fn cli_accepts_mod_fragmentation_instrument_protocol_flags() {
-    // Verify the new TMT-CLI flags parse and the param resolver picks up a
-    // real bundled .param file. We use the existing BSA fixture (no actual
-    // TMT spectra) and pass a tiny TMT-style mods file — the binary should
-    // exit 0 because all flags are valid and the resolver finds
-    // HCD_QExactive_Tryp_TMT.param.
+fn cli_accepts_mod_fragmentation_protocol_flags() {
+    // Verify the TMT-CLI flags parse and the param resolver picks up a real
+    // bundled model. We use the existing BSA fixture (no actual TMT spectra)
+    // and pass a tiny TMT-style mods file — the binary should exit 0 because
+    // all flags are valid. (--instrument was removed: analyzer resolution is
+    // metadata-detected for mzML/.raw/.d and `--fragment-tol-*` for MGF.)
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
     let mods_path = dir.path().join("mods.txt");
@@ -180,13 +180,12 @@ fn cli_accepts_mod_fragmentation_instrument_protocol_flags() {
     ).unwrap();
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
     .arg("--mod").arg(&mods_path)
     .arg("--fragmentation").arg("3")
-    .arg("--instrument").arg("3")
     .arg("--protocol").arg("4")
     // Allow a wider tolerance — the TMT-labelled candidates differ in mass
     // and we just want to confirm the binary exits cleanly, not assert
@@ -205,12 +204,12 @@ fn cli_accepts_mod_fragmentation_instrument_protocol_flags() {
 #[test]
 fn cli_rejects_invalid_protocol_index() {
     // Out-of-range --protocol must produce a non-zero exit with the
-    // helpful error message from `resolve_bundled_param`.
+    // helpful error message from `parse_protocol`.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -268,7 +267,7 @@ fn bench_mode_max_spectra_produces_nonempty_pin() {
     let pin_path = dir.path().join("bench.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -293,7 +292,7 @@ fn cli_rejects_inverted_charge_range() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -313,7 +312,7 @@ fn cli_rejects_inverted_isotope_error_range() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -333,7 +332,7 @@ fn cli_accepts_isotope_error_min_negative_one() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -356,7 +355,7 @@ fn cli_accepts_precursor_cal_off() {
     let pin_path = dir.path().join("out.pin");
 
     let status = base_cmd(
-        "test-fixtures/test.mgf",
+        "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
@@ -378,7 +377,7 @@ fn cli_accepts_precursor_cal_off() {
 #[test]
 fn cli_accepts_both_named_and_numeric_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
-    let test_mgf = fixture("test-fixtures/test.mgf");
+    let test_mgf = fixture("test-fixtures/test.mgf.gz");
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mods_path = dir.path().join("mods.txt");
@@ -403,7 +402,6 @@ fn cli_accepts_both_named_and_numeric_param_values() {
                             &pin_a)
         .arg("--mod").arg(&mods_path)
         .arg("--fragmentation").arg("3")
-        .arg("--instrument").arg("3")
         .arg("--protocol").arg("4")
         .arg("--ntt").arg("2")
         .arg("--precursor-tol-ppm").arg("100")
@@ -417,7 +415,6 @@ fn cli_accepts_both_named_and_numeric_param_values() {
                             &pin_b)
         .arg("--mods").arg(&mods_path)
         .arg("--fragmentation").arg("HCD")
-        .arg("--instrument").arg("QExactive")
         .arg("--protocol").arg("TMT")
         .arg("--enzyme-specificity").arg("fully")
         .arg("--precursor-tol-ppm").arg("100")
@@ -440,4 +437,81 @@ fn cli_accepts_both_named_and_numeric_param_values() {
     lines_b.sort_unstable();
     assert_eq!(lines_a, lines_b,
         "legacy and named CLI forms must produce equivalent PIN output");
+}
+
+// ── MGF metadata-less model-selection routing tests ──────────────────────────
+
+#[test]
+fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
+    // MGF carries no analyzer metadata. With no --fragmentation/--fragment-tol
+    // flags, decision E applies: assume CID / low-res / 0.5 Da (cid_lowres_tryp)
+    // and emit a warning so the user knows a default was chosen.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let output = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &pin_path,
+    )
+    .output()
+    .unwrap();
+
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "andes exited non-zero; stderr: {err}");
+    assert!(err.to_lowercase().contains("cid_lowres"), "stderr: {err}");
+    assert!(
+        err.to_lowercase().contains("assuming") || err.to_lowercase().contains("warn"),
+        "expected metadata-less default warning; stderr: {err}"
+    );
+}
+
+#[test]
+fn mgf_fragment_tol_ppm_selects_high_res_model() {
+    // --fragment-tol-ppm on MGF input declares high-resolution MS/MS, so the
+    // resolver selects a QExactive (high-res) model rather than the low-res
+    // default.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let output = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--fragment-tol-ppm")
+    .arg("20")
+    .output()
+    .unwrap();
+
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "andes exited non-zero; stderr: {err}");
+    assert!(err.to_lowercase().contains("qexactive"), "stderr: {err}");
+}
+
+// ── Fragment-tolerance CLI flag tests ─────────────────────────────────────────
+
+#[test]
+fn fragment_tol_flags_are_mutually_exclusive() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pin_path = dir.path().join("out.pin");
+
+    let output = base_cmd(
+        "test-fixtures/test.mgf.gz",
+        "test-fixtures/BSA.fasta",
+        &pin_path,
+    )
+    .arg("--fragment-tol-ppm")
+    .arg("20")
+    .arg("--fragment-tol-da")
+    .arg("0.5")
+    .output()
+    .expect("run andes");
+
+    assert!(!output.status.success(), "both flags together must fail");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("cannot be used with") || err.contains("conflicts"),
+        "expected conflict error in stderr, got: {err}"
+    );
 }

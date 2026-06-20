@@ -1,9 +1,9 @@
 #!/bin/bash
 set -uo pipefail
-AD=$BENCH/astral-data
+AD=/srv/data/msgf-bench/astral-data
 MZML=LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.mzML
 FASTA=ProteoBenchFASTA_MixedSpecies_HYE.fasta
-RES=$BENCH/repo/bench-astral; mkdir -p $RES
+RES=/srv/data/msgf-bench/repo/bench-astral; mkdir -p $RES
 OIMG=ghcr.io/openms/openms-tools-thirdparty:latest
 PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
 echo "################ a comparison engine ASTRAL $(date -Is) ################"

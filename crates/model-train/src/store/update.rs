@@ -243,8 +243,9 @@ pub fn commit_update(
     new_param: &Param,
     new_sources: &[(SourceLedger, CountStats)],
 ) -> Result<(), TrainError> {
-    // Read all existing models into memory.
+    // Read all existing models into memory, preserving their GBDT blobs.
     let mut other_models: Vec<ModelEntry> = Vec::new();
+    let mut other_blobs: Vec<Option<Vec<u8>>> = Vec::new();
 
     if path.exists() {
         let store = ModelStore::open(path)?;
@@ -253,6 +254,8 @@ pub fn commit_update(
                 continue; // will be replaced
             }
             let p = store.load_param(&id)?;
+            // Preserve the GBDT blob (if any) for the existing model.
+            let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
             let ledgers = store.load_sources(&id)?;
             let mut src = Vec::new();
             for l in ledgers {
@@ -260,39 +263,28 @@ pub fn commit_update(
                 src.push((l, s));
             }
             other_models.push((id, p, src));
+            other_blobs.push(blob);
         }
     }
 
     // Write to a temp file, then rename atomically.
     let tmp = path.with_extension("parquet.tmp");
 
-    // Write the updated model first, then the other models.
-    // We reuse write_model_with_sources for each model sequentially by
-    // writing into the same file via a multi-model approach.
-    //
-    // Current write_model_with_sources only supports ONE model per call.
-    // We combine all models into a single file by writing each sequentially
-    // into a temp file and then combining.  The simplest approach: write
-    // all (model_id, param, sources) tuples into the same file.
-    //
-    // Since write_model_with_sources creates a new file each time, we write
-    // each model to a separate temp file and then merge.  Actually, looking at
-    // the write path: the combined schema supports MULTIPLE models in one file
-    // (each row is keyed by model_id). We can call write_models for the plain
-    // params and then write source rows for each model.
-    //
-    // The simplest correct path: write ALL models (including the updated one)
-    // using a single write_multi_model_with_sources helper.
-    write_all_models_with_sources(
-        &tmp,
-        std::iter::once((model_id.to_string(), new_param, new_sources.to_vec()))
-            .chain(other_models.iter().map(|(id, p, s)| (id.clone(), p, s.clone())))
-            .collect::<Vec<_>>()
-            .iter()
-            .map(|(id, p, s)| (id.as_str(), *p, s.as_slice()))
-            .collect::<Vec<_>>()
-            .as_slice(),
-    )?;
+    // Write ALL models (including the updated one) using a single
+    // write_all_models_with_sources_inner call. The updated model inherits
+    // any GBDT blob from new_param.gbdt_peak_model.
+    let all_entries: Vec<_> = std::iter::once((model_id.to_string(), new_param, new_sources.to_vec()))
+        .chain(other_models.iter().map(|(id, p, s)| (id.clone(), p, s.clone())))
+        .collect();
+    let new_blob = new_param.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
+    let all_blobs: Vec<Option<Vec<u8>>> = std::iter::once(new_blob)
+        .chain(other_blobs)
+        .collect();
+    let entries_slice: Vec<_> = all_entries
+        .iter()
+        .map(|(id, p, s)| (id.as_str(), *p, s.as_slice()))
+        .collect();
+    write_all_models_with_sources_inner(&tmp, &entries_slice, &all_blobs)?;
 
     // Commit the temp file. `rename` replaces atomically on Unix, but on Windows
     // it fails when the destination already exists — so fall back to
@@ -350,13 +342,33 @@ pub fn write_all_models_with_sources_pub(
     path: &Path,
     models: ModelSlice<'_>,
 ) -> Result<(), TrainError> {
-    write_all_models_with_sources(path, models)
+    let blobs = vec![None; models.len()];
+    write_all_models_with_sources_inner(path, models, &blobs)
 }
 
-fn write_all_models_with_sources(
+/// Like [`write_all_models_with_sources_pub`] but each model may carry a GBDT
+/// blob (parallel to `models`). `None` ⇒ no blob (legacy/rank-core-only).
+///
+/// `blobs` must have the same length as `models` (enforced by a `debug_assert`).
+/// Each entry corresponds to the model at the same index in `models`.
+pub fn write_all_models_with_sources_and_gbdt_pub(
     path: &Path,
     models: ModelSlice<'_>,
+    blobs: &[Option<Vec<u8>>],
 ) -> Result<(), TrainError> {
+    write_all_models_with_sources_inner(path, models, blobs)
+}
+
+fn write_all_models_with_sources_inner(
+    path: &Path,
+    models: ModelSlice<'_>,
+    blobs: &[Option<Vec<u8>>],
+) -> Result<(), TrainError> {
+    debug_assert_eq!(
+        blobs.len(),
+        models.len(),
+        "blobs slice must be 1:1 with models"
+    );
     use crate::store::schema::combined_schema;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
@@ -368,10 +380,11 @@ fn write_all_models_with_sources(
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
-    for &(model_id, param, sources) in models {
+    for (i, &(model_id, param, sources)) in models.iter().enumerate() {
         // Write each model to a temp buffer and read back the batches.
         let tmp_path = path.with_extension(format!("tmp_{model_id}.parquet"));
-        write_model_with_sources(&tmp_path, model_id, param, sources)?;
+        let blob = blobs.get(i).cloned().flatten();
+        write_model_with_sources(&tmp_path, model_id, param, sources, blob)?;
 
         let tmp_file = std::fs::File::open(&tmp_path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(tmp_file)

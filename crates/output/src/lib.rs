@@ -23,5 +23,11 @@ pub use tsv::{write_tsv, write_tsv_to};
 pub mod pin;
 pub use pin::{write_pin, write_pin_to};
 
+pub mod stats;
+pub use stats::{write_statistics_log, RunStatistics};
+
+pub mod qpx;
+pub use qpx::write_qpx;
+
 pub(crate) mod row_context;
 pub(crate) mod percolator_enz;

@@ -6,7 +6,7 @@ _The data-driven peptide search engine of the quantms ecosystem. Built and maint
 
 [![CI](https://github.com/bigbio/andes/actions/workflows/ci.yml/badge.svg)](https://github.com/bigbio/andes/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/bigbio/andes)](https://github.com/bigbio/andes/releases)
-[![License: UCSD-Noncommercial](https://img.shields.io/badge/license-UCSD--Noncommercial-blue)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 > **A fast, data-driven peptide search engine** — spectra (mzML, MGF, native Thermo `.raw`, Bruker timsTOF `.d`) + a FASTA database in, Percolator-ready `.pin` out. Leading PSM counts at 1% FDR, in minutes where comparable Java tools take hours. To our knowledge, the **first proteomics search engine designed and built end-to-end with AI coding agents.**
 
@@ -299,17 +299,13 @@ PIN output columns are bit-exact with Java MS-GF+ on the agreement bucket (same 
 
 ## Citation
 
-If you use andes in published work, please cite the original MS-GF+ paper:
+If you use andes in published work, please cite:
 
-> Kim, S. and Pevzner, P.A. (2014). MS-GF+ makes progress towards a universal database search tool for proteomics. *Nature Communications*, 5:5277.
-
-And optionally this Rust port:
-
-> bigbio (2026). andes: a Rust port of MS-GF+ for the quantms pipeline. https://github.com/bigbio/andes
+> bigbio (2026). andes: a data-driven peptide search engine for the quantms ecosystem. https://github.com/bigbio/andes
 
 ## License
 
-andes inherits the upstream MS-GF+ UCSD-Noncommercial license. The license restricts redistribution and commercial use; see `LICENSE` for the full text and `NOTICE` for attribution. The original Java implementation is preserved on the `java-legacy` branch (frozen at the bigbio-optimized version) and `java-legacy-original` branch (synced to upstream `MSGFPlus/msgfplus/master`).
+andes is released under the **Apache License 2.0** — see [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution. The original Java MS-GF+ implementation andes grew out of is preserved on the `java-legacy` branch.
 
 ## Acknowledgments
 

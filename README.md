@@ -228,6 +228,16 @@ andes --spectrum spectra.mzML --database db.fasta \
 
 `--output-parquet` writes an OpenMS `QPXFile`-schema bundle (`psms`/`proteins`/`search_params` parquet) — see [`DOCS.md` §3e](DOCS.md). andes can emit `.pin`, `.tsv`, and `.parquet` in one run.
 
+**Integrated rescoring (`--rescore`):** run the search and then **Percolator** in one command, joining Percolator's PEP and q-value back into the outputs:
+
+```bash
+andes --spectrum spectra.mzML --database db.fasta \
+  --output-pin out.pin --output-parquet out.idparquet \
+  --rescore --fdr 0.01
+```
+
+andes resolves a Percolator backend in order: `--percolator-bin <path>` → `percolator` on `$PATH` → the pinned biocontainers docker image (force with `--percolator-docker`). With `--rescore` the QPX `posterior_error_probability` column is filled and a `q-value` score added, and a filtered `<stem>.q<fdr>.tsv` (target PSMs at q ≤ `--fdr`) is written next to the PIN. Extra Percolator flags pass through `--percolator-args "<...>"`. Without `--output-pin`, a temporary PIN is used (keep it with `--keep-pin true`).
+
 **[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
 Point quantms's PSM search step at `andes` and use the standard quantms post-processing. The `.pin` row format is the same; existing quantms scripts using legacy numeric flag values (`--fragmentation 3 --protocol 4`) keep working without modification (the legacy numeric flag values are documented in [`DOCS.md`](DOCS.md)).

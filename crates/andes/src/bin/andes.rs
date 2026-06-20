@@ -436,6 +436,42 @@ struct SearchArgs {
     /// DEBUG ONLY: also emit the legacy separate <out>.refine.pin (disjoint-union A/B).
     #[arg(long = "refine-debug-split-pin", default_value_t = false, hide = true)]
     refine_debug_split_pin: bool,
+
+    /// Run Percolator on the PIN after the search and join its PEP/q-value back
+    /// into the outputs (QPX `posterior_error_probability` + a `q-value` score,
+    /// and a filtered `<stem>.q<fdr>.tsv`). Needs a Percolator backend (see
+    /// `--percolator-bin` / `--percolator-docker`). Default off.
+    #[arg(long = "rescore", default_value_t = false)]
+    rescore: bool,
+
+    /// Reported FDR threshold for the filtered `<stem>.q<fdr>.tsv` written under
+    /// `--rescore` (target PSMs with Percolator q-value ≤ this). Default 0.01.
+    #[arg(long = "fdr", default_value_t = 0.01)]
+    fdr: f64,
+
+    /// Explicit path to a Percolator binary (highest-priority backend). When
+    /// omitted, `percolator` on `$PATH` is used, else the docker fallback.
+    #[arg(long = "percolator-bin")]
+    percolator_bin: Option<std::path::PathBuf>,
+
+    /// Force the Percolator docker fallback (the pinned biocontainers image)
+    /// instead of looking for a native binary. Requires the `docker` CLI.
+    #[arg(long = "percolator-docker", default_value_t = false)]
+    percolator_docker: bool,
+
+    /// Percolator docker image tag for the docker fallback (power-user override).
+    #[arg(long = "percolator-image", hide = true, default_value = output::DEFAULT_PERCOLATOR_IMAGE)]
+    percolator_image: String,
+
+    /// Extra arguments passed verbatim to Percolator (after the fixed flags,
+    /// before the PIN path). e.g. `--percolator-args "--testFDR 0.05"`.
+    #[arg(long = "percolator-args", default_value = "")]
+    percolator_args: String,
+
+    /// Keep the PIN file after rescoring. With `--rescore` and no `--output-pin`,
+    /// a temporary PIN is used and deleted unless this is true. Default true.
+    #[arg(long = "keep-pin", default_value_t = true, action = clap::ArgAction::Set)]
+    keep_pin: bool,
 }
 
 /// Training arguments for `andes train-from-search`.
@@ -838,16 +874,15 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let output_pin = match search.output_pin {
-                Some(p) => p,
-                None => {
-                    eprintln!("error: --output-pin is required for search");
-                    return ExitCode::from(2);
-                }
-            };
+            // --output-pin is required UNLESS --rescore is set: rescore can route
+            // the search through a temporary PIN (deleted afterwards when
+            // --keep-pin false), so a PIN path is not mandatory in that mode.
+            if search.output_pin.is_none() && !search.rescore {
+                eprintln!("error: --output-pin is required for search (or use --rescore)");
+                return ExitCode::from(2);
+            }
             run(Cli {
                 database: Some(database),
-                output_pin: Some(output_pin),
                 ..search
             })
         }
@@ -1249,7 +1284,25 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
-    let output_pin_path: PathBuf = cli.output_pin.expect("output_pin validated in main");
+    // PIN destination. Normally `--output-pin`. Under `--rescore` without an
+    // explicit path we write to a temp dir (kept alive in `_rescore_tmp` until
+    // the rescore phase has parsed it). `--keep-pin false` also routes the PIN
+    // to a temp dir so it is removed when the dir drops at function exit.
+    let mut _rescore_tmp: Option<tempfile::TempDir> = None;
+    let output_pin_path: PathBuf = match cli.output_pin.clone() {
+        Some(p) if cli.keep_pin || !cli.rescore => p,
+        // --rescore with --keep-pin false but an explicit path: still honor the
+        // explicit path (user asked for it); keep-pin only governs the temp case.
+        Some(p) => p,
+        None => {
+            // --rescore without --output-pin → temp PIN.
+            let dir = tempfile::tempdir()
+                .map_err(|e| format!("creating temp dir for rescore PIN: {e}"))?;
+            let path = dir.path().join("andes.pin");
+            _rescore_tmp = Some(dir);
+            path
+        }
+    };
     if spectrum_paths.len() > 1 {
         eprintln!(
             "Multi-spectrum search: {} inputs → one PIN",
@@ -2263,6 +2316,63 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // ── Rescore: run Percolator on the PIN, join PEP/q-value downstream ───────
+    // Sits BETWEEN the PIN write and the QPX/TSV writes so the parsed
+    // `SpecId → PercolatorPsm` map can be threaded into `write_qpx` and the
+    // filtered TSV. `None` (rescore off) keeps every downstream output identical
+    // to a non-rescore run.
+    let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
+        if cli.rescore {
+            let backend = output::resolve_backend(
+                cli.percolator_bin.as_deref(),
+                cli.percolator_docker,
+                &cli.percolator_image,
+            )
+            .map_err(|e| format!("{e}"))?;
+            eprintln!("Rescore: Percolator backend = {}", backend.describe());
+            let extra: Vec<String> =
+                cli.percolator_args.split_whitespace().map(|s| s.to_string()).collect();
+            let t_resc = std::time::Instant::now();
+            let map = output::run_percolator(&backend, &output_pin_path, &extra)
+                .map_err(|e| format!("{e}"))?;
+            eprintln!(
+                "Rescore: Percolator produced {} target PSMs [{:.2}s]",
+                map.len(),
+                t_resc.elapsed().as_secs_f64()
+            );
+            Some(map)
+        } else {
+            None
+        };
+
+    // Filtered TSV: target PSMs whose Percolator q-value ≤ --fdr. Written next to
+    // the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM with
+    // the join key + q/PEP + peptide/proteins from the Percolator result.
+    if let Some(ref map) = rescore_map {
+        let fdr = cli.fdr;
+        let stem = output_pin_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes".to_string());
+        let dir = output_pin_path.parent().unwrap_or_else(|| Path::new("."));
+        let q_tag = format!("{fdr}").replace('.', "p");
+        let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
+        let mut accepted: Vec<&output::PercolatorPsm> =
+            map.values().filter(|p| p.q_value <= fdr).collect();
+        accepted.sort_by(|a, b| {
+            a.q_value.partial_cmp(&b.q_value).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        match write_filtered_tsv(&filtered_path, &accepted) {
+            Ok(()) => eprintln!(
+                "Wrote filtered TSV: {} ({} PSMs at q<={})",
+                filtered_path.display(),
+                accepted.len(),
+                fdr
+            ),
+            Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
+        }
+    }
+
     // ── Run summary: final tolerances + per-modification PSM tally ────────────
     // andes auto-resolves the scoring model and the precursor/fragment
     // tolerances from the data, so the FINAL search parameters differ from
@@ -2303,6 +2413,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &param.mme,
             &run_id,
             &primary_paths,
+            rescore_map.as_ref(),
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
             Err(e) => eprintln!("WARN: could not write {}: {e}", parquet_dir.display()),
@@ -2337,6 +2448,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Write the FDR-filtered rescore TSV: one row per accepted target PSM (already
+/// filtered to q ≤ fdr and sorted by q ascending). Columns: the Percolator join
+/// key (`PSMId`, == PIN SpecId), `q-value`, `posterior_error_probability`,
+/// `peptide`, `proteinIds`.
+fn write_filtered_tsv(
+    path: &Path,
+    psms: &[&output::PercolatorPsm],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut w = std::io::BufWriter::new(File::create(path)?);
+    writeln!(w, "PSMId\tq-value\tposterior_error_probability\tpeptide\tproteinIds")?;
+    for p in psms {
+        writeln!(w, "{}\t{}\t{}\t{}\t{}", p.psm_id, p.q_value, p.pep, p.peptide, p.proteins)?;
+    }
+    w.flush()
 }
 
 // ── Training pipeline ─────────────────────────────────────────────────────────

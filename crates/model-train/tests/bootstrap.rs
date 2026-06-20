@@ -68,8 +68,8 @@ fn load_hcd_scorer() -> RankScorer {
 
 /// Load spectra from BSA test.mgf fixture.
 fn load_bsa_spectra() -> Vec<model::Spectrum> {
-    let path = fixture("test-fixtures/test.mgf");
-    let file = File::open(&path).expect("open test.mgf");
+    let path = fixture("test-fixtures/test.mgf.gz");
+    let file = input::open_buf_maybe_gz(&path).expect("open test.mgf");
     MgfReader::new(BufReader::new(file))
         .filter_map(|r| r.ok())
         .collect()

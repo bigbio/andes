@@ -155,7 +155,7 @@ fn rust_matches_superset_java_target_psms() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("test-fixtures/test.mgf")).unwrap();
+    let mgf_file = input::open_buf_maybe_gz(&fixture("test-fixtures/test.mgf.gz")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();
@@ -228,7 +228,7 @@ fn rust_top1_matches_java_top1_for_majority_of_spectra() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("test-fixtures/test.mgf")).unwrap();
+    let mgf_file = input::open_buf_maybe_gz(&fixture("test-fixtures/test.mgf.gz")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();
@@ -323,7 +323,7 @@ fn r1_tie_retention_active_in_production_pipeline() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("test-fixtures/test.mgf")).unwrap();
+    let mgf_file = input::open_buf_maybe_gz(&fixture("test-fixtures/test.mgf.gz")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();
@@ -415,7 +415,7 @@ fn r2_deduped_psm_count_matches_java_on_bsa_fixture() {
     let idx = SearchIndex::from_target_db(&target, "XXX");
     let params = SearchParams::default_tryptic(aa_set());
 
-    let mgf_file = File::open(fixture("test-fixtures/test.mgf")).unwrap();
+    let mgf_file = input::open_buf_maybe_gz(&fixture("test-fixtures/test.mgf.gz")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

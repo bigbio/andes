@@ -309,9 +309,17 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
             .position(|c| *c == name)
             .ok_or(PercolatorError::MissingColumn { column: name, header: header.to_string() })
     };
+    // Match a column by name-prefix. Percolator 3.7.x emits the PEP column as
+    // `posterior_error_prob`; other builds/tools use the full
+    // `posterior_error_probability`. A prefix match accepts both.
+    let find_prefix = |prefix: &'static str| -> Result<usize, PercolatorError> {
+        cols.iter()
+            .position(|c| c.starts_with(prefix))
+            .ok_or(PercolatorError::MissingColumn { column: prefix, header: header.to_string() })
+    };
     let id_col = find("PSMId")?;
     let q_col = find("q-value")?;
-    let pep_col = find("posterior_error_probability")?;
+    let pep_col = find_prefix("posterior_error_prob")?;
     let pep_seq_col = find("peptide")?;
     let prot_col = find("proteinIds")?;
 
@@ -350,8 +358,9 @@ mod tests {
 
     #[test]
     fn parse_msgf_style_header() {
-        // MS-GF+ style: q-value at col 3 (0-based 2).
-        let text = "PSMId\tscore\tq-value\tposterior_error_probability\tpeptide\tproteinIds\n\
+        // Real Percolator 3.7.x header: the PEP column is the abbreviated
+        // `posterior_error_prob` (verified against a live percolator:3.7.1 run).
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     title_100_1\t2.5\t0.001\t0.0005\tR.PEPTIDEK.A\tsp|P1\tsp|P2\n\
                     title_101_1\t1.0\t0.02\t0.03\tK.ANOTHERK.R\tsp|P3\n";
         let m = parse_psm_results(text).unwrap();

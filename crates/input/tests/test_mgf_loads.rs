@@ -1,7 +1,6 @@
 //! Load `astral-speed/test-fixtures/test.mgf` (small fixture)
 //! and assert basic invariants.
 
-use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 

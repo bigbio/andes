@@ -51,41 +51,55 @@ andes is also the only engine here that reads Thermo `.raw` and Bruker timsTOF `
 andes is a streaming, multi-pass search cascade that ends in one uniform Percolator rescoring step.
 
 ```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"ui-sans-serif, system-ui, sans-serif","fontSize":"14px","lineColor":"#94a3b8","primaryBorderColor":"#cbd5e1"}}}%%
 flowchart TD
     %% ---- Scoring models (trained offline) ----
-    subgraph TRAIN["Scoring models — trained offline on public data"]
+    subgraph TRAIN["🧠 Scoring models · trained offline on public data"]
       direction LR
-      PRIDE[("PRIDE<br/>public datasets")] -->|"SDRF / quantms curation"| TR["andes train<br/>(own model per regime)"]
-      TR --> STORE["models.parquet<br/>per activation × instrument × enzyme × protocol"]
+      PRIDE[("PRIDE<br/>public datasets")] -->|"SDRF · quantms curation"| TR["andes train<br/>own model per regime"]
+      TR --> STORE[["models.parquet<br/>activation × instrument × enzyme × protocol"]]
     end
 
     %% ---- Inputs ----
-    SPEC["Spectra<br/>mzML · MGF · Thermo .raw · Bruker .d"]
-    DB["FASTA database<br/>target only — decoys auto-generated"]
+    SPEC(["📈 Spectra<br/>mzML · MGF · Thermo .raw · Bruker .d"])
+    DB(["🧬 FASTA database<br/>target only — decoys auto-generated"])
 
     %% ---- Candidate generation ----
     DB --> CAND["Candidate peptides<br/>enzymatic digest + variable mods"]
-    CAND --> IDX{"Candidate index<br/>--candidate-index auto"}
+    CAND --> IDX{"Candidate index<br/>auto"}
     IDX -->|"fits memory"| RAM["in-RAM index"]
     IDX -->|"too large"| MMAP["out-of-core mmap index"]
 
     %% ---- Pass 1 ----
-    SPEC --> P1["Pass 1 — top-1 search<br/>peptide-spectrum scoring"]
+    SPEC --> P1["⚡ Pass 1 · top-1 search<br/>peptide–spectrum scoring"]
     RAM --> P1
     MMAP --> P1
     STORE -. model selected per spectrum .-> P1
     P1 --> QUEUE["Top-N PSM queues<br/>+ rich per-PSM features"]
 
     %% ---- Optional second passes ----
-    QUEUE -->|"--chimeric (opt-in)"| CHIM["Pass 2a — chimeric<br/>recover co-isolated 2nd peptide<br/>from the residual spectrum"]
-    QUEUE -->|"--refine (opt-in)"| REF["Pass 2b — PTM refinement<br/>discovery mods on confident-protein anchors"]
+    QUEUE -.->|"--chimeric · opt-in"| CHIM["Pass 2a · chimeric<br/>recover co-isolated 2nd peptide<br/>from the residual spectrum"]
+    QUEUE -.->|"--refine · opt-in"| REF["Pass 2b · PTM refinement<br/>discovery mods on confident-protein anchors"]
 
     %% ---- Merge + rescore ----
     QUEUE --> MERGE["Unified PIN<br/>Pass 1 + chimeric + refine"]
     CHIM --> MERGE
     REF --> MERGE
     MERGE --> PERC["Percolator 3.7.1<br/>semi-supervised rescoring"]
-    PERC --> OUT["FDR-controlled PSMs<br/>q ≤ 0.01 · entrapment-validated"]
+    PERC --> OUT(["✅ FDR-controlled PSMs<br/>q ≤ 0.01 · entrapment-validated"])
+
+    %% ---- palette ----
+    classDef io      fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#1e3a8a;
+    classDef model   fill:#faf5ff,stroke:#a855f7,stroke-width:1.5px,color:#6b21a8;
+    classDef core    fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#065f46;
+    classDef opt     fill:#fff7ed,stroke:#f97316,stroke-width:1.5px,color:#9a3412,stroke-dasharray:4 3;
+    classDef out     fill:#fdf2f8,stroke:#ec4899,stroke-width:1.5px,color:#9d174f;
+    class SPEC,DB io;
+    class PRIDE,TR,STORE model;
+    class CAND,IDX,RAM,MMAP,P1,QUEUE,MERGE core;
+    class CHIM,REF opt;
+    class PERC,OUT out;
+    style TRAIN fill:#fcfaff,stroke:#d8b4fe,stroke-width:1px,color:#6b21a8;
 ```
 
 1. **Candidate generation.** The FASTA is digested into candidate peptides (with variable mods). The candidate index is chosen automatically — kept in RAM, or mapped out-of-core (`mmap`) when it would exceed available memory — so very large mod searches don't OOM (`--candidate-index {auto,ram,mmap}`).

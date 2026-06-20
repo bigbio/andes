@@ -56,7 +56,7 @@ fn read_sorted_rows(path: &PathBuf) -> (String, Vec<String>) {
 fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
     let root = workspace_root();
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
-    let spectra = root.join("test-fixtures/test.mgf");
+    let spectra = root.join("test-fixtures/test.mgf.gz");
     let fasta = root.join("test-fixtures/BSA.fasta");
     assert!(spectra.exists(), "fixture missing: {}", spectra.display());
     assert!(fasta.exists(), "fixture missing: {}", fasta.display());

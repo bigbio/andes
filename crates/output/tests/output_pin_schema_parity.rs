@@ -149,7 +149,7 @@ fn rust_pin_rows_have_at_least_header_column_count() {
     params.charge_range = 2..=3;
     params.isotope_error_range = -1..=2;
 
-    let mgf_file = File::open(fixture("test-fixtures/test.mgf")).unwrap();
+    let mgf_file = input::open_buf_maybe_gz(&fixture("test-fixtures/test.mgf.gz")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

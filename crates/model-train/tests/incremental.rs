@@ -284,11 +284,11 @@ fn acceptance_gate_same_model_is_accepted() {
             .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
     }
 
-    let bsa_mgf = fixture("test-fixtures/test.mgf");
+    let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
     // Load spectra.
-    let f = File::open(&bsa_mgf).expect("open test.mgf");
+    let f = input::open_buf_maybe_gz(&bsa_mgf).expect("open test.mgf");
     let reader = MgfReader::new(BufReader::new(f));
     let spectra: Vec<_> = reader.filter_map(|r| r.ok()).collect();
 

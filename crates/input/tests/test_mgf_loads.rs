@@ -10,7 +10,7 @@ use input::MgfReader;
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("test-fixtures/test.mgf")
+        .join("test-fixtures/test.mgf.gz")
         .canonicalize()
         .expect("canonicalize test.mgf path")
 }
@@ -18,7 +18,7 @@ fn fixture_path() -> PathBuf {
 #[test]
 fn test_mgf_parses_completely() {
     let path = fixture_path();
-    let file = File::open(&path)
+    let file = input::open_buf_maybe_gz(&path)
         .unwrap_or_else(|e| panic!("open {path:?}: {e}"));
     let reader = MgfReader::new(BufReader::new(file));
     let mut count = 0;
@@ -33,7 +33,7 @@ fn test_mgf_parses_completely() {
 #[test]
 fn test_mgf_first_spectrum_has_expected_shape() {
     let path = fixture_path();
-    let file = File::open(&path).unwrap();
+    let file = input::open_buf_maybe_gz(&path).unwrap();
     let reader = MgfReader::new(BufReader::new(file));
     let first = reader.into_iter().next().unwrap().unwrap();
     assert!(!first.title.is_empty(), "first spectrum has empty title");

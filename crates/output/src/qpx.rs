@@ -192,7 +192,7 @@ fn modification_fields() -> Fields {
         Field::new(
             "positions",
             DataType::List(Arc::new(Field::new(
-                "item",
+                "element",
                 DataType::Struct(position_fields()),
                 true,
             ))),
@@ -237,7 +237,7 @@ fn metavalue_fields() -> Fields {
 }
 
 fn list_of(item: DataType) -> DataType {
-    DataType::List(Arc::new(Field::new("item", item, true)))
+    DataType::List(Arc::new(Field::new("element", item, true)))
 }
 
 /// Full `psms.parquet` Arrow schema (column order + types verbatim from QPX).
@@ -334,10 +334,16 @@ fn build_psms_batch(
     let mut psm_metavalues = list_struct_builder(metavalue_fields());
     let mut spectrum_metavalues = list_struct_builder(metavalue_fields());
     let mut run_identifier = StringBuilder::new();
-    let mut mz_array = ListBuilder::new(arrow::array::Float32Builder::new());
-    let mut intensity_array = ListBuilder::new(arrow::array::Float32Builder::new());
-    let mut charge_array = ListBuilder::new(Int32Builder::new());
-    let mut ion_type_array = ListBuilder::new(StringBuilder::new());
+    let mut mz_array = primitive_list_builder(
+        arrow::array::Float32Builder::new(),
+        DataType::Float32,
+    );
+    let mut intensity_array = primitive_list_builder(
+        arrow::array::Float32Builder::new(),
+        DataType::Float32,
+    );
+    let mut charge_array = primitive_list_builder(Int32Builder::new(), DataType::Int32);
+    let mut ion_type_array = primitive_list_builder(StringBuilder::new(), DataType::Utf8);
 
     // Per-spectrum identification index (matches OpenMS, which gives each
     // spectrum's hit-list a stable index). Incremented once per emitted PSM.
@@ -575,8 +581,8 @@ fn append_metavalue(sb: &mut StructBuilder, name: &str, value: &str, value_type:
 /// Build a `ListBuilder<StructBuilder>` for a `list<struct<...>>` column from
 /// the struct's field definitions.
 fn list_struct_builder(fields: Fields) -> ListBuilder<StructBuilder> {
-    let item_field = Arc::new(Field::new(
-        "item",
+    let element_field = Arc::new(Field::new(
+        "element",
         DataType::Struct(fields.clone()),
         true,
     ));
@@ -584,7 +590,18 @@ fn list_struct_builder(fields: Fields) -> ListBuilder<StructBuilder> {
         .iter()
         .map(|f| make_builder_for(f.data_type()))
         .collect();
-    ListBuilder::new(StructBuilder::new(fields, child_builders)).with_field(item_field)
+    ListBuilder::new(StructBuilder::new(fields, child_builders)).with_field(element_field)
+}
+
+/// Build a `ListBuilder` for a `list<T>` primitive column whose element field is
+/// named `"element"` (QPX/Parquet LIST convention), matching the schema produced
+/// by [`list_of`]. `inner` is the leaf `DataType` (nullable, as `list_of` emits).
+fn primitive_list_builder<T: arrow::array::ArrayBuilder>(
+    values_builder: T,
+    inner: DataType,
+) -> ListBuilder<T> {
+    let element_field = Arc::new(Field::new("element", inner, true));
+    ListBuilder::new(values_builder).with_field(element_field)
 }
 
 /// Construct an Arrow `ArrayBuilder` for the given field type. Handles the
@@ -758,7 +775,7 @@ fn build_search_params_batch(
 
 /// Build a single-row `List<Utf8>` array whose one cell holds `values`.
 fn string_list_singleton(values: Vec<String>) -> arrow::array::ListArray {
-    let mut b = ListBuilder::new(StringBuilder::new());
+    let mut b = primitive_list_builder(StringBuilder::new(), DataType::Utf8);
     for v in values {
         b.values().append_value(v);
     }

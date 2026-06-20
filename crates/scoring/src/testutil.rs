@@ -19,7 +19,7 @@ use model::tolerance::Tolerance;
 /// rebuilding 50 lines of boilerplate.
 pub fn tiny_param() -> Param {
     let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-    let prefix_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let prefix_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
     let noise_ion = IonType::Noise;
 
     // max_rank = 3 means each rank-distribution array has length 4
@@ -69,6 +69,9 @@ pub fn tiny_param() -> Param {
         noise_err_dist_table: FxHashMap::default(),
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
+        frag_intensity_model: None,
+        rich_ion_model: None,
     };
     p.rebuild_cache();
     p
@@ -87,7 +90,7 @@ pub fn tiny_param() -> Param {
 /// `gf/primitive_graph.rs`.
 pub fn tiny_param_with_ions() -> Param {
     let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
     let noise = IonType::Noise;
 
     // max_rank=3 → 4 slots. Ion has higher freq at rank 1.
@@ -134,6 +137,9 @@ pub fn tiny_param_with_ions() -> Param {
         noise_err_dist_table: FxHashMap::default(),
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
+        frag_intensity_model: None,
+        rich_ion_model: None,
     };
     p.rebuild_cache();
     p

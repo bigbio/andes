@@ -20,11 +20,11 @@ fn test_partition_b() -> Partition {
 }
 
 fn test_ion_prefix() -> IonType {
-    IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits() }
+    IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 }
 }
 
 fn test_ion_suffix() -> IonType {
-    IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() }
+    IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 }
 }
 
 fn make_count_stats_0() -> CountStats {
@@ -106,6 +106,7 @@ fn per_source_stats_round_trip_and_sum() {
         "m",
         &param,
         &[(ledger0.clone(), s0.clone()), (ledger1.clone(), s1.clone())],
+        None,
     )
     .unwrap();
 
@@ -153,7 +154,7 @@ fn load_param_ignores_source_stat_rows() {
     let path = dir.path().join("models.parquet");
     let param = fixture_param();
 
-    write_model_with_sources(&path, "only_model", &param, &[]).unwrap();
+    write_model_with_sources(&path, "only_model", &param, &[], None).unwrap();
 
     let store = ModelStore::open(&path).unwrap();
     let loaded = store.load_param("only_model").unwrap();

@@ -250,14 +250,20 @@ fn extract_peaks(raw: &RawSpectrum) -> Vec<(f64, f32)> {
 }
 
 /// Map a Thermo `DissociationMethod` to the model's [`ActivationMethod`].
-/// Electron-based variants (ETD/ETCID/ETHCD/ECD/…) collapse to `ETD`; unknown
-/// or unsupported methods return `None` (the resolver then keeps its default).
+/// Pure electron-based methods (ETD/ECD/NETD) map to `ETD`. Supplemental-
+/// activation methods (ETciD/EThcD/ECciD/EChcD) are EThcD-class: the
+/// collisional supplement produces b/y ions the pure-ETD c/z model can't
+/// score, and no EThcD model exists, so they map to `HCD` (b/y) — see H6,
+/// mirrors the mzML reader's EThcD detection. Unknown methods return `None`.
 fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
     match d.0 {
         1 => Some(ActivationMethod::CID),
         2 => Some(ActivationMethod::HCD),
-        // ETD, ETCID, ETHCD, ECD, ECCID, ECHCD, NETD
-        4 | 5 | 6 | 8 | 9 | 10 | 16 => Some(ActivationMethod::ETD),
+        // Pure electron transfer/capture: ETD, ECD, NETD → c/z model.
+        4 | 8 | 16 => Some(ActivationMethod::ETD),
+        // Supplemental activation (EThcD/ETciD/EChcD/ECciD): electron + beam/
+        // resonant collision in one step → route to HCD (b/y), not pure ETD.
+        5 | 6 | 9 | 10 => Some(ActivationMethod::HCD),
         _ => None,
     }
 }
@@ -372,9 +378,14 @@ mod tests {
     fn dissociation_maps_to_activation() {
         assert_eq!(map_dissociation(DissociationMethod(1)), Some(ActivationMethod::CID));
         assert_eq!(map_dissociation(DissociationMethod(2)), Some(ActivationMethod::HCD));
-        // ETD / ETCID / ETHCD / ECD-family / NETD all collapse to ETD.
-        for v in [4u8, 5, 6, 8, 9, 10, 16] {
+        // Pure electron transfer/capture (ETD=4, ECD=8, NETD=16) → ETD.
+        for v in [4u8, 8, 16] {
             assert_eq!(map_dissociation(DissociationMethod(v)), Some(ActivationMethod::ETD));
+        }
+        // H6: supplemental activation (ETciD=5, EThcD=6, ECciD=9, EChcD=10) →
+        // HCD (b/y), not pure ETD — the collisional supplement makes b/y ions.
+        for v in [5u8, 6, 9, 10] {
+            assert_eq!(map_dissociation(DissociationMethod(v)), Some(ActivationMethod::HCD));
         }
         assert_eq!(map_dissociation(DissociationMethod(0)), None); // Unknown
     }

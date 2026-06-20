@@ -76,12 +76,12 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | `--instrument` | enum | `low-res` | Instrument class for bundled model resolution. Named: `low-res`, `high-res`, `TOF`, `QExactive`. | Java `-inst`; numeric `0`=low-res, `1`=high-res, `2`=TOF, `3`=QExactive |
 | `--protocol` | enum | `auto` | Search protocol suffix for bundled model resolution. Named: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
 | `--param-file` | path | *(auto)* | Explicit path to a `.param` scoring model file. When set, overrides all auto-detection and bundled resolution. Required when running a release binary outside the source tree if bundled resources are not present. | Java `-conf` / model path |
-| `--model-store` | path | *(bundled)* | Path to a Parquet model store to use instead of the bundled `resources/ionstat/models.parquet`. Model selection reads from this store when set. | *(no Java equivalent)* |
+| `--model-store` | path | *(bundled)* | Path to a Parquet model store to use instead of the bundled `resources/models.parquet`. Model selection reads from this store when set. | *(no Java equivalent)* |
 | `--model` | string | *(auto-select)* | Exact model ID to load from the model store, skipping automatic selection by `(--fragmentation, --instrument, --protocol)`. Useful for searching with a freshly-trained model (see `andes train`). | *(no Java equivalent)* |
 
 **Bundled default when all scoring flags are at their defaults** (`--fragmentation auto --instrument low-res --protocol auto`): `hcd_qexactive_tryp` (from the parquet model store). This preserves pre-auto-detect behaviour for MGF inputs and mzML files without activation metadata.
 
-**Model selection** (when `--param-file` is not set, resolved from `resources/ionstat/models.parquet`):
+**Model selection** (when `--param-file` is not set, resolved from `resources/models.parquet`):
 
 1. Build a selection key: `{Frag}_{Inst}_Trypsin` with optional protocol experiment class (e.g. `tmt`).
 2. Exact match on the key → use that model.
@@ -196,50 +196,89 @@ andes writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RawScore` (the GF-free rank score) — the generating function and all of its derived score columns have been removed. With the default charge range `--charge-min 2 --charge-max 5`, the header has **39 columns** (listed below in order). The `chargeN` one-hots track the `--charge-min`…`--charge-max` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`).
+Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge-min`…`--charge-max` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 65 columns listed below in emission order.
 
-`--chimeric` does **not** change the column set; the header is the same 39 columns. What it changes: it populates the `PrecursorIsotopeKL` / `PrecursorSNR` features (`0.0` otherwise) from a linked MS1, and — because a single scan can then emit several rows — the `SpecId` of multi-row scans gains a trailing per-row index (see `SpecId` below). Multi-row scans also occur without `--chimeric` whenever rank-1 candidates tie on `RawScore`.
+There are **two score columns**, easy to confuse:
 
-Columns in emission order (39 with the default 2–5 charge range):
+* **`RankScore`** (col 7) — the rank-LLR score; the **ranking** signal that orders candidates within a spectrum (this was historically called `RawScore`).
+* **`RawScore`** (col 62) — the fused strong-score `signal − null`; the **headline discriminative** feature Percolator weights most (historically `StrongScore`). With `--score strong` it also becomes the ranking signal.
 
-| # | Column | Type | Description |
-|---|---|---|---|
-| 1 | `SpecId` | string | `{specID}_{scan}_{rank}` PSM identifier. On scans that emit more than one row (under `--chimeric`, or when candidates tie on `RawScore`), a per-row index is appended → `{specID}_{scan}_{rank}_{rowIdx}` to keep SpecIds unique. |
-| 2 | `Label` | int | `+1` target, `-1` decoy (by **source protein**, not peptide sequence). |
-| 3 | `ScanNr` | int | MS2 scan number from the input file. |
-| 4 | `ExpMass` | float | Experimental neutral precursor mass (Da): `precursor_mz × charge − charge × proton`. |
-| 5 | `CalcMass` | float | Theoretical neutral peptide mass (includes H₂O). |
-| 6 | `mass` | float | Duplicate of `ExpMass` (OpenMS PercolatorAdapter convention). |
-| 7 | `RawScore` | int | Rounded raw match score — the sole score/rank column. |
-| 8 | `isotope_error` | int | Winning isotope offset (−1…2 by default). |
-| 9 | `peplen` | int | Peptide residue count **+ 2** (includes flanking pre/post residues). |
-| 10 | `dm` | float | Precursor mass error (Da) after isotope correction. |
-| 11 | `absdm` | float | Absolute value of `dm`. |
-| 12… | `charge2` … `chargeK` | 0/1 | One-hot encoding of assigned precursor charge; one column per state in the `--charge-min`…`--charge-max` range. |
-| | `enzN` | 0/1 | N-terminal boundary consistent with enzyme rules. |
-| | `enzC` | 0/1 | C-terminal boundary consistent with enzyme rules. |
-| | `enzInt` | int | Count of internal enzymatic cleavage positions in the peptide. |
-| | `NumMatchedMainIons` | int | Matched charge-1 b/y fragment positions. |
-| | `longest_b` | int | Longest contiguous matched b-ion run. |
-| | `longest_y` | int | Longest contiguous matched y-ion run. |
-| | `longest_y_pct` | float | `longest_y / peptide.length()` (6 decimal places). |
-| | `ExplainedIonCurrentRatio` | float | Matched b+y intensity / total MS2 intensity. |
-| | `NTermIonCurrentRatio` | float | Matched b-ion intensity / total MS2 intensity. |
-| | `CTermIonCurrentRatio` | float | Matched y-ion intensity / total MS2 intensity. |
-| | `MS2IonCurrent` | float | Sum of all MS2 peak intensities (not log-scaled). |
-| | `IsolationWindowEfficiency` | float | Always `0.0` (not available from parsed spectra). |
-| | `MeanErrorTop7` | float | Mean absolute Da error of top-7 most-intense matched ions. |
-| | `StdevErrorTop7` | float | Population stdev of absolute Da errors (top-7). |
-| | `MeanRelErrorTop7` | float | Mean signed ppm error of top-7 ions. |
-| | `StdevRelErrorTop7` | float | Population stdev of signed ppm errors (top-7). |
-| | `matchedIonRatio` | float | `NumMatchedMainIons / peptide.length()`. |
-| | `EdgeScore` | int | Per-bond edge-scoring sum (ion-existence score + error score) accumulated across the peptide backbone. Additive feature. |
-| | `PrecursorIsotopeKL` | float | KL divergence of the precursor isotope envelope vs the theoretical model (MS1). `0.0` unless `--chimeric` populates it from a linked MS1 scan. |
-| | `PrecursorSNR` | float | Precursor signal-to-noise ratio from the MS1 envelope. `0.0` unless `--chimeric` populates it. |
-| | `DeltaRawScore` | float | `RawScore(best) − RawScore(2nd-best distinct peptide)` for the spectrum; emitted on the rank-1 row only (`0.0` on lower-ranked rows). |
-| | `TailorScore` | float | Tailor per-spectrum calibration (Yang et al., JPR 2020): `RawScore` ÷ the spectrum's top-1% RawScore quantile — makes RawScores comparable across spectra. |
-| 38 | `Peptide` | string | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 39 | `Proteins` | string | Protein accession(s); decoy accessions carry `--decoy-prefix`. Multiple accessions tab-separated when one peptide maps to several proteins. |
+Most of the columns after `matchedIonRatio` are **additive** features: extra evidence Percolator can learn weights for without perturbing the core score distribution. Several are **0.0 unless a flag/model is active** — see the note after the table.
+
+`--chimeric` does **not** change the column set. It populates `PrecursorIsotopeKL` / `PrecursorSNR` (`0.0` otherwise) from a linked MS1, and — because a scan can then emit several rows — appends a per-row index to multi-row `SpecId`s (see below). Multi-row scans also occur without `--chimeric` whenever rank-1 candidates tie.
+
+| # | Column | Type | Range | Description |
+|---|---|---|---|---|
+| 1 | `SpecId` | string | — | `{specID}_{scan}_{rank}` PSM id; multi-row scans get a `_{rowIdx}` suffix to stay unique. |
+| 2 | `Label` | int | {−1, +1} | `+1` target, `−1` decoy (by **source protein**, TDC convention). |
+| 3 | `ScanNr` | int | ≥0 | MS2 scan number. |
+| 4 | `ExpMass` | float | >0 | Experimental neutral precursor mass (Da): `mz×z − z×proton`. |
+| 5 | `CalcMass` | float | >0 | Theoretical neutral peptide mass (Da, incl. H₂O). |
+| 6 | `mass` | float | >0 | Duplicate of `ExpMass` (PercolatorAdapter convention). |
+| 7 | `RankScore` | int | unbounded | **Rank-LLR ranking score** (orders candidates within a spectrum). |
+| 8 | `isotope_error` | int | [−1, 2] | Winning ¹³C isotope offset. |
+| 9 | `peplen` | int | ≥6 | Residue count **+ 2** (includes flanking pre/post). |
+| 10 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
+| 11 | `absdm` | float | ≥0 | `\|dm\|`. |
+| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge; one column per state in `--charge-min`…`--charge-max`. |
+| 16 | `enzN` | 0/1 | one-hot | N-terminal boundary consistent with the enzyme rule. |
+| 17 | `enzC` | 0/1 | one-hot | C-terminal boundary consistent with the enzyme rule. |
+| 18 | `enzInt` | int | ≥0 | Count of internal positions matching the enzyme rule. |
+| 19 | `NumMatchedMainIons` | int | [0, peplen−1] | Matched charge-1 b/y fragment positions. |
+| 20 | `longest_b` | int | [0, peplen−1] | Longest contiguous matched b-ion run. |
+| 21 | `longest_y` | int | [0, peplen−1] | Longest contiguous matched y-ion run. |
+| 22 | `longest_y_pct` | float | [0, 1] | `longest_y / peplen`. |
+| 23 | `ExplainedIonCurrentRatio` | float | [0, 1] | Matched b+y intensity / total MS2 ion current. |
+| 24 | `NTermIonCurrentRatio` | float | [0, 1] | Matched b-ion intensity / total MS2 ion current. |
+| 25 | `CTermIonCurrentRatio` | float | [0, 1] | Matched y-ion intensity / total MS2 ion current. |
+| 26 | `MS2IonCurrent` | float | ≥0 | Sum of all MS2 peak intensities (not log-scaled). |
+| 27 | `IsolationWindowEfficiency` | float | 0.0 | Always `0.0` (not available from parsed spectra). |
+| 28 | `MeanErrorTop7` | float | ≥0 | Mean absolute ppm error of the top-7 most-intense matched ions. |
+| 29 | `StdevErrorTop7` | float | ≥0 | Population stdev of absolute ppm errors (top-7). |
+| 30 | `MeanRelErrorTop7` | float | signed | Mean signed ppm error (top-7). |
+| 31 | `StdevRelErrorTop7` | float | ≥0 | Population stdev of signed ppm errors (top-7). |
+| 32 | `matchedIonRatio` | float | [0, 1] | `NumMatchedMainIons / peplen`. |
+| 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive (Kim et al. 2014). |
+| 34 | `PrecursorIsotopeKL` | float | ≥0 | KL divergence of precursor isotope envelope vs averagine. **0.0 unless `--chimeric`.** |
+| 35 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
+| 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
+| 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile (Yang et al. 2020); cross-spectrum comparability. |
+| 38 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions — mass-accuracy evidence the rank score discards. |
+| 39 | `NeutralLossIonCount` | int | ≥0 | Matched b/y ions with −H₂O/−NH₃ partner peaks. |
+| 40 | `LongestComplementaryLadder` | int | [0, peplen−1] | Longest run of bonds where both bᵢ and y₍ₙ₋ᵢ₎ matched. |
+| 41 | `ComplementaryIonBalance` | float | ≥0 | `Σ 1/(1+\|rankᵦ−rankᵧ\|)` over complementary bonds. |
+| 42 | `MeanMatchedIntensityRank` | float | ≥1 | Mean intensity-rank of matched ions (1 = most intense; lower is better). |
+| 43 | `DoublyChargedMatchedIonCount` | int | ≥0 | Matched charge-2 b/y ions. |
+| 44 | `UniqueMatchFraction` | float | [0, 1] | Within-peptide peak-explanation uniqueness. |
+| 45 | `ChanceMatchSurprise` | float | ≥0 | `Σ max(0, −ln(ρ·Δ))` — how improbable the matches are by chance (null moat). |
+| 46 | `IntensitySignal` | float | [0, 1] | Cosine sim. of predicted vs observed intensities. **0.0 without an intensity model.** |
+| 47 | `FragPredExplained` | float | [0, 1] | `Σ(matched·pred)/Σpred`. **0.0 without a frag-intensity model.** |
+| 48 | `FragPredChanceLLR` | float | ≥0 | `Σ matched·pred·max(0,−ln p_chance)`. **0.0 without a frag-intensity model.** |
+| 49 | `FragTopKObserved` | float | [0, 1] | Top-K predicted-most-intense ions observed. **0.0 without a frag-intensity model.** |
+| 50 | `RichIonLLR` | float | unbounded | Decoy-aware per-annotated-ion LLR sum. **0.0 without a rich-ion model.** |
+| 51 | `IsRefinement` | 0/1 | one-hot | 1 if the PSM came from the Pass-2 refinement search. **0 without `--refine`.** |
+| 52 | `NumMods` | int | ≥0 | Variable-modification count on the matched peptide. |
+| 53 | `RefinementModClass` | int | [0, 99] | Mod-class id for subgroup-FDR grouping. **0 without `--refine`.** |
+| 54 | `ModSiteShiftedMatched` | int | ≥0 | Matched mod-bearing (mass-shifted) b/y ions. **0 for unmodified peptides.** |
+| 55 | `ModSiteShiftedFrac` | float | [0, 1] | Matched shifted ÷ total shifted ions. |
+| 56 | `ModSiteIntensFrac` | float | [0, 1] | Shifted-ion intensity ÷ all matched-ion intensity. |
+| 57 | `ModSiteLocalized` | 0/1 | one-hot | 1 if a bracketing ion pair localizes the mod. |
+| 58 | `ModSiteDetCount` | int | ≥0 | Count of site-determining (bracketing) ions over all mod sites. |
+| 59 | `MassCompetitionEvidence` | float | ≥0 | `Σ 1/(1+ambiguity+ρ)` — alternative-mass competition null term. |
+| 60 | `CandidateRankEntropy` | float | ≥0 | Softmax entropy over the retained top-K candidate scores (spectrum-level). |
+| 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
+| 62 | `RawScore` | float | unbounded | **Headline fused strong-score** `signal − null` — the primary discriminative feature. |
+| 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore` (significance calibration). |
+| 64 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
+| 65 | `Proteins` | string | — | Protein accession(s), tab-separated for shared peptides; decoys carry `--decoy-prefix`. |
+
+**Conditional columns** (always present in the header, but `0.0`/`0` unless their condition holds):
+
+* `PrecursorIsotopeKL`, `PrecursorSNR` — need `--chimeric` + a linked MS1.
+* `IntensitySignal`, `FragPredExplained`, `FragPredChanceLLR`, `FragTopKObserved` — need a trained intensity / frag-intensity model.
+* `RichIonLLR` — needs a trained rich-ion model.
+* `IsRefinement`, `NumMods`, `RefinementModClass`, `ModSite*` — populated by `--refine` (and the `ModSite*` block only on modified peptides).
+* `DeltaRankScore` — emitted on the rank-1 row only.
 
 ### 3b. TSV columns
 
@@ -269,6 +308,41 @@ Decoy PSMs are included in TSV output; downstream tools label them via Percolato
 ### 3c. PIN vs TSV — which to use
 
 Use **PIN** when the goal is FDR calibration or rescoring: Percolator, MS²Rescore, Mokapot, and quantms-style pipelines consume `.pin` directly and learn feature weights from the full Percolator feature set (including `EdgeScore`). Use **TSV** for spreadsheet inspection, custom reporting, or tools that expect a flat PSM table. You can emit both in one run with `--output-pin` and `--output-tsv`. For production quantms workflows, PIN is the standard path; TSV is optional diagnostics.
+
+### 3d. Run summary (`statistics.log`)
+
+andes auto-resolves the scoring model and the precursor/fragment tolerances from the input metadata, so the parameters a search **ends** with are not necessarily the CLI inputs: precursor calibration tightens the window, and a high-res model carries (e.g.) a 20 ppm fragment tolerance even when the input named none. To make a run's true parameters recoverable, andes prints a summary to stderr at the end of every search **and** writes a `statistics.log` next to the PIN (in the PIN's parent directory). Implementation: `crates/output/src/stats.rs`.
+
+The summary records the **final** precursor tolerance (+ calibration mode), the **final** fragment tolerance (the resolved model's `mme`), the number of spectra with a match, the pre-FDR rank-1 target/decoy PSM split, and a **per-modification PSM tally** — for each modification (fixed like Carbamidomethyl and variable like Oxidation/Acetyl), how many rank-1 target PSMs carry it, plus an `(unmodified)` count.
+
+```text
+──────── andes run summary ────────
+  Final precursor tolerance : Symmetric(10.0 ppm) (calibration: Auto)
+  Final fragment tolerance  : 0.5 Da
+  Spectra with a match      : 48210
+  Rank-1 PSMs (pre-FDR)     : 31204 target, 17006 decoy
+  PTM report (rank-1 target PSMs carrying each modification):
+    Carbamidomethyl : 28933
+    Oxidation       :  6120
+    Acetyl          :   341
+    (unmodified)    :  2150
+  ───────────────────────────────────
+```
+
+Counts are **pre-FDR**, taken over each spectrum's best (rank-1) candidate; final FDR control happens downstream in Percolator. The tally is most useful with `--refine`, where it shows exactly which discovered PTMs were identified and at what volume. (`statistics.log` matches the gitignore `*.log*` pattern — it is a per-run output artifact, not a tracked file.)
+
+### 3e. QPX `.idparquet` bundle (`--output-parquet`)
+
+`--output-parquet <DIR>` writes an **OpenMS-compatible QPX 1.0** Parquet bundle — a directory (conventionally ending in `.idparquet`) containing `psms.parquet`, `proteins.parquet`, and `search_params.parquet`. The schema (column names, Arrow types, nested `list<element: …>` structures, and the per-file metadata keys `qpx_version`/`file_type`/`uuid`/`creation_date`/`software_provider`/`creator`) matches what OpenMS's `QPXFile` writer emits byte-for-byte, so the files are interchangeable with OpenMS / [quantms](https://github.com/bigbio/quantms) tooling. Implementation: `crates/output/src/qpx.rs`. Reuses the workspace's existing `arrow`/`parquet` stack — no new heavy dependency.
+
+`psms.parquet` carries one row per PSM with `sequence`, `peptidoform`, `modifications` (name + Unimod accession + positions), `precursor_charge`, `calculated_mz`/`observed_mz`, `is_decoy`, `scan`/`rt`, `protein_accessions` (with flanks + offsets), the spectrum `mz_array`/`intensity_array`, the headline `score` (`andes:RawScore`), and an `additional_scores` list carrying the other andes features (`RankScore`, `TailorScore`, `DeltaRankScore`, `EdgeScore`, `RichIonLLR`, …). `search_params.parquet` records the resolved engine/tolerances/enzyme/modifications.
+
+Fields andes does **not** compute pre-rescoring are written null: `posterior_error_probability` and the q-value are Percolator's job (downstream), and `predicted_rt`/`ion_mobility`/per-peak `charge_array`/`ion_type_array` are not produced. `proteins.parquet` lists the distinct accessions seen in PSMs (andes does no protein inference). Emit it alongside `--output-pin`/`--output-tsv`:
+
+```bash
+andes --spectrum spectra.mzML --database db.fasta \
+  --output-pin out.pin --output-parquet out.idparquet
+```
 
 ---
 
@@ -313,10 +387,10 @@ timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes 
 | FT-ICR | `MS:1000480` (FT) | `high-res` |
 | TOF | `MS:1000128` | `TOF` |
 
-### Bundled model store (`resources/ionstat/models.parquet`)
+### Bundled model store (`resources/models.parquet`)
 
 All 39 scoring models ship with the binary as a single Parquet model store
-(`resources/ionstat/models.parquet`). The store covers the full
+(`resources/models.parquet`). The store covers the full
 fragmentation × instrument × protocol matrix (CID/ETD/HCD/UVPD ×
 LowRes/HighRes/TOF/QExactive × Trypsin, with protocol variants for Phospho, TMT,
 iTRAQ, iTRAQPhospho).
@@ -411,7 +485,7 @@ andes --spectrum more.mzML --database mydata.fasta --output-pin out.pin \
 
 See **[`TRAIN.md`](TRAIN.md)** for the full guide: where to get training data, the experiment-class catalog, incremental training (`--update --add` / `--remove-source` / `--reweight` / `--decay`), and how to evaluate a candidate model on held-out data before committing it.
 
-andes ships its own model store at `resources/ionstat/models.parquet`, containing all 39 bundled scoring models. The `--param-file` flag can additionally load an external binary model file directly for custom or externally supplied models.
+andes ships its own model store at `resources/models.parquet`, containing all 39 bundled scoring models. The `--param-file` flag can additionally load an external binary model file directly for custom or externally supplied models.
 
 ---
 

@@ -30,7 +30,7 @@ use model::tolerance::Tolerance;
 /// prefix ion, used to probe rank-distribution smoothing in isolation.
 fn one_partition_template(max_rank: i32) -> Param {
     let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
     let mut frag_off_table = FxHashMap::default();
     frag_off_table.insert(
         part,
@@ -62,6 +62,9 @@ fn one_partition_template(max_rank: i32) -> Param {
         noise_err_dist_table: FxHashMap::default(),
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
+            frag_intensity_model: None,
+            rich_ion_model: None,
     };
     p.rebuild_cache();
     p
@@ -76,7 +79,7 @@ fn one_partition_template(max_rank: i32) -> Param {
 fn noise_rank_dist_stays_sharp_not_flattened_by_smoothing() {
     let max_rank = 150;
     let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
     let template = one_partition_template(max_rank);
 
     let mut counts = CountStats::new();
@@ -389,7 +392,7 @@ fn sparse_partition_shrinks_toward_independent_prior() {
     let max_rank = 150;
     let n_slots = (max_rank + 1) as usize;
     let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
     let template = one_partition_template(max_rank);
 
     let mut prior = one_partition_template(max_rank);
@@ -448,7 +451,7 @@ fn rank_window_smoothing_preserves_head_smooths_tail() {
 fn rank_smoothing_softens_signal_not_noise() {
     let max_rank = 150;
     let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
     let template = one_partition_template(max_rank);
 
     let mut counts = CountStats::new();
@@ -457,8 +460,7 @@ fn rank_smoothing_softens_signal_not_noise() {
         counts.bump_rank(part, IonType::Noise, 0);
     }
 
-    let mut cfg_on = EstimatorConfig::default();
-    cfg_on.rank_smoothing = true;
+    let cfg_on = EstimatorConfig { rank_smoothing: true, ..Default::default() };
     let on = Estimator::new(cfg_on).estimate(&counts, &template);
     let off = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
 

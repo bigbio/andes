@@ -16,6 +16,8 @@ fn build_set_and_peptide_via_public_api() {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let set = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

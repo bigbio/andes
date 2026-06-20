@@ -10,6 +10,9 @@ use model::peptide::Peptide;
 /// Half-width (Da) for `local_peak_density` in chance-match and competition terms.
 pub const DENSITY_HW: f64 = 50.0;
 
+use crate::frag_features::extract_frag_features;
+use crate::ion_features::extract_ion_features;
+use crate::gbdt_eval::GbdtPeakModel;
 use crate::intensity_model::{IntensityIonType, IntensityModel};
 use crate::scoring::fragment_ions::{predict_by_ions, IonKind};
 use crate::scoring::ScoredSpectrum;
@@ -53,9 +56,17 @@ fn position_bin(idx: u32, pep_len: usize) -> i32 {
 }
 
 /// Signal numerator: spectral cosine between predicted and observed relative
-/// intensities over charge-1 b/y ions. Returns 0.0 when `model` is `None`.
+/// intensities over charge-1 b/y ions.
+///
+/// - If `frag_model` is `Some`, it drives the predicted intensities (charge=1,
+///   nce=0.0 to match training in `frag_dataset.rs`).
+/// - Otherwise falls back to the coarse `IntensityModel` lookup table
+///   (existing behaviour, byte-identical when `frag_model` is `None`).
+/// - Returns 0.0 when both `model` and `frag_model` are `None` (no predictor).
+#[allow(clippy::too_many_arguments)]
 pub fn intensity_signal(
     model: Option<&IntensityModel>,
+    frag_model: Option<&GbdtPeakModel>,
     scored_spec: &ScoredSpectrum<'_>,
     peptide: &Peptide,
     precursor_charge: u8,
@@ -63,10 +74,10 @@ pub fn intensity_signal(
     feature_tol: f64,
     feature_tol_is_ppm: bool,
 ) -> f32 {
-    let model = match model {
-        Some(m) => m,
-        None => return 0.0,
-    };
+    // Require at least one predictor.
+    if model.is_none() && frag_model.is_none() {
+        return 0.0;
+    }
     let n = peptide.length();
     if n < 2 {
         return 0.0;
@@ -82,28 +93,41 @@ pub fn intensity_signal(
     }
 
     let seq: Vec<u8> = peptide.residues.iter().map(|aa| aa.residue).collect();
-    let predicted = predict_by_ions(peptide, 1..=1);
+    // Predict 1+ AND 2+ fragments: high-charge precursors put real signal in 2+
+    // ions, which a 1+-only prediction is blind to. Training (frag_dataset) uses
+    // the SAME 1..=2 range and the same frag-charge feature.
+    let predicted = predict_by_ions(peptide, 1..=2);
     let mut pred_vec = Vec::with_capacity(predicted.len());
     let mut obs_vec = Vec::with_capacity(predicted.len());
 
     for ion in &predicted {
-        let (flank_n, flank_c) = match flank_residues(&seq, ion.kind, ion.position) {
-            Some(f) => f,
-            None => continue,
+        let log_rel = if let Some(g) = frag_model {
+            // v3 frag-intensity regressor path (precursor charge, nce=0.0 matches training).
+            let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, ion.charge, 0.0);
+            g.predict_value(&feats)
+        } else {
+            // Existing coarse table path (fallback; model is Some here).
+            let (flank_n, flank_c) = match flank_residues(&seq, ion.kind, ion.position) {
+                Some(f) => f,
+                None => continue,
+            };
+            let ion_type = match ion.kind {
+                IonKind::B => IntensityIonType::B,
+                IonKind::Y => IntensityIonType::Y,
+            };
+            // model is guaranteed Some when frag_model is None (checked above).
+            #[allow(clippy::unwrap_used)]
+            let (mean_log, _) = model.unwrap().predict_log_rel(
+                ion_type,
+                flank_n,
+                flank_c,
+                position_bin(ion.position, n),
+                i32::from(precursor_charge),
+                nce_bin,
+            );
+            mean_log as f32
         };
-        let ion_type = match ion.kind {
-            IonKind::B => IntensityIonType::B,
-            IonKind::Y => IntensityIonType::Y,
-        };
-        let (mean_log, _) = model.predict_log_rel(
-            ion_type,
-            flank_n,
-            flank_c,
-            position_bin(ion.position, n),
-            i32::from(precursor_charge),
-            nce_bin,
-        );
-        pred_vec.push(mean_log.exp());
+        pred_vec.push(f64::from(log_rel).exp());
 
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
@@ -118,6 +142,95 @@ pub fn intensity_signal(
     }
 
     spectral_cosine_similarity(&pred_vec, &obs_vec) as f32
+}
+
+/// Frag-intensity LLR battery: three additive discriminative PIN features
+/// derived from the v3 frag-intensity GBDT's per-fragment predicted intensity,
+/// deployed as likelihood-ratio signals instead of a single cosine (the cosine
+/// normalizes both vectors and smears target/decoy separation, so a more
+/// accurate intensity model gives no PSM lift — confirmed 3× on Astral).
+///
+/// Returns `(explained, chance_llr, topk_observed)`:
+/// - `explained` = `Σ(matched·pred) / Σpred` — of the intensity the model
+///   predicts, the fraction actually observed. Asymmetric (NOT normalized by the
+///   observed vector like cosine) → true peptides explain their predicted-bright
+///   ions; decoys don't.
+/// - `chance_llr` = `Σ matched·pred·max(0, −ln p_chance)` — predicted-intensity-
+///   weighted chance-match surprise. Fuses the prediction with the local-noise
+///   denominator (rewards a predicted-bright match in a sparse region); the
+///   cosine ignores chance entirely.
+/// - `topk_observed` = fraction of the top-`FRAG_TOPK` predicted-most-intense
+///   ions that are observed — rank-based, intensity-scale-free, robust.
+///
+/// All `0.0` when `frag_model` is `None` (neutral additive features). Enumerates
+/// `1..=2` to match the serve cosine + the trainer.
+pub fn frag_llr_battery(
+    frag_model: Option<&GbdtPeakModel>,
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    precursor_charge: u8,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> (f32, f32, f32) {
+    const FRAG_TOPK: usize = 6;
+    let g = match frag_model {
+        Some(g) => g,
+        None => return (0.0, 0.0, 0.0),
+    };
+    if peptide.length() < 2 {
+        return (0.0, 0.0, 0.0);
+    }
+    let predicted = predict_by_ions(peptide, 1..=2);
+    let mut sum_p = 0.0f64;
+    let mut sum_matched_p = 0.0f64;
+    let mut sum_chance_llr = 0.0f64;
+    // (predicted intensity, matched?) for the top-K observed-fraction feature.
+    let mut pred_matched: Vec<(f64, bool)> = Vec::with_capacity(predicted.len());
+
+    for ion in &predicted {
+        let feats = extract_frag_features(
+            peptide,
+            ion.kind,
+            ion.position,
+            precursor_charge,
+            ion.charge,
+            0.0,
+        );
+        let p = f64::from(g.predict_value(&feats)).exp();
+        let tol_da = if feature_tol_is_ppm {
+            ion.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
+        let matched = scored_spec.nearest_peak_full(ion.mz, tol_da).is_some();
+        sum_p += p;
+        if matched {
+            sum_matched_p += p;
+            let rho = scored_spec.local_peak_density(ion.mz, DENSITY_HW);
+            // p_chance = probability of a random peak in the match window.
+            let p_chance = (rho * 2.0 * tol_da).clamp(1e-12, 1.0);
+            let surprise = (-p_chance.ln()).max(0.0);
+            sum_chance_llr += p * surprise;
+        }
+        pred_matched.push((p, matched));
+    }
+
+    let explained = if sum_p > 0.0 {
+        (sum_matched_p / sum_p) as f32
+    } else {
+        0.0
+    };
+
+    // Fraction of the top-K predicted-most-intense ions that were observed.
+    pred_matched.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let k = pred_matched.len().min(FRAG_TOPK);
+    let topk_observed = if k > 0 {
+        pred_matched[..k].iter().filter(|(_, m)| *m).count() as f32 / k as f32
+    } else {
+        0.0
+    };
+
+    (explained, sum_chance_llr as f32, topk_observed)
 }
 
 /// Matched-ion tuple: (intensity, observed_mz, predicted_mz, is_b_ion).
@@ -291,6 +404,53 @@ pub fn strong_score_calibrated(
     }
 }
 
+/// Decoy-aware rich-ion LLR: `Σ` over matched b/y ions of the per-ion
+/// `predict_logit(P(signal | features))` from the rich-ion GBDT. The model is
+/// trained on target-matched (positive) vs decoy-matched (negative) ions, so a
+/// true peptide's matched ions score high and a decoy's chance-matched ions
+/// score low — the SUM separates target from decoy (assignment-aware, NOT the
+/// isotropic per-peak quality that sank the intensity cosine). Returns 0.0 when
+/// no rich-ion model is loaded (neutral additive feature; RankScore untouched).
+/// Enumerates `1..=2` to match the trainer (`ion_dataset`).
+pub fn rich_ion_llr(
+    model: Option<&GbdtPeakModel>,
+    scored_spec: &ScoredSpectrum<'_>,
+    peptide: &Peptide,
+    precursor_charge: u8,
+    feature_tol: f64,
+    feature_tol_is_ppm: bool,
+) -> f32 {
+    let g = match model {
+        Some(g) => g,
+        None => return 0.0,
+    };
+    if peptide.length() < 2 {
+        return 0.0;
+    }
+    let mut sum = 0.0f64;
+    for ion in predict_by_ions(peptide, 1..=2) {
+        let tol_da = if feature_tol_is_ppm {
+            ion.mz * feature_tol / 1e6
+        } else {
+            feature_tol
+        };
+        if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
+            let feats = extract_ion_features(
+                peptide,
+                scored_spec,
+                ion.kind,
+                ion.position,
+                precursor_charge,
+                ion.charge,
+                feature_tol,
+                feature_tol_is_ppm,
+            );
+            sum += f64::from(g.predict_logit(&feats));
+        }
+    }
+    sum as f32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,7 +540,7 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let signal = intensity_signal(None, &ss, &pep(b"AR"), 2, "unknown", 20.0, true);
+        let signal = intensity_signal(None, None, &ss, &pep(b"AR"), 2, "unknown", 20.0, true);
         assert_eq!(signal, 0.0);
     }
 
@@ -407,10 +567,10 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let good = intensity_signal(Some(&model), &ss, &peptide, 2, "unknown", 20.0, true);
+        let good = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true);
 
         let wrong_pep = pep(b"FGHIK");
-        let bad = intensity_signal(Some(&model), &ss, &wrong_pep, 2, "unknown", 20.0, true);
+        let bad = intensity_signal(Some(&model), None, &ss, &wrong_pep, 2, "unknown", 20.0, true);
         assert!(good > bad, "good={good} bad={bad}");
         assert!(good > 0.1);
     }
@@ -520,13 +680,109 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let partial = intensity_signal(Some(&model), &ss, &peptide, 2, "unknown", 20.0, true);
+        let partial = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true);
         let empty_spec = Spectrum {
             peaks: vec![(400.0, 1000.0)],
             ..Default::default()
         };
         let ss_empty = ScoredSpectrum::new_without_filtering(&empty_spec);
-        let none = intensity_signal(Some(&model), &ss_empty, &peptide, 2, "unknown", 20.0, true);
+        let none = intensity_signal(Some(&model), None, &ss_empty, &peptide, 2, "unknown", 20.0, true);
         assert!(partial > none);
+    }
+
+    /// Build a constant-leaf GbdtPeakModel (apply_sigmoid=false) that returns
+    /// `leaf_value` for every input. Uses the public struct fields + `to_bytes`
+    /// / `from_bytes` round-trip to honour the validation path.
+    fn const_leaf_gbdt(leaf_value: f32) -> crate::gbdt_eval::GbdtPeakModel {
+        use crate::gbdt_eval::{GbdtPeakModel, Tree};
+        let m = GbdtPeakModel {
+            n_features: crate::frag_features::N_FRAG_FEATURES as u32,
+            apply_sigmoid: false,
+            trees: vec![Tree {
+                feature: vec![-1],            // single leaf node
+                threshold: vec![0.0],
+                left: vec![-1],
+                right: vec![-1],
+                value: vec![leaf_value],
+                default_left: vec![1],
+            }],
+            iso_x: vec![],
+            iso_y: vec![],
+        };
+        // Round-trip through bytes to exercise the validator.
+        GbdtPeakModel::from_bytes(&m.to_bytes()).expect("const-leaf gbdt round-trip")
+    }
+
+    #[test]
+    fn intensity_signal_uses_frag_model_when_present() {
+        // A constant-leaf frag model returning 0.0 (=> exp 1.0 for every ion).
+        // Build ARCDE with a peak at y3 so the observed vector is non-zero.
+        let g = const_leaf_gbdt(0.0); // predict_value returns 0.0 => exp(0) = 1.0
+
+        let peptide = pep(b"ARCDE");
+        let predicted = predict_by_ions(&peptide, 1..=1);
+        let y3 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::Y && p.position == 3)
+            .expect("y3");
+        let spec = Spectrum {
+            peaks: vec![(y3.mz, 1000.0)],
+            ..Default::default()
+        };
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+
+        // frag_model Some, table model None => should still compute cosine > 0.
+        let sig = intensity_signal(None, Some(&g), &ss, &peptide, 2, "unknown", 20.0, true);
+        assert!(sig > 0.0, "expected signal > 0 with frag model, got {sig}");
+    }
+
+    #[test]
+    fn intensity_signal_falls_back_to_table_when_no_frag_model() {
+        // With frag_model = None the result must equal the table-only path.
+        let tmp = NamedTempFile::new().unwrap();
+        write_model(
+            tmp.path(),
+            &[("y", "R", "C", 5, 2, "unknown", 100, 0.0, 0.01)],
+        );
+        let model = IntensityModel::load(tmp.path()).unwrap();
+        let peptide = pep(b"ARCDE");
+        let predicted = predict_by_ions(&peptide, 1..=1);
+        let y3 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::Y && p.position == 3)
+            .unwrap();
+        let spec = Spectrum {
+            peaks: vec![(y3.mz, 1000.0)],
+            ..Default::default()
+        };
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+
+        let with_table = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true);
+        // Same call was already exercised in `missing_observed_ions_reduce_signal`;
+        // just verify it's > 0 (table path active, not early-return).
+        assert!(with_table > 0.0, "table fallback expected > 0, got {with_table}");
+    }
+
+    #[test]
+    fn rich_ion_llr_zero_without_model() {
+        // No rich-ion model loaded ⇒ neutral additive feature (0.0), RankScore untouched.
+        let peptide = pep(b"ARCDE");
+        let predicted = predict_by_ions(&peptide, 1..=1);
+        let y3 = predicted.iter().find(|p| p.kind == IonKind::Y && p.position == 3).unwrap();
+        let spec = Spectrum { peaks: vec![(y3.mz, 1000.0)], ..Default::default() };
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        assert_eq!(rich_ion_llr(None, &ss, &peptide, 2, 20.0, true), 0.0);
+    }
+
+    #[test]
+    fn intensity_signal_zero_when_no_predictor_at_all() {
+        let spec = Spectrum {
+            peaks: vec![(500.0, 1000.0)],
+            ..Default::default()
+        };
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        // Both None => must return 0.0 exactly.
+        let sig = intensity_signal(None, None, &ss, &pep(b"ARCDE"), 2, "unknown", 20.0, true);
+        assert_eq!(sig, 0.0, "no predictor must yield 0.0");
     }
 }

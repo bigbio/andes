@@ -190,6 +190,17 @@ pub fn combined_schema() -> SchemaRef {
         nf("max_charge", DataType::Int32),
         nf("num_precursor_off", DataType::Int32),
         nf("charge_hist", charge_hist_dt),
+        // Serialized GBDT blob (`AGBD` bytes). Null for models without a GBDT.
+        // Absent in old stores → reader defaults to gbdt_peak_model = None (backward-compatible).
+        nf("gbdt_model_bytes", DataType::Binary),
+        // Serialized fragment-intensity GBDT blob (regressor, raw predict_value output).
+        // Null for models without a trained intensity regressor.
+        // Absent in old stores → reader defaults to frag_intensity_model = None (backward-compatible).
+        nf("frag_intensity_model_bytes", DataType::Binary),
+        // Serialized rich-ion GBDT blob (logistic LLR classifier, raw predict_value output).
+        // Null for models without a trained rich-ion classifier.
+        // Absent in old stores → reader defaults to rich_ion_model = None (backward-compatible).
+        nf("rich_ion_model_bytes", DataType::Binary),
         // ── table-only ──────────────────────────────────────────────────────
         nf("part_charge", DataType::Int32),
         nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 for bit-exact round-trip
@@ -197,11 +208,18 @@ pub fn combined_schema() -> SchemaRef {
         nf("ion_kind", DataType::Utf8),        // "prefix"|"suffix"|"noise"|"-"
         nf("ion_charge", DataType::Int32),
         nf("ion_offset_bits", DataType::Int32), // f32::to_bits() as i32; 0 for noise/dist rows
+        // loss_class for rank_dist/stat rows: 0=intact, 1=glyco, 2=phospho, 255=generic.
+        // Absent (null) in old stores → reader defaults to 0 (backward-compatible).
+        nf("ion_loss_class", DataType::Int32),
         nf("table_kind", DataType::Utf8),
         // "rank_dist", "ion_err", "noise_err", "ion_existence", "frag_off" → values
         nf("values", list_of(DataType::Float32)),
         // "precursor_off" → precursor_offsets (full struct)
         nf("precursor_offsets", precursor_off_dt),
+        // Per-entry loss_class list for "frag_off" rows (parallel to the flat values list).
+        // Each entry in the frag_off flat list (stride-4) has a corresponding loss_class here.
+        // Absent/null in old stores → all entries default to loss_class=0 (backward-compatible).
+        nf("frag_off_loss_classes", list_of(DataType::Int32)),
         // ── source-only ─────────────────────────────────────────────────────
         nf("source_id", DataType::Utf8),
         nf("dataset", DataType::Utf8),

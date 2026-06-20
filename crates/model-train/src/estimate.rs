@@ -189,6 +189,9 @@ impl Estimator {
             noise_err_dist_table,
             ion_existence_table,
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
+            frag_intensity_model: None,
+            rich_ion_model: None,
         };
         // Rebuild the per-partition ion-type cache required by RankScorer::new
         // and ion_types_for_partition_slice.
@@ -293,6 +296,32 @@ impl Estimator {
                 let raw = counts.rank.get(&(part, ion))
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
+                let n: u64 = raw.iter().sum();
+                let emp = normalize_with_pseudo(raw, n_slots, pseudo);
+                let blended = if n < min_count {
+                    blend(&emp, &parent_vec(ion, pseudo), n as f32, w)
+                } else {
+                    emp
+                };
+                let final_dist = if rank_smoothing {
+                    smooth_rank_window(&blended, n_slots - 1)
+                } else {
+                    blended
+                };
+                ion_table.insert(ion, final_dist);
+            }
+
+            // Neutral-loss ions are NOT part of the template's frag_off_table
+            // (the seed carries only the intact b/y offset layout), so the loop
+            // above skips them. Pick up any loss-classed ions accumulated for
+            // THIS partition directly from the counts and estimate their rank
+            // tables the same way. For standard training there are no loss keys,
+            // so this is inert and estimation stays byte-identical.
+            for (&(p2, ion), raw_counts) in &counts.rank {
+                if p2 != part || !ion.is_loss() || ion_table.contains_key(&ion) {
+                    continue;
+                }
+                let raw = raw_counts.as_slice();
                 let n: u64 = raw.iter().sum();
                 let emp = normalize_with_pseudo(raw, n_slots, pseudo);
                 let blended = if n < min_count {

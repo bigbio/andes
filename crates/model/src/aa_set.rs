@@ -252,18 +252,15 @@ impl AminoAcidSet {
             * prob_per_aa
     }
 
-    /// Compute and store cleavage credits/penalties from the given enzyme's
-    /// efficiency values.
+    /// Store per-cleavage-site log-odds scores derived from the enzyme's
+    /// efficiency `e` and the background cleavage-site probability `p`.
     ///
-    /// Formula:
-    /// ```text
-    /// peptideCleavageCredit = round(log(efficiency / probCleavageSites))
-    /// peptideCleavagePenalty = round(log((1-efficiency) / (1-probCleavageSites)))
-    /// neighboringAACleavageCredit = round(log(neighEfficiency / probCleavageSites))
-    /// neighboringAACleavagePenalty = round(log((1-neighEfficiency) / (1-probCleavageSites)))
-    /// ```
-    ///
-    /// Both efficiencies of `0.0` (no enzyme) → all fields stay `0`.
+    /// These are the standard Bernoulli log-likelihood-ratio for "is this
+    /// position a genuine enzymatic cleavage site": rounded `ln(e/p)` when the
+    /// site is cleaved (credit) and rounded `ln((1-e)/(1-p))` when it is not
+    /// (penalty), evaluated for both the peptide termini and the neighbouring
+    /// residues. `e` is andes's chosen enzyme-efficiency prior; `e = 0.0`
+    /// (no enzyme) leaves all four scores at `0`.
     pub fn register_enzyme(
         &mut self,
         enzyme: Enzyme,

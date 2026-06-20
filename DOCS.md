@@ -331,6 +331,19 @@ The summary records the **final** precursor tolerance (+ calibration mode), the 
 
 Counts are **pre-FDR**, taken over each spectrum's best (rank-1) candidate; final FDR control happens downstream in Percolator. The tally is most useful with `--refine`, where it shows exactly which discovered PTMs were identified and at what volume. (`statistics.log` matches the gitignore `*.log*` pattern — it is a per-run output artifact, not a tracked file.)
 
+### 3e. QPX `.idparquet` bundle (`--output-parquet`)
+
+`--output-parquet <DIR>` writes an **OpenMS-compatible QPX 1.0** Parquet bundle — a directory (conventionally ending in `.idparquet`) containing `psms.parquet`, `proteins.parquet`, and `search_params.parquet`. The schema (column names, Arrow types, nested `list<element: …>` structures, and the per-file metadata keys `qpx_version`/`file_type`/`uuid`/`creation_date`/`software_provider`/`creator`) matches what OpenMS's `QPXFile` writer emits byte-for-byte, so the files are interchangeable with OpenMS / [quantms](https://github.com/bigbio/quantms) tooling. Implementation: `crates/output/src/qpx.rs`. Reuses the workspace's existing `arrow`/`parquet` stack — no new heavy dependency.
+
+`psms.parquet` carries one row per PSM with `sequence`, `peptidoform`, `modifications` (name + Unimod accession + positions), `precursor_charge`, `calculated_mz`/`observed_mz`, `is_decoy`, `scan`/`rt`, `protein_accessions` (with flanks + offsets), the spectrum `mz_array`/`intensity_array`, the headline `score` (`andes:RawScore`), and an `additional_scores` list carrying the other andes features (`RankScore`, `TailorScore`, `DeltaRankScore`, `EdgeScore`, `RichIonLLR`, …). `search_params.parquet` records the resolved engine/tolerances/enzyme/modifications.
+
+Fields andes does **not** compute pre-rescoring are written null: `posterior_error_probability` and the q-value are Percolator's job (downstream), and `predicted_rt`/`ion_mobility`/per-peak `charge_array`/`ion_type_array` are not produced. `proteins.parquet` lists the distinct accessions seen in PSMs (andes does no protein inference). Emit it alongside `--output-pin`/`--output-tsv`:
+
+```bash
+andes --spectrum spectra.mzML --database db.fasta \
+  --output-pin out.pin --output-parquet out.idparquet
+```
+
 ---
 
 ## 4. Auto-detection

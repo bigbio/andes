@@ -8,8 +8,8 @@ fn every_bundled_model_round_trips_via_store() {
     let store_path = dir.path().join("models.parquet");
 
     // Migrate the local test fixtures (3 representative .param files) instead of
-    // the full resources/ionstat directory (which no longer ships .param files —
-    // models are now bundled in a single resources/ionstat/models.parquet store).
+    // the full legacy param directory (which no longer ships .param files —
+    // models are now bundled in a single resources/models.parquet store).
     let fixtures = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"));
 
     let ids = migrate_dir(fixtures, &store_path).expect("migrate");
@@ -26,7 +26,7 @@ fn every_bundled_model_round_trips_via_store() {
 /// Standing all-models fidelity gate.
 ///
 /// The 39 original `.param` source files were migrated into the bundled
-/// `resources/ionstat/models.parquet` and removed from the tree, so the
+/// `resources/models.parquet` and removed from the tree, so the
 /// migration can no longer be re-validated against the `.param` ground truth in
 /// CI. This test instead asserts that EVERY model shipped in the bundled store
 /// survives a `Param -> write -> read -> Param` round-trip byte-identically —
@@ -36,7 +36,7 @@ fn every_bundled_model_round_trips_via_store() {
 fn all_bundled_store_models_round_trip_write_read() {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/ionstat/models.parquet"
+        "/../../resources/models.parquet"
     ));
     let store = ModelStore::open(bundled).expect("open bundled models.parquet");
     let ids = store.model_ids();

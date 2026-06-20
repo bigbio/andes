@@ -381,4 +381,35 @@ mod tests {
         let (mean, _) = model.predict_log_rel(IntensityIonType::Y, b'K', b'R', 5, 2, "25");
         assert!((mean - (-0.8)).abs() < 1e-9);
     }
+
+    /// Regression for the unused-model bug: the inference path
+    /// (`compute_psm_features`) passes `nce_bin="unknown"`, which matches no
+    /// numeric training bin. Before `train-intensity` emitted backoff marginals
+    /// (`__any__` nce, `*` flanks), every such lookup fell through to the single
+    /// global mean — so `pred_vec` was constant per spectrum and the
+    /// `IntensitySignal` cosine became model-value-independent. With the
+    /// marginals present, the lookup recovers the flank-specific mean.
+    #[test]
+    fn unknown_nce_inference_lookup_uses_flank_context_not_global() {
+        let tmp = NamedTempFile::new().unwrap();
+        write_fixture(
+            tmp.path(),
+            &[
+                // Real cells (numeric nce, as the aggregator emits), two flanks.
+                ("y", "K", "R", 5, 2, "30", 200, -0.2, 0.1),
+                ("b", "A", "L", 5, 2, "30", 200, -3.5, 0.1),
+                // Backoff marginals the finalizer now emits (nce → __any__).
+                ("y", "K", "R", 5, 2, "__any__", 200, -0.2, 0.1),
+                ("b", "A", "L", 5, 2, "__any__", 200, -3.5, 0.1),
+            ],
+        );
+        let model = IntensityModel::load(tmp.path()).unwrap();
+        // nce="unknown": exact (…,"unknown") misses, backs off to the
+        // flank-specific __any__ row — distinct per flank pair, NOT the global.
+        let (y_kr, _) = model.predict_log_rel(IntensityIonType::Y, b'K', b'R', 5, 2, "unknown");
+        let (b_al, _) = model.predict_log_rel(IntensityIonType::B, b'A', b'L', 5, 2, "unknown");
+        assert!((y_kr - (-0.2)).abs() < 1e-9, "y(K|R) uses its own marginal");
+        assert!((b_al - (-3.5)).abs() < 1e-9, "b(A|L) uses its own marginal");
+        assert!((y_kr - b_al).abs() > 1.0, "per-context predictions stay distinct (model consulted, not global)");
+    }
 }

@@ -12,7 +12,10 @@ use crate::enzyme::Enzyme;
 use crate::modification::{ModLocation, ModParseError, Modification, ResidueSpec};
 
 const STANDARD_RESIDUES: &[u8] = b"ACDEFGHIKLMNPQRSTVWY";
-const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 1000.0;
+// Upper bound for a single mod's mass delta. Raised from 1000 to 5000 Da to
+// admit intact-glycan mods (common N-glycans run ~900–3500 Da; e.g. A2G2S2 is
+// 2204.77) while still catching gross typos / composition-string mistakes.
+const IMPLAUSIBLE_MASS_THRESHOLD: f64 = 5000.0;
 
 #[derive(Debug, Clone)]
 pub struct AminoAcidSet {
@@ -60,6 +63,110 @@ impl AminoAcidSet {
 
     pub fn iter_variants(&self) -> impl Iterator<Item = &AminoAcid> {
         self.table.values().flat_map(|v| v.iter())
+    }
+
+    /// Enumerate the FIXED modifications carried by this set as
+    /// `(residue, mass_delta)` pairs.
+    ///
+    /// Fixed mods are folded into the per-`(residue, location)` variant table
+    /// at build time, so a single fixed `Modification` (e.g. Carbamidomethyl-C)
+    /// is referenced by several `AminoAcid` variants (its Anywhere slot plus the
+    /// terminal lists). This walks `iter_variants`, keeps only fixed mods, and
+    /// de-duplicates by `(residue, mass_delta.to_bits())` so each distinct fixed
+    /// mod is reported exactly once. Order is unspecified (table iteration).
+    ///
+    /// Read-only; intended for callers that must inspect which fixed chemistry
+    /// is active (e.g. the refinement cascade, which only supports the standard
+    /// Carbamidomethyl-C baseline).
+    pub fn fixed_mod_deltas(&self) -> Vec<(u8, f64)> {
+        let mut seen: std::collections::HashSet<(u8, u64)> = std::collections::HashSet::new();
+        let mut out: Vec<(u8, f64)> = Vec::new();
+        for aa in self.iter_variants() {
+            if let Some(m) = aa.mod_.as_ref() {
+                if m.fixed && seen.insert((aa.residue, m.mass_delta.to_bits())) {
+                    out.push((aa.residue, m.mass_delta));
+                }
+            }
+        }
+        out
+    }
+
+    /// All DISTINCT modifications carried by this set — FIXED and VARIABLE — as
+    /// the original `Arc<Modification>` records (location, `ResidueSpec`, and the
+    /// `fixed` flag preserved).
+    ///
+    /// The builder shares ONE `Arc<Modification>` per registered mod across every
+    /// `(residue, location)` variant it folds into (a wildcard or anywhere mod is
+    /// referenced from many slots), so de-duplicating by `Arc` identity returns
+    /// each registered mod exactly once. Order is unspecified (table iteration).
+    ///
+    /// Used by the refinement cascade to seed Pass-2 with the base search's FULL
+    /// chemistry (Cam-C, TMT, iTRAQ, Ox-M, …) before layering the discovery tier —
+    /// so labeled/non-standard fixed mods are no longer silently dropped.
+    ///
+    /// EXCLUDES the builder's synthesized "stacked" terminal variants — when a
+    /// residue carries a fixed Anywhere mod AND a variable terminal mod, `build`
+    /// folds them into a combined `"<fixed>+<variable>"` `Modification` (see the
+    /// terminal-cache logic) with a distinct Arc. That combined entry is a build
+    /// artifact, NOT an independently-declared mod (its primitive components are
+    /// each enumerated separately), so re-adding it to a fresh builder would
+    /// inject a spurious summed-mass variable mod. The `+` in the name is the
+    /// builder's own stacking marker (also relied on elsewhere); we filter on it.
+    pub fn distinct_mods(&self) -> Vec<Arc<Modification>> {
+        let mut seen: std::collections::HashSet<*const Modification> =
+            std::collections::HashSet::new();
+        let mut out: Vec<Arc<Modification>> = Vec::new();
+        for aa in self.iter_variants() {
+            if let Some(m) = aa.mod_.as_ref() {
+                if m.name.contains('+') {
+                    continue; // synthesized fixed+variable stacked variant
+                }
+                if seen.insert(Arc::as_ptr(m)) {
+                    out.push(Arc::clone(m));
+                }
+            }
+        }
+        out
+    }
+
+    /// Canonical, order-independent fingerprint of the FIXED modifications that
+    /// ALSO distinguishes them by `ModLocation`.
+    ///
+    /// [`fixed_mod_deltas`] collapses fixed mods to `(residue, delta)`, which is
+    /// insufficient for cache keys: a fixed `*` +229 at `NTerm` and a fixed `*`
+    /// +229 `Anywhere` yield the SAME `(residue, delta)` set yet fold very
+    /// different base masses into a peptide (N-term once vs every residue). Any
+    /// cache keyed on `fixed_mod_deltas` would treat them as identical and reuse
+    /// a stale, mass-shifted candidate index. This fingerprint keys on the
+    /// `(residue, location)` table entries — which differ between those two
+    /// configs — so it tells them apart. Returns sorted `(residue,
+    /// location_rank, mass_delta_bits)`, deduplicated.
+    pub fn fixed_mod_fingerprint(&self) -> Vec<(u8, u8, u64)> {
+        fn loc_rank(l: ModLocation) -> u8 {
+            match l {
+                ModLocation::Anywhere => 0,
+                ModLocation::NTerm => 1,
+                ModLocation::CTerm => 2,
+                ModLocation::ProtNTerm => 3,
+                ModLocation::ProtCTerm => 4,
+            }
+        }
+        let mut seen: std::collections::HashSet<(u8, u8, u64)> = std::collections::HashSet::new();
+        let mut out: Vec<(u8, u8, u64)> = Vec::new();
+        for ((residue, location), variants) in &self.table {
+            for aa in variants {
+                if let Some(m) = aa.mod_.as_ref() {
+                    if m.fixed {
+                        let key = (*residue, loc_rank(*location), m.mass_delta.to_bits());
+                        if seen.insert(key) {
+                            out.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out
     }
 
     // -----------------------------------------------------------------------
@@ -201,6 +308,8 @@ impl AminoAcidSetBuilder {
             location: ModLocation::Anywhere,
             fixed: true,
             accession: Some("UNIMOD:4".to_string()),
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         Self {
             fixed_mods: vec![cam],
@@ -367,9 +476,37 @@ impl AminoAcidSetBuilder {
                             variants.push(std_aa.clone().with_mod(Arc::clone(fm)));
                         }
                     }
+                    // A residue carrying a fixed ANYWHERE mod (e.g. Carbamidomethyl-C)
+                    // keeps it at EVERY position, including the termini. A terminal
+                    // VARIABLE mod (e.g. protein-N-term Acetyl) must therefore STACK on
+                    // top of that fixed mass — emitting variable-alone would drop the
+                    // mandatory fixed mod (e.g. an N-terminal Cys would become Acetyl-only
+                    // +42 instead of CAM+Acetyl +99, a wrong-mass candidate). Fold the
+                    // fixed-anywhere mass into a combined mod so the stacked form is
+                    // enumerated. (The fixed-anywhere-only form is already present via the
+                    // Anywhere list propagated into this terminal cache.)
+                    let fixed_anywhere: Option<&Arc<Modification>> = fixed_mods_arc
+                        .iter()
+                        .find(|m| m.location == ModLocation::Anywhere && m.applies_to(r, ModLocation::Anywhere));
                     for vm in &variable_matches {
                         if vm.location == loc {
-                            variants.push(std_aa.clone().with_mod(Arc::clone(vm)));
+                            let aa = match fixed_anywhere {
+                                Some(fm) => {
+                                    let combined = Modification {
+                                        name: format!("{}+{}", fm.name, vm.name),
+                                        mass_delta: fm.mass_delta + vm.mass_delta,
+                                        residue: vm.residue,
+                                        location: vm.location,
+                                        fixed: false, // stacked variant still consumes a variable slot
+                                        accession: None,
+                                        neutral_losses: vm.neutral_losses.clone(),
+                                        loss_class: vm.loss_class,
+                                    };
+                                    std_aa.clone().with_mod(Arc::new(combined))
+                                }
+                                None => std_aa.clone().with_mod(Arc::clone(vm)),
+                            };
+                            variants.push(aa);
                         }
                     }
                 }
@@ -470,7 +607,7 @@ fn mods_target_same_slot(a: &Modification, b: &Modification) -> bool {
 pub enum AaSetError {
     #[error("conflicting fixed and variable mod for residue {residue:?} at {location:?}")]
     ConflictingMods { residue: char, location: ModLocation },
-    #[error("mod {name:?} mass delta {delta} is implausible (>1000 Da)")]
+    #[error("mod {name:?} mass delta {delta} is implausible (>5000 Da)")]
     ImplausibleMassDelta { name: String, delta: f64 },
     #[error("malformed Mods.txt line {line_no}: {source}")]
     ModsTxtParse { line_no: usize, #[source] source: ModParseError },
@@ -495,6 +632,8 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: true,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -506,6 +645,8 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         }
     }
 
@@ -566,11 +707,13 @@ mod tests {
     fn implausible_mass_errors() {
         let bad = Modification {
             name: "Bad".to_string(),
-            mass_delta: 1500.0,
+            mass_delta: 8000.0,
             residue: ResidueSpec::Specific(b'C'),
             location: ModLocation::Anywhere,
             fixed: true,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let err = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(bad)
@@ -621,6 +764,8 @@ mod tests {
             location: ModLocation::CTerm,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(cterm_mod)
@@ -634,6 +779,93 @@ mod tests {
         let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
         assert_eq!(c_variants.len(), 1);
         assert!(c_variants[0].is_modified());
+    }
+
+    #[test]
+    fn fixed_mod_deltas_empty_for_standard_set() {
+        let set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        assert!(set.fixed_mod_deltas().is_empty());
+    }
+
+    #[test]
+    fn fixed_mod_deltas_reports_cam_c_once() {
+        // Carbamidomethyl-C is the lone fixed mod; it must be reported exactly
+        // once as (C, +57.02146) even though it is folded into several slots.
+        let set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c().build().unwrap();
+        let deltas = set.fixed_mod_deltas();
+        assert_eq!(deltas.len(), 1, "exactly one distinct fixed mod, got {deltas:?}");
+        let (res, delta) = deltas[0];
+        assert_eq!(res, b'C');
+        assert!((delta - 57.02146).abs() < 1e-6, "expected CAM-C delta, got {delta}");
+    }
+
+    #[test]
+    fn fixed_mod_deltas_reports_each_distinct_fixed_mod() {
+        // A TMT-style set: fixed TMT on K AND fixed CAM on C → two distinct
+        // fixed mods, one entry per (residue, delta). Variable Oxidation-M
+        // must NOT appear (it is not fixed).
+        let tmt_k = Modification {
+            name: "TMT6plex".to_string(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(carbamidomethyl_c())
+            .add_fixed_mod(tmt_k)
+            .add_variable_mod(oxidation_m())
+            .build()
+            .unwrap();
+        let mut deltas = set.fixed_mod_deltas();
+        deltas.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(deltas.len(), 2, "two distinct fixed mods, got {deltas:?}");
+        assert_eq!(deltas[0].0, b'C');
+        assert!((deltas[0].1 - 57.02146).abs() < 1e-6);
+        assert_eq!(deltas[1].0, b'K');
+        assert!((deltas[1].1 - 229.162932).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fixed_mod_fingerprint_distinguishes_location_where_deltas_collide() {
+        // A fixed +229 on K Anywhere vs at the N-term fold DIFFERENT base masses
+        // (every K vs the N-terminal residue only) yet produce the SAME
+        // (residue, delta) set. `fixed_mod_deltas` can't tell them apart; the
+        // location-aware fingerprint MUST — else the mmap index cache key
+        // collides and silently reuses a mass-shifted candidate index.
+        let mk = |loc: ModLocation| Modification {
+            name: "TMT6plex".to_string(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Specific(b'K'),
+            location: loc,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let anywhere = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(mk(ModLocation::Anywhere))
+            .build()
+            .unwrap();
+        let nterm = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(mk(ModLocation::NTerm))
+            .build()
+            .unwrap();
+        // The delta-only view collides (that IS the bug being guarded against)...
+        assert_eq!(
+            anywhere.fixed_mod_deltas(),
+            nterm.fixed_mod_deltas(),
+            "fixed_mod_deltas is expected to collide on location"
+        );
+        // ...but the location-aware fingerprint must differ.
+        assert_ne!(
+            anywhere.fixed_mod_fingerprint(),
+            nterm.fixed_mod_fingerprint(),
+            "fingerprint must distinguish Anywhere vs NTerm fixed mod"
+        );
     }
 
     #[test]
@@ -706,6 +938,8 @@ mod tests {
             location: ModLocation::NTerm,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(nterm_mod)
@@ -819,6 +1053,8 @@ mod tests {
             location: ModLocation::ProtNTerm,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())
@@ -835,16 +1071,34 @@ mod tests {
         let n_any_acetyl   = anywhere.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
         assert_eq!(n_any_acetyl, 0, "Acetyl Prot-N-term must NOT appear in Anywhere AA list");
 
-        // Prot-N-term: starts from Anywhere list + Acetyl variants per residue
-        // (wildcard residue → 20 acetyl variants added at Prot-N-term).
-        let n_pn_acetyl = prot_n.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
-        assert_eq!(n_pn_acetyl, 20, "Prot-N-term AA list must include 20 acetyl variants (one per residue)");
+        // Prot-N-term: starts from Anywhere list + one acetyl-bearing variant per
+        // residue (wildcard residue → 20 acetyl variants added at Prot-N-term).
+        // For Cys, the fixed Carbamidomethyl STACKS under the variable Acetyl, so
+        // its variant is the combined "Carbamidomethyl+Acetyl" (not Acetyl-alone).
+        let n_pn_acetyl = prot_n
+            .iter()
+            .filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
+            .count();
+        assert_eq!(n_pn_acetyl, 20, "Prot-N-term AA list must include 20 acetyl-bearing variants (one per residue)");
 
-        // Total Prot-N-term list = Anywhere list + 20 acetyl variants.
+        // P1b regression: protein-N-term Cys must carry CAM+Acetyl (+99.032590),
+        // NOT Acetyl-alone (+42.010565). The fixed CAM (+57.02146) is mandatory.
+        let c_pn = prot_n
+            .iter()
+            .find(|aa| aa.residue == b'C' && aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
+            .expect("Cys must have an acetyl-bearing Prot-N-term variant");
+        let c_delta = c_pn.mod_.as_ref().unwrap().mass_delta;
+        assert!(
+            (c_delta - (57.02146 + 42.010565)).abs() < 1e-4,
+            "Prot-N-term Cys acetyl variant must be CAM+Acetyl (+99.032), got +{c_delta} \
+             (Acetyl-alone +42.01 would drop the mandatory fixed CAM)"
+        );
+
+        // Total Prot-N-term list = Anywhere list + 20 acetyl-bearing variants.
         assert_eq!(
             prot_n.len(),
             anywhere.len() + 20,
-            "Prot-N-term list = Anywhere list + 20 acetyl variants; \
+            "Prot-N-term list = Anywhere list + 20 acetyl-bearing variants; \
              actual Anywhere len = {}, Prot-N-term len = {}, Anywhere modified = {}",
             anywhere.len(), prot_n.len(), n_any_modified
         );

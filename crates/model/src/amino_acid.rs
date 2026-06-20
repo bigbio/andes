@@ -33,8 +33,15 @@ pub struct AminoAcid {
 
 impl AminoAcid {
     /// Look up the standard (unmodified) residue table. Returns `None`
-    /// for any byte not in the 20-residue standard set.
+    /// for any byte not in the standard set.
     pub fn standard(residue: u8) -> Option<Self> {
+        // Selenocysteine (Sec, `U`): composition C3H5NOSe, so it can't be expressed
+        // via the (C,H,N,O,S) tuple — use its monoisotopic residue mass directly.
+        // Without this, selenoprotein peptides (GPX1-4, SELENOP, TXNRD, ...) are
+        // silently dropped by candidate generation.
+        if residue == b'U' {
+            return Some(AminoAcid { residue: b'U', mass: 150.953636, mod_: None });
+        }
         let (c, h, n, o, s) = standard_composition(residue)?;
         let mass = c as f64 * C + h as f64 * H + n as f64 * N
                  + o as f64 * O + s as f64 * S;
@@ -160,6 +167,16 @@ mod tests {
     }
 
     #[test]
+    fn selenocysteine_u_is_supported() {
+        // Sec (U): C3H5NOSe monoisotopic residue mass ~150.95364.
+        let u = AminoAcid::standard(b'U').expect("U (selenocysteine) must be recognized");
+        assert!((u.mass - 150.953636).abs() < 1e-4, "Sec mass {} off", u.mass);
+        assert!(u.mod_.is_none());
+        // Other non-standard residues still rejected.
+        assert!(AminoAcid::standard(b'B').is_none());
+    }
+
+    #[test]
     fn nominal_mass_for_glycine() {
         // Gly mass ≈ 57.02146 → nominal 57
         let g = AminoAcid::standard(b'G').unwrap();
@@ -181,6 +198,8 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation.clone());
         assert!(m.is_modified());
@@ -196,6 +215,8 @@ mod tests {
             location: ModLocation::Anywhere,
             fixed: false,
             accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation);
         // M (131) + Ox (16) = 147 nominal

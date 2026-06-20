@@ -129,7 +129,7 @@ pub fn learn_calibration_stats(
     prepared: &PreparedSearch<'_>,
     main_params: &SearchParams,
 ) -> CalibrationStats {
-    if spec_keys.len() < constants::MIN_SPECKEYS_FOR_PREPASS {
+    if spec_keys.len() < main_params.cal_min_spec_keys {
         return CalibrationStats::default();
     }
 
@@ -420,6 +420,7 @@ mod tests {
         SearchParams {
             aa_set: aa,
             enzyme: Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
             min_length: 6,
             max_length: 40,
             max_missed_cleavages: 1,
@@ -431,10 +432,15 @@ mod tests {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Auto,
+            cal_min_spec_keys: constants::MIN_SPECKEYS_FOR_PREPASS,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            chimeric_max_coisolated: 2,
+            chimeric_max_kl: 0.3,
             score_mode: crate::search_params::ScoreMode::Rank,
+            refine_select_psm_fdr: 0.01,
+            candidate_index: crate::search_params::CandidateIndexMode::Ram,
         }
     }
 

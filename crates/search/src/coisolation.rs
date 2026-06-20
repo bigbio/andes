@@ -54,6 +54,11 @@ pub(crate) fn detect_coisolated(
 
     let mut out: Vec<CoIsolated> = Vec::new();
     for &(mz, _inten) in &cands {
+        // Cap check BEFORE accepting any candidate, so `max_n == 0` is a hard
+        // disable (zero secondaries), not "one then stop".
+        if out.len() >= max_n {
+            break;
+        }
         if (mz - selected_mz).abs() <= tol_da {
             continue; // skip the selected precursor (monoisotope)
         }
@@ -98,9 +103,6 @@ pub(crate) fn detect_coisolated(
         if let Some((_, c)) = best {
             out.push(c);
         }
-        if out.len() >= max_n {
-            break;
-        }
     }
     out
 }
@@ -120,10 +122,12 @@ fn primary_matched_peak_keys(
         return keys;
     }
     let predicted = predict_by_ions(peptide, 1..=1);
-    let tol_is_ppm = scorer.param().data_type.instrument.is_high_resolution();
-    let tol = if tol_is_ppm { 20.0_f64 } else { 0.5_f64 };
     for p in &predicted {
-        let tol_da = if tol_is_ppm { p.mz * tol / 1e6 } else { tol };
+        // Use the SAME tolerance the scoring phase matched the primary's peaks
+        // with (`param().mme`), NOT the PIN feature tolerance — otherwise pass-2
+        // strips a different peak set than pass-1 actually scored, leaving stray
+        // primary peaks in (or pulling extra peaks out of) the residual.
+        let tol_da = scorer.param().mme.as_da(p.mz);
         let lo_mz = p.mz - tol_da;
         let hi_mz = p.mz + tol_da;
         // `spec.peaks` is m/z-sorted; binary-search the window start, scan to `hi_mz`.
@@ -399,6 +403,26 @@ mod tests {
     }
 
     #[test]
+    fn max_n_zero_is_a_hard_disable() {
+        // Same setup as above, but max_n=0 must emit ZERO secondaries (the cap is
+        // checked BEFORE pushing — not "one then stop").
+        let z = 2u8;
+        let selected_mz = 600.0;
+        let sel_neutral = (selected_mz - PROTON) * z as f64;
+        let co_mz = 600.7;
+        let co_neutral = (co_mz - PROTON) * z as f64;
+        let mut peaks = envelope(selected_mz, z, sel_neutral, 1000.0);
+        peaks.extend(envelope(co_mz, z, co_neutral, 500.0));
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let got = detect_coisolated(&peaks, 599.0, 601.5, selected_mz, 2..=3, 0.02, 0.5, 0);
+        assert!(got.is_empty(), "max_n=0 must emit zero secondaries, got {}", got.len());
+        // And max_n=1 still caps at exactly one.
+        let one = detect_coisolated(&peaks, 599.0, 601.5, selected_mz, 2..=3, 0.02, 0.5, 1);
+        assert_eq!(one.len(), 1, "max_n=1 caps at one");
+    }
+
+    #[test]
     fn no_coisolation_when_only_selected_present() {
         let z = 2u8;
         let selected_mz = 600.0;
@@ -424,8 +448,8 @@ mod tests {
     /// non-trivial prefix/suffix rank tables so b/y matches earn positive score.
     fn tiny_scorer() -> RankScorer {
         let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits() };
-        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits() };
+        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
         let noise = IonType::Noise;
 
         let mut ion_table = FxHashMap::default();
@@ -465,6 +489,9 @@ mod tests {
             noise_err_dist_table: FxHashMap::default(),
             ion_existence_table: FxHashMap::default(),
             partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
+            frag_intensity_model: None,
+            rich_ion_model: None,
         };
         param.rebuild_cache();
         RankScorer::new(&param)

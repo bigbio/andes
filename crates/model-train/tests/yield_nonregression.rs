@@ -21,7 +21,7 @@
 //!
 //! 1. Load training spectra (`train.mzML`) using the production `MzMLReader`.
 //! 2. Load the bundled `hcd_qexactive_tryp` seed model from
-//!    `resources/ionstat/models.parquet` via `ModelStore`.
+//!    `resources/models.parquet` via `ModelStore`.
 //! 3. Run the full model-train pipeline (library calls, not the CLI):
 //!    `bootstrap_labels` → `StatsAccumulator` → `Estimator::estimate` → trained `RankScorer`.
 //! 4. Load validation spectra (`validate.mzML` if present, else `train.mzML`).
@@ -53,10 +53,10 @@ use model_train::{
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Path to the bundled Parquet store (`resources/ionstat/models.parquet`).
+/// Path to the bundled Parquet store (`resources/models.parquet`).
 fn bundled_store_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/ionstat/models.parquet")
+        .join("../../resources/models.parquet")
 }
 
 /// Standard HCD/tryptic amino-acid set: Carbamidomethyl-C (fixed) + Oxidation-M (variable).
@@ -68,6 +68,8 @@ fn standard_aa_set() -> model::AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -76,6 +78,8 @@ fn standard_aa_set() -> model::AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

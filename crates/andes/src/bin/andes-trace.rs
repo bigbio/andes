@@ -191,6 +191,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -199,6 +201,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -363,8 +367,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 selected.charge, selected.parent_mass, selected.seg_num,
                 ion_list.len(),
                 ion_list.iter().map(|i| match i {
-                    scoring_crate::param_model::IonType::Prefix { charge, offset_bits } => format!("P(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
-                    scoring_crate::param_model::IonType::Suffix { charge, offset_bits } => format!("S(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
+                    scoring_crate::param_model::IonType::Prefix { charge, offset_bits, .. } => format!("P(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
+                    scoring_crate::param_model::IonType::Suffix { charge, offset_bits, .. } => format!("S(c={},off={:.3})", charge, f32::from_bits(*offset_bits)),
                     scoring_crate::param_model::IonType::Noise => "Noise".to_string(),
                 }).collect::<Vec<_>>()
             );

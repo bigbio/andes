@@ -9,7 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, StringArray, StructArray,
+    Array, BinaryArray, BooleanArray, Float32Array, Int32Array, Int64Array, ListArray, StringArray,
+    StructArray,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rustc_hash::FxHashMap;
@@ -216,6 +217,17 @@ struct ManifestRow {
     max_charge: i32,
     num_precursor_off: i32,
     charge_hist: Vec<(i32, i32)>,
+    /// Serialized GBDT blob, if present. `None` for models written before this
+    /// column was added (backward-compatible: column absent ⇒ `gbdt_peak_model = None`).
+    gbdt_bytes: Option<Vec<u8>>,
+    /// Serialized fragment-intensity GBDT blob, if present. `None` for models
+    /// written before this column existed (backward-compatible: column absent ⇒
+    /// `frag_intensity_model = None`).
+    frag_intensity_bytes: Option<Vec<u8>>,
+    /// Serialized rich-ion GBDT blob, if present. `None` for models
+    /// written before this column existed (backward-compatible: column absent ⇒
+    /// `rich_ion_model = None`).
+    rich_ion_bytes: Option<Vec<u8>>,
 }
 
 fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
@@ -345,9 +357,33 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                                     format!("frag_off flat length {} not multiple of 4", len),
                                 ));
                             }
+
+                            // Read the parallel frag_off_loss_classes column if present.
+                            // Old stores (without this column) yield all loss_class=0.
+                            let loss_classes_vec: Vec<i32> = match batch.column_by_name("frag_off_loss_classes") {
+                                Some(col) => {
+                                    if let Some(list) = col.as_any().downcast_ref::<ListArray>() {
+                                        if list.is_null(i) {
+                                            Vec::new()
+                                        } else {
+                                            let item = list.value(i);
+                                            if let Some(arr) = item.as_any().downcast_ref::<Int32Array>() {
+                                                (0..arr.len()).map(|k| arr.value(k)).collect()
+                                            } else {
+                                                Vec::new()
+                                            }
+                                        }
+                                    } else {
+                                        Vec::new()
+                                    }
+                                }
+                                None => Vec::new(),
+                            };
+
                             let mut frags: Vec<FragmentOffsetFrequency> =
                                 Vec::with_capacity(len / 4);
                             let mut j = 0;
+                            let mut entry_idx = 0usize;
                             while j + 3 < len {
                                 let is_prefix_f = flat.value(j);
                                 let ion_charge = flat.value(j + 1) as i32;
@@ -357,15 +393,21 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                                 // round-trips without precision loss.
                                 let offset_bits = offset_bits_f.to_bits();
                                 let frequency = flat.value(j + 3);
+                                // Read per-entry loss_class from parallel column; default 0.
+                                let lc: u8 = loss_classes_vec
+                                    .get(entry_idx)
+                                    .map(|&v| v.clamp(0, 255) as u8)
+                                    .unwrap_or(0);
                                 let ion_type = if is_prefix_f > 0.5 {
-                                    IonType::Prefix { charge: ion_charge, offset_bits }
+                                    IonType::Prefix { charge: ion_charge, offset_bits, loss_class: lc }
                                 } else if is_prefix_f < -0.5 {
                                     IonType::Noise
                                 } else {
-                                    IonType::Suffix { charge: ion_charge, offset_bits }
+                                    IonType::Suffix { charge: ion_charge, offset_bits, loss_class: lc }
                                 };
                                 frags.push(FragmentOffsetFrequency { ion_type, frequency });
                                 j += 4;
+                                entry_idx += 1;
                             }
                             frag_off_table.insert(part, frags);
                         }
@@ -382,7 +424,15 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
                             let kind = ik_col.value(i);
                             let ic = ic_col.value(i);
                             let iob = iob_col.value(i) as u32;
-                            let ion_type = decode_ion_type(kind, ic, iob)?;
+                            // Read ion_loss_class; default 0 for old stores (column absent).
+                            let lc: u8 = match batch.column_by_name("ion_loss_class") {
+                                Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
+                                    Some(arr) if !arr.is_null(i) => arr.value(i).clamp(0, 255) as u8,
+                                    _ => 0,
+                                },
+                                None => 0,
+                            };
+                            let ion_type = decode_ion_type(kind, ic, iob, lc)?;
 
                             let values_arr = list_col(&batch, "values")?;
                             if values_arr.is_null(i) { continue; }
@@ -475,8 +525,38 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
         noise_err_dist_table,
         ion_existence_table,
         partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
+        frag_intensity_model: None,
+        rich_ion_model: None,
     };
     param.rebuild_cache();
+
+    // Decode and attach the GBDT signal/noise model if a blob was stored.
+    if let Some(bytes) = manifest.gbdt_bytes.as_ref() {
+        param.gbdt_peak_model = Some(
+            scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
+                .map_err(|e| TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}")))?,
+        );
+    }
+
+    // Decode and attach the fragment-intensity regressor if a blob was stored.
+    if let Some(bytes) = manifest.frag_intensity_bytes.as_ref() {
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
+            .map_err(|e| TrainError::Other(
+                format!("decode frag_intensity_model_bytes for '{model_id}': {e}")
+            ))?;
+        param.frag_intensity_model = Some(std::sync::Arc::new(model));
+    }
+
+    // Decode and attach the rich-ion classifier if a blob was stored.
+    if let Some(bytes) = manifest.rich_ion_bytes.as_ref() {
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
+            .map_err(|e| TrainError::Other(
+                format!("decode rich_ion_model_bytes for '{model_id}': {e}")
+            ))?;
+        param.rich_ion_model = Some(std::sync::Arc::new(model));
+    }
+
     Ok(param)
 }
 
@@ -529,6 +609,41 @@ fn parse_manifest_row(
         }
     }
 
+    // Read the optional GBDT blob. Column absent (old store) → None (backward-compat).
+    // Column present but wrong type → hard error (schema corruption).
+    let gbdt_bytes: Option<Vec<u8>> = match batch.column_by_name("gbdt_model_bytes") {
+        None => None, // backward-compat: old store without the column
+        Some(col) => {
+            let arr = col.as_any().downcast_ref::<BinaryArray>()
+                .ok_or_else(|| TrainError::Other("gbdt_model_bytes column is not BinaryArray".into()))?;
+            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
+        }
+    };
+
+    // Read the optional fragment-intensity model blob (backward-compatible: column absent → None).
+    let frag_intensity_bytes: Option<Vec<u8>> = match batch.column_by_name("frag_intensity_model_bytes") {
+        None => None, // backward-compat: old store without the column
+        Some(col) => {
+            let arr = col.as_any().downcast_ref::<BinaryArray>()
+                .ok_or_else(|| TrainError::Other(
+                    "frag_intensity_model_bytes column is not BinaryArray".into()
+                ))?;
+            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
+        }
+    };
+
+    // Read the optional rich-ion model blob (backward-compatible: column absent → None).
+    let rich_ion_bytes: Option<Vec<u8>> = match batch.column_by_name("rich_ion_model_bytes") {
+        None => None, // backward-compat: old store without the column
+        Some(col) => {
+            let arr = col.as_any().downcast_ref::<BinaryArray>()
+                .ok_or_else(|| TrainError::Other(
+                    "rich_ion_model_bytes column is not BinaryArray".into()
+                ))?;
+            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
+        }
+    };
+
     Ok(ManifestRow {
         activation,
         instrument,
@@ -546,13 +661,20 @@ fn parse_manifest_row(
         max_charge,
         num_precursor_off,
         charge_hist,
+        gbdt_bytes,
+        frag_intensity_bytes,
+        rich_ion_bytes,
     })
 }
 
-fn decode_ion_type(kind: &str, charge: i32, offset_bits: u32) -> Result<IonType, TrainError> {
+/// Reconstruct an [`IonType`] from the stored kind/charge/offset_bits/loss_class fields.
+///
+/// `loss_class` defaults to `0` for stores written before the `ion_loss_class` column
+/// was added (backward-compatible: old files simply omit the column).
+fn decode_ion_type(kind: &str, charge: i32, offset_bits: u32, loss_class: u8) -> Result<IonType, TrainError> {
     match kind {
-        "prefix" => Ok(IonType::Prefix { charge, offset_bits }),
-        "suffix" => Ok(IonType::Suffix { charge, offset_bits }),
+        "prefix" => Ok(IonType::Prefix { charge, offset_bits, loss_class }),
+        "suffix" => Ok(IonType::Suffix { charge, offset_bits, loss_class }),
         "noise" => Ok(IonType::Noise),
         other => Err(TrainError::Other(format!("unknown ion_kind: {other}"))),
     }
@@ -854,7 +976,15 @@ fn read_ion_type(
     let kind = ik_col.value(i);
     let ic = ic_col.value(i);
     let iob = iob_col.value(i) as u32;
-    decode_ion_type(kind, ic, iob)
+    // Read ion_loss_class if present; default to 0 for old stores that lack this column.
+    let loss_class: u8 = match batch.column_by_name("ion_loss_class") {
+        Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
+            Some(arr) if !arr.is_null(i) => arr.value(i).clamp(0, 255) as u8,
+            _ => 0,
+        },
+        None => 0,
+    };
+    decode_ion_type(kind, ic, iob, loss_class)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -867,7 +997,7 @@ mod tests {
     /// manifest dir (same convention the binary uses via `CARGO_MANIFEST_DIR`).
     fn bundled_store_path() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/ionstat/models.parquet")
+            .join("../../resources/models.parquet")
     }
 
     #[test]

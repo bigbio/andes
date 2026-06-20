@@ -104,6 +104,15 @@ pub struct PsmFeatures {
     /// and `y_{n-i}` matched). A contiguous ladder is stronger evidence than
     /// scattered complementary pairs.
     pub longest_complementary_ladder: u32,
+    /// ADDITIVE: complementary-ion intensity-rank BALANCE. Σ over cleavage bonds
+    /// where both the charge-1 prefix `b_i` and complementary suffix `y_{n-i}`
+    /// matched, weighted by their intensity-rank agreement `1/(1+|rank_b−rank_y|)`.
+    /// Orthogonal to `longest_complementary_ladder` (run length, no intensity)
+    /// and `num_matched_main_ions` (no pairing): a true peptide produces both
+    /// halves of a bond at correlated ranks; a decoy matching a few peaks on one
+    /// series does not. Targets low-res CID/TMT discrimination. 0.0 when no
+    /// complementary pair matched.
+    pub complementary_ion_balance: f32,
     /// Count of matched b/y ions that also have a neutral-loss partner peak at
     /// −H2O (−18.0106 Da) or −NH3 (−17.0265 Da) within feature tolerance.
     /// Strong CID/TMT signal that the intensity-rank model underuses.
@@ -136,6 +145,52 @@ pub struct PsmFeatures {
     /// intensities over b/y ions. 0.0 when no intensity model is loaded.
     pub intensity_signal: f32,
 
+    // ── Strong-score S1b: frag-intensity LLR battery (additive PIN columns) ──
+    // Discriminative likelihood-ratio features from the v3 frag-intensity GBDT,
+    // deployed instead of a cosine (the cosine normalizes both vectors and smears
+    // target/decoy separation). All 0.0 when no frag-intensity model is loaded.
+    /// Predicted-intensity-weighted explained fraction: `Σ(matched·pred)/Σpred`.
+    pub frag_pred_explained: f32,
+    /// Predicted-intensity-weighted chance-match surprise:
+    /// `Σ matched·pred·max(0,−ln p_chance)` — fuses prediction with the noise denom.
+    pub frag_pred_chance_llr: f32,
+    /// Fraction of the top-K predicted-most-intense ions that are observed.
+    pub frag_topk_observed: f32,
+
+    /// Decoy-aware rich-ion LLR: Σ over matched b/y ions of the per-ion
+    /// `predict_logit(P(signal))` from the rich-ion GBDT (chemistry + complement
+    /// coherence features; trained target-matched vs decoy-matched). Additive PIN
+    /// column; 0.0 when no rich-ion model is loaded. RankScore is unaffected.
+    pub rich_ion_llr: f32,
+
+    /// Refinement-cascade tags (additive PIN columns). All 0 on the default
+    /// (non-`--refine`) path. 1 if this PSM came from the Pass-2 refinement search.
+    pub is_refinement: u32,
+    /// Count of variable modifications on the matched peptide (0 = unmodified).
+    pub num_mods: u32,
+    /// Mod-class id for subgroup-FDR grouping: 0=none, 1=oxidation, 2=deamidation,
+    /// 3=nterm_acetyl, 4=nterm_loss(pyro-Glu), 5=alkyl, 99=other.
+    pub refine_mod_class: u32,
+
+    // ── Mod-localization site-determining-ion features (additive PIN columns) ──
+    // All 0.0 for an unmodified peptide. Orthogonal to RankScore: they measure
+    // whether the spectrum LOCALIZES a variable mod via its site-determining
+    // (b/y mass-shift-bracketing) ions. Computed by `mod_site_features` in the
+    // scoring crate. See `crates/scoring/src/mod_site_features.rs`.
+    /// Count of matched SHIFTED b/y ions (fragments carrying the mod's mass
+    /// shift) — confirms the mod is present.
+    pub mod_site_shifted_matched: f32,
+    /// Matched shifted ions / total theoretical shifted ions.
+    pub mod_site_shifted_frac: f32,
+    /// Summed intensity of matched shifted ions / summed intensity of ALL
+    /// matched ions (0.0 if none matched).
+    pub mod_site_intens_frac: f32,
+    /// 1.0 if ANY mod site has a matched bracketing (site-determining) ion pair
+    /// that localizes the mod (e.g. `b_{p-1}` + `b_p` both matched), else 0.0.
+    pub mod_site_localized: f32,
+    /// Number of bracketing (site-determining) matched ions summed over mod sites.
+    pub mod_site_det_count: f32,
+
     // ── Strong-score S2: null denominator terms (additive PIN columns) ────
     /// `Σ 1/(1+competition)` over matched ions; competition = within-peptide
     /// alternative-mass ambiguity + local peak density (S2 term 2).
@@ -150,8 +205,12 @@ pub struct PsmFeatures {
 
     // ── Strong-score S3: fused signal − null ────────────────────────────────
     /// `intensity_signal − null` where `null` combines chance-match surprise,
-    /// mass-competition penalty, and listwise ambiguity. Always computed;
-    /// drives ranking and PIN `RawScore` only under `ScoreMode::Strong`.
+    /// mass-competition penalty, and listwise ambiguity. Always computed and
+    /// emitted as the `RawScore` PIN column (the headline/fused score). Under
+    /// `ScoreMode::Strong` it ALSO drives ranking — top-1 selection via
+    /// `rank_score` — but `psm.score` (the `RankScore` column) stays the
+    /// rank-LLR in BOTH modes, so `RankScore` always reports the b/y-ion-rank
+    /// model score.
     pub strong_score: f32,
 
     // ── Strong-score S4: per-spectrum significance calibration ──────────────
@@ -453,6 +512,24 @@ impl TopNQueue {
         }
     }
 
+    /// Rewrite every retained PSM's `candidate_idxs` through `remap`, preserving
+    /// per-PSM order. Used by the out-of-core (`Mmap`) candidate backing to turn
+    /// per-spectrum LOCAL candidate-slot indices into the GLOBAL indices the
+    /// PIN/TSV writers resolve against the materialized `candidates` slice. The
+    /// queue ordering keys (`score` / `rank_score`) are untouched, so this never
+    /// reorders the queue.
+    pub fn remap_candidate_idxs<F: FnMut(u32) -> u32>(&mut self, mut remap: F) {
+        let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
+        for psm in &mut psms {
+            for idx in &mut psm.candidate_idxs {
+                *idx = remap(*idx);
+            }
+        }
+        for psm in psms {
+            self.heap.push(Reverse(psm));
+        }
+    }
+
     /// Re-rank retained PSMs by `features.strong_score` and mirror it into
     /// `score` / `rank_score` for queue ordering and PIN `RawScore` emission.
     /// Called only under `ScoreMode::Strong` after `fill_post_topn`.
@@ -460,9 +537,13 @@ impl TopNQueue {
         let cap = self.capacity as usize;
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
         for psm in &mut psms {
-            let s = psm.features.strong_score;
-            psm.score = s;
-            psm.rank_score = s;
+            // Re-rank / select top-1 by the fused strong score, but DO NOT touch
+            // `psm.score`: it stays the rank-LLR so the `RankScore` PIN column
+            // always reports the b/y-ion-rank-model score (the fused score is
+            // emitted separately as the `RawScore` column = features.strong_score).
+            // The queue Ord ranks by `rank_score` alone, so setting only it
+            // reorders the queue without losing the rank-LLR.
+            psm.rank_score = psm.features.strong_score;
         }
         psms.sort_by(|a, b| b.cmp(a));
         Self::retain_top_with_ties(&mut psms, cap);
@@ -826,7 +907,10 @@ mod tests {
         q.reorder_by_strong_score();
         let top = q.peek_top().unwrap();
         assert!((top.features.strong_score - 5.0).abs() < f32::EPSILON);
-        assert!((top.score - 5.0).abs() < f32::EPSILON);
+        // psm.score stays the rank-LLR (NOT clobbered with the strong score), so
+        // the RankScore column always reports the b/y-ion-rank-model score.
+        assert!((top.score - 100.0).abs() < f32::EPSILON);
+        // rank_score IS set to the strong score so top-1 selection ranks by it.
         assert!((top.rank_score - 5.0).abs() < f32::EPSILON);
     }
 

@@ -3,7 +3,7 @@
 # Andes — the data-driven peptide search engine of the quantms ecosystem.
 #
 # Multi-stage build: compile the `andes` Rust binary, then ship it on a slim
-# Debian runtime with the bundled model store (`resources/ionstat/models.parquet`)
+# Debian runtime with the bundled model store (`resources/models.parquet`)
 # placed next to the binary so it is self-contained.
 #
 # This image builds the pure-Rust path, which reads **mzML** and **MGF** spectra
@@ -51,7 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Lay out the install so `current_exe()` finds the model store next to the
-# binary: <exe_dir>/resources/ionstat/models.parquet (see bundled_store_path()).
+# binary: <exe_dir>/resources/models.parquet (see bundled_store_path()).
 WORKDIR /opt/andes
 COPY --from=builder /usr/local/bin/andes /opt/andes/andes
 COPY resources/ /opt/andes/resources/

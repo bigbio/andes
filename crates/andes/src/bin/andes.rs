@@ -10,7 +10,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{sync_channel, SyncSender};
@@ -34,7 +33,7 @@ use model_train::{
     store::{
         SourceLedger,
         update_add, update_remove, update_reweight, update_decay, commit_update,
-        write_all_models_with_sources_pub,
+        write_all_models_with_sources_pub, write_all_models_with_sources_and_gbdt_pub,
     },
 };
 use scoring_crate::{Param, RankScorer};
@@ -43,6 +42,7 @@ use search::{
     learn_calibration_stats, CalibrationStats,
     PreparedSearch, PrecursorCalMode, SearchIndex, SearchParams, SpecKey, TopNQueue,
 };
+use search::candidate_index::index_cache_path;
 use search::precursor_cal::{constants as cal_constants, sample_every_nth};
 use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader};
 
@@ -58,16 +58,6 @@ pub enum Fragmentation {
     #[clap(name = "ETD")]  Etd,
     #[clap(name = "HCD")]  Hcd,
     #[clap(name = "UVPD")] Uvpd,
-}
-
-/// Instrument class. Drives the `LowRes`/`HighRes`/`TOF`/`QExactive`
-/// classification used to pick the bundled param file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Instrument {
-    #[clap(name = "low-res")]   LowRes,
-    #[clap(name = "high-res")]  HighRes,
-    #[clap(name = "TOF")]       Tof,
-    #[clap(name = "QExactive")] QExactive,
 }
 
 /// Search protocol: sample labeling or enrichment strategy applied during the experiment.
@@ -98,6 +88,49 @@ enum ScoreFlag {
     Strong,
 }
 
+/// Candidate-resolution backing: in-RAM (`ram`, default) or out-of-core mmap
+/// base-peptide index with lazy mod enumeration (`mmap`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum CandidateIndexFlag {
+    /// Pick automatically: estimate the in-RAM candidate index size against
+    /// available memory and use out-of-core mmap only if it would not fit
+    /// (default). Errs toward RAM (byte-identical to prior releases) and only
+    /// falls back to mmap when RAM would risk an OOM.
+    #[default]
+    Auto,
+    /// Force the in-RAM candidate index (advanced; may OOM on very large mod
+    /// searches — that is what `auto` protects against).
+    Ram,
+    /// Force the out-of-core mmap'd base-peptide index (advanced; lower peak RAM,
+    /// result-equivalent but not byte-identical to `ram`).
+    Mmap,
+}
+
+/// Available system memory in bytes, from Linux `/proc/meminfo` (`MemAvailable`).
+/// Returns `None` when it cannot be determined (non-Linux, restricted sandbox);
+/// callers should then keep the conservative RAM default.
+fn available_memory_bytes() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            // e.g. "MemAvailable:   12345678 kB"
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
+/// Emit a one-line search-progress update after each scored chunk: cumulative
+/// spectra scored, throughput, and elapsed time. The streaming search has no
+/// upfront total for mzML/MGF, so this reports a running count + rate rather than
+/// a percentage (use it to see the search is live and how fast it is going).
+fn report_search_progress(scored: usize, start: std::time::Instant) {
+    let secs = start.elapsed().as_secs_f64();
+    let rate = if secs > 0.0 { scored as f64 / secs } else { 0.0 };
+    eprintln!("[search] {scored} spectra scored (~{rate:.0}/s, {secs:.0}s elapsed)");
+}
+
 /// Search arguments (shared by the default search path and exposed as a
 /// flat arg group so that `andes --spectrum X --database Y --output-pin Z`
 /// keeps working unchanged).
@@ -125,9 +158,27 @@ struct SearchArgs {
     #[arg(long)]
     output_tsv: Option<PathBuf>,
 
+    /// Output QPX `.idparquet/` bundle directory (optional; OpenMS-compatible).
+    /// Writes `psms.parquet` + `proteins.parquet` + `search_params.parquet`.
+    #[arg(long)]
+    output_parquet: Option<PathBuf>,
+
     /// Decoy prefix used when generating reversed decoy sequences.
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
+
+    /// How to generate decoys: `reverse` (default; reverse each sequence),
+    /// `shuffle` (seeded reproducible shuffle), or `none` (no decoys — for a
+    /// FASTA that already contains decoys, or external FDR). `none` with a
+    /// target-only FASTA leaves the search without decoys (FDR can't be
+    /// estimated) and warns.
+    #[arg(long = "decoy-strategy", default_value = "reverse")]
+    decoy_strategy: String,
+
+    /// Seed for `--decoy-strategy shuffle` (reproducible decoys). Ignored by
+    /// reverse/none.
+    #[arg(long = "decoy-seed", default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
+    decoy_seed: u64,
 
     /// Minimum isotope-error offset to try.
     #[arg(long, default_value = "-1")]
@@ -141,12 +192,35 @@ struct SearchArgs {
     /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
     /// precursor tolerance for the main search; `auto` skips the correction when
     /// the sample is too small to be reliable.
-    #[arg(long = "precursor-cal", default_value = "off", value_parser = parse_precursor_cal)]
+    #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
+
+    /// Minimum SpecKeys before precursor calibration runs (default 10000).
+    /// Lower it to calibrate small/targeted runs that would otherwise be
+    /// skipped; raising it is more conservative. Only consulted when
+    /// `--precursor-cal` is `auto`/`on`.
+    #[arg(long = "cal-min-spec-keys", default_value_t = search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS)]
+    cal_min_spec_keys: usize,
 
     /// Precursor mass tolerance in ppm.
     #[arg(long, default_value = "20.0")]
     precursor_tol_ppm: f64,
+
+    /// Precursor tolerance in Da (overrides --precursor-tol-ppm; for low-res
+    /// precursor selection). The asymmetric ppm flags below take precedence.
+    #[arg(long = "precursor-tol-da")]
+    precursor_tol_da: Option<f64>,
+
+    /// Asymmetric precursor tolerance, left (lower) window in ppm. Requires
+    /// --precursor-tol-right-ppm; together they override the symmetric forms
+    /// (for a known systematic precursor offset).
+    #[arg(long = "precursor-tol-left-ppm")]
+    precursor_tol_left_ppm: Option<f64>,
+
+    /// Asymmetric precursor tolerance, right (upper) window in ppm. Requires
+    /// --precursor-tol-left-ppm.
+    #[arg(long = "precursor-tol-right-ppm")]
+    precursor_tol_right_ppm: Option<f64>,
 
     /// Minimum precursor charge to try when not specified in the spectrum.
     #[arg(long, default_value = "2")]
@@ -169,6 +243,21 @@ struct SearchArgs {
           default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
 
+    /// Proteolytic enzyme for in-silico digestion. Named values: trypsin
+    /// (default), chymotrypsin, lysc, aspn, gluc, lysn, argc, alphalp,
+    /// nocleavage, nonspecific. A wrong enzyme yields ~no PSMs (fails loud,
+    /// not silent). Previously hardcoded to trypsin with no override.
+    ///
+    /// Multi-protease digest: pass a `,`- or `+`-separated list (e.g.
+    /// `--enzyme gluc,trypsin`) to accept peptides cleaved by ANY listed
+    /// protease (the union of their cleavage rules). The FIRST entry is the
+    /// primary — it drives model selection and the cleavage-credit feature; if
+    /// no model matches that enzyme for the data, andes WARNs and you should
+    /// pass `--model`. Combining a universal protease (nonspecific/alphalp)
+    /// with specific ones makes the whole digest non-specific (warned).
+    #[arg(long, default_value = "trypsin")]
+    enzyme: String,
+
     /// Maximum number of missed cleavages per peptide.
     #[arg(long, default_value = "1")]
     max_missed_cleavages: u32,
@@ -182,18 +271,25 @@ struct SearchArgs {
     #[arg(long, default_value = "6")]
     min_length: u32,
 
-    /// Maximum peptide length, in residues.
-    #[arg(long, default_value = "40")]
+    /// Maximum peptide length, in residues. (50 matches the reference engine/a comparison engine defaults;
+    /// 40 dropped long tryptic peptides.)
+    #[arg(long, default_value = "50")]
     max_length: u32,
+
+    /// Maximum number of variable modifications per peptide. A `NumMods=N` line
+    /// in a --mods file overrides this.
+    #[arg(long = "max-mods", default_value = "3")]
+    max_mods: u32,
 
     /// Path to the .param scoring model file.
     ///
-    /// If not supplied, a bundled file under
-    /// `resources/ionstat/` is selected from
-    /// `(--fragmentation, --instrument, --protocol)` (default
-    /// `HCD_QExactive_Tryp.param`). When running the binary outside the source
-    /// tree this path may not exist; supply --param-file explicitly in that
-    /// case.
+    /// If not supplied, a scoring model is selected from the bundled
+    /// `models.parquet` store. For mzML/.raw/.d the activation method and
+    /// analyzer resolution are auto-detected from metadata; for MGF the
+    /// `--fragmentation` and `--fragment-tol-ppm/-da` flags drive selection
+    /// (default: CID / low-res). When running the binary outside the source
+    /// tree the bundled store may not exist; supply --param-file explicitly
+    /// in that case.
     #[arg(long)]
     param_file: Option<PathBuf>,
 
@@ -208,25 +304,33 @@ struct SearchArgs {
     /// A single `NumMods=N` line sets the max variable mods per peptide.
     /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
     /// are ignored. When omitted, the binary uses its built-in defaults
-    /// (Carbamidomethyl-C fixed, Oxidation-M variable). The deprecated
+    /// (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl variable). The deprecated
     /// `--mod` form (singular) is still accepted as a hidden alias.
     #[arg(long = "mods", alias = "mod", value_name = "MODFILE")]
     mods: Option<PathBuf>,
 
-    /// Fragmentation method. Named values: auto, CID, ETD, HCD, UVPD.
+    /// Fragmentation/activation method for MGF input only. mzML/.raw/.d
+    /// auto-detect this. Named values: auto, CID, ETD, HCD, UVPD.
     /// Legacy numeric CLI indices: 0=auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD.
-    #[arg(long, default_value = "auto", value_parser = parse_fragmentation)]
+    #[arg(long, hide = true, default_value = "auto", value_parser = parse_fragmentation)]
     fragmentation: Fragmentation,
-
-    /// Instrument class. Named values: low-res, high-res, TOF, QExactive.
-    /// Legacy numeric CLI indices: 0=low-res, 1=high-res, 2=TOF, 3=QExactive.
-    #[arg(long, default_value = "low-res", value_parser = parse_instrument)]
-    instrument: Instrument,
 
     /// Search protocol. Named values: auto, phospho, iTRAQ, iTRAQ-phospho, TMT, standard.
     /// Legacy numeric CLI indices: 0=auto, 1=phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=standard.
     #[arg(long, default_value = "auto", value_parser = parse_protocol)]
     protocol: Protocol,
+
+    /// Fragment-matching tolerance in ppm for **MGF input only** (high-resolution
+    /// MS/MS). Has no effect on mzML/.raw/.d (analyzer auto-detected). Mutually
+    /// exclusive with `--fragment-tol-da`.
+    #[arg(long = "fragment-tol-ppm", hide = true, conflicts_with = "fragment_tol_da")]
+    fragment_tol_ppm: Option<f64>,
+
+    /// Fragment-matching tolerance in Da for **MGF input only** (low-resolution
+    /// ion-trap MS/MS). Has no effect on mzML/.raw/.d. Mutually exclusive with
+    /// `--fragment-tol-ppm`.
+    #[arg(long = "fragment-tol-da", hide = true, conflicts_with = "fragment_tol_ppm")]
+    fragment_tol_da: Option<f64>,
 
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
     #[arg(long, default_value_t = num_cpus::get())]
@@ -258,15 +362,26 @@ struct SearchArgs {
     #[arg(long, default_value = "1.5")]
     isolation_halfwidth: f64,
 
+    /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
+    /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
+    /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.
+    #[arg(long = "chimeric-max-coisolated", default_value = "4")]
+    chimeric_max_coisolated: usize,
+
+    /// Chimeric mode: averagine-envelope KL gate for accepting a co-isolated MS1
+    /// envelope (lower = stricter/cleaner; fewer spurious secondaries).
+    #[arg(long = "chimeric-max-kl", default_value = "0.3")]
+    chimeric_max_kl: f32,
+
     /// Path to a Parquet model store to use instead of the bundled
-    /// `resources/ionstat/models.parquet`. When set, model selection reads from
+    /// `resources/models.parquet`. When set, model selection reads from
     /// this store; when unset, the bundled store is used.
     #[arg(long = "model-store")]
     model_store: Option<PathBuf>,
 
     /// Exact model ID to load from the model store (bundled or `--model-store`).
-    /// When set, skips automatic selection by `(--fragmentation, --instrument,
-    /// --protocol)` and loads this ID directly. Useful after `andes train`
+    /// When set, skips automatic selection (metadata detection / `--fragmentation`
+    /// / `--protocol`) and loads this ID directly. Useful after `andes train`
     /// to search with the freshly-trained model.
     #[arg(long = "model")]
     model_id_override: Option<String>,
@@ -281,11 +396,51 @@ struct SearchArgs {
     /// (fused intensity + competition score from S1–S3).
     #[arg(long = "score", default_value = "rank")]
     score: ScoreFlag,
+
+    /// Candidate-index backing: `auto` (default — automatically use out-of-core
+    /// mmap only when the in-RAM candidate index would not fit available memory;
+    /// otherwise RAM, byte-identical to prior releases), or force `ram` / `mmap`
+    /// (advanced overrides). `mmap` lowers peak RAM with lazy per-spectrum mod
+    /// enumeration (result-equivalent PSMs, not byte-identical).
+    #[arg(long = "candidate-index", default_value = "auto")]
+    candidate_index: CandidateIndexFlag,
+
+    /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
+    #[arg(long = "refine", default_value_t = false)]
+    refine: bool,
+
+    /// YAML refinement config; omit to use the built-in 5-mod DEFAULT tier.
+    #[arg(long = "refine-config")]
+    refine_config: Option<std::path::PathBuf>,
+
+    /// Confident-anchor SCOPING FDR (not a reported FDR). Default 0.01 — the same
+    /// internal TDC q used for calibration/training/report. A looser gate (e.g.
+    /// 0.10) admits low-confidence anchors that leak into the entrapment-FDP
+    /// (b1931: 0.10 → 4.86% vs 0.01 → 0.29% true FDP). Hidden power-user knob;
+    /// leave at the default unless you have a measured reason to widen it.
+    #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true)]
+    refine_select_psm_fdr: f64,
+
+    /// Max variable mods per refined peptide. Overrides the value from
+    /// `--refine-config` YAML; when neither is given, the built-in tier's value (2).
+    #[arg(long = "refine-max-mods")]
+    refine_max_mods: Option<u32>,
+
+    /// Require high-res data for refinement; on low-res, skip refine. Overrides the
+    /// `--refine-config` YAML `high_res_only`; when neither is given, the tier
+    /// default (true). e.g. `--refine-high-res-only false` forces the cascade on
+    /// low-res data.
+    #[arg(long = "refine-high-res-only", action = clap::ArgAction::Set)]
+    refine_high_res_only: Option<bool>,
+
+    /// DEBUG ONLY: also emit the legacy separate <out>.refine.pin (disjoint-union A/B).
+    #[arg(long = "refine-debug-split-pin", default_value_t = false, hide = true)]
+    refine_debug_split_pin: bool,
 }
 
-/// Training arguments for `andes train`.
+/// Training arguments for `andes train-from-search`.
 #[derive(Args, Debug)]
-struct TrainArgs {
+struct TrainFromSearchArgs {
     /// Input spectrum file (training data). Same format dispatch as for search:
     /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
     ///
@@ -332,7 +487,7 @@ struct TrainArgs {
     model_id: Option<String>,
 
     /// Path to a mods.txt file (same format as `--mods` for search). When
-    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M
+    /// omitted, uses built-in defaults (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl
     /// variable).
     #[arg(long)]
     mods: Option<PathBuf>,
@@ -389,7 +544,7 @@ struct TrainArgs {
     force: bool,
 }
 
-/// Training arguments for `andes train-from-msnet`.
+/// Training arguments for `andes train`.
 ///
 /// Trains a scoring model directly from externally-labeled, high-confidence
 /// PSMs supplied as a "flat training parquet" (one row per PSM, each carrying
@@ -399,7 +554,7 @@ struct TrainArgs {
 /// deconvolution, segments, frag/precursor offset tables, max_rank); all
 /// learned distributions come from the input data.
 #[derive(Args, Debug)]
-struct TrainFromMsnetArgs {
+struct TrainArgs {
     /// Input flat training parquet(s). Repeatable; stats accumulate across all
     /// inputs into a single model.
     #[arg(long = "in", required = true)]
@@ -491,6 +646,16 @@ struct TrainFromMsnetArgs {
     /// (Kim et al., Nat Commun 5:5277, 2014).
     #[arg(long)]
     rank_smoothing: bool,
+
+    /// Source identifier for the source ledger. Defaults to "msnet".
+    #[arg(long, default_value = "msnet")]
+    source: String,
+
+    /// Whether to also train and embed a GBDT peak model. `on` (default) and
+    /// `auto` train GBDT and write the blob; `off` writes rank-core only
+    /// (byte-identical to the pre-GBDT path).
+    #[arg(long, default_value = "on")]
+    gbdt: GbdtMode,
 }
 
 /// Training arguments for `andes train-intensity`.
@@ -510,28 +675,123 @@ struct TrainIntensityArgs {
     out: PathBuf,
 }
 
+/// GBDT training mode for `andes train`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum GbdtMode {
+    /// Train and embed a GBDT peak model (default).
+    #[default]
+    #[clap(name = "on")]
+    On,
+    /// Same as `on` (reserved for future heuristic auto-detection).
+    #[clap(name = "auto")]
+    Auto,
+    /// Skip GBDT; write rank-core only (byte-identical to pre-GBDT path).
+    #[clap(name = "off")]
+    Off,
+}
+
+/// Training arguments for `andes train-intensity-gbdt`.
+///
+/// Reads flat training parquets (same schema as `train-from-msnet`) and fits a
+/// GBDT fragment-intensity regressor (`v3 frag model`).  The trained model is
+/// written into `--out-store` alongside any existing models under `--model-id`.
+#[derive(Args, Debug)]
+struct TrainIntensityGbdtArgs {
+    /// Input flat training parquet(s). Repeatable; data accumulate across all
+    /// inputs into a single frag-intensity model.
+    #[arg(long = "in", required = true)]
+    inputs: Vec<PathBuf>,
+
+    /// Path to the Parquet model store to write (created if absent; existing
+    /// models are preserved and re-written alongside the new one). REQUIRED.
+    #[arg(long = "out-store", required = true)]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `default`.
+    #[arg(long = "model-id", default_value = "default")]
+    model_id: String,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
+    /// a path to a binary `.param` file.  Supplies structural hyperparameters
+    /// (fragment tolerance, charge range) used when building the frag dataset.
+    #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
+    seed_model: String,
+
+    /// Number of worker threads (Rayon). Default: 8.
+    #[arg(long, default_value_t = 8usize)]
+    threads: usize,
+}
+
+/// Training arguments for `andes train-rich-ion-llr`.
+///
+/// Reads flat training parquets (same schema as `train-from-msnet`) and fits a
+/// GBDT rich-ion LLR classifier (logistic; decoy-aware).  The trained model is
+/// written into `--out-store` alongside any existing models under `--model-id`.
+#[derive(Args, Debug)]
+struct TrainRichIonLlrArgs {
+    /// Input flat training parquet(s). Repeatable; data accumulate across all
+    /// inputs into a single rich-ion model.
+    #[arg(long = "in", required = true)]
+    inputs: Vec<PathBuf>,
+
+    /// Path to the Parquet model store to write (created if absent; existing
+    /// models are preserved and re-written alongside the new one). REQUIRED.
+    #[arg(long = "out-store", required = true)]
+    out_store: PathBuf,
+
+    /// Model ID written into the store. Default: `default`.
+    #[arg(long = "model-id", default_value = "default")]
+    model_id: String,
+
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
+    /// a path to a binary `.param` file.  Supplies structural hyperparameters
+    /// (fragment tolerance, charge range) used when building the ion dataset.
+    #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
+    seed_model: String,
+
+    /// Number of worker threads (Rayon). Default: 8.
+    #[arg(long, default_value_t = 8usize)]
+    threads: usize,
+}
+
 /// Available subcommands.
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Train a scoring model directly from externally-labeled, high-confidence
+    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
+    /// search. This is the primary training path for the Phase-3 "own models".
+    ///
+    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
+    #[command(alias = "train-from-msnet")]
+    Train(Box<TrainArgs>),
+
     /// Train a scoring model from spectra and a FASTA database, writing the
     /// result to a Parquet model store.
     ///
-    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
-    Train(Box<TrainArgs>),
-
-    /// Train a scoring model directly from externally-labeled, high-confidence
-    /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
-    /// search. Used for the Phase-3 "own models" path.
-    ///
-    /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`):
-    /// the largest variant (`Train`) dominates the size otherwise.
-    #[command(name = "train-from-msnet")]
-    TrainFromMsnet(Box<TrainFromMsnetArgs>),
+    /// Boxed to keep the `Command` enum compact.
+    #[command(name = "train-from-search")]
+    TrainFromSearch(Box<TrainFromSearchArgs>),
 
     /// Merge MSNet intensity aggregation parquets into a finalized intensity
     /// model for the strong-score numerator.
     #[command(name = "train-intensity")]
     TrainIntensity(Box<TrainIntensityArgs>),
+
+    /// Train a v3 GBDT fragment-intensity regressor from flat training
+    /// parquets and embed it in a Parquet model store alongside existing
+    /// rank-core models.
+    ///
+    /// Boxed to keep the `Command` enum compact.
+    #[command(name = "train-intensity-gbdt")]
+    TrainIntensityGbdt(Box<TrainIntensityGbdtArgs>),
+
+    /// Train a GBDT rich-ion LLR classifier (logistic; decoy-aware) from flat
+    /// training parquets and embed it in a Parquet model store alongside
+    /// existing rank-core models.
+    ///
+    /// Boxed to keep the `Command` enum compact.
+    #[command(name = "train-rich-ion-llr")]
+    TrainRichIonLlr(Box<TrainRichIonLlrArgs>),
 }
 
 /// Top-level CLI.  When no subcommand is given, the flattened `SearchArgs`
@@ -560,8 +820,10 @@ fn main() -> ExitCode {
     let top = TopCli::parse();
     let result = match top.command {
         Some(Command::Train(args)) => run_train(*args),
-        Some(Command::TrainFromMsnet(args)) => run_train_from_msnet(*args),
+        Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
+        Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
+        Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
         None => {
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
@@ -660,7 +922,20 @@ struct ParseStats {
 }
 
 fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
-    let ext = path
+    // Strip a trailing `.gz` so the format is detected from the underlying
+    // extension (`spectra.mzML.gz` → mzML, `spectra.mgf.gz` → MGF). `.raw`/`.d`
+    // are binary/directory and never gzipped, so this only affects mzML/MGF.
+    let is_gz = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+    let effective: std::path::PathBuf = if is_gz {
+        path.file_stem().map(std::path::PathBuf::from).unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let ext = effective
         .extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
@@ -770,8 +1045,8 @@ fn scan_spectrum_metadata(
 ) -> Result<Vec<SpectrumMeta>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     if is_mzml {
-        let f = File::open(path)?;
-        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(ms_level, ms_level);
+        let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
+            .with_ms_level_range(ms_level, ms_level);
         for result in reader {
             if out.len() >= bench_cap {
                 break;
@@ -784,8 +1059,7 @@ fn scan_spectrum_metadata(
             });
         }
     } else {
-        let f = File::open(path)?;
-        let reader = MgfReader::new(BufReader::new(f));
+        let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
         for result in reader {
             if out.len() >= bench_cap {
                 break;
@@ -836,8 +1110,8 @@ fn load_spectra_by_index(
         return Ok(loaded);
     }
     if is_mzml {
-        let f = File::open(path)?;
-        let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(ms_level, ms_level);
+        let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
+            .with_ms_level_range(ms_level, ms_level);
         for (idx, result) in reader.enumerate() {
             if idx >= bench_cap {
                 break;
@@ -852,8 +1126,7 @@ fn load_spectra_by_index(
             }
         }
     } else {
-        let f = File::open(path)?;
-        let reader = MgfReader::new(BufReader::new(f));
+        let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
         for (idx, result) in reader.enumerate() {
             if idx >= bench_cap {
                 break;
@@ -869,6 +1142,32 @@ fn load_spectra_by_index(
         }
     }
     Ok(loaded)
+}
+
+/// Auto-detect an isobaric label (TMT/iTRAQ) by sampling the first `SAMPLE_N`
+/// MS2 spectra and inspecting their reporter-ion region. Used only when
+/// `--protocol auto` is left at its default, to engage the isobaric windowed
+/// peak filter with zero config.
+///
+/// Returns `None` for `.raw`/`.d` (the sampling reader here is mzML/MGF only —
+/// the protocol then stays as-is, byte-identical) and for label-free data, so
+/// non-isobaric runs are unchanged. The mzML benchmark datasets (Astral, UPS1,
+/// TMT) all flow through the mzML branch.
+fn detect_isobaric_sampled(
+    path: &Path,
+    is_mzml: bool,
+    is_mgf: bool,
+    ms_level: u32,
+    high_res: bool,
+) -> Option<input::IsobaricLabel> {
+    const SAMPLE_N: usize = 1000;
+    if !(is_mzml || is_mgf) {
+        return None;
+    }
+    let indices: HashSet<usize> = (0..SAMPLE_N).collect();
+    let loaded = load_spectra_by_index(path, is_mzml, ms_level, &indices, usize::MAX).ok()?;
+    let sample: Vec<Spectrum> = loaded.into_values().collect();
+    input::detect_isobaric(&sample, high_res)
 }
 
 fn tolerance_ppm_display(t: Tolerance) -> Option<f64> {
@@ -894,11 +1193,12 @@ fn run_precursor_calibration(
     let meta = scan_spectrum_metadata(spectrum_path, is_mzml, ms_level, bench_cap)?;
     let spec_keys = build_spec_keys_from_metadata(&meta, params.charge_range.clone(), params.min_peaks);
 
-    if spec_keys.len() < cal_constants::MIN_SPECKEYS_FOR_PREPASS {
+    if spec_keys.len() < params.cal_min_spec_keys {
         eprintln!(
-            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s)",
+            "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
+             Lower --cal-min-spec-keys to calibrate smaller/targeted runs.",
             spec_keys.len(),
-            cal_constants::MIN_SPECKEYS_FOR_PREPASS,
+            params.cal_min_spec_keys,
             t_cal.elapsed().as_secs_f64()
         );
         return Ok(CalibrationStats::default());
@@ -939,6 +1239,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.spectrum.is_empty() {
         return Err("no --spectrum inputs".into());
     }
+    // Parse the digestion enzyme(s) once. `--enzyme` accepts a comma-separated
+    // list for a multi-protease digest; the FIRST entry is the primary (drives
+    // model selection via build_selection_key + the cleavage-credit feature),
+    // the rest widen candidate enumeration (params.extra_enzymes). The common
+    // single-enzyme case yields an empty extras list ⇒ digestion bit-identical.
+    let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
+    warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
@@ -955,7 +1262,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let t_phase = std::time::Instant::now();
     // ── 1. Load FASTA target database ────────────────────────────────────────
     let target_db =
-        FastaReader::load_all(BufReader::new(File::open(&database_path)?))?;
+        FastaReader::load_all(input::open_buf_maybe_gz(&database_path)?)?;
     eprintln!(
         "Loaded {} target proteins from {} [PHASE fasta_load: {:.2}s]",
         target_db.proteins.len(),
@@ -964,9 +1271,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     );
     log_rss("after_fasta_load");
 
-    // ── 2. Build SearchIndex (target + reversed decoys) ───────────────────────
+    // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
+    let decoy_strategy = search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy)
+        .ok_or_else(|| format!(
+            "unknown --decoy-strategy '{}' (expected reverse/shuffle/none)",
+            cli.decoy_strategy
+        ))?;
     let t_phase = std::time::Instant::now();
-    let idx = SearchIndex::from_target_db(&target_db, &cli.decoy_prefix);
+    let idx = SearchIndex::from_target_db_with_strategy(
+        &target_db,
+        &cli.decoy_prefix,
+        decoy_strategy,
+        cli.decoy_seed,
+    );
     eprintln!("[PHASE search_index_build: {:.2}s]", t_phase.elapsed().as_secs_f64());
     log_rss("after_search_index_build");
 
@@ -974,12 +1291,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     //
     // If --mod is given, parse the mods.txt file. Otherwise
     // fall back to andes's historical defaults (CAM fixed on C,
-    // Oxidation variable on M) so existing tests keep their behaviour.
+    // Oxidation variable on M + protein-N-term Acetyl variable).
     //
     // `num_mods_from_file` is populated only when --mod is given and the
     // file contains a `NumMods=N` line; it overrides the default
     // `max_variable_mods_per_peptide` (3) below.
-    let (aa, num_mods_from_file) = match &cli.mods {
+    let (mut aa, num_mods_from_file) = match &cli.mods {
         Some(path) => {
             let n = AminoAcidSetBuilder::parse_num_mods_from_file(path)
                 .map_err(|e| format!("parsing NumMods= from {}: {e}", path.display()))?;
@@ -995,36 +1312,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
             (set, n)
         }
-        None => {
-            let cam = Modification {
-                name: "Carbamidomethyl".into(),
-                mass_delta: 57.02146,
-                residue: ResidueSpec::Specific(b'C'),
-                location: ModLocation::Anywhere,
-                fixed: true,
-                accession: None,
-            };
-            let ox = Modification {
-                name: "Oxidation".into(),
-                mass_delta: 15.99491,
-                residue: ResidueSpec::Specific(b'M'),
-                location: ModLocation::Anywhere,
-                fixed: false,
-                accession: None,
-            };
-            let set = AminoAcidSetBuilder::new_standard()
-                .add_fixed_mod(cam)
-                .add_variable_mod(ox)
-                .build()?;
-            (set, None)
-        }
+        // No --mods: andes defaults (CAM-C fixed, Ox-M variable). The isobaric
+        // tag (TMT/iTRAQ) is injected later, after protocol detection (C1).
+        None => (default_aa_set_with_tag(None)?, None),
     };
 
     // ── 4. Load Param scoring model ───────────────────────────────────────────
     //
-    // `--param-file` wins outright. Otherwise, for mzML with `--fragmentation auto`,
-    // peek the file's dominant activation method and pick the bundled `.param`.
-    // MGF and explicit fragmentation/instrument flags use `resolve_bundled_param`.
+    // `--param-file` wins outright. Otherwise the model is selected from the
+    // Parquet store: for mzML/.raw/.d the activation+analyzer are auto-detected
+    // from metadata; for MGF (metadata-less) the `--fragmentation` /
+    // `--fragment-tol-*` flags drive `resolve_metadataless_selection`.
     let spectrum_ext = spectrum_path
         .extension()
         .and_then(|e| e.to_str())
@@ -1040,9 +1338,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`
-    // is always CID/TimsTOF (DDA-PASEF). Detection only runs when
-    // `--fragmentation auto` is set (otherwise the CLI flags override).
-    let auto_route_eligible = cli.fragmentation == Fragmentation::Auto && (is_mzml || is_raw || is_d);
+    // is always CID/TimsTOF (DDA-PASEF). Detection runs for every metadata-
+    // bearing format and always wins over the MGF-only `--fragmentation` /
+    // `--fragment-tol-*` flags (which carry no metadata of their own).
+    let auto_route_eligible = is_mzml || is_raw || is_d;
     let detected_activation_instrument: Option<(ActivationMethod, Option<InstrumentType>)> =
         if !auto_route_eligible {
             None
@@ -1062,6 +1361,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // is_d — timsTOF DDA-PASEF: CID fragmentation on a TOF analyzer.
             Some((ActivationMethod::CID, Some(InstrumentType::TimsTOF)))
         };
+    // Pre-compute before the routing match consumes `detected_activation_instrument`.
+    let instrument_was_detected = detected_activation_instrument
+        .map(|(_, inst)| inst.is_some())
+        .unwrap_or(false);
 
     let t_phase = std::time::Instant::now();
     let mut param = if let Some(ref override_path) = cli.param_file {
@@ -1070,50 +1373,57 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Param::load_from_file(override_path)
             .map_err(|e| format!("loading param file {}: {e}", override_path.display()))?
     } else {
-        // ── Auto / explicit flags: resolve from the Parquet model store. ──────
+        // ── Resolve (activation, instrument) for the Parquet model store. ─────
         //
-        // For `--fragmentation auto` with a detectable input the detected
-        // (activation, instrument) is used; for explicit flags or MGF (no
-        // detection) the CLI enum values are converted to ActivationMethod /
-        // InstrumentType for the store lookup.
+        // Metadata-first precedence: a fully detected (activation, instrument)
+        // wins outright. When only the activation method is detected (analyzer
+        // unknown), or nothing is detected (MGF / metadata-less mzML/.raw), the
+        // metadata-less resolver folds in the MGF-only `--fragmentation` and
+        // `--fragment-tol-*` flags (decision E default: CID / low-res).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
-            if auto_route_eligible {
-                match detected_activation_instrument {
-                    Some((method, inst)) => {
-                        eprintln!(
-                            "Param resolver: auto-detected dominant activation \
-                             method = {} (instrument = {}) from {}",
-                            method.name(),
-                            inst.map(|i| i.name()).unwrap_or("unknown/default"),
-                            spectrum_path.display()
-                        );
-                        (method, inst)
-                    }
-                    None => {
-                        // No detectable activation — fall back to CLI flags.
-                        // For the all-defaults case (Auto+LowRes+Auto) this
-                        // returns HCD/QExactive to match the historical default.
-                        cli_flags_to_activation_instrument(
-                            cli.fragmentation, cli.instrument, cli.protocol,
-                        )
-                    }
+            match detected_activation_instrument {
+                Some((method, Some(inst))) => {
+                    eprintln!(
+                        "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
+                        method.name(), inst.name(), spectrum_path.display()
+                    );
+                    (method, Some(inst))
                 }
-            } else {
-                // Explicit `--fragmentation` / `--instrument` flags (or MGF
-                // where auto-detection is not eligible).
-                cli_flags_to_activation_instrument(
-                    cli.fragmentation, cli.instrument, cli.protocol,
-                )
+                Some((method, None)) => resolve_metadataless_selection(
+                    Some(method), cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
+                ),
+                None => resolve_metadataless_selection(
+                    None, cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
+                ),
             };
 
         let (model_id, p) = load_param_from_store(
             activation,
             instrument_opt,
             cli.protocol,
+            search_enzyme,
             cli.model_store.as_deref(),
             cli.model_id_override.as_deref(),
         )?;
         eprintln!("Param model: {model_id} (from store)");
+        // E5/E12: loud-fail the silent enzyme fallback. If the user explicitly
+        // chose a non-Trypsin enzyme but no enzyme-matching model exists for the
+        // detected activation/instrument, selection backs off to a Trypsin/generic
+        // model whose cleavage prior + PIN enzymatic features are for the wrong
+        // protease. Warn unmissably (skip when --model pins the choice on purpose).
+        if cli.model_id_override.is_none() && search_enzyme != model::enzyme::Enzyme::Trypsin {
+            if let Some(selected) = p.data_type.enzyme {
+                if selected != search_enzyme {
+                    eprintln!(
+                        "WARN: --enzyme {} has no matching model for the detected \
+                         activation/instrument; fell back to '{model_id}' (enzyme {:?}). \
+                         Scores will use the wrong protease's cleavage prior + PIN features. \
+                         Train a matching model or pass --model to choose explicitly.",
+                        search_enzyme.name(), selected
+                    );
+                }
+            }
+        }
         p
     };
     // Stamp the requested isobaric protocol onto the loaded model so the dense-
@@ -1121,19 +1431,79 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // searches even when model selection fell back to a non-isobaric table
     // (there is no bundled CID-TMT model, so `--protocol TMT` resolves to
     // `cid_lowres_tryp`, whose stored protocol is Standard).
+    // An explicit `--protocol` wins outright. When left at `auto` (the default),
+    // auto-detect TMT/iTRAQ from MS2 reporter ions (mzML/MGF) so the dense-peak
+    // windowed filter engages with zero config — the same path `--protocol TMT`
+    // takes today. Detection returns None for label-free data, so non-isobaric
+    // runs stay byte-identical.
     match cli.protocol {
         Protocol::Tmt => param.data_type.protocol = model::protocol::Protocol::TMT,
         Protocol::Itraq => param.data_type.protocol = model::protocol::Protocol::ITRAQ,
         Protocol::ItraqPhospho => param.data_type.protocol = model::protocol::Protocol::ITRAQPhospho,
+        Protocol::Auto => {
+            let high_res = param.data_type.instrument.is_high_resolution();
+            match detect_isobaric_sampled(&spectrum_path, is_mzml, is_mgf, cli.ms_level as u32, high_res) {
+                Some(input::IsobaricLabel::Tmt) => {
+                    eprintln!("Protocol resolver: auto-detected TMT reporter ions → engaging isobaric windowed peak filter");
+                    param.data_type.protocol = model::protocol::Protocol::TMT;
+                }
+                Some(input::IsobaricLabel::Itraq) => {
+                    eprintln!("Protocol resolver: auto-detected iTRAQ reporter ions → engaging isobaric windowed peak filter");
+                    param.data_type.protocol = model::protocol::Protocol::ITRAQ;
+                }
+                None => {}
+            }
+        }
         _ => {}
     }
-    let scorer = RankScorer::new(&param);
+    // C1: parameter-free path only (no explicit --mods). When the protocol
+    // resolves to TMT/iTRAQ, inject the tag as a fixed mod on K + peptide
+    // N-term so labeled peptides match their precursor mass — otherwise the
+    // reporter filter engages but every labeled candidate is +tag Da off and
+    // misses. With explicit --mods the user owns the mod set (they may already
+    // supply the tag), so those runs stay byte-identical.
+    if cli.mods.is_none() {
+        let tag = match param.data_type.protocol {
+            model::protocol::Protocol::TMT => Some(("TMT6plex", 229.162932_f64)),
+            model::protocol::Protocol::ITRAQ | model::protocol::Protocol::ITRAQPhospho => {
+                Some(("iTRAQ4plex", 144.102063_f64))
+            }
+            _ => None,
+        };
+        if let Some((name, mass)) = tag {
+            aa = default_aa_set_with_tag(Some((name, mass)))?;
+            eprintln!(
+                "Protocol resolver: injected {name} fixed mod (+{mass:.4} on K + peptide N-term) \
+                 into the candidate set (no --mods given)"
+            );
+        }
+    }
+    let mut scorer = RankScorer::new(&param);
+    // Fragment-tol override applies to metadata-less (MGF) input only. For
+    // mzML/.raw/.d the analyzer is auto-detected, so the override is ignored.
+    let frag_tol_override = cli_fragment_tol_override(cli.fragment_tol_ppm, cli.fragment_tol_da);
+    if frag_tol_override.is_some() {
+        if instrument_was_detected {
+            eprintln!("WARN: --fragment-tol-* ignored — instrument auto-detected from metadata (use --fragment-tol-ppm/-da with MGF input only)");
+        } else {
+            scorer.set_fragment_tol_override(frag_tol_override);
+        }
+    }
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance =
-        PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm));
+        match (cli.precursor_tol_left_ppm, cli.precursor_tol_right_ppm, cli.precursor_tol_da) {
+            (Some(l), Some(r), _) => {
+                PrecursorTolerance::asymmetric(Tolerance::Ppm(l), Tolerance::Ppm(r))
+            }
+            (Some(_), None, _) | (None, Some(_), _) => {
+                return Err("--precursor-tol-left-ppm and --precursor-tol-right-ppm must be given together".into());
+            }
+            (None, None, Some(da)) => PrecursorTolerance::symmetric(Tolerance::Da(da)),
+            (None, None, None) => PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm)),
+        };
     params.charge_range = cli.charge_min..=cli.charge_max;
     if cli.charge_min > cli.charge_max {
         return Err(format!(
@@ -1172,10 +1542,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     params.chimeric = chimeric_active;
     params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
+    params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
+    params.chimeric_max_kl = cli.chimeric_max_kl;
     // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
     // secondaries come from Pass 2. The default top_n (10) would make Pass 1 emit
     // blind multi-emission per scan = inflated FDR.
     params.top_n_psms_per_spectrum = if chimeric_active { 1 } else { cli.top_n };
+    params.enzyme = search_enzyme;
+    params.extra_enzymes = extra_enzymes.clone();
     params.num_tolerable_termini = match cli.enzyme_specificity {
         EnzymeSpecificity::Fully => 2,
         EnzymeSpecificity::Semi => 1,
@@ -1185,18 +1559,117 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.min_peaks = cli.min_peaks;
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;
+    params.max_variable_mods_per_peptide = cli.max_mods;
     if let Some(n) = num_mods_from_file {
-        params.max_variable_mods_per_peptide = n;
+        params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
+    params.cal_min_spec_keys = cli.cal_min_spec_keys;
     params.precursor_mass_shift_ppm = 0.0;
+    params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {
         ScoreFlag::Rank => search::ScoreMode::Rank,
         ScoreFlag::Strong => search::ScoreMode::Strong,
     };
+    params.candidate_index = match cli.candidate_index {
+        CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
+        CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
+        CandidateIndexFlag::Auto => {
+            // mmap is not compatible with the chimeric / refine in-RAM passes
+            // (handled below); those are not the OOM-prone giant-mod-space case,
+            // so `auto` simply keeps them on RAM.
+            if params.chimeric || cli.refine {
+                search::CandidateIndexMode::Ram
+            } else {
+                match available_memory_bytes() {
+                    Some(avail) => {
+                        // Budget 60% of available memory for the candidate index;
+                        // the rest covers spectra, the model, scoring scratch, etc.
+                        let budget = (avail as f64 * 0.60) as u64;
+                        if search::candidate_index::ram_candidate_index_fits(
+                            &idx, &params, &cli.decoy_prefix, budget,
+                        ) {
+                            search::CandidateIndexMode::Ram
+                        } else {
+                            eprintln!(
+                                "[auto] in-RAM candidate index would exceed the ~{} GiB budget \
+                                 (60% of {} GiB available) → using out-of-core mmap \
+                                 (force with --candidate-index ram)",
+                                budget >> 30,
+                                avail >> 30
+                            );
+                            search::CandidateIndexMode::Mmap
+                        }
+                    }
+                    // Can't read available memory: keep the byte-identical RAM
+                    // default; the user can force --candidate-index mmap.
+                    None => search::CandidateIndexMode::Ram,
+                }
+            }
+        }
+    };
+    // The out-of-core (`Mmap`) candidate path materializes candidates lazily and
+    // only syncs them into `prepared.candidates` AFTER the scan. The chimeric
+    // Pass 2 and the refinement cascade both read `prepared.candidates` /
+    // `bucket_index` DURING scanning, so they are not supported together with
+    // `--candidate-index mmap` in this phase (fail loud rather than silently
+    // produce wrong results).
+    if params.candidate_index == search::CandidateIndexMode::Mmap {
+        if params.chimeric {
+            return Err("--candidate-index mmap is not yet compatible with --chimeric \
+                        (the chimeric Pass 2 needs the in-RAM candidate index)"
+                .into());
+        }
+        if cli.refine {
+            return Err("--candidate-index mmap is not yet compatible with --refine \
+                        (the refinement cascade needs the in-RAM candidate index)"
+                .into());
+        }
+    }
+    // --refine + --chimeric run together correctly but do NOT currently STACK:
+    // the chimeric secondary (co-isolated) PSMs collapse the refinement's
+    // confident-anchor set, so refinement adds little on top of chimeric. Warn so
+    // the user isn't surprised that the combination ≈ chimeric alone.
+    if params.chimeric && cli.refine {
+        eprintln!(
+            "WARN: --refine + --chimeric do not stack in this release — the chimeric \
+             secondary PSMs shrink the refinement's confident-anchor set, so refinement \
+             contributes little on top of chimeric. Consider running them separately."
+        );
+    }
     if params.score_mode == search::ScoreMode::Strong {
         eprintln!("score mode: strong (ranking + PIN RawScore use StrongScore)");
     }
+
+    // ── Resolved-parameter banner (reanalysis auditability) ───────────────────
+    // One consolidated record of every resolved search parameter, so a
+    // (zero-config) run is fully reproducible/auditable from its log. Values that
+    // were auto-detected from the data/store are tagged [detected].
+    eprintln!("──────── andes resolved parameters ────────");
+    eprintln!("  spectra        : {}", spectrum_path.display());
+    eprintln!("  model          : (see 'Param model:' line above) [detected]");
+    eprintln!("  activation     : {:?} [detected]", param.data_type.activation);
+    eprintln!("  instrument     : {:?} [detected]", param.data_type.instrument);
+    eprintln!("  protocol       : {:?}", param.data_type.protocol);
+    if extra_enzymes.is_empty() {
+        eprintln!("  enzyme         : {} ({:?} termini, <={} missed cleavages)",
+                  search_enzyme.name(), cli.enzyme_specificity, params.max_missed_cleavages);
+    } else {
+        let extras: Vec<&str> = extra_enzymes.iter().map(|e| e.name()).collect();
+        eprintln!("  enzyme         : {} (primary) + {} (multi-protease union) ({:?} termini, <={} missed cleavages)",
+                  search_enzyme.name(), extras.join(","), cli.enzyme_specificity, params.max_missed_cleavages);
+    }
+    eprintln!("  mods           : {}",
+              if cli.mods.is_some() { "from --mods file" }
+              else { "defaults (Cam-C fixed, Ox-M variable) + isobaric tag if detected" });
+    eprintln!("  max var-mods   : {} per peptide", params.max_variable_mods_per_peptide);
+    eprintln!("  peptide length : {}-{}", params.min_length, params.max_length);
+    eprintln!("  precursor tol  : {:?} (calibration: {:?})", params.precursor_tolerance, params.precursor_cal_mode);
+    eprintln!("  charge range   : {}-{}", params.charge_range.start(), params.charge_range.end());
+    eprintln!("  isotope errors : {}..={}", params.isotope_error_range.start(), params.isotope_error_range.end());
+    eprintln!("  decoy          : {:?} (prefix {})   chimeric: {}",
+              decoy_strategy, cli.decoy_prefix, params.chimeric);
+    eprintln!("───────────────────────────────────────────");
 
     // ── 6+7. Stream-load + chunked search ─────────────────────────────────
     //
@@ -1320,19 +1793,44 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         })
         .transpose()?;
 
-    let prepared = match reuse_parts {
-        Some(parts) => {
+    let mut prepared = match (reuse_parts, params.candidate_index) {
+        // Calibration reuse always takes the in-RAM parts (calibration is RAM-only).
+        // Warn if the user explicitly requested mmap so they know it was not applied.
+        (Some(parts), _) => {
+            if cli.candidate_index == CandidateIndexFlag::Mmap {
+                eprintln!(
+                    "WARN: --candidate-index mmap is ignored when precursor calibration \
+                     reuse is active; running in-RAM for this search."
+                );
+            }
             PreparedSearch::from_parts(&idx, &params, &scorer, fragment_tol_da, parts)
         }
-        None => PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix),
+        (None, search::CandidateIndexMode::Mmap) => {
+            // Use a content-addressed cache path so repeated searches over the
+            // same FASTA + params reuse the index without rebuilding.
+            let path = index_cache_path(&idx, &params);
+            PreparedSearch::prepare_mmap(
+                &idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix, &path,
+            )
+            .map_err(|e| format!("build out-of-core candidate index: {e}"))?
+        }
+        (None, search::CandidateIndexMode::Ram) => {
+            PreparedSearch::prepare(&idx, &params, &scorer, fragment_tol_da, &cli.decoy_prefix)
+        }
     }
     .with_intensity_model(intensity_model);
     log_rss("after_prepared_search");
-    eprintln!(
-        "PreparedSearch: {} candidates, {} mass buckets",
-        prepared.candidates.len(),
-        prepared.bucket_index.len(),
-    );
+    match params.candidate_index {
+        search::CandidateIndexMode::Ram => eprintln!(
+            "PreparedSearch: {} candidates, {} mass buckets (candidate-index: ram)",
+            prepared.candidates.len(),
+            prepared.bucket_index.len(),
+        ),
+        search::CandidateIndexMode::Mmap => eprintln!(
+            "PreparedSearch: out-of-core candidate-index: mmap \
+             (base peptides resolved lazily per spectrum)"
+        ),
+    }
 
     let bench_mode = cli.max_spectra > 0;
 
@@ -1417,8 +1915,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let mslevel = 2;
             let parser_handle = thread::spawn(move || -> Result<(usize, Vec<String>), String> {
                 if file_is_mzml {
-                    let f = File::open(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?;
-                    let reader = MzMLReader::new(BufReader::new(f))
+                    let reader = MzMLReader::new(
+                        input::open_buf_maybe_gz(&spectrum_path).map_err(|e| format!("open mzML: {e}"))?,
+                    )
                         .with_ms_level_range(mslevel, mslevel)
                         .with_ms1_capture(true);
                     let (errc, errs) =
@@ -1466,9 +1965,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ms1_linked += chunk_link.ms1_peaks.len();
                 all_queues.extend(queues);
                 for mut spec in chunk_spectra.into_iter() {
-                    spec.peaks = Vec::new();
+                    // Peaks are normally dropped post-scoring to bound memory
+                    // (only the metadata is needed downstream). Under `--refine`
+                    // we RETAIN them: the Pass-2 cascade re-scores the
+                    // unidentified spectra and needs their peak lists. Memory
+                    // cost: the full peak buffer for every spectrum stays
+                    // resident through the refinement pass (acceptable; --refine
+                    // is opt-in and scoped to one search).
+                    if !cli.refine {
+                        spec.peaks = Vec::new();
+                    }
                     all_spectra.push(spec);
                 }
+                report_search_progress(all_spectra.len(), t_search_start);
             }
             let (err_count, first_errors) = parser_handle
                 .join()
@@ -1488,10 +1997,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let parser_handle = thread::spawn(
                 move || -> Result<ParseStats, Box<dyn std::error::Error + Send + Sync>> {
                     if file_is_mzml {
-                        let f = File::open(&spectrum_path)
-                            .map_err(|e| format!("open mzML: {e}"))?;
-                        let reader = MzMLReader::new(BufReader::new(f))
-                            .with_ms_level_range(ms_level_u32, ms_level_u32);
+                        let reader = MzMLReader::new(
+                            input::open_buf_maybe_gz(&spectrum_path)
+                                .map_err(|e| format!("open mzML: {e}"))?,
+                        )
+                        .with_ms_level_range(ms_level_u32, ms_level_u32);
                         Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
                     } else if file_is_raw {
                         #[cfg(feature = "thermo")]
@@ -1523,9 +2033,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 .into())
                         }
                     } else {
-                        let f = File::open(&spectrum_path)
-                            .map_err(|e| format!("open MGF: {e}"))?;
-                        let reader = MgfReader::new(BufReader::new(f));
+                        let reader = MgfReader::new(
+                            input::open_buf_maybe_gz(&spectrum_path)
+                                .map_err(|e| format!("open MGF: {e}"))?,
+                        );
                         Ok(send_chunks(reader, CHUNK_SIZE, remaining_cap, tx))
                     }
                 },
@@ -1544,9 +2055,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let queues = prepared.run_chunk(&chunk, offset);
                 all_queues.extend(queues);
                 for mut spec in chunk.into_iter() {
-                    spec.peaks = Vec::new();
+                    // See the chimeric-loop note above: normally peaks are
+                    // dropped post-scoring to bound memory, but `--refine` needs
+                    // them for the Pass-2 re-scoring of unidentified spectra.
+                    if !cli.refine {
+                        spec.peaks = Vec::new();
+                    }
                     all_spectra.push(spec);
                 }
+                report_search_progress(all_spectra.len(), t_search_start);
                 log_rss(&format!("after_chunk_{:06}_specs", all_spectra.len()));
             }
 
@@ -1602,9 +2119,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Bench mode: capped at {} spectra", cli.max_spectra);
     }
 
+    // `Mmap` mode: drain the per-spectrum materialized candidates accumulated
+    // during the scan into `prepared.candidates` so the PIN/TSV writers resolve
+    // every PSM's `candidate_idxs` against a real candidate slice (no-op + cheap
+    // in the default `Ram` mode, where candidates already live there).
+    prepared.sync_materialized_candidates();
+
     // Downstream code uses these names.
     let spectra = all_spectra;
-    let queues = all_queues;
+    let mut queues = all_queues;
 
     let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
     eprintln!(
@@ -1613,11 +2136,118 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         search_elapsed.as_secs_f64()
     );
 
-    // ── 8. Write PIN ─────────────────────────────────────────────────────────
+    // ── 7b. PTM-refinement cascade (Pass-2) ───────────────────────────────────
+    // Opt-in (`--refine`). Runs a scoped Pass-2 over the unidentified spectra
+    // against the confidently-identified proteins, with the refinement
+    // variable-mod tier applied. Computed BEFORE the Pass-1 PIN write (it reads
+    // `&queues`/`&spectra` immutably). The Pass-2 winners ARE merged into
+    // `queues` (force_pushed per scan by `merge_into_pass1`) and written to a
+    // SINGLE unified PIN, so a scan's unmodified Pass-1 and modified Pass-2 PSMs
+    // compete in one report. Collapse best-per-scan downstream; optionally split
+    // by mokapot --group-column on IsRefinement/RefinementModClass. (Legacy
+    // separate-PIN A/B is still available behind --refine-debug-split-pin.)
+    let refine_output = if cli.refine {
+        // Refinement config: explicit YAML or the built-in 5-mod default tier.
+        let base_cfg = match &cli.refine_config {
+            Some(p) => search::RefineConfig::from_yaml_str(&std::fs::read_to_string(p)?)
+                .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
+            None => search::RefineConfig::default_tier(),
+        };
+        // CLI `--refine-max-mods` overrides the YAML/tier value only when explicitly
+        // passed; otherwise the config's own `max_mods` is honored.
+        let cfg = search::RefineConfig {
+            max_mods: cli.refine_max_mods.unwrap_or(base_cfg.max_mods),
+            ..base_cfg
+        };
+
+        // High-res signal: the resolved model's instrument class. High-res
+        // instruments fragment-match in ppm (20 ppm vs 0.5 Da ion-trap), which is
+        // exactly the regime where the near-isobaric refinement deltas (e.g.
+        // deamidation +0.984 vs a C13 isotope error) are resolvable.
+        let high_res = param.data_type.instrument.is_high_resolution();
+
+        // CLI `--refine-high-res-only` overrides the YAML/tier value only when
+        // explicitly passed; otherwise the config's own `high_res_only` is honored.
+        let high_res_only = cli.refine_high_res_only.unwrap_or(cfg.high_res_only);
+        if high_res_only && !high_res {
+            eprintln!("WARN: --refine-high-res-only: data is low-res; skipping refinement.");
+            None
+        } else {
+            // Target-only db recovered from the Pass-1 combined index; the
+            // cascade regenerates its own decoys for the scoped Pass-2.
+            let target_db = idx.target_db();
+            let t_refine = std::time::Instant::now();
+            let out = search::refinement::run_refinement(
+                &queues,
+                &spectra,
+                &prepared.candidates,
+                &target_db,
+                &params,
+                &scorer,
+                &cfg,
+                0.01, // report_q = 1% FDR report threshold (spec)
+                high_res,
+                fragment_tol_da,
+                &cli.decoy_prefix,
+                decoy_strategy,
+                1,
+            );
+            eprintln!("[PHASE refinement: {:.2}s]", t_refine.elapsed().as_secs_f64());
+            out
+        }
+    } else {
+        None
+    };
+
+    // ── 8. Write PIN — single unified list (Pass-1 ⊕ merged refine) ──────────
     // Bench mode still writes PIN (so we can diff against the reference
     // fixture) but skips TSV.
     let t_phase = std::time::Instant::now();
-    output::write_pin(&output_pin_path, &spectra, &queues, &prepared.candidates, &params, &idx)?;
+    // `pin_candidates`/`pin_index` own the list written to PIN/TSV: the merged
+    // Pass-1 ⊕ Pass-2 candidates when --refine is active, else the Pass-1 pool
+    // moved straight through. Owned (not borrowed) so they outlive the writes.
+    // Owned PIN candidate list + index. In the refine arm we MOVE
+    // `prepared.candidates` into the merge (which extends it in place); in the
+    // non-refine arm we move it straight into the tuple. Either way the Pass-1
+    // pool is never duplicated. `prepared.candidates`/`idx` are not used past this
+    // point (verified), so the move is safe.
+    let refine_merged = refine_output.is_some();
+    let pin_candidates;
+    let pin_index;
+    if let Some(out) = refine_output {
+        if cli.refine_debug_split_pin {
+            // Legacy A/B: emit the separate refine PIN exactly as before, from out.*.
+            // Must run BEFORE merge_into_pass1 because that call consumes `out`.
+            let refine_out_path = refine_pin_path(&output_pin_path);
+            let subset_spectra: Vec<Spectrum> = out
+                .global_spectrum_indices
+                .iter()
+                .map(|&i| spectra[i].clone())
+                .collect();
+            output::write_pin(
+                &refine_out_path,
+                &subset_spectra,
+                &out.queues,
+                &out.candidates,
+                &params,
+                &out.index,
+            )?;
+            eprintln!(
+                "DEBUG split PIN: wrote legacy refine PIN {} ({} PSMs over {} spectra).",
+                refine_out_path.display(),
+                out.queues.iter().map(|q| q.len()).sum::<usize>(),
+                out.queues.len(),
+            );
+        }
+        let merged =
+            search::refinement::merge_into_pass1(&mut queues, prepared.candidates, &idx, out);
+        pin_candidates = merged.candidates;
+        pin_index = merged.index;
+    } else {
+        pin_candidates = prepared.candidates;
+        pin_index = idx;
+    }
+    output::write_pin(&output_pin_path, &spectra, &queues, &pin_candidates, &params, &pin_index)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
         output_pin_path.display(),
@@ -1625,6 +2255,59 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         t_total.elapsed().as_secs_f64()
     );
     log_rss("after_pin_write");
+    if cli.refine {
+        if refine_merged {
+            eprintln!("Refinement PSMs merged into unified PIN (Pass-1 ⊕ Pass-2).");
+        } else {
+            eprintln!("Refinement produced no Pass-2 PSMs; unified PIN contains Pass-1 only.");
+        }
+    }
+
+    // ── Run summary: final tolerances + per-modification PSM tally ────────────
+    // andes auto-resolves the scoring model and the precursor/fragment
+    // tolerances from the data, so the FINAL search parameters differ from
+    // whatever the user passed on the CLI. Emit a summary to stderr and write a
+    // `statistics.log` next to the PIN so a run's true parameters (and which
+    // PTMs were identified, with PSM counts) are always recoverable.
+    let run_stats =
+        output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
+    eprint!("{}", run_stats.render());
+    let stats_path = output_pin_path
+        .parent()
+        .map(|d| d.join("statistics.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("statistics.log"));
+    match output::write_statistics_log(&run_stats, &stats_path) {
+        Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
+        Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
+    }
+
+    // ── QPX `.idparquet/` bundle (optional, OpenMS-compatible) ───────────────
+    // Mirrors the PIN write from the SAME unified candidate/index pair. Sourced
+    // here (not in the bench/TSV arms) so it is produced for every run that asks
+    // for it, including bench mode. Run identifier = the spectrum file stem so
+    // it is stable across re-runs of the same input.
+    if let Some(ref parquet_dir) = cli.output_parquet {
+        let run_id = spectrum_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes_run".to_string());
+        let primary_paths: Vec<String> =
+            spectrum_paths.iter().map(|p| p.display().to_string()).collect();
+        match output::write_qpx(
+            parquet_dir,
+            &spectra,
+            &queues,
+            &pin_candidates,
+            &params,
+            &pin_index,
+            &param.mme,
+            &run_id,
+            &primary_paths,
+        ) {
+            Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
+            Err(e) => eprintln!("WARN: could not write {}: {e}", parquet_dir.display()),
+        }
+    }
 
     if bench_mode {
         eprintln!("Bench mode: skipping TSV write.");
@@ -1645,7 +2328,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>()
                 .join("+")
         };
-        output::write_tsv(tsv_path, &spectra, &queues, &prepared.candidates, &params, &idx, &spec_file_name, is_mgf)?;
+        // Use the SAME merged candidate/index pair the PIN write used: after
+        // `merge_into_pass1`, `queues` holds candidate indices into the merged
+        // candidate list (Pass-1 ⊕ offset Pass-2), so resolving them against the
+        // un-merged `prepared.candidates`/`idx` would be wrong/out-of-bounds.
+        output::write_tsv(tsv_path, &spectra, &queues, &pin_candidates, &params, &pin_index, &spec_file_name, is_mgf)?;
         eprintln!("Wrote TSV: {}", tsv_path.display());
     }
 
@@ -1666,8 +2353,8 @@ fn load_spectra_for_train(
     let mut spectra = Vec::new();
     match ext_lower.as_deref() {
         Some("mzml") => {
-            let f = File::open(path)?;
-            let reader = MzMLReader::new(BufReader::new(f)).with_ms_level_range(2, 2);
+            let reader = MzMLReader::new(input::open_buf_maybe_gz(path)?)
+                .with_ms_level_range(2, 2);
             for item in reader {
                 match item {
                     Ok(s) => spectra.push(s),
@@ -1725,8 +2412,7 @@ fn load_spectra_for_train(
         }
         // MGF (default / backwards-compatible).
         _ => {
-            let f = File::open(path)?;
-            let reader = MgfReader::new(BufReader::new(f));
+            let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
             for item in reader {
                 match item {
                     Ok(s) => spectra.push(s),
@@ -1765,7 +2451,7 @@ fn build_train_search_params(
 ///
 /// When `args.update_model` is set, runs in incremental update mode (Part D).
 /// Otherwise runs the standard initial-training pipeline (Part A).
-fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = std::time::Instant::now();
 
     // ── 1. Configure Rayon thread pool ────────────────────────────────────────
@@ -2016,6 +2702,8 @@ fn build_msnet_peptide(
                 location: ModLocation::Anywhere,
                 fixed: false,
                 accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             residues.push(aa.with_mod(Arc::new(m)));
         } else {
@@ -2302,6 +2990,75 @@ fn finalize_intensity_stats(sum_log_rel: f64, sum_log_rel_sq: f64, count: i64) -
     Some((mean, var))
 }
 
+/// Sentinel flank residue for flank-marginalized backoff rows (matches the
+/// `b'*'` key built by `IntensityModel::predict_log_rel`'s backoff).
+const ANY_FLANK: &str = "*";
+/// Sentinel nce bin for nce-marginalized backoff rows (matches `"__any__"`).
+const ANY_NCE: &str = "__any__";
+
+/// Emit backoff marginal rows so `IntensityModel::predict_log_rel`'s documented
+/// sparse-key backoff (drop `nce_bin`, then flank residues) actually finds rows.
+///
+/// The aggregator only writes exact `(ion, flank_n, flank_c, pos_bin, charge,
+/// nce_bin)` cells with real flanks and a real (numeric/`"unknown"`) nce bin.
+/// The backoff probes `nce_bin="__any__"` and `flank=b'*'` keys that the
+/// aggregator never produces, so without these marginals every lookup whose
+/// exact key is absent falls through to the single global mean — making the
+/// trained per-context intensities unused. In particular the inference path
+/// (`compute_psm_features`) passes `nce_bin="unknown"`, which matches no trained
+/// numeric bin, so *every* inference lookup hit the global mean and the
+/// `IntensitySignal` cosine became model-value-independent.
+///
+/// We accumulate each real cell into three marginals: drop nce, drop flanks,
+/// and drop both. Marginal keys are disjoint from real keys (real flanks are
+/// residues, real nce bins are numeric or `"unknown"`), so snapshotting the
+/// real cells first avoids double-counting.
+fn add_backoff_marginals(merged: &mut rustc_hash::FxHashMap<IntensityAggKey, IntensityAggStats>) {
+    let base: Vec<(IntensityAggKey, IntensityAggStats)> =
+        merged.iter().map(|(k, s)| (k.clone(), s.clone())).collect();
+
+    fn bump(
+        merged: &mut rustc_hash::FxHashMap<IntensityAggKey, IntensityAggStats>,
+        key: IntensityAggKey,
+        s: &IntensityAggStats,
+    ) {
+        let slot = merged.entry(key).or_default();
+        slot.count += s.count;
+        slot.sum_log_rel += s.sum_log_rel;
+        slot.sum_log_rel_sq += s.sum_log_rel_sq;
+    }
+
+    for (k, s) in &base {
+        // Drop nce: keep flank/pos/charge structure, marginalize over collision energy.
+        bump(
+            merged,
+            IntensityAggKey { nce_bin: ANY_NCE.to_string(), ..k.clone() },
+            s,
+        );
+        // Drop flanks: keep pos/charge/nce, marginalize over the residue pair.
+        bump(
+            merged,
+            IntensityAggKey {
+                flank_n: ANY_FLANK.to_string(),
+                flank_c: ANY_FLANK.to_string(),
+                ..k.clone()
+            },
+            s,
+        );
+        // Drop both flanks and nce.
+        bump(
+            merged,
+            IntensityAggKey {
+                flank_n: ANY_FLANK.to_string(),
+                flank_c: ANY_FLANK.to_string(),
+                nce_bin: ANY_NCE.to_string(),
+                ..k.clone()
+            },
+            s,
+        );
+    }
+}
+
 fn write_intensity_model(
     path: &Path,
     merged: &rustc_hash::FxHashMap<IntensityAggKey, IntensityAggStats>,
@@ -2420,6 +3177,15 @@ fn run_train_intensity(args: TrainIntensityArgs) -> Result<(), Box<dyn std::erro
         return Err("no intensity key rows read from any --in parquet".into());
     }
 
+    let exact_keys = merged.len();
+    add_backoff_marginals(&mut merged);
+    eprintln!(
+        "train-intensity: {} exact keys + {} backoff marginals = {} total",
+        exact_keys,
+        merged.len() - exact_keys,
+        merged.len()
+    );
+
     write_intensity_model(&args.out, &merged)?;
     eprintln!(
         "train-intensity: wrote {} keys -> {}",
@@ -2433,11 +3199,310 @@ fn run_train_intensity(args: TrainIntensityArgs) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// `andes train-from-msnet`: train a scoring model directly from
-/// externally-labeled PSM parquets, reusing the existing
-/// accumulate → estimate → store machinery but bypassing the bootstrap search.
-fn run_train_from_msnet(
-    args: TrainFromMsnetArgs,
+/// `andes train-intensity-gbdt`: fit a v3 GBDT fragment-intensity regressor
+/// from externally-labeled PSM parquets and embed it in a Parquet model store.
+///
+/// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
+/// from the `run_train` path and delegates the store write to
+/// `write_all_models_with_sources_and_gbdt_pub`, preserving all other models.
+fn run_train_intensity_gbdt(
+    args: TrainIntensityGbdtArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use model_train::gbdt::dataset::PsmRow;
+    use model_train::gbdt::frag_dataset::build_frag_dataset;
+    use model_train::gbdt::train::{train_gbdt_regression, TrainParams};
+
+    let n_files = args.inputs.len();
+    let model_id = args.model_id.clone();
+    let seed = args.seed_model.clone();
+    let t = args.threads;
+    eprintln!("train-intensity-gbdt: in={n_files} model_id={model_id} seed={seed} threads={t}");
+
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT_FRAG: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT_FRAG.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    // ── 2. Read all input parquets ────────────────────────────────────────────
+    let mut psms: Vec<MsnetPsm> = Vec::new();
+    for input in &args.inputs {
+        eprintln!("train-intensity-gbdt: reading {} ...", input.display());
+        let part = read_msnet_parquet(input)?;
+        eprintln!("train-intensity-gbdt:   {} PSM rows", part.len());
+        psms.extend(part);
+    }
+    if psms.is_empty() {
+        return Err("no PSM rows read from any --in parquet".into());
+    }
+    eprintln!(
+        "train-intensity-gbdt: {} total PSM rows across {} file(s)",
+        psms.len(),
+        args.inputs.len()
+    );
+
+    // ── 3. Load seed Param and build the scorer ───────────────────────────────
+    let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
+    eprintln!("train-intensity-gbdt: seed model = {seed_model_id}");
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4. Build frag-intensity regression dataset ────────────────────────────
+    eprintln!(
+        "train-intensity-gbdt: building frag dataset from {} PSMs ...",
+        psms.len()
+    );
+    let rows: Vec<PsmRow<'_>> = psms
+        .iter()
+        .map(|psm| PsmRow {
+            spectrum: &psm.spectrum,
+            peptide: &psm.peptide,
+            charge: psm.charge,
+        })
+        .collect();
+    let ds = build_frag_dataset(&rows, &seed_scorer);
+    eprintln!(
+        "train-intensity-gbdt: dataset: {} ion rows, {} features",
+        ds.y.len(),
+        ds.n_features,
+    );
+
+    // ── 5. Train the GBDT regressor ───────────────────────────────────────────
+    let trained_frag = train_gbdt_regression(&ds, &TrainParams::default(), 42);
+    eprintln!(
+        "train-intensity-gbdt: trained frag model: {} trees",
+        trained_frag.trees.len()
+    );
+
+    // ── 6. Embed the trained model in the seed Param ──────────────────────────
+    // The seed Param supplies selection columns (activation/instrument/enzyme/
+    // protocol) so model routing works; we stamp the frag model onto it.
+    let mut out_param = seed_param;
+    out_param.frag_intensity_model = Some(Arc::new(trained_frag));
+
+    // ── 7. Write to store, preserving existing models ─────────────────────────
+    let store_path = &args.out_store;
+
+    {
+        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
+        if store_path.exists() {
+            let store = ModelStore::open(store_path)
+                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+            for id in store.model_ids() {
+                if id == args.model_id {
+                    eprintln!("train-intensity-gbdt: overwriting existing model '{id}' in store");
+                    continue;
+                }
+                let p = store
+                    .load_param(&id)
+                    .map_err(|e| format!("reading model '{id}': {e}"))?;
+                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
+                let src_ledgers = store.load_sources(&id).unwrap_or_default();
+                let mut src = Vec::new();
+                for l in src_ledgers {
+                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                        src.push((l, s));
+                    }
+                }
+                existing_other.push((id, p, src));
+                existing_blobs.push(blob);
+            }
+        }
+
+        // New model has no rank-core sources; sources slice is empty.
+        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+        all_entries.push((args.model_id.clone(), out_param, vec![]));
+        for (id, p, src) in existing_other {
+            all_entries.push((id, p, src));
+        }
+
+        // New model carries no separate GBDT peak-model blob (the frag-intensity
+        // model is embedded directly on Param.frag_intensity_model, not in the
+        // gbdt_model_bytes column).  Existing models' blobs are preserved.
+        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![None];
+        all_blobs.extend(existing_blobs);
+
+        write_all_models_with_sources_and_gbdt_pub(
+            store_path,
+            &all_entries
+                .iter()
+                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+                .collect::<Vec<_>>(),
+            &all_blobs,
+        )
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    }
+
+    eprintln!(
+        "train-intensity-gbdt: wrote model '{model_id}' to {} [{:.2}s]",
+        store_path.display(),
+        t0.elapsed().as_secs_f64(),
+    );
+
+    Ok(())
+}
+
+/// `andes train-rich-ion-llr`: fit a GBDT rich-ion LLR classifier (logistic;
+/// decoy-aware) from externally-labeled PSM parquets and embed it in a Parquet
+/// model store.
+///
+/// The function reuses `read_msnet_parquet` / `load_seed_param` / `RankScorer`
+/// from the `run_train` path and delegates the store write to
+/// `write_all_models_with_sources_and_gbdt_pub`, preserving all other models.
+fn run_train_rich_ion_llr(
+    args: TrainRichIonLlrArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use model_train::gbdt::dataset::PsmRow;
+    use model_train::gbdt::ion_dataset::build_ion_dataset;
+    use model_train::gbdt::train::{train_gbdt, TrainParams};
+
+    let n_files = args.inputs.len();
+    let model_id = args.model_id.clone();
+    let seed = args.seed_model.clone();
+    let t = args.threads;
+    eprintln!("train-rich-ion-llr: in={n_files} model_id={model_id} seed={seed} threads={t}");
+
+    let t0 = std::time::Instant::now();
+
+    // ── 1. Configure Rayon thread pool ────────────────────────────────────────
+    static POOL_INIT_RICH_ION: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    POOL_INIT_RICH_ION.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.threads)
+            .build_global()
+            .expect("build_global");
+    });
+
+    // ── 2. Read all input parquets ────────────────────────────────────────────
+    let mut psms: Vec<MsnetPsm> = Vec::new();
+    for input in &args.inputs {
+        eprintln!("train-rich-ion-llr: reading {} ...", input.display());
+        let part = read_msnet_parquet(input)?;
+        eprintln!("train-rich-ion-llr:   {} PSM rows", part.len());
+        psms.extend(part);
+    }
+    if psms.is_empty() {
+        return Err("no PSM rows read from any --in parquet".into());
+    }
+    eprintln!(
+        "train-rich-ion-llr: {} total PSM rows across {} file(s)",
+        psms.len(),
+        args.inputs.len()
+    );
+
+    // ── 3. Load seed Param and build the scorer ───────────────────────────────
+    let (seed_model_id, seed_param) = load_seed_param(&Some(args.seed_model.clone()))?;
+    eprintln!("train-rich-ion-llr: seed model = {seed_model_id}");
+    let seed_scorer = RankScorer::new(&seed_param);
+
+    // ── 4. Build rich-ion classification dataset ──────────────────────────────
+    eprintln!(
+        "train-rich-ion-llr: building ion dataset from {} PSMs ...",
+        psms.len()
+    );
+    let rows: Vec<PsmRow<'_>> = psms
+        .iter()
+        .map(|psm| PsmRow {
+            spectrum: &psm.spectrum,
+            peptide: &psm.peptide,
+            charge: psm.charge,
+        })
+        .collect();
+    let ds = build_ion_dataset(&rows, &seed_scorer);
+    eprintln!(
+        "train-rich-ion-llr: dataset: {} ion rows, {} features",
+        ds.y.len(),
+        ds.n_features,
+    );
+
+    // ── 5. Train the GBDT classifier (logits held-out AUC) ────────────────────
+    let trained_rich_ion = train_gbdt(&ds, &TrainParams::default(), 42);
+    eprintln!(
+        "train-rich-ion-llr: trained rich-ion model: {} trees",
+        trained_rich_ion.trees.len()
+    );
+
+    // ── 6. Embed the trained model in the seed Param ──────────────────────────
+    // The seed Param supplies selection columns (activation/instrument/enzyme/
+    // protocol) so model routing works; we stamp the rich-ion model onto it.
+    let mut out_param = seed_param;
+    out_param.rich_ion_model = Some(Arc::new(trained_rich_ion));
+
+    // ── 7. Write to store, preserving existing models ─────────────────────────
+    let store_path = &args.out_store;
+
+    {
+        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
+        if store_path.exists() {
+            let store = ModelStore::open(store_path)
+                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+            for id in store.model_ids() {
+                if id == args.model_id {
+                    eprintln!("train-rich-ion-llr: overwriting existing model '{id}' in store");
+                    continue;
+                }
+                let p = store
+                    .load_param(&id)
+                    .map_err(|e| format!("reading model '{id}': {e}"))?;
+                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
+                let src_ledgers = store.load_sources(&id).unwrap_or_default();
+                let mut src = Vec::new();
+                for l in src_ledgers {
+                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                        src.push((l, s));
+                    }
+                }
+                existing_other.push((id, p, src));
+                existing_blobs.push(blob);
+            }
+        }
+
+        // New model has no rank-core sources; sources slice is empty.
+        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+        all_entries.push((args.model_id.clone(), out_param, vec![]));
+        for (id, p, src) in existing_other {
+            all_entries.push((id, p, src));
+        }
+
+        // New model carries no separate GBDT peak-model blob (the rich-ion
+        // model is embedded directly on Param.rich_ion_model, not in the
+        // gbdt_model_bytes column).  Existing models' blobs are preserved.
+        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![None];
+        all_blobs.extend(existing_blobs);
+
+        write_all_models_with_sources_and_gbdt_pub(
+            store_path,
+            &all_entries
+                .iter()
+                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+                .collect::<Vec<_>>(),
+            &all_blobs,
+        )
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    }
+
+    eprintln!(
+        "train-rich-ion-llr: wrote model '{model_id}' to {} [{:.2}s]",
+        store_path.display(),
+        t0.elapsed().as_secs_f64(),
+    );
+
+    Ok(())
+}
+
+/// `andes train`: train a scoring model directly from externally-labeled PSM
+/// parquets, reusing the existing accumulate → estimate → store machinery but
+/// bypassing the bootstrap search.
+fn run_train(
+    args: TrainArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use rayon::prelude::*;
 
@@ -2456,36 +3521,36 @@ fn run_train_from_msnet(
     let mut psms: Vec<MsnetPsm> = Vec::new();
     let mut rows_read = 0usize;
     for input in &args.inputs {
-        eprintln!("train-from-msnet: reading {} ...", input.display());
+        eprintln!("train: reading {} ...", input.display());
         let part = read_msnet_parquet(input)?;
         rows_read += part.len();
-        eprintln!("train-from-msnet:   {} PSM rows", part.len());
+        eprintln!("train:   {} PSM rows", part.len());
         psms.extend(part);
     }
     if psms.is_empty() {
         return Err("no PSM rows read from any --in parquet".into());
     }
-    eprintln!("train-from-msnet: {rows_read} total PSM rows across {} file(s)", args.inputs.len());
+    eprintln!("train: {rows_read} total PSM rows across {} file(s)", args.inputs.len());
 
     // ── 3. Load seed Param and apply the fragment-tolerance override ──────────
     let (seed_model_id, mut seed_param): (String, Param) =
         load_seed_param(&Some(args.seed_model.clone()))?;
-    eprintln!("train-from-msnet: seed model = {seed_model_id}");
+    eprintln!("train: seed model = {seed_model_id}");
     if let Some(ppm) = args.fragment_tol_ppm {
         seed_param.mme = Tolerance::Ppm(ppm);
-        eprintln!("train-from-msnet: fragment tolerance overridden to {ppm} ppm");
+        eprintln!("train: fragment tolerance overridden to {ppm} ppm");
     } else if let Some(da) = args.fragment_tol_da {
         seed_param.mme = Tolerance::Da(da);
-        eprintln!("train-from-msnet: fragment tolerance overridden to {da} Da");
+        eprintln!("train: fragment tolerance overridden to {da} Da");
     } else {
-        eprintln!("train-from-msnet: using seed fragment tolerance {:?}", seed_param.mme);
+        eprintln!("train: using seed fragment tolerance {:?}", seed_param.mme);
     }
 
     // Build the scorer AFTER the tolerance override so accumulation uses it.
     let seed_scorer = RankScorer::new(&seed_param);
 
     // ── 4. Accumulate ion-match statistics (parallel; per-worker CountStats) ──
-    eprintln!("train-from-msnet: accumulating ion-match statistics ...");
+    eprintln!("train: accumulating ion-match statistics ...");
     let stats = psms
         .par_iter()
         .fold(
@@ -2498,10 +3563,10 @@ fn run_train_from_msnet(
         )
         .collect::<Vec<_>>();
     let stats = merge(stats);
-    eprintln!("train-from-msnet: accumulated {} PSMs", psms.len());
+    eprintln!("train: accumulated {} PSMs", psms.len());
 
     // ── 5. Estimate the model (replaces all learned tables in the seed) ───────
-    eprintln!("train-from-msnet: estimating model parameters ...");
+    eprintln!("train: estimating model parameters ...");
     let cfg = EstimatorConfig {
         pseudo: args.train_pseudo,
         noise_pseudo: args.train_noise_pseudo,
@@ -2511,7 +3576,7 @@ fn run_train_from_msnet(
         rank_smoothing: args.rank_smoothing,
     };
     eprintln!(
-        "train-from-msnet: estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
+        "train: estimator pseudo={} noise_pseudo={} backoff_weight={} min_count={}",
         cfg.pseudo, cfg.noise_pseudo, cfg.backoff_weight, cfg.min_count
     );
     let estimator = Estimator::new(cfg);
@@ -2532,11 +3597,12 @@ fn run_train_from_msnet(
                 seed_param.data_type.activation,
                 Some(seed_param.data_type.instrument),
                 Protocol::Auto,
+                model::enzyme::Enzyme::Trypsin, // inert (model_id_override below makes selection columns unused)
                 Some(store_path.as_path()),
                 Some(&prior_id),
             )
             .map_err(|e| format!("loading --prior-model '{prior_id}': {e}"))?;
-            eprintln!("train-from-msnet: prior model = {prior_id} (from {})", store_path.display());
+            eprintln!("train: prior model = {prior_id} (from {})", store_path.display());
             Some(p)
         }
         None => None,
@@ -2545,7 +3611,7 @@ fn run_train_from_msnet(
     let mut trained_param =
         estimator.estimate_with_prior(&stats, &seed_param, prior_param.as_ref());
     let n_partitions = trained_param.partitions.len();
-    eprintln!("train-from-msnet: trained model has {n_partitions} partitions");
+    eprintln!("train: trained model has {n_partitions} partitions");
 
     // ── 5b. Override the selection-relevant data_type from flags ──────────────
     // The trained model inherits the seed's data_type; minting a NEW slug whose
@@ -2571,7 +3637,7 @@ fn run_train_from_msnet(
             .ok_or_else(|| format!("unknown --protocol '{prot}' (expected Automatic/TMT/iTRAQ/iTRAQPhospho/Phosphorylation/Standard)"))?;
     }
     eprintln!(
-        "train-from-msnet: model data_type = {:?}/{:?}/{:?}/{:?}",
+        "train: model data_type = {:?}/{:?}/{:?}/{:?}",
         trained_param.data_type.activation,
         trained_param.data_type.instrument,
         trained_param.data_type.enzyme,
@@ -2586,7 +3652,7 @@ fn run_train_from_msnet(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "msnet".to_string());
     let ledger = SourceLedger {
-        source_id: "msnet".to_string(),
+        source_id: args.source.clone(),
         dataset,
         n_psms: psms.len() as i64,
         date: format_today_iso8601(),
@@ -2596,48 +3662,102 @@ fn run_train_from_msnet(
         experiment_class: trained_param.data_type.protocol.name().to_string(),
     };
 
+    // ── 6b. Optionally train a GBDT peak model ────────────────────────────────
+    let gbdt_blob: Option<Vec<u8>> = if args.gbdt != GbdtMode::Off {
+        use model_train::gbdt::dataset::{build_dataset, PsmRow};
+        use model_train::gbdt::train::{train_gbdt, TrainParams};
+
+        eprintln!("train: building GBDT dataset from {} PSMs ...", psms.len());
+        let gbdt_rows: Vec<PsmRow<'_>> = psms.iter().map(|psm| {
+            // Pass the full mod-carrying peptide: labels are mod-aware so b/y
+            // ions over Cam-C/TMT/Ox-M land at the correct (shifted) m/z.
+            PsmRow {
+                spectrum: &psm.spectrum,
+                peptide: &psm.peptide,
+                charge: psm.charge,
+            }
+        }).collect();
+
+        let gbdt_dataset = build_dataset(&gbdt_rows, &seed_scorer);
+        eprintln!(
+            "train: GBDT dataset: {} peak rows, {} positives",
+            gbdt_dataset.y.len(),
+            gbdt_dataset.y.iter().filter(|&&l| l == 1).count(),
+        );
+
+        let gbdt_params = TrainParams::default();
+        let trained_gbdt = train_gbdt(&gbdt_dataset, &gbdt_params, 42);
+        eprintln!(
+            "train: GBDT trained: {} trees",
+            trained_gbdt.trees.len(),
+        );
+        Some(trained_gbdt.to_bytes())
+    } else {
+        None
+    };
+
     // ── 7. Write to store, preserving any other existing models ───────────────
+    // Unified path: ALWAYS reads existing models from the store, builds the
+    // combined entries list (new model + existing others), and writes once via
+    // write_all_models_with_sources_and_gbdt_pub.  The GBDT blob (Some or None)
+    // flows through for the new model; existing models' blobs are re-serialised
+    // from their loaded gbdt_peak_model so no blob is ever lost on re-write.
     let store_path = &args.out_store;
     let model_id = args.model_id.clone();
-    let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
-    if store_path.exists() {
-        let store = ModelStore::open(store_path)
-            .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
-        for id in store.model_ids() {
-            if id == model_id {
-                eprintln!("train-from-msnet: overwriting existing model '{id}' in store");
-                continue;
-            }
-            let p = store.load_param(&id)
-                .map_err(|e| format!("reading model '{id}': {e}"))?;
-            let src_ledgers = store.load_sources(&id).unwrap_or_default();
-            let mut src = Vec::new();
-            for l in src_ledgers {
-                if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
-                    src.push((l, s));
+
+    {
+        let mut existing_other: Vec<ModelEntryOwned> = Vec::new();
+        let mut existing_blobs: Vec<Option<Vec<u8>>> = Vec::new();
+        if store_path.exists() {
+            let store = ModelStore::open(store_path)
+                .map_err(|e| format!("opening existing store {}: {e}", store_path.display()))?;
+            for id in store.model_ids() {
+                if id == model_id {
+                    eprintln!("train: overwriting existing model '{id}' in store");
+                    continue;
                 }
+                let p = store.load_param(&id)
+                    .map_err(|e| format!("reading model '{id}': {e}"))?;
+                // Preserve the GBDT blob (if any) for the existing model.
+                let blob = p.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
+                let src_ledgers = store.load_sources(&id).unwrap_or_default();
+                let mut src = Vec::new();
+                for l in src_ledgers {
+                    if let Ok(s) = store.load_source_stats(&id, &l.source_id) {
+                        src.push((l, s));
+                    }
+                }
+                existing_other.push((id, p, src));
+                existing_blobs.push(blob);
             }
-            existing_other.push((id, p, src));
         }
-    }
 
-    let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
-    all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
-    for (id, p, src) in existing_other {
-        all_entries.push((id, p, src));
-    }
+        // Build the combined entries list: new model first, then existing others.
+        let mut all_entries: Vec<ModelEntryOwned> = Vec::new();
+        all_entries.push((model_id.clone(), trained_param, vec![(ledger, stats)]));
+        for (id, p, src) in existing_other {
+            all_entries.push((id, p, src));
+        }
 
-    write_all_models_with_sources_pub(
-        store_path,
-        &all_entries.iter()
-            .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+        // Parallel blobs: new model gets gbdt_blob (Some or None); existing models
+        // get their preserved blobs.
+        let mut all_blobs: Vec<Option<Vec<u8>>> = vec![gbdt_blob];
+        all_blobs.extend(existing_blobs);
+
+        write_all_models_with_sources_and_gbdt_pub(
+            store_path,
+            &all_entries.iter()
+                .map(|(id, p, s)| (id.as_str(), p, s.as_slice()))
+                .collect::<Vec<_>>(),
+            &all_blobs,
+        )
+        .map_err(|e| format!("writing model store {}: {e}", store_path.display()))?;
+    }
 
     eprintln!(
-        "train-from-msnet: wrote model '{model_id}' to {} (source 'msnet', {} PSMs, {n_partitions} partitions) [{:.2}s]",
+        "train: wrote model '{model_id}' to {} (source '{}', {} PSMs, {n_partitions} partitions) [{:.2}s]",
         store_path.display(),
+        args.source,
         psms.len(),
         t0.elapsed().as_secs_f64(),
     );
@@ -2648,7 +3768,7 @@ fn run_train_from_msnet(
 /// Incremental update mode (Part D): `--update <MODEL_ID>` plus one of
 /// `--add`, `--remove-source`, `--reweight`, `--decay`.
 fn run_train_update(
-    args: TrainArgs,
+    args: TrainFromSearchArgs,
     model_id: &str,
     t0: std::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2851,7 +3971,7 @@ fn load_seed_param(seed_model: &Option<String>) -> Result<(String, Param), Box<d
 }
 
 /// Build an `AminoAcidSet` from an optional mods file, defaulting to
-/// Carbamidomethyl-C fixed + Oxidation-M variable.
+/// Carbamidomethyl-C fixed + Oxidation-M variable + protein-N-term Acetyl variable.
 fn build_aa_set(
     mods: &Option<PathBuf>,
 ) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
@@ -2872,6 +3992,8 @@ fn build_aa_set(
                 location: ModLocation::Anywhere,
                 fixed: true,
                 accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             let ox = Modification {
                 name: "Oxidation".into(),
@@ -2880,6 +4002,8 @@ fn build_aa_set(
                 location: ModLocation::Anywhere,
                 fixed: false,
                 accession: None,
+                neutral_losses: Vec::new(),
+                loss_class: 0,
             };
             Ok(AminoAcidSetBuilder::new_standard()
                 .add_fixed_mod(cam)
@@ -2887,6 +4011,79 @@ fn build_aa_set(
                 .build()?)
         }
     }
+}
+
+/// Build the default `AminoAcidSet` (CAM-C fixed + Ox-M variable), optionally
+/// with an isobaric tag (TMT/iTRAQ) as a FIXED mod on K + peptide N-term.
+///
+/// Used by the no-`--mods` (parameter-free) path: when the protocol resolves to
+/// TMT/iTRAQ the tag MUST be in the candidate set, or every labeled peptide is
+/// `+tag·(nK+1)` Da off at the precursor and silently misses (C1).
+fn default_aa_set_with_tag(
+    tag: Option<(&str, f64)>,
+) -> Result<model::AminoAcidSet, Box<dyn std::error::Error>> {
+    let cam = Modification {
+        name: "Carbamidomethyl".into(),
+        mass_delta: 57.02146,
+        residue: ResidueSpec::Specific(b'C'),
+        location: ModLocation::Anywhere,
+        fixed: true,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let ox = Modification {
+        name: "Oxidation".into(),
+        mass_delta: 15.99491,
+        residue: ResidueSpec::Specific(b'M'),
+        location: ModLocation::Anywhere,
+        fixed: false,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    // Protein N-terminal acetylation (+42.010565) — a near-universal default in
+    // the field (the reference engine / a comparison engine / a quantitation tool). Restricted to the PROTEIN N-term
+    // (one site per protein, after Met cleavage), so it is combinatorially cheap
+    // (not every peptide N-term) and biologically correct.
+    let acetyl = Modification {
+        name: "Acetyl".into(),
+        mass_delta: 42.010565,
+        residue: ResidueSpec::Wildcard,
+        location: ModLocation::ProtNTerm,
+        fixed: false,
+        accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
+    };
+    let mut b = AminoAcidSetBuilder::new_standard()
+        .add_fixed_mod(cam)
+        .add_variable_mod(ox)
+        .add_variable_mod(acetyl);
+    if let Some((name, mass)) = tag {
+        let tag_k = Modification {
+            name: name.into(),
+            mass_delta: mass,
+            residue: ResidueSpec::Specific(b'K'),
+            location: ModLocation::Anywhere,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        let tag_nterm = Modification {
+            name: name.into(),
+            mass_delta: mass,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::NTerm,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
+        };
+        b = b.add_fixed_mod(tag_k).add_fixed_mod(tag_nterm);
+    }
+    Ok(b.build()?)
 }
 
 /// Format today's date as `YYYY-MM-DD` using `std::time::SystemTime`.
@@ -2916,171 +4113,118 @@ fn unix_days_to_iso8601(days: u64) -> String {
     format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
-/// Convert the CLI `Fragmentation` enum to `ActivationMethod`.
+/// Convert the CLI `Fragmentation` enum to `Option<ActivationMethod>`.
 ///
-/// `Fragmentation::Auto` is treated as `ActivationMethod::CID` here because
-/// the old ladder normalised `Auto → CID` when explicit flags were used
-/// (without mzML peek). When `--fragmentation auto` is combined with mzML/raw
-/// input the detection path is taken instead of this function.
-fn cli_fragmentation_to_activation(f: Fragmentation) -> ActivationMethod {
+/// `Fragmentation::Auto` returns `None` (no activation explicitly requested);
+/// every concrete variant maps to its `ActivationMethod`. Used by
+/// [`resolve_metadataless_selection`] so that an unset `--fragmentation`
+/// defers to detection or the class-consistent default.
+fn cli_fragmentation_to_activation_opt(f: Fragmentation) -> Option<ActivationMethod> {
     match f {
-        Fragmentation::Auto => ActivationMethod::CID,
-        Fragmentation::Cid  => ActivationMethod::CID,
-        Fragmentation::Etd  => ActivationMethod::ETD,
-        Fragmentation::Hcd  => ActivationMethod::HCD,
-        Fragmentation::Uvpd => ActivationMethod::UVPD,
+        Fragmentation::Auto => None,
+        Fragmentation::Cid  => Some(ActivationMethod::CID),
+        Fragmentation::Etd  => Some(ActivationMethod::ETD),
+        Fragmentation::Hcd  => Some(ActivationMethod::HCD),
+        Fragmentation::Uvpd => Some(ActivationMethod::UVPD),
     }
 }
 
-/// Convert the CLI `Instrument` enum to `InstrumentType`.
-fn cli_instrument_to_instrument_type(i: Instrument) -> InstrumentType {
-    match i {
-        Instrument::LowRes    => InstrumentType::LowRes,
-        Instrument::HighRes   => InstrumentType::HighRes,
-        Instrument::Tof       => InstrumentType::TOF,
-        Instrument::QExactive => InstrumentType::QExactive,
-    }
+/// Resolve the CLI fragment-tolerance override (MGF only) into a `Tolerance`.
+/// `--fragment-tol-ppm` ⇒ `Ppm`; `--fragment-tol-da` ⇒ `Da`; none ⇒ `None`.
+fn cli_fragment_tol_override(
+    fragment_tol_ppm: Option<f64>,
+    fragment_tol_da: Option<f64>,
+) -> Option<model::tolerance::Tolerance> {
+    use model::tolerance::Tolerance;
+    fragment_tol_ppm
+        .map(Tolerance::Ppm)
+        .or_else(|| fragment_tol_da.map(Tolerance::Da))
 }
 
-/// Resolve `(Fragmentation, Instrument, Protocol)` from CLI flags to
-/// `(ActivationMethod, InstrumentType, Protocol)` for store lookup.
+/// Parse the `--enzyme` value into `(primary, extras)`.
 ///
-/// Handles the historical all-defaults short-circuit: when the user omits
-/// all scoring-model flags (`--fragmentation auto`, `--instrument low-res`,
-/// `--protocol auto`) the old ladder returned `HCD_QExactive_Tryp.param`.
-/// We replicate this by returning `(HCD, QExactive, Auto)` for that case
-/// instead of `(CID, LowRes, Auto)` (which would resolve to `cid_lowres_tryp`).
-fn cli_flags_to_activation_instrument(
-    fragmentation: Fragmentation,
-    instrument: Instrument,
-    protocol: Protocol,
-) -> (ActivationMethod, Option<InstrumentType>) {
-    // Historical all-defaults short-circuit (mirrors resolve_bundled_param step 0).
-    if fragmentation == Fragmentation::Auto
-        && instrument == Instrument::LowRes
-        && protocol == Protocol::Auto
-    {
-        return (ActivationMethod::HCD, Some(InstrumentType::QExactive));
-    }
-    (
-        cli_fragmentation_to_activation(fragmentation),
-        Some(cli_instrument_to_instrument_type(instrument)),
-    )
-}
-
-/// Translate `(--fragmentation, --instrument, --protocol)` into a bundled
-/// `.param` filename and resolve it under
-/// `resources/ionstat/` relative to the cargo manifest dir.
-///
-/// CLI indices for legacy numeric flags:
-/// - fragmentation: 0=Auto/CID, 1=CID, 2=ETD, 3=HCD, 4=UVPD
-/// - instrument:    0=LowRes,   1=HighRes, 2=TOF, 3=QExactive
-/// - protocol:      0=Automatic,1=Phosphorylation, 2=iTRAQ,
-///   3=iTRAQPhospho, 4=TMT, 5=Standard
-///
-/// When all three are `None`, the historical default
-/// `HCD_QExactive_Tryp.param` is returned (preserving existing tests'
-/// behaviour). Only Tryp is supported as the enzyme component for now;
-/// other enzymes require the user to pass `--param-file` directly.
-///
-/// Bundled `.param` resolution ladder: try the exact
-/// `{frag}_{inst}_Tryp{protocol}.param` first; if that doesn't resolve, drop
-/// the protocol suffix; if that also doesn't resolve, use the final
-/// `(frag, inst)`-keyed ladder. Returns an error only if even the
-/// last-resort `CID_LowRes_Tryp.param` is missing from the bundled
-/// resources (a packaging defect, not a CLI input error).
-///
-/// Reference implementation of the historical filename-based resolution ladder.
-/// The search path now goes through [`load_param_from_store`]; the store-selection
-/// equivalence test validates the store-based selection against an independent
-/// copy of this logic.
-#[allow(dead_code)]
-fn resolve_bundled_param(
-    fragmentation: Fragmentation,
-    instrument:    Instrument,
-    protocol:      Protocol,
-) -> Result<PathBuf, String> {
-    // Step 0: default-to-bundled short-circuit. When the caller passes all
-    // defaults (Fragmentation::Auto, Instrument::LowRes, Protocol::Auto),
-    // fall back to the bundled HCD_QExactive_Tryp.param — the behavior of
-    // omitting all three flags.
-    if fragmentation == Fragmentation::Auto
-        && instrument == Instrument::LowRes
-        && protocol == Protocol::Auto {
-        return canonicalize_bundled("HCD_QExactive_Tryp.param");
-    }
-
-    // Step 1: Normalize.
-    //   - Auto fragmentation → CID
-    //   - HCD with low-res inst → upgrade to QExactive
-    let frag = match fragmentation {
-        Fragmentation::Auto => "CID",
-        Fragmentation::Cid  => "CID",
-        Fragmentation::Etd  => "ETD",
-        Fragmentation::Hcd  => "HCD",
-        Fragmentation::Uvpd => "UVPD",
-    };
-    let mut inst = match instrument {
-        Instrument::LowRes    => "LowRes",
-        Instrument::HighRes   => "HighRes",
-        Instrument::Tof       => "TOF",
-        Instrument::QExactive => "QExactive",
-    };
-    // HCD-upgrade rule: HCD with low-res inst → upgrade to QExactive.
-    if frag == "HCD" && inst == "LowRes" {
-        inst = "QExactive";
-    }
-
-    let prot_suffix: &str = match protocol {
-        Protocol::Auto         => "",          // empty: no protocol suffix
-        Protocol::Phospho      => "_Phosphorylation",
-        Protocol::Itraq        => "_iTRAQ",
-        Protocol::ItraqPhospho => "_iTRAQPhospho",
-        Protocol::Tmt          => "_TMT",
-        Protocol::Standard     => "",          // standard = no suffix
-    };
-
-    // Step 1: Try the exact requested combination first.
-    //   `{frag}_{inst}_Tryp{prot_suffix}.param`
-    let exact = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
-    if let Ok(path) = canonicalize_bundled(&exact) {
-        return Ok(path);
-    }
-
-    // Step 2: Drop protocol — try `{frag}_{inst}_Tryp.param`.
-    // For (CID, HighRes, Tryp, TMT) this lands on `CID_HighRes_Tryp.param`
-    // when the protocol-specific file is missing.
-    if !prot_suffix.is_empty() {
-        let no_protocol = format!("{frag}_{inst}_Tryp.param");
-        if let Ok(path) = canonicalize_bundled(&no_protocol) {
-            eprintln!(
-                "Param resolver: `{exact}` not bundled; falling back to `{no_protocol}` \
-                 (protocol suffix dropped when exact match missing)",
-            );
-            return Ok(path);
+/// Accepts `,` or `+` separators (the latter matching a quantitation tool/the reference engine
+/// docs), trims whitespace, drops empty tokens, and de-duplicates by enzyme
+/// while preserving order. The first surviving entry is the primary (drives
+/// model selection and the cleavage-credit PIN feature); the rest only widen
+/// candidate enumeration. Errors on an unknown name or empty input.
+fn parse_enzymes(
+    spec: &str,
+) -> Result<(model::enzyme::Enzyme, Vec<model::enzyme::Enzyme>), Box<dyn std::error::Error>> {
+    use model::enzyme::Enzyme;
+    let mut all: Vec<Enzyme> = Vec::new();
+    for tok in spec.split([',', '+']).map(str::trim).filter(|s| !s.is_empty()) {
+        let e = Enzyme::from_name(tok).ok_or_else(|| format!(
+            "unknown --enzyme '{tok}' (expected trypsin/chymotrypsin/lysc/aspn/gluc/lysn/argc/\
+             alphalp/nocleavage/nonspecific/elastase)"
+        ))?;
+        if !all.contains(&e) {
+            all.push(e); // dedup, keep order (first = primary)
         }
     }
+    let (primary, extras) = all.split_first().ok_or("empty --enzyme")?;
+    Ok((*primary, extras.to_vec()))
+}
 
-    // Step 3: Alternate enzyme — try Trypsin (for C-term enzymes) or LysN
-    // (for N-term enzymes). We always use Tryp here for now.
+/// Warn when a universal protease (NonSpecific, or AlphaLP which cleaves every
+/// bond) is combined with specific protease(s): the cleavage-site union then
+/// covers EVERY position, so the digest is effectively non-specific — usually
+/// not what a user adding it to a specific list intends.
+fn warn_if_universal_protease_combo(
+    primary: model::enzyme::Enzyme,
+    extras: &[model::enzyme::Enzyme],
+) {
+    use model::enzyme::Enzyme;
+    let is_universal = |e: &Enzyme| matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP);
+    let is_specific =
+        |e: &Enzyme| !matches!(e, Enzyme::NonSpecific | Enzyme::AlphaLP | Enzyme::NoCleavage);
+    let all: Vec<Enzyme> = std::iter::once(primary).chain(extras.iter().copied()).collect();
+    if all.len() > 1 && all.iter().any(is_universal) && all.iter().any(is_specific) {
+        eprintln!(
+            "WARN: --enzyme combines a universal protease (NonSpecific/AlphaLP) with specific \
+             one(s); their union cleaves at EVERY position, so this is effectively a \
+             non-specific digest (much larger search space). Drop the universal protease to \
+             keep the specific cleavage rules."
+        );
+    }
+}
 
-    // Step 4: Final fallback ladder by (fragmentation, instrument).
-    //   - HCD + (TOF|HighRes) + C-term → CID_TOF_Tryp
-    //   - ETD + C-term                  → ETD_LowRes_Tryp
-    //   - Non-electron + N-term         → CID_LowRes_LysN  (skipped; N-term TBD)
-    //   - default                        → CID_LowRes_Tryp
-    //
-    // For our currently-supported (frag, inst) combos:
-    let final_fallback = match (frag, inst) {
-        ("HCD", "TOF") | ("HCD", "HighRes") => "CID_TOF_Tryp.param",
-        ("ETD", _) => "ETD_LowRes_Tryp.param",
-        _ => "CID_LowRes_Tryp.param",
+/// Resolve (activation, instrument) for model selection on metadata-less input
+/// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
+/// the `--fragment-tol-*` unit; activation from detected method, else
+/// `--fragmentation`, else the class-consistent default. When nothing
+/// disambiguates, decision E: CID / LowRes (→ `cid_lowres_tryp`) + a warning.
+fn resolve_metadataless_selection(
+    detected_activation: Option<ActivationMethod>,
+    fragmentation: Fragmentation,
+    fragment_tol_ppm: Option<f64>,
+    fragment_tol_da: Option<f64>,
+) -> (ActivationMethod, Option<InstrumentType>) {
+    let instrument: Option<InstrumentType> = if fragment_tol_ppm.is_some() {
+        Some(InstrumentType::QExactive)
+    } else if fragment_tol_da.is_some() {
+        Some(InstrumentType::LowRes)
+    } else {
+        None
     };
-    eprintln!(
-        "Param resolver: `{exact}` not bundled and protocol-less drop also missing; \
-         using final fallback `{final_fallback}` (final resolution ladder)",
-    );
-    canonicalize_bundled(final_fallback)
+    let explicit = cli_fragmentation_to_activation_opt(fragmentation);
+    // Class-consistent default when neither detection nor `--fragmentation`
+    // names an activation: high-res classes imply HCD, otherwise CID.
+    let class_default = match instrument {
+        Some(InstrumentType::QExactive)
+        | Some(InstrumentType::HighRes)
+        | Some(InstrumentType::TOF) => ActivationMethod::HCD,
+        _ => ActivationMethod::CID,
+    };
+    let activation = detected_activation.or(explicit).unwrap_or(class_default);
+    if detected_activation.is_none() && explicit.is_none() && instrument.is_none() {
+        eprintln!(
+            "WARN: MGF input with no --fragmentation/--fragment-tol; assuming \
+             CID / low-res / 0.5 Da. Pass --fragmentation and --fragment-tol-ppm/-da \
+             to override."
+        );
+    }
+    (activation, instrument)
 }
 
 /// Peek the spectrum file and return the dominant
@@ -3108,8 +4252,7 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 
     const MAX_PEEK: usize = 64;
 
-    let file = File::open(spectrum_path).ok()?;
-    let reader = MzMLReader::new(BufReader::new(file));
+    let reader = MzMLReader::new(input::open_buf_maybe_gz(spectrum_path).ok()?);
 
     // Tally counts keyed by ActivationMethod variant.
     let mut counts: std::collections::HashMap<ActivationMethod, usize> =
@@ -3167,57 +4310,6 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
     Some(dominant)
 }
 
-/// Resolve a bundled `.param` file for the given activation method.
-///
-/// Auto-detect path: pick the bundled instrument+enzyme pair that best matches
-/// the dataset when the user passes fragmentation `auto` (per-spectrum param
-/// dispatch at file-wide granularity).
-///
-/// The `detected_instrument` argument is the instrument type detected by
-/// scanning the mzML's `<instrumentConfiguration>` blocks (see
-/// `input::detect_instrument_type`). `None` means we couldn't detect it
-/// (older mzML, MGF, etc.) — defaults to low-resolution ion-trap routing.
-///
-/// Mapping (Tryp / no-protocol unless protocol overrides):
-///   - CID  → frag=1, inst=detected (LowRes when none).
-///   - HCD  → frag=3, inst=detected (HCD + low-res upgrades to QExactive).
-///   - ETD  → frag=2, inst=detected.
-///   - PQD  → CID (PQD collapsed to CID for model routing).
-///   - UVPD → frag=4, inst=QExactive (only QExactive variant exists bundled).
-///
-/// Reference implementation of the historical activation-aware resolution ladder
-/// (kept alongside [`resolve_bundled_param`]); the search path now uses
-/// [`load_param_from_store`].
-#[allow(dead_code)]
-fn resolve_bundled_param_for_activation(
-    method:               ActivationMethod,
-    detected_instrument:  Option<InstrumentType>,
-    protocol:             Protocol,
-) -> Result<PathBuf, String> {
-    let frag = match method {
-        ActivationMethod::CID  => Fragmentation::Cid,
-        ActivationMethod::ETD  => Fragmentation::Etd,
-        ActivationMethod::HCD  => Fragmentation::Hcd,
-        ActivationMethod::UVPD => Fragmentation::Uvpd,
-        // PQD → CID for model routing.
-        ActivationMethod::PQD  => Fragmentation::Cid,
-    };
-    // New instrument classes fall back to their family for model resolution
-    // (no Astral-specific or TimsTOF-specific .param file bundled yet).
-    let inst = match detected_instrument.map(|i| i.family_fallback()) {
-        Some(InstrumentType::LowRes)    => Instrument::LowRes,
-        Some(InstrumentType::HighRes)   => Instrument::HighRes,
-        Some(InstrumentType::TOF)       => Instrument::Tof,
-        Some(InstrumentType::QExactive) => Instrument::QExactive,
-        // OrbitrapAstral → QExactive and TimsTOF → TOF via family_fallback above;
-        // these arms are unreachable after fallback but keep the match exhaustive.
-        Some(InstrumentType::OrbitrapAstral) => Instrument::QExactive,
-        Some(InstrumentType::TimsTOF)        => Instrument::Tof,
-        None                                 => Instrument::LowRes,
-    };
-    resolve_bundled_param(frag, inst, protocol)
-}
-
 /// Helper to call `input::detect_instrument_type` on an mzML path.
 ///
 /// Mirrors the structure of `detect_dominant_activation` so the two
@@ -3232,51 +4324,30 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
         return None;
     }
 
-    let file = File::open(spectrum_path).ok()?;
-    detect_instrument_type(BufReader::new(file))
-}
-
-/// Resolve a bundled `.param` filename under
-/// `resources/ionstat/` relative to the crate's cargo manifest
-/// dir (set at compile time). Returns a helpful error if the file does
-/// not exist.
-#[allow(dead_code)]
-fn canonicalize_bundled(filename: &str) -> Result<PathBuf, String> {
-    let candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("resources/ionstat")
-        .join(filename);
-    candidate.canonicalize().map_err(|e| format!(
-        "bundled param file not found at `{}`: {e}\n\
-         Hint: not every (fragmentation, instrument, protocol) combination \
-         has a bundled .param file. Supply --param-file <PATH> to specify \
-         the scoring model explicitly, or list available files under \
-         `resources/ionstat/`.",
-        candidate.display()
-    ))
+    detect_instrument_type(input::open_buf_maybe_gz(spectrum_path).ok()?)
 }
 
 /// Resolve the path to the bundled `models.parquet` store.
 ///
 /// A packaged release ships `resources/` next to the binary, so prefer
-/// `<exe_dir>/resources/ionstat/models.parquet` when it exists — that makes an
+/// `<exe_dir>/resources/models.parquet` when it exists — that makes an
 /// installed binary self-contained regardless of where it runs. Fall back to the
 /// compile-time source tree (`CARGO_MANIFEST_DIR`) for `cargo run` / tests.
 fn bundled_store_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let next_to_binary = dir.join("resources/ionstat/models.parquet");
+            let next_to_binary = dir.join("resources/models.parquet");
             if next_to_binary.exists() {
                 return next_to_binary;
             }
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/ionstat/models.parquet")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet")
 }
 
 /// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying
 /// all old-ladder normalizations. This is the new entry point used by the
-/// search binary in place of `resolve_bundled_param*`.
+/// search binary, replacing the former filename-based resolution ladder.
 ///
 /// `activation`: the detected or explicitly set `ActivationMethod`.
 /// `instrument`: the detected or explicitly set `InstrumentType` (None = undetected → LowRes).
@@ -3285,6 +4356,7 @@ fn build_selection_key(
     activation: ActivationMethod,
     instrument: Option<InstrumentType>,
     protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
 ) -> SelectionKey {
     use std::collections::BTreeSet;
 
@@ -3305,7 +4377,20 @@ fn build_selection_key(
     //    inline here.
     let (final_act, final_inst, drop_protocol): (&str, &str, bool) =
         match (act_str, inst_after_family) {
-            ("HCD", "LowRes")    => ("HCD", "QExactive", false),
+            // H5: low-res (ion-trap) HCD. MS-GF+ "upgraded" this to the high-res
+            // QExactive model, which then matched 0.5-Da peaks at 20 ppm and lost
+            // ~18% of PSMs silently. No hcd_lowres model exists, so route to the
+            // low-res b/y model (cid_lowres_tryp) instead — correct fragment
+            // tolerance and ion series. Intentional divergence from MS-GF+'s
+            // ladder, pinned by store_selection_equivalence.rs.
+            ("HCD", "LowRes")    => {
+                eprintln!(
+                    "WARN: low-res (ion-trap) HCD detected — no hcd_lowres model exists; \
+                     routing to cid_lowres_tryp (low-res b/y, 0.5-Da tolerance) rather than \
+                     the high-res QExactive model. Pass --model to override."
+                );
+                ("CID", "LowRes", true)
+            }
             ("HCD", "TOF")       => ("CID", "TOF",       true),
             ("CID", "QExactive") => ("CID", "LowRes",    true),
             ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD", "LowRes", true),
@@ -3331,8 +4416,8 @@ fn build_selection_key(
     SelectionKey {
         activation: final_act.to_string(),
         instrument: final_inst.to_string(),
-        // Parquet stores enzyme as "Trypsin" for the tryptic models.
-        enzyme: "Trypsin".to_string(),
+        // Parquet stores the enzyme as its `Enzyme::name()` ("Trypsin", "LysC", ...).
+        enzyme: enzyme.name().to_string(),
         experiment_class,
     }
 }
@@ -3340,14 +4425,14 @@ fn build_selection_key(
 /// Load the scoring [`Param`] from the bundled Parquet store for the given
 /// `(activation, instrument, protocol)` combination.
 ///
-/// This is the new model-resolution path that replaces
-/// `Param::load_from_file(resolve_bundled_param*(...))`. The `model_id`
+/// This is the new model-resolution path, replacing the former
+/// filename-based resolution ladder. The `model_id`
 /// selected from the store will be identical to the lowercased filename
 /// stem of the old `.param` path (guaranteed by the equivalence gate test
 /// `store_selection_matches_old_ladder_for_all_combos`).
 ///
 /// `custom_store_path`: when `Some`, use that Parquet file instead of the
-/// bundled `resources/ionstat/models.parquet` (honours `--model-store`).
+/// bundled `resources/models.parquet` (honours `--model-store`).
 ///
 /// `model_id_override`: when `Some`, skip automatic selection and load this
 /// exact model ID (honours `--model`).
@@ -3355,6 +4440,7 @@ fn load_param_from_store(
     activation: ActivationMethod,
     instrument: Option<InstrumentType>,
     protocol: Protocol,
+    enzyme: model::enzyme::Enzyme,
     custom_store_path: Option<&Path>,
     model_id_override: Option<&str>,
 ) -> Result<(String, Param), Box<dyn std::error::Error>> {
@@ -3368,7 +4454,7 @@ fn load_param_from_store(
         id.to_string()
     } else {
         let entries = store.selection_entries();
-        let key = build_selection_key(activation, instrument, protocol);
+        let key = build_selection_key(activation, instrument, protocol, enzyme);
 
         // Forward-compat: `build_selection_key` collapses instruments with a real
         // family fallback (OrbitrapAstral → QExactive, TimsTOF → TOF) so the
@@ -3389,16 +4475,23 @@ fn load_param_from_store(
         };
 
         exact_id.unwrap_or_else(|| {
-            select(
-                &entries,
-                &key,
-                // `build_selection_key` already applies family fallback + all
-                // normalizations, so the family_fn here is the identity.
-                |i| i.to_string(),
-                Some("hcd_qexactive_tryp"),
-            )
-            .unwrap_or("hcd_qexactive_tryp")
-            .to_string()
+            // `build_selection_key` already applies family fallback + all
+            // normalizations, so the family_fn here is the identity. (L6) Pass
+            // `None` for the generic so a true no-match returns `None`, letting us
+            // WARN that the chosen model is a last-resort fallback rather than
+            // silently emitting `hcd_qexactive_tryp` for mis-detected data.
+            match select(&entries, &key, |i| i.to_string(), None) {
+                Some(id) => id.to_string(),
+                None => {
+                    eprintln!(
+                        "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
+                         — falling back to the generic 'hcd_qexactive_tryp'; scores may be \
+                         mis-calibrated for this data. Pin a model with --model if this is wrong.",
+                        key.activation, key.instrument, key.enzyme, key.experiment_class
+                    );
+                    "hcd_qexactive_tryp".to_string()
+                }
+            }
         })
     };
 
@@ -3406,6 +4499,20 @@ fn load_param_from_store(
         .map_err(|e| format!("loading model '{model_id}' from store: {e}"))?;
 
     Ok((model_id, param))
+}
+
+/// Derive the refine-PIN path from the main PIN path: insert `.refine` before
+/// the extension (`out.pin` → `out.refine.pin`). If the path has no extension,
+/// append `.refine.pin` (`out` → `out.refine.pin`).
+fn refine_pin_path(main: &std::path::Path) -> PathBuf {
+    match main.extension().and_then(|e| e.to_str()) {
+        Some(ext) => main.with_extension(format!("refine.{ext}")),
+        None => {
+            let mut s = main.as_os_str().to_owned();
+            s.push(".refine.pin");
+            PathBuf::from(s)
+        }
+    }
 }
 
 /// Parse `--fragmentation` value. Accepts named (case-insensitive: auto, CID,
@@ -3421,22 +4528,6 @@ fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
         _ => Err(format!(
             "invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD \
              (or legacy 0..=4)"
-        )),
-    }
-}
-
-/// Parse `--instrument` value. Accepts named (low-res, high-res, TOF,
-/// QExactive) or legacy numeric (0=LowRes, 1=HighRes, 2=TOF, 3=QExactive).
-fn parse_instrument(s: &str) -> Result<Instrument, String> {
-    if let Ok(v) = <Instrument as ValueEnum>::from_str(s, true) { return Ok(v); }
-    match s.parse::<u8>() {
-        Ok(0) => Ok(Instrument::LowRes),
-        Ok(1) => Ok(Instrument::HighRes),
-        Ok(2) => Ok(Instrument::Tof),
-        Ok(3) => Ok(Instrument::QExactive),
-        _ => Err(format!(
-            "invalid instrument `{s}`: expected low-res|high-res|TOF|QExactive \
-             (or legacy 0..=3)"
         )),
     }
 }
@@ -3488,13 +4579,67 @@ fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
 }
 
 #[cfg(test)]
+mod enzyme_cli_tests {
+    use super::parse_enzymes;
+    use model::enzyme::Enzyme;
+
+    #[test]
+    fn single_enzyme_has_no_extras() {
+        let (primary, extras) = parse_enzymes("trypsin").unwrap();
+        assert_eq!(primary, Enzyme::Trypsin);
+        assert!(extras.is_empty(), "single enzyme ⇒ empty extras (bit-identical path)");
+    }
+
+    #[test]
+    fn comma_and_plus_separators_both_parse() {
+        let (p1, e1) = parse_enzymes("gluc,trypsin").unwrap();
+        let (p2, e2) = parse_enzymes("gluc+trypsin").unwrap();
+        assert_eq!((p1, e1.as_slice()), (Enzyme::GluC, [Enzyme::Trypsin].as_slice()));
+        assert_eq!((p2, e2.as_slice()), (Enzyme::GluC, [Enzyme::Trypsin].as_slice()));
+    }
+
+    #[test]
+    fn first_token_is_primary_order_matters_for_selection() {
+        assert_eq!(parse_enzymes("trypsin,gluc").unwrap().0, Enzyme::Trypsin);
+        assert_eq!(parse_enzymes("gluc,trypsin").unwrap().0, Enzyme::GluC);
+    }
+
+    #[test]
+    fn duplicate_tokens_are_deduped_preserving_order() {
+        // "trypsin,trypsin,gluc" and the alias "tryp" collapse to [Trypsin, GluC].
+        let (primary, extras) = parse_enzymes("trypsin, tryp , gluc, gluc").unwrap();
+        assert_eq!(primary, Enzyme::Trypsin);
+        assert_eq!(extras, vec![Enzyme::GluC]);
+    }
+
+    #[test]
+    fn whitespace_and_empties_tolerated() {
+        let (primary, extras) = parse_enzymes("  lysc , , trypsin ").unwrap();
+        assert_eq!(primary, Enzyme::LysC);
+        assert_eq!(extras, vec![Enzyme::Trypsin]);
+    }
+
+    #[test]
+    fn unknown_enzyme_errors_and_empty_errors() {
+        assert!(parse_enzymes("bogus").is_err());
+        assert!(parse_enzymes("").is_err());
+        assert!(parse_enzymes("  , ").is_err());
+    }
+
+    #[test]
+    fn elastase_aliases_to_nonspecific() {
+        assert_eq!(parse_enzymes("elastase").unwrap().0, Enzyme::NonSpecific);
+    }
+}
+
+#[cfg(test)]
 mod param_resolver_tests {
     use super::*;
 
     // ── Tests of the resolve_bundled_param / resolve_bundled_param_for_activation
     //    ladder were removed in the model-store migration: those functions are now
     //    dead code (#[cfg_attr(not(test), allow(dead_code))]) and the bundled .param
-    //    files no longer ship on disk (they live in resources/ionstat/models.parquet).
+    //    files no longer ship on disk (they live in resources/models.parquet).
     //    The store_selection_equivalence integration test covers the same
     //    correctness invariant without requiring physical .param files.
 
@@ -3502,12 +4647,6 @@ mod param_resolver_tests {
     fn parse_fragmentation_rejects_out_of_range_numeric() {
         let err = parse_fragmentation("99").unwrap_err();
         assert!(err.contains("0..=4"), "error message should mention range, got: {err}");
-    }
-
-    #[test]
-    fn parse_instrument_rejects_out_of_range_numeric() {
-        let err = parse_instrument("99").unwrap_err();
-        assert!(err.contains("0..=3"), "got: {err}");
     }
 
     #[test]
@@ -3622,5 +4761,58 @@ mod train_from_msnet_tests {
     fn nonstandard_residue_errors() {
         let r = build_msnet_peptide("PEPTBDE", &[], &[], 0.0, 0.0);
         assert!(r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod intensity_marginal_tests {
+    use super::*;
+    use rustc_hash::FxHashMap;
+
+    fn cell(ion: &str, fn_: &str, fc: &str, nce: &str, count: i64, sum: f64) -> (IntensityAggKey, IntensityAggStats) {
+        (
+            IntensityAggKey {
+                ion_type: ion.to_string(),
+                flank_n: fn_.to_string(),
+                flank_c: fc.to_string(),
+                pos_bin: 5,
+                charge: 2,
+                nce_bin: nce.to_string(),
+            },
+            IntensityAggStats { count, sum_log_rel: sum, sum_log_rel_sq: sum * sum / count as f64 },
+        )
+    }
+
+    /// The finalizer must emit the backoff marginals that `predict_log_rel`
+    /// probes, or the trained per-context intensities go unused at inference
+    /// (which passes `nce_bin="unknown"`).
+    #[test]
+    fn backoff_marginals_are_emitted_with_summed_stats() {
+        let mut merged: FxHashMap<IntensityAggKey, IntensityAggStats> = FxHashMap::default();
+        // Two real cells: same flank/pos/charge, different numeric nce bins.
+        for (k, s) in [
+            cell("y", "K", "R", "30", 100, -20.0),
+            cell("y", "K", "R", "40", 50, -15.0),
+        ] {
+            merged.insert(k, s);
+        }
+        let exact = merged.len();
+        add_backoff_marginals(&mut merged);
+
+        // nce-marginal (`__any__`) keeps flanks, sums across both nce bins.
+        let any_nce = merged
+            .get(&cell("y", "K", "R", ANY_NCE, 0, 0.0).0)
+            .expect("nce-marginal must exist");
+        assert_eq!(any_nce.count, 150, "summed over the two nce bins");
+        assert!((any_nce.sum_log_rel - (-35.0)).abs() < 1e-9);
+
+        // flank-marginal (`*`/`*`) keeps each nce bin separately.
+        assert!(merged.contains_key(&cell("y", ANY_FLANK, ANY_FLANK, "30", 0, 0.0).0));
+        // both-marginal exists too.
+        assert!(merged.contains_key(&cell("y", ANY_FLANK, ANY_FLANK, ANY_NCE, 0, 0.0).0));
+
+        // Real cells are untouched (no double counting).
+        assert_eq!(merged.get(&cell("y", "K", "R", "30", 0, 0.0).0).unwrap().count, 100);
+        assert!(merged.len() > exact, "marginals added new keys");
     }
 }

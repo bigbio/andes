@@ -23,6 +23,9 @@ rustc-hash = "2"
 thiserror = { workspace = true }
 arrow = "53"
 parquet = "53"
+# Temp PIN destination for `--rescore` without `--output-pin` (and the
+# `--keep-pin false` path).
+tempfile = "3.10"
 
 [features]
 # Native Thermo .raw input (delegates to the input crate's `thermo` feature).

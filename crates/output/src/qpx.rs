@@ -113,6 +113,13 @@ pub fn write_qpx(
     let sp_batch = build_search_params_batch(params, fragment_tol, run_id, primary_ms_run_paths)?;
     write_parquet(&out_dir.join("search_params.parquet"), "search_params", sp_batch)?;
 
+    // OpenMS' QPX reader (PSMArrowIO::importFromParquet) requires a
+    // protein_groups member to load the bundle, even though andes does not run
+    // protein inference (that is the downstream ProteinInference/Percolator
+    // step). Emit a valid zero-row file so OpenMS tools can read the idparquet.
+    let pg_batch = build_protein_groups_batch();
+    write_parquet(&out_dir.join("protein_groups.parquet"), "protein_groups", pg_batch)?;
+
     Ok(())
 }
 
@@ -739,6 +746,36 @@ fn build_proteins_batch(
         Arc::new(run_identifier.finish()),
     ];
     RecordBatch::try_new(schema, columns).map_err(to_io)
+}
+
+// ── protein_groups.parquet builder ────────────────────────────────────────────
+
+/// Empty `protein_groups.parquet` with the OpenMS QPX protein-group schema.
+///
+/// andes does not perform protein inference, so there are no groups to emit, but
+/// OpenMS' `PSMArrowIO::importFromParquet` requires this bundle member to be
+/// present to read the `.idparquet` directory at all (e.g. PercolatorAdapter).
+/// We therefore write a schema-correct, zero-row file. Downstream OpenMS
+/// ProteinInference / Percolator populate the actual groups.
+fn build_protein_groups_batch() -> RecordBatch {
+    // struct<name: utf8, values: list<inner>> — the OpenMS metavalue container
+    let data_struct = |inner: DataType| -> DataType {
+        DataType::Struct(Fields::from(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("values", list_of(inner), true),
+        ]))
+    };
+    let fields = vec![
+        Field::new("group_type", DataType::Utf8, true),
+        Field::new("probability", DataType::Float64, true),
+        Field::new("accessions", list_of(DataType::Utf8), true),
+        Field::new("run_identifier", DataType::Utf8, true),
+        Field::new("group_index", DataType::Int32, true),
+        Field::new("float_data", list_of(data_struct(DataType::Float64)), true),
+        Field::new("string_data", list_of(data_struct(DataType::Utf8)), true),
+        Field::new("integer_data", list_of(data_struct(DataType::Int64)), true),
+    ];
+    RecordBatch::new_empty(Arc::new(Schema::new(fields)))
 }
 
 // ── search_params.parquet builder ─────────────────────────────────────────────

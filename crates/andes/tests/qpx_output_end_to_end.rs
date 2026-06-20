@@ -120,9 +120,17 @@ fn search_writes_qpx_idparquet_bundle() {
         let dt = by_name
             .get(name)
             .unwrap_or_else(|| panic!("psms.parquet missing list column `{name}`"));
-        assert!(
-            matches!(dt, DataType::List(_)),
-            "column `{name}` should be a List, got {dt:?}"
+        let DataType::List(elem) = dt else {
+            panic!("column `{name}` should be a List, got {dt:?}");
+        };
+        // QPX/Parquet LIST convention: the list element field must be named
+        // `element` (arrow-rs defaults to `item`; regression guard for the
+        // OpenMS interop fix).
+        assert_eq!(
+            elem.name(),
+            "element",
+            "column `{name}` list element field must be named `element`, got `{}`",
+            elem.name()
         );
     }
 

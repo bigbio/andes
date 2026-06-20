@@ -41,7 +41,7 @@ pub struct Param {
     pub ion_existence_table: FxHashMap<Partition, Vec<f32>>,
     /// Pre-filtered ion-type list per partition (Noise excluded), populated
     /// at load time. Used by `ion_types_for_partition_slice` to avoid
-    /// per-call Vec allocation in the GF DP hot path.
+    /// per-call Vec allocation in the node-scoring DP hot path.
     /// Call `rebuild_cache()` after manually constructing a `Param` in tests
     /// or any context where the cache was not populated during `load_from_bytes`.
     pub partition_ion_types_cache: FxHashMap<Partition, Vec<IonType>>,
@@ -162,7 +162,7 @@ impl Param {
         seg.min(self.num_segments - 1).max(0)
     }
 
-    /// Alias for `segment_num_for` matching the name used by the GF DP code
+    /// Alias for `segment_num_for` matching the name used by the node-scoring DP code
     /// (`param.segment_num(theo_mz, parent_mass)`).
     #[inline]
     pub fn segment_num(&self, peak_mz: f64, parent_mass: f64) -> usize {
@@ -219,7 +219,7 @@ impl Param {
 
     /// Slice-borrowing version of `ion_types_for_partition`. Reads from the
     /// pre-filtered `partition_ion_types_cache` populated at param-load time.
-    /// Zero allocations per call. Used by the GF DP hot path.
+    /// Zero allocations per call. Used by the node-scoring DP hot path.
     pub fn ion_types_for_partition_slice(&self, charge: u8, parent_mass: f64, seg: usize) -> &[IonType] {
         let part = self.partition_for(charge, parent_mass, seg);
         self.partition_ion_types_cache

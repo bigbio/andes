@@ -26,7 +26,7 @@ pub struct AminoAcidSet {
     /// dominating its cost. Same hashbrown internals, faster hasher.
     table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>>,
     /// Per-location flattened AA lists, precomputed at build time. Avoids
-    /// per-call rebuild in the GF DP hot path (PrimitiveAaGraph::new).
+    /// per-call rebuild in the node-scoring DP hot path (PrimitiveAaGraph::new).
     aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>>,
     has_cterm_mods: bool,
     min_aa_mass: f64,
@@ -193,7 +193,7 @@ impl AminoAcidSet {
 
     /// Borrow the precomputed AA list for `location` as a slice. Avoids
     /// the per-call Vec allocation that `aa_list_for` performs. Used in the
-    /// GF DP hot path (`PrimitiveAaGraph::new`).
+    /// node-scoring DP hot path (`PrimitiveAaGraph::new`).
     pub fn cached_aa_list(&self, location: ModLocation) -> &[AminoAcid] {
         self.aa_lists_cache
             .get(&location)
@@ -544,7 +544,7 @@ impl AminoAcidSetBuilder {
             .any(|m| matches!(m.location, ModLocation::CTerm | ModLocation::ProtCTerm));
 
         // 5. Precompute the per-location AA lists used by `aa_list_for` and
-        // `cached_aa_list`. Runs once at build time so the GF DP hot path
+        // `cached_aa_list`. Runs once at build time so the node-scoring DP hot path
         // can borrow a slice.
         let mut aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>> = FxHashMap::default();
         let anywhere_list: Vec<AminoAcid> = STANDARD_RESIDUES
@@ -1040,8 +1040,8 @@ mod tests {
     }
 
     #[test]
-    fn acetyl_prot_n_term_appears_in_source_aas_for_gf() {
-        // GF DP source AAs at Prot-N-term must include
+    fn acetyl_prot_n_term_appears_in_source_aas_for_scoring() {
+        // node-scoring DP source AAs at Prot-N-term must include
         // both unmodified residues AND wildcard-Acetyl variants for each
         // residue. Prot-N-term source AAs must include the Anywhere list
         // (locMap propagation) plus Prot-N-term-specific variants.

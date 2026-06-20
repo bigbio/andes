@@ -108,7 +108,6 @@ impl<'a> StatsAccumulator<'a> {
         // (Kim et al., Nat Commun 5:5277, 2014 — sharper missing-slot-dominated
         // noise; see dense_noise_facts).
         let noise_facts = match std::env::var("ANDES_DENSE_NOISE")
-            .or_else(|_| std::env::var("MSGF_DENSE_NOISE"))
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
         {

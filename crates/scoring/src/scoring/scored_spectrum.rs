@@ -18,7 +18,7 @@
 //! from ranking. `offset` is in m/z space, added after dividing by `c`.
 //!
 //! Also exposes `prob_peak`, `main_ion`, `node_score`, `edge_score`,
-//! and `observed_node_mass` for the GF DP graph traversal.
+//! and `observed_node_mass` for the node-scoring DP graph traversal.
 
 use std::sync::OnceLock;
 
@@ -204,11 +204,9 @@ fn peak_filter_env() -> &'static PeakFilterEnv {
     static CACHE: OnceLock<PeakFilterEnv> = OnceLock::new();
     CACHE.get_or_init(|| {
         let w = std::env::var("ANDES_PEAK_WINDOW")
-            .or_else(|_| std::env::var("MSGF_PEAK_WINDOW"))
             .ok()
             .and_then(|s| s.parse::<f64>().ok());
         let k = std::env::var("ANDES_PEAK_PER_WINDOW")
-            .or_else(|_| std::env::var("MSGF_PEAK_PER_WINDOW"))
             .ok()
             .and_then(|s| s.parse::<usize>().ok());
         match (w, k) {
@@ -817,7 +815,7 @@ impl<'a> ScoredSpectrum<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // GF DP scoring methods
+    // node-scoring DP scoring methods
     // -----------------------------------------------------------------------
 
     /// Combined node score for a peptide split position:
@@ -1134,7 +1132,7 @@ impl<'a> ScoredSpectrum<'a> {
         (part, idx, cur_mass, prev_mass)
     }
 
-    /// Edge score for the GF DP.
+    /// Edge score for the node-scoring DP.
     ///
     /// If `param.ion_existence_table` is empty (edge scoring not supported),
     /// returns 0. Otherwise:
@@ -1195,7 +1193,7 @@ impl<'a> ScoredSpectrum<'a> {
     ///
     /// Nominal masses are computed the same way as in `score_psm`:
     /// `nominal_from(prefix_real_mass) as f64` — the integer nominal mass cast
-    /// to f64, matching the GF DP's `active_nodes[ni] as f64` convention.
+    /// to f64, matching the node-scoring DP's `active_nodes[ni] as f64` convention.
     pub fn ion_match_facts(&self, peptide: &Peptide, scorer: &RankScorer) -> Vec<IonMatchFact> {
         let param = scorer.param();
         let max_rank = scorer.max_rank();

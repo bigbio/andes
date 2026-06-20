@@ -923,9 +923,7 @@ fn configure_bundled_dotnet() {
 /// We gate behind an env var so production runs stay quiet; flip the var on
 /// when debugging memory regressions.
 fn log_rss(tag: &str) {
-    let probe_set = std::env::var_os("ANDES_RSS_PROBE").is_some()
-        || std::env::var_os("MSGF_RSS_PROBE").is_some()
-        || std::env::var_os("MSGFRUST_RSS_PROBE").is_some();
+    let probe_set = std::env::var_os("ANDES_RSS_PROBE").is_some();
     if !probe_set {
         return;
     }
@@ -1752,8 +1750,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     });
     eprintln!("Using {} worker threads", cli.threads);
 
-    // Fragment tolerance of 0.5 Da matches the gf_bsa_parity integration test
-    // (and the canonical HCD default).
+    // Fragment tolerance of 0.5 Da is the canonical low-res HCD default.
     let fragment_tol_da = 0.5_f64;
 
     let bench_cap = if cli.max_spectra > 0 {

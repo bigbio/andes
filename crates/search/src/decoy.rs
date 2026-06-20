@@ -12,7 +12,8 @@ pub const DEFAULT_DECOY_SEED: u64 = 42;
 /// How decoy proteins are generated for the target+decoy search database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DecoyStrategy {
-    /// Reverse each target sequence (default; deterministic, MS-GF+ compatible).
+    /// Reverse each target sequence (default; deterministic reverse decoys,
+    /// Elias & Gygi, Nat Methods 2007).
     #[default]
     Reverse,
     /// Shuffle each target sequence with a seeded, reproducible RNG. Useful when
@@ -237,7 +238,7 @@ mod tests {
         let target = make_db(&[("P1", b"ABCD"), ("P2", b"EFGH")]);
         let built = build_search_db(&target, "XXX", DecoyStrategy::Reverse, DEFAULT_DECOY_SEED);
         let legacy = target_plus_decoy(&target, "XXX");
-        // Reverse strategy is bit-identical to the legacy path (parity).
+        // Reverse strategy is byte-identical to the simple target_plus_decoy path.
         assert_eq!(built.len(), legacy.len());
         for (a, b) in built.proteins.iter().zip(legacy.proteins.iter()) {
             assert_eq!(a.accession, b.accession);

@@ -80,7 +80,7 @@ pub fn tiny_param() -> Param {
 /// Richer `Param` for testing the GF / ScoredSpectrum scoring paths.
 ///
 /// Differs from `tiny_param()` in three ways that matter for the GF tests:
-/// - `parent_mass = 1000.0` (smaller, so GF DP exercises fewer nodes)
+/// - `parent_mass = 1000.0` (smaller, so node-scoring DP exercises fewer nodes)
 /// - `mme = Tolerance::Da(0.5)` (simpler tolerance arithmetic in fragment lookup)
 /// - `frag_off_table` seeded with one `FragmentOffsetFrequency` entry for the
 ///   prefix ion, so `ion_types_for_segment(0)` returns a non-empty list and

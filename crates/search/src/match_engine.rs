@@ -36,19 +36,19 @@ use scoring_crate::scoring::{
 };
 use model::spectrum::Spectrum;
 
-/// One-time-built state shared across every chunk of a streamed search.
-///
-/// `match_spectra` materializes its full set of candidates, bucket index,
-/// distinct-peptide counts, and enzyme-registered aa_set in a single pass at
-/// startup. For chunked / streaming spectrum loading we want to reuse that
-/// state instead of rebuilding it per chunk. `PreparedSearch::prepare` does
-/// the setup once; `PreparedSearch::run_chunk` runs the per-spectrum scoring
-/// loop on any slice of `Spectrum`s using that prepared state.
-///
-/// The two-pass split mirrors the original `match_spectra` body — there is
-/// no algorithmic change. Pre-existing single-call callers can still use
-/// `match_spectra(...)` which is now a thin wrapper around
-/// `prepare` + a single `run_chunk` call.
+// One-time-built state shared across every chunk of a streamed search.
+//
+// `match_spectra` materializes its full set of candidates, bucket index,
+// distinct-peptide counts, and enzyme-registered aa_set in a single pass at
+// startup. For chunked / streaming spectrum loading we want to reuse that
+// state instead of rebuilding it per chunk. `PreparedSearch::prepare` does
+// the setup once; `PreparedSearch::run_chunk` runs the per-spectrum scoring
+// loop on any slice of `Spectrum`s using that prepared state.
+//
+// The two-pass split mirrors the original `match_spectra` body — there is
+// no algorithmic change. Pre-existing single-call callers can still use
+// `match_spectra(...)` which is now a thin wrapper around
+// `prepare` + a single `run_chunk` call.
 
 /// Selects how `PreparedSearch` resolves the per-spectrum candidate set.
 ///

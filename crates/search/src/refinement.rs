@@ -1389,14 +1389,14 @@ mod tests {
         let cfg = RefineConfig::default_tier();
 
         // Pass-1 candidates: spectrum 0 has a target PSM; spectrum 1 is empty.
-        let pass1_cands = vec![cand(0, false)];
-        let mut global_queues = vec![
+        let pass1_cands = [cand(0, false)];
+        let mut global_queues = [
             queue_with(vec![psm(0, 0, 40.0)]), // identified
             TopNQueue::new(10),                // unidentified
         ];
 
         // Simulate a Pass-2 winner for spectrum 1: an Oxidation-M peptide.
-        let pass2_cands = vec![Candidate {
+        let pass2_cands = [Candidate {
             peptide: modded_pep(b'M', 15.994915),
             protein_index: 0,
             start_offset_in_protein: 0,

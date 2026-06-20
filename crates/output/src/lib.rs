@@ -21,13 +21,19 @@ pub mod tsv;
 pub use tsv::{write_tsv, write_tsv_to};
 
 pub mod pin;
-pub use pin::{write_pin, write_pin_to};
+pub use pin::{format_spec_id, write_pin, write_pin_to};
 
 pub mod stats;
 pub use stats::{write_statistics_log, RunStatistics};
 
 pub mod qpx;
 pub use qpx::write_qpx;
+
+pub mod percolator;
+pub use percolator::{
+    parse_psm_results, resolve_backend, run_percolator, PercolatorBackend, PercolatorError,
+    PercolatorPsm, DEFAULT_PERCOLATOR_IMAGE,
+};
 
 pub(crate) mod row_context;
 pub(crate) mod percolator_enz;

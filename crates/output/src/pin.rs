@@ -80,6 +80,33 @@ use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 use model::spectrum::Spectrum;
 
+// ── shared SpecId formatting ───────────────────────────────────────────────────
+
+/// Format the Percolator `SpecId` (== QPX row identity) for one PSM row.
+///
+/// This is the SINGLE source of truth for the SpecId string, called from BOTH
+/// the PIN writer (here) and the QPX writer (`crate::qpx`) so Percolator's
+/// `PSMId` join key reconstructs identically on both sides.
+///
+/// Rule (must stay stable — it is the PIN/QPX/Percolator join contract):
+/// - single-row scan → `"{spec_id}_{scan}_{rank}"`
+/// - multi-row scan  → `"{spec_id}_{scan}_{rank}_{row_idx}"`
+///
+/// `spec_id` is `spec.title` (or `"scan={scan}"` when the title is empty — see
+/// [`crate::row_context::RowContext`]); `rank` is the 1-based rank from
+/// [`crate::row_context::iter_ranked_by_rank_score`]; `row_idx` is the per-scan
+/// emission index; `multi_row` is true when the scan emits more than one row
+/// (under `--chimeric` or when ties at queue capacity are retained), in which
+/// case `_{row_idx}` disambiguates SpecIds that would otherwise collide on equal
+/// `rank`. Single-row scans keep the historical `specID_scan_rank` format.
+pub fn format_spec_id(spec_id: &str, scan: i32, rank: u32, row_idx: usize, multi_row: bool) -> String {
+    if multi_row {
+        format!("{spec_id}_{scan}_{rank}_{row_idx}")
+    } else {
+        format!("{spec_id}_{scan}_{rank}")
+    }
+}
+
 // ── public API ───────────────────────────────────────────────────────────────
 
 /// Write all PSMs to a Percolator `.pin` file at `output_path`.
@@ -411,11 +438,7 @@ fn write_psm_row<W: Write>(
     // SpecIds in the PIN (ambiguous downstream mapping). Append the per-row
     // emission index to disambiguate. Single-row-per-scan keeps the historical
     // `specID_scan_rank` format so the schema/common case is unchanged.
-    if multi_row {
-        write!(writer, "{}_{}_{}_{}", ctx.spec_id, ctx.scan, rank, row_idx)?;
-    } else {
-        write!(writer, "{}_{}_{}", ctx.spec_id, ctx.scan, rank)?;
-    }
+    write!(writer, "{}", format_spec_id(&ctx.spec_id, ctx.scan, rank, row_idx, multi_row))?;
     write!(writer, "\t{}\t{}\t", label, ctx.scan)?;
     write_double(writer, exp_mass)?;
     writer.write_all(b"\t")?;

@@ -16,9 +16,4 @@ algorithm and tool — with its own peptide-spectrum scoring, its statistical
 models trained on our own data, and its own implementation. We gratefully
 acknowledge MS-GF+ as the origin and inspiration for this work.
 
-Users citing andes should also cite the foundational MS-GF+ publication:
-
-  Kim, S. and Pevzner, P.A. (2014). "MS-GF+ makes progress towards a universal
-  database search tool for proteomics." Nature Communications 5:5277.
-
 See HERITAGE.md for the lineage of this project.

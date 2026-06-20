@@ -158,6 +158,11 @@ struct SearchArgs {
     #[arg(long)]
     output_tsv: Option<PathBuf>,
 
+    /// Output QPX `.idparquet/` bundle directory (optional; OpenMS-compatible).
+    /// Writes `psms.parquet` + `proteins.parquet` + `search_params.parquet`.
+    #[arg(long)]
+    output_parquet: Option<PathBuf>,
+
     /// Decoy prefix used when generating reversed decoy sequences.
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
@@ -2274,6 +2279,34 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match output::write_statistics_log(&run_stats, &stats_path) {
         Ok(()) => eprintln!("Wrote statistics: {}", stats_path.display()),
         Err(e) => eprintln!("WARN: could not write {}: {e}", stats_path.display()),
+    }
+
+    // ── QPX `.idparquet/` bundle (optional, OpenMS-compatible) ───────────────
+    // Mirrors the PIN write from the SAME unified candidate/index pair. Sourced
+    // here (not in the bench/TSV arms) so it is produced for every run that asks
+    // for it, including bench mode. Run identifier = the spectrum file stem so
+    // it is stable across re-runs of the same input.
+    if let Some(ref parquet_dir) = cli.output_parquet {
+        let run_id = spectrum_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "andes_run".to_string());
+        let primary_paths: Vec<String> =
+            spectrum_paths.iter().map(|p| p.display().to_string()).collect();
+        match output::write_qpx(
+            parquet_dir,
+            &spectra,
+            &queues,
+            &pin_candidates,
+            &params,
+            &pin_index,
+            &param.mme,
+            &run_id,
+            &primary_paths,
+        ) {
+            Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
+            Err(e) => eprintln!("WARN: could not write {}: {e}", parquet_dir.display()),
+        }
     }
 
     if bench_mode {

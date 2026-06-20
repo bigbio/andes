@@ -1,3 +1,5 @@
+> ⚠️ **Internal / superseded report.** This is an early multi-engine validation run (includes the reference engine / a comparison search engine / ProSE for development context). The current public benchmark — andes vs Java MS-GF+ vs a comparison engine — is [`2026-06-15-public-benchmark.md`](2026-06-15-public-benchmark.md).
+
 # 4-engine native-format benchmark (2026-06-01)
 
 Head-to-head of **Java MS-GF+**, **a comparison search engine**, **the reference engine**, and **andes** on two

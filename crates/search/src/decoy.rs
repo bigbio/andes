@@ -150,6 +150,20 @@ pub fn is_decoy_accession(accession: &str, prefix: &str) -> bool {
     accession.starts_with(&decoy_accession_needle(prefix))
 }
 
+/// Returns `true` iff `accession` is a decoy under the AFFIX convention: it
+/// starts with the prefix needle `"<prefix>_"` (andes' native decoy naming) OR
+/// — when `suffix` is set and non-empty — ends with `suffix`.
+///
+/// The suffix form lets andes recognize decoys produced by an external pipeline
+/// whose pre-built target+decoy DB tags decoys with an accession SUFFIX (e.g.
+/// quantms / OpenMS DecoyDatabase: `<orig>_rev`) rather than andes' prefix. Used
+/// with `--decoy-strategy none` so andes consumes the shared decoy DB verbatim
+/// instead of generating its own (which would double-decoy and bias FDR).
+pub fn is_decoy_accession_affix(accession: &str, prefix: &str, suffix: Option<&str>) -> bool {
+    accession.starts_with(&decoy_accession_needle(prefix))
+        || suffix.is_some_and(|s| !s.is_empty() && accession.ends_with(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +280,20 @@ mod tests {
         // Short custom prefix: a real "rev..." target must NOT be misread as decoy.
         assert!(is_decoy_accession("rev_sp|P1", "rev"));
         assert!(!is_decoy_accession("reverse_kinase", "rev"));
+    }
+
+    #[test]
+    fn affix_matches_prefix_or_suffix() {
+        // Prefix (andes-native) still works with no suffix configured.
+        assert!(is_decoy_accession_affix("XXX_P12345", "XXX", None));
+        assert!(!is_decoy_accession_affix("P12345", "XXX", None));
+        // Suffix form recognizes quantms/OpenMS "<orig>_rev" decoys that the
+        // prefix test alone misses.
+        assert!(is_decoy_accession_affix("sp|P02769|ALBU_BOVIN_rev", "XXX", Some("rev")));
+        assert!(!is_decoy_accession_affix("sp|P02769|ALBU_BOVIN", "XXX", Some("rev")));
+        // Either affix qualifies; an empty suffix is ignored (no spurious match).
+        assert!(is_decoy_accession_affix("XXX_P1", "XXX", Some("rev")));
+        assert!(!is_decoy_accession_affix("P1", "XXX", Some("")));
     }
 
     #[test]

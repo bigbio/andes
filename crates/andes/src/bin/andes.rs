@@ -167,6 +167,15 @@ struct SearchArgs {
     #[arg(long, default_value = "XXX_")]
     decoy_prefix: String,
 
+    /// Decoy-accession SUFFIX used to RECOGNIZE pre-built decoys in the input
+    /// FASTA (e.g. `rev` for quantms/OpenMS `<orig>_rev` decoys). When set, a
+    /// protein is a decoy iff its accession starts with `<decoy-prefix>_` OR ends
+    /// with this suffix. Typically paired with `--decoy-strategy none` so andes
+    /// consumes an externally-built target+decoy database instead of generating
+    /// its own decoys (which would double-decoy and bias FDR).
+    #[arg(long = "decoy-suffix")]
+    decoy_suffix: Option<String>,
+
     /// How to generate decoys: `reverse` (default; reverse each sequence),
     /// `shuffle` (seeded reproducible shuffle), or `none` (no decoys — for a
     /// FASTA that already contains decoys, or external FDR). `none` with a
@@ -1334,6 +1343,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let idx = SearchIndex::from_target_db_with_strategy(
         &target_db,
         &cli.decoy_prefix,
+        cli.decoy_suffix.as_deref(),
         decoy_strategy,
         cli.decoy_seed,
     );

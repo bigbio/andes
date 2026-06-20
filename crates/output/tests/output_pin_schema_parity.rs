@@ -41,7 +41,7 @@ const GF_COLUMNS: [&str; 4] = ["DeNovoScore", "lnSpecEValue", "lnEValue", "lnDel
 
 /// Additive feature columns Andes emits between matchedIonRatio and Peptide.
 const ADDITIVE_COLUMNS: [&str; 4] =
-    ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore"];
+    ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRankScore"];
 
 #[test]
 fn rust_pin_header_is_gf_free_schema() {
@@ -59,7 +59,9 @@ fn rust_pin_header_is_gf_free_schema() {
     let header = first_line(&rust_pin_path);
     let cols: Vec<&str> = header.split('\t').collect();
 
-    // RawScore present; GF columns absent.
+    // RankScore (rank-LLR, formerly "RawScore") + RawScore (fused, formerly
+    // "StrongScore") present; GF columns absent.
+    assert!(cols.contains(&"RankScore"), "RankScore column must be present:\n{header}");
     assert!(cols.contains(&"RawScore"), "RawScore column must be present:\n{header}");
     for gf in GF_COLUMNS {
         assert!(
@@ -84,6 +86,22 @@ fn rust_pin_header_is_gf_free_schema() {
             "additive column {name} must sit between matchedIonRatio and Peptide"
         );
     }
+
+    // Proteins must be the very last column (after Peptide).
+    let proteins_pos = cols
+        .iter()
+        .rposition(|c| *c == "Proteins")
+        .expect("Proteins column missing");
+    assert_eq!(
+        proteins_pos,
+        cols.len() - 1,
+        "Proteins must be the last column in the PIN header; PIN Proteins is rest-of-line and \
+         cannot be followed by additional columns without corrupting Percolator's protein parsing"
+    );
+    assert!(
+        peptide_pos < proteins_pos,
+        "column order must be ... Peptide ... Proteins (last)"
+    );
 }
 
 #[test]
@@ -102,6 +120,8 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -110,6 +130,8 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -127,7 +149,7 @@ fn rust_pin_rows_have_at_least_header_column_count() {
     params.charge_range = 2..=3;
     params.isotope_error_range = -1..=2;
 
-    let mgf_file = File::open(fixture("test-fixtures/test.mgf")).unwrap();
+    let mgf_file = input::open_buf_maybe_gz(&fixture("test-fixtures/test.mgf.gz")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

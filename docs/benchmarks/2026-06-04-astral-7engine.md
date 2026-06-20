@@ -1,3 +1,5 @@
+> ⚠️ **Internal / superseded report.** This is an early multi-engine validation run (includes MSFragger / Sage / ProSE for development context). The current public benchmark — andes vs Java MS-GF+ vs Comet — is [`2026-06-15-public-benchmark.md`](2026-06-15-public-benchmark.md).
+
 # 7-engine Astral benchmark — uniform Percolator (2026-06-04)
 
 Head-to-head of **andes** (top-1 and `--chimeric`), **MSFragger 4.2** (DDA+),

@@ -33,7 +33,7 @@ fn fixture_param() -> Param {
 fn make_stats_s0() -> CountStats {
     use scoring_crate::param_model::{IonType, Partition};
     let pa = Partition { charge: 2, parent_mass: 800.0_f32, seg_num: 0 };
-    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits() };
+    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 };
 
     let mut s = CountStats::new();
     s.bump_rank(pa, ion, 0);
@@ -53,7 +53,7 @@ fn make_stats_s0() -> CountStats {
 fn make_stats_s1() -> CountStats {
     use scoring_crate::param_model::{IonType, Partition};
     let pa = Partition { charge: 2, parent_mass: 800.0_f32, seg_num: 0 };
-    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits() };
+    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 };
 
     let mut s = CountStats::new();
     s.bump_rank(pa, ion, 0);
@@ -98,7 +98,7 @@ fn add_then_remove_source_restores_model() {
     let estimator = model_train::estimate::Estimator::new(cfg.clone());
     let p0 = estimator.estimate(&s0, &param);
 
-    write_model_with_sources(&path, "m", &p0, &[(ledger0.clone(), s0.clone())]).unwrap();
+    write_model_with_sources(&path, "m", &p0, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
     // Verify P0 round-trips.
     let store = ModelStore::open(&path).unwrap();
@@ -141,7 +141,7 @@ fn remove_nonexistent_source_errors() {
     let param = fixture_param();
     let s0 = make_stats_s0();
     let ledger0 = make_ledger("s0");
-    write_model_with_sources(&path, "m", &param, &[(ledger0, s0)]).unwrap();
+    write_model_with_sources(&path, "m", &param, &[(ledger0, s0)], None).unwrap();
 
     let cfg = EstimatorConfig::default();
     let result = update_remove(&path, "m", "nonexistent", cfg);
@@ -164,6 +164,7 @@ fn reweight_source_changes_param() {
         "m",
         &param,
         &[(ledger0, s0), (ledger1, s1)],
+        None,
     )
     .unwrap();
 
@@ -192,7 +193,7 @@ fn decay_with_empty_date_unchanged() {
     let s0 = make_stats_s0();
     let mut ledger0 = make_ledger("s0");
     ledger0.date = String::new(); // empty date
-    write_model_with_sources(&path, "m", &param, &[(ledger0.clone(), s0)]).unwrap();
+    write_model_with_sources(&path, "m", &param, &[(ledger0.clone(), s0)], None).unwrap();
 
     let cfg = EstimatorConfig::default();
     let (_, sources) = update_decay(&path, "m", 365.0, cfg).unwrap();
@@ -228,7 +229,7 @@ fn commit_update_preserves_other_models() {
     }
     // Write "m" with sources into a fresh store (overwrite).
     let path2 = dir.path().join("m2.parquet");
-    write_model_with_sources(&path2, "m", &param, &[(ledger0.clone(), s0.clone())]).unwrap();
+    write_model_with_sources(&path2, "m", &param, &[(ledger0.clone(), s0.clone())], None).unwrap();
 
     let cfg = EstimatorConfig::default();
     let s1 = make_stats_s1();
@@ -269,7 +270,6 @@ fn acceptance_gate_rule() {
 #[cfg(test)]
 #[test]
 fn acceptance_gate_same_model_is_accepted() {
-    use std::fs::File;
     use std::io::BufReader;
     use input::MgfReader;
     use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
@@ -283,11 +283,11 @@ fn acceptance_gate_same_model_is_accepted() {
             .unwrap_or_else(|e| panic!("canonicalize {rel}: {e}"))
     }
 
-    let bsa_mgf = fixture("test-fixtures/test.mgf");
+    let bsa_mgf = fixture("test-fixtures/test.mgf.gz");
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
 
     // Load spectra.
-    let f = File::open(&bsa_mgf).expect("open test.mgf");
+    let f = input::open_buf_maybe_gz(&bsa_mgf).expect("open test.mgf");
     let reader = MgfReader::new(BufReader::new(f));
     let spectra: Vec<_> = reader.filter_map(|r| r.ok()).collect();
 
@@ -306,6 +306,8 @@ fn acceptance_gate_same_model_is_accepted() {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -314,6 +316,8 @@ fn acceptance_gate_same_model_is_accepted() {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let aa = AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)

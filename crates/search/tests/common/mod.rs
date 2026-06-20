@@ -32,6 +32,8 @@ pub fn aa_set() -> model::AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: true,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     let ox = Modification {
         name: "Oxidation".into(),
@@ -40,6 +42,8 @@ pub fn aa_set() -> model::AminoAcidSet {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: None,
+        neutral_losses: Vec::new(),
+        loss_class: 0,
     };
     AminoAcidSetBuilder::new_standard()
         .add_fixed_mod(cam)
@@ -50,7 +54,7 @@ pub fn aa_set() -> model::AminoAcidSet {
 
 /// Load `HCD_QExactive_Tryp.param` and construct a RankScorer.
 ///
-/// The bundled `resources/ionstat/*.param` files were migrated into the Parquet
+/// The bundled legacy `.param` files were migrated into the Parquet
 /// store and removed from the tree; load the retained test fixture instead.
 pub fn rank_scorer() -> RankScorer {
     let param_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -33,6 +33,13 @@ pub enum ScoreMode {
 pub struct SearchParams {
     pub aa_set: AminoAcidSet,
     pub enzyme: Enzyme,
+    /// Additional proteases for a multi-protease digest (default empty). A
+    /// span is accepted as a cleavage site if `enzyme` OR any of these cut
+    /// there — the union of all configured proteases' rules. `enzyme` remains
+    /// the primary (drives model selection and the cleavage-credit PIN
+    /// feature); these only widen candidate enumeration. Empty ⇒ behaviour is
+    /// bit-identical to the single-enzyme path.
+    pub extra_enzymes: Vec<Enzyme>,
     pub min_length: u32,
     pub max_length: u32,
     pub max_missed_cleavages: u32,
@@ -67,6 +74,13 @@ pub struct SearchParams {
     /// Precursor mass calibration mode (`auto`, `on`, `off`). Default `Off`
     /// (opt-in).
     pub precursor_cal_mode: PrecursorCalMode,
+    /// Minimum number of SpecKeys before the precursor-calibration pre-pass
+    /// runs. Below this, calibration is skipped (a small/targeted run can't
+    /// learn a robust file-wide shift). Default
+    /// [`crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS`] (10_000);
+    /// exposed via `--cal-min-spec-keys` so targeted runs can opt in to
+    /// calibrating with fewer spectra.
+    pub cal_min_spec_keys: usize,
     /// Learned file-wide ppm shift applied to observed neutral masses in the
     /// main pass. Stays 0.0 until the pre-pass calibrator runs.
     pub precursor_mass_shift_ppm: f64,
@@ -75,8 +89,42 @@ pub struct SearchParams {
     /// Fallback isolation half-width (Da) used when the mzML lacks
     /// `<isolationWindow>` offsets. Only consulted when `chimeric` is true.
     pub chimeric_isolation_halfwidth_da: f64,
+    /// Max co-isolated SECONDARY peptides to search per chimeric spectrum
+    /// (the chimeric-N lever). The proven default is 2 (one secondary, the
+    /// +101%-Astral setting); higher N searches deeper co-fragments on the
+    /// residual (Astral wide windows co-isolate 3-5+). Only consulted when
+    /// `chimeric` is true.
+    pub chimeric_max_coisolated: usize,
+    /// Averagine-envelope KL gate for accepting a co-isolated MS1 envelope as a
+    /// secondary precursor — lower = stricter/cleaner → fewer spurious
+    /// secondaries. Default 0.3. Only consulted when `chimeric` is true.
+    pub chimeric_max_kl: f32,
     /// Ranking / RawScore source: `Rank` (default) or `Strong` (S3 fused score).
     pub score_mode: ScoreMode,
+    /// Refinement-cascade selection FDR (SCOPING only, NOT a reported FDR):
+    /// proteins with a Pass-1 target PSM at internal-TDC-q <= this are refined.
+    /// Default 0.01 (same internal TDC q as calibration/report). A looser gate
+    /// leaks low-confidence anchors into the entrapment-FDP. Only consulted when
+    /// `--refine` is set.
+    pub refine_select_psm_fdr: f64,
+    /// Candidate-resolution backing: `Ram` (default, in-RAM `Vec<Candidate>` +
+    /// bucket index — byte-identical to the historic path) or `Mmap` (out-of-core
+    /// mmap'd base-peptide index + lazy per-spectrum mod enumeration). Exposed via
+    /// `--candidate-index {ram,mmap}`. Carries the user selection into
+    /// `PreparedSearch`; `Ram` leaves every code path unchanged.
+    pub candidate_index: CandidateIndexMode,
+}
+
+/// Candidate-resolution backing selected by `--candidate-index`. Mirrors
+/// [`crate::match_engine::CandidateBacking`] at the params layer so the binary
+/// can carry the user choice without depending on the engine type directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CandidateIndexMode {
+    /// In-RAM candidate Vec + mass-bucket index. Default; byte-identical path.
+    #[default]
+    Ram,
+    /// Out-of-core mmap'd base-peptide index + lazy mod enumeration.
+    Mmap,
 }
 
 impl SearchParams {
@@ -95,8 +143,9 @@ impl SearchParams {
         Self {
             aa_set,
             enzyme: Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
             min_length: 6,
-            max_length: 40,
+            max_length: 50,
             max_missed_cleavages: 1,
             max_variable_mods_per_peptide: 3,
             precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
@@ -106,10 +155,19 @@ impl SearchParams {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: PrecursorCalMode::Off,
+            cal_min_spec_keys: crate::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            // N=4 is the measured sweet spot on Astral entrapment: +726 PSMs
+            // (+1.4%) over N=2 at flat true-FDP (1.18→1.19%); N=6 adds only +62
+            // more and FDP creeps. N=2 was the original (+101%-vs-no-chimeric)
+            // setting; deeper co-fragments are the diminishing tail.
+            chimeric_max_coisolated: 4,
+            chimeric_max_kl: 0.3,
             score_mode: ScoreMode::Rank,
+            refine_select_psm_fdr: 0.01,
+            candidate_index: CandidateIndexMode::Ram,
         }
     }
 
@@ -154,7 +212,7 @@ mod tests {
         let params = SearchParams::default_tryptic(aa_set);
         assert_eq!(params.enzyme, Enzyme::Trypsin);
         assert_eq!(params.min_length, 6);
-        assert_eq!(params.max_length, 40);
+        assert_eq!(params.max_length, 50);
         assert_eq!(params.max_missed_cleavages, 1);
         assert_eq!(params.max_variable_mods_per_peptide, 3);
         assert_eq!(*params.charge_range.start(), 2);
@@ -171,6 +229,12 @@ mod tests {
         assert_eq!(params.precursor_mass_shift_ppm, 0.0);
         assert!(!params.chimeric);
         assert_eq!(params.chimeric_isolation_halfwidth_da, 1.5);
+        // chimeric-N default = 4, the measured Astral sweet spot (+726 PSMs vs
+        // N=2 at flat true-FDP). N=2 was the original setting; --chimeric-max-
+        // coisolated overrides. KL gate stays 0.3.
+        assert_eq!(params.chimeric_max_coisolated, 4);
+        assert_eq!(params.chimeric_max_kl, 0.3);
         assert_eq!(params.score_mode, ScoreMode::Rank);
+        assert_eq!(params.refine_select_psm_fdr, 0.01);
     }
 }

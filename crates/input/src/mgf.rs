@@ -158,11 +158,20 @@ fn parse_pepmass(value: &str) -> Result<(f64, Option<f32>), ()> {
 }
 
 fn parse_charge(value: &str) -> Result<i32, ()> {
-    let trimmed = value.trim();
-    let stripped = trimmed
+    // Tolerate multi-value MGF charge strings ("2+ and 3+", "2+,3+") — common in
+    // msconvert output. Take the first token's charge rather than dropping the
+    // whole spectrum (the engine still scores it at that charge). Single values
+    // ("2+", "2") are unchanged.
+    let first = value
+        .trim()
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .find(|t| !t.is_empty())
+        .unwrap_or("")
+        .trim();
+    let stripped = first
         .strip_suffix('+')
-        .or_else(|| trimmed.strip_suffix('-'))
-        .unwrap_or(trimmed);
+        .or_else(|| first.strip_suffix('-'))
+        .unwrap_or(first);
     stripped.parse().map_err(|_| ())
 }
 
@@ -241,6 +250,14 @@ mod tests {
     #[test]
     fn parse_charge_no_sign_ok() {
         assert_eq!(parse_charge("4").unwrap(), 4);
+    }
+
+    #[test]
+    fn parse_charge_multi_value_takes_first() {
+        // msconvert-style ambiguous charge — must NOT drop the spectrum.
+        assert_eq!(parse_charge("2+ and 3+").unwrap(), 2);
+        assert_eq!(parse_charge("2+,3+").unwrap(), 2);
+        assert_eq!(parse_charge("3 and 4").unwrap(), 3);
     }
 
     #[test]

@@ -162,7 +162,10 @@ fn write_header<W: Write>(
         "ExpMass".to_string(),
         "CalcMass".to_string(),
         "mass".to_string(),
-        "RawScore".to_string(),
+        // RankScore = the rank-LLR ranking score (formerly "RawScore"; value is
+        // `psm.score`). Renamed so the headline/primary column is "RawScore"
+        // (the fused score, formerly "StrongScore").
+        "RankScore".to_string(),
     ];
     cols.extend_from_slice(&[
         "isotope_error".to_string(),
@@ -211,7 +214,7 @@ fn write_header<W: Write>(
         // orthogonal "lead over the runner-up" signal without touching any
         // existing column. Populated only when a distinct runner-up was scored
         // (i.e. effectively needs internal retention ≥ 2 candidates per scan).
-        "DeltaRawScore".to_string(),
+        "DeltaRankScore".to_string(),
         // ADDITIVE Tailor per-spectrum calibration (Yang et al., JPR 2020):
         // RawScore / (spectrum's top-1% quantile RawScore). Makes RawScores
         // comparable across spectra — the role the removed generating function
@@ -226,6 +229,10 @@ fn write_header<W: Write>(
         // LongestComplementaryLadder = longest consecutive run of complementary
         // cleavage sites (both b and y matched).
         "LongestComplementaryLadder".to_string(),
+        // ComplementaryIonBalance = Σ over bonds where both b_i and y_{n-i}
+        // matched, weighted by intensity-rank agreement 1/(1+|rank_b−rank_y|)
+        // (ADDITIVE; orthogonal to the run-length ladder above).
+        "ComplementaryIonBalance".to_string(),
         // MeanMatchedIntensityRank = mean intensity-rank of matched ions (lower
         // = matched dominant peaks).
         "MeanMatchedIntensityRank".to_string(),
@@ -239,16 +246,41 @@ fn write_header<W: Write>(
         // IntensitySignal = strong-score S1 numerator: cosine similarity between
         // IntensityModel predictions and observed relative intensities (0 without model).
         "IntensitySignal".to_string(),
+        // Tier-2 frag-intensity LLR battery (0 without a frag-intensity model).
+        // FragPredExplained = Σ(matched·pred)/Σpred; FragPredChanceLLR =
+        // Σ matched·pred·max(0,−ln p_chance); FragTopKObserved = top-K hit rate.
+        "FragPredExplained".to_string(),
+        "FragPredChanceLLR".to_string(),
+        "FragTopKObserved".to_string(),
+        // RichIonLLR = decoy-aware per-annotated-ion LLR sum (0 without a rich-ion model).
+        "RichIonLLR".to_string(),
+        // Refinement-cascade additive columns (0 without --refine):
+        // IsRefinement = from Pass-2 search; NumMods = variable-mod count;
+        // RefinementModClass = mod-class id for subgroup-FDR grouping.
+        "IsRefinement".to_string(),
+        "NumMods".to_string(),
+        "RefinementModClass".to_string(),
+        // Mod-localization site-determining-ion columns (0 for unmodified
+        // peptides). ModSiteShiftedMatched = matched mod-bearing b/y ions;
+        // ModSiteShiftedFrac = matched/total shifted; ModSiteIntensFrac =
+        // shifted/all matched intensity; ModSiteLocalized = 1 if a bracketing
+        // ion pair localizes the mod; ModSiteDetCount = # site-determining ions.
+        "ModSiteShiftedMatched".to_string(),
+        "ModSiteShiftedFrac".to_string(),
+        "ModSiteIntensFrac".to_string(),
+        "ModSiteLocalized".to_string(),
+        "ModSiteDetCount".to_string(),
         // MassCompetitionEvidence = S2 null term 2: Σ 1/(1+ambiguity+ρ).
         "MassCompetitionEvidence".to_string(),
         // CandidateRankEntropy = S2 listwise: softmax entropy over retained top-K.
         "CandidateRankEntropy".to_string(),
         // ListwiseScoreGap = S2 listwise: top-1 − top-2 RawScore in retained queue.
         "ListwiseScoreGap".to_string(),
-        // StrongScore = S3 fused signal − null (always emitted; ranks when --score strong).
-        "StrongScore".to_string(),
-        // StrongScoreCal = S4 per-spectrum z-scored significance.
-        "StrongScoreCal".to_string(),
+        // RawScore = S3 fused signal − null (formerly "StrongScore"; the
+        // headline/primary score, always emitted; ranks when --score strong).
+        "RawScore".to_string(),
+        // RawScoreCal = S4 per-spectrum z-scored significance (formerly "StrongScoreCal").
+        "RawScoreCal".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -487,6 +519,8 @@ fn write_psm_row<W: Write>(
     write!(writer, "\t{}", psm.features.neutral_loss_ion_count)?;
     write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
     writer.write_all(b"\t")?;
+    write_double(writer, psm.features.complementary_ion_balance as f64)?;
+    writer.write_all(b"\t")?;
     write_double(writer, psm.features.mean_matched_intensity_rank as f64)?;
     write!(writer, "\t{}", psm.features.doubly_charged_matched_ion_count)?;
     writer.write_all(b"\t")?;
@@ -495,6 +529,32 @@ fn write_psm_row<W: Write>(
     write_double(writer, psm.features.chance_match_surprise as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.intensity_signal as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.frag_pred_explained as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.frag_pred_chance_llr as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.frag_topk_observed as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.rich_ion_llr as f64)?;
+    // Refinement-cascade additive columns (0 without --refine); same order as header.
+    write!(
+        writer,
+        "\t{}\t{}\t{}",
+        psm.features.is_refinement, psm.features.num_mods, psm.features.refine_mod_class
+    )?;
+    // Mod-localization site-determining-ion columns (0.0 without a var mod);
+    // same order as the header.
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_shifted_matched as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_shifted_frac as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_intens_frac as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_localized as f64)?;
+    writer.write_all(b"\t")?;
+    write_double(writer, psm.features.mod_site_det_count as f64)?;
     writer.write_all(b"\t")?;
     write_double(writer, psm.features.mass_competition_evidence as f64)?;
     writer.write_all(b"\t")?;
@@ -705,6 +765,7 @@ mod tests {
         SearchParams {
             aa_set,
             enzyme: model::enzyme::Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
             min_length: 6,
             max_length: 40,
             max_missed_cleavages: 1,
@@ -716,10 +777,15 @@ mod tests {
             num_tolerable_termini: 2,
             min_peaks: 10,
             precursor_cal_mode: search::PrecursorCalMode::Auto,
+            cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
             precursor_mass_shift_ppm: 0.0,
             chimeric: false,
             chimeric_isolation_halfwidth_da: 1.5,
+            chimeric_max_coisolated: 2,
+            chimeric_max_kl: 0.3,
             score_mode: search::ScoreMode::Rank,
+            refine_select_psm_fdr: 0.01,
+            candidate_index: search::CandidateIndexMode::Ram,
         }
     }
 
@@ -754,7 +820,7 @@ mod tests {
         // matchedIonRatio and Peptide.
         let expected: Vec<&str> = vec![
             "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "mass",
-            "RawScore", "isotope_error",
+            "RankScore", "isotope_error",
             "peplen", "dm", "absdm",
             "charge2", "charge3",
             "enzN", "enzC", "enzInt",
@@ -764,20 +830,33 @@ mod tests {
             "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
             "matchedIonRatio",
             "EdgeScore",
-            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRawScore", "TailorScore",
+            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRankScore", "TailorScore",
             "PpmGaussianScore",
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
+            "ComplementaryIonBalance",
             "MeanMatchedIntensityRank",
             "DoublyChargedMatchedIonCount",
             "UniqueMatchFraction",
             "ChanceMatchSurprise",
             "IntensitySignal",
+            "FragPredExplained",
+            "FragPredChanceLLR",
+            "FragTopKObserved",
+            "RichIonLLR",
+            "IsRefinement",
+            "NumMods",
+            "RefinementModClass",
+            "ModSiteShiftedMatched",
+            "ModSiteShiftedFrac",
+            "ModSiteIntensFrac",
+            "ModSiteLocalized",
+            "ModSiteDetCount",
             "MassCompetitionEvidence",
             "CandidateRankEntropy",
             "ListwiseScoreGap",
-            "StrongScore",
-            "StrongScoreCal",
+            "RawScore",
+            "RawScoreCal",
             "Peptide", "Proteins",
         ];
 
@@ -795,6 +874,25 @@ mod tests {
             cols, expected,
             "PIN header columns must match the reference fixture column order exactly"
         );
+    }
+
+    /// Additive refinement-cascade columns are always present in the header
+    /// (they carry 0 without `--refine`). Guards Task 2 of the PTM cascade.
+    #[test]
+    fn pin_header_has_refinement_columns() {
+        let params = make_params(2..=3);
+        let spectra: Vec<Spectrum> = vec![];
+        let queues: Vec<TopNQueue> = vec![];
+        let idx = make_empty_search_index();
+
+        let mut buf = Vec::<u8>::new();
+        let cands: Vec<Candidate> = vec![];
+        write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx).unwrap();
+
+        let cols = parse_header(&buf);
+        for col in ["IsRefinement", "NumMods", "RefinementModClass"] {
+            assert!(cols.iter().any(|c| c == col), "header missing column {col}");
+        }
     }
 
     // ── Test 2: decoy PSM gets Label = -1 ────────────────────────────────────
@@ -1054,13 +1152,13 @@ mod tests {
 
         let col_idx = cols
             .iter()
-            .position(|c| c == "DeltaRawScore")
-            .expect("DeltaRawScore column missing");
+            .position(|c| c == "DeltaRankScore")
+            .expect("DeltaRankScore column missing");
 
-        let r1: f64 = rows[0][col_idx].parse().expect("rank-1 DeltaRawScore numeric");
-        let r2: f64 = rows[1][col_idx].parse().expect("rank-2 DeltaRawScore numeric");
-        assert!((r1 - 7.0).abs() < 1e-6, "rank-1 DeltaRawScore should be 7.0, got {r1}");
-        assert_eq!(r2, 0.0, "rank-2 DeltaRawScore should be gated to 0.0, got {r2}");
+        let r1: f64 = rows[0][col_idx].parse().expect("rank-1 DeltaRankScore numeric");
+        let r2: f64 = rows[1][col_idx].parse().expect("rank-2 DeltaRankScore numeric");
+        assert!((r1 - 7.0).abs() < 1e-6, "rank-1 DeltaRankScore should be 7.0, got {r1}");
+        assert_eq!(r2, 0.0, "rank-2 DeltaRankScore should be gated to 0.0, got {r2}");
     }
 
     /// Verify that `longest_y_pct` is formatted with 6 decimal places.

@@ -122,7 +122,7 @@ fn diagnose_peptide_mismatches() {
     let scorer = rank_scorer();
 
     // ── 3. Load spectra ──────────────────────────────────────────────────────
-    let mgf_file = File::open(fixture("test-fixtures/test.mgf")).unwrap();
+    let mgf_file = input::open_buf_maybe_gz(&fixture("test-fixtures/test.mgf.gz")).unwrap();
     let spectra: Vec<_> = MgfReader::new(BufReader::new(mgf_file))
         .filter_map(|r| r.ok())
         .collect();

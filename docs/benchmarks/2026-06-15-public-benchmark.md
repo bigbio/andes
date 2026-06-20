@@ -1,10 +1,10 @@
 # Public benchmark — andes vs the open-source field (2026-06-15)
 
 Head-to-head of **andes** (top-1 and `--chimeric`), **Java MS-GF+ v20240326**,
-**Sage 0.14.7**, **Comet 2025.01** (via OpenMS), and **ProSE** (OpenMS), across
-three datasets spanning high-res HCD and low-res ion-trap CID. Every engine is
-re-scored through **one uniform Percolator** (3.7.1, `--seed 42 -Y`), on the same
-8-thread VM. FDR honesty is verified independently with a 1:1 entrapment search.
+and **Comet 2025.01** (via OpenMS), across three datasets spanning high-res HCD
+and low-res ion-trap CID. Every engine is re-scored through **one uniform
+Percolator** (3.7.1, `--seed 42 -Y`), on the same 8-thread VM. FDR honesty is
+verified independently with a 1:1 entrapment search.
 
 ## Results — PSMs / peptides @ 1% FDR
 
@@ -13,22 +13,24 @@ re-scored through **one uniform Percolator** (3.7.1, `--seed 42 -Y`), on the sam
 | **andes** (`--chimeric`) | **69,968 / 28,442** | **12,043 / 10,654** | **17,879 / 4,706** |
 | **andes** (top-1) | **36,782 / 23,898** | **11,957 / 10,636** | 17,143 / 4,451 |
 | Java MS-GF+ v20240326 | 26,542 / 17,954 | 11,555 / 9,863 | 17,305 / 4,421 |
-| Sage 0.14.7 | 32,091 / 21,398 | 11,232 / 9,481 | 15,653 / 4,202 |
 | Comet 2025.01 | 31,435 / 20,608 | 10,876 / 9,290 | 15,809 / 4,219 |
-| ProSE (OpenMS) | 30,590 / 20,590 | 7,659 / 7,066 | 8,901 / 2,960 |
 
-- **Astral (high-res HCD):** andes top-1 alone beats every competitor on both PSMs
-  and peptides; `--chimeric` (co-isolated second peptides) is +118% over the next
-  engine. Reproduced from native `.raw` and converted mzML alike.
+- **Astral (high-res HCD):** andes top-1 alone beats both Java MS-GF+ and Comet on
+  PSMs and peptides; `--chimeric` (co-isolated second peptides) roughly doubles the
+  top-1 count. Reproduced from native `.raw` and converted mzML alike.
 - **TMT a05058 (low-res ion-trap CID, TMT-labeled):** andes top-1 leads on PSMs
-  **and** peptides. ProSE underperforms — it caps fragment tolerance at 0.1 Da and
-  is designed for high-res fragmentation.
+  **and** peptides.
 - **UPS1 / PXD001819 (low-res CID LFQ):** andes top-1 is within 1% of Java on PSMs
   and ahead on peptides; `--chimeric` takes the PSM lead.
 
 Wall time: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h
-(≈10–40×), on par with the C++/Rust engines (Comet/Sage 1–4 min). andes is the
-only engine here that reads Thermo `.raw` and Bruker timsTOF `.d` natively.
+(≈10–40×), on par with Comet. andes is the only engine here that reads Thermo
+`.raw` and Bruker timsTOF `.d` natively.
+
+> **Models:** these runs use the bundled `resources/models.parquet` — andes's own
+> models trained on public PRIDE data for the covered regimes. A separate
+> 1%-true-entrapment-FDP cross-check (mode-independent) confirms the ordering on
+> the low-res sets: andes ≈ Java MS-GF+, both ahead of Comet.
 
 ## The 1% FDR is real — entrapment validation
 

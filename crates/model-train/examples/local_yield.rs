@@ -1,7 +1,6 @@
 //! Local proof: train a model on the tiny BSA fixture and compare its 1% FDR
 //! yield vs the seed (fallback), plus dump the trained Noise distribution shape.
 //! Run: cargo run -p model-train --example local_yield
-use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 

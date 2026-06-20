@@ -3,7 +3,6 @@
 //! Uses the BSA fixture (test-fixtures/test.mgf + test-fixtures/BSA.fasta)
 //! and the HCD_QExactive_Tryp.param seed model.
 
-use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 

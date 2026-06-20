@@ -46,6 +46,56 @@ Against the canonical open-source engines — **Java MS-GF+ and Comet** — ande
 
 andes is also the only engine here that reads Thermo `.raw` and Bruker timsTOF `.d` natively. Full methodology, per-engine parameters, data URLs, config files, and the entrapment-FDP validation: [`docs/benchmarks/`](docs/benchmarks/).
 
+## How it works
+
+andes is a streaming, multi-pass search cascade that ends in one uniform Percolator rescoring step.
+
+```mermaid
+flowchart TD
+    %% ---- Scoring models (trained offline) ----
+    subgraph TRAIN["Scoring models — trained offline on public data"]
+      direction LR
+      PRIDE[("PRIDE<br/>public datasets")] -->|"SDRF / quantms curation"| TR["andes train<br/>(own model per regime)"]
+      TR --> STORE["models.parquet<br/>per activation × instrument × enzyme × protocol"]
+    end
+
+    %% ---- Inputs ----
+    SPEC["Spectra<br/>mzML · MGF · Thermo .raw · Bruker .d"]
+    DB["FASTA database<br/>target only — decoys auto-generated"]
+
+    %% ---- Candidate generation ----
+    DB --> CAND["Candidate peptides<br/>enzymatic digest + variable mods"]
+    CAND --> IDX{"Candidate index<br/>--candidate-index auto"}
+    IDX -->|"fits memory"| RAM["in-RAM index"]
+    IDX -->|"too large"| MMAP["out-of-core mmap index"]
+
+    %% ---- Pass 1 ----
+    SPEC --> P1["Pass 1 — top-1 search<br/>peptide-spectrum scoring"]
+    RAM --> P1
+    MMAP --> P1
+    STORE -. model selected per spectrum .-> P1
+    P1 --> QUEUE["Top-N PSM queues<br/>+ rich per-PSM features"]
+
+    %% ---- Optional second passes ----
+    QUEUE -->|"--chimeric (opt-in)"| CHIM["Pass 2a — chimeric<br/>recover co-isolated 2nd peptide<br/>from the residual spectrum"]
+    QUEUE -->|"--refine (opt-in)"| REF["Pass 2b — PTM refinement<br/>discovery mods on confident-protein anchors"]
+
+    %% ---- Merge + rescore ----
+    QUEUE --> MERGE["Unified PIN<br/>Pass 1 + chimeric + refine"]
+    CHIM --> MERGE
+    REF --> MERGE
+    MERGE --> PERC["Percolator 3.7.1<br/>semi-supervised rescoring"]
+    PERC --> OUT["FDR-controlled PSMs<br/>q ≤ 0.01 · entrapment-validated"]
+```
+
+1. **Candidate generation.** The FASTA is digested into candidate peptides (with variable mods). The candidate index is chosen automatically — kept in RAM, or mapped out-of-core (`mmap`) when it would exceed available memory — so very large mod searches don't OOM (`--candidate-index {auto,ram,mmap}`).
+2. **Data-driven scoring.** Each spectrum is scored against its candidates with a model **selected per spectrum** by its `(activation, instrument, enzyme, protocol)`. These are andes's **own models, trained offline on public [PRIDE](https://www.ebi.ac.uk/pride/) datasets** curated through the **[quantms](https://github.com/bigbio/quantms)** / SDRF pipeline — not hand-tuned heuristics.
+3. **Pass 1** is the standard top-1 search, emitting top-N PSM queues with rich per-PSM features.
+4. **Optional second passes** (opt-in, off by default, do not change the default engine):
+   - **`--chimeric`** detects co-isolated precursors in each scan's MS1 isolation window and searches the *residual* spectrum (primary peaks removed) for the **second peptide** — recovering co-isolated IDs without wide-window FDR inflation.
+   - **`--refine`** runs a **PTM-discovery** search (oxidation, deamidation, pyro-Glu, acetyl, …) anchored on confident-protein peptides, to rescue modified spectra a closed search misses.
+5. **Merge + rescore.** Pass 1 and any second-pass PSMs are written to **one Percolator PIN**; Percolator does the semi-supervised rescoring and FDR control. The reported 1% FDR is independently **entrapment-validated** (true FDP ≈ 1%).
+
 ## Install
 
 **Option 1 — download a release archive** (recommended):

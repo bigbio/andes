@@ -2,7 +2,7 @@
 //! generation.
 
 use crate::decoy::{
-    build_search_db, decoy_accession_needle, normalize_decoy_prefix, DecoyStrategy,
+    build_search_db, is_decoy_accession_affix, normalize_decoy_prefix, DecoyStrategy,
     DEFAULT_DECOY_SEED,
 };
 use model::protein::ProteinDb;
@@ -16,15 +16,30 @@ pub struct SearchIndex {
     /// replaces the old positional `len()/2` invariant so target-only and
     /// shuffle decoy modes work without a hardcoded 1:1 layout assumption.
     pub decoy_prefix: String,
+    /// Optional decoy-accession SUFFIX (e.g. `"rev"` for quantms/OpenMS
+    /// `<orig>_rev` decoys). When set, a protein is a decoy iff its accession
+    /// starts with `"<decoy_prefix>_"` OR ends with this suffix. `None` =
+    /// andes-native prefix-only decoys. Set with `--decoy-suffix` (typically
+    /// alongside `--decoy-strategy none`) to consume an externally-built
+    /// target+decoy database without generating extra decoys.
+    pub decoy_suffix: Option<String>,
 }
 
 impl SearchIndex {
+    /// Target/decoy membership for `accession` under this index's affix config
+    /// (prefix needle OR optional suffix). Single entry point used by candidate
+    /// generation and the target-protein iterators so RAM and mmap paths agree.
+    pub fn is_decoy_accession(&self, accession: &str) -> bool {
+        is_decoy_accession_affix(accession, &self.decoy_prefix, self.decoy_suffix.as_deref())
+    }
+
     /// Pipeline: target ProteinDb → reversed decoys → concat target+decoy.
     /// Convenience wrapper for the default (Reverse) strategy.
     pub fn from_target_db(target: &ProteinDb, decoy_prefix: &str) -> Self {
         Self::from_target_db_with_strategy(
             target,
             decoy_prefix,
+            None,
             DecoyStrategy::Reverse,
             DEFAULT_DECOY_SEED,
         )
@@ -36,15 +51,15 @@ impl SearchIndex {
     pub fn from_target_db_with_strategy(
         target: &ProteinDb,
         decoy_prefix: &str,
+        decoy_suffix: Option<&str>,
         strategy: DecoyStrategy,
         seed: u64,
     ) -> Self {
         let norm = normalize_decoy_prefix(decoy_prefix);
-        let needle = decoy_accession_needle(decoy_prefix);
         let pre = target
             .proteins
             .iter()
-            .filter(|p| p.accession.starts_with(&needle))
+            .filter(|p| is_decoy_accession_affix(&p.accession, decoy_prefix, decoy_suffix))
             .count();
         match strategy {
             DecoyStrategy::None => {
@@ -79,7 +94,7 @@ impl SearchIndex {
             }
         }
         let db = build_search_db(target, decoy_prefix, strategy, seed);
-        Self { db, decoy_prefix: norm }
+        Self { db, decoy_prefix: norm, decoy_suffix: decoy_suffix.map(str::to_string) }
     }
 
     /// Look up the `Protein` at the given index in the combined target+decoy
@@ -100,11 +115,10 @@ impl SearchIndex {
     /// inputs. For the default Reverse strategy on a clean target FASTA it is
     /// equivalent to the first half of the combined db.
     pub fn iter_target_proteins(&self) -> impl Iterator<Item = &model::protein::Protein> {
-        let needle = decoy_accession_needle(&self.decoy_prefix);
         self.db
             .proteins
             .iter()
-            .filter(move |p| !p.accession.starts_with(&needle))
+            .filter(move |p| !self.is_decoy_accession(&p.accession))
     }
 
     /// Clone the TARGET-only proteins into a fresh `ProteinDb` — every protein
@@ -145,7 +159,11 @@ impl SearchIndex {
     /// `self.db.len() + j`, so callers must offset `other`'s `protein_index`
     /// values by `self.db.len()` when merging its candidates.
     pub fn concat(&self, other: &SearchIndex) -> SearchIndex {
-        SearchIndex { db: self.db.concat(&other.db), decoy_prefix: self.decoy_prefix.clone() }
+        SearchIndex {
+            db: self.db.concat(&other.db),
+            decoy_prefix: self.decoy_prefix.clone(),
+            decoy_suffix: self.decoy_suffix.clone(),
+        }
     }
 }
 
@@ -266,10 +284,10 @@ mod tests {
 
     #[test]
     fn searchindex_concat_keeps_self_decoy_prefix_and_appends_db() {
-        let a = SearchIndex { db: ProteinDb { proteins: vec![] }, decoy_prefix: "XXX".into() };
+        let a = SearchIndex { db: ProteinDb { proteins: vec![] }, decoy_prefix: "XXX".into(), decoy_suffix: None };
         let b = SearchIndex { db: ProteinDb { proteins: vec![
             model::protein::Protein { accession: "P".into(), description: String::new(), sequence: b"AK".to_vec() }
-        ]}, decoy_prefix: "ZZZ".into() };
+        ]}, decoy_prefix: "ZZZ".into(), decoy_suffix: None };
         let c = a.concat(&b);
         assert_eq!(c.db.len(), 1);
         assert_eq!(c.decoy_prefix, "XXX");

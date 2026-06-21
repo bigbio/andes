@@ -6,9 +6,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+#[cfg(feature = "legacy-param-migrate")]
 use std::io::Cursor;
+#[cfg(feature = "legacy-param-migrate")]
 use std::path::Path;
 
+#[cfg(feature = "legacy-param-migrate")]
 use byteorder::{BigEndian, ReadBytesExt};
 
 use crate::gbdt_eval::GbdtPeakModel;
@@ -41,7 +44,7 @@ pub struct Param {
     pub ion_existence_table: FxHashMap<Partition, Vec<f32>>,
     /// Pre-filtered ion-type list per partition (Noise excluded), populated
     /// at load time. Used by `ion_types_for_partition_slice` to avoid
-    /// per-call Vec allocation in the GF DP hot path.
+    /// per-call Vec allocation in the node-scoring DP hot path.
     /// Call `rebuild_cache()` after manually constructing a `Param` in tests
     /// or any context where the cache was not populated during `load_from_bytes`.
     pub partition_ion_types_cache: FxHashMap<Partition, Vec<IonType>>,
@@ -162,7 +165,7 @@ impl Param {
         seg.min(self.num_segments - 1).max(0)
     }
 
-    /// Alias for `segment_num_for` matching the name used by the GF DP code
+    /// Alias for `segment_num_for` matching the name used by the node-scoring DP code
     /// (`param.segment_num(theo_mz, parent_mass)`).
     #[inline]
     pub fn segment_num(&self, peak_mz: f64, parent_mass: f64) -> usize {
@@ -219,7 +222,7 @@ impl Param {
 
     /// Slice-borrowing version of `ion_types_for_partition`. Reads from the
     /// pre-filtered `partition_ion_types_cache` populated at param-load time.
-    /// Zero allocations per call. Used by the GF DP hot path.
+    /// Zero allocations per call. Used by the node-scoring DP hot path.
     pub fn ion_types_for_partition_slice(&self, charge: u8, parent_mass: f64, seg: usize) -> &[IonType] {
         let part = self.partition_for(charge, parent_mass, seg);
         self.partition_ion_types_cache
@@ -231,6 +234,11 @@ impl Param {
     /// Parse a complete big-endian `.param` byte stream (the legacy single-file
     /// binary model format). Errors on buffer underruns, unknown enum names,
     /// missing validation marker, or trailing bytes.
+    ///
+    /// Feature-gated: the default engine build ships no `.param` reader (the
+    /// Parquet `ModelStore` is the canonical format). Enable
+    /// `--features legacy-param-migrate` for the offline one-time migration.
+    #[cfg(feature = "legacy-param-migrate")]
     pub fn load_from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut cursor = Cursor::new(bytes);
         let param = read_param(&mut cursor)?;
@@ -249,6 +257,7 @@ impl Param {
         Ok(param)
     }
 
+    #[cfg(feature = "legacy-param-migrate")]
     pub fn load_from_file(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         Self::load_from_bytes(&bytes)
@@ -264,6 +273,7 @@ impl Param {
     }
 }
 
+#[cfg(feature = "legacy-param-migrate")]
 fn read_param(cursor: &mut Cursor<&[u8]>) -> Result<Param> {
     // -- Section 1: header --
     let version = read_i32(cursor)?;
@@ -644,6 +654,7 @@ pub type Result<T> = std::result::Result<T, ParamParseError>;
 
 /// Read a UTF-16BE string of the given length (in 2-byte code units).
 /// Length 0 → empty string. Non-ASCII code units are rejected.
+#[cfg(feature = "legacy-param-migrate")]
 fn read_utf16be_string(cursor: &mut Cursor<&[u8]>, len: u8) -> Result<String> {
     let mut buf = String::with_capacity(len as usize);
     for _ in 0..len {
@@ -664,20 +675,23 @@ fn read_utf16be_string(cursor: &mut Cursor<&[u8]>, len: u8) -> Result<String> {
     Ok(buf)
 }
 
-// --- low-level read helpers ---
+// --- low-level read helpers (legacy `.param` reader only) ---
 
+#[cfg(feature = "legacy-param-migrate")]
 fn read_i32(cursor: &mut Cursor<&[u8]>) -> Result<i32> {
     let pos = cursor.position() as usize;
     cursor.read_i32::<BigEndian>()
         .map_err(|_| ParamParseError::UnexpectedEof { offset: pos, needed: 4 })
 }
 
+#[cfg(feature = "legacy-param-migrate")]
 fn read_f32(cursor: &mut Cursor<&[u8]>) -> Result<f32> {
     let pos = cursor.position() as usize;
     cursor.read_f32::<BigEndian>()
         .map_err(|_| ParamParseError::UnexpectedEof { offset: pos, needed: 4 })
 }
 
+#[cfg(feature = "legacy-param-migrate")]
 fn read_bool(cursor: &mut Cursor<&[u8]>) -> Result<bool> {
     let pos = cursor.position() as usize;
     let b = cursor.read_u8()
@@ -686,7 +700,8 @@ fn read_bool(cursor: &mut Cursor<&[u8]>) -> Result<bool> {
 }
 
 /// Read a single signed byte as the length prefix for a UTF-16BE string.
-/// Java's `readByte` returns `i8`; values < 0 are illegal here.
+/// The on-disk length prefix is a signed byte; negative values are illegal.
+#[cfg(feature = "legacy-param-migrate")]
 fn read_i8_as_u8(cursor: &mut Cursor<&[u8]>) -> Result<u8> {
     let pos = cursor.position() as usize;
     let b = cursor.read_i8()
@@ -761,9 +776,15 @@ mod tests {
         assert_eq!(i.offset(), Some(1.5));
     }
 
+    /// Legacy binary `.param` reader tests. Gated to the offline
+    /// `legacy-param-migrate` feature: the default engine build ships no
+    /// `.param` reader, so these only run with the migration feature on.
+    #[cfg(feature = "legacy-param-migrate")]
+    mod legacy_reader {
+    use super::*;
+
     /// Build a minimal `.param`-style byte buffer that exercises sections
     /// 1-4 (header + tolerance + deconvolution + charge histogram).
-    /// Tasks 7-9 extend this fixture as their tests are added.
     fn buf_sections_1_to_4() -> Vec<u8> {
         let mut b = Vec::new();
         // version
@@ -774,7 +795,7 @@ mod tests {
         // instrument type "LowRes" — len 6
         b.push(6);
         for c in b"LowRes" { b.push(0); b.push(*c); }
-        // enzyme "Tryp" — len 4 (Java's short name for Trypsin)
+        // enzyme "Tryp" — len 4 (the format's short name for Trypsin)
         b.push(4);
         for c in b"Tryp" { b.push(0); b.push(*c); }
         // protocol "Standard" — len 8
@@ -1009,6 +1030,7 @@ mod tests {
             other => panic!("expected BadEnum, got {:?}", other),
         }
     }
+    } // mod legacy_reader
 
     fn make_param() -> Param {
         use model::activation::ActivationMethod;

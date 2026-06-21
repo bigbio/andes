@@ -26,7 +26,7 @@ pub struct AminoAcidSet {
     /// dominating its cost. Same hashbrown internals, faster hasher.
     table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>>,
     /// Per-location flattened AA lists, precomputed at build time. Avoids
-    /// per-call rebuild in the GF DP hot path (PrimitiveAaGraph::new).
+    /// per-call rebuild in the node-scoring DP hot path (PrimitiveAaGraph::new).
     aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>>,
     has_cterm_mods: bool,
     min_aa_mass: f64,
@@ -193,7 +193,7 @@ impl AminoAcidSet {
 
     /// Borrow the precomputed AA list for `location` as a slice. Avoids
     /// the per-call Vec allocation that `aa_list_for` performs. Used in the
-    /// GF DP hot path (`PrimitiveAaGraph::new`).
+    /// node-scoring DP hot path (`PrimitiveAaGraph::new`).
     pub fn cached_aa_list(&self, location: ModLocation) -> &[AminoAcid] {
         self.aa_lists_cache
             .get(&location)
@@ -252,18 +252,15 @@ impl AminoAcidSet {
             * prob_per_aa
     }
 
-    /// Compute and store cleavage credits/penalties from the given enzyme's
-    /// efficiency values.
+    /// Store per-cleavage-site log-odds scores derived from the enzyme's
+    /// efficiency `e` and the background cleavage-site probability `p`.
     ///
-    /// Formula:
-    /// ```text
-    /// peptideCleavageCredit = round(log(efficiency / probCleavageSites))
-    /// peptideCleavagePenalty = round(log((1-efficiency) / (1-probCleavageSites)))
-    /// neighboringAACleavageCredit = round(log(neighEfficiency / probCleavageSites))
-    /// neighboringAACleavagePenalty = round(log((1-neighEfficiency) / (1-probCleavageSites)))
-    /// ```
-    ///
-    /// Both efficiencies of `0.0` (no enzyme) → all fields stay `0`.
+    /// These are the standard Bernoulli log-likelihood-ratio for "is this
+    /// position a genuine enzymatic cleavage site": rounded `ln(e/p)` when the
+    /// site is cleaved (credit) and rounded `ln((1-e)/(1-p))` when it is not
+    /// (penalty), evaluated for both the peptide termini and the neighbouring
+    /// residues. `e` is andes's chosen enzyme-efficiency prior; `e = 0.0`
+    /// (no enzyme) leaves all four scores at `0`.
     pub fn register_enzyme(
         &mut self,
         enzyme: Enzyme,
@@ -544,7 +541,7 @@ impl AminoAcidSetBuilder {
             .any(|m| matches!(m.location, ModLocation::CTerm | ModLocation::ProtCTerm));
 
         // 5. Precompute the per-location AA lists used by `aa_list_for` and
-        // `cached_aa_list`. Runs once at build time so the GF DP hot path
+        // `cached_aa_list`. Runs once at build time so the node-scoring DP hot path
         // can borrow a slice.
         let mut aa_lists_cache: FxHashMap<ModLocation, Vec<AminoAcid>> = FxHashMap::default();
         let anywhere_list: Vec<AminoAcid> = STANDARD_RESIDUES
@@ -1040,8 +1037,8 @@ mod tests {
     }
 
     #[test]
-    fn acetyl_prot_n_term_appears_in_source_aas_for_gf() {
-        // GF DP source AAs at Prot-N-term must include
+    fn acetyl_prot_n_term_appears_in_source_aas_for_scoring() {
+        // node-scoring DP source AAs at Prot-N-term must include
         // both unmodified residues AND wildcard-Acetyl variants for each
         // residue. Prot-N-term source AAs must include the Anywhere list
         // (locMap propagation) plus Prot-N-term-specific variants.

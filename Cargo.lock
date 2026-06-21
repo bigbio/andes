@@ -1787,6 +1787,7 @@ dependencies = [
  "input",
  "memchr",
  "model",
+ "model-train",
  "parquet",
  "scoring",
  "search",

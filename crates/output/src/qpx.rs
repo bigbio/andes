@@ -51,7 +51,9 @@ use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
 use crate::percolator::PercolatorPsm;
-use crate::pin::format_spec_id;
+use crate::pin::{
+    feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
+};
 use crate::row_context::{iter_ranked_by_rank_score, resolve_accession};
 
 /// QPX format version string written into every file's schema metadata.
@@ -434,7 +436,24 @@ fn build_psms_batch(
             higher_score_better.append_value(true);
             hit_index.append_value(hit as i32);
             peptide_identification_index.append_value(pep_id_index);
-            psm_metavalues.append(true); // empty list
+            // Per-PSM discriminative features (the column OpenMS'
+            // PercolatorAdapter reads). Sourced from the SHARED pin.rs feature
+            // vector so the idparquet carries the SAME features as the PIN.
+            // `rank` (1-based) gates DeltaRankScore exactly as the PIN does.
+            //
+            // Every feature name is written with the `andes:` prefix (mirroring
+            // comet's `COMET:` convention) so OpenMS' PercolatorAdapter collects
+            // them as andes-specific features. The prefix lives ONLY here — the
+            // PIN writer's own column names (in `crate::pin`) are unprefixed.
+            {
+                let mvb = psm_metavalues.values();
+                for (name, value, fmt) in psm_feature_values(psm, ranks[hit]) {
+                    let value_str = format_feature_value(value, fmt);
+                    let prefixed = format!("andes:{name}");
+                    append_metavalue(mvb, &prefixed, &value_str, feature_value_type(fmt));
+                }
+                psm_metavalues.append(true);
+            }
             // One spectrum metavalue: the MS:1001115 scan number (as OpenMS does).
             {
                 let sb = spectrum_metavalues.values();

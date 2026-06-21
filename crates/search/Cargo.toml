@@ -16,5 +16,10 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 smallvec = "1"
 
+[features]
+# Legacy binary `.param` reader, used only by the end-to-end search regression
+# tests that load a real model fixture. Off by default; forwards to scoring.
+legacy-param-migrate = ["scoring_crate/legacy-param-migrate"]
+
 [dev-dependencies]
 tempfile = "3.10"

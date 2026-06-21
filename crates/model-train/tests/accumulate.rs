@@ -30,11 +30,17 @@ fn make_peptide(seq: &[u8]) -> Peptide {
 
 /// Load the bundled HCD_QExactive_Tryp param file and build a RankScorer.
 fn load_hcd_scorer() -> (Param, RankScorer) {
-    let param_path = Path::new(concat!(
+    // Load the hcd_qexactive_tryp model from the canonical Parquet store
+    // (byte-identical to the legacy HCD_QExactive_Tryp.param it was migrated
+    // from — see migration_parity).
+    let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/HCD_QExactive_Tryp.param"
+        "/../../resources/models.parquet"
     ));
-    let param = Param::load_from_file(param_path).expect("load HCD_QExactive_Tryp.param");
+    let store = model_train::store::ModelStore::open(bundled)
+        .expect("open bundled models.parquet");
+    let param = store.load_param("hcd_qexactive_tryp")
+        .expect("load hcd_qexactive_tryp from store");
     let scorer = RankScorer::new(&param);
     (param, scorer)
 }

@@ -23,11 +23,16 @@ use scoring_crate::{param_model::Param, scoring::rank_scorer::RankScorer};
 // ---------------------------------------------------------------------------
 
 fn fixture_param() -> Param {
-    let param_path = Path::new(concat!(
+    // hcd_qexactive_tryp from the canonical Parquet store (byte-identical to
+    // the migrated HCD_QExactive_Tryp.param — see migration_parity).
+    let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/HCD_QExactive_Tryp.param"
+        "/../../resources/models.parquet"
     ));
-    Param::load_from_file(param_path).expect("load HCD_QExactive_Tryp.param")
+    let store = model_train::store::ModelStore::open(bundled)
+        .expect("open bundled models.parquet");
+    store.load_param("hcd_qexactive_tryp")
+        .expect("load hcd_qexactive_tryp from store")
 }
 
 fn make_stats_s0() -> CountStats {
@@ -291,12 +296,8 @@ fn acceptance_gate_same_model_is_accepted() {
     let reader = MgfReader::new(BufReader::new(f));
     let spectra: Vec<_> = reader.filter_map(|r| r.ok()).collect();
 
-    // Load scorer.
-    let param_path = Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/HCD_QExactive_Tryp.param"
-    ));
-    let param = Param::load_from_file(param_path).expect("load param");
+    // Load scorer from the canonical Parquet store.
+    let param = fixture_param();
     let scorer = RankScorer::new(&param);
 
     let cam = Modification {

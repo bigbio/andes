@@ -9,21 +9,22 @@ use model::protocol::Protocol;
 use model::tolerance::Tolerance;
 use std::path::Path;
 
-fn fixture() -> Param {
-    // Load from the local test fixtures directory (not the bundled resources).
-    let param_path = Path::new(concat!(
+/// Open the canonical bundled Parquet store. The slugs loaded below are
+/// byte-identical to the legacy `.param` files they were migrated from.
+fn bundled_store() -> model_train::store::ModelStore {
+    let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/CID_TOF_aLP.param"
+        "/../../resources/models.parquet"
     ));
-    Param::load_from_file(param_path).expect("load fixture CID_TOF_aLP.param")
+    model_train::store::ModelStore::open(bundled).expect("open bundled models.parquet")
+}
+
+fn fixture() -> Param {
+    bundled_store().load_param("cid_tof_alp").expect("load cid_tof_alp from store")
 }
 
 fn fixture2() -> Param {
-    let param_path = Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/HCD_TOF_aLP.param"
-    ));
-    Param::load_from_file(param_path).expect("load fixture HCD_TOF_aLP.param")
+    bundled_store().load_param("hcd_tof_alp").expect("load hcd_tof_alp from store")
 }
 
 /// Construct a minimal `Param` that contains loss-ion entries (loss_class != 0)

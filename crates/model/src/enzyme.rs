@@ -1,5 +1,5 @@
 //! Enzymatic cleavage rules. The 8 canonical variants are pinned by
-//! `tests/enzyme_rules_match_java.rs`. Custom enzymes are deferred.
+//! `tests/enzyme_rules.rs`. Custom enzymes are deferred.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Enzyme {

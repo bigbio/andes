@@ -266,9 +266,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     for ((c, s), n) in &partition_counts {
         println!("    charge={} seg={}: {} partitions", c, s, n);
     }
-    if std::env::var_os("ANDES_TRACE_DUMP_PARTITIONS").is_some()
-        || std::env::var_os("MSGF_TRACE_DUMP_PARTITIONS").is_some()
-    {
+    if std::env::var_os("ANDES_TRACE_DUMP_PARTITIONS").is_some() {
         println!("  ALL partitions (idx, c, pm, seg):");
         for (i, part) in param.partitions.iter().enumerate() {
             println!("    [{}] c={} pm={} seg={}", i, part.charge, part.parent_mass, part.seg_num);
@@ -307,9 +305,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load just the requested scan. Auto-detect format by file extension:
     // `.mzML`/`.mzml` → MzMLReader; anything else (e.g. `.mgf`) → MgfReader.
     // For MGF specifically, fall back to extracting `scan=N` from the TITLE
-    // line when the reader did not populate `Spectrum::scan` (the BSA parity
-    // fixture `test.mgf` has no `SCANS=` field — scan is only encoded in
-    // TITLE, matching what `gf_java_parity.rs` does).
+    // line when the reader did not populate `Spectrum::scan` (some MGF
+    // fixtures have no `SCANS=` field — scan is only encoded in the TITLE).
     let ext = cli
         .spectrum
         .extension()
@@ -622,9 +619,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Extract `scan=N` from an MGF TITLE string (e.g. mzML
-/// `controllerType=0 controllerNumber=1 scan=3416`). Mirrors the helper in
-/// `crates/search/tests/gf_java_parity.rs` — required because the BSA parity
-/// fixture `test.mgf` has no `SCANS=` line, so `Spectrum::scan` is `None`.
+/// `controllerType=0 controllerNumber=1 scan=3416`). Required because some
+/// MGF fixtures have no `SCANS=` line, so `Spectrum::scan` is `None`.
 fn extract_scan_from_title(title: &str) -> Option<i32> {
     title
         .split_ascii_whitespace()

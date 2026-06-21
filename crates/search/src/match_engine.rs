@@ -122,9 +122,9 @@ pub struct PreparedSearch<'a> {
     /// index. Drained into `self.candidates` after each chunk's scan. `None` in
     /// `Ram` mode (the field is never touched, so `Ram` stays unchanged).
     mmap_accum: Option<Mutex<MmapAccumulator>>,
-    /// `params.aa_set` with the search enzyme registered for GF cleavage
+    /// `params.aa_set` with the search enzyme registered for cleavage
     /// scoring. Cheap to clone, but we keep one shared copy here.
-    pub aa_set_for_gf: AminoAcidSet,
+    pub aa_set_for_scoring: AminoAcidSet,
     /// Optional MS1 linkage for the chimeric precursor isotope features.
     /// `None` unless the binary supplied one via
     /// [`Self::with_ms1_link`] under `--chimeric`. When `None` (the default
@@ -222,7 +222,7 @@ impl MmapAccumulator {
 pub struct PreparedParts {
     candidates: Vec<Candidate>,
     bucket_index: BTreeMap<i32, Vec<usize>>,
-    aa_set_for_gf: AminoAcidSet,
+    aa_set_for_scoring: AminoAcidSet,
 }
 
 /// Derive the inclusive `[min_nominal, max_nominal]` nominal-mass bucket bounds
@@ -265,7 +265,7 @@ pub(crate) fn candidate_nominal_bounds(
 
 impl<'a> PreparedSearch<'a> {
     /// Build the per-search state once. Enumerates candidates, builds the
-    /// mass-bucket index, and clones+registers the aa_set for GF cleavage
+    /// mass-bucket index, and clones+registers the aa_set for cleavage
     /// scoring.
     pub fn prepare(
         idx: &'a SearchIndex,
@@ -288,8 +288,8 @@ impl<'a> PreparedSearch<'a> {
 
         // Build mass-bucket index: nominal(peptide.mass() - H2O) → Vec<candidate_idx>.
         //
-        // Uses the same nominal_from convention as the GF mass-bin loop so that
-        // bucket keys align with the GF's mass-bin lookup.
+        // Uses the same nominal_from convention as the node-scoring DP's
+        // nominal-mass binning so that bucket keys align with that lookup.
         // Stores only indices into `candidates` — no cloning, tiny memory overhead.
         let mut bucket_index: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
         for (cand_idx, cand) in candidates.iter().enumerate() {
@@ -297,13 +297,13 @@ impl<'a> PreparedSearch<'a> {
             bucket_index.entry(nominal).or_default().push(cand_idx);
         }
 
-        // Build an aa_set clone with enzyme registered (for GF cleavage scoring).
+        // Build an aa_set clone with enzyme registered (for cleavage scoring).
         // Defaults: peptide_eff = 0.95, neighboring_eff = 0.95.
         // Cloning is cheap (AminoAcidSet is a HashMap of ~20 entries).
         // This avoids mutating the shared SearchParams.aa_set borrow.
-        let mut aa_set_for_gf: AminoAcidSet = params.aa_set.clone();
+        let mut aa_set_for_scoring: AminoAcidSet = params.aa_set.clone();
         if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
-            aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
+            aa_set_for_scoring.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
         PreparedSearch {
@@ -316,7 +316,7 @@ impl<'a> PreparedSearch<'a> {
             backing_mode: CandidateBacking::Ram,
             mmap_index: None,
             mmap_accum: None,
-            aa_set_for_gf,
+            aa_set_for_scoring,
             ms1_link: None,
             intensity_model: None,
             mmap_target_bare_seqs: None,
@@ -368,9 +368,9 @@ impl<'a> PreparedSearch<'a> {
             );
         }
 
-        let mut aa_set_for_gf: AminoAcidSet = params.aa_set.clone();
+        let mut aa_set_for_scoring: AminoAcidSet = params.aa_set.clone();
         if params.enzyme != Enzyme::NoCleavage && params.enzyme != Enzyme::NonSpecific {
-            aa_set_for_gf.register_enzyme(params.enzyme, 0.95, 0.95);
+            aa_set_for_scoring.register_enzyme(params.enzyme, 0.95, 0.95);
         }
 
         // RC1 fix: build the GLOBAL target bare-sequence set ONCE from the full
@@ -392,7 +392,7 @@ impl<'a> PreparedSearch<'a> {
             backing_mode: CandidateBacking::Mmap,
             mmap_index: Some(mmap_index),
             mmap_accum: Some(Mutex::new(MmapAccumulator::default())),
-            aa_set_for_gf,
+            aa_set_for_scoring,
             ms1_link: None,
             intensity_model: None,
             mmap_target_bare_seqs: Some(target_bare_seqs),
@@ -417,7 +417,7 @@ impl<'a> PreparedSearch<'a> {
         PreparedParts {
             candidates: self.candidates,
             bucket_index: self.bucket_index,
-            aa_set_for_gf: self.aa_set_for_gf,
+            aa_set_for_scoring: self.aa_set_for_scoring,
         }
     }
 
@@ -442,7 +442,7 @@ impl<'a> PreparedSearch<'a> {
             backing_mode: CandidateBacking::Ram,
             mmap_index: None,
             mmap_accum: None,
-            aa_set_for_gf: parts.aa_set_for_gf,
+            aa_set_for_scoring: parts.aa_set_for_scoring,
             ms1_link: None,
             intensity_model: None,
             mmap_target_bare_seqs: None,
@@ -502,7 +502,7 @@ impl<'a> PreparedSearch<'a> {
         let fragment_tolerance_da = self.fragment_tolerance_da;
         let candidates = &self.candidates;
         let bucket_index = &self.bucket_index;
-        let aa_set_for_gf = &self.aa_set_for_gf;
+        let aa_set_for_scoring = &self.aa_set_for_scoring;
         // Out-of-core (`Mmap`) backing handles, `None` on the default `Ram` path.
         let mmap_index = self.mmap_index.as_ref();
         let mmap_accum = self.mmap_accum.as_ref();
@@ -520,8 +520,7 @@ impl<'a> PreparedSearch<'a> {
         // per scan. Tests the "fragment theft" hypothesis behind chimeric FDR
         // inflation. Zero cost unless ANDES_CHIMERIC_OVERLAP is set AND --chimeric.
         let chim_overlap = params.chimeric
-            && (std::env::var("ANDES_CHIMERIC_OVERLAP").is_ok()
-                || std::env::var("MSGF_CHIMERIC_OVERLAP").is_ok());
+            && std::env::var("ANDES_CHIMERIC_OVERLAP").is_ok();
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.
@@ -766,10 +765,10 @@ impl<'a> PreparedSearch<'a> {
             // The four credit/penalty values are SearchParams-constant; we
             // resolve them ONCE here. The per-candidate logic becomes four
             // branches over precomputed i32 constants.
-            let enz_credit_neighboring = aa_set_for_gf.neighboring_aa_cleavage_credit();
-            let enz_penalty_neighboring = aa_set_for_gf.neighboring_aa_cleavage_penalty();
-            let enz_credit_peptide = aa_set_for_gf.peptide_cleavage_credit();
-            let enz_penalty_peptide = aa_set_for_gf.peptide_cleavage_penalty();
+            let enz_credit_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_credit();
+            let enz_penalty_neighboring = aa_set_for_scoring.neighboring_aa_cleavage_penalty();
+            let enz_credit_peptide = aa_set_for_scoring.peptide_cleavage_credit();
+            let enz_penalty_peptide = aa_set_for_scoring.peptide_cleavage_penalty();
             let enz_is_c_term = params.enzyme.is_c_term();
             let enz_is_n_term = params.enzyme.is_n_term();
             let enz = params.enzyme;
@@ -1314,7 +1313,7 @@ pub fn run_pass2_coisolation(
                 &prepared.candidates,
                 &prepared.bucket_index,
                 prepared.scorer,
-                &prepared.aa_set_for_gf,
+                &prepared.aa_set_for_scoring,
                 params,
                 prepared.fragment_tolerance_da,
                 prepared.intensity_model.as_deref(),

@@ -4,11 +4,16 @@ use scoring_crate::param_model::{IonType, Param, Partition};
 use std::path::Path;
 
 fn fixture_param() -> Param {
-    let param_path = Path::new(concat!(
+    // hcd_qexactive_tryp from the canonical Parquet store (byte-identical to
+    // the migrated HCD_QExactive_Tryp.param — see migration_parity).
+    let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/HCD_QExactive_Tryp.param"
+        "/../../resources/models.parquet"
     ));
-    Param::load_from_file(param_path).expect("load fixture HCD_QExactive_Tryp.param")
+    let store = model_train::store::ModelStore::open(bundled)
+        .expect("open bundled models.parquet");
+    store.load_param("hcd_qexactive_tryp")
+        .expect("load hcd_qexactive_tryp from store")
 }
 
 fn test_partition_a() -> Partition {

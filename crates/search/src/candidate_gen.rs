@@ -17,7 +17,7 @@ use model::enzyme::Enzyme;
 use model::modification::ModLocation;
 use model::peptide::Peptide;
 use model::protein::Protein;
-use crate::decoy::decoy_accession_needle;
+use crate::decoy::is_decoy_accession_affix;
 use crate::search_index::SearchIndex;
 use crate::search_params::SearchParams;
 
@@ -42,14 +42,15 @@ pub fn enumerate_candidates<'a>(
     params: &'a SearchParams,
     decoy_prefix: &'a str,
 ) -> impl Iterator<Item = Candidate> + 'a {
-    // Decoy membership uses the SHARED needle "<prefix>_" (decoy_accession_needle)
-    // — the SAME test SearchIndex uses — so candidate generation and the index
-    // can never diverge. Decoys are built as "<prefix>_<orig>", so the "_"
-    // delimiter is required: a target accession starting with the bare prefix
-    // (e.g. "XXXfoo", or any accession under a short custom prefix) is NOT a decoy.
-    let needle = decoy_accession_needle(decoy_prefix);
+    // Decoy membership uses the SHARED affix test (prefix needle "<prefix>_" OR
+    // the index's optional decoy suffix) — the SAME test SearchIndex uses — so
+    // candidate generation and the index can never diverge. Native andes decoys
+    // are built as "<prefix>_<orig>" (the "_" delimiter is required, so a target
+    // accession merely starting with the bare prefix is NOT a decoy); the suffix
+    // form recognizes externally-built decoys (e.g. quantms "<orig>_rev").
+    let suffix = idx.decoy_suffix.clone();
     idx.db.proteins.iter().enumerate().flat_map(move |(p_idx, protein)| {
-        let is_decoy = protein.accession.starts_with(&needle);
+        let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix.as_deref());
         enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
     })
 }

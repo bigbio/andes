@@ -221,6 +221,7 @@ pub fn build_refinement_index(
     SearchIndex {
         db,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
+        decoy_suffix: None,
     }
 }
 
@@ -261,6 +262,7 @@ pub fn build_peptide_anchored_index(
     SearchIndex {
         db: combined,
         decoy_prefix: crate::decoy::normalize_decoy_prefix(decoy_prefix),
+        decoy_suffix: None,
     }
 }
 
@@ -1570,12 +1572,13 @@ mod tests {
         let p1_index = SearchIndex {
             db: ProteinDb { proteins: vec![protein("P0", b"PEPTIDEK")] },
             decoy_prefix: "XXX".into(),
+            decoy_suffix: None,
         };
         let mut p1_queues = vec![queue_with(vec![psm(0, 0, 40.0)])];
 
         // Refine: 1 modified candidate (its OWN protein 0 = BASEPEP_0), one PSM (rank 22) on spectrum 0.
         let refine = RefinementOutput {
-            index: SearchIndex { db: ProteinDb { proteins: vec![protein("BASEPEP_0", b"PEPTIDEK")] }, decoy_prefix: "XXX".into() },
+            index: SearchIndex { db: ProteinDb { proteins: vec![protein("BASEPEP_0", b"PEPTIDEK")] }, decoy_prefix: "XXX".into(), decoy_suffix: None },
             candidates: vec![cand(0, false)],   // protein_index 0 in the refine db
             queues: vec![queue_with(vec![psm(0, 0, 22.0)])], // candidate_idxs=[0], spectrum 0
             global_spectrum_indices: vec![0],
@@ -1605,6 +1608,7 @@ mod tests {
         let p1_index = SearchIndex {
             db: ProteinDb { proteins: vec![protein("P0", b"AAAK"), protein("P1", b"BBBK")] }, // prot_offset = 2
             decoy_prefix: "XXX".into(),
+            decoy_suffix: None,
         };
         let mut p1_queues = vec![queue_with(vec![psm(0, 0, 40.0)])];
 
@@ -1615,6 +1619,7 @@ mod tests {
             index: SearchIndex {
                 db: ProteinDb { proteins: vec![protein("BASEPEP_0", b"PEPTIDEK"), protein("BASEPEP_1", b"SAMPLEK")] },
                 decoy_prefix: "XXX".into(),
+                decoy_suffix: None,
             },
             candidates: vec![cand(0, false), cand(1, false)],
             queues: vec![queue_with(vec![shared])],

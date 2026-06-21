@@ -107,6 +107,104 @@ pub fn format_spec_id(spec_id: &str, scan: i32, rank: u32, row_idx: usize, multi
     }
 }
 
+// ── shared per-PSM feature vector ──────────────────────────────────────────────
+
+/// How a feature value is rendered (PIN bytes + QPX `value_type`).
+///
+/// This is the SINGLE source of truth for the per-PSM discriminative feature
+/// formatting, shared by the PIN writer (here) and the QPX `.idparquet` writer
+/// (`crate::qpx`) so the two never diverge in which features they emit or how
+/// they format them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FeatureFmt {
+    /// Integer value. PIN: `{}`. QPX `value_type` = `"int"`.
+    Int,
+    /// General `%.6g`-style double (see [`write_double`]). PIN: `write_double`.
+    /// QPX `value_type` = `"double"`.
+    Double,
+    /// Fixed 6-decimal double (`{:.6}`). Used only by `longest_y_pct` to match
+    /// the historical PIN byte layout. QPX `value_type` = `"double"`.
+    Fixed6,
+}
+
+/// One per-PSM discriminative feature: `(name, value, fmt)`.
+pub type Feature = (&'static str, f64, FeatureFmt);
+
+/// Compute the ordered per-PSM discriminative feature vector for one PSM.
+///
+/// This is the SINGLE source of truth for andes's Percolator feature set,
+/// consumed by BOTH the PIN writer (`write_psm_row`) and the QPX `.idparquet`
+/// writer (`crate::qpx::build_psms_batch`, into the `psm_metavalues` column) so
+/// the discriminative power of the PIN and the idparquet never diverge.
+///
+/// The list intentionally EXCLUDES the columns OpenMS' PercolatorAdapter adds
+/// generically (SpecId / Label / ScanNr / ExpMass / CalcMass / mass / peplen /
+/// dm / absdm / the charge one-hots / enzN / enzC / enzInt) and the
+/// non-numeric Peptide / Proteins columns. It DOES include `RankScore` and
+/// `isotope_error` (the two numeric per-PSM signals the PIN writes in its
+/// leading block) plus the entire fragment/error/strong-score feature block.
+///
+/// `rank` is the 1-based rank used to gate `DeltaRankScore` to the rank-1 row
+/// (mirroring the PIN writer), so the value matches the PIN byte-for-byte.
+pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
+    use FeatureFmt::{Double, Fixed6, Int};
+    let f = &psm.features;
+    // RankScore: the integer-rounded ranking score (matches the PIN `RankScore`
+    // column, which writes `psm.score.round() as i32`).
+    let rank_score = psm.score.round() as i32 as f64;
+    // DeltaRankScore is per-spectrum and emitted only on the rank-1 row.
+    let delta_rank_score = if rank == 1 { f.delta_raw_score as f64 } else { 0.0 };
+    vec![
+        ("RankScore", rank_score, Int),
+        ("isotope_error", psm.isotope_offset as f64, Int),
+        ("NumMatchedMainIons", f.num_matched_main_ions as f64, Int),
+        ("longest_b", f.longest_b as f64, Int),
+        ("longest_y", f.longest_y as f64, Int),
+        ("longest_y_pct", f.longest_y_pct as f64, Fixed6),
+        ("ExplainedIonCurrentRatio", f.explained_ion_current_ratio as f64, Double),
+        ("NTermIonCurrentRatio", f.n_term_ion_current_ratio as f64, Double),
+        ("CTermIonCurrentRatio", f.c_term_ion_current_ratio as f64, Double),
+        ("MS2IonCurrent", f.ms2_ion_current as f64, Double),
+        ("IsolationWindowEfficiency", f.isolation_window_efficiency as f64, Double),
+        ("MeanErrorTop7", f.mean_error_top7 as f64, Double),
+        ("StdevErrorTop7", f.stdev_error_top7 as f64, Double),
+        ("MeanRelErrorTop7", f.mean_rel_error_top7 as f64, Double),
+        ("StdevRelErrorTop7", f.stdev_rel_error_top7 as f64, Double),
+        ("matchedIonRatio", f.matched_ion_ratio as f64, Double),
+        ("EdgeScore", f.edge_score as f64, Int),
+        ("PrecursorIsotopeKL", f.precursor_isotope_kl as f64, Double),
+        ("PrecursorSNR", f.precursor_snr as f64, Double),
+        ("DeltaRankScore", delta_rank_score, Double),
+        ("TailorScore", f.tailor_score as f64, Double),
+        ("PpmGaussianScore", f.ppm_gaussian_score as f64, Double),
+        ("NeutralLossIonCount", f.neutral_loss_ion_count as f64, Int),
+        ("LongestComplementaryLadder", f.longest_complementary_ladder as f64, Int),
+        ("ComplementaryIonBalance", f.complementary_ion_balance as f64, Double),
+        ("MeanMatchedIntensityRank", f.mean_matched_intensity_rank as f64, Double),
+        ("DoublyChargedMatchedIonCount", f.doubly_charged_matched_ion_count as f64, Int),
+        ("UniqueMatchFraction", f.unique_match_fraction as f64, Double),
+        ("ChanceMatchSurprise", f.chance_match_surprise as f64, Double),
+        ("IntensitySignal", f.intensity_signal as f64, Double),
+        ("FragPredExplained", f.frag_pred_explained as f64, Double),
+        ("FragPredChanceLLR", f.frag_pred_chance_llr as f64, Double),
+        ("FragTopKObserved", f.frag_topk_observed as f64, Double),
+        ("RichIonLLR", f.rich_ion_llr as f64, Double),
+        ("IsRefinement", f.is_refinement as f64, Int),
+        ("NumMods", f.num_mods as f64, Int),
+        ("RefinementModClass", f.refine_mod_class as f64, Int),
+        ("ModSiteShiftedMatched", f.mod_site_shifted_matched as f64, Double),
+        ("ModSiteShiftedFrac", f.mod_site_shifted_frac as f64, Double),
+        ("ModSiteIntensFrac", f.mod_site_intens_frac as f64, Double),
+        ("ModSiteLocalized", f.mod_site_localized as f64, Double),
+        ("ModSiteDetCount", f.mod_site_det_count as f64, Double),
+        ("MassCompetitionEvidence", f.mass_competition_evidence as f64, Double),
+        ("CandidateRankEntropy", f.candidate_rank_entropy as f64, Double),
+        ("ListwiseScoreGap", f.listwise_score_gap as f64, Double),
+        ("RawScore", f.strong_score as f64, Double),
+        ("RawScoreCal", f.strong_score_cal as f64, Double),
+    ]
+}
+
 // ── public API ───────────────────────────────────────────────────────────────
 
 /// Write all PSMs to a Percolator `.pin` file at `output_path`.
@@ -319,6 +417,34 @@ fn write_header<W: Write>(
     writeln!(writer, "{}", cols.join("\t"))
 }
 
+/// Format a feature value to a string using the SAME rules the PIN writer uses,
+/// so the QPX `psm_metavalues` strings and the PIN columns are byte-consistent.
+///
+/// - [`FeatureFmt::Int`]: integer (`{}` on the rounded value).
+/// - [`FeatureFmt::Double`]: `%.6g`-style via [`write_double`].
+/// - [`FeatureFmt::Fixed6`]: `{:.6}` fixed point.
+pub fn format_feature_value(value: f64, fmt: FeatureFmt) -> String {
+    match fmt {
+        FeatureFmt::Int => format!("{}", value.round() as i64),
+        FeatureFmt::Fixed6 => format!("{:.6}", value),
+        FeatureFmt::Double => {
+            let mut buf = Vec::with_capacity(16);
+            // write_double is infallible for an in-memory Vec.
+            write_double(&mut buf, value).expect("write_double to Vec is infallible");
+            String::from_utf8(buf).expect("write_double emits ASCII")
+        }
+    }
+}
+
+/// QPX `value_type` string for a feature format (mirrors a comparison engine's convention:
+/// `"int"` for integers, `"double"` for floats).
+pub fn feature_value_type(fmt: FeatureFmt) -> &'static str {
+    match fmt {
+        FeatureFmt::Int => "int",
+        FeatureFmt::Double | FeatureFmt::Fixed6 => "double",
+    }
+}
+
 // ── per-spectrum rows ──────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -472,122 +598,30 @@ fn write_psm_row<W: Write>(
     let enz_int = count_internal_enzymatic(&residues, params.enzyme);
     write!(writer, "\t{}\t{}\t{}", enz_n, enz_c, enz_int)?;
 
-    // 4 fragment-coverage feature columns:
-    // NumMatchedMainIons, longest_b, longest_y, longest_y_pct
-    write!(
-        writer,
-        "\t{}\t{}\t{}\t{:.6}",
-        psm.features.num_matched_main_ions,
-        psm.features.longest_b,
-        psm.features.longest_y,
-        psm.features.longest_y_pct,
-    )?;
-    // 9 feature columns from psm.features:
-    // ExplainedIonCurrentRatio, NTermIonCurrentRatio, CTermIonCurrentRatio,
-    // MS2IonCurrent, IsolationWindowEfficiency,
-    // MeanErrorTop7, StdevErrorTop7, MeanRelErrorTop7, StdevRelErrorTop7
+    // Fragment/error/strong-score feature block — written from the SHARED
+    // per-PSM feature vector (`psm_feature_values`) so the PIN and the QPX
+    // `.idparquet` (`crate::qpx`, `psm_metavalues` column) can never diverge.
     //
-    // IsolationWindowEfficiency is always 0.0 (not available from the Spectrum object).
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.explained_ion_current_ratio as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.n_term_ion_current_ratio as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.c_term_ion_current_ratio as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.ms2_ion_current as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.isolation_window_efficiency as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mean_error_top7 as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.stdev_error_top7 as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mean_rel_error_top7 as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.stdev_rel_error_top7 as f64)?;
-
-    // matchedIonRatio (the GF-derived lnDeltaSpecEValue is no longer emitted).
-    writer.write_all(b"\t")?;
-    write_double(writer, matched_ion_ratio)?;
-
-    // EdgeScore: additive Percolator feature (Kim et al., Nat Commun 5:5277, 2014).
-    writer.write_all(b"\t")?;
-    write!(writer, "{}", psm.features.edge_score)?;
-
-    // PrecursorIsotopeKL, PrecursorSNR: additive chimeric MS1 precursor-envelope
-    // features. 0.0 unless `--chimeric` populated them from a linked MS1.
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.precursor_isotope_kl as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.precursor_snr as f64)?;
-
-    // DeltaRawScore: additive top-1 dominance feature. Emitted on the rank-1
-    // row only (mirrors lnDeltaSpecEValue's rank gating); 0.0 for rank > 1.
-    // The value is a per-spectrum scalar stored identically on every retained
-    // PSM by the match engine, so gating on rank avoids double-attributing it.
-    let delta_raw_score = if rank == 1 { psm.features.delta_raw_score as f64 } else { 0.0 };
-    writer.write_all(b"\t")?;
-    write_double(writer, delta_raw_score)?;
-
-    // TailorScore: additive per-spectrum calibration. Emitted on every row
-    // (unlike DeltaRawScore) — each PSM has its own RawScore, so each row's
-    // TailorScore = that PSM's RawScore / the spectrum's shared denominator.
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.tailor_score as f64)?;
-
-    // Strong-score Stage-1 bolt-ons (additive, per-PSM).
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.ppm_gaussian_score as f64)?;
-    write!(writer, "\t{}", psm.features.neutral_loss_ion_count)?;
-    write!(writer, "\t{}", psm.features.longest_complementary_ladder)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.complementary_ion_balance as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mean_matched_intensity_rank as f64)?;
-    write!(writer, "\t{}", psm.features.doubly_charged_matched_ion_count)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.unique_match_fraction as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.chance_match_surprise as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.intensity_signal as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.frag_pred_explained as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.frag_pred_chance_llr as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.frag_topk_observed as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.rich_ion_llr as f64)?;
-    // Refinement-cascade additive columns (0 without --refine); same order as header.
-    write!(
-        writer,
-        "\t{}\t{}\t{}",
-        psm.features.is_refinement, psm.features.num_mods, psm.features.refine_mod_class
-    )?;
-    // Mod-localization site-determining-ion columns (0.0 without a var mod);
-    // same order as the header.
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mod_site_shifted_matched as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mod_site_shifted_frac as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mod_site_intens_frac as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mod_site_localized as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mod_site_det_count as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.mass_competition_evidence as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.candidate_rank_entropy as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.listwise_score_gap as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.strong_score as f64)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, psm.features.strong_score_cal as f64)?;
+    // `psm_feature_values` returns the full ordered feature list; its first two
+    // entries (`RankScore`, `isotope_error`) are written inline above in their
+    // historical leading-block positions, so this loop skips them and emits the
+    // tail (`NumMatchedMainIons` … `RawScoreCal`) — the exact PIN column order.
+    //
+    // `matched_ion_ratio` is bound above for the doc cross-reference; the shared
+    // list re-derives the identical value, so the binding is intentionally inert
+    // here (silence the unused-variable lint without changing byte output).
+    let _ = matched_ion_ratio;
+    let features = psm_feature_values(psm, rank);
+    debug_assert_eq!(features[0].0, "RankScore");
+    debug_assert_eq!(features[1].0, "isotope_error");
+    for &(_name, value, fmt) in &features[2..] {
+        writer.write_all(b"\t")?;
+        match fmt {
+            FeatureFmt::Int => write!(writer, "{}", value.round() as i64)?,
+            FeatureFmt::Fixed6 => write!(writer, "{:.6}", value)?,
+            FeatureFmt::Double => write_double(writer, value)?,
+        }
+    }
 
     // Peptide column (always one).
     // Proteins column(s): one tab-separated accession per candidate_idx.

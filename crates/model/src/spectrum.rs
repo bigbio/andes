@@ -23,8 +23,8 @@ pub struct Spectrum {
     /// Activation method recorded in the source file (mzML `<activation>`
     /// cvParam, or `ACTIVATION=` in MGF). `None` when the source doesn't
     /// record one. This is *informational* — used by the CLI binary to
-    /// auto-route to the matching bundled `.param` file when the user
-    /// hasn't overridden `--param-file`/`--fragmentation`/`--instrument`.
+    /// auto-route to the matching bundled model when the user
+    /// hasn't overridden `--fragmentation`/`--instrument`.
     /// It is NOT used by the scoring loop directly.
     pub activation_method: Option<ActivationMethod>,
     /// Isolation-window lower offset in Da (selected m/z − lower = window start).

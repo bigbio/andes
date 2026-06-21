@@ -9,8 +9,7 @@ use model::protocol::Protocol;
 use model::tolerance::Tolerance;
 use std::path::Path;
 
-/// Open the canonical bundled Parquet store. The slugs loaded below are
-/// byte-identical to the legacy `.param` files they were migrated from.
+/// Open the canonical bundled Parquet store.
 fn bundled_store() -> model_train::store::ModelStore {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),

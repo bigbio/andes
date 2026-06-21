@@ -1,14 +1,13 @@
 //! Equivalence gate: for every (ActivationMethod × InstrumentType × Protocol)
-//! combination that the old `resolve_bundled_param_for_activation` ladder
-//! handles, assert that the new store-based selection returns the same
-//! `model_id` as the lowercased filename stem of the old path.
+//! combination that the reference resolution ladder handles, assert that the
+//! store-based selection returns the same `model_id`.
 //!
-//! This test is the safety proof that switching the search binary from
-//! `Param::load_from_file` to `ModelStore::load_param` is behavior-preserving
-//! for the bundled store.
+//! This test is the safety proof that the store-based model selection
+//! (`ModelStore::load_param`) returns the correct bundled model for each
+//! activation/instrument/protocol combination.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use model::{activation::ActivationMethod, InstrumentType};
 use model_train::{
@@ -40,18 +39,19 @@ fn protocol_suffix(p: Protocol) -> &'static str {
     }
 }
 
-/// Replicate the OLD 5-level ladder (resolve_bundled_param logic).
-fn resolve_bundled_param_old(
+/// Reference 5-level resolution ladder, expressed directly as lowercase
+/// `model_id` strings (the canonical identifiers in the parquet store).
+fn resolve_model_id_old(
     fragmentation: Fragmentation,
     instrument: Instrument,
     protocol: Protocol,
-) -> PathBuf {
+) -> String {
     // Step 0: all-defaults short-circuit.
     if fragmentation == Fragmentation::Auto
         && instrument == Instrument::LowRes
         && protocol == Protocol::Auto
     {
-        return canonicalize_bundled("HCD_QExactive_Tryp.param");
+        return "hcd_qexactive_tryp".to_string();
     }
 
     let frag = match fragmentation {
@@ -67,36 +67,41 @@ fn resolve_bundled_param_old(
         Instrument::Tof       => "TOF",
         Instrument::QExactive => "QExactive",
     };
-    // H5: the MS-GF+ HCD/LowRes → QExactive "upgrade" rule is intentionally
-    // removed (it silently scored ion-trap HCD with the high-res model). With
-    // no upgrade, frag="HCD"/inst="LowRes" finds no HCD_LowRes_Tryp model and
-    // falls through to the CID_LowRes_Tryp final-fallback below — the correct
-    // low-res b/y model. (No `inst = "QExactive"` reassignment.)
+    // H5: low-res (ion-trap) HCD is NOT routed to the high-res model. With no
+    // hcd_lowres model bundled, frag="HCD"/inst="LowRes" finds no exact match
+    // and falls through to the cid_lowres_tryp final-fallback below — the
+    // correct low-res b/y model.
 
     let prot_suffix = protocol_suffix(protocol);
-    let exact = format!("{frag}_{inst}_Tryp{prot_suffix}.param");
-    if let Ok(p) = try_bundled(&exact) { return p; }
+    let exact = model_id(frag, inst, prot_suffix);
+    if let Some(id) = try_bundled(&exact) { return id; }
 
     if !prot_suffix.is_empty() {
-        let no_prot = format!("{frag}_{inst}_Tryp.param");
-        if let Ok(p) = try_bundled(&no_prot) { return p; }
+        let no_prot = model_id(frag, inst, "");
+        if let Some(id) = try_bundled(&no_prot) { return id; }
     }
 
     // Final fallback ladder.
     let final_fallback = match (frag, inst) {
-        ("HCD", "TOF") | ("HCD", "HighRes") => "CID_TOF_Tryp.param",
-        ("ETD", _)                           => "ETD_LowRes_Tryp.param",
-        _                                    => "CID_LowRes_Tryp.param",
+        ("HCD", "TOF") | ("HCD", "HighRes") => "cid_tof_tryp",
+        ("ETD", _)                           => "etd_lowres_tryp",
+        _                                    => "cid_lowres_tryp",
     };
-    canonicalize_bundled(final_fallback)
+    final_fallback.to_string()
 }
 
-/// Replicate the OLD resolve_bundled_param_for_activation logic.
+/// Build a lowercase store `model_id` from the (fragmentation, instrument,
+/// protocol-suffix) components, e.g. `("CID","LowRes","_TMT")` → `cid_lowres_tryp_tmt`.
+fn model_id(frag: &str, inst: &str, prot_suffix: &str) -> String {
+    format!("{frag}_{inst}_Tryp{prot_suffix}").to_ascii_lowercase()
+}
+
+/// Reference resolution ladder keyed on (activation, instrument, protocol).
 fn resolve_for_activation_old(
     method: ActivationMethod,
     detected_instrument: Option<InstrumentType>,
     protocol: Protocol,
-) -> PathBuf {
+) -> String {
     let frag = match method {
         ActivationMethod::CID  => Fragmentation::Cid,
         ActivationMethod::ETD  => Fragmentation::Etd,
@@ -113,17 +118,7 @@ fn resolve_for_activation_old(
         Some(InstrumentType::TimsTOF)        => Instrument::Tof,
         None                                 => Instrument::LowRes,
     };
-    resolve_bundled_param_old(frag, inst, protocol)
-}
-
-/// Build a path under resources/legacy-params for a given filename WITHOUT requiring
-/// the file to exist on disk. Used only to derive the lowercased stem for
-/// comparison with the parquet store's model IDs — the .param files themselves
-/// are no longer shipped on disk (they live in models.parquet).
-fn canonicalize_bundled(filename: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/legacy-params")
-        .join(filename)
+    resolve_model_id_old(frag, inst, protocol)
 }
 
 /// Lazily initialized set of model IDs from the bundled parquet store.
@@ -140,31 +135,13 @@ fn bundled_model_ids() -> &'static std::collections::BTreeSet<String> {
     })
 }
 
-/// Check whether a bundled .param file WOULD have existed under the old naming
-/// scheme. Since the files no longer live on disk, we derive the expected
-/// existence from the bundled parquet store: a model exists iff it has an
-/// entry in the store.
-fn try_bundled(filename: &str) -> Result<PathBuf, ()> {
-    // Derive the expected model ID from the filename stem (lowercase).
-    let stem = PathBuf::from(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    if bundled_model_ids().contains(&stem) {
-        Ok(canonicalize_bundled(filename))
+/// Return the `model_id` iff it is present in the bundled parquet store.
+fn try_bundled(model_id: &str) -> Option<String> {
+    if bundled_model_ids().contains(model_id) {
+        Some(model_id.to_string())
     } else {
-        Err(())
+        None
     }
-}
-
-/// Extract the lowercased filename stem from a `.param` path.
-/// e.g. `.../HCD_QExactive_Tryp.param` → `"hcd_qexactive_tryp"`.
-fn stem_of(p: &Path) -> String {
-    p.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default()
 }
 
 // ── new selection helpers ────────────────────────────────────────────────────
@@ -203,27 +180,26 @@ fn protocol_to_experiment_class(p: Protocol) -> BTreeSet<String> {
 /// family, different instrument slug only), where the protocol IS preserved.
 fn normalize_activation_instrument(act: &str, inst: &str) -> (String, String, bool) {
     match (act, inst) {
-        // H5: HCD + LowRes → CID + LowRes. The MS-GF+ instrument-upgrade rule
-        // (→ HCD/QExactive) silently scored ion-trap HCD at high-res tolerance;
-        // there is no hcd_lowres model, so route to the low-res b/y model
-        // (cid_lowres_tryp). Protocol dropped (final-fallback base model).
-        // Intentional divergence from MS-GF+, mirrored in build_selection_key.
+        // H5: HCD + LowRes → CID + LowRes. Low-res (ion-trap) HCD is not routed
+        // to the high-res model; there is no hcd_lowres model, so route to the
+        // low-res b/y model (cid_lowres_tryp). Protocol dropped (final-fallback
+        // base model). Mirrored in build_selection_key.
         ("HCD", "LowRes") => ("CID".into(), "LowRes".into(), true),
-        // HCD + TOF → CID + TOF (HCD_TOF_Tryp.param not bundled; old
-        // final fallback maps (HCD, TOF|HighRes) → CID_TOF_Tryp).
+        // HCD + TOF → CID + TOF (no hcd_tof model bundled; final fallback
+        // maps (HCD, TOF|HighRes) → cid_tof_tryp).
         // Protocol dropped: final fallback returns base model only.
         ("HCD", "TOF") => ("CID".into(), "TOF".into(), true),
-        // CID + QExactive → CID + LowRes (CID_QExactive_Tryp not bundled;
-        // old final fallback default arm → CID_LowRes_Tryp).
+        // CID + QExactive → CID + LowRes (no cid_qexactive model bundled;
+        // final fallback default arm → cid_lowres_tryp).
         // Protocol dropped.
         ("CID", "QExactive") => ("CID".into(), "LowRes".into(), true),
-        // ETD + any non-(LowRes|HighRes) → ETD + LowRes (old final fallback
-        // `("ETD", _)` → ETD_LowRes_Tryp.param). Protocol dropped.
+        // ETD + any non-(LowRes|HighRes) → ETD + LowRes (final fallback
+        // `("ETD", _)` → etd_lowres_tryp). Protocol dropped.
         ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => {
             ("ETD".into(), "LowRes".into(), true)
         }
-        // UVPD + non-QExactive → CID + LowRes (only UVPD_QExactive_Tryp
-        // is bundled; old final fallback default arm → CID_LowRes_Tryp).
+        // UVPD + non-QExactive → CID + LowRes (only uvpd_qexactive_tryp
+        // is bundled; final fallback default arm → cid_lowres_tryp).
         // Protocol dropped.
         ("UVPD", i) if i != "QExactive" => ("CID".into(), "LowRes".into(), true),
         _ => (act.into(), inst.into(), false),
@@ -238,7 +214,7 @@ fn build_key(
     instrument: InstrumentType,
     protocol: Protocol,
 ) -> SelectionKey {
-    // 1. PQD → CID (Java's NewScorerFactory rule).
+    // 1. PQD → CID (PQD is scored with the CID model).
     let act = match method {
         ActivationMethod::PQD => "CID",
         other                 => other.name(),
@@ -324,8 +300,7 @@ fn store_selection_matches_old_ladder_for_all_combos() {
     for &act in &all_activations() {
         for &inst in &all_instruments() {
             for &prot in &all_protocols() {
-                let old_path = resolve_for_activation_old(act, Some(inst), prot);
-                let old_stem = stem_of(&old_path);
+                let old_id = resolve_for_activation_old(act, Some(inst), prot);
 
                 let key = build_key(act, inst, prot);
                 let new_id = select(
@@ -337,9 +312,9 @@ fn store_selection_matches_old_ladder_for_all_combos() {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "hcd_qexactive_tryp".to_string());
 
-                if new_id != old_stem {
+                if new_id != old_id {
                     failures.push(format!(
-                        "{:?}/{:?}/{:?}: old={old_stem} new={new_id}  key=({},{},{},[{:?}])",
+                        "{:?}/{:?}/{:?}: old={old_id} new={new_id}  key=({},{},{},[{:?}])",
                         act, inst, prot,
                         key.activation, key.instrument, key.enzyme,
                         key.experiment_class.iter().collect::<Vec<_>>()
@@ -352,10 +327,9 @@ fn store_selection_matches_old_ladder_for_all_combos() {
     // Also test the `None` instrument (no instrument detected → LowRes).
     for &act in &all_activations() {
         for &prot in &all_protocols() {
-            let old_path = resolve_for_activation_old(act, None, prot);
-            let old_stem = stem_of(&old_path);
+            let old_id = resolve_for_activation_old(act, None, prot);
 
-            // None instrument → LowRes (Java default LOW_RESOLUTION_LTQ).
+            // None instrument → LowRes (low-res default).
             let key = build_key(act, InstrumentType::LowRes, prot);
             let new_id = select(
                 &entries,
@@ -366,9 +340,9 @@ fn store_selection_matches_old_ladder_for_all_combos() {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "hcd_qexactive_tryp".to_string());
 
-            if new_id != old_stem {
+            if new_id != old_id {
                 failures.push(format!(
-                    "{:?}/None/{:?}: old={old_stem} new={new_id}  key=({},{},{},[{:?}])",
+                    "{:?}/None/{:?}: old={old_id} new={new_id}  key=({},{},{},[{:?}])",
                     act, prot,
                     key.activation, key.instrument, key.enzyme,
                     key.experiment_class.iter().collect::<Vec<_>>()

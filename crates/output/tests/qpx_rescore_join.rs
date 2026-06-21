@@ -72,8 +72,7 @@ fn run_bsa_search() -> (
         .build()
         .unwrap();
 
-    // hcd_qexactive_tryp from the canonical Parquet store (byte-identical to
-    // the migrated HCD_QExactive_Tryp.param).
+    // hcd_qexactive_tryp from the canonical Parquet store.
     let store = model_train::store::ModelStore::open(
         &fixture("resources/models.parquet"),
     ).unwrap();

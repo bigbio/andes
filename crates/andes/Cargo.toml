@@ -9,13 +9,6 @@ license.workspace = true
 name = "andes"
 path = "src/bin/andes.rs"
 
-# Diagnostic trace tool: reads the legacy binary `.param` format directly.
-# Built only with the offline `legacy-param-migrate` feature.
-[[bin]]
-name = "andes-trace"
-path = "src/bin/andes-trace.rs"
-required-features = ["legacy-param-migrate"]
-
 [dependencies]
 model = { path = "../model" }
 scoring_crate = { path = "../scoring", package = "scoring" }
@@ -44,13 +37,6 @@ thermo = ["input/thermo"]
 # feature). Not enabled by default: turn on with `--features timstof`. Reading a
 # `.d` needs no vendor runtime (pure Rust). Default builds read mzML/MGF only.
 timstof = ["input/timstof"]
-# Offline legacy binary `.param` support: builds the `andes-trace` diagnostic
-# binary and honors `.param` seed files for `train`. Off by default — the
-# default engine ships no `.param` reader (models live in the Parquet store).
-legacy-param-migrate = [
-    "scoring_crate/legacy-param-migrate",
-    "model-train/legacy-param-migrate",
-]
 
 [dev-dependencies]
 tempfile = "3.10"

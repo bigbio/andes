@@ -13,12 +13,6 @@ byteorder = { workspace = true }
 arrow = "53"
 parquet = "53"
 
-[features]
-# Offline migration of the legacy binary `.param` model format into the
-# canonical Parquet `ModelStore`. NOT enabled by default: the default engine
-# build ships no `.param` reader. Enable for the one-time migration only.
-legacy-param-migrate = []
-
 [dev-dependencies]
 tempfile = "3.10"
 input = { path = "../input" }

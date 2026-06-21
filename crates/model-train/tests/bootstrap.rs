@@ -1,7 +1,7 @@
 //! Integration tests for [`model_train::labeled::bootstrap_labels`].
 //!
 //! Uses the BSA fixture (test-fixtures/test.mgf + test-fixtures/BSA.fasta)
-//! and the HCD_QExactive_Tryp.param seed model.
+//! and the hcd_qexactive_tryp seed model.
 
 use std::io::BufReader;
 use std::path::Path;
@@ -55,8 +55,7 @@ fn bsa_aa_set() -> model::AminoAcidSet {
         .unwrap()
 }
 
-/// Load hcd_qexactive_tryp from the canonical Parquet store (byte-identical
-/// to the migrated HCD_QExactive_Tryp.param — see migration_parity).
+/// Load hcd_qexactive_tryp from the canonical Parquet store.
 fn load_hcd_scorer() -> RankScorer {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),

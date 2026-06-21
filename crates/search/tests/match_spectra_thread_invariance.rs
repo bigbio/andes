@@ -3,6 +3,11 @@
 //! (node scoring + rank_score assignment) runs entirely on one Rayon worker
 //! — there is no FP-accumulation non-determinism across thread counts, only
 //! wall time changes.
+//!
+//! Loads a real `.param` model fixture, so the whole test is gated to the
+//! offline `legacy-param-migrate` feature (default build has no `.param`
+//! reader). Run with `--features legacy-param-migrate`.
+#![cfg(feature = "legacy-param-migrate")]
 
 mod common;
 use common::*;

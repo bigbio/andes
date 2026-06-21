@@ -21,7 +21,7 @@ use model::{
 };
 use output::PercolatorPsm;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use scoring_crate::{Param, RankScorer};
+use scoring_crate::RankScorer;
 use search::{match_spectra, SearchIndex, SearchParams};
 use input::{FastaReader, MgfReader};
 
@@ -72,7 +72,12 @@ fn run_bsa_search() -> (
         .build()
         .unwrap();
 
-    let param = Param::load_from_file(&fixture("test-fixtures/HCD_QExactive_Tryp.param")).unwrap();
+    // hcd_qexactive_tryp from the canonical Parquet store (byte-identical to
+    // the migrated HCD_QExactive_Tryp.param).
+    let store = model_train::store::ModelStore::open(
+        &fixture("resources/models.parquet"),
+    ).unwrap();
+    let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);
 
     let mut params = SearchParams::default_tryptic(aa);

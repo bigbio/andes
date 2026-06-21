@@ -13,9 +13,7 @@
 use input::ThermoRawReader;
 
 fn test_raw_path() -> Option<String> {
-    std::env::var("ANDES_TEST_RAW")
-        .ok()
-        .or_else(|| std::env::var("MSGF_TEST_RAW").ok())
+    std::env::var("ANDES_TEST_RAW").ok()
 }
 
 #[test]

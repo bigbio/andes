@@ -357,7 +357,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_msgf_style_header() {
+    fn parse_pin_header() {
         // Real Percolator 3.7.x header: the PEP column is the abbreviated
         // `posterior_error_prob` (verified against a live percolator:3.7.1 run).
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\

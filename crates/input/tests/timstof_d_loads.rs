@@ -15,7 +15,7 @@
 use input::TimsTofReader;
 
 fn test_d_path() -> Option<std::ffi::OsString> {
-    std::env::var_os("ANDES_TEST_D").or_else(|| std::env::var_os("MSGF_TEST_D"))
+    std::env::var_os("ANDES_TEST_D")
 }
 
 #[test]

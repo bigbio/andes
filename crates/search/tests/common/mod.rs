@@ -54,8 +54,10 @@ pub fn aa_set() -> model::AminoAcidSet {
 
 /// Load `HCD_QExactive_Tryp.param` and construct a RankScorer.
 ///
-/// The bundled legacy `.param` files were migrated into the Parquet
-/// store and removed from the tree; load the retained test fixture instead.
+/// Gated to the offline `legacy-param-migrate` feature: the default build
+/// ships no `.param` reader (models live in the Parquet store). The end-to-end
+/// search regression tests that need a real model run under this feature.
+#[cfg(feature = "legacy-param-migrate")]
 pub fn rank_scorer() -> RankScorer {
     let param_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

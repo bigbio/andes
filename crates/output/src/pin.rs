@@ -863,11 +863,11 @@ mod tests {
 
     // ── Test 1: header columns match the reference fixture ──────────────────
 
-    /// The expected column list is copied verbatim from the reference fixture's
-    /// first line (`test-fixtures/parity/bsa_test_mgf_java.pin`), which uses
-    /// charge2..=charge3 (BSA test uses charge_range 2..=3).
+    /// The expected column list is andes's own PIN schema (defined by
+    /// `write_header`), here pinned for charge2..=charge3 (the BSA test uses
+    /// charge_range 2..=3).
     ///
-    /// Byte-parity note: the fixture header is compared column-by-column below.
+    /// The header is asserted column-by-column below.
     #[test]
     fn pin_header_columns_are_gf_free_schema() {
         // GF-free schema: RawScore is the sole score column; the GF-derived

@@ -1,5 +1,9 @@
-//! End-to-end Phase 4e: BSA.fasta + test.mgf → top-N PSMs.
-//! First full test on real local data.
+//! End-to-end: BSA.fasta + test.mgf → top-N PSMs on real local data.
+//!
+//! Loads a real `.param` model fixture, so the whole test is gated to the
+//! offline `legacy-param-migrate` feature (the default build has no `.param`
+//! reader). Run with `--features legacy-param-migrate`.
+#![cfg(feature = "legacy-param-migrate")]
 
 mod common;
 use common::*;

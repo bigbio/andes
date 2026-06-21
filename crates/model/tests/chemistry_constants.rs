@@ -35,11 +35,13 @@ fn integer_mass_scaler_matches_residue_table_mean() {
     // Sanity-check INTEGER_MASS_SCALER against the 20 standard residues:
     //   ratio = integer_formula_mass / monoisotopic_mass
     //   mean(ratio) ≈ 0.9995.
-    // INTEGER_MASS_SCALER is a PINNED production constant (0.999497) — changing it
-    // would shift integer-mass bins and alter scoring — so it is not required to
-    // exactly equal the recomputed table mean (the residue masses were refined
-    // after the constant was set). The bound below is a loose sanity check; the
-    // exact value is pinned by the `assert_eq!` at the end.
+    // INTEGER_MASS_SCALER (0.999497) is andes's integer-mass scaling factor — a
+    // fixed approximation of this residue-mass-ratio mean, used to map
+    // monoisotopic masses onto integer bins (mass.rs documents the derivation
+    // from the IUPAC residue masses). It is held at a single reproducible f32
+    // across releases because changing it shifts the integer-mass bins; the
+    // loose bound below confirms it stays within ~1e-3 of the residue mean, and
+    // the `assert_eq!` pins the exact reproducible value.
     let compositions: &[(u32, u32, u32, u32, u32, f64)] = &[
         (2,  3, 1, 1, 0, 57.02146),   // G
         (3,  5, 1, 1, 0, 71.03711),   // A

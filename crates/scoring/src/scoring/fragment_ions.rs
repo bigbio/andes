@@ -4,7 +4,7 @@
 //! neutral-loss-shifted b/y ions for residues whose modification declares
 //! `neutral_losses`. Produces `PredictedIon`s (each tagged with a
 //! `loss_class`; 0 = intact) at every requested charge. Also exposes
-//! `ions_for_node` for per-nominal-mass GF DP scoring.
+//! `ions_for_node` for per-nominal-mass node-scoring DP scoring.
 //!
 //! ## Neutral-loss emission (gated, inert by default)
 //!
@@ -57,7 +57,7 @@ pub fn ions_for_node(
 
 /// Callback variant of `ions_for_node`. Calls `f(ion, theo_mz, partition)`
 /// once per (ion, theo_mz) pair without allocating an intermediate Vec.
-/// Used by `directional_node_score` in the GF DP hot path (~5 splits ×
+/// Used by `directional_node_score` in the node-scoring DP hot path (~5 splits ×
 /// 2 directions × ~38k spectra ÷ 12 threads = millions of calls per search).
 ///
 /// `partition` is precomputed per outer-segment iteration (constant for

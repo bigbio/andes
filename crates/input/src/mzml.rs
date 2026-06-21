@@ -2271,9 +2271,9 @@ mod tests {
 
     /// H6: an electron-transfer term + a collisional term within a SINGLE
     /// `<activation>` block is supplemental activation (EThcD/ETciD), NOT pure
-    /// ETD. MS-GF+ gave ETD unconditional precedence here, which under-scored
-    /// the b/y ions the supplemental collision produces. The detector now
-    /// routes such blocks to HCD (b/y). (CID-then-ETD order; mirror of the
+    /// ETD. Giving ETD unconditional precedence here under-scores the b/y
+    /// ions the supplemental collision produces, so the detector routes such
+    /// blocks to HCD (b/y). (CID-then-ETD order; mirror of the
     /// ETD-then-CID `etcid_*` test → confirms order-independence.)
     #[test]
     fn etd_plus_supplemental_collisional_routes_to_hcd() {

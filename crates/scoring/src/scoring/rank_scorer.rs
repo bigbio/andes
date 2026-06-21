@@ -163,7 +163,7 @@ impl RankScorer {
     }
 
     /// Borrow the dense `(IonType, log_table)` pairs for `partition`. Used by
-    /// the GF DP hot path so per-ion scoring is array indexing, not HashMap
+    /// the node-scoring DP hot path so per-ion scoring is array indexing, not HashMap
     /// lookup. Returns empty slice if the partition has no ions.
     pub fn partition_ion_logs(&self, partition: &Partition) -> &[(IonType, Vec<f32>)] {
         self.partition_ion_logs

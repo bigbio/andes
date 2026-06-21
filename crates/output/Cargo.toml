@@ -21,3 +21,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tempfile = "3.10"
 input = { path = "../input" }
 smallvec = "1"
+# End-to-end tests load a real model from the canonical Parquet store.
+model-train = { path = "../model-train" }

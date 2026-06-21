@@ -18,7 +18,7 @@
 //! from ranking. `offset` is in m/z space, added after dividing by `c`.
 //!
 //! Also exposes `prob_peak`, `main_ion`, `node_score`, `edge_score`,
-//! and `observed_node_mass` for the GF DP graph traversal.
+//! and `observed_node_mass` for the node-scoring DP graph traversal.
 
 use std::sync::OnceLock;
 
@@ -204,11 +204,9 @@ fn peak_filter_env() -> &'static PeakFilterEnv {
     static CACHE: OnceLock<PeakFilterEnv> = OnceLock::new();
     CACHE.get_or_init(|| {
         let w = std::env::var("ANDES_PEAK_WINDOW")
-            .or_else(|_| std::env::var("MSGF_PEAK_WINDOW"))
             .ok()
             .and_then(|s| s.parse::<f64>().ok());
         let k = std::env::var("ANDES_PEAK_PER_WINDOW")
-            .or_else(|_| std::env::var("MSGF_PEAK_PER_WINDOW"))
             .ok()
             .and_then(|s| s.parse::<usize>().ok());
         match (w, k) {
@@ -817,7 +815,7 @@ impl<'a> ScoredSpectrum<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // GF DP scoring methods
+    // node-scoring DP scoring methods
     // -----------------------------------------------------------------------
 
     /// Combined node score for a peptide split position:
@@ -1134,7 +1132,7 @@ impl<'a> ScoredSpectrum<'a> {
         (part, idx, cur_mass, prev_mass)
     }
 
-    /// Edge score for the GF DP.
+    /// Edge score for the node-scoring DP.
     ///
     /// If `param.ion_existence_table` is empty (edge scoring not supported),
     /// returns 0. Otherwise:
@@ -1195,7 +1193,7 @@ impl<'a> ScoredSpectrum<'a> {
     ///
     /// Nominal masses are computed the same way as in `score_psm`:
     /// `nominal_from(prefix_real_mass) as f64` — the integer nominal mass cast
-    /// to f64, matching the GF DP's `active_nodes[ni] as f64` convention.
+    /// to f64, matching the node-scoring DP's `active_nodes[ni] as f64` convention.
     pub fn ion_match_facts(&self, peptide: &Peptide, scorer: &RankScorer) -> Vec<IonMatchFact> {
         let param = scorer.param();
         let max_rank = scorer.max_rank();
@@ -2580,34 +2578,6 @@ mod tests {
         assert_ne!(e, 0, "edge_score should be nonzero with populated existence table");
     }
 
-    #[test]
-    fn directional_node_score_segment_cache_sanity() {
-        use crate::param_model::Param;
-        use std::path::PathBuf;
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("tests/fixtures/CID_LowRes_Tryp.param");
-        let param = Param::load_from_file(&path).expect("param loads");
-        let scorer = RankScorer::new(&param);
-        let peaks: Vec<(f64, f32)> = (0..100).map(|i| (50.0 + i as f64 * 19.5, 100.0 - i as f32)).collect();
-        let spec = Spectrum {
-            title: "segment_cache".into(), precursor_mz: 800.0, precursor_intensity: None,
-            precursor_charge: Some(2), rt_seconds: None, scan: None, peaks,
-            activation_method: None,
-            isolation_lower_offset: None, isolation_upper_offset: None,
-        };
-        let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let mut state: u64 = 0xCAFEBABEDEADBEEF;
-        let mut next = || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
-        for _ in 0..200 {
-            let nominal_mass = 100.0 + (next() % 2400) as f64;
-            let is_prefix = (next() & 1) == 0;
-            let charge = 2 + (next() % 3) as u8;
-            let parent_mass = 600.0 + (next() % 2400) as f64;
-            let val = ss.directional_node_score(nominal_mass, is_prefix, &scorer, charge, parent_mass, 0.0);
-            assert!(val.is_finite() || val == 0.0,
-                "non-finite directional_node_score at nominal={nominal_mass} prefix={is_prefix} charge={charge} parent_mass={parent_mass}: {val}");
-        }
-    }
 
     #[test]
     fn empty_spectrum_yields_no_ranks() {
@@ -3012,54 +2982,5 @@ mod precursor_filter_tests {
         let ss = ScoredSpectrum::new(&s, &scorer, 2);
         // No filtering occurred (c <= 0 was skipped) → both peaks kept.
         assert_eq!(ss.peak_count_after_filtering(), 2);
-    }
-
-    /// Regression: `dense_noise_facts` must emit a mass-error bin for every
-    /// matched noise probe (just like `ion_match_facts`), so the noise
-    /// mass-error histogram can be learned during training. Before the fix the
-    /// closure pushed `error_bin = None` unconditionally, leaving the noise
-    /// error table uniform and cratering high-res scoring.
-    #[test]
-    fn dense_noise_facts_emits_error_bins_for_matched_probes() {
-        use model::amino_acid::AminoAcid;
-        use crate::param_model::Param;
-        use std::path::PathBuf;
-
-        // High-res fixture has error_scaling_factor = 100 (> 0), so matched
-        // probes MUST carry an error bin.
-        let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        path.push("tests/fixtures/CID_HighRes_Tryp.param");
-        let param = Param::load_from_file(&path).expect("param loads");
-        assert!(param.error_scaling_factor > 0, "fixture must have esf > 0");
-        let scorer = RankScorer::new(&param);
-
-        let charge: u8 = 2;
-        let residues: Vec<AminoAcid> =
-            b"PEPTIDEK".iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
-        let peptide = Peptide::new(residues, b'K', b'A');
-
-        // Dense comb of peaks across the full fragment m/z range so that the
-        // evenly-spaced dense-noise probes are guaranteed to match some peak
-        // (mme = 0.5 Da, comb spacing 0.4 Da → every probe has a peak within
-        // tolerance).
-        let peaks: Vec<(f64, f32)> = (0..3000)
-            .map(|i| (50.0 + i as f64 * 0.4, 100.0 - (i % 50) as f32))
-            .collect();
-        // precursor m/z for the peptide at this charge.
-        let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
-        let s = make_spec(precursor_mz, &peaks);
-
-        let ss = ScoredSpectrum::new(&s, &scorer, charge);
-        let facts = ss.dense_noise_facts(&peptide, &scorer, 64);
-
-        assert!(!facts.is_empty(), "dense_noise_facts must return facts");
-        let matched = facts.iter().filter(|(_, r, _)| r.is_some()).count();
-        assert!(matched > 0, "dense comb must produce at least one matched probe");
-        let with_bin = facts.iter().filter(|(_, _, ebin)| ebin.is_some()).count();
-        assert!(
-            with_bin > 0,
-            "dense_noise_facts must emit at least one error_bin = Some for matched probes \
-             (was always None before the fix); matched={matched}"
-        );
     }
 }

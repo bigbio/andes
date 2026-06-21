@@ -4,8 +4,7 @@ use scoring_crate::param_model::{IonType, Param, Partition};
 use std::path::Path;
 
 fn fixture_param() -> Param {
-    // hcd_qexactive_tryp from the canonical Parquet store (byte-identical to
-    // the migrated HCD_QExactive_Tryp.param — see migration_parity).
+    // hcd_qexactive_tryp from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models.parquet"

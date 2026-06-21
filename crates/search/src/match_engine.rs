@@ -1475,7 +1475,7 @@ pub(crate) fn compute_psm_features(
     // Percolator feature counting uses a hardcoded fragment tolerance, NOT
     // param.mme (Kim et al., Nat Commun 5:5277, 2014). High-res instruments
     // (HighRes / TOF / QExactive) get 20 ppm; low-res LTQ gets 0.5 Da.
-    // The param.mme value (0.5 Da for HCD_QExactive_Tryp.param) is the
+    // The param.mme value (0.5 Da for the hcd_qexactive_tryp model) is the
     // coarser binning tolerance used by the rank-distribution tables —
     // appropriate for node-score lookup but ~50× too wide for feature
     // counting at m/z 500.

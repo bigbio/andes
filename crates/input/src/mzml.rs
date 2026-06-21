@@ -20,8 +20,8 @@ use model::{ActivationMethod, InstrumentType, Spectrum};
 // Mass-analyzer cvParams used by `detect_instrument_type`. Sourced from the
 // PSI-MS controlled vocabulary (HUPO-PSI MS ontology). When no `--instrument`
 // flag is given, the CLI defaults to low-resolution ion-trap routing; per-file
-// auto-detection reads these terms to pick a sensible bundled `.param` file
-// (LTQ Velos data → CID_LowRes; Orbitrap CID → CID_HighRes).
+// auto-detection reads these terms to pick a sensible bundled model
+// (LTQ Velos data → cid_lowres; Orbitrap CID → cid_highres).
 //
 // Ion-trap family → InstrumentType::LowRes.
 const CV_ANALYZER_ION_TRAP:           &str = "MS:1000264"; // ion trap (generic)

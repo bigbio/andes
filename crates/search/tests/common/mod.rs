@@ -9,7 +9,6 @@
 use std::path::PathBuf;
 
 use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
-use scoring_crate::{Param, RankScorer};
 
 /// Resolve a path relative to the workspace root (CARGO_MANIFEST_DIR/../../..).
 ///
@@ -52,22 +51,6 @@ pub fn aa_set() -> model::AminoAcidSet {
         .unwrap()
 }
 
-/// Load `HCD_QExactive_Tryp.param` and construct a RankScorer.
-///
-/// Gated to the offline `legacy-param-migrate` feature: the default build
-/// ships no `.param` reader (models live in the Parquet store). The end-to-end
-/// search regression tests that need a real model run under this feature.
-#[cfg(feature = "legacy-param-migrate")]
-pub fn rank_scorer() -> RankScorer {
-    let param_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("test-fixtures/HCD_QExactive_Tryp.param")
-        .canonicalize()
-        .unwrap_or_else(|e| panic!("canonicalize HCD_QExactive_Tryp.param: {e}"));
-    let param = Param::load_from_file(&param_path)
-        .unwrap_or_else(|e| panic!("load HCD_QExactive_Tryp.param: {e}"));
-    RankScorer::new(&param)
-}
 
 /// Strip Percolator flanking (`X.PEPTIDE.Y`) and mod-mass tokens like
 /// `+57.021` / `-18.0` from a `.pin`-format peptide string. Returns the

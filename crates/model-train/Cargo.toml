@@ -16,15 +16,5 @@ thiserror = { workspace = true }
 arrow = "53"
 parquet = "53"
 
-[features]
-# Offline migration of legacy binary `.param` models into the Parquet store.
-# Forwards to the scoring crate's `.param` reader. Off by default.
-legacy-param-migrate = ["scoring_crate/legacy-param-migrate"]
-
 [dev-dependencies]
 tempfile = "3.10"
-
-# Offline tool that migrates the legacy binary `.param` format to Parquet.
-[[example]]
-name = "gen_bundled_store"
-required-features = ["legacy-param-migrate"]

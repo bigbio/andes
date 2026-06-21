@@ -20,7 +20,7 @@
 //! # Column semantics (psms.parquet)
 //!
 //! The schema (column names + Arrow types) is copied verbatim from the OpenMS
-//! `QPXPSMSchema` so a downstream reader can use one code path for MS-GF+ and
+//! `QPXPSMSchema` so a downstream reader can use one code path for OpenMS-native and
 //! andes output. andes sources every field it can from the same per-PSM data
 //! the PIN writer uses ([`crate::pin`]); fields andes does not compute (PEP,
 //! predicted RT, ion mobility, cv params, metavalues) are written null/empty —

@@ -3,9 +3,9 @@
 //! handles, assert that the new store-based selection returns the same
 //! `model_id` as the lowercased filename stem of the old path.
 //!
-//! This test is the safety proof that switching the search binary from
-//! `Param::load_from_file` to `ModelStore::load_param` is behavior-preserving
-//! for the bundled store.
+//! This test is the safety proof that the store-based model selection
+//! (`ModelStore::load_param`) returns the correct bundled model for each
+//! activation/instrument/protocol combination.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

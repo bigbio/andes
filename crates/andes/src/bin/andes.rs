@@ -50,7 +50,7 @@ use input::{detect_instrument_type, FastaReader, MgfReader, Ms1Link, MzMLReader}
 type ModelEntryOwned = (String, Param, Vec<(SourceLedger, CountStats)>);
 
 /// Fragmentation method. `Auto` detects from the mzML's activation block and
-/// falls back to the bundled `HCD_QExactive_Tryp.param` when nothing is detected.
+/// falls back to the bundled `hcd_qexactive_tryp` model when nothing is detected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Fragmentation {
     #[clap(name = "auto")] Auto,
@@ -491,9 +491,8 @@ struct TrainFromSearchArgs {
     #[arg(long)]
     database: Option<PathBuf>,
 
-    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
-    /// a path to a binary `.param` file. When omitted, the bundled
-    /// `hcd_qexactive_tryp` model is used as the seed.
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
+    /// When omitted, the bundled `hcd_qexactive_tryp` model is used as the seed.
     #[arg(long = "seed-model")]
     seed_model: Option<String>,
 
@@ -602,8 +601,8 @@ struct TrainArgs {
     #[arg(long = "model-id", default_value = "default")]
     model_id: String,
 
-    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or a
-    /// path to a binary `.param` file. Supplies structural hyperparameters only.
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
+    /// Supplies structural hyperparameters only.
     #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
     seed_model: String,
 
@@ -744,8 +743,8 @@ struct TrainIntensityGbdtArgs {
     #[arg(long = "model-id", default_value = "default")]
     model_id: String,
 
-    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
-    /// a path to a binary `.param` file.  Supplies structural hyperparameters
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
+    /// Supplies structural hyperparameters
     /// (fragment tolerance, charge range) used when building the frag dataset.
     #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
     seed_model: String,
@@ -776,8 +775,8 @@ struct TrainRichIonLlrArgs {
     #[arg(long = "model-id", default_value = "default")]
     model_id: String,
 
-    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`) or
-    /// a path to a binary `.param` file.  Supplies structural hyperparameters
+    /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
+    /// Supplies structural hyperparameters
     /// (fragment tolerance, charge range) used when building the ion dataset.
     #[arg(long = "seed-model", default_value = "hcd_qexactive_tryp")]
     seed_model: String,
@@ -4071,18 +4070,7 @@ fn load_seed_param(seed_model: &Option<String>) -> Result<(String, Param), Box<d
             Ok(("hcd_qexactive_tryp".to_string(), p))
         }
         Some(seed) => {
-            // A `.param` seed file is only honored with the offline
-            // `legacy-param-migrate` feature; the default build seeds from the
-            // canonical Parquet store by slug only.
-            #[cfg(feature = "legacy-param-migrate")]
-            {
-                let as_path = Path::new(seed);
-                if as_path.is_file() {
-                    let p = Param::load_from_file(as_path)
-                        .map_err(|e| format!("loading seed param file {}: {e}", as_path.display()))?;
-                    return Ok((seed.clone(), p));
-                }
-            }
+            // Seed by slug from the canonical Parquet store.
             let store_path = bundled_store_path();
             let store = ModelStore::open(&store_path)
                 .map_err(|e| format!("opening bundled store: {e}"))?;

@@ -51,7 +51,9 @@ use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
 use crate::percolator::PercolatorPsm;
-use crate::pin::format_spec_id;
+use crate::pin::{
+    feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
+};
 use crate::row_context::{iter_ranked_by_rank_score, resolve_accession};
 
 /// QPX format version string written into every file's schema metadata.
@@ -112,6 +114,13 @@ pub fn write_qpx(
 
     let sp_batch = build_search_params_batch(params, fragment_tol, run_id, primary_ms_run_paths)?;
     write_parquet(&out_dir.join("search_params.parquet"), "search_params", sp_batch)?;
+
+    // OpenMS' QPX reader (PSMArrowIO::importFromParquet) requires a
+    // protein_groups member to load the bundle, even though andes does not run
+    // protein inference (that is the downstream ProteinInference/Percolator
+    // step). Emit a valid zero-row file so OpenMS tools can read the idparquet.
+    let pg_batch = build_protein_groups_batch();
+    write_parquet(&out_dir.join("protein_groups.parquet"), "protein_groups", pg_batch)?;
 
     Ok(())
 }
@@ -427,7 +436,24 @@ fn build_psms_batch(
             higher_score_better.append_value(true);
             hit_index.append_value(hit as i32);
             peptide_identification_index.append_value(pep_id_index);
-            psm_metavalues.append(true); // empty list
+            // Per-PSM discriminative features (the column OpenMS'
+            // PercolatorAdapter reads). Sourced from the SHARED pin.rs feature
+            // vector so the idparquet carries the SAME features as the PIN.
+            // `rank` (1-based) gates DeltaRankScore exactly as the PIN does.
+            //
+            // Every feature name is written with the `andes:` prefix (mirroring
+            // comet's `COMET:` convention) so OpenMS' PercolatorAdapter collects
+            // them as andes-specific features. The prefix lives ONLY here — the
+            // PIN writer's own column names (in `crate::pin`) are unprefixed.
+            {
+                let mvb = psm_metavalues.values();
+                for (name, value, fmt) in psm_feature_values(psm, ranks[hit]) {
+                    let value_str = format_feature_value(value, fmt);
+                    let prefixed = format!("andes:{name}");
+                    append_metavalue(mvb, &prefixed, &value_str, feature_value_type(fmt));
+                }
+                psm_metavalues.append(true);
+            }
             // One spectrum metavalue: the MS:1001115 scan number (as OpenMS does).
             {
                 let sb = spectrum_metavalues.values();
@@ -739,6 +765,36 @@ fn build_proteins_batch(
         Arc::new(run_identifier.finish()),
     ];
     RecordBatch::try_new(schema, columns).map_err(to_io)
+}
+
+// ── protein_groups.parquet builder ────────────────────────────────────────────
+
+/// Empty `protein_groups.parquet` with the OpenMS QPX protein-group schema.
+///
+/// andes does not perform protein inference, so there are no groups to emit, but
+/// OpenMS' `PSMArrowIO::importFromParquet` requires this bundle member to be
+/// present to read the `.idparquet` directory at all (e.g. PercolatorAdapter).
+/// We therefore write a schema-correct, zero-row file. Downstream OpenMS
+/// ProteinInference / Percolator populate the actual groups.
+fn build_protein_groups_batch() -> RecordBatch {
+    // struct<name: utf8, values: list<inner>> — the OpenMS metavalue container
+    let data_struct = |inner: DataType| -> DataType {
+        DataType::Struct(Fields::from(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("values", list_of(inner), true),
+        ]))
+    };
+    let fields = vec![
+        Field::new("group_type", DataType::Utf8, true),
+        Field::new("probability", DataType::Float64, true),
+        Field::new("accessions", list_of(DataType::Utf8), true),
+        Field::new("run_identifier", DataType::Utf8, true),
+        Field::new("group_index", DataType::Int32, true),
+        Field::new("float_data", list_of(data_struct(DataType::Float64)), true),
+        Field::new("string_data", list_of(data_struct(DataType::Utf8)), true),
+        Field::new("integer_data", list_of(data_struct(DataType::Int64)), true),
+    ];
+    RecordBatch::new_empty(Arc::new(Schema::new(fields)))
 }
 
 // ── search_params.parquet builder ─────────────────────────────────────────────

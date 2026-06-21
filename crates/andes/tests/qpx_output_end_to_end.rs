@@ -137,10 +137,94 @@ fn search_writes_qpx_idparquet_bundle() {
     // Column count must equal the full QPX PSM schema (29 columns).
     assert_eq!(schema.fields().len(), 29, "psms.parquet column count");
 
-    // ── At least one data row ────────────────────────────────────────────────
+    // ── At least one data row + populated `psm_metavalues` ───────────────────
+    use arrow::array::{Array, ListArray, StringArray, StructArray};
+
     let mut reader = builder.build().expect("build parquet reader");
-    let total: usize = std::iter::from_fn(|| reader.next())
-        .map(|b| b.expect("read batch").num_rows())
-        .sum();
+    let mut total = 0usize;
+    // Whether we saw at least one PSM whose `psm_metavalues` carries the
+    // andes:-prefixed discriminative features with parseable numeric values.
+    let mut saw_features = false;
+    let mut saw_andes_rankscore = false;
+    let mut saw_andes_rawscore = false;
+    for batch in std::iter::from_fn(|| reader.next()) {
+        let batch = batch.expect("read batch");
+        total += batch.num_rows();
+
+        let mv = batch
+            .column_by_name("psm_metavalues")
+            .expect("psm_metavalues column")
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("psm_metavalues is a ListArray");
+
+        for row in 0..mv.len() {
+            if mv.is_null(row) {
+                continue;
+            }
+            let entries = mv.value(row);
+            let entries = entries
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("psm_metavalues element is a StructArray");
+            let names = entries
+                .column_by_name("name")
+                .expect("name field")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("name is utf8");
+            let values = entries
+                .column_by_name("value")
+                .expect("value field")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("value is utf8");
+            let types = entries
+                .column_by_name("value_type")
+                .expect("value_type field")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("value_type is utf8");
+
+            if entries.is_empty() {
+                continue;
+            }
+            saw_features = true;
+            for i in 0..entries.len() {
+                let name = names.value(i);
+                let value = values.value(i);
+                let vtype = types.value(i);
+                assert!(
+                    name.starts_with("andes:"),
+                    "every psm_metavalue name must be andes:-prefixed, got `{name}`"
+                );
+                assert!(
+                    vtype == "int" || vtype == "double",
+                    "value_type must be int|double (comet convention), got `{vtype}` for `{name}`"
+                );
+                value.parse::<f64>().unwrap_or_else(|_| {
+                    panic!("psm_metavalue `{name}` value `{value}` is not a parseable number")
+                });
+                if name == "andes:RankScore" {
+                    saw_andes_rankscore = true;
+                }
+                if name == "andes:RawScore" {
+                    saw_andes_rawscore = true;
+                }
+            }
+        }
+    }
     assert!(total >= 1, "psms.parquet should have >=1 row, got {total}");
+    assert!(
+        saw_features,
+        "psm_metavalues must be non-empty for at least one PSM"
+    );
+    assert!(
+        saw_andes_rankscore,
+        "psm_metavalues must contain the andes:RankScore feature"
+    );
+    assert!(
+        saw_andes_rawscore,
+        "psm_metavalues must contain the andes:RawScore feature"
+    );
 }

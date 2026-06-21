@@ -44,7 +44,7 @@ impl ActivationMethod {
 
     /// Case-sensitive lookup. Returns `None` for unknown names, including the
     /// runtime sentinels `ASWRITTEN` and `FUSION` which never appear in
-    /// stored `.param` files.
+    /// bundled models.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "CID"  => Some(ActivationMethod::CID),
@@ -90,8 +90,8 @@ mod tests {
     #[test]
     fn from_name_runtime_sentinels_unknown() {
         // ASWRITTEN and FUSION are runtime metadata strings that should
-        // never appear in stored .param files; we omit them and return
-        // None so the param loader can surface BadEnum.
+        // never appear in bundled models; we omit them and return
+        // None so the loader can surface BadEnum.
         assert_eq!(ActivationMethod::from_name("As written in the spectrum or CID if no info"), None);
         assert_eq!(ActivationMethod::from_name("Merge spectra from the same precursor"), None);
     }

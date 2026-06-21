@@ -615,8 +615,8 @@ impl<'a> ScoredSpectrum<'a> {
     /// `(rank, mz, intensity)` triples sorted by rank ascending (rank 1 = most
     /// intense). Filtered-out peaks (rank == `u32::MAX`) are skipped.
     ///
-    /// Read-only — does not affect scoring. Used by `andes-trace --dump-peaks`
-    /// to inspect this implementation's kept-peak/rank assignment.
+    /// Read-only — does not affect scoring. Exposes this implementation's
+    /// kept-peak/rank assignment for inspection in tests.
     pub fn dump_active_peaks(&self) -> Vec<(u32, f64, f32)> {
         let (peaks, ranks) = self.active_peaks_and_ranks();
         let mut out: Vec<(u32, f64, f32)> = peaks

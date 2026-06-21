@@ -1,6 +1,6 @@
 //! Activation methods used by tandem MS spectrum acquisition. The five
 //! canonical variants (CID/ETD/HCD/PQD/UVPD) are pinned by
-//! `tests/activation_method_match_java.rs`.
+//! `tests/activation_method.rs`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivationMethod {

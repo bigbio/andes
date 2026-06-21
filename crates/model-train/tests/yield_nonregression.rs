@@ -104,9 +104,7 @@ fn load_mzml(path: &Path) -> Vec<model::Spectrum> {
 #[test]
 fn trained_model_yield_not_worse_than_fallback() {
     // ── Skip guard ────────────────────────────────────────────────────────────
-    let bench_dir = match std::env::var("ANDES_TRAIN_BENCH")
-        .or_else(|_| std::env::var("MSGF_TRAIN_BENCH"))
-    {
+    let bench_dir = match std::env::var("ANDES_TRAIN_BENCH") {
         Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
         _ => {
             eprintln!(

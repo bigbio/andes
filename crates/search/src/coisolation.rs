@@ -568,7 +568,7 @@ mod tests {
             &prepared.candidates,
             &prepared.bucket_index,
             &scorer,
-            &prepared.aa_set_for_gf,
+            &prepared.aa_set_for_scoring,
             &params,
             frag_tol,
             None,
@@ -595,7 +595,7 @@ mod tests {
             &prepared.candidates,
             &prepared.bucket_index,
             &scorer,
-            &prepared.aa_set_for_gf,
+            &prepared.aa_set_for_scoring,
             &params,
             frag_tol,
             None,
@@ -675,7 +675,7 @@ mod tests {
 
         let got = search_secondary(
             &spec, &primary, &std::collections::HashSet::new(), co, &prepared.candidates,
-            &prepared.bucket_index, &scorer, &prepared.aa_set_for_gf,
+            &prepared.bucket_index, &scorer, &prepared.aa_set_for_scoring,
             &params, frag_tol, None,
         );
         let (psm, _claimed) = got.expect("secondary must be found at the calibration-adjusted mass");

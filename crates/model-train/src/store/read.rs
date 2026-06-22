@@ -1001,15 +1001,17 @@ mod tests {
     }
 
     #[test]
-    fn selection_entries_returns_39_with_hcd_qexactive_tryp() {
+    fn selection_entries_returns_40_with_hcd_qexactive_tryp() {
         let path = bundled_store_path();
         let store = ModelStore::open(&path)
             .expect("failed to open bundled models.parquet");
         let entries = store.selection_entries();
+        // v0.2.0 added the dedicated `cid_lowres_tryp_tmt` model (routable via
+        // `--protocol TMT`), bringing the bundle from 39 to 40 selection entries.
         assert_eq!(
             entries.len(),
-            39,
-            "expected 39 selection entries, got {}",
+            40,
+            "expected 40 selection entries, got {}",
             entries.len()
         );
         let found = entries
@@ -1018,6 +1020,13 @@ mod tests {
         assert!(
             found,
             "expected an entry with model_id == \"hcd_qexactive_tryp\""
+        );
+        let found_tmt = entries
+            .iter()
+            .any(|e| e.model_id == "cid_lowres_tryp_tmt");
+        assert!(
+            found_tmt,
+            "expected an entry with model_id == \"cid_lowres_tryp_tmt\""
         );
     }
 }

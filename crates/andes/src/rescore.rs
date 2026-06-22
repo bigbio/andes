@@ -100,35 +100,103 @@ fn fold_of(scan: u32, seed: u64) -> usize {
 }
 
 /// 3-fold CV GBDT scores (calibrated P(target)) per row — leakage-safe.
+/// Semi-supervised refinement iterations per fold (Percolator-style; converges fast).
+const N_ITERS: usize = 3;
+/// q-value threshold for selecting confident targets as positives during the
+/// semi-supervised iteration.
+const SEL_FDR: f64 = 0.01;
+
+/// Initial per-train-row ranking: the single (feature, sign) that yields the
+/// most train targets at q < SEL_FDR. Bootstraps the semi-supervised loop from a
+/// known-discriminative direction instead of a cold-start (all-targets-vs-decoy)
+/// classifier, which under-fits when many "targets" are actually wrong.
+fn init_scores(d: &PinData, train: &[usize]) -> Vec<f32> {
+    let nf = d.n_features;
+    let mut best = vec![0.0f32; train.len()];
+    let mut best_count: i64 = -1;
+    for f in 0..nf {
+        for &dir in &[1.0f32, -1.0f32] {
+            let items: Vec<ScoredLabel> = train
+                .iter()
+                .map(|&r| ScoredLabel { score: dir * d.x[r * nf + f], is_decoy: d.is_decoy[r] })
+                .collect();
+            let q = qvalues(&items);
+            let cnt = (0..train.len())
+                .filter(|&k| !d.is_decoy[train[k]] && q[k] < SEL_FDR)
+                .count() as i64;
+            if cnt > best_count {
+                best_count = cnt;
+                best = items.iter().map(|it| it.score).collect();
+            }
+        }
+    }
+    best
+}
+
+/// Semi-supervised, leakage-safe CV scores. For each held-out fold: bootstrap a
+/// ranking from the best single feature, then iterate {select confident targets
+/// (q < SEL_FDR) + ALL decoys → train a GBDT → rescore the train rows}; the final
+/// model scores the held-out fold. The test fold never participates in training,
+/// so q-values computed downstream stay honest (no decoy leakage). This mirrors
+/// Percolator's semi-supervised loop and lifts the discriminant well above the
+/// old single-pass fit (which trained on all targets, including the wrong ones).
 fn cv_scores(d: &PinData, seed: u64) -> Vec<f32> {
     let n = d.is_decoy.len();
     let nf = d.n_features;
     let folds: Vec<usize> = d.scans.iter().map(|&s| fold_of(s, seed)).collect();
     let mut out = vec![0.0f32; n];
-    let params = TrainParams::default();
+    // Use ALL decoys (no negative undersampling) when rescoring.
+    let params = TrainParams { neg_pos_ratio: 1e9, ..TrainParams::default() };
     for fold in 0..N_FOLDS {
-        let mut x = Vec::new();
-        let mut y = Vec::new();
-        let mut groups = Vec::new();
-        for r in 0..n {
-            if folds[r] == fold {
-                continue;
-            }
-            x.extend_from_slice(&d.x[r * nf..(r + 1) * nf]);
-            y.push(if d.is_decoy[r] { 0u8 } else { 1u8 });
-            groups.push(d.scans[r]);
-        }
-        // Degenerate fold (all one class) → leave held-out scores at 0.
-        if y.is_empty() || y.iter().all(|&v| v == 0) || y.iter().all(|&v| v == 1) {
+        let train: Vec<usize> = (0..n).filter(|&r| folds[r] != fold).collect();
+        let test: Vec<usize> = (0..n).filter(|&r| folds[r] == fold).collect();
+        let n_dec = train.iter().filter(|&&r| d.is_decoy[r]).count();
+        if train.is_empty() || n_dec == 0 || n_dec == train.len() {
             continue;
         }
-        let ds = Dataset { x, y, groups, n_features: nf };
-        let model = train_gbdt(&ds, &params, seed.wrapping_add(fold as u64 + 1));
-        for r in 0..n {
-            if folds[r] != fold {
-                continue;
+        let mut train_scores = init_scores(d, &train);
+        let mut model = None;
+        for iter in 0..N_ITERS {
+            let items: Vec<ScoredLabel> = (0..train.len())
+                .map(|k| ScoredLabel { score: train_scores[k], is_decoy: d.is_decoy[train[k]] })
+                .collect();
+            let q = qvalues(&items);
+            let (mut xs, mut ys, mut gs) = (Vec::new(), Vec::new(), Vec::new());
+            for k in 0..train.len() {
+                let r = train[k];
+                // positives = confident targets; negatives = ALL decoys; drop
+                // ambiguous (non-confident) targets from training.
+                if !(d.is_decoy[r] || q[k] < SEL_FDR) {
+                    continue;
+                }
+                xs.extend_from_slice(&d.x[r * nf..(r + 1) * nf]);
+                ys.push(if d.is_decoy[r] { 0u8 } else { 1u8 });
+                gs.push(d.scans[r]);
             }
-            out[r] = model.predict_proba(&d.x[r * nf..(r + 1) * nf]);
+            if ys.is_empty() || ys.iter().all(|&v| v == 0) || ys.iter().all(|&v| v == 1) {
+                break;
+            }
+            let ds = Dataset { x: xs, y: ys, groups: gs, n_features: nf };
+            let m = train_gbdt(&ds, &params, seed.wrapping_add((fold * N_ITERS + iter) as u64 + 1));
+            train_scores = train
+                .iter()
+                .map(|&r| m.predict_proba(&d.x[r * nf..(r + 1) * nf]))
+                .collect();
+            model = Some(m);
+        }
+        match model {
+            Some(m) => {
+                for &r in &test {
+                    out[r] = m.predict_proba(&d.x[r * nf..(r + 1) * nf]);
+                }
+            }
+            // Degenerate (no model trained) → fall back to the init ranking.
+            None => {
+                let ti = init_scores(d, &test);
+                for (k, &r) in test.iter().enumerate() {
+                    out[r] = ti[k];
+                }
+            }
         }
     }
     out

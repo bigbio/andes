@@ -34,3 +34,9 @@ Run andes on Astral entrapment, CLOSED vs --chimeric vs --refine; rescore (Perco
 
 ### Iter 2 FINAL — richer refine tier REFUTED
 - default 40,838 total / 4,020 Pass-2 @0.60%; expanded 40,774 total / 3,586 Pass-2 @0.50%. Expanded = -64 total, -434 Pass-2 confident IDs DESPITE +29% raw winners. Bigger search (3.8x candidates: Methyl/Dimethyl/Trimethyl) -> FDR pressure -> FEWER confident. KEEP the 5-mod default. Expanded = opt-in --refine-config for methylation studies only. Refine track DONE (validated + tier tuned).
+
+### Iter 3 — chimeric N=4 vs N=8 — N=4 CONFIRMED optimal
+- N4: 53,068 @1.21% (17,870 sec); N8: 53,207 @1.24% (18,004 sec). +139 PSMs (+0.26%), 8 ENT -> FDP rises. Co-isolation saturates at ~4 on Astral's narrow isolation; 5th-8th slots = FDR-noise. KEEP N=4. Chimeric depth lever tapped. Binary f6805e2a.
+
+### Iter 4 (scoping) — charge-1 fragment blind spot (audit flagged HIGHEST value scoring lever)
+The cosine + GBDT intensity prediction only model charge-1 fragments; 2+ precursors carry charge-2 fragments unmodeled. Investigating the code to scope an extension to charge 1..=2.

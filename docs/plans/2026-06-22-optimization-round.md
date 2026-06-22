@@ -50,3 +50,10 @@ strong_score.rs + ion_features.rs already use predict_by_ions(1..=2); scored_spe
 ### Iter 5 — semi-tryptic BLOCKED by in-RAM enumeration OOM (real engineering finding)
 - fully baseline healthy: 38,011 @0.79%. semi OOM'd at ~31.6GB even at 1/32 DB scale -> memory NOT DB-proportional = runaway in-RAM candidate enumeration. Root: build_base_peptide_index/enumerate_candidates materialize the FULL candidate Vec before compacting to 20-byte records; semi emits ~30x candidates. mmap index streams SCORING not the BUILD -> doesn't help.
 - VERDICT: semi (+non-specific/open) UNMEASURABLE on 31GB VM. Real optimization = make candidate enumeration STREAMING/out-of-core (emit->compact-record->external-sort, not collect full Vec). Unlocks a whole class of expansion search. Iter 6 = scope it.
+
+### Iter 6 — model frontier: bundle WINS; gain needs ANALYZER-MATCHED corpus
+- shipped bundle 37,521@0.82% (WINS) vs own_winning v2-retrain 36,539@0.90% (-2.6%, MORE QExactive rows REGRESSED) vs own_release 21,656 (store-load issue). Bundled hcd_qexactive_tryp at corpus ceiling for its regime.
+- ★ KEY: Astral = Orbitrap-ASTRAL analyzer; the QExactive-trained model only approximates it. The real gain = a DEDICATED `hcd_astral_tryp` slug trained on NATIVE Astral DDA tryptic spectra (analyzer-matched), NOT more QExactive volume. Iter 7 = discover Astral DDA tryptic PRIDE datasets to build that corpus.
+
+## Round summary (so far)
+Engine is WELL-TUNED: parameter (chimeric N), scoring (charge-1, strong/rank), and same-regime model levers are at/near ceiling — strong endorsement of v0.2.0. The ONE win: refine VALIDATED (+2,827 real PTM IDs @0.60% FDP; the 'unvalidated' was a BASEPEP measurement artifact). Two concrete next-gain frontiers: (1) dedicated ANALYZER-MATCHED Astral model (new corpus, Codon long-pole); (2) streaming candidate enumeration (unblocks semi/non-specific/open — currently OOMs in-RAM).

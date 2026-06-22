@@ -83,7 +83,9 @@ pub enum EnzymeSpecificity {
 /// Primary ranking mode: inherited RawScore (`rank`) or fused strong score (`strong`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum ScoreFlag {
+    /// Pick by the resolved model's instrument: `strong` for high-res, `rank` for low-res.
     #[default]
+    Auto,
     Rank,
     Strong,
 }
@@ -389,9 +391,10 @@ struct SearchArgs {
     #[arg(long = "intensity-model")]
     intensity_model: Option<PathBuf>,
 
-    /// Ranking / PIN RawScore source: `rank` (default, byte-identical) or `strong`
-    /// (fused intensity + competition score from S1–S3).
-    #[arg(long = "score", default_value = "rank")]
+    /// Ranking / PIN RawScore source: `auto` (default — `strong` for high-res
+    /// instruments, `rank` for low-res), `rank`, or `strong` (fused intensity +
+    /// competition score from S1–S3).
+    #[arg(long = "score", default_value = "auto")]
     score: ScoreFlag,
 
     /// Candidate-index backing: `auto` (default — automatically use out-of-core
@@ -1613,6 +1616,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.score_mode = match cli.score {
         ScoreFlag::Rank => search::ScoreMode::Rank,
         ScoreFlag::Strong => search::ScoreMode::Strong,
+        // Auto: strong re-ranking pays on high-res (sharp fragment peaks → the
+        // intensity / rich-ion GBDTs separate target/decoy); on low-res it
+        // collapses the candidate pool and regresses, so use rank. Decided from
+        // the resolved model's instrument.
+        ScoreFlag::Auto => {
+            if param.data_type.instrument.is_high_resolution() {
+                search::ScoreMode::Strong
+            } else {
+                search::ScoreMode::Rank
+            }
+        }
     };
     params.candidate_index = match cli.candidate_index {
         CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,

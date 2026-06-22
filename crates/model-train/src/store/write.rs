@@ -96,7 +96,7 @@ fn write_models_inner(
     // Delegate to write_model_with_sources with no source data.
     if models.is_empty() {
         let schema = combined_schema();
-        let props = WriterProperties::builder().build();
+        let props = WriterProperties::builder().set_compression(parquet::basic::Compression::SNAPPY).build();
         let file = std::fs::File::create(path)?;
         let writer = ArrowWriter::try_new(file, schema, Some(props))
             .map_err(|e| TrainError::Parquet(e.to_string()))?;
@@ -123,7 +123,7 @@ fn write_models_inner(
     let manifest_batch = build_manifest_batch(&schema, &sorted, &sorted_blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
-    let props = WriterProperties::builder().build();
+    let props = WriterProperties::builder().set_compression(parquet::basic::Compression::SNAPPY).build();
     let file = std::fs::File::create(path)?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
@@ -165,7 +165,7 @@ pub fn write_model_with_sources(
     let manifest_batch = build_manifest_batch(&schema, &sorted, &blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
-    let props = WriterProperties::builder().build();
+    let props = WriterProperties::builder().set_compression(parquet::basic::Compression::SNAPPY).build();
     let file = std::fs::File::create(path)?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| TrainError::Parquet(e.to_string()))?;

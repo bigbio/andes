@@ -456,10 +456,13 @@ struct SearchArgs {
     #[arg(long = "rescore-native", default_value_t = false)]
     rescore_native: bool,
 
-    /// Reported FDR threshold for the filtered `<stem>.q<fdr>.tsv` written under
-    /// `--rescore` (target PSMs with Percolator q-value ≤ this). Default 0.01.
-    #[arg(long = "fdr", default_value_t = 0.01)]
-    fdr: f64,
+    /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
+    /// (target PSMs at q ≤ this). Setting it EXPLICITLY without `--rescore` /
+    /// `--rescore-native` TRIGGERS rescoring and auto-picks the backend:
+    /// Percolator if one is available, otherwise the built-in native rescorer.
+    /// When rescoring runs, the threshold defaults to 0.01 if unset.
+    #[arg(long = "fdr")]
+    fdr: Option<f64>,
 
     /// Explicit path to a Percolator binary (highest-priority backend). When
     /// omitted, `percolator` on `$PATH` is used, else the docker fallback.
@@ -888,7 +891,11 @@ fn main() -> ExitCode {
             // --output-pin is required UNLESS --rescore is set: rescore can route
             // the search through a temporary PIN (deleted afterwards when
             // --keep-pin false), so a PIN path is not mandatory in that mode.
-            if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
+            if search.output_pin.is_none()
+                && !search.rescore
+                && !search.rescore_native
+                && search.fdr.is_none()
+            {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
@@ -2331,13 +2338,46 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── Rescore: run Percolator on the PIN, join PEP/q-value downstream ───────
-    // Sits BETWEEN the PIN write and the QPX/TSV writes so the parsed
-    // `SpecId → PercolatorPsm` map can be threaded into `write_qpx` and the
-    // filtered TSV. `None` (rescore off) keeps every downstream output identical
-    // to a non-rescore run.
+    // ── Rescore: run Percolator (or the native rescorer) on the PIN, join ─────
+    // PEP/q-value downstream. Sits BETWEEN the PIN write and the QPX/TSV writes
+    // so the parsed `SpecId → PercolatorPsm` map can be threaded into
+    // `write_qpx` and the filtered TSV. `None` keeps every downstream output
+    // identical to a non-rescore run.
+    //
+    // Backend choice: `--rescore` forces Percolator; `--rescore-native` forces
+    // the native rescorer; an EXPLICIT `--fdr` with neither flag triggers
+    // rescoring and auto-picks — Percolator if a backend resolves, else native.
+    let fdr_threshold = cli.fdr.unwrap_or(0.01);
+    let (use_percolator, use_native) = if cli.rescore {
+        (true, false)
+    } else if cli.rescore_native {
+        (false, true)
+    } else if cli.fdr.is_some() {
+        match output::resolve_backend(
+            cli.percolator_bin.as_deref(),
+            cli.percolator_docker,
+            &cli.percolator_image,
+        ) {
+            Ok(b) => {
+                eprintln!(
+                    "Rescore: --fdr set without a backend flag → Percolator found ({}), using it.",
+                    b.describe()
+                );
+                (true, false)
+            }
+            Err(_) => {
+                eprintln!(
+                    "Rescore: --fdr set without a backend flag and no Percolator available → \
+                     using the native rescorer. (Point to/install Percolator for production-grade FDR.)"
+                );
+                (false, true)
+            }
+        }
+    } else {
+        (false, false)
+    };
     let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
-        if cli.rescore {
+        if use_percolator {
             let backend = output::resolve_backend(
                 cli.percolator_bin.as_deref(),
                 cli.percolator_docker,
@@ -2356,7 +2396,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 t_resc.elapsed().as_secs_f64()
             );
             Some(map)
-        } else if cli.rescore_native {
+        } else if use_native {
             eprintln!(
                 "Rescore: NATIVE GBDT rescorer (no Percolator; leakage-safe 3-fold target-decoy CV). \
                  Fallback — use --rescore (Percolator) for production-grade FDR."
@@ -2380,7 +2420,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM with
     // the join key + q/PEP + peptide/proteins from the Percolator result.
     if let Some(ref map) = rescore_map {
-        let fdr = cli.fdr;
+        let fdr = fdr_threshold;
         let stem = output_pin_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())

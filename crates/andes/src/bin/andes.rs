@@ -464,6 +464,14 @@ struct SearchArgs {
     #[arg(long = "fdr")]
     fdr: Option<f64>,
 
+    /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
+    /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
+    /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
+    /// `--pep` is a supplementary per-PSM gate. Like `--fdr`, setting it
+    /// explicitly triggers rescoring. Default: no PEP cap.
+    #[arg(long = "pep")]
+    pep: Option<f64>,
+
     /// Explicit path to a Percolator binary (highest-priority backend). When
     /// omitted, `percolator` on `$PATH` is used, else the docker fallback.
     #[arg(long = "percolator-bin")]
@@ -895,6 +903,7 @@ fn main() -> ExitCode {
                 && !search.rescore
                 && !search.rescore_native
                 && search.fdr.is_none()
+                && search.pep.is_none()
             {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
@@ -2352,7 +2361,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (true, false)
     } else if cli.rescore_native {
         (false, true)
-    } else if cli.fdr.is_some() {
+    } else if cli.fdr.is_some() || cli.pep.is_some() {
         match output::resolve_backend(
             cli.percolator_bin.as_deref(),
             cli.percolator_docker,
@@ -2428,17 +2437,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let dir = output_pin_path.parent().unwrap_or_else(|| Path::new("."));
         let q_tag = format!("{fdr}").replace('.', "p");
         let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
-        let mut accepted: Vec<&output::PercolatorPsm> =
-            map.values().filter(|p| p.q_value <= fdr).collect();
+        // q-value is the primary set-level FDR control; an optional --pep ANDs a
+        // per-PSM local-FDR cap on top.
+        let pep_cap = cli.pep;
+        let mut accepted: Vec<&output::PercolatorPsm> = map
+            .values()
+            .filter(|p| p.q_value <= fdr && pep_cap.is_none_or(|t| p.pep <= t))
+            .collect();
         accepted.sort_by(|a, b| {
             a.q_value.partial_cmp(&b.q_value).unwrap_or(std::cmp::Ordering::Equal)
         });
+        let pep_note = pep_cap.map(|t| format!(" and PEP<={t}")).unwrap_or_default();
         match write_filtered_tsv(&filtered_path, &accepted) {
             Ok(()) => eprintln!(
-                "Wrote filtered TSV: {} ({} PSMs at q<={})",
+                "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
                 filtered_path.display(),
                 accepted.len(),
-                fdr
+                fdr,
+                pep_note
             ),
             Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
         }

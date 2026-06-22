@@ -46,3 +46,7 @@ strong_score.rs + ion_features.rs already use predict_by_ions(1..=2); scored_spe
 
 ### Iter 5 (running) — semi-tryptic search-space expansion
 --enzyme-specificity semi vs fully on Astral entrapment: does the semi-tryptic expansion (N-term processing, signal peptides) add REAL IDs at honest FDP, or bloat?
+
+### Iter 5 — semi-tryptic BLOCKED by in-RAM enumeration OOM (real engineering finding)
+- fully baseline healthy: 38,011 @0.79%. semi OOM'd at ~31.6GB even at 1/32 DB scale -> memory NOT DB-proportional = runaway in-RAM candidate enumeration. Root: build_base_peptide_index/enumerate_candidates materialize the FULL candidate Vec before compacting to 20-byte records; semi emits ~30x candidates. mmap index streams SCORING not the BUILD -> doesn't help.
+- VERDICT: semi (+non-specific/open) UNMEASURABLE on 31GB VM. Real optimization = make candidate enumeration STREAMING/out-of-core (emit->compact-record->external-sort, not collect full Vec). Unlocks a whole class of expansion search. Iter 6 = scope it.

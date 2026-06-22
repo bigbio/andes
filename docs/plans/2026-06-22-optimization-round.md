@@ -40,3 +40,9 @@ Run andes on Astral entrapment, CLOSED vs --chimeric vs --refine; rescore (Perco
 
 ### Iter 4 (scoping) — charge-1 fragment blind spot (audit flagged HIGHEST value scoring lever)
 The cosine + GBDT intensity prediction only model charge-1 fragments; 2+ precursors carry charge-2 fragments unmodeled. Investigating the code to scope an extension to charge 1..=2.
+
+### Iter 4 (scoping) — charge-1 blind spot ALREADY ADDRESSED
+strong_score.rs + ion_features.rs already use predict_by_ions(1..=2); scored_spectrum deconvolves z>1 frags onto charge-1 axis (1760-1810). Only mod_site_features (PTM localization) still 1..=1 (narrow). The audit's "HIGHEST value" charge-1 lever was fixed post-audit. No headroom here. (Pattern this round: the easy parameter/scoring levers are already tuned — refine tier, chimeric N, charge-1 all confirmed optimal — pointing to MODELS/corpus as the next real frontier.)
+
+### Iter 5 (running) — semi-tryptic search-space expansion
+--enzyme-specificity semi vs fully on Astral entrapment: does the semi-tryptic expansion (N-term processing, signal peptides) add REAL IDs at honest FDP, or bloat?

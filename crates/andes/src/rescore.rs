@@ -73,7 +73,12 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
         if f.len() <= pep_i {
             continue;
         }
-        let label: i32 = f[label_i].trim().parse().unwrap_or(1);
+        // Label is FDR-critical (target=1 / decoy=-1) — fail loud on a malformed
+        // value rather than silently defaulting to target and corrupting the FDR.
+        let raw = f[label_i].trim();
+        let label: i32 = raw.parse().map_err(|_| {
+            format!("PIN Label column has non-integer value {raw:?} (expected 1 or -1)")
+        })?;
         d.is_decoy.push(label < 0);
         d.spec_ids.push(f[id_i].to_string());
         d.scans

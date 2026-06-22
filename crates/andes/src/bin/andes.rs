@@ -16,6 +16,9 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
+#[path = "../rescore.rs"]
+mod rescore;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
@@ -443,6 +446,15 @@ struct SearchArgs {
     /// `--percolator-bin` / `--percolator-docker`). Default off.
     #[arg(long = "rescore", default_value_t = false)]
     rescore: bool,
+
+    /// Rescore with the built-in NATIVE GBDT rescorer instead of Percolator (no
+    /// Percolator backend needed). Leakage-safe 3-fold target-decoy cross-
+    /// validation over the PIN features → q-value + PEP. A self-contained
+    /// FALLBACK for benchmarking / offline use — NOT production-grade FDR; prefer
+    /// `--rescore` (Percolator) for production. Writes the same QPX q-value/PEP +
+    /// filtered `<stem>.q<fdr>.tsv` outputs. Ignored if `--rescore` is also set.
+    #[arg(long = "rescore-native", default_value_t = false)]
+    rescore_native: bool,
 
     /// Reported FDR threshold for the filtered `<stem>.q<fdr>.tsv` written under
     /// `--rescore` (target PSMs with Percolator q-value ≤ this). Default 0.01.
@@ -876,7 +888,7 @@ fn main() -> ExitCode {
             // --output-pin is required UNLESS --rescore is set: rescore can route
             // the search through a temporary PIN (deleted afterwards when
             // --keep-pin false), so a PIN path is not mandatory in that mode.
-            if search.output_pin.is_none() && !search.rescore {
+            if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
@@ -2340,6 +2352,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("{e}"))?;
             eprintln!(
                 "Rescore: Percolator produced {} target PSMs [{:.2}s]",
+                map.len(),
+                t_resc.elapsed().as_secs_f64()
+            );
+            Some(map)
+        } else if cli.rescore_native {
+            eprintln!(
+                "Rescore: NATIVE GBDT rescorer (no Percolator; leakage-safe 3-fold target-decoy CV). \
+                 Fallback — use --rescore (Percolator) for production-grade FDR."
+            );
+            let t_resc = std::time::Instant::now();
+            let pin_text = std::fs::read_to_string(&output_pin_path)
+                .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
+            let map = rescore::native_rescore_pin(&pin_text, 42)
+                .map_err(|e| format!("native rescore: {e}"))?;
+            eprintln!(
+                "Rescore: native produced {} PSMs (q-value+PEP) [{:.2}s]",
                 map.len(),
                 t_resc.elapsed().as_secs_f64()
             );

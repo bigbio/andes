@@ -1,26 +1,25 @@
 #![allow(clippy::needless_range_loop)]
-//! Native (Percolator-free) PSM rescorer: a Percolator-style semi-supervised
-//! **regularized linear** model over the PIN feature matrix → per-PSM q-value + PEP.
+//! Native (Percolator-free) PSM rescorer: a cross-validated GBDT over the PIN
+//! feature matrix → per-PSM q-value + PEP.
 //!
-//! ROLE: a self-contained, no-external-dependency rescorer. Percolator (`--rescore`)
-//! remains the reference; this aims to match it standalone.
+//! ROLE: the self-contained FALLBACK for when a Percolator backend is not
+//! available (benchmarking / offline / zero-dependency). It is NOT a
+//! production-grade FDR engine — Percolator (`--rescore`) remains the
+//! recommended path and the reference cross-check; this is honestly surfaced as
+//! a *native* rescore.
 //!
-//! METHOD (leakage-safe, mokapot/Percolator-style): 3-fold target-decoy CV folded
-//! by spectrum (ScanNr) so a spectrum's target+decoy PSMs never split across folds.
-//! Per held-out fold: z-score the features on the train rows, bootstrap a ranking
-//! from the single best feature, then run the semi-supervised loop — {select
-//! confident targets (q < 1%) + ALL decoys → fit an **L2-regularized logistic
-//! regression** (class-balanced, warm-started) → rescore the train rows} — and the
-//! final weights score the held-out fold. The L2 regularization is what lets the
-//! confident-set iteration refine WITHOUT the self-confirmation overfit a GBDT
-//! suffers (a tree memorizes the trivially-separable confident set; a regularized
-//! linear hyperplane generalizes). This is why Percolator/Sage/mokapot use linear
-//! models for rescoring. The test fold never trains, so downstream TDC q-values
-//! stay honest. Output map matches `output::run_percolator` so the QPX-injection +
-//! filtered-TSV path is reused unchanged.
+//! METHOD (mokapot-style, leakage-safe): 3-fold target-decoy cross-validation.
+//! Rows are folded by spectrum (ScanNr) so a spectrum's target+decoy PSMs never
+//! split across folds. For each fold a GBDT classifier (target=1 / decoy=0) is
+//! trained on the OTHER folds and scores the held-out fold — so every PSM is
+//! scored by a model that never trained on it (no decoy leakage → no fake-good
+//! q-values). The pooled CV scores feed a monotone TDC q-value and a calibrated
+//! PEP. The output map matches `output::run_percolator`'s shape so the
+//! downstream QPX-injection + filtered-TSV path is reused unchanged.
 
 use std::collections::HashMap;
 
+use model_train::gbdt::train::{train_gbdt, Dataset, TrainParams};
 use output::PercolatorPsm;
 use search::tdc::{qvalues, ScoredLabel};
 
@@ -100,185 +99,36 @@ fn fold_of(scan: u32, seed: u64) -> usize {
     (z % N_FOLDS as u64) as usize
 }
 
-/// Semi-supervised refinement iterations per fold (Percolator-style; converges fast).
-const N_ITERS: usize = 10;
-/// q-value threshold for selecting confident targets as positives.
-const SEL_FDR: f64 = 0.01;
-/// L2 regularization strength (on z-scored features) — the overfit guard.
-const LAMBDA: f32 = 1e-3;
-/// Gradient-descent learning rate + iterations (z-scored features → well-conditioned).
-const LR: f32 = 0.5;
-const GD_ITERS: usize = 100;
-
-/// Build the z-scored feature matrix for ALL rows, using per-feature mean/std
-/// computed over `train` (std floored). Precomputing once per fold turns every
-/// later dot-product into a plain `w·z` (no re-standardizing in the GD loop).
-fn zscore_matrix(d: &PinData, train: &[usize]) -> Vec<f32> {
-    let nf = d.n_features;
-    let n = d.is_decoy.len();
-    let mut mean = vec![0.0f32; nf];
-    for &r in train {
-        for j in 0..nf {
-            mean[j] += d.x[r * nf + j];
-        }
-    }
-    let inv = 1.0 / train.len().max(1) as f32;
-    for j in 0..nf {
-        mean[j] *= inv;
-    }
-    let mut m2 = vec![0.0f32; nf];
-    for &r in train {
-        for j in 0..nf {
-            let dlt = d.x[r * nf + j] - mean[j];
-            m2[j] += dlt * dlt;
-        }
-    }
-    let std: Vec<f32> = (0..nf)
-        .map(|j| {
-            let v = (m2[j] * inv).sqrt();
-            if v > 1e-6 { v } else { 1.0 }
-        })
-        .collect();
-    let mut zx = vec![0.0f32; n * nf];
-    for r in 0..n {
-        for j in 0..nf {
-            zx[r * nf + j] = (d.x[r * nf + j] - mean[j]) / std[j];
-        }
-    }
-    zx
-}
-
-/// Linear score `w·zx_r + bias` (`w` has length nf+1; bias is last).
-#[inline]
-fn dot(zx: &[f32], nf: usize, r: usize, w: &[f32]) -> f32 {
-    let base = r * nf;
-    let mut z = w[nf];
-    for j in 0..nf {
-        z += w[j] * zx[base + j];
-    }
-    z
-}
-
-/// L2-regularized logistic regression by gradient descent over `rows` (already
-/// z-scored in `zx`). `y`: +1 target / -1 decoy. `wpos`/`wneg` are class weights.
-/// `w` is warm-started (len nf+1; last = bias). Bias is not regularized.
-fn train_logistic(
-    zx: &[f32],
-    nf: usize,
-    rows: &[usize],
-    y: &[i8],
-    mut w: Vec<f32>,
-    wpos: f32,
-    wneg: f32,
-) -> Vec<f32> {
-    if w.len() != nf + 1 {
-        w = vec![0.0f32; nf + 1];
-    }
-    let inv_n = 1.0 / rows.len().max(1) as f32;
-    let mut grad = vec![0.0f32; nf + 1];
-    for _ in 0..GD_ITERS {
-        grad.iter_mut().for_each(|g| *g = 0.0);
-        for (i, &r) in rows.iter().enumerate() {
-            let base = r * nf;
-            let z = dot(zx, nf, r, &w);
-            let yi = y[i] as f32;
-            let cw = if y[i] > 0 { wpos } else { wneg };
-            // d/dz log(1+exp(-yi·z)) = -yi · sigmoid(-yi·z)
-            let s = 1.0 / (1.0 + (yi * z).exp());
-            let g = -yi * s * cw;
-            for j in 0..nf {
-                grad[j] += g * zx[base + j];
-            }
-            grad[nf] += g;
-        }
-        for j in 0..nf {
-            w[j] -= LR * (grad[j] * inv_n + LAMBDA * w[j]);
-        }
-        w[nf] -= LR * grad[nf] * inv_n;
-    }
-    w
-}
-
-/// Initial per-train-row ranking: the single (feature, sign) that yields the most
-/// train targets at q < SEL_FDR. Bootstraps the semi-supervised loop from a
-/// known-discriminative direction.
-fn init_scores(d: &PinData, train: &[usize]) -> Vec<f32> {
-    let nf = d.n_features;
-    let mut best = vec![0.0f32; train.len()];
-    let mut best_count: i64 = -1;
-    for f in 0..nf {
-        for &dir in &[1.0f32, -1.0f32] {
-            let items: Vec<ScoredLabel> = train
-                .iter()
-                .map(|&r| ScoredLabel { score: dir * d.x[r * nf + f], is_decoy: d.is_decoy[r] })
-                .collect();
-            let q = qvalues(&items);
-            let cnt = (0..train.len())
-                .filter(|&k| !d.is_decoy[train[k]] && q[k] < SEL_FDR)
-                .count() as i64;
-            if cnt > best_count {
-                best_count = cnt;
-                best = items.iter().map(|it| it.score).collect();
-            }
-        }
-    }
-    best
-}
-
-/// Semi-supervised, leakage-safe CV scores via the regularized LINEAR model.
+/// 3-fold CV GBDT scores (calibrated P(target)) per row — leakage-safe.
 fn cv_scores(d: &PinData, seed: u64) -> Vec<f32> {
     let n = d.is_decoy.len();
     let nf = d.n_features;
     let folds: Vec<usize> = d.scans.iter().map(|&s| fold_of(s, seed)).collect();
     let mut out = vec![0.0f32; n];
+    let params = TrainParams::default();
     for fold in 0..N_FOLDS {
-        let train: Vec<usize> = (0..n).filter(|&r| folds[r] != fold).collect();
-        let test: Vec<usize> = (0..n).filter(|&r| folds[r] == fold).collect();
-        let n_dec = train.iter().filter(|&&r| d.is_decoy[r]).count();
-        if train.is_empty() || n_dec == 0 || n_dec == train.len() {
+        let mut x = Vec::new();
+        let mut y = Vec::new();
+        let mut groups = Vec::new();
+        for r in 0..n {
+            if folds[r] == fold {
+                continue;
+            }
+            x.extend_from_slice(&d.x[r * nf..(r + 1) * nf]);
+            y.push(if d.is_decoy[r] { 0u8 } else { 1u8 });
+            groups.push(d.scans[r]);
+        }
+        // Degenerate fold (all one class) → leave held-out scores at 0.
+        if y.is_empty() || y.iter().all(|&v| v == 0) || y.iter().all(|&v| v == 1) {
             continue;
         }
-        let zx = zscore_matrix(d, &train);
-        let mut train_scores = init_scores(d, &train);
-        let mut w: Vec<f32> = vec![0.0f32; nf + 1];
-        let mut have_model = false;
-        for _ in 0..N_ITERS {
-            let items: Vec<ScoredLabel> = (0..train.len())
-                .map(|k| ScoredLabel { score: train_scores[k], is_decoy: d.is_decoy[train[k]] })
-                .collect();
-            let q = qvalues(&items);
-            let (mut sub, mut y) = (Vec::new(), Vec::new());
-            for k in 0..train.len() {
-                let r = train[k];
-                // positives = confident targets; negatives = ALL decoys.
-                if !(d.is_decoy[r] || q[k] < SEL_FDR) {
-                    continue;
-                }
-                sub.push(r);
-                y.push(if d.is_decoy[r] { -1i8 } else { 1i8 });
+        let ds = Dataset { x, y, groups, n_features: nf };
+        let model = train_gbdt(&ds, &params, seed.wrapping_add(fold as u64 + 1));
+        for r in 0..n {
+            if folds[r] != fold {
+                continue;
             }
-            let npos = y.iter().filter(|&&v| v > 0).count();
-            let nneg = y.len() - npos;
-            if npos == 0 || nneg == 0 {
-                break;
-            }
-            // Class-balanced weights (Cpos/Cneg ≈ inverse class frequency).
-            let wpos = y.len() as f32 / (2.0 * npos as f32);
-            let wneg = y.len() as f32 / (2.0 * nneg as f32);
-            w = train_logistic(&zx, nf, &sub, &y, w, wpos, wneg);
-            train_scores = train.iter().map(|&r| dot(&zx, nf, r, &w)).collect();
-            have_model = true;
-        }
-        if have_model {
-            for &r in &test {
-                out[r] = dot(&zx, nf, r, &w);
-            }
-        } else {
-            // Degenerate fold → fall back to the bootstrap ranking.
-            let ti = init_scores(d, &test);
-            for (k, &r) in test.iter().enumerate() {
-                out[r] = ti[k];
-            }
+            out[r] = model.predict_proba(&d.x[r * nf..(r + 1) * nf]);
         }
     }
     out
@@ -303,8 +153,8 @@ pub fn native_rescore_pin(
     let q = qvalues(&items);
     let mut map = HashMap::with_capacity(n);
     for i in 0..n {
-        // PEP = P(decoy-like) = sigmoid(−score); high-scoring targets → ~0, decoys → ~1.
-        let pep = (1.0 / (1.0 + (scores[i] as f64).exp())).clamp(PROB_EPS, 1.0);
+        // PEP = 1 − calibrated P(target); decoys naturally land near 1.
+        let pep = (1.0 - scores[i] as f64).clamp(PROB_EPS, 1.0);
         map.insert(
             d.spec_ids[i].clone(),
             PercolatorPsm {

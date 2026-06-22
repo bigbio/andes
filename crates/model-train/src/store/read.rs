@@ -1001,17 +1001,17 @@ mod tests {
     }
 
     #[test]
-    fn selection_entries_returns_40_with_hcd_qexactive_tryp() {
+    fn selection_entries_returns_38_with_hcd_qexactive_tryp() {
         let path = bundled_store_path();
         let store = ModelStore::open(&path)
             .expect("failed to open bundled models.parquet");
         let entries = store.selection_entries();
         // v0.2.0 added the dedicated `cid_lowres_tryp_tmt` model (routable via
-        // `--protocol TMT`), bringing the bundle from 39 to 40 selection entries.
+        // `--protocol TMT`), dropping 2 seed phospho slugs nets 38 selection entries.
         assert_eq!(
             entries.len(),
-            40,
-            "expected 40 selection entries, got {}",
+            38,
+            "expected 38 selection entries, got {}",
             entries.len()
         );
         let found = entries

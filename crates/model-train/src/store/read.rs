@@ -1087,17 +1087,19 @@ mod tests {
     }
 
     #[test]
-    fn selection_entries_returns_38_with_hcd_qexactive_tryp() {
+    fn selection_entries_returns_bundled_count_with_hcd_qexactive_tryp() {
         let path = bundled_store_path();
         let store = ModelStore::open(&path)
             .expect("failed to open bundled models.parquet");
         let entries = store.selection_entries();
-        // v0.2.0 added the dedicated `cid_lowres_tryp_tmt` model (routable via
-        // `--protocol TMT`), dropping 2 seed phospho slugs nets 38 selection entries.
+        // v1: the bundle ships 17 fully own-trained models (one selection entry
+        // each; no MS-GF+-seeded regimes). Earlier bundles shipped 38 entries
+        // including seeded regimes that have since been dropped (not retrainable
+        // from public data) rather than shipped as seed copies.
         assert_eq!(
             entries.len(),
-            38,
-            "expected 38 selection entries, got {}",
+            17,
+            "expected 17 selection entries, got {}",
             entries.len()
         );
         let found = entries

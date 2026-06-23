@@ -3082,8 +3082,12 @@ fn read_intensity_partial(path: &Path) -> Result<Vec<(IntensityAggKey, Intensity
             let (sum, sum_sq) = if let (Some(sum_c), Some(sq_c)) = (sum_col, sum_sq_col) {
                 (sum_c.value(i), sq_c.value(i))
             } else {
-                let mean = mean_col.unwrap().value(i);
-                let var = var_col.unwrap().value(i);
+                let mean = mean_col
+                    .ok_or("intensity partial: mean_log_rel column missing while in mean/var path")?
+                    .value(i);
+                let var = var_col
+                    .ok_or("intensity partial: var_log_rel column missing while in mean/var path")?
+                    .value(i);
                 (mean * count as f64, (var + mean * mean) * count as f64)
             };
             let key = IntensityAggKey {

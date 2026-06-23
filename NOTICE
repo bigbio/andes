@@ -11,9 +11,8 @@ You may obtain a copy of the License at
 Origin and acknowledgement
 ================================================================================
 
-andes began as an effort to improve MS-GF+ and evolved into an independent
-algorithm and tool — with its own peptide-spectrum scoring, its statistical
-models trained on our own data, and its own implementation. We gratefully
-acknowledge MS-GF+ as the origin and inspiration for this work.
+andes has its own peptide-spectrum scoring, its own statistical models trained
+on public PRIDE data, and its own Rust implementation.
 
-See HERITAGE.md for the lineage of this project.
+Prior art: MS-GF+ (Kim & Pevzner, Nat Commun 2014;5:5277). See HERITAGE.md for
+the project's lineage.

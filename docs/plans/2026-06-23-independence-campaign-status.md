@@ -56,3 +56,8 @@ HARVESTING NOW (Codon array 54426808): hcd_qexactive_tryp_itraqphospho (PXD00638
 - PXD010595 (ProteomeTools II) = TRYPTIC-ONLY (no AspN/LysN/HLA arms) -> cid_lowres_aspn/lysn/nocleavage + cid_highres_nocleavage have NO source from it. Re-discover or DROP.
 - PXD014777 (TOF) DEFERRED: Bruker .d, harvester is Thermo-.raw-only -> needs a .d-aware branch (follow-up). cid_tof_tryp pending that.
 REVISED TALLY: ~17 (Wave1) + 4 (Wave2 harvesting) = ~21 confirmed own-trained. Gaps needing re-discovery: 5 ETD-enzyme + 4 non-tryptic-CID + cid_tof_tryp(.d) + cid_highres_tryp. If re-discovery fails -> drop (exotic ETD-enzyme likely drops; non-tryptic CID worth one targeted retry). Honest floor ~21/39 own-trained even if all gaps drop = still a massive jump from 1.
+
+## Re-discovery (a0c7b299) STALLED (technical watchdog, not a data verdict)
+Partial finding before stall: non-tryptic CID IS likely sourceable — a large deposit has 2xIT (ion-trap low-res) runs covering HLA (non-specific) + AspN. Accession NOT captured. -> DEFER non-tryptic CID (cid_lowres_aspn/lysn/nocleavage + cid_highres_nocleavage) as "sourceable-pending-focused-retry" (a future session: PRIDE search ProteomeTools-immunopeptidome / multi-protease, verify file existence, harvest). NOT blocking the bundle.
+ETD-low-res enzymes (5): no verified alt for the gone PXD024364 -> DROP (exotic, consistent with etd_lowres_argc/alp drop).
+DECISION: don't keep chasing the niche tail through flaky agents. Proceed with the BUNDLE MERGE of the ~21 confirmed own-trained (Wave-1 17 + Wave-2 4 when flats land), DROP the confirmed-un-sourceable, DEFER non-tryptic+TOF(.d). Honest shipped count ~21-25/39 own-trained = the win. Remaining tail is a documented follow-up, not a blocker.

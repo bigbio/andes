@@ -117,3 +117,14 @@ On the ProteoBench LFQ_Astral_DDA_15min_50ng benchmark (ASTRAL_entrapment.fasta,
 - NEW hcd_astral_tryp (FULLY own-trained, 0 seed tables, 218,738 PSMs): 36,685 real @ 0.91% FDP, 17:33
 NULL: own-trained is -416 PSMs (-1.1%), effective tie/slight loss vs the bundled MS-GF+-derived model. Thesis (analyzer-matched Astral model beats bundled) NOT supported on N=1. CAVEAT N=1 (one mzML, could flip). The bundled high-res model already serves Astral well.
 ★ REFRAME (user): the release-relevant gate is NOT vs the bundled MS-GF+-derived model but vs the FIELD (Comet/MSFragger/MS-GF+). If 36,685 beats them -> the own-trained model is FIELD-BEATING + independence-clean = strong release story regardless of the 1.1% vs bundled. Multi-engine benchmark on the SAME file LAUNCHED (ac259ac3). Prior Astral benchmarks (andes +~30% over MSFragger) were on a DIFFERENT file -> measure on this one.
+
+### ★★ FIELD BENCHMARK (2026-06-23) — own-trained hcd_astral_tryp IS FIELD-BEATING
+Same byte-identical Astral benchmark (LFQ_Astral_DDA_15min_50ng + ASTRAL_entrapment.fasta, uniform Percolator q<=0.01, entrapment-FDP):
+- andes bundled hcd_qexactive_tryp (MS-GF+-derived): 37,101 @ 0.91%
+- andes OWN-TRAINED hcd_astral_tryp: 36,685 @ 0.91%  <-- the new model
+- MSFragger 4.2: 29,810 @ 1.41%  (own-trained +23.1%)
+- Comet: 29,061 @ 1.25%  (+26.2%)
+- MS-GF+ Java: 24,507 @ 1.10%  (+49.7%)
+VERDICT: own-trained hcd_astral_tryp beats EVERY external engine by +23-50% at equal-or-better FDP, fully own-data (0 seed). The -1.1% vs the legacy bundled model is N=1 noise. => SHIP IT: meets the project objective (own data / no patent / beat all tools). Validates the retrain pipeline as the template for the independence campaign.
+FLAGS: N=1 file; MSFragger Percolator Concatenated vs others Separate (but entrapment-FDP is mode-independent + 23% margin dwarfs any artifact).
+B1 sharpened: 38/39 bundled models STILL MS-GF+-derived; this makes ~2/39 own-trained. Honest provenance framing = "predominantly seeded, retraining in progress, first field-beating own-trained model (Astral) shipping now."

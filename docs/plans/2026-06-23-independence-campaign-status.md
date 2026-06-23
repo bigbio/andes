@@ -83,3 +83,9 @@ Detection-fixed binary + partitioned v1 bundle, /srv/data/msgf-bench/v1-definiti
   -> andes-v1 LEADS each: Astral +30%, TMT +5.3% (own cid_lowres_tryp_tmt now BEATS field), UPS +1.2% (now leads top-1 not just chim). Headline holds + stronger.
   Entrapment-FDP: Astral 1.07% / TMT 2.01% / UPS 1.85% (honest).
 PENDING (a749a6d4): Astral chimeric number + sanity-check the 41,080 vs old 36,782 (+11.7%) is same-FASTA apples-to-apples (big jump - verify). Then these are the FINAL README numbers.
+
+## ★ BENCHMARK HONESTY CORRECTION (a749a6d4) — 41,080 is methodology-inflated, NOT a model win
+Finish-up caught it: the 41,080 (Astral) vs old 36,782 (+11.7%) is NOT the v1 models — it's revCat-FASTA + mix-max-percolator vs the old plain-FASTA + `-Y` TDC. CONTROL: old model hcd_qexactive_tryp on the NEW setup = 41,009 ~= astral 41,080 -> the jump is the methodology, model A/B is a TIE. Astral chimeric (recovered) = 67,298.
+★ DO NOT claim a +11.7% Astral improvement. The andes-v1(mix-max/revCat) vs Java/Comet(old -Y/plain) table also MIXES methodologies -> not strictly fair.
+HONEST takeaway (unchanged + good): v1 own models TIE-or-slightly-beat old (no regression, independence is FREE) + robustly LEAD field at any consistent methodology.
+FIX: FINAL fair benchmark a2020b68 = andes-v1 on the EXACT old methodology (plain FASTA + andes decoys + percolator -Y, matching the reused Java 26,542/Comet 31,435) -> publishable table. Expect andes-v1 ~= old 36,782 (model A/B tie) + still leads field. NO methodology drift this time (no revCat, no mix-max).

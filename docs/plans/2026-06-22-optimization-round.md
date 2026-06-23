@@ -81,3 +81,11 @@ Frontier after the cheap-lever round: the QExactive-trained bundle is corpus-bou
 - Corpus = PXD065579 (Kumar et al, MCP 2026:101562). Human HCT116/Jurkat, PTMScan immunoaffinity enrichment (phospho-Y, acetyl-K, ubiquitin K-e-GG, methyl, succinyl), Orbitrap Astral + Lumos, nDIA + DDA mixed. Use ONLY the Astral+DDA subset (inventory agent ae88134e scoping it).
 - TIES TO MaxSBM/glyco doc (docs/plans/2026-06-20-glyco-neutral-loss-and-maxsbm.md): train diagnostic/loss-ion (d-ion/p-ion) behavior on REAL Astral PTM spectra — phospho neutral losses, ubiquitin-GG remnant, acetyl. pepXML/mzML in the deposit may give ready PTM labels without re-searching.
 - SECONDARY for the base model too (its Astral-DDA runs add analyzer diversity), but PTM-enrichment-biased so not the base.
+
+### Phase 2 inventory result (PXD065579 Astral+DDA subset) — scoped 2026-06-23
+~25 Astral-DDA .raw runs (EXCLUDE ~20 Astral-nDIA + ~20 Lumos-DDA). By PTM:
+- Ubiquitin K-e-GG: 8 (HCT116, incl MG132/Control) — RICHEST + the +114.0429 K-e-GG remnant IS the MaxSBM d-ion/p-ion case -> BEST PTM to start.
+- Phospho-Y: 6 + IMAC global pSTY: 3 = 9 phospho total (classic -98 HPO3 / -80 neutral loss = andes loss_class already handles).
+- Acetyl-K: 4. Succinyl-K: 2 (mouse liver). Methyl-R: 2 (mouse liver).
+★ READY-MADE LABELS (no re-search): FragPipe interact-*-Astral-DDA-*.mod.pep.xml (PeptideProphet PSMs w/ localized mods) + *_calibrated.mzML + combined_site_{K_114.0429,STY_79.9663,K_42.0106}.tsv -> pair calibrated spectra <-> localized mods directly to build PTM training flats. FTP ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2026/05/PXD065579/ (.raw not on API page1 -> FTP-list to size).
+CAVEAT: thin per-PTM (pilot), single-rep input titrations -> good for diagnostic-ion PRESENCE learning, weak for generality; supplement before claiming generality. Start with ubiquitin KGG.

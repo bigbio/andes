@@ -65,6 +65,62 @@ pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<
         .collect()
 }
 
+/// Per-item monotone TDC q-value, returned in the SAME order as `items`
+/// (`out[i]` is the q-value of `items[i]`). Same walk as
+/// [`confident_target_indices`] (sort by score desc, q = decoys/max(targets,1),
+/// monotone-from-bottom, conservative equal-score ties). Empty input -> empty.
+///
+/// Used by the native rescorer to report a q-value per PSM (not just the
+/// confident set). Decoys get a q-value too (callers filter by `is_decoy`).
+pub fn qvalues(items: &[ScoredLabel]) -> Vec<f64> {
+    let n = items.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        let sa = if items[a].score.is_nan() { f32::NEG_INFINITY } else { items[a].score };
+        let sb = if items[b].score.is_nan() { f32::NEG_INFINITY } else { items[b].score };
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut q = vec![1.0_f64; n];
+    let (mut targets, mut decoys) = (0u64, 0u64);
+    for (rank, &i) in order.iter().enumerate() {
+        if items[i].is_decoy {
+            decoys += 1;
+        } else {
+            targets += 1;
+        }
+        q[rank] = decoys as f64 / targets.max(1) as f64;
+    }
+    let mut min_q = 1.0_f64;
+    for qi in q.iter_mut().rev() {
+        if *qi < min_q {
+            min_q = *qi;
+        }
+        *qi = min_q;
+    }
+    let mut start = 0usize;
+    while start < n {
+        let s = items[order[start]].score;
+        let mut end = start + 1;
+        let tie = |x: f32, y: f32| (x.is_nan() && y.is_nan()) || x.to_bits() == y.to_bits();
+        while end < n && tie(items[order[end]].score, s) {
+            end += 1;
+        }
+        let worst = q[start..end].iter().cloned().fold(0.0_f64, f64::max);
+        for qi in &mut q[start..end] {
+            *qi = worst;
+        }
+        start = end;
+    }
+    let mut out = vec![1.0_f64; n];
+    for (rank, &i) in order.iter().enumerate() {
+        out[i] = q[rank];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

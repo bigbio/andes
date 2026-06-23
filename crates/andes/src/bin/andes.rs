@@ -4452,21 +4452,40 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
     detect_instrument_type(input::open_buf_maybe_gz(spectrum_path).ok()?)
 }
 
-/// Resolve the path to the bundled `models.parquet` store.
+/// Resolve the path to the bundled model store.
+///
+/// The store may ship either as a single `resources/models.parquet` file or as
+/// a per-protocol partitioned directory `resources/models/` (Hive-style
+/// `protocol=<P>/models.parquet`). [`ModelStore::open`] accepts both, so the
+/// resolver prefers the partitioned **directory** when present and falls back
+/// to the single file.
 ///
 /// A packaged release ships `resources/` next to the binary, so prefer
-/// `<exe_dir>/resources/models.parquet` when it exists — that makes an
-/// installed binary self-contained regardless of where it runs. Fall back to the
-/// compile-time source tree (`CARGO_MANIFEST_DIR`) for `cargo run` / tests.
+/// `<exe_dir>/resources/...` when it exists — that makes an installed binary
+/// self-contained regardless of where it runs. Fall back to the compile-time
+/// source tree (`CARGO_MANIFEST_DIR`) for `cargo run` / tests.
 fn bundled_store_path() -> PathBuf {
+    // Search roots in priority order: next to the binary, then the source tree.
+    let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let next_to_binary = dir.join("resources/models.parquet");
-            if next_to_binary.exists() {
-                return next_to_binary;
-            }
+            roots.push(dir.join("resources"));
         }
     }
+    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"));
+
+    for root in &roots {
+        let partitioned = root.join("models");
+        if partitioned.is_dir() {
+            return partitioned;
+        }
+        let single = root.join("models.parquet");
+        if single.exists() {
+            return single;
+        }
+    }
+
+    // Last-resort default (source tree single file) for error messages.
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet")
 }
 

@@ -48,3 +48,11 @@ DROP (un-sourceable -> do NOT ship MS-GF+ seed):
 - ETD exotics: etd_lowres_argc (only LysargiNase proxy), etd_highres_nocleavage (only top-down=diff regime), etd_lowres_lysn_phosphorylation (weak proxy)
 
 TALLY: ~17 (Wave1 train) + ~13 (Wave2 sourceable) = ~30 own-trainable / 39; ~8-9 DROP (aLP x4, UVPD-TMT, ETD-argc, ETD-hr-nocleavage, ETD-lysn-phospho). => honest "MS-GF+ model free for ~30 shipped regimes, ~9 dropped as un-sourceable" -> Apache relicense defensible.
+
+## Wave-2 harvest reality-check (2026-06-23, agent aed146397) — 2 discovery ERRORS caught
+HARVESTING NOW (Codon array 54426808): hcd_qexactive_tryp_itraqphospho (PXD006380), cid_lowres_tryp_phosphorylation (PXD001428 trypsin arm), cid_lowres_lysn_phosphorylation (PXD001114 LysargiNase proxy), hcd_highres_tryp_phosphorylation (PXD009449). ETA 3-8h.
+★ CORRECTIONS to Wave-2 discovery (verified at harvest):
+- PXD024364 (Coon ETD goldmine) = UNAVAILABLE (0 files, withdrawn) -> the 5 etd_lowres_{tryp,lysc,lysn,aspn,gluc} have NO source. Re-discover or DROP.
+- PXD010595 (ProteomeTools II) = TRYPTIC-ONLY (no AspN/LysN/HLA arms) -> cid_lowres_aspn/lysn/nocleavage + cid_highres_nocleavage have NO source from it. Re-discover or DROP.
+- PXD014777 (TOF) DEFERRED: Bruker .d, harvester is Thermo-.raw-only -> needs a .d-aware branch (follow-up). cid_tof_tryp pending that.
+REVISED TALLY: ~17 (Wave1) + 4 (Wave2 harvesting) = ~21 confirmed own-trained. Gaps needing re-discovery: 5 ETD-enzyme + 4 non-tryptic-CID + cid_tof_tryp(.d) + cid_highres_tryp. If re-discovery fails -> drop (exotic ETD-enzyme likely drops; non-tryptic CID worth one targeted retry). Honest floor ~21/39 own-trained even if all gaps drop = still a massive jump from 1.

@@ -110,3 +110,10 @@ Clean Astral-TMT-DDA exists; Astral has NO SPS-MS3 -> reporters are in the high-
 - VALIDATE (held-out, independent lab) -> PXD055796 (Emory ALS, human, FragPipe+Percolator results ready). Caveat TMTpro-16 vs train-18: only the reporter cluster (126-135) differs; b/y identical (+304.2071), and the scorer ignores the reporter region -> harmless. Strict-plex alt: filtered-Astral subset of PXD062520 (human TMTpro-18).
 - Multi-instrument sets (PXD062520/PXD060332) need Astral-only filtering. PXD058918 mixes DIA+TMT (use TMT raws). Slug hcd_astral_tryp_tmt.
 ★ HARVEST DEFERRED (~100-150GB) until Phase-1 base PROVES analyzer-matched model beats bundled on benchmark @ honest FDP. Discipline: prove the thesis on the cheap LFQ base before the big TMT/PTM downloads. (KGG 38GB already staged = cheap.)
+
+### Phase-1 A/B VERDICT (2026-06-23) — own-trained hcd_astral_tryp vs bundled
+On the ProteoBench LFQ_Astral_DDA_15min_50ng benchmark (ASTRAL_entrapment.fasta, Percolator @ q<=0.01), identical binary/settings:
+- bundled hcd_qexactive_tryp (MS-GF+-derived): 37,101 real @ 0.91% FDP, 16:41
+- NEW hcd_astral_tryp (FULLY own-trained, 0 seed tables, 218,738 PSMs): 36,685 real @ 0.91% FDP, 17:33
+NULL: own-trained is -416 PSMs (-1.1%), effective tie/slight loss vs the bundled MS-GF+-derived model. Thesis (analyzer-matched Astral model beats bundled) NOT supported on N=1. CAVEAT N=1 (one mzML, could flip). The bundled high-res model already serves Astral well.
+★ REFRAME (user): the release-relevant gate is NOT vs the bundled MS-GF+-derived model but vs the FIELD (Comet/MSFragger/MS-GF+). If 36,685 beats them -> the own-trained model is FIELD-BEATING + independence-clean = strong release story regardless of the 1.1% vs bundled. Multi-engine benchmark on the SAME file LAUNCHED (ac259ac3). Prior Astral benchmarks (andes +~30% over MSFragger) were on a DIFFERENT file -> measure on this one.

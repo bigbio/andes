@@ -57,3 +57,8 @@ strong_score.rs + ion_features.rs already use predict_by_ions(1..=2); scored_spe
 
 ## Round summary (so far)
 Engine is WELL-TUNED: parameter (chimeric N), scoring (charge-1, strong/rank), and same-regime model levers are at/near ceiling — strong endorsement of v0.2.0. The ONE win: refine VALIDATED (+2,827 real PTM IDs @0.60% FDP; the 'unvalidated' was a BASEPEP measurement artifact). Two concrete next-gain frontiers: (1) dedicated ANALYZER-MATCHED Astral model (new corpus, Codon long-pole); (2) streaming candidate enumeration (unblocks semi/non-specific/open — currently OOMs in-RAM).
+
+### Streaming-index fix (7e1e0e6f) — NECESSARY but INSUFFICIENT for full-DB semi
+- Dropped the Vec<Candidate> (real memory win, parity-clean) BUT build_base_peptide_index still sorts the Vec<IndexRecord> IN RAM. Full-DB semi-tryptic Astral = >1.5B records (>31GB) -> still OOMs at ~31.5GB (dmesg-confirmed 3 OOM-kills). The 20-byte-records-fit estimate was wrong (records themselves >31GB).
+- Full fix = EXTERNAL/chunked sort (spill records to disk + k-way merge by mass_milli) instead of in-RAM sort_by_key — or DB sharding. The streaming fix stands as a memory improvement (helps giant-mod-space too) but doesn't unblock full-DB semi alone.
+- ★ DISCIPLINE: before the external-sort investment, TEST whether semi-tryptic even ADDS IDs (most expansion levers bloated this round). The fix now lets REDUCED-DB semi fit -> A/B semi vs fully on a reduced Astral DB to get the semi value signal cheaply. If semi wins -> external sort worth it; if bloats -> skip it.

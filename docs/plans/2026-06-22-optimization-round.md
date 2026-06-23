@@ -99,3 +99,7 @@ DECISION (user asked which to start): START WITH MASSIVE (MSV000098998) for Phas
 - DESIGN: train base on PXD046453 (regime-match, easy ready IDs) AND CHO (independent) -> A/B both on benchmark; both-improve = real not lab-fit.
 - PXD046453 harvest+label-inspect LAUNCHED (aa34922a). Base CHO harvest job 54144438 still downloading.
 - Phase-2 KGG head-start DONE (a53dd208): 8/8 ubiquitin K-e-GG raws (38GB) + site truth combined_site_K_114.0429.tsv + FragPipe labels (6/8 runs) at $B/astral_corpus_ptm/PXD065579_KGG/.
+
+### Phase 3 — Astral TMT model (hcd_astral_tryp_tmt), user-added 2026-06-23
+TMT-on-Astral is a distinct regime (reporter ions, TMT/TMTpro fixed on K+Nterm, shifted b/y); bundled TMT models are LOW-RES CID only -> no Astral match. Ties to the historical TMT weak-spot. Slug hcd_astral_tryp_tmt, keyed (beam-CID, Astral, trypsin, TMT). Need a TRAIN + a HELD-OUT VALIDATION Astral-TMT-DDA pair (independent; entrapment-FDP). Candidates from base discovery (flagged as TMT, excluded from label-free base — wanted HERE): PXD058918, PXD060332, PXD062520, PXD063977, PXD055796. Discovery agent aef3296b scoping: confirm Astral+DDA (not DIA, PRIDE DDA facet unreliable), TMT plex, MS2-reporter vs MS3 (prefer MS2), has-IDs, recommend train+holdout. NOTE the low-res TMT benchmark PXD007683 is a DIFFERENT regime (not a validation set for Astral-TMT).
+CAMPAIGN = Astral model family: hcd_astral_tryp (LFQ base) + PTM-aware (KGG/phospho diagnostic ions) + hcd_astral_tryp_tmt (TMT).

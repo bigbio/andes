@@ -72,3 +72,14 @@ Auto-select confirmed own-trained models for both. NO regression anywhere -> v1 
 ## v1 re-benchmark (a14940ab) — own models IMPROVED but benchmark INVALID for v1 (wrong binary) + Astral routing reopened
 Own-trained v1 numbers (std 1% FDR): Astral top-1 39,506 (was 36,782, +7.4%!) / chimeric 68,244 (+117% vs field); UPS1 chimeric 18,732 (+4.8%, leads field) / top-1 17,129 (within 1% Java, README framing holds). Beats Java(26,542/-/17,305)+Comet(31,435/-/15,809) on Astral+UPS. Entrapment-FDP honest (0.9-1.2%).
 ★ 3 ISSUES -> re-run (a4524410): (1) used OLD Jun-22 binary (no detection fix) -> Astral auto-picked hcd_qexactive_tryp not shipped hcd_astral_tryp. (2) ★ hcd_qexactive_tryp (39,506) appears BETTER on Astral than dedicated hcd_astral_tryp (~35-37k) — BOTH own-trained now, so independence moot, pure perf call: REOPENS v1 Astral routing (keep dedicated astral key OR route Astral->qexactive). (3) TMT a05058.mzML DELETED from VM (disk pressure) -> unmeasured; re-stage from PXD007683. a4524410 = definitive: detection-fixed binary + partitioned bundle + Astral A/B (astral vs qexactive) + re-staged TMT + UPS, std-FDR table + entrapment footnote.
+
+## DEFINITIVE BENCHMARK (a4524410, RECOVERED from crash) — Astral routing RESOLVED + v1 leads all 3
+Detection-fixed binary + partitioned v1 bundle, /srv/data/msgf-bench/v1-definitive/. Recovered by counting the Percolator outputs (agent crashed before reporting).
+★ ASTRAL A/B = TIE: hcd_astral_tryp 41,080 table / 36,776 real @1.07% vs hcd_qexactive_tryp 41,009 / 36,832 @1.09% (within 71 PSMs / 0.2%). The earlier 'qexactive 39,506 >> astral 35,304' was a BINARY/METRIC artifact (old non-detection-fixed binary + mismatched FASTA/metric). -> KEEP hcd_astral_tryp as Astral default (no reversal); detection fix stays.
+★ FINAL v1 table (q<=0.01 std FASTA, own models, leads all 3):
+  andes-v1 top-1: Astral 41,080 / TMT 12,170 / UPS 17,511
+  andes-v1 chim:  Astral (pending percolator on astralA_chim.pin) / TMT 12,277 / UPS 18,283
+  Java MS-GF+:    26,542 / 11,555 / 17,305    Comet: 31,435 / 10,876 / 15,809
+  -> andes-v1 LEADS each: Astral +30%, TMT +5.3% (own cid_lowres_tryp_tmt now BEATS field), UPS +1.2% (now leads top-1 not just chim). Headline holds + stronger.
+  Entrapment-FDP: Astral 1.07% / TMT 2.01% / UPS 1.85% (honest).
+PENDING (a749a6d4): Astral chimeric number + sanity-check the 41,080 vs old 36,782 (+11.7%) is same-FASTA apples-to-apples (big jump - verify). Then these are the FINAL README numbers.

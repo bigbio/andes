@@ -69,3 +69,15 @@ Engine is WELL-TUNED: parameter (chimeric N), scoring (charge-1, strong/rank), a
 - VERDICT: semi value UNTESTABLE on 31GB; unblocking needs bounded per-spectrum enumeration + external-sort + a bigmem box just to measure — not worth it speculatively (expansion levers bloated this round). ABANDON. Keep the streaming fix.
 
 ## ROUND CLOSED. Net: 1 validated win (refine, +2,827 real PTM IDs @0.60% FDP) + 1 small memory fix (streaming index). Everything else confirmed at-ceiling or infeasible -> strong endorsement that v0.2.0 is well-tuned. The ONE remaining real-gain frontier = a dedicated ANALYZER-MATCHED Astral model (hcd_astral_tryp, native Astral DDA corpus) — a fresh multi-session sub-project.
+
+## DEDICATED ASTRAL MODEL CAMPAIGN (2026-06-23, user-driven corpus)
+Frontier after the cheap-lever round: the QExactive-trained bundle is corpus-bounded for the Astral regime (more QExactive data REGRESSED -2.6%) -> train analyzer-matched Astral models. Two corpora, two phases:
+
+### Phase 1 — BASE general model (hcd_astral_tryp)
+- Corpus = MSV000098998 / PXD067958 (GSK HCP-on-Astral benchmark). Orbitrap Astral, CHO (Cricetulus griseus, no-leakage vs human HeLa benchmark), LABEL-FREE DDA Top80. 21 DDA runs / 29.94 GB (7 load levels x 3 reps), sample-verified genuine Astral raw. DIA (102 GB) excluded. SIL 13C/15N heavy spike-in in every run -> declare as variable mods. Enzyme assumed trypsin (no params in deposit). FTP blocked -> MassIVE HTTPS DownloadResultFile works.
+- Harvest LAUNCHED (agent aa21980b) -> $B/astral_corpus/ + CHO FASTA (UP000001075). Next: search -> flat -> andes train -> A/B vs bundled on human Astral benchmark @ honest entrapment-FDP.
+
+### Phase 2 — PTM-AWARE Astral model (the "future", user-endorsed 2026-06-23)
+- Corpus = PXD065579 (Kumar et al, MCP 2026:101562). Human HCT116/Jurkat, PTMScan immunoaffinity enrichment (phospho-Y, acetyl-K, ubiquitin K-e-GG, methyl, succinyl), Orbitrap Astral + Lumos, nDIA + DDA mixed. Use ONLY the Astral+DDA subset (inventory agent ae88134e scoping it).
+- TIES TO MaxSBM/glyco doc (docs/plans/2026-06-20-glyco-neutral-loss-and-maxsbm.md): train diagnostic/loss-ion (d-ion/p-ion) behavior on REAL Astral PTM spectra — phospho neutral losses, ubiquitin-GG remnant, acetyl. pepXML/mzML in the deposit may give ready PTM labels without re-searching.
+- SECONDARY for the base model too (its Astral-DDA runs add analyzer diversity), but PTM-enrichment-biased so not the base.

@@ -89,3 +89,13 @@ Finish-up caught it: the 41,080 (Astral) vs old 36,782 (+11.7%) is NOT the v1 mo
 ★ DO NOT claim a +11.7% Astral improvement. The andes-v1(mix-max/revCat) vs Java/Comet(old -Y/plain) table also MIXES methodologies -> not strictly fair.
 HONEST takeaway (unchanged + good): v1 own models TIE-or-slightly-beat old (no regression, independence is FREE) + robustly LEAD field at any consistent methodology.
 FIX: FINAL fair benchmark a2020b68 = andes-v1 on the EXACT old methodology (plain FASTA + andes decoys + percolator -Y, matching the reused Java 26,542/Comet 31,435) -> publishable table. Expect andes-v1 ~= old 36,782 (model A/B tie) + still leads field. NO methodology drift this time (no revCat, no mix-max).
+
+## ★★ FINAL FAIR BENCHMARK (a2020b68) — LOCKED, honest, one methodology (plain FASTA + andes XXX_ decoys + percolator -Y TDC, verified)
+README table (PSMs @1% FDR, all rows one methodology; competitors reused):
+  andes-v1 top-1:   Astral 39,101 / TMT 11,986 / UPS 17,129
+  andes-v1 chim:    Astral 67,022 / TMT 12,188 / UPS 18,732
+  Java MS-GF+:      26,542 / 11,555 / 17,305     Comet: 31,435 / 10,876 / 15,809
+LEADS: Astral +47%(Java)/+24%(Comet); TMT +3.7%/+10.2% (PSMs+peptides); UPS beats Comet +8.4%, ties Java(-1% PSMs but +peptides), chim leads outright.
+INDEPENDENCE-IS-FREE (v1 vs old README andes, SAME methodology): TMT +0.2% / UPS -0.08% = FLAT (low-res A/B tie); Astral +6.3% (39,101 vs 36,782) = REAL modest own-model gain (verified plain+TDC, NOT the false +11.7% revCat/mix-max drift). => fully-own bundle is quality-neutral-to-POSITIVE + leads field. CAVEAT: Astral on mzML (.raw gone), N=1. Binary md5 c48ce36f (detection fix present). Models pinned: Astral->hcd_astral_tryp, TMT->cid_lowres_tryp_tmt, UPS->cid_lowres_tryp. Results /srv/data/msgf-bench/v1-final/.
+Entrapment footnote (from v1-definitive, mix-max - approx): Astral ~0.95-1.07%, TMT ~1.01%, UPS ~1.80% true FDP @ nominal 1% q.
+=> THESE are the FINAL README numbers. Proceed to PR.

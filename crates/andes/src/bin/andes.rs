@@ -16,6 +16,9 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
+#[path = "../rescore.rs"]
+mod rescore;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, ModLocation, Modification,
@@ -444,10 +447,30 @@ struct SearchArgs {
     #[arg(long = "rescore", default_value_t = false)]
     rescore: bool,
 
-    /// Reported FDR threshold for the filtered `<stem>.q<fdr>.tsv` written under
-    /// `--rescore` (target PSMs with Percolator q-value ≤ this). Default 0.01.
-    #[arg(long = "fdr", default_value_t = 0.01)]
-    fdr: f64,
+    /// Rescore with the built-in NATIVE GBDT rescorer instead of Percolator (no
+    /// Percolator backend needed). Leakage-safe 3-fold target-decoy cross-
+    /// validation over the PIN features → q-value + PEP. A self-contained
+    /// FALLBACK for benchmarking / offline use — NOT production-grade FDR; prefer
+    /// `--rescore` (Percolator) for production. Writes the same QPX q-value/PEP +
+    /// filtered `<stem>.q<fdr>.tsv` outputs. Ignored if `--rescore` is also set.
+    #[arg(long = "rescore-native", default_value_t = false)]
+    rescore_native: bool,
+
+    /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
+    /// (target PSMs at q ≤ this). Setting it EXPLICITLY without `--rescore` /
+    /// `--rescore-native` TRIGGERS rescoring and auto-picks the backend:
+    /// Percolator if one is available, otherwise the built-in native rescorer.
+    /// When rescoring runs, the threshold defaults to 0.01 if unset.
+    #[arg(long = "fdr")]
+    fdr: Option<f64>,
+
+    /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
+    /// applied IN ADDITION to `--fdr` (a PSM must pass both q ≤ `--fdr` AND
+    /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
+    /// `--pep` is a supplementary per-PSM gate. Like `--fdr`, setting it
+    /// explicitly triggers rescoring. Default: no PEP cap.
+    #[arg(long = "pep")]
+    pep: Option<f64>,
 
     /// Explicit path to a Percolator binary (highest-priority backend). When
     /// omitted, `percolator` on `$PATH` is used, else the docker fallback.
@@ -876,7 +899,12 @@ fn main() -> ExitCode {
             // --output-pin is required UNLESS --rescore is set: rescore can route
             // the search through a temporary PIN (deleted afterwards when
             // --keep-pin false), so a PIN path is not mandatory in that mode.
-            if search.output_pin.is_none() && !search.rescore {
+            if search.output_pin.is_none()
+                && !search.rescore
+                && !search.rescore_native
+                && search.fdr.is_none()
+                && search.pep.is_none()
+            {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
             }
@@ -2319,13 +2347,46 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── Rescore: run Percolator on the PIN, join PEP/q-value downstream ───────
-    // Sits BETWEEN the PIN write and the QPX/TSV writes so the parsed
-    // `SpecId → PercolatorPsm` map can be threaded into `write_qpx` and the
-    // filtered TSV. `None` (rescore off) keeps every downstream output identical
-    // to a non-rescore run.
+    // ── Rescore: run Percolator (or the native rescorer) on the PIN, join ─────
+    // PEP/q-value downstream. Sits BETWEEN the PIN write and the QPX/TSV writes
+    // so the parsed `SpecId → PercolatorPsm` map can be threaded into
+    // `write_qpx` and the filtered TSV. `None` keeps every downstream output
+    // identical to a non-rescore run.
+    //
+    // Backend choice: `--rescore` forces Percolator; `--rescore-native` forces
+    // the native rescorer; an EXPLICIT `--fdr` with neither flag triggers
+    // rescoring and auto-picks — Percolator if a backend resolves, else native.
+    let fdr_threshold = cli.fdr.unwrap_or(0.01);
+    let (use_percolator, use_native) = if cli.rescore {
+        (true, false)
+    } else if cli.rescore_native {
+        (false, true)
+    } else if cli.fdr.is_some() || cli.pep.is_some() {
+        match output::resolve_backend(
+            cli.percolator_bin.as_deref(),
+            cli.percolator_docker,
+            &cli.percolator_image,
+        ) {
+            Ok(b) => {
+                eprintln!(
+                    "Rescore: --fdr set without a backend flag → Percolator found ({}), using it.",
+                    b.describe()
+                );
+                (true, false)
+            }
+            Err(_) => {
+                eprintln!(
+                    "Rescore: --fdr set without a backend flag and no Percolator available → \
+                     using the native rescorer. (Point to/install Percolator for production-grade FDR.)"
+                );
+                (false, true)
+            }
+        }
+    } else {
+        (false, false)
+    };
     let rescore_map: Option<std::collections::HashMap<String, output::PercolatorPsm>> =
-        if cli.rescore {
+        if use_percolator {
             let backend = output::resolve_backend(
                 cli.percolator_bin.as_deref(),
                 cli.percolator_docker,
@@ -2344,6 +2405,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 t_resc.elapsed().as_secs_f64()
             );
             Some(map)
+        } else if use_native {
+            eprintln!(
+                "Rescore: NATIVE GBDT rescorer (no Percolator; leakage-safe 3-fold target-decoy CV). \
+                 Fallback — use --rescore (Percolator) for production-grade FDR."
+            );
+            let t_resc = std::time::Instant::now();
+            let pin_text = std::fs::read_to_string(&output_pin_path)
+                .map_err(|e| format!("reading PIN for native rescore: {e}"))?;
+            let map = rescore::native_rescore_pin(&pin_text, 42)
+                .map_err(|e| format!("native rescore: {e}"))?;
+            eprintln!(
+                "Rescore: native produced {} PSMs (q-value+PEP) [{:.2}s]",
+                map.len(),
+                t_resc.elapsed().as_secs_f64()
+            );
+            Some(map)
         } else {
             None
         };
@@ -2352,7 +2429,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the PIN as `<stem>.q<fdr>.tsv` (rescore only). One row per accepted PSM with
     // the join key + q/PEP + peptide/proteins from the Percolator result.
     if let Some(ref map) = rescore_map {
-        let fdr = cli.fdr;
+        let fdr = fdr_threshold;
         let stem = output_pin_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -2360,17 +2437,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let dir = output_pin_path.parent().unwrap_or_else(|| Path::new("."));
         let q_tag = format!("{fdr}").replace('.', "p");
         let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
-        let mut accepted: Vec<&output::PercolatorPsm> =
-            map.values().filter(|p| p.q_value <= fdr).collect();
+        // q-value is the primary set-level FDR control; an optional --pep ANDs a
+        // per-PSM local-FDR cap on top.
+        let pep_cap = cli.pep;
+        let mut accepted: Vec<&output::PercolatorPsm> = map
+            .values()
+            .filter(|p| p.q_value <= fdr && pep_cap.is_none_or(|t| p.pep <= t))
+            .collect();
         accepted.sort_by(|a, b| {
             a.q_value.partial_cmp(&b.q_value).unwrap_or(std::cmp::Ordering::Equal)
         });
+        let pep_note = pep_cap.map(|t| format!(" and PEP<={t}")).unwrap_or_default();
         match write_filtered_tsv(&filtered_path, &accepted) {
             Ok(()) => eprintln!(
-                "Wrote filtered TSV: {} ({} PSMs at q<={})",
+                "Wrote filtered TSV: {} ({} PSMs at q<={}{})",
                 filtered_path.display(),
                 accepted.len(),
-                fdr
+                fdr,
+                pep_note
             ),
             Err(e) => eprintln!("WARN: could not write {}: {e}", filtered_path.display()),
         }

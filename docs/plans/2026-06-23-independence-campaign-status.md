@@ -61,3 +61,10 @@ REVISED TALLY: ~17 (Wave1) + 4 (Wave2 harvesting) = ~21 confirmed own-trained. G
 Partial finding before stall: non-tryptic CID IS likely sourceable — a large deposit has 2xIT (ion-trap low-res) runs covering HLA (non-specific) + AspN. Accession NOT captured. -> DEFER non-tryptic CID (cid_lowres_aspn/lysn/nocleavage + cid_highres_nocleavage) as "sourceable-pending-focused-retry" (a future session: PRIDE search ProteomeTools-immunopeptidome / multi-protease, verify file existence, harvest). NOT blocking the bundle.
 ETD-low-res enzymes (5): no verified alt for the gone PXD024364 -> DROP (exotic, consistent with etd_lowres_argc/alp drop).
 DECISION: don't keep chasing the niche tail through flaky agents. Proceed with the BUNDLE MERGE of the ~21 confirmed own-trained (Wave-1 17 + Wave-2 4 when flats land), DROP the confirmed-un-sourceable, DEFER non-tryptic+TOF(.d). Honest shipped count ~21-25/39 own-trained = the win. Remaining tail is a documented follow-up, not a blocker.
+
+## v1 VALIDATION COMPLETE (a6b7d5bf) — own-trained bundle HOLDS on all 3 benchmarks -> GREEN LIGHT
+Matched 1% true entrapment-FDP, Percolator 3.7.1, v1 bundle models_v1_own.parquet (SHA 12b2c176, 15 own, ZERO MS-GF+):
+- Astral (hcd_astral_tryp): field-beating +23-50% vs MSFragger/Comet/MS-GF+.
+- UPS1 (cid_lowres_tryp, own): 16,584 @0.995% = +0.84% vs prior bundled (16,446) -> slight BEAT.
+- TMT (cid_lowres_tryp_tmt, own): 11,363 @0.998% = flat vs prior's non-TMT FALLBACK (prior 39-model bundle has NO low-res CID-TMT model; v1 ADDS one). No regression; known low-res-TMT gap unchanged but v1 strictly more complete.
+Auto-select confirmed own-trained models for both. NO regression anywhere -> v1 ships. CAVEAT N=1/dataset; TMT not a same-model A/B (prior fell back to non-TMT). VERDICT: pure-own v1 bundle validated -> proceed to v1 branch assembly (docs remove MS-GF+, supported table, test count 38->17, .param removal, I1).

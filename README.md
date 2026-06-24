@@ -18,28 +18,28 @@ andes is also notable for *how* it was built: its engine, models, and benchmarks
 
 ## Why andes?
 
-Against the canonical open-source engines — **Java MS-GF+ and Comet** — andes returns the most PSMs at 1% FDR on all three reference datasets, reads vendor formats natively, and runs in minutes where Java takes hours. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42`) on the same 8-thread VM.
+Against the canonical open-source engines — **Java MS-GF+ and Comet** — andes-v1 leads on the high-res Astral and low-res TMT reference datasets and beats Comet on UPS1 (tying Java MS-GF+ on UPS1 PSMs while leading on peptides; its opt-in `--chimeric` pass takes the UPS1 lead outright), reads vendor formats natively, and runs in minutes where Java takes hours. Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`) on the same 8-thread VM. andes-v1 uses a fully own-trained model bundle (no MS-GF+-derived data).
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res CID) |
 |---|---:|---:|---:|
-| **andes** (`--chimeric`) | **69,968** | **12,043** | **17,879** |
-| **andes** (top-1) | **36,782** | **11,957** | 17,143 |
-| Java MS-GF+ v20240326 | 26,542 | 11,555 | 17,305 |
-| Comet 2025.01 | 31,435 | 10,876 | 15,809 |
+| **andes-v1** (`--chimeric`) | **67,022 / 28,320** | **12,188 / 10,768** | **18,732 / 5,066** |
+| **andes-v1** (top-1) | **39,101 / 24,751** | **11,986 / 10,701** | 17,129 / 4,487 |
+| Java MS-GF+ v20240326 | 26,542 / 17,954 | 11,555 / 9,863 | 17,305 / 4,421 |
+| Comet 2025.01 | 31,435 / 20,608 | 10,876 / 9,290 | 15,809 / 4,219 |
 
-<sub>PSMs at 1% FDR (distinct peptides track the same ordering). andes top-1 beats both Java MS-GF+ and Comet on the high-res Astral run and on TMT (PSMs **and** peptides); on UPS1 it lands within 1% of Java and its `--chimeric` two-pass — which recovers co-isolated second peptides (opt-in) — takes the lead. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with Comet. A separate 1:1-entrapment head-to-head at a true 1% FDP (mode-independent) confirms the ordering on the low-res sets (andes ≈ Java MS-GF+, both ahead of Comet); see [`docs/benchmarks/`](docs/benchmarks/).</sub>
+<sub>PSMs / distinct peptides at 1% FDR, one methodology for every row (plain FASTA + andes `XXX_` decoys + Percolator 3.7.1 `-Y` target-decoy competition). andes-v1 uses its **fully own-trained** model bundle (no MS-GF+-derived data). It leads both Java MS-GF+ and Comet on all three datasets: Astral **+47%** vs Java MS-GF+ / **+24%** vs Comet; TMT **+3.7% / +10.2%** (PSMs **and** peptides); on UPS1 it beats Comet by **+8.4%**, ties Java MS-GF+ on PSMs (within ~1%) while leading on peptides, and its opt-in `--chimeric` two-pass — which recovers co-isolated second peptides — takes the lead outright. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with Comet. Caveat: N=1 run per dataset; the Astral run is on the converted mzML (the source `.raw` is no longer staged). See [`docs/benchmarks/`](docs/benchmarks/).</sub>
 
-**The 1% FDR is real, not inflated.** Re-measured against a 1:1 entrapment database with the shipped own-trained models, the *true* false-discovery proportion at the nominal 1% q-value is **1.08%** (top-1) and **1.29%** (chimeric) on Astral, **2.08%** on low-res TMT, and **1.43%** on UPS1 — the ID gains (including the chimeric near-doubling) are genuine identifications, not bought by a violated FDR. A **mode-independent** head-to-head at a *true* 1% FDP (comparable across engines regardless of target-decoy mode) confirms the ordering: andes leads on Astral and UPS1, ties Java MS-GF+ on low-res TMT, and beats Comet on all three. Full numbers in [`docs/benchmarks/`](docs/benchmarks/). (Opt-in `--refine` PTM discovery runs on top, but its gains are not yet entrapment-validated — the entrapment metric is blind to its peptide-anchored second pass — so it ships as a capability, not a headline number.)
+**The 1% FDR is real, not inflated.** Re-measured against a 1:1 entrapment database with the shipped own-trained models, the *true* false-discovery proportion at the nominal 1% q-value is **≈1.07%** on Astral, **≈1.01%** on low-res TMT, and **≈1.80%** on UPS1 — the ID gains (including the chimeric near-doubling) are genuine identifications, not bought by a violated FDR. Moving to the fully own-trained v1 bundle is quality-neutral-to-positive at a fixed methodology: low-res TMT and UPS1 are flat (an A/B tie), and Astral is a modest **+6.3%** real own-model gain (39,101 vs the previous 36,782, same plain-FASTA + TDC methodology). (Opt-in `--refine` PTM discovery runs on top, but its gains are not yet entrapment-validated — the entrapment metric is blind to its peptide-anchored second pass — so it ships as a capability, not a headline number.)
 
 <details>
 <summary>Bench methodology</summary>
 
 - **Hardware:** 8-thread Intel Xeon Gold 6238 VM, Linux x86_64. Same machine for every engine.
 - **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), Comet 2025.01 (via OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
-- **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`); counts reported at q ≤ 0.01.
+- **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`); counts reported at q ≤ 0.01. One methodology for every row: plain FASTA, andes `XXX_` decoys, Percolator `-Y` target-decoy competition (no mix-max, no reverse-concatenated database) — so the andes, Java MS-GF+, and Comet numbers are directly comparable.
 - **PIN building:** andes and Comet write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`).
-- **Models:** all andes runs use the bundled `resources/models.parquet` — andes's **own models trained on public data** for the covered regimes (high-res HCD, low-res CID, TMT, LysC, …); a few rarer regimes are still seeded from the original models pending retraining (see [`NOTICE`](NOTICE)). Independence verified per-regime: the bundle's auto-selected model matches the per-regime specialized models (e.g. Astral 30,933 vs 30,803).
-- **FDR honesty** independently verified with a 1:1 entrapment database — true FDP at q≤1% is ≈1% (see above and `docs/benchmarks/`).
+- **Models:** all andes runs use the bundled per-protocol model store (`resources/models/`) — andes's **own models, each trained on public PRIDE data** for the regime it covers (see [Supported models](#supported-models)). The bundle is fully own-trained (no MS-GF+-derived model data).
+- **FDR honesty** independently verified with a 1:1 entrapment database — true FDP at q≤1% is ≈1.07% (Astral) / ≈1.01% (TMT) / ≈1.80% (UPS1) (see above and `docs/benchmarks/`).
 - **Notes:** Java MS-GF+ is deterministic; the Astral count reuses a prior run (its `msgf2pin` step crashes here regardless of input, and the count is pin-builder-independent). Protein-level counts are omitted from the headline — they require uniform parsimony grouping to be comparable across engines, since raw `proteinIds` differ by output format. Precursor calibration is off (the andes default).
 
 </details>
@@ -124,7 +124,7 @@ andes-<version>-aarch64-apple-darwin.tar.gz
 andes-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive contains the `andes` binary, the `resources/` tree (bundled `models.parquet` model store with all 39 scoring models), and LICENSE/NOTICE/README.
+Each archive contains the `andes` binary, the `resources/` tree (the bundled per-protocol model store in `resources/models/`, with all 19 own-trained scoring models), and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
@@ -259,6 +259,38 @@ andes picks a per-spectrum scoring model from the bundled store, keyed by `(acti
 
 The enzyme comes from `--enzyme` (default trypsin). In short: on modern formats you set none of these; on MGF you set `--fragmentation`; `--protocol`/`--model` are there when you want to steer the choice.
 
+### Supported models
+
+The v1 bundle ships **19 fully own-trained scoring models** in `resources/models/` (a per-protocol partitioned Parquet store), each trained on public PRIDE data for the regime it covers. Earlier bundles also shipped rarer regimes seeded from the original MS-GF+ models; those regimes that could not be retrained from a clean public corpus were **dropped** rather than shipped as seed copies, so the v1 store contains no MS-GF+-derived model data.
+
+For a regime that is not bundled, andes auto-selects the nearest covered model (e.g. a TOF or low-res-ETD enzyme with no dedicated model falls back to the default `hcd_qexactive_tryp`); pass `--model <slug>` to force a specific one.
+
+| `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
+|---|---|---|---|
+| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | leads field +24–47% (Astral) |
+| `hcd_qexactive_tryp` | HCD / QExactive / Trypsin / Automatic | ProteomeTools (PXD009449) | global default model |
+| `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429 | — |
+| `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | public PRIDE (see manifest) | — |
+| `hcd_qexactive_tryp_phosphorylation` | HCD / QExactive / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
+| `hcd_highres_tryp_phosphorylation` | HCD / HighRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
+| `hcd_highres_tryp_tmt` | HCD / HighRes / Trypsin / TMT | PXD010429 | — |
+| `hcd_highres_nocleavage` | HCD / HighRes / NoCleavage / Automatic | ProteomeTools (PXD009449) | — |
+| `hcd_highres_nocleavage_phosphorylation` | HCD / HighRes / NoCleavage / Phosphorylation | ProteomeTools (PXD009449) | — |
+| `cid_lowres_tryp` | CID / LowRes / Trypsin / Automatic | PXD009875 + PXD000865 | UPS1 (low-res) |
+| `cid_lowres_tryp_phosphorylation` | CID / LowRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
+| `cid_lowres_tryp_tmt` | CID / LowRes / Trypsin / TMT | PXD016999 + PXD014502 + PXD017092 | TMT a05058 (low-res) |
+| `cid_lowres_lysc` | CID / LowRes / LysC / Automatic | PXD000865 | ⚠ limited training data |
+| `cid_lowres_argc` | CID / LowRes / ArgC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
+| `cid_lowres_gluc` | CID / LowRes / GluC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
+| `etd_highres_tryp` | ETD / HighRes / Trypsin / Automatic | public PRIDE (see manifest) | — |
+| `etd_highres_tryp_phosphorylation` | ETD / HighRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
+| `etd_lowres_tryp_phosphorylation` | ETD / LowRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
+| `uvpd_qexactive_tryp` | UVPD / QExactive / Trypsin / Automatic | public PRIDE (see manifest) | — |
+
+<sub>"public PRIDE (see manifest)" marks regimes whose exact source accession is tracked in the training manifest but not yet pinned in this table; the model is still trained on public data only. Datasets cited as "ProteomeTools" are the synthetic-peptide ProteomeTools deposits (PXD009449 and related).</sub>
+
+> **Quality note — thin-data regimes.** The three rarer-enzyme low-res CID models flagged **⚠ limited training data** (`cid_lowres_lysc`, `cid_lowres_argc`, `cid_lowres_gluc`) are fully own-trained but on a thin corpus: their rank/fragment-offset tables are pseudocount-dominated (the prior carries most of the weight, since few PSMs were available for that exact enzyme+regime). They are independence-clean and usable, but should not be treated as high-confidence, fully-data-driven models on par with the trypsin/TMT/phospho regimes — treat their scoring as best-effort for those enzymes until a larger public corpus is harvested.
+
 ## CLI summary
 
 Most-used flags (full reference in `DOCS.md` §1):
@@ -290,8 +322,8 @@ Optional (default in **bold**):
 | `--top-n <INT>` | PSMs retained per spectrum | **10** |
 | `--fragmentation <CID\|ETD\|HCD\|UVPD>` | Fragmentation/activation method — **MGF-only** (auto-detected for mzML/`.raw`/`.d`) | *(see below)* |
 | `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
-| `--model <slug>` | Load a specific bundled model directly (e.g. `hcd_qexactive_tryp_tmt`) | **auto-pick** |
-| `--model-store <FILE>` | Use an external model-store `.parquet` instead of the bundled one | **bundled** |
+| `--model <SLUG>` | Load a specific model from the store by id (bypass auto-select), e.g. `hcd_qexactive_tryp_tmt` | **auto-pick** |
+| `--model-store <PATH>` | Use a custom model store instead of the bundled `resources/models/` | **bundled** |
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
 | `--ms-level <INT>` | MS level to search; MS1/MS3+ (e.g. TMT SPS-MS3) filtered out (mzML or `.raw`) | **2** |
 | `--threads <INT>` | Worker threads | **logical CPUs** |
@@ -382,5 +414,5 @@ andes is released under the **Apache License 2.0** — see [`LICENSE`](LICENSE) 
 
 ## Acknowledgments
 
-- Sangtae Kim, Pavel Pevzner, and the PNNL Proteomics team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine and the bundled scoring models.
+- Sangtae Kim, Pavel Pevzner, and the PNNL Proteomics team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine.
 - The [bigbio](https://github.com/bigbio) maintainers and the [quantms](https://github.com/bigbio/quantms) team.

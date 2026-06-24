@@ -18,12 +18,15 @@ fn bundled_store() -> model_train::store::ModelStore {
     model_train::store::ModelStore::open(bundled).expect("open bundled models.parquet")
 }
 
+// Two distinct bundled models used purely as round-trip Param fixtures (any
+// two distinct own-trained v1 models work; the previously used `cid_tof_alp` /
+// `hcd_tof_alp` were dropped as un-sourceable in the v1 own-trained bundle).
 fn fixture() -> Param {
-    bundled_store().load_param("cid_tof_alp").expect("load cid_tof_alp from store")
+    bundled_store().load_param("hcd_qexactive_tryp").expect("load hcd_qexactive_tryp from store")
 }
 
 fn fixture2() -> Param {
-    bundled_store().load_param("hcd_tof_alp").expect("load hcd_tof_alp from store")
+    bundled_store().load_param("uvpd_qexactive_tryp").expect("load uvpd_qexactive_tryp from store")
 }
 
 /// Construct a minimal `Param` that contains loss-ion entries (loss_class != 0)
@@ -234,7 +237,7 @@ fn old_store_without_loss_class_reads_as_zero() {
     ));
     let store = ModelStore::open(bundled).expect("open bundled models.parquet");
     let ids = store.model_ids();
-    assert!(ids.len() >= 38, "expected >=38 bundled models, got {}", ids.len());
+    assert!(ids.len() >= 19, "expected >=19 bundled models, got {}", ids.len());
 
     for id in &ids {
         let param = store.load_param(id).expect("load bundled model");

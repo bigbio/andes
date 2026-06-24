@@ -48,7 +48,13 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         (2, 700.0), (2, 800.0), (2, 900.0), (2, 1000.0),
         (3, 1200.0), (3, 1500.0),
     ];
-    let cfg = GeometryConfig { num_segments: 2, max_rank: 150, n_mass_tiers: 2 };
+    // occupancy=1, max=2 → each charge gets min(n_masses, 2) = 2 tiers.
+    let cfg = GeometryConfig {
+        num_segments: 2,
+        max_rank: 150,
+        mass_tier_occupancy: 1,
+        max_mass_tiers: 2,
+    };
     let derived = derive_geometry(&corpus, &base, &cfg);
 
     // Geometry is the derived one, not the seed's.

@@ -17,7 +17,28 @@ use crate::labeled::LabeledMatch;
 pub struct GeometryConfig {
     pub num_segments: i32,
     pub max_rank: i32,
-    pub n_mass_tiers: usize,
+    /// Target training PSMs per mass tier. The tier count is derived PER CHARGE
+    /// as `n_psms_for_charge / mass_tier_occupancy` (clamped to
+    /// `1..=max_mass_tiers`), so a data-rich charge gets many tiers and a sparse
+    /// charge few — matching how a seed geometry's resolution scales with data
+    /// (the dominant charges carry ~33 tiers, sparse charges ~4). A fixed small
+    /// tier count instead under-partitions the data-rich charges, leaving the
+    /// learned tables badly undertrained.
+    pub mass_tier_occupancy: usize,
+    /// Upper bound on mass tiers per charge.
+    pub max_mass_tiers: usize,
+}
+
+/// Adaptive per-charge mass-tier count: `n_psms / occupancy`, clamped to
+/// `1..=max_tiers`. An `occupancy` of 0 falls back to `max_tiers` (treat every
+/// charge as data-rich). Guarantees at least one tier so a charge with any data
+/// is never dropped.
+fn adaptive_n_tiers(n_psms: usize, occupancy: usize, max_tiers: usize) -> usize {
+    let cap = max_tiers.max(1);
+    if occupancy == 0 {
+        return cap;
+    }
+    (n_psms / occupancy).clamp(1, cap)
 }
 
 /// b-ion m/z offset (proton). y-ion offset adds a water. Both CODATA-sourced
@@ -62,7 +83,8 @@ pub fn derive_mass_tiers(masses: &[f32], n_tiers: usize) -> Vec<f32> {
 /// `tiers_by_charge` input to [`build_partition_skeleton`].
 pub fn derive_tiers_by_charge(
     charge_masses: &[(i32, f32)],
-    n_tiers: usize,
+    occupancy: usize,
+    max_tiers: usize,
 ) -> Vec<(i32, Vec<f32>)> {
     let mut by_charge: std::collections::BTreeMap<i32, Vec<f32>> =
         std::collections::BTreeMap::new();
@@ -71,7 +93,11 @@ pub fn derive_tiers_by_charge(
     }
     by_charge
         .into_iter()
-        .map(|(charge, masses)| (charge, derive_mass_tiers(&masses, n_tiers)))
+        .map(|(charge, masses)| {
+            // Adaptive: tier count scales with this charge's data volume.
+            let n_tiers = adaptive_n_tiers(masses.len(), occupancy, max_tiers);
+            (charge, derive_mass_tiers(&masses, n_tiers))
+        })
         .collect()
 }
 
@@ -130,7 +156,8 @@ pub fn build_frag_off_table(
 /// (data_type, tolerance, deconvolution, version, precursor offsets) from `base`.
 /// Learned tables are left empty for [`Estimator::estimate`] to fill.
 pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &GeometryConfig) -> Param {
-    let tiers_by_charge = derive_tiers_by_charge(charge_masses, cfg.n_mass_tiers);
+    let tiers_by_charge =
+        derive_tiers_by_charge(charge_masses, cfg.mass_tier_occupancy, cfg.max_mass_tiers);
     let partitions = build_partition_skeleton(&tiers_by_charge, cfg.num_segments);
     let frag_off_table = build_frag_off_table(&partitions);
 
@@ -259,7 +286,12 @@ mod tests {
             (2, 1000.0), (2, 1200.0), (2, 1400.0), (2, 1600.0),
             (3, 2000.0), (3, 2400.0),
         ];
-        let cfg = GeometryConfig { num_segments: 2, max_rank: 150, n_mass_tiers: 2 };
+        let cfg = GeometryConfig {
+            num_segments: 2,
+            max_rank: 150,
+            mass_tier_occupancy: 1,
+            max_mass_tiers: 2,
+        };
         let p = derive_geometry(&charge_masses, &base, &cfg);
 
         // Geometry comes from config + data.
@@ -311,8 +343,37 @@ mod tests {
             (2, 100.0), (2, 200.0), (2, 300.0), (2, 400.0),
             (3, 500.0), (3, 600.0),
         ];
-        let got = derive_tiers_by_charge(&pairs, 2);
+        // occupancy=1, max=2 → each charge gets min(n_masses, 2) tiers = 2.
+        let got = derive_tiers_by_charge(&pairs, 1, 2);
         assert_eq!(got, vec![(2, vec![100.0, 300.0]), (3, vec![500.0, 600.0])]);
+    }
+
+    #[test]
+    fn adaptive_tiers_scale_with_per_charge_data() {
+        assert_eq!(adaptive_n_tiers(0, 100, 33), 1); // never drop a charge with data
+        assert_eq!(adaptive_n_tiers(50, 100, 33), 1); // below one occupancy → 1
+        assert_eq!(adaptive_n_tiers(100, 100, 33), 1);
+        assert_eq!(adaptive_n_tiers(350, 100, 33), 3);
+        assert_eq!(adaptive_n_tiers(100_000, 2500, 33), 33); // data-rich → capped
+        assert_eq!(adaptive_n_tiers(10, 0, 33), 33); // occupancy 0 → cap
+    }
+
+    #[test]
+    fn tiers_by_charge_data_rich_gets_more_tiers_than_sparse() {
+        // charge 2: 40 masses, charge 4: 4 masses; occupancy=10, cap=8.
+        let mut pairs: Vec<(i32, f32)> = Vec::new();
+        for i in 0..40 {
+            pairs.push((2, 500.0 + i as f32));
+        }
+        for i in 0..4 {
+            pairs.push((4, 800.0 + i as f32));
+        }
+        let got = derive_tiers_by_charge(&pairs, 10, 8);
+        let t2 = &got.iter().find(|(c, _)| *c == 2).unwrap().1;
+        let t4 = &got.iter().find(|(c, _)| *c == 4).unwrap().1;
+        assert_eq!(t2.len(), 4); // 40/10 = 4 tiers
+        assert_eq!(t4.len(), 1); // 4/10 < 1 → clamped to 1
+        assert!(t2.len() > t4.len());
     }
 
     #[test]

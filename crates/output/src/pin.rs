@@ -250,11 +250,38 @@ pub fn write_pin_to<W: Write>(
 
     write_header(writer, min_charge, max_charge)?;
 
+    // FDR-join guard: the PIN `SpecId` (`{spec_id}_{scan}` base) is the key
+    // Percolator joins q-values/PEPs back onto (its result map is keyed by
+    // `PSMId == SpecId`). Two spectra sharing the same title+scan — or several
+    // metadata-less spectra collapsing to `scan=0` — would silently overwrite
+    // each other in that map, mis-annotating or losing FDR for real PSMs. Detect
+    // the collision while writing and fail loud instead of corrupting the join.
+    let mut seen_spec_bases: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(queues.len());
+
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
             continue;
         }
         let spec = &spectra[spec_idx];
+        // Base SpecId key, mirroring RowContext::new (row_context.rs): title, or
+        // `scan=N` when the title is empty, suffixed with the scan number.
+        let scan = spec.scan.unwrap_or(0);
+        let base = if spec.title.is_empty() {
+            format!("scan={scan}_{scan}")
+        } else {
+            format!("{}_{scan}", spec.title)
+        };
+        if !seen_spec_bases.insert(base.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "duplicate PIN SpecId base '{base}': two spectra share the same title and \
+                     scan, which would collide on the Percolator q-value/PEP join and silently \
+                     corrupt FDR. Ensure each spectrum has a unique title or scan number."
+                ),
+            ));
+        }
         write_spectrum_rows(
             writer,
             spec,
@@ -972,6 +999,31 @@ mod tests {
 
         // Label is column index 1 (SpecId=0, Label=1)
         assert_eq!(rows[0][1], "-1", "decoy PSM should have Label = -1");
+    }
+
+    #[test]
+    fn write_pin_errors_on_duplicate_spec_id_base() {
+        // Two DISTINCT spectra with identical title+scan collapse to the same
+        // SpecId base; that would silently overwrite each other on the Percolator
+        // q-value/PEP join and corrupt FDR. write_pin must fail loud instead.
+        let params = make_params(2..=3);
+        let spectra = vec![
+            make_spectrum("dup", 7, 500.0),
+            make_spectrum("dup", 7, 600.0), // same title+scan, different spectrum
+        ];
+        let mut q0 = TopNQueue::new(10);
+        q0.push(make_psm(0, 10.0, 10.0, 0, 2));
+        let mut q1 = TopNQueue::new(10);
+        q1.push(make_psm(1, 9.0, 9.0, 0, 2));
+        let queues = vec![q0, q1];
+        let idx = make_empty_search_index();
+        let cands = vec![make_candidate(0, false)];
+
+        let mut buf = Vec::<u8>::new();
+        let err = write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx)
+            .expect_err("duplicate SpecId base must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("duplicate PIN SpecId"), "got: {err}");
     }
 
     // ── Test 3: charge one-hot encoding ────────────────────────────────────

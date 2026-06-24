@@ -69,6 +69,15 @@ pub enum PercolatorError {
     Io(std::io::Error),
     /// The result TSV was missing a required column.
     MissingColumn { column: &'static str, header: String },
+    /// A result row had fewer columns than the header requires (truncated/corrupt).
+    MalformedRow { line: String },
+    /// A `q-value`/PEP field was not a finite number — propagating it as NaN
+    /// would silently corrupt FDR filtering downstream.
+    NonFiniteScore { column: &'static str, value: String },
+    /// The same `PSMId` appeared in more than one result row. `PSMId` is the
+    /// join key into the idparquet and must be unique; a duplicate means the
+    /// last-write-wins map would silently drop a PSM.
+    DuplicatePsmId { psm_id: String },
 }
 
 impl std::fmt::Display for PercolatorError {
@@ -94,6 +103,15 @@ impl std::fmt::Display for PercolatorError {
             PercolatorError::Io(e) => write!(f, "reading Percolator results: {e}"),
             PercolatorError::MissingColumn { column, header } => {
                 write!(f, "Percolator result missing `{column}` column; header was: {header}")
+            }
+            PercolatorError::MalformedRow { line } => {
+                write!(f, "Percolator result row has too few columns: {line}")
+            }
+            PercolatorError::NonFiniteScore { column, value } => {
+                write!(f, "Percolator result `{column}` is not a finite number: {value:?}")
+            }
+            PercolatorError::DuplicatePsmId { psm_id } => {
+                write!(f, "Percolator result has duplicate PSMId `{psm_id}` (join key must be unique)")
             }
         }
     }
@@ -177,6 +195,22 @@ impl ResultPaths {
             weights: out_dir.join(format!("{stem}.percolator.weights.txt")),
         }
     }
+
+    /// Delete any result files left over from a previous run, so that a silent
+    /// non-write by Percolator can never be mis-read as this run's output (the
+    /// success check in `run_percolator` trusts `target.exists()`). Absent files
+    /// are fine; a real removal failure is an error (we must not leave a stale
+    /// file we would then read).
+    fn clear_stale(&self) -> std::io::Result<()> {
+        for p in [&self.target, &self.decoy, &self.weights] {
+            match std::fs::remove_file(p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Build the argument vector for a NATIVE Percolator invocation (binary path
@@ -256,6 +290,10 @@ pub fn run_percolator(
     let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     let stem = pin.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "andes".to_string());
     let out = ResultPaths::new(&out_dir, &stem);
+    // Remove any stale outputs from a previous run BEFORE launching, so the
+    // `out.target.exists()` success check below can only pass on a file this
+    // run actually wrote (guards against reading a previous run's results).
+    out.clear_stale()?;
 
     let output = match backend {
         PercolatorBackend::Binary(bin) => Command::new(bin)
@@ -300,6 +338,16 @@ fn tail_lines(s: &str, n: usize) -> String {
 /// does not shift the parse. `proteinIds` is the LAST logical column; every tab
 /// after it is a separate protein id, so the rest of the line is captured and
 /// re-joined with `;`.
+/// Parse a Percolator score field, rejecting anything that is not a finite
+/// number (empty, non-numeric, NaN, or ±inf) — such a value must not flow into
+/// FDR filtering as a silent NaN.
+fn parse_finite(s: &str, column: &'static str) -> Result<f64, PercolatorError> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(v),
+        _ => Err(PercolatorError::NonFiniteScore { column, value: s.to_string() }),
+    }
+}
+
 pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
     let mut lines = text.lines();
     let header = lines.next().unwrap_or("");
@@ -329,14 +377,17 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        // Guard: a row shorter than the highest non-protein index we read is malformed.
+        // Fail loud on a row shorter than the highest non-protein index we read
+        // (truncated/corrupt) — silently skipping it would drop a PSM and bias FDR.
         let max_scalar = id_col.max(q_col).max(pep_col).max(pep_seq_col);
         if fields.len() <= max_scalar {
-            continue;
+            return Err(PercolatorError::MalformedRow { line: line.to_string() });
         }
         let psm_id = fields[id_col].to_string();
-        let q_value = fields[q_col].parse::<f64>().unwrap_or(f64::NAN);
-        let pep = fields[pep_col].parse::<f64>().unwrap_or(f64::NAN);
+        // A non-finite or unparseable q-value/PEP must be an error, never a
+        // silent NaN — NaN compares false in every FDR threshold check.
+        let q_value = parse_finite(fields[q_col], "q-value")?;
+        let pep = parse_finite(fields[pep_col], "posterior_error_prob")?;
         let peptide = fields[pep_seq_col].to_string();
         // proteinIds is the trailing column: re-join everything from prot_col on.
         let proteins = if fields.len() > prot_col {
@@ -344,10 +395,15 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
         } else {
             String::new()
         };
-        map.insert(
-            psm_id.clone(),
-            PercolatorPsm { psm_id, q_value, pep, peptide, proteins },
-        );
+        if map
+            .insert(
+                psm_id.clone(),
+                PercolatorPsm { psm_id: psm_id.clone(), q_value, pep, peptide, proteins },
+            )
+            .is_some()
+        {
+            return Err(PercolatorError::DuplicatePsmId { psm_id });
+        }
     }
     Ok(map)
 }
@@ -386,6 +442,57 @@ mod tests {
         assert_eq!(r.pep, 0.002);
         assert_eq!(r.peptide, "K.SAGEPEPK.L");
         assert_eq!(r.proteins, "DECOY_x");
+    }
+
+    #[test]
+    fn clear_stale_removes_prior_outputs() {
+        let dir = std::env::temp_dir().join(format!("andes_perc_stale_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = ResultPaths::new(&dir, "x");
+        std::fs::write(&out.target, b"stale").unwrap();
+        std::fs::write(&out.weights, b"stale").unwrap();
+        assert!(out.target.exists());
+        out.clear_stale().unwrap();
+        assert!(!out.target.exists(), "stale target must be removed");
+        assert!(!out.weights.exists(), "stale weights must be removed");
+        // Idempotent: clearing again when files are absent is Ok.
+        out.clear_stale().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_errors_on_non_finite_qvalue() {
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    x_1_1\t2.0\tnan\t0.01\tK.PK.A\tsp|P1\n";
+        let err = parse_psm_results(text).unwrap_err();
+        assert!(matches!(err, PercolatorError::NonFiniteScore { column, .. } if column == "q-value"),
+            "got {err:?}");
+    }
+
+    #[test]
+    fn parse_errors_on_unparseable_pep() {
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    x_1_1\t2.0\t0.01\tnotanumber\tK.PK.A\tsp|P1\n";
+        let err = parse_psm_results(text).unwrap_err();
+        assert!(matches!(err, PercolatorError::NonFiniteScore { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_errors_on_short_row() {
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    x_1_1\t2.0\t0.01\n";
+        let err = parse_psm_results(text).unwrap_err();
+        assert!(matches!(err, PercolatorError::MalformedRow { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_errors_on_duplicate_psmid() {
+        let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
+                    dup_1_1\t2.0\t0.01\t0.005\tK.PK.A\tsp|P1\n\
+                    dup_1_1\t1.0\t0.02\t0.006\tK.QK.A\tsp|P2\n";
+        let err = parse_psm_results(text).unwrap_err();
+        assert!(matches!(err, PercolatorError::DuplicatePsmId { ref psm_id } if psm_id == "dup_1_1"),
+            "got {err:?}");
     }
 
     #[test]

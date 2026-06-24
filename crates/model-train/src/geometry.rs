@@ -8,6 +8,8 @@
 use rustc_hash::FxHashMap;
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition};
 
+use crate::labeled::LabeledMatch;
+
 /// Knobs for [`derive_geometry`] — the structural choices that, in a seed model,
 /// were inherited verbatim. Swept by the benchmark harness; collapse to fixed
 /// defaults once the optimum is validated.
@@ -173,6 +175,16 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
     param
 }
 
+/// Extract the `(charge, parent_mass)` corpus from confident labels — the input
+/// to [`derive_geometry`]. `parent_mass = peptide.mass()` (the neutral mass the
+/// partitioner keys on).
+pub fn corpus_charge_masses(labels: &[LabeledMatch]) -> Vec<(i32, f32)> {
+    labels
+        .iter()
+        .map(|l| (l.charge as i32, l.peptide.mass() as f32))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +232,24 @@ mod tests {
         };
         p.rebuild_cache();
         p
+    }
+
+    #[test]
+    fn corpus_extraction_maps_charge_and_peptide_mass() {
+        use model::amino_acid::AminoAcid;
+        use model::peptide::Peptide;
+        fn pep(seq: &[u8]) -> Peptide {
+            let residues = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+            Peptide::new(residues, b'_', b'-')
+        }
+        let p1 = pep(b"PEPTIDE");
+        let p2 = pep(b"PEPTIDER");
+        let (m1, m2) = (p1.mass() as f32, p2.mass() as f32);
+        let labels = vec![
+            LabeledMatch { spectrum_index: 0, peptide: p1, charge: 2, confidence: 0.001 },
+            LabeledMatch { spectrum_index: 1, peptide: p2, charge: 3, confidence: 0.001 },
+        ];
+        assert_eq!(corpus_charge_masses(&labels), vec![(2, m1), (3, m2)]);
     }
 
     #[test]

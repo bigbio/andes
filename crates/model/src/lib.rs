@@ -17,6 +17,7 @@ pub mod protein;
 pub mod protocol;
 pub mod spectrum;
 pub mod tolerance;
+pub mod unimod;
 
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};
 pub use activation::ActivationMethod;
@@ -30,3 +31,4 @@ pub use protein::{Protein, ProteinDb};
 pub use protocol::Protocol;
 pub use spectrum::Spectrum;
 pub use tolerance::{PrecursorTolerance, Tolerance};
+pub use unimod::{UnimodDb, UnimodMod, UnimodResolveError};

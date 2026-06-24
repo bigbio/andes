@@ -206,7 +206,9 @@ fn run_train(in_parquet: &Path, store: &Path, extra: &[&str]) {
         .arg("--model-id")
         .arg("default")
         .arg("--threads")
-        .arg("1");
+        .arg("1")
+        // Tiny synthetic fixture: below the GBDT quality gate (finding 3.6).
+        .arg("--allow-degenerate-model");
     for e in extra {
         cmd.arg(e);
     }
@@ -403,6 +405,7 @@ fn multiple_inputs_accumulate() {
         .arg(&store)
         .arg("--threads")
         .arg("1")
+        .arg("--allow-degenerate-model")
         .status()
         .expect("run");
     assert!(status.success(), "should exit 0");

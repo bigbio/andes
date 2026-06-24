@@ -195,6 +195,10 @@ fn train_intensity_gbdt_roundtrip() {
         .arg("test_frag")
         .arg("--threads")
         .arg("1")
+        // The synthetic fixture is tiny (a few PSMs) and intentionally below the
+        // GBDT quality gate (finding 3.6); opt into the degenerate fallback so
+        // this round-trip test still produces a model to inspect.
+        .arg("--allow-degenerate-model")
         .status()
         .expect("run andes train-intensity-gbdt");
 
@@ -250,6 +254,7 @@ fn train_intensity_gbdt_preserves_existing_models() {
         .arg("existing_model")
         .arg("--threads")
         .arg("1")
+        .arg("--allow-degenerate-model")
         .status()
         .expect("run train-from-msnet");
     assert!(s1.success(), "train-from-msnet should exit 0, got {s1}");
@@ -265,6 +270,7 @@ fn train_intensity_gbdt_preserves_existing_models() {
         .arg("frag_model")
         .arg("--threads")
         .arg("1")
+        .arg("--allow-degenerate-model")
         .status()
         .expect("run train-intensity-gbdt");
     assert!(s2.success(), "train-intensity-gbdt should exit 0, got {s2}");

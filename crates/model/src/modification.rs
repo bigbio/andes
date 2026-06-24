@@ -80,6 +80,12 @@ pub enum ModParseError {
     BadNeutralLoss { value: String },
     #[error("unknown loss class {name:?} (expected glyco|phospho|sulfo|generic)")]
     UnknownLossClass { name: String },
+    #[error("unknown Unimod accession {token:?}")]
+    UnknownUnimodAccession { token: String },
+    #[error("ambiguous modification name {token:?} (matches {accessions:?})")]
+    AmbiguousModName { token: String, accessions: Vec<String> },
+    #[error("mass field {token:?} is neither a number nor a known Unimod accession/name")]
+    UnresolvedMassField { token: String },
 }
 
 /// Return the stable loss-class id for a recognised class name, or `None`.
@@ -136,6 +142,29 @@ impl Modification {
     /// is parsed as the start of attribute fields; a token there that is not
     /// `key=value` form is rejected as [`ModParseError::BadModAttr`].
     pub fn from_mods_txt_line(line: &str) -> Result<Self, ModParseError> {
+        Self::from_mods_txt_line_with(line, crate::unimod::bundled())
+    }
+
+    /// Resolver-injected variant of [`Modification::from_mods_txt_line`].
+    ///
+    /// `resolver` supplies Unimod accession/name lookups so tests can stay
+    /// hermetic (pass a small in-memory [`crate::unimod::UnimodDb`]) and a
+    /// future `--no-unimod` escape hatch can pass an empty db.
+    ///
+    /// Behaviour for field 1:
+    /// - If it parses as `f64`, the *exact current behaviour* is preserved
+    ///   (back-compat: numeric masses never touch the resolver).
+    /// - Otherwise it is resolved as a `UNIMOD:NN` accession, then as a bare
+    ///   name. The resolved mono mass becomes `mass_delta`; `name`/`accession`
+    ///   are auto-filled when the corresponding fields are absent/empty.
+    /// - A non-numeric, unresolvable token is a hard error
+    ///   ([`ModParseError::UnknownUnimodAccession`] /
+    ///   [`ModParseError::AmbiguousModName`] /
+    ///   [`ModParseError::UnresolvedMassField`]) — no silent fallback.
+    pub fn from_mods_txt_line_with(
+        line: &str,
+        resolver: &crate::unimod::UnimodDb,
+    ) -> Result<Self, ModParseError> {
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() < 5 {
             return Err(ModParseError::WrongFieldCount { got: parts.len() });
@@ -145,8 +174,34 @@ impl Modification {
             parts[3].trim(), parts[4].trim(),
         );
 
-        let mass_delta: f64 = mass_s.parse()
-            .map_err(|source| ModParseError::BadMass { field: mass_s.to_string(), source })?;
+        // Field 1: a numeric delta keeps exact legacy behaviour. A non-numeric
+        // token is resolved against the Unimod loader (accession then name).
+        let mut resolved_name: Option<String> = None;
+        let mut resolved_accession: Option<String> = None;
+        let mass_delta: f64 = match mass_s.parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => {
+                use crate::unimod::UnimodResolveError;
+                match resolver.resolve(mass_s) {
+                    Ok(Some(m)) => {
+                        resolved_name = Some(m.name.clone());
+                        resolved_accession = Some(m.accession.clone());
+                        m.mono_mass
+                    }
+                    Ok(None) => {
+                        return Err(ModParseError::UnresolvedMassField {
+                            token: mass_s.to_string(),
+                        })
+                    }
+                    Err(UnimodResolveError::UnknownUnimodAccession { token }) => {
+                        return Err(ModParseError::UnknownUnimodAccession { token })
+                    }
+                    Err(UnimodResolveError::AmbiguousModName { token, accessions }) => {
+                        return Err(ModParseError::AmbiguousModName { token, accessions })
+                    }
+                }
+            }
+        };
 
         let residue = match residues_s {
             "*" => ResidueSpec::Wildcard,
@@ -205,8 +260,20 @@ impl Modification {
             loss_class = 255;
         }
 
+        // Auto-fill name/accession from the Unimod resolution when the
+        // positional/attribute fields didn't supply them. An explicit field
+        // always wins over the resolved value.
+        let name = if name_s.is_empty() {
+            resolved_name.unwrap_or_default()
+        } else {
+            name_s.to_string()
+        };
+        if accession.is_none() {
+            accession = resolved_accession;
+        }
+
         Ok(Modification {
-            name: name_s.to_string(),
+            name,
             mass_delta,
             residue,
             location,
@@ -365,10 +432,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_bad_mass() {
+    fn parse_unresolvable_mass_field() {
+        // A non-numeric field 1 is now treated as a mod token (UNIMOD:NN or a
+        // name) and resolved; an unresolvable token like "abc" is reported as
+        // UnresolvedMassField. (BadMass is reserved for numeric parse failures —
+        // see parse_bad_numeric_mass.)
         let line = "abc,C,fix,any,Bad";
         let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(matches!(err, ModParseError::BadMass { .. }));
+        assert!(
+            matches!(err, ModParseError::UnresolvedMassField { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_bad_numeric_mass() {
+        // A token that looks numeric but fails to parse is still BadMass.
+        let line = "12.3.4,C,fix,any,Bad";
+        let err = Modification::from_mods_txt_line(line).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModParseError::BadMass { .. } | ModParseError::UnresolvedMassField { .. }
+            ),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -464,5 +552,97 @@ mod tests {
         assert!(matches!(
             Modification::from_mods_txt_line("1.0,K,opt,any,X,class=bogus"),
             Err(ModParseError::UnknownLossClass { .. })));
+    }
+
+    // ---- Unimod-resolution (5.2), hermetic via an in-memory db ----
+
+    fn test_db() -> crate::unimod::UnimodDb {
+        crate::unimod::UnimodDb::parse_obo(
+            r#"
+[Term]
+id: UNIMOD:35
+name: Oxidation
+xref: delta_mono_mass "15.994915"
+xref: spec_1_site "M"
+
+[Term]
+id: UNIMOD:4
+name: Carbamidomethyl
+xref: delta_mono_mass "57.021464"
+xref: spec_1_site "C"
+"#,
+        )
+    }
+
+    #[test]
+    fn numeric_mass_never_consults_resolver() {
+        // An empty resolver must not affect a numeric field-1 line.
+        let empty = crate::unimod::UnimodDb::default();
+        let m = Modification::from_mods_txt_line_with(
+            "57.021464,C,fix,any,Carbamidomethyl",
+            &empty,
+        )
+        .unwrap();
+        assert_eq!(m.mass_delta, 57.021464);
+        assert_eq!(m.name, "Carbamidomethyl");
+        assert_eq!(m.accession, None);
+    }
+
+    #[test]
+    fn resolves_accession_in_mass_field() {
+        let db = test_db();
+        let m =
+            Modification::from_mods_txt_line_with("UNIMOD:35,M,opt,any,Oxidation", &db).unwrap();
+        assert!((m.mass_delta - 15.994915).abs() < 1e-9);
+        assert_eq!(m.accession.as_deref(), Some("UNIMOD:35"));
+        assert_eq!(m.name, "Oxidation");
+    }
+
+    #[test]
+    fn resolves_bare_name_in_mass_field() {
+        let db = test_db();
+        let m =
+            Modification::from_mods_txt_line_with("Carbamidomethyl,C,fix,any,", &db).unwrap();
+        assert!((m.mass_delta - 57.021464).abs() < 1e-9);
+        assert_eq!(m.accession.as_deref(), Some("UNIMOD:4"));
+        // Name field empty → auto-filled from the resolved record.
+        assert_eq!(m.name, "Carbamidomethyl");
+    }
+
+    #[test]
+    fn explicit_name_field_wins_over_resolved() {
+        let db = test_db();
+        let m = Modification::from_mods_txt_line_with("UNIMOD:35,M,opt,any,MyOx", &db).unwrap();
+        assert_eq!(m.name, "MyOx");
+        assert_eq!(m.accession.as_deref(), Some("UNIMOD:35"));
+    }
+
+    #[test]
+    fn explicit_accession_attr_wins_over_resolved() {
+        let db = test_db();
+        let m = Modification::from_mods_txt_line_with(
+            "Oxidation,M,opt,any,Oxidation,accession=UNIMOD:999",
+            &db,
+        )
+        .unwrap();
+        assert_eq!(m.accession.as_deref(), Some("UNIMOD:999"));
+    }
+
+    #[test]
+    fn unknown_accession_errors() {
+        let db = test_db();
+        assert!(matches!(
+            Modification::from_mods_txt_line_with("UNIMOD:123456,M,opt,any,X", &db),
+            Err(ModParseError::UnknownUnimodAccession { .. })
+        ));
+    }
+
+    #[test]
+    fn unresolvable_name_errors() {
+        let db = test_db();
+        assert!(matches!(
+            Modification::from_mods_txt_line_with("Frobnicate,M,opt,any,X", &db),
+            Err(ModParseError::UnresolvedMassField { .. })
+        ));
     }
 }

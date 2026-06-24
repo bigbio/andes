@@ -198,7 +198,7 @@ fn synthetic_rows() -> Vec<Row> {
 
 fn run_train(in_parquet: &Path, store: &Path, extra: &[&str]) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
-    cmd.arg("train-from-msnet")
+    cmd.arg("train")
         .arg("--in")
         .arg(in_parquet)
         .arg("--out-store")
@@ -394,7 +394,7 @@ fn multiple_inputs_accumulate() {
     let store = dir.path().join("models.parquet");
 
     let status = Command::new(env!("CARGO_BIN_EXE_andes"))
-        .arg("train-from-msnet")
+        .arg("train")
         .arg("--in")
         .arg(&a)
         .arg("--in")

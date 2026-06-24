@@ -29,8 +29,16 @@ use crate::TrainError;
 
 /// A handle to a Parquet model store.  Created by [`ModelStore::open`].
 pub struct ModelStore {
-    path: PathBuf,
-    /// Full manifest rows read at open time.
+    /// One or more Parquet part files that make up this store.
+    ///
+    /// - Single-file store: a one-element vector holding the file path.
+    /// - Partitioned store (a directory of `protocol=<P>/models.parquet`
+    ///   partitions): one entry per partition file, sorted for determinism.
+    ///
+    /// All read operations scan every part and union the results, so a
+    /// partitioned store is indistinguishable from the equivalent single file.
+    parts: Vec<PathBuf>,
+    /// Full manifest rows read at open time (union across all parts).
     manifest: Vec<RawManifestEntry>,
 }
 
@@ -50,10 +58,22 @@ pub struct RawManifestEntry {
 }
 
 impl ModelStore {
-    /// Open the store and read the manifest (one pass through the Parquet file).
+    /// Open the store and read the manifest.
+    ///
+    /// `path` may be either:
+    /// - a single Parquet file (the historical layout, `resources/models.parquet`), or
+    /// - a **directory** of per-protocol Parquet partitions written in the
+    ///   Hive-style layout `protocol=<Protocol>/models.parquet` (or, more
+    ///   generally, any tree of `*.parquet` files). Every partition is read and
+    ///   the manifests/tables are unioned into one in-memory store, exactly as
+    ///   if they had been written to a single file.
     pub fn open(path: &Path) -> Result<Self, TrainError> {
-        let manifest = read_manifest(path)?;
-        Ok(Self { path: path.to_owned(), manifest })
+        let parts = resolve_parts(path)?;
+        let mut manifest: Vec<RawManifestEntry> = Vec::new();
+        for part in &parts {
+            manifest.extend(read_manifest(part)?);
+        }
+        Ok(Self { parts, manifest })
     }
 
     /// List all model IDs in the store.
@@ -91,8 +111,11 @@ impl ModelStore {
     }
 
     /// Load and reconstruct a [`Param`] for the given `model_id`.
+    ///
+    /// In a partitioned store, each model lives in exactly one partition; the
+    /// reconstructor scans every part and stops once it has assembled the model.
     pub fn load_param(&self, model_id: &str) -> Result<Param, TrainError> {
-        reconstruct_param(&self.path, model_id)
+        reconstruct_param(&self.parts, model_id)
     }
 
     /// Return the source ledger entries for the given `model_id`.
@@ -100,7 +123,11 @@ impl ModelStore {
     /// Returns an empty `Vec` if the store contains no `"source"` rows for
     /// this model (e.g. stores written by the legacy [`super::write_models`]).
     pub fn load_sources(&self, model_id: &str) -> Result<Vec<SourceLedger>, TrainError> {
-        read_sources(&self.path, model_id)
+        let mut ledgers: Vec<SourceLedger> = Vec::new();
+        for part in &self.parts {
+            ledgers.extend(read_sources(part, model_id)?);
+        }
+        Ok(ledgers)
     }
 
     /// Reconstruct the [`CountStats`] for `(model_id, source_id)` from the
@@ -113,8 +140,58 @@ impl ModelStore {
         model_id: &str,
         source_id: &str,
     ) -> Result<CountStats, TrainError> {
-        read_source_stats(&self.path, model_id, source_id)
+        // A model's stat rows live in exactly one partition. Scan parts and
+        // return the first part that actually contains stats for this pair.
+        let mut last_err: Option<TrainError> = None;
+        for part in &self.parts {
+            match read_source_stats(part, model_id, source_id) {
+                Ok(stats) => return Ok(stats),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            TrainError::NoModel(format!("source_stats({model_id}, {source_id})"))
+        }))
     }
+}
+
+// ── partition resolution ──────────────────────────────────────────────────────
+
+/// Resolve `path` to the list of Parquet part files that constitute the store.
+///
+/// - A regular file ⇒ a single-element list (single-file store).
+/// - A directory ⇒ every `*.parquet` file found beneath it (recursively),
+///   sorted for deterministic iteration order. This covers the Hive-style
+///   `protocol=<P>/models.parquet` partition layout.
+fn resolve_parts(path: &Path) -> Result<Vec<PathBuf>, TrainError> {
+    if path.is_dir() {
+        let mut parts: Vec<PathBuf> = Vec::new();
+        collect_parquet_files(path, &mut parts)?;
+        if parts.is_empty() {
+            return Err(TrainError::Other(format!(
+                "no *.parquet partition files found under directory {}",
+                path.display()
+            )));
+        }
+        parts.sort();
+        Ok(parts)
+    } else {
+        Ok(vec![path.to_owned()])
+    }
+}
+
+/// Recursively collect `*.parquet` files under `dir` into `out`.
+fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), TrainError> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            collect_parquet_files(&p, out)?;
+        } else if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
+            out.push(p);
+        }
+    }
+    Ok(())
 }
 
 /// Convert the parquet `protocol` column value to a `BTreeSet<String>` experiment class.
@@ -230,15 +307,12 @@ struct ManifestRow {
     rich_ion_bytes: Option<Vec<u8>>,
 }
 
-fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
-    // We do a full scan of the file and collect relevant rows. For large stores
-    // this is acceptable as a first implementation; predicate pushdown can be
-    // added later.
-
-    let file = std::fs::File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|e| TrainError::Parquet(e.to_string()))?;
-    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainError> {
+    // We do a full scan of each part file and collect relevant rows. For large
+    // stores this is acceptable as a first implementation; predicate pushdown
+    // can be added later. In a partitioned store every row for a given model
+    // lives in exactly one partition, so accumulating across parts is a no-op
+    // for parts that don't contain this model.
 
     let mut manifest_opt: Option<ManifestRow> = None;
     // partition list (in stored order)
@@ -252,6 +326,17 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
     let mut ion_err_dist_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
     let mut noise_err_dist_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
     let mut ion_existence_table: FxHashMap<Partition, Vec<f32>> = FxHashMap::default();
+
+    for path in parts {
+        // A model lives in exactly one partition; once we've assembled it from
+        // a part (manifest found), no later part can contribute more rows.
+        if manifest_opt.is_some() {
+            break;
+        }
+        let file = std::fs::File::open(path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
+        let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     for batch in reader {
         let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
@@ -472,6 +557,7 @@ fn reconstruct_param(path: &Path, model_id: &str) -> Result<Param, TrainError> {
             }
         }
     }
+    } // end per-part loop
 
     let manifest = manifest_opt
         .ok_or_else(|| TrainError::NoModel(model_id.to_string()))?;
@@ -1001,17 +1087,19 @@ mod tests {
     }
 
     #[test]
-    fn selection_entries_returns_38_with_hcd_qexactive_tryp() {
+    fn selection_entries_returns_bundled_count_with_hcd_qexactive_tryp() {
         let path = bundled_store_path();
         let store = ModelStore::open(&path)
             .expect("failed to open bundled models.parquet");
         let entries = store.selection_entries();
-        // v0.2.0 added the dedicated `cid_lowres_tryp_tmt` model (routable via
-        // `--protocol TMT`), dropping 2 seed phospho slugs nets 38 selection entries.
+        // v1: the bundle ships 19 fully own-trained models (one selection entry
+        // each; no MS-GF+-seeded regimes). Earlier bundles shipped 38 entries
+        // including seeded regimes that have since been dropped (not retrainable
+        // from public data) rather than shipped as seed copies.
         assert_eq!(
             entries.len(),
-            38,
-            "expected 38 selection entries, got {}",
+            19,
+            "expected 19 selection entries, got {}",
             entries.len()
         );
         let found = entries

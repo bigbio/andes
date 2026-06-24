@@ -284,6 +284,8 @@ pub fn score_psm(
     };
 
     // ── Neutral-loss contribution gate (peptide-aware, additive) ─────────────
+    // Design/extension notes (glyco + sequence-based modifiers à la MaxSBM):
+    //   docs/plans/2026-06-20-glyco-neutral-loss-and-maxsbm.md
     // Loss ions are scored only when (a) the activation method preserves them
     // (ETD strips no labile mods → no loss ions), (b) the model carries trained
     // loss tables, and (c) the peptide actually declares a loss-bearing mod.

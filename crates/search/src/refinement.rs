@@ -266,6 +266,16 @@ pub fn build_peptide_anchored_index(
     }
 }
 
+/// Whether the Pass-2 refinement cascade can produce valid FDR under
+/// `decoy_strategy`. Pass-2 builds its own scoped target+decoy index for
+/// target-decoy competition; [`DecoyStrategy::None`] would make that index
+/// target-only, so every Pass-2 winner would be a target with no decoy
+/// competition — inflating the refinement FDR. In that case the cascade must be
+/// skipped rather than emit biased PSMs.
+fn refinement_supported(decoy_strategy: DecoyStrategy) -> bool {
+    !matches!(decoy_strategy, DecoyStrategy::None)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // (d) refinement_aa_set
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,6 +528,19 @@ pub fn run_refinement(
     // confident PEPTIDES, not a protein subset); keep the param so the andes call
     // site is untouched.
     let _ = full_target_db;
+
+    // Pass-2 builds its own scoped target+decoy index for TDC. With
+    // DecoyStrategy::None that index is target-only, so every Pass-2 winner is a
+    // target with no decoy competition — which inflates the refinement FDR.
+    // Skip the cascade (rather than emit biased PSMs) with a clear warning.
+    if !refinement_supported(decoy_strategy) {
+        eprintln!(
+            "[refine] skipped: --refine needs generated decoys for valid Pass-2 FDR, but \
+             --decoy-strategy none was set (a target-only Pass-2 index would bias FDR). \
+             Re-run with --decoy-strategy reverse|shuffle to enable refinement."
+        );
+        return None;
+    }
 
     // 1. Confident base peptides from Pass-1 (PEPTIDE-anchored scoping gate).
     //    Empty ⇒ nothing to refine.
@@ -1494,6 +1517,41 @@ mod tests {
         };
         param.rebuild_cache();
         RankScorer::new(&param)
+    }
+
+    #[test]
+    fn refinement_unsupported_without_generated_decoys() {
+        // Pass-2 needs its own decoys for TDC; None would bias FDR.
+        assert!(!refinement_supported(DecoyStrategy::None));
+        assert!(refinement_supported(DecoyStrategy::Reverse));
+        assert!(refinement_supported(DecoyStrategy::Shuffle));
+    }
+
+    #[test]
+    fn run_refinement_skips_when_decoy_strategy_none() {
+        // Confident target + an unidentified spectrum would normally proceed to
+        // Pass-2, but DecoyStrategy::None makes the scoped index target-only, so
+        // the cascade is skipped (None) rather than emitting FDR-biased PSMs.
+        let aa_set = base_set_with_cam_c();
+        let params = SearchParams::default_tryptic(aa_set);
+        let scorer = tiny_scorer();
+        let target = ProteinDb { proteins: vec![protein("P0", b"MKWVTFISLLR")] };
+        let pass1_cands = vec![cand(0, false), cand(1, false)];
+        // spec 0 confidently identified (high score) -> a confident base peptide;
+        // spec 1 weak -> unidentified, so without the guard Pass-2 would run.
+        let queues = vec![
+            queue_with(vec![psm(0, 0, 80.0)]),
+            queue_with(vec![psm(1, 1, 1.0)]),
+        ];
+        let spectra: Vec<model::spectrum::Spectrum> =
+            vec![model::spectrum::Spectrum::default(), model::spectrum::Spectrum::default()];
+
+        let out = run_refinement(
+            &queues, &spectra, &pass1_cands, &target, &params, &scorer,
+            &RefineConfig::default_tier(), 0.01, true, 0.5, "XXX",
+            DecoyStrategy::None, 42,
+        );
+        assert!(out.is_none());
     }
 
     #[test]

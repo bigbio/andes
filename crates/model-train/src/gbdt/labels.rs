@@ -62,9 +62,9 @@ pub fn theoretical_ion_mzs(peptide: &Peptide, z: u8) -> Vec<f64> {
 }
 
 /// 1 if a peak matches any theoretical ion of any confident peptide within the
-/// per-peak `mme` tolerance (the SAME fragment tolerance the matcher uses — so
-/// high-res runs no longer admit chance matches at the old hardcoded 0.5 Da),
-/// else 0. `peptides` is the confident set (union for chimeric IDs).
+/// per-peak `mme` tolerance (the SAME fragment tolerance the matcher uses, so
+/// high-res runs don't admit chance matches), else 0. `peptides` is the
+/// confident set (union for chimeric IDs).
 pub fn label_peaks(peaks: &[(f64, f32)], peptides: &[&Peptide], z: u8, mme: &Tolerance) -> Vec<u8> {
     let mut theo: Vec<f64> = peptides.iter().flat_map(|p| theoretical_ion_mzs(p, z)).collect();
     theo.sort_by(|a, b| a.partial_cmp(b).unwrap());

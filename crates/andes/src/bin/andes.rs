@@ -6,7 +6,7 @@
 //!
 //! Format dispatch by `--spectrum` extension: `.mzML`/`.mzml` → `MzMLReader`;
 //! `.d` → `TimsTofReader` (native Bruker timsTOF, only under `--features
-//! timstof`); otherwise `MgfReader` (default / backwards-compatible).
+//! timstof`); otherwise `MgfReader` (default reader).
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -239,7 +239,7 @@ struct SearchArgs {
     /// Proteolytic enzyme for in-silico digestion. Named values: trypsin
     /// (default), chymotrypsin, lysc, aspn, gluc, lysn, argc, alphalp,
     /// nocleavage, nonspecific. A wrong enzyme yields ~no PSMs (fails loud,
-    /// not silent). Previously hardcoded to trypsin with no override.
+    /// not silent).
     ///
     /// Multi-protease digest: pass a `,`- or `+`-separated list (e.g.
     /// `--enzyme gluc,trypsin`) to accept peptides cleaved by ANY listed
@@ -838,7 +838,7 @@ struct TopCli {
     search: SearchArgs,
 }
 
-// Backward-compatibility alias: keep old name pointing to the search args.
+// Alias used internally for the search-args type.
 type Cli = SearchArgs;
 
 fn main() -> ExitCode {
@@ -1422,7 +1422,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // wins outright. When only the activation method is detected (analyzer
         // unknown), or nothing is detected (MGF / metadata-less mzML/.raw), the
         // metadata-less resolver folds in the MGF-only `--fragmentation` and
-        // `--fragment-tol-*` flags (decision E default: CID / low-res).
+        // `--fragment-tol-*` flags. Default when no metadata: CID / low-res
+        // (cid_lowres_tryp).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected_activation_instrument {
                 Some((method, Some(inst))) => {
@@ -1596,8 +1597,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ScoreFlag::Strong => search::ScoreMode::Strong,
         // Auto: strong re-ranking pays on high-res (sharp fragment peaks → the
         // intensity / rich-ion GBDTs separate target/decoy); on low-res it
-        // collapses the candidate pool and regresses, so use rank. Decided from
-        // the resolved model's instrument.
+        // collapses the candidate pool → use rank. Keyed off the resolved
+        // model's instrument resolution.
         ScoreFlag::Auto => {
             if param.data_type.instrument.is_high_resolution() {
                 search::ScoreMode::Strong
@@ -2178,8 +2179,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `queues` (force_pushed per scan by `merge_into_pass1`) and written to a
     // SINGLE unified PIN, so a scan's unmodified Pass-1 and modified Pass-2 PSMs
     // compete in one report. Collapse best-per-scan downstream; optionally split
-    // by mokapot --group-column on IsRefinement/RefinementModClass. (Legacy
-    // separate-PIN A/B is still available behind --refine-debug-split-pin.)
+    // by mokapot --group-column on IsRefinement/RefinementModClass.
+    // `--refine-debug-split-pin` instead emits Pass-2 to a separate PIN.
     let refine_output = if cli.refine {
         // Refinement config: explicit YAML or the built-in 5-mod default tier.
         let base_cfg = match &cli.refine_config {
@@ -2551,7 +2552,7 @@ fn load_spectra_for_train(
                 .into());
             }
         }
-        // MGF (default / backwards-compatible).
+        // MGF (default reader).
         _ => {
             let reader = MgfReader::new(input::open_buf_maybe_gz(path)?);
             for item in reader {
@@ -4332,7 +4333,7 @@ fn warn_if_universal_protease_combo(
 /// (MGF, or mzML/.raw with no analyzer metadata). Resolution class comes from
 /// the `--fragment-tol-*` unit; activation from detected method, else
 /// `--fragmentation`, else the class-consistent default. When nothing
-/// disambiguates, decision E: CID / LowRes (→ `cid_lowres_tryp`) + a warning.
+/// disambiguates, defaults to CID / LowRes (→ `cid_lowres_tryp`) + a warning.
 fn resolve_metadataless_selection(
     detected_activation: Option<ActivationMethod>,
     fragmentation: Fragmentation,

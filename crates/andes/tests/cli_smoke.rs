@@ -262,7 +262,7 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
 #[test]
 fn bench_mode_max_spectra_produces_nonempty_pin() {
     // Regression for send_chunks bench-cap bug: --max-spectra 100 must not
-    // drop the entire final partial chunk (which used to truncate to zero).
+    // drop the entire final partial chunk.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("bench.pin");
 

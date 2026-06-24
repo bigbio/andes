@@ -391,7 +391,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
     // OFFLINE GATE METRIC: held-out AUC of P(signal) on the group-disjoint
     // validation set. This is the review's free gate — AUC ≈ 0.5 means the
     // peptide-agnostic peak model does not discriminate signal from noise and
-    // is not worth wiring (jump to the per-ion v3 design instead).
+    // is not worth wiring.
     let n_pos_val = val_y.iter().filter(|&&y| y == 1).count();
     let val_auc = auc(&raw_val_final, &val_y);
     eprintln!(
@@ -503,7 +503,7 @@ fn mse(raw_val: &[f32], val_y: &[f32]) -> f32 {
 /// - Early stopping on validation MSE (lower = better).
 /// - No PAVA isotonic calibration; `apply_sigmoid = false`.
 ///
-/// // TODO(v3): factor the shared boosting loop with the classification path.
+/// // TODO: factor the shared boosting loop with the classification path.
 pub fn train_gbdt_regression(
     ds: &RegressionDataset,
     p: &TrainParams,

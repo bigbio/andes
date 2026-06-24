@@ -11,10 +11,9 @@ use model::protein::ProteinDb;
 pub struct SearchIndex {
     pub db: ProteinDb,
     /// Normalized decoy-accession prefix (no trailing `_`). A protein is a decoy
-    /// iff its accession starts with `"<decoy_prefix>_"` — the single source of
-    /// truth for target/decoy membership, shared with candidate generation. This
-    /// replaces the old positional `len()/2` invariant so target-only and
-    /// shuffle decoy modes work without a hardcoded 1:1 layout assumption.
+    /// iff its accession is `"<decoy_prefix>_…"`, independent of FASTA layout
+    /// (supports target-only and shuffle modes). The single source of truth for
+    /// target/decoy membership, shared with candidate generation.
     pub decoy_prefix: String,
     /// Optional decoy-accession SUFFIX (e.g. `"rev"` for quantms/OpenMS
     /// `<orig>_rev` decoys). When set, a protein is a decoy iff its accession

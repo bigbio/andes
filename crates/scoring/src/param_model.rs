@@ -44,7 +44,7 @@ pub struct Param {
     pub partition_ion_types_cache: FxHashMap<Partition, Vec<IonType>>,
     /// Optional peptide-agnostic GBDT per-peak signal/noise model. Populated by
     /// the store reader from the manifest row's `gbdt_model_bytes` blob; `None`
-    /// for legacy stores and for any slug without a trained GBDT (scoring is
+    /// for stores / slugs without a trained GBDT (scoring is
     /// then byte-identical to the pre-GBDT engine).
     pub gbdt_peak_model: Option<GbdtPeakModel>,
     /// Optional GBDT fragment-intensity model (regressor, raw `predict_value`

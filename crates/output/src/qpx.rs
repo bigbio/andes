@@ -320,6 +320,47 @@ fn psms_schema() -> Arc<Schema> {
 
 // ── psms.parquet builder ──────────────────────────────────────────────────────
 
+/// Validate the Percolator (`--rescore`) join. When rescoring is on, every
+/// emitted **non-decoy** PSM row must have a matching Percolator result; a
+/// missing match means the `SpecId` derivation drifted between the PIN and the
+/// idparquet, which silently corrupts downstream FDR (those target rows would
+/// otherwise be written with a null q-value). Decoys are exempt — Percolator
+/// writes them to a separate file the caller does not load. On failure the
+/// error reports how many target rows were unmatched and how many Percolator
+/// keys went unused.
+fn audit_rescore_join(
+    emitted: &[(String, bool)],
+    rescore: &HashMap<String, PercolatorPsm>,
+) -> std::io::Result<()> {
+    let mut targets = 0usize;
+    let mut missing = 0usize;
+    let mut consumed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (spec_id, is_decoy) in emitted {
+        if *is_decoy {
+            continue;
+        }
+        targets += 1;
+        if rescore.contains_key(spec_id) {
+            consumed.insert(spec_id.as_str());
+        } else {
+            missing += 1;
+        }
+    }
+    if missing > 0 {
+        let extra = rescore.len().saturating_sub(consumed.len());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Percolator (--rescore) join incomplete: {missing}/{targets} non-decoy PSM \
+                 rows had no matching Percolator result ({extra} Percolator keys unused). \
+                 This corrupts FDR — the idparquet SpecId derivation has drifted from the \
+                 PIN written for Percolator. Refusing to emit silently-null q-values."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_psms_batch(
     spectra: &[Spectrum],
@@ -372,6 +413,11 @@ fn build_psms_batch(
     // spectrum's hit-list a stable index). Incremented once per emitted PSM.
     let mut pep_id_index: i32 = 0;
 
+    // When rescoring is on, record each emitted row's (SpecId, is_decoy) so the
+    // Percolator join can be audited for completeness after the loop. Empty (no
+    // allocation) and unused when rescore is off, keeping that path identical.
+    let mut rescore_emitted: Vec<(String, bool)> = Vec::new();
+
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
             continue;
@@ -401,10 +447,14 @@ fn build_psms_batch(
             // matched target-PSM result (PEP + q-value). `None` when rescore is
             // off, or when a row had no matching Percolator output (e.g. a decoy,
             // which Percolator writes to the decoy file we do not load here).
-            let matched = rescore.and_then(|m| {
+            let matched = if let Some(m) = rescore {
                 let spec_id = format_spec_id(&spec_id_str, scan_num, ranks[hit], hit, multi_row);
-                m.get(&spec_id)
-            });
+                let hit_result = m.get(&spec_id);
+                rescore_emitted.push((spec_id, cand.is_decoy));
+                hit_result
+            } else {
+                None
+            };
 
             sequence.append_value(bare_sequence(cand));
             peptidoform.append_value(peptidoform_string(cand));
@@ -474,6 +524,12 @@ fn build_psms_batch(
 
             pep_id_index += 1;
         }
+    }
+
+    // Fail loud if the Percolator join was incomplete (target rows with no
+    // matching result), rather than silently emitting null q-values.
+    if let Some(m) = rescore {
+        audit_rescore_join(&rescore_emitted, m)?;
     }
 
     let columns: Vec<ArrayRef> = vec![
@@ -901,5 +957,41 @@ fn precursor_tol_scalar(t: &PrecursorTolerance) -> (f64, bool) {
         (hi, hi_ppm)
     } else {
         (lo, lo_ppm)
+    }
+}
+
+#[cfg(test)]
+mod rescore_join_tests {
+    use super::*;
+
+    fn psm(id: &str) -> PercolatorPsm {
+        PercolatorPsm {
+            psm_id: id.to_string(),
+            q_value: 0.0,
+            pep: 0.0,
+            peptide: "PEPTIDE".to_string(),
+            proteins: String::new(),
+        }
+    }
+
+    #[test]
+    fn rescore_join_errors_on_unmatched_target() {
+        let mut map = HashMap::new();
+        map.insert("scan=1_1_1".to_string(), psm("scan=1_1_1"));
+        // A target (non-decoy) row whose SpecId is absent from Percolator output.
+        let emitted = vec![("scan=2_2_1".to_string(), false)];
+        let err = audit_rescore_join(&emitted, &map).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn rescore_join_ok_when_targets_matched_and_decoys_exempt() {
+        let mut map = HashMap::new();
+        map.insert("scan=1_1_1".to_string(), psm("scan=1_1_1"));
+        let emitted = vec![
+            ("scan=1_1_1".to_string(), false), // target, matched
+            ("scan=9_9_1".to_string(), true),  // decoy, no match is fine
+        ];
+        assert!(audit_rescore_join(&emitted, &map).is_ok());
     }
 }

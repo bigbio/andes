@@ -241,7 +241,7 @@ fn train_intensity_gbdt_preserves_existing_models() {
 
     // First: train a rank-core model into the store via train-from-msnet.
     let s1 = Command::new(env!("CARGO_BIN_EXE_andes"))
-        .arg("train-from-msnet")
+        .arg("train")
         .arg("--in")
         .arg(&in_parquet)
         .arg("--out-store")

@@ -191,16 +191,13 @@ struct SearchArgs {
 
     /// Seed for `--decoy-strategy shuffle` (reproducible decoys). Ignored by
     /// reverse/none.
-    #[arg(long = "decoy-seed", default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
+    #[arg(long = "decoy-seed", hide = true, default_value_t = search::decoy::DEFAULT_DECOY_SEED)]
     decoy_seed: u64,
 
-    /// Minimum isotope-error offset to try.
-    #[arg(long, default_value = "-1")]
-    isotope_error_min: i8,
-
-    /// Maximum isotope-error offset to try.
-    #[arg(long, default_value = "2")]
-    isotope_error_max: i8,
+    /// Isotope-error offset range to try, as `MIN..MAX` (also accepts `MIN-MAX`).
+    /// Negative offsets allowed. Default `-1..2`.
+    #[arg(long = "isotope-error", default_value = "-1..2", value_parser = parse_isotope_error_range)]
+    isotope_error: (i8, i8),
 
     /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
     /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
@@ -213,46 +210,28 @@ struct SearchArgs {
     /// Lower it to calibrate small/targeted runs that would otherwise be
     /// skipped; raising it is more conservative. Only consulted when
     /// `--precursor-cal` is `auto`/`on`.
-    #[arg(long = "cal-min-spec-keys", default_value_t = search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS)]
+    #[arg(long = "cal-min-spec-keys", hide = true, default_value_t = search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS)]
     cal_min_spec_keys: usize,
 
-    /// Precursor mass tolerance in ppm.
-    #[arg(long, default_value = "20.0")]
-    precursor_tol_ppm: f64,
+    /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
+    /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
+    /// Default `20ppm`.
+    #[arg(long = "precursor-tol", default_value = "20ppm", value_parser = parse_precursor_tol)]
+    precursor_tol: Tolerance,
 
-    /// Precursor tolerance in Da (overrides --precursor-tol-ppm; for low-res
-    /// precursor selection). The asymmetric ppm flags below take precedence.
-    #[arg(long = "precursor-tol-da")]
-    precursor_tol_da: Option<f64>,
-
-    /// Asymmetric precursor tolerance, left (lower) window in ppm. Requires
-    /// --precursor-tol-right-ppm; together they override the symmetric forms
-    /// (for a known systematic precursor offset).
-    #[arg(long = "precursor-tol-left-ppm")]
-    precursor_tol_left_ppm: Option<f64>,
-
-    /// Asymmetric precursor tolerance, right (upper) window in ppm. Requires
-    /// --precursor-tol-left-ppm.
-    #[arg(long = "precursor-tol-right-ppm")]
-    precursor_tol_right_ppm: Option<f64>,
-
-    /// Minimum precursor charge to try when not specified in the spectrum.
-    #[arg(long, default_value = "2")]
-    charge_min: u8,
-
-    /// Maximum precursor charge to try when not specified in the spectrum.
-    #[arg(long, default_value = "5")]
-    charge_max: u8,
+    /// Precursor charge range to try when not specified in the spectrum, as
+    /// `MIN..MAX` (also accepts `MIN-MAX`). Default `2..5`.
+    #[arg(long = "charge", default_value = "2..5", value_parser = parse_charge_range)]
+    charge: (u8, u8),
 
     /// Maximum number of PSMs to retain per spectrum.
-    #[arg(long, default_value = "10")]
+    #[arg(long, hide = true, default_value = "10")]
     top_n: u32,
 
     /// Number of Tolerable Termini (enzymatic-cleavage enforcement at span
-    /// boundaries). `fully`: both termini must be cleavage sites (strict,
-    /// equivalent to legacy `-ntt 2`). `semi`: at least one terminus must be a
-    /// cleavage site (legacy `-ntt 1`). `non-specific`: neither terminus needs
-    /// to be a cleavage site (legacy `-ntt 0`). Legacy numeric 0/1/2 still accepted.
+    /// boundaries). `fully`: both termini must be cleavage sites (strict).
+    /// `semi`: at least one terminus must be a cleavage site. `non-specific`:
+    /// neither terminus needs to be a cleavage site.
     #[arg(long = "enzyme-specificity", alias = "ntt",
           default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
@@ -278,7 +257,7 @@ struct SearchArgs {
 
     /// Minimum number of peaks an MS2 spectrum must have to be scored; spectra
     /// with fewer peaks are skipped.
-    #[arg(long, default_value = "10")]
+    #[arg(long, hide = true, default_value = "10")]
     min_peaks: u32,
 
     /// Minimum peptide length, in residues.
@@ -306,20 +285,17 @@ struct SearchArgs {
     /// A single `NumMods=N` line sets the max variable mods per peptide.
     /// Inline `#`-comments are stripped. Blank lines and full-line `#`-comments
     /// are ignored. When omitted, the binary uses its built-in defaults
-    /// (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl variable). The deprecated
-    /// `--mod` form (singular) is still accepted as a hidden alias.
-    #[arg(long = "mods", alias = "mod", value_name = "MODFILE")]
+    /// (Carbamidomethyl-C fixed, Oxidation-M + protein-N-term-Acetyl variable).
+    #[arg(long = "mods", value_name = "MODFILE")]
     mods: Option<PathBuf>,
 
     /// Fragmentation/activation method for MGF input only. mzML/.raw/.d
     /// auto-detect this. Named values: auto, CID, ETD, HCD, UVPD.
-    /// Legacy numeric CLI indices: 0=auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD.
     #[arg(long, hide = true, default_value = "auto", value_parser = parse_fragmentation)]
     fragmentation: Fragmentation,
 
     /// Search protocol. Named values: auto, phospho, iTRAQ, iTRAQ-phospho, TMT, standard.
-    /// Legacy numeric CLI indices: 0=auto, 1=phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=standard.
-    #[arg(long, default_value = "auto", value_parser = parse_protocol)]
+    #[arg(long, hide = true, default_value = "auto", value_parser = parse_protocol)]
     protocol: Protocol,
 
     /// Fragment-matching tolerance in ppm for **MGF input only** (high-resolution
@@ -339,7 +315,7 @@ struct SearchArgs {
     threads: usize,
 
     /// Debug/benchmark cap: process only the first N spectra (0 = no cap).
-    #[arg(long, default_value = "0")]
+    #[arg(long, hide = true, default_value = "0")]
     max_spectra: usize,
 
     /// MS level to search. Defaults to MS2 (identification); MS1 and any higher
@@ -348,7 +324,7 @@ struct SearchArgs {
     /// want a different level. Applies to mzML and Thermo `.raw`; MGF files do
     /// not encode MS level and are always treated as MS2. The chimeric cascade
     /// always searches MS2 (it pairs MS2 with its preceding MS1).
-    #[arg(long, default_value = "2")]
+    #[arg(long, hide = true, default_value = "2")]
     ms_level: u8,
 
     /// Enable the two-pass chimeric cascade for co-isolated (co-fragmented)
@@ -361,37 +337,37 @@ struct SearchArgs {
 
     /// Chimeric mode: fallback isolation half-width in Da when the mzML omits the
     /// per-scan isolation-window offsets.
-    #[arg(long, default_value = "1.5")]
+    #[arg(long, hide = true, default_value = "1.5")]
     isolation_halfwidth: f64,
 
     /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
     /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
     /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.
-    #[arg(long = "chimeric-max-coisolated", default_value = "4")]
+    #[arg(long = "chimeric-max-coisolated", hide = true, default_value = "4")]
     chimeric_max_coisolated: usize,
 
     /// Chimeric mode: averagine-envelope KL gate for accepting a co-isolated MS1
     /// envelope (lower = stricter/cleaner; fewer spurious secondaries).
-    #[arg(long = "chimeric-max-kl", default_value = "0.3")]
+    #[arg(long = "chimeric-max-kl", hide = true, default_value = "0.3")]
     chimeric_max_kl: f32,
 
     /// Path to a Parquet model store to use instead of the bundled
     /// `resources/models.parquet`. When set, model selection reads from
     /// this store; when unset, the bundled store is used.
-    #[arg(long = "model-store")]
+    #[arg(long = "model-store", hide = true)]
     model_store: Option<PathBuf>,
 
     /// Exact model ID to load from the model store (bundled or `--model-store`).
     /// When set, skips automatic selection (metadata detection / `--fragmentation`
     /// / `--protocol`) and loads this ID directly. Useful after `andes train`
     /// to search with the freshly-trained model.
-    #[arg(long = "model")]
+    #[arg(long = "model", hide = true)]
     model_id_override: Option<String>,
 
     /// Path to a trained intensity model parquet (`andes train-intensity` output).
     /// Populates the additive `IntensitySignal` PIN column; ranking stays on RawScore
     /// until `--score strong` is enabled in a later phase. When unset, the column is 0.0.
-    #[arg(long = "intensity-model")]
+    #[arg(long = "intensity-model", hide = true)]
     intensity_model: Option<PathBuf>,
 
     /// Ranking / PIN RawScore source: `auto` (default — `strong` for high-res
@@ -405,7 +381,7 @@ struct SearchArgs {
     /// otherwise RAM, byte-identical to prior releases), or force `ram` / `mmap`
     /// (advanced overrides). `mmap` lowers peak RAM with lazy per-spectrum mod
     /// enumeration (result-equivalent PSMs, not byte-identical).
-    #[arg(long = "candidate-index", default_value = "auto")]
+    #[arg(long = "candidate-index", hide = true, default_value = "auto")]
     candidate_index: CandidateIndexFlag,
 
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
@@ -413,7 +389,7 @@ struct SearchArgs {
     refine: bool,
 
     /// YAML refinement config; omit to use the built-in 5-mod DEFAULT tier.
-    #[arg(long = "refine-config")]
+    #[arg(long = "refine-config", hide = true)]
     refine_config: Option<std::path::PathBuf>,
 
     /// Confident-anchor SCOPING FDR (not a reported FDR). Default 0.01 — the same
@@ -426,19 +402,15 @@ struct SearchArgs {
 
     /// Max variable mods per refined peptide. Overrides the value from
     /// `--refine-config` YAML; when neither is given, the built-in tier's value (2).
-    #[arg(long = "refine-max-mods")]
+    #[arg(long = "refine-max-mods", hide = true)]
     refine_max_mods: Option<u32>,
 
     /// Require high-res data for refinement; on low-res, skip refine. Overrides the
     /// `--refine-config` YAML `high_res_only`; when neither is given, the tier
     /// default (true). e.g. `--refine-high-res-only false` forces the cascade on
     /// low-res data.
-    #[arg(long = "refine-high-res-only", action = clap::ArgAction::Set)]
+    #[arg(long = "refine-high-res-only", hide = true, action = clap::ArgAction::Set)]
     refine_high_res_only: Option<bool>,
-
-    /// DEBUG ONLY: also emit the legacy separate <out>.refine.pin (disjoint-union A/B).
-    #[arg(long = "refine-debug-split-pin", default_value_t = false, hide = true)]
-    refine_debug_split_pin: bool,
 
     /// Run Percolator on the PIN after the search and join its PEP/q-value back
     /// into the outputs (QPX `posterior_error_probability` + a `q-value` score,
@@ -469,17 +441,17 @@ struct SearchArgs {
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
     /// `--pep` is a supplementary per-PSM gate. Like `--fdr`, setting it
     /// explicitly triggers rescoring. Default: no PEP cap.
-    #[arg(long = "pep")]
+    #[arg(long = "pep", hide = true)]
     pep: Option<f64>,
 
     /// Explicit path to a Percolator binary (highest-priority backend). When
     /// omitted, `percolator` on `$PATH` is used, else the docker fallback.
-    #[arg(long = "percolator-bin")]
+    #[arg(long = "percolator-bin", hide = true)]
     percolator_bin: Option<std::path::PathBuf>,
 
     /// Force the Percolator docker fallback (the pinned biocontainers image)
     /// instead of looking for a native binary. Requires the `docker` CLI.
-    #[arg(long = "percolator-docker", default_value_t = false)]
+    #[arg(long = "percolator-docker", hide = true, default_value_t = false)]
     percolator_docker: bool,
 
     /// Percolator docker image tag for the docker fallback (power-user override).
@@ -488,12 +460,12 @@ struct SearchArgs {
 
     /// Extra arguments passed verbatim to Percolator (after the fixed flags,
     /// before the PIN path). e.g. `--percolator-args "--testFDR 0.05"`.
-    #[arg(long = "percolator-args", default_value = "")]
+    #[arg(long = "percolator-args", hide = true, default_value = "")]
     percolator_args: String,
 
     /// Keep the PIN file after rescoring. With `--rescore` and no `--output-pin`,
     /// a temporary PIN is used and deleted unless this is true. Default true.
-    #[arg(long = "keep-pin", default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long = "keep-pin", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     keep_pin: bool,
 }
 
@@ -709,9 +681,9 @@ struct TrainArgs {
     #[arg(long, default_value = "msnet")]
     source: String,
 
-    /// Whether to also train and embed a GBDT peak model. `on` (default) and
-    /// `auto` train GBDT and write the blob; `off` writes rank-core only
-    /// (byte-identical to the pre-GBDT path).
+    /// Whether to also train and embed a GBDT peak model. `on` (default) trains
+    /// GBDT and writes the blob; `off` writes rank-core only (byte-identical to
+    /// the pre-GBDT path).
     #[arg(long, default_value = "on")]
     gbdt: GbdtMode,
 }
@@ -740,9 +712,6 @@ enum GbdtMode {
     #[default]
     #[clap(name = "on")]
     On,
-    /// Same as `on` (reserved for future heuristic auto-detection).
-    #[clap(name = "auto")]
-    Auto,
     /// Skip GBDT; write rank-core only (byte-identical to pre-GBDT path).
     #[clap(name = "off")]
     Off,
@@ -820,19 +789,19 @@ enum Command {
     /// search. This is the primary training path for the Phase-3 "own models".
     ///
     /// Boxed to keep the `Command` enum compact (clippy `large_enum_variant`).
-    #[command(alias = "train-from-msnet")]
+    #[command(hide = true)]
     Train(Box<TrainArgs>),
 
     /// Train a scoring model from spectra and a FASTA database, writing the
     /// result to a Parquet model store.
     ///
     /// Boxed to keep the `Command` enum compact.
-    #[command(name = "train-from-search")]
+    #[command(name = "train-from-search", hide = true)]
     TrainFromSearch(Box<TrainFromSearchArgs>),
 
     /// Merge MSNet intensity aggregation parquets into a finalized intensity
     /// model for the strong-score numerator.
-    #[command(name = "train-intensity")]
+    #[command(name = "train-intensity", hide = true)]
     TrainIntensity(Box<TrainIntensityArgs>),
 
     /// Train a v3 GBDT fragment-intensity regressor from flat training
@@ -840,7 +809,7 @@ enum Command {
     /// rank-core models.
     ///
     /// Boxed to keep the `Command` enum compact.
-    #[command(name = "train-intensity-gbdt")]
+    #[command(name = "train-intensity-gbdt", hide = true)]
     TrainIntensityGbdt(Box<TrainIntensityGbdtArgs>),
 
     /// Train a GBDT rich-ion LLR classifier (logistic; decoy-aware) from flat
@@ -848,7 +817,7 @@ enum Command {
     /// existing rank-core models.
     ///
     /// Boxed to keep the `Command` enum compact.
-    #[command(name = "train-rich-ion-llr")]
+    #[command(name = "train-rich-ion-llr", hide = true)]
     TrainRichIonLlr(Box<TrainRichIonLlrArgs>),
 }
 
@@ -1567,31 +1536,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
-    params.precursor_tolerance =
-        match (cli.precursor_tol_left_ppm, cli.precursor_tol_right_ppm, cli.precursor_tol_da) {
-            (Some(l), Some(r), _) => {
-                PrecursorTolerance::asymmetric(Tolerance::Ppm(l), Tolerance::Ppm(r))
-            }
-            (Some(_), None, _) | (None, Some(_), _) => {
-                return Err("--precursor-tol-left-ppm and --precursor-tol-right-ppm must be given together".into());
-            }
-            (None, None, Some(da)) => PrecursorTolerance::symmetric(Tolerance::Da(da)),
-            (None, None, None) => PrecursorTolerance::symmetric(Tolerance::Ppm(cli.precursor_tol_ppm)),
-        };
-    params.charge_range = cli.charge_min..=cli.charge_max;
-    if cli.charge_min > cli.charge_max {
-        return Err(format!(
-            "invalid charge range: --charge-min {} > --charge-max {}",
-            cli.charge_min, cli.charge_max
-        ).into());
-    }
-    params.isotope_error_range = cli.isotope_error_min..=cli.isotope_error_max;
-    if cli.isotope_error_min > cli.isotope_error_max {
-        return Err(format!(
-            "invalid isotope error range: --isotope-error-min {} > --isotope-error-max {}",
-            cli.isotope_error_min, cli.isotope_error_max
-        ).into());
-    }
+    params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
+    // Ranges are validated (min <= max) by the clap value parsers.
+    let (charge_min, charge_max) = cli.charge;
+    params.charge_range = charge_min..=charge_max;
+    let (iso_min, iso_max) = cli.isotope_error;
+    params.isotope_error_range = iso_min..=iso_max;
     // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
     // `.raw` readers. MGF (no MS1) and the Bruker `.d` reader (DDA MS2 only;
     // chimeric on `.d` is out of scope) make `--chimeric` inert, so keep
@@ -2299,30 +2249,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let pin_candidates;
     let pin_index;
     if let Some(out) = refine_output {
-        if cli.refine_debug_split_pin {
-            // Legacy A/B: emit the separate refine PIN exactly as before, from out.*.
-            // Must run BEFORE merge_into_pass1 because that call consumes `out`.
-            let refine_out_path = refine_pin_path(&output_pin_path);
-            let subset_spectra: Vec<Spectrum> = out
-                .global_spectrum_indices
-                .iter()
-                .map(|&i| spectra[i].clone())
-                .collect();
-            output::write_pin(
-                &refine_out_path,
-                &subset_spectra,
-                &out.queues,
-                &out.candidates,
-                &params,
-                &out.index,
-            )?;
-            eprintln!(
-                "DEBUG split PIN: wrote legacy refine PIN {} ({} PSMs over {} spectra).",
-                refine_out_path.display(),
-                out.queues.iter().map(|q| q.len()).sum::<usize>(),
-                out.queues.len(),
-            );
-        }
         let merged =
             search::refinement::merge_into_pass1(&mut queues, prepared.candidates, &idx, out);
         pin_candidates = merged.candidates;
@@ -4730,59 +4656,87 @@ fn load_param_from_store(
     Ok((model_id, param))
 }
 
-/// Derive the refine-PIN path from the main PIN path: insert `.refine` before
-/// the extension (`out.pin` → `out.refine.pin`). If the path has no extension,
-/// append `.refine.pin` (`out` → `out.refine.pin`).
-fn refine_pin_path(main: &std::path::Path) -> PathBuf {
-    match main.extension().and_then(|e| e.to_str()) {
-        Some(ext) => main.with_extension(format!("refine.{ext}")),
-        None => {
-            let mut s = main.as_os_str().to_owned();
-            s.push(".refine.pin");
-            PathBuf::from(s)
-        }
-    }
-}
-
-/// Parse `--fragmentation` value. Accepts named (case-insensitive: auto, CID,
-/// ETD, HCD, UVPD) or legacy numeric (0=Auto, 1=CID, 2=ETD, 3=HCD, 4=UVPD).
+/// Parse `--fragmentation` value. Accepts named values (case-insensitive: auto,
+/// CID, ETD, HCD, UVPD).
 fn parse_fragmentation(s: &str) -> Result<Fragmentation, String> {
-    if let Ok(v) = <Fragmentation as ValueEnum>::from_str(s, true) { return Ok(v); }
-    match s.parse::<u8>() {
-        Ok(0) => Ok(Fragmentation::Auto),
-        Ok(1) => Ok(Fragmentation::Cid),
-        Ok(2) => Ok(Fragmentation::Etd),
-        Ok(3) => Ok(Fragmentation::Hcd),
-        Ok(4) => Ok(Fragmentation::Uvpd),
-        _ => Err(format!(
-            "invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD \
-             (or legacy 0..=4)"
-        )),
-    }
+    <Fragmentation as ValueEnum>::from_str(s, true).map_err(|_| {
+        format!("invalid fragmentation `{s}`: expected auto|CID|ETD|HCD|UVPD")
+    })
 }
 
-/// Parse `--protocol` value. Accepts named or legacy numeric
-/// (0=Auto, 1=Phospho, 2=iTRAQ, 3=iTRAQ-phospho, 4=TMT, 5=Standard).
+/// Parse `--protocol` value. Accepts named values only.
 fn parse_protocol(s: &str) -> Result<Protocol, String> {
-    if let Ok(v) = <Protocol as ValueEnum>::from_str(s, true) { return Ok(v); }
-    match s.parse::<u8>() {
-        Ok(0) => Ok(Protocol::Auto),
-        Ok(1) => Ok(Protocol::Phospho),
-        Ok(2) => Ok(Protocol::Itraq),
-        Ok(3) => Ok(Protocol::ItraqPhospho),
-        Ok(4) => Ok(Protocol::Tmt),
-        Ok(5) => Ok(Protocol::Standard),
-        _ => Err(format!(
-            "invalid --protocol `{s}`: valid range is 0..=5 \
-             (0=Automatic, 1=Phosphorylation, 2=iTRAQ, 3=iTRAQPhospho, \
-              4=TMT, 5=Standard) or named auto|phospho|iTRAQ|iTRAQ-phospho|TMT|standard"
-        )),
-    }
+    <Protocol as ValueEnum>::from_str(s, true).map_err(|_| {
+        format!(
+            "invalid --protocol `{s}`: expected \
+             auto|phospho|iTRAQ|iTRAQ-phospho|TMT|standard"
+        )
+    })
 }
 
-/// Parse `--enzyme-specificity` (`--ntt`) value. Accepts named
-/// (non-specific, semi, fully) or legacy numeric (0=non-specific,
-/// 1=semi, 2=fully).
+/// Parse a `MIN..MAX` (or `MIN-MAX`) range into a `(min, max)` pair, generic
+/// over the integer type so it serves both `--charge` (u8) and
+/// `--isotope-error` (i8, negatives allowed). The `-` separator is tried only
+/// when the value does not parse as `..`; a leading negative MIN is handled by
+/// the `..` form (`-1..2`).
+fn parse_int_range<T>(s: &str, label: &str) -> Result<(T, T), String>
+where
+    T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
+{
+    let split = |sep: &str| -> Option<(&str, &str)> {
+        s.split_once(sep).map(|(a, b)| (a.trim(), b.trim()))
+    };
+    let (lo_s, hi_s) = if let Some(p) = split("..") {
+        p
+    } else if let Some((a, b)) = s.trim().rsplit_once('-') {
+        // `MIN-MAX`: rsplit so a leading negative MIN (e.g. `-1-2`) keeps its sign.
+        (a.trim(), b.trim())
+    } else {
+        return Err(format!("invalid {label} `{s}`: expected MIN..MAX (or MIN-MAX)"));
+    };
+    let lo: T = lo_s
+        .parse()
+        .map_err(|_| format!("invalid {label} `{s}`: bad MIN `{lo_s}`"))?;
+    let hi: T = hi_s
+        .parse()
+        .map_err(|_| format!("invalid {label} `{s}`: bad MAX `{hi_s}`"))?;
+    if lo > hi {
+        return Err(format!("invalid {label} `{s}`: MIN {lo} > MAX {hi}"));
+    }
+    Ok((lo, hi))
+}
+
+/// Parse `--charge MIN..MAX` (also `MIN-MAX`) into `(u8, u8)`.
+fn parse_charge_range(s: &str) -> Result<(u8, u8), String> {
+    parse_int_range::<u8>(s, "charge")
+}
+
+/// Parse `--isotope-error MIN..MAX` (also `MIN-MAX`) into `(i8, i8)`; negatives allowed.
+fn parse_isotope_error_range(s: &str) -> Result<(i8, i8), String> {
+    parse_int_range::<i8>(s, "isotope-error")
+}
+
+/// Parse `--precursor-tol VALUE+unit` (e.g. `20ppm`, `0.02da`/`0.02Da`).
+fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
+    let t = s.trim();
+    let lower = t.to_ascii_lowercase();
+    let (num_str, is_ppm) = if let Some(n) = lower.strip_suffix("ppm") {
+        (n, true)
+    } else if let Some(n) = lower.strip_suffix("da") {
+        (n, false)
+    } else {
+        return Err(format!(
+            "invalid --precursor-tol `{s}`: expected VALUE+unit, e.g. 20ppm or 0.02da"
+        ));
+    };
+    let v: f64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid --precursor-tol `{s}`: bad number `{num_str}`"))?;
+    Ok(if is_ppm { Tolerance::Ppm(v) } else { Tolerance::Da(v) })
+}
+
+/// Parse `--precursor-cal` value. Accepts auto|on|off.
 fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
     match s.to_ascii_lowercase().as_str() {
         "auto" => Ok(PrecursorCalMode::Auto),
@@ -4795,16 +4749,9 @@ fn parse_precursor_cal(s: &str) -> Result<PrecursorCalMode, String> {
 }
 
 fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
-    if let Ok(v) = <EnzymeSpecificity as ValueEnum>::from_str(s, true) { return Ok(v); }
-    match s.parse::<u8>() {
-        Ok(0) => Ok(EnzymeSpecificity::NonSpecific),
-        Ok(1) => Ok(EnzymeSpecificity::Semi),
-        Ok(2) => Ok(EnzymeSpecificity::Fully),
-        _ => Err(format!(
-            "invalid enzyme specificity `{s}`: expected non-specific|semi|fully \
-             (or legacy 0..=2)"
-        )),
-    }
+    <EnzymeSpecificity as ValueEnum>::from_str(s, true).map_err(|_| {
+        format!("invalid enzyme specificity `{s}`: expected non-specific|semi|fully")
+    })
 }
 
 #[cfg(test)]
@@ -4871,15 +4818,53 @@ mod param_resolver_tests {
     //    activation/instrument/protocol → model_id selection invariant.
 
     #[test]
-    fn parse_fragmentation_rejects_out_of_range_numeric() {
-        let err = parse_fragmentation("99").unwrap_err();
-        assert!(err.contains("0..=4"), "error message should mention range, got: {err}");
+    fn parse_fragmentation_accepts_named_rejects_numeric() {
+        assert_eq!(parse_fragmentation("HCD").unwrap(), Fragmentation::Hcd);
+        assert_eq!(parse_fragmentation("auto").unwrap(), Fragmentation::Auto);
+        // Legacy numeric forms are no longer accepted.
+        assert!(parse_fragmentation("3").is_err());
+        assert!(parse_fragmentation("99").is_err());
     }
 
     #[test]
-    fn parse_protocol_rejects_out_of_range_numeric() {
-        let err = parse_protocol("99").unwrap_err();
-        assert!(err.contains("0..=5"), "got: {err}");
+    fn parse_protocol_accepts_named_rejects_numeric() {
+        assert_eq!(parse_protocol("TMT").unwrap(), Protocol::Tmt);
+        assert_eq!(parse_protocol("auto").unwrap(), Protocol::Auto);
+        assert!(parse_protocol("4").is_err());
+        assert!(parse_protocol("99").is_err());
+    }
+
+    #[test]
+    fn parse_enzyme_specificity_named_only() {
+        assert_eq!(parse_enzyme_specificity("fully").unwrap(), EnzymeSpecificity::Fully);
+        assert_eq!(parse_enzyme_specificity("semi").unwrap(), EnzymeSpecificity::Semi);
+        assert!(parse_enzyme_specificity("2").is_err());
+    }
+
+    #[test]
+    fn parse_charge_range_forms() {
+        assert_eq!(parse_charge_range("2..5").unwrap(), (2, 5));
+        assert_eq!(parse_charge_range("2-5").unwrap(), (2, 5));
+        assert_eq!(parse_charge_range("3..3").unwrap(), (3, 3));
+        assert!(parse_charge_range("5..2").is_err());
+        assert!(parse_charge_range("x..5").is_err());
+    }
+
+    #[test]
+    fn parse_isotope_error_range_allows_negatives() {
+        assert_eq!(parse_isotope_error_range("-1..2").unwrap(), (-1, 2));
+        assert_eq!(parse_isotope_error_range("-1-2").unwrap(), (-1, 2));
+        assert_eq!(parse_isotope_error_range("0..0").unwrap(), (0, 0));
+        assert!(parse_isotope_error_range("2..-1").is_err());
+    }
+
+    #[test]
+    fn parse_precursor_tol_units() {
+        assert_eq!(parse_precursor_tol("20ppm").unwrap(), Tolerance::Ppm(20.0));
+        assert_eq!(parse_precursor_tol("0.02da").unwrap(), Tolerance::Da(0.02));
+        assert_eq!(parse_precursor_tol("0.02Da").unwrap(), Tolerance::Da(0.02));
+        assert!(parse_precursor_tol("20").is_err());
+        assert!(parse_precursor_tol("xppm").is_err());
     }
 
     #[test]

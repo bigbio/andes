@@ -184,19 +184,19 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--mod").arg(&mods_path)
-    .arg("--fragmentation").arg("3")
-    .arg("--protocol").arg("4")
+    .arg("--mods").arg(&mods_path)
+    .arg("--fragmentation").arg("HCD")
+    .arg("--protocol").arg("TMT")
     // Allow a wider tolerance — the TMT-labelled candidates differ in mass
     // and we just want to confirm the binary exits cleanly, not assert
     // recall on a non-TMT fixture.
-    .arg("--precursor-tol-ppm").arg("100")
+    .arg("--precursor-tol").arg("100ppm")
     .status()
     .expect("run andes with TMT flags");
 
     assert!(
         status.success(),
-        "andes should exit 0 with --mod + TMT flags, got: {status}"
+        "andes should exit 0 with --mods + TMT flags, got: {status}"
     );
     assert!(pin_path.exists(), "PIN output should still be written");
 }
@@ -296,10 +296,8 @@ fn cli_rejects_inverted_charge_range() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--charge-min")
-    .arg("4")
-    .arg("--charge-max")
-    .arg("2")
+    .arg("--charge")
+    .arg("4..2")
     .status()
     .expect("run andes with inverted charge range");
 
@@ -316,10 +314,8 @@ fn cli_rejects_inverted_isotope_error_range() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--isotope-error-min")
-    .arg("3")
-    .arg("--isotope-error-max")
-    .arg("-1")
+    .arg("--isotope-error")
+    .arg("3..-1")
     .status()
     .expect("run andes with inverted isotope range");
 
@@ -336,16 +332,14 @@ fn cli_accepts_isotope_error_min_negative_one() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--isotope-error-min")
-    .arg("-1")
-    .arg("--isotope-error-max")
-    .arg("2")
+    .arg("--isotope-error")
+    .arg("-1..2")
     .arg("--max-spectra")
     .arg("10")
     .status()
-    .expect("run andes with isotope-error-min -1");
+    .expect("run andes with isotope-error -1..2");
 
-    assert!(status.success(), "space-separated -1 must parse as isotope min");
+    assert!(status.success(), "negative isotope-error MIN must parse");
     assert!(pin_path.exists());
 }
 
@@ -370,12 +364,13 @@ fn cli_accepts_precursor_cal_off() {
     assert!(pin_path.exists());
 }
 
-/// Regression guard: legacy Java numeric flag values and the new
-/// Rust-idiomatic named values must resolve to byte-identical PIN output.
-/// Quantms scripts use the numeric form; new docs recommend the named form.
-/// If this test breaks, the legacy compat layer is broken.
+/// Smoke guard for the canonical (named + merged-range) CLI surface that the
+/// quantms andes module passes: named `--fragmentation/--protocol`, the
+/// `--enzyme-specificity` name, the merged `--charge`/`--isotope-error` ranges,
+/// and the unit-bearing `--precursor-tol`. Legacy numeric forms and split-range
+/// flags were removed (andes is pre-release, no back-compat).
 #[test]
-fn cli_accepts_both_named_and_numeric_param_values() {
+fn cli_accepts_canonical_named_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");
     let test_mgf = fixture("test-fixtures/test.mgf.gz");
 
@@ -390,53 +385,25 @@ fn cli_accepts_both_named_and_numeric_param_values() {
          15.994915,M,opt,any,Oxidation\n",
     ).unwrap();
 
-    let tmp_a = tempfile::tempdir().expect("tmpdir a");
-    let pin_a = tmp_a.path().join("legacy.pin");
+    let tmp = tempfile::tempdir().expect("tmpdir");
+    let pin = tmp.path().join("named.pin");
 
-    let tmp_b = tempfile::tempdir().expect("tmpdir b");
-    let pin_b = tmp_b.path().join("named.pin");
-
-    // Run A: legacy numeric form (mirrors current quantms usage).
-    let status_a = base_cmd(test_mgf.to_str().unwrap(),
-                            bsa_fasta.to_str().unwrap(),
-                            &pin_a)
-        .arg("--mod").arg(&mods_path)
-        .arg("--fragmentation").arg("3")
-        .arg("--protocol").arg("4")
-        .arg("--ntt").arg("2")
-        .arg("--precursor-tol-ppm").arg("100")
-        .status()
-        .expect("legacy form exit");
-    assert!(status_a.success(), "legacy CLI form failed");
-
-    // Run B: canonical named form (mirrors new docs).
-    let status_b = base_cmd(test_mgf.to_str().unwrap(),
-                            bsa_fasta.to_str().unwrap(),
-                            &pin_b)
+    let status = base_cmd(test_mgf.to_str().unwrap(),
+                          bsa_fasta.to_str().unwrap(),
+                          &pin)
         .arg("--mods").arg(&mods_path)
         .arg("--fragmentation").arg("HCD")
         .arg("--protocol").arg("TMT")
         .arg("--enzyme-specificity").arg("fully")
-        .arg("--precursor-tol-ppm").arg("100")
+        .arg("--charge").arg("2..5")
+        .arg("--isotope-error").arg("-1..2")
+        .arg("--precursor-tol").arg("100ppm")
         .status()
         .expect("named form exit");
-    assert!(status_b.success(), "named CLI form failed");
+    assert!(status.success(), "canonical named CLI form failed");
 
-    let pin_a_content = std::fs::read_to_string(&pin_a).expect("read legacy pin");
-    let pin_b_content = std::fs::read_to_string(&pin_b).expect("read named pin");
-
-    // Row order can vary between separate process invocations (Rayon scheduling);
-    // compare header + sorted data rows to verify equivalent search output.
-    let mut lines_a: Vec<&str> = pin_a_content.lines().collect();
-    let mut lines_b: Vec<&str> = pin_b_content.lines().collect();
-    assert!(!lines_a.is_empty() && !lines_b.is_empty(), "PIN files must not be empty");
-    let header_a = lines_a.remove(0);
-    let header_b = lines_b.remove(0);
-    assert_eq!(header_a, header_b, "PIN headers must match");
-    lines_a.sort_unstable();
-    lines_b.sort_unstable();
-    assert_eq!(lines_a, lines_b,
-        "legacy and named CLI forms must produce equivalent PIN output");
+    let pin_content = std::fs::read_to_string(&pin).expect("read pin");
+    assert!(!pin_content.lines().next().unwrap_or("").is_empty(), "PIN must have a header");
 }
 
 // ── MGF metadata-less model-selection routing tests ──────────────────────────

@@ -45,6 +45,24 @@ pub fn derive_mass_tiers(masses: &[f32], n_tiers: usize) -> Vec<f32> {
     tiers
 }
 
+/// Group corpus `(charge, parent_mass)` PSMs by charge and derive each charge's
+/// equal-occupancy `parent_mass` tier bounds, returned ascending by charge — the
+/// `tiers_by_charge` input to [`build_partition_skeleton`].
+pub fn derive_tiers_by_charge(
+    charge_masses: &[(i32, f32)],
+    n_tiers: usize,
+) -> Vec<(i32, Vec<f32>)> {
+    let mut by_charge: std::collections::BTreeMap<i32, Vec<f32>> =
+        std::collections::BTreeMap::new();
+    for &(charge, mass) in charge_masses {
+        by_charge.entry(charge).or_default().push(mass);
+    }
+    by_charge
+        .into_iter()
+        .map(|(charge, masses)| (charge, derive_mass_tiers(&masses, n_tiers)))
+        .collect()
+}
+
 /// Build the partition skeleton: the Cartesian product of charges, their
 /// `parent_mass` tier lower-bounds, and the `0..num_segments` segments. Returned
 /// sorted by the `Partition` lex order (the loader / `find_partition` invariant).
@@ -119,6 +137,17 @@ mod tests {
         ];
         let tiers = derive_mass_tiers(&masses, 4);
         assert_eq!(tiers, vec![100.0, 300.0, 500.0, 700.0]);
+    }
+
+    #[test]
+    fn tiers_by_charge_groups_and_quantiles_per_charge() {
+        // charge 2: 4 masses, 2 tiers -> [100,300]; charge 3: 2 masses -> [500,600].
+        let pairs = vec![
+            (2, 100.0), (2, 200.0), (2, 300.0), (2, 400.0),
+            (3, 500.0), (3, 600.0),
+        ];
+        let got = derive_tiers_by_charge(&pairs, 2);
+        assert_eq!(got, vec![(2, vec![100.0, 300.0]), (3, vec![500.0, 600.0])]);
     }
 
     #[test]

@@ -102,7 +102,7 @@ pub fn intensity_signal(
 
     for ion in &predicted {
         let log_rel = if let Some(g) = frag_model {
-            // v3 frag-intensity regressor path (precursor charge, nce=0.0 matches training).
+            // Frag-intensity regressor path (precursor charge, nce=0.0 matches training).
             let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, ion.charge, 0.0);
             g.predict_value(&feats)
         } else {
@@ -145,7 +145,7 @@ pub fn intensity_signal(
 }
 
 /// Frag-intensity LLR battery: three additive discriminative PIN features
-/// derived from the v3 frag-intensity GBDT's per-fragment predicted intensity,
+/// derived from the frag-intensity GBDT's per-fragment predicted intensity,
 /// deployed as likelihood-ratio signals instead of a single cosine (the cosine
 /// normalizes both vectors and smears target/decoy separation, so a more
 /// accurate intensity model gives no PSM lift — confirmed 3× on Astral).
@@ -381,8 +381,7 @@ pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
     let sum: f64 = retained_strong.iter().map(|&s| f64::from(s)).sum();
     let sum_sq: f64 = retained_strong.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
     // Leave exactly ONE copy of `this` out, so mean and variance are over the
-    // same subset. The prior `filter(s != this)` dropped EVERY tied value,
-    // making the variance disagree with the mean when ties were present.
+    // same subset.
     let n_others = (n - 1) as f64;
     let mean_others = (sum - this_d) / n_others;
     let var_others = ((sum_sq - this_d * this_d) / n_others - mean_others * mean_others).max(0.0);

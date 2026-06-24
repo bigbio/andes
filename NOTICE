@@ -12,7 +12,17 @@ Origin and acknowledgement
 ================================================================================
 
 andes has its own peptide-spectrum scoring, its own statistical models trained
-on public PRIDE data, and its own Rust implementation.
+on public PRIDE data, and an independent Rust implementation.
 
-Prior art: MS-GF+ (Kim & Pevzner, Nat Commun 2014;5:5277). See HERITAGE.md for
-the project's lineage.
+andes began as a fork of MS-GF+ (Kim & Pevzner, Nat Commun 2014;5:5277) and was
+independently rewritten in Rust. Its generating-function scoring was replaced
+with an empirical rank/intensity model, and its bundled scoring models are
+trained on public data — so the current engine and models share no code or model
+data with MS-GF+, which remains the cited origin and inspiration.
+
+Its design also draws on ideas from the broader open-source proteomics
+search-engine community, and we gratefully acknowledge:
+
+  - X!Tandem  (Craig & Beavis, Bioinformatics 2004)
+  - Comet     (Eng, Jahan & Hoopmann, Proteomics 2013)
+  - Sage      (Lazear, J. Proteome Res. 2023)

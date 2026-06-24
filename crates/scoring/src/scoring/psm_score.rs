@@ -496,7 +496,7 @@ mod tests {
         Peptide::new(vec![t, w1, w2], b'_', b'-')
     }
 
-    /// Task 7.3: `score_psm` adds the peptide-aware neutral-loss contribution
+    /// `score_psm` adds the peptide-aware neutral-loss contribution
     /// for loss-bearing peptides, and is byte-identical for non-loss peptides.
     #[test]
     fn score_psm_adds_neutral_loss_contribution_and_is_inert_otherwise() {

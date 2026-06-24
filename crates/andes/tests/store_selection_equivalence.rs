@@ -102,7 +102,7 @@ fn resolve_model_id_old(
     // (the v1 case) falls straight through to the global default rather than to
     // `cid_lowres_tryp`. Encode that here so the reference tracks the binary.
     let final_fallback: Option<&str> = match (frag, inst) {
-        // TOF/HighRes HCD historically used cid_tof_tryp (dropped in v1).
+        // TOF/HighRes HCD maps to cid_tof_tryp.
         ("HCD", "TOF") | ("HCD", "HighRes") => Some("cid_tof_tryp"),
         ("ETD", _)                          => Some("etd_lowres_tryp"),
         // The binary rewrites these to cid_lowres_tryp (drop_protocol arms).
@@ -416,22 +416,16 @@ fn store_selection_matches_old_ladder_for_all_combos() {
     }
 }
 
-// ── Decision E: metadata-less CLI default ─────────────────────────────────────
+// ── Metadata-less CLI default ─────────────────────────────────────────────────
 //
 // The equivalence matrix above exercises the *activation-aware* ladder
 // (`resolve_for_activation_old`), which always receives a concrete activation
-// method, so it never hits the historical all-defaults short-circuit
-// (`Fragmentation::Auto && Instrument::LowRes && Protocol::Auto → hcd_qexactive`)
-// that the removed `--instrument` CLI flag used to reach. That short-circuit
-// was a CLI-flag artifact, not a property of the store, so dropping it does not
-// affect the matrix above.
+// method, so it never hits the all-defaults short-circuit.
 //
-// Decision E changes that metadata-less, no-flags CLI default from
-// `hcd_qexactive` to `cid_lowres`: with no analyzer metadata and no
-// `--fragmentation`/`--fragment-tol-*`, the binary's
-// `resolve_metadataless_selection` now yields `(CID, None)` → `cid_lowres_tryp`.
-// This test pins that new default against the store directly (mirroring the
-// binary's resolver), so the behavior change is asserted, not merely implied.
+// With no analyzer metadata and no `--fragmentation`/`--fragment-tol-*`, the
+// binary's `resolve_metadataless_selection` yields `(CID, None)` →
+// `cid_lowres_tryp`. This test pins that default against the store directly
+// (mirroring the binary's resolver).
 #[test]
 fn metadataless_no_flags_default_selects_cid_lowres() {
     let entries = bundled_selection_entries();

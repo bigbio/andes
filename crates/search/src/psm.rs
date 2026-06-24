@@ -74,8 +74,8 @@ pub struct PsmFeatures {
     /// confidence signal. Emitted as the additive `DeltaRawScore` PIN column on
     /// the rank-1 row only (0.0 elsewhere). Captured during candidate scoring
     /// (NOT from the retained queue), so it is populated even at `top_n = 1`
-    /// where the runner-up is otherwise evicted — and without perturbing the
-    /// GF `min_score` / SpecEValue of any emitted PSM (purely additive).
+    /// where the runner-up is otherwise evicted — and without perturbing any
+    /// emitted PSM's score (purely additive).
     pub delta_raw_score: f32,
 
     /// Tailor per-spectrum score calibration (Yang et al., JPR 2020):
@@ -83,7 +83,7 @@ pub struct PsmFeatures {
     /// top-1% quantile of its candidate-score distribution (the score at rank
     /// `ceil(0.01 * N)` from the top). Dividing each PSM's RawScore by its own
     /// spectrum's high-quantile score makes RawScores comparable across spectra
-    /// — the role the removed generating function used to play. Emitted as the
+    /// (per-spectrum calibration). Emitted as the
     /// additive `TailorScore` PIN column. Falls back to `denom = 1.0`
     /// (TailorScore = RawScore) when the spectrum has too few candidates
     /// (< 100) or the quantile score is `<= 0`, so it never divides by zero or

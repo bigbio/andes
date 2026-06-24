@@ -3,6 +3,7 @@ pub mod gbdt;
 pub mod accumulate;
 pub mod counts;
 pub mod estimate;
+pub mod geometry;
 pub mod catalog;
 pub mod select;
 pub mod labeled;

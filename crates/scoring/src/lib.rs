@@ -15,7 +15,6 @@ pub mod scoring;
 #[cfg(test)]
 pub(crate) mod testutil;
 
-// Convenience re-exports.
 pub use intensity_model::{IntensityIonType, IntensityModel, IntensityModelError};
 pub use param_model::Param;
 pub use scoring::{IonMatchFact, RankScorer, ScoredSpectrum};

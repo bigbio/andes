@@ -102,7 +102,7 @@ impl AminoAcidSet {
     ///
     /// Used by the refinement cascade to seed Pass-2 with the base search's FULL
     /// chemistry (Cam-C, TMT, iTRAQ, Ox-M, …) before layering the discovery tier —
-    /// so labeled/non-standard fixed mods are no longer silently dropped.
+    /// so labeled/non-standard fixed mods are reported, not dropped.
     ///
     /// EXCLUDES the builder's synthesized "stacked" terminal variants — when a
     /// residue carries a fixed Anywhere mod AND a variable terminal mod, `build`

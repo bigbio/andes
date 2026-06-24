@@ -463,9 +463,7 @@ impl<R: BufRead> MzMLReader<R> {
             });
         }
 
-        // Drop non-finite or non-positive-m/z / negative-intensity points
-        // before they can reach the scorer (matches the timsTOF reader, which
-        // already filters; mzML previously passed NaN/Inf/garbage through).
+        // Drop non-finite / non-positive peaks before scoring.
         let mut peaks: Vec<(f64, f32)> = mz_vals
             .into_iter()
             .zip(int_vals)
@@ -1755,8 +1753,7 @@ mod tests {
     #[test]
     fn non_finite_and_nonpositive_peaks_are_filtered() {
         // NaN / Inf / negative-m/z points must be dropped before reaching the
-        // scorer (the timsTOF reader already does this; mzML used to pass them
-        // through). Only the two finite, positive-m/z peaks should survive.
+        // scorer. Only the two finite, positive-m/z peaks should survive.
         let mz_b64 = encode_f64_b64(&[f64::NAN, 100.0, -50.0, f64::INFINITY, 200.0]);
         let int_b64 = encode_f64_b64(&[10.0, 1000.0, 10.0, 10.0, 500.0]);
         let spec = ms2_spectrum_xml(

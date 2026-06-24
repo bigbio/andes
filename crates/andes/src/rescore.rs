@@ -128,7 +128,15 @@ fn cv_scores(d: &PinData, seed: u64) -> Vec<f32> {
             continue;
         }
         let ds = Dataset { x, y, groups, n_features: nf };
-        let model = train_gbdt(&ds, &params, seed.wrapping_add(fold as u64 + 1));
+        // A fold that fails the trainer's quality gate (too few rows, no
+        // held-out signal, etc.) contributes no held-out scores — same as the
+        // degenerate-fold skip above. The native rescorer is an opt-in
+        // benchmarking fallback, so a non-deployable fold is left at 0 rather
+        // than aborting the whole rescore.
+        let model = match train_gbdt(&ds, &params, seed.wrapping_add(fold as u64 + 1)) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         for r in 0..n {
             if folds[r] != fold {
                 continue;

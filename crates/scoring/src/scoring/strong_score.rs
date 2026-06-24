@@ -10,6 +10,31 @@ use model::peptide::Peptide;
 /// Half-width (Da) for `local_peak_density` in chance-match and competition terms.
 pub const DENSITY_HW: f64 = 50.0;
 
+/// Finite clamp (finding 3.4) for a GBDT regressor's predicted log-relative
+/// fragment intensity before `exp`. The frag-intensity model emits a *log*
+/// relative intensity; a corrupt/degenerate tree (extreme leaf values) can
+/// return a magnitude large enough that `exp` overflows to `+inf`, which then
+/// poisons every downstream sum (`sum_p`, `explained`, the chance LLR). Real
+/// calibrated outputs sit within a few units of zero, so this bound is never
+/// engaged on the happy path — `exp(±50)` (≈5e21 / ≈2e-22) is already far past
+/// any physical relative intensity. Clamping keeps the derived features finite
+/// instead of `inf`/`NaN`.
+const LOG_INTENSITY_CLAMP: f64 = 50.0;
+
+/// Convert a GBDT regressor's predicted log-relative intensity to a finite,
+/// non-negative linear intensity. Clamps the log value to
+/// `[-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP]` (a no-op for real outputs) and
+/// substitutes `0.0` for a non-finite prediction so callers never propagate
+/// `inf`/`NaN`.
+#[inline]
+fn predicted_linear_intensity(g: &GbdtPeakModel, feats: &[f32]) -> f64 {
+    let log_rel = f64::from(g.predict_value(feats));
+    if !log_rel.is_finite() {
+        return 0.0;
+    }
+    log_rel.clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP).exp()
+}
+
 use crate::frag_features::extract_frag_features;
 use crate::ion_features::extract_ion_features;
 use crate::gbdt_eval::GbdtPeakModel;
@@ -101,10 +126,13 @@ pub fn intensity_signal(
     let mut obs_vec = Vec::with_capacity(predicted.len());
 
     for ion in &predicted {
-        let log_rel = if let Some(g) = frag_model {
+        // Predicted LINEAR relative intensity, kept finite (finding 3.4): the
+        // GBDT/intensity-model paths emit a log-relative value; an extreme
+        // prediction would otherwise `exp` to `+inf` and corrupt the cosine.
+        let pred_intensity = if let Some(g) = frag_model {
             // Frag-intensity regressor path (precursor charge, nce=0.0 matches training).
             let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, ion.charge, 0.0);
-            g.predict_value(&feats)
+            predicted_linear_intensity(g, &feats)
         } else {
             // Existing coarse table path (fallback; model is Some here).
             let (flank_n, flank_c) = match flank_residues(&seq, ion.kind, ion.position) {
@@ -125,9 +153,16 @@ pub fn intensity_signal(
                 i32::from(precursor_charge),
                 nce_bin,
             );
-            mean_log as f32
+            // Preserve the historical f64→f32→f64 round-trip exactly so the
+            // happy-path cosine is byte-identical; only add finiteness/clamp.
+            let log_rel = f64::from(mean_log as f32);
+            if log_rel.is_finite() {
+                log_rel.clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP).exp()
+            } else {
+                0.0
+            }
         };
-        pred_vec.push(f64::from(log_rel).exp());
+        pred_vec.push(pred_intensity);
 
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
@@ -196,7 +231,7 @@ pub fn frag_llr_battery(
             ion.charge,
             0.0,
         );
-        let p = f64::from(g.predict_value(&feats)).exp();
+        let p = predicted_linear_intensity(g, &feats);
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
         } else {
@@ -710,6 +745,36 @@ mod tests {
         };
         // Round-trip through bytes to exercise the validator.
         GbdtPeakModel::from_bytes(&m.to_bytes()).expect("const-leaf gbdt round-trip")
+    }
+
+    #[test]
+    fn predicted_linear_intensity_is_finite_for_extreme_leaf() {
+        // An extreme positive leaf would `exp` to +inf without the clamp.
+        let g_big = const_leaf_gbdt(1.0e6);
+        let v = super::predicted_linear_intensity(&g_big, &[0.0f32; crate::frag_features::N_FRAG_FEATURES]);
+        assert!(v.is_finite(), "clamped exp must be finite, got {v}");
+        assert!(v > 0.0);
+        // An extreme negative leaf clamps toward 0, still finite.
+        let g_small = const_leaf_gbdt(-1.0e6);
+        let v2 = super::predicted_linear_intensity(&g_small, &[0.0f32; crate::frag_features::N_FRAG_FEATURES]);
+        assert!(v2.is_finite() && v2 >= 0.0, "got {v2}");
+        // A normal leaf (0.0) is unchanged: exp(0) == 1.
+        let g0 = const_leaf_gbdt(0.0);
+        let v3 = super::predicted_linear_intensity(&g0, &[0.0f32; crate::frag_features::N_FRAG_FEATURES]);
+        assert!((v3 - 1.0).abs() < 1e-9, "exp(0) must be 1.0, got {v3}");
+    }
+
+    #[test]
+    fn frag_llr_battery_finite_with_extreme_model() {
+        // A frag model with an extreme leaf must not produce NaN/inf features.
+        let g = const_leaf_gbdt(1.0e6);
+        let peptide = pep(b"ARCDE");
+        let spec = Spectrum { peaks: vec![(300.0, 1000.0)], ..Default::default() };
+        let ss = ScoredSpectrum::new_without_filtering(&spec);
+        let (explained, chance, topk) = frag_llr_battery(Some(&g), &ss, &peptide, 2, 20.0, true);
+        for (name, v) in [("explained", explained), ("chance", chance), ("topk", topk)] {
+            assert!(v.is_finite(), "{name} must be finite, got {v}");
+        }
     }
 
     #[test]

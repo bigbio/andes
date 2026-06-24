@@ -6,8 +6,26 @@
 
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
+use crate::TrainError;
 use super::isotonic::pava;
 use super::tree::{fit_tree, TreeParams};
+
+// ---------------------------------------------------------------------------
+// Quality-gate thresholds (finding 3.6)
+// ---------------------------------------------------------------------------
+
+/// Minimum number of training rows for a classifier/regressor to be trusted.
+/// Below this the model overfits noise and is not deployable.
+pub const MIN_TRAIN_ROWS: usize = 100;
+
+/// Minimum held-out AUC for the classification trainer. AUC ≈ 0.5 means the
+/// model does not discriminate signal from noise and must not be wired.
+pub const MIN_VAL_AUC: f64 = 0.55;
+
+/// Minimum held-out Pearson r and R² for the regression trainer. A non-positive
+/// R² means the model predicts worse than the mean.
+pub const MIN_VAL_PEARSON: f64 = 0.10;
+pub const MIN_VAL_R2: f64 = 0.0;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -37,6 +55,14 @@ pub struct TrainParams {
     pub val_fraction: f32,
     /// Stop if validation logloss does not improve for this many rounds.
     pub early_stop_rounds: u32,
+    /// Opt-in fallback (finding 3.6): when `true`, a failed quality gate is
+    /// downgraded from a hard error to a `stderr` warning and the trainer
+    /// returns the (possibly empty/low-quality) model — restoring the historical
+    /// always-return behavior. Default `false`: gate failures are hard errors so
+    /// a non-deployable model is never silently shipped. Intended only for
+    /// small synthetic fixtures / benchmarking where the operator accepts the
+    /// risk.
+    pub allow_degenerate: bool,
 }
 
 impl Default for TrainParams {
@@ -51,7 +77,24 @@ impl Default for TrainParams {
             neg_pos_ratio: 4.0,
             val_fraction: 0.2,
             early_stop_rounds: 30,
+            allow_degenerate: false,
         }
+    }
+}
+
+/// Helper for the quality gates: either return a hard `QualityGate` error, or —
+/// when `allow_degenerate` is set — warn and yield the fallback model so the
+/// historical always-return behavior is preserved for opt-in callers.
+fn gate_or_fallback(
+    allow_degenerate: bool,
+    reason: String,
+    fallback: impl FnOnce() -> GbdtPeakModel,
+) -> Result<GbdtPeakModel, TrainError> {
+    if allow_degenerate {
+        eprintln!("WARN: gbdt quality gate failed ({reason}); returning degenerate model (--allow-degenerate-model)");
+        Ok(fallback())
+    } else {
+        Err(TrainError::QualityGate(reason))
     }
 }
 
@@ -184,20 +227,37 @@ fn shuffle_indices(indices: &mut [usize], rng: &mut u64) {
 ///
 /// All randomness is seeded from `seed`; two calls with identical arguments
 /// and seed produce byte-for-byte identical models.
-pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
+pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
 
-    // --- Guard: degenerate input → empty model ---------------------------------
+    // --- Hard gate: degenerate input (finding 3.6) -----------------------------
+    // Previously these returned a deployable-looking empty model. Now they fail
+    // loudly so a no-signal training set is never silently shipped.
+    let empty_classifier = || GbdtPeakModel {
+        n_features: nf as u32,
+        apply_sigmoid: true,
+        trees: vec![],
+        iso_x: vec![],
+        iso_y: vec![],
+    };
     let n_pos = ds.y.iter().filter(|&&y| y == 1).count();
-    if n_pos == 0 || n_rows == 0 || nf == 0 {
-        return GbdtPeakModel {
-            n_features: nf as u32,
-            apply_sigmoid: true,
-            trees: vec![],
-            iso_x: vec![],
-            iso_y: vec![],
-        };
+    if nf == 0 {
+        return gate_or_fallback(p.allow_degenerate, "classifier: zero features".into(), empty_classifier);
+    }
+    if n_rows < MIN_TRAIN_ROWS {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            format!("classifier: {n_rows} rows < minimum {MIN_TRAIN_ROWS}"),
+            empty_classifier,
+        );
+    }
+    if n_pos == 0 || n_pos == n_rows {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "classifier: training labels are single-class (need both 0 and 1)".into(),
+            empty_classifier,
+        );
     }
 
     let n_bins = p.n_bins.min(256);
@@ -247,15 +307,13 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
         }
     }
 
-    // Guard: if no validation rows (e.g. empty val fraction), return empty model.
+    // Gate: no validation rows (e.g. all groups landed in train) → cannot gate.
     if val_rows.is_empty() {
-        return GbdtPeakModel {
-            n_features: nf as u32,
-            apply_sigmoid: true,
-            trees: vec![],
-            iso_x: vec![],
-            iso_y: vec![],
-        };
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "classifier: validation split is empty (cannot evaluate held-out AUC)".into(),
+            empty_classifier,
+        );
     }
 
     // --- Step 3: Negative undersample TRAIN rows (seeded) ---------------------
@@ -265,15 +323,13 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
         train_rows.iter().copied().filter(|&r| ds.y[r] == 0).collect();
 
     let n_pos_train = train_pos.len();
-    // Guard: if no positives in training set, return empty model.
+    // Gate: no positives in the training split after the disjoint split.
     if n_pos_train == 0 {
-        return GbdtPeakModel {
-            n_features: nf as u32,
-            apply_sigmoid: true,
-            trees: vec![],
-            iso_x: vec![],
-            iso_y: vec![],
-        };
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "classifier: training split has no positive rows".into(),
+            empty_classifier,
+        );
     }
 
     let n_neg_keep =
@@ -399,6 +455,37 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
         val_n - n_pos_val
     );
 
+    // Hard gates (finding 3.6): an empty ensemble or a non-discriminating model
+    // must not be returned as deployable.
+    if trees.is_empty() {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "classifier: empty tree ensemble (no useful split found)".into(),
+            empty_classifier,
+        );
+    }
+    if n_pos_val == 0 || n_pos_val == val_n {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "classifier: validation split is single-class (AUC undefined)".into(),
+            empty_classifier,
+        );
+    }
+    if !val_auc.is_finite() || val_auc < MIN_VAL_AUC {
+        let trees_for_fallback = trees.clone();
+        return gate_or_fallback(
+            p.allow_degenerate,
+            format!("classifier: held-out AUC {val_auc:.4} < minimum {MIN_VAL_AUC}"),
+            move || GbdtPeakModel {
+                n_features: nf as u32,
+                apply_sigmoid: true,
+                trees: trees_for_fallback,
+                iso_x: vec![],
+                iso_y: vec![],
+            },
+        );
+    }
+
     // Build (p_sigmoid, y) pairs sorted by p_sigmoid.
     let mut cal_pairs: Vec<(f32, f32)> = raw_val_final
         .iter()
@@ -412,13 +499,13 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> GbdtPeakModel {
     let (iso_x, iso_y) = pava(&sorted_p, &sorted_y);
 
     // --- Return ---------------------------------------------------------------
-    GbdtPeakModel {
+    Ok(GbdtPeakModel {
         n_features: nf as u32,
         apply_sigmoid: true,
         trees,
         iso_x,
         iso_y,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -508,19 +595,27 @@ pub fn train_gbdt_regression(
     ds: &RegressionDataset,
     p: &TrainParams,
     seed: u64,
-) -> GbdtPeakModel {
+) -> Result<GbdtPeakModel, TrainError> {
     let n_rows = ds.y.len();
     let nf = ds.n_features;
 
-    // Guard: degenerate input → empty model.
-    if n_rows == 0 || nf == 0 {
-        return GbdtPeakModel {
-            n_features: nf as u32,
-            apply_sigmoid: false,
-            trees: vec![],
-            iso_x: vec![],
-            iso_y: vec![],
-        };
+    let empty_regressor = || GbdtPeakModel {
+        n_features: nf as u32,
+        apply_sigmoid: false,
+        trees: vec![],
+        iso_x: vec![],
+        iso_y: vec![],
+    };
+    // Hard gate: degenerate input (finding 3.6).
+    if nf == 0 {
+        return gate_or_fallback(p.allow_degenerate, "regressor: zero features".into(), empty_regressor);
+    }
+    if n_rows < MIN_TRAIN_ROWS {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            format!("regressor: {n_rows} rows < minimum {MIN_TRAIN_ROWS}"),
+            empty_regressor,
+        );
     }
 
     let n_bins = p.n_bins.min(256);
@@ -565,15 +660,13 @@ pub fn train_gbdt_regression(
         }
     }
 
-    // Guard: no validation rows → empty model.
+    // Gate: no validation/training rows → cannot fit or gate.
     if val_rows.is_empty() || train_rows.is_empty() {
-        return GbdtPeakModel {
-            n_features: nf as u32,
-            apply_sigmoid: false,
-            trees: vec![],
-            iso_x: vec![],
-            iso_y: vec![],
-        };
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "regressor: empty train or validation split".into(),
+            empty_regressor,
+        );
     }
 
     // --- Step 3: Build compact train/val arrays (NO undersampling) -----------
@@ -668,14 +761,41 @@ pub fn train_gbdt_regression(
         "train-gbdt: regression val Pearson r = {r:.4}  R2 = {r2:.4}  (n_val={n})"
     );
 
+    // Hard gates (finding 3.6): an empty ensemble or a model that doesn't beat
+    // the mean is not deployable.
+    if trees.is_empty() {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "regressor: empty tree ensemble (no useful split found)".into(),
+            empty_regressor,
+        );
+    }
+    if !r.is_finite() || !r2.is_finite() || r < MIN_VAL_PEARSON || r2 < MIN_VAL_R2 {
+        let trees_for_fallback = trees.clone();
+        return gate_or_fallback(
+            p.allow_degenerate,
+            format!(
+                "regressor: held-out Pearson r = {r:.4} (min {MIN_VAL_PEARSON}), \
+                 R2 = {r2:.4} (min {MIN_VAL_R2})"
+            ),
+            move || GbdtPeakModel {
+                n_features: nf as u32,
+                apply_sigmoid: false,
+                trees: trees_for_fallback,
+                iso_x: vec![],
+                iso_y: vec![],
+            },
+        );
+    }
+
     // --- Return (no sigmoid, no isotonic) ------------------------------------
-    GbdtPeakModel {
+    Ok(GbdtPeakModel {
         n_features: nf as u32,
         apply_sigmoid: false,
         trees,
         iso_x: vec![],
         iso_y: vec![],
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -728,7 +848,7 @@ mod tests {
     #[test]
     fn separable_data_trains_and_separates() {
         let ds = separable(6, 4000, 0x1234);
-        let model = train_gbdt(&ds, &TrainParams::default(), 0xC0FFEE);
+        let model = train_gbdt(&ds, &TrainParams::default(), 0xC0FFEE).expect("separable passes gate");
         assert!(model.apply_sigmoid);
         assert_eq!(model.n_features as usize, 6);
         assert!(!model.trees.is_empty(), "should fit at least one tree");
@@ -747,8 +867,8 @@ mod tests {
     #[test]
     fn deterministic_for_same_seed() {
         let ds = separable(5, 1500, 7);
-        let a = train_gbdt(&ds, &TrainParams::default(), 99);
-        let b = train_gbdt(&ds, &TrainParams::default(), 99);
+        let a = train_gbdt(&ds, &TrainParams::default(), 99).expect("separable passes gate");
+        let b = train_gbdt(&ds, &TrainParams::default(), 99).expect("separable passes gate");
         assert_eq!(
             a.to_bytes(),
             b.to_bytes(),
@@ -757,7 +877,9 @@ mod tests {
     }
 
     #[test]
-    fn no_positives_returns_empty_model() {
+    fn no_positives_fails_quality_gate() {
+        // Finding 3.6: a single-class / too-small training set must now FAIL
+        // loudly instead of silently returning a deployable-looking empty model.
         let ds = Dataset {
             x: vec![0.1f32; 10 * 3],
             y: vec![0u8; 10],
@@ -765,7 +887,37 @@ mod tests {
             n_features: 3,
         };
         let m = train_gbdt(&ds, &TrainParams::default(), 1);
-        assert!(m.trees.is_empty());
+        assert!(matches!(m, Err(TrainError::QualityGate(_))), "got {m:?}");
+    }
+
+    #[test]
+    fn too_few_rows_fails_quality_gate() {
+        // Below MIN_TRAIN_ROWS, even with both classes present → hard gate.
+        let n = MIN_TRAIN_ROWS - 1;
+        let mut x = vec![0.0f32; n * 3];
+        let mut y = vec![0u8; n];
+        for r in 0..n {
+            x[r * 3] = (r % 2) as f32;
+            y[r] = (r % 2) as u8; // both classes, separable, but too few rows
+        }
+        let ds = Dataset { x, y, groups: (0..n as u32).collect(), n_features: 3 };
+        let m = train_gbdt(&ds, &TrainParams::default(), 7);
+        assert!(matches!(m, Err(TrainError::QualityGate(_))), "too few rows must fail gate, got {m:?}");
+    }
+
+    #[test]
+    fn allow_degenerate_returns_fallback_instead_of_error() {
+        // The opt-in fallback (finding 3.6) downgrades the gate to a warning and
+        // returns the (empty) model.
+        let ds = Dataset {
+            x: vec![0.1f32; 10 * 3],
+            y: vec![0u8; 10],
+            groups: (0..10).collect(),
+            n_features: 3,
+        };
+        let p = TrainParams { allow_degenerate: true, ..TrainParams::default() };
+        let m = train_gbdt(&ds, &p, 1).expect("fallback returns a model");
+        assert!(m.trees.is_empty(), "fallback model is the degenerate empty model");
     }
 
     #[test]
@@ -794,7 +946,7 @@ mod tests {
         }
         let ds = RegressionDataset { x, y, groups: g, n_features: nf };
         let p = TrainParams::default();
-        let model = train_gbdt_regression(&ds, &p, 42);
+        let model = train_gbdt_regression(&ds, &p, 42).expect("linear target passes gate");
         let lo: f32 = model.trees.iter().map(|t| t.eval(&[0.0, 0.5])).sum();
         let hi: f32 = model.trees.iter().map(|t| t.eval(&[1.0, 0.5])).sum();
         assert!(hi > lo + 0.5, "must be monotone in x0: lo={lo} hi={hi}");

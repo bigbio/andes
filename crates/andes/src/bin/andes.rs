@@ -3712,8 +3712,29 @@ fn run_train(
         eprintln!("train: using seed fragment tolerance {:?}", seed_param.mme);
     }
 
+    // ── 3b. Geometry template: own-derived (ANDES_DERIVE_GEOMETRY) or seed ─────
+    // Default is the seed's geometry. When ANDES_DERIVE_GEOMETRY is set, the
+    // partition/segment geometry is derived from this corpus instead (the seed
+    // still supplies non-geometry metadata). Env-gated, not a CLI flag, so the
+    // benchmark harness can A/B seed-vs-derived; becomes the default once the
+    // sweep validates it.
+    let template: Param = if std::env::var("ANDES_DERIVE_GEOMETRY").is_ok() {
+        eprintln!(
+            "train: ANDES_DERIVE_GEOMETRY set — deriving partition geometry from {} PSMs",
+            psms.len()
+        );
+        let corpus: Vec<(i32, f32)> = psms
+            .iter()
+            .map(|p| (p.charge as i32, p.peptide.mass() as f32))
+            .collect();
+        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, n_mass_tiers: 4 };
+        derive_geometry(&corpus, &seed_param, &geo_cfg)
+    } else {
+        seed_param.clone()
+    };
+
     // Build the scorer AFTER the tolerance override so accumulation uses it.
-    let seed_scorer = RankScorer::new(&seed_param);
+    let seed_scorer = RankScorer::new(&template);
 
     // ── 4. Accumulate ion-match statistics (parallel; per-worker CountStats) ──
     eprintln!("train: accumulating ion-match statistics ...");
@@ -3775,7 +3796,7 @@ fn run_train(
     };
 
     let mut trained_param =
-        estimator.estimate_with_prior(&stats, &seed_param, prior_param.as_ref());
+        estimator.estimate_with_prior(&stats, &template, prior_param.as_ref());
     let n_partitions = trained_param.partitions.len();
     eprintln!("train: trained model has {n_partitions} partitions");
 

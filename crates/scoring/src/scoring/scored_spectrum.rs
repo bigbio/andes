@@ -1903,11 +1903,28 @@ fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) 
             }
         }
     }
+    // Deterministic selection: highest summed frequency, ties broken by a stable
+    // preference — Suffix (y) before Prefix (b), then lower charge — so a model
+    // whose frag_off_table carries tied or placeholder-zero frequencies (e.g. a
+    // derived-geometry template before frequencies are learned) still selects a
+    // meaningful, reproducible main ion instead of depending on hash iteration
+    // order. A normally-trained model's distinct learned frequencies dominate, so
+    // this leaves its main-ion choice unchanged.
+    let tiebreak = |ion: IonType| -> (u8, i32, u32, u8) {
+        match ion {
+            IonType::Suffix { charge, offset_bits, loss_class } => (0, charge, offset_bits, loss_class),
+            IonType::Prefix { charge, offset_bits, loss_class } => (1, charge, offset_bits, loss_class),
+            IonType::Noise => (2, 0, 0, 0),
+        }
+    };
     let mut best_ion: Option<IonType> = None;
     let mut best_freq = f32::NEG_INFINITY;
+    let mut best_key = (u8::MAX, i32::MAX, u32::MAX, u8::MAX);
     for (&ion, &freq) in &ion_freq {
-        if freq > best_freq {
+        let key = tiebreak(ion);
+        if freq > best_freq || (freq == best_freq && key < best_key) {
             best_freq = freq;
+            best_key = key;
             best_ion = Some(ion);
         }
     }
@@ -1917,6 +1934,32 @@ fn main_ion_from_param(param: &Param, partition: crate::param_model::Partition) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_ion_deterministic_with_placeholder_zero_frequencies() {
+        // A derived-geometry template carries b/y ions with placeholder zero
+        // frequencies. main_ion_from_param must still pick a stable, meaningful
+        // ion (not a hash-order-dependent one). Tiebreak prefers Suffix(y) at the
+        // lowest charge.
+        use crate::param_model::{FragmentOffsetFrequency, IonType, Partition};
+        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+        let zero = |ion| FragmentOffsetFrequency { ion_type: ion, frequency: 0.0 };
+        let b1 = IonType::Prefix { charge: 1, offset_bits: 1.0_f32.to_bits(), loss_class: 0 };
+        let y1 = IonType::Suffix { charge: 1, offset_bits: 19.0_f32.to_bits(), loss_class: 0 };
+        let b2 = IonType::Prefix { charge: 2, offset_bits: 1.0_f32.to_bits(), loss_class: 0 };
+        let y2 = IonType::Suffix { charge: 2, offset_bits: 19.0_f32.to_bits(), loss_class: 0 };
+
+        let mut p = crate::testutil::tiny_param();
+        p.num_segments = 1;
+        p.frag_off_table.clear();
+        p.frag_off_table.insert(part, vec![zero(b1), zero(y1), zero(b2), zero(y2), zero(IonType::Noise)]);
+        p.rebuild_cache();
+
+        let a = main_ion_from_param(&p, part);
+        let b = main_ion_from_param(&p, part);
+        assert_eq!(a, b, "main ion must be deterministic across calls");
+        assert_eq!(a, y1, "tied-zero frequencies must resolve to y1 (Suffix, charge 1), not a hash-order ion");
+    }
     use crate::param_model::{IonType, Partition, SpecDataType};
     use crate::scoring::rank_scorer::RankScorer;
     use crate::testutil::tiny_param_with_ions;

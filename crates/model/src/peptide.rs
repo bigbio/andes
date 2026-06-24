@@ -98,10 +98,18 @@ impl Hash for Peptide {
 
 impl std::fmt::Display for Peptide {
     /// Canonical text form: `pre.SEQ_WITH_MODS.post`.
-    /// Mod deltas render as `{:+.5}` (signed, 5 decimals) after each
-    /// modified residue. Charge is not rendered. This format is the
-    /// inverse of `Peptide::from_str`; the byte-parity PIN/TSV output
-    /// formats live in the `output` crate.
+    ///
+    /// Mod deltas render as `{:+.5}` (signed, 5 decimals) after each modified
+    /// residue. **This output is byte-parity-sensitive**: it is written
+    /// verbatim into the PIN peptide column (`output/src/pin.rs`) that
+    /// Percolator consumes, so the numeric form is preserved exactly for
+    /// back-compat. Charge is not rendered.
+    ///
+    /// `from_str` is the inverse and accepts both this numeric form (matched by
+    /// *tolerance*, since 5-dp rounding is lossy — e.g. `57.021464` →
+    /// `+57.02146`) and the ProForma-ish `[UNIMOD:NN]` accession form emitted by
+    /// [`Peptide::to_proforma`] / the QPX peptidoform. See
+    /// `tests/peptide_round_trip_corpus.rs`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.", self.pre as char)?;
         for aa in &self.residues {
@@ -111,6 +119,38 @@ impl std::fmt::Display for Peptide {
             }
         }
         write!(f, ".{}", self.post as char)
+    }
+}
+
+impl Peptide {
+    /// ProForma-ish text form: `pre.SEQ_WITH_MODS.post`, where a modified
+    /// residue carrying an `accession` is followed by `[UNIMOD:NN]` (a lossless
+    /// identity) and an accession-less mod falls back to the `{:+.5}` numeric
+    /// delta. This is the form that round-trips *exactly* through
+    /// [`Peptide::from_str`] when accessions are present, and matches the QPX
+    /// peptidoform (`output/src/qpx.rs`).
+    ///
+    /// Unlike [`std::fmt::Display`], this is **not** written into the
+    /// byte-parity PIN column, so it can use the richer accession syntax.
+    pub fn to_proforma(&self) -> String {
+        use std::fmt::Write;
+        let mut s = String::new();
+        let _ = write!(s, "{}.", self.pre as char);
+        for aa in &self.residues {
+            let _ = write!(s, "{}", aa.residue as char);
+            if let Some(m) = &aa.mod_ {
+                match m.accession.as_deref() {
+                    Some(acc) if !acc.is_empty() => {
+                        let _ = write!(s, "[{acc}]");
+                    }
+                    _ => {
+                        let _ = write!(s, "{:+.5}", m.mass_delta);
+                    }
+                }
+            }
+        }
+        let _ = write!(s, ".{}", self.post as char);
+        s
     }
 }
 
@@ -128,7 +168,20 @@ pub enum PeptideParseError {
     BadModMass { token: String, position: usize, #[source] source: std::num::ParseFloatError },
     #[error("mod {token:?} at position {position} does not match any variant in AminoAcidSet")]
     UnknownMod { token: String, position: usize },
+    #[error("mod delta {token:?} at position {position} is ambiguous: matches multiple variants within tolerance")]
+    AmbiguousMod { token: String, position: usize },
 }
+
+/// Tolerance (Da) for matching an accession-less `{:+.5}` mod delta back to a
+/// known variant in `from_str`. The `Display` form rounds the delta to 5
+/// decimals, so the printed value can differ from the stored bit pattern by up
+/// to half a unit in the last printed place (5e-6). We use a slightly looser
+/// 1e-4 bound so that legitimately distinct mods (which differ by far more, e.g.
+/// the ~3 mDa Phospho/Trimethyl-class spacings are still > 1e-4) remain
+/// distinguishable while round-trip rounding is absorbed. Two variants that fall
+/// within this window of one printed delta are reported as ambiguous rather than
+/// silently picking one.
+pub const MOD_DELTA_MATCH_TOL: f64 = 1e-4;
 
 impl Peptide {
     /// Parse `pre.SEQ.post` form. `aa_set` provides the variant lookup
@@ -166,7 +219,31 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
         }
         i += 1;
 
-        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+        if i < bytes.len() && bytes[i] == b'[' {
+            // ProForma-ish accession form: `[UNIMOD:NN]`. Match the variant by
+            // accession (a lossless identity round trip).
+            let start = i;
+            let close = s[i..].find(']')
+                .map(|off| i + off)
+                .ok_or_else(|| PeptideParseError::UnknownMod {
+                    token: format!("{}{}", r as char, &s[start..]), position: start - 1,
+                })?;
+            let acc = s[start + 1..close].trim();
+            i = close + 1;
+
+            let variant = aa_set
+                .variants_for(r, crate::modification::ModLocation::Anywhere)
+                .iter()
+                .find(|aa| aa.mod_.as_ref()
+                    .and_then(|m| m.accession.as_deref())
+                    .map(|a| a == acc)
+                    .unwrap_or(false))
+                .cloned()
+                .ok_or_else(|| PeptideParseError::UnknownMod {
+                    token: format!("{}[{}]", r as char, acc), position: start - 1,
+                })?;
+            out.push(variant);
+        } else if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
             let start = i;
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
@@ -177,16 +254,24 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
                 PeptideParseError::BadModMass { token: token.to_string(), position: start, source }
             })?;
 
-            let variant = aa_set
+            // Tolerance match: the Display form rounds the delta to 5 dp, so an
+            // exact bit-compare no longer round-trips (e.g. 57.021464 →
+            // +57.02146). Match within `MOD_DELTA_MATCH_TOL`; reject if more
+            // than one variant falls in the window (ambiguous).
+            let mut matches = aa_set
                 .variants_for(r, crate::modification::ModLocation::Anywhere)
                 .iter()
-                .find(|aa| aa.mod_.as_ref()
-                    .map(|m| m.mass_delta.to_bits() == delta.to_bits())
-                    .unwrap_or(false))
-                .cloned()
-                .ok_or_else(|| PeptideParseError::UnknownMod {
-                    token: format!("{}{}", r as char, token), position: start - 1
-                })?;
+                .filter(|aa| aa.mod_.as_ref()
+                    .map(|m| (m.mass_delta - delta).abs() <= MOD_DELTA_MATCH_TOL)
+                    .unwrap_or(false));
+            let variant = matches.next().cloned().ok_or_else(|| PeptideParseError::UnknownMod {
+                token: format!("{}{}", r as char, token), position: start - 1,
+            })?;
+            if matches.next().is_some() {
+                return Err(PeptideParseError::AmbiguousMod {
+                    token: format!("{}{}", r as char, token), position: start - 1,
+                });
+            }
             out.push(variant);
         } else {
             let aa = AminoAcid::standard(r)

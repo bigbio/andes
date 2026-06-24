@@ -432,10 +432,31 @@ mod tests {
     }
 
     #[test]
-    fn parse_bad_mass() {
+    fn parse_unresolvable_mass_field() {
+        // A non-numeric field 1 is now treated as a mod token (UNIMOD:NN or a
+        // name) and resolved; an unresolvable token like "abc" is reported as
+        // UnresolvedMassField. (BadMass is reserved for numeric parse failures —
+        // see parse_bad_numeric_mass.)
         let line = "abc,C,fix,any,Bad";
         let err = Modification::from_mods_txt_line(line).unwrap_err();
-        assert!(matches!(err, ModParseError::BadMass { .. }));
+        assert!(
+            matches!(err, ModParseError::UnresolvedMassField { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_bad_numeric_mass() {
+        // A token that looks numeric but fails to parse is still BadMass.
+        let line = "12.3.4,C,fix,any,Bad";
+        let err = Modification::from_mods_txt_line(line).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ModParseError::BadMass { .. } | ModParseError::UnresolvedMassField { .. }
+            ),
+            "got: {err:?}"
+        );
     }
 
     #[test]

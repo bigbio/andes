@@ -260,7 +260,7 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
             // than one variant falls in the window (ambiguous).
             let mut matches = aa_set
                 .variants_for(r, crate::modification::ModLocation::Anywhere)
-                .into_iter()
+                .iter()
                 .filter(|aa| aa.mod_.as_ref()
                     .map(|m| (m.mass_delta - delta).abs() <= MOD_DELTA_MATCH_TOL)
                     .unwrap_or(false));

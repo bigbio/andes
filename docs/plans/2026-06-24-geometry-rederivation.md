@@ -100,21 +100,33 @@ template exists, the existing `accumulate → estimate` flow is untouched.
   `version`, `precursor_off_map`) is *not* geometry/IP — `derive_geometry` takes
   it from a base `Param` (the seed, or a minimal config). Only G1/G3/G4/G6 are
   derived. (A fully config-driven metadata path is a later step.)
-- **Train wiring**: `train` (`andes.rs:2697`) becomes
-  `let template = if args.derive_geometry { derive_geometry(&labels, &seed_param,
-  geo_cfg) } else { seed_param };` then `RankScorer::new(&template)` /
-  `accumulate` / `estimate(&stats, &template)` unchanged.
+- **Train wiring**: `train` (`andes.rs:2697`) builds its template via
+  `derive_geometry(&labels, &seed_param, geo_cfg)` and passes it to
+  `RankScorer::new` / `accumulate` / `estimate` unchanged. **No CLI flag** — see §4.
 
-## 4. Pipeline + CLI integration
+## 4. Integration — derived geometry is the DEFAULT, no new CLI flag
 
-- New `--derive-geometry` (alias `--no-seed`) on `andes train`. When set, build
-  the template via `derive_geometry` instead of `load_seed_param`; `--seed-model`
-  becomes optional. Default (unset) = current seed behavior → **back-compat, no
-  result change for existing trains**.
-- `GeometryConfig` knobs exposed as hidden CLI flags for the sweep
-  (`--geo-num-segments`, `--geo-max-rank`, `--geo-mass-tiers`).
-- Makes seedless from-scratch training possible (closes the "seed structurally
-  required" gap).
+Geometry being own-derived is the *goal*, not an option, so it ships as the
+default `train` behavior — not an opt-in flag (a flag nobody should ever turn
+off, and pure bloat on the just-minimized CLI). Concretely:
+
+- `train` always builds its template via `derive_geometry(&labels, &seed_param,
+  geo_cfg)`; the seed supplies only **non-geometry** metadata (tolerance /
+  activation / deconv / version) until seedless training removes even that. There
+  is **no `--derive-geometry` flag**.
+- The seed-vs-derived A/B needed to *validate* the change is driven by the
+  **benchmark harness / a throwaway internal switch** (an undocumented `ANDES_*`
+  env), deleted once derived geometry is the validated default. It never becomes
+  CLI surface.
+- `GeometryConfig` (`num_segments`, `max_rank`, `n_mass_tiers`) is a **sweep-harness**
+  concern, not CLI flags; once the §5 sweep picks the optimum it collapses to
+  fixed defaults in code.
+- Flipping the default is **result-changing for every retrain**, so it is gated:
+  derivation becomes the default only after the §5 sweep proves derived ≥ seed at
+  1% entrapment-FDP on all 3 regimes. Until then it lives behind the internal
+  switch.
+- Bonus: making geometry derivable also closes the "seed structurally required"
+  gap, enabling fully seedless training later.
 
 ## 5. Sweep (after the code lands) — benchmark-gated, safest-first
 

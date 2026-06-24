@@ -83,6 +83,28 @@ tables, `rebuild_cache()`), to hand to `accumulate`/`estimate`.
 Steps A+C need one light pass over labeled PSMs (no full search). Once the
 template exists, the existing `accumulate → estimate` flow is untouched.
 
+### Pinned integration details (verified in-tree)
+
+- **Corpus `parent_mass`** = `peptide.mass()` (f64) — the same `neutral_mass =
+  (precursor_mz − PROTON)·charge` the partitioner uses (`scored_spectrum.rs:347`);
+  `LabeledMatch { peptide, charge }` (`labeled.rs:73`) supplies both. Step A
+  iterates the label set → `(charge, peptide.mass())`.
+- **Ion set (G6)** is chemistry, not seed data: per partition of precursor charge
+  `C`, emit `Prefix`(b) and `Suffix`(y) at fragment charges `1..=max(1, C−1)`,
+  `loss_class 0`, offsets `model::mass::PROTON` (b) and `H2O+PROTON` (y), plus a
+  `Noise` entry (RankScorer requires one per populated partition). Frequency:
+  from a count pass, or uniform-then-learned (the rank/existence tables carry the
+  real distribution either way). Keep the threshold prune (>0.15) as a later
+  refinement.
+- **Non-geometry metadata** (`data_type`, `mme` tolerance, `apply_deconvolution`,
+  `version`, `precursor_off_map`) is *not* geometry/IP — `derive_geometry` takes
+  it from a base `Param` (the seed, or a minimal config). Only G1/G3/G4/G6 are
+  derived. (A fully config-driven metadata path is a later step.)
+- **Train wiring**: `train` (`andes.rs:2697`) becomes
+  `let template = if args.derive_geometry { derive_geometry(&labels, &seed_param,
+  geo_cfg) } else { seed_param };` then `RankScorer::new(&template)` /
+  `accumulate` / `estimate(&stats, &template)` unchanged.
+
 ## 4. Pipeline + CLI integration
 
 - New `--derive-geometry` (alias `--no-seed`) on `andes train`. When set, build

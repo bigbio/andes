@@ -77,8 +77,10 @@ fn resolve_model_id_old(
     // The exact protocol-suffixed model is only selectable if it is bundled AND
     // actually keyed for the requested protocol's experiment_class — this
     // mirrors `select()`'s exact-match step, which is protocol-key-aware.
-    // (e.g. `etd_highres_tryp_phosphorylation` is keyed protocol=Automatic in
-    // the v1 store, so it is NOT phospho-selectable and the base model wins.)
+    // (e.g. `etd_highres_tryp_phosphorylation` is keyed protocol=Phosphorylation
+    // in the v1 (N=19) store, so ETD/HighRes/Phospho exact-matches it rather
+    // than falling back to the base model. This check reads the store's actual
+    // experiment_class, so it tracks the manifest protocol key automatically.)
     if bundled_with_protocol(&exact, protocol) { return exact; }
 
     if !prot_suffix.is_empty() {
@@ -87,7 +89,7 @@ fn resolve_model_id_old(
     }
 
     // Final fallback ladder. Each fallback target is gated through the bundle:
-    // the v1 bundle ships a curated subset (17 own-trained regimes), so a
+    // the v1 bundle ships a curated subset (19 own-trained regimes), so a
     // fallback model that is not bundled (e.g. `cid_tof_tryp`, `etd_lowres_tryp`
     // were dropped as un-sourceable) degrades to the global default
     // `hcd_qexactive_tryp` — exactly what the real `select()` does.

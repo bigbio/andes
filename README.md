@@ -124,7 +124,7 @@ andes-<version>-aarch64-apple-darwin.tar.gz
 andes-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive contains the `andes` binary, the `resources/` tree (the bundled per-protocol model store in `resources/models/`, with all 17 own-trained scoring models), and LICENSE/NOTICE/README.
+Each archive contains the `andes` binary, the `resources/` tree (the bundled per-protocol model store in `resources/models/`, with all 19 own-trained scoring models), and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
@@ -254,7 +254,7 @@ The enzyme comes from `--enzyme` (default trypsin). In short: on modern formats 
 
 ### Supported models
 
-The v1 bundle ships **17 fully own-trained scoring models** in `resources/models/` (a per-protocol partitioned Parquet store), each trained on public PRIDE data for the regime it covers. Earlier bundles also shipped rarer regimes seeded from the original MS-GF+ models; those regimes that could not be retrained from a clean public corpus were **dropped** rather than shipped as seed copies, so the v1 store contains no MS-GF+-derived model data.
+The v1 bundle ships **19 fully own-trained scoring models** in `resources/models/` (a per-protocol partitioned Parquet store), each trained on public PRIDE data for the regime it covers. Earlier bundles also shipped rarer regimes seeded from the original MS-GF+ models; those regimes that could not be retrained from a clean public corpus were **dropped** rather than shipped as seed copies, so the v1 store contains no MS-GF+-derived model data.
 
 For a regime that is not bundled, andes auto-selects the nearest covered model (e.g. a TOF or low-res-ETD enzyme with no dedicated model falls back to the default `hcd_qexactive_tryp`); pass `--model <slug>` to force a specific one.
 
@@ -265,20 +265,24 @@ For a regime that is not bundled, andes auto-selects the nearest covered model (
 | `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429 | — |
 | `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | public PRIDE (see manifest) | — |
 | `hcd_qexactive_tryp_phosphorylation` | HCD / QExactive / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
+| `hcd_highres_tryp_phosphorylation` | HCD / HighRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
 | `hcd_highres_tryp_tmt` | HCD / HighRes / Trypsin / TMT | PXD010429 | — |
 | `hcd_highres_nocleavage` | HCD / HighRes / NoCleavage / Automatic | ProteomeTools (PXD009449) | — |
-| `hcd_highres_nocleavage_phosphorylation` | HCD / HighRes / NoCleavage / Automatic | ProteomeTools (PXD009449) | — |
+| `hcd_highres_nocleavage_phosphorylation` | HCD / HighRes / NoCleavage / Phosphorylation | ProteomeTools (PXD009449) | — |
 | `cid_lowres_tryp` | CID / LowRes / Trypsin / Automatic | PXD009875 + PXD000865 | UPS1 (low-res) |
+| `cid_lowres_tryp_phosphorylation` | CID / LowRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
 | `cid_lowres_tryp_tmt` | CID / LowRes / Trypsin / TMT | PXD016999 + PXD014502 + PXD017092 | TMT a05058 (low-res) |
-| `cid_lowres_lysc` | CID / LowRes / LysC / Automatic | PXD000865 | — |
-| `cid_lowres_argc` | CID / LowRes / ArgC / Automatic | public PRIDE (see manifest) | — |
-| `cid_lowres_gluc` | CID / LowRes / GluC / Automatic | public PRIDE (see manifest) | — |
+| `cid_lowres_lysc` | CID / LowRes / LysC / Automatic | PXD000865 | ⚠ limited training data |
+| `cid_lowres_argc` | CID / LowRes / ArgC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
+| `cid_lowres_gluc` | CID / LowRes / GluC / Automatic | public PRIDE (see manifest) | ⚠ limited training data |
 | `etd_highres_tryp` | ETD / HighRes / Trypsin / Automatic | public PRIDE (see manifest) | — |
-| `etd_highres_tryp_phosphorylation` | ETD / HighRes / Trypsin / Automatic | public PRIDE (see manifest) | — |
+| `etd_highres_tryp_phosphorylation` | ETD / HighRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
 | `etd_lowres_tryp_phosphorylation` | ETD / LowRes / Trypsin / Phosphorylation | public PRIDE (see manifest) | — |
 | `uvpd_qexactive_tryp` | UVPD / QExactive / Trypsin / Automatic | public PRIDE (see manifest) | — |
 
 <sub>"public PRIDE (see manifest)" marks regimes whose exact source accession is tracked in the training manifest but not yet pinned in this table; the model is still trained on public data only. Datasets cited as "ProteomeTools" are the synthetic-peptide ProteomeTools deposits (PXD009449 and related).</sub>
+
+> **Quality note — thin-data regimes.** The three rarer-enzyme low-res CID models flagged **⚠ limited training data** (`cid_lowres_lysc`, `cid_lowres_argc`, `cid_lowres_gluc`) are fully own-trained but on a thin corpus: their rank/fragment-offset tables are pseudocount-dominated (the prior carries most of the weight, since few PSMs were available for that exact enzyme+regime). They are independence-clean and usable, but should not be treated as high-confidence, fully-data-driven models on par with the trypsin/TMT/phospho regimes — treat their scoring as best-effort for those enzymes until a larger public corpus is harvested.
 
 ## CLI summary
 

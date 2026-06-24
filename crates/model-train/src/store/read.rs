@@ -1092,14 +1092,14 @@ mod tests {
         let store = ModelStore::open(&path)
             .expect("failed to open bundled models.parquet");
         let entries = store.selection_entries();
-        // v1: the bundle ships 17 fully own-trained models (one selection entry
+        // v1: the bundle ships 19 fully own-trained models (one selection entry
         // each; no MS-GF+-seeded regimes). Earlier bundles shipped 38 entries
         // including seeded regimes that have since been dropped (not retrainable
         // from public data) rather than shipped as seed copies.
         assert_eq!(
             entries.len(),
-            17,
-            "expected 17 selection entries, got {}",
+            19,
+            "expected 19 selection entries, got {}",
             entries.len()
         );
         let found = entries

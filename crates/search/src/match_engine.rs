@@ -352,6 +352,9 @@ impl<'a> PreparedSearch<'a> {
         decoy_prefix: &str,
         index_path: &std::path::Path,
     ) -> std::io::Result<Self> {
+        // Out-of-core mmap mode cannot serve the chimeric Pass-2 (it needs the
+        // in-RAM candidate index); reject the combination before building anything.
+        reject_unsupported_mmap_combo(params)?;
         let (mmap_index, was_built) =
             MmapCandidateIndex::open_or_build(index_path, idx, params, decoy_prefix)?;
         if was_built {
@@ -1929,7 +1932,49 @@ pub(crate) fn compute_psm_features(
     }
 }
 
+/// Reject combinations the mmap (out-of-core) candidate backing cannot serve.
+///
+/// The chimeric two-pass cascade (`run_pass2_coisolation` → `search_secondary`)
+/// resolves co-isolated peptides against the IN-RAM `candidates`/`bucket_index`,
+/// which are empty under mmap mode (candidate resolution goes through
+/// `mmap_index` instead). Running both together silently yields no secondaries,
+/// so the combination is rejected up front in [`PreparedSearch::prepare_mmap`].
+fn reject_unsupported_mmap_combo(params: &SearchParams) -> std::io::Result<()> {
+    if params.chimeric {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "--chimeric is not supported together with --candidate-index mmap: the \
+             chimeric Pass-2 search resolves co-isolated peptides against the \
+             in-memory candidate index, which is not populated in out-of-core mmap \
+             mode. Use either --chimeric or --candidate-index mmap, not both.",
+        ));
+    }
+    Ok(())
+}
+
 // ── Unit tests for feature columns ───────────────────────────────────────────
+
+#[cfg(test)]
+mod mmap_combo_tests {
+    use super::*;
+    use model::aa_set::AminoAcidSetBuilder;
+
+    #[test]
+    fn mmap_rejects_chimeric() {
+        let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut p = SearchParams::default_tryptic(aa);
+        p.chimeric = true;
+        let err = reject_unsupported_mmap_combo(&p).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn mmap_allows_non_chimeric() {
+        let aa = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let p = SearchParams::default_tryptic(aa);
+        assert!(reject_unsupported_mmap_combo(&p).is_ok());
+    }
+}
 
 #[cfg(test)]
 mod feature_tests {

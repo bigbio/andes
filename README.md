@@ -228,15 +228,22 @@ andes --spectrum spectra.mzML --database db.fasta \
 
 `--output-parquet` writes an OpenMS `QPXFile`-schema bundle (`psms`/`proteins`/`search_params` parquet) — see [`DOCS.md` §3e](DOCS.md). andes can emit `.pin`, `.tsv`, and `.parquet` in one run.
 
-**Integrated rescoring (`--rescore`):** run the search and then **Percolator** in one command, joining Percolator's PEP and q-value back into the outputs:
+**Integrated rescoring → q-values & PEP (`--rescore` / `--rescore-native`):** andes emits the PIN (feature matrix) and hands FDR to a **rescorer**, which joins a **q-value** and **PEP** back into the outputs — the QPX `posterior_error_probability` column, a `q-value` score, and a filtered `<stem>.q<fdr>.tsv` (target PSMs at q ≤ `--fdr`) next to the PIN. Two backends:
+
+- **`--rescore`** — **Percolator** (recommended, production-grade). andes resolves a backend in order: `--percolator-bin <path>` → `percolator` on `$PATH` → the pinned biocontainers docker image (force with `--percolator-docker`). Extra flags pass through `--percolator-args "<...>"`.
+- **`--rescore-native`** — a built-in, **Percolator-free** rescorer: a GBDT over the PIN features, trained with **leakage-safe 3-fold target-decoy cross-validation (folded by spectrum)** → q-value + calibrated PEP. A self-contained **fallback** for benchmarking / offline use; Percolator stays the recommended path. On real TMT data it lands within noise of Percolator at a true ≤1% entrapment-FDP.
 
 ```bash
 andes --spectrum spectra.mzML --database db.fasta \
   --output-pin out.pin --output-parquet out.idparquet \
-  --rescore --fdr 0.01
+  --rescore --fdr 0.01            # Percolator; or --rescore-native; or just --fdr 0.01 to auto-pick a backend
 ```
 
-andes resolves a Percolator backend in order: `--percolator-bin <path>` → `percolator` on `$PATH` → the pinned biocontainers docker image (force with `--percolator-docker`). With `--rescore` the QPX `posterior_error_probability` column is filled and a `q-value` score added, and a filtered `<stem>.q<fdr>.tsv` (target PSMs at q ≤ `--fdr`) is written next to the PIN. Extra Percolator flags pass through `--percolator-args "<...>"`. Without `--output-pin`, a temporary PIN is used (keep it with `--keep-pin true`).
+**`--fdr` auto-picks a backend.** Setting `--fdr` **explicitly** without `--rescore`/`--rescore-native` *triggers* rescoring and auto-resolves: Percolator if one is available, else the native rescorer. So `--fdr 0.01` alone "just works".
+
+**Filtering.** `--fdr <q>` keeps target PSMs at **q-value ≤ q** — the set-level FDR control (default 0.01 when rescoring runs). `--pep <p>` optionally **ANDs** a per-PSM **PEP** (local-FDR) cap on top (kept iff q ≤ `--fdr` *and* PEP ≤ `--pep`); the q-value remains primary, `--pep` is a supplementary gate. Without `--output-pin`, a temporary PIN is used (keep it with `--keep-pin true`).
+
+**With `--chimeric` / `--refine`.** The rescorer reads every PIN row; chimeric secondary and refine Pass-2 PSMs share their scan's `ScanNr`, so the native rescorer's per-spectrum CV folds them with their primary (no decoy leakage) — `--chimeric` rescoring is entrapment-validated for both backends. `--refine`'s Pass-2 is **peptide-anchored**, so a single pooled q-value (Percolator *or* native) is not fully FDR-calibrated for the refined subset (it needs grouped/subset FDR); refine ships as a discovery capability, not an FDR-validated count.
 
 **[quantms](https://github.com/bigbio/quantms) pipeline integration:**
 
@@ -304,22 +311,28 @@ Optional (default in **bold**):
 | `--output-parquet <DIR>` | Also write an OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`) | **none** |
 | `--mods <FILE>` | mods.txt file | **Cam-C fixed + Ox-M variable** |
 | `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance (ppm) | **20.0** |
-| `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift | **off** |
+| `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift (`auto` skips it when the sample is too small) | **auto** |
 | `--isotope-error-min/-max <INT>` | Isotope-error range | **-1, 2** |
 | `--charge-min/-max <INT>` | Charge range when absent in the spectrum | **2, 5** |
 | `--enzyme-specificity <fully\|semi\|non-specific>` | Tolerable termini (NTT) | **fully** |
 | `--max-missed-cleavages <INT>` | Missed cleavages | **1** |
-| `--min-length/-max-length <INT>` | Peptide length range | **6, 40** |
+| `--min-length/-max-length <INT>` | Peptide length range | **6, 50** |
+| `--score <auto\|rank\|strong>` | RawScore / ranking source — `auto` picks **strong** for high-res, **rank** for low-res, by the model's instrument | **auto** |
 | `--min-peaks <INT>` | Min peaks per spectrum to score | **10** |
 | `--top-n <INT>` | PSMs retained per spectrum | **10** |
 | `--fragmentation <CID\|ETD\|HCD\|UVPD>` | Fragmentation/activation method — **MGF-only** (auto-detected for mzML/`.raw`/`.d`) | *(see below)* |
 | `--protocol <auto\|phospho\|iTRAQ\|iTRAQ-phospho\|TMT\|standard>` | Search protocol | **auto** |
-| `--model <SLUG>` | Load a specific model from the store by id (bypass auto-select) | **auto-pick** |
-| `--model-store <PATH>` | Use a custom model store instead of the bundled one | **bundled `resources/models/`** |
+| `--model <SLUG>` | Load a specific model from the store by id (bypass auto-select), e.g. `hcd_qexactive_tryp_tmt` | **auto-pick** |
+| `--model-store <PATH>` | Use a custom model store instead of the bundled `resources/models/` | **bundled** |
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
 | `--ms-level <INT>` | MS level to search; MS1/MS3+ (e.g. TMT SPS-MS3) filtered out (mzML or `.raw`) | **2** |
 | `--threads <INT>` | Worker threads | **logical CPUs** |
 | `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
+| `--refine` | PTM-discovery second pass on confident-protein anchors | **off** |
+| `--rescore` | Rescore the PIN with **Percolator** → q-value + PEP (see [Integrated rescoring](#common-workflows)) | **off** |
+| `--rescore-native` | Rescore with the **built-in** CV'd-GBDT rescorer (no Percolator) | **off** |
+| `--fdr <FLOAT>` | q-value cutoff for the filtered TSV; **set explicitly → triggers rescoring + auto-picks a backend** | **0.01** (when rescoring) |
+| `--pep <FLOAT>` | optional per-PSM PEP cap, ANDed with `--fdr` | **none** |
 
 Run `andes --help` for the auto-generated help with full descriptions and the legacy numeric flag aliases.
 

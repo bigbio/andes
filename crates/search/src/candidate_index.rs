@@ -132,11 +132,13 @@ pub fn base_peptide_records(
         ..params.clone()
     };
 
-    // Collect first (iterator borrows idx and base_params with the same lifetime).
-    let candidates: Vec<_> = enumerate_candidates(idx, &base_params, decoy_prefix).collect();
-
-    candidates
-        .into_iter()
+    // Stream the candidate iterator straight into compact 20-byte IndexRecords —
+    // do NOT `.collect()` the full `Vec<Candidate>` first. Each `Candidate` carries
+    // a heap peptide (~100 B); for an expanded digest (semi-tryptic / non-specific)
+    // there can be hundreds of millions of them, so materializing the Candidate Vec
+    // OOMs (tens of GB) where the compacted records (20 B each) fit. `base_params`
+    // outlives the statement, so the borrow is fine without the intermediate Vec.
+    enumerate_candidates(idx, &base_params, decoy_prefix)
         .map(|c| {
             let mass_milli = (c.peptide.mass() * 1000.0).round() as u64;
             let mut f: u16 = 0;

@@ -1108,6 +1108,8 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum S {
         Outside,
+        ReferenceableParamGroupList,
+        ReferenceableParamGroup, // inside <referenceableParamGroup id="X">
         InstrumentConfigurationList,
         InstrumentConfiguration, // inside <instrumentConfiguration id="X">
         ComponentListAnalyzer,   // inside <componentList><analyzer>
@@ -1124,6 +1126,17 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     // Stored under the IC currently being parsed.
     let mut current_ic_id: Option<String> = None;
     let mut current_ic_type: Option<InstrumentType> = None;
+
+    // referenceableParamGroup id → instrument-model InstrumentType. mzML emits
+    // the `<referenceableParamGroupList>` BEFORE `<instrumentConfigurationList>`,
+    // so this map is fully built by the time an `<instrumentConfiguration>`
+    // resolves a `<referenceableParamGroupRef>`. ThermoRawFileParser 2.0 puts
+    // the instrument-model cvParam (e.g. Orbitrap Astral MS:1003378) in such a
+    // group rather than inline in the IC — without following the ref, Astral
+    // mzMLs misdetect as the generic QExactive (orbitrap-analyzer) fallback.
+    let mut rpg_map: HashMap<String, InstrumentType> = HashMap::new();
+    let mut current_rpg_id: Option<String> = None;
+    let mut current_rpg_type: Option<InstrumentType> = None;
 
     // run-level defaultInstrumentConfigurationRef.
     let mut default_ic_ref: Option<String> = None;
@@ -1150,6 +1163,14 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
             Event::Start(ref e) => {
                 let tag = e.local_name().as_ref().to_owned();
                 match tag.as_slice() {
+                    b"referenceableParamGroupList" if state == S::Outside => {
+                        state = S::ReferenceableParamGroupList;
+                    }
+                    b"referenceableParamGroup" if state == S::ReferenceableParamGroupList => {
+                        current_rpg_id = attr_str(e, b"id");
+                        current_rpg_type = None;
+                        state = S::ReferenceableParamGroup;
+                    }
                     b"instrumentConfigurationList" if state == S::Outside => {
                         state = S::InstrumentConfigurationList;
                     }
@@ -1193,6 +1214,18 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                     // Don't transition state — the spectrum tag is still
                     // open; the End handler for `<spectrum>` consumes it.
                 }
+                // An <instrumentConfiguration> that pulls its instrument-model
+                // cvParam from a <referenceableParamGroup> does so via a
+                // self-closing <referenceableParamGroupRef ref="..."/>. Resolve
+                // it against the group map; the group's model wins for this IC
+                // (mirrors the inline "model wins outright" rule).
+                if tag == b"referenceableParamGroupRef" && state == S::InstrumentConfiguration {
+                    if let Some(r) = attr_str(e, b"ref") {
+                        if let Some(&t) = rpg_map.get(&r) {
+                            current_ic_type = Some(t);
+                        }
+                    }
+                }
                 if tag == b"cvParam" {
                     let acc = attr_str(e, b"accession").unwrap_or_default();
                     match state {
@@ -1223,30 +1256,22 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                         // OrbitrapAstral is checked FIRST so it wins over the
                         // generic QExactive group.
                         S::InstrumentConfiguration => {
-                            let model = match acc.as_str() {
-                                CV_MODEL_ORBITRAP_ASTRAL => Some(InstrumentType::OrbitrapAstral),
-                                CV_MODEL_Q_EXACTIVE
-                                | CV_MODEL_Q_EXACTIVE_HF
-                                | CV_MODEL_Q_EXACTIVE_HF_X
-                                | CV_MODEL_Q_EXACTIVE_PLUS
-                                | CV_MODEL_ORBITRAP_FUSION => Some(InstrumentType::QExactive),
-                                _ => {
-                                    // Name-substring fallback: some mzML files record
-                                    // the instrument model name even when using an
-                                    // unregistered or future accession. If the cvParam
-                                    // `name` attribute contains "astral" (case-insensitive)
-                                    // treat it as OrbitrapAstral so detection is robust.
-                                    let cv_name = attr_str(e, b"name").unwrap_or_default();
-                                    if cv_name.to_ascii_lowercase().contains("astral") {
-                                        Some(InstrumentType::OrbitrapAstral)
-                                    } else {
-                                        None
-                                    }
-                                }
-                            };
-                            if let Some(t) = model {
+                            let cv_name = attr_str(e, b"name").unwrap_or_default();
+                            if let Some(t) = instrument_model_type(acc.as_str(), &cv_name) {
                                 // Model wins outright if seen.
                                 current_ic_type = Some(t);
+                            }
+                        }
+                        // Same instrument-model cvParams, but inside a
+                        // <referenceableParamGroup>: captured so an IC that
+                        // references the group (via <referenceableParamGroupRef>)
+                        // can resolve its model. First model in the group wins.
+                        S::ReferenceableParamGroup => {
+                            let cv_name = attr_str(e, b"name").unwrap_or_default();
+                            if current_rpg_type.is_none() {
+                                if let Some(t) = instrument_model_type(acc.as_str(), &cv_name) {
+                                    current_rpg_type = Some(t);
+                                }
                             }
                         }
                         // Within <spectrum>: pick up ms-level.
@@ -1268,6 +1293,15 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
             Event::End(ref e) => {
                 let tag = e.local_name().as_ref().to_owned();
                 match tag.as_slice() {
+                    b"referenceableParamGroup" if state == S::ReferenceableParamGroup => {
+                        if let (Some(id), Some(t)) = (current_rpg_id.take(), current_rpg_type.take()) {
+                            rpg_map.insert(id, t);
+                        }
+                        state = S::ReferenceableParamGroupList;
+                    }
+                    b"referenceableParamGroupList" if state == S::ReferenceableParamGroupList => {
+                        state = S::Outside;
+                    }
                     b"analyzer" if state == S::ComponentListAnalyzer => {
                         state = S::InstrumentConfiguration;
                     }
@@ -1341,6 +1375,30 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Map an instrument-model cvParam (`accession` + the cvParam `name`) to an
+/// [`InstrumentType`]. OrbitrapAstral is checked first so it wins over the
+/// generic QExactive (orbitrap-analyzer) group; a `name` containing "astral"
+/// is a robustness fallback for files that use an unregistered/future
+/// accession. Used both for inline `<instrumentConfiguration>` cvParams and
+/// for cvParams inside a referenced `<referenceableParamGroup>`.
+fn instrument_model_type(acc: &str, name: &str) -> Option<InstrumentType> {
+    match acc {
+        CV_MODEL_ORBITRAP_ASTRAL => Some(InstrumentType::OrbitrapAstral),
+        CV_MODEL_Q_EXACTIVE
+        | CV_MODEL_Q_EXACTIVE_HF
+        | CV_MODEL_Q_EXACTIVE_HF_X
+        | CV_MODEL_Q_EXACTIVE_PLUS
+        | CV_MODEL_ORBITRAP_FUSION => Some(InstrumentType::QExactive),
+        _ => {
+            if name.to_ascii_lowercase().contains("astral") {
+                Some(InstrumentType::OrbitrapAstral)
+            } else {
+                None
+            }
+        }
+    }
+}
 
 /// Extract a named attribute value as an owned String.
 fn attr_str(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
@@ -2902,5 +2960,47 @@ mod tests {
         let xml = wrap_with_instrument_configs(ic, "IC1", &ms2_spectrum_with_ic_ref("IC1"));
         let result = detect_instrument_type(Cursor::new(xml));
         assert_eq!(result, Some(InstrumentType::QExactive));
+    }
+
+    #[test]
+    fn detect_instrument_astral_model_in_referenceable_param_group() {
+        // ThermoRawFileParser-2.0 layout: the Orbitrap Astral instrument-model
+        // cvParam (MS:1003378) lives in a <referenceableParamGroup>, and the IC
+        // pulls it in via <referenceableParamGroupRef>. The IC's own <analyzer>
+        // carries the generic orbitrap term (which ALONE maps to QExactive), so
+        // this regression-guards that the group's model is resolved and wins —
+        // otherwise every Astral mzML in this common layout misdetects as
+        // QExactive and never reaches an OrbitrapAstral-keyed scoring model.
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<mzML xmlns="http://psi.hupo.org/ms/mzml">
+  <referenceableParamGroupList count="1">
+    <referenceableParamGroup id="commonInstrumentParams">
+      <cvParam accession="MS:1003378" name="Orbitrap Astral" value=""/>
+      <cvParam accession="MS:1000529" name="instrument serial number" value="FSN123"/>
+    </referenceableParamGroup>
+  </referenceableParamGroupList>
+  <instrumentConfigurationList count="1">
+    <instrumentConfiguration id="IC1">
+      <referenceableParamGroupRef ref="commonInstrumentParams"/>
+      <componentList count="3">
+        <source order="1">
+          <cvParam accession="MS:1000398" name="nanoelectrospray" value=""/>
+        </source>
+        <analyzer order="2">
+          <cvParam accession="MS:1000484" name="orbitrap" value=""/>
+        </analyzer>
+        <detector order="3"/>
+      </componentList>
+    </instrumentConfiguration>
+  </instrumentConfigurationList>
+  <run id="r" defaultInstrumentConfigurationRef="IC1">
+    <spectrumList count="1" defaultDataProcessingRef="dp">
+      {spectrum}
+    </spectrumList>
+  </run>
+</mzML>"#
+            .replace("{spectrum}", &ms2_spectrum_with_ic_ref("IC1"));
+        let result = detect_instrument_type(Cursor::new(xml));
+        assert_eq!(result, Some(InstrumentType::OrbitrapAstral));
     }
 }

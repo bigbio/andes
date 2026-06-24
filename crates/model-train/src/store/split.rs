@@ -1,7 +1,7 @@
 //! Split a single-file model store into per-protocol Parquet partitions.
 //!
-//! The bundled store historically ships as one `resources/models.parquet`
-//! file. This module rewrites it as a Hive-style partitioned directory:
+//! The bundled store ships as one `resources/models.parquet` file. This module
+//! rewrites it as a Hive-style partitioned directory:
 //!
 //! ```text
 //! <dir>/protocol=Automatic/models.parquet

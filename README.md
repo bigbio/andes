@@ -411,8 +411,3 @@ If you use andes in published work, please cite:
 ## License
 
 andes is released under the **Apache License 2.0** — see [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution. The original Java MS-GF+ implementation andes grew out of is preserved on the `java-legacy` branch.
-
-## Acknowledgments
-
-- Sangtae Kim, Pavel Pevzner, and the PNNL Proteomics team at UCSD's Center for Computational Mass Spectrometry, for the original MS-GF+ engine.
-- The [bigbio](https://github.com/bigbio) maintainers and the [quantms](https://github.com/bigbio/quantms) team.

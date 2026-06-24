@@ -93,9 +93,7 @@ impl Enzyme {
     }
 
     /// Required by the candidate-generation walk. For builtin enzymes this
-    /// is always `true`: any residue is allowed *inside* a peptide. The hook
-    /// exists for future custom-enzyme support that might forbid certain
-    /// residues internally.
+    /// is always `true`: any residue is allowed *inside* a peptide.
     pub fn allows_internal(self, _residue: u8) -> bool {
         true
     }

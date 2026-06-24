@@ -77,7 +77,7 @@ pub fn write_models(path: &Path, models: &[(String, &Param)]) -> Result<(), Trai
 }
 
 /// Like [`write_models`], but each model may carry a transcoded GBDT blob
-/// (`AGBD` bytes) stored on its manifest row. `None` ⇒ null column (legacy).
+/// (`AGBD` bytes) stored on its manifest row. `None` ⇒ null column (rank-core-only models).
 pub fn write_models_with_gbdt(
     path: &Path,
     models: &[(&str, &Param, Option<Vec<u8>>)],
@@ -150,7 +150,7 @@ fn write_models_inner(
 /// entry in `sources`.  `sources` may be empty.
 ///
 /// `gbdt_blob` is an optional GBDT model blob (`AGBD` bytes) to embed on the
-/// manifest row. Pass `None` to omit (legacy/rank-core-only models).
+/// manifest row. Pass `None` to omit (rank-core-only models).
 pub fn write_model_with_sources(
     path: &Path,
     model_id: &str,
@@ -287,7 +287,7 @@ fn build_manifest_batch(
         }
         charge_hist.append(true);
 
-        // gbdt_model_bytes: manifest-only Binary column; None => null cell (legacy store).
+        // gbdt_model_bytes: manifest-only Binary column; None => null cell (rank-core-only models).
         match gbdt_blobs.get(i).and_then(|b| b.as_ref()) {
             Some(bytes) => gbdt_b.append_value(bytes),
             None => gbdt_b.append_null(),

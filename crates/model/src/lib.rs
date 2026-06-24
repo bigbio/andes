@@ -18,7 +18,6 @@ pub mod protocol;
 pub mod spectrum;
 pub mod tolerance;
 
-// Convenience re-exports for the most-used types.
 pub use aa_set::{AaSetError, AminoAcidSet, AminoAcidSetBuilder};
 pub use activation::ActivationMethod;
 pub use amino_acid::AminoAcid;

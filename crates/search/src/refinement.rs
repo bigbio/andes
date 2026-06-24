@@ -307,10 +307,9 @@ fn parse_residue_spec(res: &str) -> ResidueSpec {
 /// variable mod (Ox-M, Acetyl, …) the user declared, recovered from
 /// [`AminoAcidSet::distinct_mods`]. The discovery tier is then layered on top as
 /// VARIABLE mods, DE-DUPLICATED against the base (a base variable Oxidation-M and
-/// the tier's Oxidation-M are the same chemistry → added once). This is what lets
-/// `--refine` work on labeled data: previously only the standard CAM-C baseline
-/// was reconstructed, so TMT/iTRAQ deltas were dropped and every Pass-2 candidate
-/// mass-mismatched its precursor (a silent no-op).
+/// the tier's Oxidation-M are the same chemistry → added once). Inheriting the
+/// full declared chemistry keeps Pass-2 candidate masses consistent with the
+/// precursor for labeled searches (TMT/iTRAQ).
 pub fn refinement_aa_set(
     base: &AminoAcidSet,
     cfg: &RefineConfig,
@@ -1225,7 +1224,7 @@ mod tests {
     #[test]
     fn refinement_aa_set_inherits_nonstandard_fixed_tmt() {
         // A labeled search: fixed CAM-C + fixed TMT6plex-on-K. Pass-2 MUST carry
-        // the TMT delta forward (previously it was dropped → silent no-op on TMT).
+        // the TMT delta forward.
         let tmt_k = Modification {
             name: "TMT6plex".into(),
             mass_delta: 229.162932,

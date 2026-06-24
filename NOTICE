@@ -12,7 +12,7 @@ Origin and acknowledgement
 ================================================================================
 
 andes has its own peptide-spectrum scoring, its own statistical models trained
-on public PRIDE data, and its own Rust implementation.
+on public PRIDE data, and an independent Rust implementation.
 
 Prior art: MS-GF+ (Kim & Pevzner, Nat Commun 2014;5:5277). See HERITAGE.md for
 the project's lineage.

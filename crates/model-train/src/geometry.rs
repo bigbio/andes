@@ -5,7 +5,17 @@
 //! membership) from andes's own labeled corpus, so a trained model owns its
 //! geometry rather than inheriting it from a seed template.
 
-use scoring_crate::param_model::Partition;
+use rustc_hash::FxHashMap;
+use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition};
+
+/// b-ion m/z offset (proton). y-ion offset adds a water. Both CODATA-sourced
+/// in `model::mass` — chemistry, not seed data.
+fn b_offset_bits() -> u32 {
+    (model::mass::PROTON as f32).to_bits()
+}
+fn y_offset_bits() -> u32 {
+    ((model::mass::H2O + model::mass::PROTON) as f32).to_bits()
+}
 
 /// Equal-occupancy `parent_mass` tier lower-bounds for one charge.
 ///
@@ -55,9 +65,51 @@ pub fn build_partition_skeleton(
     parts
 }
 
+/// Build the per-partition ion membership (`frag_off_table`, G6) by chemistry,
+/// not by copying a seed: for a partition of precursor charge `C`, emit b
+/// (`Prefix`) and y (`Suffix`) ions at fragment charges `1..=max(1, C-1)`,
+/// `loss_class 0`, plus a `Noise` entry (RankScorer requires one per populated
+/// partition). Frequencies are placeholders here (refined by a later count
+/// pass); the ion *set* is what makes the geometry own-derived.
+pub fn build_frag_off_table(
+    partitions: &[Partition],
+) -> FxHashMap<Partition, Vec<FragmentOffsetFrequency>> {
+    let mut table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = FxHashMap::default();
+    for &part in partitions {
+        let max_frag_charge = (part.charge - 1).max(1);
+        let mut frags: Vec<FragmentOffsetFrequency> = Vec::new();
+        for fc in 1..=max_frag_charge {
+            frags.push(FragmentOffsetFrequency {
+                ion_type: IonType::Prefix { charge: fc, offset_bits: b_offset_bits(), loss_class: 0 },
+                frequency: 0.0,
+            });
+            frags.push(FragmentOffsetFrequency {
+                ion_type: IonType::Suffix { charge: fc, offset_bits: y_offset_bits(), loss_class: 0 },
+                frequency: 0.0,
+            });
+        }
+        frags.push(FragmentOffsetFrequency { ion_type: IonType::Noise, frequency: 0.0 });
+        table.insert(part, frags);
+    }
+    table
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ion_charges(frags: &[FragmentOffsetFrequency], want_prefix: bool) -> Vec<i32> {
+        let mut cs: Vec<i32> = frags
+            .iter()
+            .filter_map(|f| match f.ion_type {
+                IonType::Prefix { charge, .. } if want_prefix => Some(charge),
+                IonType::Suffix { charge, .. } if !want_prefix => Some(charge),
+                _ => None,
+            })
+            .collect();
+        cs.sort();
+        cs
+    }
 
     #[test]
     fn equal_occupancy_tiers_split_uniform_distribution() {
@@ -89,5 +141,25 @@ mod tests {
             Partition { charge: 3, parent_mass: 600.0, seg_num: 1 },
         ];
         assert_eq!(parts, expect);
+    }
+
+    #[test]
+    fn frag_off_table_ion_set_scales_with_precursor_charge() {
+        let p2 = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
+        let p3 = Partition { charge: 3, parent_mass: 800.0, seg_num: 0 };
+        let table = build_frag_off_table(&[p2, p3]);
+
+        // charge 2 -> fragment charges {1}: b1, y1, + Noise = 3 entries.
+        let f2 = table.get(&p2).expect("partition present");
+        assert_eq!(ion_charges(f2, true), vec![1], "b-ion charges");
+        assert_eq!(ion_charges(f2, false), vec![1], "y-ion charges");
+        assert_eq!(f2.iter().filter(|f| f.ion_type.is_noise()).count(), 1, "one Noise");
+        assert_eq!(f2.len(), 3);
+
+        // charge 3 -> fragment charges {1,2}: b1,b2,y1,y2,+Noise = 5 entries.
+        let f3 = table.get(&p3).expect("partition present");
+        assert_eq!(ion_charges(f3, true), vec![1, 2]);
+        assert_eq!(ion_charges(f3, false), vec![1, 2]);
+        assert_eq!(f3.len(), 5);
     }
 }

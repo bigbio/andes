@@ -74,20 +74,49 @@ fn resolve_model_id_old(
 
     let prot_suffix = protocol_suffix(protocol);
     let exact = model_id(frag, inst, prot_suffix);
-    if let Some(id) = try_bundled(&exact) { return id; }
+    // The exact protocol-suffixed model is only selectable if it is bundled AND
+    // actually keyed for the requested protocol's experiment_class — this
+    // mirrors `select()`'s exact-match step, which is protocol-key-aware.
+    // (e.g. `etd_highres_tryp_phosphorylation` is keyed protocol=Phosphorylation
+    // in the v1 (N=19) store, so ETD/HighRes/Phospho exact-matches it rather
+    // than falling back to the base model. This check reads the store's actual
+    // experiment_class, so it tracks the manifest protocol key automatically.)
+    if bundled_with_protocol(&exact, protocol) { return exact; }
 
     if !prot_suffix.is_empty() {
         let no_prot = model_id(frag, inst, "");
         if let Some(id) = try_bundled(&no_prot) { return id; }
     }
 
-    // Final fallback ladder.
-    let final_fallback = match (frag, inst) {
-        ("HCD", "TOF") | ("HCD", "HighRes") => "cid_tof_tryp",
-        ("ETD", _)                           => "etd_lowres_tryp",
-        _                                    => "cid_lowres_tryp",
+    // Final fallback ladder. Each fallback target is gated through the bundle:
+    // the v1 bundle ships a curated subset (19 own-trained regimes), so a
+    // fallback model that is not bundled (e.g. `cid_tof_tryp`, `etd_lowres_tryp`
+    // were dropped as un-sourceable) degrades to the global default
+    // `hcd_qexactive_tryp` — exactly what the real `select()` does.
+    //
+    // IMPORTANT: this mirror must match the binary's `build_selection_key`
+    // *normalization*, not just bundle membership. The binary only rewrites
+    // `(HCD,LowRes)`, `(CID,QExactive)`, `(UVPD,non-QE)`, `(ETD,non-LowRes/HighRes)`
+    // and `(HCD,TOF)`; for every other unmatched `(frag,inst)` it keeps the
+    // instrument verbatim, so a TOF instrument with no `*_tof_*` model bundled
+    // (the v1 case) falls straight through to the global default rather than to
+    // `cid_lowres_tryp`. Encode that here so the reference tracks the binary.
+    let final_fallback: Option<&str> = match (frag, inst) {
+        // TOF/HighRes HCD historically used cid_tof_tryp (dropped in v1).
+        ("HCD", "TOF") | ("HCD", "HighRes") => Some("cid_tof_tryp"),
+        ("ETD", _)                          => Some("etd_lowres_tryp"),
+        // The binary rewrites these to cid_lowres_tryp (drop_protocol arms).
+        ("CID", "QExactive") | ("UVPD", _)  => Some("cid_lowres_tryp"),
+        // CID/HCD on LowRes resolve to the low-res b/y model.
+        (_, "LowRes")                       => Some("cid_lowres_tryp"),
+        // Anything else (notably CID/PQD on TOF or QExactive-family without a
+        // matching model) has no normalization arm → global default.
+        _                                   => None,
     };
-    final_fallback.to_string()
+    match final_fallback {
+        Some(id) => try_bundled(id).unwrap_or_else(|| "hcd_qexactive_tryp".to_string()),
+        None     => "hcd_qexactive_tryp".to_string(),
+    }
 }
 
 /// Build a lowercase store `model_id` from the (fragmentation, instrument,
@@ -133,6 +162,33 @@ fn bundled_model_ids() -> &'static std::collections::BTreeSet<String> {
             .unwrap_or_else(|e| panic!("failed to open bundled models.parquet: {e}"));
         store.model_ids().into_iter().collect()
     })
+}
+
+/// Lazily initialized map `model_id -> experiment_class` from the bundled store.
+fn bundled_model_classes() -> &'static std::collections::BTreeMap<String, BTreeSet<String>> {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<std::collections::BTreeMap<String, BTreeSet<String>>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/models.parquet");
+        let store = model_train::ModelStore::open(&store_path)
+            .unwrap_or_else(|e| panic!("failed to open bundled models.parquet: {e}"));
+        store
+            .selection_entries()
+            .into_iter()
+            .map(|e| (e.model_id, e.experiment_class))
+            .collect()
+    })
+}
+
+/// True iff `model_id` is bundled AND its experiment_class matches the
+/// requested protocol (mirrors `select()`'s protocol-aware exact match).
+fn bundled_with_protocol(model_id: &str, protocol: Protocol) -> bool {
+    let want = protocol_to_experiment_class(protocol);
+    match bundled_model_classes().get(model_id) {
+        Some(have) => *have == want,
+        None => false,
+    }
 }
 
 /// Return the `model_id` iff it is present in the bundled parquet store.

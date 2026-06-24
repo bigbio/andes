@@ -105,6 +105,9 @@ pub enum MzMLParseError {
 
     #[error("mismatched binary array lengths: m/z {mz_len} vs intensity {int_len}")]
     LengthMismatch { mz_len: usize, int_len: usize },
+
+    #[error("truncated binary array: decoded {decoded_len} bytes is not a multiple of the {elem_bytes}-byte element width")]
+    TruncatedBinary { decoded_len: usize, elem_bytes: usize },
 }
 
 // io::Error → MzMLParseError via the Zlib variant.
@@ -348,6 +351,14 @@ pub struct MzMLReader<R: BufRead> {
     /// `None` if no MS1 has been seen yet. Read when emitting each MS2 to
     /// build `Ms1Link::ms2_to_ms1`.
     latest_ms1_idx: Option<usize>,
+    /// Strict mode (finding 4.1). When `true`, the default [`Iterator`] yields
+    /// the parse `Err` for a malformed spectrum (then stops) instead of
+    /// silently resyncing past it. Default `false` (tolerant resync) preserves
+    /// the historical behavior for callers that intentionally skip bad scans.
+    strict: bool,
+    /// Count of malformed spectra skipped by the tolerant path. Lets a tolerant
+    /// caller observe that data was dropped (see [`Self::skipped_count`]).
+    skipped: usize,
 }
 
 impl<R: BufRead> MzMLReader<R> {
@@ -367,7 +378,23 @@ impl<R: BufRead> MzMLReader<R> {
             capture_ms1: false,
             captured_ms1: Vec::new(),
             latest_ms1_idx: None,
+            strict: false,
+            skipped: 0,
         }
+    }
+
+    /// Opt into strict parsing (finding 4.1): the default [`Iterator`] will
+    /// surface a malformed spectrum as `Err` (then end) instead of skipping it.
+    /// Default-tolerant behavior is preserved unless this is set.
+    pub fn strict(mut self) -> Self {
+        self.strict = true;
+        self
+    }
+
+    /// Number of malformed spectra the tolerant iterator skipped so far. A
+    /// tolerant caller can check this after iteration to detect dropped data.
+    pub fn skipped_count(&self) -> usize {
+        self.skipped
     }
 
     /// Widen or narrow the ms-level filter (e.g. `with_ms_level_range(1, 2)`
@@ -1055,10 +1082,19 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
                     self.done = true;
                     return None;
                 }
+                Err(_e) if self.strict => {
+                    // Strict mode (finding 4.1): surface the malformed spectrum
+                    // as Err and stop, rather than silently skipping it.
+                    self.done = true;
+                    return Some(Err(_e));
+                }
                 Err(_e) => {
-                    // Resync past the malformed spectrum and keep parsing (skip the
-                    // bad scan, not the rest of the file). Only an unreadable XML
-                    // stream stops us — mirrors `read_with_ms1` / chunked paths.
+                    // Tolerant (default): resync past the malformed spectrum and
+                    // keep parsing (skip the bad scan, not the rest of the file).
+                    // Only an unreadable XML stream stops us — mirrors
+                    // `read_with_ms1` / chunked paths. Count the drop so a caller
+                    // can observe it via `skipped_count`.
+                    self.skipped += 1;
                     match self.resync_to_next_spectrum() {
                         Ok(true) => continue,
                         Ok(false) => {
@@ -1433,8 +1469,21 @@ fn decode_binary_array(ctx: &BinaryArrayCtx) -> Result<Vec<f64>, MzMLParseError>
         raw
     };
 
+    // Require the decoded buffer to be an exact multiple of the element width
+    // (finding 4.2). A trailing remainder means the array was truncated mid-
+    // value; previously the `while let Ok(..)` loop silently rounded the count
+    // down (treating `UnexpectedEof` as a clean end) and dropped the partial
+    // value, hiding the corruption.
+    let elem_bytes = if ctx.precision_bits == 64 { 8usize } else { 4usize };
+    if bytes.len() % elem_bytes != 0 {
+        return Err(MzMLParseError::TruncatedBinary {
+            decoded_len: bytes.len(),
+            elem_bytes,
+        });
+    }
+
     let mut cur = std::io::Cursor::new(&bytes);
-    let mut out: Vec<f64> = Vec::new();
+    let mut out: Vec<f64> = Vec::with_capacity(bytes.len() / elem_bytes);
 
     if ctx.precision_bits == 64 {
         while let Ok(v) = cur.read_f64::<LittleEndian>() {
@@ -2999,5 +3048,65 @@ mod tests {
             .replace("{spectrum}", &ms2_spectrum_with_ic_ref("IC1"));
         let result = detect_instrument_type(Cursor::new(xml));
         assert_eq!(result, Some(InstrumentType::OrbitrapAstral));
+    }
+
+    // ── Finding 4.2: truncated binary array ───────────────────────────────────
+
+    #[test]
+    fn truncated_binary_array_is_rejected() {
+        // 12 raw bytes is not a multiple of the 8-byte f64 width → must error.
+        let truncated_b64 = STANDARD.encode([0u8; 12]);
+        let spec = ms2_spectrum_xml(
+            "scan=1",
+            &bda_plain("MS:1000514", &truncated_b64),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[1000.0, 2000.0])),
+            500.5,
+            Some(2),
+        );
+        let mut reader = MzMLReader::new(Cursor::new(wrap_spectra(&spec))).strict();
+        let first = reader.next().expect("should yield a result");
+        assert!(
+            matches!(first, Err(MzMLParseError::TruncatedBinary { elem_bytes: 8, .. })),
+            "truncated f64 array must be rejected, got {first:?}"
+        );
+    }
+
+    // ── Finding 4.1: strict vs tolerant malformed-spectrum handling ───────────
+
+    /// A spectrum with invalid base64 in its `<binary>` block (parse error).
+    fn malformed_spectrum() -> String {
+        ms2_spectrum_xml(
+            "scan=bad",
+            &bda_plain("MS:1000514", "!!!not-base64!!!"),
+            &bda_plain("MS:1000515", "!!!not-base64!!!"),
+            500.5,
+            Some(2),
+        )
+    }
+
+    #[test]
+    fn strict_iterator_surfaces_malformed_spectrum_as_err() {
+        let xml = wrap_spectra(&malformed_spectrum());
+        let mut reader = MzMLReader::new(Cursor::new(xml)).strict();
+        let first = reader.next().expect("should yield a result");
+        assert!(first.is_err(), "strict mode must surface the parse error");
+    }
+
+    #[test]
+    fn tolerant_iterator_skips_and_counts_malformed_spectrum() {
+        // Bad spectrum followed by a good one: tolerant default skips the bad
+        // scan, still yields the good one, and records the skip.
+        let good = ms2_spectrum_xml(
+            "scan=2",
+            &bda_plain("MS:1000514", &encode_f64_b64(&[150.0, 300.0])),
+            &bda_plain("MS:1000515", &encode_f64_b64(&[2000.0, 1000.0])),
+            500.5,
+            Some(2),
+        );
+        let xml = wrap_spectra(&format!("{}{}", malformed_spectrum(), good));
+        let mut reader = MzMLReader::new(Cursor::new(xml));
+        let collected: Vec<_> = reader.by_ref().filter_map(|r| r.ok()).collect();
+        assert_eq!(collected.len(), 1, "tolerant mode keeps the good spectrum");
+        assert!(reader.skipped_count() >= 1, "tolerant mode records the dropped scan");
     }
 }

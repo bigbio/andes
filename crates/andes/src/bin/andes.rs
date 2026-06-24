@@ -302,13 +302,13 @@ struct SearchArgs {
     /// Fragment-matching tolerance in ppm for **MGF input only** (high-resolution
     /// MS/MS). Has no effect on mzML/.raw/.d (analyzer auto-detected). Mutually
     /// exclusive with `--fragment-tol-da`.
-    #[arg(long = "fragment-tol-ppm", hide = true, conflicts_with = "fragment_tol_da")]
+    #[arg(long = "fragment-tol-ppm", hide = true, conflicts_with = "fragment_tol_da", value_parser = parse_positive_tol)]
     fragment_tol_ppm: Option<f64>,
 
     /// Fragment-matching tolerance in Da for **MGF input only** (low-resolution
     /// ion-trap MS/MS). Has no effect on mzML/.raw/.d. Mutually exclusive with
     /// `--fragment-tol-ppm`.
-    #[arg(long = "fragment-tol-da", hide = true, conflicts_with = "fragment_tol_ppm")]
+    #[arg(long = "fragment-tol-da", hide = true, conflicts_with = "fragment_tol_ppm", value_parser = parse_positive_tol)]
     fragment_tol_da: Option<f64>,
 
     /// Number of worker threads for the search loop. Defaults to logical CPU count.
@@ -398,7 +398,7 @@ struct SearchArgs {
     /// 0.10) admits low-confidence anchors that leak into the entrapment-FDP
     /// (b1931: 0.10 → 4.86% vs 0.01 → 0.29% true FDP). Hidden power-user knob;
     /// leave at the default unless you have a measured reason to widen it.
-    #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true)]
+    #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true, value_parser = parse_unit_fraction)]
     refine_select_psm_fdr: f64,
 
     /// Max variable mods per refined peptide. Overrides the value from
@@ -434,7 +434,7 @@ struct SearchArgs {
     /// `--rescore-native` TRIGGERS rescoring and auto-picks the backend:
     /// Percolator if one is available, otherwise the built-in native rescorer.
     /// When rescoring runs, the threshold defaults to 0.01 if unset.
-    #[arg(long = "fdr")]
+    #[arg(long = "fdr", value_parser = parse_unit_fraction)]
     fdr: Option<f64>,
 
     /// Optional per-PSM PEP (posterior error probability / local FDR) cap,
@@ -442,7 +442,7 @@ struct SearchArgs {
     /// PEP ≤ `--pep`). The q-value stays the primary set-level FDR control;
     /// `--pep` is a supplementary per-PSM gate. Like `--fdr`, setting it
     /// explicitly triggers rescoring. Default: no PEP cap.
-    #[arg(long = "pep", hide = true)]
+    #[arg(long = "pep", hide = true, value_parser = parse_unit_fraction)]
     pep: Option<f64>,
 
     /// Explicit path to a Percolator binary (highest-priority backend). When
@@ -497,7 +497,7 @@ struct TrainFromSearchArgs {
 
     /// Target-decoy q-value threshold for accepting PSMs as confident training
     /// labels. Use a lenient value (e.g. 0.1 or 0.5) for small fixtures.
-    #[arg(long = "train-fdr", default_value = "0.01")]
+    #[arg(long = "train-fdr", default_value = "0.01", value_parser = parse_unit_fraction)]
     train_fdr: f64,
 
     /// Instrument tag to embed in the trained model's metadata. Default: `QExactive`.
@@ -687,6 +687,11 @@ struct TrainArgs {
     /// the pre-GBDT path).
     #[arg(long, default_value = "on")]
     gbdt: GbdtMode,
+
+    /// Opt-in fallback (finding 3.6): downgrade a failed GBDT quality gate to a
+    /// warning and embed the degenerate model anyway. Default off.
+    #[arg(long = "allow-degenerate-model", hide = true, default_value_t = false)]
+    allow_degenerate_model: bool,
 }
 
 /// Training arguments for `andes train-intensity`.
@@ -748,6 +753,14 @@ struct TrainIntensityGbdtArgs {
     /// Number of worker threads (Rayon). Default: 8.
     #[arg(long, default_value_t = 8usize)]
     threads: usize,
+
+    /// Opt-in fallback (finding 3.6): when set, a failed GBDT quality gate
+    /// (too few rows / no held-out signal / empty ensemble) is downgraded from a
+    /// hard error to a warning and the degenerate model is still written. Default
+    /// off — gate failures abort with a non-zero exit. Intended for small
+    /// synthetic fixtures / benchmarking only.
+    #[arg(long = "allow-degenerate-model", hide = true, default_value_t = false)]
+    allow_degenerate_model: bool,
 }
 
 /// Training arguments for `andes train-rich-ion-llr`.
@@ -780,6 +793,11 @@ struct TrainRichIonLlrArgs {
     /// Number of worker threads (Rayon). Default: 8.
     #[arg(long, default_value_t = 8usize)]
     threads: usize,
+
+    /// Opt-in fallback (finding 3.6): downgrade a failed GBDT quality gate to a
+    /// warning and write the degenerate model anyway. Default off.
+    #[arg(long = "allow-degenerate-model", hide = true, default_value_t = false)]
+    allow_degenerate_model: bool,
 }
 
 /// Available subcommands.
@@ -2431,7 +2449,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rescore_map.as_ref(),
         ) {
             Ok(()) => eprintln!("Wrote QPX bundle: {}", parquet_dir.display()),
-            Err(e) => eprintln!("WARN: could not write {}: {e}", parquet_dir.display()),
+            // Finding 3.9: failure to write an explicitly-requested output is a
+            // hard error, not a WARN-and-exit-0. The user asked for this
+            // artifact; silently exiting 0 without it hides data loss from any
+            // calling pipeline.
+            Err(e) => {
+                return Err(format!(
+                    "failed to write requested --output-parquet {}: {e}",
+                    parquet_dir.display()
+                )
+                .into());
+            }
         }
     }
 
@@ -3439,7 +3467,11 @@ fn run_train_intensity_gbdt(
     );
 
     // ── 5. Train the GBDT regressor ───────────────────────────────────────────
-    let trained_frag = train_gbdt_regression(&ds, &TrainParams::default(), 42);
+    // Hard-error if the trainer's quality gate fails (finding 3.6): a training
+    // subcommand must not silently emit a non-deployable model, unless the
+    // operator opts into the degenerate fallback.
+    let train_params = TrainParams { allow_degenerate: args.allow_degenerate_model, ..TrainParams::default() };
+    let trained_frag = train_gbdt_regression(&ds, &train_params, 42)?;
     eprintln!(
         "train-intensity-gbdt: trained frag model: {} trees",
         trained_frag.trees.len()
@@ -3589,7 +3621,9 @@ fn run_train_rich_ion_llr(
     );
 
     // ── 5. Train the GBDT classifier (logits held-out AUC) ────────────────────
-    let trained_rich_ion = train_gbdt(&ds, &TrainParams::default(), 42);
+    // Hard-error on quality-gate failure (finding 3.6) unless opted out.
+    let train_params = TrainParams { allow_degenerate: args.allow_degenerate_model, ..TrainParams::default() };
+    let trained_rich_ion = train_gbdt(&ds, &train_params, 42)?;
     eprintln!(
         "train-rich-ion-llr: trained rich-ion model: {} trees",
         trained_rich_ion.trees.len()
@@ -3872,8 +3906,10 @@ fn run_train(
             gbdt_dataset.y.iter().filter(|&&l| l == 1).count(),
         );
 
-        let gbdt_params = TrainParams::default();
-        let trained_gbdt = train_gbdt(&gbdt_dataset, &gbdt_params, 42);
+        let gbdt_params = TrainParams { allow_degenerate: args.allow_degenerate_model, ..TrainParams::default() };
+        // Hard-error on quality-gate failure (finding 3.6) instead of writing a
+        // degenerate model into the store (unless opted out).
+        let trained_gbdt = train_gbdt(&gbdt_dataset, &gbdt_params, 42)?;
         eprintln!(
             "train: GBDT trained: {} trees",
             trained_gbdt.trees.len(),
@@ -4748,9 +4784,27 @@ where
     Ok((lo, hi))
 }
 
+/// Largest precursor charge state andes will search. Beyond this the candidate
+/// space is dominated by noise and the fragment model is untrained.
+const MAX_SUPPORTED_CHARGE: u8 = 50;
+
 /// Parse `--charge MIN..MAX` (also `MIN-MAX`) into `(u8, u8)`.
+///
+/// Domain-validates (finding 3.8): the minimum charge must be >= 1 (charge 0 is
+/// not a real precursor) and the maximum must be within the supported bound.
 fn parse_charge_range(s: &str) -> Result<(u8, u8), String> {
-    parse_int_range::<u8>(s, "charge")
+    let (lo, hi) = parse_int_range::<u8>(s, "charge")?;
+    if lo < 1 {
+        return Err(format!(
+            "invalid charge `{s}`: minimum charge must be >= 1 (got {lo})"
+        ));
+    }
+    if hi > MAX_SUPPORTED_CHARGE {
+        return Err(format!(
+            "invalid charge `{s}`: maximum charge {hi} exceeds supported bound {MAX_SUPPORTED_CHARGE}"
+        ));
+    }
+    Ok((lo, hi))
 }
 
 /// Parse `--isotope-error MIN..MAX` (also `MIN-MAX`) into `(i8, i8)`; negatives allowed.
@@ -4775,7 +4829,44 @@ fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
         .trim()
         .parse()
         .map_err(|_| format!("invalid --precursor-tol `{s}`: bad number `{num_str}`"))?;
+    // Domain check (finding 3.8): a tolerance must be a finite positive width.
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!(
+            "invalid --precursor-tol `{s}`: value must be finite and > 0 (got {v})"
+        ));
+    }
     Ok(if is_ppm { Tolerance::Ppm(v) } else { Tolerance::Da(v) })
+}
+
+/// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
+/// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
+/// bad value is rejected at parse time with a clear message.
+fn parse_unit_fraction(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid value `{s}`: expected a number in [0, 1]"))?;
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        return Err(format!(
+            "invalid value `{s}`: must be finite and within [0, 1] (got {v})"
+        ));
+    }
+    Ok(v)
+}
+
+/// Parse a fragment-tolerance scalar (`--fragment-tol-ppm` / `--fragment-tol-da`)
+/// — must be a finite, strictly-positive width (finding 3.8).
+fn parse_positive_tol(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid tolerance `{s}`: expected a positive number"))?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!(
+            "invalid tolerance `{s}`: must be finite and > 0 (got {v})"
+        ));
+    }
+    Ok(v)
 }
 
 /// Parse `--precursor-cal` value. Accepts auto|on|off.
@@ -4794,6 +4885,50 @@ fn parse_enzyme_specificity(s: &str) -> Result<EnzymeSpecificity, String> {
     <EnzymeSpecificity as ValueEnum>::from_str(s, true).map_err(|_| {
         format!("invalid enzyme specificity `{s}`: expected non-specific|semi|fully")
     })
+}
+
+#[cfg(test)]
+mod cli_domain_validator_tests {
+    use super::*;
+
+    #[test]
+    fn charge_range_rejects_zero_and_out_of_bounds() {
+        assert!(parse_charge_range("2..5").is_ok());
+        assert!(parse_charge_range("1..1").is_ok());
+        assert!(parse_charge_range("0..5").is_err(), "charge 0 must be rejected");
+        assert!(parse_charge_range("0..0").is_err(), "charge 0..0 must be rejected");
+        assert!(parse_charge_range("2..60").is_err(), "charge above bound must be rejected");
+    }
+
+    #[test]
+    fn precursor_tol_rejects_nonpositive_and_nonfinite() {
+        assert!(parse_precursor_tol("20ppm").is_ok());
+        assert!(parse_precursor_tol("0.02da").is_ok());
+        assert!(parse_precursor_tol("0ppm").is_err(), "zero tol rejected");
+        assert!(parse_precursor_tol("-5ppm").is_err(), "negative tol rejected");
+        assert!(parse_precursor_tol("infda").is_err(), "inf tol rejected");
+        assert!(parse_precursor_tol("nanppm").is_err(), "nan tol rejected");
+    }
+
+    #[test]
+    fn unit_fraction_rejects_out_of_range() {
+        assert_eq!(parse_unit_fraction("0.01").unwrap(), 0.01);
+        assert_eq!(parse_unit_fraction("0").unwrap(), 0.0);
+        assert_eq!(parse_unit_fraction("1").unwrap(), 1.0);
+        assert!(parse_unit_fraction("-0.1").is_err());
+        assert!(parse_unit_fraction("1.5").is_err());
+        assert!(parse_unit_fraction("nan").is_err());
+        assert!(parse_unit_fraction("inf").is_err());
+    }
+
+    #[test]
+    fn positive_tol_rejects_nonpositive_and_nonfinite() {
+        assert_eq!(parse_positive_tol("20").unwrap(), 20.0);
+        assert!(parse_positive_tol("0").is_err());
+        assert!(parse_positive_tol("-1").is_err());
+        assert!(parse_positive_tol("nan").is_err());
+        assert!(parse_positive_tol("inf").is_err());
+    }
 }
 
 #[cfg(test)]

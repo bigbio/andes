@@ -29,15 +29,15 @@ fn separable_18(n: usize, seed: u64) -> Dataset {
 #[test]
 fn trainer_is_deterministic() {
     let ds = separable_18(3000, 11);
-    let m1 = train_gbdt(&ds, &TrainParams::default(), 42);
-    let m2 = train_gbdt(&ds, &TrainParams::default(), 42);
+    let m1 = train_gbdt(&ds, &TrainParams::default(), 42).expect("separable data passes the gate");
+    let m2 = train_gbdt(&ds, &TrainParams::default(), 42).expect("separable data passes the gate");
     assert_eq!(m1.to_bytes(), m2.to_bytes(), "same seed must yield identical model bytes");
 }
 
 #[test]
 fn trained_model_roundtrips_through_blob_and_separates() {
     let ds = separable_18(3000, 5);
-    let model = train_gbdt(&ds, &TrainParams::default(), 7);
+    let model = train_gbdt(&ds, &TrainParams::default(), 7).expect("separable data passes the gate");
     assert!(!model.trees.is_empty(), "should fit at least one tree on separable data");
     assert_eq!(model.n_features, 18);
     assert!(model.apply_sigmoid);
@@ -61,7 +61,7 @@ fn different_seeds_can_differ_but_both_separate() {
     // contradiction — just that training is robust, not seed-fragile).
     let ds = separable_18(3000, 5);
     for seed in [1u64, 2, 999] {
-        let m = train_gbdt(&ds, &TrainParams::default(), seed);
+        let m = train_gbdt(&ds, &TrainParams::default(), seed).expect("separable data passes the gate");
         let mut hi = vec![0.0f32; 18]; hi[0] = 0.95;
         let mut lo = vec![0.0f32; 18]; lo[0] = 0.05;
         assert!(m.predict_logit(&hi) > m.predict_logit(&lo),

@@ -236,13 +236,43 @@ impl ThermoRawReader {
 /// contract documents the invariant. RawFileReader centroid streams are normally
 /// already sorted, so the list is only sorted when an inversion is present.
 fn extract_peaks(raw: &RawSpectrum) -> Vec<(f64, f32)> {
-    let mut peaks: Vec<(f64, f32)> = match raw.data_raw() {
+    let (mz, intensity) = match raw.data_raw() {
         Some(data) => match (data.mz(), data.intensity()) {
-            (Some(mz), Some(intensity)) => mz.iter().zip(intensity.iter()).collect(),
-            _ => Vec::new(),
+            (Some(mz), Some(intensity)) => (mz, intensity),
+            _ => return Vec::new(),
         },
-        None => Vec::new(),
+        None => return Vec::new(),
     };
+
+    // Finding 4.3: a `zip` silently truncates to the shorter array, hiding a
+    // ragged (m/z, intensity) pair from a corrupt scan. Detect the mismatch and
+    // warn (the FlatBuffers contract is one intensity per m/z), then only pair
+    // up to the common length so we never read past either array.
+    if mz.len() != intensity.len() {
+        eprintln!(
+            "Thermo .raw: scan has mismatched peak arrays (m/z {} vs intensity {}); \
+             pairing only the common prefix",
+            mz.len(),
+            intensity.len()
+        );
+    }
+    let n = mz.len().min(intensity.len());
+
+    // Apply the same finite/positive sanitization the mzML and timsTOF readers
+    // use (finding 4.3): drop non-finite / non-positive m/z and non-finite /
+    // negative intensities before scoring.
+    let raw_pairs: Vec<(f64, f32)> = (0..n).map(|i| (mz.get(i), intensity.get(i))).collect();
+    sanitize_thermo_peaks(raw_pairs)
+}
+
+/// Drop non-finite / non-positive m/z and non-finite / negative intensities,
+/// then enforce the m/z-ascending invariant downstream consumers require.
+/// Mirrors the mzML / timsTOF peak filter (finding 4.3).
+fn sanitize_thermo_peaks(pairs: Vec<(f64, f32)>) -> Vec<(f64, f32)> {
+    let mut peaks: Vec<(f64, f32)> = pairs
+        .into_iter()
+        .filter(|&(m, it)| m.is_finite() && m > 0.0 && it.is_finite() && it >= 0.0)
+        .collect();
     if peaks.windows(2).any(|w| w[0].0 > w[1].0) {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     }
@@ -373,6 +403,25 @@ impl Iterator for ThermoRawReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_thermo_peaks_filters_and_sorts() {
+        // Finding 4.3: drop NaN/inf/non-positive m/z and NaN/inf/negative
+        // intensity; sort ascending by m/z.
+        let pairs = vec![
+            (300.0, 1000.0f32),
+            (f64::NAN, 500.0),     // bad m/z
+            (0.0, 100.0),          // non-positive m/z
+            (-5.0, 100.0),         // negative m/z
+            (150.0, 2000.0),       // valid, out of order
+            (400.0, f32::NAN),     // bad intensity
+            (450.0, f32::INFINITY),// bad intensity
+            (500.0, -1.0),         // negative intensity
+            (250.0, 0.0),          // valid (zero intensity allowed)
+        ];
+        let out = super::sanitize_thermo_peaks(pairs);
+        assert_eq!(out, vec![(150.0, 2000.0), (250.0, 0.0), (300.0, 1000.0)]);
+    }
 
     #[test]
     fn dissociation_maps_to_activation() {

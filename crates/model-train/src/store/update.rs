@@ -50,6 +50,32 @@ type ModelEntry = (String, Param, Vec<(SourceLedger, CountStats)>);
 type ModelSlice<'a> = &'a [(&'a str, &'a Param, &'a [(SourceLedger, CountStats)])];
 
 // ---------------------------------------------------------------------------
+// Weight validation (finding 3.5)
+// ---------------------------------------------------------------------------
+
+/// Upper bound on a source weight. A weight is a count multiplier; a value this
+/// large would either be a units mistake or risk saturating the `u64` counts in
+/// [`CountStats::scaled`]. Far above any legitimate re-weighting.
+const MAX_SOURCE_WEIGHT: f32 = 1.0e6;
+
+/// Validate a source weight before it scales count statistics.
+///
+/// An unchecked weight silently corrupts the combined model: `NaN`/negative
+/// rounds counts to `0` (erasing the source), and a huge value saturates the
+/// `u64` counts in [`CountStats::scaled`]. Require a finite, non-negative,
+/// bounded weight at every ingestion point (the `--add`/`--reweight` API and
+/// the Parquet-loaded ledgers funneled through `estimate_from_sources`).
+fn validate_weight(source_id: &str, weight: f32) -> Result<(), TrainError> {
+    if !weight.is_finite() || !(0.0..=MAX_SOURCE_WEIGHT).contains(&weight) {
+        return Err(TrainError::Other(format!(
+            "source '{source_id}' has invalid weight {weight}: must be finite, \
+             >= 0.0, and <= {MAX_SOURCE_WEIGHT}"
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -65,6 +91,11 @@ pub fn update_add(
     stats: CountStats,
     est_cfg: EstimatorConfig,
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
+    // Validate the incoming weight up front (finding 3.5) so a NaN/negative/huge
+    // value fails loudly at the API rather than silently erasing or saturating
+    // counts.
+    validate_weight(&ledger.source_id, ledger.weight)?;
+
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -144,6 +175,9 @@ pub fn update_reweight(
     weight: f32,
     est_cfg: EstimatorConfig,
 ) -> Result<(Param, Vec<(SourceLedger, CountStats)>), TrainError> {
+    // Validate the new weight up front (finding 3.5).
+    validate_weight(source_id, weight)?;
+
     let store = ModelStore::open(path)?;
     let template = store.load_param(model_id)?;
     let existing_ledgers = store.load_sources(model_id)?;
@@ -314,6 +348,10 @@ fn estimate_from_sources(
 ) -> Result<Param, TrainError> {
     let mut combined = CountStats::new();
     for (ledger, stats) in sources {
+        // Validate every weight before scaling (finding 3.5) — this is the
+        // chokepoint that also covers weights loaded from Parquet ledgers, not
+        // just the API entry points.
+        validate_weight(&ledger.source_id, ledger.weight)?;
         combined.add(&stats.scaled(ledger.weight));
     }
     let estimator = Estimator::new(est_cfg);
@@ -454,4 +492,26 @@ fn julian_day_number(y: i32, m: u32, d: u32) -> i64 {
         - y2 as i64 / 100
         + y2 as i64 / 400
         - 32045
+}
+
+#[cfg(test)]
+mod weight_validation_tests {
+    use super::{validate_weight, MAX_SOURCE_WEIGHT};
+
+    #[test]
+    fn accepts_valid_weights() {
+        assert!(validate_weight("s", 0.0).is_ok());
+        assert!(validate_weight("s", 1.0).is_ok());
+        assert!(validate_weight("s", 0.5).is_ok());
+        assert!(validate_weight("s", MAX_SOURCE_WEIGHT).is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_weights() {
+        assert!(validate_weight("s", f32::NAN).is_err(), "NaN");
+        assert!(validate_weight("s", f32::INFINITY).is_err(), "inf");
+        assert!(validate_weight("s", f32::NEG_INFINITY).is_err(), "-inf");
+        assert!(validate_weight("s", -1.0).is_err(), "negative");
+        assert!(validate_weight("s", MAX_SOURCE_WEIGHT * 2.0).is_err(), "too large");
+    }
 }

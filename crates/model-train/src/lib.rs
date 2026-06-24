@@ -22,6 +22,13 @@ pub enum TrainError {
     Parquet(String),
     #[error("model not found for selection key: {0}")]
     NoModel(String),
+    /// A GBDT trainer's hard quality gate failed (finding 3.6): too few rows,
+    /// a single-class classification target, sub-threshold held-out
+    /// AUC/Pearson/R², or an empty tree ensemble. The caller decides whether to
+    /// hard-error or fall back, but the trainer never silently returns a
+    /// non-deployable model.
+    #[error("gbdt quality gate failed: {0}")]
+    QualityGate(String),
     #[error("{0}")]
     Other(String),
 }

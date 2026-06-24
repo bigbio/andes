@@ -195,6 +195,22 @@ impl ResultPaths {
             weights: out_dir.join(format!("{stem}.percolator.weights.txt")),
         }
     }
+
+    /// Delete any result files left over from a previous run, so that a silent
+    /// non-write by Percolator can never be mis-read as this run's output (the
+    /// success check in `run_percolator` trusts `target.exists()`). Absent files
+    /// are fine; a real removal failure is an error (we must not leave a stale
+    /// file we would then read).
+    fn clear_stale(&self) -> std::io::Result<()> {
+        for p in [&self.target, &self.decoy, &self.weights] {
+            match std::fs::remove_file(p) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Build the argument vector for a NATIVE Percolator invocation (binary path
@@ -274,6 +290,10 @@ pub fn run_percolator(
     let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     let stem = pin.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "andes".to_string());
     let out = ResultPaths::new(&out_dir, &stem);
+    // Remove any stale outputs from a previous run BEFORE launching, so the
+    // `out.target.exists()` success check below can only pass on a file this
+    // run actually wrote (guards against reading a previous run's results).
+    out.clear_stale()?;
 
     let output = match backend {
         PercolatorBackend::Binary(bin) => Command::new(bin)
@@ -422,6 +442,22 @@ mod tests {
         assert_eq!(r.pep, 0.002);
         assert_eq!(r.peptide, "K.SAGEPEPK.L");
         assert_eq!(r.proteins, "DECOY_x");
+    }
+
+    #[test]
+    fn clear_stale_removes_prior_outputs() {
+        let dir = std::env::temp_dir().join(format!("andes_perc_stale_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = ResultPaths::new(&dir, "x");
+        std::fs::write(&out.target, b"stale").unwrap();
+        std::fs::write(&out.weights, b"stale").unwrap();
+        assert!(out.target.exists());
+        out.clear_stale().unwrap();
+        assert!(!out.target.exists(), "stale target must be removed");
+        assert!(!out.weights.exists(), "stale weights must be removed");
+        // Idempotent: clearing again when files are absent is Ok.
+        out.clear_stale().unwrap();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

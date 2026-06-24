@@ -6,7 +6,17 @@
 //! geometry rather than inheriting it from a seed template.
 
 use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition};
+use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition};
+
+/// Knobs for [`derive_geometry`] — the structural choices that, in a seed model,
+/// were inherited verbatim. Swept by the benchmark harness; collapse to fixed
+/// defaults once the optimum is validated.
+#[derive(Debug, Clone)]
+pub struct GeometryConfig {
+    pub num_segments: i32,
+    pub max_rank: i32,
+    pub n_mass_tiers: usize,
+}
 
 /// b-ion m/z offset (proton). y-ion offset adds a water. Both CODATA-sourced
 /// in `model::mass` — chemistry, not seed data.
@@ -112,9 +122,134 @@ pub fn build_frag_off_table(
     table
 }
 
+/// Assemble a geometry-only [`Param`] from corpus `(charge, parent_mass)` PSMs:
+/// derive per-charge tiers → partition skeleton → chemistry ion table, take the
+/// segment count / rank cap from `cfg`, and clone the **non-geometry** metadata
+/// (data_type, tolerance, deconvolution, version, precursor offsets) from `base`.
+/// Learned tables are left empty for [`Estimator::estimate`] to fill.
+pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &GeometryConfig) -> Param {
+    let tiers_by_charge = derive_tiers_by_charge(charge_masses, cfg.n_mass_tiers);
+    let partitions = build_partition_skeleton(&tiers_by_charge, cfg.num_segments);
+    let frag_off_table = build_frag_off_table(&partitions);
+
+    // Charge histogram + span from the corpus.
+    let mut charge_counts: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
+    for &(charge, _) in charge_masses {
+        *charge_counts.entry(charge).or_insert(0) += 1;
+    }
+    let charge_hist: Vec<(i32, i32)> = charge_counts.iter().map(|(&c, &n)| (c, n)).collect();
+    let min_charge = charge_counts.keys().next().copied().unwrap_or(base.min_charge);
+    let max_charge = charge_counts.keys().next_back().copied().unwrap_or(base.max_charge);
+
+    let mut param = Param {
+        // Non-geometry metadata cloned from the base/seed.
+        version: base.version,
+        data_type: base.data_type.clone(),
+        mme: base.mme,
+        apply_deconvolution: base.apply_deconvolution,
+        deconvolution_error_tolerance: base.deconvolution_error_tolerance,
+        num_precursor_off: base.num_precursor_off,
+        precursor_off_map: base.precursor_off_map.clone(),
+        error_scaling_factor: base.error_scaling_factor,
+        // Geometry derived from config + corpus.
+        num_segments: cfg.num_segments,
+        max_rank: cfg.max_rank,
+        partitions,
+        frag_off_table,
+        charge_hist,
+        min_charge,
+        max_charge,
+        // Learned tables left empty for `Estimator::estimate` to fill.
+        rank_dist_table: FxHashMap::default(),
+        ion_err_dist_table: FxHashMap::default(),
+        noise_err_dist_table: FxHashMap::default(),
+        ion_existence_table: FxHashMap::default(),
+        partition_ion_types_cache: FxHashMap::default(),
+        gbdt_peak_model: None,
+        frag_intensity_model: None,
+        rich_ion_model: None,
+    };
+    param.rebuild_cache();
+    param
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model::activation::ActivationMethod;
+    use model::instrument::InstrumentType;
+    use model::protocol::Protocol;
+    use model::tolerance::Tolerance;
+    use scoring_crate::param_model::SpecDataType;
+
+    /// Minimal non-geometry base `Param` (the metadata `derive_geometry` clones).
+    fn base_param() -> Param {
+        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+        let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
+            FxHashMap::default();
+        frag_off_table.insert(part, vec![]);
+        let mut p = Param {
+            version: 10001,
+            data_type: SpecDataType {
+                activation: ActivationMethod::HCD,
+                instrument: InstrumentType::QExactive,
+                enzyme: None,
+                protocol: Protocol::Automatic,
+            },
+            mme: Tolerance::Ppm(20.0),
+            apply_deconvolution: false,
+            deconvolution_error_tolerance: 0.0,
+            charge_hist: vec![(2, 100)],
+            min_charge: 2,
+            max_charge: 2,
+            num_segments: 1,
+            partitions: vec![part],
+            num_precursor_off: 0,
+            precursor_off_map: FxHashMap::default(),
+            frag_off_table,
+            max_rank: 3,
+            rank_dist_table: FxHashMap::default(),
+            error_scaling_factor: 0,
+            ion_err_dist_table: FxHashMap::default(),
+            noise_err_dist_table: FxHashMap::default(),
+            ion_existence_table: FxHashMap::default(),
+            partition_ion_types_cache: FxHashMap::default(),
+            gbdt_peak_model: None,
+            frag_intensity_model: None,
+            rich_ion_model: None,
+        };
+        p.rebuild_cache();
+        p
+    }
+
+    #[test]
+    fn derive_geometry_assembles_geometry_only_param() {
+        let base = base_param();
+        let charge_masses = vec![
+            (2, 1000.0), (2, 1200.0), (2, 1400.0), (2, 1600.0),
+            (3, 2000.0), (3, 2400.0),
+        ];
+        let cfg = GeometryConfig { num_segments: 2, max_rank: 150, n_mass_tiers: 2 };
+        let p = derive_geometry(&charge_masses, &base, &cfg);
+
+        // Geometry comes from config + data.
+        assert_eq!(p.num_segments, 2);
+        assert_eq!(p.max_rank, 150);
+        // 2 charges × 2 tiers × 2 segments = 8 partitions.
+        assert_eq!(p.partitions.len(), 8);
+        assert_eq!(p.min_charge, 2);
+        assert_eq!(p.max_charge, 3);
+        // Every partition carries a Noise entry (RankScorer requires it).
+        for part in &p.partitions {
+            let frags = p.frag_off_table.get(part).expect("frag entry per partition");
+            assert!(frags.iter().any(|f| f.ion_type.is_noise()));
+        }
+        // Non-geometry metadata cloned from base.
+        assert_eq!(p.mme, base.mme);
+        assert_eq!(p.version, base.version);
+        // Learned tables start empty (estimate fills them).
+        assert!(p.rank_dist_table.is_empty());
+    }
 
     fn ion_charges(frags: &[FragmentOffsetFrequency], want_prefix: bool) -> Vec<i32> {
         let mut cs: Vec<i32> = frags

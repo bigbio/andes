@@ -69,9 +69,31 @@ impl ModelStore {
     ///   if they had been written to a single file.
     pub fn open(path: &Path) -> Result<Self, TrainError> {
         let parts = resolve_parts(path)?;
+        // Build a model_id → part index as we read manifests (finding 3.7). In a
+        // partitioned store every model must live in exactly one part; a
+        // duplicate `model_id` across parts (e.g. a stale temp partition left
+        // behind) otherwise makes `load_param` path-order-dependent — it stops at
+        // the first part that contains the id. Reject the ambiguity up front.
         let mut manifest: Vec<RawManifestEntry> = Vec::new();
+        let mut owner: FxHashMap<String, PathBuf> = FxHashMap::default();
         for part in &parts {
-            manifest.extend(read_manifest(part)?);
+            for entry in read_manifest(part)? {
+                if let Some(prev) = owner.get(&entry.model_id) {
+                    if prev != part {
+                        return Err(TrainError::Other(format!(
+                            "duplicate model_id '{}' found in two partitions ({} and {}); \
+                             a partitioned store must hold each model in exactly one part \
+                             (remove the stale/duplicate partition)",
+                            entry.model_id,
+                            prev.display(),
+                            part.display(),
+                        )));
+                    }
+                } else {
+                    owner.insert(entry.model_id.clone(), part.clone());
+                }
+                manifest.push(entry);
+            }
         }
         Ok(Self { parts, manifest })
     }
@@ -181,15 +203,31 @@ fn resolve_parts(path: &Path) -> Result<Vec<PathBuf>, TrainError> {
 }
 
 /// Recursively collect `*.parquet` files under `dir` into `out`.
+///
+/// Temporary / in-flight artifacts are ignored (finding 3.7) so a partial write
+/// left behind by an interrupted store update doesn't shadow or duplicate a real
+/// partition: files whose name starts with `.` (hidden / atomic-write temp) or
+/// ends with `.tmp.parquet`, and any `.crc`-style sidecars (non-`.parquet`
+/// extension) are skipped.
 fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), TrainError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
         if p.is_dir() {
             collect_parquet_files(&p, out)?;
-        } else if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
-            out.push(p);
+            continue;
         }
+        if p.extension().and_then(|e| e.to_str()) != Some("parquet") {
+            continue;
+        }
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // Skip hidden/temp partition files (e.g. `.models.parquet.tmp.parquet`,
+        // `.~tmp.parquet`, or any dotfile) so a stale temp doesn't become a
+        // phantom duplicate partition.
+        if name.starts_with('.') || name.ends_with(".tmp.parquet") {
+            continue;
+        }
+        out.push(p);
     }
     Ok(())
 }
@@ -618,11 +656,16 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     param.rebuild_cache();
 
     // Decode and attach the GBDT signal/noise model if a blob was stored.
+    // Enforce the feature-contract at load (finding 3.1): a blob whose declared
+    // feature count doesn't match the in-process per-peak extractor would
+    // otherwise mis-score via NaN→default_left traversal rather than erroring.
     if let Some(bytes) = manifest.gbdt_bytes.as_ref() {
-        param.gbdt_peak_model = Some(
-            scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
-                .map_err(|e| TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}")))?,
-        );
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
+            .map_err(|e| TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}")))?;
+        model
+            .validate_n_features(scoring_crate::peak_features::N_FEATURES, "peak")
+            .map_err(|e| TrainError::Other(format!("gbdt_model_bytes for '{model_id}': {e}")))?;
+        param.gbdt_peak_model = Some(model);
     }
 
     // Decode and attach the fragment-intensity regressor if a blob was stored.
@@ -631,6 +674,9 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
             .map_err(|e| TrainError::Other(
                 format!("decode frag_intensity_model_bytes for '{model_id}': {e}")
             ))?;
+        model
+            .validate_n_features(scoring_crate::frag_features::N_FRAG_FEATURES, "frag-intensity")
+            .map_err(|e| TrainError::Other(format!("frag_intensity_model_bytes for '{model_id}': {e}")))?;
         param.frag_intensity_model = Some(std::sync::Arc::new(model));
     }
 
@@ -640,6 +686,9 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
             .map_err(|e| TrainError::Other(
                 format!("decode rich_ion_model_bytes for '{model_id}': {e}")
             ))?;
+        model
+            .validate_n_features(scoring_crate::ion_features::N_ION_FEATURES, "rich-ion")
+            .map_err(|e| TrainError::Other(format!("rich_ion_model_bytes for '{model_id}': {e}")))?;
         param.rich_ion_model = Some(std::sync::Arc::new(model));
     }
 
@@ -1112,6 +1161,41 @@ mod tests {
         assert!(
             found_tmt,
             "expected an entry with model_id == \"cid_lowres_tryp_tmt\""
+        );
+    }
+
+    #[test]
+    fn duplicate_model_id_across_parts_is_rejected() {
+        // Finding 3.7: two partitions that both declare the same model_id make
+        // load order-dependent, so `open` must reject it.
+        let src = bundled_store_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Two real partitions, each a full copy of the bundle → every model_id
+        // appears twice across parts.
+        std::fs::copy(&src, dir.path().join("part_a.parquet")).expect("copy a");
+        std::fs::copy(&src, dir.path().join("part_b.parquet")).expect("copy b");
+        let msg = match ModelStore::open(dir.path()) {
+            Ok(_) => panic!("duplicate model_id across parts must be rejected"),
+            Err(e) => format!("{e}"),
+        };
+        assert!(msg.contains("duplicate model_id"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn temp_suffix_partition_is_ignored() {
+        // Finding 3.7: a stale temp partition (dotfile / `.tmp.parquet`) must be
+        // skipped so it neither shadows nor duplicates a real partition.
+        let src = bundled_store_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::copy(&src, dir.path().join("models.parquet")).expect("copy real");
+        // A leftover temp copy of the same data — would otherwise trip the
+        // duplicate-id guard if it weren't ignored.
+        std::fs::copy(&src, dir.path().join(".models.parquet.tmp.parquet")).expect("copy temp");
+        std::fs::copy(&src, dir.path().join("models.tmp.parquet")).expect("copy temp2");
+        let store = ModelStore::open(dir.path()).expect("temp partitions must be ignored");
+        assert!(
+            store.model_ids().iter().any(|id| id == "hcd_qexactive_tryp"),
+            "real partition must still load"
         );
     }
 }

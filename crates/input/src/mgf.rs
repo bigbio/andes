@@ -112,7 +112,11 @@ impl<R: BufRead> Iterator for MgfReader<R> {
             }
 
             match parse_peak(&line) {
-                Ok((mz, intensity)) => peaks.push((mz, intensity)),
+                // Drop non-finite / non-positive peaks (finding 4.4), mirroring
+                // the mzML / timsTOF readers; a syntactically-malformed line is
+                // still a hard error.
+                Ok(Some((mz, intensity))) => peaks.push((mz, intensity)),
+                Ok(None) => { /* peak out of domain: skip */ }
                 Err(()) => return Some(Err(MgfParseError::BadPeak {
                     line: self.line_no, got: line,
                 })),
@@ -175,11 +179,20 @@ fn parse_charge(value: &str) -> Result<i32, ()> {
     stripped.parse().map_err(|_| ())
 }
 
-fn parse_peak(line: &str) -> Result<(f64, f32), ()> {
+/// Parse one `mz intensity` peak line.
+///
+/// `Err(())` is a syntactically malformed line (hard error upstream). `Ok(None)`
+/// is a syntactically-valid but out-of-domain peak (non-finite / non-positive
+/// m/z, or non-finite / negative intensity) that must be dropped rather than
+/// scored (finding 4.4). `Ok(Some(..))` is a usable peak.
+fn parse_peak(line: &str) -> Result<Option<(f64, f32)>, ()> {
     let mut iter = line.split_ascii_whitespace();
     let mz: f64 = iter.next().ok_or(())?.parse().map_err(|_| ())?;
     let intensity: f32 = iter.next().ok_or(())?.parse().map_err(|_| ())?;
-    Ok((mz, intensity))
+    if !mz.is_finite() || mz <= 0.0 || !intensity.is_finite() || intensity < 0.0 {
+        return Ok(None);
+    }
+    Ok(Some((mz, intensity)))
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -262,16 +275,31 @@ mod tests {
 
     #[test]
     fn parse_peak_space_separator() {
-        assert_eq!(parse_peak("100.0 1.5").unwrap(), (100.0, 1.5));
+        assert_eq!(parse_peak("100.0 1.5").unwrap(), Some((100.0, 1.5)));
     }
 
     #[test]
     fn parse_peak_tab_separator() {
-        assert_eq!(parse_peak("100.0\t1.5").unwrap(), (100.0, 1.5));
+        assert_eq!(parse_peak("100.0\t1.5").unwrap(), Some((100.0, 1.5)));
     }
 
     #[test]
     fn parse_peak_garbage_errors() {
         assert!(parse_peak("not a peak").is_err());
+    }
+
+    #[test]
+    fn parse_peak_out_of_domain_is_dropped() {
+        // Finding 4.4: syntactically valid but out-of-domain peaks are dropped
+        // (Ok(None)), not errored, mirroring the mzML / timsTOF readers.
+        assert_eq!(parse_peak("0 100").unwrap(), None, "zero m/z");
+        assert_eq!(parse_peak("-5 100").unwrap(), None, "negative m/z");
+        assert_eq!(parse_peak("inf 100").unwrap(), None, "inf m/z");
+        assert_eq!(parse_peak("nan 100").unwrap(), None, "nan m/z");
+        assert_eq!(parse_peak("100 -1").unwrap(), None, "negative intensity");
+        assert_eq!(parse_peak("100 inf").unwrap(), None, "inf intensity");
+        assert_eq!(parse_peak("100 nan").unwrap(), None, "nan intensity");
+        // Zero intensity is allowed (a real, if uninformative, peak).
+        assert_eq!(parse_peak("100 0").unwrap(), Some((100.0, 0.0)));
     }
 }

@@ -29,6 +29,8 @@ pub enum GbdtError {
     Io(#[from] std::io::Error),
     #[error("malformed AGBD blob: {0}")]
     Malformed(String),
+    #[error("GBDT feature-contract violation for {kind} model: blob declares {got} features but the evaluator extracts {expected}")]
+    FeatureCountMismatch { kind: &'static str, expected: u32, got: u32 },
 }
 
 /// Reject implausibly large counts from a corrupt/version-skewed blob before
@@ -181,6 +183,27 @@ impl GbdtPeakModel {
         write_f32_vec(&mut b, &self.iso_x);
         write_f32_vec(&mut b, &self.iso_y);
         b
+    }
+
+    /// Enforce the feature-count contract: the blob's declared `n_features`
+    /// must exactly equal the number of features the in-process extractor for
+    /// this model role produces. A skewed/wrong-slot blob otherwise scores
+    /// plausibly — `eval` reads missing feature slots as `NaN` and silently
+    /// descends `default_left`, yielding a finite but meaningless score with no
+    /// error. Call this once at load (see `model-train`'s store reader) so a
+    /// schema-mismatched model is rejected up front instead of mis-scoring.
+    ///
+    /// `kind` is a short role label used only in the error message
+    /// (`"peak"`, `"frag-intensity"`, `"rich-ion"`).
+    pub fn validate_n_features(&self, expected: usize, kind: &'static str) -> Result<(), GbdtError> {
+        if self.n_features as usize != expected {
+            return Err(GbdtError::FeatureCountMismatch {
+                kind,
+                expected: expected as u32,
+                got: self.n_features,
+            });
+        }
+        Ok(())
     }
 
     /// Raw regression output: sum of all tree leaf values, with NO sigmoid
@@ -344,6 +367,23 @@ mod tests {
         let v = m.predict_value(&[1.0]);
         assert!((v - 2.0).abs() < 1e-6,
             "predict_value must not apply isotonic map; expected 2.0, got {v}");
+    }
+
+    #[test]
+    fn validate_n_features_enforces_exact_count() {
+        // toy_model declares n_features = 1.
+        let m = toy_model();
+        // Exact match passes.
+        assert!(m.validate_n_features(1, "peak").is_ok());
+        // Any other count is rejected (a wrong-slot / schema-skewed blob).
+        assert!(matches!(
+            m.validate_n_features(18, "peak"),
+            Err(GbdtError::FeatureCountMismatch { kind: "peak", expected: 18, got: 1 })
+        ));
+        assert!(matches!(
+            m.validate_n_features(0, "rich-ion"),
+            Err(GbdtError::FeatureCountMismatch { expected: 0, got: 1, .. })
+        ));
     }
 
     #[test]

@@ -65,6 +65,37 @@ pub struct RankScorer {
     fragment_tol_override: Option<model::tolerance::Tolerance>,
 }
 
+/// Documented smoothing floor for the rank-LLR computation (finding 3.2).
+///
+/// The trained estimator already floors every frequency to a small positive
+/// value (see `model-train`'s `estimate`), so for every bundled / well-formed
+/// model the numerator and denominator are strictly positive and this floor is
+/// never engaged — the resulting LLR is byte-identical to the unguarded
+/// `ln(ion/(noise·norm))`. The floor exists purely so a *corrupt* table (a
+/// zero, negative, or NaN frequency that escaped the estimator) yields a
+/// finite, bounded LLR instead of `±inf`/`NaN` silently propagating through the
+/// DP and `round() as i32`. `1e-9` matches the estimator's own additive floor
+/// scale.
+const FREQ_FLOOR: f32 = 1e-9;
+
+/// Compute one finite rank-LLR entry `ln(ion / (noise · norm))`.
+///
+/// Sanitizes the inputs to keep the result finite: a non-finite or
+/// non-positive numerator/denominator is replaced by [`FREQ_FLOOR`]. For valid
+/// (strictly positive, finite) inputs this is exactly `(ion/(noise·norm)).ln()`,
+/// so happy-path scoring is unchanged.
+#[inline]
+fn finite_llr(ion_freq: f32, noise_freq: f32, norm: f32) -> f32 {
+    let num = if ion_freq.is_finite() && ion_freq > 0.0 { ion_freq } else { FREQ_FLOOR };
+    let den_raw = noise_freq * norm;
+    let den = if den_raw.is_finite() && den_raw > 0.0 { den_raw } else { FREQ_FLOOR };
+    let llr = (num / den).ln();
+    // For any valid model the floor is never hit, so this assert documents the
+    // invariant (finite LLRs) without affecting release behavior.
+    debug_assert!(llr.is_finite(), "rank LLR must be finite (ion={ion_freq}, noise={noise_freq}, norm={norm})");
+    llr
+}
+
 impl RankScorer {
     pub fn new(param: &Param) -> Self {
         // Precompute, for every (partition, ion) pair, the per-rank LLR table
@@ -95,7 +126,7 @@ impl RankScorer {
                 // prefix is all that is jointly defined.
                 let rank_count = ion_freqs.len().min(noise_freqs.len());
                 let table: Vec<f32> = (0..rank_count)
-                    .map(|r| (ion_freqs[r] / (noise_freqs[r] * charge_or_seg)).ln())
+                    .map(|r| finite_llr(ion_freqs[r], noise_freqs[r], charge_or_seg))
                     .collect();
 
                 log_table.insert((*partition, *ion_type), table);
@@ -271,21 +302,32 @@ impl RankScorer {
     /// Returns `ln(ion_existence_prob / noise_baseline)`. Yields 0 if the
     /// partition has no existence table, or `index` is out of range.
     ///
-    /// Degenerate-input behavior is load-bearing and intentionally left
-    /// un-clamped on the denominator: for very peak-dense spectra at small
-    /// parent mass, `prob_peak` can exceed 1, which makes the one-present
-    /// baseline (`prob_peak * (1 - prob_peak)`) negative. `ln` of a
-    /// positive/negative ratio is NaN, and the caller's `round() as i32` maps
-    /// NaN to 0 — neutralizing that edge. Clamping the denominator to a tiny
-    /// positive value instead would emit a large spurious positive score
-    /// (e.g. `ln(0.028 / 1e-38) ≈ +84`) per affected edge and inflate DP
-    /// maxima by roughly an order of magnitude on short charge-2 peptides, so
-    /// we let NaN/±inf flow through to the rounding step unchanged.
+    /// Degenerate-input behavior (finding 3.3): for very peak-dense spectra at
+    /// small parent mass, `prob_peak` can exceed 1 (it is a peaks-per-position
+    /// rate, not a clamped probability), which makes the one-present baseline
+    /// (`prob_peak * (1 - prob_peak)`) negative and the both/neither baselines
+    /// degenerate. Historically the code let `ln(positive/negative) = NaN` flow
+    /// through to the caller's `round() as i32`, which maps NaN to 0 — i.e. the
+    /// edge contributed nothing. That is the intended outcome (clamping the
+    /// denominator to a tiny positive value would instead emit a large spurious
+    /// positive score, e.g. `ln(0.028 / 1e-38) ≈ +84`, and inflate DP maxima by
+    /// ~an order of magnitude on short charge-2 peptides). Rather than rely on
+    /// silent NaN→0 rounding, we now detect the out-of-domain case explicitly
+    /// and return the SAME bounded neutral score (`0.0`). The happy-path branch
+    /// (`prob_peak` a valid probability) is unchanged and byte-identical.
     pub fn ion_existence_score(&self, partition: Partition, index: usize, prob_peak: f32) -> f32 {
         let Some(table) = self.param.ion_existence_table.get(&partition) else {
             return 0.0;
         };
         if index >= table.len() {
+            return 0.0;
+        }
+        // Out-of-domain `prob_peak` (NaN, or outside [0,1]) makes the noise
+        // baseline non-positive / non-finite, which previously yielded a NaN
+        // that the caller rounded to 0. Return that neutral 0 explicitly so the
+        // edge evidence is dropped deterministically instead of via float NaN
+        // semantics. Valid probabilities take the normal path below unchanged.
+        if !prob_peak.is_finite() || !(0.0..=1.0).contains(&prob_peak) {
             return 0.0;
         }
         let noise_baseline = match index {
@@ -296,8 +338,6 @@ impl RankScorer {
         // Floor an exact-zero learned probability to 0.01 so ln stays finite;
         // a true 0 would otherwise force ln(0) = -inf for an observed pair.
         let ion_prob = if table[index] == 0.0 { 0.01 } else { table[index] };
-        // Deliberately no denominator clamp (see the doc note): NaN/±inf are
-        // expected on degenerate input and are resolved by the caller's round.
         (ion_prob / noise_baseline).ln()
     }
 
@@ -373,6 +413,41 @@ mod tests {
         assert_eq!(s.feature_match_tolerance(), Tolerance::Da(0.6));
         s.set_fragment_tol_override(None);
         assert_eq!(s.feature_match_tolerance(), Tolerance::Da(0.5));
+    }
+
+    #[test]
+    fn finite_llr_matches_plain_ln_for_valid_inputs() {
+        // For strictly-positive finite frequencies the helper is exactly the
+        // unguarded ln-ratio (happy-path byte-identical).
+        let got = super::finite_llr(0.6, 0.1, 1.0);
+        let want = (0.6_f32 / (0.1_f32 * 1.0)).ln();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn finite_llr_stays_finite_on_corrupt_inputs() {
+        // Zero / negative / NaN frequencies must NOT produce ±inf or NaN.
+        assert!(super::finite_llr(0.0, 0.1, 1.0).is_finite(), "zero ion freq");
+        assert!(super::finite_llr(0.6, 0.0, 1.0).is_finite(), "zero noise freq");
+        assert!(super::finite_llr(0.6, 0.1, 0.0).is_finite(), "zero norm");
+        assert!(super::finite_llr(f32::NAN, 0.1, 1.0).is_finite(), "NaN ion freq");
+        assert!(super::finite_llr(0.6, f32::NAN, 1.0).is_finite(), "NaN noise freq");
+        assert!(super::finite_llr(-1.0, 0.1, 1.0).is_finite(), "negative ion freq");
+        assert!(super::finite_llr(0.6, -0.1, 1.0).is_finite(), "negative noise freq");
+    }
+
+    #[test]
+    fn rank_scorer_new_tables_are_finite_even_with_zero_freqs() {
+        // Inject a degenerate ion table (a zero entry) and confirm the built
+        // LLR table is finite throughout (no -inf from ln(0)).
+        let mut param = tiny_param();
+        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+        let zeroed = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        param.rank_dist_table.get_mut(&part).unwrap().insert(zeroed, vec![0.0, 0.0, 0.0, 0.0]);
+        let scorer = RankScorer::new(&param);
+        for table in scorer.log_table.values() {
+            assert!(table.iter().all(|v| v.is_finite()), "all LLR entries must be finite");
+        }
     }
 
     #[test]
@@ -476,6 +551,32 @@ mod tests {
         assert!(scorer.partition_loss_ion_logs(&part).iter().any(|(ion, _)| *ion == loss));
         // A standard model has no loss tables.
         assert!(!RankScorer::new(&tiny_param()).has_loss_tables());
+    }
+
+    #[test]
+    fn ion_existence_score_out_of_domain_prob_peak_is_bounded_zero() {
+        // Build a param with an ion-existence table for one partition.
+        let mut param = tiny_param();
+        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+        param.ion_existence_table.insert(part, vec![0.7, 0.1, 0.1, 0.1]);
+        let scorer = RankScorer::new(&param);
+
+        // prob_peak > 1 (dense spectrum): previously produced NaN→round→0.
+        // Now returns an explicit, finite, bounded 0.0 — never NaN/±inf.
+        for &index in &[0usize, 1, 2, 3] {
+            let s = scorer.ion_existence_score(part, index, 1.5);
+            assert!(s.is_finite(), "out-of-domain prob_peak must give finite score");
+            assert_eq!(s, 0.0, "out-of-domain edge contributes neutral 0");
+            // NaN prob_peak also neutralized.
+            let s_nan = scorer.ion_existence_score(part, index, f32::NAN);
+            assert_eq!(s_nan, 0.0);
+        }
+
+        // A valid in-domain prob_peak still scores via the normal path (finite,
+        // generally non-zero) — happy path unchanged.
+        let s_valid = scorer.ion_existence_score(part, 3, 0.3);
+        assert!(s_valid.is_finite());
+        assert_ne!(s_valid, 0.0, "valid prob_peak must score on the normal path");
     }
 
     #[test]

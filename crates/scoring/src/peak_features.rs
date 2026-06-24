@@ -1,9 +1,9 @@
 //! Peptide-AGNOSTIC per-peak signal/noise features (the GBDT input contract).
 //!
 //! THIS LIST IS THE SINGLE SOURCE OF TRUTH. The Python training extractor
-//! (`training/gbdt/feature_spec.py`, created in Task A2.6) will mirror
-//! `FEATURE_NAMES` in the same order; the cross-language parity test (Task
-//! A2.10) enforces it. Every feature is computable once per spectrum (no
+//! (`training/gbdt/feature_spec.py`) must mirror `FEATURE_NAMES` in the same
+//! order; a cross-language parity test enforces it. Every feature is computable
+//! once per spectrum (no
 //! candidate peptide is consulted), so the GBDT is evaluated once per peak at
 //! spectrum-prep, never in the inner candidate loop.
 

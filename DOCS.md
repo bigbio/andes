@@ -593,7 +593,7 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 
 ## 9. License and citation
 
-andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text, [`NOTICE`](NOTICE) for attribution, and [`HERITAGE.md`](HERITAGE.md) for the project's origin in MS-GF+.
+andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution and the project's origin in MS-GF+.
 
 The software is provided **"as is"** without warranty.
 
@@ -605,4 +605,4 @@ If you use andes in published work, please cite both andes and the foundational 
 
 > Kim, S. and Pevzner, P.A. (2014). MS-GF+ makes progress towards a universal database search tool for proteomics. *Nature Communications*, 5:5277.
 
-andes originated from MS-GF+ (https://github.com/MSGFPlus/msgfplus); see [`HERITAGE.md`](HERITAGE.md).
+andes originated from MS-GF+ (https://github.com/MSGFPlus/msgfplus); see [`NOTICE`](NOTICE).

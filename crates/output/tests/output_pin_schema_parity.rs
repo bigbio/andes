@@ -1,12 +1,9 @@
-//! `.pin` schema test for Andes's GF-free output.
+//! `.pin` schema test for Andes's output.
 //!
-//! NOTE: Andes removed the generating function entirely, so its `.pin` schema
-//! INTENTIONALLY diverges from the historical GF-heavy Percolator schema: the
-//! GF-derived columns (`DeNovoScore`, `lnSpecEValue`, `lnEValue`,
-//! `lnDeltaSpecEValue`) are no longer emitted, and `RawScore` is the sole score
-//! column. This test asserts the GF-free schema rather than comparing against
-//! a legacy reference fixture:
-//!   - `RawScore` is present, the GF columns are absent.
+//! Asserts the schema invariant:
+//!   - `RawScore` is present and is the sole score column.
+//!   - `DeNovoScore`, `lnSpecEValue`, `lnEValue`, and `lnDeltaSpecEValue` are
+//!     absent.
 //!   - The additive feature columns (`EdgeScore`, `PrecursorIsotopeKL`,
 //!     `PrecursorSNR`, `DeltaRawScore`) are present, between `matchedIonRatio`
 //!     and `Peptide`.
@@ -35,8 +32,7 @@ fn first_line(path: &std::path::Path) -> String {
     BufReader::new(f).lines().next().expect("file is empty").expect("read first line")
 }
 
-/// Columns that the generating function used to emit and that GF-free Andes
-/// must NOT emit anymore.
+/// Columns that must NOT appear in the schema.
 const GF_COLUMNS: [&str; 4] = ["DeNovoScore", "lnSpecEValue", "lnEValue", "lnDeltaSpecEValue"];
 
 /// Additive feature columns Andes emits between matchedIonRatio and Peptide.

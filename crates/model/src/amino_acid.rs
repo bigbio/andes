@@ -52,7 +52,7 @@ impl AminoAcid {
     /// field is unchanged; consumers compute total mass as `aa.mass +
     /// mod_.mass_delta` separately (see `Peptide::mass`).
     ///
-    /// Accepts either an owned `Modification` (legacy callers, test code)
+    /// Accepts either an owned `Modification` (test code)
     /// or an `Arc<Modification>` (the hot path inside the candidate
     /// enumerator). `Into<Arc<Modification>>` is implemented for both
     /// shapes by `std`, so callers don't need to wrap manually.

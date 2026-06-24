@@ -347,7 +347,7 @@ pub fn write_all_models_with_sources_pub(
 }
 
 /// Like [`write_all_models_with_sources_pub`] but each model may carry a GBDT
-/// blob (parallel to `models`). `None` ⇒ no blob (legacy/rank-core-only).
+/// blob (parallel to `models`). `None` ⇒ no blob (rank-core-only).
 ///
 /// `blobs` must have the same length as `models` (enforced by a `debug_assert`).
 /// Each entry corresponds to the model at the same index in `models`.

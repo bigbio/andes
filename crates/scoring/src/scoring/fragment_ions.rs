@@ -21,7 +21,7 @@
 //! series/charge/position and `loss_class` set to that mod's class. The
 //! intact ion is always kept. If no spanned residue declares losses, or the
 //! gate is off, ZERO loss ions are emitted ⇒ output identical to the
-//! canonical b/y set. v1: multiple loss-bearing residues in one fragment
+//! canonical b/y set. Multiple loss-bearing residues in one fragment
 //! emit each residue's losses independently (no cross-products).
 
 use std::ops::RangeInclusive;
@@ -156,7 +156,7 @@ pub fn predict_by_ions(peptide: &Peptide, charge_range: RangeInclusive<u8>) -> V
 /// losses, ZERO loss ions are emitted and the output is byte-identical to the
 /// canonical b/y set (this is the safety guarantee behind [`predict_by_ions`]).
 ///
-/// v1: multiple loss-bearing residues within a single fragment emit each
+/// Multiple loss-bearing residues within a single fragment emit each
 /// residue's losses independently (no cross-products of simultaneous losses).
 pub fn predict_by_ions_with_losses(
     peptide: &Peptide,

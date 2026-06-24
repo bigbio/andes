@@ -1,11 +1,10 @@
 //! Native Bruker timsTOF `.d` reader (`feature = "timstof"`).
 //!
-//! Wraps the pure-Rust [`timsrust`] crate (the same reader Sage uses) and
-//! yields the same [`Spectrum`] model as the mzML/MGF/Thermo readers, so the
-//! search path is format-agnostic. A Bruker `.d` is a DIRECTORY holding a TDF
-//! SQLite database (`analysis.tdf`) plus its binary blob (`analysis.tdf_bin`);
-//! `timsrust` reads both natively with NO vendor runtime and NO bundling
-//! (unlike the Thermo `.raw` reader, which needs the hosted .NET runtime).
+//! Wraps the pure-Rust [`timsrust`] crate and yields the same [`Spectrum`]
+//! model as the mzML/MGF/Thermo readers, so the search path is
+//! format-agnostic. A Bruker `.d` is a DIRECTORY holding a TDF SQLite database
+//! (`analysis.tdf`) plus its binary blob (`analysis.tdf_bin`); `timsrust` reads
+//! both natively with NO vendor runtime and NO bundling.
 //!
 //! Built only under `--features timstof`. mzML/MGF reading never pulls in
 //! `timsrust`.
@@ -134,8 +133,8 @@ impl TimsTofReader {
             precursor_mz,
             precursor_intensity,
             precursor_charge,
-            // `timsrust` retention time is in SECONDS (Sage divides it by 60 to
-            // get minutes); the model stores seconds, so it is carried as-is.
+            // `timsrust` retention time is in SECONDS; the model stores
+            // seconds, so it is carried as-is (RT seconds → minutes downstream).
             rt_seconds: Some(precursor.rt),
             scan: Some(scan_number),
             peaks: extract_peaks(raw),

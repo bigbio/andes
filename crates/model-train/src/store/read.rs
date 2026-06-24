@@ -196,8 +196,8 @@ fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Train
 
 /// Convert the parquet `protocol` column value to a `BTreeSet<String>` experiment class.
 ///
-/// This maps the Java/binary naming convention in the store to the lowercase
-/// slug-set used by [`crate::select`].
+/// Maps the stored `protocol` column naming to the lowercase slug-set used by
+/// [`crate::select`].
 ///
 /// `iTRAQPhospho` is intentionally mapped to the single slug `"itraqphospho"`
 /// (not `{"itraq","phospho"}`) so that:
@@ -1092,10 +1092,7 @@ mod tests {
         let store = ModelStore::open(&path)
             .expect("failed to open bundled models.parquet");
         let entries = store.selection_entries();
-        // v1: the bundle ships 19 fully own-trained models (one selection entry
-        // each; no MS-GF+-seeded regimes). Earlier bundles shipped 38 entries
-        // including seeded regimes that have since been dropped (not retrainable
-        // from public data) rather than shipped as seed copies.
+        // The bundle ships 19 own-trained models, one selection entry each.
         assert_eq!(
             entries.len(),
             19,

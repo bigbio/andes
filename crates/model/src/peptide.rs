@@ -55,7 +55,7 @@ impl Peptide {
 
     /// Residue-only neutral mass (no terminal `H2O`).
     ///
-    /// Matches Java `DatabaseMatch.getPeptideMass()` and the calibrator's
+    /// `neutral_mass - H2O`, the calibrator's
     /// `(precursor_mz - proton) * charge - H2O` observed mass convention.
     pub fn residue_mass(&self) -> f64 {
         self.neutral_mass - H2O

@@ -4,8 +4,8 @@
 //! per-PSM rows.
 //!
 //! andes does not reimplement Percolator; it orchestrates the real binary (or
-//! the pinned biocontainers docker image) exactly as `benchmark/run_percolator_docker.sh`
-//! does (`--seed 42 --results-psms … --decoy-results-psms … --weights … --only-psms <PIN>`).
+//! the pinned biocontainers docker image) with
+//! `--seed 42 --results-psms … --decoy-results-psms … --weights … --only-psms <PIN>`.
 //! The result TSV is parsed by HEADER NAME (not column index) so it survives the
 //! column-offset differences between engines (e.g. a Sage-style extra `FileName`
 //! column).

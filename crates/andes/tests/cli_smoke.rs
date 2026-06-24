@@ -262,7 +262,7 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
 #[test]
 fn bench_mode_max_spectra_produces_nonempty_pin() {
     // Regression for send_chunks bench-cap bug: --max-spectra 100 must not
-    // drop the entire final partial chunk (which used to truncate to zero).
+    // drop the entire final partial chunk.
     let dir = tempfile::tempdir().expect("tempdir");
     let pin_path = dir.path().join("bench.pin");
 
@@ -370,10 +370,8 @@ fn cli_accepts_precursor_cal_off() {
     assert!(pin_path.exists());
 }
 
-/// Regression guard: legacy Java numeric flag values and the new
-/// Rust-idiomatic named values must resolve to byte-identical PIN output.
+/// Numeric and named flag values produce identical results.
 /// Quantms scripts use the numeric form; new docs recommend the named form.
-/// If this test breaks, the legacy compat layer is broken.
 #[test]
 fn cli_accepts_both_named_and_numeric_param_values() {
     let bsa_fasta = fixture("test-fixtures/BSA.fasta");

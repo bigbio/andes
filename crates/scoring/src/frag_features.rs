@@ -1,4 +1,4 @@
-//! Peptide-CONDITIONED per-fragment features for the v3 intensity regressor.
+//! Peptide-conditioned per-fragment features for the intensity regressor.
 //! The SINGLE source of the feature vector — imported by both the trainer's
 //! frag-dataset builder and `intensity_signal` — so train/infer features match
 //! by construction (mirrors `PeakFeatureCtx::for_spectrum`).

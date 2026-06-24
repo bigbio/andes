@@ -342,8 +342,7 @@ fn write_header<W: Write>(
         "DeltaRankScore".to_string(),
         // ADDITIVE Tailor per-spectrum calibration (Yang et al., JPR 2020):
         // RawScore / (spectrum's top-1% quantile RawScore). Makes RawScores
-        // comparable across spectra — the role the removed generating function
-        // used to play — recovering low-res discrimination without the GF.
+        // comparable across spectra (per-spectrum calibration).
         "TailorScore".to_string(),
         // ADDITIVE strong-score Stage-1 bolt-ons (deterministic, no model
         // change): PpmGaussianScore = Σ exp(-½(ppm/7)²) over matched ions

@@ -1282,6 +1282,39 @@ fn run_precursor_calibration(
     Ok(stats)
 }
 
+/// gzipped spectrum files (`foo.mzML.gz`, `foo.mgf.gz`) are not supported: the
+/// readers need an uncompressed file, and the bare `.gz` extension would
+/// otherwise be mis-routed to the MGF parser (silent garbage). Error clearly.
+fn reject_gzipped_spectrum(path: &std::path::Path) -> Result<(), String> {
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("gz"))
+    {
+        return Err(format!(
+            "gzipped spectrum input is not supported: {}. Decompress it first \
+             (e.g. `gunzip`) and pass the uncompressed .mzML/.mgf/.raw file or .d directory.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod gz_routing_tests {
+    use super::reject_gzipped_spectrum;
+    use std::path::Path;
+
+    #[test]
+    fn rejects_gzipped_spectra_accepts_plain() {
+        assert!(reject_gzipped_spectrum(Path::new("x/foo.mzML.gz")).is_err());
+        assert!(reject_gzipped_spectrum(Path::new("foo.mgf.GZ")).is_err());
+        assert!(reject_gzipped_spectrum(Path::new("foo.mzML")).is_ok());
+        assert!(reject_gzipped_spectrum(Path::new("foo.raw")).is_ok());
+        assert!(reject_gzipped_spectrum(Path::new("run.d")).is_ok());
+    }
+}
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
@@ -1295,6 +1328,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
     warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
+    // Reject gzipped spectra up front: `foo.mzML.gz` has extension "gz", so the
+    // by-extension format router would silently fall through to the MGF parser.
+    for p in spectrum_paths {
+        reject_gzipped_spectrum(p)?;
+    }
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
     // PIN destination. Normally `--output-pin`. Under `--rescore` without an

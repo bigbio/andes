@@ -2677,21 +2677,24 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
         .into());
     }
 
-    // ── 5b. Geometry template: own-derived (ANDES_DERIVE_GEOMETRY) or seed ─────
-    // Default is the seed's geometry. When ANDES_DERIVE_GEOMETRY is set, the
-    // partition/segment geometry is derived from this corpus instead (the seed
-    // still supplies non-geometry metadata). Env-gated, not a CLI flag, so the
-    // benchmark harness can A/B seed-vs-derived; becomes the default once the
-    // sweep validates it.
-    let template: Param = if std::env::var("ANDES_DERIVE_GEOMETRY").is_ok() {
+    // ── 5b. Geometry template: own-derived (DEFAULT) or seed (opt-out) ─────────
+    // andes derives the partition/segment geometry from THIS corpus by default
+    // (own geometry — no MS-GF+ partition structure); the seed supplies only
+    // non-geometry metadata. Opt out with ANDES_SEED_GEOMETRY=1 to reuse the
+    // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
+    // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
+    // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
+    let use_seed_geometry = std::env::var("ANDES_SEED_GEOMETRY").is_ok();
+    let template: Param = if !use_seed_geometry {
         eprintln!(
-            "train: ANDES_DERIVE_GEOMETRY set — deriving partition geometry from {} PSMs",
+            "train: deriving own partition geometry from {} PSMs (set ANDES_SEED_GEOMETRY=1 to reuse seed geometry)",
             labels.len()
         );
         let corpus = corpus_charge_masses(&labels);
         let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 3 };
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
+        eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
         seed_param.clone()
     };
     let accum_scorer = RankScorer::new(&template);
@@ -3746,15 +3749,17 @@ fn run_train(
         eprintln!("train: using seed fragment tolerance {:?}", seed_param.mme);
     }
 
-    // ── 3b. Geometry template: own-derived (ANDES_DERIVE_GEOMETRY) or seed ─────
-    // Default is the seed's geometry. When ANDES_DERIVE_GEOMETRY is set, the
-    // partition/segment geometry is derived from this corpus instead (the seed
-    // still supplies non-geometry metadata). Env-gated, not a CLI flag, so the
-    // benchmark harness can A/B seed-vs-derived; becomes the default once the
-    // sweep validates it.
-    let template: Param = if std::env::var("ANDES_DERIVE_GEOMETRY").is_ok() {
+    // ── 3b. Geometry template: own-derived (DEFAULT) or seed (opt-out) ─────────
+    // andes derives the partition/segment geometry from THIS corpus by default
+    // (own geometry — no MS-GF+ partition structure); the seed supplies only
+    // non-geometry metadata. Opt out with ANDES_SEED_GEOMETRY=1 to reuse the
+    // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
+    // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
+    // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
+    let use_seed_geometry = std::env::var("ANDES_SEED_GEOMETRY").is_ok();
+    let template: Param = if !use_seed_geometry {
         eprintln!(
-            "train: ANDES_DERIVE_GEOMETRY set — deriving partition geometry from {} PSMs",
+            "train: deriving own partition geometry from {} PSMs (set ANDES_SEED_GEOMETRY=1 to reuse seed geometry)",
             psms.len()
         );
         let corpus: Vec<(i32, f32)> = psms
@@ -3764,6 +3769,7 @@ fn run_train(
         let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 3 };
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
+        eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
         seed_param.clone()
     };
 

@@ -1282,36 +1282,22 @@ fn run_precursor_calibration(
     Ok(stats)
 }
 
-/// gzipped spectrum files (`foo.mzML.gz`, `foo.mgf.gz`) are not supported: the
-/// readers need an uncompressed file, and the bare `.gz` extension would
-/// otherwise be mis-routed to the MGF parser (silent garbage). Error clearly.
-fn reject_gzipped_spectrum(path: &std::path::Path) -> Result<(), String> {
-    if path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|s| s.eq_ignore_ascii_case("gz"))
-    {
-        return Err(format!(
-            "gzipped spectrum input is not supported: {}. Decompress it first \
-             (e.g. `gunzip`) and pass the uncompressed .mzML/.mgf/.raw file or .d directory.",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
-mod gz_routing_tests {
-    use super::reject_gzipped_spectrum;
+mod format_routing_tests {
+    use super::input_format_flags;
     use std::path::Path;
 
+    // A gzipped spectrum is read transparently (input::open_maybe_gz) and must be
+    // routed by its UNDERLYING extension, not the bare `.gz` (finding 2.5).
     #[test]
-    fn rejects_gzipped_spectra_accepts_plain() {
-        assert!(reject_gzipped_spectrum(Path::new("x/foo.mzML.gz")).is_err());
-        assert!(reject_gzipped_spectrum(Path::new("foo.mgf.GZ")).is_err());
-        assert!(reject_gzipped_spectrum(Path::new("foo.mzML")).is_ok());
-        assert!(reject_gzipped_spectrum(Path::new("foo.raw")).is_ok());
-        assert!(reject_gzipped_spectrum(Path::new("run.d")).is_ok());
+    fn gz_is_routed_by_the_underlying_extension() {
+        // (is_mzml, is_raw, is_d, is_mgf)
+        assert_eq!(input_format_flags(Path::new("x/foo.mzML.gz")), (true, false, false, false));
+        assert_eq!(input_format_flags(Path::new("foo.MGF.GZ")), (false, false, false, true));
+        assert_eq!(input_format_flags(Path::new("foo.mzML")), (true, false, false, false));
+        assert_eq!(input_format_flags(Path::new("foo.raw")), (false, true, false, false));
+        assert_eq!(input_format_flags(Path::new("run.d")), (false, false, true, false));
+        assert_eq!(input_format_flags(Path::new("foo.mgf")), (false, false, false, true));
     }
 }
 
@@ -1328,11 +1314,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (search_enzyme, extra_enzymes) = parse_enzymes(&cli.enzyme)?;
     warn_if_universal_protease_combo(search_enzyme, &extra_enzymes);
     let spectrum_paths = &cli.spectrum;
-    // Reject gzipped spectra up front: `foo.mzML.gz` has extension "gz", so the
-    // by-extension format router would silently fall through to the MGF parser.
-    for p in spectrum_paths {
-        reject_gzipped_spectrum(p)?;
-    }
     let spectrum_path: PathBuf = spectrum_paths[0].clone();
     let database_path: PathBuf = cli.database.expect("database validated in main");
     // PIN destination. Normally `--output-pin`. Under `--rescore` without an
@@ -1428,18 +1409,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the activation+analyzer are auto-detected from metadata; for MGF
     // (metadata-less) the `--fragmentation` / `--fragment-tol-*` flags drive
     // `resolve_metadataless_selection`.
-    let spectrum_ext = spectrum_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase());
-    let is_mzml = matches!(spectrum_ext.as_deref(), Some("mzml"));
-    // Native Thermo `.raw` (feature-gated; needs the .NET 8 runtime).
-    let is_raw = matches!(spectrum_ext.as_deref(), Some("raw"));
-    // Native Bruker timsTOF `.d` (feature-gated; pure Rust, no vendor runtime).
-    // A `.d` is a directory, but the path still carries the `.d` extension.
-    let is_d = matches!(spectrum_ext.as_deref(), Some("d"));
-    // Anything that is neither mzML, `.raw`, nor `.d` is treated as MGF (default).
-    let is_mgf = !is_mzml && !is_raw && !is_d;
+    // Detect the format from the underlying extension, stripping a trailing
+    // `.gz` first so `spectra.mzML.gz` routes as mzML (not mis-routed to MGF by
+    // the bare `.gz`); input::open_maybe_gz then reads it transparently. Native
+    // `.raw` (Thermo, .NET 8) and `.d` (Bruker timsTOF, pure Rust) are
+    // binary/directory and never gzipped. Anything else is treated as MGF.
+    let (is_mzml, is_raw, is_d, is_mgf) = input_format_flags(&spectrum_path);
 
     // Detect (activation, instrument) from the input for auto-routing.
     // mzML peeks the file; Thermo `.raw` reads vendor metadata; Bruker `.d`

@@ -54,6 +54,7 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         max_rank: 150,
         mass_tier_occupancy: 1,
         max_mass_tiers: 2,
+        max_fragment_charge: 2,
     };
     let derived = derive_geometry(&corpus, &base, &cfg);
 

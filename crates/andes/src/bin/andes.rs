@@ -2689,7 +2689,7 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
             labels.len()
         );
         let corpus = corpus_charge_masses(&labels);
-        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33 };
+        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 1 };
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         seed_param.clone()
@@ -3761,7 +3761,7 @@ fn run_train(
             .iter()
             .map(|p| (p.charge as i32, p.peptide.mass() as f32))
             .collect();
-        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33 };
+        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 1 };
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         seed_param.clone()

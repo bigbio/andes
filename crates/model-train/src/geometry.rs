@@ -27,6 +27,15 @@ pub struct GeometryConfig {
     pub mass_tier_occupancy: usize,
     /// Upper bound on mass tiers per charge.
     pub max_mass_tiers: usize,
+    /// Upper bound on the fragment ion charge modelled per partition. The scorer
+    /// enumerates and peak-matches a theoretical fragment for EVERY ion type in a
+    /// partition, so emitting b/y at charges `1..=C-1` (precursor-1) multiplies
+    /// per-candidate scoring cost ~linearly in the number of fragment charges —
+    /// for high-res data those high-charge fragments almost never match yet cost
+    /// most of the wall time (~7.7× on Astral). The seed models charge-1 only;
+    /// capping here at 1 restores that speed. 2 captures the (small) high-charge-
+    /// precursor gain at ~2× cost. Effective bound is `min(C-1, max_fragment_charge)`.
+    pub max_fragment_charge: i32,
 }
 
 /// Adaptive per-charge mass-tier count: `n_psms / occupancy`, clamped to
@@ -129,10 +138,15 @@ pub fn build_partition_skeleton(
 /// pass); the ion *set* is what makes the geometry own-derived.
 pub fn build_frag_off_table(
     partitions: &[Partition],
+    max_fragment_charge: i32,
 ) -> FxHashMap<Partition, Vec<FragmentOffsetFrequency>> {
     let mut table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = FxHashMap::default();
+    let cap = max_fragment_charge.max(1);
     for &part in partitions {
-        let max_frag_charge = (part.charge - 1).max(1);
+        // Bound the fragment charge by both chemistry (<= precursor-1) and the
+        // configured cap, with a floor of 1. Capping avoids the per-candidate
+        // scoring blow-up from rarely-observed high-charge fragments.
+        let max_frag_charge = (part.charge - 1).clamp(1, cap);
         let mut frags: Vec<FragmentOffsetFrequency> = Vec::new();
         for fc in 1..=max_frag_charge {
             frags.push(FragmentOffsetFrequency {
@@ -159,7 +173,7 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
     let tiers_by_charge =
         derive_tiers_by_charge(charge_masses, cfg.mass_tier_occupancy, cfg.max_mass_tiers);
     let partitions = build_partition_skeleton(&tiers_by_charge, cfg.num_segments);
-    let frag_off_table = build_frag_off_table(&partitions);
+    let frag_off_table = build_frag_off_table(&partitions, cfg.max_fragment_charge);
 
     // Charge histogram + span from the corpus.
     let mut charge_counts: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
@@ -291,6 +305,7 @@ mod tests {
             max_rank: 150,
             mass_tier_occupancy: 1,
             max_mass_tiers: 2,
+            max_fragment_charge: 2,
         };
         let p = derive_geometry(&charge_masses, &base, &cfg);
 
@@ -399,22 +414,21 @@ mod tests {
     }
 
     #[test]
-    fn frag_off_table_ion_set_scales_with_precursor_charge() {
+    fn frag_off_table_caps_fragment_charge() {
         let p2 = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
         let p3 = Partition { charge: 3, parent_mass: 800.0, seg_num: 0 };
-        let table = build_frag_off_table(&[p2, p3]);
 
-        // charge 2 -> fragment charges {1}: b1, y1, + Noise = 3 entries.
-        let f2 = table.get(&p2).expect("partition present");
-        assert_eq!(ion_charges(f2, true), vec![1], "b-ion charges");
-        assert_eq!(ion_charges(f2, false), vec![1], "y-ion charges");
-        assert_eq!(f2.iter().filter(|f| f.ion_type.is_noise()).count(), 1, "one Noise");
-        assert_eq!(f2.len(), 3);
+        // cap=1 (seed-matching, fast): every partition gets charge-1 b/y only,
+        // even the charge-3 precursor — this is what kept the seed at ~298 spec/s.
+        let t1 = build_frag_off_table(&[p2, p3], 1);
+        assert_eq!(ion_charges(t1.get(&p2).unwrap(), true), vec![1]);
+        assert_eq!(ion_charges(t1.get(&p3).unwrap(), true), vec![1], "charge-3 capped to frag 1");
+        assert_eq!(t1.get(&p3).unwrap().len(), 3, "b1,y1,Noise");
 
-        // charge 3 -> fragment charges {1,2}: b1,b2,y1,y2,+Noise = 5 entries.
-        let f3 = table.get(&p3).expect("partition present");
-        assert_eq!(ion_charges(f3, true), vec![1, 2]);
-        assert_eq!(ion_charges(f3, false), vec![1, 2]);
-        assert_eq!(f3.len(), 5);
+        // cap=2: charge-3 precursor gets b/y at {1,2}; charge-2 still bounded by C-1=1.
+        let t2 = build_frag_off_table(&[p2, p3], 2);
+        assert_eq!(ion_charges(t2.get(&p2).unwrap(), true), vec![1], "charge-2 bounded by C-1");
+        assert_eq!(ion_charges(t2.get(&p3).unwrap(), true), vec![1, 2]);
+        assert_eq!(t2.get(&p3).unwrap().len(), 5, "b1,b2,y1,y2,Noise");
     }
 }

@@ -27,14 +27,16 @@ pub struct GeometryConfig {
     pub mass_tier_occupancy: usize,
     /// Upper bound on mass tiers per charge.
     pub max_mass_tiers: usize,
-    /// Upper bound on the fragment ion charge modelled per partition. The scorer
-    /// enumerates and peak-matches a theoretical fragment for EVERY ion type in a
-    /// partition, so emitting b/y at charges `1..=C-1` (precursor-1) multiplies
-    /// per-candidate scoring cost ~linearly in the number of fragment charges —
-    /// for high-res data those high-charge fragments almost never match yet cost
-    /// most of the wall time (~7.7× on Astral). The seed models charge-1 only;
-    /// capping here at 1 restores that speed. 2 captures the (small) high-charge-
-    /// precursor gain at ~2× cost. Effective bound is `min(C-1, max_fragment_charge)`.
+    /// Upper bound on the fragment ion charge modelled per partition, **for
+    /// non-deconvolved (low-res) data only**. The scorer enumerates and
+    /// peak-matches a theoretical fragment for EVERY ion type in a partition, so
+    /// each extra fragment charge multiplies per-candidate cost. High-res data
+    /// (`apply_deconvolution = true`) collapses every fragment to its 1+ form
+    /// before scoring, so [`derive_geometry`] forces the bound to 1 there
+    /// regardless of this value (modelling 2+/3+ on high-res is pure noise — it
+    /// caused a 7.7× slowdown + score degeneracy on Astral). On low-res data the
+    /// effective bound is `min(C-1, max_fragment_charge)`; the low-res TMT seed
+    /// genuinely uses charges 1,2,3, so the default is 3.
     pub max_fragment_charge: i32,
 }
 
@@ -173,7 +175,15 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
     let tiers_by_charge =
         derive_tiers_by_charge(charge_masses, cfg.mass_tier_occupancy, cfg.max_mass_tiers);
     let partitions = build_partition_skeleton(&tiers_by_charge, cfg.num_segments);
-    let frag_off_table = build_frag_off_table(&partitions, cfg.max_fragment_charge);
+    // Regime-aware fragment-charge bound. High-res data deconvolutes every
+    // fragment to its singly-charged monoisotopic form BEFORE scoring, so the
+    // model only needs charge-1 b/y (modelling 2+/3+ there is pure noise — it
+    // caused score degeneracy + a 7.7x slowdown on Astral). Low-res data is NOT
+    // deconvolved, so genuine 2+/3+ fragments survive and must be modelled (the
+    // low-res TMT seed uses charges 1,2,3). Derive the bound from the corpus's
+    // own deconvolution setting rather than copying a seed's ion set.
+    let effective_frag_charge = if base.apply_deconvolution { 1 } else { cfg.max_fragment_charge };
+    let frag_off_table = build_frag_off_table(&partitions, effective_frag_charge);
 
     // Charge histogram + span from the corpus.
     let mut charge_counts: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
@@ -291,6 +301,41 @@ mod tests {
             LabeledMatch { spectrum_index: 1, peptide: p2, charge: 3, confidence: 0.001 },
         ];
         assert_eq!(corpus_charge_masses(&labels), vec![(2, m1), (3, m2)]);
+    }
+
+    #[test]
+    fn derive_geometry_deconv_forces_fragment_charge_one() {
+        // High-res (apply_deconvolution = true): all fragments collapse to 1+,
+        // so even a charge-4 precursor partition gets charge-1 b/y only,
+        // regardless of cfg.max_fragment_charge.
+        let mut base = base_param();
+        base.apply_deconvolution = true;
+        let charge_masses = vec![(2, 1000.0), (4, 2500.0)];
+        let cfg = GeometryConfig {
+            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
+            max_mass_tiers: 1, max_fragment_charge: 3,
+        };
+        let p = derive_geometry(&charge_masses, &base, &cfg);
+        for frags in p.frag_off_table.values() {
+            assert!(ion_charges(frags, true).iter().all(|&c| c == 1), "deconv -> b charge 1 only");
+            assert!(ion_charges(frags, false).iter().all(|&c| c == 1), "deconv -> y charge 1 only");
+        }
+    }
+
+    #[test]
+    fn derive_geometry_low_res_keeps_multicharge_fragments() {
+        // Low-res (apply_deconvolution = false): a charge-3 precursor keeps
+        // fragments up to min(C-1, cap) = 2.
+        let mut base = base_param();
+        base.apply_deconvolution = false;
+        let charge_masses = vec![(3, 2000.0)];
+        let cfg = GeometryConfig {
+            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
+            max_mass_tiers: 1, max_fragment_charge: 3,
+        };
+        let p = derive_geometry(&charge_masses, &base, &cfg);
+        let frags = p.frag_off_table.values().next().expect("a partition");
+        assert_eq!(ion_charges(frags, true), vec![1, 2], "no deconv, charge-3 -> b at 1,2");
     }
 
     #[test]

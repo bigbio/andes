@@ -19,6 +19,7 @@ use model_train::geometry::{derive_geometry, GeometryConfig};
 use model_train::store::ModelStore;
 
 const PROTON: f64 = 1.007_276_49;
+const H2O: f64 = 18.010_564_68;
 
 fn make_peptide(seq: &[u8]) -> Peptide {
     let residues = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
@@ -74,9 +75,27 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     let scorer = RankScorer::new(&derived);
 
     // (2) Accumulate a spectrum for a charge-2 peptide into the DERIVED partitions.
-    let peptide = make_peptide(b"PEPTIDE");
+    let seq = b"PEPTIDE";
+    let peptide = make_peptide(seq);
     let charge = 2u8;
     let precursor_mz = (peptide.mass() + charge as f64 * PROTON) / charge as f64;
+
+    // Place peaks AT the peptide's own b/y ion m/z (charge 1) so the model's
+    // enumerated fragments actually match and record real ranks.
+    let res: Vec<f64> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap().mass).collect();
+    let mut peaks: Vec<(f64, f32)> = Vec::new();
+    let mut cum = 0.0;
+    for (i, &m) in res.iter().take(res.len() - 1).enumerate() {
+        cum += m;
+        peaks.push((cum + PROTON, (2000 - i as i32 * 120).max(100) as f32)); // b(i+1)+
+    }
+    let mut cum_y = 0.0;
+    for (i, &m) in res.iter().rev().take(res.len() - 1).enumerate() {
+        cum_y += m;
+        peaks.push((cum_y + H2O + PROTON, (1900 - i as i32 * 120).max(100) as f32)); // y(i+1)+
+    }
+    peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
     let spectrum = Spectrum {
         title: "synthetic".into(),
         precursor_mz,
@@ -84,15 +103,23 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
         precursor_charge: Some(charge as i32),
         rt_seconds: None,
         scan: None,
-        peaks: (1..=20)
-            .map(|i| (150.0 + i as f64 * 45.0, (2000 - i * 90) as f32))
-            .collect(),
+        peaks,
         activation_method: None,
         isolation_lower_offset: None,
         isolation_upper_offset: None,
     };
     let mut stats = CountStats::default();
     StatsAccumulator::new(&scorer).accumulate(&mut stats, &spectrum, &peptide, charge);
+
+    // ★ THE BUG + FIX: a GEOMETRY-ONLY template (empty rank_dist_table) must still
+    // enumerate ion MEMBERSHIP from frag_off_table and record matched-fragment
+    // ranks. Pre-fix, the accumulator enumerated ions from the (empty) trained
+    // LLR cache → ZERO facts → uniform/flat tables → degenerate, slow scoring.
+    // Post-fix it enumerates membership → real ranks land in counts.rank.
+    assert!(
+        !stats.rank.is_empty(),
+        "geometry-only accumulate recorded NO rank facts — trained tables would be flat (the bug)"
+    );
 
     // (3) Estimate fills the learned tables from the accumulated counts.
     let estimated = Estimator::new(EstimatorConfig::default()).estimate(&stats, &derived);

@@ -32,7 +32,7 @@ use model_train::{
     gate::evaluate_candidate,
     geometry::{corpus_charge_masses, derive_geometry, GeometryConfig},
     labeled::bootstrap_labels,
-    select::{select, SelectionKey},
+    select::{select, select_nearest, SelectionKey},
     protocol_to_experiment_class as store_protocol_to_experiment_class,
     store::{
         SourceLedger,
@@ -4728,22 +4728,23 @@ fn load_param_from_store(
 
         exact_id.unwrap_or_else(|| {
             // `build_selection_key` already applies family fallback + all
-            // normalizations, so the family_fn here is the identity. (L6) Pass
-            // `None` for the generic so a true no-match returns `None`, letting us
-            // WARN that the chosen model is a last-resort fallback rather than
-            // silently emitting `hcd_qexactive_tryp` for mis-detected data.
-            match select(&entries, &key, |i| i.to_string(), None) {
-                Some(id) => id.to_string(),
-                None => {
-                    eprintln!(
-                        "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
-                         — falling back to the generic 'hcd_qexactive_tryp'; scores may be \
-                         mis-calibrated for this data. Pin a model with --model if this is wrong.",
-                        key.activation, key.instrument, key.enzyme, key.experiment_class
-                    );
-                    "hcd_qexactive_tryp".to_string()
-                }
+            // normalizations, so the family_fn here is the identity. When the
+            // exact ladder misses (e.g. a protocol the own-only store doesn't
+            // carry), select_nearest routes to the CLOSEST own model — relaxing
+            // the enzyme, then the activation (keeping the instrument) — and only
+            // resolves to the standard base as a last resort, WARNing which model
+            // it substituted so the user can pin one with --model.
+            let (id, substituted) =
+                select_nearest(&entries, &key, |i| i.to_string(), "hcd_qexactive_tryp");
+            if substituted {
+                eprintln!(
+                    "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
+                     — using the nearest available model '{}'; scores may be mis-calibrated for \
+                     this data. Pin a model with --model if this is wrong.",
+                    key.activation, key.instrument, key.enzyme, key.experiment_class, id
+                );
             }
+            id.to_string()
         })
     };
 

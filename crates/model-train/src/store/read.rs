@@ -1141,11 +1141,13 @@ mod tests {
         let store = ModelStore::open(&path)
             .expect("failed to open bundled models.parquet");
         let entries = store.selection_entries();
-        // The bundle ships 19 own-trained models, one selection entry each.
+        // The bundle ships 17 own-trained models, one selection entry each. (Two
+        // seed-copy phospho slugs with no own training data were dropped; their
+        // queries route to the nearest own model via select_nearest.)
         assert_eq!(
             entries.len(),
-            19,
-            "expected 19 selection entries, got {}",
+            17,
+            "expected 17 selection entries, got {}",
             entries.len()
         );
         let found = entries

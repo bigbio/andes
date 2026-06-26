@@ -229,6 +229,48 @@ pub fn select<'a>(
     generic_id
 }
 
+/// Like [`select`] but it NEVER fails: when the exact backoff ladder misses, it
+/// relaxes the digest ENZYME (→ `Tryp`, which barely affects the fragmentation
+/// tables) while keeping the activation and instrument — the dominant scoring
+/// axes — and only then resolves to `standard_id`. This is what lets an own-only
+/// store route a requested protocol it doesn't carry to the CLOSEST available
+/// model, or to a standard base.
+///
+/// The activation (ion chemistry: b/y vs c/z) and instrument resolution matter
+/// far more to the scoring tables than the enzyme, so we deliberately do NOT
+/// cross activation here — a same-activation standard base (`hcd_qexactive_tryp`,
+/// b/y) is a better fallback for an HCD/CID query than an ETD (c/z) model at a
+/// matching instrument would be. (Activation-aware nearest-matching across
+/// resolutions is a future refinement.)
+///
+/// Returns `(model_id, substituted)` — `substituted` is `true` when an inexact
+/// (nearest or standard) model was chosen, so the caller can WARN which model
+/// was actually used. The exact ladder ([`select`]) is consulted FIRST and
+/// unchanged, so any selection that already resolved is byte-identical; and an
+/// all-`Tryp` query never triggers the enzyme relaxation, so tryptic selection
+/// (the equivalence gate) is unchanged.
+pub fn select_nearest<'a>(
+    entries: &'a [SelectionEntry],
+    key: &SelectionKey,
+    instrument_family: impl Fn(&str) -> String + Copy,
+    standard_id: &'a str,
+) -> (&'a str, bool) {
+    // 1. Exact ladder (instrument + mods, with family fallback) — unchanged.
+    if let Some(id) = select(entries, key, instrument_family, None) {
+        return (id, false);
+    }
+    // 2. Relax the enzyme to the dominant tryptic models, KEEPING the activation
+    //    and instrument.
+    if key.enzyme != "Tryp" {
+        let k = SelectionKey { enzyme: "Tryp".to_string(), ..key.clone() };
+        if let Some(id) = select(entries, &k, instrument_family, None) {
+            return (id, true);
+        }
+    }
+    // 3. Standard base — guaranteed present in the bundled store.
+    (standard_id, true)
+}
+
 /// Parse a manifest experiment-class string (e.g. `"phospho+tmt"`) into a `BTreeSet<String>`.
 ///
 /// An empty string or the literal `"standard"` maps to an empty set.
@@ -413,6 +455,73 @@ mod tests {
             ),
             Some("qe")
         );
+    }
+
+    // ---- select_nearest (own-only store fallback) ----
+
+    /// The 17-own store has cid_lowres_tryp but NOT cid_lowres_tryp_phosphorylation
+    /// (dropped seed-copy). A CID phospho query routes to cid_lowres_tryp via the
+    /// EXACT ladder's pre-existing empty-class step (the plain model covers the
+    /// backbone; the phospho mod is still searched via --mods), so it is NOT a
+    /// nearest/standard substitution — no WARN.
+    #[test]
+    fn dropped_cid_phospho_routes_to_cid_tryp() {
+        let m = vec![
+            e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+        ];
+        let (id, sub) = select_nearest(
+            &m, &key("CID", "LowRes", "Tryp", &["phospho"]), fam, "hcd_qexactive_tryp");
+        assert_eq!(id, "cid_lowres_tryp");
+        assert!(!sub, "empty-class fallback is the existing ladder, not a nearest substitution");
+    }
+
+    /// Enzyme backoff: a GluC query with no GluC model falls to the Tryp model of
+    /// the SAME activation+instrument.
+    #[test]
+    fn enzyme_backoff_to_tryp() {
+        let m = vec![e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[])];
+        let (id, sub) = select_nearest(
+            &m, &key("CID", "LowRes", "GluC", &[]), fam, "hcd_qexactive_tryp");
+        assert_eq!(id, "cid_lowres_tryp");
+        assert!(sub);
+    }
+
+    /// No same-activation/instrument tryptic model at all → standard base. We do
+    /// NOT cross activation, so an ETD model present at a different instrument is
+    /// deliberately NOT chosen for an HCD query (a b/y standard beats a c/z model).
+    #[test]
+    fn no_enzyme_match_falls_back_to_standard_not_other_activation() {
+        let m = vec![
+            e("etd_highres_tryp", "ETD", "HighRes", "Tryp", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+        ];
+        // HCD/HighRes/Tryp (no exact, no HCD/HighRes model) → standard HCD, NOT the
+        // ETD model (which only happens to share the HighRes instrument).
+        let (id, sub) = select_nearest(
+            &m, &key("HCD", "HighRes", "Tryp", &[]), fam, "hcd_qexactive_tryp");
+        assert_eq!(id, "hcd_qexactive_tryp");
+        assert!(sub);
+    }
+
+    /// Standard fallback: nothing close at all → the standard base, substituted.
+    #[test]
+    fn falls_back_to_standard_base() {
+        let m = vec![e("etd_highres_tryp", "ETD", "HighRes", "Tryp", &[])];
+        let (id, sub) = select_nearest(
+            &m, &key("UVPD", "TimsTOF", "ArgC", &[]), fam, "hcd_qexactive_tryp");
+        assert_eq!(id, "hcd_qexactive_tryp");
+        assert!(sub);
+    }
+
+    /// An exact hit is NOT flagged as substituted (byte-identical to `select`).
+    #[test]
+    fn exact_hit_not_substituted() {
+        let m = manifest();
+        let (id, sub) = select_nearest(
+            &m, &key("HCD", "OrbitrapAstral", "Tryp", &[]), fam, "generic");
+        assert_eq!(id, "astral");
+        assert!(!sub);
     }
 
     // ---- parse_experiment_class ----

@@ -1012,6 +1012,25 @@ fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
     }
 }
 
+/// Build the geometry-derivation [`GeometryConfig`], honouring `ANDES_GEO_*`
+/// env overrides so the structural knobs can be swept before settling on fixed
+/// defaults. Unset vars fall back to the validated defaults.
+fn geo_config_from_env() -> GeometryConfig {
+    fn envp<T: std::str::FromStr>(key: &str, default: T) -> T {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+    GeometryConfig {
+        num_segments: envp("ANDES_GEO_SEGMENTS", 2),
+        max_rank: envp("ANDES_GEO_MAX_RANK", 150),
+        mass_tier_occupancy: envp("ANDES_GEO_OCCUPANCY", 2500),
+        max_mass_tiers: envp("ANDES_GEO_MAX_TIERS", 33),
+        max_fragment_charge: envp("ANDES_GEO_MAX_FRAG_CHARGE", 3),
+    }
+}
+
 fn merge_parse_stats(acc: &mut ParseStats, part: ParseStats) {
     acc.error_count += part.error_count;
     for e in part.first_errors {
@@ -2704,7 +2723,7 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
             labels.len()
         );
         let corpus = corpus_charge_masses(&labels);
-        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 3 };
+        let geo_cfg = geo_config_from_env();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
@@ -3779,7 +3798,7 @@ fn run_train(
             .iter()
             .map(|p| (p.charge as i32, p.peptide.mass() as f32))
             .collect();
-        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 3 };
+        let geo_cfg = geo_config_from_env();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");

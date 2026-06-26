@@ -632,25 +632,24 @@ fn non_met_first_residue_does_not_trigger_cleavage() {
 //                   free C from start=5: ends 10..=11 not cleavage → 10 → 1 span.
 //                   free N for end=5: starts 0..=0 not cleavage → (none, since 0 is cleavage pos) → 0.
 //                   free N for end=11: starts 0..=6 not cleavage → 1,2,3,4,6 → 5 spans.
-//   Total new semi spans = 5 + 1 + 0 + 5 = 11. Total ntt=1 = 2 (strict) + 11 = 13.
+//   (Semi spans are additionally bounded by max_missed_cleavages — see the
+//   per-span derivation below the NTT_PROTEIN const for the missed=0 count.)
 //
 // Use "AAAAAKAAAAR" with min=5, max=11, missed=0, no mods.
 
 const NTT_PROTEIN: &[u8] = b"AAAAAKAAAAR";
-//   Trypsin cleavage positions: [0, 6, 11] (cleavage AFTER K at idx 5 → next pos = 6;
-//   cleavage AFTER R at idx 10 → next pos = 11).
-//   Let me recompute: for C-term enzyme, position i is in cleavage_positions if
-//   enzyme.is_cleavable_after(seq[i-1]). K is at index 5 → position 6 (since i=6, seq[5]=K).
-//   R is at index 10 → position 11. Plus 0 and 11.
-//   Cleavage positions: [0, 6, 11].
-//   Strict (ntt=2, min=5, max=11, missed=0): spans (0,6)=len6, (6,11)=len5 → 2.
-//   Free-C from tryptic starts:
-//     start=0: ends in [5,11] not in {0,6,11} → 5,7,8,9,10 → 5 spans.
-//     start=6: ends in [11,11] not in {0,6,11} → none (11 is cleavage) → 0 spans.
-//   Free-N for tryptic ends:
-//     end=6: starts in [0,1] not in {0,6,11} → 1 → 1 span.
-//     end=11: starts in [0,6] not in {0,6,11} → 1,2,3,4,5 → 5 spans. But start=6 is cleavage → {0} at start: 1,2,3,4,5 → 5 spans.
-//   New semi spans = 5 + 0 + 1 + 5 = 11. Total ntt=1 = 2 + 11 = 13.
+//   Trypsin cleavage positions: [0, 6, 11] (cleavage AFTER K at idx 5 → pos 6;
+//   AFTER R at idx 10 → pos 11; plus the protein ends 0 and 11).
+//   Strict (ntt=2, min=5, max=11, missed=0): (0,6)=len6, (6,11)=len5 → 2 spans.
+//   Semi-tryptic spans (ntt=1) ALSO respect max_missed_cleavages (=0 here), so any
+//   span whose [start,end] straddles the internal cleavage site (pos 6) is pruned —
+//   the same internal-site bound the strict path applies (finding 2.4):
+//     Free-C from start=0: non-cleavage ends 5,7,8,9,10; only end=5 has 0 internal
+//       sites (5<6) → 1 span (7,8,9,10 each cross site 6 → pruned).
+//     Free-C from start=6: no non-cleavage end in [11,11] → 0.
+//     Free-N for end=6:  start=1 (non-cleavage), no site in (1,6) → 1 span.
+//     Free-N for end=11: starts 1..5 all cross site 6 → pruned → 0.
+//   New semi spans = 1 + 0 + 1 + 0 = 2. Total ntt=1 = 2 strict + 2 semi = 4.
 
 fn ntt_protein_index() -> SearchIndex {
     make_index(NTT_PROTEIN)
@@ -690,8 +689,9 @@ fn ntt_1_emits_strict_plus_semi_spans() {
         ntt1_count > ntt2_count,
         "ntt=1 ({ntt1_count}) should generate more candidates than ntt=2 ({ntt2_count})"
     );
-    // Expected: 2 strict + 11 semi = 13.
-    assert_eq!(ntt1_count, 13, "expected 13 ntt=1 candidates, got {ntt1_count}");
+    // Expected: 2 strict + 2 semi = 4 (semi spans crossing the internal K/R site
+    // are pruned by the max_missed_cleavages=0 bound — finding 2.4).
+    assert_eq!(ntt1_count, 4, "expected 4 ntt=1 candidates, got {ntt1_count}");
 }
 
 /// ntt=1 includes spans with a tryptic N-term but non-tryptic C-term.

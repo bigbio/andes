@@ -350,21 +350,39 @@ fn build_terminal_variants(
         term_variants.iter().any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false))
     };
 
-    let n_term_variants: &[AminoAcid] = if pos == 0 {
-        let loc = if is_protein_n_term { ModLocation::ProtNTerm } else { ModLocation::NTerm };
-        params.aa_set.variants_for(residue, loc)
+    // Peptide-terminal mods (NTerm/CTerm — e.g. the fixed TMT/iTRAQ N-term tag)
+    // apply at EVERY pos-0 / last residue. Protein-terminal mods (ProtNTerm/
+    // ProtCTerm — e.g. variable Acetyl) additionally apply only at the protein
+    // terminus. UNION both at a protein terminus so a protein-N/C-term peptide
+    // still carries its fixed peptide-terminal tag (finding 2.3: the lookup was
+    // ProtNTerm XOR NTerm, silently dropping a fixed N-term tag on protein-N-term
+    // peptides → wrong precursor/fragment mass for TMT/iTRAQ). Non-protein-term
+    // and label-free cases are unchanged (the union adds nothing there).
+    let union_terminal =
+        |peptide_loc: ModLocation, protein_loc: ModLocation, at_protein_term: bool| -> Vec<AminoAcid> {
+            let mut v = params.aa_set.variants_for(residue, peptide_loc).to_vec();
+            if at_protein_term {
+                for pv in params.aa_set.variants_for(residue, protein_loc) {
+                    if !v.contains(pv) {
+                        v.push(pv.clone());
+                    }
+                }
+            }
+            v
+        };
+    let n_term_variants: Vec<AminoAcid> = if pos == 0 {
+        union_terminal(ModLocation::NTerm, ModLocation::ProtNTerm, is_protein_n_term)
     } else {
-        &[]
+        Vec::new()
     };
-    let c_term_variants: &[AminoAcid] = if pos == span_len - 1 {
-        let loc = if is_protein_c_term { ModLocation::ProtCTerm } else { ModLocation::CTerm };
-        params.aa_set.variants_for(residue, loc)
+    let c_term_variants: Vec<AminoAcid> = if pos == span_len - 1 {
+        union_terminal(ModLocation::CTerm, ModLocation::ProtCTerm, is_protein_c_term)
     } else {
-        &[]
+        Vec::new()
     };
 
-    let has_fixed_n = has_fixed_in(n_term_variants);
-    let has_fixed_c = has_fixed_in(c_term_variants);
+    let has_fixed_n = has_fixed_in(&n_term_variants);
+    let has_fixed_c = has_fixed_in(&c_term_variants);
 
     // If a fixed terminal mod is mandatory at this position, the
     // unmodified Anywhere variant is not a legal candidate. Drop the
@@ -386,12 +404,12 @@ fn build_terminal_variants(
     // mod is present, the modded variant is the only legal one for
     // that mod's residue/location slot; variable mods stack on top
     // by adding additional explored variants.
-    for v in n_term_variants {
+    for v in &n_term_variants {
         if !variants.contains(v) {
             variants.push(v.clone());
         }
     }
-    for v in c_term_variants {
+    for v in &c_term_variants {
         if !variants.contains(v) {
             variants.push(v.clone());
         }
@@ -1032,6 +1050,48 @@ mod tests {
         params.min_length = 3;
         params.max_variable_mods_per_peptide = 1;
         (db, params)
+    }
+
+    // 2.3: a FIXED peptide-N-term mod (e.g. the TMT/iTRAQ tag) must be applied at
+    // EVERY pos-0 residue, INCLUDING protein-N-term peptides. Before the fix,
+    // build_terminal_variants looked up ProtNTerm XOR NTerm, so a protein-N-term
+    // peptide silently lost its fixed N-term tag → wrong precursor/fragment mass.
+    #[test]
+    fn fixed_n_term_tag_applies_to_protein_n_term_peptides() {
+        use model::modification::ResidueSpec;
+        let tmt = Modification {
+            name: "TMT6plex".into(), mass_delta: 229.162932,
+            residue: ResidueSpec::Wildcard, location: ModLocation::NTerm,
+            fixed: true, accession: None, neutral_losses: Vec::new(), loss_class: 0,
+        };
+        let acetyl = Modification {
+            name: "Acetyl".into(), mass_delta: 42.010565,
+            residue: ResidueSpec::Wildcard, location: ModLocation::ProtNTerm,
+            fixed: false, accession: None, neutral_losses: Vec::new(), loss_class: 0,
+        };
+        // First tryptic peptide AAAPEPTIDEK sits at the protein N-terminus (offset 0).
+        let target = ProteinDb { proteins: vec![Protein {
+            accession: "P1".into(), description: "tmt protein-nterm".into(),
+            sequence: b"AAAPEPTIDEKQQQR".to_vec(),
+        }]};
+        let db = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard()
+            .add_fixed_mod(tmt).add_variable_mod(acetyl).build().unwrap();
+        let mut params = SearchParams::default_tryptic(aa_set);
+        params.min_length = 3;
+        params.max_variable_mods_per_peptide = 1;
+
+        let pnt: Vec<_> = enumerate_candidates(&db, &params, "XXX")
+            .filter(|c| !c.is_decoy && c.start_offset_in_protein == 0)
+            .collect();
+        assert!(!pnt.is_empty(), "expected a protein-N-term peptide candidate");
+        let has_tmt = pnt.iter().any(|c| {
+            c.peptide.residues.first()
+                .and_then(|aa| aa.mod_.as_ref())
+                .map(|m| (m.mass_delta - 229.162932).abs() < 1e-3)
+                .unwrap_or(false)
+        });
+        assert!(has_tmt, "protein-N-term peptide must carry the fixed N-term TMT tag (finding 2.3)");
     }
 
     /// Set-equality assertion shared by both tests: the lazy candidate set for

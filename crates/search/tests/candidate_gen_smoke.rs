@@ -413,17 +413,16 @@ fn protein_n_term_mod_only_at_protein_start() {
     assert_eq!(mod_count, 1, "exactly 1 candidate should have the ProtNTerm mod");
 }
 
-/// N-Term mod applies to peptides NOT at the protein N-terminus.
+/// A peptide-N-term (NTerm) mod applies to EVERY peptide N-terminus, INCLUDING
+/// the protein-start peptide — the protein's N-terminus IS a peptide N-terminus
+/// (finding 2.3: the old ProtNTerm-XOR-NTerm lookup wrongly excluded it).
 ///
 /// Protein: "AAAAAAKMAAAAAK" (length 14).
-/// Trypsin + missed=0 → (0..7)="AAAAAAK" (protein N-term) + (7..14)="MAAAAAK" (not at start).
-/// With NTerm Acetyl variable mod and max_mods=1:
-/// - "AAAAAAK" (protein start, offset=0): ProtNTerm lookup → NTerm mod does NOT apply → 1 unmod.
-/// - "MAAAAAK" (offset=7): NTerm lookup → NTerm Acetyl applies to position 0 → 2 variants.
-///
-/// Total: 3.
+/// Trypsin + missed=0 → (0..7)="AAAAAAK" (protein N-term) + (7..14)="MAAAAAK".
+/// With an NTerm Acetyl variable mod and max_mods=1, BOTH peptides get
+/// unmod + NTerm-acetyl = 2 each → total 4.
 #[test]
-fn nterm_mod_applies_to_non_protein_start_peptides() {
+fn nterm_mod_applies_to_every_peptide_n_terminus() {
     let target = ProteinDb {
         proteins: vec![Protein {
             accession: "P1".into(), description: "".into(),
@@ -441,23 +440,22 @@ fn nterm_mod_applies_to_non_protein_start_peptides() {
         .filter(|c| !c.is_decoy)
         .collect();
 
-    // "AAAAAAK" (protein start): no NTerm mod (gets ProtNTerm which is empty) → 1.
-    // "MAAAAAK" (offset 7): NTerm Acetyl applies → 2.
-    // Total: 3.
+    // Both "AAAAAAK" (offset 0) and "MAAAAAK" (offset 7): unmod + NTerm-acetyl = 2 each.
+    // Total: 4.
     assert_eq!(
-        candidates.len(), 3,
-        "expected 3 candidates (1 for protein-start, 2 for offset-7 with NTerm mod), got {}",
+        candidates.len(), 4,
+        "expected 4 candidates (unmod + NTerm-acetyl for both the offset-0 and offset-7 peptides), got {}",
         candidates.len()
     );
 
-    // The modified candidate must be at offset 7 (non-protein-start).
-    let modified: Vec<_> = candidates.iter()
+    // The NTerm mod now appears on BOTH peptide N-termini (offsets 0 and 7).
+    let modified_offsets: std::collections::BTreeSet<usize> = candidates.iter()
         .filter(|c| c.peptide.residues[0].is_modified())
+        .map(|c| c.start_offset_in_protein)
         .collect();
-    assert_eq!(modified.len(), 1, "exactly 1 candidate should have the NTerm mod");
     assert_eq!(
-        modified[0].start_offset_in_protein, 7,
-        "NTerm mod should appear on the offset-7 peptide, not at offset 0"
+        modified_offsets, std::collections::BTreeSet::from([0usize, 7usize]),
+        "NTerm acetyl should appear on both peptide N-termini (offsets 0 and 7), got {modified_offsets:?}"
     );
 
     // The NTerm mod must NOT appear at any internal position.
@@ -477,17 +475,19 @@ fn nterm_mod_applies_to_non_protein_start_peptides() {
 ///
 /// Protein: "MAAAAKR" (length 7).
 /// Trypsin cleaves after K(5): spans (0..6)="MAAAAK" (not protein C-term) and (6..7)="R" (protein C-term).
+/// A protein-C-term peptide is ALSO a peptide C-terminus, so it carries BOTH the
+/// peptide-C-term (CTerm) and protein-C-term (ProtCTerm) mods (finding 2.3).
 /// Standard pass:
-/// - "MAAAAK" (end < protein_len): CTerm Amide applies → 2 variants.
-/// - "R" (end == protein_len): ProtCTerm GlyGly applies → 2 variants.
+/// - "MAAAAK" (end < protein_len): CTerm Amide → unmod + Amide = 2.
+/// - "R" (end == protein_len): CTerm Amide ∪ ProtCTerm GlyGly → unmod + Amide + GlyGly = 3.
 ///
 /// Met-cleavage pass (sub_seq="AAAAKR"):
-/// - "AAAA" (abs_end=5, not protein C-term): CTerm Amide → 2 variants.
-/// - "KR" (abs_end=7, protein C-term): ProtCTerm GlyGly → 2 variants.
+/// - "AAAA" (abs_end=5, not protein C-term): CTerm Amide → 2.
+/// - "KR" (abs_end=7, protein C-term): CTerm Amide ∪ ProtCTerm GlyGly → 3.
 ///
-/// Total: 4 + 4 = 8.
+/// Total: (2 + 3) + (2 + 3) = 10.
 ///
-/// This also verifies the C-Term mod does NOT bleed into the protein-C-term peptide, and vice versa.
+/// The CTerm mod does NOT bleed into NON-protein-C-term peptides (those get only Amide).
 #[test]
 fn c_term_and_protein_c_term_distinguished() {
     let target = ProteinDb {
@@ -507,12 +507,12 @@ fn c_term_and_protein_c_term_distinguished() {
         .filter(|c| !c.is_decoy)
         .collect();
 
-    // Standard pass: "MAAAAK"×2 + "R"×2 = 4.
-    // B5 Met-cleavage pass (sub_seq="AAAAKR"): "AAAA"×2 + "KR"×2 = 4.
-    // Total: 8.
+    // Standard pass: "MAAAAK"×2 + "R"×3 = 5.
+    // B5 Met-cleavage pass (sub_seq="AAAAKR"): "AAAA"×2 + "KR"×3 = 5.
+    // Total: 10 (protein-C-term peptides "R"/"KR" each carry unmod + CTerm Amide + ProtCTerm GlyGly).
     assert_eq!(
-        candidates.len(), 8,
-        "expected 8 candidates, got {}",
+        candidates.len(), 10,
+        "expected 10 candidates, got {}",
         candidates.len()
     );
 
@@ -525,14 +525,16 @@ fn c_term_and_protein_c_term_distinguished() {
         if let Some(last) = residues.last() {
             if let Some(m) = &last.mod_ {
                 if is_prot_c_term {
-                    // Protein-C-term peptide "R" or Met-cleaved "KR": should get ProtCTerm GlyGly (+114.04).
+                    // Protein-C-term peptide "R"/"KR": it is BOTH a peptide and a
+                    // protein C-terminus, so either the CTerm Amide (-0.984) OR the
+                    // ProtCTerm GlyGly (+114.04) is valid here (finding 2.3).
                     assert!(
-                        m.mass_delta > 0.0,
-                        "protein C-term peptide got a negative delta mod ({}); expected ProtCTerm GlyGly",
+                        (m.mass_delta - (-0.984)).abs() < 0.01 || m.mass_delta > 100.0,
+                        "protein C-term peptide got an unexpected mod delta ({}); expected CTerm Amide or ProtCTerm GlyGly",
                         m.mass_delta
                     );
                 } else {
-                    // Non-protein-C-term peptide "MAAAAK" or Met-cleaved "AAAA": should get CTerm Amide (-0.984).
+                    // Non-protein-C-term peptide "MAAAAK" or Met-cleaved "AAAA": only CTerm Amide (-0.984).
                     assert!(
                         m.mass_delta < 0.0,
                         "non-protein-C-term peptide got a positive delta mod ({}); expected CTerm Amide",

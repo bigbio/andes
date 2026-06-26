@@ -4731,7 +4731,7 @@ fn load_param_from_store(
             // normalizations, so the family_fn here is the identity. When the
             // exact ladder misses (e.g. a protocol the own-only store doesn't
             // carry), select_nearest routes to the CLOSEST own model — relaxing
-            // the enzyme, then the activation (keeping the instrument) — and only
+            // the enzyme (keeping the activation and instrument) — and only
             // resolves to the standard base as a last resort, WARNing which model
             // it substituted so the user can pin one with --model.
             let (id, substituted) =

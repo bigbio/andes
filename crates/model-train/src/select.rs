@@ -88,10 +88,14 @@ fn try_steps_1_to_3<'a>(
         return None;
     }
 
-    // Step 1: exact experiment_class set match.
+    // Step 1: exact experiment_class set match. On ties (two models with the
+    // same selection dimensions, e.g. a mis-tagged manifest), pick the
+    // lexicographically smallest model_id so selection is independent of
+    // manifest/partition row order.
     if let Some(hit) = candidates
         .iter()
-        .find(|e| &e.experiment_class == key_class)
+        .filter(|e| &e.experiment_class == key_class)
+        .min_by_key(|e| &e.model_id)
     {
         return Some(&hit.model_id);
     }
@@ -146,7 +150,11 @@ fn try_steps_1_to_3<'a>(
     for tag in LABELING_TAGS {
         if key_class.contains(*tag) {
             let tag_set: BTreeSet<String> = std::iter::once((*tag).to_string()).collect();
-            if let Some(hit) = candidates.iter().find(|e| e.experiment_class == tag_set) {
+            if let Some(hit) = candidates
+                .iter()
+                .filter(|e| e.experiment_class == tag_set)
+                .min_by_key(|e| &e.model_id)
+            {
                 return Some(&hit.model_id);
             }
         }
@@ -164,12 +172,13 @@ fn try_step_4<'a>(
 ) -> Option<&'a str> {
     entries
         .iter()
-        .find(|e| {
+        .filter(|e| {
             e.activation == activation
                 && e.instrument == instrument
                 && e.enzyme == enzyme
                 && e.experiment_class.is_empty()
         })
+        .min_by_key(|e| &e.model_id)
         .map(|e| e.model_id.as_str())
 }
 
@@ -330,6 +339,27 @@ mod tests {
             e("qe", "HCD", "QExactive", "Tryp", &[]),
             e("generic", "HCD", "QExactive", "Tryp", &[]),
         ]
+    }
+
+    #[test]
+    fn exact_match_tie_break_is_deterministic() {
+        // Two models with identical selection dimensions (e.g. a mis-tagged
+        // manifest where an Astral model is left labelled QExactive). Exact-match
+        // selection must be independent of row order: lexicographically smallest
+        // model_id wins regardless of which appears first in the manifest.
+        let a = vec![
+            e("zzz_model", "HCD", "QExactive", "Tryp", &[]),
+            e("aaa_model", "HCD", "QExactive", "Tryp", &[]),
+        ];
+        let mut b = a.clone();
+        b.reverse();
+        let k = key("HCD", "QExactive", "Tryp", &[]);
+        assert_eq!(select(&a, &k, fam, None), Some("aaa_model"));
+        assert_eq!(
+            select(&a, &k, fam, None),
+            select(&b, &k, fam, None),
+            "selection must not depend on manifest row order"
+        );
     }
 
     #[test]

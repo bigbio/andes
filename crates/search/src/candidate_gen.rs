@@ -178,11 +178,15 @@ fn enumerate_protein_from_offset(
                 if cleavage_set.contains(&end) {
                     continue;
                 }
-                // No missed-cleavage filter here: the "missed cleavages between
-                // start and end" concept applies to strictly tryptic spans.
-                // For semi-tryptic peptides with a free terminus, the
-                // semi-tryptic span is treated as a single candidate regardless
-                // of internal K/R residues.
+                // Bound internal missed cleavages the same way strict spans are
+                // bounded: a semi-tryptic peptide with more than
+                // `max_missed_cleavages` internal K/R sites is implausible and
+                // bloats the candidate space.
+                if missed_cleavages_between(&cleavage_positions, start, end)
+                    > params.max_missed_cleavages
+                {
+                    continue;
+                }
                 emit_span(&ctx, start, end, &mut out);
             }
         }
@@ -197,6 +201,12 @@ fn enumerate_protein_from_offset(
             for start in s_min..=s_max {
                 // Skip starts that are cleavage positions — already emitted above.
                 if cleavage_set.contains(&start) {
+                    continue;
+                }
+                // Same internal missed-cleavage bound as the strict path.
+                if missed_cleavages_between(&cleavage_positions, start, end)
+                    > params.max_missed_cleavages
+                {
                     continue;
                 }
                 emit_span(&ctx, start, end, &mut out);
@@ -810,6 +820,42 @@ pub fn lazy_candidates_for_nominal_window(
         }
     }
     out
+}
+
+/// Count enzymatic cleavage sites strictly inside `(start, end)` — the missed
+/// cleavages internal to a candidate peptide spanning `[start, end]`.
+/// `cleavage_positions` is sorted ascending. This matches the strict path's
+/// `offset` count (positions strictly between the two tryptic ends), so the
+/// semi-specific path can apply the same `max_missed_cleavages` bound.
+fn missed_cleavages_between(cleavage_positions: &[u32], start: u32, end: u32) -> u32 {
+    let lo = cleavage_positions.partition_point(|&c| c <= start);
+    let hi = cleavage_positions.partition_point(|&c| c < end);
+    (hi - lo) as u32
+}
+
+#[cfg(test)]
+mod missed_cleavage_tests {
+    use super::missed_cleavages_between;
+
+    #[test]
+    fn counts_only_strictly_internal_sites() {
+        let cp = [0u32, 5, 10, 15, 20];
+        // endpoints excluded; only sites strictly between are missed cleavages
+        assert_eq!(missed_cleavages_between(&cp, 0, 20), 3); // 5,10,15
+        assert_eq!(missed_cleavages_between(&cp, 5, 10), 0); // adjacent
+        assert_eq!(missed_cleavages_between(&cp, 0, 10), 1); // 5
+        assert_eq!(missed_cleavages_between(&cp, 3, 17), 3); // 5,10,15
+        assert_eq!(missed_cleavages_between(&cp, 10, 11), 0);
+    }
+
+    #[test]
+    fn matches_strict_offset_semantics() {
+        // For strict spans cp[i]..cp[j], missed == j-i-1 (the strict path's offset).
+        let cp = [2u32, 9, 14, 30];
+        assert_eq!(missed_cleavages_between(&cp, cp[0], cp[1]), 0); // offset 0
+        assert_eq!(missed_cleavages_between(&cp, cp[0], cp[2]), 1); // offset 1
+        assert_eq!(missed_cleavages_between(&cp, cp[0], cp[3]), 2); // offset 2
+    }
 }
 
 #[cfg(test)]

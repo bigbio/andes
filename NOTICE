@@ -11,8 +11,8 @@ You may obtain a copy of the License at
 Origin and acknowledgement
 ================================================================================
 
-andes started from MS-GF+ as an effort to improve its performance, and grew into
-a complete new algorithm of its own.
+andes started as an effort to optimize MS-GF+ and is now an independent search
+algorithm of its own.
 
 We gratefully acknowledge MS-GF+ and the open-source proteomics search engines
 whose work has informed the field and ours:

@@ -17,7 +17,39 @@ use crate::labeled::LabeledMatch;
 pub struct GeometryConfig {
     pub num_segments: i32,
     pub max_rank: i32,
-    pub n_mass_tiers: usize,
+    /// Target training PSMs per mass tier. The tier count is derived PER CHARGE
+    /// as `n_psms_for_charge / mass_tier_occupancy` (clamped to
+    /// `1..=max_mass_tiers`), so a data-rich charge gets many tiers and a sparse
+    /// charge few — matching how a seed geometry's resolution scales with data
+    /// (the dominant charges carry ~33 tiers, sparse charges ~4). A fixed small
+    /// tier count instead under-partitions the data-rich charges, leaving the
+    /// learned tables badly undertrained.
+    pub mass_tier_occupancy: usize,
+    /// Upper bound on mass tiers per charge.
+    pub max_mass_tiers: usize,
+    /// Upper bound on the fragment ion charge modelled per partition, **for
+    /// non-deconvolved (low-res) data only**. The scorer enumerates and
+    /// peak-matches a theoretical fragment for EVERY ion type in a partition, so
+    /// each extra fragment charge multiplies per-candidate cost. High-res data
+    /// (`apply_deconvolution = true`) collapses every fragment to its 1+ form
+    /// before scoring, so [`derive_geometry`] forces the bound to 1 there
+    /// regardless of this value (modelling 2+/3+ on high-res is pure noise — it
+    /// caused a 7.7× slowdown + score degeneracy on Astral). On low-res data the
+    /// effective bound is `min(C-1, max_fragment_charge)`; the low-res TMT seed
+    /// genuinely uses charges 1,2,3, so the default is 3.
+    pub max_fragment_charge: i32,
+}
+
+/// Adaptive per-charge mass-tier count: `n_psms / occupancy`, clamped to
+/// `1..=max_tiers`. An `occupancy` of 0 falls back to `max_tiers` (treat every
+/// charge as data-rich). Guarantees at least one tier so a charge with any data
+/// is never dropped.
+fn adaptive_n_tiers(n_psms: usize, occupancy: usize, max_tiers: usize) -> usize {
+    let cap = max_tiers.max(1);
+    if occupancy == 0 {
+        return cap;
+    }
+    (n_psms / occupancy).clamp(1, cap)
 }
 
 /// b-ion m/z offset (proton). y-ion offset adds a water. Both CODATA-sourced
@@ -62,7 +94,8 @@ pub fn derive_mass_tiers(masses: &[f32], n_tiers: usize) -> Vec<f32> {
 /// `tiers_by_charge` input to [`build_partition_skeleton`].
 pub fn derive_tiers_by_charge(
     charge_masses: &[(i32, f32)],
-    n_tiers: usize,
+    occupancy: usize,
+    max_tiers: usize,
 ) -> Vec<(i32, Vec<f32>)> {
     let mut by_charge: std::collections::BTreeMap<i32, Vec<f32>> =
         std::collections::BTreeMap::new();
@@ -71,7 +104,11 @@ pub fn derive_tiers_by_charge(
     }
     by_charge
         .into_iter()
-        .map(|(charge, masses)| (charge, derive_mass_tiers(&masses, n_tiers)))
+        .map(|(charge, masses)| {
+            // Adaptive: tier count scales with this charge's data volume.
+            let n_tiers = adaptive_n_tiers(masses.len(), occupancy, max_tiers);
+            (charge, derive_mass_tiers(&masses, n_tiers))
+        })
         .collect()
 }
 
@@ -103,10 +140,15 @@ pub fn build_partition_skeleton(
 /// pass); the ion *set* is what makes the geometry own-derived.
 pub fn build_frag_off_table(
     partitions: &[Partition],
+    max_fragment_charge: i32,
 ) -> FxHashMap<Partition, Vec<FragmentOffsetFrequency>> {
     let mut table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = FxHashMap::default();
+    let cap = max_fragment_charge.max(1);
     for &part in partitions {
-        let max_frag_charge = (part.charge - 1).max(1);
+        // Bound the fragment charge by both chemistry (<= precursor-1) and the
+        // configured cap, with a floor of 1. Capping avoids the per-candidate
+        // scoring blow-up from rarely-observed high-charge fragments.
+        let max_frag_charge = (part.charge - 1).clamp(1, cap);
         let mut frags: Vec<FragmentOffsetFrequency> = Vec::new();
         for fc in 1..=max_frag_charge {
             frags.push(FragmentOffsetFrequency {
@@ -130,9 +172,18 @@ pub fn build_frag_off_table(
 /// (data_type, tolerance, deconvolution, version, precursor offsets) from `base`.
 /// Learned tables are left empty for [`Estimator::estimate`] to fill.
 pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &GeometryConfig) -> Param {
-    let tiers_by_charge = derive_tiers_by_charge(charge_masses, cfg.n_mass_tiers);
+    let tiers_by_charge =
+        derive_tiers_by_charge(charge_masses, cfg.mass_tier_occupancy, cfg.max_mass_tiers);
     let partitions = build_partition_skeleton(&tiers_by_charge, cfg.num_segments);
-    let frag_off_table = build_frag_off_table(&partitions);
+    // Regime-aware fragment-charge bound. High-res data deconvolutes every
+    // fragment to its singly-charged monoisotopic form BEFORE scoring, so the
+    // model only needs charge-1 b/y (modelling 2+/3+ there is pure noise — it
+    // caused score degeneracy + a 7.7x slowdown on Astral). Low-res data is NOT
+    // deconvolved, so genuine 2+/3+ fragments survive and must be modelled (the
+    // low-res TMT seed uses charges 1,2,3). Derive the bound from the corpus's
+    // own deconvolution setting rather than copying a seed's ion set.
+    let effective_frag_charge = if base.apply_deconvolution { 1 } else { cfg.max_fragment_charge };
+    let frag_off_table = build_frag_off_table(&partitions, effective_frag_charge);
 
     // Charge histogram + span from the corpus.
     let mut charge_counts: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
@@ -253,13 +304,54 @@ mod tests {
     }
 
     #[test]
+    fn derive_geometry_deconv_forces_fragment_charge_one() {
+        // High-res (apply_deconvolution = true): all fragments collapse to 1+,
+        // so even a charge-4 precursor partition gets charge-1 b/y only,
+        // regardless of cfg.max_fragment_charge.
+        let mut base = base_param();
+        base.apply_deconvolution = true;
+        let charge_masses = vec![(2, 1000.0), (4, 2500.0)];
+        let cfg = GeometryConfig {
+            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
+            max_mass_tiers: 1, max_fragment_charge: 3,
+        };
+        let p = derive_geometry(&charge_masses, &base, &cfg);
+        for frags in p.frag_off_table.values() {
+            assert!(ion_charges(frags, true).iter().all(|&c| c == 1), "deconv -> b charge 1 only");
+            assert!(ion_charges(frags, false).iter().all(|&c| c == 1), "deconv -> y charge 1 only");
+        }
+    }
+
+    #[test]
+    fn derive_geometry_low_res_keeps_multicharge_fragments() {
+        // Low-res (apply_deconvolution = false): a charge-3 precursor keeps
+        // fragments up to min(C-1, cap) = 2.
+        let mut base = base_param();
+        base.apply_deconvolution = false;
+        let charge_masses = vec![(3, 2000.0)];
+        let cfg = GeometryConfig {
+            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
+            max_mass_tiers: 1, max_fragment_charge: 3,
+        };
+        let p = derive_geometry(&charge_masses, &base, &cfg);
+        let frags = p.frag_off_table.values().next().expect("a partition");
+        assert_eq!(ion_charges(frags, true), vec![1, 2], "no deconv, charge-3 -> b at 1,2");
+    }
+
+    #[test]
     fn derive_geometry_assembles_geometry_only_param() {
         let base = base_param();
         let charge_masses = vec![
             (2, 1000.0), (2, 1200.0), (2, 1400.0), (2, 1600.0),
             (3, 2000.0), (3, 2400.0),
         ];
-        let cfg = GeometryConfig { num_segments: 2, max_rank: 150, n_mass_tiers: 2 };
+        let cfg = GeometryConfig {
+            num_segments: 2,
+            max_rank: 150,
+            mass_tier_occupancy: 1,
+            max_mass_tiers: 2,
+            max_fragment_charge: 2,
+        };
         let p = derive_geometry(&charge_masses, &base, &cfg);
 
         // Geometry comes from config + data.
@@ -311,8 +403,37 @@ mod tests {
             (2, 100.0), (2, 200.0), (2, 300.0), (2, 400.0),
             (3, 500.0), (3, 600.0),
         ];
-        let got = derive_tiers_by_charge(&pairs, 2);
+        // occupancy=1, max=2 → each charge gets min(n_masses, 2) tiers = 2.
+        let got = derive_tiers_by_charge(&pairs, 1, 2);
         assert_eq!(got, vec![(2, vec![100.0, 300.0]), (3, vec![500.0, 600.0])]);
+    }
+
+    #[test]
+    fn adaptive_tiers_scale_with_per_charge_data() {
+        assert_eq!(adaptive_n_tiers(0, 100, 33), 1); // never drop a charge with data
+        assert_eq!(adaptive_n_tiers(50, 100, 33), 1); // below one occupancy → 1
+        assert_eq!(adaptive_n_tiers(100, 100, 33), 1);
+        assert_eq!(adaptive_n_tiers(350, 100, 33), 3);
+        assert_eq!(adaptive_n_tiers(100_000, 2500, 33), 33); // data-rich → capped
+        assert_eq!(adaptive_n_tiers(10, 0, 33), 33); // occupancy 0 → cap
+    }
+
+    #[test]
+    fn tiers_by_charge_data_rich_gets_more_tiers_than_sparse() {
+        // charge 2: 40 masses, charge 4: 4 masses; occupancy=10, cap=8.
+        let mut pairs: Vec<(i32, f32)> = Vec::new();
+        for i in 0..40 {
+            pairs.push((2, 500.0 + i as f32));
+        }
+        for i in 0..4 {
+            pairs.push((4, 800.0 + i as f32));
+        }
+        let got = derive_tiers_by_charge(&pairs, 10, 8);
+        let t2 = &got.iter().find(|(c, _)| *c == 2).unwrap().1;
+        let t4 = &got.iter().find(|(c, _)| *c == 4).unwrap().1;
+        assert_eq!(t2.len(), 4); // 40/10 = 4 tiers
+        assert_eq!(t4.len(), 1); // 4/10 < 1 → clamped to 1
+        assert!(t2.len() > t4.len());
     }
 
     #[test]
@@ -338,22 +459,21 @@ mod tests {
     }
 
     #[test]
-    fn frag_off_table_ion_set_scales_with_precursor_charge() {
+    fn frag_off_table_caps_fragment_charge() {
         let p2 = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
         let p3 = Partition { charge: 3, parent_mass: 800.0, seg_num: 0 };
-        let table = build_frag_off_table(&[p2, p3]);
 
-        // charge 2 -> fragment charges {1}: b1, y1, + Noise = 3 entries.
-        let f2 = table.get(&p2).expect("partition present");
-        assert_eq!(ion_charges(f2, true), vec![1], "b-ion charges");
-        assert_eq!(ion_charges(f2, false), vec![1], "y-ion charges");
-        assert_eq!(f2.iter().filter(|f| f.ion_type.is_noise()).count(), 1, "one Noise");
-        assert_eq!(f2.len(), 3);
+        // cap=1 (seed-matching, fast): every partition gets charge-1 b/y only,
+        // even the charge-3 precursor — this is what kept the seed at ~298 spec/s.
+        let t1 = build_frag_off_table(&[p2, p3], 1);
+        assert_eq!(ion_charges(t1.get(&p2).unwrap(), true), vec![1]);
+        assert_eq!(ion_charges(t1.get(&p3).unwrap(), true), vec![1], "charge-3 capped to frag 1");
+        assert_eq!(t1.get(&p3).unwrap().len(), 3, "b1,y1,Noise");
 
-        // charge 3 -> fragment charges {1,2}: b1,b2,y1,y2,+Noise = 5 entries.
-        let f3 = table.get(&p3).expect("partition present");
-        assert_eq!(ion_charges(f3, true), vec![1, 2]);
-        assert_eq!(ion_charges(f3, false), vec![1, 2]);
-        assert_eq!(f3.len(), 5);
+        // cap=2: charge-3 precursor gets b/y at {1,2}; charge-2 still bounded by C-1=1.
+        let t2 = build_frag_off_table(&[p2, p3], 2);
+        assert_eq!(ion_charges(t2.get(&p2).unwrap(), true), vec![1], "charge-2 bounded by C-1");
+        assert_eq!(ion_charges(t2.get(&p3).unwrap(), true), vec![1, 2]);
+        assert_eq!(t2.get(&p3).unwrap().len(), 5, "b1,b2,y1,y2,Noise");
     }
 }

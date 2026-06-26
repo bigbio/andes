@@ -1471,22 +1471,53 @@ fn visit_directional_node_ion_matches<F>(
                 ion_logs_slice.len()
             );
         }
-        for (ion, logs) in ion_logs_slice {
-            let theo_mz = match (is_prefix, *ion) {
-                (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
-                (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
-                _ => continue,
-            };
-            if param.segment_num(theo_mz, parent_mass) != seg {
-                continue;
+        if !ion_logs_slice.is_empty() {
+            // Trained template (all scoring + trained-model accumulation): iterate
+            // the ion types that carry learned LLR tables. UNCHANGED hot path.
+            for (ion, logs) in ion_logs_slice {
+                let theo_mz = match (is_prefix, *ion) {
+                    (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
+                    (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                    _ => continue,
+                };
+                if param.segment_num(theo_mz, parent_mass) != seg {
+                    continue;
+                }
+                let tol_da = if tight_high_res && param.data_type.instrument.is_high_resolution() {
+                    theo_mz * HIGHRES_ERR_PPM * 1e-6
+                } else {
+                    mme.as_da(theo_mz)
+                };
+                let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
+                visit(partition, *ion, rank, logs, theo_mz, tol_da);
             }
-            let tol_da = if tight_high_res && param.data_type.instrument.is_high_resolution() {
-                theo_mz * HIGHRES_ERR_PPM * 1e-6
-            } else {
-                mme.as_da(theo_mz)
-            };
-            let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
-            visit(partition, *ion, rank, logs, theo_mz, tol_da);
+        } else {
+            // GEOMETRY-ONLY template (initial own-geometry training, before the
+            // rank tables exist): the scorer's per-partition LLR cache is empty,
+            // so enumerate ion MEMBERSHIP from the partition's frag_off set
+            // instead, recording match facts with empty `logs`. Without this, a
+            // freshly-derived geometry records ZERO ion facts → the estimator
+            // emits the uniform Laplace prior → flat tables → degenerate, ~7×-slow
+            // scoring. The accumulator's `visit` only reads partition/ion/rank, so
+            // the empty `logs` is harmless. No-op at scoring time, where the
+            // trained cache is always populated (so this branch never runs).
+            for &ion in param.ion_types_for_partition_slice(charge, parent_mass, seg) {
+                let theo_mz = match (is_prefix, ion) {
+                    (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
+                    (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                    _ => continue,
+                };
+                if param.segment_num(theo_mz, parent_mass) != seg {
+                    continue;
+                }
+                let tol_da = if tight_high_res && param.data_type.instrument.is_high_resolution() {
+                    theo_mz * HIGHRES_ERR_PPM * 1e-6
+                } else {
+                    mme.as_da(theo_mz)
+                };
+                let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
+                visit(partition, ion, rank, &[], theo_mz, tol_da);
+            }
         }
     }
 }

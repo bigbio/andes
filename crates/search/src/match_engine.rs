@@ -1076,11 +1076,19 @@ impl<'a> PreparedSearch<'a> {
                 // node + cleavage), the same value emitted in the RawScore column.
                 features.tailor_score = psm.score / tailor_denom;
                 // Float-precision rank score (additive; ranking unchanged): the
-                // unrounded prefix+suffix node-score sum, recovering the
-                // discrimination per-split integer rounding compresses on short
-                // low-evidence peptides. Computed only for emitted PSMs.
-                features.rank_score_float =
-                    score_psm_float(ss, &cand.peptide, scorer, psm.charge_used, fragment_tolerance_da);
+                // emitted RawScore (`psm.score` = node + cleavage) with the
+                // per-split node sum left UNROUNDED, recovering the discrimination
+                // integer rounding compresses on short low-evidence peptides.
+                // `psm.score - score_psm(...)` is the cleavage credit (everything
+                // RawScore adds beyond the rounded node sum); swapping the rounded
+                // node sum for the unrounded `score_psm_float` yields the float
+                // RawScore. Computed only for emitted PSMs. (b/y-only: for the rare
+                // loss-bearing peptide it omits RawScore's neutral-loss term.)
+                let rounded_node =
+                    score_psm(ss, &cand.peptide, scorer, psm.charge_used, fragment_tolerance_da);
+                features.rank_score_float = score_psm_float(
+                    ss, &cand.peptide, scorer, psm.charge_used, fragment_tolerance_da,
+                ) + (psm.score - rounded_node);
                 features.strong_score = fuse_strong_score(&StrongScoreInputs {
                     intensity_signal: features.intensity_signal,
                     chance_match_surprise: features.chance_match_surprise,

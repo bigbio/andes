@@ -91,6 +91,18 @@ pub struct PsmFeatures {
     /// it is computed from never alters which candidates are scored or kept.
     pub tailor_score: f32,
 
+    /// Float-precision rank score: the prefix+suffix b/y node-score sum
+    /// accumulated WITHOUT the per-split `round() as i32` that compresses score
+    /// separation on short / low-evidence peptides (most acute at low
+    /// resolution). For standard peptides this is the unrounded equivalent of the
+    /// integer `RawScore`; for loss-bearing peptides it intentionally EXCLUDES
+    /// the neutral-loss term `RawScore` adds (b/y-only — see
+    /// [`scoring_crate::scoring::score_psm_float`]). Computed for emitted PSMs
+    /// only. Emitted as the additive `RankScoreFloat` PIN column alongside the
+    /// unchanged integer `RankScore`, so Percolator can recover the lost
+    /// discrimination without disrupting the existing ranking.
+    pub rank_score_float: f32,
+
     // ── Strong-score Stage-1 additive bolt-ons (new PIN columns) ───────────
     /// `Σ exp(-½ (ppmᵢ/σ)²)` over all matched b/y ions (σ = 7 ppm). A
     /// Gaussian-kernel "tight-match evidence" sum: a fragment matched at a few

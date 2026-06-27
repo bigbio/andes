@@ -202,6 +202,7 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("ListwiseScoreGap", f.listwise_score_gap as f64, Double),
         ("RawScore", f.strong_score as f64, Double),
         ("RawScoreCal", f.strong_score_cal as f64, Double),
+        ("RankScoreFloat", f.rank_score_float as f64, Double),
     ]
 }
 
@@ -432,6 +433,11 @@ fn write_header<W: Write>(
         "RawScore".to_string(),
         // RawScoreCal = S4 per-spectrum z-scored significance (formerly "StrongScoreCal").
         "RawScoreCal".to_string(),
+        // ADDITIVE float-precision rank score: the unrounded prefix+suffix node
+        // sum (no per-split round() as i32), recovering the discrimination
+        // integer rounding compresses on short low-evidence peptides. Ranking
+        // unchanged; emitted alongside the integer RankScore.
+        "RankScoreFloat".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -940,6 +946,7 @@ mod tests {
             "ListwiseScoreGap",
             "RawScore",
             "RawScoreCal",
+            "RankScoreFloat",
             "Peptide", "Proteins",
         ];
 

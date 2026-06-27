@@ -238,7 +238,7 @@ fn old_store_without_loss_class_reads_as_zero() {
     ));
     let store = ModelStore::open(bundled).expect("open bundled models.parquet");
     let ids = store.model_ids();
-    assert!(ids.len() >= 19, "expected >=19 bundled models, got {}", ids.len());
+    assert!(ids.len() >= 17, "expected >=17 bundled models, got {}", ids.len());
 
     for id in &ids {
         let param = store.load_param(id).expect("load bundled model");

@@ -32,7 +32,7 @@ use model_train::{
     gate::evaluate_candidate,
     geometry::{corpus_charge_masses, derive_geometry, GeometryConfig},
     labeled::bootstrap_labels,
-    select::{select, SelectionKey},
+    select::{select, select_nearest, SelectionKey},
     protocol_to_experiment_class as store_protocol_to_experiment_class,
     store::{
         SourceLedger,
@@ -1009,6 +1009,25 @@ fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
         } else {
             spec.title = format!("{prefix}{}", spec.title);
         }
+    }
+}
+
+/// Build the geometry-derivation [`GeometryConfig`], honouring `ANDES_GEO_*`
+/// env overrides so the structural knobs can be swept before settling on fixed
+/// defaults. Unset vars fall back to the validated defaults.
+fn geo_config_from_env() -> GeometryConfig {
+    fn envp<T: std::str::FromStr>(key: &str, default: T) -> T {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+    GeometryConfig {
+        num_segments: envp("ANDES_GEO_SEGMENTS", 2),
+        max_rank: envp("ANDES_GEO_MAX_RANK", 150),
+        mass_tier_occupancy: envp("ANDES_GEO_OCCUPANCY", 2500),
+        max_mass_tiers: envp("ANDES_GEO_MAX_TIERS", 33),
+        max_fragment_charge: envp("ANDES_GEO_MAX_FRAG_CHARGE", 3),
     }
 }
 
@@ -2704,7 +2723,7 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
             labels.len()
         );
         let corpus = corpus_charge_masses(&labels);
-        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 3 };
+        let geo_cfg = geo_config_from_env();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
@@ -3779,7 +3798,7 @@ fn run_train(
             .iter()
             .map(|p| (p.charge as i32, p.peptide.mass() as f32))
             .collect();
-        let geo_cfg = GeometryConfig { num_segments: 2, max_rank: 150, mass_tier_occupancy: 2500, max_mass_tiers: 33, max_fragment_charge: 3 };
+        let geo_cfg = geo_config_from_env();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
@@ -4728,22 +4747,23 @@ fn load_param_from_store(
 
         exact_id.unwrap_or_else(|| {
             // `build_selection_key` already applies family fallback + all
-            // normalizations, so the family_fn here is the identity. (L6) Pass
-            // `None` for the generic so a true no-match returns `None`, letting us
-            // WARN that the chosen model is a last-resort fallback rather than
-            // silently emitting `hcd_qexactive_tryp` for mis-detected data.
-            match select(&entries, &key, |i| i.to_string(), None) {
-                Some(id) => id.to_string(),
-                None => {
-                    eprintln!(
-                        "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
-                         — falling back to the generic 'hcd_qexactive_tryp'; scores may be \
-                         mis-calibrated for this data. Pin a model with --model if this is wrong.",
-                        key.activation, key.instrument, key.enzyme, key.experiment_class
-                    );
-                    "hcd_qexactive_tryp".to_string()
-                }
+            // normalizations, so the family_fn here is the identity. When the
+            // exact ladder misses (e.g. a protocol the own-only store doesn't
+            // carry), select_nearest routes to the CLOSEST own model — relaxing
+            // the enzyme (keeping the activation and instrument) — and only
+            // resolves to the standard base as a last resort, WARNing which model
+            // it substituted so the user can pin one with --model.
+            let (id, substituted) =
+                select_nearest(&entries, &key, |i| i.to_string(), "hcd_qexactive_tryp");
+            if substituted {
+                eprintln!(
+                    "WARN: no model matched (activation={}, instrument={}, enzyme={}, class={:?}) \
+                     — using the nearest available model '{}'; scores may be mis-calibrated for \
+                     this data. Pin a model with --model if this is wrong.",
+                    key.activation, key.instrument, key.enzyme, key.experiment_class, id
+                );
             }
+            id.to_string()
         })
     };
 

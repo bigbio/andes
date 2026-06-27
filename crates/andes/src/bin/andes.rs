@@ -1016,18 +1016,23 @@ fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
 /// env overrides so the structural knobs can be swept before settling on fixed
 /// defaults. Unset vars fall back to the validated defaults.
 fn geo_config_from_env() -> GeometryConfig {
-    fn envp<T: std::str::FromStr>(key: &str, default: T) -> T {
+    // Parse an override, but only accept it when `is_valid` (every geometry knob
+    // must be strictly positive — a zero/negative tier count or rank would
+    // produce a degenerate geometry). Invalid values fall back to the default
+    // rather than reaching `derive_geometry`.
+    fn envp<T: Copy + std::str::FromStr>(key: &str, default: T, is_valid: impl Fn(&T) -> bool) -> T {
         std::env::var(key)
             .ok()
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| v.parse::<T>().ok())
+            .filter(&is_valid)
             .unwrap_or(default)
     }
     GeometryConfig {
-        num_segments: envp("ANDES_GEO_SEGMENTS", 2),
-        max_rank: envp("ANDES_GEO_MAX_RANK", 150),
-        mass_tier_occupancy: envp("ANDES_GEO_OCCUPANCY", 2500),
-        max_mass_tiers: envp("ANDES_GEO_MAX_TIERS", 33),
-        max_fragment_charge: envp("ANDES_GEO_MAX_FRAG_CHARGE", 3),
+        num_segments: envp("ANDES_GEO_SEGMENTS", 2, |v| *v > 0),
+        max_rank: envp("ANDES_GEO_MAX_RANK", 150, |v| *v > 0),
+        mass_tier_occupancy: envp("ANDES_GEO_OCCUPANCY", 2500, |v| *v > 0),
+        max_mass_tiers: envp("ANDES_GEO_MAX_TIERS", 33, |v| *v > 0),
+        max_fragment_charge: envp("ANDES_GEO_MAX_FRAG_CHARGE", 3, |v| *v > 0),
     }
 }
 

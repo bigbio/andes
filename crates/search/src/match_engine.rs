@@ -30,7 +30,7 @@ use scoring_crate::mod_site_features::{
 };
 use scoring_crate::scoring::{
     frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
-    psm_edge_score, rich_ion_llr, score_psm,
+    psm_edge_score, rich_ion_llr, score_psm, score_psm_float,
     strong_score_calibrated, RankScorer, OnlineStats, ScoredSpectrum, StrongScoreInputs,
     DENSITY_HW,
 };
@@ -1075,6 +1075,12 @@ impl<'a> PreparedSearch<'a> {
                 // affect ranking. Uses `psm.score` (the PIN RawScore =
                 // node + cleavage), the same value emitted in the RawScore column.
                 features.tailor_score = psm.score / tailor_denom;
+                // Float-precision rank score (additive; ranking unchanged): the
+                // unrounded prefix+suffix node-score sum, recovering the
+                // discrimination per-split integer rounding compresses on short
+                // low-evidence peptides. Computed only for emitted PSMs.
+                features.rank_score_float =
+                    score_psm_float(ss, &cand.peptide, scorer, psm.charge_used, fragment_tolerance_da);
                 features.strong_score = fuse_strong_score(&StrongScoreInputs {
                     intensity_signal: features.intensity_signal,
                     chance_match_surprise: features.chance_match_surprise,
@@ -1903,6 +1909,7 @@ pub(crate) fn compute_psm_features(
         // `compute_psm_features` has no cross-candidate view, so default to the
         // uncalibrated RawScore-equivalent here (overwritten in fill_post_topn).
         tailor_score: 0.0,
+        rank_score_float: 0.0, // set per-PSM at emission (fill_post_topn)
         ppm_gaussian_score,
         longest_complementary_ladder,
         complementary_ion_balance,

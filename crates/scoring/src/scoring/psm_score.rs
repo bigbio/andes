@@ -367,6 +367,60 @@ pub fn score_psm(
     total as f32
 }
 
+/// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split
+/// node scores (`prefix_score + suffix_score`) instead of rounding each split to
+/// `i32` before accumulation.
+///
+/// Emitted as the additive `RankScoreFloat` PIN feature so Percolator can
+/// recover the discrimination that per-split integer rounding compresses away on
+/// short / low-evidence peptides (most acute at low resolution, where each
+/// split's LLR is small). Does NOT affect candidate ranking — [`score_psm`] and
+/// the integer `RawScore` are unchanged. Computed only for emitted PSMs.
+///
+/// The peptide-aware neutral-loss contribution that [`score_psm`] adds is
+/// omitted here: it is rare (loss-bearing mods only) and the feature targets the
+/// standard b/y separation.
+pub fn score_psm_float(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    scorer: &RankScorer,
+    charge: u8,
+    fragment_tolerance_da: f64,
+) -> f32 {
+    if charge == 0 {
+        return 0.0;
+    }
+    let n = peptide.length();
+    if n < 2 {
+        return 0.0;
+    }
+    let spectrum_parent_mass = scored_spec.parent_mass();
+    let peptide_nominal = peptide.nominal_residue_mass();
+    let mut total = 0.0_f32;
+    let mut prefix_mass_acc = 0.0_f64;
+    for s in 1..n {
+        let aa = &peptide.residues[s - 1];
+        let residue_mass = aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        prefix_mass_acc += residue_mass;
+        let prefix_nominal = nominal_from(prefix_mass_acc);
+        let suffix_nominal = peptide_nominal - prefix_nominal;
+        let contribution = scored_spec
+            .cached_split_score_f32(prefix_nominal, suffix_nominal)
+            .unwrap_or_else(|| {
+                scored_spec.node_score(
+                    prefix_nominal as f64,
+                    suffix_nominal as f64,
+                    scorer,
+                    charge,
+                    spectrum_parent_mass,
+                    fragment_tolerance_da,
+                ) as f32
+            });
+        total += contribution;
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -643,6 +643,20 @@ impl<'a> ScoredSpectrum<'a> {
         Some((pref + suff).round() as i32)
     }
 
+    /// Float-precision companion to [`cached_split_score`]: the UNROUNDED
+    /// `prefix_score + suffix_score` for this split. Used by
+    /// [`crate::scoring::score_psm_float`] to accumulate the rank score without
+    /// the per-split integer rounding that compresses score separation on short
+    /// low-evidence peptides. Returns `None` on the same cache-miss conditions.
+    pub fn cached_split_score_f32(&self, prefix_nominal: i32, suffix_nominal: i32) -> Option<f32> {
+        if prefix_nominal < 0 || suffix_nominal < 0 {
+            return None;
+        }
+        let pref = *self.prefix_score_cache.get(prefix_nominal as usize)?;
+        let suff = *self.suffix_score_cache.get(suffix_nominal as usize)?;
+        Some(pref + suff)
+    }
+
     /// Trace-only accessor: raw `prefix_score_cache[prefix_nominal]` if in
     /// range, i.e. the prefix-direction node score at that nominal mass.
     /// Returns `None` for an out-of-range index or an empty cache (the

@@ -856,6 +856,29 @@ impl<'a> ScoredSpectrum<'a> {
         (pref + suff).round() as i32
     }
 
+    /// Unrounded `f32` companion to [`node_score`]: `prefix_score + suffix_score`
+    /// WITHOUT the `round() as i32`. Used as the cache-miss fallback in
+    /// [`crate::scoring::score_psm_float`] so `RankScoreFloat` stays truly
+    /// unrounded even on the (rare) out-of-cache split, rather than silently
+    /// reverting to integer arithmetic.
+    pub fn node_score_f32(
+        &self,
+        prefix_nominal: f64,
+        suffix_nominal: f64,
+        scorer: &RankScorer,
+        charge: u8,
+        parent_mass: f64,
+        fragment_tolerance_da: f64,
+    ) -> f32 {
+        let pref = self.directional_node_score(
+            prefix_nominal, true, scorer, charge, parent_mass, fragment_tolerance_da,
+        );
+        let suff = self.directional_node_score(
+            suffix_nominal, false, scorer, charge, parent_mass, fragment_tolerance_da,
+        );
+        pref + suff
+    }
+
     /// Score for a single directional (prefix or suffix) node at `nominal_mass`.
     ///
     /// **Fragment tolerance:** the per-ion peak-lookup window comes from

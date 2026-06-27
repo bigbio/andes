@@ -407,14 +407,17 @@ pub fn score_psm_float(
         let contribution = scored_spec
             .cached_split_score_f32(prefix_nominal, suffix_nominal)
             .unwrap_or_else(|| {
-                scored_spec.node_score(
+                // Unrounded fallback: node_score_f32 (not node_score) so a cache
+                // miss does not silently revert RankScoreFloat to integer
+                // arithmetic (Codex review #1).
+                scored_spec.node_score_f32(
                     prefix_nominal as f64,
                     suffix_nominal as f64,
                     scorer,
                     charge,
                     spectrum_parent_mass,
                     fragment_tolerance_da,
-                ) as f32
+                )
             });
         total += contribution;
     }

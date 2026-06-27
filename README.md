@@ -261,7 +261,7 @@ The enzyme comes from `--enzyme` (default trypsin). In short: on modern formats 
 
 ### Supported models
 
-The v1 bundle ships **19 fully own-trained scoring models** in `resources/models/` (a per-protocol partitioned Parquet store), each trained on public PRIDE data for the regime it covers. Earlier bundles also shipped rarer regimes seeded from the original MS-GF+ models; those regimes that could not be retrained from a clean public corpus were **dropped** rather than shipped as seed copies, so the v1 store contains no MS-GF+-derived model data.
+The bundle ships **17 fully own-trained scoring models** in `resources/models/` (a per-protocol partitioned Parquet store), each trained on public PRIDE data for the regime it covers — with the partition geometry itself **derived from andes's own corpus** (no MS-GF+ code, constants, or geometry). Earlier bundles also shipped rarer regimes seeded from the original MS-GF+ models; those regimes that could not be retrained from a clean public corpus were **dropped** rather than shipped as seed copies, so the store contains no MS-GF+-derived model data.
 
 For a regime that is not bundled, andes auto-selects the nearest covered model (e.g. a TOF or low-res-ETD enzyme with no dedicated model falls back to the default `hcd_qexactive_tryp`); pass `--model <slug>` to force a specific one.
 

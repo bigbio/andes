@@ -12,7 +12,7 @@ pub mod gate;
 
 // Re-export the most commonly used types at the crate root.
 pub use store::{ModelStore, RawManifestEntry, protocol_to_experiment_class};
-pub use select::{SelectionEntry, SelectionKey, select, parse_experiment_class};
+pub use select::{SelectionEntry, SelectionKey, select, select_nearest, parse_experiment_class};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TrainError {

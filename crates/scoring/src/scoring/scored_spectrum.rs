@@ -62,6 +62,23 @@ fn trace_ions_enabled() -> bool {
     })
 }
 
+/// Pure soft-match blend: weight a matched ion's score by a Gaussian of its mass
+/// error `Δm = peak_mz − theo_mz` and blend toward the missing-ion score.
+///
+/// `w = exp(-½(Δm/σ)²)`, with `σ` the model's match tolerance (floored at `1e-6`
+/// Da to avoid a divide-by-zero when the tolerance is degenerate), and the returned score is
+/// `w·matched + (1-w)·missing`. A peak at the window centre (`Δm = 0`) gets
+/// `w = 1` (full `matched` credit); a peak at the tolerance edge gets `w ≪ 1`
+/// (mostly `missing`). Factored out as a small pure fn so the weighting math is
+/// unit-testable without the memoized env probe or the scoring DP.
+#[inline]
+fn soft_blend(matched: f32, missing: f32, dm: f32, sigma: f32) -> f32 {
+    let sigma = sigma.max(1e-6);
+    let z = dm / sigma;
+    let w = (-0.5 * z * z).exp();
+    w * matched + (1.0 - w) * missing
+}
+
 /// Per-ion match result returned by [`ScoredSpectrum::ion_match_facts`].
 ///
 /// Used by `StatsAccumulator` in `model-train` to accumulate rank and
@@ -936,19 +953,31 @@ impl<'a> ScoredSpectrum<'a> {
             charge,
             parent_mass,
             false, // scoring: keep the model's wide mme (0.5 Da)
-            |_, _, rank, logs, _, _| {
-                let score = match rank {
-                    Some(rank) => {
+            |_, _, matched_peak, logs, theo_mz, tol_da| {
+                let missing = if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 };
+                let score = match matched_peak {
+                    Some((rank, peak_mz)) => {
                         let idx = rank.min(max_rank).max(1) as usize - 1;
                         let base = if idx < logs.len() { logs[idx] } else { 0.0 };
                         // Additive per-peak GBDT term for the MATCHED peak.
-                        // Empty slice (no model) adds nothing → byte-identical.
+                        // Empty slice (no model) adds nothing.
                         let gbdt = gbdt_logit_by_rank.get(rank as usize).copied().unwrap_or(0.0);
-                        base + gbdt
+                        let matched = base + gbdt;
+                        // Soft matching (always on, PARAMETER-FREE): weight the matched
+                        // LLR by a Gaussian of the peak's mass error and blend toward the
+                        // missing-ion score for off-centre (likely-noise) peaks, instead
+                        // of the hard tolerance cliff that scored a 0.01 Da and a 0.49 Da
+                        // error identically inside the window. σ = the model's OWN match
+                        // tolerance `tol_da` (no tuned knob): a centre peak keeps full
+                        // credit, a window-edge peak keeps exp(-½) ≈ 0.61, far peaks
+                        // approach `missing`. High-res deconvolves to a tight window so
+                        // Δm ≪ σ and this is ~inert there; it self-scales per regime via
+                        // each model's `mme`. The matched-peak m/z is reused from the
+                        // SAME window scan that produced `rank` (no second scan).
+                        let dm = (peak_mz - theo_mz) as f32;
+                        soft_blend(matched, missing, dm, tol_da as f32)
                     }
-                    None => {
-                        if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 }
-                    }
+                    None => missing,
                 };
                 total += score;
             },
@@ -1298,9 +1327,11 @@ impl<'a> ScoredSpectrum<'a> {
                     self.charge,
                     self.parent_mass,
                     true, // training: tight high-res match -> consistent sharp tables
-                    |partition, ion, rank, _logs, theo_mz, tol_da| {
+                    |partition, ion, matched_peak, _logs, theo_mz, _tol_da| {
+                        // Reuse the matched peak's m/z from the driver's single
+                        // window scan (no re-scan via `matched_peak_mz`).
                         let (rank, error_bin) =
-                            ion_fact_rank_and_error(rank, peaks, ranks, theo_mz, tol_da, max_rank, esf);
+                            ion_fact_rank_and_error_from_match(matched_peak, theo_mz, max_rank, esf);
                         out.push(IonMatchFact {
                             partition,
                             ion_type: ion,
@@ -1425,29 +1456,11 @@ impl<'a> ScoredSpectrum<'a> {
                     self.charge,
                     self.parent_mass,
                     true, // training: tight high-res match -> consistent sharp tables
-                    |partition, _ion, rank, _logs, theo_mz, tol_da| {
-                        let (r, ebin) = match rank {
-                            Some(rk) => {
-                                let clamped = rk.min(max_rank).max(1);
-                                let ebin = if esf > 0 {
-                                    let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
-                                        .map(|peak_mz| (peak_mz - theo_mz) as f32)
-                                        .unwrap_or(0.0);
-                                    let mut idx = (error_da * esf as f32).round() as i32;
-                                    if idx > esf {
-                                        idx = esf;
-                                    } else if idx < -esf {
-                                        idx = -esf;
-                                    }
-                                    idx += esf;
-                                    Some(idx as u32)
-                                } else {
-                                    None
-                                };
-                                (Some(clamped), ebin)
-                            }
-                            None => (None, None),
-                        };
+                    |partition, _ion, matched_peak, _logs, theo_mz, _tol_da| {
+                        // Reuse the matched peak's m/z from the driver's single
+                        // window scan (no re-scan via `matched_peak_mz`).
+                        let (r, ebin) =
+                            ion_fact_rank_and_error_from_match(matched_peak, theo_mz, max_rank, esf);
                         out.push((partition, r, ebin));
                     },
                 );
@@ -1478,7 +1491,10 @@ fn visit_directional_node_ion_matches<F>(
     tight_high_res: bool,
     mut visit: F,
 ) where
-    F: FnMut(Partition, IonType, Option<u32>, &[f32], f64, f64),
+    // The closure receives the matched peak as `Option<(rank, peak_mz)>` so a
+    // single window scan (`nearest_peak_rank_and_mz_in`) yields BOTH the rank and
+    // the mass error; callers that only need the rank ignore the m/z.
+    F: FnMut(Partition, IonType, Option<(u32, f64)>, &[f32], f64, f64),
 {
     use crate::param_model::IonType;
 
@@ -1525,8 +1541,8 @@ fn visit_directional_node_ion_matches<F>(
                 } else {
                     mme.as_da(theo_mz)
                 };
-                let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
-                visit(partition, *ion, rank, logs, theo_mz, tol_da);
+                let matched = nearest_peak_rank_and_mz_in(peaks, ranks, theo_mz, tol_da);
+                visit(partition, *ion, matched, logs, theo_mz, tol_da);
             }
         } else {
             // GEOMETRY-ONLY template (initial own-geometry training, before the
@@ -1552,8 +1568,8 @@ fn visit_directional_node_ion_matches<F>(
                 } else {
                     mme.as_da(theo_mz)
                 };
-                let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
-                visit(partition, ion, rank, &[], theo_mz, tol_da);
+                let matched = nearest_peak_rank_and_mz_in(peaks, ranks, theo_mz, tol_da);
+                visit(partition, ion, matched, &[], theo_mz, tol_da);
             }
         }
     }
@@ -1666,13 +1682,30 @@ fn ion_fact_rank_and_error(
     max_rank: u32,
     esf: i32,
 ) -> (Option<u32>, Option<u32>) {
-    match rank {
-        Some(r) => {
+    // Loss-fact path: the loss driver only hands back the rank, so re-derive the
+    // matched m/z here (a single extra scan, only for loss-declaring peptides).
+    let matched = rank.map(|r| {
+        let mz = matched_peak_mz(peaks, ranks, theo_mz, tol_da).unwrap_or(theo_mz);
+        (r, mz)
+    });
+    ion_fact_rank_and_error_from_match(matched, theo_mz, max_rank, esf)
+}
+
+/// Compute the clamped rank and the scaled mass-error bin from a matched peak
+/// `(rank, peak_mz)` that the intact driver already produced in a single scan.
+/// Behaviorally identical to [`ion_fact_rank_and_error`] but takes the m/z
+/// directly instead of re-scanning the window. `None` ⇒ unmatched ("missing").
+fn ion_fact_rank_and_error_from_match(
+    matched: Option<(u32, f64)>,
+    theo_mz: f64,
+    max_rank: u32,
+    esf: i32,
+) -> (Option<u32>, Option<u32>) {
+    match matched {
+        Some((r, peak_mz)) => {
             let clamped = r.min(max_rank).max(1);
             let ebin = if esf > 0 {
-                let error_da = matched_peak_mz(peaks, ranks, theo_mz, tol_da)
-                    .map(|peak_mz| (peak_mz - theo_mz) as f32)
-                    .unwrap_or(0.0);
+                let error_da = (peak_mz - theo_mz) as f32;
                 let mut idx = (error_da * esf as f32).round() as i32;
                 if idx > esf {
                     idx = esf;
@@ -1800,6 +1833,22 @@ fn matched_peak_mz(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, toleranc
 }
 
 fn nearest_peak_rank_in(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<u32> {
+    nearest_peak_rank_and_mz_in(peaks, ranks, target_mz, tolerance_da).map(|(rank, _mz)| rank)
+}
+
+/// Single-scan companion to [`nearest_peak_rank_in`] + [`matched_peak_mz`]:
+/// return both the intensity rank AND the m/z of the highest-intensity peak
+/// within `tolerance_da` of `target_mz` in one window pass, or `None` when no
+/// peak matches. Used by [`visit_directional_node_ion_matches`] so the matched
+/// peak's rank and its mass error are obtained from a single scan (the soft-match
+/// branch and the training error-bin code previously re-scanned the window via
+/// `matched_peak_mz`).
+fn nearest_peak_rank_and_mz_in(
+    peaks: &[(f64, f32)],
+    ranks: &[u32],
+    target_mz: f64,
+    tolerance_da: f64,
+) -> Option<(u32, f64)> {
     if peaks.is_empty() {
         return None;
     }
@@ -1819,7 +1868,7 @@ fn nearest_peak_rank_in(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tol
             best = Some((i, intensity));
         }
     }
-    best.map(|(i, _)| ranks[i])
+    best.map(|(i, _)| (ranks[i], peaks[i].0))
 }
 
 /// Isotope-cluster deconvolution: collapse multiply-charged isotope envelopes
@@ -2028,6 +2077,88 @@ mod tests {
         assert_eq!(a, b, "main ion must be deterministic across calls");
         assert_eq!(a, y1, "tied-zero frequencies must resolve to y1 (Suffix, charge 1), not a hash-order ion");
     }
+
+    // ---- Soft fragment matching (ANDES_SOFT_MATCH) -------------------------
+    //
+    // Soft matching is now ALWAYS ON and PARAMETER-FREE (σ = the model's match
+    // tolerance), so the scoring closure delegates unconditionally to `soft_blend`.
+    // These tests exercise that weighting math directly.
+
+    #[test]
+    fn soft_match_centre_gives_full_credit() {
+        // (b) A peak exactly at theo_mz (Δm = 0) ⇒ w ≈ 1 ⇒ full `matched` credit.
+        let matched = 4.0_f32;
+        let missing = -2.0_f32;
+        let sigma = 0.5 * 0.5; // factor 0.5 × tol 0.5 Da
+        let s = soft_blend(matched, missing, 0.0, sigma);
+        assert!((s - matched).abs() < 1e-6, "centre peak must keep full matched credit, got {s}");
+    }
+
+    #[test]
+    fn soft_match_edge_gives_mostly_missing() {
+        // (c) A peak at the tolerance edge (Δm = tol) with a sub-unity factor has
+        // w ≪ 1, so the blend sits close to `missing`.
+        let matched = 4.0_f32;
+        let missing = -2.0_f32;
+        let tol = 0.5_f32;
+        let factor = 0.5_f32;
+        let sigma = factor * tol;
+        let s = soft_blend(matched, missing, tol, sigma); // Δm at the edge
+        // z = tol/(0.5*tol) = 2 ⇒ w = exp(-2) ≈ 0.135 ⇒ heavily weighted to missing.
+        assert!(s < 0.5 * (matched + missing), "edge peak must lean toward missing, got {s}");
+        let w = (-0.5f32 * 2.0 * 2.0).exp();
+        let expected = w * matched + (1.0 - w) * missing;
+        assert!((s - expected).abs() < 1e-5, "edge blend math mismatch: {s} vs {expected}");
+    }
+
+    #[test]
+    fn soft_match_monotonic_in_abs_dm() {
+        // (d) The matched contribution decreases monotonically as |Δm| grows
+        // (for matched > missing). Walk Δm outward from the centre.
+        let matched = 5.0_f32;
+        let missing = -1.0_f32;
+        let sigma = 0.5 * 0.5;
+        let mut prev = f32::INFINITY;
+        for k in 0..20 {
+            let dm = k as f32 * 0.02; // 0.00 .. 0.38 Da
+            let s = soft_blend(matched, missing, dm, sigma);
+            assert!(s <= prev + 1e-6, "blend must be non-increasing in |Δm|: dm={dm} s={s} prev={prev}");
+            prev = s;
+        }
+        // Symmetric in sign of Δm.
+        let plus = soft_blend(matched, missing, 0.1, sigma);
+        let minus = soft_blend(matched, missing, -0.1, sigma);
+        assert!((plus - minus).abs() < 1e-6, "blend must be symmetric in Δm sign");
+    }
+
+    #[test]
+    fn soft_match_large_factor_approaches_hard() {
+        // A very large factor (σ ≫ tol) ⇒ w ≈ 1 across the window ⇒ ≈ hard match.
+        let matched = 3.0_f32;
+        let missing = -2.0_f32;
+        let huge_sigma = 1000.0_f32; // σ ≫ any realistic Δm
+        let s = soft_blend(matched, missing, 0.4, huge_sigma);
+        assert!((s - matched).abs() < 1e-3, "σ ≫ tol must degenerate to hard matching, got {s}");
+    }
+
+    #[test]
+    fn nearest_peak_rank_and_mz_single_scan_matches_split_helpers() {
+        // The single-scan helper must return the SAME rank as `nearest_peak_rank_in`
+        // and the SAME m/z as `matched_peak_mz` (it replaces both with one pass).
+        let peaks = vec![(99.95, 10.0_f32), (100.05, 50.0_f32), (100.5, 5.0_f32)];
+        let ranks = vec![2_u32, 1, 3];
+        let tol = 0.1;
+        let combined = nearest_peak_rank_and_mz_in(&peaks, &ranks, 100.0, tol);
+        let rank = nearest_peak_rank_in(&peaks, &ranks, 100.0, tol);
+        let mz = matched_peak_mz(&peaks, &ranks, 100.0, tol);
+        assert_eq!(combined.map(|(r, _)| r), rank, "single-scan rank must match");
+        assert_eq!(combined.map(|(_, m)| m), mz, "single-scan m/z must match");
+        // Highest-intensity peak in window is (100.05, 50) with rank 1.
+        assert_eq!(combined, Some((1, 100.05)));
+        // No peak in window ⇒ None on all three.
+        assert_eq!(nearest_peak_rank_and_mz_in(&peaks, &ranks, 200.0, tol), None);
+    }
+
     use crate::param_model::{IonType, Partition, SpecDataType};
     use crate::scoring::rank_scorer::RankScorer;
     use crate::testutil::tiny_param_with_ions;

@@ -174,7 +174,10 @@ pub fn build_frag_off_table(
 pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &GeometryConfig) -> Param {
     let tiers_by_charge =
         derive_tiers_by_charge(charge_masses, cfg.mass_tier_occupancy, cfg.max_mass_tiers);
-    let partitions = build_partition_skeleton(&tiers_by_charge, cfg.num_segments);
+    // Validate the segment count once so the skeleton (which clamps to >=1) and
+    // the stored `Param.num_segments` cannot disagree.
+    let num_segments = cfg.num_segments.max(1);
+    let partitions = build_partition_skeleton(&tiers_by_charge, num_segments);
     // Regime-aware fragment-charge bound. High-res data deconvolutes every
     // fragment to its singly-charged monoisotopic form BEFORE scoring, so the
     // model only needs charge-1 b/y (modelling 2+/3+ there is pure noise — it
@@ -205,7 +208,7 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
         precursor_off_map: base.precursor_off_map.clone(),
         error_scaling_factor: base.error_scaling_factor,
         // Geometry derived from config + corpus.
-        num_segments: cfg.num_segments,
+        num_segments,
         max_rank: cfg.max_rank,
         partitions,
         frag_off_table,

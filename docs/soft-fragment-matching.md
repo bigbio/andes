@@ -42,7 +42,8 @@ tolerance edge (`Δm = σ`) keeps `w = exp(−½) ≈ 0.61`; peaks farther out a
 
 ## Why parameter-free (no `σ` knob)
 
-`σ` is the model's own match tolerance (`mme`), not a tuned coefficient. This:
+`σ` is the model's own match tolerance — the `mme` ("max mass error") field each
+model carries — not a tuned coefficient. This:
 
 - **scales per regime automatically** — a low-res model carries a wide tolerance
   (wide σ, meaningful softening); a high-res model deconvolves to a tight window

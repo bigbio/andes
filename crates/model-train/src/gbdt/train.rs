@@ -346,6 +346,16 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     active_train.sort_unstable(); // deterministic order
 
     let n_active = active_train.len();
+    // Gate: the effective training subset (post split + undersample) is what the
+    // trees actually see — the pre-split row count can clear MIN_TRAIN_ROWS while
+    // this does not.
+    if n_active < MIN_TRAIN_ROWS {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            format!("classifier: {n_active} active training rows < minimum {MIN_TRAIN_ROWS}"),
+            empty_classifier,
+        );
+    }
 
     // Build per-row compact maps for fast access.
     // active_train[i] → original row index.
@@ -671,6 +681,15 @@ pub fn train_gbdt_regression(
 
     // --- Step 3: Build compact train/val arrays (NO undersampling) -----------
     let n_active = train_rows.len();
+    // Gate: the post-split training row count is what the trees actually see —
+    // the pre-split row count can clear MIN_TRAIN_ROWS while this does not.
+    if n_active < MIN_TRAIN_ROWS {
+        return gate_or_fallback(
+            p.allow_degenerate,
+            format!("regressor: {n_active} training rows after split < minimum {MIN_TRAIN_ROWS}"),
+            empty_regressor,
+        );
+    }
     let mut train_binned = vec![0u8; n_active * nf];
     let mut train_y = vec![0.0f32; n_active];
     for (i, &r) in train_rows.iter().enumerate() {
@@ -770,7 +789,7 @@ pub fn train_gbdt_regression(
             empty_regressor,
         );
     }
-    if !r.is_finite() || !r2.is_finite() || r < MIN_VAL_PEARSON || r2 < MIN_VAL_R2 {
+    if !r.is_finite() || !r2.is_finite() || r < MIN_VAL_PEARSON || r2 <= MIN_VAL_R2 {
         let trees_for_fallback = trees.clone();
         return gate_or_fallback(
             p.allow_degenerate,

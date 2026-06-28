@@ -24,11 +24,11 @@ Benchmarked at **1% true false-discovery proportion** — measured against a 1:1
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
-| **andes** (own-geometry) | **36,730** | **11,215** | 14,919 |
+| **andes** (own-geometry) | **36,873** | **11,163** | 15,061 |
 | Java MS-GF+ v20240326 | 26,542 † | 10,651 | **15,904** |
 | Comet 2025.01 | 28,401 | 8,566 | 14,708 |
 
-<sub>PSMs at **1% true entrapment-FDP** (1:1 entrapment database; FDP = 2·ENT/total at the deepest score-sorted prefix with FDP ≤ 1% — a ground-truth metric independent of Percolator's concatenated-vs-separate mode), one methodology for every row (plain FASTA + andes `XXX_` decoys + uniform Percolator 3.7.1). **andes beats Comet on all three datasets** — Astral **+29%**, TMT **+31%**, UPS1 **+1.4%** — and beats Java MS-GF+ on Astral and TMT (**+5.3%** on TMT). **On UPS1 (low-res LFQ) andes leads Comet but trails Java MS-GF+ by ~6%**: low-resolution LFQ is Java MS-GF+'s strongest regime and a known limitation of andes's rank model — stated plainly rather than hidden. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with Comet. Opt-in `--chimeric` recovers co-isolated second peptides for a further gain on high-res. **†** Java Astral shown at q≤1% (not re-run at entrapment-FDP); andes leads by a wide margin under either metric. N=1 run per dataset; the Astral run is on converted mzML. See [`docs/benchmarks/`](docs/benchmarks/).</sub>
+<sub>PSMs at **1% true entrapment-FDP** (1:1 entrapment database; FDP = 2·ENT/total at the deepest score-sorted prefix with FDP ≤ 1% — a ground-truth metric independent of Percolator's concatenated-vs-separate mode), one methodology for every row (plain FASTA + andes `XXX_` decoys + uniform Percolator 3.7.1). **andes beats Comet on all three datasets** — Astral **+30%**, TMT **+30%**, UPS1 **+2.4%** — and beats Java MS-GF+ on Astral and TMT (**+4.8%** on TMT). **On UPS1 (low-res LFQ) andes leads Comet but trails Java MS-GF+ by ~5%**: low-resolution LFQ is Java MS-GF+'s strongest regime and a known limitation of andes's rank model — stated plainly rather than hidden. Speed: andes finishes each run in ~1–4 min vs Java MS-GF+'s 9 min – 2.5 h (≈10–40×), on par with Comet. Opt-in `--chimeric` recovers co-isolated second peptides for a further gain on high-res. **†** Java Astral shown at q≤1% (not re-run at entrapment-FDP); andes leads by a wide margin under either metric. N=1 run per dataset; the Astral run is on converted mzML. See [`docs/benchmarks/`](docs/benchmarks/).</sub>
 
 **The 1% FDR is real, not inflated.** The table above *is* the entrapment measurement — every count is at a 1:1-entrapment-verified true FDP ≤ 1%, not a nominal q-value, so the ID gains are genuine identifications rather than a violated FDR. (Opt-in `--refine` PTM discovery runs on top, but its gains are not yet entrapment-validated — the entrapment metric is blind to its peptide-anchored second pass — so it ships as a capability, not a headline number.)
 
@@ -125,7 +125,7 @@ andes-<version>-aarch64-apple-darwin.tar.gz
 andes-<version>-x86_64-pc-windows-msvc.zip
 ```
 
-Each archive contains the `andes` binary, the `resources/` tree (the bundled per-protocol model store in `resources/models/`, with all 19 own-trained scoring models), and LICENSE/NOTICE/README.
+Each archive contains the `andes` binary, the `resources/` tree (the bundled per-protocol model store in `resources/models/`, with all 17 own-trained scoring models), and LICENSE/NOTICE/README.
 
 **Option 2 — `cargo install`:**
 
@@ -161,11 +161,12 @@ A row in `out.pin` is one peptide–spectrum match, with rich per-PSM features p
 
 ### Output scores
 
-Each PSM row carries two scores plus a battery of additive discriminative features for Percolator. The most important columns (full **65-column** reference with per-column value ranges in [`DOCS.md` §3a](DOCS.md)):
+Each PSM row carries two scores plus a battery of additive discriminative features for Percolator. The most important columns (full **66-column** reference with per-column value ranges in [`DOCS.md` §3a](DOCS.md)):
 
 | Column | Type | Range | What it is |
 |---|---|---|---|
 | `RankScore` | int | unbounded | **Ranking** score (rank-LLR) — orders candidates within a spectrum. |
+| `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum) — finer-grained ranking feature for Percolator. |
 | `RawScore` | float | unbounded | **Headline discriminative** score (fused `signal − null`) — the feature Percolator weights most. |
 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore` (significance). |
 | `TailorScore` | float | ≥0 | `RankScore` ÷ spectrum top-1% quantile — cross-spectrum comparability. |

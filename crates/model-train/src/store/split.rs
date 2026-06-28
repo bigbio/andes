@@ -117,6 +117,19 @@ pub fn split_store_by_protocol(
     }
 
     // 3. Write one partition file per protocol.
+    // Prune any pre-existing `protocol=*` partitions first so a rerun against a
+    // smaller src can't leave stale partitions behind (mirrors the python
+    // splitter's rmtree-then-recreate).
+    if dir.exists() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let p = entry.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if p.is_dir() && name.starts_with("protocol=") {
+                std::fs::remove_dir_all(&p)?;
+            }
+        }
+    }
     std::fs::create_dir_all(dir)?;
     let mut written: Vec<(String, std::path::PathBuf)> = Vec::new();
     for (proto, batches) in &by_protocol {

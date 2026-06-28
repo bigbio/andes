@@ -196,7 +196,7 @@ andes writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge-min`…`--charge-max` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 65 columns listed below in emission order.
+Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge-min`…`--charge-max` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 66 columns listed below in emission order.
 
 There are **two score columns**, easy to confuse:
 
@@ -269,8 +269,9 @@ Most of the columns after `matchedIonRatio` are **additive** features: extra evi
 | 61 | `ListwiseScoreGap` | float | signed | Top-1 − top-2 `RankScore` in the retained queue. |
 | 62 | `RawScore` | float | unbounded | **Headline fused strong-score** `signal − null` — the primary discriminative feature. |
 | 63 | `RawScoreCal` | float | signed | Per-spectrum z-scored `RawScore` (significance calibration). |
-| 64 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
-| 65 | `Proteins` | string | — | Protein accession(s), tab-separated for shared peptides; decoys carry `--decoy-prefix`. |
+| 64 | `RankScoreFloat` | float | unbounded | Unrounded `RankScore` (continuous split-sum) — finer-grained ranking feature than the integer `RankScore`. |
+| 65 | `Peptide` | string | — | `pre.SEQUENCE.post` with `+mass` mod annotations. |
+| 66 | `Proteins` | string | — | Protein accession(s), tab-separated for shared peptides; decoys carry `--decoy-prefix`. |
 
 **Conditional columns** (always present in the header, but `0.0`/`0` unless their condition holds):
 

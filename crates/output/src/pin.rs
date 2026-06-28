@@ -249,24 +249,23 @@ pub fn write_pin_to<W: Write>(
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
 
-    write_header(writer, min_charge, max_charge)?;
-
     // FDR-join guard: the PIN `SpecId` (`{spec_id}_{scan}` base) is the key
     // Percolator joins q-values/PEPs back onto (its result map is keyed by
     // `PSMId == SpecId`). Two spectra sharing the same title+scan — or several
     // metadata-less spectra collapsing to `scan=0` — would silently overwrite
-    // each other in that map, mis-annotating or losing FDR for real PSMs. Detect
-    // the collision while writing and fail loud instead of corrupting the join.
+    // each other in that map, mis-annotating or losing FDR for real PSMs.
+    // Pre-scan ALL emitting spectra for base collisions BEFORE writing anything,
+    // so a collision fails the whole write loudly instead of leaving a
+    // partially-written PIN. The base generation mirrors RowContext::new
+    // (row_context.rs): title, or `scan=N` when the title is empty, suffixed
+    // with the scan number.
     let mut seen_spec_bases: std::collections::HashSet<String> =
         std::collections::HashSet::with_capacity(queues.len());
-
     for (spec_idx, queue) in queues.iter().enumerate() {
         if queue.is_empty() {
             continue;
         }
         let spec = &spectra[spec_idx];
-        // Base SpecId key, mirroring RowContext::new (row_context.rs): title, or
-        // `scan=N` when the title is empty, suffixed with the scan number.
         let scan = spec.scan.unwrap_or(0);
         let base = if spec.title.is_empty() {
             format!("scan={scan}_{scan}")
@@ -283,6 +282,15 @@ pub fn write_pin_to<W: Write>(
                 ),
             ));
         }
+    }
+
+    write_header(writer, min_charge, max_charge)?;
+
+    for (spec_idx, queue) in queues.iter().enumerate() {
+        if queue.is_empty() {
+            continue;
+        }
+        let spec = &spectra[spec_idx];
         write_spectrum_rows(
             writer,
             spec,

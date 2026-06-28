@@ -46,7 +46,11 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
     let header = lines.next().ok_or("empty PIN")?;
     let cols: Vec<&str> = header.split('\t').collect();
     let find = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
-    let id_i = find("SpecId").or_else(|| find("PSMId")).unwrap_or(0);
+    // Require an explicit PSM identifier column — never silently fall back to
+    // column 0, which would let a malformed header join on an arbitrary field.
+    let id_i = find("SpecId")
+        .or_else(|| find("PSMId"))
+        .ok_or("PIN missing SpecId/PSMId column")?;
     let label_i = find("Label").ok_or("PIN missing Label column")?;
     let scan_i = find("ScanNr").ok_or("PIN missing ScanNr column")?;
     let pep_i = find("Peptide").ok_or("PIN missing Peptide column")?;
@@ -65,30 +69,53 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
         x: Vec::new(),
         n_features,
     };
-    for line in lines {
+    for (lineno, line) in lines.enumerate() {
         if line.is_empty() {
             continue;
         }
         let f: Vec<&str> = line.split('\t').collect();
+        // A truncated row is corruption, not something to silently drop — a
+        // dropped row would quietly undercount the rescored set. (lineno+2 = the
+        // 1-based file line, accounting for the header consumed above.)
         if f.len() <= pep_i {
-            continue;
+            return Err(format!(
+                "PIN line {} is truncated: {} columns, expected > {}",
+                lineno + 2,
+                f.len(),
+                pep_i
+            ));
         }
-        // Label is FDR-critical (target=1 / decoy=-1) — fail loud on a malformed
-        // value rather than silently defaulting to target and corrupting the FDR.
+        // Label is FDR-critical — require exactly 1 (target) or -1 (decoy); fail
+        // loud on anything else rather than defaulting to target and corrupting
+        // the FDR.
         let raw = f[label_i].trim();
-        let label: i32 = raw.parse().map_err(|_| {
-            format!("PIN Label column has non-integer value {raw:?} (expected 1 or -1)")
+        let label: i32 = raw.parse().ok().filter(|&l| l == 1 || l == -1).ok_or_else(|| {
+            format!("PIN line {} Label is {raw:?} (expected 1 or -1)", lineno + 2)
         })?;
         d.is_decoy.push(label < 0);
         d.spec_ids.push(f[id_i].to_string());
-        d.scans
-            .push(f.get(scan_i).and_then(|s| s.trim().parse().ok()).unwrap_or(0));
+        // ScanNr drives the CV fold assignment — a bad value would silently
+        // mis-fold the spectrum, so fail loud instead of defaulting to 0.
+        let scan_raw = f[scan_i].trim();
+        let scan: u32 = scan_raw
+            .parse()
+            .map_err(|_| format!("PIN line {} ScanNr is {scan_raw:?} (expected integer)", lineno + 2))?;
+        d.scans.push(scan);
         d.peptides.push(f[pep_i].to_string());
         d.proteins
             .push(f.get(pep_i + 1..).map(|s| s.join(";")).unwrap_or_default());
         for &ci in &feat_cols {
-            let v: f32 = f.get(ci).and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
-            d.x.push(if v.is_finite() { v } else { 0.0 });
+            let raw = f[ci].trim();
+            let v: f32 = raw.parse().map_err(|_| {
+                format!("PIN line {} feature column {ci} is {raw:?} (expected number)", lineno + 2)
+            })?;
+            if !v.is_finite() {
+                return Err(format!(
+                    "PIN line {} feature column {ci} is non-finite ({v})",
+                    lineno + 2
+                ));
+            }
+            d.x.push(v);
         }
     }
     Ok(d)
@@ -166,18 +193,34 @@ pub fn native_rescore_pin(
     let q = qvalues(&items);
     let mut map = HashMap::with_capacity(n);
     for i in 0..n {
-        // PEP = 1 − calibrated P(target); decoys naturally land near 1.
+        // TARGET-ONLY result contract: match `output::run_percolator`, whose
+        // results file contains only target PSMs. Decoys above drive the TDC
+        // q-value, but emitting one here would let a low-q decoy leak into the
+        // filtered TSV / QPX as an accepted identification (the downstream path
+        // filters by q-value/PEP and has no decoy label).
+        if d.is_decoy[i] {
+            continue;
+        }
+        // PEP = 1 − calibrated P(target).
         let pep = (1.0 - scores[i] as f64).clamp(PROB_EPS, 1.0);
-        map.insert(
-            d.spec_ids[i].clone(),
-            PercolatorPsm {
-                psm_id: d.spec_ids[i].clone(),
-                q_value: q[i],
-                pep,
-                peptide: d.peptides[i].clone(),
-                proteins: d.proteins[i].clone(),
-            },
-        );
+        if map
+            .insert(
+                d.spec_ids[i].clone(),
+                PercolatorPsm {
+                    psm_id: d.spec_ids[i].clone(),
+                    q_value: q[i],
+                    pep,
+                    peptide: d.peptides[i].clone(),
+                    proteins: d.proteins[i].clone(),
+                },
+            )
+            .is_some()
+        {
+            // SpecIds are unique per emitted PSM (multi-row scans carry a per-row
+            // suffix); a collision means a corrupt PIN whose last-wins overwrite
+            // would silently drop a target — fail loud instead.
+            return Err(format!("duplicate target PSM identifier {:?} in PIN", d.spec_ids[i]));
+        }
     }
     Ok(map)
 }
@@ -241,6 +284,30 @@ mod tests {
             confident < 30,
             "pure noise should yield ~no confident IDs (leakage!), got {confident}"
         );
+    }
+
+    #[test]
+    fn decoys_never_appear_in_results() {
+        // Target-only contract: no decoy row may surface in the result map, even
+        // a high-scoring (low-q) one — otherwise it leaks into the filtered TSV.
+        let pin = synth_pin(600, true);
+        let map = native_rescore_pin(&pin, 42).unwrap();
+        assert!(
+            map.keys().all(|k| !k.ends_with("_-1")),
+            "a decoy SpecId leaked into the target-only result map"
+        );
+        // And the synthetic PIN had n/2 decoys, so the map must be target-only.
+        assert!(map.len() <= 300, "result map must exclude decoys, got {} entries", map.len());
+    }
+
+    #[test]
+    fn malformed_rows_fail_loud() {
+        // Truncated row, bad label, bad scan, and non-numeric feature must all error.
+        let base = "SpecId\tLabel\tScanNr\tf1\tPeptide\tProteins\n";
+        assert!(native_rescore_pin(&format!("{base}s1\t1\t10\n"), 1).is_err(), "truncated");
+        assert!(native_rescore_pin(&format!("{base}s1\t2\t10\t0.5\tK.P.K\tP1\n"), 1).is_err(), "label=2");
+        assert!(native_rescore_pin(&format!("{base}s1\t1\tNaN\t0.5\tK.P.K\tP1\n"), 1).is_err(), "bad scan");
+        assert!(native_rescore_pin(&format!("{base}s1\t1\t10\tabc\tK.P.K\tP1\n"), 1).is_err(), "bad feature");
     }
 
     #[test]

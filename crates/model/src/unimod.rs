@@ -171,10 +171,12 @@ impl UnimodDb {
     /// accession, ambiguous name).
     pub fn resolve(&self, token: &str) -> Result<Option<&UnimodMod>, UnimodResolveError> {
         let t = token.trim();
+        // Match the `UNIMOD:` accession prefix case-insensitively (e.g. accepts
+        // "uNiMoD:35"), then canonicalise to `UNIMOD:<num>` for by_accession.
         if let Some(num) = t
-            .strip_prefix("UNIMOD:")
-            .or_else(|| t.strip_prefix("unimod:"))
-            .or_else(|| t.strip_prefix("Unimod:"))
+            .get(..7)
+            .filter(|p| p.eq_ignore_ascii_case("UNIMOD:"))
+            .map(|_| &t[7..])
         {
             // Canonicalise to `UNIMOD:<num>`.
             let key = format!("UNIMOD:{}", num.trim());

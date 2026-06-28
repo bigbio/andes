@@ -57,6 +57,11 @@ def main() -> int:
     m_proto = pc.filter(full["protocol"], manifest_mask).to_pylist()
     model_protocol = {}
     for mid, proto in zip(m_mid, m_proto):
+        if mid in model_protocol:
+            raise ValueError(
+                f"duplicate manifest model_id {mid!r} (each model_id must have "
+                "exactly one manifest row)"
+            )
         model_protocol[mid] = proto if proto is not None else ""
 
     # 2. assign a protocol to every row by its model_id.

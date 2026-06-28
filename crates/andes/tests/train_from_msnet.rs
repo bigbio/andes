@@ -197,6 +197,12 @@ fn synthetic_rows() -> Vec<Row> {
 }
 
 fn run_train(in_parquet: &Path, store: &Path, extra: &[&str]) {
+    run_train_env(in_parquet, store, extra, &[]);
+}
+
+/// Like [`run_train`] but injects environment variables — e.g.
+/// `ANDES_SEED_GEOMETRY=1` to opt OUT of own-geometry derivation.
+fn run_train_env(in_parquet: &Path, store: &Path, extra: &[&str], env: &[(&str, &str)]) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_andes"));
     cmd.arg("train")
         .arg("--in")
@@ -212,8 +218,23 @@ fn run_train(in_parquet: &Path, store: &Path, extra: &[&str]) {
     for e in extra {
         cmd.arg(e);
     }
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     let status = cmd.status().expect("run andes train-from-msnet");
     assert!(status.success(), "train-from-msnet should exit 0, got {status}");
+}
+
+/// An order-independent signature of a trained model's partition geometry
+/// (charge × parent-mass tier × segment), used to compare the derived-vs-seed
+/// geometry without depending on partition ordering.
+fn geometry_sig(partitions: &[scoring_crate::param_model::Partition]) -> Vec<(i32, i32, u32)> {
+    let mut v: Vec<(i32, i32, u32)> = partitions
+        .iter()
+        .map(|q| (q.charge, q.seg_num, q.parent_mass.to_bits()))
+        .collect();
+    v.sort_unstable();
+    v
 }
 
 #[test]
@@ -239,6 +260,53 @@ fn train_from_msnet_writes_model_with_rank_dist() {
         "trained rank_dist_table should be non-empty"
     );
     assert!(!param.partitions.is_empty(), "trained model should have partitions");
+}
+
+/// Wiring guard (finding 3.9): `run_train` — the binary's default training path —
+/// must DERIVE the partition geometry from the corpus (the own-geometry,
+/// MS-GF+-free path), and only reuse the seed geometry when `ANDES_SEED_GEOMETRY=1`
+/// opts out. If the binary ever silently fell back to seed geometry, the two
+/// models trained below would be geometry-identical — so we assert they differ.
+/// This exercises the same `andes train` entry point `andes::main` uses, not just
+/// the lower-level `derive_geometry` helper (covered in model-train).
+#[test]
+fn geometry_derived_by_default_differs_from_seed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let in_parquet = dir.path().join("psms.parquet");
+    write_flat_parquet(&in_parquet, &synthetic_rows());
+
+    // DEFAULT: derive geometry from the (tiny) corpus.
+    let store_derived = dir.path().join("derived.parquet");
+    run_train_env(&in_parquet, &store_derived, &["--fragment-tol-ppm", "20"], &[]);
+
+    // OPT-OUT: reuse the bundled seed's full partition geometry.
+    let store_seed = dir.path().join("seed.parquet");
+    run_train_env(
+        &in_parquet,
+        &store_seed,
+        &["--fragment-tol-ppm", "20"],
+        &[("ANDES_SEED_GEOMETRY", "1")],
+    );
+
+    let derived = ModelStore::open(&store_derived).unwrap().load_param("default").unwrap();
+    let seed = ModelStore::open(&store_seed).unwrap().load_param("default").unwrap();
+
+    let sd = geometry_sig(&derived.partitions);
+    let ss = geometry_sig(&seed.partitions);
+    assert!(!sd.is_empty() && !ss.is_empty(), "both trained models must have partitions");
+    assert_ne!(
+        sd, ss,
+        "default training must DERIVE geometry from the corpus, but it matched the seed geometry \
+         exactly — the own-geometry wiring in run_train has regressed"
+    );
+    // The 3-PSM corpus (charges 2,2,3) yields a strictly smaller geometry than the
+    // full bundled seed (hcd_qexactive_tryp), confirming it adapts to the corpus.
+    assert!(
+        sd.len() < ss.len(),
+        "derived geometry ({} partitions) should be smaller than the reused seed ({})",
+        sd.len(),
+        ss.len()
+    );
 }
 
 #[test]

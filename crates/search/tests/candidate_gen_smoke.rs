@@ -526,18 +526,19 @@ fn c_term_and_protein_c_term_distinguished() {
             if let Some(m) = &last.mod_ {
                 if is_prot_c_term {
                     // Protein-C-term peptide "R"/"KR": it is BOTH a peptide and a
-                    // protein C-terminus, so either the CTerm Amide (-0.984) OR the
-                    // ProtCTerm GlyGly (+114.04) is valid here (finding 2.3).
+                    // protein C-terminus, so either the CTerm Amide (-0.984016) OR
+                    // the ProtCTerm GlyGly (+114.042927) is valid here (finding 2.3).
                     assert!(
-                        (m.mass_delta - (-0.984)).abs() < 0.01 || m.mass_delta > 100.0,
-                        "protein C-term peptide got an unexpected mod delta ({}); expected CTerm Amide or ProtCTerm GlyGly",
+                        (m.mass_delta - (-0.984016)).abs() < 1e-4
+                            || (m.mass_delta - 114.042927).abs() < 1e-4,
+                        "protein C-term peptide got an unexpected mod delta ({}); expected CTerm Amide (-0.984016) or ProtCTerm GlyGly (114.042927)",
                         m.mass_delta
                     );
                 } else {
-                    // Non-protein-C-term peptide "MAAAAK" or Met-cleaved "AAAA": only CTerm Amide (-0.984).
+                    // Non-protein-C-term peptide "MAAAAK" or Met-cleaved "AAAA": only CTerm Amide (-0.984016).
                     assert!(
-                        m.mass_delta < 0.0,
-                        "non-protein-C-term peptide got a positive delta mod ({}); expected CTerm Amide",
+                        (m.mass_delta - (-0.984016)).abs() < 1e-4,
+                        "non-protein-C-term peptide got an unexpected delta mod ({}); expected CTerm Amide (-0.984016)",
                         m.mass_delta
                     );
                 }

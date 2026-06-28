@@ -104,6 +104,12 @@ fn resolve_model_id_old(
     let final_fallback: Option<&str> = match (frag, inst) {
         // TOF/HighRes HCD maps to cid_tof_tryp.
         ("HCD", "TOF") | ("HCD", "HighRes") => Some("cid_tof_tryp"),
+        // The binary only rewrites ETD when the instrument is neither LowRes nor
+        // HighRes (`("ETD", i) if !matches!(i, "LowRes" | "HighRes")`); for those
+        // two it keeps the instrument verbatim, so ETD/LowRes & ETD/HighRes are
+        // NOT normalized and (being unbundled) fall through to the global default
+        // rather than etd_lowres_tryp or the generic cid_lowres_tryp LowRes arm.
+        ("ETD", "LowRes") | ("ETD", "HighRes") => None,
         ("ETD", _)                          => Some("etd_lowres_tryp"),
         // The binary rewrites these to cid_lowres_tryp (drop_protocol arms).
         ("CID", "QExactive") | ("UVPD", _)  => Some("cid_lowres_tryp"),

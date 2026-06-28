@@ -68,6 +68,39 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
         let pb: Param = partitioned.load_param(id).expect("load_param partitioned");
         assert_params_equal(id, &pa, &pb);
     }
+
+    // 4. Per-model source ledgers + per-source stats equivalence.
+    for id in &a {
+        let mut la = single.load_sources(id).expect("load_sources single");
+        let mut lb = partitioned.load_sources(id).expect("load_sources partitioned");
+        la.sort_by(|x, y| x.source_id.cmp(&y.source_id));
+        lb.sort_by(|x, y| x.source_id.cmp(&y.source_id));
+        assert_eq!(la, lb, "[{id}] load_sources differ between single and partitioned");
+
+        // Each (model_id, source_id) that has stat rows must reconstruct
+        // identical sufficient statistics from either layout (CountStats'
+        // PartialEq ignores trailing histogram zeros). Sources without stat
+        // rows must be absent (NoModel) in BOTH layouts.
+        for src in &la {
+            match (
+                single.load_source_stats(id, &src.source_id),
+                partitioned.load_source_stats(id, &src.source_id),
+            ) {
+                (Ok(sa), Ok(sb)) => assert_eq!(
+                    sa, sb,
+                    "[{id}/{}] load_source_stats differ between single and partitioned",
+                    src.source_id
+                ),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!(
+                    "[{id}/{}] load_source_stats presence differs: single={:?} partitioned={:?}",
+                    src.source_id,
+                    a.is_ok(),
+                    b.is_ok()
+                ),
+            }
+        }
+    }
 }
 
 /// Compare two reconstructed Params field-by-field (the cache field and the
@@ -177,7 +210,8 @@ fn partitioned_v1_store_loads_identical_when_present() {
         Err(_) => tempfile::tempdir().unwrap().keep().join("models"),
     };
     if out.exists() {
-        std::fs::remove_dir_all(&out).ok();
+        std::fs::remove_dir_all(&out)
+            .unwrap_or_else(|e| panic!("failed to clear {} before re-split: {e}", out.display()));
     }
     let written = split_store_by_protocol(&src, &out).expect("split v1 store");
     eprintln!("v1 partitions written to {}:", out.display());

@@ -1359,6 +1359,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             path
         }
     };
+    // DURABLE base for run artifacts that must survive function exit — the
+    // filtered q-value TSV and `statistics.log`. When the PIN is a real path
+    // these sit next to it; but when the PIN is a temp file (`--rescore`/`--fdr`
+    // without `--output-pin`) deriving them from `output_pin_path` would write
+    // them INTO the temp dir, which is deleted at exit — so the user would be
+    // told the TSV was written and then find it gone. Fall back to an explicit
+    // `--output-tsv`/`--output-parquet` location, else the current directory.
+    let report_base: PathBuf = if _rescore_tmp.is_some() {
+        cli.output_tsv
+            .clone()
+            .or_else(|| cli.output_parquet.clone())
+            .unwrap_or_else(|| PathBuf::from("andes.pin"))
+    } else {
+        output_pin_path.clone()
+    };
     if spectrum_paths.len() > 1 {
         eprintln!(
             "Multi-spectrum search: {} inputs → one PIN",
@@ -2413,11 +2428,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // the join key + q/PEP + peptide/proteins from the Percolator result.
     if let Some(ref map) = rescore_map {
         let fdr = fdr_threshold;
-        let stem = output_pin_path
+        let stem = report_base
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "andes".to_string());
-        let dir = output_pin_path.parent().unwrap_or_else(|| Path::new("."));
+        let dir = report_base.parent().unwrap_or_else(|| Path::new("."));
         let q_tag = format!("{fdr}").replace('.', "p");
         let filtered_path = dir.join(format!("{stem}.q{q_tag}.tsv"));
         // q-value is the primary set-level FDR control; an optional --pep ANDs a
@@ -2452,7 +2467,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let run_stats =
         output::RunStatistics::compute(&queues, &pin_candidates, &params, &param.mme);
     eprint!("{}", run_stats.render());
-    let stats_path = output_pin_path
+    let stats_path = report_base
         .parent()
         .map(|d| d.join("statistics.log"))
         .unwrap_or_else(|| std::path::PathBuf::from("statistics.log"));
@@ -4796,23 +4811,29 @@ fn parse_protocol(s: &str) -> Result<Protocol, String> {
     })
 }
 
+/// In a `MIN-MAX` dash range, the separator is the first `-` whose preceding
+/// char is an ASCII digit: any earlier `-` is MIN's sign and any `-` right after
+/// it is MAX's sign. This makes signed endpoints unambiguous — `2-5`→(2,5),
+/// `-1-2`→(-1,2), `-3--1`→(-3,-1) — which a naive `split`/`rsplit` on `-` cannot.
+fn dash_sep_index(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    (1..b.len()).find(|&i| b[i] == b'-' && b[i - 1].is_ascii_digit())
+}
+
 /// Parse a `MIN..MAX` (or `MIN-MAX`) range into a `(min, max)` pair, generic
 /// over the integer type so it serves both `--charge` (u8) and
 /// `--isotope-error` (i8, negatives allowed). The `-` separator is tried only
-/// when the value does not parse as `..`; a leading negative MIN is handled by
-/// the `..` form (`-1..2`).
+/// when the value does not parse as `..`; signed endpoints are supported in both
+/// forms (`-1..2`, `-3--1`).
 fn parse_int_range<T>(s: &str, label: &str) -> Result<(T, T), String>
 where
     T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
 {
-    let split = |sep: &str| -> Option<(&str, &str)> {
-        s.split_once(sep).map(|(a, b)| (a.trim(), b.trim()))
-    };
-    let (lo_s, hi_s) = if let Some(p) = split("..") {
-        p
-    } else if let Some((a, b)) = s.trim().rsplit_once('-') {
-        // `MIN-MAX`: rsplit so a leading negative MIN (e.g. `-1-2`) keeps its sign.
+    let trimmed = s.trim();
+    let (lo_s, hi_s) = if let Some((a, b)) = trimmed.split_once("..") {
         (a.trim(), b.trim())
+    } else if let Some(idx) = dash_sep_index(trimmed) {
+        (trimmed[..idx].trim(), trimmed[idx + 1..].trim())
     } else {
         return Err(format!("invalid {label} `{s}`: expected MIN..MAX (or MIN-MAX)"));
     };

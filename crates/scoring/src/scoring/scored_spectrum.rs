@@ -68,9 +68,10 @@ fn trace_ions_enabled() -> bool {
 /// `w = exp(-½(Δm/σ)²)`, with `σ` the model's match tolerance (floored at `1e-6`
 /// Da to avoid a divide-by-zero when the tolerance is degenerate), and the returned score is
 /// `w·matched + (1-w)·missing`. A peak at the window centre (`Δm = 0`) gets
-/// `w = 1` (full `matched` credit); a peak at the tolerance edge gets `w ≪ 1`
-/// (mostly `missing`). Factored out as a small pure fn so the weighting math is
-/// unit-testable without the memoized env probe or the scoring DP.
+/// `w = 1` (full `matched` credit); a peak one `σ` out (`Δm = σ`) keeps
+/// `w = exp(-½) ≈ 0.61` (still mostly `matched`, since `σ` is the full match
+/// tolerance); only peaks well beyond `σ` approach `missing`. Factored out as a
+/// small pure fn so the weighting math is unit-testable without the scoring DP.
 #[inline]
 fn soft_blend(matched: f32, missing: f32, dm: f32, sigma: f32) -> f32 {
     let sigma = sigma.max(1e-6);
@@ -2078,7 +2079,7 @@ mod tests {
         assert_eq!(a, y1, "tied-zero frequencies must resolve to y1 (Suffix, charge 1), not a hash-order ion");
     }
 
-    // ---- Soft fragment matching (ANDES_SOFT_MATCH) -------------------------
+    // ---- Soft fragment matching --------------------------------------------
     //
     // Soft matching is now ALWAYS ON and PARAMETER-FREE (σ = the model's match
     // tolerance), so the scoring closure delegates unconditionally to `soft_blend`.

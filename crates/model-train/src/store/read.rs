@@ -164,16 +164,18 @@ impl ModelStore {
     ) -> Result<CountStats, TrainError> {
         // A model's stat rows live in exactly one partition. Scan parts and
         // return the first part that actually contains stats for this pair.
-        let mut last_err: Option<TrainError> = None;
+        // Only a `NoModel` miss is a reason to keep probing the next partition;
+        // any other error (Parquet/schema) is real and must surface immediately.
         for part in &self.parts {
             match read_source_stats(part, model_id, source_id) {
                 Ok(stats) => return Ok(stats),
-                Err(e) => last_err = Some(e),
+                Err(TrainError::NoModel(_)) => continue,
+                Err(e) => return Err(e),
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            TrainError::NoModel(format!("source_stats({model_id}, {source_id})"))
-        }))
+        Err(TrainError::NoModel(format!(
+            "source_stats({model_id}, {source_id})"
+        )))
     }
 }
 
@@ -213,14 +215,19 @@ fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Train
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let p = entry.path();
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if p.is_dir() {
+            // Skip hidden / temp staging dirs (e.g. `.tmp`, `_temporary`) before
+            // descending so a stale partial write never contributes parquet files.
+            if name.starts_with('.') || name.starts_with('_') {
+                continue;
+            }
             collect_parquet_files(&p, out)?;
             continue;
         }
         if p.extension().and_then(|e| e.to_str()) != Some("parquet") {
             continue;
         }
-        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Skip hidden/temp partition files (e.g. `.models.parquet.tmp.parquet`,
         // `.~tmp.parquet`, or any dotfile) so a stale temp doesn't become a
         // phantom duplicate partition.

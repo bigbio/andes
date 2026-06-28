@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "andes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "clap",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "input"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "byteorder",
@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rustc-hash",
  "tempfile",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "model-train"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "input",
@@ -1780,7 +1780,7 @@ dependencies = [
 
 [[package]]
 name = "output"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -2088,7 +2088,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "scoring"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "byteorder",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "search"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "input",
  "memmap2",

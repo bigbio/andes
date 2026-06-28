@@ -247,7 +247,12 @@ impl Modification {
                         neutral_losses.push(v);
                     }
                 }
-                "accession" => accession = Some(value.trim().to_string()),
+                "accession" => {
+                    // Treat an empty `accession=` as missing (mirrors the empty-name
+                    // handling) so it doesn't block the resolved fallback below.
+                    let a = value.trim();
+                    accession = if a.is_empty() { None } else { Some(a.to_string()) };
+                }
                 "class" => {
                     loss_class = loss_class_id(value)
                         .ok_or_else(|| ModParseError::UnknownLossClass { name: value.trim().to_string() })?;
@@ -435,8 +440,8 @@ mod tests {
     fn parse_unresolvable_mass_field() {
         // A non-numeric field 1 is now treated as a mod token (UNIMOD:NN or a
         // name) and resolved; an unresolvable token like "abc" is reported as
-        // UnresolvedMassField. (BadMass is reserved for numeric parse failures —
-        // see parse_bad_numeric_mass.)
+        // UnresolvedMassField. This contract does not depend on which tokens the
+        // bundled Unimod DB happens to resolve.
         let line = "abc,C,fix,any,Bad";
         let err = Modification::from_mods_txt_line(line).unwrap_err();
         assert!(
@@ -447,14 +452,14 @@ mod tests {
 
     #[test]
     fn parse_bad_numeric_mass() {
-        // A token that looks numeric but fails to parse is still BadMass.
+        // A token that looks numeric but fails to parse as f64 (e.g. "12.3.4")
+        // is not a numeric delta, so it is handed to the resolver as a token.
+        // Since it resolves to neither an accession nor a name, the contract is
+        // a single, DB-independent UnresolvedMassField — assert exactly that.
         let line = "12.3.4,C,fix,any,Bad";
         let err = Modification::from_mods_txt_line(line).unwrap_err();
         assert!(
-            matches!(
-                err,
-                ModParseError::BadMass { .. } | ModParseError::UnresolvedMassField { .. }
-            ),
+            matches!(err, ModParseError::UnresolvedMassField { .. }),
             "got: {err:?}"
         );
     }

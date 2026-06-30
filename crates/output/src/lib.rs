@@ -37,3 +37,6 @@ pub use percolator::{
 
 pub(crate) mod row_context;
 pub(crate) mod percolator_enz;
+
+pub mod glyco_pin;
+pub use glyco_pin::write_glyco_pin;

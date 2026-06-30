@@ -124,7 +124,9 @@ fn main() {
         let precursor_neutral = (t.precursor_mz - PROTON) * prec_z as f64;
 
         // --- De-novo-only baseline (top_k=5, same as Phase-1) ---
-        if ox.fired {
+        // Run over ALL matched truth scans (same denominator as hybrid) so the
+        // de-novo baseline is directly comparable to the hybrid number.
+        {
             let dn_cands = solve_backbone(peaks, precursor_neutral, prec_z, 20.0, 5);
             if dn_cands.iter().any(|c| in_window(c.backbone_mass, t.backbone_mass)) {
                 n_denovo_searchable += 1;
@@ -134,7 +136,17 @@ fn main() {
         // --- Hybrid candidates ---
         let hybrid = hybrid_candidates(peaks, precursor_neutral, prec_z, &glycans, 20.0, 5);
 
-        let searchable_hit = hybrid.iter().find(|h| in_window(h.backbone_mass, t.backbone_mass));
+        // Attribute the hit to the CLOSEST candidate within the gate window (not
+        // the first in mass-sorted order) so DB-vs-de-novo split reflects which
+        // branch actually resolved the truth.
+        let searchable_hit = hybrid
+            .iter()
+            .filter(|h| in_window(h.backbone_mass, t.backbone_mass))
+            .min_by(|a, b| {
+                let da = (a.backbone_mass - t.backbone_mass).abs();
+                let db = (b.backbone_mass - t.backbone_mass).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
         let hybrid_searchable = searchable_hit.is_some();
         if hybrid_searchable {
             n_hybrid_searchable += 1;

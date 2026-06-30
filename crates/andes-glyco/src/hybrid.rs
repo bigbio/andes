@@ -126,7 +126,8 @@ pub fn hybrid_candidates(
             })
     });
 
-    // --- Dedup: merge candidates within 0.02 Da, prefer Db source ---
+    // --- Dedup: merge candidates within max(bb*20e-6, 0.01) Da, prefer Db source ---
+    // Window matches the gate/searchable window so dedup and gate agree.
     // Strategy: single-pass, keep a running "cluster representative".
     // Because Db is sorted before DeNovo at equal mass, when a cluster contains
     // both, the first element is always Db → the representative is Db.
@@ -138,7 +139,8 @@ pub fn hybrid_candidates(
     let mut rep = combined.remove(0);
 
     for next in combined {
-        if (next.backbone_mass - rep.backbone_mass).abs() < 0.02 {
+        let tol = (rep.backbone_mass * 20e-6_f64).max(0.01);
+        if (next.backbone_mass - rep.backbone_mass).abs() < tol {
             // Same cluster: prefer Db source. Since Db is sorted first, rep is
             // already Db if any Db candidate exists in this cluster.
             // If rep is DeNovo and next is Db (shouldn't happen due to sort order,

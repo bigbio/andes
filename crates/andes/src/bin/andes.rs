@@ -2264,7 +2264,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and write a separate `.glyco.pin` file.  The standard PIN is skipped.
     if cli.glyco {
         let t_glyco = std::time::Instant::now();
-        let glycan_list = andes_glyco::glycan_db::n_glycan_list();
+        // Use the curated common list (~600 glycans) by default so that ALL
+        // backbone candidates can be b/y-scored in phase-1 (avoids the
+        // Y-ladder pre-filter ceiling).  The full ~2510-entry list is available
+        // via n_glycan_list() for research/exhaustive searches.
+        let glycan_list = andes_glyco::glycan_db::n_glycan_list_common();
         let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
         let spectra_for_glyco: &[_] = if cli.glyco_max_spectra > 0 {
             &spectra[..spectra.len().min(cli.glyco_max_spectra)]

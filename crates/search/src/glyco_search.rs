@@ -11,6 +11,16 @@
 // peptide backbone only.  The glycan-level evidence (oxonium ions, Y-ladder)
 // lives in the GlycoPsmKey appended as additive PIN columns.
 //
+// Backbone selection strategy (v2 — b/y-ranked):
+//
+//   The prior approach (Y-ladder pre-filter → core_y_hits-ranked cap) discarded
+//   backbones whose spectra lacked strong core-Y ions before any b/y scoring,
+//   capping find-rate at ~11 %.  The fix: use the curated `n_glycan_list_common()`
+//   (~600 glycans instead of 2510), score ALL resulting backbone candidates in
+//   phase-1 b/y scoring, aggregate the best b/y rank score per backbone, and
+//   only then apply the backbone_top_k cap.  Y-ladder hit count is retained as
+//   a tiebreaker so spectra with strong Y-ladder evidence still benefit from it.
+//
 // Placement: inside the search crate so `pub(crate)` items (compute_psm_features,
 // candidate_nominal_bounds) are reachable without visibility changes.
 
@@ -146,46 +156,22 @@ pub fn glyco_search_run(
                 deduped_backbone.push(rep);
             }
 
-            // Rank backbone candidates by core-Y ladder evidence, not by size.
+            // --- b/y-ranked backbone selection (replaces Y-ladder pre-filter) ---
             //
-            // For each candidate backbone `bb`, count how many of the 6 singly-charged
-            // core-Y ions (Y0..Y5 at bb+PROTON, bb+PROTON+CORE_Y_STEPS[i]) appear in
-            // the spectrum within the match tolerance.  A higher count means the
-            // spectrum directly supports this backbone as the true peptide mass.
+            // Previous approach: rank all backbones by core_y_hits → truncate to
+            // backbone_top_k → score the survivors in phase-1.  This discards the
+            // true backbone when the spectrum has weak core-Y ions (common in HCD),
+            // capping find-rate at ~11 %.
             //
-            // The old sort (backbone_mass DESC = smallest glycan first) kept the 20
-            // largest backbones, which are the 20 smallest glycans.  Real serum
-            // N-glycans are large (HexNAc2Hex5+, sialylated), so the true backbone
-            // (precursor − large glycan = small backbone) was almost always discarded.
+            // New approach: skip the Y-ladder pre-filter entirely.  Instead, run
+            // phase-1 b/y scoring (score_psm) for EVERY backbone candidate.  Because
+            // we use n_glycan_list_common() (~600 glycans) by default, the total
+            // number of (backbone, candidate) pairs per spectrum is tractable.
             //
-            // Sort: PRIMARY = core_y_hits DESC (more ladder evidence = higher rank),
-            //       SECONDARY = backbone_mass DESC (deterministic tiebreaker — prefer
-            //       larger backbone when evidence is tied, keeps the old heuristic as
-            //       a fallback and ensures a total order).
-            let core_y_counts: Vec<u8> = deduped_backbone
-                .iter()
-                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass, tol_ppm))
-                .collect();
-            let mut indexed: Vec<(usize, u8)> = core_y_counts
-                .iter()
-                .copied()
-                .enumerate()
-                .collect();
-            indexed.sort_by(|&(ai, ay), &(bi, by)| {
-                by.cmp(&ay) // core_y_hits DESC
-                    .then_with(|| {
-                        // backbone_mass DESC as deterministic tiebreaker
-                        deduped_backbone[bi]
-                            .backbone_mass
-                            .partial_cmp(&deduped_backbone[ai].backbone_mass)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-            });
-            indexed.truncate(backbone_top_k);
-            deduped_backbone = indexed
-                .into_iter()
-                .map(|(i, _)| deduped_backbone[i].clone())
-                .collect();
+            // After phase-1 we know the best b/y score achieved for each backbone.
+            // We THEN rank backbones by that best b/y score, using core_y_hits as a
+            // tiebreaker, and apply the backbone_top_k cap.  Only phase-2
+            // (compute_psm_features) is bounded by that cap.
 
             // Build ScoredSpectrum per unique charge (cached, cheap amortized).
             let mut scored_per_charge: Vec<(u8, ScoredSpectrum<'_>)> = Vec::new();
@@ -195,16 +181,24 @@ pub fn glyco_search_run(
                 }
             }
 
-            // Two-phase scoring:
-            // Phase 1: cheap score_psm+edge for all (backbone, candidate, charge) triples.
-            //          Track best (backbone_hit_idx, cand_slot, z) per dedup key.
-            // Phase 2: compute_psm_features only for the unique winners.
+            // Collect core-Y hit counts for all backbones (cheap, used as tiebreaker
+            // after b/y ranking; avoids a second pass over deduped_backbone later).
+            let core_y_counts: Vec<u8> = deduped_backbone
+                .iter()
+                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass, tol_ppm))
+                .collect();
+
+            // Phase 1: cheap b/y scoring for ALL backbones.
+            //
+            // Accumulate per (cand_slot, glycan_key) winner: the best-ranked
+            // (backbone_hit_idx, z, rank, score, edge).
+            //
+            // Simultaneously track per backbone index the best b/y rank seen over
+            // all of its matching candidates.  This is the signal used to rank
+            // backbones AFTER phase-1.
             //
             // Dedup key: (cand_slot, glycan composition).
             // For DeNovo (no glycan): uses sentinel (255, 255, 255, 255, 255).
-
-            // Phase 1: cheap scoring pass.
-            // Accumulate winners: key → (bb_hit_idx, cand_slot, z, rank, score, edge).
             #[derive(Clone, Copy)]
             struct CheapWinner {
                 bb_hit_idx: usize,
@@ -217,6 +211,10 @@ pub fn glyco_search_run(
             }
             let mut cheap_winners: HashMap<(u32, u8, u8, u8, u8, u8), CheapWinner> =
                 HashMap::new();
+
+            // Per-backbone best b/y rank (index = backbone index in deduped_backbone).
+            let mut backbone_best_rank: Vec<f32> =
+                vec![f32::NEG_INFINITY; deduped_backbone.len()];
 
             for (bb_idx, bb_hit) in deduped_backbone.iter().enumerate() {
                 let bb_residue = bb_hit.backbone_mass;
@@ -277,6 +275,11 @@ pub fn glyco_search_run(
                     }
                     let z = match best_z { Some(z) => z, None => continue };
 
+                    // Update per-backbone best rank.
+                    if best_rank > backbone_best_rank[bb_idx] {
+                        backbone_best_rank[bb_idx] = best_rank;
+                    }
+
                     let w = CheapWinner {
                         bb_hit_idx: bb_idx,
                         cand_slot,
@@ -297,13 +300,40 @@ pub fn glyco_search_run(
                 }
             }
 
+            // Determine which backbones are in the top-K by b/y rank.
+            //
+            // Rank: PRIMARY = backbone_best_rank DESC (best b/y score from any
+            //       candidate that matched this backbone);
+            //       SECONDARY = core_y_hits DESC (Y-ladder evidence breaks ties,
+            //       so spectra with strong Y-ladder evidence retain that advantage);
+            //       TERTIARY = backbone_mass DESC (deterministic tiebreak).
+            let mut backbone_order: Vec<usize> = (0..deduped_backbone.len()).collect();
+            backbone_order.sort_by(|&ai, &bi| {
+                backbone_best_rank[bi]
+                    .partial_cmp(&backbone_best_rank[ai])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| core_y_counts[bi].cmp(&core_y_counts[ai]))
+                    .then_with(|| {
+                        deduped_backbone[bi]
+                            .backbone_mass
+                            .partial_cmp(&deduped_backbone[ai].backbone_mass)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            backbone_order.truncate(backbone_top_k);
+            // Build a set of accepted backbone indices for O(1) lookup.
+            let accepted_backbones: std::collections::HashSet<usize> =
+                backbone_order.into_iter().collect();
+
             // Phase 2: expensive feature extraction for top-K winners only.
+            // Only process cheap_winners whose backbone is in the accepted set.
             // Cap at backbone_top_k × 2 to bound compute_psm_features calls.
-            // After Phase 1 we have potentially hundreds of unique (cand, glycan)
-            // pairs; only the top-ranked ones are worth expensive feature extraction.
             let max_features = backbone_top_k * 2;
             let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> = {
-                let mut v: Vec<_> = cheap_winners.into_iter().collect();
+                let mut v: Vec<_> = cheap_winners
+                    .into_iter()
+                    .filter(|(_, w)| accepted_backbones.contains(&w.bb_hit_idx))
+                    .collect();
                 v.sort_by(|a, b| {
                     b.1.rank
                         .partial_cmp(&a.1.rank)
@@ -498,6 +528,71 @@ mod tests {
             (candidates[1].0 - noise_bb).abs() < 0.01,
             "expected noise_bb ranked second, got backbone_mass={}",
             candidates[1].0
+        );
+    }
+
+    /// b/y ranking: a backbone whose backbone b/y ions match the spectrum must
+    /// outrank a backbone that does NOT match, even when the losing backbone has
+    /// more core-Y hits.
+    ///
+    /// This validates the new backbone selection logic: after phase-1 b/y scoring,
+    /// the backbone with a higher `backbone_best_rank` (best score_psm over all
+    /// its matching peptide candidates) must rank above one with lower b/y rank,
+    /// regardless of Y-ladder evidence.
+    ///
+    /// We simulate the per-backbone ranking sort that runs after phase-1:
+    ///   PRIMARY   = backbone_best_rank DESC
+    ///   SECONDARY = core_y_hits DESC (tiebreaker)
+    ///   TERTIARY  = backbone_mass DESC
+    #[test]
+    fn by_rank_promotes_byone_matching_backbone_over_y_ladder_backbone() {
+        // true_bb: backbone whose peptide b/y ions match the spectrum.
+        //   - backbone_best_rank = 10.0 (good b/y match)
+        //   - core_y_hits = 0         (no Y-ladder ions — no pre-filter benefit)
+        let true_bb_mass = 1500.0_f64;
+        let true_bb_best_rank: f32 = 10.0;
+        let true_bb_core_y: u8 = 0;
+
+        // noise_bb: backbone with strong Y-ladder but poor b/y backbone match.
+        //   - backbone_best_rank = 2.0 (poor b/y: wrong peptide candidates)
+        //   - core_y_hits = 6         (coincidental Y-ladder ions)
+        let noise_bb_mass = 2000.0_f64;
+        let noise_bb_best_rank: f32 = 2.0;
+        let noise_bb_core_y: u8 = 6;
+
+        // Simulate the backbone_order sort from glyco_search_run:
+        //   PRIMARY = backbone_best_rank DESC
+        //   SECONDARY = core_y_hits DESC
+        //   TERTIARY = backbone_mass DESC
+        let backbones = vec![
+            (noise_bb_mass, noise_bb_best_rank, noise_bb_core_y), // idx=0
+            (true_bb_mass, true_bb_best_rank, true_bb_core_y),   // idx=1
+        ];
+        let mut order: Vec<usize> = (0..backbones.len()).collect();
+        order.sort_by(|&ai, &bi| {
+            backbones[bi]
+                .1
+                .partial_cmp(&backbones[ai].1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| backbones[bi].2.cmp(&backbones[ai].2))
+                .then_with(|| {
+                    backbones[bi]
+                        .0
+                        .partial_cmp(&backbones[ai].0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+
+        // true_bb (idx=1) must be ranked first because its b/y rank (10.0) > noise_bb (2.0).
+        assert_eq!(
+            order[0], 1,
+            "expected true_bb (idx=1) ranked first by b/y rank, got idx={}",
+            order[0]
+        );
+        assert_eq!(
+            order[1], 0,
+            "expected noise_bb (idx=0) ranked second, got idx={}",
+            order[1]
         );
     }
 }

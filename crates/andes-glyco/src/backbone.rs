@@ -5,6 +5,9 @@ pub struct BackboneCandidate {
     pub backbone_mass: f64,
     pub core_y_hits: u8,
     pub votes: u32,
+    /// Sum of sqrt-compressed, base-peak-normalised intensities of all peaks
+    /// that voted for this backbone cluster. Primary ranking after core_y_hits.
+    pub intensity_score: f64,
 }
 
 pub fn solve_backbone(
@@ -15,64 +18,164 @@ pub fn solve_backbone(
     top_k: usize,
 ) -> Vec<BackboneCandidate> {
     use std::collections::HashMap;
-    // Bucket votes for a backbone mass at 0.01-Da resolution.
-    // Per key we track: vote count, which core-Y steps contributed, and the
-    // vote-weighted sum of the *true* (unrounded) backbone-mass estimates that
-    // landed in this bin. The weighted sum lets us report the CENTROID mass of a
-    // merged near-mass cluster rather than the lowest-mass edge — without the
-    // centroid the reported mass is biased low by up to the match tolerance,
-    // which would invalidate the ±20 ppm searchable-backbone gate.
-    let mut votes: HashMap<i64, (u32, [bool; 6], f64)> = HashMap::new();
-    let neutral = |mz: f64, z: f64| (mz - PROTON) * z; // peak neutral mass at charge z
-    for &(pmz, _pi) in peaks {
-        for z in 1..=precursor_z.max(1) {
+
+    if peaks.is_empty() {
+        return Vec::new();
+    }
+
+    // --- intensity normalisation: sqrt-compress then normalise to base peak ---
+    // sqrt compression prevents a single huge peak from dominating (e.g. oxonium
+    // at m/z 204 that happens to vote for a spurious low-mass backbone), while
+    // still weighting true Y-ions (which tend to be higher-intensity) over noise.
+    let base_peak_intensity = peaks
+        .iter()
+        .map(|&(_, i)| i)
+        .fold(0.0_f32, f32::max)
+        .max(1.0_f32); // avoid divide-by-zero on all-zero spectra
+
+    // Precompute normalised sqrt intensities once.
+    let norm_sqrt: Vec<f64> = peaks
+        .iter()
+        .map(|&(_, i)| (i / base_peak_intensity).max(0.0).sqrt() as f64)
+        .collect();
+
+    // Minimum plausible backbone mass: real N-glycopeptides are >=500 Da
+    // (smallest tryptic glycopeptide with NXS/T sequon). This cuts the very common
+    // spurious cluster at ~203 Da (HexNAc oxonium m/z 204 at z=1 votes as Y0).
+    const MIN_BB: f64 = 500.0;
+    // Minimum implied glycan mass for N-glycopeptides: the core requires at least
+    // 2×HexNAc (~406 Da). This cuts spurious high-mass backbone candidates that
+    // leave no room for a real glycan.
+    const MIN_GLYCAN: f64 = 406.0; // 2×HexNAc = minimum N-glycan core
+
+    let prec_z_max = precursor_z.max(1);
+    let neutral = |mz: f64, z: f64| (mz - PROTON) * z;
+
+    // Per bin key, accumulate:
+    //   .0  raw vote count (u32)             — for centroid/dedup
+    //   .1  per-rung best-intensity seen      — [f64; 6], one slot per Y-ion rung
+    //   .2  vote-weighted mass sum (f64)      — for centroid
+    //   .3  sum of normalised sqrt intensities — intensity ranking score
+    //
+    // KEY CHANGE: each rung slot records the MAXIMUM intensity that voted for it
+    // (de-duplicated across charges). This means a single peak seen at z=2 and z=3
+    // does NOT double-count; only its best weight contributes to the intensity score.
+    // This collapses the spurious inflation of low-mass clusters.
+    //
+    // Per-key per-rung accumulation: we first collect per (key, rung) the best
+    // weight from any charge, then aggregate into the bucket.
+    //
+    // Data layout: outer HashMap key = backbone bin key; inner = rung index (0–5),
+    // value = (best_w_for_rung, mass_accum, vote_count). We compute the final
+    // intensity_score as the sum of per-rung best weights.
+
+    // Two-pass: collect best-weight per (backbone_bin, rung) then aggregate.
+    // We use a flat HashMap keyed by (backbone_bin, rung_idx) for efficiency.
+    let mut rung_best: HashMap<(i64, u8), (f64 /*best_w*/, f64 /*mass for centroid*/, u32 /*vote count*/)> =
+        HashMap::new();
+
+    // Per-rung weights: Y0 (bare backbone) and Y1 (first HexNAc) are the most
+    // diagnostic evidence for a specific backbone mass; they are unique to the
+    // backbone and not part of a repeated glycan motif. Y3-Y5 (Hex additions)
+    // are less specific because hexose residues are common in many glycan
+    // antennae structures and can arise coincidentally.
+    //   ri: 0=Y0, 1=Y1, 2=Y2, 3=Y3, 4=Y4, 5=Y5
+    const RUNG_WEIGHT: [f64; 6] = [2.0, 2.0, 1.5, 1.0, 1.0, 1.0];
+
+    for (peak_idx, &(pmz, _pi)) in peaks.iter().enumerate() {
+        let w = norm_sqrt[peak_idx];
+        for z in 1..=prec_z_max {
             let pn = neutral(pmz, z as f64);
             if pn <= 0.0 || pn > precursor_neutral {
                 continue;
             }
-            // this peak could be Y0 (bare backbone) or Y_r (backbone + core step r)
-            // candidate backbone = pn - core_step (Y0: step 0)
-            for (ri, step) in std::iter::once(0.0).chain(CORE_Y_STEPS.iter().copied()).enumerate() {
+            for (ri, step) in std::iter::once(0.0)
+                .chain(CORE_Y_STEPS.iter().copied())
+                .enumerate()
+            {
                 let bb = pn - step;
-                if bb <= 0.0 {
+                // Plausibility gates:
+                //  1. backbone must be within [MIN_BB, precursor_neutral)
+                //  2. implied glycan (precursor − backbone) must be ≥ MIN_GLYCAN
+                //     to avoid spurious candidates where the backbone consumes nearly
+                //     the entire precursor mass, leaving no room for a real glycan.
+                if bb < MIN_BB || bb >= precursor_neutral {
+                    continue;
+                }
+                if precursor_neutral - bb < MIN_GLYCAN {
                     continue;
                 }
                 let key = (bb * 100.0).round() as i64;
                 let tol_key = ((bb * tol_ppm / 1e6).max(0.01) * 100.0).round() as i64;
-                // accumulate into nearby keys within tolerance
+                let ri_u8 = ri.min(5) as u8;
+                // Rung-weighted intensity: Y0 and Y1 are more diagnostic than Y3-Y5.
+                let rw = RUNG_WEIGHT[ri_u8 as usize];
+                let weighted_w = w * rw;
                 for k in (key - tol_key)..=(key + tol_key) {
-                    let e = votes.entry(k).or_insert((0, [false; 6], 0.0));
-                    e.0 += 1;
-                    if ri < 6 {
-                        e.1[ri] = true;
+                    let e = rung_best
+                        .entry((k, ri_u8))
+                        .or_insert((0.0, 0.0, 0));
+                    // keep the best rung-weighted intensity seen (charge-dedup)
+                    if weighted_w > e.0 {
+                        e.0 = weighted_w;
                     }
-                    // accumulate the unrounded backbone estimate, weighted by 1
-                    // vote, so backbone_mass = mass_sum / votes is the centroid.
-                    e.2 += bb;
+                    e.1 += bb; // for vote-weighted centroid
+                    e.2 += 1;
                 }
             }
         }
     }
-    // Per-key candidates: backbone_mass is the vote-weighted centroid (mass_sum /
-    // votes), not the bin's rounded center, so it is unbiased within the bin.
-    let mut cands: Vec<BackboneCandidate> = votes
+
+    // Aggregate per (bin, rung) into per-bin stats.
+    // Per-bin stats: (raw_votes: u32, rung_hit_mask: [bool;6], mass_sum: f64, intensity_score: f64)
+    let mut bins: HashMap<i64, (u32, [bool; 6], f64, f64)> = HashMap::new();
+
+    for ((k, ri), (best_w, mass_sum, vote_count)) in rung_best {
+        let e = bins.entry(k).or_insert((0, [false; 6], 0.0, 0.0));
+        e.0 += vote_count;
+        if (ri as usize) < 6 {
+            e.1[ri as usize] = true;
+        }
+        e.2 += mass_sum;
+        // intensity score = sum of per-rung best weights; each rung contributes
+        // at most once (the best weight seen across all charges + all peaks
+        // that could have generated this rung).
+        e.3 += best_w;
+    }
+
+    // Build candidates from bins.
+    let mut cands: Vec<BackboneCandidate> = bins
         .into_iter()
-        .map(|(_k, (v, hits, mass_sum))| BackboneCandidate {
+        .map(|(_k, (v, hits, mass_sum, int_score))| BackboneCandidate {
             backbone_mass: mass_sum / v as f64,
             core_y_hits: hits.iter().filter(|&&h| h).count() as u8,
             votes: v,
+            intensity_score: int_score,
         })
         .filter(|c| c.core_y_hits >= 2)
         .collect(); // core-Y quorum
+
+    // Sort: PRIMARY = core_y_hits (more distinct rungs = stronger evidence),
+    // SECONDARY = intensity_score (sum of rung-weighted sqrt-normalised intensities,
+    // charge-deduplicated — true Y-ions tend to be brighter than spurious matches),
+    // TERTIARY = backbone_mass ascending (deterministic tiebreak).
     cands.sort_by(|a, b| {
-        b.core_y_hits.cmp(&a.core_y_hits)
-            .then(b.votes.cmp(&a.votes))
-            .then(a.backbone_mass.partial_cmp(&b.backbone_mass).unwrap_or(std::cmp::Ordering::Equal))
+        b.core_y_hits
+            .cmp(&a.core_y_hits)
+            .then(
+                b.intensity_score
+                    .partial_cmp(&a.intensity_score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+            .then(
+                a.backbone_mass
+                    .partial_cmp(&b.backbone_mass)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
     });
+
     // Merge near-mass clusters into a single vote-weighted centroid. We keep the
-    // higher-ranked representative (a) and fold the merged neighbour's (b) votes
-    // and mass into it so the survivor reports the cluster CENTROID rather than
-    // its lowest-mass edge. dedup_by removes b and keeps the mutated a.
+    // higher-ranked representative (kept) and fold the removed neighbour (cur) into it.
     // dedup_by calls the closure as (cur, kept): `cur` is the element under
     // inspection and `kept` is the surviving representative. Returning true
     // removes `cur`; we first fold its votes/mass into `kept` so the survivor
@@ -84,6 +187,7 @@ pub fn solve_backbone(
                 + cur.backbone_mass * cur.votes as f64)
                 / total;
             kept.votes += cur.votes;
+            kept.intensity_score += cur.intensity_score;
             kept.core_y_hits = kept.core_y_hits.max(cur.core_y_hits);
             true
         } else {
@@ -153,15 +257,15 @@ mod tests {
     /// Regression test: solve_backbone must return the same ordered result on repeated calls.
     /// We build two synthetic peptide+core-Y ladders with backbone masses 1200.0 and 1800.0 Da,
     /// each yielding the same number of core-Y hits and votes, producing a tie on
-    /// (core_y_hits, votes). Without the backbone_mass tiebreaker the HashMap iteration
-    /// order could permute the two candidates across runs.
+    /// (core_y_hits, intensity_score). Without the backbone_mass tiebreaker the HashMap
+    /// iteration order could permute the two candidates across runs.
     #[test]
     fn solve_backbone_is_deterministic_under_ties() {
         let proton = crate::glycan_mass::PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 
         // Build identical core-Y ladders anchored at two different backbone masses.
-        // Both backbones get exactly the same number of Y-ladder peaks → tied hits & votes.
+        // Both backbones get exactly the same number of Y-ladder peaks → tied hits & scores.
         let bb1 = 1200.0_f64;
         let bb2 = 1800.0_f64;
 
@@ -197,5 +301,39 @@ mod tests {
                 c2.backbone_mass
             );
         }
+    }
+
+    /// High-intensity true Y-ions should rank above equal-rung-count low-intensity noise.
+    /// Build a known backbone ladder with high intensity, and a spurious same-rung-count
+    /// cluster built from very low-intensity peaks. The true backbone must rank first.
+    #[test]
+    fn solve_backbone_intensity_weighted_prefers_bright_ladder() {
+        let proton = crate::glycan_mass::PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+
+        // True backbone at 1500 Da — bright peaks
+        let true_bb = 1500.0_f64;
+        let mut peaks: Vec<(f64, f32)> = vec![(true_bb + proton, 10000.0)]; // Y0 bright
+        for &s in steps.iter() {
+            peaks.push((true_bb + s + proton, 8000.0));
+        }
+
+        // Spurious backbone at 800 Da — dim peaks that by flat-vote coincidence
+        // would accumulate the same rung count but much lower intensity.
+        let spurious_bb = 800.0_f64;
+        peaks.push((spurious_bb + proton, 1.0)); // Y0 dim
+        for &s in steps.iter() {
+            peaks.push((spurious_bb + s + proton, 1.0));
+        }
+
+        let precursor_neutral = true_bb + 1444.53;
+        let out = solve_backbone(&peaks, precursor_neutral, 2, 20.0, 5);
+        assert!(!out.is_empty());
+        // The bright true-backbone cluster must be ranked first.
+        assert!(
+            (out[0].backbone_mass - true_bb).abs() < 0.05,
+            "expected true backbone first, got {}",
+            out[0].backbone_mass
+        );
     }
 }

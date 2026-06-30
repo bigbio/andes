@@ -385,6 +385,17 @@ struct SearchArgs {
     #[arg(long = "candidate-index", hide = true, default_value = "auto")]
     candidate_index: CandidateIndexFlag,
 
+    /// Glycopeptide search mode: enumerate hybrid backbone candidates (DB + de-novo
+    /// Y-ladder), filter by N-X-S/T sequon, score bare backbones, and write a
+    /// `.glyco.pin` file instead of the standard PIN. Default off.
+    #[arg(long = "glyco", default_value_t = false)]
+    glyco: bool,
+
+    /// Maximum backbone candidates per spectrum in glyco mode (DB + de-novo
+    /// combined, after union-dedup). Hidden advanced knob; default 20.
+    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 20usize)]
+    glyco_backbone_top_k: usize,
+
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
     #[arg(long = "refine", default_value_t = false)]
     refine: bool,
@@ -2241,6 +2252,52 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         spectra.len(),
         search_elapsed.as_secs_f64()
     );
+
+    // ── 7a. Glyco mode: run glyco scoring and write .glyco.pin, then return ──
+    // When --glyco is active, we run the glyco-PSM scoring driver over ALL
+    // accumulated spectra (using the PreparedSearch from the standard search)
+    // and write a separate `.glyco.pin` file.  The standard PIN is skipped.
+    if cli.glyco {
+        let t_glyco = std::time::Instant::now();
+        let glycan_list = andes_glyco::glycan_db::n_glycan_list();
+        let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
+        let glyco_results = search::glyco_search::glyco_search_run(
+            &spectra,
+            &prepared,
+            &glycan_list,
+            glyco_tol_ppm,
+            cli.glyco_backbone_top_k,
+        );
+        let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
+        eprintln!(
+            "[glyco] scored {} spectra → {} glyco-PSM rows [{:.2}s]",
+            glyco_results.len(),
+            total_glyco_rows,
+            t_glyco.elapsed().as_secs_f64()
+        );
+
+        // Derive glyco PIN path: `<output_pin>.glyco.pin` (or
+        // `<output_pin_stem>.glyco.pin` if it already ends in `.pin`).
+        let glyco_pin_path = {
+            let stem = output_pin_path.with_extension("");
+            stem.with_extension("glyco.pin")
+        };
+        output::write_glyco_pin(
+            &glyco_pin_path,
+            &spectra,
+            &glyco_results,
+            &prepared.candidates,
+            &params,
+            &idx,
+        )?;
+        eprintln!(
+            "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",
+            glyco_pin_path.display(),
+            total_glyco_rows,
+            t_total.elapsed().as_secs_f64()
+        );
+        return Ok(());
+    }
 
     // ── 7b. PTM-refinement cascade (Pass-2) ───────────────────────────────────
     // Opt-in (`--refine`). Runs a scoped Pass-2 over the unidentified spectra

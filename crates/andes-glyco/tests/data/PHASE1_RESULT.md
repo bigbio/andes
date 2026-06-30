@@ -59,3 +59,9 @@ and the glycan composition is known a priori.
 The sparse stratum jumped from 2.7% to 71.6% — the biggest gain — because sparse spectra
 (≤2 core-Y rungs) were structurally inaccessible to the de-novo solver but are trivially
 solved by the DB branch: no Y-ladder evidence is needed when the glycan is enumerated.
+
+## SP-A FINAL (corrected source attribution, commit 3aa93a6c, glycan DB=2510 comps, n=542)
+- De-novo-only baseline: 57.7% (313/542)
+- Hybrid searchable-backbone: **90.4%** (490/542) — GATE PASS
+- Source split (reliable): DB-branch 87.3% (428/490), de-novo-only 12.7% (62/490)
+- Sparse stratum (≤2 core-Y): 71.6% (106/148)

@@ -392,8 +392,10 @@ struct SearchArgs {
     glyco: bool,
 
     /// Maximum backbone candidates per spectrum in glyco mode (DB + de-novo
-    /// combined, after union-dedup). Hidden advanced knob; default 20.
-    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 20usize)]
+    /// combined, after union-dedup). Hidden advanced knob; default 50.
+    /// Raised from 20: core-Y evidence ranking means the cap now cuts fewer
+    /// true positives, so more headroom is inexpensive and safe.
+    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 50usize)]
     glyco_backbone_top_k: usize,
 
     /// Limit glyco scoring to the first N spectra (0 = no limit). Hidden dev knob.

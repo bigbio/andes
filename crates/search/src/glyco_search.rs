@@ -20,6 +20,7 @@ use model::mass::{nominal_from, H2O, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
+use andes_glyco::backbone::count_core_y_hits;
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
 use andes_glyco::hybrid::{hybrid_candidates, BackboneHit, Source};
@@ -145,16 +146,46 @@ pub fn glyco_search_run(
                 deduped_backbone.push(rep);
             }
 
-            // Sort DESC by backbone_mass (largest backbone = smallest glycan first),
-            // then cap at backbone_top_k.  Larger backbone masses are more likely to
-            // have matching candidates in the tryptic database (smaller glycan,
-            // bigger peptide).
-            deduped_backbone.sort_by(|a, b| {
-                b.backbone_mass
-                    .partial_cmp(&a.backbone_mass)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+            // Rank backbone candidates by core-Y ladder evidence, not by size.
+            //
+            // For each candidate backbone `bb`, count how many of the 6 singly-charged
+            // core-Y ions (Y0..Y5 at bb+PROTON, bb+PROTON+CORE_Y_STEPS[i]) appear in
+            // the spectrum within the match tolerance.  A higher count means the
+            // spectrum directly supports this backbone as the true peptide mass.
+            //
+            // The old sort (backbone_mass DESC = smallest glycan first) kept the 20
+            // largest backbones, which are the 20 smallest glycans.  Real serum
+            // N-glycans are large (HexNAc2Hex5+, sialylated), so the true backbone
+            // (precursor − large glycan = small backbone) was almost always discarded.
+            //
+            // Sort: PRIMARY = core_y_hits DESC (more ladder evidence = higher rank),
+            //       SECONDARY = backbone_mass DESC (deterministic tiebreaker — prefer
+            //       larger backbone when evidence is tied, keeps the old heuristic as
+            //       a fallback and ensures a total order).
+            let core_y_counts: Vec<u8> = deduped_backbone
+                .iter()
+                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass, tol_ppm))
+                .collect();
+            let mut indexed: Vec<(usize, u8)> = core_y_counts
+                .iter()
+                .copied()
+                .enumerate()
+                .collect();
+            indexed.sort_by(|&(ai, ay), &(bi, by)| {
+                by.cmp(&ay) // core_y_hits DESC
+                    .then_with(|| {
+                        // backbone_mass DESC as deterministic tiebreaker
+                        deduped_backbone[bi]
+                            .backbone_mass
+                            .partial_cmp(&deduped_backbone[ai].backbone_mass)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
             });
-            deduped_backbone.truncate(backbone_top_k);
+            indexed.truncate(backbone_top_k);
+            deduped_backbone = indexed
+                .into_iter()
+                .map(|(i, _)| deduped_backbone[i].clone())
+                .collect();
 
             // Build ScoredSpectrum per unique charge (cached, cheap amortized).
             let mut scored_per_charge: Vec<(u8, ScoredSpectrum<'_>)> = Vec::new();
@@ -398,5 +429,75 @@ mod tests {
         let result = GlycoSpectrumResult { spectrum_idx: 7, hits: vec![] };
         let c = result.clone();
         assert_eq!(c.spectrum_idx, 7);
+    }
+
+    /// Core-Y ranking: a backbone WITH Y-ladder support must outrank one without.
+    ///
+    /// This test constructs two synthetic backbone candidates:
+    ///   - `true_bb` (small backbone, large glycan): has all 6 core-Y ions present
+    ///     in the spectrum.
+    ///   - `noise_bb` (large backbone, small glycan): has zero core-Y ions in the
+    ///     spectrum.
+    ///
+    /// Under the old size-based ranking, `noise_bb` (larger backbone_mass) would
+    /// have been ranked first and `true_bb` would be discarded.  After the fix,
+    /// `count_core_y_hits` gives `true_bb` a count of 6 and `noise_bb` a count of 0,
+    /// so the sort produces: `true_bb` first, `noise_bb` second.
+    #[test]
+    fn core_y_ranking_promotes_supported_backbone_over_unsupported() {
+        use andes_glyco::backbone::count_core_y_hits;
+        use andes_glyco::glycan_mass::{CORE_Y_STEPS, PROTON};
+
+        // True backbone: small peptide (large glycan).
+        // Typical serum N-glycopeptide scenario: backbone ~1100 Da, glycan ~2200 Da.
+        let true_bb = 1100.0_f64;
+
+        // Noise backbone: large peptide (small glycan).
+        // The OLD buggy ranking kept this one (largest backbone = first after DESC sort).
+        let noise_bb = 2800.0_f64;
+
+        // Build synthetic spectrum: core-Y ions for true_bb only.
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (true_bb + PROTON, 500.0),                          // Y0
+            (true_bb + PROTON + CORE_Y_STEPS[0], 400.0),       // Y1
+            (true_bb + PROTON + CORE_Y_STEPS[1], 350.0),       // Y2
+            (true_bb + PROTON + CORE_Y_STEPS[2], 300.0),       // Y3
+            (true_bb + PROTON + CORE_Y_STEPS[3], 250.0),       // Y4
+            (true_bb + PROTON + CORE_Y_STEPS[4], 200.0),       // Y5
+            (900.0, 10.0),   // noise
+            (1050.0, 10.0),  // noise
+        ];
+        // Deliberately do NOT add core-Y ions for noise_bb.
+        // Add some noise near noise_bb m/z to ensure they don't accidentally match.
+        peaks.push((noise_bb + PROTON + 5.0, 50.0)); // off by 5 Da — won't match
+
+        let tol_ppm = 20.0;
+
+        // Verify counts directly.
+        let true_hits = count_core_y_hits(&peaks, true_bb, tol_ppm);
+        let noise_hits = count_core_y_hits(&peaks, noise_bb, tol_ppm);
+
+        assert_eq!(true_hits, 6, "expected all 6 core-Y hits for true_bb, got {}", true_hits);
+        assert_eq!(noise_hits, 0, "expected 0 core-Y hits for noise_bb, got {}", noise_hits);
+
+        // Now simulate the new ranking logic: sort by core_y_hits DESC, backbone_mass DESC.
+        let mut candidates = vec![
+            (noise_bb, noise_hits), // large backbone — old ranking would put this first
+            (true_bb, true_hits),   // small backbone — true hit
+        ];
+        candidates.sort_by(|&(am, ay), &(bm, by)| {
+            by.cmp(&ay).then_with(|| bm.partial_cmp(&am).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        assert!(
+            (candidates[0].0 - true_bb).abs() < 0.01,
+            "expected true_bb ranked first after core-Y sort, got backbone_mass={}",
+            candidates[0].0
+        );
+        assert!(
+            (candidates[1].0 - noise_bb).abs() < 0.01,
+            "expected noise_bb ranked second, got backbone_mass={}",
+            candidates[1].0
+        );
     }
 }

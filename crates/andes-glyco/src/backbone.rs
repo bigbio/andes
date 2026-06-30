@@ -307,6 +307,51 @@ pub fn solve_backbone(
     cands
 }
 
+/// Count core-Y ladder support ions for a given backbone mass in a spectrum.
+///
+/// For a candidate backbone mass `bb`, the core-Y ion ladder produces peaks at:
+///   Y0 = bb + PROTON
+///   Y1 = bb + PROTON + CORE_Y_STEPS[0]
+///   ...
+///   Y5 = bb + PROTON + CORE_Y_STEPS[4]
+///
+/// Returns the number of those 6 ions (Y0 through Y5) that have a matching peak
+/// in `peaks` within the match tolerance: max(mz * tol_ppm / 1e6, 0.01) Da.
+///
+/// `peaks` need not be sorted. This function performs binary-search if sorted,
+/// and falls back to a linear scan (but for typical spectrum sizes, linear is fine).
+pub fn count_core_y_hits(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64) -> u8 {
+    // Build the 6 expected Y-ion m/z values (all singly charged).
+    let ions: [f64; 6] = [
+        bb + PROTON,
+        bb + PROTON + CORE_Y_STEPS[0],
+        bb + PROTON + CORE_Y_STEPS[1],
+        bb + PROTON + CORE_Y_STEPS[2],
+        bb + PROTON + CORE_Y_STEPS[3],
+        bb + PROTON + CORE_Y_STEPS[4],
+    ];
+
+    // Check if peaks are sorted (mzML parsers almost always emit sorted peaks).
+    let sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
+
+    let mut hits: u8 = 0;
+    for &ion_mz in &ions {
+        let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
+        let found = if sorted {
+            let lo = ion_mz - tol;
+            let hi = ion_mz + tol;
+            let start = peaks.partition_point(|&(m, _)| m < lo);
+            peaks[start..].iter().any(|&(m, _)| m <= hi)
+        } else {
+            peaks.iter().any(|&(m, _)| (m - ion_mz).abs() <= tol)
+        };
+        if found {
+            hits += 1;
+        }
+    }
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

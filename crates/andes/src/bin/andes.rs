@@ -396,6 +396,10 @@ struct SearchArgs {
     #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 20usize)]
     glyco_backbone_top_k: usize,
 
+    /// Limit glyco scoring to the first N spectra (0 = no limit). Hidden dev knob.
+    #[arg(long = "glyco-max-spectra", hide = true, default_value_t = 0usize)]
+    glyco_max_spectra: usize,
+
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
     #[arg(long = "refine", default_value_t = false)]
     refine: bool,
@@ -2084,12 +2088,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 for mut spec in chunk_spectra.into_iter() {
                     // Peaks are normally dropped post-scoring to bound memory
                     // (only the metadata is needed downstream). Under `--refine`
-                    // we RETAIN them: the Pass-2 cascade re-scores the
-                    // unidentified spectra and needs their peak lists. Memory
-                    // cost: the full peak buffer for every spectrum stays
-                    // resident through the refinement pass (acceptable; --refine
-                    // is opt-in and scoped to one search).
-                    if !cli.refine {
+                    // or `--glyco` we RETAIN them: refine's Pass-2 re-scores
+                    // unidentified spectra; glyco_search_run needs the full
+                    // peak lists for oxonium ion detection. Memory cost: full
+                    // peak buffer stays resident (acceptable; both are opt-in).
+                    if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -2173,9 +2176,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 all_queues.extend(queues);
                 for mut spec in chunk.into_iter() {
                     // See the chimeric-loop note above: normally peaks are
-                    // dropped post-scoring to bound memory, but `--refine` needs
-                    // them for the Pass-2 re-scoring of unidentified spectra.
-                    if !cli.refine {
+                    // dropped post-scoring to bound memory, but `--refine` or
+                    // `--glyco` needs the full peak lists retained.
+                    if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -2261,8 +2264,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let t_glyco = std::time::Instant::now();
         let glycan_list = andes_glyco::glycan_db::n_glycan_list();
         let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
+        let spectra_for_glyco: &[_] = if cli.glyco_max_spectra > 0 {
+            &spectra[..spectra.len().min(cli.glyco_max_spectra)]
+        } else {
+            &spectra
+        };
         let glyco_results = search::glyco_search::glyco_search_run(
-            &spectra,
+            spectra_for_glyco,
             &prepared,
             &glycan_list,
             glyco_tol_ppm,

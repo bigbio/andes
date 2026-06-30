@@ -78,6 +78,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "andes-glyco"
+version = "0.3.0"
+dependencies = [
+ "input",
+ "model",
+]
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

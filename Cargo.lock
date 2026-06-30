@@ -61,6 +61,7 @@ dependencies = [
 name = "andes"
 version = "0.3.0"
 dependencies = [
+ "andes-glyco",
  "arrow",
  "clap",
  "input",
@@ -1790,6 +1791,7 @@ dependencies = [
 name = "output"
 version = "0.3.0"
 dependencies = [
+ "andes-glyco",
  "arrow",
  "chrono",
  "input",
@@ -2112,6 +2114,7 @@ dependencies = [
 name = "search"
 version = "0.3.0"
 dependencies = [
+ "andes-glyco",
  "input",
  "memmap2",
  "model",

@@ -4,3 +4,8 @@ version = "0.3.0"
 edition = "2021"
 
 [dependencies]
+
+# Only used by the `glyco_probe` Phase-1 gate binary (mzML iteration). The core
+# library (oxonium/backbone/glycan_mass) has no runtime deps.
+input = { path = "../input" }
+model = { path = "../model" }

@@ -1,5 +1,6 @@
 use crate::glycan_mass::{CORE_Y_STEPS, PROTON};
 
+#[derive(Debug, Clone)]
 pub struct BackboneCandidate {
     pub backbone_mass: f64,
     pub core_y_hits: u8,
@@ -14,8 +15,14 @@ pub fn solve_backbone(
     top_k: usize,
 ) -> Vec<BackboneCandidate> {
     use std::collections::HashMap;
-    // bucket votes for a backbone mass at 0.01-Da resolution
-    let mut votes: HashMap<i64, (u32, [bool; 6])> = HashMap::new();
+    // Bucket votes for a backbone mass at 0.01-Da resolution.
+    // Per key we track: vote count, which core-Y steps contributed, and the
+    // vote-weighted sum of the *true* (unrounded) backbone-mass estimates that
+    // landed in this bin. The weighted sum lets us report the CENTROID mass of a
+    // merged near-mass cluster rather than the lowest-mass edge — without the
+    // centroid the reported mass is biased low by up to the match tolerance,
+    // which would invalidate the ±20 ppm searchable-backbone gate.
+    let mut votes: HashMap<i64, (u32, [bool; 6], f64)> = HashMap::new();
     let neutral = |mz: f64, z: f64| (mz - PROTON) * z; // peak neutral mass at charge z
     for &(pmz, _pi) in peaks {
         for z in 1..=precursor_z.max(1) {
@@ -34,19 +41,24 @@ pub fn solve_backbone(
                 let tol_key = ((bb * tol_ppm / 1e6).max(0.01) * 100.0).round() as i64;
                 // accumulate into nearby keys within tolerance
                 for k in (key - tol_key)..=(key + tol_key) {
-                    let e = votes.entry(k).or_insert((0, [false; 6]));
+                    let e = votes.entry(k).or_insert((0, [false; 6], 0.0));
                     e.0 += 1;
                     if ri < 6 {
                         e.1[ri] = true;
                     }
+                    // accumulate the unrounded backbone estimate, weighted by 1
+                    // vote, so backbone_mass = mass_sum / votes is the centroid.
+                    e.2 += bb;
                 }
             }
         }
     }
+    // Per-key candidates: backbone_mass is the vote-weighted centroid (mass_sum /
+    // votes), not the bin's rounded center, so it is unbiased within the bin.
     let mut cands: Vec<BackboneCandidate> = votes
         .into_iter()
-        .map(|(k, (v, hits))| BackboneCandidate {
-            backbone_mass: k as f64 / 100.0,
+        .map(|(_k, (v, hits, mass_sum))| BackboneCandidate {
+            backbone_mass: mass_sum / v as f64,
             core_y_hits: hits.iter().filter(|&&h| h).count() as u8,
             votes: v,
         })
@@ -57,7 +69,27 @@ pub fn solve_backbone(
             .then(b.votes.cmp(&a.votes))
             .then(a.backbone_mass.partial_cmp(&b.backbone_mass).unwrap_or(std::cmp::Ordering::Equal))
     });
-    cands.dedup_by(|a, b| (a.backbone_mass - b.backbone_mass).abs() < 0.05);
+    // Merge near-mass clusters into a single vote-weighted centroid. We keep the
+    // higher-ranked representative (a) and fold the merged neighbour's (b) votes
+    // and mass into it so the survivor reports the cluster CENTROID rather than
+    // its lowest-mass edge. dedup_by removes b and keeps the mutated a.
+    // dedup_by calls the closure as (cur, kept): `cur` is the element under
+    // inspection and `kept` is the surviving representative. Returning true
+    // removes `cur`; we first fold its votes/mass into `kept` so the survivor
+    // reports the cluster CENTROID rather than its lowest-mass edge.
+    cands.dedup_by(|cur, kept| {
+        if (kept.backbone_mass - cur.backbone_mass).abs() < 0.05 {
+            let total = kept.votes as f64 + cur.votes as f64;
+            kept.backbone_mass = (kept.backbone_mass * kept.votes as f64
+                + cur.backbone_mass * cur.votes as f64)
+                / total;
+            kept.votes += cur.votes;
+            kept.core_y_hits = kept.core_y_hits.max(cur.core_y_hits);
+            true
+        } else {
+            false
+        }
+    });
     cands.truncate(top_k);
     cands
 }
@@ -87,6 +119,35 @@ mod tests {
     fn solve_backbone_empty_without_core_quorum() {
         let peaks = vec![(700.0, 50.0_f32), (1234.5, 50.0)]; // no core-Y ladder
         assert!(solve_backbone(&peaks, 2500.0, 2, 20.0, 5).is_empty());
+    }
+
+    /// The reported backbone mass must be the vote-weighted CENTROID of a merged
+    /// near-mass cluster, not its lowest-mass edge. We build a Y-ladder anchored
+    /// at a backbone whose mass is offset by a non-integer amount from the 0.01-Da
+    /// bin grid; the tolerance window spreads votes symmetrically across several
+    /// bins. With a centroid, the recovered mass must land within ~1 mDa of the
+    /// true center; a lowest-edge tiebreak would bias it low by the tol window.
+    #[test]
+    fn solve_backbone_reports_cluster_centroid_not_low_edge() {
+        let proton = crate::glycan_mass::PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        // True backbone chosen to sit between 0.01-Da bins (…x.xx5 region).
+        let bb = 1500.005_f64;
+        let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 50.0)]; // Y0
+        for &s in steps.iter() {
+            peaks.push((bb + s + proton, 50.0));
+        }
+        let precursor = bb + 1444.53;
+        let out = solve_backbone(&peaks, precursor, 2, 20.0, 5);
+        assert!(!out.is_empty());
+        // Centroid must be within 2 mDa of the true backbone (unbiased).
+        // The old lowest-edge behaviour skewed low by up to the 0.03-Da window.
+        assert!(
+            (out[0].backbone_mass - bb).abs() < 0.002,
+            "centroid off by {:.4} (got {})",
+            (out[0].backbone_mass - bb).abs(),
+            out[0].backbone_mass
+        );
     }
 
     /// Regression test: solve_backbone must return the same ordered result on repeated calls.

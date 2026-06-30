@@ -1,5 +1,6 @@
 use crate::glycan_mass::CORE_OXONIUM_MZ;
 
+#[derive(Debug, Clone)]
 pub struct OxoniumEvidence {
     pub fired: bool,
     pub summed_frac: f32,

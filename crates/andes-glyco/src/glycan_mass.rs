@@ -32,7 +32,7 @@ pub const CORE_OXONIUM_MZ: [f64; 5] = [
 /// Y-ion offsets above the peptide backbone for the trimannosyl core ladder (Y1..Y5).
 /// Y1 = +HexNAc; Y2 = +2HexNAc; Y3 = +2HexNAc+Hex; Y4 = +2HexNAc+2Hex; Y5 = +2HexNAc+3Hex.
 pub const CORE_Y_STEPS: [f64; 5] = [
-    203.07937, // Y1: +HexNAc
+    HEXNAC,    // Y1: +HexNAc
     406.15874, // Y2: +2HexNAc
     568.21156, // Y3: +2HexNAc+Hex
     730.26438, // Y4: +2HexNAc+2Hex
@@ -45,7 +45,7 @@ pub const MONO_STEPS: [f64; 5] = [
     HEX,       // 162.05282
     FUC,       // 146.05791
     365.13219, // HexHexNAc combo
-    324.10565, // HexNeuAc combo
+    324.10565, // 2x Hex (HexHex)
 ];
 
 #[cfg(test)]
@@ -54,6 +54,8 @@ mod tests {
 
     #[test]
     fn core_y_steps_are_cumulative_core() {
+        // Y1 must equal HEXNAC (catches literal drift in the first step)
+        assert_eq!(CORE_Y_STEPS[0], HEXNAC);
         // Y2 = Y1 + HexNAc; Y3 = Y2 + Hex; Y4 = Y3 + Hex; Y5 = Y4 + Hex
         assert!((CORE_Y_STEPS[1] - (CORE_Y_STEPS[0] + HEXNAC)).abs() < 1e-4);
         assert!((CORE_Y_STEPS[2] - (CORE_Y_STEPS[1] + HEX)).abs() < 1e-4);

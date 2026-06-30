@@ -80,10 +80,6 @@ dependencies = [
 [[package]]
 name = "andes-glyco"
 version = "0.3.0"
-dependencies = [
- "input",
- "model",
-]
 
 [[package]]
 name = "android-tzdata"

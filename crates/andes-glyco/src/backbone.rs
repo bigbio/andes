@@ -1,5 +1,14 @@
 use crate::glycan_mass::{CORE_Y_STEPS, PROTON};
 
+/// Water molecule mass (monoisotopic).
+const H2O: f64 = 18.010565;
+
+/// Constant for b/y complement-pair sum: for a backbone of neutral mass `bb`,
+/// a singly-charged b-ion and its complementary singly-charged y-ion satisfy:
+///   b_mz + y_mz = bb + H2O + 2*PROTON
+/// so we check |p1_mz + p2_mz - (bb + BY_COMPLEMENT_OFFSET)| <= tol.
+const BY_COMPLEMENT_OFFSET: f64 = H2O + 2.0 * PROTON; // 18.010565 + 2*1.0072765 = 20.025118
+
 #[derive(Debug, Clone)]
 pub struct BackboneCandidate {
     pub backbone_mass: f64,
@@ -8,6 +17,74 @@ pub struct BackboneCandidate {
     /// Sum of sqrt-compressed, base-peak-normalised intensities of all peaks
     /// that voted for this backbone cluster. Primary ranking after core_y_hits.
     pub intensity_score: f64,
+    /// Complement-pair (b/y) confirmation score: sum of min(i1, i2) for peak
+    /// pairs (p1_mz, p2_mz) where |p1_mz + p2_mz - (bb + BY_COMPLEMENT_OFFSET)|
+    /// ≤ max(|bb + BY_COMPLEMENT_OFFSET| * 20 ppm, 0.02). Spurious clusters have
+    /// few/no complement pairs; real backbones with b/y ladders score higher.
+    pub complement_score: f64,
+}
+
+/// Count complement (b/y) pairs for a candidate backbone neutral mass `bb`.
+///
+/// Returns the sum of min(sqrt_norm_i1, sqrt_norm_i2) over unique singly-charged
+/// (b, y) peak pairs where:
+///   - b_mz ∈ [50, bb/2]  (singly-charged b-ion, below midpoint — avoids glycan-heavy region)
+///   - y_mz = target - b_mz  (complementary y-ion)
+///   - |b_mz + y_mz - target| ≤ tol
+///
+/// Restricting b_mz < bb/2 ensures each pair is counted only once and avoids the
+/// large-mz glycan-ion region (glycan Y-ions dominate the upper half of the spectrum
+/// and create incidental pair noise for every candidate backbone).
+///
+/// `peaks` must be sorted by m/z ascending.
+/// `norm_sqrt` is the sqrt-compressed base-peak-normalised intensity array
+/// (parallel to `peaks`).
+fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
+    let target = bb + BY_COMPLEMENT_OFFSET;
+    // tolerance: ±20 ppm of the target sum, floor 0.02 Da
+    let tol = (target * 20e-6).max(0.02);
+
+    let n = peaks.len();
+    if n < 2 {
+        return 0.0;
+    }
+
+    // b-ion window: singly-charged peptide backbone b-ions are in [50, bb/2].
+    // This cuts the glycan-heavy region (y-ion series > bb/2) which creates
+    // noise pairs for every candidate regardless of whether it is the true backbone.
+    let b_lo = 50.0_f64;
+    let b_hi = bb / 2.0; // midpoint — each pair (b, y) has b < y when b < bb/2
+
+    let mut score = 0.0_f64;
+
+    // For each candidate b-ion (mz ∈ [b_lo, b_hi]), look up its complement y at
+    // y_mz = target - b_mz using a binary search into the sorted peak list.
+    for (i, &(b_mz, _)) in peaks.iter().enumerate() {
+        if b_mz < b_lo {
+            continue;
+        }
+        if b_mz > b_hi {
+            break; // peaks are sorted; nothing further qualifies as b-ion
+        }
+        let y_mz = target - b_mz;
+        // y_mz must be > b_mz (ensured by b_mz < bb/2 since target ≈ bb+20), > 0
+        if y_mz <= b_mz || y_mz <= 0.0 {
+            continue;
+        }
+        // Binary search for y_mz ± tol in sorted peaks (skip self)
+        let y_lo = y_mz - tol;
+        let y_hi = y_mz + tol;
+        let start = peaks.partition_point(|&(m, _)| m < y_lo);
+        let end = peaks.partition_point(|&(m, _)| m <= y_hi);
+        for j in start..end {
+            if j == i {
+                continue; // self-pair guard (shouldn't happen given b<y constraint)
+            }
+            let w = norm_sqrt[i].min(norm_sqrt[j]);
+            score += w;
+        }
+    }
+    score
 }
 
 pub fn solve_backbone(
@@ -143,30 +220,61 @@ pub fn solve_backbone(
         e.3 += best_w;
     }
 
+    // Sort peaks by m/z for the two-pointer complement-score sweep.
+    // Note: peaks passed in may not be sorted; we need a sorted copy.
+    // Avoid cloning the whole peaks vec if already sorted (most mzML parsers sort).
+    let sorted_peaks: Vec<(f64, f32)>;
+    let sorted_norm: Vec<f64>;
+    let (sp, sn): (&[(f64, f32)], &[f64]) = {
+        let already_sorted = peaks
+            .windows(2)
+            .all(|w| w[0].0 <= w[1].0);
+        if already_sorted {
+            (peaks, &norm_sqrt)
+        } else {
+            let mut idx: Vec<usize> = (0..peaks.len()).collect();
+            idx.sort_by(|&a, &b| peaks[a].0.partial_cmp(&peaks[b].0).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_peaks = idx.iter().map(|&i| peaks[i]).collect();
+            sorted_norm = idx.iter().map(|&i| norm_sqrt[i]).collect();
+            (&sorted_peaks, &sorted_norm)
+        }
+    };
+
     // Build candidates from bins.
     let mut cands: Vec<BackboneCandidate> = bins
         .into_iter()
-        .map(|(_k, (v, hits, mass_sum, int_score))| BackboneCandidate {
-            backbone_mass: mass_sum / v as f64,
-            core_y_hits: hits.iter().filter(|&&h| h).count() as u8,
-            votes: v,
-            intensity_score: int_score,
+        .map(|(_k, (v, hits, mass_sum, int_score))| {
+            let bb = mass_sum / v as f64;
+            let cscore = complement_score(sp, sn, bb);
+            BackboneCandidate {
+                backbone_mass: bb,
+                core_y_hits: hits.iter().filter(|&&h| h).count() as u8,
+                votes: v,
+                intensity_score: int_score,
+                complement_score: cscore,
+            }
         })
         .filter(|c| c.core_y_hits >= 2)
         .collect(); // core-Y quorum
 
     // Sort: PRIMARY = core_y_hits (more distinct rungs = stronger evidence),
-    // SECONDARY = intensity_score (sum of rung-weighted sqrt-normalised intensities,
-    // charge-deduplicated — true Y-ions tend to be brighter than spurious matches),
+    // SECONDARY = combined score: intensity_score + complement_score * COMPLEMENT_WEIGHT
+    //   (complement pairs from real b/y ladders break ties; spurious clusters have none),
     // TERTIARY = backbone_mass ascending (deterministic tiebreak).
+    //
+    // COMPLEMENT_WEIGHT tuned so complement evidence has meaningful influence but does
+    // not override a large core_y_hits gap. A weight of 0.5 means a candidate needs
+    // ~2 extra complement pairs per unit of intensity score deficit to win the tie.
+    const COMPLEMENT_WEIGHT: f64 = 0.3;
     cands.sort_by(|a, b| {
         b.core_y_hits
             .cmp(&a.core_y_hits)
-            .then(
-                b.intensity_score
-                    .partial_cmp(&a.intensity_score)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
+            .then({
+                let sa = a.intensity_score + a.complement_score * COMPLEMENT_WEIGHT;
+                let sb = b.intensity_score + b.complement_score * COMPLEMENT_WEIGHT;
+                sb.partial_cmp(&sa)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then(
                 a.backbone_mass
                     .partial_cmp(&b.backbone_mass)
@@ -188,6 +296,7 @@ pub fn solve_backbone(
                 / total;
             kept.votes += cur.votes;
             kept.intensity_score += cur.intensity_score;
+            kept.complement_score = kept.complement_score.max(cur.complement_score);
             kept.core_y_hits = kept.core_y_hits.max(cur.core_y_hits);
             true
         } else {
@@ -301,6 +410,78 @@ mod tests {
                 c2.backbone_mass
             );
         }
+    }
+
+    /// Complement-pair (b/y) confirmation: a candidate WITH complement-pair support
+    /// must outrank an otherwise-equal candidate WITHOUT. We build two synthetic
+    /// backbones at the same precursor:
+    ///  - `true_bb`: full core-Y ladder (same rung count and intensity as spurious)
+    ///    PLUS synthetic b/y fragment ion pairs that satisfy b+y ≈ bb+20.025118.
+    ///  - `spurious_bb`: same core-Y ladder (identical rung count and intensity)
+    ///    but NO complement b/y pairs.
+    /// After solve_backbone, `true_bb` must be first (complement_score tips the tie).
+    #[test]
+    fn solve_backbone_complement_pairs_promote_true_backbone() {
+        let proton = crate::glycan_mass::PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+
+        // Two backbones at different masses; same number of core-Y rungs (6 each)
+        // and same intensity — so core_y_hits and intensity_score are tied.
+        // Use intensity 500.0 for both so sqrt-norm is equal.
+        let true_bb = 1500.0_f64;
+        let spurious_bb = 1300.0_f64;
+
+        let intensity = 500.0_f32;
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+
+        // Core-Y ladder for true_bb
+        peaks.push((true_bb + proton, intensity)); // Y0
+        for &s in steps.iter() {
+            peaks.push((true_bb + s + proton, intensity));
+        }
+
+        // Core-Y ladder for spurious_bb (identical count and intensity)
+        peaks.push((spurious_bb + proton, intensity)); // Y0
+        for &s in steps.iter() {
+            peaks.push((spurious_bb + s + proton, intensity));
+        }
+
+        // Add complement pairs only for true_bb.
+        // A valid b-ion at b_mz and its complement y at y_mz = (true_bb + BY_COMPLEMENT_OFFSET) - b_mz.
+        // Choose b_mz values far from the core-Y peaks to avoid confusion.
+        let comp_target = true_bb + BY_COMPLEMENT_OFFSET; // 1500 + 20.025118 = 1520.025118
+        // Three b/y pairs: b at 300, 450, 600 Da → y = comp_target - b
+        for &b_mz in &[300.0_f64, 450.0, 600.0] {
+            let y_mz = comp_target - b_mz;
+            // Only add if y_mz > 0 and distinct from existing peaks
+            if y_mz > 0.0 {
+                peaks.push((b_mz, intensity));
+                peaks.push((y_mz, intensity));
+            }
+        }
+
+        // Precursor must be large enough: true_bb + glycan (1444.53 ≥ MIN_GLYCAN=406)
+        let precursor_neutral = true_bb + 1444.53;
+
+        // Both spurious_bb (1300) and true_bb (1500) are within [MIN_BB, precursor_neutral)
+        // and leave room for MIN_GLYCAN:
+        //   precursor_neutral - spurious_bb = 1500+1444.53 - 1300 = 1644.53 ≥ 406 ✓
+        let out = solve_backbone(&peaks, precursor_neutral, 2, 20.0, 5);
+
+        assert!(!out.is_empty(), "expected candidates");
+        // true_bb must be ranked first because its complement_score > 0 while spurious_bb = 0.
+        assert!(
+            (out[0].backbone_mass - true_bb).abs() < 0.05,
+            "expected true_bb ({}) first, got backbone_mass={:.4} complement_score={:.4}",
+            true_bb,
+            out[0].backbone_mass,
+            out[0].complement_score,
+        );
+        assert!(
+            out[0].complement_score > 0.0,
+            "true_bb must have positive complement_score, got {}",
+            out[0].complement_score
+        );
     }
 
     /// High-intensity true Y-ions should rank above equal-rung-count low-intensity noise.

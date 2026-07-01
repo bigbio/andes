@@ -30,7 +30,7 @@ use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
-use andes_glyco::backbone::{core_y_intensity, count_core_y_hits};
+use andes_glyco::backbone::{core_y_intensity, count_core_y_hits, glycan_y_intensity};
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
 use andes_glyco::hybrid::{hybrid_candidates_with_isotope, BackboneHit, Source};
@@ -475,11 +475,16 @@ pub fn glyco_search_run(
                     glycan_source: bb_hit.source.clone(),
                     oxonium_summed_frac: ox_ev.summed_frac,
                     n_core_oxonium_ions: ox_ev.n_core_ions,
-                    // Intensity-weighted core-Y ladder match at the NEUTRAL
-                    // backbone — a glyco-discriminating feature (was hardcoded
-                    // 0.0 = dead). Phase-1: attacks the ranking loss where a
-                    // wrong peptide outranks the true one at the same backbone.
-                    y_ladder_intensity_score: core_y_intensity(&spec.peaks, bb_neutral, tol_ppm) as f32,
+                    // Y-ladder intensity match at the NEUTRAL backbone. For an
+                    // ANNOTATED glycan use the COMPOSITION-SPECIFIC ladder
+                    // (Phase 2: a wrong glycan of similar mass scores lower, so
+                    // the feature discriminates on the glycan axis); for a novel
+                    // glycan fall back to the composition-independent core-Y
+                    // ladder. (Was hardcoded 0.0 = dead before Phase 1.)
+                    y_ladder_intensity_score: match &bb_hit.glycan {
+                        Some(g) => glycan_y_intensity(&spec.peaks, bb_neutral, g, tol_ppm) as f32,
+                        None => core_y_intensity(&spec.peaks, bb_neutral, tol_ppm) as f32,
+                    },
                     // Threaded from the per-backbone Y-ladder evidence computed
                     // earlier in `core_y_counts` (previously discarded/hardcoded
                     // to 0, so the `CoreYHits` PIN feature was always dead).

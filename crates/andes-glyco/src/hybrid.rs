@@ -98,6 +98,28 @@ pub fn db_branch(
     out
 }
 
+/// Find the known glycan composition nearest to `target_mass` within tolerance.
+///
+/// Used to ANNOTATE a Y-ladder-derived backbone with its glycan (glycan =
+/// precursor_neutral − backbone). Returns the closest composition within
+/// `max(target_mass·tol_ppm·1e-6, 0.02)` Da, or `None` when the residual matches
+/// no known glycan (a novel/unexpected glycan — kept, not discarded). Linear
+/// scan (glyco lists are ~hundreds of entries, a handful of backbones/spectrum).
+fn nearest_glycan(glycans: &[GlycanComp], target_mass: f64, tol_ppm: f64) -> Option<GlycanComp> {
+    if target_mass <= 0.0 {
+        return None;
+    }
+    let tol = (target_mass * tol_ppm * 1e-6_f64).max(0.02);
+    let mut best: Option<(f64, &GlycanComp)> = None;
+    for g in glycans {
+        let d = (g.mass - target_mass).abs();
+        if d <= tol && best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, g));
+        }
+    }
+    best.map(|(_, g)| g.clone())
+}
+
 /// Hybrid backbone candidate union: DB-branch ∪ de-novo Y-ladder.
 ///
 /// 1. Run oxonium gate (min_frac=0.10, tol=20 ppm). If it doesn't fire,
@@ -135,32 +157,48 @@ pub fn hybrid_candidates_with_isotope(
 ) -> Vec<BackboneHit> {
     const MIN_BACKBONE: f64 = 500.0;
 
-    // --- DB branch (always; doesn't require oxonium evidence) ---
-    let mut combined: Vec<BackboneHit> = db_branch(
-        precursor_neutral,
-        glycans,
-        MIN_BACKBONE,
-        precursor_z,
-        isotope_offset,
-    );
+    // === Y-ION-FIRST candidate generation ===
+    // The de-novo Y-ladder solver is the PRIMARY (and only) backbone source: we
+    // read the glycan-independent trimannosyl-core Y-ion ladder to determine the
+    // backbone mass from the spectrum, then annotate the glycan by subtraction
+    // (glycan = precursor_neutral − backbone). This is the architecture of
+    // a glyco search engine / a cross-spectrum glyco engine / StrucGP. The previous design enumerated
+    // `precursor − every glycan` (~600 brute-force backbones) ranked by a
+    // glycan-blind peptide b/y score, which forced top-k ≈ 600 and ~19%
+    // find-rate. `db_branch` is retained (tests / annotation) but is no longer
+    // used to GENERATE backbones.
 
-    // --- De-novo branch (requires oxonium gate to have fired) ---
+    // Oxonium gate: glyco-spectrum filter (every mature engine gates on oxonium).
     let ox = oxonium_gate(peaks, 0.10, tol_ppm);
-    if ox.fired {
-        let dn = solve_backbone(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
-        for c in dn {
-            // `solve_backbone` derives its candidate mass from the Y0 ion, i.e.
-            // the peptide NEUTRAL mass (water included). Convert to the RESIDUE
-            // mass convention used by the DB branch (see module doc) so union,
-            // dedup, and the driver's exact-mass filter compare like-for-like.
-            combined.push(BackboneHit {
-                backbone_mass: c.backbone_mass - H2O,
-                glycan: None,
-                source: Source::DeNovo,
-                charge: precursor_z,
-                isotope_offset,
-            });
+    if !ox.fired {
+        return Vec::new();
+    }
+
+    // PRIMARY: Y-ladder solver → backbone-mass candidates ranked by core-Y evidence.
+    let dn = solve_backbone(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
+    let mut combined: Vec<BackboneHit> = Vec::with_capacity(dn.len());
+    for c in dn {
+        // `solve_backbone` returns the Y0-derived peptide NEUTRAL mass (water
+        // included); convert to the RESIDUE convention used everywhere else.
+        let bb = c.backbone_mass - H2O;
+        if bb < MIN_BACKBONE {
+            continue;
         }
+        // Annotate the glycan by subtraction. `precursor_neutral` and `bb` are
+        // both residue-convention, so `precursor_neutral − bb` = glycan mass.
+        let glycan = nearest_glycan(glycans, precursor_neutral - bb, tol_ppm);
+        let source = if glycan.is_some() {
+            Source::Db
+        } else {
+            Source::DeNovo
+        };
+        combined.push(BackboneHit {
+            backbone_mass: bb,
+            glycan,
+            source,
+            charge: precursor_z,
+            isotope_offset,
+        });
     }
 
     // --- Sort all candidates by backbone_mass for dedup pass ---

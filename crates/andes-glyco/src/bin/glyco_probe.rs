@@ -22,6 +22,14 @@ use andes_glyco::oxonium::oxonium_gate;
 // Keep solve_backbone import for the de-novo-only comparison baseline.
 use andes_glyco::backbone::solve_backbone;
 
+/// Water mass (monoisotopic). The truth `backbone_mass` and `hybrid_candidates`
+/// both use the RESIDUE convention (water NOT included), exactly like the
+/// production driver (`glyco_search.rs` subtracts H2O from `precursor_neutral`).
+/// Y-ion ladders, however, live at the NEUTRAL peptide mass (residue + H2O), so
+/// rung checks add H2O back and the de-novo baseline (which returns NEUTRAL from
+/// `solve_backbone`) subtracts it.
+const H2O: f64 = 18.010565;
+
 /// Symmetric ±20 ppm candidate-window check (floor 0.01 Da), per the gate spec.
 fn in_window(solved: f64, truth: f64) -> bool {
     (solved - truth).abs() <= (truth * 20e-6).max(0.01)
@@ -95,6 +103,12 @@ fn main() {
     // De-novo-only baseline (for comparison with prior Phase-1 result).
     let mut n_denovo_searchable = 0usize;
 
+    // DB-branch-only ceiling: precursor−glycan over the whole list, independent
+    // of any core-Y ladder. This is the max find-rate the DB branch could add
+    // (limited only by glycan-list coverage) — the sparse stratum the Y-first
+    // cascade cannot anchor lives here.
+    let mut n_db_only_searchable = 0usize;
+
     // Hybrid counters.
     let mut n_hybrid_searchable = 0usize;
     let mut n_hybrid_from_db = 0usize;       // first hit came from DB branch
@@ -121,20 +135,36 @@ fn main() {
         }
 
         let prec_z = t.precursor_z.max(1);
-        let precursor_neutral = (t.precursor_mz - PROTON) * prec_z as f64;
+        // RESIDUE convention (H2O subtracted), matching the production driver
+        // (glyco_search.rs) so `hybrid_candidates` returns backbone masses
+        // directly comparable to the truth `backbone_mass` (also residue).
+        let precursor_neutral = (t.precursor_mz - PROTON) * prec_z as f64 - H2O;
 
         // --- De-novo-only baseline (top_k=5, same as Phase-1) ---
         // Run over ALL matched truth scans (same denominator as hybrid) so the
         // de-novo baseline is directly comparable to the hybrid number.
         {
             let dn_cands = solve_backbone(peaks, precursor_neutral, prec_z, 20.0, 5);
-            if dn_cands.iter().any(|c| in_window(c.backbone_mass, t.backbone_mass)) {
+            // solve_backbone returns NEUTRAL peptide mass (Y0-derived); truth is
+            // residue → subtract H2O before comparing.
+            if dn_cands.iter().any(|c| in_window(c.backbone_mass - H2O, t.backbone_mass)) {
                 n_denovo_searchable += 1;
             }
         }
 
+        // --- DB-branch-only ceiling (precursor − each known glycan) ---
+        {
+            let db = andes_glyco::hybrid::db_branch(precursor_neutral, &glycans, 500.0, prec_z, 0);
+            if db.iter().any(|h| in_window(h.backbone_mass, t.backbone_mass)) {
+                n_db_only_searchable += 1;
+            }
+        }
+
         // --- Hybrid candidates ---
-        let hybrid = hybrid_candidates(peaks, precursor_neutral, prec_z, &glycans, 20.0, 5);
+        // top_k=50 matches the production driver's `--glyco-backbone-top-k`
+        // default (glyco_search) so the probe's generation find-rate reflects
+        // what the driver actually sees (the probe previously used 5).
+        let hybrid = hybrid_candidates(peaks, precursor_neutral, prec_z, &glycans, 20.0, 50);
 
         // Attribute the hit to the CLOSEST candidate within the gate window (not
         // the first in mass-sorted order) so DB-vs-de-novo split reflects which
@@ -168,9 +198,12 @@ fn main() {
             }
             false
         };
-        let mut rungs = if rung_present(t.backbone_mass) { 1 } else { 0 };
+        // Y-ion ladder lives at the NEUTRAL peptide mass (residue + H2O); truth
+        // is residue, so add H2O back to locate the real Y-ions.
+        let neutral_bb = t.backbone_mass + H2O;
+        let mut rungs = if rung_present(neutral_bb) { 1 } else { 0 };
         for &s in CORE_Y_STEPS.iter() {
-            if rung_present(t.backbone_mass + s) {
+            if rung_present(neutral_bb + s) {
                 rungs += 1;
             }
         }
@@ -193,6 +226,15 @@ fn main() {
         "oxonium-fired:               {} ({:.1}% of matched)",
         n_oxonium,
         pct(n_oxonium, n_found_spec)
+    );
+    println!();
+    println!(
+        "--- DB-branch-only ceiling (precursor − glycan, coverage-limited) ---"
+    );
+    println!(
+        "searchable-backbone OVERALL: {} ({:.1}% of matched)",
+        n_db_only_searchable,
+        pct(n_db_only_searchable, n_found_spec)
     );
     println!();
     println!("--- De-novo-only baseline (Phase-1 top_k=5, oxonium-gated) ---");

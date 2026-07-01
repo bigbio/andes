@@ -37,6 +37,8 @@ use andes_glyco::hybrid::{hybrid_candidates_with_isotope, BackboneHit, Source};
 use andes_glyco::oxonium::oxonium_gate;
 use andes_glyco::sequon::has_nxst_sequon;
 
+use crate::glyco_fragment_index::FragmentIndex;
+
 use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmMatch;
 #[cfg(test)]
@@ -57,6 +59,37 @@ pub struct FullGlycoPsm {
 pub struct GlycoSpectrumResult {
     pub spectrum_idx: usize,
     pub hits: Vec<FullGlycoPsm>,
+}
+
+/// Minimum implied N-glycan mass (2×HexNAc core) for the peptide-first path's
+/// glycan-by-subtraction filter. Mirrors the solver's `MIN_GLYCAN`.
+const MIN_GLYCAN: f64 = 406.0;
+
+/// Find the known glycan nearest `target` mass within tolerance, using a sorted
+/// `(mass, glycan_index)` view for a binary-search start. Returns the matched
+/// composition, or `None` when the subtraction residual matches no known glycan
+/// (used by the peptide-first path's glycan-by-subtraction check).
+fn nearest_glycan_mass(
+    sorted: &[(f64, usize)],
+    glycans: &[GlycanComp],
+    target: f64,
+    tol_ppm: f64,
+) -> Option<GlycanComp> {
+    let tol = (target * tol_ppm * 1e-6_f64).max(0.02);
+    let lo = target - tol;
+    let hi = target + tol;
+    let start = sorted.partition_point(|&(m, _)| m < lo);
+    let mut best: Option<(f64, usize)> = None;
+    for &(m, gi) in &sorted[start..] {
+        if m > hi {
+            break;
+        }
+        let d = (m - target).abs();
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, gi));
+        }
+    }
+    best.map(|(_, gi)| glycans[gi].clone())
 }
 
 /// Dedup backbone hits collected across charges and isotope offsets.
@@ -147,6 +180,32 @@ pub fn glyco_search_run(
     let bucket_index = &prepared.bucket_index;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
 
+    // PEPTIDE-FIRST index (combines with the backbone-first hybrid below). Build a
+    // fragment-ion index over the SEQUON candidate peptides ONCE. Per spectrum we
+    // query it for peptides with real b/y support, then keep those whose
+    // glycan-by-subtraction (`precursor − peptide`) hits a known glycan. This
+    // recovers backbones on weak/absent-core-Y spectra that the core-Y-ranked
+    // truncation drops — the candidate-generation ceiling — without a brute force.
+    let frag_index = {
+        let seq_entries = candidates.iter().enumerate().filter_map(|(i, c)| {
+            let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+            if has_nxst_sequon(&res) {
+                Some((i as u32, &c.peptide))
+            } else {
+                None
+            }
+        });
+        FragmentIndex::build(seq_entries, fragment_tolerance_da.max(0.01))
+    };
+    // Sorted glycan masses for the peptide-first glycan-by-subtraction lookup.
+    let glycan_sorted: Vec<(f64, usize)> = {
+        let mut v: Vec<(f64, usize)> = glycan_list.iter().enumerate().map(|(i, g)| (g.mass, i)).collect();
+        v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    };
+    // Minimum b/y peaks a peptide must match to be a peptide-first candidate.
+    const MIN_BY_MATCHES: u32 = 4;
+
     // Process spectra in parallel; filter_map returns None for spectra with no
     // glyco hits. Order within the output Vec is not guaranteed (rayon chunks),
     // but the PIN writer only needs the hits themselves (spec_idx is in each row).
@@ -202,6 +261,40 @@ pub fn glyco_search_run(
                     );
                     for h in hits {
                         all_backbone.push(h);
+                    }
+                }
+            }
+
+            // PEPTIDE-FIRST union: for oxonium-positive spectra, ask the fragment
+            // index which sequon peptides actually have b/y support, then keep the
+            // ones whose glycan-by-subtraction hits a known glycan across the same
+            // charge/isotope grid. These backbones are selected by PEPTIDE evidence
+            // (works when core-Y is weak/absent), and the glycan filter keeps the
+            // count small — a handful of high-quality candidates per spectrum.
+            if ox_ev.fired {
+                for (cand_idx, _n) in frag_index.query(&spec.peaks, MIN_BY_MATCHES) {
+                    let pep_residue = candidates[cand_idx as usize].peptide.mass() - H2O;
+                    for &z in &charges_to_try {
+                        let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;
+                        for iso in iso_min..=iso_max {
+                            let precursor_neutral = observed_neutral - iso as f64 * ISOTOPE;
+                            let glycan_mass = precursor_neutral - pep_residue;
+                            if glycan_mass < MIN_GLYCAN {
+                                continue;
+                            }
+                            if let Some(g) =
+                                nearest_glycan_mass(&glycan_sorted, glycan_list, glycan_mass, tol_ppm)
+                            {
+                                all_backbone.push(BackboneHit {
+                                    backbone_mass: pep_residue,
+                                    glycan: Some(g),
+                                    source: Source::Db,
+                                    charge: z,
+                                    isotope_offset: iso,
+                                    glycan_mass_residual: glycan_mass,
+                                });
+                            }
+                        }
                     }
                 }
             }

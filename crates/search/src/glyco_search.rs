@@ -204,7 +204,13 @@ pub fn glyco_search_run(
         v
     };
     // Minimum b/y peaks a peptide must match to be a peptide-first candidate.
-    const MIN_BY_MATCHES: u32 = 4;
+    // 6 (was 4) sharply cuts the coincidental-match Poisson tail — most of the
+    // per-spectrum query cost — with negligible loss of real glycopeptides
+    // (identifiable backbones carry several b/y ions).
+    const MIN_BY_MATCHES: u32 = 6;
+    // Hard cap on peptide-first candidates per spectrum (strongest b/y support
+    // first) so a peak-dense spectrum can't blow up phase-1 scoring.
+    const MAX_PEPTIDE_FIRST: usize = 64;
 
     // Process spectra in parallel; filter_map returns None for spectra with no
     // glyco hits. Order within the output Vec is not guaranteed (rayon chunks),
@@ -272,7 +278,11 @@ pub fn glyco_search_run(
             // (works when core-Y is weak/absent), and the glycan filter keeps the
             // count small — a handful of high-quality candidates per spectrum.
             if ox_ev.fired {
-                for (cand_idx, _n) in frag_index.query(&spec.peaks, MIN_BY_MATCHES) {
+                let mut pf = frag_index.query(&spec.peaks, MIN_BY_MATCHES);
+                // Keep the strongest-b/y-support peptides first, then bound the count.
+                pf.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                pf.truncate(MAX_PEPTIDE_FIRST);
+                for (cand_idx, _n) in pf {
                     let pep_residue = candidates[cand_idx as usize].peptide.mass() - H2O;
                     for &z in &charges_to_try {
                         let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;

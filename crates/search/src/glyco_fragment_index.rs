@@ -21,10 +21,14 @@ use std::collections::{HashMap, HashSet};
 use model::peptide::Peptide;
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 
-/// Inverted index: fragment-m/z bin → candidate indices with a b/y ion there.
+/// Inverted index: fragment-m/z bin → `(candidate_index, theoretical_mz)`
+/// postings. The theoretical m/z is stored so `query` can validate the real
+/// fragment tolerance (bins are only a coarse bucket) and count DISTINCT matched
+/// theoretical ions per candidate rather than raw postings.
 pub struct FragmentIndex {
     bin_width: f64,
-    bins: HashMap<i64, Vec<u32>>,
+    tol: f64,
+    bins: HashMap<i64, Vec<(u32, f64)>>,
 }
 
 impl FragmentIndex {
@@ -33,50 +37,57 @@ impl FragmentIndex {
         (mz / bin_width).round() as i64
     }
 
-    /// Build the index over `(candidate_index, &Peptide)` entries, indexing each
-    /// peptide's singly-charged b/y ions. `bin_width` is the m/z bin size (Da);
-    /// pick it near the fragment tolerance (e.g. 0.02 for 20 ppm at ~1 kDa). A
-    /// peptide is recorded at most once per bin so a bin collision within one
-    /// peptide does not inflate its match count.
-    pub fn build<'a>(
-        entries: impl IntoIterator<Item = (u32, &'a Peptide)>,
-        bin_width: f64,
-    ) -> Self {
-        let mut bins: HashMap<i64, Vec<u32>> = HashMap::new();
-        for (idx, pep) in entries {
-            let mut seen: HashSet<i64> = HashSet::new();
-            for ion in predict_by_ions(pep, 1..=1) {
-                let b = Self::bin_of(ion.mz, bin_width);
-                if seen.insert(b) {
-                    bins.entry(b).or_default().push(idx);
-                }
-            }
-        }
-        FragmentIndex { bin_width, bins }
+    /// Identity of a theoretical ion for distinct-ion counting: high-resolution
+    /// rounded m/z (1 mDa), fine enough to separate distinct b/y ions.
+    #[inline]
+    fn ion_id(mz: f64) -> i64 {
+        (mz * 1000.0).round() as i64
     }
 
-    /// Return `(candidate_index, match_count)` for candidates whose b/y ions
-    /// match at least `min_matches` DISTINCT spectrum peaks. Each peak is matched
-    /// against its bin ±1 (≈ ±1.5·bin_width tolerance) and contributes at most
-    /// one count per candidate.
+    /// Build the index over `(candidate_index, &Peptide)` entries, indexing each
+    /// peptide's singly-charged b/y ions. `tol` is the fragment match tolerance
+    /// in Da; `bin_width` should be ≥ `tol` (bins bucket coarsely, the stored
+    /// theoretical m/z is distance-checked at query time). A peptide is recorded
+    /// at most once per bin so a bin collision within one peptide does not bloat
+    /// the postings.
+    pub fn build<'a>(
+        entries: impl IntoIterator<Item = (u32, &'a Peptide)>,
+        tol: f64,
+    ) -> Self {
+        let bin_width = tol.max(0.001);
+        let mut bins: HashMap<i64, Vec<(u32, f64)>> = HashMap::new();
+        for (idx, pep) in entries {
+            for ion in predict_by_ions(pep, 1..=1) {
+                let b = Self::bin_of(ion.mz, bin_width);
+                bins.entry(b).or_default().push((idx, ion.mz));
+            }
+        }
+        FragmentIndex { bin_width, tol, bins }
+    }
+
+    /// Return `(candidate_index, matched_ion_count)` for candidates whose
+    /// theoretical b/y ions match at least `min_matches` DISTINCT spectrum peaks
+    /// within the fragment tolerance. Each theoretical ion is counted at most
+    /// once per candidate (a peak within tol of the ion "explains" it), so
+    /// noise clustered near one ion cannot inflate the count.
     pub fn query(&self, peaks: &[(f64, f32)], min_matches: u32) -> Vec<(u32, u32)> {
-        let mut counts: HashMap<u32, u32> = HashMap::new();
+        // candidate -> set of matched theoretical-ion ids (distinct ions).
+        let mut matched: HashMap<u32, HashSet<i64>> = HashMap::new();
         for &(mz, _) in peaks {
             let b = Self::bin_of(mz, self.bin_width);
-            let mut hit: HashSet<u32> = HashSet::new();
             for nb in [b - 1, b, b + 1] {
                 if let Some(v) = self.bins.get(&nb) {
-                    for &idx in v {
-                        hit.insert(idx);
+                    for &(idx, theo) in v {
+                        if (mz - theo).abs() <= self.tol {
+                            matched.entry(idx).or_default().insert(Self::ion_id(theo));
+                        }
                     }
                 }
             }
-            for idx in hit {
-                *counts.entry(idx).or_default() += 1;
-            }
         }
-        counts
+        matched
             .into_iter()
+            .map(|(idx, s)| (idx, s.len() as u32))
             .filter(|&(_, c)| c >= min_matches)
             .collect()
     }
@@ -113,6 +124,42 @@ mod tests {
         let b = hits.iter().find(|&&(i, _)| i == 1).map(|&(_, c)| c).unwrap_or(0);
         assert!(a >= 3, "pep_a must match its own ladder (got {a})");
         assert!(a > b, "pep_a ({a}) must outscore the unrelated pep_b ({b})");
+    }
+
+    /// Codex re-review #2: match counts must be tolerance-checked DISTINCT ions.
+    /// A peak in the bin neighbourhood but OUTSIDE the fragment tolerance must
+    /// not count, and several peaks clustered around ONE theoretical ion must
+    /// count that ion only once.
+    #[test]
+    fn fragment_index_counts_tolerance_checked_distinct_ions() {
+        let aa = aa();
+        let pep = Peptide::from_str("K.PEPTIDESK.R", &aa).unwrap();
+        let tol = 0.02;
+        let idx = FragmentIndex::build([(0u32, &pep)], tol);
+        let ions = predict_by_ions(&pep, 1..=1);
+
+        // Take the first real ion; add: (a) an in-tolerance duplicate, (b) an
+        // out-of-tolerance neighbour (~0.5 Da off, same 0.02 bin neighbourhood
+        // it is NOT, but well outside tol) — neither should raise the count above
+        // the count of distinct real ions.
+        let first = ions[0].mz;
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (first, 100.0),
+            (first + 0.005, 100.0),  // within tol → same ion, must not double-count
+            (first + 0.5, 100.0),    // far off → must not count
+        ];
+        // Add a couple more genuine ions so the peptide can pass a threshold of 3.
+        peaks.push((ions[1].mz, 100.0));
+        peaks.push((ions[2].mz, 100.0));
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let hits = idx.query(&peaks, 1);
+        let c = hits.iter().find(|&&(i, _)| i == 0).map(|&(_, c)| c).unwrap_or(0);
+        // Exactly 3 distinct ions matched (ions[0], [1], [2]); the duplicate and
+        // the far peak add nothing.
+        assert_eq!(c, 3, "must count 3 distinct tolerance-valid ions, got {c}");
+        // And the far-off peak alone must not let it pass a threshold of 4.
+        assert!(idx.query(&peaks, 4).is_empty(), "must not inflate past distinct-ion count");
     }
 
     /// A spectrum of pure noise must select nothing at a sane threshold.

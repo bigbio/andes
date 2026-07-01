@@ -73,9 +73,8 @@ fn nearest_glycan_mass(
     sorted: &[(f64, usize)],
     glycans: &[GlycanComp],
     target: f64,
-    tol_ppm: f64,
+    tol: f64,
 ) -> Option<GlycanComp> {
-    let tol = (target * tol_ppm * 1e-6_f64).max(0.02);
     let lo = target - tol;
     let hi = target + tol;
     let start = sorted.partition_point(|&(m, _)| m < lo);
@@ -187,15 +186,32 @@ pub fn glyco_search_run(
     // recovers backbones on weak/absent-core-Y spectra that the core-Y-ranked
     // truncation drops — the candidate-generation ceiling — without a brute force.
     let frag_index = {
-        let seq_entries = candidates.iter().enumerate().filter_map(|(i, c)| {
-            let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-            if has_nxst_sequon(&res) {
-                Some((i as u32, &c.peptide))
-            } else {
-                None
-            }
-        });
-        FragmentIndex::build(seq_entries, fragment_tolerance_da.max(0.01))
+        let seq_entries: Vec<(u32, &model::peptide::Peptide)> = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+                if has_nxst_sequon(&res) {
+                    Some((i as u32, &c.peptide))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // Memory guard (Codex re-review #3): glyco is forced to the in-RAM
+        // candidate index, and the fragment index adds ~24 B/ion of postings.
+        // Warn on very large sequon sets so an OOM isn't silent (a smaller search
+        // space or an out-of-core index is the fix for those).
+        let est_mb = seq_entries.len().saturating_mul(20 * 24) / 1_000_000;
+        if seq_entries.len() > 3_000_000 {
+            eprintln!(
+                "WARN glyco fragment index: {} sequon candidates (~{} MB postings) — \
+                 large database; consider narrowing the search space",
+                seq_entries.len(),
+                est_mb
+            );
+        }
+        FragmentIndex::build(seq_entries.iter().copied(), fragment_tolerance_da.max(0.01))
     };
     // Sorted glycan masses for the peptide-first glycan-by-subtraction lookup.
     let glycan_sorted: Vec<(f64, usize)> = {
@@ -278,11 +294,14 @@ pub fn glyco_search_run(
             // (works when core-Y is weak/absent), and the glycan filter keeps the
             // count small — a handful of high-quality candidates per spectrum.
             if ox_ev.fired {
+                // Process strongest-b/y-support peptides first, but cap on VALID
+                // (peptide, charge, isotope, glycan) hypotheses — NOT raw b/y
+                // count — so high-count peptides that cannot form a known glycan
+                // don't evict a lower-count peptide that can (Codex re-review #1).
                 let mut pf = frag_index.query(&spec.peaks, MIN_BY_MATCHES);
-                // Keep the strongest-b/y-support peptides first, then bound the count.
                 pf.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-                pf.truncate(MAX_PEPTIDE_FIRST);
-                for (cand_idx, _n) in pf {
+                let mut pf_added = 0usize;
+                'pf: for (cand_idx, _n) in pf {
                     let pep_residue = candidates[cand_idx as usize].peptide.mass() - H2O;
                     for &z in &charges_to_try {
                         let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;
@@ -292,17 +311,30 @@ pub fn glyco_search_run(
                             if glycan_mass < MIN_GLYCAN {
                                 continue;
                             }
+                            // Tolerance is set by the PRECURSOR mass error (the
+                            // measured quantity), not the smaller glycan mass
+                            // (CodeRabbit): glycan = precursor − (exact) peptide.
+                            let tol = (precursor_neutral * tol_ppm * 1e-6_f64).max(0.02);
                             if let Some(g) =
-                                nearest_glycan_mass(&glycan_sorted, glycan_list, glycan_mass, tol_ppm)
+                                nearest_glycan_mass(&glycan_sorted, glycan_list, glycan_mass, tol)
                             {
+                                // Observed backbone = precursor − theoretical glycan,
+                                // matching the DB path's convention so the peptide's
+                                // precursor mass error is preserved downstream
+                                // (CodeRabbit: theoretical pep mass → 0 mass error).
+                                let bb = precursor_neutral - g.mass;
                                 all_backbone.push(BackboneHit {
-                                    backbone_mass: pep_residue,
+                                    backbone_mass: bb,
                                     glycan: Some(g),
                                     source: Source::Db,
                                     charge: z,
                                     isotope_offset: iso,
-                                    glycan_mass_residual: glycan_mass,
+                                    glycan_mass_residual: precursor_neutral - bb,
                                 });
+                                pf_added += 1;
+                                if pf_added >= MAX_PEPTIDE_FIRST {
+                                    break 'pf;
+                                }
                             }
                         }
                     }

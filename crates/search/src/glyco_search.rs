@@ -26,14 +26,14 @@
 
 use std::collections::HashMap;
 
-use model::mass::{nominal_from, H2O, PROTON};
+use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
 use andes_glyco::backbone::count_core_y_hits;
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
-use andes_glyco::hybrid::{hybrid_candidates, BackboneHit, Source};
+use andes_glyco::hybrid::{hybrid_candidates_with_isotope, BackboneHit, Source};
 use andes_glyco::oxonium::oxonium_gate;
 use andes_glyco::sequon::has_nxst_sequon;
 
@@ -105,21 +105,36 @@ pub fn glyco_search_run(
                 _ => params.charge_range.clone().collect(),
             };
 
-            // Gather backbone hits across all charges, then union+dedup.
+            // Gather backbone hits across all charges AND all isotope offsets,
+            // then union+dedup. Mirrors the standard search path's
+            // `isotope_error_range` handling (search_params.rs): glyco
+            // precursors frequently mis-pick the M+1/M+2 isotope peak, so
+            // trying only the monoisotopic offset silently loses the true
+            // backbone. Each resulting `BackboneHit` records the (charge,
+            // isotope_offset) pair that produced it (see hybrid.rs).
+            let iso_min = *params.isotope_error_range.start();
+            let iso_max = *params.isotope_error_range.end();
             let mut all_backbone: Vec<BackboneHit> = Vec::new();
             for &z in &charges_to_try {
                 let charge_f = z as f64;
-                let precursor_neutral = (spec.precursor_mz - PROTON) * charge_f - H2O;
-                let hits = hybrid_candidates(
-                    &spec.peaks,
-                    precursor_neutral,
-                    z,
-                    glycan_list,
-                    tol_ppm,
-                    50,
-                );
-                for h in hits {
-                    all_backbone.push(h);
+                let observed_neutral = (spec.precursor_mz - PROTON) * charge_f - H2O;
+                for iso in iso_min..=iso_max {
+                    let precursor_neutral = observed_neutral - (iso as f64) * ISOTOPE;
+                    if precursor_neutral <= 0.0 {
+                        continue;
+                    }
+                    let hits = hybrid_candidates_with_isotope(
+                        &spec.peaks,
+                        precursor_neutral,
+                        z,
+                        iso,
+                        glycan_list,
+                        tol_ppm,
+                        50,
+                    );
+                    for h in hits {
+                        all_backbone.push(h);
+                    }
                 }
             }
 
@@ -127,8 +142,11 @@ pub fn glyco_search_run(
                 return None;
             }
 
-            // Dedup cross-charge backbone hits within 0.02 Da.
-            // Sort ascending by backbone_mass, prefer Db over DeNovo in ties.
+            // Dedup cross-charge/cross-isotope backbone hits within the
+            // configured tolerance window (max(bb*tol_ppm*1e-6, 0.02)).
+            // Sort ascending by backbone_mass, prefer Db over DeNovo in ties,
+            // then prefer isotope_offset 0 (monoisotopic) as a deterministic
+            // tiebreak among equal-source duplicates from different iso tries.
             all_backbone.sort_by(|a, b| {
                 a.backbone_mass
                     .partial_cmp(&b.backbone_mass)
@@ -138,12 +156,14 @@ pub fn glyco_search_run(
                         let ob = if b.source == Source::Db { 0u8 } else { 1u8 };
                         oa.cmp(&ob)
                     })
+                    .then_with(|| a.isotope_offset.abs().cmp(&b.isotope_offset.abs()))
+                    .then_with(|| a.charge.cmp(&b.charge))
             });
             let mut deduped_backbone: Vec<BackboneHit> = Vec::with_capacity(all_backbone.len());
             {
                 let mut rep = all_backbone.remove(0);
                 for next in all_backbone {
-                    let tol = (rep.backbone_mass * 20e-6_f64).max(0.02);
+                    let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.02);
                     if (next.backbone_mass - rep.backbone_mass).abs() < tol {
                         if rep.source == Source::DeNovo && next.source == Source::Db {
                             rep = next;
@@ -204,6 +224,7 @@ pub fn glyco_search_run(
                 bb_hit_idx: usize,
                 cand_slot: usize,
                 z: u8,
+                isotope_offset: i8,
                 rank: f32,
                 score: f32,
                 edge: i32,
@@ -218,6 +239,13 @@ pub fn glyco_search_run(
 
             for (bb_idx, bb_hit) in deduped_backbone.iter().enumerate() {
                 let bb_residue = bb_hit.backbone_mass;
+                // The charge (and isotope offset) that produced this backbone
+                // via `hybrid_candidates_with_isotope`. Scoring MUST use this
+                // exact charge — re-deriving/re-picking a charge independently
+                // here would score against a precursor mass inconsistent with
+                // the one that actually matched this backbone (BUG: precursor
+                // charge silently dropped).
+                let z = bb_hit.charge;
 
                 // Tight nominal bounds.
                 let nb = nominal_from(bb_residue);
@@ -228,6 +256,15 @@ pub fn glyco_search_run(
                     .range((nb - widen)..=(nb + widen))
                     .flat_map(|(_, v)| v.iter().copied())
                     .collect();
+
+                let ss = match scored_per_charge.iter().find(|(c, _)| *c == z) {
+                    Some((_, s)) => s,
+                    // The backbone's charge fell outside `charges_to_try`
+                    // (shouldn't happen since `hybrid_candidates_with_isotope`
+                    // is only called for charges in that set, but guard
+                    // defensively rather than panic).
+                    None => continue,
+                };
 
                 for cand_slot in candidate_slots {
                     let cand = &candidates[cand_slot];
@@ -248,45 +285,23 @@ pub fn glyco_search_run(
                         None => (cand_slot as u32, 255, 255, 255, 255, 255),
                     };
 
-                    // Pick best charge cheaply.
-                    let mut best_z: Option<u8> = None;
-                    let mut best_rank: f32 = f32::NEG_INFINITY;
-                    let mut best_score: f32 = 0.0;
-                    let mut best_edge: i32 = 0;
-                    for &z in &charges_to_try {
-                        let obs_rn = (spec.precursor_mz - PROTON) * z as f64 - H2O;
-                        if obs_rn - bb_residue < 0.0 {
-                            continue;
-                        }
-                        let ss = scored_per_charge
-                            .iter()
-                            .find(|(c, _)| *c == z)
-                            .map(|(_, s)| s)
-                            .expect("ScoredSpectrum must exist for this charge");
-                        let sc = score_psm(ss, &cand.peptide, scorer, z, fragment_tolerance_da);
-                        let ei = psm_edge_score(ss, &cand.peptide, scorer, z);
-                        let rk = sc + ei as f32;
-                        if rk > best_rank {
-                            best_rank = rk;
-                            best_z = Some(z);
-                            best_score = sc;
-                            best_edge = ei;
-                        }
-                    }
-                    let z = match best_z { Some(z) => z, None => continue };
+                    let sc = score_psm(ss, &cand.peptide, scorer, z, fragment_tolerance_da);
+                    let ei = psm_edge_score(ss, &cand.peptide, scorer, z);
+                    let rk = sc + ei as f32;
 
                     // Update per-backbone best rank.
-                    if best_rank > backbone_best_rank[bb_idx] {
-                        backbone_best_rank[bb_idx] = best_rank;
+                    if rk > backbone_best_rank[bb_idx] {
+                        backbone_best_rank[bb_idx] = rk;
                     }
 
                     let w = CheapWinner {
                         bb_hit_idx: bb_idx,
                         cand_slot,
                         z,
-                        rank: best_rank,
-                        score: best_score,
-                        edge: best_edge,
+                        isotope_offset: bb_hit.isotope_offset,
+                        rank: rk,
+                        score: sc,
+                        edge: ei,
                         cand_residue_mass,
                     };
                     cheap_winners
@@ -306,19 +321,24 @@ pub fn glyco_search_run(
             //       candidate that matched this backbone);
             //       SECONDARY = core_y_hits DESC (Y-ladder evidence breaks ties,
             //       so spectra with strong Y-ladder evidence retain that advantage);
-            //       TERTIARY = backbone_mass DESC (deterministic tiebreak).
+            //       TERTIARY = backbone_mass DESC via `total_cmp` (a true total
+            //       order over all f64 bit patterns incl. sign/NaN — unlike the
+            //       old `partial_cmp().unwrap_or(Equal)`, which silently treated
+            //       any NaN comparison as a tie);
+            //       QUATERNARY = bb_idx DESC — final total-order tiebreak so
+            //       HashMap/rayon iteration-order jitter can never change which
+            //       backbones survive truncation (BUG 4: nondeterministic cap).
             let mut backbone_order: Vec<usize> = (0..deduped_backbone.len()).collect();
             backbone_order.sort_by(|&ai, &bi| {
                 backbone_best_rank[bi]
-                    .partial_cmp(&backbone_best_rank[ai])
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&backbone_best_rank[ai])
                     .then_with(|| core_y_counts[bi].cmp(&core_y_counts[ai]))
                     .then_with(|| {
                         deduped_backbone[bi]
                             .backbone_mass
-                            .partial_cmp(&deduped_backbone[ai].backbone_mass)
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .total_cmp(&deduped_backbone[ai].backbone_mass)
                     })
+                    .then_with(|| bi.cmp(&ai))
             });
             backbone_order.truncate(backbone_top_k);
             // Build a set of accepted backbone indices for O(1) lookup.
@@ -327,17 +347,29 @@ pub fn glyco_search_run(
 
             // Phase 2: expensive feature extraction for top-K winners only.
             // Only process cheap_winners whose backbone is in the accepted set.
-            // Cap at backbone_top_k × 2 to bound compute_psm_features calls.
-            let max_features = backbone_top_k * 2;
+            //
+            // Cap at backbone_top_k × 2 to bound compute_psm_features calls,
+            // but never below the number of accepted backbones — otherwise a
+            // spectrum with many DISTINCT accepted backbones (each contributing
+            // >2 candidate/glycan winners) could have true phase-1 winners
+            // silently dropped before feature computation ever runs (BUG 4:
+            // accepted candidates discarded pre-features). `accepted_backbones`
+            // is already bounded by `backbone_top_k`, so this cap can only grow,
+            // never shrink, relative to the correctness requirement.
+            let max_features = (backbone_top_k * 2).max(accepted_backbones.len() * 4);
             let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> = {
                 let mut v: Vec<_> = cheap_winners
                     .into_iter()
                     .filter(|(_, w)| accepted_backbones.contains(&w.bb_hit_idx))
                     .collect();
+                // Deterministic total order: rank DESC via `total_cmp` (not
+                // partial_cmp-with-Equal-fallback), then gl_key ASC as the
+                // final tiebreak so truncation never depends on HashMap
+                // iteration order (BUG 4).
                 v.sort_by(|a, b| {
                     b.1.rank
-                        .partial_cmp(&a.1.rank)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .total_cmp(&a.1.rank)
+                        .then_with(|| a.0.cmp(&b.0))
                 });
                 v.truncate(max_features);
                 v
@@ -380,7 +412,10 @@ pub fn glyco_search_run(
                     edge_score: w.edge,
                     activation_method: Some(scorer.param().data_type.activation),
                     features,
-                    isotope_offset: 0,
+                    // The isotope offset that was actually subtracted when this
+                    // backbone was derived (BUG 1 fix — previously hardcoded 0
+                    // even when an M+1/M+2 offset produced the winning match).
+                    isotope_offset: w.isotope_offset,
                     precursor_mz_override: None,
                 };
                 let glycan_mass = bb_hit.glycan.as_ref().map(|g| g.mass).unwrap_or(0.0);
@@ -391,7 +426,10 @@ pub fn glyco_search_run(
                     oxonium_summed_frac: ox_ev.summed_frac,
                     n_core_oxonium_ions: ox_ev.n_core_ions,
                     y_ladder_intensity_score: 0.0,
-                    core_y_hits: 0,
+                    // Threaded from the per-backbone Y-ladder evidence computed
+                    // earlier in `core_y_counts` (previously discarded/hardcoded
+                    // to 0, so the `CoreYHits` PIN feature was always dead).
+                    core_y_hits: core_y_counts[w.bb_hit_idx],
                     glycan_mass,
                     backbone_mass: bb_neutral,
                 };
@@ -414,12 +452,86 @@ pub fn glyco_search_run(
 
 #[cfg(test)]
 mod tests {
-    // Integration-level tests are deferred to the search-crate integration tests
-    // (tests/ directory) where real PreparedSearch fixtures can be built.
-    // Unit-level sequon + mass filter logic is tested in andes_glyco::sequon.
+    // Integration-level tests (full `glyco_search_run` over a `PreparedSearch`)
+    // are deferred to the search-crate integration tests (tests/ directory)
+    // where real PreparedSearch fixtures can be built. Unit-level sequon + mass
+    // filter logic is tested in andes_glyco::sequon.
     //
     // Smoke test: verify the public types compile and are accessible.
     use super::*;
+
+    /// BUG 1 regression: `glyco_search_run`'s isotope sweep (the `for iso in
+    /// iso_min..=iso_max` loop feeding `hybrid_candidates_with_isotope`) must
+    /// recover the true backbone when the spectrum's reported precursor m/z
+    /// corresponds to an M+1 (or M+2) isotope peak rather than the
+    /// monoisotopic mass — mirroring the standard search path's
+    /// `isotope_error_range` handling. Before the fix, glyco always called
+    /// `hybrid_candidates` with isotope_offset implicitly 0, so an M+1-picked
+    /// precursor would never match the true backbone via the DB branch.
+    ///
+    /// This test reproduces the driver's per-offset precursor_neutral
+    /// derivation directly (rather than requiring a full PreparedSearch
+    /// fixture) and confirms: (a) offset 0 does NOT recover the true
+    /// backbone when the observed mass is +1 isotope high, and (b) offset +1
+    /// DOES recover it via the DB branch.
+    #[test]
+    fn isotope_sweep_recovers_backbone_from_misassigned_precursor() {
+        use andes_glyco::glycan_db::GlycanComp;
+        use andes_glyco::hybrid::hybrid_candidates_with_isotope;
+
+        let true_backbone_residue = 1500.0_f64;
+        let glycan = GlycanComp {
+            hexnac: 2,
+            hex: 3,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 2.0 * andes_glyco::glycan_mass::HEXNAC + 3.0 * andes_glyco::glycan_mass::HEX,
+        };
+        let true_precursor_neutral = true_backbone_residue + glycan.mass;
+
+        // Simulate the instrument reporting the M+1 isotope peak as the
+        // precursor: observed_neutral = true_precursor_neutral + 1*ISOTOPE.
+        let observed_neutral = true_precursor_neutral + ISOTOPE;
+
+        let glycans = vec![glycan];
+        let peaks: Vec<(f64, f32)> = vec![(204.08665, 100.0)]; // irrelevant to DB branch
+
+        // Offset 0 (monoisotopic assumption): DB branch computes
+        // bb = observed_neutral - glycan.mass, which is 1 ISOTOPE too heavy.
+        let hits_offset0 =
+            hybrid_candidates_with_isotope(&peaks, observed_neutral, 2, 0, &glycans, 20.0, 5);
+        let recovered_at_0 = hits_offset0
+            .iter()
+            .any(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.01);
+        assert!(
+            !recovered_at_0,
+            "offset 0 should NOT recover the true backbone from an M+1-picked precursor \
+             (sanity check that this test actually exercises the isotope-mismatch case)"
+        );
+
+        // Offset +1: precursor_neutral = observed_neutral - 1*ISOTOPE = true value.
+        let precursor_neutral_iso1 = observed_neutral - ISOTOPE;
+        let hits_offset1 = hybrid_candidates_with_isotope(
+            &peaks,
+            precursor_neutral_iso1,
+            2,
+            1,
+            &glycans,
+            20.0,
+            5,
+        );
+        let recovered_at_1 = hits_offset1.iter().find(|h| {
+            (h.backbone_mass - true_backbone_residue).abs() < 0.01 && h.source == Source::Db
+        });
+        assert!(
+            recovered_at_1.is_some(),
+            "offset +1 must recover the true backbone from an M+1-picked precursor"
+        );
+        let hit = recovered_at_1.unwrap();
+        assert_eq!(hit.isotope_offset, 1, "recovered hit must record isotope_offset=1");
+        assert_eq!(hit.charge, 2, "recovered hit must record the charge it was matched at");
+    }
 
     #[test]
     fn full_glyco_psm_is_clone() {

@@ -146,8 +146,14 @@ fn write_glyco_psm_row<W: Write>(
     let precursor_mz = spec.precursor_mz;
     let exp_mass = precursor_mz * charge - charge * PROTON;
 
-    // CalcMass: peptide backbone mass (no glycan on the backbone).
-    let calc_mass = cand.peptide.mass();
+    // CalcMass: the INTACT glycopeptide neutral mass (peptide backbone +
+    // glycan), NOT the bare backbone alone. The b/y scoring against Percolator
+    // is bare-backbone (see module doc), but CalcMass/dm/absdm here are
+    // compared against the observed PRECURSOR mass, which includes the
+    // glycan. Omitting `glycan_mass` (0.0 for de-novo hits without a resolved
+    // composition) previously left `dm`/`absdm` off by ~the glycan mass,
+    // corrupting the mass-error PIN features Percolator uses for q-values.
+    let calc_mass = cand.peptide.mass() + key.glycan_mass;
     let mass = exp_mass;
 
     let raw_score = psm.score.round() as i32;
@@ -474,6 +480,167 @@ mod tests {
         assert_eq!(
             if dn_key.glycan_source == Source::Db { 1u8 } else { 0u8 },
             0
+        );
+    }
+
+    // ── BUG 3 regression: CalcMass must include the glycan mass ──────────────
+
+    use model::aa_set::AminoAcidSetBuilder;
+    use model::peptide::Peptide;
+    use model::protein::{Protein, ProteinDb};
+    use model::tolerance::{PrecursorTolerance, Tolerance};
+    use search::candidate_gen::Candidate;
+    use search::search_params::SearchParams;
+
+    fn make_glyco_search_index(accession: &str) -> SearchIndex {
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: accession.to_string(),
+                description: String::new(),
+                sequence: b"MKWVTFISLLNSTK".to_vec(),
+            }],
+        };
+        SearchIndex::from_target_db(&target, "XXX_")
+    }
+
+    fn make_glyco_candidate() -> Candidate {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        // "NSTK" contains an N-X-S/T sequon (N-S-T).
+        let peptide = Peptide::from_str("K.NSTK.R", &aa_set).expect("valid peptide");
+        Candidate {
+            peptide,
+            protein_index: 0,
+            start_offset_in_protein: 0,
+            is_decoy: false,
+            is_protein_n_term: false,
+            is_protein_c_term: false,
+        }
+    }
+
+    fn make_glyco_spectrum(precursor_mz: f64) -> Spectrum {
+        Spectrum {
+            title: "test_spec".to_string(),
+            precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: Some(1),
+            peaks: vec![],
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        }
+    }
+
+    fn make_glyco_params() -> SearchParams {
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        SearchParams {
+            aa_set,
+            enzyme: model::enzyme::Enzyme::Trypsin,
+            extra_enzymes: Vec::new(),
+            min_length: 6,
+            max_length: 40,
+            max_missed_cleavages: 1,
+            max_variable_mods_per_peptide: 3,
+            precursor_tolerance: PrecursorTolerance::symmetric(Tolerance::Ppm(20.0)),
+            charge_range: 2..=3,
+            isotope_error_range: -1..=2,
+            top_n_psms_per_spectrum: 10,
+            num_tolerable_termini: 2,
+            min_peaks: 10,
+            precursor_cal_mode: search::PrecursorCalMode::Off,
+            cal_min_spec_keys: search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS,
+            precursor_mass_shift_ppm: 0.0,
+            chimeric: false,
+            chimeric_isolation_halfwidth_da: 1.5,
+            chimeric_max_coisolated: 2,
+            chimeric_max_kl: 0.3,
+            score_mode: search::ScoreMode::Rank,
+            refine_select_psm_fdr: 0.01,
+            candidate_index: search::CandidateIndexMode::Ram,
+        }
+    }
+
+    /// BUG 3: `CalcMass` in the glyco PIN row must be the INTACT glycopeptide
+    /// neutral mass (`peptide.mass() + glycan_mass`), not the bare backbone
+    /// alone. Before the fix, `CalcMass = cand.peptide.mass()` only, which
+    /// left `dm`/`absdm` off by ~the glycan mass (here 892.317 Da for
+    /// HexNAc2Hex3) since the observed `ExpMass` is the intact precursor.
+    #[test]
+    fn calc_mass_includes_glycan_mass() {
+        let search_index = make_glyco_search_index("sp|P00000|TEST");
+        let candidates = vec![make_glyco_candidate()];
+        let params = make_glyco_params();
+
+        let glycan_mass = 2.0 * andes_glyco::glycan_mass::HEXNAC
+            + 3.0 * andes_glyco::glycan_mass::HEX; // ~892.317 Da
+        let peptide_neutral_mass = candidates[0].peptide.mass();
+
+        // Precursor m/z consistent with the INTACT glycopeptide at z=2 so
+        // `dm` should be near 0 once CalcMass correctly includes the glycan.
+        let intact_neutral = peptide_neutral_mass + glycan_mass;
+        let z = 2.0_f64;
+        let precursor_mz = (intact_neutral + z * PROTON) / z;
+        let spectrum = make_glyco_spectrum(precursor_mz);
+        let spectra = vec![spectrum];
+
+        let psm = make_minimal_psm(0, 10.0);
+        let glycan_key = GlycoPsmKey {
+            spectrum_idx: 0,
+            glycan: Some(GlycanComp {
+                hexnac: 2,
+                hex: 3,
+                fuc: 0,
+                neuac: 0,
+                neugc: 0,
+                mass: glycan_mass,
+            }),
+            glycan_source: Source::Db,
+            oxonium_summed_frac: 0.2,
+            n_core_oxonium_ions: 2,
+            y_ladder_intensity_score: 0.0,
+            core_y_hits: 3,
+            glycan_mass,
+            backbone_mass: peptide_neutral_mass,
+        };
+        let hit = FullGlycoPsm { glycan_key, psm };
+        let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
+
+        let mut buf = Vec::new();
+        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index)
+            .expect("write_glyco_pin_to must succeed");
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() >= 2, "expected header + at least one PSM row");
+
+        let header_cols: Vec<&str> = lines[0].split('\t').collect();
+        let calc_mass_col = header_cols.iter().position(|&c| c == "CalcMass").unwrap();
+        let dm_col = header_cols.iter().position(|&c| c == "dm").unwrap();
+
+        let row_cols: Vec<&str> = lines[1].split('\t').collect();
+        let calc_mass: f64 = row_cols[calc_mass_col].parse().unwrap();
+        let dm: f64 = row_cols[dm_col].parse().unwrap();
+
+        // `write_double` formats with ~6 significant digits (see `write_double`
+        // in this file), so a masses-in-the-thousands value round-trips to
+        // within ~0.01 Da, not exact float precision. The bug this test
+        // guards against (omitting `glycan_mass`, ~892 Da here) is 4+ orders
+        // of magnitude larger than this formatting tolerance.
+        assert!(
+            (calc_mass - intact_neutral).abs() < 0.05,
+            "CalcMass must equal peptide.mass() + glycan_mass ({:.4}), got {:.4} \
+             (bare peptide mass alone would be {:.4})",
+            intact_neutral,
+            calc_mass,
+            peptide_neutral_mass
+        );
+        assert!(
+            dm.abs() < 0.05,
+            "dm should be ~0 for a precursor matched to the intact glycopeptide mass \
+             once CalcMass includes the glycan; got dm={:.6} (bug: CalcMass omitting \
+             glycan_mass would produce dm ~= -{:.4})",
+            dm,
+            glycan_mass
         );
     }
 }

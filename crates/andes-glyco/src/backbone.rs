@@ -1,7 +1,7 @@
 use crate::glycan_mass::{CORE_Y_STEPS, PROTON};
 
 /// Water molecule mass (monoisotopic).
-const H2O: f64 = 18.010565;
+pub(crate) const H2O: f64 = 18.010565;
 
 /// Constant for b/y complement-pair sum: for a backbone of neutral mass `bb`,
 /// a singly-charged b-ion and its complementary singly-charged y-ion satisfy:

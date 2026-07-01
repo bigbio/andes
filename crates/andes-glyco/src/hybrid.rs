@@ -3,8 +3,16 @@
 // DB branch: for each known glycan composition, `backbone = precursor_neutral − glycan.mass`.
 // De-novo branch: the existing Y-ladder complement-pair solver (backbone.rs).
 // Union: merge candidates within 0.02 Da, preferring DB source over de-novo.
+//
+// Mass convention: `BackboneHit::backbone_mass` is always the peptide RESIDUE
+// mass (water NOT included), matching the DB branch's
+// `precursor_neutral − glycan.mass` (where `precursor_neutral` is itself
+// computed with H2O already subtracted, see glyco_search.rs). `solve_backbone`
+// derives its candidate mass from the Y0 ion (`Y0 = bare_peptide_NEUTRAL_mass +
+// PROTON`), i.e. the peptide NEUTRAL mass (water included). We subtract H2O
+// here so both branches agree on one convention before union/dedup/filter.
 
-use crate::backbone::solve_backbone;
+use crate::backbone::{solve_backbone, H2O};
 use crate::glycan_db::GlycanComp;
 use crate::oxonium::oxonium_gate;
 
@@ -24,6 +32,16 @@ pub struct BackboneHit {
     /// The glycan composition that produced this backbone (Db source only).
     pub glycan: Option<GlycanComp>,
     pub source: Source,
+    /// Precursor charge state used to derive `precursor_neutral` (and thus
+    /// this `backbone_mass`). Scoring/emission MUST use this charge, not an
+    /// independently re-picked one, or the reported mass/backbone pairing is
+    /// inconsistent with what was actually matched.
+    pub charge: u8,
+    /// Isotope offset (in units of `model::mass::ISOTOPE`) that was subtracted
+    /// from the observed precursor mass before deriving `backbone_mass`. `0` =
+    /// monoisotopic. Mirrors the standard search path's `isotope_error_range`
+    /// handling (see `search_params.rs`), which glyco previously ignored.
+    pub isotope_offset: i8,
 }
 
 /// DB-branch backbone enumeration.
@@ -34,6 +52,8 @@ pub fn db_branch(
     precursor_neutral: f64,
     glycans: &[GlycanComp],
     min_backbone: f64,
+    charge: u8,
+    isotope_offset: i8,
 ) -> Vec<BackboneHit> {
     let mut out: Vec<BackboneHit> = glycans
         .iter()
@@ -44,6 +64,8 @@ pub fn db_branch(
                     backbone_mass: bb,
                     glycan: Some(g.clone()),
                     source: Source::Db,
+                    charge,
+                    isotope_offset,
                 })
             } else {
                 None
@@ -94,20 +116,49 @@ pub fn hybrid_candidates(
     tol_ppm: f64,
     top_k: usize,
 ) -> Vec<BackboneHit> {
+    hybrid_candidates_with_isotope(peaks, precursor_neutral, precursor_z, 0, glycans, tol_ppm, top_k)
+}
+
+/// Same as [`hybrid_candidates`] but records the isotope offset that produced
+/// `precursor_neutral` on every returned [`BackboneHit`] (see
+/// [`BackboneHit::isotope_offset`]). Callers that try multiple isotope offsets
+/// (mirroring the standard search's `isotope_error_range`) should call this
+/// once per offset and union the results.
+pub fn hybrid_candidates_with_isotope(
+    peaks: &[(f64, f32)],
+    precursor_neutral: f64,
+    precursor_z: u8,
+    isotope_offset: i8,
+    glycans: &[GlycanComp],
+    tol_ppm: f64,
+    top_k: usize,
+) -> Vec<BackboneHit> {
     const MIN_BACKBONE: f64 = 500.0;
 
     // --- DB branch (always; doesn't require oxonium evidence) ---
-    let mut combined: Vec<BackboneHit> = db_branch(precursor_neutral, glycans, MIN_BACKBONE);
+    let mut combined: Vec<BackboneHit> = db_branch(
+        precursor_neutral,
+        glycans,
+        MIN_BACKBONE,
+        precursor_z,
+        isotope_offset,
+    );
 
     // --- De-novo branch (requires oxonium gate to have fired) ---
     let ox = oxonium_gate(peaks, 0.10, tol_ppm);
     if ox.fired {
         let dn = solve_backbone(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
         for c in dn {
+            // `solve_backbone` derives its candidate mass from the Y0 ion, i.e.
+            // the peptide NEUTRAL mass (water included). Convert to the RESIDUE
+            // mass convention used by the DB branch (see module doc) so union,
+            // dedup, and the driver's exact-mass filter compare like-for-like.
             combined.push(BackboneHit {
-                backbone_mass: c.backbone_mass,
+                backbone_mass: c.backbone_mass - H2O,
                 glycan: None,
                 source: Source::DeNovo,
+                charge: precursor_z,
+                isotope_offset,
             });
         }
     }
@@ -126,8 +177,10 @@ pub fn hybrid_candidates(
             })
     });
 
-    // --- Dedup: merge candidates within max(bb*20e-6, 0.01) Da, prefer Db source ---
-    // Window matches the gate/searchable window so dedup and gate agree.
+    // --- Dedup: merge candidates within max(bb*tol_ppm*1e-6, 0.01) Da, prefer Db source ---
+    // Window derives from the caller's `tol_ppm` (previously hardcoded to a
+    // 20 ppm assumption) so dedup always agrees with the gate/searchable
+    // window actually configured for this run.
     // Strategy: single-pass, keep a running "cluster representative".
     // Because Db is sorted before DeNovo at equal mass, when a cluster contains
     // both, the first element is always Db → the representative is Db.
@@ -139,7 +192,7 @@ pub fn hybrid_candidates(
     let mut rep = combined.remove(0);
 
     for next in combined {
-        let tol = (rep.backbone_mass * 20e-6_f64).max(0.01);
+        let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.01);
         if (next.backbone_mass - rep.backbone_mass).abs() < tol {
             // Same cluster: prefer Db source. Since Db is sorted first, rep is
             // already Db if any Db candidate exists in this cluster.
@@ -174,7 +227,7 @@ mod tests {
         let true_backbone = 1500.0_f64;
         let precursor = true_backbone + glycan_mass;
 
-        let hits = db_branch(precursor, &glycans, 500.0);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
         assert!(!hits.is_empty(), "expected DB branch hits");
 
         // Must include a hit within ±0.01 Da of true_backbone.
@@ -190,7 +243,7 @@ mod tests {
         let glycans = n_glycan_list();
         // Very small precursor so backbone would be < 500 Da.
         let precursor = 600.0; // glycan of ~100 Da not in list; backbone ~100 Da
-        let hits = db_branch(precursor, &glycans, 500.0);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
         for h in &hits {
             assert!(h.backbone_mass >= 500.0, "backbone below min: {}", h.backbone_mass);
         }
@@ -201,7 +254,7 @@ mod tests {
     fn db_branch_is_sorted() {
         let glycans = n_glycan_list();
         let precursor = 4000.0;
-        let hits = db_branch(precursor, &glycans, 500.0);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
         for w in hits.windows(2) {
             assert!(
                 w[0].backbone_mass <= w[1].backbone_mass + 1e-9,
@@ -283,5 +336,137 @@ mod tests {
             "expected Db source to win dedup, got {:?}",
             near[0].source
         );
+    }
+
+    /// BUG 2 regression: the DB branch and the de-novo branch must agree on
+    /// the RESIDUE-mass convention (water NOT included) for `backbone_mass`.
+    ///
+    /// Before the fix, `solve_backbone` returned the peptide NEUTRAL mass
+    /// (derived from the Y0 ion `= bare_peptide_neutral + PROTON`), while the
+    /// DB branch computed `precursor_neutral - glycan.mass` where
+    /// `precursor_neutral` already has H2O subtracted (residue-mass
+    /// convention). The two branches were therefore ~18 Da (H2O) apart on a
+    /// backbone that should be identical, silently breaking dedup/union and
+    /// the driver's exact-mass candidate filter for de-novo hits.
+    ///
+    /// This test isolates `solve_backbone`'s raw output against the known
+    /// residue mass and asserts the H2O gap directly, then verifies
+    /// `hybrid_candidates` (which applies the fix) reports the de-novo
+    /// backbone within tight tolerance of the residue-mass convention.
+    #[test]
+    fn denovo_and_db_branches_agree_on_residue_mass_convention() {
+        let proton = PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+
+        // Residue-mass convention backbone (matches the DB branch/driver).
+        let true_backbone_residue = 1500.0_f64;
+        let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3, no DB entry needed here
+        let precursor_neutral = true_backbone_residue + glycan_mass;
+
+        // Build a synthetic core-Y ladder anchored at the RESIDUE-mass
+        // backbone (Y0 = bare_peptide_NEUTRAL + PROTON = (residue+H2O)+PROTON),
+        // plus oxonium peaks so `hybrid_candidates`'s de-novo branch fires
+        // (it is gated behind `oxonium_gate`).
+        let neutral_backbone = true_backbone_residue + crate::backbone::H2O;
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (204.08665, 200.0), // HexNAc oxonium
+            (138.05496, 150.0), // HexNAc fragment
+            (186.07608, 80.0),  // HexNAc ring-open
+            (neutral_backbone + proton, 100.0),
+        ];
+        for &s in steps.iter() {
+            peaks.push((neutral_backbone + s + proton, 90.0));
+        }
+
+        // 1. Raw solve_backbone output is in NEUTRAL-mass convention: it must
+        //    be ~H2O (18.0106 Da) ABOVE the residue-mass backbone.
+        let raw = crate::backbone::solve_backbone(&peaks, precursor_neutral, 2, 20.0, 5);
+        assert!(!raw.is_empty(), "expected solve_backbone candidates");
+        let raw_gap = raw[0].backbone_mass - true_backbone_residue;
+        assert!(
+            (raw_gap - crate::backbone::H2O).abs() < 0.01,
+            "expected solve_backbone's raw output to be ~H2O ({:.4}) above the \
+             residue-mass backbone, got gap={:.4} (raw={:.4}, residue={:.4})",
+            crate::backbone::H2O,
+            raw_gap,
+            raw[0].backbone_mass,
+            true_backbone_residue
+        );
+
+        // 2. After the hybrid_candidates fix, the CLOSEST DeNovo BackboneHit
+        //    to the true residue-mass backbone must land within tight
+        //    tolerance (gap ~0), not ~H2O away (the pre-fix neutral-mass
+        //    convention). `solve_backbone` can return multiple candidate
+        //    clusters (top_k=5); we pick the nearest one to the known true
+        //    value rather than assuming index 0, since cluster ORDER is not
+        //    what this test is verifying — the MASS CONVENTION is.
+        let hits = hybrid_candidates(&peaks, precursor_neutral, 2, &[], 20.0, 5);
+        let dn_hit = hits
+            .iter()
+            .filter(|h| h.source == Source::DeNovo)
+            .min_by(|a, b| {
+                (a.backbone_mass - true_backbone_residue)
+                    .abs()
+                    .total_cmp(&(b.backbone_mass - true_backbone_residue).abs())
+            })
+            .expect("expected at least one DeNovo BackboneHit");
+        assert!(
+            (dn_hit.backbone_mass - true_backbone_residue).abs() < 0.01,
+            "DeNovo backbone_mass must match residue-mass convention: expected \
+             ~{:.4}, got {:.4} (gap={:.4}); note the pre-fix bug would leave this \
+             ~H2O ({:.4}) away instead",
+            true_backbone_residue,
+            dn_hit.backbone_mass,
+            dn_hit.backbone_mass - true_backbone_residue,
+            crate::backbone::H2O
+        );
+    }
+
+    /// `db_branch` must record the (charge, isotope_offset) it was called
+    /// with on every returned `BackboneHit` (BUG: precursor charge silently
+    /// dropped / isotope offsets ignored).
+    #[test]
+    fn db_branch_records_charge_and_isotope_offset() {
+        let glycans = n_glycan_list();
+        let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
+        let true_backbone = 1500.0_f64;
+        let precursor = true_backbone + glycan_mass;
+
+        let hits = db_branch(precursor, &glycans, 500.0, 3, -1);
+        assert!(!hits.is_empty());
+        for h in &hits {
+            assert_eq!(h.charge, 3, "charge must be threaded onto BackboneHit");
+            assert_eq!(h.isotope_offset, -1, "isotope_offset must be threaded onto BackboneHit");
+        }
+    }
+
+    /// `hybrid_candidates_with_isotope` must thread a non-zero isotope offset
+    /// onto both DB and DeNovo hits (BUG 1: isotope offsets ignored).
+    #[test]
+    fn hybrid_candidates_with_isotope_threads_offset_onto_all_hits() {
+        let glycans = n_glycan_list();
+        let proton = PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+
+        let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
+        let true_backbone = 1500.0_f64;
+        let precursor = true_backbone + glycan_mass;
+
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (204.08665, 200.0),
+            (138.05496, 150.0),
+            (186.07608, 80.0),
+            (true_backbone + proton, 100.0),
+        ];
+        for &s in steps.iter() {
+            peaks.push((true_backbone + s + proton, 90.0));
+        }
+
+        let hits = hybrid_candidates_with_isotope(&peaks, precursor, 2, 2, &glycans, 20.0, 10);
+        assert!(!hits.is_empty(), "expected hybrid hits");
+        for h in &hits {
+            assert_eq!(h.isotope_offset, 2, "every hit must carry the caller's isotope offset");
+            assert_eq!(h.charge, 2, "every hit must carry the caller's charge");
+        }
     }
 }

@@ -1699,10 +1699,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
         CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
         CandidateIndexFlag::Auto => {
-            // mmap is not compatible with the chimeric / refine in-RAM passes
-            // (handled below); those are not the OOM-prone giant-mod-space case,
-            // so `auto` simply keeps them on RAM.
-            if params.chimeric || cli.refine {
+            // mmap is not compatible with the chimeric / refine / glyco in-RAM
+            // passes (handled below); those are not the OOM-prone giant-mod-space
+            // case, so `auto` simply keeps them on RAM.
+            if params.chimeric || cli.refine || cli.glyco {
                 search::CandidateIndexMode::Ram
             } else {
                 match available_memory_bytes() {
@@ -1748,6 +1748,42 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             return Err("--candidate-index mmap is not yet compatible with --refine \
                         (the refinement cascade needs the in-RAM candidate index)"
                 .into());
+        }
+        if cli.glyco {
+            return Err("--candidate-index mmap is not yet compatible with --glyco \
+                        (glyco_search_run needs the in-RAM candidate index/bucket_index)"
+                .into());
+        }
+    }
+    // --glyco is a standalone driver (see the `if cli.glyco` early-return block
+    // below): it writes its own `.glyco.pin` and skips the standard PIN/rescore/
+    // TSV/Parquet/refine machinery entirely. Silently ignoring those flags would
+    // mislead a user who expects them to apply, so fail fast instead.
+    if cli.glyco {
+        let mut unsupported: Vec<&str> = Vec::new();
+        if cli.output_tsv.is_some() {
+            unsupported.push("--output-tsv");
+        }
+        if cli.output_parquet.is_some() {
+            unsupported.push("--output-parquet");
+        }
+        if cli.rescore {
+            unsupported.push("--rescore");
+        }
+        if cli.refine {
+            unsupported.push("--refine");
+        }
+        if cli.fdr.is_some() {
+            unsupported.push("--fdr");
+        }
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "--glyco does not support: {} (glyco mode writes a standalone \
+                 .glyco.pin and skips the standard PIN/rescore/TSV/Parquet/refine \
+                 pipeline; run Percolator on the .glyco.pin separately)",
+                unsupported.join(", ")
+            )
+            .into());
         }
     }
     // --refine + --chimeric run together correctly but do NOT currently STACK:

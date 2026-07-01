@@ -265,9 +265,16 @@ mod tests {
         }
     }
 
-    /// hybrid_candidates must return hits from both DB and de-novo sources when
-    /// the spectrum has a real core-Y ladder (de-novo fires) and the precursor
-    /// matches a known glycan (DB fires).
+    /// hybrid_candidates (now Y-ion-first: solve_backbone is the sole
+    /// generator) must recover the true backbone AND annotate it against the
+    /// glycan list when the implied glycan mass matches a known composition.
+    ///
+    /// NOTE: `solve_backbone` anchors its Y0 rung at the peptide NEUTRAL mass
+    /// (`neutral_backbone + PROTON`, water INCLUDED) — peaks must be built at
+    /// `true_backbone_residue + H2O + PROTON`, not `true_backbone_residue +
+    /// PROTON`, or the recovered residue mass (and thus the by-subtraction
+    /// glycan mass) is off by H2O and no longer annotates (see the 4d1362be
+    /// de-novo/DB H2O-convention fix).
     #[test]
     fn hybrid_union_contains_both_sources() {
         let glycans = n_glycan_list();
@@ -275,30 +282,33 @@ mod tests {
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3 ~892.317
-        let true_backbone = 1500.0_f64;
-        let precursor = true_backbone + glycan_mass;
+        let true_backbone_residue = 1500.0_f64;
+        let precursor = true_backbone_residue + glycan_mass;
+        let y0_neutral = true_backbone_residue + H2O;
 
         // Build a synthetic spectrum: oxonium peaks + full core-Y ladder.
         let mut peaks: Vec<(f64, f32)> = vec![
             (204.08665, 200.0), // HexNAc oxonium
             (138.05496, 150.0), // HexNAc fragment
             (186.07608, 80.0),  // HexNAc ring-open
-            (true_backbone + proton, 100.0), // Y0
+            (y0_neutral + proton, 100.0), // Y0
         ];
         for &s in steps.iter() {
-            peaks.push((true_backbone + s + proton, 90.0));
+            peaks.push((y0_neutral + s + proton, 90.0));
         }
 
         let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 10);
         assert!(!hits.is_empty(), "expected hybrid hits");
 
+        // The recovered backbone must annotate to the known HexNAc2Hex3
+        // composition (Source::Db), since the implied glycan mass matches.
         let has_db = hits.iter().any(|h| h.source == Source::Db);
-        let has_dn = hits.iter().any(|h| h.source == Source::DeNovo);
-        assert!(has_db, "expected at least one DB hit");
-        assert!(has_dn, "expected at least one DeNovo hit");
+        assert!(has_db, "expected at least one annotated (Db) hit, got {:?}", hits);
     }
 
-    /// Dedup: when DB and de-novo candidates cluster within 0.02 Da, the Db source wins.
+    /// Dedup: near-duplicate solver candidates within 0.02 Da collapse to one
+    /// representative, and it must be annotated (Source::Db) when the implied
+    /// glycan mass matches a known composition.
     #[test]
     fn hybrid_dedup_keeps_db_over_denovo() {
         let glycans = n_glycan_list();
@@ -307,18 +317,19 @@ mod tests {
 
         // True backbone matches a DB glycan exactly.
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // ~892.317
-        let true_backbone = 1500.0_f64;
-        let precursor = true_backbone + glycan_mass;
+        let true_backbone_residue = 1500.0_f64;
+        let precursor = true_backbone_residue + glycan_mass;
+        let y0_neutral = true_backbone_residue + H2O;
 
-        // Full core-Y ladder so de-novo also proposes ~1500 Da.
+        // Full core-Y ladder anchored at the correct NEUTRAL mass.
         let mut peaks: Vec<(f64, f32)> = vec![
             (204.08665, 200.0),
             (138.05496, 150.0),
             (186.07608, 80.0),
-            (true_backbone + proton, 100.0),
+            (y0_neutral + proton, 100.0),
         ];
         for &s in steps.iter() {
-            peaks.push((true_backbone + s + proton, 90.0));
+            peaks.push((y0_neutral + s + proton, 90.0));
         }
 
         let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 10);
@@ -327,7 +338,7 @@ mod tests {
         // in the ±0.02 Da window, and it must be Source::Db.
         let near: Vec<&BackboneHit> = hits
             .iter()
-            .filter(|h| (h.backbone_mass - true_backbone).abs() < 0.02)
+            .filter(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.02)
             .collect();
         assert_eq!(near.len(), 1, "expected exactly one candidate near true backbone after dedup, got {}", near.len());
         assert_eq!(

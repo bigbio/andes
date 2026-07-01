@@ -30,7 +30,7 @@ use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
-use andes_glyco::backbone::count_core_y_hits;
+use andes_glyco::backbone::{core_y_intensity, count_core_y_hits};
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
 use andes_glyco::hybrid::{hybrid_candidates_with_isotope, BackboneHit, Source};
@@ -241,9 +241,13 @@ pub fn glyco_search_run(
 
             // Collect core-Y hit counts for all backbones (cheap, used as tiebreaker
             // after b/y ranking; avoids a second pass over deduped_backbone later).
+            // Core-Y ions live at the NEUTRAL peptide mass (Y0 = neutral + PROTON);
+            // `backbone_mass` is the RESIDUE mass, so add H2O. (Previously passed
+            // the residue mass → the ladder was sought ~H2O too low, so CoreYHits
+            // measured near-noise. Phase-1 convention fix.)
             let core_y_counts: Vec<u8> = deduped_backbone
                 .iter()
-                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass, tol_ppm))
+                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass + H2O, tol_ppm))
                 .collect();
 
             // Phase 1: cheap b/y scoring for ALL backbones.
@@ -471,7 +475,11 @@ pub fn glyco_search_run(
                     glycan_source: bb_hit.source.clone(),
                     oxonium_summed_frac: ox_ev.summed_frac,
                     n_core_oxonium_ions: ox_ev.n_core_ions,
-                    y_ladder_intensity_score: 0.0,
+                    // Intensity-weighted core-Y ladder match at the NEUTRAL
+                    // backbone — a glyco-discriminating feature (was hardcoded
+                    // 0.0 = dead). Phase-1: attacks the ranking loss where a
+                    // wrong peptide outranks the true one at the same backbone.
+                    y_ladder_intensity_score: core_y_intensity(&spec.peaks, bb_neutral, tol_ppm) as f32,
                     // Threaded from the per-backbone Y-ladder evidence computed
                     // earlier in `core_y_counts` (previously discarded/hardcoded
                     // to 0, so the `CoreYHits` PIN feature was always dead).

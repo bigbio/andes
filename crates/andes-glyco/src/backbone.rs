@@ -346,6 +346,53 @@ pub fn solve_backbone_min(
 ///
 /// `peaks` need not be sorted. This function performs binary-search if sorted,
 /// and falls back to a linear scan (but for typical spectrum sizes, linear is fine).
+/// Intensity-weighted core-Y ladder match. Like [`count_core_y_hits`] but sums
+/// the base-peak-normalised intensity of each matched core-Y ion (Y0..Y5)
+/// instead of counting them. A real glycopeptide backbone matches the ladder
+/// with high intensity; a wrong backbone matches little or nothing, so this
+/// discriminates true from false better than the bare count.
+///
+/// `bb` is the NEUTRAL peptide backbone mass (Y0 = bb + PROTON), matching
+/// `solve_backbone`'s output convention (NOT the residue mass).
+pub fn core_y_intensity(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64) -> f64 {
+    let base = peaks
+        .iter()
+        .map(|&(_, i)| i)
+        .fold(0.0f32, f32::max)
+        .max(1e-9) as f64;
+    let ions: [f64; 6] = [
+        bb + PROTON,
+        bb + PROTON + CORE_Y_STEPS[0],
+        bb + PROTON + CORE_Y_STEPS[1],
+        bb + PROTON + CORE_Y_STEPS[2],
+        bb + PROTON + CORE_Y_STEPS[3],
+        bb + PROTON + CORE_Y_STEPS[4],
+    ];
+    let sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
+    let mut score = 0.0f64;
+    for &ion_mz in &ions {
+        let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
+        let (lo, hi) = (ion_mz - tol, ion_mz + tol);
+        // Best (max-intensity) peak within tolerance of this ion.
+        let best = if sorted {
+            let start = peaks.partition_point(|&(m, _)| m < lo);
+            peaks[start..]
+                .iter()
+                .take_while(|&&(m, _)| m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        } else {
+            peaks
+                .iter()
+                .filter(|&&(m, _)| m >= lo && m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        };
+        score += (best as f64) / base;
+    }
+    score
+}
+
 pub fn count_core_y_hits(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64) -> u8 {
     // Build the 6 expected Y-ion m/z values (all singly charged).
     let ions: [f64; 6] = [
@@ -409,6 +456,38 @@ mod tests {
     /// unrelated peak as a spurious single-rung backbone. Without b/y complement
     /// support, a single core-Y hit is not enough — otherwise noise peaks become
     /// candidates that enter peptide scoring.
+    /// Convention + intensity regression: the core-Y ladder ions live at the
+    /// NEUTRAL peptide mass (Y0 = neutral + PROTON). `count_core_y_hits` and the
+    /// new `core_y_intensity` must both be given the NEUTRAL backbone; feeding
+    /// the residue mass (H2O too low) misses the ladder. `core_y_intensity` sums
+    /// matched base-peak-normalised intensity instead of counting.
+    #[test]
+    fn core_y_intensity_and_count_use_neutral_convention() {
+        let proton = PROTON;
+        let steps = CORE_Y_STEPS;
+        let neutral = 1500.0_f64; // neutral peptide backbone (Y0 = neutral + proton)
+        let mut peaks: Vec<(f64, f32)> = vec![(neutral + proton, 1000.0)]; // Y0, base peak
+        for &s in steps.iter() {
+            peaks.push((neutral + s + proton, 500.0));
+        }
+        peaks.push((321.0, 10.0)); // noise
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // NEUTRAL input → full ladder (6 rungs), positive intensity.
+        assert_eq!(count_core_y_hits(&peaks, neutral, 20.0), 6, "neutral must match all 6 rungs");
+        let inten = core_y_intensity(&peaks, neutral, 20.0);
+        assert!(inten > 0.0, "core_y_intensity must be positive for a real ladder, got {inten}");
+        // Y0 (1.0 normalised) + 5×0.5 = 3.5 expected.
+        assert!((inten - 3.5).abs() < 1e-6, "expected 3.5 normalised intensity, got {inten}");
+
+        // RESIDUE input (neutral − H2O) → the ladder is missed (wrong convention).
+        let residue = neutral - H2O;
+        assert!(
+            count_core_y_hits(&peaks, residue, 20.0) < 6,
+            "residue mass (H2O too low) must NOT match the neutral-anchored ladder"
+        );
+    }
+
     #[test]
     fn quorum1_rejects_single_rung_without_complement() {
         // Scattered noise peaks: some will coincidentally hit a single Y-rung

@@ -6,6 +6,7 @@
 //! Depends on `model` and `scoring` crates.
 
 pub mod candidate_gen;
+pub mod glyco_fragment_index;
 pub mod glyco_search;
 pub mod candidate_index;
 mod chimeric_features;

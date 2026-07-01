@@ -12,7 +12,7 @@
 // PROTON`), i.e. the peptide NEUTRAL mass (water included). We subtract H2O
 // here so both branches agree on one convention before union/dedup/filter.
 
-use crate::backbone::{solve_backbone_min, H2O};
+use crate::backbone::{core_y_intensity, solve_backbone_min, H2O};
 use crate::glycan_db::GlycanComp;
 use crate::oxonium::oxonium_gate;
 
@@ -230,15 +230,30 @@ pub fn hybrid_candidates_with_isotope(
         });
     }
 
-    // BOUNDED DB FALLBACK (Codex re-review #1): if even the relaxed quorum-1
-    // solver found nothing — a truly 0-core-Y oxonium-positive spectrum (no
-    // detectable Y-ladder at all) — fall back to `precursor − known glycan` so
-    // these real glyco spectra are not silently dropped. This fires ONLY for
-    // the rare 0-rung set (NOT the weak-ladder tail, which the quorum-1 pass
-    // already handles), so it avoids the O(glycans) cost blowing up broadly;
-    // the downstream b/y ranking + `backbone_top_k` in `glyco_search` bound the
-    // per-spectrum candidate count.
-    if combined.is_empty() {
+    // DB-UNION vs 0-core-Y FALLBACK.
+    //
+    // `y_first_has_evidence` = the Y-ladder solver anchored at least one backbone
+    // (the spectrum has core-Y evidence). In that case we UNION the DB branch
+    // (`precursor − every known glycan`) so a mis-anchored solver can't hide the
+    // true backbone: the true backbone carries the real core-Y ladder, so ranking
+    // the union by `core_y_intensity` and truncating to `top_k` (below) keeps it
+    // while staying cheap for the driver's phase-1 b/y scoring. This lifts
+    // find-rate toward the DB-branch ceiling (95.8%) without the O(glycans)
+    // phase-1 blowup of scoring every DB backbone.
+    //
+    // If the solver found NOTHING (a truly 0-core-Y spectrum), there is no core-Y
+    // signal to rank by, so we fall back to the DB branch un-ranked (rare; the
+    // driver's `backbone_top_k` bounds it) — this is the previous behaviour.
+    let y_first_has_evidence = !combined.is_empty();
+    if y_first_has_evidence {
+        combined.extend(db_branch(
+            precursor_neutral,
+            glycans,
+            MIN_BACKBONE,
+            precursor_z,
+            isotope_offset,
+        ));
+    } else {
         combined = db_branch(precursor_neutral, glycans, MIN_BACKBONE, precursor_z, isotope_offset);
     }
 
@@ -287,6 +302,26 @@ pub fn hybrid_candidates_with_isotope(
         }
     }
     deduped.push(rep);
+
+    // When we unioned the DB branch, rank the combined set by cheap core-Y
+    // intensity (at the NEUTRAL backbone) and keep the top_k so the driver's
+    // phase-1 b/y scoring stays bounded. The true backbone carries the real
+    // trimannosyl-core ladder, so it survives; spurious DB backbones (no ladder)
+    // are dropped. Ties broken by mass for determinism. (When we did NOT union —
+    // the 0-core-Y fallback — leave the set as-is; the driver bounds it.)
+    if y_first_has_evidence && deduped.len() > top_k {
+        let mut scored: Vec<(f64, BackboneHit)> = deduped
+            .into_iter()
+            .map(|h| (core_y_intensity(peaks, h.backbone_mass + H2O, tol_ppm), h))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.backbone_mass.to_bits().cmp(&b.1.backbone_mass.to_bits()))
+        });
+        scored.truncate(top_k);
+        deduped = scored.into_iter().map(|(_, h)| h).collect();
+    }
 
     deduped
 }
@@ -383,6 +418,39 @@ mod tests {
         // composition (Source::Db), since the implied glycan mass matches.
         let has_db = hits.iter().any(|h| h.source == Source::Db);
         assert!(has_db, "expected at least one annotated (Db) hit, got {:?}", hits);
+    }
+
+    /// Phase 2b (DB-union): when the Y-ladder solver has evidence, the DB branch
+    /// is unioned (~2510 candidates) but the result stays bounded to `top_k`, and
+    /// the true backbone — which carries the real core-Y ladder — survives the
+    /// core-Y-ranked truncation. This is what lifts find-rate toward the DB
+    /// ceiling without a phase-1 blowup.
+    #[test]
+    fn db_union_stays_bounded_and_keeps_true_backbone() {
+        let glycans = n_glycan_list(); // full list (~2510)
+        let proton = PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3
+        let true_backbone_residue = 1500.0_f64;
+        let precursor = true_backbone_residue + glycan_mass;
+        let y0_neutral = true_backbone_residue + H2O;
+
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (204.08665, 200.0),
+            (138.05496, 150.0),
+            (y0_neutral + proton, 1000.0), // Y0 bright
+        ];
+        for &s in steps.iter() {
+            peaks.push((y0_neutral + s + proton, 600.0));
+        }
+
+        let top_k = 5;
+        let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, top_k);
+        assert!(hits.len() <= top_k, "DB-union must stay bounded to top_k, got {}", hits.len());
+        let found = hits
+            .iter()
+            .any(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.05);
+        assert!(found, "true backbone (real core-Y ladder) must survive core-Y-ranked truncation");
     }
 
     /// Dedup: near-duplicate solver candidates within 0.02 Da collapse to one

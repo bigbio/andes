@@ -87,6 +87,9 @@ fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
     score
 }
 
+/// Y-ion-first backbone solver at the default core-Y quorum (≥2 distinct core-Y
+/// rungs). See [`solve_backbone_min`] for the quorum-parameterised variant used
+/// by the confidence-cascade rescue.
 pub fn solve_backbone(
     peaks: &[(f64, f32)],
     precursor_neutral: f64,
@@ -94,7 +97,26 @@ pub fn solve_backbone(
     tol_ppm: f64,
     top_k: usize,
 ) -> Vec<BackboneCandidate> {
+    solve_backbone_min(peaks, precursor_neutral, precursor_z, tol_ppm, top_k, 2)
+}
+
+/// As [`solve_backbone`], but with a configurable minimum core-Y rung quorum
+/// (`min_core_y`). The primary path uses `2` (conservative, few candidates); the
+/// rescue path relaxes to `1` (Y0/Y1-only, weak-ladder spectra) — still
+/// evidence-driven and bounded to `top_k`, unlike a blind precursor−glycan
+/// enumeration. `min_core_y` is clamped to at least 1 (a candidate always has
+/// its own Y0/anchor rung, so `0` would admit every mass bin).
+pub fn solve_backbone_min(
+    peaks: &[(f64, f32)],
+    precursor_neutral: f64,
+    precursor_z: u8,
+    tol_ppm: f64,
+    top_k: usize,
+    min_core_y: u8,
+) -> Vec<BackboneCandidate> {
     use std::collections::HashMap;
+
+    let min_core_y = min_core_y.max(1);
 
     if peaks.is_empty() {
         return Vec::new();
@@ -254,8 +276,8 @@ pub fn solve_backbone(
                 complement_score: cscore,
             }
         })
-        .filter(|c| c.core_y_hits >= 2)
-        .collect(); // core-Y quorum
+        .filter(|c| c.core_y_hits >= min_core_y)
+        .collect(); // core-Y quorum (2 = primary, 1 = relaxed rescue)
 
     // Sort: PRIMARY = core_y_hits (more distinct rungs = stronger evidence),
     // SECONDARY = combined score: intensity_score + complement_score * COMPLEMENT_WEIGHT

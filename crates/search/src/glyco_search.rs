@@ -130,7 +130,13 @@ pub fn glyco_search_run(
                         iso,
                         glycan_list,
                         tol_ppm,
-                        50,
+                        // Honor the configured cap (Codex finding #2): this was
+                        // hardcoded to 50, so `--glyco-backbone-top-k` overrides
+                        // were silently ignored and the Y-first solver truncated
+                        // at 50 regardless. The solver ranks by core-Y evidence,
+                        // so a larger cap only widens the candidate space the
+                        // downstream b/y scorer sees.
+                        backbone_top_k,
                     );
                     for h in hits {
                         all_backbone.push(h);
@@ -418,7 +424,15 @@ pub fn glyco_search_run(
                     isotope_offset: w.isotope_offset,
                     precursor_mz_override: None,
                 };
-                let glycan_mass = bb_hit.glycan.as_ref().map(|g| g.mass).unwrap_or(0.0);
+                // Use the annotated composition's theoretical mass when a known
+                // glycan matched; otherwise fall back to the observed residual
+                // (precursor − backbone) so a novel/unannotated glycan still
+                // reports its real intact mass instead of 0.0 (Codex finding #3).
+                let glycan_mass = bb_hit
+                    .glycan
+                    .as_ref()
+                    .map(|g| g.mass)
+                    .unwrap_or(bb_hit.glycan_mass_residual);
                 let glycan_key = GlycoPsmKey {
                     spectrum_idx: spec_idx,
                     glycan: bb_hit.glycan.clone(),
@@ -460,23 +474,23 @@ mod tests {
     // Smoke test: verify the public types compile and are accessible.
     use super::*;
 
-    /// BUG 1 regression: `glyco_search_run`'s isotope sweep (the `for iso in
-    /// iso_min..=iso_max` loop feeding `hybrid_candidates_with_isotope`) must
-    /// recover the true backbone when the spectrum's reported precursor m/z
-    /// corresponds to an M+1 (or M+2) isotope peak rather than the
-    /// monoisotopic mass — mirroring the standard search path's
-    /// `isotope_error_range` handling. Before the fix, glyco always called
-    /// `hybrid_candidates` with isotope_offset implicitly 0, so an M+1-picked
-    /// precursor would never match the true backbone via the DB branch.
+    /// Isotope-sweep GLYCAN ANNOTATION regression. Under the Y-ion-first
+    /// cascade the backbone is read from the core-Y ladder and is therefore
+    /// recovered regardless of which isotope peak the instrument picked as the
+    /// precursor. The isotope sweep's remaining job is to annotate the glycan
+    /// CORRECTLY: `glycan = precursor_neutral − backbone` only matches a known
+    /// composition when the precursor is at the right isotope offset.
     ///
-    /// This test reproduces the driver's per-offset precursor_neutral
-    /// derivation directly (rather than requiring a full PreparedSearch
-    /// fixture) and confirms: (a) offset 0 does NOT recover the true
-    /// backbone when the observed mass is +1 isotope high, and (b) offset +1
-    /// DOES recover it via the DB branch.
+    /// With the precursor mis-picked at M+1, this test confirms: (a) at offset
+    /// 0 the backbone is still found from the ladder, but its by-subtraction
+    /// glycan is ~1 ISOTOPE off → NOT annotated (Source::DeNovo); (b) at offset
+    /// +1 the corrected precursor yields the true glycan → annotated Source::Db
+    /// with isotope_offset=1. This is exactly what the driver's
+    /// `for iso in iso_min..=iso_max` sweep buys in the Y-first world.
     #[test]
-    fn isotope_sweep_recovers_backbone_from_misassigned_precursor() {
+    fn isotope_sweep_annotates_glycan_only_at_correct_offset() {
         use andes_glyco::glycan_db::GlycanComp;
+        use andes_glyco::glycan_mass::{CORE_Y_STEPS, PROTON as GLY_PROTON};
         use andes_glyco::hybrid::hybrid_candidates_with_isotope;
 
         let true_backbone_residue = 1500.0_f64;
@@ -490,29 +504,40 @@ mod tests {
         };
         let true_precursor_neutral = true_backbone_residue + glycan.mass;
 
-        // Simulate the instrument reporting the M+1 isotope peak as the
-        // precursor: observed_neutral = true_precursor_neutral + 1*ISOTOPE.
+        // Instrument reports the M+1 isotope peak as the precursor.
         let observed_neutral = true_precursor_neutral + ISOTOPE;
 
         let glycans = vec![glycan];
-        let peaks: Vec<(f64, f32)> = vec![(204.08665, 100.0)]; // irrelevant to DB branch
 
-        // Offset 0 (monoisotopic assumption): DB branch computes
-        // bb = observed_neutral - glycan.mass, which is 1 ISOTOPE too heavy.
-        let hits_offset0 =
+        // Full core-Y ladder anchored at the true backbone (Y0 = peptide neutral
+        // + proton = residue + H2O + proton) plus two oxonium ions so the gate
+        // fires. The ladder is independent of the precursor isotope pick.
+        let y0_neutral = true_backbone_residue + H2O;
+        let mut peaks: Vec<(f64, f32)> = vec![(204.08665, 200.0), (138.05496, 120.0)];
+        peaks.push((y0_neutral + GLY_PROTON, 150.0));
+        for &s in CORE_Y_STEPS.iter() {
+            peaks.push((y0_neutral + s + GLY_PROTON, 100.0));
+        }
+
+        // Offset 0 (M+1 assumption uncorrected): backbone recovered from the
+        // ladder, but the by-subtraction glycan is ~1 ISOTOPE off → not annotated.
+        let hits0 =
             hybrid_candidates_with_isotope(&peaks, observed_neutral, 2, 0, &glycans, 20.0, 5);
-        let recovered_at_0 = hits_offset0
+        let bb0 = hits0
             .iter()
-            .any(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.01);
+            .find(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.05);
         assert!(
-            !recovered_at_0,
-            "offset 0 should NOT recover the true backbone from an M+1-picked precursor \
-             (sanity check that this test actually exercises the isotope-mismatch case)"
+            bb0.is_some(),
+            "backbone is read from the ladder → recovered even at the wrong isotope offset"
+        );
+        assert!(
+            bb0.unwrap().source == Source::DeNovo,
+            "at the wrong offset the glycan is ~1 ISOTOPE off and must NOT annotate to a known composition"
         );
 
-        // Offset +1: precursor_neutral = observed_neutral - 1*ISOTOPE = true value.
+        // Offset +1: corrected precursor → true glycan → annotated Source::Db.
         let precursor_neutral_iso1 = observed_neutral - ISOTOPE;
-        let hits_offset1 = hybrid_candidates_with_isotope(
+        let hits1 = hybrid_candidates_with_isotope(
             &peaks,
             precursor_neutral_iso1,
             2,
@@ -521,14 +546,12 @@ mod tests {
             20.0,
             5,
         );
-        let recovered_at_1 = hits_offset1.iter().find(|h| {
-            (h.backbone_mass - true_backbone_residue).abs() < 0.01 && h.source == Source::Db
-        });
-        assert!(
-            recovered_at_1.is_some(),
-            "offset +1 must recover the true backbone from an M+1-picked precursor"
-        );
-        let hit = recovered_at_1.unwrap();
+        let hit = hits1
+            .iter()
+            .find(|h| {
+                (h.backbone_mass - true_backbone_residue).abs() < 0.05 && h.source == Source::Db
+            })
+            .expect("offset +1 must recover AND annotate the backbone via the corrected precursor");
         assert_eq!(hit.isotope_offset, 1, "recovered hit must record isotope_offset=1");
         assert_eq!(hit.charge, 2, "recovered hit must record the charge it was matched at");
     }

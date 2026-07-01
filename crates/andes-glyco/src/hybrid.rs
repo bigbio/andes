@@ -12,7 +12,7 @@
 // PROTON`), i.e. the peptide NEUTRAL mass (water included). We subtract H2O
 // here so both branches agree on one convention before union/dedup/filter.
 
-use crate::backbone::{solve_backbone, H2O};
+use crate::backbone::{solve_backbone_min, H2O};
 use crate::glycan_db::GlycanComp;
 use crate::oxonium::oxonium_gate;
 
@@ -42,6 +42,13 @@ pub struct BackboneHit {
     /// monoisotopic. Mirrors the standard search path's `isotope_error_range`
     /// handling (see `search_params.rs`), which glyco previously ignored.
     pub isotope_offset: i8,
+    /// Observed residual glycan mass = `precursor_neutral − backbone_mass`, the
+    /// intact glycan actually implied by this backbone. Populated for EVERY hit,
+    /// including novel/unannotated ones where `glycan` is `None` (a de-novo
+    /// glycan that matched no known composition). Downstream code must use this
+    /// for the intact `CalcMass` rather than `glycan.map(|g| g.mass).unwrap_or(0.0)`,
+    /// which silently reported the bare peptide for novel glycans.
+    pub glycan_mass_residual: f64,
 }
 
 /// DB-branch backbone enumeration.
@@ -66,6 +73,9 @@ pub fn db_branch(
                     source: Source::Db,
                     charge,
                     isotope_offset,
+                    // By construction bb = precursor − g.mass, so the observed
+                    // residual is exactly the glycan mass.
+                    glycan_mass_residual: precursor_neutral - bb,
                 })
             } else {
                 None
@@ -174,8 +184,23 @@ pub fn hybrid_candidates_with_isotope(
         return Vec::new();
     }
 
-    // PRIMARY: Y-ladder solver → backbone-mass candidates ranked by core-Y evidence.
-    let dn = solve_backbone(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
+    // Y-ION-FIRST confidence cascade (replaces both the deleted DB brute force
+    // AND the Codex-flagged silent drop). The core-Y ladder is the primary
+    // evidence, but we degrade the quorum gracefully instead of giving up:
+    //   1. PRIMARY (quorum 2): ≥2 distinct core-Y rungs → high-confidence,
+    //      few candidates. Handles the Y-ladder-rich majority.
+    //   2. RESCUE (quorum 1): if the primary yields nothing, relax to a single
+    //      core-Y rung (Y0/Y1 — the most diagnostic). This recovers the
+    //      weak-ladder tail (Codex finding #1) while staying evidence-driven
+    //      and bounded to `top_k` — unlike a blind `precursor − every glycan`
+    //      enumeration (~600 backbones/spectrum), which is both O(glycans) slow
+    //      and precision-poor. Spectra with NO core-Y ladder at all remain
+    //      unsearchable by this method (a documented limitation; they need an
+    //      oxonium-composition / cross-spectrum lever, not brute force).
+    let mut dn = solve_backbone_min(peaks, precursor_neutral, precursor_z, tol_ppm, top_k, 2);
+    if dn.is_empty() {
+        dn = solve_backbone_min(peaks, precursor_neutral, precursor_z, tol_ppm, top_k, 1);
+    }
     let mut combined: Vec<BackboneHit> = Vec::with_capacity(dn.len());
     for c in dn {
         // `solve_backbone` returns the Y0-derived peptide NEUTRAL mass (water
@@ -186,7 +211,8 @@ pub fn hybrid_candidates_with_isotope(
         }
         // Annotate the glycan by subtraction. `precursor_neutral` and `bb` are
         // both residue-convention, so `precursor_neutral − bb` = glycan mass.
-        let glycan = nearest_glycan(glycans, precursor_neutral - bb, tol_ppm);
+        let residual = precursor_neutral - bb;
+        let glycan = nearest_glycan(glycans, residual, tol_ppm);
         let source = if glycan.is_some() {
             Source::Db
         } else {
@@ -198,6 +224,9 @@ pub fn hybrid_candidates_with_isotope(
             source,
             charge: precursor_z,
             isotope_offset,
+            // Keep the observed residual even when annotation returned None so a
+            // novel glycan's intact mass is not lost (Codex finding #3).
+            glycan_mass_residual: residual,
         });
     }
 
@@ -471,6 +500,67 @@ mod tests {
         );
     }
 
+    /// Finding #3 regression (Codex adversarial review): a Y-first backbone
+    /// whose implied glycan matches NO known composition (a novel/unexpected
+    /// glycan — explicitly "kept, not discarded") must still carry the observed
+    /// residual glycan mass (`precursor_neutral − backbone`). Previously the hit
+    /// was pushed with `glycan: None` and the residual was thrown away, so
+    /// downstream `glycan_mass` fell back to 0.0 → the intact PIN `CalcMass`
+    /// represented the bare peptide, not the glycopeptide.
+    #[test]
+    fn novel_glycan_hit_preserves_residual_mass() {
+        let glycans = n_glycan_list();
+        let proton = PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+
+        // A glycan mass deliberately off the composition grid so nothing in the
+        // list matches within tolerance → annotation returns None.
+        let novel_glycan_mass = 1234.5678_f64;
+        assert!(
+            nearest_glycan(&glycans, novel_glycan_mass, 20.0).is_none(),
+            "premise: {novel_glycan_mass} must not match any known composition"
+        );
+
+        let true_backbone_residue = 1500.0_f64;
+        let precursor = true_backbone_residue + novel_glycan_mass;
+        let y0_neutral = true_backbone_residue + H2O;
+
+        // Full core-Y ladder so the Y-first solver anchors the backbone.
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (204.08665, 200.0),
+            (138.05496, 150.0),
+            (186.07608, 80.0),
+            (y0_neutral + proton, 100.0),
+        ];
+        for &s in steps.iter() {
+            peaks.push((y0_neutral + s + proton, 90.0));
+        }
+
+        let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 10);
+        let novel = hits
+            .iter()
+            .filter(|h| h.source == Source::DeNovo && h.glycan.is_none())
+            .min_by(|a, b| {
+                (a.backbone_mass - true_backbone_residue)
+                    .abs()
+                    .total_cmp(&(b.backbone_mass - true_backbone_residue).abs())
+            })
+            .expect("expected a novel (unannotated) DeNovo hit near the true backbone");
+
+        // The residual glycan mass must equal precursor − backbone (the observed
+        // intact glycan), NOT 0.0.
+        assert!(
+            (novel.glycan_mass_residual - (precursor - novel.backbone_mass)).abs() < 1e-6,
+            "residual must be precursor − backbone; got {}",
+            novel.glycan_mass_residual
+        );
+        assert!(
+            (novel.glycan_mass_residual - novel_glycan_mass).abs() < 0.02,
+            "residual must recover the novel glycan mass ~{novel_glycan_mass}, got {}",
+            novel.glycan_mass_residual
+        );
+    }
+
     /// `db_branch` must record the (charge, isotope_offset) it was called
     /// with on every returned `BackboneHit` (BUG: precursor charge silently
     /// dropped / isotope offsets ignored).
@@ -487,6 +577,57 @@ mod tests {
             assert_eq!(h.charge, 3, "charge must be threaded onto BackboneHit");
             assert_eq!(h.isotope_offset, -1, "isotope_offset must be threaded onto BackboneHit");
         }
+    }
+
+    /// Finding #1 regression (Codex adversarial review of the Y-ion-first
+    /// rewrite): an oxonium-positive spectrum whose core-Y ladder is too WEAK
+    /// for the primary quorum (only a single core-Y rung present, below the ≥2
+    /// primary quorum — common in HCD, the sparse stratum) must STILL yield the
+    /// true backbone via the quorum-1 confidence-cascade rescue. The pure
+    /// Y-ion-first path silently returned an empty Vec here, dropping the whole
+    /// weak-ladder tail.
+    ///
+    /// (Spectra with NO core-Y ladder at all remain unsearchable by this
+    /// evidence-driven method — a documented limitation, not a silent drop; a
+    /// blind precursor−glycan brute force is O(glycans)-slow and precision-poor.)
+    #[test]
+    fn weak_ladder_spectrum_is_rescued_by_quorum1_cascade() {
+        let glycans = n_glycan_list();
+        // HexNAc2Hex3 (trimannosyl core) — present in the list.
+        let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
+        let true_backbone_residue = 1500.0_f64;
+        let precursor = true_backbone_residue + glycan_mass;
+        let y0_neutral = true_backbone_residue + H2O;
+        let proton = PROTON;
+
+        // Oxonium peaks so the glyco gate fires + a SINGLE core-Y rung (Y0 only,
+        // no Y1..Y5) → the primary quorum-2 solver finds nothing, but the
+        // quorum-1 rescue anchors on the lone Y0.
+        let peaks: Vec<(f64, f32)> = vec![
+            (204.08665, 200.0),           // HexNAc oxonium
+            (138.05496, 150.0),           // HexNAc fragment
+            (186.07608, 80.0),            // HexNAc ring-open
+            (y0_neutral + proton, 120.0), // Y0 (the single core-Y rung)
+        ];
+
+        // Premise: the primary quorum-2 solver alone recovers nothing (1 rung < 2).
+        let primary = crate::backbone::solve_backbone(&peaks, precursor, 2, 20.0, 50);
+        assert!(
+            primary.is_empty(),
+            "premise: quorum-2 solver should find nothing with a single core-Y rung, got {:?}",
+            primary
+        );
+
+        let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 50);
+        let found = hits.iter().any(|h| {
+            (h.backbone_mass - true_backbone_residue).abs() < 0.05 && h.source == Source::Db
+        });
+        assert!(
+            found,
+            "quorum-1 cascade must recover the true backbone for a weak-ladder \
+             known-glycan spectrum; got {:?}",
+            hits
+        );
     }
 
     /// `hybrid_candidates_with_isotope` must thread a non-zero isotope offset

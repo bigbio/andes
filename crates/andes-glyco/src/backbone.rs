@@ -276,8 +276,12 @@ pub fn solve_backbone_min(
                 complement_score: cscore,
             }
         })
-        .filter(|c| c.core_y_hits >= min_core_y)
-        .collect(); // core-Y quorum (2 = primary, 1 = relaxed rescue)
+        // Core-Y quorum. The primary path requires ≥2 distinct core-Y rungs.
+        // The relaxed rescue (min_core_y=1) additionally requires b/y COMPLEMENT
+        // support for a single-rung candidate, so a lone unrelated peak accepted
+        // as some Y-rung cannot become a spurious backbone (Codex re-review #3).
+        .filter(|c| c.core_y_hits >= 2 || (c.core_y_hits >= min_core_y && c.complement_score > 0.0))
+        .collect();
 
     // Sort: PRIMARY = core_y_hits (more distinct rungs = stronger evidence),
     // SECONDARY = combined score: intensity_score + complement_score * COMPLEMENT_WEIGHT
@@ -399,6 +403,27 @@ mod tests {
     fn solve_backbone_empty_without_core_quorum() {
         let peaks = vec![(700.0, 50.0_f32), (1234.5, 50.0)]; // no core-Y ladder
         assert!(solve_backbone(&peaks, 2500.0, 2, 20.0, 5).is_empty());
+    }
+
+    /// Codex re-review #3: the relaxed quorum-1 rescue must NOT accept a lone
+    /// unrelated peak as a spurious single-rung backbone. Without b/y complement
+    /// support, a single core-Y hit is not enough — otherwise noise peaks become
+    /// candidates that enter peptide scoring.
+    #[test]
+    fn quorum1_rejects_single_rung_without_complement() {
+        // Scattered noise peaks: some will coincidentally hit a single Y-rung
+        // bin at various masses, but none form a b/y complement pair.
+        let peaks = vec![
+            (700.0, 50.0_f32),
+            (911.3, 40.0),
+            (1301.7, 45.0),
+            (1502.9, 30.0),
+        ];
+        let out = solve_backbone_min(&peaks, 3000.0, 2, 20.0, 50, 1);
+        assert!(
+            out.is_empty(),
+            "quorum-1 must reject single-rung candidates lacking b/y complement, got {out:?}"
+        );
     }
 
     /// The reported backbone mass must be the vote-weighted CENTROID of a merged

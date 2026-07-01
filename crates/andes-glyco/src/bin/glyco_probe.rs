@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader};
 
 use andes_glyco::glycan_db::n_glycan_list;
 use andes_glyco::glycan_mass::{CORE_Y_STEPS, PROTON};
-use andes_glyco::hybrid::{hybrid_candidates, Source};
+use andes_glyco::hybrid::{db_branch, hybrid_candidates_with_isotope, BackboneHit, Source};
 use andes_glyco::oxonium::oxonium_gate;
 // Keep solve_backbone import for the de-novo-only comparison baseline.
 use andes_glyco::backbone::solve_backbone;
@@ -29,6 +29,13 @@ use andes_glyco::backbone::solve_backbone;
 /// rung checks add H2O back and the de-novo baseline (which returns NEUTRAL from
 /// `solve_backbone`) subtracts it.
 const H2O: f64 = 18.010565;
+
+/// Neutron mass step for isotope-error handling. The production driver sweeps
+/// `isotope_error_range` (default −1..=2); the probe mirrors that so its
+/// find-rate/ceiling reflect the shipped search path (Codex re-review #4).
+const ISOTOPE: f64 = 1.003355;
+const ISO_MIN: i8 = -1;
+const ISO_MAX: i8 = 2;
 
 /// Symmetric ±20 ppm candidate-window check (floor 0.01 Da), per the gate spec.
 fn in_window(solved: f64, truth: f64) -> bool {
@@ -152,19 +159,30 @@ fn main() {
             }
         }
 
-        // --- DB-branch-only ceiling (precursor − each known glycan) ---
+        // Isotope sweep mirroring the driver: try each offset's corrected
+        // precursor neutral and union the candidates.
+        let iso_neutrals: Vec<(i8, f64)> = (ISO_MIN..=ISO_MAX)
+            .map(|iso| (iso, precursor_neutral - (iso as f64) * ISOTOPE))
+            .filter(|&(_, pn)| pn > 0.0)
+            .collect();
+
+        // --- DB-branch-only ceiling (precursor − each known glycan), swept ---
         {
-            let db = andes_glyco::hybrid::db_branch(precursor_neutral, &glycans, 500.0, prec_z, 0);
-            if db.iter().any(|h| in_window(h.backbone_mass, t.backbone_mass)) {
+            let searchable = iso_neutrals.iter().any(|&(iso, pn)| {
+                db_branch(pn, &glycans, 500.0, prec_z, iso)
+                    .iter()
+                    .any(|h| in_window(h.backbone_mass, t.backbone_mass))
+            });
+            if searchable {
                 n_db_only_searchable += 1;
             }
         }
 
-        // --- Hybrid candidates ---
-        // top_k=50 matches the production driver's `--glyco-backbone-top-k`
-        // default (glyco_search) so the probe's generation find-rate reflects
-        // what the driver actually sees (the probe previously used 5).
-        let hybrid = hybrid_candidates(peaks, precursor_neutral, prec_z, &glycans, 20.0, 50);
+        // --- Hybrid candidates (isotope-swept, top_k=50 as in the driver) ---
+        let mut hybrid: Vec<BackboneHit> = Vec::new();
+        for &(iso, pn) in &iso_neutrals {
+            hybrid.extend(hybrid_candidates_with_isotope(peaks, pn, prec_z, iso, &glycans, 20.0, 50));
+        }
 
         // Attribute the hit to the CLOSEST candidate within the gate window (not
         // the first in mass-sorted order) so DB-vs-de-novo split reflects which
@@ -237,7 +255,7 @@ fn main() {
         pct(n_db_only_searchable, n_found_spec)
     );
     println!();
-    println!("--- De-novo-only baseline (Phase-1 top_k=5, oxonium-gated) ---");
+    println!("--- De-novo-only baseline (solve_backbone top_k=5, all matched scans) ---");
     println!(
         "searchable-backbone OVERALL: {} ({:.1}% of matched)",
         n_denovo_searchable,

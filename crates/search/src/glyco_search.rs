@@ -59,6 +59,68 @@ pub struct GlycoSpectrumResult {
     pub hits: Vec<FullGlycoPsm>,
 }
 
+/// Dedup backbone hits collected across charges and isotope offsets.
+///
+/// Two hits are merged ONLY when they represent the same candidate: the same
+/// backbone mass (within `max(bb*tol_ppm*1e-6, 0.02)`) AND the same glycan
+/// hypothesis. Distinct glycan hypotheses at the same backbone mass are kept
+/// separate:
+///   - annotated (`Source::Db`) hits with different compositions, and
+///   - de-novo hits from different isotope offsets — these carry different
+///     residual glycan masses (`glycan_mass_residual = precursor(iso) − bb`),
+///     so merging them would corrupt the intact `CalcMass` of novel glycans by
+///     up to one isotope (Codex adversarial-review finding #2).
+///
+/// When a DeNovo and a Db hit coincide at the same backbone AND isotope offset,
+/// the Db (annotated) hit is kept as the representative.
+fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<BackboneHit> {
+    if all_backbone.is_empty() {
+        return Vec::new();
+    }
+    // Sort by backbone mass; within a mass cluster, put Db before DeNovo and
+    // monoisotopic (|offset| small) first for deterministic representatives.
+    all_backbone.sort_by(|a, b| {
+        a.backbone_mass
+            .partial_cmp(&b.backbone_mass)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let oa = if a.source == Source::Db { 0u8 } else { 1u8 };
+                let ob = if b.source == Source::Db { 0u8 } else { 1u8 };
+                oa.cmp(&ob)
+            })
+            .then_with(|| a.isotope_offset.abs().cmp(&b.isotope_offset.abs()))
+            .then_with(|| a.charge.cmp(&b.charge))
+    });
+
+    let mut deduped: Vec<BackboneHit> = Vec::with_capacity(all_backbone.len());
+    let mut rep = all_backbone.remove(0);
+    for next in all_backbone {
+        let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.02);
+        let same_backbone = (next.backbone_mass - rep.backbone_mass).abs() < tol;
+        // Same candidate iff same backbone AND same glycan hypothesis.
+        let same_hypothesis = match (&rep.glycan, &next.glycan) {
+            (Some(g1), Some(g2)) => g1 == g2,
+            // Unannotated: the residual is isotope-specific, so only the same
+            // offset is the same candidate.
+            (None, None) => rep.isotope_offset == next.isotope_offset,
+            // DeNovo vs Db: the same candidate only at the same isotope offset
+            // (then the annotated hit supersedes below).
+            _ => rep.isotope_offset == next.isotope_offset,
+        };
+        if same_backbone && same_hypothesis {
+            if rep.source == Source::DeNovo && next.source == Source::Db {
+                rep = next; // prefer the annotated representative
+            }
+            // otherwise `next` is a duplicate of `rep` (e.g. different charge)
+        } else {
+            deduped.push(rep);
+            rep = next;
+        }
+    }
+    deduped.push(rep);
+    deduped
+}
+
 /// Run the glyco-PSM scoring driver over all spectra.
 ///
 /// For each spectrum:
@@ -148,39 +210,9 @@ pub fn glyco_search_run(
                 return None;
             }
 
-            // Dedup cross-charge/cross-isotope backbone hits within the
-            // configured tolerance window (max(bb*tol_ppm*1e-6, 0.02)).
-            // Sort ascending by backbone_mass, prefer Db over DeNovo in ties,
-            // then prefer isotope_offset 0 (monoisotopic) as a deterministic
-            // tiebreak among equal-source duplicates from different iso tries.
-            all_backbone.sort_by(|a, b| {
-                a.backbone_mass
-                    .partial_cmp(&b.backbone_mass)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        let oa = if a.source == Source::Db { 0u8 } else { 1u8 };
-                        let ob = if b.source == Source::Db { 0u8 } else { 1u8 };
-                        oa.cmp(&ob)
-                    })
-                    .then_with(|| a.isotope_offset.abs().cmp(&b.isotope_offset.abs()))
-                    .then_with(|| a.charge.cmp(&b.charge))
-            });
-            let mut deduped_backbone: Vec<BackboneHit> = Vec::with_capacity(all_backbone.len());
-            {
-                let mut rep = all_backbone.remove(0);
-                for next in all_backbone {
-                    let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.02);
-                    if (next.backbone_mass - rep.backbone_mass).abs() < tol {
-                        if rep.source == Source::DeNovo && next.source == Source::Db {
-                            rep = next;
-                        }
-                    } else {
-                        deduped_backbone.push(rep);
-                        rep = next;
-                    }
-                }
-                deduped_backbone.push(rep);
-            }
+            // Dedup cross-charge/cross-isotope backbone hits, merging only hits
+            // that represent the SAME (backbone, glycan-hypothesis) candidate.
+            let deduped_backbone = dedup_backbone_hits(all_backbone, tol_ppm);
 
             // --- b/y-ranked backbone selection (replaces Y-ladder pre-filter) ---
             //
@@ -523,16 +555,21 @@ mod tests {
         // ladder, but the by-subtraction glycan is ~1 ISOTOPE off → not annotated.
         let hits0 =
             hybrid_candidates_with_isotope(&peaks, observed_neutral, 2, 0, &glycans, 20.0, 5);
-        let bb0 = hits0
+        let matching0: Vec<_> = hits0
             .iter()
-            .find(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.05);
+            .filter(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.05)
+            .collect();
         assert!(
-            bb0.is_some(),
+            !matching0.is_empty(),
             "backbone is read from the ladder → recovered even at the wrong isotope offset"
         );
         assert!(
-            bb0.unwrap().source == Source::DeNovo,
+            matching0.iter().any(|h| h.source == Source::DeNovo),
             "at the wrong offset the glycan is ~1 ISOTOPE off and must NOT annotate to a known composition"
+        );
+        assert!(
+            matching0.iter().all(|h| h.source != Source::Db),
+            "wrong isotope offset must not produce a DB annotation for the true backbone"
         );
 
         // Offset +1: corrected precursor → true glycan → annotated Source::Db.
@@ -554,6 +591,33 @@ mod tests {
             .expect("offset +1 must recover AND annotate the backbone via the corrected precursor");
         assert_eq!(hit.isotope_offset, 1, "recovered hit must record isotope_offset=1");
         assert_eq!(hit.charge, 2, "recovered hit must record the charge it was matched at");
+    }
+
+    /// P0.1 (Codex #2): `dedup_backbone_hits` must NOT merge two de-novo hits
+    /// that share a backbone mass but carry different isotope offsets — their
+    /// residual glycan masses differ, so merging corrupts the novel-glycan
+    /// intact mass. Same-hypothesis duplicates (same offset) must still merge.
+    #[test]
+    fn dedup_preserves_distinct_isotope_residuals_for_novel_glycans() {
+        use andes_glyco::hybrid::BackboneHit;
+        let mk = |iso: i8, residual: f64| BackboneHit {
+            backbone_mass: 1500.0,
+            glycan: None, // novel / unannotated
+            source: Source::DeNovo,
+            charge: 3,
+            isotope_offset: iso,
+            glycan_mass_residual: residual,
+        };
+        // Two isotope hypotheses at the same backbone → both must survive.
+        let out = dedup_backbone_hits(vec![mk(0, 892.317), mk(1, 891.313)], 20.0);
+        assert_eq!(out.len(), 2, "distinct isotope residuals must not be merged: {out:?}");
+        let residuals: Vec<f64> = out.iter().map(|h| h.glycan_mass_residual).collect();
+        assert!(residuals.iter().any(|r| (r - 892.317).abs() < 1e-6));
+        assert!(residuals.iter().any(|r| (r - 891.313).abs() < 1e-6));
+
+        // Same offset (true duplicate, e.g. from another charge) must merge.
+        let dup = dedup_backbone_hits(vec![mk(0, 892.317), mk(0, 892.317)], 20.0);
+        assert_eq!(dup.len(), 1, "same-hypothesis duplicates must merge");
     }
 
     #[test]

@@ -230,6 +230,18 @@ pub fn hybrid_candidates_with_isotope(
         });
     }
 
+    // BOUNDED DB FALLBACK (Codex re-review #1): if even the relaxed quorum-1
+    // solver found nothing — a truly 0-core-Y oxonium-positive spectrum (no
+    // detectable Y-ladder at all) — fall back to `precursor − known glycan` so
+    // these real glyco spectra are not silently dropped. This fires ONLY for
+    // the rare 0-rung set (NOT the weak-ladder tail, which the quorum-1 pass
+    // already handles), so it avoids the O(glycans) cost blowing up broadly;
+    // the downstream b/y ranking + `backbone_top_k` in `glyco_search` bound the
+    // per-spectrum candidate count.
+    if combined.is_empty() {
+        combined = db_branch(precursor_neutral, glycans, MIN_BACKBONE, precursor_z, isotope_offset);
+    }
+
     // --- Sort all candidates by backbone_mass for dedup pass ---
     // Total-order: backbone_mass bits asc, then Source::Db before DeNovo.
     combined.sort_by(|a, b| {
@@ -500,6 +512,37 @@ mod tests {
         );
     }
 
+    /// P0.2 (Codex re-review #1): a truly 0-core-Y oxonium-positive spectrum
+    /// (NO core-Y ladder at all → both the quorum-2 and quorum-1 solver passes
+    /// return nothing) carrying a KNOWN glycan must still be searchable via the
+    /// bounded DB fallback (`precursor − known glycan`). The Y-first-only path
+    /// silently dropped these; they are a real, representable slice of the data
+    /// (DB-branch ceiling 85.9% vs cascade 80.1%).
+    #[test]
+    fn zero_core_y_known_glycan_is_recovered_by_db_fallback() {
+        let glycans = n_glycan_list();
+        let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3, in list
+        let true_backbone_residue = 1500.0_f64;
+        let precursor = true_backbone_residue + glycan_mass;
+
+        // Oxonium only — NO core-Y ladder anywhere.
+        let peaks: Vec<(f64, f32)> = vec![
+            (204.08665, 200.0),
+            (138.05496, 150.0),
+            (366.13950, 60.0),
+            (900.0, 20.0),
+        ];
+        // Premise: both solver quorums find nothing.
+        assert!(crate::backbone::solve_backbone_min(&peaks, precursor, 2, 20.0, 50, 1).is_empty(),
+            "premise: even quorum-1 solver must be empty for a 0-core-Y spectrum");
+
+        let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 50);
+        let found = hits.iter().any(|h| {
+            (h.backbone_mass - true_backbone_residue).abs() < 0.02 && h.source == Source::Db
+        });
+        assert!(found, "DB fallback must recover the 0-core-Y known-glycan backbone; got {hits:?}");
+    }
+
     /// Finding #3 regression (Codex adversarial review): a Y-first backbone
     /// whose implied glycan matches NO known composition (a novel/unexpected
     /// glycan — explicitly "kept, not discarded") must still carry the observed
@@ -509,17 +552,15 @@ mod tests {
     /// represented the bare peptide, not the glycopeptide.
     #[test]
     fn novel_glycan_hit_preserves_residual_mass() {
-        let glycans = n_glycan_list();
+        // Empty glycan list makes the "no annotation" premise deterministic and
+        // independent of the shipped DB contents (CodeRabbit): nothing can ever
+        // annotate, so every hit is DeNovo and must carry its residual.
+        let glycans: Vec<GlycanComp> = Vec::new();
         let proton = PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
 
-        // A glycan mass deliberately off the composition grid so nothing in the
-        // list matches within tolerance → annotation returns None.
+        // A glycan mass off any plausible composition grid.
         let novel_glycan_mass = 1234.5678_f64;
-        assert!(
-            nearest_glycan(&glycans, novel_glycan_mass, 20.0).is_none(),
-            "premise: {novel_glycan_mass} must not match any known composition"
-        );
 
         let true_backbone_residue = 1500.0_f64;
         let precursor = true_backbone_residue + novel_glycan_mass;

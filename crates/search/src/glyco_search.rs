@@ -190,6 +190,18 @@ pub fn glyco_search_run(
     let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // Fast dev harness: ANDES_GLYCO_SCANS=<file> (one scan number per line)
+    // restricts the glyco driver to those scans (e.g. the truth-scan subset), so
+    // a redesign iteration is minutes not hours. The standard search still runs
+    // over all spectra; only glyco scoring is subset. Unset = all spectra.
+    let scan_filter: Option<std::collections::HashSet<i32>> = std::env::var("ANDES_GLYCO_SCANS")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(&path).ok())
+        .map(|s| {
+            s.lines()
+                .filter_map(|l| l.trim().parse::<i32>().ok())
+                .collect()
+        });
     // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
     // core-Y cap and the driver's backbone_top_k — to measure the true findable
     // ceiling. Large finite cap avoids the max_features usize overflow. SLOW.
@@ -272,6 +284,13 @@ pub fn glyco_search_run(
      -> Option<GlycoSpectrumResult> {
             if spec.peaks.len() < params.min_peaks as usize {
                 return None;
+            }
+            // Fast dev harness: skip spectra outside the scan subset (if set).
+            if let Some(ref scans) = scan_filter {
+                match spec.scan {
+                    Some(sc) if scans.contains(&sc) => {}
+                    _ => return None,
+                }
             }
 
             // Oxonium evidence for the whole spectrum (charge-independent).

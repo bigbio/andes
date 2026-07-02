@@ -32,6 +32,7 @@ use rayon::prelude::*;
 
 use andes_glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
+    y0y1_anchor_intensity,
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
@@ -767,6 +768,15 @@ pub fn glyco_search_run(
                         ) as f32,
                         _ => 0.0,
                     },
+                    // G2 Y0/Y1 anchor: peptide-mass-conditioned (uses THIS
+                    // candidate's neutral mass, so it discriminates competing
+                    // peptides). Additive PIN feature only — not in the ranker.
+                    y0y1_anchor_score: y0y1_anchor_intensity(
+                        &spec.peaks,
+                        cand.peptide.mass(),
+                        w.z,
+                        tol_ppm,
+                    ) as f32,
                     // Threaded from the per-backbone Y-ladder evidence computed
                     // earlier in `core_y_counts` (previously discarded/hardcoded
                     // to 0, so the `CoreYHits` PIN feature was always dead).
@@ -1036,6 +1046,7 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
+            y0y1_anchor_score: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

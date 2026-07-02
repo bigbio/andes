@@ -579,6 +579,66 @@ pub fn glycan_y_intensity_decoy(
     score
 }
 
+/// G2 Y0/Y1 peptide-mass ANCHOR score.
+///
+/// Y0 (the bare peptide backbone) and Y1 (peptide + one innermost HexNAc) are the
+/// ONE peptide-mass-conditioned signal in a stepped-HCD N-glyco spectrum: they
+/// are high-intensity even when the interior b/y ladder is dead, and — unlike the
+/// backbone/spectrum-level oxonium / core-Y / glycan-mass features (which are
+/// identical for two peptides competing at the same backbone window) — their m/z
+/// is a function of the PEPTIDE mass, so they discriminate competing peptides.
+/// This is the SP-B lever (see docs/plans/glyco/20-theory/why-andes-fails-and-succeed.md §2).
+///
+/// Returns the summed base-peak-normalised intensity of Y0 and Y1 matched at
+/// charges `1..=min(prec_z, 2)`. `bb_neutral` is the NEUTRAL peptide backbone
+/// mass (Y0 neutral = `bb_neutral`; observed 1+ = `bb_neutral + PROTON`).
+///
+/// It is an ADDITIVE PIN feature only — never fold it into the ranking score.
+pub fn y0y1_anchor_intensity(
+    peaks: &[(f64, f32)],
+    bb_neutral: f64,
+    prec_z: u8,
+    tol_ppm: f64,
+) -> f64 {
+    use crate::glycan_mass::HEXNAC;
+    let base = peaks
+        .iter()
+        .map(|&(_, i)| i)
+        .fold(0.0f32, f32::max)
+        .max(1e-9) as f64;
+    let sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
+    let match_int = |ion_mz: f64| -> f64 {
+        let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
+        let (lo, hi) = (ion_mz - tol, ion_mz + tol);
+        let best = if sorted {
+            let start = peaks.partition_point(|&(m, _)| m < lo);
+            peaks[start..]
+                .iter()
+                .take_while(|&&(m, _)| m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        } else {
+            peaks
+                .iter()
+                .filter(|&&(m, _)| m >= lo && m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        };
+        (best as f64) / base
+    };
+
+    let zmax = prec_z.max(1).min(2);
+    let y0_neutral = bb_neutral;
+    let y1_neutral = bb_neutral + HEXNAC;
+    let mut score = 0.0;
+    for z in 1..=zmax {
+        let zf = z as f64;
+        score += match_int((y0_neutral + zf * PROTON) / zf);
+        score += match_int((y1_neutral + zf * PROTON) / zf);
+    }
+    score
+}
+
 pub fn count_core_y_hits(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64) -> u8 {
     // Build the 6 expected Y-ion m/z values (all singly charged).
     let ions: [f64; 6] = [
@@ -678,6 +738,34 @@ mod tests {
         assert!(s_true > s_decoy,
             "true composition Y-ladder ({s_true}) must beat the decoy ({s_decoy})");
         assert!(s_true > 0.0, "true composition must have positive Y-ladder intensity");
+    }
+
+    /// G2 Y0/Y1 peptide-mass ANCHOR: the score must be (a) high when the Y0 (bare
+    /// peptide) and Y1 (peptide+HexNAc) ions for THIS backbone are present, (b)
+    /// zero when they are absent, and — the key property SPA2 features lack — (c)
+    /// PEPTIDE-MASS-DISCRIMINATING: for a spectrum whose Y0/Y1 belong to backbone
+    /// A, `anchor(A) > anchor(B)` for a different-mass backbone B. This is what
+    /// lets it separate competing peptides at one backbone window.
+    #[test]
+    fn y0y1_anchor_scores_and_discriminates() {
+        use crate::glycan_mass::HEXNAC;
+        let bb_a = 1500.0_f64; // neutral peptide mass A
+        let bb_b = 1650.0_f64; // a different peptide mass B
+        // Spectrum carries Y0/Y1 (1+ and 2+) for backbone A only, plus noise.
+        let peaks: Vec<(f64, f32)> = vec![
+            (bb_a + PROTON, 1000.0),                       // Y0 1+
+            (bb_a + HEXNAC + PROTON, 800.0),               // Y1 1+
+            ((bb_a + 2.0 * PROTON) / 2.0, 500.0),          // Y0 2+
+            (204.087, 300.0),                              // oxonium noise
+        ];
+        let a = y0y1_anchor_intensity(&peaks, bb_a, 2, 20.0);
+        let b = y0y1_anchor_intensity(&peaks, bb_b, 2, 20.0);
+        assert!(a > 0.0, "anchor must fire for the true backbone, got {a}");
+        assert!(a > b, "anchor must discriminate: A ({a}) > B ({b})");
+
+        // No Y0/Y1 anywhere → zero.
+        let empty = vec![(204.087, 100.0), (366.14, 80.0)];
+        assert_eq!(y0y1_anchor_intensity(&empty, bb_a, 2, 20.0), 0.0);
     }
 
     /// G3 glycan-axis decoy: a DECOY glycan ladder keeps Y0/Y1 (core anchor +

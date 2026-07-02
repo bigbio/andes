@@ -19,60 +19,89 @@
 
 use crate::glycan_db::GlycanComp;
 
-/// A whitelist of confidently-identified backbone (peptide residue) masses from
-/// a first pass, sorted and deduplicated.
+/// One confident donor backbone plus the RETENTION-TIME window over which it (and
+/// its glycoform siblings) were observed. RT gating is what makes cross-spectrum
+/// transfer safe: a backbone may only be transferred to an acceptor spectrum that
+/// CO-ELUTES with the donor, otherwise we would propose a backbone from an
+/// unrelated peptide that merely shares a precursor-mass coincidence (this is why
+/// the un-gated NULL-v1 scaffold was gated OFF — see
+/// docs/plans/glyco/20-theory/why-andes-fails-and-succeed.md §4).
+#[derive(Debug, Clone)]
+struct BackboneEntry {
+    backbone: f64,
+    rt_min: f32,
+    rt_max: f32,
+}
+
+/// A whitelist of confidently-identified backbone (peptide residue) masses from a
+/// first pass, each carrying the donor RT window, sorted+deduplicated by backbone.
 #[derive(Debug, Clone, Default)]
 pub struct GlycoformWhitelist {
-    backbones: Vec<f64>,
+    entries: Vec<BackboneEntry>,
 }
 
 impl GlycoformWhitelist {
-    /// Build from confident backbone residue masses, sorting and collapsing
-    /// near-duplicates within `dedup_tol` Da (many glycoforms of one peptide
-    /// contribute the same backbone; keep it once).
-    pub fn new(mut backbones: Vec<f64>, dedup_tol: f64) -> Self {
-        backbones.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mut out: Vec<f64> = Vec::with_capacity(backbones.len());
-        for x in backbones {
-            if out.last().map_or(true, |&l| (x - l).abs() > dedup_tol) {
-                out.push(x);
+    /// Build from confident `(backbone_residue_mass, donor_rt_seconds)` donor
+    /// observations, sorting by backbone and collapsing near-duplicates within
+    /// `dedup_tol` Da (many glycoforms of one peptide contribute the same
+    /// backbone). Collapsed donors extend the entry's `[rt_min, rt_max]` window,
+    /// so the whitelist records the full elution span of each confident backbone.
+    pub fn new(mut donors: Vec<(f64, f32)>, dedup_tol: f64) -> Self {
+        donors.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut out: Vec<BackboneEntry> = Vec::with_capacity(donors.len());
+        for (bb, rt) in donors {
+            match out.last_mut() {
+                Some(e) if (bb - e.backbone).abs() <= dedup_tol => {
+                    e.rt_min = e.rt_min.min(rt);
+                    e.rt_max = e.rt_max.max(rt);
+                }
+                _ => out.push(BackboneEntry { backbone: bb, rt_min: rt, rt_max: rt }),
             }
         }
-        GlycoformWhitelist { backbones: out }
+        GlycoformWhitelist { entries: out }
     }
 
     pub fn len(&self) -> usize {
-        self.backbones.len()
+        self.entries.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.backbones.is_empty()
+        self.entries.is_empty()
     }
 
-    /// Propose confident backbones consistent with `precursor_neutral`: for each
-    /// whitelisted backbone `bb`, if `precursor_neutral − bb ≥ min_glycan` and is
-    /// within `tol` of a known glycan, emit `(bb, glycan)`. `glycan_sorted` is a
-    /// `(mass, glycan_index)` view sorted ascending by mass for binary search.
+    /// Propose confident backbones consistent with `precursor_neutral` for an
+    /// acceptor spectrum eluting at `acceptor_rt` (seconds). A backbone is
+    /// proposed only if the acceptor co-elutes with the donor — `acceptor_rt`
+    /// falls within `[rt_min − rt_window, rt_max + rt_window]` — AND
+    /// `precursor_neutral − backbone` is within `tol` of a known glycan and
+    /// ≥ `min_glycan`. Emits `(backbone, glycan)`.
     ///
-    /// `tol` should be set from the PRECURSOR mass error (the measured quantity),
-    /// consistent with the peptide-first path.
+    /// `rt_window` is the co-elution half-width in seconds (a cross-spectrum glyco engine uses
+    /// ~±1800 s). `tol` is set from the PRECURSOR mass error, as in the
+    /// peptide-first path.
     pub fn transfer(
         &self,
         precursor_neutral: f64,
+        acceptor_rt: f32,
+        rt_window: f32,
         glycan_sorted: &[(f64, usize)],
         glycans: &[GlycanComp],
         min_glycan: f64,
         tol: f64,
     ) -> Vec<(f64, GlycanComp)> {
         let mut out: Vec<(f64, GlycanComp)> = Vec::new();
-        for &bb in &self.backbones {
-            let glycan_mass = precursor_neutral - bb;
+        for e in &self.entries {
+            let glycan_mass = precursor_neutral - e.backbone;
             if glycan_mass < min_glycan {
-                // whitelist is sorted ascending → larger bb only shrinks the
-                // implied glycan, so we can stop.
+                // entries sorted by backbone ascending → larger backbone only
+                // shrinks the implied glycan, so nothing further qualifies.
                 break;
             }
+            // RT gate: acceptor must co-elute with the donor window.
+            if acceptor_rt < e.rt_min - rt_window || acceptor_rt > e.rt_max + rt_window {
+                continue;
+            }
             if let Some(g) = nearest_glycan(glycan_sorted, glycans, glycan_mass, tol) {
-                out.push((bb, g));
+                out.push((e.backbone, g));
             }
         }
         out
@@ -116,9 +145,15 @@ mod tests {
         v
     }
 
+    // Wide RT window so the non-RT tests below are unaffected by gating.
+    const WIDE_RT: f32 = 1e9;
+
     #[test]
     fn whitelist_dedups_sibling_backbones() {
-        let wl = GlycoformWhitelist::new(vec![1500.0, 1500.005, 1500.01, 2000.0], 0.02);
+        let wl = GlycoformWhitelist::new(
+            vec![(1500.0, 100.0), (1500.005, 110.0), (1500.01, 120.0), (2000.0, 100.0)],
+            0.02,
+        );
         // The three ~1500 backbones (sibling glycoforms of one peptide) collapse to one.
         assert_eq!(wl.len(), 2);
     }
@@ -127,17 +162,15 @@ mod tests {
     fn transfer_recovers_sibling_glycoform_without_a_ladder() {
         let glycans = n_glycan_list();
         let sorted = sorted_view(&glycans);
-        // A peptide backbone confidently seen on a well-fragmented glycoform.
+        // A peptide backbone confidently seen on a well-fragmented glycoform at RT 900 s.
         let backbone = 1500.0_f64;
-        let wl = GlycoformWhitelist::new(vec![backbone], 0.02);
+        let wl = GlycoformWhitelist::new(vec![(backbone, 900.0)], 0.02);
 
-        // A DIFFERENT glycoform of the same peptide: backbone + HexNAc2Hex3.
+        // A DIFFERENT glycoform of the same peptide: backbone + HexNAc2Hex3, co-eluting.
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX;
         let precursor = backbone + glycan_mass;
 
-        // Transfer proposes the confident backbone for this precursor — no core-Y
-        // ladder from the target spectrum is needed.
-        let hits = wl.transfer(precursor, &sorted, &glycans, 406.0, 0.05);
+        let hits = wl.transfer(precursor, 900.0, WIDE_RT, &sorted, &glycans, 406.0, 0.05);
         assert!(
             hits.iter().any(|(bb, _)| (bb - backbone).abs() < 0.02),
             "transfer must propose the confident sibling backbone, got {hits:?}"
@@ -148,9 +181,36 @@ mod tests {
     fn transfer_rejects_precursor_with_no_valid_glycan() {
         let glycans = n_glycan_list();
         let sorted = sorted_view(&glycans);
-        let wl = GlycoformWhitelist::new(vec![1500.0], 0.02);
+        let wl = GlycoformWhitelist::new(vec![(1500.0, 900.0)], 0.02);
         // Precursor implies a glycan of ~50 Da (below the N-glycan core) → nothing.
-        let hits = wl.transfer(1550.0, &sorted, &glycans, 406.0, 0.05);
+        let hits = wl.transfer(1550.0, 900.0, WIDE_RT, &sorted, &glycans, 406.0, 0.05);
         assert!(hits.is_empty(), "sub-core glycan must not transfer, got {hits:?}");
+    }
+
+    /// G4 RT gate: a backbone may transfer to a co-eluting acceptor but NOT to one
+    /// outside the donor RT window — otherwise transfer propagates an unrelated
+    /// peptide that only shares a precursor-mass coincidence.
+    #[test]
+    fn transfer_respects_rt_window() {
+        let glycans = n_glycan_list();
+        let sorted = sorted_view(&glycans);
+        let backbone = 1500.0_f64;
+        let wl = GlycoformWhitelist::new(vec![(backbone, 1000.0)], 0.02); // donor at RT 1000 s
+        let precursor = backbone + 2.0 * HEXNAC + 3.0 * HEX;
+        let window = 300.0_f32;
+
+        // Acceptor co-eluting (RT 1100, |Δ| = 100 < 300) → transfer fires.
+        let inside = wl.transfer(precursor, 1100.0, window, &sorted, &glycans, 406.0, 0.05);
+        assert!(
+            inside.iter().any(|(bb, _)| (bb - backbone).abs() < 0.02),
+            "co-eluting acceptor must receive the transfer, got {inside:?}"
+        );
+
+        // Acceptor far away (RT 5000, |Δ| = 4000 > 300) → no transfer.
+        let outside = wl.transfer(precursor, 5000.0, window, &sorted, &glycans, 406.0, 0.05);
+        assert!(
+            outside.is_empty(),
+            "acceptor outside the RT window must NOT receive the transfer, got {outside:?}"
+        );
     }
 }

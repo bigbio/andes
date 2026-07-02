@@ -812,13 +812,23 @@ pub fn glyco_search_run(
     // masses from pass-1 PSMs with a strong core-Y ladder (well-fragmented
     // glycoforms), then transfer them to poorly-fragmenting sibling glycoforms.
     const CONF_MIN_CORE_Y: u8 = 3;
-    let confident_bb: Vec<f64> = pass1
+    // G4 RT co-elution half-width (seconds). a cross-spectrum glyco engine uses ~±1800 s;
+    // tunable to tighten the gate on short gradients. RT gating is MANDATORY —
+    // it is why the un-gated NULL-v1 scaffold was OFF.
+    let rt_window: f32 = std::env::var("ANDES_GLYCO_RT_WINDOW")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1800.0);
+    // Confident donors carry their spectrum RT so transfer only fires to
+    // co-eluting acceptors. Donors without an RT cannot be gated → excluded.
+    let confident_bb: Vec<(f64, f32)> = pass1
         .iter()
         .flat_map(|r| {
+            let rt = spectra[r.spectrum_idx].rt_seconds;
             r.hits
                 .iter()
                 .filter(|h| h.glycan_key.core_y_hits >= CONF_MIN_CORE_Y)
-                .map(|h| h.glycan_key.backbone_mass - H2O)
+                .filter_map(move |h| rt.map(|t| (h.glycan_key.backbone_mass - H2O, t as f32)))
         })
         .collect();
     let whitelist = GlycoformWhitelist::new(confident_bb, 0.02);
@@ -850,6 +860,12 @@ pub fn glyco_search_run(
             if !oxonium_gate(&spec.peaks, 0.10, tol_ppm).fired {
                 return None;
             }
+            // RT gate: an acceptor without an RT cannot be co-elution-checked, so
+            // it is skipped (conservative — no un-gated transfer).
+            let acceptor_rt = match spec.rt_seconds {
+                Some(t) => t as f32,
+                None => return None,
+            };
             let charges_to_try: Vec<u8> = match spec.precursor_charge {
                 Some(z) if z > 0 => vec![z as u8],
                 _ => params.charge_range.clone().collect(),
@@ -863,9 +879,15 @@ pub fn glyco_search_run(
                         continue;
                     }
                     let tol = (pn * tol_ppm * 1e-6_f64).max(0.02);
-                    for (_bb, g) in
-                        whitelist.transfer(pn, &glycan_sorted, glycan_list, MIN_GLYCAN, tol)
-                    {
+                    for (_bb, g) in whitelist.transfer(
+                        pn,
+                        acceptor_rt,
+                        rt_window,
+                        &glycan_sorted,
+                        glycan_list,
+                        MIN_GLYCAN,
+                        tol,
+                    ) {
                         // Observed backbone = precursor − theoretical glycan (real
                         // mass error), matching the DB/peptide-first convention.
                         let bb_obs = pn - g.mass;

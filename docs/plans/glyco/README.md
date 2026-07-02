@@ -30,16 +30,19 @@ independent AI reviews and our own measurements converge: the lever is
 generation machinery, and *not* a naive glycan-decoy Percolator pile (refuted:
 29.4% → 4.4%).
 
-## Roadmap at a glance (detail in `50-roadmap/`)
+## Roadmap at a glance (canonical labels; detail in `50-roadmap/roadmap.md`)
 
 | Phase | Goal | Gate |
 |---|---|---|
-| **G0** | Correctness nits (DET-1, P0.3 measured, probe isotope fidelity) | no regression on 90.4% generation |
+| **G0** | Correctness hygiene (DET-1 → `total_cmp`, P0.3 measured, probe isotope fidelity) | invariants: 46 tests green, find-rate unchanged, bit-reproducible |
 | **G1** ✓ | Glycan-Y-first candidate selection | +7–11 pts findability (DONE, verified) |
-| **P0 (SP-B kill-gate)** | Y0/Y1 peptide-mass anchor + complement features | decoy-separated top-1 lift on 523 truth |
-| **P1 (SP-B model)** | Harvest → `protocol=NGlyco` regime-matched strong model | top-1 ≥ 120/154 (80%) |
-| **G3 (2D-FDR)** | a glyco search engine separate-axis FDR (NOT unified Percolator pile) | true-FDP ≤ 5% @1% |
-| **G4 (cross-spectrum)** | RT-gated glycoform transfer (a cross-spectrum glyco engine) | recover sparse-b/y stratum |
+| **G2** ★ | Y0/Y1 peptide-mass anchor feature + **decoy-separated kill-gate** (cheap decision) | GO if anchor lifts top-1 **and** separates target/decoy; else skip to G4 |
+| **G3** | Harvest → `protocol=NGlyco` regime-matched strong model (calibration layer) | retrained model + anchor beats field-default eval top-1; clears kill-gate on held-out data |
+| **G3′** | a glyco search engine separate-axis 2D-FDR as a Percolator post-process (NOT a unified pile) | combined 2D q ≤ 1% holds vs entrapment; recovery doesn't collapse |
+| **G4** ★ | RT-gated in-process cross-spectrum transfer (a cross-spectrum glyco engine) — the ceiling-breaker | net glyco-PSM gain on the sparse-b/y stratum at 2D-FDR 1% |
+
+★ = the two levers the thesis rests on (G2 cheap decision, G4 ceiling-breaker); G3 retraining is the calibration layer between them.
+**Label crosswalk:** `50-roadmap/phases.md` writes G2 as **P0** and G3 as **P1** — same phases, `P` denotes the two SP-B sub-steps. Canonical labels are G0–G4 + G3′ (this table + `roadmap.md`).
 
 ## Hard constraints (do not violate)
 

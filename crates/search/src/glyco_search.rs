@@ -180,13 +180,34 @@ pub fn glyco_search_run(
     let bucket_index = &prepared.bucket_index;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
 
+    // Independent experiment toggles (one variable at a time): the peptide-first
+    // fragment-index path (default ON) and cross-spectrum glycoform transfer
+    // (default OFF, opt-in). Kept separable to isolate each lever + its cost.
+    let peptide_first_on = std::env::var("ANDES_GLYCO_PEPTIDE_FIRST")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
+    // core-Y cap and the driver's backbone_top_k — to measure the true findable
+    // ceiling. Large finite cap avoids the max_features usize overflow. SLOW.
+    let exhaustive = std::env::var("ANDES_GLYCO_EXHAUSTIVE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
+
     // PEPTIDE-FIRST index (combines with the backbone-first hybrid below). Build a
     // fragment-ion index over the SEQUON candidate peptides ONCE. Per spectrum we
     // query it for peptides with real b/y support, then keep those whose
     // glycan-by-subtraction (`precursor − peptide`) hits a known glycan. This
     // recovers backbones on weak/absent-core-Y spectra that the core-Y-ranked
     // truncation drops — the candidate-generation ceiling — without a brute force.
-    let frag_index = {
+    // Only build the (expensive) index when the peptide-first path is on; an
+    // empty index is a no-op query otherwise (CodeRabbit: avoid the wasted build).
+    let frag_index = if !peptide_first_on {
+        FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01))
+    } else {
         let seq_entries: Vec<(u32, &model::peptide::Peptide)> = candidates
             .iter()
             .enumerate()
@@ -228,26 +249,6 @@ pub fn glyco_search_run(
     // Hard cap on peptide-first candidates per spectrum (strongest b/y support
     // first) so a peak-dense spectrum can't blow up phase-1 scoring.
     const MAX_PEPTIDE_FIRST: usize = 64;
-
-    // Independent experiment toggles (one variable at a time): the peptide-first
-    // fragment-index path (default ON) and cross-spectrum glycoform transfer
-    // (default OFF, opt-in via env). Keeping them separable lets us isolate each
-    // lever's contribution and its cost.
-    let peptide_first_on = std::env::var("ANDES_GLYCO_PEPTIDE_FIRST")
-        .map(|v| v != "0")
-        .unwrap_or(true);
-    let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
-    // core-Y cap and the driver's backbone_top_k — to measure the true findable
-    // ceiling (is the ~30% a truncation artifact?). Uses a large finite cap to
-    // avoid usize overflow in the max_features arithmetic. SLOW (scores the whole
-    // DB-union); a one-off measurement, not a shipping mode.
-    let exhaustive = std::env::var("ANDES_GLYCO_EXHAUSTIVE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
 
     // Per-spectrum processing, reused across both passes. `transfer` holds extra
     // backbones injected by cross-spectrum transfer (empty on pass 1).
@@ -758,7 +759,11 @@ pub fn glyco_search_run(
     for r in pass2 {
         by_idx.insert(r.spectrum_idx, r);
     }
-    by_idx.into_values().collect()
+    // Deterministic output order (CodeRabbit): HashMap iteration is unordered,
+    // so sort by spectrum_idx for reproducibility.
+    let mut out: Vec<GlycoSpectrumResult> = by_idx.into_values().collect();
+    out.sort_by_key(|r| r.spectrum_idx);
+    out
 }
 
 #[cfg(test)]

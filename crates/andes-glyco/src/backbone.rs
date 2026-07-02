@@ -474,6 +474,111 @@ pub fn glycan_y_intensity(
     score
 }
 
+/// Deterministic mixing (splitmix64) → a reproducible per-(seed,rung) offset.
+#[inline]
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Glycan-axis DECOY of [`glycan_y_intensity`]: same composition (same TOTAL mass
+/// → still matches the precursor), same Y0 and Y1 (the bare-backbone anchor + the
+/// first HexNAc, shared by every N-glycan so preserving them keeps the decoy a
+/// plausible glycopeptide), but every INTERMEDIATE Y-rung (Y2..Y_{n-1}) is shifted
+/// by a deterministic pseudo-random offset in [1, 30] Da (a glyco search engine/an open-search PTM tool
+/// decoy-glycan recipe). On a real-glycan spectrum the shifted rungs miss the true
+/// Y-ions, so the decoy sums far less matched intensity than the target ladder —
+/// that target−decoy gap is the glycan-axis signal Percolator turns into 2D FDR.
+///
+/// `seed` (e.g. the glycan index) makes the decoy reproducible. `bb_neutral` is
+/// the NEUTRAL peptide backbone (Y0 = bb_neutral + PROTON), as in the target.
+pub fn glycan_y_intensity_decoy(
+    peaks: &[(f64, f32)],
+    bb_neutral: f64,
+    comp: &crate::glycan_db::GlycanComp,
+    tol_ppm: f64,
+    seed: u64,
+) -> f64 {
+    use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
+    let base = peaks
+        .iter()
+        .map(|&(_, i)| i)
+        .fold(0.0f32, f32::max)
+        .max(1e-9) as f64;
+
+    // Same canonical cumulative-adds order as glycan_y_intensity.
+    let core_hexnac = comp.hexnac.min(2);
+    let core_hex = comp.hex.min(3);
+    let mut adds: Vec<f64> = Vec::new();
+    for _ in 0..core_hexnac {
+        adds.push(HEXNAC);
+    }
+    for _ in 0..core_hex {
+        adds.push(HEX);
+    }
+    for _ in 0..(comp.hexnac - core_hexnac) {
+        adds.push(HEXNAC);
+    }
+    for _ in 0..(comp.hex - core_hex) {
+        adds.push(HEX);
+    }
+    for _ in 0..comp.fuc {
+        adds.push(FUC);
+    }
+    for _ in 0..comp.neuac {
+        adds.push(NEUAC);
+    }
+    for _ in 0..comp.neugc {
+        adds.push(NEUGC);
+    }
+
+    let sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
+    let match_int = |ion_mz: f64| -> f64 {
+        let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
+        let (lo, hi) = (ion_mz - tol, ion_mz + tol);
+        let best = if sorted {
+            let start = peaks.partition_point(|&(m, _)| m < lo);
+            peaks[start..]
+                .iter()
+                .take_while(|&&(m, _)| m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        } else {
+            peaks
+                .iter()
+                .filter(|&&(m, _)| m >= lo && m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        };
+        (best as f64) / base
+    };
+
+    // Y0 (bare backbone) is always kept.
+    let mut score = match_int(bb_neutral + PROTON);
+    let mut cum = 0.0;
+    // `ai` is the add index: ai==0 → Y1 (kept, core anchor); ai>=1 → shifted.
+    for (ai, m) in adds.iter().enumerate() {
+        cum += m;
+        // The LAST cumulative add reconstructs the full glycan (= precursor − bb),
+        // which is the precursor, not a fragment; skip it as glycan_y_intensity's
+        // ladder does implicitly (it walks all adds, but the top rung coincides
+        // with the precursor and matches for target and decoy alike — so to make
+        // the decoy discriminate we only need the INTERMEDIATE rungs shifted).
+        let shift = if ai == 0 {
+            0.0 // keep Y1
+        } else {
+            // deterministic offset in [1, 30] Da at mDa resolution
+            let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            1.0 + (h % 29_000) as f64 / 1000.0
+        };
+        score += match_int(bb_neutral + cum + shift + PROTON);
+    }
+    score
+}
+
 pub fn count_core_y_hits(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64) -> u8 {
     // Build the 6 expected Y-ion m/z values (all singly charged).
     let ions: [f64; 6] = [
@@ -573,6 +678,39 @@ mod tests {
         assert!(s_true > s_decoy,
             "true composition Y-ladder ({s_true}) must beat the decoy ({s_decoy})");
         assert!(s_true > 0.0, "true composition must have positive Y-ladder intensity");
+    }
+
+    /// G3 glycan-axis decoy: a DECOY glycan ladder keeps Y0/Y1 (core anchor +
+    /// precursor match) but shifts the intermediate Y-rungs, so on a TRUE-glycan
+    /// spectrum it matches far less intensity than the target ladder. That gap is
+    /// the glycan-axis discrimination Percolator needs for 2D FDR. It must also be
+    /// deterministic (same seed → same decoy) for reproducibility.
+    #[test]
+    fn glycan_y_intensity_decoy_scores_below_target_on_true_spectrum() {
+        use crate::glycan_db::GlycanComp;
+        use crate::glycan_mass::{HEX, HEXNAC};
+        let proton = PROTON;
+        let bb = 1500.0_f64;
+        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
+                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        // Spectrum built from the TRUE composition's full Y-ladder.
+        let mut cum = 0.0;
+        let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 1000.0)]; // Y0
+        for m in [HEXNAC, HEXNAC, HEX, HEX, HEX] {
+            cum += m;
+            peaks.push((bb + cum + proton, 500.0));
+        }
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        let s_true = glycan_y_intensity(&peaks, bb, &truth, 20.0);
+        let s_decoy = glycan_y_intensity_decoy(&peaks, bb, &truth, 20.0, 12345);
+        assert!(s_decoy < s_true,
+            "decoy ladder ({s_decoy}) must score below the target ({s_true})");
+        // Decoy still retains Y0 + Y1 (bb + first HexNAc), so it is > 0 but small.
+        assert!(s_decoy > 0.0, "decoy keeps Y0/Y1 anchor, should be > 0");
+        // Determinism: same seed → identical score.
+        let s_decoy2 = glycan_y_intensity_decoy(&peaks, bb, &truth, 20.0, 12345);
+        assert!((s_decoy - s_decoy2).abs() < 1e-12, "decoy must be deterministic");
     }
 
     /// Convention + intensity regression: the core-Y ladder ions live at the

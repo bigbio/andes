@@ -315,8 +315,11 @@ pub fn hybrid_candidates_with_isotope(
             .map(|h| (core_y_intensity(peaks, h.backbone_mass + H2O, tol_ppm), h))
             .collect();
         scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            // DET-1: total_cmp on the intensity primary key (was partial_cmp +
+            // unwrap_or(Equal), which silently mapped any NaN to a tie). The mass
+            // to_bits tiebreak is already a total order, so this is behaviour-
+            // preserving on finite intensities and only hardens the NaN edge.
+            b.0.total_cmp(&a.0)
                 .then_with(|| a.1.backbone_mass.to_bits().cmp(&b.1.backbone_mass.to_bits()))
         });
         scored.truncate(top_k);

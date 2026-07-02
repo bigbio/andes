@@ -163,7 +163,32 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::glycan_mass::{HEX, HEXNAC};
+    use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC, WATER};
+
+    /// G0 (H2O convention): an ATTACHED glycan mass is Σ(residue masses) with NO
+    /// extra water — the +H2O belongs to the peptide backbone alone. Guards the #1
+    /// divergence risk (the −18.0106 double-count). Every DB glycan must equal its
+    /// residue sum exactly, and must NOT equal residue-sum + H2O.
+    #[test]
+    fn attached_glycan_has_no_extra_water() {
+        for g in n_glycan_list() {
+            let residue_sum = g.hexnac as f64 * HEXNAC
+                + g.hex as f64 * HEX
+                + g.fuc as f64 * FUC
+                + g.neuac as f64 * NEUAC
+                + g.neugc as f64 * NEUGC;
+            assert!(
+                (g.mass - residue_sum).abs() < 1e-9,
+                "glycan mass {} must equal residue sum {residue_sum} (no water)",
+                g.mass
+            );
+            assert!(
+                (g.mass - (residue_sum + WATER)).abs() > 1.0,
+                "glycan mass {} must NOT include water",
+                g.mass
+            );
+        }
+    }
 
     // --- n_glycan_list_common tests ---
 

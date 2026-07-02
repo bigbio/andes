@@ -239,6 +239,15 @@ pub fn glyco_search_run(
     let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
+    // core-Y cap and the driver's backbone_top_k — to measure the true findable
+    // ceiling (is the ~30% a truncation artifact?). Uses a large finite cap to
+    // avoid usize overflow in the max_features arithmetic. SLOW (scores the whole
+    // DB-union); a one-off measurement, not a shipping mode.
+    let exhaustive = std::env::var("ANDES_GLYCO_EXHAUSTIVE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
 
     // Per-spectrum processing, reused across both passes. `transfer` holds extra
     // backbones injected by cross-spectrum transfer (empty on pass 1).
@@ -289,8 +298,9 @@ pub fn glyco_search_run(
                         // were silently ignored and the Y-first solver truncated
                         // at 50 regardless. The solver ranks by core-Y evidence,
                         // so a larger cap only widens the candidate space the
-                        // downstream b/y scorer sees.
-                        backbone_top_k,
+                        // downstream b/y scorer sees. `effective_top_k` is huge in
+                        // exhaustive mode (no truncation).
+                        effective_top_k,
                     );
                     for h in hits {
                         all_backbone.push(h);
@@ -532,7 +542,7 @@ pub fn glyco_search_run(
                     })
                     .then_with(|| bi.cmp(&ai))
             });
-            backbone_order.truncate(backbone_top_k);
+            backbone_order.truncate(effective_top_k);
             // Build a set of accepted backbone indices for O(1) lookup.
             let accepted_backbones: std::collections::HashSet<usize> =
                 backbone_order.into_iter().collect();
@@ -548,7 +558,7 @@ pub fn glyco_search_run(
             // accepted candidates discarded pre-features). `accepted_backbones`
             // is already bounded by `backbone_top_k`, so this cap can only grow,
             // never shrink, relative to the correctness requirement.
-            let max_features = (backbone_top_k * 2).max(accepted_backbones.len() * 4);
+            let max_features = (effective_top_k * 2).max(accepted_backbones.len() * 4);
             let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> = {
                 let mut v: Vec<_> = cheap_winners
                     .into_iter()

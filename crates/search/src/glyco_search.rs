@@ -38,6 +38,7 @@ use andes_glyco::oxonium::oxonium_gate;
 use andes_glyco::sequon::has_nxst_sequon;
 
 use crate::glyco_fragment_index::FragmentIndex;
+use andes_glyco::crossspectrum::GlycoformWhitelist;
 
 use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmMatch;
@@ -228,13 +229,23 @@ pub fn glyco_search_run(
     // first) so a peak-dense spectrum can't blow up phase-1 scoring.
     const MAX_PEPTIDE_FIRST: usize = 64;
 
-    // Process spectra in parallel; filter_map returns None for spectra with no
-    // glyco hits. Order within the output Vec is not guaranteed (rayon chunks),
-    // but the PIN writer only needs the hits themselves (spec_idx is in each row).
-    let results: Vec<GlycoSpectrumResult> = spectra
-        .par_iter()
-        .enumerate()
-        .filter_map(|(spec_idx, spec)| {
+    // Independent experiment toggles (one variable at a time): the peptide-first
+    // fragment-index path (default ON) and cross-spectrum glycoform transfer
+    // (default OFF, opt-in via env). Keeping them separable lets us isolate each
+    // lever's contribution and its cost.
+    let peptide_first_on = std::env::var("ANDES_GLYCO_PEPTIDE_FIRST")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    // Per-spectrum processing, reused across both passes. `transfer` holds extra
+    // backbones injected by cross-spectrum transfer (empty on pass 1).
+    let process_one = |spec_idx: usize,
+                       spec: &Spectrum,
+                       transfer: &[BackboneHit]|
+     -> Option<GlycoSpectrumResult> {
             if spec.peaks.len() < params.min_peaks as usize {
                 return None;
             }
@@ -293,7 +304,7 @@ pub fn glyco_search_run(
             // charge/isotope grid. These backbones are selected by PEPTIDE evidence
             // (works when core-Y is weak/absent), and the glycan filter keeps the
             // count small — a handful of high-quality candidates per spectrum.
-            if ox_ev.fired {
+            if peptide_first_on && ox_ev.fired {
                 // Process strongest-b/y-support peptides first, but cap on VALID
                 // (peptide, charge, isotope, glycan) hypotheses — NOT raw b/y
                 // count — so high-count peptides that cannot form a known glycan
@@ -340,6 +351,10 @@ pub fn glyco_search_run(
                     }
                 }
             }
+
+            // Cross-spectrum transfer: backbones borrowed from confident sibling
+            // glycoforms (empty on pass 1). Added to the same dedup/score path.
+            all_backbone.extend_from_slice(transfer);
 
             if all_backbone.is_empty() {
                 return None;
@@ -638,10 +653,102 @@ pub fn glyco_search_run(
                     hits: best_hits.into_values().collect(),
                 })
             }
+    };
+
+    // PASS 1: baseline candidate gen (+ peptide-first if on), no transfer.
+    let pass1: Vec<GlycoSpectrumResult> = spectra
+        .par_iter()
+        .enumerate()
+        .filter_map(|(spec_idx, spec)| process_one(spec_idx, spec, &[]))
+        .collect();
+
+    if !cross_spectrum_on {
+        return pass1;
+    }
+
+    // CROSS-SPECTRUM TRANSFER. Build a whitelist of CONFIDENT backbone (residue)
+    // masses from pass-1 PSMs with a strong core-Y ladder (well-fragmented
+    // glycoforms), then transfer them to poorly-fragmenting sibling glycoforms.
+    const CONF_MIN_CORE_Y: u8 = 3;
+    let confident_bb: Vec<f64> = pass1
+        .iter()
+        .flat_map(|r| {
+            r.hits
+                .iter()
+                .filter(|h| h.glycan_key.core_y_hits >= CONF_MIN_CORE_Y)
+                .map(|h| h.glycan_key.backbone_mass - H2O)
+        })
+        .collect();
+    let whitelist = GlycoformWhitelist::new(confident_bb, 0.02);
+    if whitelist.is_empty() {
+        return pass1;
+    }
+    // Spectra that already have a confident ID need no transfer (bounds pass 2).
+    let confident_scans: std::collections::HashSet<usize> = pass1
+        .iter()
+        .filter(|r| r.hits.iter().any(|h| h.glycan_key.core_y_hits >= CONF_MIN_CORE_Y))
+        .map(|r| r.spectrum_idx)
+        .collect();
+    let mut by_idx: HashMap<usize, GlycoSpectrumResult> =
+        pass1.into_iter().map(|r| (r.spectrum_idx, r)).collect();
+
+    // PASS 2: only the non-confident (weak-ladder) spectra; inject transferred
+    // backbones and re-score. Results supersede their pass-1 entry.
+    let iso_min = *params.isotope_error_range.start();
+    let iso_max = *params.isotope_error_range.end();
+    let pass2: Vec<GlycoSpectrumResult> = spectra
+        .par_iter()
+        .enumerate()
+        .filter(|(spec_idx, _)| !confident_scans.contains(spec_idx))
+        .filter_map(|(spec_idx, spec)| {
+            if spec.peaks.len() < params.min_peaks as usize {
+                return None;
+            }
+            // Transfer only to glyco-plausible (oxonium-positive) spectra.
+            if !oxonium_gate(&spec.peaks, 0.10, tol_ppm).fired {
+                return None;
+            }
+            let charges_to_try: Vec<u8> = match spec.precursor_charge {
+                Some(z) if z > 0 => vec![z as u8],
+                _ => params.charge_range.clone().collect(),
+            };
+            let mut transfer: Vec<BackboneHit> = Vec::new();
+            for &z in &charges_to_try {
+                let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;
+                for iso in iso_min..=iso_max {
+                    let pn = observed_neutral - iso as f64 * ISOTOPE;
+                    if pn <= 0.0 {
+                        continue;
+                    }
+                    let tol = (pn * tol_ppm * 1e-6_f64).max(0.02);
+                    for (_bb, g) in
+                        whitelist.transfer(pn, &glycan_sorted, glycan_list, MIN_GLYCAN, tol)
+                    {
+                        // Observed backbone = precursor − theoretical glycan (real
+                        // mass error), matching the DB/peptide-first convention.
+                        let bb_obs = pn - g.mass;
+                        transfer.push(BackboneHit {
+                            backbone_mass: bb_obs,
+                            glycan: Some(g),
+                            source: Source::Db,
+                            charge: z,
+                            isotope_offset: iso,
+                            glycan_mass_residual: pn - bb_obs,
+                        });
+                    }
+                }
+            }
+            if transfer.is_empty() {
+                return None;
+            }
+            process_one(spec_idx, spec, &transfer)
         })
         .collect();
 
-    results
+    for r in pass2 {
+        by_idx.insert(r.spectrum_idx, r);
+    }
+    by_idx.into_values().collect()
 }
 
 #[cfg(test)]

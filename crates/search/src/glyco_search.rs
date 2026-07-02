@@ -39,6 +39,7 @@ use andes_glyco::sequon::has_nxst_sequon;
 
 use crate::glyco_fragment_index::FragmentIndex;
 use andes_glyco::crossspectrum::GlycoformWhitelist;
+use andes_glyco::glyco_y_index::GlycanYIndex;
 
 use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmMatch;
@@ -196,6 +197,19 @@ pub fn glyco_search_run(
         .map(|v| v == "1")
         .unwrap_or(false);
     let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
+    // Phase G1: glycan-Y-first candidate SELECTION (a glycan-Y-complementary
+    // index generates backbones from the strong glycan-Y ladder) + TWO-AXIS
+    // retention (keep backbones in top_k by peptide-b/y OR by glycan-Y evidence),
+    // so a weak-b/y / strong-glycan-Y spectrum survives truncation. Opt-in for a
+    // clean A/B vs the b/y-only path.
+    let yindex_on = std::env::var("ANDES_GLYCO_YINDEX")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let glycan_y_index = if yindex_on {
+        GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
+    } else {
+        GlycanYIndex::build(&[], fragment_tolerance_da.max(0.02))
+    };
 
     // PEPTIDE-FIRST index (combines with the backbone-first hybrid below). Build a
     // fragment-ion index over the SEQUON candidate peptides ONCE. Per spectrum we
@@ -358,6 +372,40 @@ pub fn glyco_search_run(
                                     break 'pf;
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // GLYCAN-Y-FIRST candidate generation (Phase G1): glycans whose core-Y
+            // ladder is supported in THIS spectrum (peptide-independent, O(#peaks))
+            // → their backbone (precursor − glycan), added with glycan evidence
+            // regardless of peptide b/y. This is how the strong glycan signal
+            // reaches the candidate set on weak-b/y spectra.
+            if yindex_on && ox_ev.fired {
+                for &z in &charges_to_try {
+                    // FULL neutral precursor (water included) — the glycan-Y index
+                    // convention (Y_complement = precursor_full − Y_ion).
+                    let precursor_full = (spec.precursor_mz - PROTON) * z as f64;
+                    for iso in iso_min..=iso_max {
+                        let pf = precursor_full - iso as f64 * ISOTOPE;
+                        if pf <= 0.0 {
+                            continue;
+                        }
+                        for (gid, _core) in glycan_y_index.query(&spec.peaks, pf, z, 2) {
+                            let g = &glycan_list[gid as usize];
+                            let backbone_residue = pf - H2O - g.mass;
+                            if backbone_residue < 500.0 {
+                                continue;
+                            }
+                            all_backbone.push(BackboneHit {
+                                backbone_mass: backbone_residue,
+                                glycan: Some(g.clone()),
+                                source: Source::Db,
+                                charge: z,
+                                isotope_offset: iso,
+                                glycan_mass_residual: g.mass,
+                            });
                         }
                     }
                 }
@@ -531,8 +579,9 @@ pub fn glyco_search_run(
             //       QUATERNARY = bb_idx DESC — final total-order tiebreak so
             //       HashMap/rayon iteration-order jitter can never change which
             //       backbones survive truncation (BUG 4: nondeterministic cap).
-            let mut backbone_order: Vec<usize> = (0..deduped_backbone.len()).collect();
-            backbone_order.sort_by(|&ai, &bi| {
+            // AXIS 1 — peptide b/y rank (primary), core-Y as tiebreak.
+            let mut by_by: Vec<usize> = (0..deduped_backbone.len()).collect();
+            by_by.sort_by(|&ai, &bi| {
                 backbone_best_rank[bi]
                     .total_cmp(&backbone_best_rank[ai])
                     .then_with(|| core_y_counts[bi].cmp(&core_y_counts[ai]))
@@ -543,10 +592,30 @@ pub fn glyco_search_run(
                     })
                     .then_with(|| bi.cmp(&ai))
             });
-            backbone_order.truncate(effective_top_k);
-            // Build a set of accepted backbone indices for O(1) lookup.
-            let accepted_backbones: std::collections::HashSet<usize> =
-                backbone_order.into_iter().collect();
+            by_by.truncate(effective_top_k);
+            let mut accepted_backbones: std::collections::HashSet<usize> =
+                by_by.into_iter().collect();
+
+            // AXIS 2 (Phase G1, TWO-AXIS retention) — also keep the top_k by
+            // GLYCAN-Y evidence (core_y_hits), so a backbone that is strong on the
+            // glycan axis but weak on peptide b/y survives truncation instead of
+            // being dropped before its glycan features can be scored.
+            if yindex_on {
+                let mut by_gy: Vec<usize> = (0..deduped_backbone.len()).collect();
+                by_gy.sort_by(|&ai, &bi| {
+                    core_y_counts[bi]
+                        .cmp(&core_y_counts[ai])
+                        .then_with(|| backbone_best_rank[bi].total_cmp(&backbone_best_rank[ai]))
+                        .then_with(|| {
+                            deduped_backbone[bi]
+                                .backbone_mass
+                                .total_cmp(&deduped_backbone[ai].backbone_mass)
+                        })
+                        .then_with(|| bi.cmp(&ai))
+                });
+                by_gy.truncate(effective_top_k);
+                accepted_backbones.extend(by_gy);
+            }
 
             // Phase 2: expensive feature extraction for top-K winners only.
             // Only process cheap_winners whose backbone is in the accepted set.

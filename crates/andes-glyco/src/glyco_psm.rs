@@ -26,6 +26,7 @@ use crate::hybrid::Source;
 ///     oxonium_summed_frac: 0.0,
 ///     n_core_oxonium_ions: 0,
 ///     y_ladder_intensity_score: 0.0,
+///     y_ladder_decoy_score: 0.0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
 /// };
@@ -45,6 +46,11 @@ pub struct GlycoPsmKey {
     pub n_core_oxonium_ions: u8,
     /// Intensity-weighted score from the core-Y ladder match.
     pub y_ladder_intensity_score: f32,
+    /// Glycan-AXIS decoy of `y_ladder_intensity_score`: the same composition's
+    /// ladder with intermediate Y-rungs shifted (Y0/Y1 kept). On a true-glycan
+    /// spectrum this scores below the target; the gap is what a glycan-decoy PIN
+    /// row exposes to Percolator for 2D FDR. 0.0 when no glycan is resolved.
+    pub y_ladder_decoy_score: f32,
     /// Number of core-Y ions matched in the spectrum.
     pub core_y_hits: u8,
     /// Pre-computed monoisotopic mass of the glycan (0.0 when `glycan` is None).
@@ -67,6 +73,7 @@ mod tests {
             oxonium_summed_frac: 0.15,
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 0.88,
+            y_ladder_decoy_score: 0.2,
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
@@ -94,6 +101,7 @@ mod tests {
             oxonium_summed_frac: 0.30,
             n_core_oxonium_ions: 3,
             y_ladder_intensity_score: 1.5,
+            y_ladder_decoy_score: 0.5,
             core_y_hits: 5,
             backbone_mass: 1500.0,
         };
@@ -110,6 +118,7 @@ mod tests {
             oxonium_summed_frac: 0.0,
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
+            y_ladder_decoy_score: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

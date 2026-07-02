@@ -2332,6 +2332,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let stem = output_pin_path.with_extension("");
             stem.with_extension("glyco.pin")
         };
+        // G3: opt-in glycan-axis decoy rows (2D-FDR discrimination on the glycan
+        // axis). Default off — no change to the shipping PIN.
+        let emit_glycan_decoy = std::env::var("ANDES_GLYCO_DECOY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         output::write_glyco_pin(
             &glyco_pin_path,
             &spectra,
@@ -2339,6 +2344,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &prepared.candidates,
             &params,
             &idx,
+            emit_glycan_decoy,
         )?;
         eprintln!(
             "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",

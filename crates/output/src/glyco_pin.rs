@@ -132,15 +132,23 @@ fn write_glyco_psm_row<W: Write>(
     candidates: &[Candidate],
     search_index: &SearchIndex,
     params: &SearchParams,
+    // When Some, this row is a GLYCAN-AXIS decoy: force Label -1, use the decoy
+    // Y-ladder score, and mark the SpecId/accession so it is traceable and
+    // Percolator treats it as a decoy (G3 2D-FDR). None = ordinary row.
+    glycan_decoy_override: Option<f32>,
 ) -> io::Result<()> {
     let psm = &hit.psm;
     let key = &hit.glycan_key;
 
+    let is_glycan_decoy = glycan_decoy_override.is_some();
     let ctx = RowContext::new(spec, cand, search_index);
     let scan = ctx.scan;
-    let spec_id = format!("{}_glyco_{}_{}", ctx.spec_id, scan, row_idx + 1);
+    let gd_suffix = if is_glycan_decoy { "_gd" } else { "" };
+    let spec_id = format!("{}_glyco_{}_{}{}", ctx.spec_id, scan, row_idx + 1, gd_suffix);
 
-    let label: i32 = if cand.is_decoy { -1 } else { 1 };
+    // A glycan-decoy is a decoy on the glycan axis regardless of the peptide's
+    // own target/decoy status.
+    let label: i32 = if is_glycan_decoy || cand.is_decoy { -1 } else { 1 };
 
     let charge = psm.charge_used as f64;
     let precursor_mz = spec.precursor_mz;
@@ -212,7 +220,9 @@ fn write_glyco_psm_row<W: Write>(
     let is_glycan_db: u8 = if key.glycan_source == Source::Db { 1 } else { 0 };
     write_double_tab(writer, key.oxonium_summed_frac as f64)?;
     write!(writer, "\t{}", key.n_core_oxonium_ions)?;
-    write_double_tab(writer, key.y_ladder_intensity_score as f64)?;
+    // YLadderScore: the decoy score for a glycan-decoy row, else the target score.
+    let y_ladder = glycan_decoy_override.unwrap_or(key.y_ladder_intensity_score);
+    write_double_tab(writer, y_ladder as f64)?;
     write!(writer, "\t{}", key.core_y_hits)?;
     write_double_tab(writer, key.glycan_mass)?;
     write!(writer, "\t{}", is_glycan_db)?;
@@ -227,11 +237,16 @@ fn write_glyco_psm_row<W: Write>(
     };
     write!(writer, "\t{}{}", cand.peptide, glycan_tag)?;
 
-    // Proteins column(s)
+    // Proteins column(s). A glycan-decoy carries a decoy-prefixed accession so
+    // Percolator (and downstream protein grouping) recognise it as a decoy.
     for &cidx in &psm.candidate_idxs {
         let cand_for_acc = &candidates[cidx as usize];
         let accession = crate::row_context::resolve_accession(cand_for_acc, search_index);
-        write!(writer, "\t{}", accession)?;
+        if is_glycan_decoy {
+            write!(writer, "\tglycandecoy_{}", accession)?;
+        } else {
+            write!(writer, "\t{}", accession)?;
+        }
     }
     writeln!(writer)
 }
@@ -253,10 +268,19 @@ pub fn write_glyco_pin(
     candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
+    emit_glycan_decoy: bool,
 ) -> io::Result<()> {
     let file = std::fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
-    write_glyco_pin_to(&mut writer, spectra, results, candidates, params, search_index)
+    write_glyco_pin_to(
+        &mut writer,
+        spectra,
+        results,
+        candidates,
+        params,
+        search_index,
+        emit_glycan_decoy,
+    )
 }
 
 /// Write glyco PIN to an arbitrary writer (useful for testing).
@@ -267,6 +291,7 @@ pub fn write_glyco_pin_to<W: Write>(
     candidates: &[Candidate],
     params: &SearchParams,
     search_index: &SearchIndex,
+    emit_glycan_decoy: bool,
 ) -> io::Result<()> {
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
@@ -287,18 +312,22 @@ pub fn write_glyco_pin_to<W: Write>(
             }
             let cand = &candidates[cand_idx];
             write_glyco_psm_row(
-                writer,
-                spec,
-                hit,
-                cand,
-                hit_idx,
-                min_charge,
-                max_charge,
-                candidates,
-                search_index,
-                params,
+                writer, spec, hit, cand, hit_idx, min_charge, max_charge, candidates,
+                search_index, params, None,
             )?;
             row_count += 1;
+
+            // G3: emit a paired glycan-axis decoy for TARGET-peptide PSMs that
+            // have a resolved glycan composition. Skip de-novo (no composition →
+            // decoy score 0) and peptide-decoy rows (they are already decoys; a
+            // glycan-decoy of a decoy peptide adds no glycan-axis signal).
+            if emit_glycan_decoy && !cand.is_decoy && hit.glycan_key.glycan.is_some() {
+                write_glyco_psm_row(
+                    writer, spec, hit, cand, hit_idx, min_charge, max_charge, candidates,
+                    search_index, params, Some(hit.glycan_key.y_ladder_decoy_score),
+                )?;
+                row_count += 1;
+            }
         }
     }
 
@@ -427,6 +456,7 @@ mod tests {
             oxonium_summed_frac: 0.25,
             n_core_oxonium_ions: 3,
             y_ladder_intensity_score: 1.2,
+            y_ladder_decoy_score: 0.3,
             core_y_hits: 5,
             glycan_mass,
             backbone_mass: 1500.0,
@@ -599,6 +629,7 @@ mod tests {
             oxonium_summed_frac: 0.2,
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 0.0,
+            y_ladder_decoy_score: 0.0,
             core_y_hits: 3,
             glycan_mass,
             backbone_mass: peptide_neutral_mass,
@@ -607,7 +638,7 @@ mod tests {
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
 
         let mut buf = Vec::new();
-        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index)
+        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false)
             .expect("write_glyco_pin_to must succeed");
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -642,5 +673,64 @@ mod tests {
             dm,
             glycan_mass
         );
+    }
+
+    /// G3: with glycan-decoy emission ON, a TARGET glyco-PSM that has a resolved
+    /// glycan must emit a PAIRED glycan-decoy row: Label -1, YLadderScore taken
+    /// from `y_ladder_decoy_score` (below the target's), so Percolator has a
+    /// glycan-axis decoy whose glyco feature actually differs from the target.
+    #[test]
+    fn emit_glycan_decoy_writes_paired_decoy_row() {
+        let search_index = make_glyco_search_index("sp|P00000|TEST");
+        let candidates = vec![make_glyco_candidate()]; // is_decoy = false (target)
+        let params = make_glyco_params();
+
+        let glycan_mass =
+            2.0 * andes_glyco::glycan_mass::HEXNAC + 3.0 * andes_glyco::glycan_mass::HEX;
+        let z = 2.0_f64;
+        let intact_neutral = candidates[0].peptide.mass() + glycan_mass;
+        let precursor_mz = (intact_neutral + z * PROTON) / z;
+        let spectra = vec![make_glyco_spectrum(precursor_mz)];
+
+        let psm = make_minimal_psm(0, 10.0);
+        let glycan_key = GlycoPsmKey {
+            spectrum_idx: 0,
+            glycan: Some(GlycanComp {
+                hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0, mass: glycan_mass,
+            }),
+            glycan_source: Source::Db,
+            oxonium_summed_frac: 0.2,
+            n_core_oxonium_ions: 2,
+            y_ladder_intensity_score: 1.2,
+            y_ladder_decoy_score: 0.3,
+            core_y_hits: 4,
+            glycan_mass,
+            backbone_mass: candidates[0].peptide.mass(),
+        };
+        let hit = FullGlycoPsm { glycan_key, psm };
+        let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
+
+        let mut buf = Vec::new();
+        // emit_glycan_decoy = true
+        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, true)
+            .expect("write must succeed");
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let header: Vec<&str> = lines[0].split('\t').collect();
+        let label_col = header.iter().position(|&c| c == "Label").unwrap();
+        let yl_col = header.iter().position(|&c| c == "YLadderScore").unwrap();
+
+        let data: Vec<Vec<&str>> = lines[1..].iter().map(|l| l.split('\t').collect()).collect();
+        assert_eq!(data.len(), 2, "target + paired glycan-decoy expected, got {}", data.len());
+
+        let targets: Vec<&Vec<&str>> = data.iter().filter(|r| r[label_col] == "1").collect();
+        let decoys: Vec<&Vec<&str>> = data.iter().filter(|r| r[label_col] == "-1").collect();
+        assert_eq!(targets.len(), 1, "one target row");
+        assert_eq!(decoys.len(), 1, "one glycan-decoy row");
+
+        let yt: f64 = targets[0][yl_col].parse().unwrap();
+        let yd: f64 = decoys[0][yl_col].parse().unwrap();
+        assert!((yt - 1.2).abs() < 1e-6, "target YLadderScore 1.2, got {yt}");
+        assert!((yd - 0.3).abs() < 1e-6, "decoy YLadderScore must be the decoy score 0.3, got {yd}");
     }
 }

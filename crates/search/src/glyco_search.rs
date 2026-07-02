@@ -30,7 +30,9 @@ use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
-use andes_glyco::backbone::{core_y_intensity, count_core_y_hits, glycan_y_intensity};
+use andes_glyco::backbone::{
+    core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
+};
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
 use andes_glyco::hybrid::{hybrid_candidates_with_isotope, BackboneHit, Source};
@@ -107,6 +109,17 @@ fn nearest_glycan_mass(
 ///
 /// When a DeNovo and a Db hit coincide at the same backbone AND isotope offset,
 /// the Db (annotated) hit is kept as the representative.
+/// Stable per-composition seed for the glycan-axis decoy ladder, so the same
+/// glycan always yields the same shifted decoy (a fixed decoy "structure",
+/// analogous to a reversed-peptide decoy being fixed per target).
+fn glycan_decoy_seed(g: &GlycanComp) -> u64 {
+    let mut s: u64 = 0xD1B5_4A32_D192_ED03;
+    for &c in &[g.hexnac, g.hex, g.fuc, g.neuac, g.neugc] {
+        s = s.wrapping_mul(0x0100_0000_01B3).wrapping_add(c as u64);
+    }
+    s
+}
+
 fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<BackboneHit> {
     if all_backbone.is_empty() {
         return Vec::new();
@@ -734,6 +747,20 @@ pub fn glyco_search_run(
                         Some(g) => glycan_y_intensity(&spec.peaks, bb_neutral, g, tol_ppm) as f32,
                         None => core_y_intensity(&spec.peaks, bb_neutral, tol_ppm) as f32,
                     },
+                    // Glycan-axis decoy ladder (G3): same composition, intermediate
+                    // Y-rungs shifted. Seed from the composition so the decoy ladder
+                    // is stable per glycan (a fixed decoy "structure"). 0.0 for
+                    // de-novo hits (no composition → no glycan-axis decoy row).
+                    y_ladder_decoy_score: match &bb_hit.glycan {
+                        Some(g) => glycan_y_intensity_decoy(
+                            &spec.peaks,
+                            bb_neutral,
+                            g,
+                            tol_ppm,
+                            glycan_decoy_seed(g),
+                        ) as f32,
+                        None => 0.0,
+                    },
                     // Threaded from the per-backbone Y-ladder evidence computed
                     // earlier in `core_y_counts` (previously discarded/hardcoded
                     // to 0, so the `CoreYHits` PIN feature was always dead).
@@ -1002,6 +1029,7 @@ mod tests {
             oxonium_summed_frac: 0.0,
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
+            y_ladder_decoy_score: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

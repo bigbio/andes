@@ -203,6 +203,12 @@ pub fn glyco_search_run(
     let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // G3 glycan-axis decoy (default OFF). When off we must NOT compute the decoy
+    // Y-ladder per hit — it is unused and ~doubles the glyco composition-ladder
+    // cost, so leaving it on would slow the shipping default path.
+    let glyco_decoy_on = std::env::var("ANDES_GLYCO_DECOY")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     // Fast dev harness: ANDES_GLYCO_SCANS=<file> (one scan number per line)
     // restricts the glyco driver to those scans (e.g. the truth-scan subset), so
     // a redesign iteration is minutes not hours. The standard search still runs
@@ -752,14 +758,14 @@ pub fn glyco_search_run(
                     // is stable per glycan (a fixed decoy "structure"). 0.0 for
                     // de-novo hits (no composition → no glycan-axis decoy row).
                     y_ladder_decoy_score: match &bb_hit.glycan {
-                        Some(g) => glycan_y_intensity_decoy(
+                        Some(g) if glyco_decoy_on => glycan_y_intensity_decoy(
                             &spec.peaks,
                             bb_neutral,
                             g,
                             tol_ppm,
                             glycan_decoy_seed(g),
                         ) as f32,
-                        None => 0.0,
+                        _ => 0.0,
                     },
                     // Threaded from the per-backbone Y-ladder evidence computed
                     // earlier in `core_y_counts` (previously discarded/hardcoded

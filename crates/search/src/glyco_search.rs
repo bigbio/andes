@@ -528,6 +528,17 @@ pub fn glyco_search_run(
             let mut backbone_best_rank: Vec<f32> =
                 vec![f32::NEG_INFINITY; deduped_backbone.len()];
 
+            // SPEED (Codex review): score_psm/psm_edge_score are BARE-BACKBONE —
+            // they depend only on (peptide, charge, spectrum), NOT the backbone or
+            // glycan. A candidate is revisited by every backbone whose mass window
+            // contains it (many glycans → many nearby backbone masses), so memoize
+            // (score, edge) per (cand_slot, charge). Lossless: identical results,
+            // far fewer b/y-scoring calls (the concrete phase-1 bottleneck).
+            let mut score_cache: HashMap<(usize, u8), (f32, i32)> = HashMap::new();
+            // Same idea for the sequon test: it depends only on the peptide but was
+            // re-run (with a fresh Vec alloc) per (backbone, candidate). Cache it.
+            let mut sequon_cache: HashMap<usize, bool> = HashMap::new();
+
             for (bb_idx, bb_hit) in deduped_backbone.iter().enumerate() {
                 let bb_residue = bb_hit.backbone_mass;
                 // The charge (and isotope offset) that produced this backbone
@@ -565,9 +576,12 @@ pub fn glyco_search_run(
                         continue;
                     }
 
-                    let residue_bytes: Vec<u8> =
-                        cand.peptide.residues.iter().map(|aa| aa.residue).collect();
-                    if !has_nxst_sequon(&residue_bytes) {
+                    let has_sequon = *sequon_cache.entry(cand_slot).or_insert_with(|| {
+                        let rb: Vec<u8> =
+                            cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+                        has_nxst_sequon(&rb)
+                    });
+                    if !has_sequon {
                         continue;
                     }
 
@@ -576,8 +590,11 @@ pub fn glyco_search_run(
                         None => (cand_slot as u32, 255, 255, 255, 255, 255),
                     };
 
-                    let sc = score_psm(ss, &cand.peptide, scorer, z, fragment_tolerance_da);
-                    let ei = psm_edge_score(ss, &cand.peptide, scorer, z);
+                    let (sc, ei) = *score_cache.entry((cand_slot, z)).or_insert_with(|| {
+                        let sc = score_psm(ss, &cand.peptide, scorer, z, fragment_tolerance_da);
+                        let ei = psm_edge_score(ss, &cand.peptide, scorer, z);
+                        (sc, ei)
+                    });
                     let rk = sc + ei as f32;
 
                     // Update per-backbone best rank.

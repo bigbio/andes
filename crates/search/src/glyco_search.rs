@@ -211,6 +211,18 @@ pub fn glyco_search_run(
     let glyco_decoy_on = std::env::var("ANDES_GLYCO_DECOY")
         .map(|v| v == "1")
         .unwrap_or(false);
+    // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
+    // glyco_pin.rs), so computing the expensive ~40-feature vector
+    // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
+    // Compute features only for the winner that will actually be emitted. These
+    // mirror the PIN writer's defaults exactly (ANDES_GLYCO_ALL_HITS /
+    // ANDES_GLYCO_DENOVO) so the driver's kept hit == the PIN's kept row.
+    let features_collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
+        .map(|v| v != "1")
+        .unwrap_or(true);
+    let features_enumerated = std::env::var("ANDES_GLYCO_DENOVO")
+        .map(|v| v != "1")
+        .unwrap_or(true);
     // Fast dev harness: ANDES_GLYCO_SCANS=<file> (one scan number per line)
     // restricts the glyco driver to those scans (e.g. the truth-scan subset), so
     // a redesign iteration is minutes not hours. The standard search still runs
@@ -539,7 +551,27 @@ pub fn glyco_search_run(
             // re-run (with a fresh Vec alloc) per (backbone, candidate). Cache it.
             let mut sequon_cache: HashMap<usize, bool> = HashMap::new();
 
+            // SPEED (Codex evidence prefilter): the dominant phase-1 cost is fully
+            // b/y-scoring raw DB-branch backbones (precursor − glycan) that are
+            // spurious mass coincidences with NO glycan evidence. A real
+            // N-glycopeptide backbone almost always shows ≥1 core-Y ion (at least
+            // Y0/Y1). So skip full scoring of a `Source::Db` backbone with
+            // core_y_counts == 0 — UNLESS the scan has no evidence backbone at all,
+            // in which case we score everything (non-dropping fallback preserves
+            // recall on genuinely weak spectra). De-novo / peptide-first / transfer
+            // backbones carry their own evidence and are never skipped.
+            let scan_has_evidence = deduped_backbone
+                .iter()
+                .enumerate()
+                .any(|(i, h)| h.source != Source::Db || core_y_counts[i] > 0);
+
             for (bb_idx, bb_hit) in deduped_backbone.iter().enumerate() {
+                if scan_has_evidence
+                    && bb_hit.source == Source::Db
+                    && core_y_counts[bb_idx] == 0
+                {
+                    continue;
+                }
                 let bb_residue = bb_hit.backbone_mass;
                 // The charge (and isotope offset) that produced this backbone
                 // via `hybrid_candidates_with_isotope`. Scoring MUST use this
@@ -703,6 +735,28 @@ pub fn glyco_search_run(
                 v.truncate(max_features);
                 v
             };
+
+            // SPEED: reduce to the winner(s) the PIN will actually emit BEFORE the
+            // expensive compute_psm_features. Default = top-1-per-scan (v is sorted
+            // by rank DESC), enumerated-only: if the rank-1 winner is de-novo it is
+            // dropped (matches select_emitted_hits); ANDES_GLYCO_DENOVO=1 keeps a
+            // de-novo winner; ANDES_GLYCO_ALL_HITS=1 keeps all (diagnostic).
+            let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> =
+                if features_collapse {
+                    match winners_for_features.first() {
+                        Some((gl_key, w)) => {
+                            let is_enum = deduped_backbone[w.bb_hit_idx].glycan.is_some();
+                            if features_enumerated && !is_enum {
+                                Vec::new()
+                            } else {
+                                vec![(*gl_key, *w)]
+                            }
+                        }
+                        None => Vec::new(),
+                    }
+                } else {
+                    winners_for_features
+                };
 
             let mut best_hits: HashMap<(u32, u8, u8, u8, u8, u8), FullGlycoPsm> =
                 HashMap::with_capacity(winners_for_features.len());

@@ -262,25 +262,38 @@ pub fn solve_backbone_min(
         }
     };
 
-    // Build candidates from bins.
+    // Build candidates from bins. Core-Y quorum: the primary path requires ≥2
+    // distinct core-Y rungs; the relaxed rescue (min_core_y=1) additionally
+    // requires b/y COMPLEMENT support for a single-rung candidate (Codex #3).
+    //
+    // PERF (profiled to 45% of the glyco phase): compute the O(peaks) complement
+    // score LAZILY — only for bins that already clear the cheap core-Y count.
+    // The old code computed it for EVERY bin (thousands of spurious single-peak
+    // bins) via .map() before the .filter(), which dominated runtime. This
+    // filter_map is result-IDENTICAL (same survivors, same scores).
     let mut cands: Vec<BackboneCandidate> = bins
         .into_iter()
-        .map(|(_k, (v, hits, mass_sum, int_score))| {
+        .filter_map(|(_k, (v, hits, mass_sum, int_score))| {
+            let core_y_hits = hits.iter().filter(|&&h| h).count() as u8;
+            // `min_core_y` is already clamped to ≥1. A bin below it can never pass
+            // the quorum, so reject BEFORE the expensive complement_score.
+            if core_y_hits < min_core_y {
+                return None;
+            }
             let bb = mass_sum / v as f64;
             let cscore = complement_score(sp, sn, bb);
-            BackboneCandidate {
-                backbone_mass: bb,
-                core_y_hits: hits.iter().filter(|&&h| h).count() as u8,
-                votes: v,
-                intensity_score: int_score,
-                complement_score: cscore,
+            if core_y_hits >= 2 || cscore > 0.0 {
+                Some(BackboneCandidate {
+                    backbone_mass: bb,
+                    core_y_hits,
+                    votes: v,
+                    intensity_score: int_score,
+                    complement_score: cscore,
+                })
+            } else {
+                None
             }
         })
-        // Core-Y quorum. The primary path requires ≥2 distinct core-Y rungs.
-        // The relaxed rescue (min_core_y=1) additionally requires b/y COMPLEMENT
-        // support for a single-rung candidate, so a lone unrelated peak accepted
-        // as some Y-rung cannot become a spurious backbone (Codex re-review #3).
-        .filter(|c| c.core_y_hits >= 2 || (c.core_y_hits >= min_core_y && c.complement_score > 0.0))
         .collect();
 
     // Sort: PRIMARY = core_y_hits (more distinct rungs = stronger evidence),

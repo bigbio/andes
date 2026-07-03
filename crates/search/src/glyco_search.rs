@@ -36,7 +36,9 @@ use andes_glyco::backbone::{
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
-use andes_glyco::hybrid::{hybrid_candidates_with_isotope, BackboneHit, Source};
+use andes_glyco::hybrid::{
+    hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
+};
 use andes_glyco::oxonium::{oxonium_gate, sialic_consistency};
 use andes_glyco::sequon::has_nxst_sequon;
 
@@ -348,25 +350,39 @@ pub fn glyco_search_run(
             for &z in &charges_to_try {
                 let charge_f = z as f64;
                 let observed_neutral = (spec.precursor_mz - PROTON) * charge_f - H2O;
+                // SPEED: the Y-ladder bin voting is isotope-INDEPENDENT (only the
+                // precursor mass gates differ), so solve it ONCE per charge at the
+                // WIDEST precursor the sweep will use (iso_min → largest neutral
+                // mass → loosest gates → a superset of every isotope's candidates),
+                // then annotate per isotope. This replaces the previous
+                // per-(charge×isotope) `solve_backbone` call (~4× redundant work;
+                // the dominant glyco-phase cost). `hybrid_candidates_presolved`
+                // re-applies each isotope's precursor gates so the result is the
+                // same candidate set the per-isotope solve produced.
+                let widest_precursor = observed_neutral - (iso_min as f64) * ISOTOPE;
+                let presolved = if widest_precursor > 0.0 {
+                    // `effective_top_k` is huge in exhaustive mode (no truncation),
+                    // so the widest-precursor superset is exact; a small
+                    // `--glyco-backbone-top-k` only perturbs near-precursor
+                    // (fully-glycosylated, gated-out) candidates. Honors the cap
+                    // (Codex finding #2 — was hardcoded to 50).
+                    solve_backbones_for_charge(&spec.peaks, widest_precursor, z, tol_ppm, effective_top_k)
+                } else {
+                    None
+                };
                 for iso in iso_min..=iso_max {
                     let precursor_neutral = observed_neutral - (iso as f64) * ISOTOPE;
                     if precursor_neutral <= 0.0 {
                         continue;
                     }
-                    let hits = hybrid_candidates_with_isotope(
+                    let hits = hybrid_candidates_presolved(
+                        presolved.as_deref(),
                         &spec.peaks,
                         precursor_neutral,
                         z,
                         iso,
                         glycan_list,
                         tol_ppm,
-                        // Honor the configured cap (Codex finding #2): this was
-                        // hardcoded to 50, so `--glyco-backbone-top-k` overrides
-                        // were silently ignored and the Y-first solver truncated
-                        // at 50 regardless. The solver ranks by core-Y evidence,
-                        // so a larger cap only widens the candidate space the
-                        // downstream b/y scorer sees. `effective_top_k` is huge in
-                        // exhaustive mode (no truncation).
                         effective_top_k,
                     );
                     for h in hits {

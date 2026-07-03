@@ -12,7 +12,7 @@
 // PROTON`), i.e. the peptide NEUTRAL mass (water included). We subtract H2O
 // here so both branches agree on one convention before union/dedup/filter.
 
-use crate::backbone::{core_y_intensity, solve_backbone_min, H2O};
+use crate::backbone::{core_y_intensity, solve_backbone_min, BackboneCandidate, H2O};
 use crate::glycan_db::GlycanComp;
 use crate::oxonium::oxonium_gate;
 
@@ -165,23 +165,52 @@ pub fn hybrid_candidates_with_isotope(
     tol_ppm: f64,
     top_k: usize,
 ) -> Vec<BackboneHit> {
-    const MIN_BACKBONE: f64 = 500.0;
+    // Single-isotope convenience: solve the Y-ladder at THIS isotope's precursor
+    // then annotate. Callers sweeping multiple isotopes should instead call
+    // `solve_backbones_for_charge` ONCE per charge (at the widest precursor) and
+    // `hybrid_candidates_presolved` per isotope — the Y-ladder bin voting is
+    // isotope-independent, so solving once is ~N× cheaper (see those fns).
+    let presolved = solve_backbones_for_charge(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
+    hybrid_candidates_presolved(
+        presolved.as_deref(),
+        peaks,
+        precursor_neutral,
+        precursor_z,
+        isotope_offset,
+        glycans,
+        tol_ppm,
+        top_k,
+    )
+}
 
-    // === Y-ION-FIRST candidate generation ===
-    // The de-novo Y-ladder solver is the PRIMARY (and only) backbone source: we
-    // read the glycan-independent trimannosyl-core Y-ion ladder to determine the
-    // backbone mass from the spectrum, then annotate the glycan by subtraction
-    // (glycan = precursor_neutral − backbone). This is the architecture of
-    // a glyco search engine / a cross-spectrum glyco engine / StrucGP. The previous design enumerated
-    // `precursor − every glycan` (~600 brute-force backbones) ranked by a
-    // glycan-blind peptide b/y score, which forced top-k ≈ 600 and ~19%
-    // find-rate. `db_branch` is retained (tests / annotation) but is no longer
-    // used to GENERATE backbones.
-
+/// Solve the de-novo Y-ladder backbones for a charge state, ONCE, at the widest
+/// precursor an isotope sweep will use. The returned candidates are reusable
+/// across every isotope offset because the Y-ladder bin voting, `complement`,
+/// and `core_y` evidence are all isotope-INDEPENDENT — only the precursor mass
+/// gates differ, and the widest precursor is the loosest gate (a superset that
+/// [`hybrid_candidates_presolved`] re-tightens per isotope).
+///
+/// Returns `None` when the oxonium gate does not fire (not a glyco spectrum) —
+/// distinct from `Some(empty)` (a glyco spectrum with no core-Y ladder, which
+/// still gets the DB-branch fallback per isotope).
+///
+/// === Y-ION-FIRST candidate generation ===
+/// The de-novo Y-ladder solver is the PRIMARY (and only) backbone source: we
+/// read the glycan-independent trimannosyl-core Y-ion ladder to determine the
+/// backbone mass from the spectrum, then annotate the glycan by subtraction
+/// (glycan = precursor_neutral − backbone). This is the architecture of
+/// a glyco search engine / a cross-spectrum glyco engine / StrucGP.
+pub fn solve_backbones_for_charge(
+    peaks: &[(f64, f32)],
+    precursor_neutral: f64,
+    precursor_z: u8,
+    tol_ppm: f64,
+    top_k: usize,
+) -> Option<Vec<BackboneCandidate>> {
     // Oxonium gate: glyco-spectrum filter (every mature engine gates on oxonium).
     let ox = oxonium_gate(peaks, 0.10, tol_ppm);
     if !ox.fired {
-        return Vec::new();
+        return None;
     }
 
     // Y-ION-FIRST confidence cascade (replaces both the deleted DB brute force
@@ -201,8 +230,53 @@ pub fn hybrid_candidates_with_isotope(
     if dn.is_empty() {
         dn = solve_backbone_min(peaks, precursor_neutral, precursor_z, tol_ppm, top_k, 1);
     }
+    Some(dn)
+}
+
+/// Annotate pre-solved backbones (from [`solve_backbones_for_charge`]) for ONE
+/// isotope offset: re-apply the per-isotope precursor gates, annotate the glycan
+/// by subtraction, union the DB branch, and dedup/truncate to `top_k`.
+///
+/// `presolved == None` (oxonium did not fire) short-circuits to empty. When it
+/// is `Some`, the per-isotope gates reduce the widest-precursor superset to
+/// EXACTLY the candidate set a per-isotope `solve_backbone_min` would produce
+/// (the gates match `solve_backbone_min`'s internal `MIN_BB`/`MIN_GLYCAN` gates,
+/// applied on the water-included neutral backbone mass).
+#[allow(clippy::too_many_arguments)]
+pub fn hybrid_candidates_presolved(
+    presolved: Option<&[BackboneCandidate]>,
+    peaks: &[(f64, f32)],
+    precursor_neutral: f64,
+    precursor_z: u8,
+    isotope_offset: i8,
+    glycans: &[GlycanComp],
+    tol_ppm: f64,
+    top_k: usize,
+) -> Vec<BackboneHit> {
+    const MIN_BACKBONE: f64 = 500.0;
+    // Must match `solve_backbone_min`'s MIN_GLYCAN so the widest-precursor
+    // superset re-tightens to this isotope's exact candidate set.
+    const MIN_GLYCAN: f64 = 406.0;
+
+    let dn = match presolved {
+        // Oxonium did not fire → not a glyco spectrum, no candidates (and no DB
+        // fallback — matches the original early return).
+        None => return Vec::new(),
+        Some(v) => v,
+    };
+
     let mut combined: Vec<BackboneHit> = Vec::with_capacity(dn.len());
     for c in dn {
+        // Per-isotope precursor gates, applied on the NEUTRAL (water-included)
+        // backbone mass EXACTLY as `solve_backbone_min` does internally, so a
+        // superset candidate that a tighter isotope would have gated out is
+        // dropped here rather than emitted with a nonsense (negative/tiny) glycan.
+        if c.backbone_mass >= precursor_neutral {
+            continue;
+        }
+        if precursor_neutral - c.backbone_mass < MIN_GLYCAN {
+            continue;
+        }
         // `solve_backbone` returns the Y0-derived peptide NEUTRAL mass (water
         // included); convert to the RESIDUE convention used everywhere else.
         let bb = c.backbone_mass - H2O;
@@ -454,6 +528,105 @@ mod tests {
             .iter()
             .any(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.05);
         assert!(found, "true backbone (real core-Y ladder) must survive core-Y-ranked truncation");
+    }
+
+    /// SPEED FACTORING equivalence: solving the Y-ladder ONCE per charge at the
+    /// widest precursor (iso_min) and annotating per isotope
+    /// (`solve_backbones_for_charge` + `hybrid_candidates_presolved`) must produce
+    /// the SAME BackboneHit union as calling `hybrid_candidates_with_isotope` per
+    /// isotope. The bin-voting / complement / core-Y evidence are
+    /// isotope-independent; only the precursor gates differ, and the widest
+    /// precursor is the loosest gate (superset), re-tightened per isotope.
+    #[test]
+    fn presolved_once_matches_per_isotope_union() {
+        const ISOTOPE: f64 = 1.00335; // C13-C12; any consistent value works here
+        let glycans = n_glycan_list();
+        let proton = PROTON;
+        let steps = crate::glycan_mass::CORE_Y_STEPS;
+        let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3
+        let true_backbone_residue = 1500.0_f64;
+        let z = 2u8;
+        let y0_neutral = true_backbone_residue + H2O;
+
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (204.08665, 200.0),
+            (138.05496, 150.0),
+            (y0_neutral + proton, 1000.0), // Y0
+        ];
+        for &s in steps.iter() {
+            peaks.push((y0_neutral + s + proton, 600.0));
+        }
+        // b/y complement pair so complement_score is exercised.
+        // BY_COMPLEMENT_OFFSET = H2O + 2*PROTON ~= 20.025118.
+        peaks.push((400.0, 300.0));
+        peaks.push((true_backbone_residue + 20.025118 - 400.0, 300.0));
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let tol = 20.0;
+        let top_k = 50;
+        let (iso_min, iso_max) = (-1i8, 2i8);
+        let observed_neutral = true_backbone_residue + glycan_mass; // residue convention
+
+        // key that captures the identity of a BackboneHit for set comparison
+        let key = |h: &BackboneHit| {
+            let src = match h.source {
+                Source::Db => 0u8,
+                Source::DeNovo => 1u8,
+            };
+            (
+                (h.backbone_mass * 100.0).round() as i64,
+                h.isotope_offset,
+                src,
+                h.glycan
+                    .as_ref()
+                    .map(|g| (g.hexnac, g.hex, g.fuc, g.neuac, g.neugc)),
+            )
+        };
+        let sorted = |hits: &[BackboneHit]| {
+            let mut k: Vec<_> = hits.iter().map(key).collect();
+            k.sort();
+            k
+        };
+
+        // OLD path: solve+annotate per isotope.
+        let mut old: Vec<BackboneHit> = Vec::new();
+        for iso in iso_min..=iso_max {
+            let pn = observed_neutral - (iso as f64) * ISOTOPE;
+            if pn <= 0.0 {
+                continue;
+            }
+            old.extend(hybrid_candidates_with_isotope(
+                &peaks, pn, z, iso, &glycans, tol, top_k,
+            ));
+        }
+
+        // NEW path: solve ONCE at the widest precursor, annotate per isotope.
+        let pn_max = observed_neutral - (iso_min as f64) * ISOTOPE;
+        let presolved = solve_backbones_for_charge(&peaks, pn_max, z, tol, top_k);
+        let mut new: Vec<BackboneHit> = Vec::new();
+        for iso in iso_min..=iso_max {
+            let pn = observed_neutral - (iso as f64) * ISOTOPE;
+            if pn <= 0.0 {
+                continue;
+            }
+            new.extend(hybrid_candidates_presolved(
+                presolved.as_deref(),
+                &peaks,
+                pn,
+                z,
+                iso,
+                &glycans,
+                tol,
+                top_k,
+            ));
+        }
+
+        assert!(!old.is_empty(), "expected non-empty union to make the test meaningful");
+        assert_eq!(
+            sorted(&old),
+            sorted(&new),
+            "factored solve-once path must equal per-isotope union"
+        );
     }
 
     /// Dedup: near-duplicate solver candidates within 0.02 Da collapse to one

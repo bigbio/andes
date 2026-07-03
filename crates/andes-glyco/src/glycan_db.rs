@@ -74,30 +74,10 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
         }
     }
 
-    // GI-3: PAUCIMANNOSE / truncated N-glycans BELOW the trimannosyl core
-    // (HexNAc 1–2, Hex 0–2, ± core Fuc). The main loop floors at HexNAc2Hex3
-    // (892 Da), so these were un-enumerable — 8 of them are glycans the published
-    // the reference engine-nglycan run ASSIGNED that andes could not (docs/plans/glyco/ISSUES.md
-    // GI-3): 203 (HexNAc), 349 (HexNAc·Fuc), 406 (HexNAc2), 552 (HexNAc2·Fuc),
-    // 568 (HexNAc2Hex1), 714, 730 (HexNAc2Hex2), 876. These lack the full core
-    // Y-ladder, so they are found only via the DB branch, not the glycan-Y index.
-    for hn in 1u8..=2 {
-        for hx in 0u8..=2 {
-            for fc in 0u8..=1 {
-                if fc > hn {
-                    continue;
-                }
-                // Skip the ones the main loop already covers (none here: all are
-                // Hex<3 or HexNAc<2 combinations below the 500 Da floor).
-                let mass =
-                    hn as f64 * HEXNAC + hx as f64 * HEX + fc as f64 * FUC;
-                if mass < 150.0 {
-                    continue;
-                }
-                out.push(GlycanComp { hexnac: hn, hex: hx, fuc: fc, neuac: 0, neugc: 0, mass });
-            }
-        }
-    }
+    // GI-3: paucimannose/truncated block below the trimannosyl core (see
+    // add_paucimannose) — 8 of these are glycans the reference engine-nglycan ASSIGNED that
+    // andes's HexNAc2Hex3-floored DB could not (docs/plans/glyco/ISSUES.md GI-3).
+    add_paucimannose(&mut out);
 
     // Total-order sort: primary = mass bits, tiebreak by composition fields.
     out.sort_by(|a, b| {
@@ -170,6 +150,10 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
         }
     }
 
+    // GI-3: paucimannose/truncated block below the trimannosyl core — must be on
+    // the DEFAULT `--glyco` list too (Codex: the shipping path uses this function).
+    add_paucimannose(&mut out);
+
     // Total-order sort: primary = mass bits, tiebreak by composition fields.
     out.sort_by(|a, b| {
         a.mass
@@ -183,6 +167,26 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
     });
 
     out
+}
+
+/// GI-3 paucimannose/truncated N-glycans below the trimannosyl core (HexNAc 1–2,
+/// Hex 0–2, ± core Fuc, no sialic; mass ≥ 150). Shared by both `n_glycan_list`
+/// and `n_glycan_list_common` so the DEFAULT `--glyco` search covers them.
+fn add_paucimannose(out: &mut Vec<GlycanComp>) {
+    for hn in 1u8..=2 {
+        for hx in 0u8..=2 {
+            for fc in 0u8..=1 {
+                if fc > hn {
+                    continue;
+                }
+                let mass = hn as f64 * HEXNAC + hx as f64 * HEX + fc as f64 * FUC;
+                if mass < 150.0 {
+                    continue;
+                }
+                out.push(GlycanComp { hexnac: hn, hex: hx, fuc: fc, neuac: 0, neugc: 0, mass });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +241,14 @@ mod tests {
                 "paucimannose glycan {m} Da must now be enumerated"
             );
         }
+        // Codex: the DEFAULT --glyco list (n_glycan_list_common) must ALSO carry them.
+        let common = n_glycan_list_common();
+        for m in gaps {
+            assert!(
+                common.iter().any(|g| (g.mass - m).abs() < 0.05),
+                "paucimannose {m} Da must be in the DEFAULT common list too"
+            );
+        }
     }
 
     // --- n_glycan_list_common tests ---
@@ -270,7 +282,8 @@ mod tests {
     fn n_glycan_list_common_plausibility_constraints() {
         let list = n_glycan_list_common();
         for g in &list {
-            assert!(g.mass >= 500.0 && g.mass <= 6000.0, "mass out of range: {}", g.mass);
+            // GI-3 paucimannose floor is 150 Da (a lone HexNAc = 203).
+            assert!(g.mass >= 150.0 && g.mass <= 6000.0, "mass out of range: {}", g.mass);
             assert!(g.fuc <= g.hexnac, "fuc > hexnac: {:?}", g);
             let max_sialic = g.hexnac.saturating_sub(2);
             assert!(

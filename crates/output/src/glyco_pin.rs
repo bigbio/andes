@@ -314,15 +314,19 @@ pub(crate) fn select_emitted_hits(
     // RESIDUAL that is not in the glycan DB — ~half of raw glyco rows. Those are
     // not glycopeptide IDs and must not enter the FDR PIN (docs/plans/glyco/ISSUES.md
     // GI-1). Filter them out first, THEN collapse.
-    let eligible: Vec<usize> = (0..hits.len())
-        .filter(|&i| !enumerated_only || hits[i].glycan_key.glycan.is_some())
-        .collect();
-    if !collapse || eligible.len() <= 1 {
-        return eligible;
+    if !collapse {
+        // Diagnostic dump: all hits (optionally enumerated-filtered).
+        return (0..hits.len())
+            .filter(|&i| !enumerated_only || hits[i].glycan_key.glycan.is_some())
+            .collect();
     }
-    eligible
-        .iter()
-        .copied()
+    if hits.is_empty() {
+        return Vec::new();
+    }
+    // Collapse over ALL hits first — the TDC winner is the best rank_score
+    // REGARDLESS of enumeration (Codex: filtering first would promote a
+    // 2nd-place enumerated hit when the real winner is de-novo, inflating IDs).
+    let winner = (0..hits.len())
         .max_by(|&a, &b| {
             hits[a]
                 .psm
@@ -337,8 +341,14 @@ pub(crate) fn select_emitted_hits(
                 // lowest index wins a full tie (deterministic)
                 .then(b.cmp(&a))
         })
-        .into_iter()
-        .collect()
+        .expect("non-empty");
+    // Emit only if the scan's actual winner has an enumerated glycan; if the
+    // winner is de-novo, the scan has NO enumerated ID → drop it (not promote a
+    // loser).
+    if enumerated_only && hits[winner].glycan_key.glycan.is_none() {
+        return Vec::new();
+    }
+    vec![winner]
 }
 
 /// Write glyco PIN to an arbitrary writer (useful for testing).
@@ -790,12 +800,18 @@ mod tests {
         fn hit(is_db: bool, rank: f32) -> FullGlycoPsm {
             FullGlycoPsm { glycan_key: make_key(is_db, 1500.0), psm: make_minimal_psm(0, rank) }
         }
-        // de-novo hit has the HIGHER rank_score, but no enumerated glycan.
+        // de-novo hit has the HIGHER rank_score → it is the TDC winner. Under
+        // enumerated-only the scan is DROPPED (not a lower enumerated hit promoted).
         let hits = vec![hit(false, 20.0), hit(true, 8.0), hit(true, 5.0)];
-        // enumerated_only=true: de-novo dropped, best enumerated (rank 8.0, idx 1) wins.
-        assert_eq!(select_emitted_hits(&hits, true, true), vec![1], "enumerated-only keeps best DB hit, drops de-novo");
+        assert!(
+            select_emitted_hits(&hits, true, true).is_empty(),
+            "de-novo TDC winner → scan dropped, NOT a losing enumerated hit promoted"
+        );
         // enumerated_only=false: de-novo (rank 20, idx 0) wins the raw collapse.
         assert_eq!(select_emitted_hits(&hits, true, false), vec![0], "without the filter the de-novo residual wins");
+        // When the ENUMERATED hit is the winner, it is emitted.
+        let db_wins = vec![hit(true, 20.0), hit(false, 8.0), hit(true, 5.0)];
+        assert_eq!(select_emitted_hits(&db_wins, true, true), vec![0], "enumerated winner is emitted");
         // A scan with ONLY de-novo hits yields nothing under enumerated-only.
         let denovo_only = vec![hit(false, 9.0), hit(false, 4.0)];
         assert!(select_emitted_hits(&denovo_only, true, true).is_empty(), "no enumerated glycan → no ID");

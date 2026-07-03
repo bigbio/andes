@@ -15,14 +15,40 @@ CodeRabbit reviews applied.
 | SR-4 | **Tie-break fix computes `glycan_y_intensity` for ALL winners**, not just those tied at the max b/y rank. Correct but ~O(winners) ladder calls/scan; could restrict to max-rank ties. | low (perf) | micro-opt |
 | SR-5 | **`solve_backbone` recomputed per (charge×isotope)** though the Y-ladder bin voting is ~isotope-independent. The identified >2× speed lever. | med (perf) | see speed plan |
 
-## Plan A — MORE glycopeptides (identified levers, ranked)
+## GI-2 part 2 — EMPIRICAL RESULT (2026-07-03): current glycan decoy is NON-FUNCTIONAL
 
-1. **GI-2 part 2 — glycan-axis 2D-FDR (highest leverage).** Emit glycan decoys on
-   the CLEAN top-1-collapsed PIN; run the separate-axis 2D-FDR (peptide-axis
-   reversed-decoy `q_P` + glycan-axis glycan-decoy `q_G`, combined). This ACTIVATES
-   the Y-ladder + sialic features (SR-2) and lets true IDs the peptide axis can't
-   separate pass on glycan evidence. Also make the glycan decoy change ALL
-   composition-conditioned features (isobaric-composition decoy), and fix SR-1.
+Ran the separate-axis 2D-FDR on the clean top-1-collapsed PIN with the EXISTING
+glycan decoy (`ANDES_GLYCO_DECOY=1`, `glycandecoy_` rows, label −1):
+
+```
+peptide-axis only (qP<=0.01) : 259 glyco-PSMs, 101 backbone-correct
+2D (qP<=0.01 AND qG<=0.01)   : 0 — ALL 259 fail the glycan axis
+```
+
+**The glycan axis wipes out every ID.** Root cause: the current glycan decoy
+differs from its target in *only* `YLadderScore` (`glyco_pin.rs` deliberately
+keeps `SialicConsistency`/`GlycanMass` IDENTICAL on the decoy row — they are
+"peptide-axis features, independent of the glycan"). One feature, and it does
+NOT separate → Percolator can push no target's `qG` below 0.01 → 0 pass. So the
+glycan axis is not a precision filter (the earlier optimistic read); with this
+decoy it is an all-or-nothing wipeout, and the glycan-axis machinery is
+effectively dead. **This makes SR-1 the blocking prerequisite, not a nicety.**
+
+## Plan A — MORE glycopeptides (identified levers, re-ranked by the above)
+
+1. **GI-2 part 2 — glycan-axis 2D-FDR, REBUILT around an ISOBARIC-COMPOSITION
+   decoy (highest leverage, now with a concrete blocker).** The glycan decoy must
+   be a DIFFERENT composition of ~equal mass (isobaric), so that ALL
+   composition-conditioned features genuinely differ target-vs-decoy:
+   `GlycanMass` residual, `SialicConsistency` (stop forcing it identical on the
+   decoy row — recompute it for the decoy composition), oxonium-derived signals,
+   and `YLadderScore`. Only then does the glycan-axis Percolator have real signal
+   to separate glycan-correct from glycan-wrong, and `qG<=0.01` keeps the
+   glycan-confident subset instead of zero. Fold in SR-1 (penalize claimed-sialic
+   with no NeuAc oxonium). Re-run the 2D-FDR; the target is a NON-zero
+   glycan-confident subset of the 259 (correctness), and — if the composition
+   features add peptide-axis signal too — more IDs. Without the isobaric decoy
+   this whole lever is inert (proven above).
 2. **Sequon-preserving glyco decoys (Codex Finding 1).** A decoy that keeps N-X-S/T
    density (shuffle preserving sequon positions) makes the PEPTIDE-axis FDR honest
    AND yields a matched decoy space → more IDs at trustworthy FDR. Replaces the

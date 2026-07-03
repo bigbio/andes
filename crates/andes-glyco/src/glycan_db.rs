@@ -74,6 +74,31 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
         }
     }
 
+    // GI-3: PAUCIMANNOSE / truncated N-glycans BELOW the trimannosyl core
+    // (HexNAc 1–2, Hex 0–2, ± core Fuc). The main loop floors at HexNAc2Hex3
+    // (892 Da), so these were un-enumerable — 8 of them are glycans the published
+    // the reference engine-nglycan run ASSIGNED that andes could not (docs/plans/glyco/ISSUES.md
+    // GI-3): 203 (HexNAc), 349 (HexNAc·Fuc), 406 (HexNAc2), 552 (HexNAc2·Fuc),
+    // 568 (HexNAc2Hex1), 714, 730 (HexNAc2Hex2), 876. These lack the full core
+    // Y-ladder, so they are found only via the DB branch, not the glycan-Y index.
+    for hn in 1u8..=2 {
+        for hx in 0u8..=2 {
+            for fc in 0u8..=1 {
+                if fc > hn {
+                    continue;
+                }
+                // Skip the ones the main loop already covers (none here: all are
+                // Hex<3 or HexNAc<2 combinations below the 500 Da floor).
+                let mass =
+                    hn as f64 * HEXNAC + hx as f64 * HEX + fc as f64 * FUC;
+                if mass < 150.0 {
+                    continue;
+                }
+                out.push(GlycanComp { hexnac: hn, hex: hx, fuc: fc, neuac: 0, neugc: 0, mass });
+            }
+        }
+    }
+
     // Total-order sort: primary = mass bits, tiebreak by composition fields.
     out.sort_by(|a, b| {
         a.mass
@@ -190,6 +215,30 @@ mod tests {
         }
     }
 
+    /// GI-3: the 8 paucimannose/truncated glycans that the reference engine-nglycan assigned
+    /// but andes's DB (floored at HexNAc2Hex3, 892 Da) could not enumerate must
+    /// now be present. Masses from docs/plans/glyco/ISSUES.md GI-3.
+    #[test]
+    fn paucimannose_gaps_now_enumerated() {
+        let db = n_glycan_list();
+        let gaps = [
+            203.079, // HexNAc
+            349.137, // HexNAc·Fuc
+            406.159, // HexNAc2
+            552.217, // HexNAc2·Fuc
+            568.211, // HexNAc2Hex1
+            714.269, // HexNAc2Hex1·Fuc
+            730.264, // HexNAc2Hex2
+            876.322, // HexNAc2Hex2·Fuc
+        ];
+        for m in gaps {
+            assert!(
+                db.iter().any(|g| (g.mass - m).abs() < 0.05),
+                "paucimannose glycan {m} Da must now be enumerated"
+            );
+        }
+    }
+
     // --- n_glycan_list_common tests ---
 
     #[test]
@@ -298,16 +347,17 @@ mod tests {
     #[test]
     fn n_glycan_list_nonempty_and_in_expected_range() {
         let list = n_glycan_list();
-        // Exact combinatorial count for the defined ranges + plausibility constraints:
-        // HexNAc 2..=8, Hex 3..=12, Fuc 0..=3, NeuAc 0..=5, NeuGc 0..=2
-        // after fuc≤hexnac, sialic≤hexnac-2, mass∈[500,6000] → 2510 compositions.
+        // HexNAc 2..=8, Hex 3..=12, Fuc 0..=3, NeuAc 0..=5, NeuGc 0..=2 (mass
+        // ∈[500,6000] → ~2510) PLUS the GI-3 paucimannose block (HexNAc 1–2,
+        // Hex 0–2, ± Fuc; ~8 more, mass ≥ 150).
         assert!(
             list.len() >= 2000 && list.len() <= 3000,
             "unexpected glycan count: {}",
             list.len()
         );
         for g in &list {
-            assert!(g.mass >= 500.0 && g.mass <= 6000.0, "mass out of range: {}", g.mass);
+            // Paucimannose floor is 150 Da (a lone HexNAc = 203); upper 6000.
+            assert!(g.mass >= 150.0 && g.mass <= 6000.0, "mass out of range: {}", g.mass);
         }
     }
 

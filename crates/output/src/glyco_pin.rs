@@ -287,6 +287,41 @@ pub fn write_glyco_pin(
     )
 }
 
+/// Select which hits of ONE scan to emit into the FDR PIN.
+///
+/// `collapse=true` (the honest default) keeps only the single best PSM — the
+/// top-1-per-scan TDC winner, by `rank_score` then `YLadderScore`, lowest hit
+/// index breaking full ties. This is REQUIRED for a valid per-scan FDR:
+/// Percolator does NOT do target/decoy competition within a scan, so emitting the
+/// ~4.5 correlated (peptide×glycan) alternatives per scan fabricates the
+/// target/decoy balance and produces fake recovery (docs/plans/glyco/LESSONS.md
+/// L1 — collapsing g4off's 1.02M rows→5,954 changed 155 "recovered" → 0 @1% FDR).
+/// The non-glyco path enforces the same one-PSM-per-scan rule
+/// (`top_n_psms_per_spectrum = 1`). `collapse=false` dumps all hits — DIAGNOSTIC
+/// ONLY, never for FDR.
+pub(crate) fn select_emitted_hits(hits: &[FullGlycoPsm], collapse: bool) -> Vec<usize> {
+    if !collapse || hits.len() <= 1 {
+        return (0..hits.len()).collect();
+    }
+    (0..hits.len())
+        .max_by(|&a, &b| {
+            hits[a]
+                .psm
+                .rank_score
+                .total_cmp(&hits[b].psm.rank_score)
+                .then(
+                    hits[a]
+                        .glycan_key
+                        .y_ladder_intensity_score
+                        .total_cmp(&hits[b].glycan_key.y_ladder_intensity_score),
+                )
+                // lowest index wins a full tie (deterministic)
+                .then(b.cmp(&a))
+        })
+        .into_iter()
+        .collect()
+}
+
 /// Write glyco PIN to an arbitrary writer (useful for testing).
 pub fn write_glyco_pin_to<W: Write>(
     writer: &mut W,
@@ -302,6 +337,13 @@ pub fn write_glyco_pin_to<W: Write>(
 
     write_glyco_header(writer, min_charge, max_charge)?;
 
+    // Top-1-per-scan collapse is the honest default (see `select_emitted_hits`).
+    // ANDES_GLYCO_ALL_HITS=1 restores the full multi-row dump for DIAGNOSTICS ONLY
+    // (its PIN must never be fed to Percolator as an FDR input).
+    let collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
+        .map(|v| v != "1")
+        .unwrap_or(true);
+
     let mut row_count = 0usize;
     for result in results {
         let spec_idx = result.spectrum_idx;
@@ -309,7 +351,8 @@ pub fn write_glyco_pin_to<W: Write>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        for (hit_idx, hit) in result.hits.iter().enumerate() {
+        for hit_idx in select_emitted_hits(&result.hits, collapse) {
+            let hit = &result.hits[hit_idx];
             let cand_idx = hit.psm.primary_candidate_idx() as usize;
             if cand_idx >= candidates.len() {
                 continue;
@@ -337,7 +380,15 @@ pub fn write_glyco_pin_to<W: Write>(
 
     writer.flush()?;
     // Return row count via a side-channel eprintln so callers can report it.
-    eprintln!("[glyco-pin] wrote {} PSM rows", row_count);
+    eprintln!(
+        "[glyco-pin] wrote {} PSM rows ({})",
+        row_count,
+        if collapse {
+            "top-1-per-scan collapse — FDR-valid"
+        } else {
+            "ALL hits — DIAGNOSTIC ONLY, not FDR-valid"
+        }
+    );
     Ok(())
 }
 
@@ -679,6 +730,30 @@ mod tests {
             dm,
             glycan_mass
         );
+    }
+
+    /// L1 (the core harness bug): the FDR PIN must emit ONE PSM per scan — the
+    /// top-1 TDC winner by rank_score. Emitting all ~4.5 (peptide×glycan)
+    /// alternatives fabricates the target/decoy balance and produced the fake
+    /// ~30% recovery. `select_emitted_hits(_, true)` must return only the best.
+    #[test]
+    fn top1_collapse_keeps_only_the_best_hit_per_scan() {
+        fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
+            let mut key = make_key(true, 1000.0);
+            key.y_ladder_intensity_score = ladder;
+            FullGlycoPsm { glycan_key: key, psm: make_minimal_psm(0, rank) }
+        }
+        let hits = vec![
+            make_hit(5.0, 1.0),
+            make_hit(10.0, 0.5), // highest rank_score → the winner
+            make_hit(8.0, 2.0),
+        ];
+        assert_eq!(select_emitted_hits(&hits, true), vec![1], "collapse keeps top-1 by rank_score");
+        assert_eq!(select_emitted_hits(&hits, false).len(), 3, "diagnostic mode keeps all");
+
+        // Full tie on rank_score → break by YLadderScore, then lowest index.
+        let tied = vec![make_hit(7.0, 1.0), make_hit(7.0, 3.0), make_hit(7.0, 3.0)];
+        assert_eq!(select_emitted_hits(&tied, true), vec![1], "tie broken by YLadder then lowest index");
     }
 
     /// G3: with glycan-decoy emission ON, a TARGET glyco-PSM that has a resolved

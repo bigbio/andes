@@ -37,7 +37,7 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::GlycoPsmKey;
 use andes_glyco::hybrid::{hybrid_candidates_with_isotope, BackboneHit, Source};
-use andes_glyco::oxonium::oxonium_gate;
+use andes_glyco::oxonium::{oxonium_gate, sialic_consistency};
 use andes_glyco::sequon::has_nxst_sequon;
 
 use crate::glyco_fragment_index::FragmentIndex;
@@ -778,6 +778,12 @@ pub fn glyco_search_run(
                         w.z,
                         tol_ppm,
                     ) as f32,
+                    // GI-2: composition-conditioned sialic-oxonium consistency
+                    // (only meaningful for an annotated glycan composition).
+                    sialic_consistency: match &bb_hit.glycan {
+                        Some(g) => sialic_consistency(&spec.peaks, g, tol_ppm),
+                        None => 0.0,
+                    },
                     // Threaded from the per-backbone Y-ladder evidence computed
                     // earlier in `core_y_counts` (previously discarded/hardcoded
                     // to 0, so the `CoreYHits` PIN feature was always dead).
@@ -1100,6 +1106,7 @@ mod tests {
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
             y0y1_anchor_score: 0.0,
+            sialic_consistency: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

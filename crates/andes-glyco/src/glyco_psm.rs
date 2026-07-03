@@ -28,6 +28,7 @@ use crate::hybrid::Source;
 ///     y_ladder_intensity_score: 0.0,
 ///     y_ladder_decoy_score: 0.0,
 ///     y0y1_anchor_score: 0.0,
+///     sialic_consistency: 0.0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
 /// };
@@ -57,6 +58,11 @@ pub struct GlycoPsmKey {
     /// the one glyco feature that discriminates competing peptides at a shared
     /// backbone window. Never folded into the ranking score.
     pub y0y1_anchor_score: f32,
+    /// GI-2 composition-conditioned SIALIC consistency (additive PIN feature):
+    /// ±NeuAc/NeuGc oxonium signed by whether this glycan claims that sialic —
+    /// the one oxonium-derived feature that discriminates glycans of different
+    /// sialic content on one spectrum. 0.0 when no glycan is resolved.
+    pub sialic_consistency: f32,
     /// Number of core-Y ions matched in the spectrum.
     pub core_y_hits: u8,
     /// Pre-computed monoisotopic mass of the glycan (0.0 when `glycan` is None).
@@ -81,6 +87,7 @@ mod tests {
             y_ladder_intensity_score: 0.88,
             y_ladder_decoy_score: 0.2,
             y0y1_anchor_score: 0.4,
+            sialic_consistency: 0.1,
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
@@ -110,6 +117,7 @@ mod tests {
             y_ladder_intensity_score: 1.5,
             y_ladder_decoy_score: 0.5,
             y0y1_anchor_score: 0.7,
+            sialic_consistency: 0.2,
             core_y_hits: 5,
             backbone_mass: 1500.0,
         };
@@ -128,6 +136,7 @@ mod tests {
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
             y0y1_anchor_score: 0.0,
+            sialic_consistency: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

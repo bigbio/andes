@@ -111,6 +111,7 @@ fn write_glyco_header<W: Write>(
         "GlycanMass".to_string(),
         "IsGlycanDb".to_string(),
         "Y0Y1Anchor".to_string(), // G2 peptide-mass anchor (additive, peptide-discriminating)
+        "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
         // Terminal columns
         "Peptide".to_string(),
         "Proteins".to_string(),
@@ -230,6 +231,10 @@ fn write_glyco_psm_row<W: Write>(
     // G2 Y0/Y1 anchor (additive, peptide-mass-conditioned). Same value on a
     // glycan-decoy row (it is a peptide-axis feature, independent of the glycan).
     write_double_tab(writer, key.y0y1_anchor_score as f64)?;
+    // GI-2 sialic consistency (composition-conditioned; same value on a glycan-decoy
+    // row since the shifted-ladder decoy keeps the composition — differs once
+    // isobaric-composition decoys land).
+    write_double_tab(writer, key.sialic_consistency as f64)?;
 
     // Peptide column: backbone sequence + optional glycan tag.
     let glycan_tag = match &key.glycan {
@@ -532,6 +537,7 @@ mod tests {
             y_ladder_intensity_score: 1.2,
             y_ladder_decoy_score: 0.3,
             y0y1_anchor_score: 0.6,
+            sialic_consistency: 0.15,
             core_y_hits: 5,
             glycan_mass,
             backbone_mass: 1500.0,
@@ -706,6 +712,7 @@ mod tests {
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
             y0y1_anchor_score: 0.0,
+            sialic_consistency: 0.0,
             core_y_hits: 3,
             glycan_mass,
             backbone_mass: peptide_neutral_mass,
@@ -823,6 +830,7 @@ mod tests {
             y_ladder_intensity_score: 1.2,
             y_ladder_decoy_score: 0.3,
             y0y1_anchor_score: 0.6,
+            sialic_consistency: 0.15,
             core_y_hits: 4,
             glycan_mass,
             backbone_mass: candidates[0].peptide.mass(),

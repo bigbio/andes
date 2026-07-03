@@ -217,7 +217,7 @@ fn write_glyco_psm_row<W: Write>(
         }
     }
 
-    // Glyco-specific columns (6).
+    // Glyco-specific columns (7, incl. Y0Y1Anchor).
     let is_glycan_db: u8 = if key.glycan_source == Source::Db { 1 } else { 0 };
     write_double_tab(writer, key.oxonium_summed_frac as f64)?;
     write!(writer, "\t{}", key.n_core_oxonium_ions)?;

@@ -1,5 +1,12 @@
 # andes N-glyco — per-phase implementation specs (G0 → G4 + G3′)
 
+> ⚠️ **CORRECTION (2026-07-03) — read [`../LESSONS.md`](../LESSONS.md) first.** Any
+> gate below citing the **523-scan truth** or **`154/523 → 83 → 66`** is **VOID**
+> (multi-row-PIN artifact, fixed in commit 7c269aab; correct answer is 0 glyco-PSMs
+> @1% FDR). Re-express all gates as **unique glyco scans/glycopeptides @ FDR on
+> top-1-collapsed PINs, vs a valid FDR-controlled reference, entrapment-validated.**
+
+
 *Engineer-executable checklist. Companion to `50-roadmap/roadmap.md` (sequencing +
 thesis). Branch `glyco-phase1`, HEAD ~`35d31bb9`. File:line anchors from
 `00-context/02-code-inventory.md`; theory from `20-theory/`; masses/notation from

@@ -1,5 +1,15 @@
 # andes N-glyco search — clean implementation roadmap (G0 → G4)
 
+> ⚠️ **CORRECTION (2026-07-03) — read [`../LESSONS.md`](../LESSONS.md) first.** Every
+> recovery gate below that cites the **523-scan truth** or the **`154/523 → 83
+> top-1 → 66 true`** chain is **VOID** — those numbers came from un-collapsed
+> multi-row PINs (fixed in commit 7c269aab). Done correctly (top-1-per-scan), andes
+> yields **0 glyco-PSMs @1% FDR**. All gates must be re-expressed as: **unique glyco
+> scans/glycopeptides @ FDR, on top-1-collapsed PINs, against a valid FDR-controlled
+> reference (the published the reference engine-nglycan result or multi-engine consensus),
+> validated by entrapment.** Do not treat the pre-correction numbers as targets.
+
+
 *Lead-architect roadmap. Authoritative sequencing document; engineers implement from this.
 Written 2026-07-02, branch `glyco-phase1` (HEAD ~`35d31bb9`). Synthesizes
 `00-context/`, `10-tools/`, `20-theory/`, `30-standards/`, `40-data/`.*

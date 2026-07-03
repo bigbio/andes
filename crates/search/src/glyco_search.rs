@@ -128,9 +128,10 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
     // Sort by backbone mass; within a mass cluster, put Db before DeNovo and
     // monoisotopic (|offset| small) first for deterministic representatives.
     all_backbone.sort_by(|a, b| {
+        // DET-1 (total order on the primary key; the prior partial_cmp+unwrap_or
+        // silently mapped NaN to a tie — same fix as hybrid.rs / the axis sorts).
         a.backbone_mass
-            .partial_cmp(&b.backbone_mass)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&b.backbone_mass)
             .then_with(|| {
                 let oa = if a.source == Source::Db { 0u8 } else { 1u8 };
                 let ob = if b.source == Source::Db { 0u8 } else { 1u8 };

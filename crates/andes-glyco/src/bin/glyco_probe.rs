@@ -74,15 +74,17 @@ fn main() {
             if c.len() < 4 {
                 continue;
             }
-            let scan: i32 = c[0].parse().unwrap();
-            truth.insert(
-                scan,
-                Truth {
-                    backbone_mass: c[1].parse().unwrap(),
-                    precursor_mz: c[2].parse().unwrap(),
-                    precursor_z: c[3].parse().unwrap(),
-                },
-            );
+            // Tolerant parse: precursor_z may be float-formatted ("2.0"); parse as
+            // f64 and round. Skip malformed rows instead of panicking (CodeRabbit).
+            let (Ok(scan), Ok(backbone_mass), Ok(precursor_mz), Ok(precursor_z)) = (
+                c[0].parse::<i32>(),
+                c[1].parse::<f64>(),
+                c[2].parse::<f64>(),
+                c[3].parse::<f64>().map(|z| z.round() as u8),
+            ) else {
+                continue;
+            };
+            truth.insert(scan, Truth { backbone_mass, precursor_mz, precursor_z });
         }
     }
     eprintln!("loaded {} truth scans", truth.len());

@@ -1770,11 +1770,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if cli.rescore {
             unsupported.push("--rescore");
         }
+        if cli.rescore_native {
+            unsupported.push("--rescore-native");
+        }
         if cli.refine {
             unsupported.push("--refine");
         }
         if cli.fdr.is_some() {
             unsupported.push("--fdr");
+        }
+        if cli.pep.is_some() {
+            unsupported.push("--pep");
         }
         if !unsupported.is_empty() {
             return Err(format!(

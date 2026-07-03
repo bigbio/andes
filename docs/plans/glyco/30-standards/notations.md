@@ -24,12 +24,17 @@ dialect. `dHex ≡ Fuc` for N-glycans; `Neu5Ac ≡ NeuAc ≡ Sia(NAc)`; `Neu5Gc 
 
 ## 2. andes canonical composition tuple
 
-Fixed-order 6-tuple, monoisotopic residue masses (Da), stored as `[u16;6]`:
+Fixed-order 6-tuple of integer **COUNTS** — how many of each monosaccharide — one
+`u16` (or `u8`) count field per position, NOT masses. The row below each name is the
+per-residue monoisotopic mass (Da) that the count is multiplied by; the composition's
+total glycan mass = Σ(count × residue-mass):
 
 ```
-GlycanComp = (Hex, HexNAc, Fuc, NeuAc, NeuGc, Other)
-             162.0528  203.0794  146.0579  291.0954  307.0903   Δ (explicit)
+GlycanComp        = ( Hex,   HexNAc,   Fuc,    NeuAc,   NeuGc,   Other )   ← integer counts
+residue mass (Da) = 162.0528 203.0794 146.0579 291.0954 307.0903  Δ (explicit)
 ```
+(In andes code these are the `u8` fields `hex/hexnac/fuc/neuac/neugc` on `GlycanComp`,
+plus a precomputed `mass` field = Σ(count × residue-mass).)
 
 `Other` is a tagged escape (Pent 132.0423, HexA 176.0321, Sulfo 79.9568, Phospho 79.9663, KDN
 250.0693) carrying its own mass so mass closure holds. Rationale: the six cover >99% of human

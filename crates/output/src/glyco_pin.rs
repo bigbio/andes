@@ -299,11 +299,25 @@ pub fn write_glyco_pin(
 /// The non-glyco path enforces the same one-PSM-per-scan rule
 /// (`top_n_psms_per_spectrum = 1`). `collapse=false` dumps all hits — DIAGNOSTIC
 /// ONLY, never for FDR.
-pub(crate) fn select_emitted_hits(hits: &[FullGlycoPsm], collapse: bool) -> Vec<usize> {
-    if !collapse || hits.len() <= 1 {
-        return (0..hits.len()).collect();
+pub(crate) fn select_emitted_hits(
+    hits: &[FullGlycoPsm],
+    collapse: bool,
+    enumerated_only: bool,
+) -> Vec<usize> {
+    // GI-1: a glyco IDENTIFICATION requires an ENUMERATED glycan composition. The
+    // de-novo branch (glycan = None) reports a bare precursor−backbone mass
+    // RESIDUAL that is not in the glycan DB — ~half of raw glyco rows. Those are
+    // not glycopeptide IDs and must not enter the FDR PIN (docs/plans/glyco/ISSUES.md
+    // GI-1). Filter them out first, THEN collapse.
+    let eligible: Vec<usize> = (0..hits.len())
+        .filter(|&i| !enumerated_only || hits[i].glycan_key.glycan.is_some())
+        .collect();
+    if !collapse || eligible.len() <= 1 {
+        return eligible;
     }
-    (0..hits.len())
+    eligible
+        .iter()
+        .copied()
         .max_by(|&a, &b| {
             hits[a]
                 .psm
@@ -343,6 +357,11 @@ pub fn write_glyco_pin_to<W: Write>(
     let collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
         .map(|v| v != "1")
         .unwrap_or(true);
+    // GI-1: emit only enumerated-composition glyco IDs by default; ANDES_GLYCO_DENOVO=1
+    // includes the de-novo mass-residual hits (diagnostic / open-search only).
+    let enumerated_only = std::env::var("ANDES_GLYCO_DENOVO")
+        .map(|v| v != "1")
+        .unwrap_or(true);
 
     let mut row_count = 0usize;
     for result in results {
@@ -351,7 +370,7 @@ pub fn write_glyco_pin_to<W: Write>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        for hit_idx in select_emitted_hits(&result.hits, collapse) {
+        for hit_idx in select_emitted_hits(&result.hits, collapse, enumerated_only) {
             let hit = &result.hits[hit_idx];
             let cand_idx = hit.psm.primary_candidate_idx() as usize;
             if cand_idx >= candidates.len() {
@@ -748,12 +767,31 @@ mod tests {
             make_hit(10.0, 0.5), // highest rank_score → the winner
             make_hit(8.0, 2.0),
         ];
-        assert_eq!(select_emitted_hits(&hits, true), vec![1], "collapse keeps top-1 by rank_score");
-        assert_eq!(select_emitted_hits(&hits, false).len(), 3, "diagnostic mode keeps all");
+        assert_eq!(select_emitted_hits(&hits, true, false), vec![1], "collapse keeps top-1 by rank_score");
+        assert_eq!(select_emitted_hits(&hits, false, false).len(), 3, "diagnostic mode keeps all");
 
         // Full tie on rank_score → break by YLadderScore, then lowest index.
         let tied = vec![make_hit(7.0, 1.0), make_hit(7.0, 3.0), make_hit(7.0, 3.0)];
-        assert_eq!(select_emitted_hits(&tied, true), vec![1], "tie broken by YLadder then lowest index");
+        assert_eq!(select_emitted_hits(&tied, true, false), vec![1], "tie broken by YLadder then lowest index");
+    }
+
+    /// GI-1: a de-novo hit (glycan = None, a bare mass residual) is NOT a glyco
+    /// identification and must be dropped by the enumerated-only filter — even
+    /// when it has the highest rank_score. The best ENUMERATED hit wins the scan.
+    #[test]
+    fn enumerated_only_drops_de_novo_hits() {
+        fn hit(is_db: bool, rank: f32) -> FullGlycoPsm {
+            FullGlycoPsm { glycan_key: make_key(is_db, 1500.0), psm: make_minimal_psm(0, rank) }
+        }
+        // de-novo hit has the HIGHER rank_score, but no enumerated glycan.
+        let hits = vec![hit(false, 20.0), hit(true, 8.0), hit(true, 5.0)];
+        // enumerated_only=true: de-novo dropped, best enumerated (rank 8.0, idx 1) wins.
+        assert_eq!(select_emitted_hits(&hits, true, true), vec![1], "enumerated-only keeps best DB hit, drops de-novo");
+        // enumerated_only=false: de-novo (rank 20, idx 0) wins the raw collapse.
+        assert_eq!(select_emitted_hits(&hits, true, false), vec![0], "without the filter the de-novo residual wins");
+        // A scan with ONLY de-novo hits yields nothing under enumerated-only.
+        let denovo_only = vec![hit(false, 9.0), hit(false, 4.0)];
+        assert!(select_emitted_hits(&denovo_only, true, true).is_empty(), "no enumerated glycan → no ID");
     }
 
     /// G3: with glycan-decoy emission ON, a TARGET glyco-PSM that has a resolved

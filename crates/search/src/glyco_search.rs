@@ -719,14 +719,41 @@ pub fn glyco_search_run(
                 v
             };
 
-            // SPEED: reduce to the winner(s) the PIN will actually emit BEFORE the
-            // expensive compute_psm_features. Default = top-1-per-scan (v is sorted
-            // by rank DESC), enumerated-only: if the rank-1 winner is de-novo it is
-            // dropped (matches select_emitted_hits); ANDES_GLYCO_DENOVO=1 keeps a
-            // de-novo winner; ANDES_GLYCO_ALL_HITS=1 keeps all (diagnostic).
+            // SPEED: reduce to the winner the PIN will actually emit BEFORE the
+            // expensive compute_psm_features. CRITICAL (Codex review): the emitted
+            // winner must be chosen by the SAME rule as the PIN writer's
+            // select_emitted_hits — rank DESC, then GLYCAN Y-ladder DESC. Competing
+            // glycan compositions on the SAME peptide have IDENTICAL b/y rank by
+            // construction, so a rank-only `first()` would emit an arbitrary glycan
+            // and defeat the Y-ladder/sialic discrimination. Compute the CHEAP
+            // Y-ladder for the candidates here (far cheaper than compute_psm_features)
+            // to break the rank tie correctly; gl_key breaks any full tie
+            // deterministically. Enumerated-only: a de-novo winner drops the scan
+            // (ANDES_GLYCO_DENOVO=1 keeps it); ANDES_GLYCO_ALL_HITS=1 keeps all.
             let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> =
                 if features_collapse {
-                    match winners_for_features.first() {
+                    let ladder = |w: &CheapWinner| -> f32 {
+                        let bb = &deduped_backbone[w.bb_hit_idx];
+                        let bbn = bb.backbone_mass + H2O;
+                        match &bb.glycan {
+                            Some(g) => glycan_y_intensity(&spec.peaks, bbn, g, tol_ppm) as f32,
+                            None => core_y_intensity(&spec.peaks, bbn, tol_ppm) as f32,
+                        }
+                    };
+                    // Precompute the ladder once per candidate (avoid O(n log n) recompute).
+                    let scored: Vec<(&((u32, u8, u8, u8, u8, u8), CheapWinner), f32)> =
+                        winners_for_features.iter().map(|e| (e, ladder(&e.1))).collect();
+                    let best = scored
+                        .iter()
+                        .max_by(|(ea, la), (eb, lb)| {
+                            ea.1
+                                .rank
+                                .total_cmp(&eb.1.rank)
+                                .then(la.total_cmp(lb))
+                                .then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
+                        })
+                        .map(|(e, _)| *e);
+                    match best {
                         Some((gl_key, w)) => {
                             let is_enum = deduped_backbone[w.bb_hit_idx].glycan.is_some();
                             if features_enumerated && !is_enum {

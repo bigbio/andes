@@ -820,7 +820,11 @@ pub fn glyco_search_run(
         .and_then(|v| v.parse().ok())
         .unwrap_or(1800.0);
     // Confident donors carry their spectrum RT so transfer only fires to
-    // co-eluting acceptors. Donors without an RT cannot be gated → excluded.
+    // co-eluting acceptors. Donors must be (a) strong-ladder (core_y_hits >=
+    // CONF_MIN_CORE_Y), (b) a TARGET peptide (never a decoy — a decoy with a
+    // strong glycan ladder would otherwise seed transfer and inject noise; Codex
+    // review), and (c) RT-bearing (a donor without RT cannot be co-elution-gated).
+    let rt_bearing = spectra.iter().filter(|s| s.rt_seconds.is_some()).count();
     let confident_bb: Vec<(f64, f32)> = pass1
         .iter()
         .flat_map(|r| {
@@ -828,11 +832,33 @@ pub fn glyco_search_run(
             r.hits
                 .iter()
                 .filter(|h| h.glycan_key.core_y_hits >= CONF_MIN_CORE_Y)
+                .filter(|h| {
+                    let ci = h.psm.primary_candidate_idx() as usize;
+                    ci < candidates.len() && !candidates[ci].is_decoy
+                })
                 .filter_map(move |h| rt.map(|t| (h.glycan_key.backbone_mass - H2O, t as f32)))
         })
         .collect();
+    let n_donor_obs = confident_bb.len();
     let whitelist = GlycoformWhitelist::new(confident_bb, 0.02);
+    // Loud diagnostics: a silently-empty whitelist (esp. from missing RT) would
+    // make a disabled transfer look like a biological ceiling (Codex review).
+    eprintln!(
+        "[glyco-xspec] cross-spectrum ON: {}/{} spectra carry RT; {} confident target donors → {} whitelist backbones (rt_window ±{}s)",
+        rt_bearing,
+        spectra.len(),
+        n_donor_obs,
+        whitelist.len(),
+        rt_window,
+    );
     if whitelist.is_empty() {
+        if rt_bearing == 0 {
+            eprintln!(
+                "[glyco-xspec] WARNING: NO spectra carry retention time — cross-spectrum transfer is DISABLED (needs mzML/raw or MGF with RTINSECONDS). Pass 2 skipped."
+            );
+        } else {
+            eprintln!("[glyco-xspec] no confident target donors → pass 2 skipped");
+        }
         return pass1;
     }
     // Spectra that already have a confident ID need no transfer (bounds pass 2).
@@ -909,6 +935,10 @@ pub fn glyco_search_run(
         })
         .collect();
 
+    eprintln!(
+        "[glyco-xspec] pass 2: {} spectra received a transferred backbone and superseded pass 1",
+        pass2.len()
+    );
     for r in pass2 {
         by_idx.insert(r.spectrum_idx, r);
     }

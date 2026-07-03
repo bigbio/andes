@@ -6,6 +6,42 @@
 
 use crate::glycan_db::GlycanComp;
 use crate::hybrid::Source;
+use std::cmp::Ordering;
+
+/// Collapse-selection mode, read ONCE from the environment (process-constant).
+///
+/// The top-1-per-scan collapse (required for honest per-scan TDC FDR) keeps a
+/// single PSM per spectrum, so *which* backbone/glycan it keeps determines the
+/// recovered ID. Default (`false`) selects by the peptide b/y `rank_score`
+/// first. `ANDES_GLYCO_SELECT=yladder` selects by the core-Y ladder first: in
+/// glyco spectra the peptide backbone b/y series is suppressed (spectra are
+/// dominated by oxonium + Y-ions), making `rank_score` a noisy primary, whereas
+/// the core-Y ladder is the DIRECT evidence that a backbone MASS is correct (a
+/// wrong backbone mass produces no core-Y ladder). Making the ladder primary
+/// targets the ranking bottleneck (backbones are generated but out-selected).
+pub fn y_primary_selection() -> bool {
+    std::env::var("ANDES_GLYCO_SELECT")
+        .map(|v| v.eq_ignore_ascii_case("yladder"))
+        .unwrap_or(false)
+}
+
+/// Total order for the top-1-per-scan collapse: `max_by(collapse_cmp(...))`
+/// yields the emitted winner. This ordering is the SINGLE SOURCE OF TRUTH shared
+/// by the driver's pre-feature reduction (glyco_search) and the PIN writer's
+/// `select_emitted_hits` — they MUST agree, or a scan's driver-emitted winner
+/// and PIN-written winner diverge (a real past bug; Codex finding). Callers
+/// append their own deterministic final tiebreak (gl_key / hit index) for the
+/// astronomically rare exact `(rank, ladder)` tie.
+///
+/// - `y_primary=false` (default): `rank_score` DESC, then `y_ladder` DESC.
+/// - `y_primary=true`: `y_ladder` DESC, then `rank_score` DESC.
+pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_primary: bool) -> Ordering {
+    if y_primary {
+        a_ladder.total_cmp(&b_ladder).then(a_rank.total_cmp(&b_rank))
+    } else {
+        a_rank.total_cmp(&b_rank).then(a_ladder.total_cmp(&b_ladder))
+    }
+}
 
 /// All glycan-level features attached to a single PSM.
 ///
@@ -75,6 +111,23 @@ pub struct GlycoPsmKey {
 mod tests {
     use super::*;
     use crate::glycan_mass::{HEX, HEXNAC};
+
+    #[test]
+    fn collapse_cmp_default_ranks_by_rank_score_then_ladder() {
+        // default: higher rank_score wins even with a lower ladder.
+        assert_eq!(collapse_cmp(5.0, 1.0, 3.0, 9.0, false), Ordering::Greater);
+        // rank tie → higher ladder wins.
+        assert_eq!(collapse_cmp(5.0, 9.0, 5.0, 1.0, false), Ordering::Greater);
+    }
+
+    #[test]
+    fn collapse_cmp_yprimary_ranks_by_ladder_then_rank_score() {
+        // y_primary: higher ladder wins even with a lower rank_score — this is
+        // the whole point (recover the correct backbone the noisy b/y rank loses).
+        assert_eq!(collapse_cmp(3.0, 9.0, 5.0, 1.0, true), Ordering::Greater);
+        // ladder tie → higher rank_score wins.
+        assert_eq!(collapse_cmp(5.0, 9.0, 3.0, 9.0, true), Ordering::Greater);
+    }
 
     #[test]
     fn glyco_psm_key_none_glycan_has_zero_glycan_mass() {

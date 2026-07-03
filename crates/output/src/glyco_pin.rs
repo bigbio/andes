@@ -21,6 +21,7 @@ use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 use model::spectrum::Spectrum;
 
+use andes_glyco::glyco_psm::{collapse_cmp, y_primary_selection};
 use andes_glyco::hybrid::Source;
 
 use crate::pin::{psm_feature_values, FeatureFmt};
@@ -326,20 +327,21 @@ pub(crate) fn select_emitted_hits(
     // Collapse over ALL hits first — the TDC winner is the best rank_score
     // REGARDLESS of enumeration (Codex: filtering first would promote a
     // 2nd-place enumerated hit when the real winner is de-novo, inflating IDs).
+    // Ordering is the SHARED `collapse_cmp` (single source of truth with the
+    // driver's pre-feature reduction). Default = b/y rank primary;
+    // ANDES_GLYCO_SELECT=yladder = core-Y ladder primary.
+    let y_primary = y_primary_selection();
     let winner = (0..hits.len())
         .max_by(|&a, &b| {
-            hits[a]
-                .psm
-                .rank_score
-                .total_cmp(&hits[b].psm.rank_score)
-                .then(
-                    hits[a]
-                        .glycan_key
-                        .y_ladder_intensity_score
-                        .total_cmp(&hits[b].glycan_key.y_ladder_intensity_score),
-                )
-                // lowest index wins a full tie (deterministic)
-                .then(b.cmp(&a))
+            collapse_cmp(
+                hits[a].psm.rank_score,
+                hits[a].glycan_key.y_ladder_intensity_score,
+                hits[b].psm.rank_score,
+                hits[b].glycan_key.y_ladder_intensity_score,
+                y_primary,
+            )
+            // lowest index wins a full tie (deterministic)
+            .then(b.cmp(&a))
         })
         .expect("non-empty");
     // Emit only if the scan's actual winner has an enumerated glycan; if the

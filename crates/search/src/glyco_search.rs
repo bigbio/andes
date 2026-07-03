@@ -35,7 +35,7 @@ use andes_glyco::backbone::{
     y0y1_anchor_intensity,
 };
 use andes_glyco::glycan_db::GlycanComp;
-use andes_glyco::glyco_psm::GlycoPsmKey;
+use andes_glyco::glyco_psm::{collapse_cmp, y_primary_selection, GlycoPsmKey};
 use andes_glyco::hybrid::{
     hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
 };
@@ -759,13 +759,15 @@ pub fn glyco_search_run(
                     // Precompute the ladder once per candidate (avoid O(n log n) recompute).
                     let scored: Vec<(&((u32, u8, u8, u8, u8, u8), CheapWinner), f32)> =
                         winners_for_features.iter().map(|e| (e, ladder(&e.1))).collect();
+                    // Collapse ordering is the SHARED `collapse_cmp` (single source
+                    // of truth with the PIN writer's select_emitted_hits). Default
+                    // = b/y rank primary; ANDES_GLYCO_SELECT=yladder = core-Y ladder
+                    // primary (targets the glyco ranking bottleneck).
+                    let y_primary = y_primary_selection();
                     let best = scored
                         .iter()
                         .max_by(|(ea, la), (eb, lb)| {
-                            ea.1
-                                .rank
-                                .total_cmp(&eb.1.rank)
-                                .then(la.total_cmp(lb))
+                            collapse_cmp(ea.1.rank, *la, eb.1.rank, *lb, y_primary)
                                 .then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
                         })
                         .map(|(e, _)| *e);

@@ -1,5 +1,12 @@
 # andes N-glycopeptide search — knowledge base & implementation roadmap
 
+> ⚠️ **READ [`LESSONS.md`](LESSONS.md) FIRST.** A 2026-07-03 session proved that
+> every glyco recovery number produced before it (the "~30% ceiling", the "2,288
+> PSMs") was a **measurement artifact** (un-collapsed multi-row PINs + mass-
+> preserving decoys). Done correctly (top-1-per-scan), andes yields **0 glyco-PSMs
+> @1% FDR**. Trust no glyco number whose eval harness you have not audited.
+
+
 > Single source of truth for the andes glyco effort: what we have, why it is
 > failing, what the field does, how we standardize masses/notations, which public
 > data we harvest, and the clean phased path to a shippable N-glyco search engine.

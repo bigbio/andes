@@ -72,3 +72,35 @@ ALL glyco features (the 2-pass Percolator re-collapse — use pass-1 Percolator'
 weights to re-pick the collapse winner from the top-K accepted candidates). The
 `--labels` training path + collapse_cmp refactor are kept (reusable); the SP-B
 rank-model arc is closed.
+
+## CORRECTION (2026-07-04) — the stage-0 "refutation" was CONFOUNDED; WITHDRAWN
+User pushback ("this has been mainly errors") + a Codex adversarial review +
+self-audit found the stage-0 A/B changed TWO variables: the glyco model had
+retrained frequencies AND an OWN-DERIVED geometry (train-from-search default),
+which COLLAPSED to 14 partitions on the sparse glyco-only corpus vs the seed's
+148. Re-ran with `ANDES_SEED_GEOMETRY=1` (frequencies-only):
+
+| model (leaky, the reference engine Fc3_r1 labels) | @1% FDR | backbone-correct | partitions |
+|---|---|---|---|
+| baseline DDA | 260 | 101 | bundled |
+| stage-0 glyco (own geometry) | 239 | 94 | 14 |
+| glyco (seed geometry) | 255 | 93 | 148 |
+
+Geometry fixed the COUNT (239→255 ≈ baseline) but backbone-correct stayed ~93
+(< 101). So glyco frequencies are NOT dramatically worse (that was a geometry
+artifact) but do NOT beat baseline on ranking either — inconclusive-leaning-
+negative, NOT a clean refutation. **The stage-0 conclusion is WITHDRAWN.**
+
+Still-uncontrolled confounds (Codex): single-engine (the reference engine) labels,
+post-Percolator @1% metric (not decoy-separated ranking separation), same-run
+label/eval overlap. A trustworthy call needs multi-dataset eval + multi-tool
+consensus truth + a ranking-separation metric. ⇒ Do the dataset harvest
+(PXD005411 a glyco search engine2, PXD016175 a glyco search engine2, PXD030670 a commercial glyco engine) FIRST, then re-test.
+Do NOT close the direction on current evidence.
+
+Review-found code bugs (fix before trusting any --labels result):
+- label ingestion has no duplicate-scan/charge/conflict guard (didn't bite here —
+  the reference engine export was 1-per-scan — but poisons on rank-alternative exports)
+- collapse_cmp is applied AFTER a rank-only truncation in glyco_search, so the
+  true ladder winner can be truncated before the shared comparator sees it
+- the fixed-mod decorator is residue-wide only (fine for Cam-C; wrong for TMT)

@@ -2879,7 +2879,14 @@ fn load_labels_from_tsv(
     };
 
     let mut labels = Vec::new();
+    // ONE label per spectrum: the accumulator must not tally the same spectrum
+    // multiple times (it would over-weight that spectrum's rank/edge/charge
+    // histograms). External glyco exports can carry rank alternatives or
+    // glycoform/site alternatives for one scan, so reject duplicate scans loudly
+    // rather than silently double-counting (Codex adversarial-review finding).
+    let mut seen_scans: std::collections::HashSet<i32> = std::collections::HashSet::new();
     let (mut miss_scan, mut miss_pep, mut miss_other) = (0usize, 0usize, 0usize);
+    let (mut dup_scan, mut charge_mismatch) = (0usize, 0usize);
     for line in lines {
         let f: Vec<&str> = line.split('\t').collect();
         if f.len() <= max_c {
@@ -2898,6 +2905,20 @@ fn load_labels_from_tsv(
             Some(&v) => v,
             None => { miss_scan += 1; continue; }
         };
+        if !seen_scans.insert(scan) {
+            // A second row for a scan already labeled: skip (keep the first).
+            dup_scan += 1;
+            continue;
+        }
+        // Charge cross-check: a label charge that disagrees with the spectrum's
+        // own precursor charge signals a stale annotation or a scan-mapping error
+        // — count it for visibility (the label charge is used for scoring, so a
+        // systematic mismatch means the corpus is built on the wrong spectra).
+        if let Some(spec_z) = spectra[idx].precursor_charge {
+            if spec_z != charge as i32 {
+                charge_mismatch += 1;
+            }
+        }
         let peptide = match Peptide::from_str(&decorate(f[pep_c].trim()), aa_set) {
             Ok(p) => p,
             Err(_) => { miss_pep += 1; continue; }
@@ -2910,14 +2931,23 @@ fn load_labels_from_tsv(
         });
     }
     eprintln!(
-        "train: loaded {} labels from {} ({} skipped: {} scan-not-found, {} unparseable-peptide, {} malformed)",
+        "train: loaded {} labels from {} ({} skipped: {} scan-not-found, {} dup-scan, {} unparseable-peptide, {} malformed; {} charge-mismatch vs mzML)",
         labels.len(),
         path.display(),
-        miss_scan + miss_pep + miss_other,
+        miss_scan + dup_scan + miss_pep + miss_other,
         miss_scan,
+        dup_scan,
         miss_pep,
         miss_other,
+        charge_mismatch,
     );
+    if charge_mismatch * 5 > labels.len().max(1) {
+        eprintln!(
+            "train: WARNING — {charge_mismatch} labels ({}%) disagree with the mzML precursor \
+             charge; the scan->spectrum mapping or the label charges may be wrong.",
+            charge_mismatch * 100 / labels.len().max(1),
+        );
+    }
     Ok(labels)
 }
 

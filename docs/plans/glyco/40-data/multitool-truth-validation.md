@@ -42,9 +42,29 @@ not conflicts — only 14 truly conflict.)
 - `mm_out/Task1GlycoSearchTask/…nglyco.psmtsv` — an open-source glyco engine PSMs.
 - `mm_nglyco.toml`, `mm_consensus.py`, `mk_consensus_truth.py` — reproducible.
 
+## Baseline re-scored vs both truths (2026-07-04)
+
+andes default (DDA model, honest defaults) on Fc3_r1, scored against each:
+
+| denominator | @1% FDR | scans hit | backbone-correct |
+|---|---|---|---|
+| full 523 (the reference engine) | 261 | 238 (45.5%) | 101 (19.3%) |
+| **196 (2-tool consensus)** | 261 | 112 (57.1%) | **51 (26.0%)** |
+
+andes scores HIGHER against the consensus (26.0% vs 19.3% backbone-correct) —
+the full 523 is dragged down by the 313 the reference engine-only scans an open-source glyco engine does
+not confirm (harder / less-certain). Baseline reproduces exactly (261/101 vs 523).
+
+**The ranking bottleneck, on trustworthy truth:** of the 112 consensus scans
+andes IDs @1% FDR, only 51 carry the correct backbone → **~54% of consensus-set
+IDs pick the WRONG backbone**. That (not generation) is the target for any
+ranking work. 84/196 consensus scans are missed @1% FDR entirely.
+
 **How to use going forward:** report glyco metrics against BOTH the full
 the reference engine truth (523) AND the 2-tool consensus (196). The consensus is the
-stricter, more trustworthy denominator for any ranking/SP-B claim. Open
+stricter, more trustworthy denominator for any ranking/SP-B claim. The honest
+SP-B target: lift consensus backbone-correct above 51/196 (train on independent
+an open-source glyco engine/consensus labels, seed geometry, measure here). Open
 questions: are the 313 the reference engine-only scans real (an open-source glyco engine under-sensitivity,
 likely — it found only 222 total) or truth inflation? Are the 12
 an open-source glyco engine-only real IDs the truth should gain? A third tool (a glyco search engine) would

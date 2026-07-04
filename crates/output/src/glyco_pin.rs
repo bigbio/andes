@@ -232,10 +232,20 @@ fn write_glyco_psm_row<W: Write>(
     // G2 Y0/Y1 anchor (additive, peptide-mass-conditioned). Same value on a
     // glycan-decoy row (it is a peptide-axis feature, independent of the glycan).
     write_double_tab(writer, key.y0y1_anchor_score as f64)?;
-    // GI-2 sialic consistency (composition-conditioned; same value on a glycan-decoy
-    // row since the shifted-ladder decoy keeps the composition — differs once
-    // isobaric-composition decoys land).
-    write_double_tab(writer, key.sialic_consistency as f64)?;
+    // GI-2 sialic consistency (composition-conditioned). On a glycan-decoy row we
+    // emit the NEGATED value: the decoy models an isobaric glycan whose sialic
+    // claim is flipped, and flipping each `±obs` term negates the whole score
+    // (`a + g` with `a = if neuac>0 {+obs} else {-obs}`). So a sialylated spectrum
+    // SUPPORTS the target's sialic claim (+high) and CONTRADICTS the decoy's
+    // (−high) — giving the glycan axis a real composition discriminator alongside
+    // the shifted Y-ladder (GI-2 part 2). For non-sialylated spectra obs≈0 → ≈0
+    // on both (no harm). Additive PIN feature; peptide axis unchanged.
+    let sialic = if is_glycan_decoy {
+        -key.sialic_consistency
+    } else {
+        key.sialic_consistency
+    };
+    write_double_tab(writer, sialic as f64)?;
 
     // Peptide column: backbone sequence + optional glycan tag.
     let glycan_tag = match &key.glycan {

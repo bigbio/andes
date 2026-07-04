@@ -98,6 +98,28 @@ consensus truth + a ranking-separation metric. ⇒ Do the dataset harvest
 (PXD005411 a glyco search engine2, PXD016175 a glyco search engine2, PXD030670 a commercial glyco engine) FIRST, then re-test.
 Do NOT close the direction on current evidence.
 
+## HONEST RE-TEST (2026-07-04) — SP-B rank model refuted, controls CLEAN
+Redid the test with every stage-0 confound controlled: seed geometry
+(`ANDES_SEED_GEOMETRY=1` → 148 partitions, no degeneration), held-out labels
+(the reference engine 8011 labels EXCLUDING the 196 consensus test scans → no test leakage),
+measured vs BOTH truths.
+
+| model | @1% FDR | vs 523 correct | vs 196 correct |
+|---|---|---|---|
+| baseline DDA | 261 | 101 | 51 |
+| honest glyco rank model | 235 | 83 | 42 |
+
+Worse on EVERY metric, cleanly. **The SP-B rank-model direction is now honestly
+refuted** (the earlier confounded 239 is superseded; this is the trustworthy
+verdict). Reason: the DDA rank model carries RICH b/y intensity-rank statistics
+from non-glyco spectra; glyco b/y are SPARSE, so training the rank model only on
+glyco data yields NOISIER per-rank vectors, not better ones. You cannot learn
+better b/y ranking from a signal that is barely present. The discriminative
+"which backbone" information is in Y-ladder + oxonium + multi-feature — which a
+single b/y rank model structurally cannot capture. ⇒ Only remaining ranking
+lever = the 2-pass Percolator re-collapse (learned MULTI-feature collapse score).
+The `--labels` path + an open-source glyco engine oracle stay as reusable infra.
+
 Review-found code bugs (fix before trusting any --labels result):
 - label ingestion has no duplicate-scan/charge/conflict guard (didn't bite here —
   the reference engine export was 1-per-scan — but poisons on rank-alternative exports)

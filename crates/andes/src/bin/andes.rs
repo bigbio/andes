@@ -507,6 +507,18 @@ struct TrainFromSearchArgs {
     #[arg(long)]
     database: Option<PathBuf>,
 
+    /// EXTERNAL LABELS (SP-B glyco training): a TSV with columns `scan`,
+    /// `peptide`, `charge`. When given, labels come from this file instead of a
+    /// seed search (`bootstrap_labels`), and `--database` is not required. The
+    /// `peptide` is the BARE backbone sequence (the glycan is stripped — the
+    /// rank model scores backbone b/y ions, which in HCD come from the
+    /// deglycosylated backbone); Cam-C and any `--mods` are applied via the
+    /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
+    /// fails to parse are skipped. Use to train a glyco-regime rank model from
+    /// the reference engine/a glyco search engine backbone IDs (see docs/plans/glyco/50-roadmap/spb-design.md).
+    #[arg(long = "labels")]
+    labels: Option<PathBuf>,
+
     /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
     /// When omitted, the bundled `hcd_qexactive_tryp` model is used as the seed.
     #[arg(long = "seed-model")]
@@ -2810,6 +2822,84 @@ fn build_train_search_params(
 ///
 /// When `args.update_model` is set, runs in incremental update mode (Part D).
 /// Otherwise runs the standard initial-training pipeline (Part A).
+/// Load external training labels from a `scan\tpeptide\tcharge` TSV (SP-B glyco
+/// training). Column order is discovered from the header (case-insensitive), so
+/// extra columns are ignored. The peptide is parsed with `aa_set` (Cam-C + any
+/// `--mods` applied). Rows with an unknown scan or an unparseable peptide/charge
+/// are skipped and counted. `confidence` is set to 0.0 (labels are pre-filtered
+/// by the external engine; the value is unused by the accumulator).
+fn load_labels_from_tsv(
+    path: &std::path::Path,
+    spectra: &[model::spectrum::Spectrum],
+    aa_set: &model::aa_set::AminoAcidSet,
+) -> Result<Vec<model_train::labeled::LabeledMatch>, Box<dyn std::error::Error>> {
+    use model::peptide::Peptide;
+    use std::collections::HashMap;
+
+    let mut scan_to_idx: HashMap<i32, usize> = HashMap::new();
+    for (i, s) in spectra.iter().enumerate() {
+        if let Some(sc) = s.scan {
+            scan_to_idx.entry(sc).or_insert(i);
+        }
+    }
+
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading labels {}: {e}", path.display()))?;
+    let mut lines = text.lines();
+    let header = lines.next().ok_or("labels file is empty")?;
+    let cols: Vec<String> = header.split('\t').map(|c| c.trim().to_ascii_lowercase()).collect();
+    let col = |names: &[&str]| -> Option<usize> {
+        cols.iter().position(|c| names.iter().any(|n| c == n))
+    };
+    let scan_c = col(&["scan", "scannr", "scan_number"]).ok_or("labels: no scan column")?;
+    let pep_c = col(&["peptide", "backbone", "sequence", "peptide_sequence"])
+        .ok_or("labels: no peptide column")?;
+    let chg_c = col(&["charge", "z", "precursor_charge"]).ok_or("labels: no charge column")?;
+    let max_c = scan_c.max(pep_c).max(chg_c);
+
+    let mut labels = Vec::new();
+    let (mut miss_scan, mut miss_pep, mut miss_other) = (0usize, 0usize, 0usize);
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() <= max_c {
+            miss_other += 1;
+            continue;
+        }
+        let scan: i32 = match f[scan_c].trim().parse() {
+            Ok(v) => v,
+            Err(_) => { miss_other += 1; continue; }
+        };
+        let charge: u8 = match f[chg_c].trim().parse() {
+            Ok(v) => v,
+            Err(_) => { miss_other += 1; continue; }
+        };
+        let idx = match scan_to_idx.get(&scan) {
+            Some(&v) => v,
+            None => { miss_scan += 1; continue; }
+        };
+        let peptide = match Peptide::from_str(f[pep_c].trim(), aa_set) {
+            Ok(p) => p,
+            Err(_) => { miss_pep += 1; continue; }
+        };
+        labels.push(model_train::labeled::LabeledMatch {
+            spectrum_index: idx,
+            peptide,
+            charge,
+            confidence: 0.0,
+        });
+    }
+    eprintln!(
+        "train: loaded {} labels from {} ({} skipped: {} scan-not-found, {} unparseable-peptide, {} malformed)",
+        labels.len(),
+        path.display(),
+        miss_scan + miss_pep + miss_other,
+        miss_scan,
+        miss_pep,
+        miss_other,
+    );
+    Ok(labels)
+}
+
 fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = std::time::Instant::now();
 
@@ -2834,28 +2924,37 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
     let spectra = load_spectra_for_train(&spectra_path)?;
     eprintln!("train: loaded {} spectra", spectra.len());
 
-    let database = args.database.clone().ok_or("--database is required for initial training")?;
-
     // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
     let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
     eprintln!("train: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4-5. Build search params (charge span + NumMods) + bootstrap labels ───
-    let search_params = build_train_search_params(&args.mods)?;
-    eprintln!(
-        "train: running seed search (train-fdr = {}) ...",
-        args.train_fdr
-    );
-    let labels = bootstrap_labels(
-        &spectra,
-        &database,
-        &seed_scorer,
-        &search_params,
-        args.train_fdr,
-    )
-    .map_err(|e| format!("bootstrap_labels: {e}"))?;
-    eprintln!("train: {} confident labels at q <= {}", labels.len(), args.train_fdr);
+    // ── 4-5. Labels: external TSV (SP-B) OR a seed search (bootstrap) ──────────
+    let labels = if let Some(ref labels_path) = args.labels {
+        // SP-B glyco path: labels come from an external engine's backbone IDs.
+        // No seed search / database needed — the peptides are given directly.
+        let aa_set = build_aa_set(&args.mods)?;
+        load_labels_from_tsv(labels_path, &spectra, &aa_set)?
+    } else {
+        let database = args
+            .database
+            .clone()
+            .ok_or("--database is required for initial training (or pass --labels)")?;
+        let search_params = build_train_search_params(&args.mods)?;
+        eprintln!(
+            "train: running seed search (train-fdr = {}) ...",
+            args.train_fdr
+        );
+        bootstrap_labels(
+            &spectra,
+            &database,
+            &seed_scorer,
+            &search_params,
+            args.train_fdr,
+        )
+        .map_err(|e| format!("bootstrap_labels: {e}"))?
+    };
+    eprintln!("train: {} confident labels", labels.len());
 
     if labels.is_empty() {
         return Err(format!(

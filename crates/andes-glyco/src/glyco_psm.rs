@@ -13,12 +13,16 @@ use std::cmp::Ordering;
 /// The top-1-per-scan collapse (required for honest per-scan TDC FDR) keeps a
 /// single PSM per spectrum, so *which* backbone/glycan it keeps determines the
 /// recovered ID. Default (`false`) selects by the peptide b/y `rank_score`
-/// first. `ANDES_GLYCO_SELECT=yladder` selects by the core-Y ladder first: in
-/// glyco spectra the peptide backbone b/y series is suppressed (spectra are
-/// dominated by oxonium + Y-ions), making `rank_score` a noisy primary, whereas
-/// the core-Y ladder is the DIRECT evidence that a backbone MASS is correct (a
-/// wrong backbone mass produces no core-Y ladder). Making the ladder primary
-/// targets the ranking bottleneck (backbones are generated but out-selected).
+/// first. `ANDES_GLYCO_SELECT=yladder` selects by the core-Y ladder first.
+///
+/// EMPIRICAL RESULT (2026-07-04, PXD025455 Fc3_r1): ladder-primary is WORSE —
+/// 260→197 @1% FDR, 101→88 backbone-correct, PIN 1928→1284 rows. It promotes
+/// de-novo / mono-offset backbones that carry strong RAW core-Y but no
+/// enumerated glycan into the per-scan winner slot, where the enumerated-only
+/// filter then drops them, losing the scan. So b/y `rank_score` is NOT just
+/// noise; the default (rank primary, ladder tiebreak) is the better rule. Kept
+/// OFF-by-default as the scaffold for a future LEARNED b/y+Y combination (SP-B)
+/// — the real fix for the ranking bottleneck, not a hard primary swap.
 pub fn y_primary_selection() -> bool {
     std::env::var("ANDES_GLYCO_SELECT")
         .map(|v| v.eq_ignore_ascii_case("yladder"))

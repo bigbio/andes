@@ -5,6 +5,28 @@ the reference engine-nglycan ~197), glyco phase **~63→37 min (~1.75×)**. All 
 (top-1 collapse, enumerated-only, mass-preserving-decoy trap) fixed; Codex +
 CodeRabbit reviews applied.
 
+## Collapse-selection A/B (2026-07-04) — Y-ladder-primary REFUTED
+
+Hypothesis: the per-scan top-1 collapse picks by b/y `rank_score` primary, but
+b/y is suppressed in glyco spectra, so a wrong backbone out-selects the correct
+one on noisy b/y; making the core-Y ladder primary should recover them. Built a
+shared `collapse_cmp` (single source of truth for driver + PIN writer) gated by
+`ANDES_GLYCO_SELECT`, and A/B'd on PXD025455 Fc3_r1:
+
+| collapse key | @1% FDR | truth scans | backbone-correct | PIN rows |
+|---|---|---|---|---|
+| **rank primary (default)** | **260** | 237 | **101** | 1928 |
+| ladder primary | 197 | 174 | 88 | 1284 |
+
+**Refuted — ladder-primary is worse.** It promotes de-novo / mono-offset
+backbones with strong RAW core-Y but no enumerated glycan into the winner slot,
+where the enumerated-only filter drops them (PIN 1928→1284). So b/y `rank_score`
+is NOT just noise; rank-primary + ladder-tiebreak is the better rule. **Lesson:
+naive selection-key swaps are exhausted — the ranking bottleneck (gen ~80% vs
+top-1 ~19%) needs a LEARNED b/y+Y combination (SP-B), not a hand-picked primary.**
+The `collapse_cmp` refactor is kept (removes the driver/PIN duplication that
+Codex flagged); the yladder knob stays OFF-by-default as SP-B scaffolding.
+
 ## Self-review — issues I see in the current code (beyond Codex/CodeRabbit)
 
 | # | Issue | Severity | Note |

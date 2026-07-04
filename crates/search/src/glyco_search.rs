@@ -717,35 +717,27 @@ pub fn glyco_search_run(
             // is already bounded by `backbone_top_k`, so this cap can only grow,
             // never shrink, relative to the correctness requirement.
             let max_features = (effective_top_k * 2).max(accepted_backbones.len() * 4);
-            let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> = {
-                let mut v: Vec<_> = cheap_winners
-                    .into_iter()
-                    .filter(|(_, w)| accepted_backbones.contains(&w.bb_hit_idx))
-                    .collect();
-                // Deterministic total order: rank DESC via `total_cmp` (not
-                // partial_cmp-with-Equal-fallback), then gl_key ASC as the
-                // final tiebreak so truncation never depends on HashMap
-                // iteration order (BUG 4).
-                v.sort_by(|a, b| {
-                    b.1.rank
-                        .total_cmp(&a.1.rank)
-                        .then_with(|| a.0.cmp(&b.0))
-                });
-                v.truncate(max_features);
-                v
-            };
+            // Filter to accepted backbones ONCE (used by both the collapse and the
+            // diagnostic dump below).
+            let accepted_winners: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> = cheap_winners
+                .into_iter()
+                .filter(|(_, w)| accepted_backbones.contains(&w.bb_hit_idx))
+                .collect();
 
             // SPEED: reduce to the winner the PIN will actually emit BEFORE the
             // expensive compute_psm_features. CRITICAL (Codex review): the emitted
             // winner must be chosen by the SAME rule as the PIN writer's
-            // select_emitted_hits — rank DESC, then GLYCAN Y-ladder DESC. Competing
-            // glycan compositions on the SAME peptide have IDENTICAL b/y rank by
-            // construction, so a rank-only `first()` would emit an arbitrary glycan
-            // and defeat the Y-ladder/sialic discrimination. Compute the CHEAP
-            // Y-ladder for the candidates here (far cheaper than compute_psm_features)
-            // to break the rank tie correctly; gl_key breaks any full tie
-            // deterministically. Enumerated-only: a de-novo winner drops the scan
-            // (ANDES_GLYCO_DENOVO=1 keeps it); ANDES_GLYCO_ALL_HITS=1 keeps all.
+            // select_emitted_hits (the shared `collapse_cmp`) — and over the FULL
+            // accepted set, NOT a rank-truncated subset: under a finite
+            // `backbone_top_k` (default 50, exhaustive mode off), a pre-collapse
+            // rank-only truncation could drop the true collapse winner (a
+            // high-ladder candidate, or a rank-tie winner decided by YLadderScore)
+            // before the comparator sees it — defeating the shared ordering and
+            // the Y-ladder / re-collapse experiments (Codex: collapse-after-
+            // truncation). The cheap glycan Y-ladder (far cheaper than
+            // compute_psm_features) breaks the rank tie; gl_key breaks a full tie.
+            // Enumerated-only: a de-novo winner drops the scan (ANDES_GLYCO_DENOVO=1
+            // keeps it); ANDES_GLYCO_ALL_HITS=1 keeps the full multi-row dump.
             let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> =
                 if features_collapse {
                     let ladder = |w: &CheapWinner| -> f32 {
@@ -756,21 +748,19 @@ pub fn glyco_search_run(
                             None => core_y_intensity(&spec.peaks, bbn, tol_ppm) as f32,
                         }
                     };
-                    // Precompute the ladder once per candidate (avoid O(n log n) recompute).
-                    let scored: Vec<(&((u32, u8, u8, u8, u8, u8), CheapWinner), f32)> =
-                        winners_for_features.iter().map(|e| (e, ladder(&e.1))).collect();
                     // Collapse ordering is the SHARED `collapse_cmp` (single source
                     // of truth with the PIN writer's select_emitted_hits). Default
                     // = b/y rank primary; ANDES_GLYCO_SELECT=yladder = core-Y ladder
-                    // primary (targets the glyco ranking bottleneck).
+                    // primary. Selected over ALL accepted candidates (no truncation).
                     let y_primary = y_primary_selection();
-                    let best = scored
+                    let best = accepted_winners
                         .iter()
+                        .map(|e| (e, ladder(&e.1)))
                         .max_by(|(ea, la), (eb, lb)| {
                             collapse_cmp(ea.1.rank, *la, eb.1.rank, *lb, y_primary)
                                 .then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
                         })
-                        .map(|(e, _)| *e);
+                        .map(|(e, _)| e);
                     match best {
                         Some((gl_key, w)) => {
                             let is_enum = deduped_backbone[w.bb_hit_idx].glycan.is_some();
@@ -783,7 +773,15 @@ pub fn glyco_search_run(
                         None => Vec::new(),
                     }
                 } else {
-                    winners_for_features
+                    // Diagnostic multi-row dump (ANDES_GLYCO_ALL_HITS=1): rank-sort
+                    // + truncate to bound the row count. Deterministic total order:
+                    // rank DESC, then gl_key ASC (never HashMap iteration order).
+                    let mut v = accepted_winners;
+                    v.sort_by(|a, b| {
+                        b.1.rank.total_cmp(&a.1.rank).then_with(|| a.0.cmp(&b.0))
+                    });
+                    v.truncate(max_features);
+                    v
                 };
 
             let mut best_hits: HashMap<(u32, u8, u8, u8, u8, u8), FullGlycoPsm> =

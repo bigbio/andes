@@ -2905,8 +2905,16 @@ fn load_labels_from_tsv(
             Some(&v) => v,
             None => { miss_scan += 1; continue; }
         };
+        // Parse the peptide BEFORE the dedup guard: an unparseable/rank-alternative
+        // row must not "claim" the scan and cause a later VALID row for the same
+        // scan to be dropped as a duplicate (Codex + code-review finding — external
+        // exports can order a weaker alternative first).
+        let peptide = match Peptide::from_str(&decorate(f[pep_c].trim()), aa_set) {
+            Ok(p) => p,
+            Err(_) => { miss_pep += 1; continue; }
+        };
         if !seen_scans.insert(scan) {
-            // A second row for a scan already labeled: skip (keep the first).
+            // A second VALID row for a scan already labeled: skip (keep the first).
             dup_scan += 1;
             continue;
         }
@@ -2919,10 +2927,6 @@ fn load_labels_from_tsv(
                 charge_mismatch += 1;
             }
         }
-        let peptide = match Peptide::from_str(&decorate(f[pep_c].trim()), aa_set) {
-            Ok(p) => p,
-            Err(_) => { miss_pep += 1; continue; }
-        };
         labels.push(model_train::labeled::LabeledMatch {
             spectrum_index: idx,
             peptide,

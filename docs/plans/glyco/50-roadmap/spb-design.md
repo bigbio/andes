@@ -120,6 +120,39 @@ single b/y rank model structurally cannot capture. ⇒ Only remaining ranking
 lever = the 2-pass Percolator re-collapse (learned MULTI-feature collapse score).
 The `--labels` path + an open-source glyco engine oracle stay as reusable infra.
 
+## 2-PASS PERCOLATOR RE-COLLAPSE (2026-07-04) — worse; re-ranking avenue CLOSED
+The "last ranking lever": emit the full multi-row PIN (ANDES_GLYCO_ALL_HITS=1,
+~333k candidate rows / 3108 scans, ~107 cand/scan), pass-A Percolator discriminant
+over all candidates, re-collapse per scan by that discriminant, pass-B honest FDR.
+
+| collapse selector | @1% FDR | vs 523 correct | vs 196 correct |
+|---|---|---|---|
+| rank_score (baseline) | 261 | 101 | 51 |
+| Percolator multi-feature discriminant | 259 | 85 | 43 |
+
+Worse. And the reason is FUNDAMENTAL, not an implementation detail: within a scan,
+ALL backbone candidates for a target peptide are labeled TARGET; the decoys are
+reversed PEPTIDES, not wrong BACKBONES. So the target/decoy discriminant learns
+"real peptide match vs reversed decoy" — it has NO signal for "which backbone is
+correct." Percolator (a target/decoy tool) structurally cannot solve within-scan
+backbone selection. Empirically plain rank_score (direct b/y match quality) beats
+the multi-feature discriminant as a per-scan selector.
+
+### Ranking-by-re-selection is now EXHAUSTED (all refuted, clean):
+- Y-ladder-primary collapse → 260→197
+- glyco b/y rank model (honest, controlled) → 51→42 (consensus)
+- 2-pass Percolator multi-feature re-collapse → 51→43 (consensus)
+
+rank_score is the best available per-scan selector; you cannot out-rank it by
+re-selecting from the SAME candidate set, because the correct-vs-wrong-backbone
+signal is neither in the sparse b/y NOR in the peptide target/decoy labels. The
+only remaining levers change the INPUTS, not the re-ranking:
+1. GENERATION — fewer wrong backbones competing per scan (tighter candidate gen),
+   so rank_score has fewer ways to be wrong.
+2. GLYCAN-AXIS decoys (GI-2 part 2) — an ISOBARIC-composition glycan decoy makes
+   the composition features discriminate glycan-correctness (a DIFFERENT
+   target/decoy axis than peptide reversal). The one untested lever.
+
 Review-found code bugs (fix before trusting any --labels result):
 - label ingestion has no duplicate-scan/charge/conflict guard (didn't bite here —
   the reference engine export was 1-per-scan — but poisons on rank-alternative exports)

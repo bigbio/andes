@@ -226,6 +226,11 @@ DOCUMENTED (not fixed; assessed impact):
 
 ROBUSTNESS VERDICT: the negative conclusions hold for all rank-primary experiments
 (baseline, SP-B rank model, 2-pass re-collapse, 2D-FDR). The ONE result to re-run
-under the truncation fix is the yladder-primary A/B (260→197) — but its mechanism
-(promotes de-novo/offset backbones dropped by enumerated-only) is independent of
-truncation, so a flip to "better" is unlikely. Re-run when the VM is back.
+under the truncation fix was the yladder-primary A/B.
+
+RE-RUN UNDER THE FIX (2026-07-04): confirmed. Rank-primary baseline reproduces
+EXACTLY (261 @1% FDR / 101 vs 523 / 51 vs 196) — the fix does not regress the
+default. Yladder-primary = 201 / 89 vs 523 / 46 vs 196 — still clearly worse than
+baseline (46 < 51 consensus). The fix nudged it (197→201) but did not flip the
+verdict. So EVERY negative conclusion now holds under the corrected collapse path;
+the review round is closed.

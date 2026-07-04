@@ -50,10 +50,13 @@ backbone-correctness gap is a STRUCTURAL ceiling (correct-vs-wrong-backbone sign
 is in neither sparse b/y nor TD labels), not a missing quick lever.
 
 ## Ideas not yet explored (ranked by leverage)
-- **B. Glyco fragment-intensity model** — predict expected b/y + Y-ladder +
-  oxonium intensities, score by spectral angle (Prosit-style). The principled
-  scoring fix the sparse per-fragment *rank* model couldn't be. Needs multi-dataset
-  training scale (idea G).
+- **B. Glyco fragment-intensity model (DESIGNED — see
+  `50-roadmap/glyco-intensity-model-design.md`)** — extend andes' existing
+  `train-intensity`/`IntensityModel`/strong-score machinery from `{b,y}` ions to
+  `{b, y, Y-ladder, oxonium}`, retrain on glyco, score each (peptide,glycan)
+  hypothesis by generative spectral-fit. The one lever the refutations don't touch
+  (it's a fit score, not ranking/TD). Reuses existing machinery; needs the harvest
+  (idea G) for training scale.
 - **A. Tighter generation** — fewer wrong backbones/scan (stricter core-Y quorum,
   precursor-mass refinement) so rank_score has fewer ways to be wrong. Attacks the
   bottleneck at the source; never A/B'd.

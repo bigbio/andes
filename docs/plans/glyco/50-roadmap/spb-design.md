@@ -153,6 +153,42 @@ only remaining levers change the INPUTS, not the re-ranking:
    the composition features discriminate glycan-correctness (a DIFFERENT
    target/decoy axis than peptide reversal). The one untested lever.
 
+## GI-2 PART 2 (2026-07-04) — separate glycan axis REFUTED (2 decoy versions)
+Added the negated-SialicConsistency glycan decoy (was YLadder-only) so the
+composition features discriminate. 2D-FDR still 0: all 261 peptide-axis passers
+fail the glycan axis, vs BOTH 523 and 196 truths.
+
+FUNDAMENTAL reason: a glycan-decoy row shares its PEPTIDE BACKBONE with the
+target, so all ~40 peptide features are IDENTICAL; only glycan-specific features
+can differ, and of those GlycanMass is isobaric (same), core-oxonium is
+composition-independent (same) — leaving just YLadderScore + SialicConsistency.
+Two (individually weak, sialic-only-for-sialylated) features cannot separate
+1127 target/decoy pairs at 1% FDR. A separate glycan axis is structurally
+underpowered for andes's feature set.
+
+AND it is redundant: the glycan features (YLadder, sialic, oxonium, GlycanMass)
+are already columns in the PEPTIDE-axis PIN, and on that axis a target vs its
+REVERSED-PEPTIDE decoy have DIFFERENT backbones → different glycan-by-subtraction
+→ those features DO discriminate. So glycan correctness is already partly
+controlled by the single peptide-axis FDR (the 261/101). Making the glycan axis
+work would need MANY more composition-specific features (per-composition oxonium,
+etc.) each with a decoy — a large feature-engineering effort, not a quick lever.
+
+## MORE-IDs INVESTIGATION — every identified lever now tested (summary)
+| lever | result |
+|---|---|
+| Y-ladder-primary collapse | worse (260→197) |
+| glyco b/y rank model (honest) | worse (51→42 consensus) |
+| 2-pass Percolator re-collapse | worse (51→43); TD can't rank within-scan backbones |
+| glycan-axis 2D-FDR (YLadder decoy) | 2D=0 |
+| glycan-axis 2D-FDR (+sialic decoy) | 2D=0 (only 2 features differ) |
+| generation | near-ceiling (~80% find-rate) |
+
+andes is at an architectural ceiling for this data: 261 @1% FDR (MORE than
+an open-source glyco engine's 222), truth validated by 2 engines, backbone-correct 101/523 &
+51/196. The remaining paths are LARGE (composition-feature engineering, better
+generation, learned models needing more labeled data), not quick levers.
+
 Review-found code bugs (fix before trusting any --labels result):
 - label ingestion has no duplicate-scan/charge/conflict guard (didn't bite here —
   the reference engine export was 1-per-scan — but poisons on rank-alternative exports)

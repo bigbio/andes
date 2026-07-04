@@ -2857,6 +2857,27 @@ fn load_labels_from_tsv(
     let chg_c = col(&["charge", "z", "precursor_charge"]).ok_or("labels: no charge column")?;
     let max_c = scan_c.max(pep_c).max(chg_c);
 
+    // Fixed-mod deltas (e.g. Cam-C 57.02146) from the aa_set: the label peptides
+    // are BARE sequences, so we annotate each fixed-mod residue with `+delta` and
+    // wrap in `-.SEQ.-` flanking so `Peptide::from_str` mass-matches the fixed
+    // variant (a bare `C` would otherwise parse as UNMODIFIED — wrong b/y masses).
+    // Variable mods (Ox-M) are left off: the label doesn't say which are modified,
+    // and the unmodified form is the correct default for the rank corpus.
+    let fixed_deltas: std::collections::HashMap<u8, f64> =
+        aa_set.fixed_mod_deltas().into_iter().collect();
+    let decorate = |seq: &str| -> String {
+        let mut d = String::with_capacity(seq.len() + 4);
+        d.push_str("-.");
+        for &b in seq.as_bytes() {
+            d.push(b as char);
+            if let Some(delta) = fixed_deltas.get(&b) {
+                d.push_str(&format!("+{:.5}", delta));
+            }
+        }
+        d.push_str(".-");
+        d
+    };
+
     let mut labels = Vec::new();
     let (mut miss_scan, mut miss_pep, mut miss_other) = (0usize, 0usize, 0usize);
     for line in lines {
@@ -2877,7 +2898,7 @@ fn load_labels_from_tsv(
             Some(&v) => v,
             None => { miss_scan += 1; continue; }
         };
-        let peptide = match Peptide::from_str(f[pep_c].trim(), aa_set) {
+        let peptide = match Peptide::from_str(&decorate(f[pep_c].trim()), aa_set) {
             Ok(p) => p,
             Err(_) => { miss_pep += 1; continue; }
         };

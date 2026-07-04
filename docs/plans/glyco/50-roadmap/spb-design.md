@@ -48,3 +48,27 @@ accumulate→estimate→store. Everything downstream (RankScorer, --model-id) re
 
 ## Success gate
 Stage 1 backbone-correct > 101 (and total @1% FDR ≥ 260) on Fc3_r1.
+
+## STAGE 0 RESULT (2026-07-04) — FAILED; direction refuted
+Trained a glyco rank model on the on-VM the reference engine Fc3_r1 backbone IDs
+(8136/8136 labels parsed, 14 partitions), re-searched Fc3_r1 with `--model`:
+
+| model | @1% FDR | truth scans | backbone-correct |
+|---|---|---|---|
+| DDA (baseline) | 260 | 237 | 101 |
+| glyco-trained (leaky) | 239 | 218 | 94 |
+
+**Worse — even leaky (train==test run).** So retraining the b/y RANK model does
+NOT fix the ranking bottleneck. The regime-mismatch hypothesis is refuted: the
+issue isn't a miscalibrated DDA model, it's that glyco b/y ions are
+fundamentally SPARSE — training on them yields NOISIER per-rank statistics, not
+better ones. Gate failed ⇒ stage 1 (PXD005411 download+train) is NOT worth it.
+
+**Combined with the collapse A/B**, two single-signal collapse fixes are now
+both dead: Y-ladder-primary (260→197) and glyco b/y rank model (260→239). The
+"which backbone" signal is split across b/y + Y-ladder + oxonium; no single one
+ranks. Remaining principled option: a LEARNED MULTI-FEATURE collapse score over
+ALL glyco features (the 2-pass Percolator re-collapse — use pass-1 Percolator's
+weights to re-pick the collapse winner from the top-K accepted candidates). The
+`--labels` training path + collapse_cmp refactor are kept (reusable); the SP-B
+rank-model arc is closed.

@@ -195,3 +195,37 @@ Review-found code bugs (fix before trusting any --labels result):
 - collapse_cmp is applied AFTER a rank-only truncation in glyco_search, so the
   true ladder winner can be truncated before the shared comparator sees it
 - the fixed-mod decorator is residue-wide only (fine for Cam-C; wrong for TMT)
+
+## REVIEW ROUND (2026-07-04) — CodeRabbit + Codex + local agent; fixes + robustness
+CodeRabbit: 0 findings. Codex: needs-attention (5). Local agent: 1 medium + confirmed
+non-bugs (sialic negation algebraically correct; collapse_cmp a proper total order).
+
+FIXED (commit d890fe8f):
+- [Codex+agent] `load_labels_from_tsv` marked a scan "seen" BEFORE parsing its
+  peptide → an unparseable first row poisoned a later valid row for the same scan.
+  Fixed (insert after parse). Did NOT affect SP-B: the the reference engine export was
+  verified 1-row-per-scan (0 duplicates), so it never triggered.
+- [Codex HIGH] Collapse winner was chosen from a rank-only TRUNCATED subset;
+  with exhaustive mode OFF by default (effective_top_k=50) a high-ladder/rank-tie
+  winner could be dropped before collapse_cmp. Fixed: select over the FULL accepted
+  set. Rank-primary experiments (baseline / SP-B / 2-pass / 2D-FDR) UNAFFECTED (the
+  rank-max always survived truncation); the **yladder-primary A/B warrants a re-run**
+  (its ladder-max could have been truncated) — pending VM access.
+
+DOCUMENTED (not fixed; assessed impact):
+- [Codex HIGH] isotope-factoring top_k truncation at the widest precursor: real but
+  the MEASURED real-data impact was ≤1 PSM (261→260 when factoring was introduced),
+  and the whole pipeline is capped at effective_top_k=50 anyway, so no NEW loss.
+- [Codex HIGH] `--labels` trained model writes SEED data_type (protocol/instrument
+  only affect model-id + ledger). Affects model-store AUTO-SELECTION, but every
+  experiment loaded via explicit `--model`, so it did NOT affect results. TODO for
+  bundled-store integration: set trained_param.data_type + an NGlyco selection key.
+- [Codex HIGH] "negated sialic is an artificial mirror decoy" — correct concern, but
+  MOOT: the glycan axis yields 0 IDs, so no q-value is ever calibrated from it; the
+  finding is that the axis is underpowered, which we already concluded.
+
+ROBUSTNESS VERDICT: the negative conclusions hold for all rank-primary experiments
+(baseline, SP-B rank model, 2-pass re-collapse, 2D-FDR). The ONE result to re-run
+under the truncation fix is the yladder-primary A/B (260→197) — but its mechanism
+(promotes de-novo/offset backbones dropped by enumerated-only) is independent of
+truncation, so a flip to "better" is unlikely. Re-run when the VM is back.

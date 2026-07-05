@@ -150,6 +150,36 @@ the honest conclusion is that andes is at its ceiling for THIS data/fragmentatio
 (HCD), and the real lever is orthogonal fragmentation (EThcD, idea C) or better
 GENERATION (idea A), not a richer HCD intensity model.
 
+## DECISIVE TEST (2026-07-05) — intensity model will NOT move the ranking bottleneck
+Ran the candidate-level measurement (`pattern_vs_sum.py`, real Fc3_r1 mzML peaks):
+for 222 correct PSMs, extracted the core-Y ladder for the CORRECT backbone vs a
+mass-shifted DECOY backbone, and compared how well the SUM (what andes uses) vs the
+PATTERN-fit (cosine to the learned template) separates them.
+
+| metric | correct>decoy rate | rescues SUM's failures |
+|---|---|---|
+| SUM (andes today) | 0.679 | — |
+| PATTERN-fit | 0.682 | 7/428 = 1.6% |
+
+IDENTICAL discrimination; the pattern rescues only 1.6% of the sum's failures (it
+fails in the SAME cases). Template = [Y0 0.055, Y1 0.128, Y2 0.014, Y3 0.009, Y4
+0.011, Y5 0.006] — the core-Y ladder is essentially Y0+Y1 (two ions); the higher
+rungs are ~0.01 (near-noise). There is NO rich intensity pattern to exploit.
+And the other ions don't help BACKBONE ranking: oxonium is backbone-INDEPENDENT (a
+mass-shifted backbone has identical oxonium), b/y are sparse.
+
+⇒ MEASURED CONCLUSION: a richer HCD glyco intensity model does NOT beat andes's
+existing YLadderScore for backbone ranking. The feasibility gates passed (ions
+learnable, model generalizes) but the discriminative signal is Y0+Y1, already
+captured. The intensity-model lever is CLOSED for the ranking bottleneck. andes is
+at its HCD ceiling (261 @1% FDR > an open-source glyco engine 222; 51/196 backbone-correct).
+
+The genuine remaining levers are NOT HCD scoring refinements:
+- **Orthogonal fragmentation (EThcD/ETD, idea C)** — c/z ions pin the backbone that
+  HCD's suppressed b/y + two-ion core-Y cannot. The real information gap.
+- **Better GENERATION (idea A)** — fewer wrong-backbone candidates per scan, so the
+  moderate (~68%) core-Y discrimination has fewer competitors to lose to.
+
 ## Staged plan + gates
 - **S1 — Data.** Harvest PXD005411/PXD016175/PXD030670 result tables; run the
   an open-source glyco engine oracle on 2–3 non-Fc3_r1 PXD025455 runs. Assemble a labeled

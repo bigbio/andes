@@ -52,6 +52,12 @@ pub struct BackboneHit {
     /// for the intact `CalcMass` rather than `glycan.map(|g| g.mass).unwrap_or(0.0)`,
     /// which silently reported the bare peptide for novel glycans.
     pub glycan_mass_residual: f64,
+    /// Cross-spectrum transfer provenance (inert for natively-generated hits).
+    pub is_transferred: bool,
+    pub transfer_graph_support: u32,
+    pub transfer_seed_score: f32,
+    pub transfer_rt_delta: f32,
+    pub transfer_ungated: bool,
 }
 
 /// DB-branch backbone enumeration.
@@ -79,6 +85,11 @@ pub fn db_branch(
                     // By construction bb = precursor − g.mass, so the observed
                     // residual is exactly the glycan mass.
                     glycan_mass_residual: precursor_neutral - bb,
+                    is_transferred: false,
+                    transfer_graph_support: 0,
+                    transfer_seed_score: 0.0,
+                    transfer_rt_delta: 0.0,
+                    transfer_ungated: false,
                 })
             } else {
                 None
@@ -307,6 +318,11 @@ pub fn hybrid_candidates_presolved(
             // Keep the observed residual even when annotation returned None so a
             // novel glycan's intact mass is not lost (Codex finding #3).
             glycan_mass_residual: residual,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         });
     }
 
@@ -958,5 +974,46 @@ mod tests {
         assert_ne!(Source::Transferred, Source::DeNovo);
         // clone + eq hold (derives intact)
         assert_eq!(Source::Transferred, Source::Transferred.clone());
+    }
+
+    /// Task 8a: `BackboneHit` must carry cross-spectrum transfer provenance
+    /// fields, inert (false/0/0.0) for natively-generated hits, so a
+    /// transferred backbone's provenance can reach the PIN via `GlycoPsmKey`.
+    #[test]
+    fn backbone_hit_carries_transfer_provenance_fields() {
+        let native = BackboneHit {
+            backbone_mass: 1500.0,
+            glycan: None,
+            source: Source::Db,
+            charge: 2,
+            isotope_offset: 0,
+            glycan_mass_residual: 892.317,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
+        };
+        assert!(!native.is_transferred);
+        assert_eq!(native.transfer_graph_support, 0);
+
+        let transferred = BackboneHit {
+            backbone_mass: 1500.0,
+            glycan: None,
+            source: Source::Transferred,
+            charge: 2,
+            isotope_offset: 0,
+            glycan_mass_residual: 892.317,
+            is_transferred: true,
+            transfer_graph_support: 5,
+            transfer_seed_score: 0.87,
+            transfer_rt_delta: 12.5,
+            transfer_ungated: true,
+        };
+        assert!(transferred.is_transferred);
+        assert_eq!(transferred.transfer_graph_support, 5);
+        assert_eq!(transferred.transfer_seed_score, 0.87);
+        assert_eq!(transferred.transfer_rt_delta, 12.5);
+        assert!(transferred.transfer_ungated);
     }
 }

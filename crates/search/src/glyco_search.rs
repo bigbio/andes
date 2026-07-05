@@ -472,6 +472,11 @@ pub fn glyco_search_run(
                                     charge: z,
                                     isotope_offset: iso,
                                     glycan_mass_residual: precursor_neutral - bb,
+                                    is_transferred: false,
+                                    transfer_graph_support: 0,
+                                    transfer_seed_score: 0.0,
+                                    transfer_rt_delta: 0.0,
+                                    transfer_ungated: false,
                                 });
                                 pf_added += 1;
                                 if pf_added >= max_peptide_first {
@@ -511,6 +516,11 @@ pub fn glyco_search_run(
                                 charge: z,
                                 isotope_offset: iso,
                                 glycan_mass_residual: g.mass,
+                                is_transferred: false,
+                                transfer_graph_support: 0,
+                                transfer_seed_score: 0.0,
+                                transfer_rt_delta: 0.0,
+                                transfer_ungated: false,
                             });
                         }
                     }
@@ -926,11 +936,11 @@ pub fn glyco_search_run(
                     core_y_hits: core_y_counts[w.bb_hit_idx],
                     glycan_mass,
                     backbone_mass: bb_neutral,
-                    is_transferred: false,
-                    transfer_graph_support: 0,
-                    transfer_seed_score: 0.0,
-                    transfer_rt_delta: 0.0,
-                    transfer_ungated: false,
+                    is_transferred: bb_hit.is_transferred,
+                    transfer_graph_support: bb_hit.transfer_graph_support,
+                    transfer_seed_score: bb_hit.transfer_seed_score,
+                    transfer_rt_delta: bb_hit.transfer_rt_delta,
+                    transfer_ungated: bb_hit.transfer_ungated,
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
@@ -1072,6 +1082,11 @@ pub fn glyco_search_run(
                             charge: z,
                             isotope_offset: iso,
                             glycan_mass_residual: pn - bb_obs,
+                            is_transferred: false,
+                            transfer_graph_support: 0,
+                            transfer_seed_score: 0.0,
+                            transfer_rt_delta: 0.0,
+                            transfer_ungated: false,
                         });
                     }
                 }
@@ -1255,6 +1270,11 @@ mod tests {
             charge: 3,
             isotope_offset: iso,
             glycan_mass_residual: residual,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         };
         // Two isotope hypotheses at the same backbone → both must survive.
         let out = dedup_backbone_hits(vec![mk(0, 892.317), mk(1, 891.313)], 20.0);

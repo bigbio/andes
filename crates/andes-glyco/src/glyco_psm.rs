@@ -81,6 +81,11 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     sialic_consistency: 0.0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
+///     is_transferred: false,
+///     transfer_graph_support: 0,
+///     transfer_seed_score: 0.0,
+///     transfer_rt_delta: 0.0,
+///     transfer_ungated: false,
 /// };
 /// assert_eq!(key.glycan_mass, 0.0);
 /// ```
@@ -119,6 +124,18 @@ pub struct GlycoPsmKey {
     pub glycan_mass: f64,
     /// Pre-computed monoisotopic mass of the peptide backbone.
     pub backbone_mass: f64,
+    /// Cross-spectrum transfer provenance + evidence (additive PIN features).
+    /// All inert (false/0) for natively-generated candidates.
+    pub is_transferred: bool,
+    /// # co-eluting, glycan-delta-linked sibling spectra corroborating this
+    /// backbone (the discriminative transfer signal).
+    pub transfer_graph_support: u32,
+    /// Pass-1 discriminant of the donor seed.
+    pub transfer_seed_score: f32,
+    /// |RT(acceptor) − RT(seed)| seconds; 0 = perfect co-elution.
+    pub transfer_rt_delta: f32,
+    /// RT unavailable ⇒ co-elution gate skipped (distrust signal).
+    pub transfer_ungated: bool,
 }
 
 #[cfg(test)]
@@ -175,6 +192,11 @@ mod tests {
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         };
         assert_eq!(key.glycan_mass, 0.0);
         assert!(key.glycan.is_none());
@@ -204,6 +226,11 @@ mod tests {
             sialic_consistency: 0.2,
             core_y_hits: 5,
             backbone_mass: 1500.0,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         };
         assert!((key.glycan_mass - expected_mass).abs() < 1e-6);
         assert!(key.glycan.is_some());
@@ -224,8 +251,28 @@ mod tests {
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         };
         let cloned = key.clone();
         assert_eq!(cloned.spectrum_idx, key.spectrum_idx);
+    }
+
+    #[test]
+    fn glyco_psm_key_defaults_to_non_transferred() {
+        let key = GlycoPsmKey {
+            spectrum_idx: 0, glycan: None, glycan_source: Source::Db,
+            oxonium_summed_frac: 0.0, n_core_oxonium_ions: 0,
+            y_ladder_intensity_score: 0.0, y_ladder_decoy_score: 0.0,
+            y0y1_anchor_score: 0.0, sialic_consistency: 0.0, core_y_hits: 0,
+            glycan_mass: 0.0, backbone_mass: 0.0,
+            is_transferred: false, transfer_graph_support: 0,
+            transfer_seed_score: 0.0, transfer_rt_delta: 0.0, transfer_ungated: false,
+        };
+        assert!(!key.is_transferred);
+        assert_eq!(key.transfer_graph_support, 0);
     }
 }

@@ -922,6 +922,11 @@ pub fn glyco_search_run(
                     core_y_hits: core_y_counts[w.bb_hit_idx],
                     glycan_mass,
                     backbone_mass: bb_neutral,
+                    is_transferred: false,
+                    transfer_graph_support: 0,
+                    transfer_seed_score: 0.0,
+                    transfer_rt_delta: 0.0,
+                    transfer_ungated: false,
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
@@ -1289,6 +1294,11 @@ mod tests {
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         };
         let hit = FullGlycoPsm { glycan_key: key, psm };
         let cloned = hit.clone();

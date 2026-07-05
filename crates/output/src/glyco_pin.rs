@@ -563,6 +563,11 @@ mod tests {
             core_y_hits: 5,
             glycan_mass,
             backbone_mass: 1500.0,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         }
     }
 
@@ -738,6 +743,11 @@ mod tests {
             core_y_hits: 3,
             glycan_mass,
             backbone_mass: peptide_neutral_mass,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
@@ -862,6 +872,11 @@ mod tests {
             core_y_hits: 4,
             glycan_mass,
             backbone_mass: candidates[0].peptide.mass(),
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];

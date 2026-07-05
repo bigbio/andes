@@ -791,9 +791,12 @@ mod tests {
     }
 
     /// L1 (the core harness bug): the FDR PIN must emit ONE PSM per scan — the
-    /// top-1 TDC winner by rank_score. Emitting all ~4.5 (peptide×glycan)
-    /// alternatives fabricates the target/decoy balance and produced the fake
-    /// ~30% recovery. `select_emitted_hits(_, true)` must return only the best.
+    /// top-1 TDC winner by the shared `collapse_cmp`. Emitting all ~4.5
+    /// (peptide×glycan) alternatives fabricates the target/decoy balance and
+    /// produced the fake ~30% recovery. `select_emitted_hits(_, true)` must
+    /// return only the best. NOTE: the default collapse key is the core-Y ladder
+    /// (see `y_primary_selection`; +70% deterministic), so the winner is the
+    /// highest-`y_ladder` hit, with `rank_score` as the tiebreak.
     #[test]
     fn top1_collapse_keeps_only_the_best_hit_per_scan() {
         fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
@@ -803,15 +806,15 @@ mod tests {
         }
         let hits = vec![
             make_hit(5.0, 1.0),
-            make_hit(10.0, 0.5), // highest rank_score → the winner
-            make_hit(8.0, 2.0),
+            make_hit(10.0, 0.5),
+            make_hit(8.0, 2.0), // highest y_ladder → the winner (ladder-primary default)
         ];
-        assert_eq!(select_emitted_hits(&hits, true, false), vec![1], "collapse keeps top-1 by rank_score");
+        assert_eq!(select_emitted_hits(&hits, true, false), vec![2], "collapse keeps top-1 by y_ladder (default)");
         assert_eq!(select_emitted_hits(&hits, false, false).len(), 3, "diagnostic mode keeps all");
 
-        // Full tie on rank_score → break by YLadderScore, then lowest index.
-        let tied = vec![make_hit(7.0, 1.0), make_hit(7.0, 3.0), make_hit(7.0, 3.0)];
-        assert_eq!(select_emitted_hits(&tied, true, false), vec![1], "tie broken by YLadder then lowest index");
+        // Full tie on y_ladder → break by rank_score, then lowest index.
+        let tied = vec![make_hit(1.0, 7.0), make_hit(3.0, 7.0), make_hit(3.0, 7.0)];
+        assert_eq!(select_emitted_hits(&tied, true, false), vec![1], "tie broken by rank_score then lowest index");
     }
 
     /// GI-1: a de-novo hit (glycan = None, a bare mass residual) is NOT a glyco

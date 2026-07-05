@@ -113,6 +113,11 @@ fn write_glyco_header<W: Write>(
         "IsGlycanDb".to_string(),
         "Y0Y1Anchor".to_string(), // G2 peptide-mass anchor (additive, peptide-discriminating)
         "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
+        "IsTransferred".to_string(),        // cross-spectrum transfer provenance (additive)
+        "TransferGraphSupport".to_string(), // # corroborating co-eluting siblings
+        "TransferSeedScore".to_string(),    // donor seed Pass-1 discriminant
+        "TransferRTDelta".to_string(),      // |RT(acceptor)-RT(seed)| seconds
+        "TransferUngated".to_string(),      // 1 = RT gate skipped (no RT)
         // Terminal columns
         "Peptide".to_string(),
         "Proteins".to_string(),
@@ -246,6 +251,14 @@ fn write_glyco_psm_row<W: Write>(
         key.sialic_consistency
     };
     write_double_tab(writer, sialic as f64)?;
+
+    // Transfer columns (additive; inert 0 for native candidates). Bools mirror
+    // the `is_glycan_db` 1/0 idiom above; numerics use write_double_tab.
+    write!(writer, "\t{}", if key.is_transferred { 1 } else { 0 })?;
+    write_double_tab(writer, key.transfer_graph_support as f64)?;
+    write_double_tab(writer, key.transfer_seed_score as f64)?;
+    write_double_tab(writer, key.transfer_rt_delta as f64)?;
+    write!(writer, "\t{}", if key.transfer_ungated { 1 } else { 0 })?;
 
     // Peptide column: backbone sequence + optional glycan tag.
     let glycan_tag = match &key.glycan {
@@ -587,6 +600,20 @@ mod tests {
         assert!(header.contains("IsGlycanDb"), "header missing IsGlycanDb");
         assert!(header.contains("Peptide"), "header missing Peptide");
         assert!(header.contains("Proteins"), "header missing Proteins");
+    }
+
+    #[test]
+    fn glyco_pin_header_has_transfer_columns_after_sialic() {
+        let mut buf = Vec::new();
+        write_glyco_header(&mut buf, 2, 4).unwrap();
+        let header = String::from_utf8(buf).unwrap();
+        let cols: Vec<&str> = header.trim().split('\t').collect();
+        for c in ["IsTransferred","TransferGraphSupport","TransferSeedScore","TransferRTDelta","TransferUngated"] {
+            assert!(cols.contains(&c), "header missing {c}");
+        }
+        let pos = |c: &str| cols.iter().position(|&h| h == c).unwrap();
+        assert!(pos("SialicConsistency") < pos("IsTransferred"));
+        assert!(pos("TransferUngated") < pos("Peptide"));
     }
 
     #[test]

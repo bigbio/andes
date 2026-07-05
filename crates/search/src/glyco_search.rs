@@ -123,6 +123,21 @@ fn glycan_decoy_seed(g: &GlycanComp) -> u64 {
     s
 }
 
+/// Order peptide-first candidates for the per-spectrum cap: strongest b/y
+/// support first, ties broken by the unique candidate index.
+///
+/// DETERMINISM (critical): `frag_index.query` returns `(cand_idx, match_count)`
+/// pairs in an internally-unordered Vec. Sorting by `match_count` ALONE with an
+/// unstable sort leaves tied-count peptides in a non-deterministic order, and
+/// the downstream per-spectrum cap then keeps a different subset of tied
+/// peptides each run. Because the glyco target/decoy separation is marginal,
+/// that ~2% per-scan candidate jitter swung Percolator @1% FDR by ~40%
+/// run-to-run. The unique `cand_idx` secondary key makes the comparator a TOTAL
+/// order, so the sorted result — and thus the capped subset — is reproducible.
+fn order_peptide_first(pf: &mut [(u32, u32)]) {
+    pf.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+}
+
 fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<BackboneHit> {
     if all_backbone.is_empty() {
         return Vec::new();
@@ -412,16 +427,10 @@ pub fn glyco_search_run(
                 // count — so high-count peptides that cannot form a known glycan
                 // don't evict a lower-count peptide that can (Codex re-review #1).
                 let mut pf = frag_index.query(&spec.peaks, MIN_BY_MATCHES);
-                // DETERMINISM (critical): `query` returns candidates in an
-                // internally-unordered Vec, so sorting by the b/y count ALONE with
-                // an unstable sort leaves tied-count peptides in a NON-deterministic
-                // order — and the per-spectrum cap (`break 'pf` below) then keeps a
-                // different subset of tied peptides each run. That injected ~2%
-                // per-scan candidate jitter which, because the glyco target/decoy
-                // separation is marginal, swung Percolator @1% FDR by ~40%
-                // run-to-run. Break count ties by the unique candidate index for a
-                // total, reproducible order.
-                pf.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                // Deterministic strongest-b/y-first order (see order_peptide_first):
+                // the per-spectrum cap below keeps a prefix of this list, so a
+                // non-total order would make the kept subset non-reproducible.
+                order_peptide_first(&mut pf);
                 let mut pf_added = 0usize;
                 'pf: for (cand_idx, _n) in pf {
                     let pep_residue = candidates[cand_idx as usize].peptide.mass() - H2O;
@@ -1080,6 +1089,53 @@ mod tests {
     //
     // Smoke test: verify the public types compile and are accessible.
     use super::*;
+
+    /// DETERMINISM regression (the 40%-FDR-swing bug): `frag_index.query`
+    /// returns `(cand_idx, match_count)` pairs in an unspecified order. The
+    /// per-spectrum cap keeps only a PREFIX of the ordered list, so if the
+    /// ordering is not a TOTAL order, tied-count peptides land in a run-dependent
+    /// order and the capped subset differs run-to-run. This test feeds the same
+    /// candidates in several different input orders (as `query` legitimately may)
+    /// and asserts `order_peptide_first` collapses them all to one identical
+    /// order — including a stable resolution of ties by `cand_idx`.
+    #[test]
+    fn order_peptide_first_is_deterministic_across_input_orders() {
+        // Two peptides tied at count 9, two tied at 7, one unique at 5 — the
+        // tied groups are where a single-key sort would be non-deterministic.
+        let canonical = vec![
+            (3u32, 9u32),
+            (8u32, 9u32),
+            (1u32, 7u32),
+            (5u32, 7u32),
+            (2u32, 5u32),
+        ];
+
+        // A few representative permutations of the SAME multiset of candidates.
+        let permutations = vec![
+            vec![(8, 9), (5, 7), (2, 5), (3, 9), (1, 7)],
+            vec![(1, 7), (3, 9), (2, 5), (8, 9), (5, 7)],
+            vec![(2, 5), (1, 7), (5, 7), (8, 9), (3, 9)],
+            vec![(5, 7), (8, 9), (3, 9), (1, 7), (2, 5)],
+        ];
+
+        for perm in permutations {
+            let mut got = perm.clone();
+            order_peptide_first(&mut got);
+            assert_eq!(
+                got, canonical,
+                "input order {perm:?} must collapse to the canonical strongest-first, \
+                 cand_idx-tiebroken order"
+            );
+        }
+
+        // Explicitly document the invariant: counts descending; within an equal
+        // count, cand_idx ascending.
+        assert_eq!(
+            canonical,
+            vec![(3, 9), (8, 9), (1, 7), (5, 7), (2, 5)],
+            "count DESC, then cand_idx ASC"
+        );
+    }
 
     /// Isotope-sweep GLYCAN ANNOTATION regression. Under the Y-ion-first
     /// cascade the backbone is read from the core-Y ladder and is therefore

@@ -412,7 +412,16 @@ pub fn glyco_search_run(
                 // count — so high-count peptides that cannot form a known glycan
                 // don't evict a lower-count peptide that can (Codex re-review #1).
                 let mut pf = frag_index.query(&spec.peaks, MIN_BY_MATCHES);
-                pf.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                // DETERMINISM (critical): `query` returns candidates in an
+                // internally-unordered Vec, so sorting by the b/y count ALONE with
+                // an unstable sort leaves tied-count peptides in a NON-deterministic
+                // order — and the per-spectrum cap (`break 'pf` below) then keeps a
+                // different subset of tied peptides each run. That injected ~2%
+                // per-scan candidate jitter which, because the glyco target/decoy
+                // separation is marginal, swung Percolator @1% FDR by ~40%
+                // run-to-run. Break count ties by the unique candidate index for a
+                // total, reproducible order.
+                pf.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 let mut pf_added = 0usize;
                 'pf: for (cand_idx, _n) in pf {
                     let pep_residue = candidates[cand_idx as usize].peptide.mass() - H2O;

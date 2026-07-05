@@ -18,6 +18,8 @@ use std::thread;
 
 #[path = "../rescore.rs"]
 mod rescore;
+#[path = "../glyco_seeds.rs"]
+mod glyco_seeds;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{

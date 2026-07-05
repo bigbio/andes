@@ -50,13 +50,14 @@ backbone-correctness gap is a STRUCTURAL ceiling (correct-vs-wrong-backbone sign
 is in neither sparse b/y nor TD labels), not a missing quick lever.
 
 ## Ideas not yet explored (ranked by leverage)
-- **B. Glyco fragment-intensity model (DESIGNED — see
-  `50-roadmap/glyco-intensity-model-design.md`)** — extend andes' existing
-  `train-intensity`/`IntensityModel`/strong-score machinery from `{b,y}` ions to
-  `{b, y, Y-ladder, oxonium}`, retrain on glyco, score each (peptide,glycan)
-  hypothesis by generative spectral-fit. The one lever the refutations don't touch
-  (it's a fit score, not ranking/TD). Reuses existing machinery; needs the harvest
-  (idea G) for training scale.
+- **B. Glyco fragment-intensity model — TESTED & CLOSED (2026-07-05, see
+  `50-roadmap/glyco-intensity-model-design.md`).** Feasibility passed (glyco ions
+  learnable CV~0.1, model generalizes cross-run cosine 0.989) BUT the decisive
+  candidate-level test refuted it for RANKING: core-Y PATTERN-fit vs SUM = identical
+  discrimination (0.679 vs 0.682), pattern rescues 1.6% of sum's failures. The
+  discriminative core-Y ladder is Y0+Y1 (2 ions, already summed); higher rungs
+  ~noise; oxonium is backbone-independent. A richer HCD intensity model does NOT
+  beat existing YLadderScore. andes at HCD ceiling.
 - **A. Tighter generation** — fewer wrong backbones/scan (stricter core-Y quorum,
   precursor-mass refinement) so rank_score has fewer ways to be wrong. Attacks the
   bottleneck at the source; never A/B'd.

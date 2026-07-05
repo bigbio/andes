@@ -323,8 +323,15 @@ pub fn glyco_search_run(
     // (identifiable backbones carry several b/y ions).
     const MIN_BY_MATCHES: u32 = 6;
     // Hard cap on peptide-first candidates per spectrum (strongest b/y support
-    // first) so a peak-dense spectrum can't blow up phase-1 scoring.
-    const MAX_PEPTIDE_FIRST: usize = 64;
+    // first) so a peak-dense spectrum can't blow up phase-1 scoring. Overridable
+    // via ANDES_GLYCO_MAX_PF for cap-sensitivity A/Bs — the deterministic
+    // collapse now keeps a fixed subset under this cap, so raising it tests
+    // whether good backbones are being truncated away. Default 64 (unchanged).
+    let max_peptide_first: usize = std::env::var("ANDES_GLYCO_MAX_PF")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(64);
 
     // Per-spectrum processing, reused across both passes. `transfer` holds extra
     // backbones injected by cross-spectrum transfer (empty on pass 1).
@@ -463,7 +470,7 @@ pub fn glyco_search_run(
                                     glycan_mass_residual: precursor_neutral - bb,
                                 });
                                 pf_added += 1;
-                                if pf_added >= MAX_PEPTIDE_FIRST {
+                                if pf_added >= max_peptide_first {
                                     break 'pf;
                                 }
                             }

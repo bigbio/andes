@@ -336,6 +336,15 @@ pub fn glyco_search_run(
                 Some(z) if z > 0 => vec![z as u8],
                 _ => params.charge_range.clone().collect(),
             };
+            // Max fragment charge for Y-ladder matching: a fragment cannot exceed
+            // the precursor charge, and glyco Y-ions are frequently 2+/3+ (matched
+            // up to +3 inside the Y functions). Default 3 when the precursor charge
+            // is unknown.
+            let max_frag_charge: u8 = spec
+                .precursor_charge
+                .filter(|&z| z > 0)
+                .map(|z| z as u8)
+                .unwrap_or(3);
 
             // Gather backbone hits across all charges AND all isotope offsets,
             // then union+dedup. Mirrors the standard search path's
@@ -524,7 +533,7 @@ pub fn glyco_search_run(
             // measured near-noise. Phase-1 convention fix.)
             let core_y_counts: Vec<u8> = deduped_backbone
                 .iter()
-                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass + H2O, tol_ppm))
+                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass + H2O, tol_ppm, max_frag_charge))
                 .collect();
 
             // Phase 1: cheap b/y scoring for ALL backbones.
@@ -744,8 +753,8 @@ pub fn glyco_search_run(
                         let bb = &deduped_backbone[w.bb_hit_idx];
                         let bbn = bb.backbone_mass + H2O;
                         match &bb.glycan {
-                            Some(g) => glycan_y_intensity(&spec.peaks, bbn, g, tol_ppm) as f32,
-                            None => core_y_intensity(&spec.peaks, bbn, tol_ppm) as f32,
+                            Some(g) => glycan_y_intensity(&spec.peaks, bbn, g, tol_ppm, max_frag_charge) as f32,
+                            None => core_y_intensity(&spec.peaks, bbn, tol_ppm, max_frag_charge) as f32,
                         }
                     };
                     // Collapse ordering is the SHARED `collapse_cmp` (single source
@@ -849,8 +858,8 @@ pub fn glyco_search_run(
                     // glycan fall back to the composition-independent core-Y
                     // ladder. (Was hardcoded 0.0 = dead before Phase 1.)
                     y_ladder_intensity_score: match &bb_hit.glycan {
-                        Some(g) => glycan_y_intensity(&spec.peaks, bb_neutral, g, tol_ppm) as f32,
-                        None => core_y_intensity(&spec.peaks, bb_neutral, tol_ppm) as f32,
+                        Some(g) => glycan_y_intensity(&spec.peaks, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
+                        None => core_y_intensity(&spec.peaks, bb_neutral, tol_ppm, max_frag_charge) as f32,
                     },
                     // Glycan-axis decoy ladder (G3): same composition, intermediate
                     // Y-rungs shifted. Seed from the composition so the decoy ladder
@@ -1263,8 +1272,8 @@ mod tests {
         let tol_ppm = 20.0;
 
         // Verify counts directly.
-        let true_hits = count_core_y_hits(&peaks, true_bb, tol_ppm);
-        let noise_hits = count_core_y_hits(&peaks, noise_bb, tol_ppm);
+        let true_hits = count_core_y_hits(&peaks, true_bb, tol_ppm, 3);
+        let noise_hits = count_core_y_hits(&peaks, noise_bb, tol_ppm, 3);
 
         assert_eq!(true_hits, 6, "expected all 6 core-Y hits for true_bb, got {}", true_hits);
         assert_eq!(noise_hits, 0, "expected 0 core-Y hits for noise_bb, got {}", noise_hits);

@@ -389,7 +389,7 @@ pub fn hybrid_candidates_presolved(
     if y_first_has_evidence && deduped.len() > top_k {
         let mut scored: Vec<(f64, BackboneHit)> = deduped
             .into_iter()
-            .map(|h| (core_y_intensity(peaks, h.backbone_mass + H2O, tol_ppm), h))
+            .map(|h| (core_y_intensity(peaks, h.backbone_mass + H2O, tol_ppm, precursor_z), h))
             .collect();
         scored.sort_by(|a, b| {
             // DET-1: total_cmp on the intensity primary key (was partial_cmp +

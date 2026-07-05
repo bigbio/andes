@@ -19,6 +19,40 @@
 
 use crate::glycan_db::GlycanComp;
 
+/// A glyco-candidate spectrum as a graph node.
+#[derive(Debug, Clone)]
+pub struct GlycoNode {
+    pub scan: u32,
+    pub precursor_neutral: f64,
+    pub rt_seconds: Option<f64>,
+}
+
+/// A confident Pass-1 seed backbone to propagate. `peptide_idx` indexes the
+/// driver's candidate array so Pass-2 can re-score the exact peptide+mods.
+#[derive(Debug, Clone)]
+pub struct Seed {
+    pub scan: u32,
+    pub peptide_idx: u32,
+    pub backbone_mass: f64,
+    pub rt_seconds: Option<f64>,
+    pub seed_score: f64,
+    pub is_decoy: bool,
+}
+
+/// A backbone transferred onto an acceptor spectrum, plus its graph evidence.
+#[derive(Debug, Clone)]
+pub struct TransferredCandidate {
+    pub acceptor_scan: u32,
+    pub peptide_idx: u32,
+    pub backbone_mass: f64,
+    pub glycan: GlycanComp,
+    pub graph_support: u32,
+    pub seed_score: f64,
+    pub rt_delta: f64,
+    pub ungated: bool,
+    pub is_decoy: bool,
+}
+
 /// One confident donor backbone plus the RETENTION-TIME window over which it (and
 /// its glycoform siblings) were observed. RT gating is what makes cross-spectrum
 /// transfer safe: a backbone may only be transferred to an acceptor spectrum that
@@ -212,5 +246,17 @@ mod tests {
             outside.is_empty(),
             "acceptor outside the RT window must NOT receive the transfer, got {outside:?}"
         );
+    }
+
+    #[test]
+    fn transfer_types_construct_and_clone() {
+        let g = crate::glycan_db::n_glycan_list()[0].clone();
+        let n = GlycoNode { scan: 5, precursor_neutral: 2000.0, rt_seconds: Some(900.0) };
+        let s = Seed { scan: 5, peptide_idx: 3, backbone_mass: 1500.0, rt_seconds: Some(900.0), seed_score: 2.5, is_decoy: false };
+        let t = TransferredCandidate { acceptor_scan: 7, peptide_idx: 3, backbone_mass: 1500.0,
+            glycan: g, graph_support: 4, seed_score: 2.5, rt_delta: 12.0, ungated: false, is_decoy: false };
+        assert_eq!(n.clone().scan, 5);
+        assert_eq!(s.clone().peptide_idx, 3);
+        assert_eq!(t.clone().graph_support, 4);
     }
 }

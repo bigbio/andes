@@ -150,7 +150,20 @@ the honest conclusion is that andes is at its ceiling for THIS data/fragmentatio
 (HCD), and the real lever is orthogonal fragmentation (EThcD, idea C) or better
 GENERATION (idea A), not a richer HCD intensity model.
 
-## DECISIVE TEST (2026-07-05) — intensity model will NOT move the ranking bottleneck
+## ⚠ CONCLUSION REOPENED (2026-07-05, Codex adversarial review)
+The "decisive test" below is METHODOLOGICALLY FLAWED and does NOT close the lever:
+it compares the correct backbone to a SYNTHETIC mass-shifted decoy, but the design
+called for testing against andes's REAL alternative-backbone competitors — the
+specific wrong (backbone, glycan) splits of the same precursor that actually beat
+the correct backbone in the collapse (the 61 consensus losses). A random mass shift
+does not model those competitors. So `0.679 vs 0.682` does NOT prove the intensity
+model can't help ranking. TODO before trusting "single-spectrum exhausted": rerun
+pattern-vs-sum on the ACTUAL per-scan candidate sets (andes ALL_HITS emits them),
+specifically the 61 wrong-backbone consensus losses — does pattern-fit reorder
+those real competitors? Until then this conclusion is PROVISIONAL, not closed.
+
+## DECISIVE TEST (2026-07-05) — [SUPERSEDED: flawed decoy model, see above]
+### intensity model will NOT move the ranking bottleneck
 Ran the candidate-level measurement (`pattern_vs_sum.py`, real Fc3_r1 mzML peaks):
 for 222 correct PSMs, extracted the core-Y ladder for the CORRECT backbone vs a
 mass-shifted DECOY backbone, and compared how well the SUM (what andes uses) vs the

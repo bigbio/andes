@@ -79,3 +79,24 @@ is in neither sparse b/y nor TD labels), not a missing quick lever.
 - `collapse_cmp` shared collapse comparator; dual-truth recovery (`run_reeval.sh`);
   2-pass re-collapse scaffold (`recollapse.py`).
 - `truth_consensus.tsv` / `truth_196.tsv` on VM.
+
+## Foundation audit (2026-07-05) — before building cross-spectrum transfer
+Deep 4-agent audit + CodeRabbit + Codex, at the user's request ("verify masses /
+ion annotations / candidate generation / glycan DB are correct before a more
+complex idea").
+- **Mass constants** — ALL CORRECT (max deviation 4.66e-7 Da).
+- **Glycan DB** — CORRECT + complete; residue-sum mass formula (no water); all
+  common human N-glycans covered (2522 full / 612 common).
+- **Ion m/z annotations** — ALL CORRECT (oxonium, Y-ladder, Y0/Y1 anchor, b/y
+  complement); no water/proton errors. Coverage note: Y-ladder matched at +1 only
+  in 3/4 fns (multiply-charged Y unmatched — a find-rate opportunity, not a bug).
+- **Candidate gen + conventions** — emitted glycan-by-subtraction masses CORRECT
+  end-to-end. ONE confirmed bug FIXED (f0021d81): off-by-H2O MIN_GLYCAN gate dropped
+  de-novo minimal-core (2xHexNAc 406 Da) backbones.
+- **Reviews**: Codex reopened the intensity-model conclusion (its "decisive test"
+  used synthetic decoys, not real competitors — PROVISIONAL now). Minor: yladder
+  A/B pool b/y-censored; isotope not exact superset; decoy final-rung shift; sialic
+  +0 case; --labels seed metadata.
+Verdict: foundations are SOLID. Fix the H2O gate (done); the "single-spectrum
+exhausted" narrative is only PROVISIONAL until the intensity model is retested on
+real competitors. Cross-spectrum transfer is a sound next lever regardless.

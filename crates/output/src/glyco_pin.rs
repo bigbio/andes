@@ -338,8 +338,8 @@ pub(crate) fn select_emitted_hits(
     // REGARDLESS of enumeration (Codex: filtering first would promote a
     // 2nd-place enumerated hit when the real winner is de-novo, inflating IDs).
     // Ordering is the SHARED `collapse_cmp` (single source of truth with the
-    // driver's pre-feature reduction). Default = b/y rank primary;
-    // ANDES_GLYCO_SELECT=yladder = core-Y ladder primary.
+    // driver's pre-feature reduction). Default = core-Y ladder primary (+70%
+    // deterministic); ANDES_GLYCO_SELECT=rank forces the old b/y-rank primary.
     let y_primary = y_primary_selection();
     let winner = (0..hits.len())
         .max_by(|&a, &b| {

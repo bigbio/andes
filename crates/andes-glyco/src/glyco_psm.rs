@@ -12,21 +12,31 @@ use std::cmp::Ordering;
 ///
 /// The top-1-per-scan collapse (required for honest per-scan TDC FDR) keeps a
 /// single PSM per spectrum, so *which* backbone/glycan it keeps determines the
-/// recovered ID. Default (`false`) selects by the peptide b/y `rank_score`
-/// first. `ANDES_GLYCO_SELECT=yladder` selects by the core-Y ladder first.
+/// recovered ID. The DEFAULT selects by the core-Y ladder first (the reliable
+/// glyco evidence in HCD); `ANDES_GLYCO_SELECT=rank` forces the old peptide b/y
+/// `rank_score`-first rule (kept as an escape hatch for A/B and regression).
 ///
-/// EMPIRICAL RESULT (2026-07-04, PXD025455 Fc3_r1): ladder-primary is WORSE —
-/// 260→197 @1% FDR, 101→88 backbone-correct, PIN 1928→1284 rows. It promotes
-/// de-novo / mono-offset backbones that carry strong RAW core-Y but no
-/// enumerated glycan into the per-scan winner slot, where the enumerated-only
-/// filter then drops them, losing the scan. So b/y `rank_score` is NOT just
-/// noise; the default (rank primary, ladder tiebreak) is the better rule. Kept
-/// OFF-by-default as the scaffold for a future LEARNED b/y+Y combination (SP-B)
-/// — the real fix for the ranking bottleneck, not a hard primary swap.
+/// DETERMINISTIC RESULT (2026-07-05, PXD025455 Fc3_r1; clean1==clean2
+/// byte-identical): core-Y-ladder primary = 218 @1% FDR / 90 backbone-correct;
+/// b/y-rank primary = 128 / 53 — a +70% win. In stepped-HCD the peptide b/y
+/// ions are sparse and rank_score is noisy, so it lifts wrong backbones into the
+/// per-scan winner slot; the core-Y ladder is the stronger, more reliable
+/// evidence. The earlier "ladder is WORSE (260→197)" verdict was a
+/// NON-DETERMINISM artifact — it was measured on the pre-fix pipeline whose ±90
+/// run-to-run jitter swamped the real +90 signal (see order_peptide_first fix).
 pub fn y_primary_selection() -> bool {
-    std::env::var("ANDES_GLYCO_SELECT")
-        .map(|v| v.eq_ignore_ascii_case("yladder"))
-        .unwrap_or(false)
+    y_primary_from_env(std::env::var("ANDES_GLYCO_SELECT").ok().as_deref())
+}
+
+/// Pure decision for [`y_primary_selection`], split out so the default/override
+/// logic is testable without racing on a process-global env var.
+fn y_primary_from_env(v: Option<&str>) -> bool {
+    match v {
+        // Explicit escape hatch to the OLD b/y-rank-primary collapse.
+        Some(s) if s.eq_ignore_ascii_case("rank") || s.eq_ignore_ascii_case("byrank") => false,
+        // Unset, "yladder", or any other value → core-Y ladder primary (default).
+        _ => true,
+    }
 }
 
 /// Total order for the top-1-per-scan collapse: `max_by(collapse_cmp(...))`
@@ -115,6 +125,23 @@ pub struct GlycoPsmKey {
 mod tests {
     use super::*;
     use crate::glycan_mass::{HEX, HEXNAC};
+
+    #[test]
+    fn y_primary_default_is_yladder_and_rank_forces_off() {
+        // DETERMINISTIC RESULT (2026-07-05, PXD025455 Fc3_r1): core-Y-ladder
+        // primary collapse = 218 @1% / 90 bb-correct vs b/y-rank primary = 128 /
+        // 53 — a +70% win. The earlier "ladder is worse (260→197)" verdict was a
+        // non-determinism artifact. So the DEFAULT (env unset) is now yladder.
+        assert!(y_primary_from_env(None), "unset -> core-Y ladder primary (new default)");
+        assert!(y_primary_from_env(Some("yladder")), "explicit yladder -> true");
+        assert!(y_primary_from_env(Some("YLadder")), "case-insensitive");
+        // Escape hatch to force the OLD b/y-rank primary (for A/B / regression).
+        assert!(!y_primary_from_env(Some("rank")), "rank -> b/y-rank primary");
+        assert!(!y_primary_from_env(Some("byrank")), "byrank -> b/y-rank primary");
+        // Unknown values fall back to the default (yladder), not a silent error.
+        assert!(y_primary_from_env(Some("")), "empty -> default");
+        assert!(y_primary_from_env(Some("garbage")), "unknown -> default");
+    }
 
     #[test]
     fn collapse_cmp_default_ranks_by_rank_score_then_ladder() {

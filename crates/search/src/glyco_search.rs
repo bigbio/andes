@@ -777,8 +777,9 @@ pub fn glyco_search_run(
                     };
                     // Collapse ordering is the SHARED `collapse_cmp` (single source
                     // of truth with the PIN writer's select_emitted_hits). Default
-                    // = b/y rank primary; ANDES_GLYCO_SELECT=yladder = core-Y ladder
-                    // primary. Selected over ALL accepted candidates (no truncation).
+                    // = core-Y ladder primary (+70% deterministic, see
+                    // y_primary_selection); ANDES_GLYCO_SELECT=rank forces the old
+                    // b/y-rank primary. Selected over ALL accepted candidates.
                     let y_primary = y_primary_selection();
                     let best = accepted_winners
                         .iter()

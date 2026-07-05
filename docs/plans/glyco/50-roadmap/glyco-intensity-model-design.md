@@ -101,6 +101,55 @@ signal. Proceed to S1/S2 with confidence. (The Y-ladder / (M0−loss) ions carry
 BACKBONE-mass signal similarly; oxonium checked here as the composition-diagnostic
 half.)
 
+## S1 + S3 RESULTS (2026-07-05)
+S1 (clean data): stood up the oracle pipeline for a non-eval run — download
+`HCC_pool_Late_Fc5_r2.raw` → ThermoRawFileParser convert to mzML (the bundled
+Thermo license prompt crashes an open-source glyco engine non-interactively; conversion sidesteps
+it) → an open-source glyco engine N-glyco. Result: **154 confident N-glyco PSMs on Fc5_r2**
+(held-out-from-Fc3_r1 training data). Pipeline is now reusable (`run_s1_clean.sh`).
+
+S3 (cross-run calibration, oxonium): train per-glycan-class oxonium lookup on
+Fc5_r2, predict held-out Fc3_r1 → **cosine median 0.989 / mean 0.983 (n=222)**.
+STRONG cross-run generalization ⇒ a trained intensity model transfers.
+NUANCE: the class-AGNOSTIC baseline is 0.986 — nearly as high. The core oxonium
+profile is NEAR-UNIVERSAL across N-glyco spectra, so oxonium GENERALIZES but is
+only weakly class-DISCRIMINATIVE in cosine (the S0 discrimination is the binary
+presence/absence of the sialic markers, not a graded profile). ⇒ Oxonium confirms
+"glyco spectrum of ~this class"; it does NOT pick the backbone. The
+backbone-discriminative signal for the RANKING bottleneck is the Y-LADDER (peptide
++ glycan-loss ions) — must validate THAT next (S3b): does the predicted Y-ladder
+separate the correct backbone from wrong ones? That is the crux, not oxonium.
+
+S3b (Y-ladder learnability): the glycan-Y-ladder is present in 222/222 PSMs. The
+DOMINANT ion (full-glycan-loss → the Y1/backbone anchor) is reliable — present
+100%, CV ≈ 0.2–0.37 per composition. But the INTERMEDIATE ladder rungs are NOISY —
+CV ≈ 0.4–1.0+, present 40–100%. So: the backbone-ANCHOR ion (Y1) is learnable and
+reliable (good — it pins the backbone mass), but the full Y-ladder INTENSITY
+PATTERN is much noisier than oxonium.
+
+## HONEST ASSESSMENT (2026-07-05) — feasibility PASSES, net-new ranking value UNPROVEN
+The feasibility gates pass: glyco ions are learnable (S0), the model generalizes
+cross-run (S3, cosine 0.989), the clean-data pipeline works (S1, 154 PSMs). BUT the
+nuances stack into a real caveat for the RANKING bottleneck specifically:
+- Oxonium is NEAR-UNIVERSAL → confirms glyco-class, does NOT pick the backbone.
+- The Y-ladder's RELIABLE part (the Y1/backbone anchor) is ALREADY used by andes
+  (`glycan_y_intensity` / `YLadderScore` / the collapse tiebreak).
+- The Y-ladder PATTERN beyond the anchor is noisy → hard to model precisely.
+⇒ The signals are real and learnable, but much of the RELIABLE signal is ALREADY in
+andes's features. Whether a calibrated generative-fit BEATS the existing YLadderScore
+for backbone RANKING is UNPROVEN — it is not guaranteed by the feasibility results.
+
+THE decisive test (do BEFORE building the full model): for truth PSMs where andes
+generates the correct backbone but ranks it below a wrong one, does the Y-ladder
+PATTERN-FIT (spectral angle vs a learned per-class template) score the correct
+backbone ABOVE the wrong one MORE OFTEN than the current YLadderScore (sum) does?
+That is a candidate-level analysis on andes's own output (emit accepted backbones +
+their Y-ladder pattern-fit vs the truth). If yes → build S2–S5. If the pattern-fit
+does not out-separate the existing sum → the intensity model won't move 51/196, and
+the honest conclusion is that andes is at its ceiling for THIS data/fragmentation
+(HCD), and the real lever is orthogonal fragmentation (EThcD, idea C) or better
+GENERATION (idea A), not a richer HCD intensity model.
+
 ## Staged plan + gates
 - **S1 — Data.** Harvest PXD005411/PXD016175/PXD030670 result tables; run the
   an open-source glyco engine oracle on 2–3 non-Fc3_r1 PXD025455 runs. Assemble a labeled

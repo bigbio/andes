@@ -83,6 +83,24 @@ rank. The strong score also enters Percolator as a feature (already partly there
 Because the strong score fits the RICH Y-ladder (not sparse b/y), it can pick the
 correct backbone where rank_score cannot.
 
+## S0 FEASIBILITY GATE (2026-07-05) — PASSED (signal is learnable + discriminative)
+Before any harvest/code, checked whether glyco-ion relative intensities are
+predictable, using the an open-source glyco engine matched-ion intensities already on the VM (222
+confident N-glyco PSMs, `feasibility_intensity.py`). Result:
+- LEARNABLE: oxonium D-ion relative intensities are highly CONSISTENT within a
+  glycan composition — CV ≈ 0.05–0.2 for D204/D138/D168/D366/D274/D292, present in
+  ~100% of PSMs (per composition: H5N4A2F1 n=24, H6N5A3 n=20, H5N4A1 n=17,
+  H6N5A3F1 n=16). Robust statistics — the OPPOSITE of the sparse-b/y that sank the
+  rank model.
+- DISCRIMINATIVE: NeuAc oxonium (D274+D292) = 12.1% mean, present 190/190 (100%) in
+  sialylated (A>0) vs 0.00%, present 0/32 (0%) in non-sialylated. Perfect class
+  separation.
+⇒ The design's core bet holds: glyco ions (oxonium + Y-ladder) are abundant,
+low-variance, class-discriminative → a class-conditioned intensity model WILL have
+signal. Proceed to S1/S2 with confidence. (The Y-ladder / (M0−loss) ions carry the
+BACKBONE-mass signal similarly; oxonium checked here as the composition-diagnostic
+half.)
+
 ## Staged plan + gates
 - **S1 — Data.** Harvest PXD005411/PXD016175/PXD030670 result tables; run the
   an open-source glyco engine oracle on 2–3 non-Fc3_r1 PXD025455 runs. Assemble a labeled

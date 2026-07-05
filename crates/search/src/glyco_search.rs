@@ -324,14 +324,18 @@ pub fn glyco_search_run(
     const MIN_BY_MATCHES: u32 = 6;
     // Hard cap on peptide-first candidates per spectrum (strongest b/y support
     // first) so a peak-dense spectrum can't blow up phase-1 scoring. Overridable
-    // via ANDES_GLYCO_MAX_PF for cap-sensitivity A/Bs — the deterministic
-    // collapse now keeps a fixed subset under this cap, so raising it tests
-    // whether good backbones are being truncated away. Default 64 (unchanged).
+    // via ANDES_GLYCO_MAX_PF. The deterministic collapse keeps a FIXED subset
+    // under this cap, so too low a cap truncates good backbones away. A cap
+    // sweep on PXD025455 Fc3_r1 (deterministic, honest FDR, 1 decoy@1% each):
+    // 64→218 @1%/90 bb-correct, 256→232/93, 1024→253/97, ∞→268/96. Default 1024
+    // = beats an open-source glyco engine (222) with the HIGHEST backbone-correct count (97)
+    // and best precision, while keeping a safety ceiling for pathological
+    // peak-dense spectra (∞ gains a few total IDs but slightly worse precision).
     let max_peptide_first: usize = std::env::var("ANDES_GLYCO_MAX_PF")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(64);
+        .unwrap_or(1024);
 
     // Per-spectrum processing, reused across both passes. `transfer` holds extra
     // backbones injected by cross-spectrum transfer (empty on pass 1).

@@ -376,4 +376,33 @@ mod tests {
         assert_eq!(s.clone().peptide_idx, 3);
         assert_eq!(t.clone().graph_support, 4);
     }
+
+    #[test]
+    fn propagate_transfers_is_deterministic_across_input_orders() {
+        let glycans = n_glycan_list();
+        let sorted = sorted_view(&glycans);
+        let bb = 1500.0_f64;
+        let g = 2.0 * HEXNAC + 3.0 * HEX;
+        let seeds = vec![
+            Seed { scan: 1, peptide_idx: 0, backbone_mass: bb, rt_seconds: Some(900.0), seed_score: 1.0, is_decoy: false },
+            Seed { scan: 9, peptide_idx: 1, backbone_mass: bb + 100.0, rt_seconds: Some(902.0), seed_score: 1.0, is_decoy: false },
+        ];
+        let mk = |order: &[usize]| {
+            let base = vec![
+                GlycoNode { scan: 2, precursor_neutral: bb + g, rt_seconds: Some(901.0) },
+                GlycoNode { scan: 3, precursor_neutral: bb + g, rt_seconds: Some(903.0) },
+                GlycoNode { scan: 4, precursor_neutral: bb + 100.0 + g, rt_seconds: Some(904.0) },
+            ];
+            let nodes: Vec<GlycoNode> = order.iter().map(|&i| base[i].clone()).collect();
+            propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 0.05)
+        };
+        let a = mk(&[0, 1, 2]);
+        let b = mk(&[2, 0, 1]);
+        let c = mk(&[1, 2, 0]);
+        let key = |v: &[TransferredCandidate]| -> Vec<(u32, u64, u64)> {
+            v.iter().map(|t| (t.acceptor_scan, t.backbone_mass.to_bits(), t.glycan.mass.to_bits())).collect()
+        };
+        assert_eq!(key(&a), key(&b));
+        assert_eq!(key(&a), key(&c));
+    }
 }

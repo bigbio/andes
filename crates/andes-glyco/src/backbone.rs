@@ -198,10 +198,17 @@ pub fn solve_backbone_min(
                 //  2. implied glycan (precursor − backbone) must be ≥ MIN_GLYCAN
                 //     to avoid spurious candidates where the backbone consumes nearly
                 //     the entire precursor mass, leaving no room for a real glycan.
-                if bb < MIN_BB || bb >= precursor_neutral {
+                // `bb` is the Y0-derived peptide NEUTRAL mass (water INCLUDED), but
+                // `precursor_neutral` is the RESIDUE convention (water excluded). The
+                // implied-glycan / upper-bound gates MUST compare in the residue
+                // convention (`bb - H2O`), else they undercount the implied glycan by
+                // H2O and silently drop minimal-core (2×HexNAc, 406.16 Da)
+                // glycopeptides (the off-by-H2O gate audit finding).
+                let bb_res = bb - H2O;
+                if bb < MIN_BB || bb_res >= precursor_neutral {
                     continue;
                 }
-                if precursor_neutral - bb < MIN_GLYCAN {
+                if precursor_neutral - bb_res < MIN_GLYCAN {
                     continue;
                 }
                 let key = (bb * 100.0).round() as i64;
@@ -687,6 +694,33 @@ pub fn count_core_y_hits(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solve_finds_backbone_with_minimal_2hexnac_core_glycan() {
+        // Off-by-H2O gate regression (audit finding): a de-novo backbone whose true
+        // glycan is the minimal N-glycan core (2×HexNAc = 406.16 Da) must be found.
+        // The gate compared the water-INCLUDED bb against residue-convention
+        // precursor_neutral, undercounting the implied glycan by H2O → 406 rejected.
+        use crate::glycan_mass::HEXNAC;
+        let bb_neutral = 1500.0_f64; // Y0-derived, water-included
+        let bb_res = bb_neutral - H2O; // residue backbone
+        let glycan = 2.0 * HEXNAC; // 406.159, the minimal N-glycan core
+        let precursor_neutral = bb_res + glycan; // residue convention
+        let mut peaks = vec![
+            (bb_neutral + PROTON, 1000.0f32),               // Y0
+            (bb_neutral + HEXNAC + PROTON, 900.0f32),       // Y1
+            (bb_neutral + 2.0 * HEXNAC + PROTON, 500.0f32), // Y2 (= intact-ish)
+        ];
+        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let cands = solve_backbone_min(&peaks, precursor_neutral, 2, 20.0, 50, 2);
+        assert!(
+            cands
+                .iter()
+                .any(|c| (c.backbone_mass - bb_neutral).abs() < 0.05),
+            "minimal 2xHexNAc-core backbone dropped by the off-by-H2O gate; got {:?}",
+            cands.iter().map(|c| c.backbone_mass).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn solve_backbone_recovers_known_mass_from_core_ladder() {

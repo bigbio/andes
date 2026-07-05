@@ -267,19 +267,22 @@ pub fn hybrid_candidates_presolved(
 
     let mut combined: Vec<BackboneHit> = Vec::with_capacity(dn.len());
     for c in dn {
-        // Per-isotope precursor gates, applied on the NEUTRAL (water-included)
-        // backbone mass EXACTLY as `solve_backbone_min` does internally, so a
-        // superset candidate that a tighter isotope would have gated out is
-        // dropped here rather than emitted with a nonsense (negative/tiny) glycan.
-        if c.backbone_mass >= precursor_neutral {
-            continue;
-        }
-        if precursor_neutral - c.backbone_mass < MIN_GLYCAN {
-            continue;
-        }
         // `solve_backbone` returns the Y0-derived peptide NEUTRAL mass (water
-        // included); convert to the RESIDUE convention used everywhere else.
+        // included); convert to the RESIDUE convention used everywhere else FIRST,
+        // then gate — the implied-glycan / upper-bound gates must compare in the
+        // residue convention (matching `solve_backbone_min` post-fix), else they
+        // undercount the implied glycan by H2O and drop minimal-core (2×HexNAc,
+        // 406 Da) glycopeptides (the off-by-H2O gate audit finding).
         let bb = c.backbone_mass - H2O;
+        // Per-isotope precursor gates: a superset candidate that a tighter isotope
+        // would have gated out is dropped here rather than emitted with a nonsense
+        // (negative/tiny) glycan.
+        if bb >= precursor_neutral {
+            continue;
+        }
+        if precursor_neutral - bb < MIN_GLYCAN {
+            continue;
+        }
         if bb < MIN_BACKBONE {
             continue;
         }

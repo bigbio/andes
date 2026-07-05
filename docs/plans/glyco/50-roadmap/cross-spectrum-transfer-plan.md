@@ -639,7 +639,36 @@ git commit -m "feat(glyco): seed extraction from rescored PIN (1% FDR, target+de
 
 ---
 
-## Task 8: `--glyco-transfer` flag + two-pass driver orchestration
+## Task 8 — REVISED (2026-07-06, after driver recon)
+
+Recon changed Task 8's shape. Facts: (1) `glyco_search_run` (search crate) already has a Pass-1/Pass-2 transfer using `core_y_hits>=3` donors + flat `GlycoformWhitelist`, gated `ANDES_GLYCO_CROSSSPECTRUM=1` (default off; the 253/97 baseline is transfer-free) — this legacy path is SUPERSEDED. (2) The native GBDT rescorer (`andes::rescore::native_rescore_pin`) lives ABOVE `search` in the crate graph, so seeding must be orchestrated in the DRIVER. (3) `native_rescore_pin` is target-only. (4) The per-candidate scoring is a 400-line closure `process_one` inside `glyco_search_run`; provenance must ride on `BackboneHit`.
+
+Chosen architecture (user: single-invocation, in-process native GBDT): one `andes --glyco --glyco-transfer` run does Pass-1 → build PIN text → native-GBDT rescore (in-proc) → 1%-FDR seeds (target+decoy) → build nodes → `propagate_transfers` → convert to provenance-bearing `BackboneHit`s → Pass-2 injection → final PIN → external Percolator for production FDR. Split into 4 sub-tasks:
+
+### Task 8a: `BackboneHit` provenance fields + wire into the key
+**Files:** Modify `crates/andes-glyco/src/hybrid.rs` (BackboneHit struct + all constructors), `crates/search/src/glyco_search.rs` (key build at ~929-933 reads `bb_hit.transfer_*`).
+**Produces:** `BackboneHit` gains `is_transferred: bool, transfer_graph_support: u32, transfer_seed_score: f32, transfer_rt_delta: f32, transfer_ungated: bool` (inert defaults). At the `GlycoPsmKey` construction (glyco_search.rs ~929-933), replace the hardcoded inert values with `bb_hit.is_transferred` / `bb_hit.transfer_graph_support` / etc. so a transferred backbone's provenance reaches the PIN.
+**Test:** unit test — a `BackboneHit` with `is_transferred=true, transfer_graph_support=5` scored through the key path yields a `GlycoPsmKey` with those values (or a focused test that the key copies them). TDD.
+
+### Task 8b: expose target+decoy q-values from the native rescorer
+**Files:** Modify `crates/andes/src/rescore.rs`.
+**Produces:** `pub fn native_rescore_qvalues(pin_text: &str, seed: u64) -> Result<Vec<(String /*spec_id*/, bool /*is_decoy*/, f64 /*q*/, f64 /*score*/)>, String>` — same `parse_pin`→`cv_scores`→`qvalues` pipeline as `native_rescore_pin` but returns ALL rows (targets AND decoys), so the symmetric decoy graph can seed from decoy 1%-FDR PSMs. Keep `native_rescore_pin` unchanged.
+**Test:** synthetic PIN (a few target + decoy rows with separable scores) → returns all rows, decoys included, q-values monotone non-decreasing by score rank. TDD.
+
+### Task 8c: `glyco_transfer_pass2` entry point (extract `process_one`)
+**Files:** Modify `crates/search/src/glyco_search.rs`.
+**Produces:** Refactor the `process_one` closure into a standalone `fn` taking its captured context explicitly (frag_index, candidates, glycan_sorted, glycan_list, params, tol_ppm, top_k, flags), so it can be called outside `glyco_search_run`. Add `pub fn glyco_transfer_pass2(spectra, prepared, glycan_list, tol_ppm, backbone_top_k, pass1: Vec<GlycoSpectrumResult>, injected: &std::collections::BTreeMap<usize, Vec<BackboneHit>>) -> Vec<GlycoSpectrumResult>` that, for each spectrum with injected transferred backbones, re-runs scoring with them and supersedes its pass-1 entry (deterministic merge, BTreeMap not HashMap). `glyco_search_run`'s own Pass-1 call uses the same extracted fn (no behavior change — guard with the existing test suite).
+**Test:** the existing glyco_search tests must stay green (proves the extraction preserved behavior); add one test that `glyco_transfer_pass2` with an injected transferred `BackboneHit` on a fixture spectrum emits a hit with `is_transferred=true`.
+
+### Task 8d: driver `--glyco-transfer` orchestration
+**Files:** Modify `crates/andes/src/bin/andes.rs` (CLI + glyco block ~2351-2392), `crates/andes/src/glyco_seeds.rs` (a `build_seed_lookup` helper if needed).
+**Consumes:** 8a/8b/8c + `glyco_seeds::seeds_at_fdr`, `andes_glyco::crossspectrum::{GlycoNode, propagate_transfers}`.
+**Produces:** when `cli.glyco && cli.glyco_transfer`: (1) run `glyco_search_run` (Pass-1, legacy xspec OFF); (2) write the Pass-1 glyco PIN to an in-memory `Vec<u8>` via `write_glyco_pin_to`; (3) `native_rescore_qvalues` on it; (4) build `SeedRow`s from the q-values (scan via the typed `ScanNr` column preferred — see carry-forward — else `extract_scan`; **fail loud on ambiguous decoy labels**), and a `lookup(scan) -> (peptide_idx, backbone_mass, rt)` from the Pass-1 winners; (5) `seeds_at_fdr(rows, 0.01, lookup)`; (6) build `Vec<GlycoNode>` from all oxonium-positive spectra, **sorted by scan** (carry-forward: propagate_transfers needs sorted input); (7) `propagate_transfers(...)`; (8) group transferred candidates by acceptor spec_idx into a `BTreeMap<usize, Vec<BackboneHit>>` with provenance set; (9) `glyco_transfer_pass2(...)`; (10) `write_glyco_pin` the final results. Gate: `--glyco-transfer` default false; a `crates/andes/tests/glyco_transfer_gate.rs` byte-identity test (flag off == baseline).
+**Test:** byte-identity gate (flag off), plus (VM/fixture-permitting) a transferred-row-present check; the real functional check is Task 9's A/B.
+
+---
+
+## Task 8 (ORIGINAL — superseded by 8a-8d above): `--glyco-transfer` flag + two-pass driver orchestration
 
 **Files:**
 - Modify: `crates/andes/src/bin/andes.rs` (CLI struct near line 391; glyco block near 2349-2386)

@@ -100,3 +100,24 @@ complex idea").
 Verdict: foundations are SOLID. Fix the H2O gate (done); the "single-spectrum
 exhausted" narrative is only PROVISIONAL until the intensity model is retested on
 real competitors. Cross-spectrum transfer is a sound next lever regardless.
+
+## ★★ BREAKTHROUGH (2026-07-05) — multi-charge Y-ladder + H2O gate fix
+The foundation audit (before building transfer) surfaced two fixes that BROKE the
+supposed "HCD ceiling":
+- off-by-H2O MIN_GLYCAN gate (f0021d81)
+- multiply-charged Y-ladder matching (8463cd7a) — we were matching +1 Y-ions ONLY;
+  stepped-HCD deposits 2+/3+ Y-ions (the intact glycopeptide is 2-6+).
+
+| metric | before | after |
+|---|---|---|
+| @1% FDR | 261 | **319** (+22%) |
+| backbone-correct vs 523 | 101 | **117** |
+| consensus scans hit | 112 (57.1%) | **150 (76.5%)** |
+| consensus backbone-correct | 51 | **60** |
+
+Backbone-correct is vs INDEPENDENT truth (the reference engine 117 / 2-tool consensus 60) → real
+IDs, not FDR inflation. andes 319 @1% FDR now far ahead of an open-source glyco engine's 222.
+LESSON: the "single-spectrum exhausted / HCD ceiling" conclusion was WRONG — Codex
+suspected it; the cause was a coverage bug, not a fundamental limit. Audit foundations
+BEFORE concluding a ceiling. Several prior "refuted" ranking conclusions should be
+re-examined on this new (larger, correcter) candidate pool.

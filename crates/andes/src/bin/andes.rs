@@ -404,6 +404,15 @@ struct SearchArgs {
     #[arg(long = "glyco-max-spectra", hide = true, default_value_t = 0usize)]
     glyco_max_spectra: usize,
 
+    /// Enable cross-spectrum backbone transfer (single-invocation two-pass;
+    /// glyco mode only). Pass-1 glyco PSMs are native-GBDT-rescored in-process,
+    /// 1%-FDR confident backbones (target+decoy) are propagated to co-eluting
+    /// sibling spectra via a glycan-delta graph, and accepted transfers are
+    /// re-scored as `Source::Transferred` Pass-2 candidates before the final
+    /// `.glyco.pin` is written. Off by default — baseline output is unchanged.
+    #[arg(long = "glyco-transfer", default_value_t = false)]
+    glyco_transfer: bool,
+
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
     #[arg(long = "refine", default_value_t = false)]
     refine: bool,
@@ -2348,18 +2357,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             &spectra
         };
-        let glyco_results = search::glyco_search::glyco_search_run(
+        let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
             &prepared,
             &glycan_list,
             glyco_tol_ppm,
             cli.glyco_backbone_top_k,
         );
-        let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
+        let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
         eprintln!(
             "[glyco] scored {} spectra → {} glyco-PSM rows [{:.2}s]",
-            glyco_results.len(),
-            total_glyco_rows,
+            pass1.len(),
+            total_pass1_rows,
             t_glyco.elapsed().as_secs_f64()
         );
 
@@ -2374,6 +2383,193 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let emit_glycan_decoy = std::env::var("ANDES_GLYCO_DECOY")
             .map(|v| v == "1")
             .unwrap_or(false);
+
+        // ── Task 8d: single-invocation cross-spectrum backbone transfer ──
+        // Off by default (`--glyco-transfer`); when off, behave EXACTLY as
+        // before (write Pass-1 unchanged) — this is the gate.
+        let glyco_results = if cli.glyco_transfer {
+            let t_xfer = std::time::Instant::now();
+
+            // Step 2: write Pass-1 to an in-memory PIN, then (step 3)
+            // native-GBDT-rescore it in-process to get target+decoy q-values.
+            let mut buf: Vec<u8> = Vec::new();
+            output::glyco_pin::write_glyco_pin_to(
+                &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false,
+            )?;
+            let pin_text = String::from_utf8(buf)
+                .map_err(|e| format!("Pass-1 glyco PIN is not valid UTF-8: {e}"))?;
+            let q_rows = rescore::native_rescore_qvalues(&pin_text, 42)?;
+
+            // Step 4: seed lookup — reproduce write_glyco_pin's top-1-per-scan
+            // collapse winner EXACTLY (same comparator, same enumerated-only
+            // gate) so `scan -> peptide_idx/backbone_mass` matches the row the
+            // PIN (and thus the q-values above) actually describe.
+            let y_primary = andes_glyco::glyco_psm::y_primary_selection();
+            // scan (as emitted into ScanNr/SpecId, i.e. spec.scan.unwrap_or(0))
+            // -> (peptide_idx, backbone_mass, rt_seconds, spec_idx).
+            let mut seed_lookup: std::collections::BTreeMap<u32, (u32, f64, Option<f64>, usize)> =
+                std::collections::BTreeMap::new();
+            for r in &pass1 {
+                if r.spectrum_idx >= spectra.len() || r.hits.is_empty() {
+                    continue;
+                }
+                let winner = (0..r.hits.len())
+                    .max_by(|&a, &b| {
+                        andes_glyco::glyco_psm::collapse_cmp(
+                            r.hits[a].psm.rank_score,
+                            r.hits[a].glycan_key.y_ladder_intensity_score,
+                            r.hits[b].psm.rank_score,
+                            r.hits[b].glycan_key.y_ladder_intensity_score,
+                            y_primary,
+                        )
+                        .then(b.cmp(&a))
+                    })
+                    .expect("non-empty hits");
+                let hit = &r.hits[winner];
+                // enumerated-only gate: a de-novo (unenumerated) winner is not
+                // an emitted PIN row (see select_emitted_hits GI-1), so it
+                // cannot have a q-value to seed from either.
+                if hit.glycan_key.glycan.is_none() {
+                    continue;
+                }
+                let spec = &spectra[r.spectrum_idx];
+                let scan = spec.scan.unwrap_or(0) as u32;
+                seed_lookup.insert(
+                    scan,
+                    (
+                        hit.psm.primary_candidate_idx(),
+                        hit.glycan_key.backbone_mass,
+                        spec.rt_seconds,
+                        r.spectrum_idx,
+                    ),
+                );
+            }
+
+            // Step 5: SeedRow extraction. native_rescore_qvalues already
+            // derives is_decoy from the PIN's own fail-loud Label parse (see
+            // rescore::parse_pin), so ambiguity is impossible here — a
+            // malformed Label would already have failed loud inside
+            // native_rescore_qvalues above.
+            let rows: Vec<glyco_seeds::SeedRow> = q_rows
+                .iter()
+                .map(|(spec_id, is_decoy, q, score)| {
+                    let scan = glyco_seeds::extract_scan(spec_id).ok_or_else(|| {
+                        format!("Task 8d: could not extract scan from rescored SpecId {spec_id:?}")
+                    })?;
+                    Ok(glyco_seeds::SeedRow { scan, is_decoy: *is_decoy, q_value: *q, score: *score })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+
+            let seeds = glyco_seeds::seeds_at_fdr(&rows, 0.01, |scan| {
+                seed_lookup.get(&scan).map(|&(pep_idx, bb, rt, _spec_idx)| (pep_idx, bb, rt))
+            });
+
+            // Step 7: oxonium-positive spectra as graph nodes, sorted by scan.
+            let mut nodes: Vec<andes_glyco::crossspectrum::GlycoNode> = Vec::new();
+            let mut scan_to_spec_idx: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            for (spec_idx, spec) in spectra_for_glyco.iter().enumerate() {
+                if spec.peaks.len() < params.min_peaks as usize {
+                    continue;
+                }
+                if !andes_glyco::oxonium::oxonium_gate(&spec.peaks, 0.10, glyco_tol_ppm).fired {
+                    continue;
+                }
+                let z = match spec.precursor_charge {
+                    Some(z) if z > 0 => z as f64,
+                    _ => continue,
+                };
+                let precursor_neutral = (spec.precursor_mz - model::mass::PROTON) * z - model::mass::H2O;
+                if precursor_neutral <= 0.0 {
+                    continue;
+                }
+                let scan = spec.scan.unwrap_or(0) as u32;
+                nodes.push(andes_glyco::crossspectrum::GlycoNode {
+                    scan,
+                    precursor_neutral,
+                    rt_seconds: spec.rt_seconds,
+                });
+                scan_to_spec_idx.insert(scan, spec_idx);
+            }
+            nodes.sort_by_key(|n| n.scan);
+
+            // Step 8/9: propagate transfers over the glycan-delta graph, then
+            // group provenance-bearing BackboneHits by acceptor spec_idx.
+            let glycan_sorted: Vec<(f64, usize)> = {
+                let mut v: Vec<(f64, usize)> =
+                    glycan_list.iter().enumerate().map(|(i, g)| (g.mass, i)).collect();
+                v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                v
+            };
+            let rt_window: f32 = std::env::var("ANDES_GLYCO_RT_WINDOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800.0);
+            const MIN_GLYCAN: f64 = 406.0;
+            // `propagate_transfers` takes one scalar tolerance for the whole
+            // batch (unlike the per-node `(mass * tol_ppm * 1e-6).max(0.02)`
+            // convention used elsewhere in this module), so scale it from a
+            // representative intact glycopeptide mass (~2500 Da: typical
+            // tryptic backbone + core N-glycan) with the same floor.
+            const REPRESENTATIVE_GLYCOPEPTIDE_MASS: f64 = 2500.0;
+            let tol = (REPRESENTATIVE_GLYCOPEPTIDE_MASS * glyco_tol_ppm * 1e-6).max(0.02);
+            let transferred = andes_glyco::crossspectrum::propagate_transfers(
+                &seeds, &nodes, &glycan_sorted, &glycan_list, rt_window, MIN_GLYCAN, tol,
+            );
+
+            let mut injected: std::collections::BTreeMap<usize, Vec<andes_glyco::hybrid::BackboneHit>> =
+                std::collections::BTreeMap::new();
+            for tc in &transferred {
+                let Some(&spec_idx) = scan_to_spec_idx.get(&tc.acceptor_scan) else {
+                    continue;
+                };
+                let charge = spectra_for_glyco[spec_idx]
+                    .precursor_charge
+                    .filter(|&z| z > 0)
+                    .map(|z| z as u8)
+                    .unwrap_or(*params.charge_range.start());
+                injected.entry(spec_idx).or_default().push(andes_glyco::hybrid::BackboneHit {
+                    backbone_mass: tc.backbone_mass,
+                    glycan: Some(tc.glycan.clone()),
+                    source: andes_glyco::hybrid::Source::Transferred,
+                    charge,
+                    isotope_offset: 0,
+                    glycan_mass_residual: tc.glycan.mass,
+                    is_transferred: true,
+                    transfer_graph_support: tc.graph_support,
+                    transfer_seed_score: tc.seed_score as f32,
+                    transfer_rt_delta: tc.rt_delta as f32,
+                    transfer_ungated: tc.ungated,
+                });
+            }
+
+            eprintln!(
+                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @1% FDR ({} decoy), {} nodes, {} transferred candidates onto {} acceptor spectra [{:.2}s]",
+                q_rows.len(),
+                seeds.len(),
+                seeds.iter().filter(|s| s.is_decoy).count(),
+                nodes.len(),
+                transferred.len(),
+                injected.len(),
+                t_xfer.elapsed().as_secs_f64()
+            );
+
+            // Step 10: Pass-2 re-score only the acceptor spectra, superseding
+            // their Pass-1 entry; everything else keeps its Pass-1 result.
+            search::glyco_search::glyco_transfer_pass2(
+                &spectra,
+                &prepared,
+                &glycan_list,
+                glyco_tol_ppm,
+                cli.glyco_backbone_top_k,
+                pass1,
+                &injected,
+            )
+        } else {
+            pass1
+        };
+        let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
+
         output::write_glyco_pin(
             &glyco_pin_path,
             &spectra,

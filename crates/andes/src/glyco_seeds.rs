@@ -41,8 +41,10 @@ pub fn parse_seed_rows(psms_tsv: &str) -> Result<Vec<SeedRow>, String> {
 }
 
 /// Pull the integer scan from a glyco SpecId like
-/// "controllerType=0 controllerNumber=1 scan=3000_glyco_3000_1".
-fn extract_scan(id: &str) -> Option<u32> {
+/// "controllerType=0 controllerNumber=1 scan=3000_glyco_3000_1". Public so the
+/// driver (Task 8d) can join the native rescorer's `spec_id` strings back to a
+/// scan number without duplicating this parsing logic.
+pub fn extract_scan(id: &str) -> Option<u32> {
     let after = id.split("scan=").nth(1)?;
     let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()

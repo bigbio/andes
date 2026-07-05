@@ -167,6 +167,76 @@ fn nearest_glycan(
     best.map(|(_, gi)| glycans[gi].clone())
 }
 
+/// Propagate confident seed backbones to co-eluting, glycan-consistent acceptor
+/// nodes. See module docs. Deterministic: output sorted by
+/// (acceptor_scan, backbone_mass, glycan mass) with an index tiebreak.
+pub fn propagate_transfers(
+    seeds: &[Seed],
+    nodes: &[GlycoNode],
+    glycan_sorted: &[(f64, usize)],
+    glycans: &[GlycanComp],
+    rt_window: f32,
+    min_glycan: f64,
+    tol: f64,
+) -> Vec<TransferredCandidate> {
+    let co_elutes = |seed_rt: Option<f64>, node_rt: Option<f64>| -> (bool, bool) {
+        // returns (passes_gate, ungated)
+        match (seed_rt, node_rt) {
+            (Some(s), Some(n)) => (((n - s).abs() as f32) <= rt_window, false),
+            _ => (true, true), // missing RT on either side: accept, flag ungated
+        }
+    };
+    let mut out: Vec<TransferredCandidate> = Vec::new();
+    for seed in seeds {
+        // First pass over nodes: collect accepting (non-self) acceptors so we
+        // can attach the family-size support to each emitted candidate.
+        let mut accepted: Vec<(u32, GlycanComp, f64, bool)> = Vec::new();
+        for node in nodes {
+            if node.scan == seed.scan {
+                continue;
+            }
+            let (gate, ungated) = co_elutes(seed.rt_seconds, node.rt_seconds);
+            if !gate {
+                continue;
+            }
+            let glycan_mass = node.precursor_neutral - seed.backbone_mass;
+            if glycan_mass < min_glycan {
+                continue;
+            }
+            if let Some(g) = nearest_glycan(glycan_sorted, glycans, glycan_mass, tol) {
+                let rt_delta = match (seed.rt_seconds, node.rt_seconds) {
+                    (Some(s), Some(n)) => (n - s).abs(),
+                    _ => 0.0,
+                };
+                accepted.push((node.scan, g, rt_delta, ungated));
+            }
+        }
+        let support = accepted.len() as u32;
+        for (acceptor_scan, glycan, rt_delta, ungated) in accepted {
+            out.push(TransferredCandidate {
+                acceptor_scan,
+                peptide_idx: seed.peptide_idx,
+                backbone_mass: seed.backbone_mass,
+                glycan,
+                graph_support: support,
+                seed_score: seed.seed_score,
+                rt_delta,
+                ungated,
+                is_decoy: seed.is_decoy,
+            });
+        }
+    }
+    // Deterministic total order (no HashMap anywhere above).
+    out.sort_by(|a, b| {
+        a.acceptor_scan
+            .cmp(&b.acceptor_scan)
+            .then(a.backbone_mass.total_cmp(&b.backbone_mass))
+            .then(a.glycan.mass.total_cmp(&b.glycan.mass))
+            .then(a.peptide_idx.cmp(&b.peptide_idx))
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +316,53 @@ mod tests {
             outside.is_empty(),
             "acceptor outside the RT window must NOT receive the transfer, got {outside:?}"
         );
+    }
+
+    #[test]
+    fn propagate_transfers_recovers_sibling_and_counts_support() {
+        let glycans = n_glycan_list();
+        let sorted = sorted_view(&glycans);
+        let backbone = 1500.0_f64;
+        let g_a = 2.0 * HEXNAC + 3.0 * HEX;      // core
+        let g_b = 2.0 * HEXNAC + 4.0 * HEX;      // +1 Hex sibling
+        // seed on scan 1 (a well-fragmented glycoform), two co-eluting acceptors.
+        let seeds = vec![Seed { scan: 1, peptide_idx: 9, backbone_mass: backbone,
+            rt_seconds: Some(900.0), seed_score: 3.0, is_decoy: false }];
+        let nodes = vec![
+            GlycoNode { scan: 1, precursor_neutral: backbone + g_a, rt_seconds: Some(900.0) }, // self: skip
+            GlycoNode { scan: 2, precursor_neutral: backbone + g_a, rt_seconds: Some(905.0) }, // sibling
+            GlycoNode { scan: 3, precursor_neutral: backbone + g_b, rt_seconds: Some(910.0) }, // sibling
+        ];
+        let out = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 0.05);
+        // Two transfers (scan 2 and 3), NOT onto the seed's own scan 1.
+        assert_eq!(out.len(), 2, "got {out:?}");
+        assert!(out.iter().all(|t| t.acceptor_scan != 1));
+        assert!(out.iter().all(|t| t.peptide_idx == 9 && (t.backbone_mass - backbone).abs() < 1e-6));
+        // graph_support = family size (2 accepting non-self nodes).
+        assert!(out.iter().all(|t| t.graph_support == 2), "support {out:?}");
+    }
+
+    #[test]
+    fn propagate_transfers_respects_rt_window_and_marks_ungated() {
+        let glycans = n_glycan_list();
+        let sorted = sorted_view(&glycans);
+        let backbone = 1500.0_f64;
+        let g = 2.0 * HEXNAC + 3.0 * HEX;
+        let seeds = vec![Seed { scan: 1, peptide_idx: 0, backbone_mass: backbone,
+            rt_seconds: Some(1000.0), seed_score: 1.0, is_decoy: false }];
+        // one co-eluting (RT 1100), one far (RT 5000), one with no RT (ungated).
+        let nodes = vec![
+            GlycoNode { scan: 2, precursor_neutral: backbone + g, rt_seconds: Some(1100.0) },
+            GlycoNode { scan: 3, precursor_neutral: backbone + g, rt_seconds: Some(5000.0) },
+            GlycoNode { scan: 4, precursor_neutral: backbone + g, rt_seconds: None },
+        ];
+        let out = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 0.05);
+        let scans: Vec<u32> = out.iter().map(|t| t.acceptor_scan).collect();
+        assert!(scans.contains(&2), "co-eluting must transfer: {out:?}");
+        assert!(!scans.contains(&3), "far RT must NOT transfer: {out:?}");
+        // ungated node (no RT) still receives, flagged ungated.
+        let u = out.iter().find(|t| t.acceptor_scan == 4).expect("ungated transfer");
+        assert!(u.ungated, "no-RT acceptor must be marked ungated");
     }
 
     #[test]

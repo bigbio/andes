@@ -187,167 +187,293 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
     deduped
 }
 
-/// Run the glyco-PSM scoring driver over all spectra.
+/// Per-run context needed to score any single spectrum's glyco candidates.
 ///
-/// For each spectrum:
-/// 1. Run `oxonium_gate` to gather oxonium evidence.
-/// 2. For each charge in the params charge range, call `hybrid_candidates`
-///    to enumerate backbone hits (DB + de-novo).
-/// 3. Union and dedup backbone hits within 0.02 Da, capping at `backbone_top_k`.
-/// 4. For each backbone hit, find candidates in the mass bucket whose peptide
-///    mass matches the backbone and has a N-X-S/T sequon.
-/// 5. Score each (peptide, glycan) pair and emit a `FullGlycoPsm`.
-///
-/// Results are serialized (rayon is not used here to keep v1 simple; the
-/// standard search path handles parallelism separately).
-pub fn glyco_search_run(
-    spectra: &[Spectrum],
-    prepared: &PreparedSearch<'_>,
-    glycan_list: &[GlycanComp],
-    tol_ppm: f64,
-    backbone_top_k: usize,
-) -> Vec<GlycoSpectrumResult> {
-    let scorer = prepared.scorer;
-    let params = prepared.params;
-    let candidates = &prepared.candidates;
-    let bucket_index = &prepared.bucket_index;
-    let fragment_tolerance_da = prepared.fragment_tolerance_da;
+/// Every field here was previously a captured variable of the `process_one`
+/// closure that used to live inside `glyco_search_run` (Task 8c extraction).
+/// This struct is a straight capture-list-to-fields translation — no field
+/// changes behavior. It lets [`score_spectrum_glyco`] be called both from
+/// `glyco_search_run`'s own two passes and from the standalone
+/// [`glyco_transfer_pass2`] entry point used by the driver's cross-spectrum
+/// orchestration.
+pub struct GlycoScoreCtx<'a> {
+    pub params: &'a crate::search_params::SearchParams,
+    pub scorer: &'a scoring_crate::scoring::RankScorer,
+    pub candidates: &'a [crate::candidate_gen::Candidate],
+    pub bucket_index: &'a std::collections::BTreeMap<i32, Vec<usize>>,
+    pub fragment_tolerance_da: f64,
+    pub intensity_model: Option<&'a scoring_crate::intensity_model::IntensityModel>,
+    pub frag_index: &'a FragmentIndex,
+    pub glycan_sorted: &'a [(f64, usize)],
+    pub glycan_list: &'a [GlycanComp],
+    pub glycan_y_index: &'a GlycanYIndex,
+    pub tol_ppm: f64,
+    pub effective_top_k: usize,
+    pub max_peptide_first: usize,
+    pub peptide_first_on: bool,
+    pub yindex_on: bool,
+    pub glyco_decoy_on: bool,
+    pub features_collapse: bool,
+    pub features_enumerated: bool,
+    pub scan_filter: Option<&'a std::collections::HashSet<i32>>,
+}
 
-    // Independent experiment toggles (one variable at a time): the peptide-first
-    // fragment-index path (default ON) and cross-spectrum glycoform transfer
-    // (default OFF, opt-in). Kept separable to isolate each lever + its cost.
-    let peptide_first_on = std::env::var("ANDES_GLYCO_PEPTIDE_FIRST")
-        .map(|v| v != "0")
-        .unwrap_or(true);
-    let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    // G3 glycan-axis decoy (default OFF). When off we must NOT compute the decoy
-    // Y-ladder per hit — it is unused and ~doubles the glyco composition-ladder
-    // cost, so leaving it on would slow the shipping default path.
-    let glyco_decoy_on = std::env::var("ANDES_GLYCO_DECOY")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
-    // glyco_pin.rs), so computing the expensive ~40-feature vector
-    // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
-    // Compute features only for the winner that will actually be emitted. These
-    // mirror the PIN writer's defaults exactly (ANDES_GLYCO_ALL_HITS /
-    // ANDES_GLYCO_DENOVO) so the driver's kept hit == the PIN's kept row.
-    let features_collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
-        .map(|v| v != "1")
-        .unwrap_or(true);
-    let features_enumerated = std::env::var("ANDES_GLYCO_DENOVO")
-        .map(|v| v != "1")
-        .unwrap_or(true);
-    // Fast dev harness: ANDES_GLYCO_SCANS=<file> (one scan number per line)
-    // restricts the glyco driver to those scans (e.g. the truth-scan subset), so
-    // a redesign iteration is minutes not hours. The standard search still runs
-    // over all spectra; only glyco scoring is subset. Unset = all spectra.
-    let scan_filter: Option<std::collections::HashSet<i32>> = std::env::var("ANDES_GLYCO_SCANS")
-        .ok()
-        .and_then(|path| std::fs::read_to_string(&path).ok())
-        .map(|s| {
-            s.lines()
-                .filter_map(|l| l.trim().parse::<i32>().ok())
-                .collect()
-        });
-    // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
-    // core-Y cap and the driver's backbone_top_k — to measure the true findable
-    // ceiling. Large finite cap avoids the max_features usize overflow. SLOW.
-    let exhaustive = std::env::var("ANDES_GLYCO_EXHAUSTIVE")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
-    // Phase G1: glycan-Y-first candidate SELECTION (a glycan-Y-complementary
-    // index generates backbones from the strong glycan-Y ladder) + TWO-AXIS
-    // retention (keep backbones in top_k by peptide-b/y OR by glycan-Y evidence),
-    // so a weak-b/y / strong-glycan-Y spectrum survives truncation. Opt-in for a
-    // clean A/B vs the b/y-only path.
-    let yindex_on = std::env::var("ANDES_GLYCO_YINDEX")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let glycan_y_index = if yindex_on {
-        GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
-    } else {
-        GlycanYIndex::build(&[], fragment_tolerance_da.max(0.02))
-    };
+/// Owns the pieces of [`GlycoScoreCtx`] that are built once per run (indices,
+/// toggle values, the resolved scan filter) so both `glyco_search_run`'s
+/// internal passes and the standalone [`glyco_transfer_pass2`] entry point
+/// build IDENTICAL context from ONE shared setup routine
+/// ([`GlycoCtxOwned::build`]) instead of two independently-maintained copies
+/// of the toggle/index construction logic.
+pub struct GlycoCtxOwned {
+    frag_index: FragmentIndex,
+    glycan_sorted: Vec<(f64, usize)>,
+    glycan_y_index: GlycanYIndex,
+    scan_filter: Option<std::collections::HashSet<i32>>,
+    effective_top_k: usize,
+    max_peptide_first: usize,
+    peptide_first_on: bool,
+    yindex_on: bool,
+    glyco_decoy_on: bool,
+    features_collapse: bool,
+    features_enumerated: bool,
+    /// Cross-spectrum transfer toggle (legacy in-driver `ANDES_GLYCO_CROSSSPECTRUM`
+    /// path). Not part of `GlycoScoreCtx` (it gates `glyco_search_run`'s own
+    /// Pass-2, not per-spectrum scoring), but built alongside the other toggles
+    /// so callers who need it (only `glyco_search_run` today) don't re-read the
+    /// env var separately.
+    pub cross_spectrum_on: bool,
+}
 
-    // PEPTIDE-FIRST index (combines with the backbone-first hybrid below). Build a
-    // fragment-ion index over the SEQUON candidate peptides ONCE. Per spectrum we
-    // query it for peptides with real b/y support, then keep those whose
-    // glycan-by-subtraction (`precursor − peptide`) hits a known glycan. This
-    // recovers backbones on weak/absent-core-Y spectra that the core-Y-ranked
-    // truncation drops — the candidate-generation ceiling — without a brute force.
-    // Only build the (expensive) index when the peptide-first path is on; an
-    // empty index is a no-op query otherwise (CodeRabbit: avoid the wasted build).
-    let frag_index = if !peptide_first_on {
-        FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01))
-    } else {
-        let seq_entries: Vec<(u32, &model::peptide::Peptide)> = candidates
-            .iter()
-            .enumerate()
-            .filter_map(|(i, c)| {
-                let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-                if has_nxst_sequon(&res) {
-                    Some((i as u32, &c.peptide))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Memory guard (Codex re-review #3): glyco is forced to the in-RAM
-        // candidate index, and the fragment index adds ~24 B/ion of postings.
-        // Warn on very large sequon sets so an OOM isn't silent (a smaller search
-        // space or an out-of-core index is the fix for those).
-        let est_mb = seq_entries.len().saturating_mul(20 * 24) / 1_000_000;
-        if seq_entries.len() > 3_000_000 {
-            eprintln!(
-                "WARN glyco fragment index: {} sequon candidates (~{} MB postings) — \
-                 large database; consider narrowing the search space",
-                seq_entries.len(),
-                est_mb
-            );
+impl GlycoCtxOwned {
+    /// Build every toggle + index that `score_spectrum_glyco` needs, exactly
+    /// as `glyco_search_run` used to build them inline. `backbone_top_k` is the
+    /// caller's requested cap (widened to `effective_top_k` under
+    /// `ANDES_GLYCO_EXHAUSTIVE=1`, same as before the extraction).
+    pub fn build(
+        candidates: &[crate::candidate_gen::Candidate],
+        glycan_list: &[GlycanComp],
+        fragment_tolerance_da: f64,
+        backbone_top_k: usize,
+    ) -> Self {
+        // Independent experiment toggles (one variable at a time): the peptide-first
+        // fragment-index path (default ON) and cross-spectrum glycoform transfer
+        // (default OFF, opt-in). Kept separable to isolate each lever + its cost.
+        let peptide_first_on = std::env::var("ANDES_GLYCO_PEPTIDE_FIRST")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let cross_spectrum_on = std::env::var("ANDES_GLYCO_CROSSSPECTRUM")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        // G3 glycan-axis decoy (default OFF). When off we must NOT compute the decoy
+        // Y-ladder per hit — it is unused and ~doubles the glyco composition-ladder
+        // cost, so leaving it on would slow the shipping default path.
+        let glyco_decoy_on = std::env::var("ANDES_GLYCO_DECOY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
+        // glyco_pin.rs), so computing the expensive ~40-feature vector
+        // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
+        // Compute features only for the winner that will actually be emitted. These
+        // mirror the PIN writer's defaults exactly (ANDES_GLYCO_ALL_HITS /
+        // ANDES_GLYCO_DENOVO) so the driver's kept hit == the PIN's kept row.
+        let features_collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
+            .map(|v| v != "1")
+            .unwrap_or(true);
+        let features_enumerated = std::env::var("ANDES_GLYCO_DENOVO")
+            .map(|v| v != "1")
+            .unwrap_or(true);
+        // Fast dev harness: ANDES_GLYCO_SCANS=<file> (one scan number per line)
+        // restricts the glyco driver to those scans (e.g. the truth-scan subset), so
+        // a redesign iteration is minutes not hours. The standard search still runs
+        // over all spectra; only glyco scoring is subset. Unset = all spectra.
+        let scan_filter: Option<std::collections::HashSet<i32>> = std::env::var("ANDES_GLYCO_SCANS")
+            .ok()
+            .and_then(|path| std::fs::read_to_string(&path).ok())
+            .map(|s| {
+                s.lines()
+                    .filter_map(|l| l.trim().parse::<i32>().ok())
+                    .collect()
+            });
+        // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
+        // core-Y cap and the driver's backbone_top_k — to measure the true findable
+        // ceiling. Large finite cap avoids the max_features usize overflow. SLOW.
+        let exhaustive = std::env::var("ANDES_GLYCO_EXHAUSTIVE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
+        // Phase G1: glycan-Y-first candidate SELECTION (a glycan-Y-complementary
+        // index generates backbones from the strong glycan-Y ladder) + TWO-AXIS
+        // retention (keep backbones in top_k by peptide-b/y OR by glycan-Y evidence),
+        // so a weak-b/y / strong-glycan-Y spectrum survives truncation. Opt-in for a
+        // clean A/B vs the b/y-only path.
+        let yindex_on = std::env::var("ANDES_GLYCO_YINDEX")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let glycan_y_index = if yindex_on {
+            GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
+        } else {
+            GlycanYIndex::build(&[], fragment_tolerance_da.max(0.02))
+        };
+
+        // PEPTIDE-FIRST index (combines with the backbone-first hybrid below). Build a
+        // fragment-ion index over the SEQUON candidate peptides ONCE. Per spectrum we
+        // query it for peptides with real b/y support, then keep those whose
+        // glycan-by-subtraction (`precursor − peptide`) hits a known glycan. This
+        // recovers backbones on weak/absent-core-Y spectra that the core-Y-ranked
+        // truncation drops — the candidate-generation ceiling — without a brute force.
+        // Only build the (expensive) index when the peptide-first path is on; an
+        // empty index is a no-op query otherwise (CodeRabbit: avoid the wasted build).
+        let frag_index = if !peptide_first_on {
+            FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01))
+        } else {
+            let seq_entries: Vec<(u32, &model::peptide::Peptide)> = candidates
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| {
+                    let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+                    if has_nxst_sequon(&res) {
+                        Some((i as u32, &c.peptide))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // Memory guard (Codex re-review #3): glyco is forced to the in-RAM
+            // candidate index, and the fragment index adds ~24 B/ion of postings.
+            // Warn on very large sequon sets so an OOM isn't silent (a smaller search
+            // space or an out-of-core index is the fix for those).
+            let est_mb = seq_entries.len().saturating_mul(20 * 24) / 1_000_000;
+            if seq_entries.len() > 3_000_000 {
+                eprintln!(
+                    "WARN glyco fragment index: {} sequon candidates (~{} MB postings) — \
+                     large database; consider narrowing the search space",
+                    seq_entries.len(),
+                    est_mb
+                );
+            }
+            FragmentIndex::build(seq_entries.iter().copied(), fragment_tolerance_da.max(0.01))
+        };
+        // Sorted glycan masses for the peptide-first glycan-by-subtraction lookup.
+        let glycan_sorted: Vec<(f64, usize)> = {
+            let mut v: Vec<(f64, usize)> = glycan_list.iter().enumerate().map(|(i, g)| (g.mass, i)).collect();
+            v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            v
+        };
+        // Minimum b/y peaks a peptide must match to be a peptide-first candidate.
+        // 6 (was 4) sharply cuts the coincidental-match Poisson tail — most of the
+        // per-spectrum query cost — with negligible loss of real glycopeptides
+        // (identifiable backbones carry several b/y ions).
+        // Hard cap on peptide-first candidates per spectrum (strongest b/y support
+        // first) so a peak-dense spectrum can't blow up phase-1 scoring. Overridable
+        // via ANDES_GLYCO_MAX_PF. The deterministic collapse keeps a FIXED subset
+        // under this cap, so too low a cap truncates good backbones away. A cap
+        // sweep on PXD025455 Fc3_r1 (deterministic, honest FDR, 1 decoy@1% each):
+        // 64→218 @1%/90 bb-correct, 256→232/93, 1024→253/97, ∞→268/96. Default 1024
+        // = beats an open-source glyco engine (222) with the HIGHEST backbone-correct count (97)
+        // and best precision, while keeping a safety ceiling for pathological
+        // peak-dense spectra (∞ gains a few total IDs but slightly worse precision).
+        let max_peptide_first: usize = std::env::var("ANDES_GLYCO_MAX_PF")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(1024);
+
+        GlycoCtxOwned {
+            frag_index,
+            glycan_sorted,
+            glycan_y_index,
+            scan_filter,
+            effective_top_k,
+            max_peptide_first,
+            peptide_first_on,
+            yindex_on,
+            glyco_decoy_on,
+            features_collapse,
+            features_enumerated,
+            cross_spectrum_on,
         }
-        FragmentIndex::build(seq_entries.iter().copied(), fragment_tolerance_da.max(0.01))
-    };
-    // Sorted glycan masses for the peptide-first glycan-by-subtraction lookup.
-    let glycan_sorted: Vec<(f64, usize)> = {
-        let mut v: Vec<(f64, usize)> = glycan_list.iter().enumerate().map(|(i, g)| (g.mass, i)).collect();
-        v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        v
-    };
-    // Minimum b/y peaks a peptide must match to be a peptide-first candidate.
-    // 6 (was 4) sharply cuts the coincidental-match Poisson tail — most of the
-    // per-spectrum query cost — with negligible loss of real glycopeptides
-    // (identifiable backbones carry several b/y ions).
-    const MIN_BY_MATCHES: u32 = 6;
-    // Hard cap on peptide-first candidates per spectrum (strongest b/y support
-    // first) so a peak-dense spectrum can't blow up phase-1 scoring. Overridable
-    // via ANDES_GLYCO_MAX_PF. The deterministic collapse keeps a FIXED subset
-    // under this cap, so too low a cap truncates good backbones away. A cap
-    // sweep on PXD025455 Fc3_r1 (deterministic, honest FDR, 1 decoy@1% each):
-    // 64→218 @1%/90 bb-correct, 256→232/93, 1024→253/97, ∞→268/96. Default 1024
-    // = beats an open-source glyco engine (222) with the HIGHEST backbone-correct count (97)
-    // and best precision, while keeping a safety ceiling for pathological
-    // peak-dense spectra (∞ gains a few total IDs but slightly worse precision).
-    let max_peptide_first: usize = std::env::var("ANDES_GLYCO_MAX_PF")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(1024);
+    }
 
-    // Per-spectrum processing, reused across both passes. `transfer` holds extra
-    // backbones injected by cross-spectrum transfer (empty on pass 1).
-    let process_one = |spec_idx: usize,
-                       spec: &Spectrum,
-                       transfer: &[BackboneHit]|
-     -> Option<GlycoSpectrumResult> {
+    /// Borrow a [`GlycoScoreCtx`] referencing this owned state plus the
+    /// per-call `prepared`/`glycan_list`/`tol_ppm` — the same values
+    /// `glyco_search_run` closes over.
+    pub fn as_ctx<'a>(
+        &'a self,
+        prepared: &'a PreparedSearch<'_>,
+        glycan_list: &'a [GlycanComp],
+        tol_ppm: f64,
+    ) -> GlycoScoreCtx<'a> {
+        GlycoScoreCtx {
+            params: prepared.params,
+            scorer: prepared.scorer,
+            candidates: &prepared.candidates,
+            bucket_index: &prepared.bucket_index,
+            fragment_tolerance_da: prepared.fragment_tolerance_da,
+            intensity_model: prepared.intensity_model.as_deref(),
+            frag_index: &self.frag_index,
+            glycan_sorted: &self.glycan_sorted,
+            glycan_list,
+            glycan_y_index: &self.glycan_y_index,
+            tol_ppm,
+            effective_top_k: self.effective_top_k,
+            max_peptide_first: self.max_peptide_first,
+            peptide_first_on: self.peptide_first_on,
+            yindex_on: self.yindex_on,
+            glyco_decoy_on: self.glyco_decoy_on,
+            features_collapse: self.features_collapse,
+            features_enumerated: self.features_enumerated,
+            scan_filter: self.scan_filter.as_ref(),
+        }
+    }
+}
+
+/// Score one spectrum's glyco backbone candidates end to end: candidate
+/// generation (backbone-first hybrid DB/de-novo + peptide-first fragment-index
+/// + glycan-Y-first, per the `ctx` toggles), dedup, b/y-ranked truncation, and
+/// phase-2 feature extraction for the surviving winners.
+///
+/// `transfer` carries extra backbones injected by cross-spectrum transfer
+/// (empty for ordinary Pass-1 scoring).
+///
+/// Extracted from the former `process_one` closure inside `glyco_search_run`
+/// (Task 8c) so it can also be driven from [`glyco_transfer_pass2`], which
+/// lives outside `glyco_search_run`'s own Pass-1/legacy-Pass-2 call sites. The
+/// body below is BYTE-FOR-BYTE identical to the former closure body except
+/// that captured variables now read from `ctx` — no scoring-logic change.
+fn score_spectrum_glyco(
+    spec_idx: usize,
+    spec: &Spectrum,
+    transfer: &[BackboneHit],
+    ctx: &GlycoScoreCtx<'_>,
+) -> Option<GlycoSpectrumResult> {
+    let params = ctx.params;
+    let scorer = ctx.scorer;
+    let candidates = ctx.candidates;
+    let bucket_index = ctx.bucket_index;
+    let fragment_tolerance_da = ctx.fragment_tolerance_da;
+    let frag_index = ctx.frag_index;
+    let glycan_sorted = ctx.glycan_sorted;
+    let glycan_list = ctx.glycan_list;
+    let glycan_y_index = ctx.glycan_y_index;
+    let tol_ppm = ctx.tol_ppm;
+    let effective_top_k = ctx.effective_top_k;
+    let max_peptide_first = ctx.max_peptide_first;
+    let peptide_first_on = ctx.peptide_first_on;
+    let yindex_on = ctx.yindex_on;
+    let glyco_decoy_on = ctx.glyco_decoy_on;
+    let features_collapse = ctx.features_collapse;
+    let features_enumerated = ctx.features_enumerated;
+    let scan_filter = ctx.scan_filter;
+    // Minimum b/y peaks a peptide must match to be a peptide-first candidate
+    // (see `glyco_search_run`'s doc comment on this constant for the tuning
+    // rationale — unchanged by the extraction).
+    const MIN_BY_MATCHES: u32 = 6;
+
             if spec.peaks.len() < params.min_peaks as usize {
                 return None;
             }
             // Fast dev harness: skip spectra outside the scan subset (if set).
-            if let Some(ref scans) = scan_filter {
+            if let Some(scans) = scan_filter {
                 match spec.scan {
                     Some(sc) if scans.contains(&sc) => {}
                     _ => return None,
@@ -852,7 +978,7 @@ pub fn glyco_search_run(
                     &cand.peptide,
                     scorer,
                     w.z,
-                    prepared.intensity_model.as_deref(),
+                    ctx.intensity_model,
                 );
 
                 let mass_error_ppm = if bb_residue > 0.0 {
@@ -953,13 +1079,45 @@ pub fn glyco_search_run(
                     hits: best_hits.into_values().collect(),
                 })
             }
-    };
+}
+
+/// Run the glyco-PSM scoring driver over all spectra.
+///
+/// For each spectrum:
+/// 1. Run `oxonium_gate` to gather oxonium evidence.
+/// 2. For each charge in the params charge range, call `hybrid_candidates`
+///    to enumerate backbone hits (DB + de-novo).
+/// 3. Union and dedup backbone hits within 0.02 Da, capping at `backbone_top_k`.
+/// 4. For each backbone hit, find candidates in the mass bucket whose peptide
+///    mass matches the backbone and has a N-X-S/T sequon.
+/// 5. Score each (peptide, glycan) pair and emit a `FullGlycoPsm`.
+///
+/// Results are serialized (rayon is not used here to keep v1 simple; the
+/// standard search path handles parallelism separately).
+pub fn glyco_search_run(
+    spectra: &[Spectrum],
+    prepared: &PreparedSearch<'_>,
+    glycan_list: &[GlycanComp],
+    tol_ppm: f64,
+    backbone_top_k: usize,
+) -> Vec<GlycoSpectrumResult> {
+    let params = prepared.params;
+    let candidates = &prepared.candidates;
+    let fragment_tolerance_da = prepared.fragment_tolerance_da;
+
+    // Shared setup (toggles + indices) — see `GlycoCtxOwned::build` for the
+    // full rationale of each; unchanged by the Task 8c extraction, just moved
+    // out of this function so `glyco_transfer_pass2` can build an IDENTICAL
+    // context from the same routine instead of a second hand-maintained copy.
+    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k);
+    let cross_spectrum_on = owned.cross_spectrum_on;
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
 
     // PASS 1: baseline candidate gen (+ peptide-first if on), no transfer.
     let pass1: Vec<GlycoSpectrumResult> = spectra
         .par_iter()
         .enumerate()
-        .filter_map(|(spec_idx, spec)| process_one(spec_idx, spec, &[]))
+        .filter_map(|(spec_idx, spec)| score_spectrum_glyco(spec_idx, spec, &[], &ctx))
         .collect();
 
     if !cross_spectrum_on {
@@ -1067,7 +1225,7 @@ pub fn glyco_search_run(
                         pn,
                         acceptor_rt,
                         rt_window,
-                        &glycan_sorted,
+                        ctx.glycan_sorted,
                         glycan_list,
                         MIN_GLYCAN,
                         tol,
@@ -1094,7 +1252,7 @@ pub fn glyco_search_run(
             if transfer.is_empty() {
                 return None;
             }
-            process_one(spec_idx, spec, &transfer)
+            score_spectrum_glyco(spec_idx, spec, &transfer, &ctx)
         })
         .collect();
 
@@ -1110,6 +1268,68 @@ pub fn glyco_search_run(
     let mut out: Vec<GlycoSpectrumResult> = by_idx.into_values().collect();
     out.sort_by_key(|r| r.spectrum_idx);
     out
+}
+
+/// Cross-spectrum transfer Pass 2 (Task 8c/8d entry point): re-score every
+/// spectrum that received one or more transferred backbones (`injected`),
+/// using the SAME [`score_spectrum_glyco`] path Pass 1 uses, and supersede
+/// that spectrum's Pass-1 entry with the re-scored result. Spectra absent
+/// from `injected` keep their Pass-1 result byte-for-byte.
+///
+/// Unlike `glyco_search_run`'s legacy in-driver `ANDES_GLYCO_CROSSSPECTRUM`
+/// path (a same-process whitelist built from Pass-1's own strong-ladder
+/// donors), this entry point is driven by the DRIVER: `injected` is expected
+/// to already carry `BackboneHit`s with `is_transferred`/`transfer_*`
+/// provenance populated by the driver's seed-extraction + `propagate_transfers`
+/// pipeline (Tasks 7/8b/8d), independent of this module's own Pass-1/Pass-2.
+///
+/// Deterministic merge: `injected` is a `BTreeMap` (never `HashMap`) and the
+/// output is sorted by `spectrum_idx`, matching `glyco_search_run`'s own
+/// determinism convention.
+pub fn glyco_transfer_pass2(
+    spectra: &[Spectrum],
+    prepared: &PreparedSearch<'_>,
+    glycan_list: &[GlycanComp],
+    tol_ppm: f64,
+    backbone_top_k: usize,
+    pass1: Vec<GlycoSpectrumResult>,
+    injected: &std::collections::BTreeMap<usize, Vec<BackboneHit>>,
+) -> Vec<GlycoSpectrumResult> {
+    let candidates = &prepared.candidates;
+    let fragment_tolerance_da = prepared.fragment_tolerance_da;
+
+    // Same shared setup `glyco_search_run` uses — identical toggles/indices,
+    // built once for this call (see `GlycoCtxOwned::build` doc comment).
+    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k);
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
+
+    // Re-score only the spectra that actually received a transferred backbone.
+    // Deterministic order: BTreeMap iteration is already key-sorted, and rayon
+    // reduces over an explicit index list rather than an unordered iterator.
+    let acceptor_idxs: Vec<usize> = injected.keys().copied().collect();
+    let superseded: std::collections::BTreeMap<usize, GlycoSpectrumResult> = acceptor_idxs
+        .par_iter()
+        .filter_map(|&spec_idx| {
+            let transfer = injected.get(&spec_idx)?;
+            if transfer.is_empty() || spec_idx >= spectra.len() {
+                return None;
+            }
+            score_spectrum_glyco(spec_idx, &spectra[spec_idx], transfer, &ctx)
+                .map(|r| (spec_idx, r))
+        })
+        .collect();
+
+    // Merge: superseded entries win; everything else keeps its Pass-1 result.
+    // BTreeMap keyed by spectrum_idx guarantees a deterministic merge order
+    // independent of `pass1`'s incoming order or rayon's completion order.
+    let mut merged: std::collections::BTreeMap<usize, GlycoSpectrumResult> = pass1
+        .into_iter()
+        .map(|r| (r.spectrum_idx, r))
+        .collect();
+    for (spec_idx, result) in superseded {
+        merged.insert(spec_idx, result);
+    }
+    merged.into_values().collect()
 }
 
 #[cfg(test)]
@@ -1469,5 +1689,184 @@ mod tests {
             "expected noise_bb (idx=0) ranked second, got idx={}",
             order[1]
         );
+    }
+
+    /// Task 8c REQUIRED test (carries forward Task 8a coverage): a transferred
+    /// `BackboneHit` injected via `glyco_transfer_pass2` must reach the emitted
+    /// PSM's `GlycoPsmKey` with ALL FIVE non-default provenance fields intact.
+    /// This guards two things at once:
+    ///   (1) the `process_one` → `score_spectrum_glyco` extraction (Task 8c)
+    ///       did not drop the `bb_hit.transfer_*` → `GlycoPsmKey` copies wired
+    ///       in Task 8a (glyco_search.rs ~929-933 in the pre-extraction file);
+    ///   (2) `glyco_transfer_pass2` actually threads its `injected` map through
+    ///       to real scoring instead of a no-op.
+    #[test]
+    fn glyco_transfer_pass2_carries_all_five_provenance_fields_into_emitted_key() {
+        use model::aa_set::AminoAcidSetBuilder;
+        use model::instrument::InstrumentType;
+        use model::protocol::Protocol;
+        use model::{activation::ActivationMethod, AminoAcid, Protein, ProteinDb, Tolerance, PROTON as MODEL_PROTON};
+        use rustc_hash::FxHashMap;
+        use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+        use scoring_crate::{Param, RankScorer};
+        use crate::search_index::SearchIndex;
+
+        // Minimal RankScorer fixture (mirrors crates/search/tests/match_engine_smoke.rs's tiny_scorer()).
+        fn tiny_scorer() -> RankScorer {
+            let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
+            let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+            let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+            let noise = IonType::Noise;
+            let mut ion_table = FxHashMap::default();
+            ion_table.insert(prefix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
+            ion_table.insert(suffix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
+            ion_table.insert(noise, vec![0.05_f32, 0.05, 0.05, 0.05]);
+            let mut rank_dist_table = FxHashMap::default();
+            rank_dist_table.insert(part, ion_table);
+            let mut frag_off_table = FxHashMap::default();
+            frag_off_table.insert(part, vec![]);
+            let mut param = Param {
+                version: 10001,
+                data_type: SpecDataType {
+                    activation: ActivationMethod::HCD,
+                    instrument: InstrumentType::QExactive,
+                    enzyme: None,
+                    protocol: Protocol::Automatic,
+                },
+                mme: Tolerance::Ppm(20.0),
+                apply_deconvolution: false,
+                deconvolution_error_tolerance: 0.0,
+                charge_hist: vec![(2, 100)],
+                min_charge: 2,
+                max_charge: 2,
+                num_segments: 1,
+                partitions: vec![part],
+                num_precursor_off: 0,
+                precursor_off_map: FxHashMap::default(),
+                frag_off_table,
+                max_rank: 3,
+                rank_dist_table,
+                error_scaling_factor: 0,
+                ion_err_dist_table: FxHashMap::default(),
+                noise_err_dist_table: FxHashMap::default(),
+                ion_existence_table: FxHashMap::default(),
+                partition_ion_types_cache: FxHashMap::default(),
+                gbdt_peak_model: None,
+                frag_intensity_model: None,
+                rich_ion_model: None,
+            };
+            param.rebuild_cache();
+            RankScorer::new(&param)
+        }
+
+        // Protein carrying a tryptic peptide with an N-X-S/T sequon (N-E-S):
+        // "MKNESVVR" -> tryptic peptide "NESVVR" after cleavage at K (pos 1).
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MKNESVVR".to_vec(),
+            }],
+        };
+        let idx = SearchIndex::from_target_db(&target, "XXX");
+        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
+        let mut params = crate::search_params::SearchParams::default_tryptic(aa_set);
+        params.min_peaks = 0; // peakless fixture spectrum; not exercising the min-peaks filter
+        params.charge_range = 2..=2;
+        params.isotope_error_range = 0..=0;
+
+        let scorer = tiny_scorer();
+        let prepared = PreparedSearch::prepare(&idx, &params, &scorer, 0.05, "XXX");
+
+        // Locate the target "NESVVR" candidate and its residue (backbone) mass.
+        let residues: Vec<AminoAcid> =
+            b"NESVVR".iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+        let backbone_peptide = model::peptide::Peptide::new(residues, b'K', b'-');
+        let backbone_residue_mass = backbone_peptide.mass() - H2O;
+        assert!(
+            prepared.candidates.iter().any(|c| {
+                !c.is_decoy
+                    && (c.peptide.mass() - H2O - backbone_residue_mass).abs() < 1e-6
+            }),
+            "fixture candidate set must contain the target NESVVR backbone"
+        );
+
+        // A known glycan composition (core: 2 HexNAc + 3 Hex).
+        let glycan_list = andes_glyco::glycan_db::n_glycan_list();
+        let glycan = glycan_list
+            .iter()
+            .find(|g| g.hexnac == 2 && g.hex == 3 && g.fuc == 0 && g.neuac == 0 && g.neugc == 0)
+            .cloned()
+            .expect("n_glycan_list must contain the core HexNAc2Hex3 composition");
+
+        // Spectrum precursor consistent with backbone + glycan at charge 2, iso 0.
+        let charge = 2u8;
+        let precursor_neutral = backbone_residue_mass + H2O + glycan.mass;
+        let precursor_mz = (precursor_neutral + charge as f64 * MODEL_PROTON) / charge as f64;
+        let spec = Spectrum {
+            title: "xfer-fixture".into(),
+            precursor_mz,
+            precursor_intensity: None,
+            precursor_charge: Some(charge as i32),
+            rt_seconds: Some(900.0),
+            scan: Some(1),
+            peaks: vec![],
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+        let spectra = vec![spec];
+
+        // Pass 1 (no transfer) on this fixture: nothing to find (no oxonium/Y-ladder
+        // evidence, peptide-first path needs real b/y matches on real peaks), so an
+        // empty Pass-1 result is the expected, honest starting point for Pass 2.
+        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50);
+        assert!(
+            pass1.iter().all(|r| r.hits.is_empty()) || pass1.is_empty(),
+            "peakless fixture must not produce a Pass-1 hit on its own: {pass1:?}"
+        );
+
+        // Inject a TRANSFERRED BackboneHit for spectrum 0 with ALL 5 non-default
+        // provenance fields set — this is the exact fixture Task 8a's key-wiring
+        // (bb_hit.transfer_* -> GlycoPsmKey.transfer_*) must preserve through the
+        // Task 8c extraction.
+        let bb_hit = BackboneHit {
+            backbone_mass: backbone_residue_mass,
+            glycan: Some(glycan.clone()),
+            source: Source::Db,
+            charge,
+            isotope_offset: 0,
+            glycan_mass_residual: glycan.mass,
+            is_transferred: true,
+            transfer_graph_support: 5,
+            transfer_seed_score: 2.5,
+            transfer_rt_delta: 12.0,
+            transfer_ungated: true,
+        };
+        let mut injected: std::collections::BTreeMap<usize, Vec<BackboneHit>> =
+            std::collections::BTreeMap::new();
+        injected.insert(0, vec![bb_hit]);
+
+        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, pass1, &injected);
+
+        assert_eq!(merged.len(), 1, "expected exactly one spectrum result: {merged:?}");
+        let result = &merged[0];
+        assert_eq!(result.spectrum_idx, 0);
+        assert!(!result.hits.is_empty(), "transferred backbone must produce a winning hit");
+
+        let key = &result.hits[0].glycan_key;
+        assert!(key.is_transferred, "IsTransferred must carry through to the emitted key");
+        assert_eq!(key.transfer_graph_support, 5, "TransferGraphSupport must carry through");
+        assert!(
+            (key.transfer_seed_score - 2.5).abs() < 1e-6,
+            "TransferSeedScore must carry through: got {}",
+            key.transfer_seed_score
+        );
+        assert!(
+            (key.transfer_rt_delta - 12.0).abs() < 1e-6,
+            "TransferRTDelta must carry through: got {}",
+            key.transfer_rt_delta
+        );
+        assert!(key.transfer_ungated, "TransferUngated must carry through to the emitted key");
     }
 }

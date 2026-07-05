@@ -201,7 +201,7 @@ fn main() {
         if hybrid_searchable {
             n_hybrid_searchable += 1;
             match searchable_hit.unwrap().source {
-                Source::Db => n_hybrid_from_db += 1,
+                Source::Db | Source::Transferred => n_hybrid_from_db += 1,
                 Source::DeNovo => n_hybrid_from_denovo += 1,
             }
         }

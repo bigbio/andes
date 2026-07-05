@@ -23,6 +23,9 @@ pub enum Source {
     Db,
     /// Backbone proposed by the de-novo Y-ladder solver.
     DeNovo,
+    /// Backbone borrowed from a confident co-eluting sibling spectrum
+    /// (cross-spectrum transfer). Carries no per-spectrum core-Y anchor.
+    Transferred,
 }
 
 /// A single backbone candidate from either the DB branch or the de-novo solver.
@@ -575,6 +578,7 @@ mod tests {
             let src = match h.source {
                 Source::Db => 0u8,
                 Source::DeNovo => 1u8,
+                Source::Transferred => 0u8, // Mirror Db: transferred backbones are DB-annotated glycans
             };
             (
                 (h.backbone_mass * 100.0).round() as i64,
@@ -946,5 +950,13 @@ mod tests {
             assert_eq!(h.isotope_offset, 2, "every hit must carry the caller's isotope offset");
             assert_eq!(h.charge, 2, "every hit must carry the caller's charge");
         }
+    }
+
+    #[test]
+    fn source_has_transferred_variant_distinct_from_db_and_denovo() {
+        assert_ne!(Source::Transferred, Source::Db);
+        assert_ne!(Source::Transferred, Source::DeNovo);
+        // clone + eq hold (derives intact)
+        assert_eq!(Source::Transferred, Source::Transferred.clone());
     }
 }

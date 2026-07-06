@@ -1,18 +1,35 @@
-# andes glyco — status resume (2026-07-04)
+# andes glyco — status resume (2026-07-06)
 
 Test bed: PXD025455 `HCC_pool_Late_Fc3_r1` (human serum NASH-HCC, stepped-HCD,
 Q Exactive HF). andes numbers use honest defaults (top-1-per-scan collapse,
-enumerated-only, Percolator FDR). Truth is 2-engine validated.
+enumerated-only, Percolator FDR). Truth is 2-engine validated. **All numbers
+below are on the DETERMINISTIC pipeline** — a critical non-determinism bug (a
+single-key `sort_unstable` that swung @1%FDR 228↔319 run-to-run) was found,
+fixed, and regression-guarded 2026-07-05; every prior single-run number had huge
+error bars.
 
-## Yield @1% FDR (same run)
-| Engine | glyco-PSMs @1% FDR | Role |
-|---|---|---|
-| the reference engine (raw) | ~1,370 | truth source |
-| the reference engine (curated truth) | 523 | eval "truth" set |
-| **andes** | **261** | Y-ladder-first generation |
-| an open-source glyco engine (O-Pair) | 222 | independent 2nd tool (we ran it) |
+## Yield @1% FDR (same run, deterministic)
+| Engine | glyco-PSMs @1% FDR | backbone-correct (523) | Role |
+|---|---|---|---|
+| the reference engine (raw) | ~1,370 | — | truth source |
+| the reference engine (curated truth) | 523 | — | eval "truth" set |
+| **andes** | **253** | **97** | yladder collapse + cap 1024 |
+| an open-source glyco engine (O-Pair) | 222 | — | independent 2nd tool (we ran it) |
 
-andes yields more @1% FDR than an open-source glyco engine.
+**andes beats an open-source glyco engine** (253 vs 222), deterministic + honest (1 decoy@1%).
+Levers (all committed on `glyco-phase1`): determinism fix → yladder default
+collapse (core-Y ladder primary, +70%: 128→218) → `MAX_PEPTIDE_FIRST` cap
+64→1024 (218→253; `ANDES_GLYCO_MAX_PF`).
+
+## Cross-spectrum transfer — EXPERIMENTAL, NOT FDR-VALID
+`--glyco-transfer` (off by default) is fully implemented (Tasks 1–8d) but a Codex
+adversarial review found it **FDR-unsound**: the `TransferredCandidate→BackboneHit`
+injection drops the seed's `is_decoy`, so decoy seeds can emit target-labeled rows
+and the symmetric-decoy graph is broken (+3 HIGH, +1 MEDIUM). It prints a loud
+EXPERIMENTAL warning at runtime; the A/B was net-neutral but **confounded** by a
+dedup bug that silently erases transfers. See
+`50-roadmap/cross-spectrum-transfer-design.md` § Known soundness bugs for the
+ordered fix-first list before any revival.
 
 ## Truth validation (measuring stick)
 | Quantity | Value |

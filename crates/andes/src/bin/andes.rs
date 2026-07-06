@@ -2531,9 +2531,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &seeds, &nodes, &glycan_sorted, &glycan_list, rt_window, MIN_GLYCAN, tol,
             );
 
+            // Min graph-support injection gate: only inject a transferred
+            // backbone corroborated by >= this many co-eluting, glycan-delta-
+            // linked sibling spectra (a real glycoform ladder), cutting the
+            // mass-coincidence singletons that the wide "any glycan-delta" edge
+            // otherwise floods in. Default 1 (no gate); tune via env for A/B.
+            let min_support: u32 = std::env::var("ANDES_GLYCO_MIN_SUPPORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
             let mut injected: std::collections::BTreeMap<usize, Vec<andes_glyco::hybrid::BackboneHit>> =
                 std::collections::BTreeMap::new();
             for tc in &transferred {
+                if tc.graph_support < min_support {
+                    continue;
+                }
                 let Some(&spec_idx) = scan_to_spec_idx.get(&tc.acceptor_scan) else {
                     continue;
                 };
@@ -2557,13 +2569,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
 
+            let injected_cands: usize = injected.values().map(|v| v.len()).sum();
             eprintln!(
-                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @1% FDR ({} decoy), {} nodes, {} transferred candidates onto {} acceptor spectra [{:.2}s]",
+                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @1% FDR ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}) onto {} acceptor spectra [{:.2}s]",
                 q_rows.len(),
                 seeds.len(),
                 seeds.iter().filter(|s| s.is_decoy).count(),
                 nodes.len(),
                 transferred.len(),
+                injected_cands,
+                min_support,
                 injected.len(),
                 t_xfer.elapsed().as_secs_f64()
             );

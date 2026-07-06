@@ -2390,6 +2390,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let glyco_results = if cli.glyco_transfer {
             let t_xfer = std::time::Instant::now();
 
+            // EXPERIMENTAL / NOT FDR-VALID. Codex adversarial review (2026-07-06)
+            // found this path does NOT preserve target/decoy identity: the
+            // TransferredCandidate -> BackboneHit conversion drops the seed's
+            // is_decoy, so a decoy seed can emit a TARGET-labeled row and the
+            // symmetric-decoy graph that final FDR relies on is broken. Also:
+            // scan-only q-join can mis-map on duplicate/MGF scans, dedup can
+            // erase transferred hits, and the RT gate is bypassed when RT is
+            // missing. See docs/plans/glyco/50-roadmap/cross-spectrum-transfer-design.md
+            // (§ Known soundness bugs). DO NOT use --glyco-transfer results for
+            // reported identifications until those are fixed.
+            eprintln!(
+                "[glyco-transfer] ⚠ EXPERIMENTAL — FDR NOT VALIDATED. Transferred \
+                 rows do not preserve target/decoy identity (Codex critical); counts \
+                 from this mode are NOT trustworthy. For research/development only."
+            );
+
             // Step 2: write Pass-1 to an in-memory PIN, then (step 3)
             // native-GBDT-rescore it in-process to get target+decoy q-values.
             let mut buf: Vec<u8> = Vec::new();
@@ -2571,9 +2587,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let injected_cands: usize = injected.values().map(|v| v.len()).sum();
             eprintln!(
-                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @1% FDR ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}) onto {} acceptor spectra [{:.2}s]",
+                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @{:.1}% native-q ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}) onto {} acceptor spectra [{:.2}s]",
                 q_rows.len(),
                 seeds.len(),
+                seed_q * 100.0,
                 seeds.iter().filter(|s| s.is_decoy).count(),
                 nodes.len(),
                 transferred.len(),

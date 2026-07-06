@@ -309,8 +309,8 @@ pub fn solve_backbone_min(
     // TERTIARY = backbone_mass ascending (deterministic tiebreak).
     //
     // COMPLEMENT_WEIGHT tuned so complement evidence has meaningful influence but does
-    // not override a large core_y_hits gap. A weight of 0.5 means a candidate needs
-    // ~2 extra complement pairs per unit of intensity score deficit to win the tie.
+    // not override a large core_y_hits gap. A weight of 0.3 means a candidate needs
+    // ~3 extra complement pairs per unit of intensity score deficit to win the tie.
     const COMPLEMENT_WEIGHT: f64 = 0.3;
     cands.sort_by(|a, b| {
         b.core_y_hits

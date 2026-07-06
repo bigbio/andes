@@ -1,8 +1,47 @@
 # Cross-Spectrum Backbone Transfer — Design
 
-**Status:** design (approved 2026-07-05), pending implementation plan
+**Status:** implemented as an EXPERIMENTAL prototype (`--glyco-transfer`, off by
+default). ⚠ **NOT FDR-VALID — do not use for reported identifications.** See
+"Known soundness bugs" below. Implemented Tasks 1–8d (2026-07-05/06); A/B on
+Fc3_r1 was net-neutral, but that result is **confounded** by the bugs below.
 **Branch:** `glyco-phase1`
 **Author:** brainstormed with the user, 2026-07-05
+
+## ⚠ Known soundness bugs (Codex adversarial review, 2026-07-06) — MUST fix before revival
+
+The A/B (net-neutral, decoys@1%=1) looked benign only because transfer barely
+moved the top-1 winners; the mechanism that would keep it honest is broken.
+Fix in this order before trusting any `--glyco-transfer` number:
+
+1. **[CRITICAL] Transferred seeds lose target/decoy identity** (`andes.rs`, the
+   `TransferredCandidate → BackboneHit` injection). `BackboneHit` carries neither
+   `peptide_idx` nor `is_decoy`, so Pass-2 scores *any* mass-matching candidate
+   and the emitted row's label comes from that candidate — a **decoy** seed can
+   emit a **target**-labeled row. Target transfers inflate without matching decoy
+   transfers ⇒ the symmetric-decoy graph is invalid ⇒ Percolator q-values are not
+   honest. *Fix:* carry the seed `peptide_idx` + `is_decoy` through Pass-2; emit
+   label-locked transferred rows; add an end-to-end test that a low-q decoy seed
+   produces decoy-labeled transferred PIN rows.
+2. **[HIGH] Scan-only q-join can seed the wrong spectrum** (`andes.rs:2407-2507`).
+   Lookup keyed by `spec.scan.unwrap_or(0)`; duplicate scans (multi-file) or MGF
+   without `SCANS` collapse last-wins. *Fix:* join on exact emitted `SpecId` or a
+   unique `spec_idx`; fail loud on duplicate/missing scan ids in transfer mode.
+3. **[HIGH] Dedup erases transferred candidates** (`glyco_search.rs:147-183`).
+   Dedup prefers `Source::Db` and does not preserve `Transferred`; a transferred
+   hit with the same backbone/glycan as a DB hit collapses into the DB hit,
+   losing `IsTransferred` + the non-Db scoring exemption — silently defeating
+   transfer on the weak-ladder spectra it targets (this is a prime suspect for
+   the net-neutral result). *Fix:* preserve/merge `Transferred` provenance in
+   dedup; regression test.
+4. **[HIGH] Missing RT ⇒ all-run mass transfer** (`crossspectrum.rs:182-187`).
+   `co_elutes` accepts when either RT is missing (only flags `ungated`, an output
+   feature, not a gate). *Fix:* require RT on both ends by default; explicit
+   unsafe opt-in with stricter support otherwise.
+5. **[MEDIUM] Fixed 2500 Da tolerance biases edges by mass** (`andes.rs:2523`).
+   *Fix:* per-acceptor `(precursor·ppm).max(0.02)` tolerance in
+   `propagate_transfers`.
+
+---
 
 ## 1. Purpose & context
 

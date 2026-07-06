@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 
 use crate::glycan_db::GlycanComp;
-use crate::glycan_mass::{CORE_Y_STEPS, HEX, HEXNAC, PROTON};
+use crate::glycan_mass::{CORE_Y_STEPS, PROTON};
 
 /// Cumulative core-Y partial-glycan masses: Y0 (0), Y1 (+HexNAc), Y2 (+2HexNAc),
 /// Y3..Y5 (+Hex each) — the trimannosyl core, glycan-independent.
@@ -128,6 +128,7 @@ impl GlycanYIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::glycan_mass::{HEX, HEXNAC};
     use crate::glycan_db::n_glycan_list;
 
     /// The index must select the true glycan from its core-Y ladder alone — no

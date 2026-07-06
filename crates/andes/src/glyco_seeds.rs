@@ -9,37 +9,6 @@ pub struct SeedRow {
     pub score: f64,
 }
 
-/// Parse a Percolator/native `.psms`+`.dpsms` (or combined) TSV. Columns:
-/// PSMId/SpecId, Label (1 target / -1 or 0 decoy), score, q-value. Scan is the
-/// integer ScanNr embedded in the SpecId (…scan=<N>…), matching glyco PIN ids.
-pub fn parse_seed_rows(psms_tsv: &str) -> Result<Vec<SeedRow>, String> {
-    let mut lines = psms_tsv.lines();
-    let header = lines.next().ok_or("empty psms")?;
-    let cols: Vec<&str> = header.split('\t').collect();
-    let find = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
-    let id_i = find("PSMId").or_else(|| find("SpecId")).ok_or("no PSMId/SpecId")?;
-    let q_i = find("q-value").ok_or("no q-value")?;
-    let s_i = find("score").unwrap_or(q_i);
-    let l_i = find("Label");
-    let mut out = Vec::new();
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let f: Vec<&str> = line.split('\t').collect();
-        let id = f.get(id_i).copied().unwrap_or("");
-        let scan = extract_scan(id).ok_or_else(|| format!("no scan in id {id}"))?;
-        let q_value: f64 = f.get(q_i).and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        let score: f64 = f.get(s_i).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        let is_decoy = l_i
-            .and_then(|i| f.get(i))
-            .map(|v| v.trim().starts_with('-') || v.trim() == "0")
-            .unwrap_or_else(|| id.contains("DECOY_"));
-        out.push(SeedRow { scan, is_decoy, q_value, score });
-    }
-    Ok(out)
-}
-
 /// Pull the integer scan from a glyco SpecId like
 /// "controllerType=0 controllerNumber=1 scan=3000_glyco_3000_1". Public so the
 /// driver (Task 8d) can join the native rescorer's `spec_id` strings back to a

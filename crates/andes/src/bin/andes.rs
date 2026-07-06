@@ -2460,7 +2460,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
 
-            let seeds = glyco_seeds::seeds_at_fdr(&rows, 0.01, |scan| {
+            // Seed FDR threshold on the NATIVE-GBDT q-value. The in-process
+            // native rescorer ranks glyco PSMs as well as Percolator (≈258
+            // targets @ native-q≤0.05 vs Percolator's 253 @ q≤0.01 on the same
+            // PIN) but its plain target-decoy q-value is more CONSERVATIVE than
+            // Percolator's π₀/mix-max-corrected q (its best achievable q floors
+            // near ~0.028), so a 0.01 gate yields ZERO seeds even though the
+            // confident set exists. 0.05 recovers the Percolator-equivalent
+            // confident seed set; final FDR is still Percolator on the merged
+            // PIN (the symmetric decoy graph keeps that honest). Tunable for A/B.
+            let seed_q: f64 = std::env::var("ANDES_GLYCO_SEED_FDR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&q: &f64| q > 0.0 && q <= 1.0)
+                .unwrap_or(0.05);
+            let seeds = glyco_seeds::seeds_at_fdr(&rows, seed_q, |scan| {
                 seed_lookup.get(&scan).map(|&(pep_idx, bb, rt, _spec_idx)| (pep_idx, bb, rt))
             });
 

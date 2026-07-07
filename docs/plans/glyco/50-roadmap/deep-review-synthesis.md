@@ -160,3 +160,21 @@ The single most important correction from R7: **the old Phase-1 premise (wire in
 - R5's glyco RT gains (+9.7%/+15.7%) = **Klein 2024 (single group), a glyco search engine-relative** — directionally strong and mechanistically sound (additive per-monosaccharide is independently supported by Klein/Zaia 2019), but the exact % won't transfer to andes; treat as "high-value, validate magnitude."
 - R2's "b2 over-predicts backbone b/y for glyco" = mechanistic inference from training-support extrapolation, not a measured andes benchmark — verify empirically before relying on b2 in the glyco selector (P1b).
 - R6's Casanovo-DB pre-FDR gains (+31–102%) are for **non-glyco tryptic** search — cited as motivation for learned selectors, not a glyco promise.
+---
+
+## ADDENDUM (2026-07-07) — P0/P0b find-rate A/B RESOLVES generation-vs-scoring
+
+Two conclusions from earlier need correction, now data-grounded on the 523 truth scans (all-hits, driver charge):
+
+**1. P0 charge-expand (ANDES_GLYCO_CHARGE_EXPAND) REFUTED.** truth_absent 301→309 (worse). Charge under-calling was the wrong hypothesis; expanding charges just adds competing candidates.
+
+**2. The "58% generation loss" is ~half ACCEPTANCE-TRUNCATION, and retention DOESN'T CONVERT — scoring is the true binding constraint.** Re-diagnosis (base truth_absent=301, top1_correct=115):
+| config | truth_absent | top1_correct | outranked |
+|---|---|---|---|
+| base | 301 | 115 | 107 |
+| YINDEX=1 | 239 | 119 | 165 |
+| top-k 500 | 200 | 115 | 208 |
+| YINDEX+top-k500 | **159** | **114** | 250 |
+YINDEX+top-k recovers 142 truth backbones into the pool (301→159) but top1_correct stays FLAT (~115) — all recovered land in truth_OUTRANKED. So: (a) ~142 = acceptance-truncation (b/y-rank top-k gate drops large/weak-b/y true backbones), recoverable by Y-aware retention; (b) retention alone is USELESS + would hurt @1% (outranked noise, cf. isolation exp); (c) top1_correct is SCORER-capped at ~115 regardless of retention → **SCORING is the ultimate binding lever** (vindicates the foundational L1/L2: peptide-conditioned scoring in the selector, which the generation-first correction had demoted); (d) ~159 = true generation-loss residual (deeper charge/mass/DB, secondary).
+
+**REVISED PRIORITY:** the SELECTOR-scoring fixes (P1a contiguity + P1b intensity-in-selector + P3a a glyco search engine separate glycan/peptide scores) are THE lever, PAIRED with Y-aware retention (default AXIS-2 YINDEX on) so the true candidate survives to be scored. Validate on top1_correct + @1% TOGETHER (retention without scoring hurts @1%). P0 generation residual (~159) is secondary. P2 RT (orthogonal rescoring) still valuable.

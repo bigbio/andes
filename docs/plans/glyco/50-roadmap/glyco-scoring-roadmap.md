@@ -272,7 +272,25 @@ capability**, not a glyco-only bolt-on. Concretely:
   - Comprehensive FDR `= FDR_G + FDR_P − FDR_{G∩P}`; glycan decoy = finite-mixture
     method; ≥2 trimannosyl-core-Y pre-gate; top-300 peak filtration (vs 50).
 
-## 6. Recommendation (CORRECTED)
+## 6b. Recommendation (RE-CORRECTED 2026-07-07 by the P0b find-rate A/B)
+The P0b re-diagnosis proves the binding lever is **SCORING**, not generation:
+Y-aware retention (YINDEX) + top-k 500 recovers 142 of 301 "absent" true backbones
+into the pool, but **top1_correct stays flat at ~115** — every recovered backbone
+lands in *truth_outranked*. Retention alone is useless (and hurts @1% via outranked
+noise). So:
+1. **SELECTOR-SCORING is the lever (P1a + P1b + P3a):** put the peptide-conditioned
+   signals (y0y1_anchor + intensity-model LLR) and an additive contiguity/coverage
+   term INTO the backbone selector (`rk`/`collapse_cmp`), so the true backbone
+   ranks above the wrong short-backbone/big-glycan competitor. This is the L1/L2
+   the deep-review had demoted — now data-vindicated.
+2. **PAIR with Y-aware retention** (default AXIS-2 `YINDEX` on) so the true
+   candidate survives top-k to be scored. Retention + scoring must land TOGETHER;
+   validate on **top1_correct AND @1%** (retention-without-scoring regresses @1%).
+3. **P2 RT rescoring** remains valuable (orthogonal axis) and is already underway.
+4. The **~159 true-generation residual** (still absent at YINDEX+top-k500) is a
+   secondary, deeper generation task (charge/mass/DB) — NOT charge-expand (refuted).
+
+## 6. Recommendation (SUPERSEDED — see §6b)
 The deep-review overturns the scoring-first plan: **58% of the gap is GENERATION,
 not scoring.** So:
 1. **P0 first — precursor-mass partitioning / charge blind spot.** No scoring, RT,

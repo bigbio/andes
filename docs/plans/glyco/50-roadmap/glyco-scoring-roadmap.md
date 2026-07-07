@@ -208,6 +208,12 @@ Ranked by leverage ÷ cost. "Pieces on hand?" = does andes already have the code
   engine + `rt_seconds` carried; schema field reserved).
 - **Flag:** the +9.7%/+15.7% figures are single-group (Klein 2024); mechanism is
   sound, exact magnitude for andes must be measured.
+- **Concrete engine-wide design (SOTA-reviewed):** see
+  `50-roadmap/rt-prediction-design.md` — GBDT RT-index (reuse `GbdtPeakModel`) +
+  per-run linear calibration + `DeltaRT`/`AbsDeltaRT`/`DeltaRTNorm` in
+  `psm_feature_values` (Commit 1, benefits regular search); per-monosaccharide
+  glycan offset (NeuAc own sign) + `DeltaRTRank`-among-glycoforms (Commit 2).
+  GBDT≈SSRCalc tier (R≈0.96–0.98), sufficient as a rescoring feature.
 
 ### Tier 3 — LEARNED FUSION & 2D-FDR (structural, higher cost)
 - **P3a — a glyco search engine-style RankSVM learned fusion** of backbone-LLR + glyco-evidence

@@ -10,6 +10,7 @@ pub mod intensity_model;
 pub mod mod_site_features;
 pub mod param_model;
 pub mod peak_features;
+pub mod rt_model;
 pub mod scoring;
 
 #[cfg(test)]

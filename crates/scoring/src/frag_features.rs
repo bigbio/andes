@@ -70,7 +70,11 @@ fn is_basic(b: u8) -> bool {
 
 /// Kyte-Doolittle hydropathy for a single-letter residue byte.
 /// Unknown residues return 0.0.
-fn hydropathy(b: u8) -> f32 {
+///
+/// Exposed (`pub`) as the single source of Kyte-Doolittle values so the
+/// engine-wide RT predictor (`rt_model`) reuses the exact same scale rather
+/// than duplicating the constants.
+pub fn hydropathy(b: u8) -> f32 {
     match b {
         b'A' => 1.8,
         b'R' => -4.5,

@@ -232,6 +232,20 @@ glycan fall-through.
 4. **P1b** intensity LLR in selector (needs glyco-validation)
 5. **P3a** RankSVM fusion → **P3b** LambdaMART → **P3c** glycan-Y intensity + 2D-FDR
 
+## 4c. GOVERNING PRINCIPLE — model changes are ENGINE-WIDE, not glyco-only (user, 2026-07-07)
+Any change to a learned model or the GBDT engine must be a **general andes
+capability**, not a glyco-only bolt-on. Concretely:
+- **RT prediction (P2)** is a general model: a backbone/peptide RT predictor that
+  benefits *regular* peptide search too (a general ΔRT rescoring feature), with the
+  per-monosaccharide glycan offset as a glyco-specific *addition* on top. Train,
+  store (parquet ModelStore), and expose it engine-wide; glyco consumes it.
+- **Any GBDT change** (new features, retraining, LambdaMART, glyco-aware intensity)
+  flows through the shared `model-train` + `scoring` crates and the model store, so
+  the rank/intensity models improve for all search modes, not just glyco.
+- Rationale: avoids a divergent glyco-only model fork, keeps one training/eval
+  path, and lifts the whole engine. Glyco-specific pieces (glycan-Y intensity,
+  per-monosaccharide RT offset) are *extensions* of the general models.
+
 ## 5. Cross-cutting discipline (do not skip)
 - **Validate on outranked truth scans + 2D/entrapment FDR**, not total @1% alone.
 - **High-res only** — SOTA intensity models assume Orbitrap; do not expect

@@ -469,6 +469,25 @@ fn glyco_charge_expand() -> u8 {
         .unwrap_or(0)
 }
 
+/// Minimum matched b/y ions a sequon peptide must have for the fragment index to
+/// return it as a PEPTIDE-FIRST candidate. Default `6` preserves the byte-identical
+/// 253/97 baseline. Lowering it lets the peptide-first path propose backbones whose
+/// peptide-backbone fragmentation is glycan-SUPPRESSED (the defining trait of hard
+/// HCD glycopeptides) — a candidate-GENERATION lever, gated behind
+/// `ANDES_GLYCO_MIN_BY` so it can be A/B'd on the VM before any default change.
+/// Clamped to ≥1 (0 would return every sequon peptide and explode the candidate set).
+fn glyco_min_by_matches() -> u32 {
+    parse_min_by(std::env::var("ANDES_GLYCO_MIN_BY").ok())
+}
+
+/// Pure parse/clamp for [`glyco_min_by_matches`] (env-free so it is testable
+/// without racing the process-global environment): default 6, clamp to ≥1.
+fn parse_min_by(v: Option<String>) -> u32 {
+    v.and_then(|s| s.parse::<u32>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(6)
+}
+
 /// Derive the charge states to enumerate for a glyco spectrum.
 ///
 /// - `expand == 0` (default): EXACT legacy behavior — trust the reported charge as
@@ -544,10 +563,10 @@ fn score_spectrum_glyco(
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
     let scan_filter = ctx.scan_filter;
-    // Minimum b/y peaks a peptide must match to be a peptide-first candidate
-    // (see `glyco_search_run`'s doc comment on this constant for the tuning
-    // rationale — unchanged by the extraction).
-    const MIN_BY_MATCHES: u32 = 6;
+    // Minimum b/y peaks a peptide must match to be a peptide-first candidate.
+    // Env-tunable via `ANDES_GLYCO_MIN_BY` (default 6 = byte-identical baseline);
+    // see `glyco_min_by_matches` for the glyco-suppression rationale.
+    let min_by_matches: u32 = glyco_min_by_matches();
 
             if spec.peaks.len() < params.min_peaks as usize {
                 return None;
@@ -644,7 +663,7 @@ fn score_spectrum_glyco(
                 // (peptide, charge, isotope, glycan) hypotheses — NOT raw b/y
                 // count — so high-count peptides that cannot form a known glycan
                 // don't evict a lower-count peptide that can (Codex re-review #1).
-                let mut pf = frag_index.query(&spec.peaks, MIN_BY_MATCHES);
+                let mut pf = frag_index.query(&spec.peaks, min_by_matches);
                 // Deterministic strongest-b/y-first order (see order_peptide_first):
                 // the per-spectrum cap below keeps a prefix of this list, so a
                 // non-total order would make the kept subset non-reproducible.
@@ -1672,6 +1691,19 @@ mod tests {
         // Zero / negative reported charge → treated as missing → range.
         assert_eq!(glyco_charges_to_try(Some(0), &range, 0), vec![2, 3]);
         assert_eq!(glyco_charges_to_try(Some(-1), &range, 0), vec![2, 3]);
+    }
+
+    #[test]
+    fn parse_min_by_defaults_to_six_and_clamps_to_one() {
+        // Unset / unparseable → byte-identical baseline gate of 6.
+        assert_eq!(parse_min_by(None), 6);
+        assert_eq!(parse_min_by(Some("garbage".into())), 6);
+        // Explicit values pass through.
+        assert_eq!(parse_min_by(Some("6".into())), 6);
+        assert_eq!(parse_min_by(Some("2".into())), 2);
+        assert_eq!(parse_min_by(Some("1".into())), 1);
+        // 0 is clamped to 1 (0 would return every sequon peptide, exploding candidates).
+        assert_eq!(parse_min_by(Some("0".into())), 1);
     }
 
     /// P0 (charge blind spot, R7: z5 = 100% absent): the true glycopeptide charge is

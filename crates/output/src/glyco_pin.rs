@@ -124,6 +124,11 @@ fn write_glyco_header<W: Write>(
         "TransferSeedScore".to_string(),    // donor seed Pass-1 discriminant
         "TransferRTDelta".to_string(),      // |RT(acceptor)-RT(seed)| seconds
         "TransferUngated".to_string(),      // 1 = RT gate skipped (no RT)
+        // Glyco RT rank (ADDITIVE, appended LAST): within-scan rank of this
+        // candidate's AbsDeltaRT among competing glycoforms, normalized to (0,1].
+        // The GlycReSoft isobaric-glycoform-disambiguation feature. 0.0 (neutral)
+        // when the scan has <2 candidate hits or RT is unavailable.
+        "DeltaRTRank".to_string(),
         // Terminal columns
         "Peptide".to_string(),
         "Proteins".to_string(),
@@ -146,6 +151,8 @@ fn write_glyco_psm_row<W: Write>(
     candidates: &[Candidate],
     search_index: &SearchIndex,
     params: &SearchParams,
+    // All of THIS scan's candidate hits (for the within-scan DeltaRTRank).
+    scan_hits: &[FullGlycoPsm],
     // When Some, this row is a GLYCAN-AXIS decoy: force Label -1, use the decoy
     // Y-ladder score, and mark the SpecId/accession so it is traceable and
     // Percolator treats it as a decoy (G3 2D-FDR). None = ordinary row.
@@ -265,6 +272,13 @@ fn write_glyco_psm_row<W: Write>(
     write_double_tab(writer, key.transfer_seed_score as f64)?;
     write_double_tab(writer, key.transfer_rt_delta as f64)?;
     write!(writer, "\t{}", if key.transfer_ungated { 1 } else { 0 })?;
+
+    // Glyco RT rank (ADDITIVE, LAST): within-scan AbsDeltaRT rank of THIS hit
+    // among the scan's competing glycoforms, normalized to (0,1]. Reuses the
+    // `abs_delta_rt` populated by `populate_glyco_rt_features`. A glycan-decoy
+    // row shares the row_idx of its paired target, so it takes that hit's rank
+    // (its AbsDeltaRT is the same peptide-axis RT delta). 0.0 when <2 candidates.
+    write_double_tab(writer, crate::glyco_rt::delta_rt_rank(scan_hits, row_idx))?;
 
     // Peptide column: backbone sequence + optional glycan tag.
     let glycan_tag = match &key.glycan {
@@ -425,7 +439,7 @@ pub fn write_glyco_pin_to<W: Write>(
             let cand = &candidates[cand_idx];
             write_glyco_psm_row(
                 writer, spec, hit, cand, hit_idx, min_charge, max_charge, candidates,
-                search_index, params, None,
+                search_index, params, &result.hits, None,
             )?;
             row_count += 1;
 
@@ -436,7 +450,7 @@ pub fn write_glyco_pin_to<W: Write>(
             if emit_glycan_decoy && !cand.is_decoy && hit.glycan_key.glycan.is_some() {
                 write_glyco_psm_row(
                     writer, spec, hit, cand, hit_idx, min_charge, max_charge, candidates,
-                    search_index, params, Some(hit.glycan_key.y_ladder_decoy_score),
+                    search_index, params, &result.hits, Some(hit.glycan_key.y_ladder_decoy_score),
                 )?;
                 row_count += 1;
             }
@@ -620,6 +634,22 @@ mod tests {
         let pos = |c: &str| cols.iter().position(|&h| h == c).unwrap();
         assert!(pos("SialicConsistency") < pos("IsTransferred"));
         assert!(pos("TransferUngated") < pos("Peptide"));
+    }
+
+    #[test]
+    fn glyco_pin_header_deltartrank_is_last_before_peptide() {
+        let mut buf = Vec::new();
+        write_glyco_header(&mut buf, 2, 4).unwrap();
+        let header = String::from_utf8(buf).unwrap();
+        let cols: Vec<&str> = header.trim().split('\t').collect();
+        let pos = |c: &str| cols.iter().position(|&h| h == c).unwrap();
+        // DeltaRT/AbsDeltaRT/DeltaRTNorm keep their in-place positions; DeltaRTRank
+        // is APPENDED last after TransferUngated, immediately before Peptide.
+        assert!(cols.contains(&"DeltaRTRank"), "header missing DeltaRTRank");
+        assert!(pos("DeltaRTNorm") < pos("DeltaRTRank"));
+        assert!(pos("TransferUngated") < pos("DeltaRTRank"));
+        assert_eq!(pos("DeltaRTRank") + 1, pos("Peptide"), "DeltaRTRank must be last before Peptide");
+        // Header column count == a written data row's column count (consistency).
     }
 
     #[test]
@@ -939,5 +969,47 @@ mod tests {
         let yd: f64 = decoys[0][yl_col].parse().unwrap();
         assert!((yt - 1.2).abs() < 1e-6, "target YLadderScore 1.2, got {yt}");
         assert!((yd - 0.3).abs() < 1e-6, "decoy YLadderScore must be the decoy score 0.3, got {yd}");
+    }
+
+    /// Every emitted glyco PIN row must have exactly as many tab-separated
+    /// fields as the header (header↔row column-count consistency), and the
+    /// DeltaRTRank column must be present and parseable. This is the guard that
+    /// appending DeltaRTRank did not desynchronise the header and the rows.
+    #[test]
+    fn header_and_row_column_counts_match_with_delta_rt_rank() {
+        let search_index = make_glyco_search_index("sp|P00000|TEST");
+        let candidates = vec![make_glyco_candidate()];
+        let params = make_glyco_params();
+
+        let glycan_mass =
+            2.0 * andes_glyco::glycan_mass::HEXNAC + 3.0 * andes_glyco::glycan_mass::HEX;
+        let z = 2.0_f64;
+        let intact_neutral = candidates[0].peptide.mass() + glycan_mass;
+        let precursor_mz = (intact_neutral + z * PROTON) / z;
+        let spectra = vec![make_glyco_spectrum(precursor_mz)];
+
+        let mut key = make_key(true, glycan_mass);
+        key.glycan = Some(GlycanComp {
+            hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0, mass: glycan_mass,
+        });
+        let hit = FullGlycoPsm { glycan_key: key, psm: make_minimal_psm(0, 10.0) };
+        let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
+
+        let mut buf = Vec::new();
+        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false)
+            .expect("write must succeed");
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let header: Vec<&str> = lines[0].split('\t').collect();
+        let ncols = header.len();
+        for (i, row) in lines[1..].iter().enumerate() {
+            let cols: Vec<&str> = row.split('\t').collect();
+            assert_eq!(cols.len(), ncols, "row {i} has {} cols, header has {ncols}", cols.len());
+        }
+        // DeltaRTRank present; single-hit scan ⇒ neutral 0.0 (parseable).
+        let rank_col = header.iter().position(|&c| c == "DeltaRTRank").unwrap();
+        let row: Vec<&str> = lines[1].split('\t').collect();
+        let rank: f64 = row[rank_col].parse().unwrap();
+        assert_eq!(rank, 0.0, "single-hit scan ⇒ DeltaRTRank neutral 0.0");
     }
 }

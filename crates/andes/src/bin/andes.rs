@@ -2625,7 +2625,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             pass1
         };
+        let mut glyco_results = glyco_results;
         let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
+
+        // Populate glyco RT PIN features (DeltaRT/AbsDeltaRT/DeltaRTNorm +
+        // predicted_rt_min) in place on each hit, using the engine-wide backbone
+        // RT index + per-monosaccharide offset + per-run self-calibration. The
+        // glyco PIN writer then also appends the within-scan DeltaRTRank. Neutral
+        // 0.0 without observed RT / <MIN_CALIBRATION_ANCHORS anchors (baseline-safe).
+        output::populate_glyco_rt_features(&spectra, &mut glyco_results, &prepared.candidates);
 
         output::write_glyco_pin(
             &glyco_pin_path,

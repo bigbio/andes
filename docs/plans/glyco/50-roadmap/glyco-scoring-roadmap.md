@@ -145,8 +145,19 @@ separation on a sparse ladder.
   transfer to low-res ion-trap glyco.
 - **Additive PIN features only** for scoring changes; modifying existing features
   regresses Percolator (andes parity lesson).
-- **Confirm single-study numbers** before hard-coding: a glyco search engine fusion constants,
-  the 50 kcal/mol charge thermodynamics, exact Deea glyco search engine percentages.
+- **Confirm single-study numbers** before hard-coding: the 50 kcal/mol charge
+  thermodynamics, exact Deea glyco search engine percentages.
+- **a glyco search engine 2.0 constants VERIFIED first-hand** (PMC5585273, 2026-07-07) — usable
+  starting values for L1/L2:
+  - `ScoreG = Σ log(intensᵢ)·(1 − merritolᵢ/4)·ratioion^0.56·ratiocore^0.42`
+    (Y-ions + diagnostic glycan ions; `ratiocore` = matched/theoretical
+    trimannosyl-core Y-ions — first-class factor).
+  - `ScoreP = Σ log(intensᵢ)·(1 − merritolᵢ/4)·ratioion^0.94` (b/y; note:
+    intensity-weighted, NOT match-count — andes's bare rank-LLR match is *below*
+    even this 2017 baseline).
+  - `ScoreGP = 0.35·ScoreG + 0.65·ScoreP` (fusion weight learned by Ranking-SVM).
+  - Comprehensive FDR `= FDR_G + FDR_P − FDR_{G∩P}`; glycan decoy = finite-mixture
+    method; ≥2 trimannosyl-core-Y pre-gate; top-300 peak filtration (vs 50).
 
 ## 6. Recommendation
 Start with **Phase 1 (L1 + L4)** — it is foundational, uses signals andes already

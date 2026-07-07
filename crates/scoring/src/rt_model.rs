@@ -241,13 +241,24 @@ pub const MIN_CALIBRATION_ANCHORS: usize = 5;
 /// mechanism). Robust to outliers: fits once, then trims the worst-residual
 /// fraction and refits (a one-pass trimmed least squares).
 ///
-/// `anchors` are `(index_pred, rt_obs_seconds)` from the run's confident PSMs.
-/// Returns `None` if there are fewer than [`MIN_CALIBRATION_ANCHORS`] anchors
+/// `anchors` are `(index_pred, rt_obs)`; the fit is unit-agnostic (whatever unit
+/// the `rt_obs` values carry is what the returned line predicts — the callers use
+/// minutes). Non-finite anchors (NaN/inf in either coordinate) are dropped so a
+/// single bad float cannot poison the fit into a NaN slope (Codex review).
+/// Returns `None` if fewer than [`MIN_CALIBRATION_ANCHORS`] finite anchors remain
 /// or the indices are degenerate (all equal ⇒ no slope is identifiable).
 pub fn calibrate(anchors: &[(f64, f64)]) -> Option<(f64, f64)> {
-    if anchors.len() < MIN_CALIBRATION_ANCHORS {
+    // Drop non-finite anchors up front (an inf/NaN would make the OLS means and
+    // sums non-finite, and the zero-variance guard does not reject NaN).
+    let finite: Vec<(f64, f64)> = anchors
+        .iter()
+        .copied()
+        .filter(|&(x, y)| x.is_finite() && y.is_finite())
+        .collect();
+    if finite.len() < MIN_CALIBRATION_ANCHORS {
         return None;
     }
+    let anchors = &finite[..];
     // First pass over all anchors.
     let (slope0, intercept0) = ols_line(anchors)?;
 
@@ -267,11 +278,15 @@ pub fn calibrate(anchors: &[(f64, f64)]) -> Option<(f64, f64)> {
     ols_line(&trimmed).or(Some((slope0, intercept0)))
 }
 
-/// Apply a calibration to a predicted index, returning RT in **minutes**.
+/// Apply a calibration fit **in seconds** to a predicted index, returning RT in
+/// minutes (divides by 60).
 ///
-/// The calibration is fit on RT observed in *seconds* (matching
-/// `Spectrum.rt_seconds`), so the fitted line yields seconds; this divides by
-/// 60 to return minutes (the PIN/QPX convention).
+/// ⚠️ UNIT CONTRACT: this is only correct when [`calibrate`] was fit on
+/// seconds-valued anchors. The production wiring (`output::rt_wiring` /
+/// `output::glyco_rt`) fits `calibrate` on **minutes** anchors and applies the
+/// line directly (`slope·index + intercept`), so it does NOT use this helper —
+/// calling it on a minutes-fit line would divide by 60 twice. Kept only for a
+/// seconds-domain caller; do not wire it into the minutes-based path.
 pub fn predicted_rt(index: f64, slope: f64, intercept: f64) -> f64 {
     (slope * index + intercept) / 60.0
 }
@@ -292,11 +307,14 @@ fn ols_line(points: &[(f64, f64)]) -> Option<(f64, f64)> {
         sxx += dx * dx;
         sxy += dx * (y - mean_y);
     }
-    if sxx.abs() < 1e-12 {
+    if !sxx.is_finite() || sxx.abs() < 1e-12 {
         return None;
     }
     let slope = sxy / sxx;
     let intercept = mean_y - slope * mean_x;
+    if !slope.is_finite() || !intercept.is_finite() {
+        return None;
+    }
     Some((slope, intercept))
 }
 
@@ -516,6 +534,28 @@ mod tests {
     fn calibrate_degenerate_indices_is_none() {
         // All indices identical ⇒ slope not identifiable.
         let anchors: Vec<(f64, f64)> = (0..10).map(|i| (3.0, i as f64)).collect();
+        assert!(calibrate(&anchors).is_none());
+    }
+
+    #[test]
+    fn calibrate_drops_non_finite_anchors_and_stays_finite() {
+        // A clean line y = 2x + 1 with NaN/inf anchors injected. The bad anchors
+        // must be dropped (not poison the fit into a NaN slope), leaving the
+        // recovered line finite and correct.
+        let mut anchors: Vec<(f64, f64)> = (0..8).map(|i| (i as f64, 2.0 * i as f64 + 1.0)).collect();
+        anchors.push((f64::NAN, 5.0));
+        anchors.push((3.0, f64::INFINITY));
+        anchors.push((f64::NEG_INFINITY, f64::NAN));
+        let (slope, intercept) = calibrate(&anchors).expect("finite anchors remain");
+        assert!(slope.is_finite() && intercept.is_finite());
+        assert!((slope - 2.0).abs() < 1e-9, "slope {slope}");
+        assert!((intercept - 1.0).abs() < 1e-9, "intercept {intercept}");
+    }
+
+    #[test]
+    fn calibrate_all_non_finite_is_none() {
+        // Fewer than MIN_CALIBRATION_ANCHORS finite anchors ⇒ None (neutral path).
+        let anchors: Vec<(f64, f64)> = (0..10).map(|_| (f64::NAN, f64::INFINITY)).collect();
         assert!(calibrate(&anchors).is_none());
     }
 

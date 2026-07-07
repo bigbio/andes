@@ -464,8 +464,13 @@ mod tests {
         let mut spectra = Vec::new();
         let mut results = Vec::new();
         for i in 0..n {
-            let p = pep(b"PEPTIDE");
-            candidates.push(cand(p, false));
+            // DISTINCT peptides (varying trailing residue) so the predicted
+            // indices differ — the calibration is non-degenerate on every axis
+            // EXCEPT anchor count, isolating the `< MIN_CALIBRATION_ANCHORS`
+            // threshold as the sole reason the RT features stay neutral (CodeRabbit).
+            let mut seq = b"PEPTIDE".to_vec();
+            seq.push(b"ACDEFGHIKLMNPQRSTVWY"[i % 20]);
+            candidates.push(cand(pep(&seq), false));
             spectra.push(spec(i as i32, Some((i as f64 + 1.0) * 60.0)));
             results.push(GlycoSpectrumResult {
                 spectrum_idx: i,

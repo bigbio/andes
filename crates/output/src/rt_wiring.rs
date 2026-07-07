@@ -79,14 +79,20 @@ pub fn populate_rt_features(
         let sorted = queue.clone().into_rank_sorted_vec();
         for (rank, psm) in iter_ranked_by_rank_score(&sorted) {
             if rank != 1 {
-                break; // only the rank-1 row(s) anchor; queue is rank-sorted
+                break; // only the rank-1 row anchors; queue is rank-sorted
             }
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             if cand.is_decoy {
-                continue; // targets only
+                continue; // skip a decoy rank-1, try the next rank-1 target
             }
             let index = model.predict_peptide(&cand.peptide);
             anchors.push((index, obs_rt_min));
+            // ONE anchor per spectrum: tied rank-1 targets (equal rank_score,
+            // distinct peptides) would otherwise inject several points sharing a
+            // single observed RT — a vertical cluster that biases the OLS slope
+            // toward 0 for that RT (review finding). The first rank-1 target is
+            // the representative anchor.
+            break;
         }
     }
 

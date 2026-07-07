@@ -1257,9 +1257,28 @@ fn score_spectrum_glyco(
             if best_hits.is_empty() {
                 None
             } else {
+                // DETERMINISM: `best_hits` is a HashMap, so `into_values()` yields
+                // hash-iteration order. Downstream consumers depend on this order —
+                // RT calibration anchors on `hits.first()` (crates/output/src/glyco_rt.rs),
+                // ANDES_GLYCO_ALL_HITS emits hits in slice order, and DeltaRTRank
+                // tie-breaks on hit index — so an unordered vector makes those
+                // outputs vary with the process hash seed (Codex review; this repo
+                // had a 40% FDR swing from exactly this class of non-determinism).
+                // Impose the same total order as the ALL_HITS diagnostic dump above:
+                // rank DESC, then the unique glycan key ASC. The top-1-per-scan
+                // collapse (`select_emitted_hits`) picks its winner by `collapse_cmp`
+                // independent of this order, so the 253/97 baseline is unchanged.
+                let mut hits: Vec<((u32, u8, u8, u8, u8, u8), FullGlycoPsm)> =
+                    best_hits.into_iter().collect();
+                hits.sort_by(|a, b| {
+                    b.1.psm
+                        .rank_score
+                        .total_cmp(&a.1.psm.rank_score)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
                 Some(GlycoSpectrumResult {
                     spectrum_idx: spec_idx,
-                    hits: best_hits.into_values().collect(),
+                    hits: hits.into_iter().map(|(_, h)| h).collect(),
                 })
             }
 }

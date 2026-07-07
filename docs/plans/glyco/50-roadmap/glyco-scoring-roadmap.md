@@ -107,20 +107,26 @@ The highest-leverage, cheapest change; both sources rank it first.
   pre-feature retention.*
 - **Cost:** medium (wiring exists; signals already computed). **Do this first.**
 
-### Phase 2 — Peptide-conditioned intensity similarity (FOUNDATION, MVP→ML)
-The glyco analogue of andes's `--score strong`, and the only lever that raises
-separation on a sparse ladder.
-- **L2:** add additive PIN features `SA_peptide`, `SA_glycan`, `SA_total` =
-  spectral similarity (cosine/spectral-angle) between observed peaks and
-  **predicted intensities for the specific candidate peptide + glycan**.
-  - **MVP-0 (rule-based, ~1–2 days):** reuse andes's own-trained rank intensities
-    for b/y + a canonical core-Y intensity prior; validate the *mechanism* before
-    any ML.
-  - **Full (high cost):** a learned model — sequence model for b/y +
-    tree-LSTM/GNN for the branched glycan (Deea glyco search engine-class). High-res Orbitrap
-    only.
-- **Gate:** additive features only (parity-safe); measure separation on outranked
-  scans; entrapment/2D-validate (Phase 3) before trusting.
+### Phase 2 — Peptide-conditioned intensity similarity (FOUNDATION) — LARGELY ALREADY BUILT
+**Key finding (2026-07-07, code-verified):** andes already has the intensity model
+and it already scores glyco PSMs. `--score strong` = a GBDT fragment-intensity
+model trained on PRIDE data (high-res; Astral +23%). In the glyco path,
+`compute_psm_features(..., ctx.intensity_model)` (`glyco_search.rs:976-982`) already
+computes the intensity-derived features (`IntensitySignal`, `FragPredExplained`,
+`FragPredChanceLLR`, `FragTopKObserved`) and emits them as glyco PIN columns — **but
+only for the winner already chosen by rank-LLR.** So the "intensity foundation" is
+NOT a model-building project; it is the SAME wiring fix as L1.
+- **L2a (do WITH L1, low cost):** use the existing `intensity_model` /
+  strong-score peptide-b/y similarity as (part of) the backbone **selector**
+  scalar, not just a post-collapse PIN column. The model predicts peptide b/y
+  intensities, which transfer to the NAKED glyco backbone (F2). High-res only
+  (Fc3 = Q-Exactive HF ✓); do NOT use on low-res ion-trap glyco.
+- **L2b (later, medium/high):** the model does NOT cover glycan-**Y**-ion
+  intensities. Add a glycan-Y intensity prior (rule-based core-Y ladder first;
+  learned tree-LSTM/GNN glycan branch only if L2a proves out) to get the glycan
+  axis (F1's ScoreG analogue).
+- **Gate:** additive/selector changes measured on outranked scans; parity-safe;
+  entrapment/2D-validate (Phase 3) before trusting.
 
 ### Phase 3 — Two-axis scoring + 2D FDR (FOUNDATION + the validation mechanism)
 - **L3:** expose two separable axes (peptide-similarity vs glycan-similarity) and a
@@ -160,8 +166,13 @@ separation on a sparse ladder.
     method; ≥2 trimannosyl-core-Y pre-gate; top-300 peak filtration (vs 50).
 
 ## 6. Recommendation
-Start with **Phase 1 (L1 + L4)** — it is foundational, uses signals andes already
-computes, directly targets the outranked scans, and is validated by the existing
-audit harness. Gate on outranked-scan recovery before investing in Phase 2's
-learned intensity model. Phase 3 (2D FDR) is both a foundation and the honesty
-gate that keeps the Phase 1/2 gains real.
+Start with **Phase 1 = L1 + L2a + L4**, which converge on ONE change: **make the
+backbone selector use the peptide-conditioned signals andes ALREADY computes** —
+the `y0y1_anchor` (L1), the existing GBDT/PRIDE `intensity_model` strong-score b/y
+similarity (L2a), and a Y-inclusive truncation (L4) — instead of ranking by bare
+b/y rank-LLR and computing those signals only after the winner is locked in. This
+is foundational, needs **no new model** (the intensity model is trained and
+already scoring glyco PSMs), directly targets the outranked scans, and is
+validated by the existing `glyco_outrank_audit.py` harness. Gate on outranked-scan
+recovery. Only then invest in L2b (glycan-Y intensity) and L3 (2D FDR — both a
+foundation and the honesty gate that keeps the gains real).

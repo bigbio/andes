@@ -231,6 +231,24 @@ pub struct PsmFeatures {
     /// per-spectrum scored-candidate null pool. Uncalibrated `strong_score` when
     /// the spectrum has too few scored candidates.
     pub strong_score_cal: f32,
+
+    // ── Engine-wide retention-time features (additive PIN columns) ──────────
+    // Populated post-search by `output::rt_wiring::populate_rt_features` after
+    // per-run calibration. ALL default to 0.0 (Default), which is the NEUTRAL
+    // value: a run without observed RT, or one where calibration failed, leaves
+    // these at 0.0 so the PIN is byte-identical to the pre-RT baseline on these
+    // columns. See `docs/plans/glyco/50-roadmap/rt-prediction-design.md`.
+    /// Signed retention-time delta in minutes: `observed_rt_min − predicted_rt_min`.
+    pub delta_rt: f32,
+    /// Absolute retention-time delta in minutes: `|delta_rt|`.
+    pub abs_delta_rt: f32,
+    /// `delta_rt` normalised by the run's gradient span (max−min observed RT, in
+    /// minutes); 0.0 when the span is non-positive. Transfers across runs.
+    pub delta_rt_norm: f32,
+    /// Calibrated predicted retention time in minutes for this PSM's peptide, or
+    /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
+    /// surfaced only into the QPX `.idparquet` `predicted_rt` field.
+    pub predicted_rt_min: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

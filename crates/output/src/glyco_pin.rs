@@ -104,7 +104,13 @@ fn write_glyco_header<W: Write>(
         "RawScore".to_string(),
         "RawScoreCal".to_string(),
         "RankScoreFloat".to_string(),
-        // Glyco-specific columns (appended after RankScoreFloat, before Peptide/Proteins)
+        // Engine-wide retention-time columns (ADDITIVE; mirror the shared
+        // `psm_feature_values` tail so the glyco PIN carries the SAME RT
+        // features as the standard PIN). 0.0 (neutral) without observed RT.
+        "DeltaRT".to_string(),
+        "AbsDeltaRT".to_string(),
+        "DeltaRTNorm".to_string(),
+        // Glyco-specific columns (appended after the RT block, before Peptide/Proteins)
         "OxoniumScore".to_string(),
         "NCoreOxoniumIons".to_string(),
         "YLadderScore".to_string(),

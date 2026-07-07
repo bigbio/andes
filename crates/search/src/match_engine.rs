@@ -1944,6 +1944,13 @@ pub(crate) fn compute_psm_features(
         listwise_score_gap: 0.0,
         strong_score: 0.0,
         strong_score_cal: 0.0,
+        // Engine-wide RT features: populated post-search (after per-run
+        // calibration) by `output::rt_wiring::populate_rt_features`; neutral 0.0
+        // here so a run without observed RT stays baseline-identical.
+        delta_rt: 0.0,
+        abs_delta_rt: 0.0,
+        delta_rt_norm: 0.0,
+        predicted_rt_min: 0.0,
     }
 }
 

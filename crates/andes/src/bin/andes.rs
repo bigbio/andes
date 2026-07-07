@@ -2732,6 +2732,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         pin_candidates = prepared.candidates;
         pin_index = idx;
     }
+
+    // Engine-wide retention-time features (additive): after all PSMs are scored
+    // and the final PIN candidate pool is fixed, run per-run RT self-calibration
+    // and populate DeltaRT/AbsDeltaRT/DeltaRTNorm (+ predicted_rt for the QPX)
+    // onto each PSM. Neutral 0.0 (baseline-identical) when observed RT is
+    // unavailable or calibration cannot be fit. See
+    // `docs/plans/glyco/50-roadmap/rt-prediction-design.md` (Commit 1).
+    output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
+
     output::write_pin(&output_pin_path, &spectra, &queues, &pin_candidates, &params, &pin_index)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",

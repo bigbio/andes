@@ -303,34 +303,6 @@ pub fn solve_backbone_min(
         })
         .collect();
 
-    // ISOTOPE-AWARE BACKBONE EXPANSION (high-charge / large-backbone fix).
-    // Above ~1800 Da the monoisotopic peak is no longer the tallest in the isotope
-    // envelope, so the INTENSITY-weighted Y-ladder vote resolves a backbone that is
-    // 1–3 neutrons HEAVY (empirically: z≥5 glycopeptides were 89% absent, and
-    // andes' nearest emitted backbone sat +1..+3 Da above the true monoisotopic
-    // mass). A heavy backbone's implied glycan (precursor − backbone) then misses
-    // the glycan list, so the correct (backbone, glycan) pair is never formed and
-    // the ID is lost outright — no FDR threshold can recover it. Emit the
-    // monoisotopic-ward variants (bb − k·ISOTOPE, k=1..3) carrying the SAME Y-ladder
-    // evidence, so the downstream glycan-by-subtraction can recover the true pair.
-    // This is the backbone-level analogue of the precursor `isotope_error_range`.
-    // Gated to large backbones so small/low-charge candidates (where the
-    // monoisotopic peak dominates) are untouched — the 253/97 baseline is unaffected.
-    const ISOTOPE_EXPAND_MIN_MASS: f64 = 1800.0;
-    let iso_variants: Vec<BackboneCandidate> = cands
-        .iter()
-        .filter(|c| c.backbone_mass >= ISOTOPE_EXPAND_MIN_MASS)
-        .flat_map(|c| {
-            let base = c.clone();
-            (1..=3u32).map(move |k| {
-                let mut v = base.clone();
-                v.backbone_mass = base.backbone_mass - k as f64 * model::mass::ISOTOPE;
-                v
-            })
-        })
-        .collect();
-    cands.extend(iso_variants);
-
     // Sort: PRIMARY = core_y_hits (more distinct rungs = stronger evidence),
     // SECONDARY = combined score: intensity_score + complement_score * COMPLEMENT_WEIGHT
     //   (complement pairs from real b/y ladders break ties; spurious clusters have none),
@@ -763,55 +735,6 @@ mod tests {
                 .any(|c| (c.backbone_mass - bb_neutral).abs() < 0.05),
             "minimal 2xHexNAc-core backbone dropped by the off-by-H2O gate; got {:?}",
             cands.iter().map(|c| c.backbone_mass).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn large_backbone_emits_monoisotopic_ward_variants() {
-        // High-charge / large-backbone isotope fix: for a large backbone whose
-        // Y-ladder was voted at (or near) a heavy isotope, the solver must ALSO
-        // emit the monoisotopic-ward variants (bb − k·ISOTOPE) so the downstream
-        // glycan-by-subtraction can recover the true pair.
-        use crate::glycan_mass::HEXNAC;
-        let iso = model::mass::ISOTOPE;
-        let bb = 2500.0_f64; // large: above the 1800 Da expansion gate
-        let precursor_neutral = (bb - H2O) + 4.0 * HEXNAC; // leave room for a glycan
-        let mut peaks = vec![
-            (bb + PROTON, 1000.0f32),                 // Y0
-            (bb + HEXNAC + PROTON, 900.0f32),         // Y1
-            (bb + 2.0 * HEXNAC + PROTON, 500.0f32),   // Y2
-        ];
-        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let cands = solve_backbone_min(&peaks, precursor_neutral, 5, 20.0, 200, 2);
-        let has = |m: f64| cands.iter().any(|c| (c.backbone_mass - m).abs() < 0.02);
-        assert!(has(bb), "base backbone missing");
-        for k in 1..=3 {
-            assert!(
-                has(bb - k as f64 * iso),
-                "monoisotopic-ward variant bb−{k}·ISOTOPE missing; got {:?}",
-                cands.iter().map(|c| c.backbone_mass).collect::<Vec<_>>()
-            );
-        }
-    }
-
-    #[test]
-    fn small_backbone_is_not_isotope_expanded() {
-        // Below the gate the monoisotopic peak dominates, so no spurious
-        // isotope-ward variants are added (protects the low-charge baseline).
-        use crate::glycan_mass::HEXNAC;
-        let iso = model::mass::ISOTOPE;
-        let bb = 1000.0_f64; // small: below the 1800 Da gate
-        let precursor_neutral = (bb - H2O) + 4.0 * HEXNAC;
-        let mut peaks = vec![
-            (bb + PROTON, 1000.0f32),
-            (bb + HEXNAC + PROTON, 900.0f32),
-            (bb + 2.0 * HEXNAC + PROTON, 500.0f32),
-        ];
-        peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let cands = solve_backbone_min(&peaks, precursor_neutral, 2, 20.0, 200, 2);
-        assert!(
-            !cands.iter().any(|c| (c.backbone_mass - (bb - iso)).abs() < 0.02),
-            "small backbone should NOT be isotope-expanded"
         );
     }
 

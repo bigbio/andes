@@ -367,6 +367,35 @@ pub fn score_psm(
     total as f32
 }
 
+/// Count-rewarding hyperscore over matched backbone b/y ions (andes-glyco 2.0
+/// peptide channel `P`).
+///
+/// `hyperscore = ln(N_matched!)`, where `N_matched` is the number of theoretical
+/// b/y positions that matched a peak (via the SAME `ion_match_facts` matcher as
+/// scoring). This is the the classic hyperscore engine / the reference engine factorial term: it rewards the
+/// NUMBER of matched fragments, the axis the intensity-weighted rank-LLR
+/// [`score_psm`] under-rewards. The the reference engine-gap audit found the residual
+/// gp-outranked truth backbones match MORE ions than the wrong winner yet score a
+/// LOWER rank-LLR — exactly what this term corrects, and (∝ Nb!·Ny!) exactly what
+/// the reference engine's hyperscore rewards. `ln(n!)` is summed directly (n is small,
+/// ≤ 2·peptide_len) to avoid a lgamma dependency. Additive; never modifies
+/// [`score_psm`].
+pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &RankScorer) -> f32 {
+    if peptide.length() < 2 {
+        return 0.0;
+    }
+    let n_matched = scored_spec
+        .ion_match_facts(peptide, scorer)
+        .iter()
+        .filter(|f| f.rank.is_some())
+        .count();
+    let mut ln_factorial = 0.0_f64;
+    for i in 2..=n_matched {
+        ln_factorial += (i as f64).ln();
+    }
+    ln_factorial as f32
+}
+
 /// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split
 /// node scores (`prefix_score + suffix_score`) instead of rounding each split to
 /// `i32` before accumulation.

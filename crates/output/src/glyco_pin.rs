@@ -383,6 +383,12 @@ pub(crate) fn select_emitted_hits(
     let gp_k = glyco_gp_k();
     let gp_j = glyco_gp_j();
     let y_primary = y_primary_selection();
+    // v2 hyperscore term: the driver (glyco_search) is the SOLE authority for the gp
+    // winner — under the honest `collapse=true` path it already reduced each scan to a
+    // SINGLE hit before feature extraction, so this max_by is over one element and its
+    // score is never decisive. The hyperscore needs raw peaks the PIN writer does not
+    // hold, so pass 0.0 here; it cannot change any real output. (rank/ladder/core-Y are
+    // stored fields, so the rest of the ordering stays consistent with the driver.)
     let winner = (0..hits.len())
         .max_by(|&a, &b| {
             if gp_on {
@@ -390,15 +396,19 @@ pub(crate) fn select_emitted_hits(
                     hits[a].psm.rank_score,
                     hits[a].glycan_key.y_ladder_intensity_score,
                     hits[a].glycan_key.core_y_hits as f32,
+                    0.0,
                     gp_k,
                     gp_j,
+                    0.0,
                 );
                 let sb = glyco_gp_fused_score(
                     hits[b].psm.rank_score,
                     hits[b].glycan_key.y_ladder_intensity_score,
                     hits[b].glycan_key.core_y_hits as f32,
+                    0.0,
                     gp_k,
                     gp_j,
+                    0.0,
                 );
                 sa.total_cmp(&sb).then(b.cmp(&a))
             } else {
@@ -939,8 +949,10 @@ mod tests {
                 h.psm.rank_score,
                 h.glycan_key.y_ladder_intensity_score,
                 h.glycan_key.core_y_hits as f32,
+                0.0, // hyperscore: PIN-side single-hit collapse, never decisive (see select_emitted_hits)
                 k,
                 j,
+                0.0,
             )
         };
         let gp_winner = (0..hits.len())

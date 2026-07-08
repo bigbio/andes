@@ -37,7 +37,7 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
     collapse_cmp, combined_selector_on, glyco_combined_selector_score, glyco_gp_fused_score,
-    glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
+    glyco_gp_h, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
     GlycoPsmKey,
 };
 use andes_glyco::hybrid::{
@@ -54,7 +54,7 @@ use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmMatch;
 #[cfg(test)]
 use crate::psm::PsmFeatures;
-use scoring_crate::scoring::{psm_edge_score, score_psm, ScoredSpectrum};
+use scoring_crate::scoring::{hyperscore_psm, psm_edge_score, score_psm, ScoredSpectrum};
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
 #[derive(Debug, Clone)]
@@ -547,6 +547,7 @@ fn score_spectrum_glyco(
     let gp_selector_on = gp_selector_on();
     let gp_k = glyco_gp_k();
     let gp_j = glyco_gp_j();
+    let gp_h = glyco_gp_h();
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -1009,6 +1010,16 @@ fn score_spectrum_glyco(
                 }
             };
 
+            // v2 peptide channel: count-rewarding hyperscore over the naked-backbone
+            // b/y ions (ln N_matched!). Computed only inside the gp branch below, on
+            // the accepted set (bounded), from the SAME ScoredSpectrum phase-1 used.
+            let hyper = |w: &CheapWinner| -> f32 {
+                match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
+                    Some((_, ss)) => hyperscore_psm(ss, &candidates[w.cand_slot].peptide, scorer),
+                    None => 0.0,
+                }
+            };
+
             // P1b + L4: PEPTIDE-CONDITIONED combined selector score for one accepted
             // winner. Composes ADDITIVELY on top of the bare b/y rank-LLR (never a
             // score_psm rewrite): + the peptide-mass-conditioned Y0/Y1 anchor
@@ -1087,7 +1098,10 @@ fn score_spectrum_glyco(
                             .iter()
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                                (e, glyco_gp_fused_score(e.1.rank, ladder(&e.1), cy, gp_k, gp_j))
+                                let s = glyco_gp_fused_score(
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                                );
+                                (e, s)
                             })
                             .max_by(|(ea, sa), (eb, sb)| {
                                 sa.total_cmp(sb)
@@ -1148,7 +1162,10 @@ fn score_spectrum_glyco(
                             .into_iter()
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                                (glyco_gp_fused_score(e.1.rank, ladder(&e.1), cy, gp_k, gp_j), e)
+                                let s = glyco_gp_fused_score(
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                                );
+                                (s, e)
                             })
                             .collect();
                     scored.sort_by(|a, b| {

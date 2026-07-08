@@ -31,7 +31,8 @@ use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
 use andes_glyco::backbone::{
-    core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
+    core_y_intensity, count_core_y_hits, glycan_intermediate_y_intensity,
+    glycan_intermediate_y_intensity_decoy, glycan_y_intensity, glycan_y_intensity_decoy,
     y0y1_anchor_intensity,
 };
 use andes_glyco::glycan_db::GlycanComp;
@@ -1284,6 +1285,21 @@ fn score_spectrum_glyco(
                         ) as f32,
                         _ => 0.0,
                     },
+                    // Intermediate (Y2+) ladder — the anchor-free, composition-
+                    // discriminating part; isolates the target−decoy signal for the
+                    // glycan FDR axis. 0.0 for de-novo hits (no composition).
+                    intermediate_y_score: match &bb_hit.glycan {
+                        Some(g) => glycan_intermediate_y_intensity(
+                            &spec.peaks, bb_neutral, g, tol_ppm, max_frag_charge,
+                        ) as f32,
+                        None => 0.0,
+                    },
+                    intermediate_y_decoy_score: match &bb_hit.glycan {
+                        Some(g) if glyco_decoy_on => glycan_intermediate_y_intensity_decoy(
+                            &spec.peaks, bb_neutral, g, tol_ppm, glycan_decoy_seed(g),
+                        ) as f32,
+                        _ => 0.0,
+                    },
                     // G2 Y0/Y1 anchor: peptide-mass-conditioned (uses THIS
                     // candidate's neutral mass, so it discriminates competing
                     // peptides). Additive PIN feature only — not in the ranker.
@@ -1845,6 +1861,8 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
+            intermediate_y_score: 0.0,
+            intermediate_y_decoy_score: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
             core_y_hits: 0,

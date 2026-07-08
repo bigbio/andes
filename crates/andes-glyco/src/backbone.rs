@@ -503,6 +503,129 @@ pub fn glycan_y_intensity(
     score
 }
 
+/// Canonical cumulative monosaccharide add-order shared by the ladder scorers:
+/// core HexNAc(≤2), core Hex(≤3), then the remaining HexNAc/Hex/Fuc/NeuAc/NeuGc.
+/// Factored out so the full and intermediate ladders stay bit-for-bit in lock-step.
+fn glycan_cumulative_adds(comp: &crate::glycan_db::GlycanComp) -> Vec<f64> {
+    use crate::glycan_mass::{FUC, HEX, HEXNAC, NEUAC, NEUGC};
+    let core_hexnac = comp.hexnac.min(2);
+    let core_hex = comp.hex.min(3);
+    let mut adds: Vec<f64> = Vec::new();
+    for _ in 0..core_hexnac {
+        adds.push(HEXNAC);
+    }
+    for _ in 0..core_hex {
+        adds.push(HEX);
+    }
+    for _ in 0..(comp.hexnac - core_hexnac) {
+        adds.push(HEXNAC);
+    }
+    for _ in 0..(comp.hex - core_hex) {
+        adds.push(HEX);
+    }
+    for _ in 0..comp.fuc {
+        adds.push(FUC);
+    }
+    for _ in 0..comp.neuac {
+        adds.push(NEUAC);
+    }
+    for _ in 0..comp.neugc {
+        adds.push(NEUGC);
+    }
+    adds
+}
+
+/// INTERMEDIATE glycan-Y ladder (Y2 and beyond) — the composition-DISCRIMINATING part
+/// of the ladder, for the glycan FDR axis.
+///
+/// [`glycan_y_intensity`] sums Y0 + every cumulative rung, but Y0 (bare backbone) and
+/// Y1 (peptide + first core HexNAc) are shared by EVERY N-glycan AND preserved by the
+/// glycan-decoy, and they carry most of the intensity — so they DOMINATE the summed
+/// score and wash out the target−decoy difference (measured target/decoy separation of
+/// the full ladder is only Cohen d≈0.12). Summing ONLY Y2..Yn isolates exactly the
+/// rungs where a true glycan and a same-mass decoy diverge; removing the shared Y0/Y1
+/// additive term can only raise the target−decoy separation the 2D-FDR glycan axis
+/// depends on. Same neutral-mass multi-charge matcher as [`glycan_y_intensity`].
+pub fn glycan_intermediate_y_intensity(
+    peaks: &[(f64, f32)],
+    bb_neutral: f64,
+    comp: &crate::glycan_db::GlycanComp,
+    tol_ppm: f64,
+    max_charge: u8,
+) -> f64 {
+    let base = peaks
+        .iter()
+        .map(|&(_, i)| i)
+        .fold(0.0f32, f32::max)
+        .max(1e-9) as f64;
+    let adds = glycan_cumulative_adds(comp);
+    let sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
+    let match_int =
+        |neutral: f64| -> f64 { best_frag_intensity(peaks, sorted, neutral, tol_ppm, max_charge) as f64 / base };
+    // Skip Y0 (bb_neutral) and Y1 (bb_neutral + adds[0]); sum Y2..Yn.
+    let mut score = 0.0;
+    let mut cum = 0.0;
+    for (ai, m) in adds.iter().enumerate() {
+        cum += m;
+        if ai >= 1 {
+            score += match_int(bb_neutral + cum);
+        }
+    }
+    score
+}
+
+/// Glycan-axis DECOY of [`glycan_intermediate_y_intensity`]: sums the SAME intermediate
+/// rungs (Y2..Yn) but each shifted by the deterministic [`glycan_y_intensity_decoy`]
+/// offset, so on a real-glycan spectrum the shifted rungs miss the true Y-ions and the
+/// decoy sums far less than the target — the per-row target−decoy gap the glycan FDR
+/// axis turns into 2D FDR. `seed` (e.g. the glycan index) makes it reproducible.
+pub fn glycan_intermediate_y_intensity_decoy(
+    peaks: &[(f64, f32)],
+    bb_neutral: f64,
+    comp: &crate::glycan_db::GlycanComp,
+    tol_ppm: f64,
+    seed: u64,
+) -> f64 {
+    let base = peaks
+        .iter()
+        .map(|&(_, i)| i)
+        .fold(0.0f32, f32::max)
+        .max(1e-9) as f64;
+    let adds = glycan_cumulative_adds(comp);
+    let sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
+    let match_int = |ion_mz: f64| -> f64 {
+        let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
+        let (lo, hi) = (ion_mz - tol, ion_mz + tol);
+        let best = if sorted {
+            let start = peaks.partition_point(|&(m, _)| m < lo);
+            peaks[start..]
+                .iter()
+                .take_while(|&&(m, _)| m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        } else {
+            peaks
+                .iter()
+                .filter(|&&(m, _)| m >= lo && m <= hi)
+                .map(|&(_, i)| i)
+                .fold(0.0f32, f32::max)
+        };
+        (best as f64) / base
+    };
+    // Skip Y0 and Y1 (kept, shared anchor); sum the shifted Y2..Yn at 1+.
+    let mut score = 0.0;
+    let mut cum = 0.0;
+    for (ai, m) in adds.iter().enumerate() {
+        cum += m;
+        if ai >= 1 {
+            let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let shift = 1.0 + (h % 29_000) as f64 / 1000.0;
+            score += match_int(bb_neutral + cum + shift + PROTON);
+        }
+    }
+    score
+}
+
 /// Deterministic mixing (splitmix64) → a reproducible per-(seed,rung) offset.
 #[inline]
 fn splitmix64(mut x: u64) -> u64 {
@@ -801,6 +924,39 @@ mod tests {
         assert!(s_true > s_decoy,
             "true composition Y-ladder ({s_true}) must beat the decoy ({s_decoy})");
         assert!(s_true > 0.0, "true composition must have positive Y-ladder intensity");
+    }
+
+    /// Intermediate (Y2+) ladder: (a) EXCLUDES Y0/Y1 — a spectrum carrying only Y0/Y1
+    /// scores exactly 0; (b) fires on the Y2.. rungs; (c) its shifted decoy scores
+    /// below the target on a true-glycan spectrum (the isolated glycan-axis signal).
+    #[test]
+    fn glycan_intermediate_y_excludes_anchor_and_decoy_scores_below_target() {
+        use crate::glycan_db::GlycanComp;
+        use crate::glycan_mass::{HEX, HEXNAC};
+        let bb = 1500.0_f64;
+        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
+                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        // Spectrum with ONLY Y0 and Y1 (bare backbone + first HexNAc) → no Y2+ evidence.
+        let anchor_only: Vec<(f64, f32)> =
+            vec![(bb + PROTON, 1000.0), (bb + HEXNAC + PROTON, 800.0), (277.0, 20.0)];
+        let mut ao = anchor_only.clone();
+        ao.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert_eq!(
+            glycan_intermediate_y_intensity(&ao, bb, &truth, 20.0, 3), 0.0,
+            "intermediate ladder must exclude the shared Y0/Y1 anchor"
+        );
+        // Full ladder present (Y0..Y5) → intermediate fires and its decoy scores below.
+        let mut cum = 0.0;
+        let mut peaks: Vec<(f64, f32)> = vec![(bb + PROTON, 1000.0)];
+        for m in [HEXNAC, HEXNAC, HEX, HEX, HEX] {
+            cum += m;
+            peaks.push((bb + cum + PROTON, 500.0));
+        }
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let s_t = glycan_intermediate_y_intensity(&peaks, bb, &truth, 20.0, 3);
+        let s_d = glycan_intermediate_y_intensity_decoy(&peaks, bb, &truth, 20.0, 42);
+        assert!(s_t > 0.0, "intermediate ladder must fire on Y2+ evidence, got {s_t}");
+        assert!(s_t > s_d, "intermediate target ({s_t}) must beat its shifted decoy ({s_d})");
     }
 
     /// G2 Y0/Y1 peptide-mass ANCHOR: the score must be (a) high when the Y0 (bare

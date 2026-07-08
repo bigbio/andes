@@ -116,6 +116,7 @@ fn write_glyco_header<W: Write>(
         "OxoniumScore".to_string(),
         "NCoreOxoniumIons".to_string(),
         "YLadderScore".to_string(),
+        "IntermediateYScore".to_string(), // Y2+ anchor-free ladder (glycan-axis discriminator)
         "CoreYHits".to_string(),
         "GlycanMass".to_string(),
         "IsGlycanDb".to_string(),
@@ -246,6 +247,14 @@ fn write_glyco_psm_row<W: Write>(
     // YLadderScore: the decoy score for a glycan-decoy row, else the target score.
     let y_ladder = glycan_decoy_override.unwrap_or(key.y_ladder_intensity_score);
     write_double_tab(writer, y_ladder as f64)?;
+    // IntermediateYScore (Y2+): the anchor-free, composition-discriminating ladder.
+    // On a glycan-decoy row emit the shifted-rung decoy value; else the target value.
+    let intermediate_y = if is_glycan_decoy {
+        key.intermediate_y_decoy_score
+    } else {
+        key.intermediate_y_score
+    };
+    write_double_tab(writer, intermediate_y as f64)?;
     write!(writer, "\t{}", key.core_y_hits)?;
     write_double_tab(writer, key.glycan_mass)?;
     write!(writer, "\t{}", is_glycan_db)?;
@@ -628,6 +637,8 @@ mod tests {
             n_core_oxonium_ions: 3,
             y_ladder_intensity_score: 1.2,
             y_ladder_decoy_score: 0.3,
+            intermediate_y_score: 0.0,
+            intermediate_y_decoy_score: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
             core_y_hits: 5,
@@ -838,6 +849,8 @@ mod tests {
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
+            intermediate_y_score: 0.0,
+            intermediate_y_decoy_score: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
             core_y_hits: 3,
@@ -1014,6 +1027,8 @@ mod tests {
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 1.2,
             y_ladder_decoy_score: 0.3,
+            intermediate_y_score: 0.0,
+            intermediate_y_decoy_score: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
             core_y_hits: 4,

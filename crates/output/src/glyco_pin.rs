@@ -22,7 +22,7 @@ use search::search_params::SearchParams;
 use model::spectrum::Spectrum;
 
 use andes_glyco::glyco_psm::{
-    collapse_cmp, glyco_gp_fused_score, glyco_gp_k, gp_selector_on, y_primary_selection,
+    collapse_cmp, glyco_gp_fused_score, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
 };
 use andes_glyco::hybrid::Source;
 
@@ -381,6 +381,7 @@ pub(crate) fn select_emitted_hits(
     // back to the legacy lexicographic `collapse_cmp` when gp is off.
     let gp_on = gp_selector_on();
     let gp_k = glyco_gp_k();
+    let gp_j = glyco_gp_j();
     let y_primary = y_primary_selection();
     let winner = (0..hits.len())
         .max_by(|&a, &b| {
@@ -388,12 +389,16 @@ pub(crate) fn select_emitted_hits(
                 let sa = glyco_gp_fused_score(
                     hits[a].psm.rank_score,
                     hits[a].glycan_key.y_ladder_intensity_score,
+                    hits[a].glycan_key.core_y_hits as f32,
                     gp_k,
+                    gp_j,
                 );
                 let sb = glyco_gp_fused_score(
                     hits[b].psm.rank_score,
                     hits[b].glycan_key.y_ladder_intensity_score,
+                    hits[b].glycan_key.core_y_hits as f32,
                     gp_k,
+                    gp_j,
                 );
                 sa.total_cmp(&sb).then(b.cmp(&a))
             } else {
@@ -911,7 +916,7 @@ mod tests {
     /// OFF (default env), the legacy ladder-primary winner is unchanged.
     #[test]
     fn gp_fused_collapse_rescues_rank_strong_hit_over_spurious_ladder() {
-        use andes_glyco::glyco_psm::{glyco_gp_fused_score, GLYCO_GP_K_DEFAULT};
+        use andes_glyco::glyco_psm::{glyco_gp_fused_score, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT};
         fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
             let mut key = make_key(true, 1000.0);
             key.y_ladder_intensity_score = ladder;
@@ -928,21 +933,18 @@ mod tests {
         );
         // The gp fused ordering (exactly what select_emitted_hits computes under gp)
         // rescues the rank-strong truth (idx 0): 15 + 50·0.05 = 17.5 > 2 + 50·0.06 = 5.
-        let k = GLYCO_GP_K_DEFAULT;
+        let (k, j) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT);
+        let gp_score = |h: &FullGlycoPsm| {
+            glyco_gp_fused_score(
+                h.psm.rank_score,
+                h.glycan_key.y_ladder_intensity_score,
+                h.glycan_key.core_y_hits as f32,
+                k,
+                j,
+            )
+        };
         let gp_winner = (0..hits.len())
-            .max_by(|&a, &b| {
-                glyco_gp_fused_score(
-                    hits[a].psm.rank_score,
-                    hits[a].glycan_key.y_ladder_intensity_score,
-                    k,
-                )
-                .total_cmp(&glyco_gp_fused_score(
-                    hits[b].psm.rank_score,
-                    hits[b].glycan_key.y_ladder_intensity_score,
-                    k,
-                ))
-                .then(b.cmp(&a))
-            })
+            .max_by(|&a, &b| gp_score(&hits[a]).total_cmp(&gp_score(&hits[b])).then(b.cmp(&a)))
             .unwrap();
         assert_eq!(gp_winner, 0, "gp fusion rescues the rank-strong truth over the spurious-ladder split");
     }

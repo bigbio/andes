@@ -37,7 +37,7 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
     collapse_cmp, combined_selector_on, glyco_combined_selector_score, glyco_gp_fused_score,
-    glyco_gp_k, gp_selector_on, y_primary_selection,
+    glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
     GlycoPsmKey,
 };
 use andes_glyco::hybrid::{
@@ -546,6 +546,7 @@ fn score_spectrum_glyco(
     // ladder term against the b/y rank in `glyco_gp_fused_score`.
     let gp_selector_on = gp_selector_on();
     let gp_k = glyco_gp_k();
+    let gp_j = glyco_gp_j();
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -1084,7 +1085,10 @@ fn score_spectrum_glyco(
                         // the PIN writer's select_emitted_hits gp branch exactly.
                         accepted_winners
                             .iter()
-                            .map(|e| (e, glyco_gp_fused_score(e.1.rank, ladder(&e.1), gp_k)))
+                            .map(|e| {
+                                let cy = core_y_counts[e.1.bb_hit_idx] as f32;
+                                (e, glyco_gp_fused_score(e.1.rank, ladder(&e.1), cy, gp_k, gp_j))
+                            })
                             .max_by(|(ea, sa), (eb, sb)| {
                                 sa.total_cmp(sb)
                                     .then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
@@ -1142,7 +1146,10 @@ fn score_spectrum_glyco(
                     let mut scored: Vec<(f32, ((u32, u8, u8, u8, u8, u8), CheapWinner))> =
                         accepted_winners
                             .into_iter()
-                            .map(|e| (glyco_gp_fused_score(e.1.rank, ladder(&e.1), gp_k), e))
+                            .map(|e| {
+                                let cy = core_y_counts[e.1.bb_hit_idx] as f32;
+                                (glyco_gp_fused_score(e.1.rank, ladder(&e.1), cy, gp_k, gp_j), e)
+                            })
                             .collect();
                     scored.sort_by(|a, b| {
                         b.0.total_cmp(&a.0).then_with(|| (a.1).0.cmp(&(b.1).0))

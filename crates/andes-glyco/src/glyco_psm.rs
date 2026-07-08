@@ -100,32 +100,56 @@ pub fn glyco_combined_selector_score(rank: f32, y0y1_anchor: f32, intensity_llr:
 /// Fc3_r1 test bed). Overridable via `ANDES_GLYCO_GP_K` for @1% tuning.
 pub const GLYCO_GP_K_DEFAULT: f32 = 50.0;
 
+/// Default weight for the core-Y HIT-COUNT term (gp2, leg 2b). Scales the integer
+/// `core_y_hits` against rank/ladder. The the reference engine-gap audit found the residual
+/// gp-outranked truth backbones have MORE matched-fragment coverage (core-Y hits,
+/// matched b/y count) than the wrong winner but a LOWER intensity-weighted
+/// RankScore — i.e. andes' rank under-rewards COUNT, exactly what the reference engine's
+/// hyperscore (∝ Nb!·Ny!) rewards. Adding this count term recovers them.
+/// Overridable via `ANDES_GLYCO_GP_J`. Offline top1-by-mass: 318 → 334 at J=5.
+pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
+
 /// Process-constant K for the `gp` selector, read ONCE by the caller (never per
 /// comparison — that would still be deterministic but wasteful) and passed into
 /// [`glyco_gp_fused_score`]. Falls back to [`GLYCO_GP_K_DEFAULT`] for a missing,
 /// unparseable, negative, or non-finite value.
 pub fn glyco_gp_k() -> f32 {
-    std::env::var("ANDES_GLYCO_GP_K")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .filter(|k| k.is_finite() && *k >= 0.0)
-        .unwrap_or(GLYCO_GP_K_DEFAULT)
+    gp_weight_from_env("ANDES_GLYCO_GP_K", GLYCO_GP_K_DEFAULT)
 }
 
-/// The `gp` fused selector score (leg 2): `rank + k·ladder`. Higher is better.
+/// Process-constant J (core-Y hit-count weight) for the `gp` selector; same
+/// read-once contract as [`glyco_gp_k`].
+pub fn glyco_gp_j() -> f32 {
+    gp_weight_from_env("ANDES_GLYCO_GP_J", GLYCO_GP_J_DEFAULT)
+}
+
+fn gp_weight_from_env(var: &str, default: f32) -> f32 {
+    std::env::var(var)
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|w| w.is_finite() && *w >= 0.0)
+        .unwrap_or(default)
+}
+
+/// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
+/// Higher is better.
 ///
-/// ADDITIVE fusion of the peptide b/y rank-LLR (`rank`) and the glycan core-Y
-/// ladder intensity (`ladder`). Unlike the legacy lexicographic [`collapse_cmp`]
-/// (ladder primary, so a wrong mass-split's spurious *tiny* ladder edge always
-/// overrides truth and the rank tiebreak never fires), this lets a real b/y-rank
-/// advantage rescue the true backbone while a *large* ladder difference still
-/// wins. Offline on PXD025455 Fc3_r1: top1-by-mass 280→318 (K=50) / 328 (K=100)
-/// of a 375 present-ceiling. Deterministic — fixed K, no per-scan normalization,
+/// ADDITIVE fusion of the peptide b/y rank-LLR (`rank`), the glycan core-Y ladder
+/// intensity (`ladder`), and the core-Y HIT COUNT (`core_y_hits`, gp2). Unlike the
+/// legacy lexicographic [`collapse_cmp`] (ladder primary, so a wrong mass-split's
+/// spurious *tiny* ladder edge always overrides truth and the rank tiebreak never
+/// fires), this lets a real b/y-rank advantage rescue the true backbone while a
+/// *large* ladder difference still wins; the `j·core_y_hits` count term additionally
+/// rescues the residual coverage-strong / rank-weak truth backbones the intensity-
+/// weighted rank misses (the axis the reference engine's hyperscore rewards). Offline on
+/// PXD025455 Fc3_r1 top1-by-mass (present ceiling 375): rank+50·ladder = 318;
+/// +5·core_y_hits = 334. Deterministic — fixed K/J, no per-scan normalization,
 /// uses only values already available at the collapse. Both collapse sites
-/// (glyco_search driver + glyco_pin `select_emitted_hits`) MUST call this with
-/// the SAME `rank`/`ladder`/`k` or their winners diverge (the collapse-parity bug).
-pub fn glyco_gp_fused_score(rank: f32, ladder: f32, k: f32) -> f32 {
-    rank + k * ladder
+/// (glyco_search driver + glyco_pin `select_emitted_hits`) MUST call this with the
+/// SAME `rank`/`ladder`/`core_y_hits`/`k`/`j` or their winners diverge (the
+/// collapse-parity bug).
+pub fn glyco_gp_fused_score(rank: f32, ladder: f32, core_y_hits: f32, k: f32, j: f32) -> f32 {
+    rank + k * ladder + j * core_y_hits
 }
 
 /// True when `ANDES_GLYCO_SELECTOR=gp` — the leg-2 fused selector. Distinct from
@@ -350,25 +374,39 @@ mod tests {
         // Leg-2 mechanism (the exact P0 failure): a wrong mass-split with a
         // SPURIOUS TINY ladder edge beats truth under the legacy ladder-primary
         // collapse, even though truth has the stronger b/y rank.
-        let k = GLYCO_GP_K_DEFAULT; // 50.0
-        let truth = glyco_gp_fused_score(15.0, 0.05, k); // 15 + 2.5  = 17.5
-        let wrong = glyco_gp_fused_score(2.0, 0.06, k); //  2 + 3.0  =  5.0
+        let (k, j) = (GLYCO_GP_K_DEFAULT, 0.0); // isolate rank/ladder (no core-Y term)
+        let truth = glyco_gp_fused_score(15.0, 0.05, 0.0, k, j); // 15 + 2.5 = 17.5
+        let wrong = glyco_gp_fused_score(2.0, 0.06, 0.0, k, j); //  2 + 3.0 =  5.0
         // Legacy y_primary would pick `wrong` (0.06 > 0.05); gp fusion rescues truth.
         assert!(collapse_cmp(15.0, 0.05, 2.0, 0.06, true) == Ordering::Less);
         assert!(truth > wrong, "a real b/y-rank advantage rescues truth under gp");
         // But a LARGE ladder difference (real glycan-Y evidence) still wins.
-        let strong_glycan = glyco_gp_fused_score(2.0, 1.0, k); // 2 + 50 = 52
+        let strong_glycan = glyco_gp_fused_score(2.0, 1.0, 0.0, k, j); // 2 + 50 = 52
         assert!(strong_glycan > truth, "a large ladder difference still wins under gp");
     }
 
     #[test]
-    fn glyco_gp_k_defaults_and_rejects_bad_overrides() {
-        // Pure default (env override tested via the public parse contract, not by
-        // racing the process env in a parallel test): the constant is the fallback.
+    fn gp2_core_y_hit_count_term_rescues_coverage_strong_truth() {
+        // gp2 (leg 2b): truth loses on rank+ladder alone but has MORE core-Y hits;
+        // the j·core_y_hits count term flips it (the the reference engine-hyperscore axis).
+        let (k, j) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT); // 50, 5
+        // truth: rank 8, ladder 0.1, core-Y 6 ; winner: rank 12, ladder 0.1, core-Y 2
+        let truth = glyco_gp_fused_score(8.0, 0.1, 6.0, k, j); // 8 + 5 + 30 = 43
+        let winner = glyco_gp_fused_score(12.0, 0.1, 2.0, k, j); // 12 + 5 + 10 = 27
+        assert!(truth > winner, "core-Y hit count rescues the coverage-strong truth");
+        // Without the count term (j=0) the higher-rank winner would win.
+        assert!(glyco_gp_fused_score(8.0, 0.1, 6.0, k, 0.0)
+            < glyco_gp_fused_score(12.0, 0.1, 2.0, k, 0.0));
+    }
+
+    #[test]
+    fn glyco_gp_weights_default_and_fusion_is_monotone() {
         assert_eq!(GLYCO_GP_K_DEFAULT, 50.0);
-        // Fusion is a plain affine combination; monotone in both terms.
-        assert!(glyco_gp_fused_score(10.0, 0.2, 50.0) > glyco_gp_fused_score(10.0, 0.1, 50.0));
-        assert!(glyco_gp_fused_score(11.0, 0.1, 50.0) > glyco_gp_fused_score(10.0, 0.1, 50.0));
+        assert_eq!(GLYCO_GP_J_DEFAULT, 5.0);
+        // Monotone in each term.
+        assert!(glyco_gp_fused_score(10.0, 0.2, 0.0, 50.0, 5.0) > glyco_gp_fused_score(10.0, 0.1, 0.0, 50.0, 5.0));
+        assert!(glyco_gp_fused_score(11.0, 0.1, 0.0, 50.0, 5.0) > glyco_gp_fused_score(10.0, 0.1, 0.0, 50.0, 5.0));
+        assert!(glyco_gp_fused_score(10.0, 0.1, 3.0, 50.0, 5.0) > glyco_gp_fused_score(10.0, 0.1, 1.0, 50.0, 5.0));
     }
 
     #[test]

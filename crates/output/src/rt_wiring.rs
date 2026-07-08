@@ -113,10 +113,15 @@ pub fn populate_rt_features(
         if queue.is_empty() {
             continue;
         }
+        // Guard against a non-finite observed RT poisoning the span (Codex review):
+        // an inf/NaN `rt_seconds` was excluded from the calibration fit but would
+        // still make max/min — and hence every DeltaRTNorm — non-finite here.
         if let Some(s) = spectra[spec_idx].rt_seconds {
-            let m = s / SECONDS_PER_MINUTE;
-            min_rt = min_rt.min(m);
-            max_rt = max_rt.max(m);
+            if s.is_finite() {
+                let m = s / SECONDS_PER_MINUTE;
+                min_rt = min_rt.min(m);
+                max_rt = max_rt.max(m);
+            }
         }
     }
     let span = max_rt - min_rt; // may be ≤ 0 (single RT / none) ⇒ norm = 0.0
@@ -126,17 +131,26 @@ pub fn populate_rt_features(
         if queue.is_empty() {
             continue;
         }
-        let obs_rt_min = spectra[spec_idx].rt_seconds.map(|s| s / SECONDS_PER_MINUTE);
+        // Only a FINITE observed RT anchors a feature; a non-finite `rt_seconds`
+        // leaves the row neutral (0.0) rather than writing inf/NaN into the PIN.
+        let obs_rt_min = spectra[spec_idx]
+            .rt_seconds
+            .filter(|s| s.is_finite())
+            .map(|s| s / SECONDS_PER_MINUTE);
         queue.fill_post_topn(|psm| {
             let obs = match obs_rt_min {
                 Some(o) => o,
-                None => return, // no observed RT ⇒ leave neutral 0.0
+                None => return, // no / non-finite observed RT ⇒ leave neutral 0.0
             };
             let cand = &candidates[psm.primary_candidate_idx() as usize];
             let index = model.predict_peptide(&cand.peptide);
             // Anchors were fit in minutes, so the line yields minutes directly.
             let pred = slope * index + intercept;
             let delta = obs - pred;
+            // Belt-and-braces: never emit a non-finite RT feature (leave neutral).
+            if !pred.is_finite() || !delta.is_finite() {
+                return;
+            }
             let norm = if span > 0.0 { delta / span } else { 0.0 };
             psm.features.predicted_rt_min = pred as f32;
             psm.features.delta_rt = delta as f32;
@@ -321,6 +335,55 @@ mod tests {
         populate_rt_features(&spectra, &mut queues, &candidates);
         for q in &queues {
             let f = q.iter_psms().next().unwrap().features.clone();
+            assert_eq!(f.delta_rt, 0.0);
+            assert_eq!(f.abs_delta_rt, 0.0);
+            assert_eq!(f.delta_rt_norm, 0.0);
+            assert_eq!(f.predicted_rt_min, 0.0);
+        }
+    }
+
+    #[test]
+    fn non_finite_rt_never_writes_inf_or_nan() {
+        // A run with enough FINITE anchors to calibrate, PLUS spectra whose
+        // rt_seconds is inf / NaN. The fit succeeds on the finite anchors, but the
+        // bad-RT rows must stay neutral 0.0 — a non-finite rt_seconds must NEVER
+        // leak into DeltaRT/AbsDeltaRT/DeltaRTNorm/predicted_rt (Codex review).
+        let mut candidates = Vec::new();
+        let mut spectra = Vec::new();
+        let mut queues = Vec::new();
+        for i in 0..8 {
+            // Distinct peptides → non-degenerate calibration.
+            let mut seq = b"PEPTIDE".to_vec();
+            seq.push(b"ACDEFGHIKLMNPQRSTVWY"[i % 20]);
+            candidates.push(cand(pep(&seq), false));
+            spectra.push(spec(i as i32, Some((i as f64 + 10.0) * 60.0)));
+            queues.push(queue_with(vec![psm(i as u32, 100.0)]));
+        }
+        let bad = candidates.len() as u32;
+        candidates.push(cand(pep(b"PEPTIDEK"), false));
+        spectra.push(spec(100, Some(f64::INFINITY)));
+        queues.push(queue_with(vec![psm(bad, 100.0)]));
+        candidates.push(cand(pep(b"PEPTIDER"), false));
+        spectra.push(spec(101, Some(f64::NAN)));
+        queues.push(queue_with(vec![psm(bad + 1, 100.0)]));
+
+        populate_rt_features(&spectra, &mut queues, &candidates);
+
+        // No feature anywhere may be inf/NaN.
+        for q in &queues {
+            let f = q.iter_psms().next().unwrap().features.clone();
+            assert!(
+                f.delta_rt.is_finite()
+                    && f.abs_delta_rt.is_finite()
+                    && f.delta_rt_norm.is_finite()
+                    && f.predicted_rt_min.is_finite(),
+                "non-finite RT feature leaked: {:?}",
+                (f.delta_rt, f.abs_delta_rt, f.delta_rt_norm, f.predicted_rt_min)
+            );
+        }
+        // The two bad-RT rows are exactly neutral.
+        for qi in [8usize, 9] {
+            let f = queues[qi].iter_psms().next().unwrap().features.clone();
             assert_eq!(f.delta_rt, 0.0);
             assert_eq!(f.abs_delta_rt, 0.0);
             assert_eq!(f.delta_rt_norm, 0.0);

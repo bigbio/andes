@@ -89,23 +89,31 @@ pub fn populate_glyco_rt_features(
             continue;
         }
         let obs_rt_min = match spectra[spec_idx].rt_seconds {
-            Some(s) => s / SECONDS_PER_MINUTE,
-            None => continue,
+            Some(s) if s.is_finite() => s / SECONDS_PER_MINUTE,
+            _ => continue, // no / non-finite observed RT ⇒ can't anchor
         };
-        let Some(hit) = result.hits.first() else {
-            continue;
-        };
-        let cand_idx = hit.psm.primary_candidate_idx() as usize;
-        if cand_idx >= candidates.len() {
-            continue;
+        // Anchor on the highest-rank-score TARGET hit for this scan. `result.hits`
+        // is rank_score-sorted (glyco_search's deterministic ordering), so the
+        // first non-decoy is the best-ranked target — mirroring the regular path's
+        // "skip a decoy rank-1, take the next rank-1 target" rule (Codex review),
+        // instead of skipping the whole scan when `hits[0]` is a decoy.
+        for hit in result.hits.iter() {
+            let cand_idx = hit.psm.primary_candidate_idx() as usize;
+            if cand_idx >= candidates.len() {
+                continue;
+            }
+            if candidates[cand_idx].is_decoy {
+                continue; // skip decoy, try the next-best target
+            }
+            let index = predict_glyco_index(
+                &model,
+                &candidates[cand_idx].peptide,
+                hit.glycan_key.glycan.as_ref(),
+                &coeffs,
+            );
+            anchors.push((index, obs_rt_min));
+            break; // one rank-1 target anchor per scan
         }
-        let cand = &candidates[cand_idx];
-        if cand.is_decoy {
-            continue; // targets only
-        }
-        let index =
-            predict_glyco_index(&model, &cand.peptide, hit.glycan_key.glycan.as_ref(), &coeffs);
-        anchors.push((index, obs_rt_min));
     }
 
     // ── Step 2: per-run calibration (anchors in minutes ⇒ line in minutes) ──
@@ -122,9 +130,11 @@ pub fn populate_glyco_rt_features(
             continue;
         }
         if let Some(s) = spectra.get(result.spectrum_idx).and_then(|sp| sp.rt_seconds) {
-            let m = s / SECONDS_PER_MINUTE;
-            min_rt = min_rt.min(m);
-            max_rt = max_rt.max(m);
+            if s.is_finite() {
+                let m = s / SECONDS_PER_MINUTE;
+                min_rt = min_rt.min(m);
+                max_rt = max_rt.max(m);
+            }
         }
     }
     let span = max_rt - min_rt; // ≤ 0 (single RT / none) ⇒ norm = 0.0
@@ -135,10 +145,11 @@ pub fn populate_glyco_rt_features(
         let obs_rt_min = spectra
             .get(spec_idx)
             .and_then(|sp| sp.rt_seconds)
+            .filter(|s| s.is_finite())
             .map(|s| s / SECONDS_PER_MINUTE);
         let obs = match obs_rt_min {
             Some(o) => o,
-            None => continue, // no observed RT ⇒ leave every hit neutral 0.0
+            None => continue, // no / non-finite observed RT ⇒ leave hits neutral 0.0
         };
         for hit in result.hits.iter_mut() {
             let cand_idx = hit.psm.primary_candidate_idx() as usize;
@@ -153,6 +164,10 @@ pub fn populate_glyco_rt_features(
             );
             let pred = slope * index + intercept;
             let delta = obs - pred;
+            // Never emit a non-finite RT feature (leave the hit neutral 0.0).
+            if !pred.is_finite() || !delta.is_finite() {
+                continue;
+            }
             let norm = if span > 0.0 { delta / span } else { 0.0 };
             hit.psm.features.predicted_rt_min = pred as f32;
             hit.psm.features.delta_rt = delta as f32;
@@ -296,6 +311,43 @@ mod tests {
     }
 
     // ── DeltaRTRank: known AbsDeltaRT → correct normalized ranks ──────────────
+
+    #[test]
+    fn glyco_anchor_skips_decoy_first_hit_to_the_target() {
+        // Each scan's rank-1 (first) hit is a DECOY with a TARGET as the next hit.
+        // The old code anchored only on hits[0] and skipped the whole scan; the fix
+        // skips the decoy and anchors the target, so calibration succeeds and the
+        // target hits get populated RT features (Codex review parity finding).
+        let n = MIN_CALIBRATION_ANCHORS + 2;
+        let mut candidates = Vec::new();
+        let mut spectra = Vec::new();
+        let mut results = Vec::new();
+        for i in 0..n {
+            let d = candidates.len() as u32;
+            candidates.push(cand(pep(b"PEPTIDEDK"), true)); // decoy = hits[0]
+            let mut seq = b"TARGETPEP".to_vec();
+            seq.push(b"ACDEFGHIKLMNPQRSTVWY"[i % 20]); // distinct → non-degenerate
+            let t = candidates.len() as u32;
+            candidates.push(cand(pep(&seq), false)); // target = hits[1]
+            spectra.push(spec(i as i32, Some((i as f64 + 10.0) * 60.0)));
+            results.push(GlycoSpectrumResult {
+                spectrum_idx: i,
+                hits: vec![
+                    hit(d, Some(glycan(2, 3, 0, 0, 0))),
+                    hit(t, Some(glycan(2, 3, 0, 0, 0))),
+                ],
+            });
+        }
+        populate_glyco_rt_features(&spectra, &mut results, &candidates);
+        // Calibration succeeded via the skipped-decoy targets ⇒ RT populated.
+        let populated = results
+            .iter()
+            .any(|r| r.hits.iter().any(|h| h.psm.features.predicted_rt_min != 0.0));
+        assert!(
+            populated,
+            "decoy-first scans must still calibrate via the next target hit"
+        );
+    }
 
     #[test]
     fn delta_rt_rank_assigns_normalized_ranks_by_abs_delta() {

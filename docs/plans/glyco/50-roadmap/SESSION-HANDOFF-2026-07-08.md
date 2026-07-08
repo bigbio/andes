@@ -9,9 +9,12 @@
 
 ## 1. Branch state — `glyco-phase1` (UNMERGED, safe to build on)
 
-Clean working tree, deterministic (byte-identical proven), twice code-reviewed
-(Codex + CodeRabbit, all findings resolved). Still **beats an open-source glyco engine: 253 @1% /
-97 backbone-correct / 1 decoy vs MM ~222**.
+Tracked tree was deterministic (byte-identical proven) and twice code-reviewed
+(Codex + CodeRabbit, all findings resolved). Current worktree also has untracked
+planning/audit files from this campaign:
+`docs/plans/glyco/50-roadmap/BEAT-the reference engine-PLAN-2026-07-08.md` and
+`docs/plans/glyco/scripts/glyco_outrank_audit.py`. Still **beats an open-source glyco engine:
+253 @1% / 97 backbone-correct / 1 decoy vs MM ~222**.
 
 Net code delivered this session (on top of the prior 253/97 baseline):
 - **RT foundation** — engine-wide + glyco retention-time features
@@ -31,26 +34,73 @@ seed model (@1% is byte-identical with RT populated). It does not move the numbe
 
 ---
 
-## 2. The governing truth — the ~253/97 plateau is a COUPLED generation∧scoring ceiling
+## 2. The governing truth after the the reference engine-gap audit
 
-Decomposition of the 523 truth backbones (validated tool):
+The previous "generation vs scoring" story was too coarse. The authoritative
+measurement is still `glyco_outrank_audit.py` on `andes_cap1024_truth_allhits.glyco.pin`,
+but interpret its buckets carefully: `truth_absent` means the correct backbone was
+not present in the emitted/all-hit candidate surface under that run, NOT necessarily
+that the database could never enumerate it.
 
-| bucket | count | meaning |
-|---|---|---|
-| never generated | **301** (58%) | backbone not in andes' candidate pool |
-| generated but out-ranked | **106** (20%) | in the pool, but a *wrong* backbone wins the top-1 collapse |
-| generated + correct | 116 (22%) | andes wins (97 survive @1% FDR) |
+Decomposition of the 523 truth backbones under the all-hit audit:
+
+> **⚠️ CORRECTED 2026-07-08 (numeric mass matching).** The original counts below came
+> from a `glyco_outrank_audit.py` build whose `residue_mass()` STRING parser mis-parses
+> **45.9%** of candidate rows (measured over 89,412 rows; e.g. a 3947 Da backbone read
+> as 146 Da), inflating `truth_absent` with false absents. Both audit tools are now
+> fixed to match numerically via **CalcMass − GlycanMass − H₂O** (repo + VM synced).
+> The corrected decomposition changes the whole diagnosis: **generation is ~half the
+> believed size; the dominant problem is SCORING.**
+
+| bucket | buggy (string) | **CORRECTED (numeric)** | meaning |
+|---|---|---|---|
+| truth_absent | 301 (58%) | **148 (28%)** | correct backbone not on the scoreable surface |
+| truth_outranked | 106 (20%) | **95 (18%)** | in the pool, but a *wrong* backbone wins top-1 |
+| top1_correct (by mass) | 116 (22%) | **280 (54%)** | winner has the correct backbone mass; only **97** survive @1% FDR |
+
+**Headline:** andes already generates AND top-1-selects the correct backbone mass for
+**280/523**, but only **97** survive @1%. The **280→97** gap (scoring + FDR-separation,
+plus some mass-correct/peptide-wrong) is the real battleground — NOT generation. The
+"generation-bound" framing below was largely a parser artifact.
+(`top1_correct` is backbone-MASS-only — the truth file has no sequence — so 280 is an
+upper bound; the honest peptide floor stays 97 @1%.)
 
 Established beyond doubt this session:
-- **It is NOT an FDR problem.** Loosening 1%→40% moved backbone-correct only
-  97→103 while decoys went 1→209. The 407 non-correct are never *emitted*.
-- **The missing backbones are searchable** — median 4 core-Y rungs, 14 b/y ions,
-  7 oxonium; masses/charge/PTMs verified correct (90% close as `precursor =
-  backbone + in-list glycan` at the reported charge). The loss is **mechanical**.
-- **Recovering generation alone does NOT move @1%.** Even when high-charge (z≥5)
-  backbones are forced into the pool, `top1_correct = 0` — they land deeply
-  out-ranked. Generation and scoring are coupled: fix one without the other and
-  the number does not move.
+- **It is NOT an FDR threshold problem.** Loosening 1% -> 40% moved
+  backbone-correct only 97 -> 103 while decoys exploded. Percolator cannot rescue
+  a correct backbone that was not emitted as the one PSM for the scan.
+- **It is NOT the mods-file problem.** Source audit shows the no-`--mods` default
+  already includes protein N-term acetylation in `default_aa_set_with_tag()`.
+  The nearby log string that says "Cam-C fixed, Ox-M variable" is stale/incomplete.
+- **It is NOT solved by the current combined selector.** Diagnostic top-1 improved
+  modestly, but the honest Percolator run on the existing `honest_comb` PIN gave
+  **236 @1% / 86 backbone-correct / 1 decoy**, worse than 253/97/1. Also,
+  `ANDES_GLYCO_SELECTOR=combined` implicitly turns `YINDEX` on unless overridden,
+  so prior combined-selector A/Bs changed candidate retention and scoring together.
+- **The miss pattern is large/high-charge backbones.** Correct IDs skew smaller
+  (median backbone mass ~1350 Da); absent/outranked are ~1750-1860 Da. z=2 is
+  mostly recoverable, z=5+ is essentially not recovered.
+- **Generation and scoring are coupled.** Adding more backbones/glycans without
+  better separation adds wrong competitors; full glycans alone crashed 253 -> 119
+  @1%.
+
+For the 95 generated-but-outranked cases (corrected numeric audit; the earlier 57/49
+split was also a parser artifact):
+
+| reason | count | note |
+|---|---:|---|
+| truth loses y-ladder | **92** | a wrong (usually implausible) mass-split has a stronger *summed* Y-ladder intensity, even though truth typically has MORE core-Y HITS |
+| y-ladder tie loses rank | 3 | glyco evidence tied; sparse b/y rank picks wrong |
+
+**The selector defect is now unambiguous:** collapse is **summed-Y-ladder-INTENSITY-primary**
+(b/y rank only a tiebreak), so 92/95 outranked truths lose to a competitor with higher
+summed Y intensity despite having more real core-Y hits (e.g. scan 10156: truth coreY=5
+loses to winner coreY=1 whose backbone is 534 Da off). Leg-2 fix = count core-Y **hits**
+(not raw summed intensity) + peptide-dominant b/y (a glyco search engine 0.65/0.35) + mass-split penalty.
+
+Median candidate count is roughly the same across buckets (~114-118), so the miss is
+not simply "too few candidates per scan"; it is **which candidate surface survives**
+and **which candidate wins top-1**.
 
 ---
 
@@ -65,69 +115,135 @@ Established beyond doubt this session:
 | isotope-aware backbone voting | z≥5 unchanged 16/18; near-misses were coincidental |
 | RT as a standalone lever | weak seed model; @1% flat |
 | wider isotope range (−1..4) | no effect |
+| current `ANDES_GLYCO_SELECTOR=combined` | honest @1% worse: 253/97/1 -> 236/86/1 |
+| glyco-only b/y rank retrain (SP-B) | worse under controlled/honest test |
+| two-pass Percolator re-collapse | worse; TD labels cannot learn within-scan backbone correctness |
+| unified glycan-decoy Percolator pile | crashed; glycan-axis features too underpowered in one label pile |
+
+Also do not rely on the old VM `gen_audit3.py` result as-is: it double-counts
+explicit `C+57.02146` when parsing PIN peptides and reports a false low
+`andes_has`. Use `glyco_outrank_audit.py` and numeric mass matching instead.
 
 ---
 
-## 4. Forward plan — prioritized levers
+## 4. Field map — what the reference engine/a glyco search engine/a cross-spectrum glyco engine do differently
 
-### P1 (RECOMMENDED FIRST) — Scoring / F1: peptide-b/y ⊕ glycan-Y learned fusion
-The binding constraint. The ceiling analysis showed 140/171 out-ranked backbones are
-**pareto-blocked** on the current collinear features (rank, anchor, intensity) — they
-need a NEW orthogonal axis. F1 scores the **peptide-backbone b/y** and the
-**glycan-Y ladder** as *separate* signals, then combines them with a learned fusion
-(a glyco search engine-2.0 does w≈0.35 glycan / 0.65 peptide). This directly attacks the 106
-out-ranked AND is the prerequisite for ANY generation recovery to convert to IDs.
-- **Design doc to start from:** `glyco-scoring-roadmap.md` §6b, `deep-review-synthesis.md`.
-- **Validate at @1% + decoys, NOT top1_correct** (the full-glycan trap: top1 rose
-  while @1% crashed).
-- Needs a brainstorm pass first (separate-score architecture + how the fusion is
-  learned within the FDR/Percolator constraint — FDR stays Percolator-only).
+The useful clean-room lesson is consistent across tools:
 
-### P2 (QUICK, do alongside P1) — Benchmark hygiene: run glyco WITH `--mods`
-My glyco runs used the hardcoded default (Cam-C + Met-ox) and dropped the **N-term
-acetylation** the reference engine searched. PTMs are already parameterized (same `--mods`
-system as normal search). Fix = pass `--mods glyco_mods.txt` (staged on the VM;
-= `docs/benchmarks/configs/mods.txt` with Cam-C + Ox-M + Prot-N-term Acetyl).
-Re-establish the honest @1% baseline with the fair mod set before/with P1.
-No code change.
+| tool | relevant winning idea | andes gap |
+|---|---|---|
+| the reference glyco engine | peptide-first mass-offset search; score naked b/y + glyco-aware ions with a hyperscore-like selector | andes has strong peptide scoring, but not a robust mass-offset DB enumeration branch feeding a glyco-aware selector |
+| a glyco search engine | glycan-first Y-complement indexing, then separate `ScoreG`/`ScoreP`/`ScoreGP` and glycan-level QC | andes has a Y-index and glyco features, but lacks a stored two-axis fused selector |
+| a cross-spectrum glyco engine | shared-backbone/cross-spectrum evidence for sparse b/y spectra | andes scaffold exists, but prior transfer payoff is bounded and cannot be the main lever |
+| O-Pair/an open-source glyco engine | paired HCD/EThcD localization and graph logic | useful direction for future paired data, not the immediate HCD-only Fc3 gap |
 
-### P3 (ONLY AFTER scoring can convert) — Generation recovery
-Mechanical, but blocked by scoring until P1 lands (recovered backbones land out-ranked):
-- **High-charge (z≥4): ~61 backbones.** z≥5 is 89% absent; the Y-ladder voting is
-  buried by spurious high-charge bins (voted-but-truncated below top_k). Fix =
-  reduce spurious bins (cap/down-weight Y-ion charge interpretations), NOT a giant
-  top_k (30 min/18 scans) and NOT charge-expand.
-- **Low-charge (z≤3): ~100 backbones.** Have evidence + correct mass but missed;
-  cause unknown (likely the voting picking a competing backbone). Un-instrumented.
-
-### PARKED — RT prediction
-Revisit only if F1 needs an extra orthogonal axis: swap the seed model for a
-trained `RtIndexModel::fit()` (or fold RT-consistency into the pre-collapse
-selector, since the post-collapse `DeltaRTRank` is inert on the 1-row-per-scan PIN).
+Conclusion: beating the reference engine on this run requires **candidate-surface + selector
+coupling**, not a single transfer/FDR tweak.
 
 ---
 
-## 5. Concrete first tasks for the next session
+## 5. Forward plan — prioritized, audited
 
-1. **Re-baseline with correct mods (P2, ~40 min VM):** run the honest @1% with
-   `--mods glyco_mods.txt` → the real starting number (should be ≥253/97, likely
-   +a few from acetyl coverage).
-2. **Brainstorm the F1 fusion design (P1):** separate peptide-b/y and glycan-Y
-   scores; where the combined score enters (selector vs additive PIN feature vs
-   both); how the fusion weight is set/learned; how it stays FDR-honest
-   (Percolator only). → then `writing-plans` → `subagent-driven-development`.
-3. Only after P1 shows it can convert out-ranked → pursue P3 high-charge generation.
+### P0 — Measurement and candidate-level audit (do first, cheap)
+Before building, make the candidate-level truth/winner table explicit for the
+~106 generated-but-outranked scans plus a sample of `truth_absent` scans:
+- wrong winner peptide/glycan/backbone vs truth peptide/glycan/backbone;
+- `ScoreP` candidate terms (`rank_score`, edge, b/y coverage/contiguity);
+- `ScoreG` candidate terms (`YLadderScore`, `CoreYHits`, Y0/Y1 anchor, sialic);
+- mass-split delta (wrong short-backbone/big-glycan patterns);
+- whether the truth was excluded by top-k retention, shortlist K=24, glycan list,
+  or no precursor-mass DB source.
+
+This decides whether the first patch is a small selector/retention fix or a real
+learned/listwise scorer. It also prevents repeating the current `combined` trap:
+top-1 can rise while honest @1% falls.
+
+### P1 — Build a real two-axis selector surface
+Implement a stored fused score, not a post-collapse PIN-only feature:
+- `ScoreP`: peptide-backbone evidence from b/y rank, edge, and preferably an
+  additive coverage/contiguity term (hyperscore-like, no `score_psm` rewrite).
+- `ScoreG`: glycan-Y evidence from `YLadderScore`, `CoreYHits`, Y0/Y1 anchor, and
+  composition-specific terms that actually differ between competitors.
+- `ScoreGP`: fixed seed fusion first (a glyco search engine-style starting point: peptide-heavy,
+  e.g. ~0.65 peptide / ~0.35 glycan after scale normalization), then learn/tune only
+  after the candidate audit shows the axes separate truth from real competitors.
+
+Hard requirements:
+- Store the fused scalar on `GlycoPsmKey` or equivalent so driver and PIN writer
+  do not recompute different winners.
+- Wire the same comparator into both `glyco_search.rs` pre-feature collapse and
+  `glyco_pin.rs::select_emitted_hits`.
+- Remove or audit the `SELECTOR_SHORTLIST_K=24` shortcut for glyco reranking; a
+  weak-b/y truth cannot be rescued if it is outside a bare-rank shortlist.
+- Keep selector and retention toggles independent. `ANDES_GLYCO_SELECTOR=...`
+  must not silently change `ANDES_GLYCO_YINDEX`.
+
+Gate: top1 audit improves AND honest Percolator @1% improves vs 253/97/1 with decoys
+controlled. Top1 alone is not sufficient.
+
+### P2 — Add precursor-mass DB enumeration, but only behind guardrails
+The code already has the primitive (`bucket_index`, `db_branch`, mass->peptide lookup),
+but the glyco driver still lacks a clean source that enumerates:
+
+```text
+precursor_neutral - glycan.mass -> backbone mass -> bucket_index peptides
+```
+
+Add this as an opt-in source (for example `ANDES_GLYCO_PRECURSOR_MASS=1`) with:
+- sequon filter;
+- charge/isotope consistency;
+- bounded emission cap;
+- glycan-decoy/selector guardrails before full-glycan expansion is trusted.
+
+Do NOT ship precursor-mass expansion by itself. Prior full-list expansion increased
+competition and crashed @1%. Generation only pays after P1 can rank the recovered
+backbone.
+
+### P3 — FDR/decoys only after stronger candidate scoring exists
+Current glycan-axis decoys are implemented but underpowered: glycan-decoy rows share
+nearly all peptide features, and only a small set of glycan features differ. A
+separate glycan axis is still the field-correct shape, but not a quick fix until
+there are richer composition/Y-ladder features.
+
+Near-term FDR rule: one top-1 row per scan, Percolator only, validate with target and
+decoy counts plus `glyco_recovery_fdr.py`. Do not use all-hit PINs for FDR except as
+diagnostic pass-A inputs.
+
+### P4 — Transfer and RT stay secondary
+Cross-spectrum transfer is real but bounded by the measured sibling availability and
+did not move the current baseline meaningfully. RT features are built and safe, but
+the current seed model is flat. Revisit both after P1/P2 create a candidate surface
+where orthogonal evidence can convert IDs.
 
 ---
 
-## 6. Key files, measuring sticks, gotchas
+## 6. Concrete first tasks for the next session
+
+1. **Write/run the candidate-level competitor audit** on
+   `andes_cap1024_truth_allhits.glyco.pin`: real wrong winner vs truth for the 106
+   outranked scans, with the `ScoreP`/`ScoreG` columns above. Include a `truth_absent`
+   sample to distinguish no-DB-source vs retention/top-k loss.
+2. **Patch the experiment toggles before more A/Bs:** decouple combined selector from
+   implicit `YINDEX`, and add a regression that driver collapse and PIN collapse pick
+   the same winner under any selector mode.
+3. **Prototype P1 stored fused selector** with no learned model first. Gate on the
+   all-hit audit and then honest @1% Percolator. If it cannot improve 253/97/1, do
+   not proceed to larger generation expansion.
+4. **Only then add P2 precursor-mass enumeration** and test joint P1+P2. Never judge
+   P2 alone on target count.
+
+---
+
+## 7. Key files, measuring sticks, gotchas
 
 - **Measuring stick:** `glyco_outrank_audit.py --truth truth_nglycan_residue.tsv
   --pin <all-hits PIN> [--out per-scan.tsv]`. Categories: top1_correct /
   truth_outranked / truth_absent. Use `glyco_recovery_fdr.py <truth> <psms> <q> <tol>`
   for @1% backbone-correct.
-- **Honest @1% recipe:** `andes --glyco` (add `--mods glyco_mods.txt`) → Percolator
-  (`--seed 42 --only-psms`). Baseline 253/97/1.
+- **Honest @1% recipe:** `andes --glyco` -> Percolator (`--seed 42 --only-psms`).
+  Current baseline 253/97/1. `--mods glyco_mods.txt` should be byte/near-byte
+  hygiene only because default code already includes Prot-N-term Acetyl; verify if
+  changing binaries.
 - **andes mass convention (bit me 3×):** backbone is **residue mass** (no water);
   the PIN writes Cam-C explicitly as `C+57.02146`. Match numerically via
   `CalcMass − GlycanMass = peptide neutral`, NOT by re-parsing the peptide string.
@@ -142,9 +258,9 @@ selector, since the post-collapse `DeltaRTRank` is inert on the 1-row-per-scan P
 
 ---
 
-## 7. Housekeeping status (this session end)
+## 8. Housekeeping status (this session end)
 
-- Branch clean, all suites green, release build clean, determinism proven.
-- Untracked `docs/plans/glyco/scripts/` = analysis scripts (left as-is).
+- Determinism previously proven; tracked code not edited by this handoff update.
+- Untracked roadmap/audit files left as-is (see section 1).
 - Memory (`project_glyco_hybrid_campaign.md` + `MEMORY.md` index) fully updated.
 - Nothing running on the VM.

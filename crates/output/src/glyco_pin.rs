@@ -21,7 +21,9 @@ use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 use model::spectrum::Spectrum;
 
-use andes_glyco::glyco_psm::{collapse_cmp, y_primary_selection};
+use andes_glyco::glyco_psm::{
+    collapse_cmp, glyco_gp_fused_score, glyco_gp_k, gp_selector_on, y_primary_selection,
+};
 use andes_glyco::hybrid::Source;
 
 use crate::pin::{psm_feature_values, FeatureFmt};
@@ -373,18 +375,38 @@ pub(crate) fn select_emitted_hits(
     // Ordering is the SHARED `collapse_cmp` (single source of truth with the
     // driver's pre-feature reduction). Default = core-Y ladder primary (+70%
     // deterministic); ANDES_GLYCO_SELECT=rank forces the old b/y-rank primary.
+    // Leg-2 `gp` fused selector (ANDES_GLYCO_SELECTOR=gp): `rank + K·ladder`, MUST
+    // match the driver's glyco_search gp branch exactly (same rank/ladder/k) or the
+    // scored winner and the written row diverge (the collapse-parity bug). Falls
+    // back to the legacy lexicographic `collapse_cmp` when gp is off.
+    let gp_on = gp_selector_on();
+    let gp_k = glyco_gp_k();
     let y_primary = y_primary_selection();
     let winner = (0..hits.len())
         .max_by(|&a, &b| {
-            collapse_cmp(
-                hits[a].psm.rank_score,
-                hits[a].glycan_key.y_ladder_intensity_score,
-                hits[b].psm.rank_score,
-                hits[b].glycan_key.y_ladder_intensity_score,
-                y_primary,
-            )
-            // lowest index wins a full tie (deterministic)
-            .then(b.cmp(&a))
+            if gp_on {
+                let sa = glyco_gp_fused_score(
+                    hits[a].psm.rank_score,
+                    hits[a].glycan_key.y_ladder_intensity_score,
+                    gp_k,
+                );
+                let sb = glyco_gp_fused_score(
+                    hits[b].psm.rank_score,
+                    hits[b].glycan_key.y_ladder_intensity_score,
+                    gp_k,
+                );
+                sa.total_cmp(&sb).then(b.cmp(&a))
+            } else {
+                collapse_cmp(
+                    hits[a].psm.rank_score,
+                    hits[a].glycan_key.y_ladder_intensity_score,
+                    hits[b].psm.rank_score,
+                    hits[b].glycan_key.y_ladder_intensity_score,
+                    y_primary,
+                )
+                // lowest index wins a full tie (deterministic)
+                .then(b.cmp(&a))
+            }
         })
         .expect("non-empty");
     // Emit only if the scan's actual winner has an enumerated glycan; if the
@@ -878,6 +900,51 @@ mod tests {
         // Full tie on y_ladder → break by rank_score, then lowest index.
         let tied = vec![make_hit(1.0, 7.0), make_hit(3.0, 7.0), make_hit(3.0, 7.0)];
         assert_eq!(select_emitted_hits(&tied, true, false), vec![1], "tie broken by rank_score then lowest index");
+    }
+
+    /// Leg-2 gp selector: the fused `rank + K·ladder` collapse rescues a rank-strong
+    /// hit that the legacy ladder-primary collapse rejects for a spurious tiny ladder
+    /// edge (the P0 failure mode: a wrong mass-split wins on a coincidental summed
+    /// Y-ladder intensity despite truth's stronger b/y). This asserts the exact
+    /// ordering expression `select_emitted_hits` uses under gp; the env dispatch
+    /// (`gp_selector_on`) is covered by `gp_selector_from_env` in glyco_psm. With gp
+    /// OFF (default env), the legacy ladder-primary winner is unchanged.
+    #[test]
+    fn gp_fused_collapse_rescues_rank_strong_hit_over_spurious_ladder() {
+        use andes_glyco::glyco_psm::{glyco_gp_fused_score, GLYCO_GP_K_DEFAULT};
+        fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
+            let mut key = make_key(true, 1000.0);
+            key.y_ladder_intensity_score = ladder;
+            FullGlycoPsm { glycan_key: key, psm: make_minimal_psm(0, rank) }
+        }
+        // idx 0 = truth (strong b/y rank, modest ladder); idx 1 = wrong split
+        // (spurious tiny ladder edge that the legacy ladder-primary collapse picks).
+        let hits = vec![make_hit(15.0, 0.05), make_hit(2.0, 0.06)];
+        // Legacy default (gp env unset) still picks the spurious-ladder hit → byte-identical.
+        assert_eq!(
+            select_emitted_hits(&hits, true, false),
+            vec![1],
+            "legacy ladder-primary picks the spurious-ladder wrong split (unchanged)"
+        );
+        // The gp fused ordering (exactly what select_emitted_hits computes under gp)
+        // rescues the rank-strong truth (idx 0): 15 + 50·0.05 = 17.5 > 2 + 50·0.06 = 5.
+        let k = GLYCO_GP_K_DEFAULT;
+        let gp_winner = (0..hits.len())
+            .max_by(|&a, &b| {
+                glyco_gp_fused_score(
+                    hits[a].psm.rank_score,
+                    hits[a].glycan_key.y_ladder_intensity_score,
+                    k,
+                )
+                .total_cmp(&glyco_gp_fused_score(
+                    hits[b].psm.rank_score,
+                    hits[b].glycan_key.y_ladder_intensity_score,
+                    k,
+                ))
+                .then(b.cmp(&a))
+            })
+            .unwrap();
+        assert_eq!(gp_winner, 0, "gp fusion rescues the rank-strong truth over the spurious-ladder split");
     }
 
     /// GI-1: a de-novo hit (glycan = None, a bare mass residual) is NOT a glyco

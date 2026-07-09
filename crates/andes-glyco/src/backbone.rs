@@ -436,16 +436,13 @@ pub fn core_y_intensity(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64, max_charge:
     score
 }
 
-/// PARTIAL-GLYCAN b/y evidence (design idea B): sequence-informative fragments that
-/// retain part of the glycan. In stepped-HCD the glycan sheds STEPWISE, so peptide b/y
-/// fragments appear both bare AND bearing the innermost core (b_i/y_i + {HexNAc,
-/// 2HexNAc, 2HexNAc+Hex, ...}). andes' base score matches only the BARE b/y; this taps
-/// the untapped second ladder. Unlike the glycan Y-ladder (which depends on the backbone
-/// MASS and is therefore shared with a reversed mass-preserving decoy), b_i+glycan
-/// depends on the PREFIX SEQUENCE, so it discriminates the true backbone from a decoy —
-/// exactly the sequence evidence the weak large/high-charge glycopeptides lack. Offline
-/// on PXD025455 Fc3_r1: +30% true−decoy gap on the fail-FDR set, rescues 5/7 bare-blind
-/// scans. `residues` are the per-residue neutral masses (residue + mods) of the backbone.
+/// PARTIAL-GLYCAN b/y evidence: peptide b/y fragments bearing the innermost core
+/// (b_i/y_i + {HexNAc, 2HexNAc, 2HexNAc+Hex, ...}) from stepwise stepped-HCD glycan
+/// shedding — the "second ladder" the bare-b/y base score ignores. Unlike the mass-based
+/// glycan Y-ladder (shared with a mass-preserving decoy), b_i+glycan depends on the
+/// PREFIX SEQUENCE, so it discriminates the true backbone from a decoy — the sequence
+/// evidence weak large/high-charge glycopeptides lack. `residues` = per-residue neutral
+/// masses (residue + mods).
 pub fn partial_glycan_by_intensity(
     peaks: &[(f64, f32)],
     residues: &[f64],

@@ -40,12 +40,9 @@ pub struct GlycanComp {
 pub fn n_glycan_list() -> Vec<GlycanComp> {
     let mut out: Vec<GlycanComp> = Vec::with_capacity(2048);
 
-    // EXPANDED (2026-07-09): widened Fuc 3→4 and Hex 3..12 → 2..14 to cover the gap
-    // compositions the full list missed (high-fucosylation, extended-Hex, truncated-Hex)
-    // — measured to add ~11 otherwise-unproducible truth backbones on PXD025455 Fc3_r1.
-    // Kept HexNAc/NeuAc/NeuGc bounds to limit candidate-space bloat (the aggressive
-    // widen ballooned the list 3×). The learned GBDT selector + peptide-decoys keep the
-    // enlarged space FDR-safe (the "expand then rank better" plan).
+    // EXPANDED 2026-07-09: Fuc 3→4, Hex 3..12 → 2..14 to cover high-Fuc / extended- and
+    // truncated-Hex gap compositions (+~11 truth backbones on PXD025455 Fc3_r1); HexNAc/
+    // NeuAc/NeuGc bounds held to limit candidate bloat.
     for hn in 2u8..=8 {
         for hx in 2u8..=14 {
             for fc in 0u8..=4 {

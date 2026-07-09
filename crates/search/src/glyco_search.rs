@@ -54,7 +54,10 @@ use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmMatch;
 #[cfg(test)]
 use crate::psm::PsmFeatures;
-use scoring_crate::scoring::{hyperscore_psm, psm_edge_score, score_psm, ScoredSpectrum};
+use scoring_crate::scoring::{
+    candidate_rank_entropy, fuse_strong_score, hyperscore_psm, listwise_score_gap, psm_edge_score,
+    score_psm, score_psm_float, ScoredSpectrum, StrongScoreInputs,
+};
 use crate::glyco_selector::glyco_selector_feature_vec;
 
 /// Lazily load the learned GBDT backbone-selector model from the path in
@@ -1022,6 +1025,26 @@ fn score_spectrum_glyco(
                 .filter(|(_, w)| accepted_backbones.contains(&w.bb_hit_idx))
                 .collect();
 
+            // PER-SPECTRUM CALIBRATION features (code-review 2026-07-09): the glyco path
+            // calls compute_psm_features directly and NEVER runs the standard search's
+            // post-merge fill (fill_post_topn), so TailorScore / RankScoreFloat /
+            // strong_score / listwise_score_gap / candidate_rank_entropy were dead 0.0 in
+            // both the PIN (Percolator lost the strongest calibration signals) and the
+            // selector. Compute them ONCE per spectrum over the accepted candidate scores
+            // — the same signals Percolator cannot derive from per-PSM features. `.score`
+            // is the same RawScore the standard Tailor histogram bins.
+            let (tailor_denom, spectrum_listwise_gap, spectrum_rank_entropy) = {
+                let mut hist: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+                let mut scores: Vec<f32> = Vec::with_capacity(accepted_winners.len());
+                for (_, w) in &accepted_winners {
+                    *hist.entry(w.score.round() as i32).or_insert(0) += 1;
+                    scores.push(w.score);
+                }
+                let denom = crate::psm::tailor_denominator(&hist, accepted_winners.len() as u32) as f32;
+                scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                (denom, listwise_score_gap(&scores), candidate_rank_entropy(&scores))
+            };
+
             // SPEED: reduce to the winner the PIN will actually emit BEFORE the
             // expensive compute_psm_features. CRITICAL (Codex review): the emitted
             // winner must be chosen by the SAME rule as the PIN writer's
@@ -1262,13 +1285,33 @@ fn score_spectrum_glyco(
                     .map(|(_, s)| s)
                     .expect("ScoredSpectrum must exist for winning charge");
                 let cand = &candidates[w.cand_slot];
-                let features = compute_psm_features(
+                let mut features = compute_psm_features(
                     ss,
                     &cand.peptide,
                     scorer,
                     w.z,
                     ctx.intensity_model,
                 );
+                // Wire the per-spectrum calibration features compute_psm_features leaves
+                // at 0.0 for glyco (the glyco path skips the standard fill_post_topn).
+                // Additive PIN features; give Percolator the calibration signals + the
+                // strongest fused score it was previously denied on glycopeptides.
+                features.rank_score_float =
+                    score_psm_float(ss, &cand.peptide, scorer, w.z, fragment_tolerance_da);
+                features.tailor_score = if tailor_denom > 0.0 {
+                    w.score / tailor_denom
+                } else {
+                    w.score
+                };
+                features.candidate_rank_entropy = spectrum_rank_entropy;
+                features.listwise_score_gap = spectrum_listwise_gap;
+                features.strong_score = fuse_strong_score(&StrongScoreInputs {
+                    intensity_signal: features.intensity_signal,
+                    chance_match_surprise: features.chance_match_surprise,
+                    mass_competition_evidence: features.mass_competition_evidence,
+                    candidate_rank_entropy: spectrum_rank_entropy,
+                    listwise_score_gap: spectrum_listwise_gap,
+                });
 
                 let mass_error_ppm = if bb_residue > 0.0 {
                     (w.cand_residue_mass - bb_residue) / bb_residue * 1e6

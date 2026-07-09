@@ -12,7 +12,7 @@
 // PROTON`), i.e. the peptide NEUTRAL mass (water included). We subtract H2O
 // here so both branches agree on one convention before union/dedup/filter.
 
-use crate::backbone::{core_y_intensity, solve_backbone_min, BackboneCandidate, H2O};
+use crate::backbone::{core_y_intensity, solve_backbone_min, BackboneCandidate, SpectrumStats, H2O};
 use crate::glycan_db::GlycanComp;
 use crate::oxonium::oxonium_gate;
 
@@ -406,9 +406,10 @@ pub fn hybrid_candidates_presolved(
     // are dropped. Ties broken by mass for determinism. (When we did NOT union —
     // the 0-core-Y fallback — leave the set as-is; the driver bounds it.)
     if y_first_has_evidence && deduped.len() > top_k {
+        let stats = SpectrumStats::new(peaks);
         let mut scored: Vec<(f64, BackboneHit)> = deduped
             .into_iter()
-            .map(|h| (core_y_intensity(peaks, h.backbone_mass + H2O, tol_ppm, precursor_z), h))
+            .map(|h| (core_y_intensity(peaks, &stats, h.backbone_mass + H2O, tol_ppm, precursor_z), h))
             .collect();
         scored.sort_by(|a, b| {
             // DET-1: total_cmp on the intensity primary key (was partial_cmp +

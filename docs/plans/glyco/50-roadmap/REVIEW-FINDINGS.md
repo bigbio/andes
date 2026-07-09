@@ -13,27 +13,34 @@ ACTED ON and what remains as precise, actionable follow-ups.
   credited the now-deleted GBDT selector, and the `partial_glycan_by_intensity` doc.
 - Build + tests green (82 + 76).
 
-## SPEED — follow-ups (agent-verified, hot loop over ~14000 spectra × ~N candidates)
+## SPEED — DONE (behavior-preserving, all 82+162 tests green)
 
-1. **Hoist per-spectrum constants out of the `backbone.rs` intensity fns.**
-   `glycan_y_intensity`/`core_y_intensity`/`glycan_y_intensity_decoy`/`y0y1_anchor_intensity`/
-   `partial_glycan_by_intensity` each recompute the base-peak max-fold (`O(#peaks)`) AND a
-   `peaks.windows(2).all(...)` sorted-check **per call**, though `Spectrum.peaks` is already
-   sorted. Compute `base_peak_intensity` + drop the sorted-check once per spectrum in
-   `score_spectrum_glyco`; pass by parameter.
-2. **Memoize the Y-ladder per `bb_hit_idx`** (a `Vec<Option<f32>>` sized to
-   `deduped_backbone.len()`), not per winner — its value is independent of `cand_slot`, so
-   candidates sharing a backbone recompute it. And carry the selection-time ladder into
-   `GlycoPsmKey.y_ladder_intensity_score` instead of the third inline recompute (~line 1360).
-3. **Precompute a per-candidate sequon-membership `Vec<bool>`** once in
-   `GlycoCtxOwned::build`; replace the per-(spectrum,backbone,candidate) `residue_bytes: Vec<u8>`
-   + `has_nxst_sequon` (glyco_search ~line 918) with an O(1) lookup.
-4. **Hoist the 7 per-spectrum `std::env::var` reads** (`gp_selector_on`, `glyco_gp_k/j/h`,
-   `glyco_charge_expand`, `y_primary_selection` — confirmed read inside `score_spectrum_glyco`,
-   which runs in `par_iter`, contending on the process env lock) into `GlycoCtxOwned::build`,
-   matching the existing toggle-hoisting pattern. Their own docs already say "read ONCE".
-5. **Precompute the per-glycan cumulative `adds` ladder** once (side-table by glycan index)
-   instead of rebuilding it via ~10 `Vec::push` on every `glycan_y_intensity` call.
+1. ✅ **Hoisted per-spectrum constants out of the `backbone.rs` intensity fns.** New
+   `backbone::SpectrumStats { base, sorted }` computed ONCE per spectrum in
+   `score_spectrum_glyco` (and in `hybrid.rs`'s core-Y ranking) and passed by reference to
+   `core_y_intensity`/`glycan_y_intensity`/`glycan_y_intensity_decoy`/`y0y1_anchor_intensity`/
+   `partial_glycan_by_intensity`/`count_core_y_hits`. Removes the per-call `O(#peaks)`
+   base-peak max-fold + `windows(2).all(...)` sorted-check (the dominant per-call cost).
+   Values are byte-identical to the old inline computation.
+3. ✅ **Per-candidate sequon-membership `Vec<bool>`** precomputed once in
+   `GlycoCtxOwned::build` (also reused by the peptide-first fragment-index build, so the
+   sequon scan now runs once, not twice); the hot-loop check is an O(1) `ctx.sequon_membership[slot]`.
+4. ✅ **Hoisted the 6 per-spectrum `std::env::var` reads** (`gp_selector_on`, `glyco_gp_k/j/h`,
+   `glyco_charge_expand`, `y_primary_selection`) into `GlycoCtxOwned::build` (read once,
+   stored on the ctx) — no more process-env-lock contention inside `par_iter`.
+5. ✅ (partial) **De-duplicated the cumulative-`adds` builder** into one
+   `glycan_cumulative_adds(comp)` shared by `glycan_y_intensity` + its decoy (was ~22 lines
+   copy-pasted). Cleanliness + single source of truth for the ladder order.
+
+## SPEED — DEFERRED (diminishing returns after the above; parity-sensitive)
+
+2. **Memoize the Y-ladder per `bb_hit_idx`** (a `Vec<Option<f32>>`), not per winner — its
+   value is independent of `cand_slot`, so candidates sharing a backbone recompute it. Carry
+   the selection-time ladder into `GlycoPsmKey.y_ladder_intensity_score` instead of the third
+   inline recompute. Deferred: needs a memo threaded through the winner loop; parity-risky.
+5b. **Full per-glycan `adds` side-table** (by glycan index) to avoid the one `Vec` alloc per
+   `glycan_y_intensity` call — smaller win now that `SpectrumStats` removed the O(#peaks) cost;
+   needs plumbing an index (not just `&GlycanComp`) into the fn.
 
 Confirmed NOT issues: `best_frag_intensity` already binary-searches (`partition_point`); the
 default (non-gbdt) path computes `compute_psm_features` for only the 1 emitted winner.

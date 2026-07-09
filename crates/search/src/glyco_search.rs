@@ -32,7 +32,7 @@ use rayon::prelude::*;
 
 use andes_glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
-    partial_glycan_by_intensity, y0y1_anchor_intensity,
+    partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
@@ -222,10 +222,25 @@ pub struct GlycoScoreCtx<'a> {
     /// P1b + L4: use the peptide-conditioned combined selector (Y0/Y1 anchor +
     /// frag/rich-ion intensity LLR) to re-rank the accepted-backbone shortlist.
     pub combined_selector_on: bool,
+    /// Leg-2 `gp` fused selector toggle + weights (ANDES_GLYCO_SELECTOR=gp,
+    /// GP_K/J/H). Process-constant, so read ONCE in [`GlycoCtxOwned::build`]
+    /// rather than per spectrum — `score_spectrum_glyco` runs in `par_iter`
+    /// and per-spectrum `std::env::var` reads contend on the process env lock.
+    pub gp_selector_on: bool,
+    pub gp_k: f32,
+    pub gp_j: f32,
+    pub gp_h: f32,
+    /// Upward charge-set expansion (ANDES_GLYCO_CHARGE_EXPAND) and glycan-Y
+    /// primary selection (ANDES_GLYCO_SELECT). Same hoisting rationale.
+    pub charge_expand: u8,
+    pub y_primary: bool,
     pub glyco_decoy_on: bool,
     pub features_collapse: bool,
     pub features_enumerated: bool,
     pub scan_filter: Option<&'a std::collections::HashSet<i32>>,
+    /// Per-candidate N-X-S/T sequon membership (indexed by candidate slot),
+    /// precomputed once so the scoring hot loop is an O(1) lookup.
+    pub sequon_membership: &'a [bool],
 }
 
 /// Owns the pieces of [`GlycoScoreCtx`] that are built once per run (indices,
@@ -244,9 +259,16 @@ pub struct GlycoCtxOwned {
     peptide_first_on: bool,
     yindex_on: bool,
     combined_selector_on: bool,
+    gp_selector_on: bool,
+    gp_k: f32,
+    gp_j: f32,
+    gp_h: f32,
+    charge_expand: u8,
+    y_primary: bool,
     glyco_decoy_on: bool,
     features_collapse: bool,
     features_enumerated: bool,
+    sequon_membership: Vec<bool>,
     /// Cross-spectrum transfer toggle (legacy in-driver `ANDES_GLYCO_CROSSSPECTRUM`
     /// path). Not part of `GlycoScoreCtx` (it gates `glyco_search_run`'s own
     /// Pass-2, not per-spectrum scoring), but built alongside the other toggles
@@ -321,6 +343,15 @@ impl GlycoCtxOwned {
         // ANDES_GLYCO_SELECTOR=combined). Default OFF → the bare b/y-rank selector,
         // byte-identical to the 253/97 baseline.
         let combined_selector_on = combined_selector_on();
+        // Leg-2 `gp` fused selector + its hand-tuned weights, the upward charge
+        // expansion, and the glycan-Y primary-selection toggle. All process
+        // constants; read ONCE here (not per spectrum in the `par_iter` hot loop).
+        let gp_selector_on = gp_selector_on();
+        let gp_k = glyco_gp_k();
+        let gp_j = glyco_gp_j();
+        let gp_h = glyco_gp_h();
+        let charge_expand = glyco_charge_expand();
+        let y_primary = y_primary_selection();
         // AXIS-2 Y-retention pairing (P0b): the combined selector can only rescue a
         // true backbone that SURVIVED top-k truncation. P0b showed Y-aware retention
         // is what surfaces those large/weak-b/y true backbones into the pool. So when
@@ -343,6 +374,18 @@ impl GlycoCtxOwned {
         // truncation drops — the candidate-generation ceiling — without a brute force.
         // Only build the (expensive) index when the peptide-first path is on; an
         // empty index is a no-op query otherwise (CodeRabbit: avoid the wasted build).
+        // Per-candidate N-X-S/T sequon membership, computed ONCE. Both the
+        // peptide-first fragment index (below) and the per-(spectrum,backbone,
+        // candidate) scoring loop filter on this predicate; recomputing the
+        // `residues → Vec<u8> → has_nxst_sequon` scan in the hot loop was pure
+        // waste (it depends only on the candidate). O(1) slot lookup instead.
+        let sequon_membership: Vec<bool> = candidates
+            .iter()
+            .map(|c| {
+                let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
+                has_nxst_sequon(&res)
+            })
+            .collect();
         let frag_index = if !peptide_first_on {
             FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01))
         } else {
@@ -350,8 +393,7 @@ impl GlycoCtxOwned {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, c)| {
-                    let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
-                    if has_nxst_sequon(&res) {
+                    if sequon_membership[i] {
                         Some((i as u32, &c.peptide))
                     } else {
                         None
@@ -408,9 +450,16 @@ impl GlycoCtxOwned {
             peptide_first_on,
             yindex_on,
             combined_selector_on,
+            gp_selector_on,
+            gp_k,
+            gp_j,
+            gp_h,
+            charge_expand,
+            y_primary,
             glyco_decoy_on,
             features_collapse,
             features_enumerated,
+            sequon_membership,
             cross_spectrum_on,
         }
     }
@@ -441,10 +490,17 @@ impl GlycoCtxOwned {
             peptide_first_on: self.peptide_first_on,
             yindex_on: self.yindex_on,
             combined_selector_on: self.combined_selector_on,
+            gp_selector_on: self.gp_selector_on,
+            gp_k: self.gp_k,
+            gp_j: self.gp_j,
+            gp_h: self.gp_h,
+            charge_expand: self.charge_expand,
+            y_primary: self.y_primary,
             glyco_decoy_on: self.glyco_decoy_on,
             features_collapse: self.features_collapse,
             features_enumerated: self.features_enumerated,
             scan_filter: self.scan_filter.as_ref(),
+            sequon_membership: &self.sequon_membership,
         }
     }
 }
@@ -544,13 +600,13 @@ fn score_spectrum_glyco(
     let peptide_first_on = ctx.peptide_first_on;
     let yindex_on = ctx.yindex_on;
     let combined_selector_on = ctx.combined_selector_on;
-    // Leg-2 `gp` fused selector (ANDES_GLYCO_SELECTOR=gp). Read once (process-constant
-    // env); independent of `combined` and of YINDEX retention. `gp_k` scales the
-    // ladder term against the b/y rank in `glyco_gp_fused_score`.
-    let gp_selector_on = gp_selector_on();
-    let gp_k = glyco_gp_k();
-    let gp_j = glyco_gp_j();
-    let gp_h = glyco_gp_h();
+    // Leg-2 `gp` fused selector (ANDES_GLYCO_SELECTOR=gp) + weights, hoisted into
+    // the ctx (built once) — independent of `combined` and of YINDEX retention.
+    // `gp_k` scales the ladder term against the b/y rank in `glyco_gp_fused_score`.
+    let gp_selector_on = ctx.gp_selector_on;
+    let gp_k = ctx.gp_k;
+    let gp_j = ctx.gp_j;
+    let gp_h = ctx.gp_h;
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -571,6 +627,12 @@ fn score_spectrum_glyco(
                 }
             }
 
+            // Per-spectrum intensity-normalisation stats (base peak + sorted flag),
+            // computed ONCE and passed to every per-candidate intensity call below
+            // (core-Y / glycan-Y / Y0Y1 / partial-glycan) instead of each call
+            // recomputing them O(#peaks) — the dominant glyco-scoring cost.
+            let stats = SpectrumStats::new(&spec.peaks);
+
             // Oxonium evidence for the whole spectrum (charge-independent).
             let ox_ev = oxonium_gate(&spec.peaks, 0.10, tol_ppm);
 
@@ -579,7 +641,7 @@ fn score_spectrum_glyco(
             // true higher charge (under-called by the acquisition) can be enumerated —
             // the P0 charge blind spot (R7: z5 = 100% absent). See its doc comment.
             let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, glyco_charge_expand());
+                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, ctx.charge_expand);
             // Max fragment charge for Y-ladder matching: a fragment cannot exceed
             // the precursor charge, and glyco Y-ions are frequently 2+/3+ (matched
             // up to +3 inside the Y functions). Default 3 when the precursor charge
@@ -790,7 +852,7 @@ fn score_spectrum_glyco(
             // measured near-noise. Phase-1 convention fix.)
             let core_y_counts: Vec<u8> = deduped_backbone
                 .iter()
-                .map(|h| count_core_y_hits(&spec.peaks, h.backbone_mass + H2O, tol_ppm, max_frag_charge))
+                .map(|h| count_core_y_hits(&spec.peaks, &stats, h.backbone_mass + H2O, tol_ppm, max_frag_charge))
                 .collect();
 
             // Phase 1: cheap b/y scoring for ALL backbones.
@@ -879,9 +941,8 @@ fn score_spectrum_glyco(
                         continue;
                     }
 
-                    let residue_bytes: Vec<u8> =
-                        cand.peptide.residues.iter().map(|aa| aa.residue).collect();
-                    if !has_nxst_sequon(&residue_bytes) {
+                    // O(1) precomputed sequon lookup (see GlycoCtxOwned::build).
+                    if !ctx.sequon_membership[cand_slot] {
                         continue;
                     }
 
@@ -1028,8 +1089,8 @@ fn score_spectrum_glyco(
                 let bb = &deduped_backbone[w.bb_hit_idx];
                 let bbn = bb.backbone_mass + H2O;
                 match &bb.glycan {
-                    Some(g) => glycan_y_intensity(&spec.peaks, bbn, g, tol_ppm, max_frag_charge) as f32,
-                    None => core_y_intensity(&spec.peaks, bbn, tol_ppm, max_frag_charge) as f32,
+                    Some(g) => glycan_y_intensity(&spec.peaks, &stats, bbn, g, tol_ppm, max_frag_charge) as f32,
+                    None => core_y_intensity(&spec.peaks, &stats, bbn, tol_ppm, max_frag_charge) as f32,
                 }
             };
 
@@ -1060,6 +1121,7 @@ fn score_spectrum_glyco(
                 // Peptide-mass-conditioned Y0/Y1 anchor (bare peptide + peptide+HexNAc).
                 let anchor = y0y1_anchor_intensity(
                     &spec.peaks,
+                    &stats,
                     cand.peptide.mass(),
                     w.z,
                     tol_ppm,
@@ -1109,7 +1171,7 @@ fn score_spectrum_glyco(
                     // = core-Y ladder primary (+70% deterministic, see
                     // y_primary_selection); ANDES_GLYCO_SELECT=rank forces the old
                     // b/y-rank primary. Selected over ALL accepted candidates.
-                    let y_primary = y_primary_selection();
+                    let y_primary = ctx.y_primary;
                     let best = if gp_selector_on {
                         // Leg 2: fused score `rank + K·ladder` over ALL accepted
                         // winners (NOT the rank-shortlist — a weak-b/y but strong-
@@ -1310,8 +1372,8 @@ fn score_spectrum_glyco(
                     // glycan fall back to the composition-independent core-Y
                     // ladder. (Was hardcoded 0.0 = dead before Phase 1.)
                     y_ladder_intensity_score: match &bb_hit.glycan {
-                        Some(g) => glycan_y_intensity(&spec.peaks, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
-                        None => core_y_intensity(&spec.peaks, bb_neutral, tol_ppm, max_frag_charge) as f32,
+                        Some(g) => glycan_y_intensity(&spec.peaks, &stats, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
+                        None => core_y_intensity(&spec.peaks, &stats, bb_neutral, tol_ppm, max_frag_charge) as f32,
                     },
                     // Glycan-axis decoy ladder (G3): same composition, intermediate
                     // Y-rungs shifted. Seed from the composition so the decoy ladder
@@ -1320,6 +1382,7 @@ fn score_spectrum_glyco(
                     y_ladder_decoy_score: match &bb_hit.glycan {
                         Some(g) if glyco_decoy_on => glycan_y_intensity_decoy(
                             &spec.peaks,
+                            &stats,
                             bb_neutral,
                             g,
                             tol_ppm,
@@ -1336,7 +1399,7 @@ fn score_spectrum_glyco(
                             .iter()
                             .map(|aa| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
                             .collect();
-                        partial_glycan_by_intensity(&spec.peaks, &residues, tol_ppm, max_frag_charge)
+                        partial_glycan_by_intensity(&spec.peaks, &stats, &residues, tol_ppm, max_frag_charge)
                             as f32
                     },
                     // G2 Y0/Y1 anchor: peptide-mass-conditioned (uses THIS
@@ -1344,6 +1407,7 @@ fn score_spectrum_glyco(
                     // peptides). Additive PIN feature only — not in the ranker.
                     y0y1_anchor_score: y0y1_anchor_intensity(
                         &spec.peaks,
+                        &stats,
                         cand.peptide.mass(),
                         w.z,
                         tol_ppm,
@@ -1526,7 +1590,7 @@ pub fn glyco_search_run(
                 None => return None,
             };
             let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, glyco_charge_expand());
+                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, ctx.charge_expand);
             let mut transfer: Vec<BackboneHit> = Vec::new();
             for &z in &charges_to_try {
                 let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;
@@ -1938,7 +2002,7 @@ mod tests {
     /// so the sort produces: `true_bb` first, `noise_bb` second.
     #[test]
     fn core_y_ranking_promotes_supported_backbone_over_unsupported() {
-        use andes_glyco::backbone::count_core_y_hits;
+        use andes_glyco::backbone::{count_core_y_hits, SpectrumStats};
         use andes_glyco::glycan_mass::{CORE_Y_STEPS, PROTON};
 
         // True backbone: small peptide (large glycan).
@@ -1967,8 +2031,9 @@ mod tests {
         let tol_ppm = 20.0;
 
         // Verify counts directly.
-        let true_hits = count_core_y_hits(&peaks, true_bb, tol_ppm, 3);
-        let noise_hits = count_core_y_hits(&peaks, noise_bb, tol_ppm, 3);
+        let stats = SpectrumStats::new(&peaks);
+        let true_hits = count_core_y_hits(&peaks, &stats, true_bb, tol_ppm, 3);
+        let noise_hits = count_core_y_hits(&peaks, &stats, noise_bb, tol_ppm, 3);
 
         assert_eq!(true_hits, 6, "expected all 6 core-Y hits for true_bb, got {}", true_hits);
         assert_eq!(noise_hits, 0, "expected 0 core-Y hits for noise_bb, got {}", noise_hits);

@@ -400,10 +400,8 @@ pub(crate) fn select_emitted_hits(
                     hits[a].glycan_key.y_ladder_intensity_score,
                     hits[a].glycan_key.core_y_hits as f32,
                     0.0,
-                    0.0,
                     gp_k,
                     gp_j,
-                    0.0,
                     0.0,
                 );
                 let sb = glyco_gp_fused_score(
@@ -411,10 +409,8 @@ pub(crate) fn select_emitted_hits(
                     hits[b].glycan_key.y_ladder_intensity_score,
                     hits[b].glycan_key.core_y_hits as f32,
                     0.0,
-                    0.0,
                     gp_k,
                     gp_j,
-                    0.0,
                     0.0,
                 );
                 sa.total_cmp(&sb).then(b.cmp(&a))
@@ -959,10 +955,8 @@ mod tests {
                 h.glycan_key.y_ladder_intensity_score,
                 h.glycan_key.core_y_hits as f32,
                 0.0, // hyperscore: PIN-side single-hit collapse, never decisive (see select_emitted_hits)
-                0.0, // partial-glycan: same (single-hit path)
                 k,
                 j,
-                0.0,
                 0.0,
             )
         };

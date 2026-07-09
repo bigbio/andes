@@ -37,7 +37,7 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
     collapse_cmp, combined_selector_on, glyco_combined_selector_score, glyco_gp_fused_score,
-    glyco_gp_h, glyco_gp_j, glyco_gp_k, glyco_gp_p, gp_selector_on, y_primary_selection,
+    glyco_gp_h, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
     GlycoPsmKey,
 };
 use andes_glyco::hybrid::{
@@ -58,37 +58,6 @@ use scoring_crate::scoring::{
     candidate_rank_entropy, fuse_strong_score, hyperscore_psm, listwise_score_gap, psm_edge_score,
     score_psm, score_psm_float, ScoredSpectrum, StrongScoreInputs,
 };
-use crate::glyco_selector::glyco_selector_feature_vec;
-
-/// Lazily load the learned GBDT backbone-selector model from the path in
-/// `ANDES_GLYCO_GBDT_MODEL` (bytes written by the `train_glyco_selector` bin). Loaded
-/// once per process; `None` when the var is unset or the file is unreadable/invalid, in
-/// which case the collapse falls back to the `gp` fused selector. Enabled at the
-/// collapse only when `ANDES_GLYCO_SELECTOR=gbdt` AND this returns `Some`.
-fn glyco_selector_model() -> Option<&'static scoring_crate::gbdt_eval::GbdtPeakModel> {
-    static MODEL: std::sync::OnceLock<Option<scoring_crate::gbdt_eval::GbdtPeakModel>> =
-        std::sync::OnceLock::new();
-    MODEL
-        .get_or_init(|| {
-            let path = std::env::var("ANDES_GLYCO_GBDT_MODEL").ok()?;
-            let bytes = std::fs::read(&path).ok()?;
-            match scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(&bytes) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    eprintln!("glyco selector: failed to load {path}: {e}");
-                    None
-                }
-            }
-        })
-        .as_ref()
-}
-
-/// True when the learned GBDT selector is requested (`ANDES_GLYCO_SELECTOR=gbdt`).
-fn gbdt_selector_requested() -> bool {
-    std::env::var("ANDES_GLYCO_SELECTOR")
-        .ok()
-        .is_some_and(|s| s.eq_ignore_ascii_case("gbdt"))
-}
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
 #[derive(Debug, Clone)]
@@ -582,11 +551,6 @@ fn score_spectrum_glyco(
     let gp_k = glyco_gp_k();
     let gp_j = glyco_gp_j();
     let gp_h = glyco_gp_h();
-    let gp_p = glyco_gp_p();
-    // Learned GBDT selector (P3): when requested AND the model loads, the collapse
-    // computes features for ALL accepted candidates and picks the argmax predict_proba
-    // (replacing the gp fused pick). Read once here (process-constant).
-    let gbdt_on = gbdt_selector_requested() && glyco_selector_model().is_some();
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -1079,18 +1043,6 @@ fn score_spectrum_glyco(
                 }
             };
 
-            // idea B partial-glycan b/y evidence for the collapse (recovers the outranked
-            // large/high-charge backbones — sequence-specific, so the TRUE backbone wins).
-            let partial = |w: &CheapWinner| -> f32 {
-                let residues: Vec<f64> = candidates[w.cand_slot]
-                    .peptide
-                    .residues
-                    .iter()
-                    .map(|aa| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
-                    .collect();
-                partial_glycan_by_intensity(&spec.peaks, &residues, tol_ppm, max_frag_charge) as f32
-            };
-
             // P1b + L4: PEPTIDE-CONDITIONED combined selector score for one accepted
             // winner. Composes ADDITIVELY on top of the bare b/y rank-LLR (never a
             // score_psm rewrite): + the peptide-mass-conditioned Y0/Y1 anchor
@@ -1151,18 +1103,7 @@ fn score_spectrum_glyco(
             const SELECTOR_SHORTLIST_K: usize = 24;
 
             let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> =
-                if features_collapse && gbdt_on {
-                    // Learned GBDT selector (P3): keep ALL accepted candidates so the
-                    // feature loop below computes full features for each; the argmax
-                    // predict_proba winner is chosen AFTER the loop (features are needed
-                    // to score). Bounded by `max_features` like the diagnostic dump.
-                    let mut v = accepted_winners;
-                    v.sort_by(|a, b| {
-                        b.1.rank.total_cmp(&a.1.rank).then_with(|| a.0.cmp(&b.0))
-                    });
-                    v.truncate(max_features);
-                    v
-                } else if features_collapse {
+                if features_collapse {
                     // Collapse ordering is the SHARED `collapse_cmp` (single source
                     // of truth with the PIN writer's select_emitted_hits). Default
                     // = core-Y ladder primary (+70% deterministic, see
@@ -1181,7 +1122,7 @@ fn score_spectrum_glyco(
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), partial(&e.1), gp_k, gp_j, gp_h, gp_p,
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
                                 );
                                 (e, s)
                             })
@@ -1245,7 +1186,7 @@ fn score_spectrum_glyco(
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), partial(&e.1), gp_k, gp_j, gp_h, gp_p,
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
                                 );
                                 (s, e)
                             })
@@ -1426,26 +1367,6 @@ fn score_spectrum_glyco(
                     transfer_ungated: bb_hit.transfer_ungated,
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
-            }
-
-            // Learned GBDT selector (P3): features are now computed for ALL accepted
-            // candidates → keep only the single argmax-`predict_proba` winner (the honest
-            // collapse is 1 hit/scan). Scored via the SAME `glyco_selector_feature_vec`
-            // used to train the model (feature parity). Tie → lower glycan key wins,
-            // matching the gp collapse's deterministic tiebreak.
-            if gbdt_on && features_collapse && best_hits.len() > 1 {
-                if let Some(model) = glyco_selector_model() {
-                    let best_key = best_hits
-                        .iter()
-                        .map(|(k, h)| {
-                            (*k, model.predict_proba(&glyco_selector_feature_vec(&h.psm, &h.glycan_key)))
-                        })
-                        .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
-                        .map(|(k, _)| k);
-                    if let Some(bk) = best_key {
-                        best_hits.retain(|k, _| *k == bk);
-                    }
-                }
             }
 
             if best_hits.is_empty() {

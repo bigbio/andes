@@ -37,7 +37,7 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
     collapse_cmp, combined_selector_on, glyco_combined_selector_score, glyco_gp_fused_score,
-    glyco_gp_e, glyco_gp_h, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
+    glyco_gp_h, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
     GlycoPsmKey,
 };
 use andes_glyco::hybrid::{
@@ -548,7 +548,6 @@ fn score_spectrum_glyco(
     let gp_k = glyco_gp_k();
     let gp_j = glyco_gp_j();
     let gp_h = glyco_gp_h();
-    let gp_e = glyco_gp_e();
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -1100,8 +1099,7 @@ fn score_spectrum_glyco(
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), e.1.edge as f32,
-                                    gp_k, gp_j, gp_h, gp_e,
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
                                 );
                                 (e, s)
                             })
@@ -1165,8 +1163,7 @@ fn score_spectrum_glyco(
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), e.1.edge as f32,
-                                    gp_k, gp_j, gp_h, gp_e,
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
                                 );
                                 (s, e)
                             })

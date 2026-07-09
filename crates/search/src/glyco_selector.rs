@@ -51,7 +51,6 @@ pub fn glyco_selector_feature_names() -> &'static [&'static str] {
         "EdgeScore",
         "PrecursorIsotopeKL",
         "PrecursorSNR",
-        "DeltaRawScore",
         "TailorScore",
         "RankScoreFloat",
         "PpmGaussianScore",
@@ -85,8 +84,11 @@ pub fn glyco_selector_feature_names() -> &'static [&'static str] {
 }
 
 /// Number of selector features (compile-time-checked against the names/vec by the
-/// unit test `feature_names_and_vec_agree`).
-pub const GLYCO_SELECTOR_N_FEATURES: usize = 46;
+/// unit test). NOTE: `DeltaRawScore`/`DeltaRankScore` is deliberately EXCLUDED — the
+/// PIN rank-gates it (0 on non-rank-1 rows), which would mismatch the per-candidate
+/// value inference computes, and it is a per-spectrum constant (no within-scan
+/// selection signal) anyway.
+pub const GLYCO_SELECTOR_N_FEATURES: usize = 45;
 
 /// Build the positional feature vector for one candidate. MUST be called at the
 /// COLLAPSE point, after [`compute_psm_features`](crate::match_engine::compute_psm_features)
@@ -112,7 +114,6 @@ pub fn glyco_selector_feature_vec(psm: &PsmMatch, key: &GlycoPsmKey) -> Vec<f32>
         f.edge_score as f32,
         f.precursor_isotope_kl,
         f.precursor_snr,
-        f.delta_raw_score,
         f.tailor_score,
         f.rank_score_float,
         f.ppm_gaussian_score,

@@ -8,6 +8,7 @@
 pub mod candidate_gen;
 pub mod glyco_fragment_index;
 pub mod glyco_search;
+pub mod glyco_selector;
 pub mod candidate_index;
 mod chimeric_features;
 pub(crate) mod coisolation;

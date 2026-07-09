@@ -37,7 +37,7 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
     collapse_cmp, combined_selector_on, glyco_combined_selector_score, glyco_gp_fused_score,
-    glyco_gp_h, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
+    glyco_gp_h, glyco_gp_j, glyco_gp_k, glyco_gp_p, gp_selector_on, y_primary_selection,
     GlycoPsmKey,
 };
 use andes_glyco::hybrid::{
@@ -582,6 +582,7 @@ fn score_spectrum_glyco(
     let gp_k = glyco_gp_k();
     let gp_j = glyco_gp_j();
     let gp_h = glyco_gp_h();
+    let gp_p = glyco_gp_p();
     // Learned GBDT selector (P3): when requested AND the model loads, the collapse
     // computes features for ALL accepted candidates and picks the argmax predict_proba
     // (replacing the gp fused pick). Read once here (process-constant).
@@ -1078,6 +1079,18 @@ fn score_spectrum_glyco(
                 }
             };
 
+            // idea B partial-glycan b/y evidence for the collapse (recovers the outranked
+            // large/high-charge backbones — sequence-specific, so the TRUE backbone wins).
+            let partial = |w: &CheapWinner| -> f32 {
+                let residues: Vec<f64> = candidates[w.cand_slot]
+                    .peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
+                    .collect();
+                partial_glycan_by_intensity(&spec.peaks, &residues, tol_ppm, max_frag_charge) as f32
+            };
+
             // P1b + L4: PEPTIDE-CONDITIONED combined selector score for one accepted
             // winner. Composes ADDITIVELY on top of the bare b/y rank-LLR (never a
             // score_psm rewrite): + the peptide-mass-conditioned Y0/Y1 anchor
@@ -1168,7 +1181,7 @@ fn score_spectrum_glyco(
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), partial(&e.1), gp_k, gp_j, gp_h, gp_p,
                                 );
                                 (e, s)
                             })
@@ -1232,7 +1245,7 @@ fn score_spectrum_glyco(
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), partial(&e.1), gp_k, gp_j, gp_h, gp_p,
                                 );
                                 (s, e)
                             })

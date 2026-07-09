@@ -40,9 +40,15 @@ pub struct GlycanComp {
 pub fn n_glycan_list() -> Vec<GlycanComp> {
     let mut out: Vec<GlycanComp> = Vec::with_capacity(2048);
 
+    // EXPANDED (2026-07-09): widened Fuc 3→4 and Hex 3..12 → 2..14 to cover the gap
+    // compositions the full list missed (high-fucosylation, extended-Hex, truncated-Hex)
+    // — measured to add ~11 otherwise-unproducible truth backbones on PXD025455 Fc3_r1.
+    // Kept HexNAc/NeuAc/NeuGc bounds to limit candidate-space bloat (the aggressive
+    // widen ballooned the list 3×). The learned GBDT selector + peptide-decoys keep the
+    // enlarged space FDR-safe (the "expand then rank better" plan).
     for hn in 2u8..=8 {
-        for hx in 3u8..=12 {
-            for fc in 0u8..=3 {
+        for hx in 2u8..=14 {
+            for fc in 0u8..=4 {
                 if fc > hn {
                     continue; // fuc ≤ hexnac
                 }
@@ -360,11 +366,11 @@ mod tests {
     #[test]
     fn n_glycan_list_nonempty_and_in_expected_range() {
         let list = n_glycan_list();
-        // HexNAc 2..=8, Hex 3..=12, Fuc 0..=3, NeuAc 0..=5, NeuGc 0..=2 (mass
-        // ∈[500,6000] → ~2510) PLUS the GI-3 paucimannose block (HexNAc 1–2,
-        // Hex 0–2, ± Fuc; ~8 more, mass ≥ 150).
+        // HexNAc 2..=8, Hex 2..=14, Fuc 0..=4, NeuAc 0..=5, NeuGc 0..=2 (mass
+        // ∈[500,6000], EXPANDED 2026-07-09 for gap coverage) PLUS the GI-3
+        // paucimannose block (HexNAc 1–2, Hex 0–2, ± Fuc; ~8 more, mass ≥ 150).
         assert!(
-            list.len() >= 2000 && list.len() <= 3000,
+            list.len() >= 3000 && list.len() <= 5000,
             "unexpected glycan count: {}",
             list.len()
         );

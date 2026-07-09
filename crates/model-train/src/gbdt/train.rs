@@ -55,6 +55,15 @@ pub struct TrainParams {
     pub val_fraction: f32,
     /// Stop if validation logloss does not improve for this many rounds.
     pub early_stop_rounds: u32,
+    /// PAIRWISE ranking objective (RankNet): when `true`, gradients push every
+    /// positive above every negative WITHIN each group instead of the pointwise
+    /// logistic `p − y`. For a top-1 SELECTOR (pick the true backbone per scan) this
+    /// directly optimizes the within-group ordering — offline XGBoost showed pairwise
+    /// beats pointwise (+9 top-1). Early-stopping switches to validation AUC (rank
+    /// quality) since pairwise raw scores are not logloss-calibrated. Default `false`
+    /// (pointwise, backward-compatible with the peak/frag models).
+    pub pairwise: bool,
+
     /// Opt-in fallback (finding 3.6): when `true`, a failed quality gate is
     /// downgraded from a hard error to a `stderr` warning and the trainer
     /// returns the (possibly empty/low-quality) model — restoring the historical
@@ -77,6 +86,7 @@ impl Default for TrainParams {
             neg_pos_ratio: 4.0,
             val_fraction: 0.2,
             early_stop_rounds: 30,
+            pairwise: false,
             allow_degenerate: false,
         }
     }
@@ -374,6 +384,27 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     let val_n = val_rows.len();
     let val_y: Vec<u8> = val_rows.iter().map(|&r| ds.y[r]).collect();
 
+    // Pairwise (RankNet) prep: group the active rows by their group id and split
+    // pos/neg, keeping only groups that have BOTH (the only ones that produce pairs).
+    // `pair_groups[k] = (positives, negatives)` as active-index vectors.
+    let pair_groups: Vec<(Vec<usize>, Vec<usize>)> = if p.pairwise {
+        let mut pos_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        let mut neg_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        for i in 0..n_active {
+            let g = ds.groups[active_train[i]];
+            if train_y[i] == 1 {
+                pos_map.entry(g).or_default().push(i);
+            } else {
+                neg_map.entry(g).or_default().push(i);
+            }
+        }
+        let mut gs: Vec<u32> = pos_map.keys().filter(|k| neg_map.contains_key(k)).copied().collect();
+        gs.sort_unstable(); // determinism
+        gs.into_iter().map(|g| (pos_map[&g].clone(), neg_map[&g].clone())).collect()
+    } else {
+        Vec::new()
+    };
+
     // --- Step 4: Boosting loop ------------------------------------------------
     // raw scores in logit space; init 0 (sigmoid(0) = 0.5).
     let mut raw_train = vec![0.0f32; n_active];
@@ -396,10 +427,32 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         // Compute gradients and hessians for active training rows.
         let mut grad = vec![0.0f32; n_active];
         let mut hess = vec![0.0f32; n_active];
-        for i in 0..n_active {
-            let pi = sigmoid(raw_train[i]);
-            grad[i] = pi - train_y[i] as f32;
-            hess[i] = (pi * (1.0 - pi)).max(1e-6);
+        if p.pairwise {
+            // RankNet pairwise loss within each group: for each (positive i, negative
+            // j), `rho = σ(-(s_i − s_j))` is the mis-ranking probability; push i up and
+            // j down. Sum over pairs → per-row grad/hess. Hessian floored so leaves are
+            // well-defined even where a row appears in no pair.
+            for (pos, neg) in &pair_groups {
+                for &i in pos {
+                    for &j in neg {
+                        let rho = sigmoid(-(raw_train[i] - raw_train[j]));
+                        grad[i] -= rho;
+                        grad[j] += rho;
+                        let h = rho * (1.0 - rho);
+                        hess[i] += h;
+                        hess[j] += h;
+                    }
+                }
+            }
+            for h in hess.iter_mut() {
+                *h = h.max(1e-6);
+            }
+        } else {
+            for i in 0..n_active {
+                let pi = sigmoid(raw_train[i]);
+                grad[i] = pi - train_y[i] as f32;
+                hess[i] = (pi * (1.0 - pi)).max(1e-6);
+            }
         }
 
         // Fit one tree on the active binned training data.
@@ -427,8 +480,14 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
         trees.push(tree);
 
-        // Evaluate validation logloss.
-        let vloss = logloss(&raw_val, &val_y);
+        // Evaluate validation loss for early stopping. Pairwise raw scores are not
+        // logloss-calibrated, so track NEGATIVE validation AUC (maximize rank quality)
+        // there; pointwise keeps logloss.
+        let vloss = if p.pairwise {
+            -auc(&raw_val, &val_y) as f32
+        } else {
+            logloss(&raw_val, &val_y)
+        };
         if vloss < best_loss - 1e-8 {
             best_loss = vloss;
             best_round = trees.len(); // number of trees at best

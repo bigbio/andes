@@ -106,7 +106,7 @@ fn main() {
 
     // ── train native GBDT ──
     let ds = Dataset { x: tr_x, y: tr_y, groups: tr_g, n_features: nf };
-    let params = TrainParams::default();
+    let params = TrainParams { pairwise: true, ..TrainParams::default() };
     let model = match train_gbdt(&ds, &params, seed) {
         Ok(m) => m,
         Err(e) => {

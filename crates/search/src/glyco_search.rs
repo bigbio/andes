@@ -32,7 +32,7 @@ use rayon::prelude::*;
 
 use andes_glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
-    y0y1_anchor_intensity,
+    partial_glycan_by_intensity, y0y1_anchor_intensity,
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
@@ -1373,6 +1373,18 @@ fn score_spectrum_glyco(
                         ) as f32,
                         _ => 0.0,
                     },
+                    // Idea B: partial-glycan b/y — sequence-specific evidence for the
+                    // weak large/high-charge glycopeptides (b_i/y_i + core glycan).
+                    partial_glycan_by: {
+                        let residues: Vec<f64> = cand
+                            .peptide
+                            .residues
+                            .iter()
+                            .map(|aa| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
+                            .collect();
+                        partial_glycan_by_intensity(&spec.peaks, &residues, tol_ppm, max_frag_charge)
+                            as f32
+                    },
                     // G2 Y0/Y1 anchor: peptide-mass-conditioned (uses THIS
                     // candidate's neutral mass, so it discriminates competing
                     // peptides). Additive PIN feature only — not in the ranker.
@@ -1954,6 +1966,7 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
+            partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
             core_y_hits: 0,

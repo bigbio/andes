@@ -221,6 +221,7 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     n_core_oxonium_ions: 0,
 ///     y_ladder_intensity_score: 0.0,
 ///     y_ladder_decoy_score: 0.0,
+///     partial_glycan_by: 0.0,
 ///     y0y1_anchor_score: 0.0,
 ///     sialic_consistency: 0.0,
 ///     core_y_hits: 0,
@@ -252,6 +253,12 @@ pub struct GlycoPsmKey {
     /// spectrum this scores below the target; the gap is what a glycan-decoy PIN
     /// row exposes to Percolator for 2D FDR. 0.0 when no glycan is resolved.
     pub y_ladder_decoy_score: f32,
+    /// PARTIAL-GLYCAN b/y evidence (idea B): matched intensity of peptide b/y fragments
+    /// bearing the innermost core glycan (b_i/y_i + {HexNAc, 2HexNAc, ...}). Unlike the
+    /// mass-based Y-ladder, this is SEQUENCE-specific → discriminates the true backbone
+    /// from mass-preserving decoys, the evidence weak large/high-charge glycopeptides
+    /// lack. Additive PIN feature. 0.0 when no backbone is resolved.
+    pub partial_glycan_by: f32,
     /// G2 Y0/Y1 peptide-mass ANCHOR (additive PIN feature): matched intensity of
     /// Y0 (bare peptide) + Y1 (peptide+HexNAc), conditioned on the PEPTIDE mass —
     /// the one glyco feature that discriminates competing peptides at a shared
@@ -442,6 +449,7 @@ mod tests {
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 0.88,
             y_ladder_decoy_score: 0.2,
+            partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.4,
             sialic_consistency: 0.1,
             core_y_hits: 4,
@@ -477,6 +485,7 @@ mod tests {
             n_core_oxonium_ions: 3,
             y_ladder_intensity_score: 1.5,
             y_ladder_decoy_score: 0.5,
+            partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.7,
             sialic_consistency: 0.2,
             core_y_hits: 5,
@@ -501,6 +510,7 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
+            partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
             core_y_hits: 0,
@@ -521,7 +531,7 @@ mod tests {
         let key = GlycoPsmKey {
             spectrum_idx: 0, glycan: None, glycan_source: Source::Db,
             oxonium_summed_frac: 0.0, n_core_oxonium_ions: 0,
-            y_ladder_intensity_score: 0.0, y_ladder_decoy_score: 0.0,
+            y_ladder_intensity_score: 0.0, y_ladder_decoy_score: 0.0, partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0, sialic_consistency: 0.0, core_y_hits: 0,
             glycan_mass: 0.0, backbone_mass: 0.0,
             is_transferred: false, transfer_graph_support: 0,

@@ -436,6 +436,52 @@ pub fn core_y_intensity(peaks: &[(f64, f32)], bb: f64, tol_ppm: f64, max_charge:
     score
 }
 
+/// PARTIAL-GLYCAN b/y evidence (design idea B): sequence-informative fragments that
+/// retain part of the glycan. In stepped-HCD the glycan sheds STEPWISE, so peptide b/y
+/// fragments appear both bare AND bearing the innermost core (b_i/y_i + {HexNAc,
+/// 2HexNAc, 2HexNAc+Hex, ...}). andes' base score matches only the BARE b/y; this taps
+/// the untapped second ladder. Unlike the glycan Y-ladder (which depends on the backbone
+/// MASS and is therefore shared with a reversed mass-preserving decoy), b_i+glycan
+/// depends on the PREFIX SEQUENCE, so it discriminates the true backbone from a decoy —
+/// exactly the sequence evidence the weak large/high-charge glycopeptides lack. Offline
+/// on PXD025455 Fc3_r1: +30% true−decoy gap on the fail-FDR set, rescues 5/7 bare-blind
+/// scans. `residues` are the per-residue neutral masses (residue + mods) of the backbone.
+pub fn partial_glycan_by_intensity(
+    peaks: &[(f64, f32)],
+    residues: &[f64],
+    tol_ppm: f64,
+    max_charge: u8,
+) -> f64 {
+    use crate::glycan_mass::{HEX, HEXNAC};
+    let n = residues.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let base = peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9) as f64;
+    let total: f64 = residues.iter().sum();
+    // Core-Y additions to a peptide fragment: chitobiose → trimannosyl core.
+    let core_adds = [
+        HEXNAC,
+        2.0 * HEXNAC,
+        2.0 * HEXNAC + HEX,
+        2.0 * HEXNAC + 2.0 * HEX,
+        2.0 * HEXNAC + 3.0 * HEX,
+    ];
+    let sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
+    let mut score = 0.0f64;
+    let mut prefix = 0.0f64;
+    for i in 1..n {
+        prefix += residues[i - 1];
+        let b = prefix; // b-ion neutral
+        let y = total - prefix + H2O; // y-ion neutral
+        for &add in &core_adds {
+            score += best_frag_intensity(peaks, sorted, b + add, tol_ppm, max_charge) as f64 / base;
+            score += best_frag_intensity(peaks, sorted, y + add, tol_ppm, max_charge) as f64 / base;
+        }
+    }
+    score
+}
+
 /// Composition-specific glycan Y-ladder intensity match.
 ///
 /// Unlike [`core_y_intensity`] (the glycan-INDEPENDENT trimannosyl core, shared

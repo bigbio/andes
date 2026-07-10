@@ -196,8 +196,8 @@ fn grouped_neg_auc(scores: &[f32], labels: &[u8], groups: &[u32]) -> Option<f32>
     let mut sum = 0.0f64;
     let mut n_groups = 0usize;
     for (_g, (s, y)) in by_group {
-        let has_pos = y.iter().any(|&v| v == 1);
-        let has_neg = y.iter().any(|&v| v == 0);
+        let has_pos = y.contains(&1);
+        let has_neg = y.contains(&0);
         if has_pos && has_neg {
             sum += auc(&s, &y);
             n_groups += 1;

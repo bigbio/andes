@@ -223,8 +223,8 @@ impl RtIndexModel {
             for i in 0..p {
                 let fi = feat[i] as f64;
                 xty[i] += fi * y;
-                for j in 0..p {
-                    xtx[i][j] += fi * feat[j] as f64;
+                for (j, &fj) in feat.iter().enumerate().take(p) {
+                    xtx[i][j] += fi * fj as f64;
                 }
             }
         }
@@ -327,8 +327,8 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>
         // Partial pivot: pick the row with the largest magnitude in this col.
         let mut pivot = col;
         let mut best = a[col][col].abs();
-        for row in (col + 1)..n {
-            let v = a[row][col].abs();
+        for (row, a_row) in a.iter().enumerate().take(n).skip(col + 1) {
+            let v = a_row[col].abs();
             if v > best {
                 best = v;
                 pivot = row;
@@ -355,8 +355,8 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>
     let mut x = vec![0.0f64; n];
     for row in (0..n).rev() {
         let mut s = b[row];
-        for k in (row + 1)..n {
-            s -= a[row][k] * x[k];
+        for (k, &xk) in x.iter().enumerate().take(n).skip(row + 1) {
+            s -= a[row][k] * xk;
         }
         x[row] = s / a[row][row];
     }

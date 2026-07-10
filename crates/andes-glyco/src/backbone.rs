@@ -532,27 +532,13 @@ fn glycan_cumulative_adds(comp: &crate::glycan_db::GlycanComp) -> Vec<f64> {
     let core_hexnac = comp.hexnac.min(2);
     let core_hex = comp.hex.min(3);
     let mut adds: Vec<f64> = Vec::new();
-    for _ in 0..core_hexnac {
-        adds.push(HEXNAC);
-    }
-    for _ in 0..core_hex {
-        adds.push(HEX);
-    }
-    for _ in 0..(comp.hexnac - core_hexnac) {
-        adds.push(HEXNAC);
-    }
-    for _ in 0..(comp.hex - core_hex) {
-        adds.push(HEX);
-    }
-    for _ in 0..comp.fuc {
-        adds.push(FUC);
-    }
-    for _ in 0..comp.neuac {
-        adds.push(NEUAC);
-    }
-    for _ in 0..comp.neugc {
-        adds.push(NEUGC);
-    }
+    adds.extend(std::iter::repeat_n(HEXNAC, core_hexnac as usize));
+    adds.extend(std::iter::repeat_n(HEX, core_hex as usize));
+    adds.extend(std::iter::repeat_n(HEXNAC, (comp.hexnac - core_hexnac) as usize));
+    adds.extend(std::iter::repeat_n(HEX, (comp.hex - core_hex) as usize));
+    adds.extend(std::iter::repeat_n(FUC, comp.fuc as usize));
+    adds.extend(std::iter::repeat_n(NEUAC, comp.neuac as usize));
+    adds.extend(std::iter::repeat_n(NEUGC, comp.neugc as usize));
     adds
 }
 
@@ -699,7 +685,7 @@ pub fn y0y1_anchor_intensity(
         (best as f64) / stats.base
     };
 
-    let zmax = prec_z.max(1).min(2);
+    let zmax = prec_z.clamp(1, 2);
     let y0_neutral = bb_neutral;
     let y1_neutral = bb_neutral + HEXNAC;
     let mut score = 0.0;
@@ -1052,6 +1038,7 @@ mod tests {
     ///    PLUS synthetic b/y fragment ion pairs that satisfy b+y ≈ bb+20.025118.
     ///  - `spurious_bb`: same core-Y ladder (identical rung count and intensity)
     ///    but NO complement b/y pairs.
+    ///
     /// After solve_backbone, `true_bb` must be first (complement_score tips the tie).
     #[test]
     fn solve_backbone_complement_pairs_promote_true_backbone() {

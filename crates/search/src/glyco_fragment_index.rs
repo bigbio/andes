@@ -92,10 +92,8 @@ impl FragmentIndex {
             for nb in [b - 1, b, b + 1] {
                 if let Some(v) = self.bins.get(&nb) {
                     for &(idx, theo) in v {
-                        if (mz - theo).abs() <= self.tol {
-                            if seen.insert((idx, Self::ion_id(theo))) {
-                                *count.entry(idx).or_insert(0) += 1;
-                            }
+                        if (mz - theo).abs() <= self.tol && seen.insert((idx, Self::ion_id(theo))) {
+                            *count.entry(idx).or_insert(0) += 1;
                         }
                     }
                 }

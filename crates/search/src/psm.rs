@@ -427,6 +427,23 @@ impl Ord for PsmMatch {
     }
 }
 
+/// `rank_score`-DESCENDING comparator for sorting a `Vec<PsmMatch>` best-first —
+/// identical semantics to `b.cmp(a)` (NaN → worst), but written as an explicit
+/// inline float compare. The argument-swapped `sort_by(|a, b| b.cmp(a))` form
+/// produced an UNSORTED result under release optimisation on the pinned
+/// toolchain (regression caught by `queue_below_capacity_keeps_everything`);
+/// the direct `cmp` used by the heap (push/peek) is unaffected. Mirrors the
+/// working comparator already used by `into_rank_sorted_vec`.
+fn rank_score_desc(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
+    // NaN → worst (map to NEG_INFINITY), then `f32::total_cmp` — a well-defined
+    // TOTAL order. A `partial_cmp(..).unwrap_or(Equal)` comparator misbehaved
+    // under release-mode `sort_by` on the pinned toolchain (left the vec
+    // unsorted); total_cmp is codegen-robust and order-equivalent for finite values.
+    let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+    let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+    br.total_cmp(&ar)
+}
+
 #[derive(Debug, Clone)]
 pub struct TopNQueue {
     capacity: u32,
@@ -575,7 +592,7 @@ impl TopNQueue {
             // reorders the queue without losing the rank-LLR.
             psm.rank_score = psm.features.strong_score;
         }
-        psms.sort_by(|a, b| b.cmp(a));
+        psms.sort_by(rank_score_desc);
         Self::retain_top_with_ties(&mut psms, cap);
         for psm in psms {
             self.heap.push(Reverse(psm));
@@ -600,7 +617,7 @@ impl TopNQueue {
             return;
         }
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
-        psms.sort_by(|a, b| b.cmp(a));
+        psms.sort_by(rank_score_desc);
         Self::retain_top_with_ties(&mut psms, cap);
         for psm in psms {
             self.heap.push(Reverse(psm));
@@ -621,7 +638,7 @@ impl TopNQueue {
     /// Drain into a Vec sorted best-first (largest `rank_score`).
     pub fn into_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
-        v.sort_by(|a, b| b.cmp(a));
+        v.sort_by(rank_score_desc);
         v
     }
 

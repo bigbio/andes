@@ -137,7 +137,7 @@ fn nearest_glycan(glycans: &[GlycanComp], target_mass: f64, tol_ppm: f64) -> Opt
     let mut best: Option<(f64, &GlycanComp)> = None;
     for g in glycans {
         let d = (g.mass - target_mass).abs();
-        if d <= tol && best.map_or(true, |(bd, _)| d < bd) {
+        if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, g));
         }
     }

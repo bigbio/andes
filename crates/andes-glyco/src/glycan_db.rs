@@ -50,7 +50,7 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
                 if fc > hn {
                     continue; // fuc ≤ hexnac
                 }
-                let max_sialic = hn.saturating_sub(2) as u8;
+                let max_sialic = hn.saturating_sub(2);
                 for na in 0u8..=5 {
                     for ng in 0u8..=2 {
                         if na + ng > max_sialic {
@@ -61,7 +61,7 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
                             + fc as f64 * FUC
                             + na as f64 * NEUAC
                             + ng as f64 * NEUGC;
-                        if mass < 500.0 || mass > 6000.0 {
+                        if !(500.0..=6000.0).contains(&mass) {
                             continue;
                         }
                         out.push(GlycanComp {
@@ -142,7 +142,7 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
                 if fc > hn {
                     continue; // fuc ≤ hexnac
                 }
-                let max_sialic = hn.saturating_sub(2) as u8;
+                let max_sialic = hn.saturating_sub(2);
                 for na in 0u8..=4 {
                     for ng in 0u8..=1 {
                         if na + ng > max_sialic {
@@ -153,7 +153,7 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
                             + fc as f64 * FUC
                             + na as f64 * NEUAC
                             + ng as f64 * NEUGC;
-                        if mass < 500.0 || mass > 6000.0 {
+                        if !(500.0..=6000.0).contains(&mass) {
                             continue;
                         }
                         out.push(GlycanComp {

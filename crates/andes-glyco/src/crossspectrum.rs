@@ -112,6 +112,7 @@ impl GlycoformWhitelist {
     /// `rt_window` is the co-elution half-width in seconds (a cross-spectrum glyco engine uses
     /// ~±1800 s). `tol` is set from the PRECURSOR mass error, as in the
     /// peptide-first path.
+    #[allow(clippy::too_many_arguments)]
     pub fn transfer(
         &self,
         precursor_neutral: f64,
@@ -160,7 +161,7 @@ fn nearest_glycan(
             break;
         }
         let d = (m - target).abs();
-        if best.map_or(true, |(bd, _)| d < bd) {
+        if best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, gi));
         }
     }
@@ -388,11 +389,9 @@ mod tests {
             Seed { scan: 9, peptide_idx: 1, backbone_mass: bb + 100.0, rt_seconds: Some(902.0), seed_score: 1.0, is_decoy: false },
         ];
         let mk = |order: &[usize]| {
-            let base = vec![
-                GlycoNode { scan: 2, precursor_neutral: bb + g, rt_seconds: Some(901.0) },
+            let base = [GlycoNode { scan: 2, precursor_neutral: bb + g, rt_seconds: Some(901.0) },
                 GlycoNode { scan: 3, precursor_neutral: bb + g, rt_seconds: Some(903.0) },
-                GlycoNode { scan: 4, precursor_neutral: bb + 100.0 + g, rt_seconds: Some(904.0) },
-            ];
+                GlycoNode { scan: 4, precursor_neutral: bb + 100.0 + g, rt_seconds: Some(904.0) }];
             let nodes: Vec<GlycoNode> = order.iter().map(|&i| base[i].clone()).collect();
             propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 0.05)
         };

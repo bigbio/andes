@@ -54,6 +54,11 @@ use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmMatch;
 #[cfg(test)]
 use crate::psm::PsmFeatures;
+
+/// Composite winner key `(candidate_slot, hexnac, hex, fuc, neuac, neugc)` — the
+/// (peptide, glycan-composition) identity used to collapse to one PSM per scan.
+type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
+
 use scoring_crate::scoring::{
     candidate_rank_entropy, fuse_strong_score, hyperscore_psm, listwise_score_gap, psm_edge_score,
     score_psm, score_psm_float, ScoredSpectrum, StrongScoreInputs,
@@ -98,7 +103,7 @@ fn nearest_glycan_mass(
             break;
         }
         let d = (m - target).abs();
-        if best.map_or(true, |(bd, _)| d < bd) {
+        if best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, gi));
         }
     }
@@ -567,8 +572,8 @@ fn glyco_charges_to_try(
 }
 
 /// Score one spectrum's glyco backbone candidates end to end: candidate
-/// generation (backbone-first hybrid DB/de-novo + peptide-first fragment-index
-/// + glycan-Y-first, per the `ctx` toggles), dedup, b/y-ranked truncation, and
+/// generation (backbone-first hybrid DB/de-novo, peptide-first fragment-index,
+/// and glycan-Y-first, per the `ctx` toggles), dedup, b/y-ranked truncation, and
 /// phase-2 feature extraction for the surviving winners.
 ///
 /// `transfer` carries extra backbones injected by cross-spectrum transfer
@@ -738,7 +743,7 @@ fn score_spectrum_glyco(
                             // (CodeRabbit): glycan = precursor − (exact) peptide.
                             let tol = (precursor_neutral * tol_ppm * 1e-6_f64).max(0.02);
                             if let Some(g) =
-                                nearest_glycan_mass(&glycan_sorted, glycan_list, glycan_mass, tol)
+                                nearest_glycan_mass(glycan_sorted, glycan_list, glycan_mass, tol)
                             {
                                 // Observed backbone = precursor − theoretical glycan,
                                 // matching the DB path's convention so the peptide's
@@ -877,7 +882,7 @@ fn score_spectrum_glyco(
                 edge: i32,
                 cand_residue_mass: f64,
             }
-            let mut cheap_winners: HashMap<(u32, u8, u8, u8, u8, u8), CheapWinner> =
+            let mut cheap_winners: HashMap<GlycanWinnerKey, CheapWinner> =
                 HashMap::new();
 
             // Per-backbone best b/y rank (index = backbone index in deduped_backbone).
@@ -1046,7 +1051,7 @@ fn score_spectrum_glyco(
             let max_features = (effective_top_k * 2).max(accepted_backbones.len() * 4);
             // Filter to accepted backbones ONCE (used by both the collapse and the
             // diagnostic dump below).
-            let accepted_winners: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> = cheap_winners
+            let accepted_winners: Vec<(GlycanWinnerKey, CheapWinner)> = cheap_winners
                 .into_iter()
                 .filter(|(_, w)| accepted_backbones.contains(&w.bb_hit_idx))
                 .collect();
@@ -1164,7 +1169,7 @@ fn score_spectrum_glyco(
             // bounded regardless of candidate fan-out.
             const SELECTOR_SHORTLIST_K: usize = 24;
 
-            let winners_for_features: Vec<((u32, u8, u8, u8, u8, u8), CheapWinner)> =
+            let winners_for_features: Vec<(GlycanWinnerKey, CheapWinner)> =
                 if features_collapse {
                     // Collapse ordering is the SHARED `collapse_cmp` (single source
                     // of truth with the PIN writer's select_emitted_hits). Default
@@ -1199,7 +1204,7 @@ fn score_spectrum_glyco(
                         // score. Total order: bare rank DESC then gl_key ASC selects
                         // the shortlist; combined DESC then ladder DESC then gl_key
                         // ASC selects the winner (no HashMap in any ordered path).
-                        let mut shortlist: Vec<&((u32, u8, u8, u8, u8, u8), CheapWinner)> =
+                        let mut shortlist: Vec<&(GlycanWinnerKey, CheapWinner)> =
                             accepted_winners.iter().collect();
                         shortlist.sort_by(|a, b| {
                             b.1.rank
@@ -1242,7 +1247,7 @@ fn score_spectrum_glyco(
                     // selector: sort by the fused `rank + K·ladder` so the audit's
                     // top-1 row reflects the selector under test. Deterministic total
                     // order: fused DESC, then gl_key ASC.
-                    let mut scored: Vec<(f32, ((u32, u8, u8, u8, u8, u8), CheapWinner))> =
+                    let mut scored: Vec<(f32, (GlycanWinnerKey, CheapWinner))> =
                         accepted_winners
                             .into_iter()
                             .map(|e| {
@@ -1265,7 +1270,7 @@ fn score_spectrum_glyco(
                     // Combined score is computed ONCE per row (Schwartzian transform)
                     // so the GBDT eval count is O(n), not O(n log n) in the sort.
                     // Deterministic total order: combined DESC, then gl_key ASC.
-                    let mut scored: Vec<(f32, ((u32, u8, u8, u8, u8, u8), CheapWinner))> =
+                    let mut scored: Vec<(f32, (GlycanWinnerKey, CheapWinner))> =
                         accepted_winners
                             .into_iter()
                             .map(|e| (combined_score(&e.1, true), e))
@@ -1287,7 +1292,7 @@ fn score_spectrum_glyco(
                     v
                 };
 
-            let mut best_hits: HashMap<(u32, u8, u8, u8, u8, u8), FullGlycoPsm> =
+            let mut best_hits: HashMap<GlycanWinnerKey, FullGlycoPsm> =
                 HashMap::with_capacity(winners_for_features.len());
 
             for (gl_key, w) in winners_for_features {
@@ -1447,7 +1452,7 @@ fn score_spectrum_glyco(
                 // rank DESC, then the unique glycan key ASC. The top-1-per-scan
                 // collapse (`select_emitted_hits`) picks its winner by `collapse_cmp`
                 // independent of this order, so the 253/97 baseline is unchanged.
-                let mut hits: Vec<((u32, u8, u8, u8, u8, u8), FullGlycoPsm)> =
+                let mut hits: Vec<(GlycanWinnerKey, FullGlycoPsm)> =
                     best_hits.into_iter().collect();
                 hits.sort_by(|a, b| {
                     b.1.psm
@@ -2039,7 +2044,7 @@ mod tests {
         assert_eq!(noise_hits, 0, "expected 0 core-Y hits for noise_bb, got {}", noise_hits);
 
         // Now simulate the new ranking logic: sort by core_y_hits DESC, backbone_mass DESC.
-        let mut candidates = vec![
+        let mut candidates = [
             (noise_bb, noise_hits), // large backbone — old ranking would put this first
             (true_bb, true_hits),   // small backbone — true hit
         ];
@@ -2092,7 +2097,7 @@ mod tests {
         //   PRIMARY = backbone_best_rank DESC
         //   SECONDARY = core_y_hits DESC
         //   TERTIARY = backbone_mass DESC
-        let backbones = vec![
+        let backbones = [
             (noise_bb_mass, noise_bb_best_rank, noise_bb_core_y), // idx=0
             (true_bb_mass, true_bb_best_rank, true_bb_core_y),   // idx=1
         ];

@@ -16,7 +16,7 @@
 //! evidence (b/y), it works on weak-core-Y spectra where the core-Y selector
 //! fails.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::peptide::Peptide;
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
@@ -25,10 +25,15 @@ use scoring_crate::scoring::fragment_ions::predict_by_ions;
 /// postings. The theoretical m/z is stored so `query` can validate the real
 /// fragment tolerance (bins are only a coarse bucket) and count DISTINCT matched
 /// theoretical ions per candidate rather than raw postings.
+///
+/// Hashing uses `rustc-hash` (FxHash) throughout: the per-spectrum query hits
+/// the bin map ~3×/peak and the match-dedup structures once per matched ion, so
+/// the default SipHash was the dominant glyco-phase cost (profiled ~93%). FxHash
+/// on the integer keys is behaviour-identical and much cheaper.
 pub struct FragmentIndex {
     bin_width: f64,
     tol: f64,
-    bins: HashMap<i64, Vec<(u32, f64)>>,
+    bins: FxHashMap<i64, Vec<(u32, f64)>>,
 }
 
 impl FragmentIndex {
@@ -55,7 +60,7 @@ impl FragmentIndex {
         tol: f64,
     ) -> Self {
         let bin_width = tol.max(0.001);
-        let mut bins: HashMap<i64, Vec<(u32, f64)>> = HashMap::new();
+        let mut bins: FxHashMap<i64, Vec<(u32, f64)>> = FxHashMap::default();
         for (idx, pep) in entries {
             for ion in predict_by_ions(pep, 1..=1) {
                 let b = Self::bin_of(ion.mz, bin_width);
@@ -71,23 +76,33 @@ impl FragmentIndex {
     /// once per candidate (a peak within tol of the ion "explains" it), so
     /// noise clustered near one ion cannot inflate the count.
     pub fn query(&self, peaks: &[(f64, f32)], min_matches: u32) -> Vec<(u32, u32)> {
-        // candidate -> set of matched theoretical-ion ids (distinct ions).
-        let mut matched: HashMap<u32, HashSet<i64>> = HashMap::new();
+        // Count DISTINCT (candidate, theoretical-ion) matches. `seen` dedups a
+        // theoretical ion matched by several peaks, keyed by the exact
+        // `(candidate_idx, ion_id)` pair; `count` tallies the first sighting per
+        // candidate. This replaces the previous `HashMap<u32, HashSet<i64>>`,
+        // which allocated a HashSet per matched candidate on every query — the
+        // profiled hotspot. Same distinct-ion semantics, no per-candidate alloc.
+        // (A `(u32, i64)` key — not a packed `u64` — keeps the ion id lossless for
+        // any accepted params: `--max-length` is uncapped and mod deltas reach
+        // ±5000 Da, so `ion_id = round(mz·1000)` is not guaranteed to fit in 32 bits.)
+        let mut seen: FxHashSet<(u32, i64)> = FxHashSet::default();
+        let mut count: FxHashMap<u32, u32> = FxHashMap::default();
         for &(mz, _) in peaks {
             let b = Self::bin_of(mz, self.bin_width);
             for nb in [b - 1, b, b + 1] {
                 if let Some(v) = self.bins.get(&nb) {
                     for &(idx, theo) in v {
                         if (mz - theo).abs() <= self.tol {
-                            matched.entry(idx).or_default().insert(Self::ion_id(theo));
+                            if seen.insert((idx, Self::ion_id(theo))) {
+                                *count.entry(idx).or_insert(0) += 1;
+                            }
                         }
                     }
                 }
             }
         }
-        matched
+        count
             .into_iter()
-            .map(|(idx, s)| (idx, s.len() as u32))
             .filter(|&(_, c)| c >= min_matches)
             .collect()
     }

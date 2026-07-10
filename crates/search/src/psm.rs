@@ -649,14 +649,18 @@ impl TopNQueue {
     pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
         v.sort_by(|a, b| {
+            // `total_cmp` (a TOTAL order), NOT `partial_cmp(..).unwrap_or(Equal)`:
+            // the latter left this sort UNORDERED under release optimisation on
+            // the pinned toolchain, so the PIN winner (the first element — see
+            // output/pin.rs) became wrong AND environment-dependent (a target vs
+            // decoy tie flipped between CI runners). NaN → worst (NEG_INFINITY).
             let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
             let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
-            br.partial_cmp(&ar)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            br.total_cmp(&ar)
                 .then_with(|| {
                     let asc = if a.score.is_nan() { f32::NEG_INFINITY } else { a.score };
                     let bsc = if b.score.is_nan() { f32::NEG_INFINITY } else { b.score };
-                    bsc.partial_cmp(&asc).unwrap_or(std::cmp::Ordering::Equal)
+                    bsc.total_cmp(&asc)
                 })
         });
         v

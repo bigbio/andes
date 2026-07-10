@@ -1072,7 +1072,7 @@ fn score_spectrum_glyco(
                     scores.push(w.score);
                 }
                 let denom = crate::psm::tailor_denominator(&hist, accepted_winners.len() as u32) as f32;
-                scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                scores.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
                 (denom, listwise_score_gap(&scores), candidate_rank_entropy(&scores))
             };
 

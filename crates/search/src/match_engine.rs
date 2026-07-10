@@ -1039,9 +1039,9 @@ impl<'a> PreparedSearch<'a> {
             // S2 listwise terms over the retained top-K queue (not the full scored pool).
             let mut retained_scores: Vec<f32> =
                 queue.iter_psms().map(|p| p.score).collect();
-            retained_scores.sort_by(|a, b| {
-                b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // total_cmp (total order), not partial_cmp+unwrap_or — the latter can
+            // sort incorrectly under release optimisation on the pinned toolchain.
+            retained_scores.sort_by(|a, b| b.total_cmp(a));
             let listwise_score_gap =
                 scoring_crate::scoring::listwise_score_gap(&retained_scores);
             let candidate_rank_entropy =

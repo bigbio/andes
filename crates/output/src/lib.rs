@@ -29,6 +29,12 @@ pub use stats::{write_statistics_log, RunStatistics};
 pub mod qpx;
 pub use qpx::write_qpx;
 
+pub mod rt_wiring;
+pub use rt_wiring::populate_rt_features;
+
+pub mod glyco_rt;
+pub use glyco_rt::populate_glyco_rt_features;
+
 pub mod percolator;
 pub use percolator::{
     parse_psm_results, resolve_backend, run_percolator, PercolatorBackend, PercolatorError,
@@ -37,3 +43,6 @@ pub use percolator::{
 
 pub(crate) mod row_context;
 pub(crate) mod percolator_enz;
+
+pub mod glyco_pin;
+pub use glyco_pin::write_glyco_pin;

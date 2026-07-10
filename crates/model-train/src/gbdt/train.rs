@@ -55,6 +55,15 @@ pub struct TrainParams {
     pub val_fraction: f32,
     /// Stop if validation logloss does not improve for this many rounds.
     pub early_stop_rounds: u32,
+    /// PAIRWISE ranking objective (RankNet): when `true`, gradients push every
+    /// positive above every negative WITHIN each group instead of the pointwise
+    /// logistic `p − y`. For a top-1 SELECTOR (pick the true backbone per scan) this
+    /// directly optimizes the within-group ordering — offline XGBoost showed pairwise
+    /// beats pointwise (+9 top-1). Early-stopping switches to validation AUC (rank
+    /// quality) since pairwise raw scores are not logloss-calibrated. Default `false`
+    /// (pointwise, backward-compatible with the peak/frag models).
+    pub pairwise: bool,
+
     /// Opt-in fallback (finding 3.6): when `true`, a failed quality gate is
     /// downgraded from a hard error to a `stderr` warning and the trainer
     /// returns the (possibly empty/low-quality) model — restoring the historical
@@ -77,6 +86,7 @@ impl Default for TrainParams {
             neg_pos_ratio: 4.0,
             val_fraction: 0.2,
             early_stop_rounds: 30,
+            pairwise: false,
             allow_degenerate: false,
         }
     }
@@ -164,6 +174,40 @@ fn auc(scores: &[f32], labels: &[u8]) -> f64 {
     }
     let sum_pos_ranks: f64 = (0..n).filter(|&r| labels[r] == 1).map(|r| ranks[r]).sum();
     (sum_pos_ranks - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos as f64 * n_neg as f64)
+}
+
+/// WITHIN-GROUP mean AUC for the pairwise (RankNet) early-stop metric, negated so
+/// smaller = better (matching the loss-minimisation convention). A global AUC
+/// over all rows is wrong for a ranking objective: RankNet only ever compares
+/// rows INSIDE a group, so cross-group order is neither optimised nor meaningful.
+/// This averages the per-group AUC over the validation groups that contain BOTH a
+/// positive and a negative (the only ones where rank quality is defined), in
+/// deterministic group order. Returns `None` when NO validation group is
+/// two-class — the metric is undefined there, so the caller must not early-stop
+/// on it (CodeRabbit).
+fn grouped_neg_auc(scores: &[f32], labels: &[u8], groups: &[u32]) -> Option<f32> {
+    use std::collections::BTreeMap;
+    let mut by_group: BTreeMap<u32, (Vec<f32>, Vec<u8>)> = BTreeMap::new();
+    for i in 0..scores.len() {
+        let e = by_group.entry(groups[i]).or_default();
+        e.0.push(scores[i]);
+        e.1.push(labels[i]);
+    }
+    let mut sum = 0.0f64;
+    let mut n_groups = 0usize;
+    for (_g, (s, y)) in by_group {
+        let has_pos = y.contains(&1);
+        let has_neg = y.contains(&0);
+        if has_pos && has_neg {
+            sum += auc(&s, &y);
+            n_groups += 1;
+        }
+    }
+    if n_groups == 0 {
+        None
+    } else {
+        Some(-(sum / n_groups as f64) as f32)
+    }
 }
 
 /// Build quantile bin upper edges for one feature column.
@@ -373,6 +417,39 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     let val_n = val_rows.len();
     let val_y: Vec<u8> = val_rows.iter().map(|&r| ds.y[r]).collect();
+    // Validation group ids, for the pairwise WITHIN-GROUP early-stop metric.
+    let val_groups: Vec<u32> = val_rows.iter().map(|&r| ds.groups[r]).collect();
+
+    // Pairwise (RankNet) prep: group the active rows by their group id and split
+    // pos/neg, keeping only groups that have BOTH (the only ones that produce pairs).
+    // `pair_groups[k] = (positives, negatives)` as active-index vectors.
+    let pair_groups: Vec<(Vec<usize>, Vec<usize>)> = if p.pairwise {
+        let mut pos_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        let mut neg_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        for i in 0..n_active {
+            let g = ds.groups[active_train[i]];
+            if train_y[i] == 1 {
+                pos_map.entry(g).or_default().push(i);
+            } else {
+                neg_map.entry(g).or_default().push(i);
+            }
+        }
+        let mut gs: Vec<u32> = pos_map.keys().filter(|k| neg_map.contains_key(k)).copied().collect();
+        gs.sort_unstable(); // determinism
+        gs.into_iter().map(|g| (pos_map[&g].clone(), neg_map[&g].clone())).collect()
+    } else {
+        Vec::new()
+    };
+    // Pairwise training with no group carrying BOTH a positive and a negative
+    // produces zero pairs → zero gradients → a degenerate all-zero model. Fail
+    // loudly instead of silently "training" nothing (CodeRabbit).
+    if p.pairwise && pair_groups.is_empty() {
+        return Err(TrainError::QualityGate(
+            "pairwise (RankNet) training requested but no training group contains \
+             both a positive and a negative row — no rank pairs can be formed"
+                .into(),
+        ));
+    }
 
     // --- Step 4: Boosting loop ------------------------------------------------
     // raw scores in logit space; init 0 (sigmoid(0) = 0.5).
@@ -396,10 +473,32 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         // Compute gradients and hessians for active training rows.
         let mut grad = vec![0.0f32; n_active];
         let mut hess = vec![0.0f32; n_active];
-        for i in 0..n_active {
-            let pi = sigmoid(raw_train[i]);
-            grad[i] = pi - train_y[i] as f32;
-            hess[i] = (pi * (1.0 - pi)).max(1e-6);
+        if p.pairwise {
+            // RankNet pairwise loss within each group: for each (positive i, negative
+            // j), `rho = σ(-(s_i − s_j))` is the mis-ranking probability; push i up and
+            // j down. Sum over pairs → per-row grad/hess. Hessian floored so leaves are
+            // well-defined even where a row appears in no pair.
+            for (pos, neg) in &pair_groups {
+                for &i in pos {
+                    for &j in neg {
+                        let rho = sigmoid(-(raw_train[i] - raw_train[j]));
+                        grad[i] -= rho;
+                        grad[j] += rho;
+                        let h = rho * (1.0 - rho);
+                        hess[i] += h;
+                        hess[j] += h;
+                    }
+                }
+            }
+            for h in hess.iter_mut() {
+                *h = h.max(1e-6);
+            }
+        } else {
+            for i in 0..n_active {
+                let pi = sigmoid(raw_train[i]);
+                grad[i] = pi - train_y[i] as f32;
+                hess[i] = (pi * (1.0 - pi)).max(1e-6);
+            }
         }
 
         // Fit one tree on the active binned training data.
@@ -427,16 +526,33 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
         trees.push(tree);
 
-        // Evaluate validation logloss.
-        let vloss = logloss(&raw_val, &val_y);
-        if vloss < best_loss - 1e-8 {
-            best_loss = vloss;
-            best_round = trees.len(); // number of trees at best
-            no_improve = 0;
+        // Evaluate validation loss for early stopping. Pairwise raw scores are not
+        // logloss-calibrated, so track NEGATIVE WITHIN-GROUP AUC (maximize rank
+        // quality) there; pointwise keeps logloss. A global AUC would score
+        // cross-group order the RankNet loss never optimises — misleading.
+        let vloss_opt = if p.pairwise {
+            grouped_neg_auc(&raw_val, &val_y, &val_groups)
         } else {
-            no_improve += 1;
-            if no_improve >= p.early_stop_rounds {
-                break;
+            Some(logloss(&raw_val, &val_y))
+        };
+        match vloss_opt {
+            Some(vloss) => {
+                if vloss < best_loss - 1e-8 {
+                    best_loss = vloss;
+                    best_round = trees.len(); // number of trees at best
+                    no_improve = 0;
+                } else {
+                    no_improve += 1;
+                    if no_improve >= p.early_stop_rounds {
+                        break;
+                    }
+                }
+            }
+            // No two-class validation group → the pairwise rank metric is
+            // undefined; keep this round's tree and DON'T early-stop on a bogus
+            // metric (eligibility is fixed across rounds, so this is all-or-none).
+            None => {
+                best_round = trees.len();
             }
         }
     }

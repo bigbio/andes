@@ -332,7 +332,7 @@ pub(crate) fn search_secondary(
         0.0
     };
     let mut sorted_secondary = secondary_scores.clone();
-    sorted_secondary.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_secondary.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
     features.listwise_score_gap =
         scoring_crate::scoring::listwise_score_gap(&sorted_secondary);
     features.candidate_rank_entropy =

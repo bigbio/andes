@@ -225,6 +225,28 @@ pub fn native_rescore_pin(
     Ok(map)
 }
 
+/// Native-rescore a PIN and return per-row (spec_id, is_decoy, q_value, score)
+/// for EVERY row (targets AND decoys), unlike `native_rescore_pin` which is
+/// target-only. Used to seed the symmetric cross-spectrum decoy-transfer graph.
+pub fn native_rescore_qvalues(
+    pin_text: &str,
+    seed: u64,
+) -> Result<Vec<(String, bool, f64, f64)>, String> {
+    let d = parse_pin(pin_text)?;
+    let n = d.is_decoy.len();
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let scores = cv_scores(&d, seed);
+    let items: Vec<ScoredLabel> = (0..n)
+        .map(|i| ScoredLabel { score: scores[i], is_decoy: d.is_decoy[i] })
+        .collect();
+    let q = qvalues(&items);
+    Ok((0..n)
+        .map(|i| (d.spec_ids[i].clone(), d.is_decoy[i], q[i], scores[i] as f64))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +337,35 @@ mod tests {
         assert!(native_rescore_pin("", 1).is_err());
         let only_header = "SpecId\tLabel\tScanNr\tf1\tPeptide\tProteins\n";
         assert!(native_rescore_pin(only_header, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn qvalues_includes_targets_and_decoys_with_finite_q_in_range() {
+        let pin = synth_pin(600, true);
+        let rows = native_rescore_qvalues(&pin, 42).unwrap();
+        // Unlike native_rescore_pin (target-only), every PIN row must come back.
+        assert_eq!(rows.len(), 600, "expected all rows (targets+decoys), got {}", rows.len());
+        let n_decoys = rows.iter().filter(|(_, is_decoy, _, _)| *is_decoy).count();
+        let n_targets = rows.len() - n_decoys;
+        assert_eq!(n_decoys, 300, "expected the synthetic PIN's 300 decoy rows preserved");
+        assert_eq!(n_targets, 300, "expected the synthetic PIN's 300 target rows preserved");
+        for (spec_id, _is_decoy, q, score) in &rows {
+            assert!(q.is_finite() && *q >= 0.0 && *q <= 1.0, "q-value out of range for {spec_id}: {q}");
+            assert!(score.is_finite(), "score not finite for {spec_id}: {score}");
+        }
+        // Separable synthetic data: many confident targets should reach q<=0.01,
+        // same signal `native_rescore_pin`'s test checks, but now decoys are visible too.
+        let confident_targets = rows
+            .iter()
+            .filter(|(_, is_decoy, q, _)| !is_decoy && *q <= 0.01)
+            .count();
+        assert!(confident_targets > 50, "expected many confident targets, got {confident_targets}");
+    }
+
+    #[test]
+    fn qvalues_empty_pin_is_safe() {
+        assert!(native_rescore_qvalues("", 1).is_err());
+        let only_header = "SpecId\tLabel\tScanNr\tf1\tPeptide\tProteins\n";
+        assert!(native_rescore_qvalues(only_header, 1).unwrap().is_empty());
     }
 }

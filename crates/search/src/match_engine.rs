@@ -1039,9 +1039,9 @@ impl<'a> PreparedSearch<'a> {
             // S2 listwise terms over the retained top-K queue (not the full scored pool).
             let mut retained_scores: Vec<f32> =
                 queue.iter_psms().map(|p| p.score).collect();
-            retained_scores.sort_by(|a, b| {
-                b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // total_cmp (total order), not partial_cmp+unwrap_or — the latter can
+            // sort incorrectly under release optimisation on the pinned toolchain.
+            retained_scores.sort_by(|a, b| b.total_cmp(a));
             let listwise_score_gap =
                 scoring_crate::scoring::listwise_score_gap(&retained_scores);
             let candidate_rank_entropy =
@@ -1944,6 +1944,13 @@ pub(crate) fn compute_psm_features(
         listwise_score_gap: 0.0,
         strong_score: 0.0,
         strong_score_cal: 0.0,
+        // Engine-wide RT features: populated post-search (after per-run
+        // calibration) by `output::rt_wiring::populate_rt_features`; neutral 0.0
+        // here so a run without observed RT stays baseline-identical.
+        delta_rt: 0.0,
+        abs_delta_rt: 0.0,
+        delta_rt_norm: 0.0,
+        predicted_rt_min: 0.0,
     }
 }
 

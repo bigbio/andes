@@ -7,7 +7,9 @@ pub mod scored_spectrum;
 pub mod strong_score;
 
 pub use fragment_ions::{predict_by_ions, PredictedIon};
-pub use psm_score::{psm_edge_existence_facts, psm_edge_score, score_psm, score_psm_float};
+pub use psm_score::{
+    hyperscore_psm, psm_edge_existence_facts, psm_edge_score, score_psm, score_psm_float,
+};
 pub use rank_scorer::RankScorer;
 pub use scored_spectrum::{IonMatchFact, ScoredSpectrum};
 pub use strong_score::{

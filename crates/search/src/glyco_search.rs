@@ -26,8 +26,6 @@
 
 use std::collections::HashMap;
 
-use rustc_hash::FxHashMap;
-
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
 use rayon::prelude::*;
@@ -886,22 +884,6 @@ fn score_spectrum_glyco(
             let mut backbone_best_rank: Vec<f32> =
                 vec![f32::NEG_INFINITY; deduped_backbone.len()];
 
-            // Per-spectrum b/y-score memo. `score_psm`/`psm_edge_score` depend ONLY
-            // on (candidate slot, charge) — never on the backbone — so the SAME
-            // candidate selected by multiple overlapping backbone mass-windows was
-            // being re-scored once per backbone. That redundancy is precisely what
-            // makes glyco slower than a normal search (which scores each candidate
-            // once); caching by (cand_slot, z) collapses it to one score per
-            // candidate/charge. Value cache only — never iterated for output, so it
-            // cannot perturb the determinism-sensitive winner ordering below.
-            // (Search output is byte-identical. The ONLY observable difference is
-            // that the off-by-default `Andes_TRACE_PEP` diagnostic emits each
-            // candidate's TRACE_RUST lines once per spectrum instead of once per
-            // overlapping backbone window — a debug-trace side effect of score_psm,
-            // not a scoring change.)
-            let mut psm_score_cache: FxHashMap<(usize, u8), (f32, i32)> =
-                FxHashMap::default();
-
             // SPEED (Codex evidence prefilter): the dominant phase-1 cost is fully
             // b/y-scoring raw DB-branch backbones (precursor − glycan) that are
             // spurious mass coincidences with NO glycan evidence. A real
@@ -937,6 +919,11 @@ fn score_spectrum_glyco(
                 let tol_da = (bb_residue * tol_ppm * 1e-6_f64).max(0.01);
                 let widen = (tol_da - 0.4999_f64).max(0.0_f64).round() as i32;
 
+                let candidate_slots: Vec<usize> = bucket_index
+                    .range((nb - widen)..=(nb + widen))
+                    .flat_map(|(_, v)| v.iter().copied())
+                    .collect();
+
                 let ss = match scored_per_charge.iter().find(|(c, _)| *c == z) {
                     Some((_, s)) => s,
                     // The backbone's charge fell outside `charges_to_try`
@@ -946,13 +933,7 @@ fn score_spectrum_glyco(
                     None => continue,
                 };
 
-                // Iterate the candidate mass-window directly (BTreeMap range is
-                // ordered + deterministic) instead of collecting a fresh
-                // `Vec<usize>` per backbone — the same slot space, no allocation.
-                for cand_slot in bucket_index
-                    .range((nb - widen)..=(nb + widen))
-                    .flat_map(|(_, v)| v.iter().copied())
-                {
+                for cand_slot in candidate_slots {
                     let cand = &candidates[cand_slot];
                     let cand_residue_mass = cand.peptide.mass() - H2O;
 
@@ -970,11 +951,8 @@ fn score_spectrum_glyco(
                         None => (cand_slot as u32, 255, 255, 255, 255, 255),
                     };
 
-                    let (sc, ei) = *psm_score_cache.entry((cand_slot, z)).or_insert_with(|| {
-                        let sc = score_psm(ss, &cand.peptide, scorer, z, fragment_tolerance_da);
-                        let ei = psm_edge_score(ss, &cand.peptide, scorer, z);
-                        (sc, ei)
-                    });
+                    let sc = score_psm(ss, &cand.peptide, scorer, z, fragment_tolerance_da);
+                    let ei = psm_edge_score(ss, &cand.peptide, scorer, z);
                     let rk = sc + ei as f32;
 
                     // Update per-backbone best rank.

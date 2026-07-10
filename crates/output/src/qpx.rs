@@ -469,7 +469,15 @@ fn build_psms_batch(
             observed_mz.append_value(adj_observed_mz);
             append_additional_scores(&mut additional_scores, psm, matched.map(|p| p.q_value));
             append_protein_accessions(&mut protein_accessions, psm, candidates, search_index);
-            predicted_rt.append_null();
+            // Calibrated predicted RT (minutes), populated post-search by
+            // `crate::rt_wiring::populate_rt_features`. The neutral 0.0 sentinel
+            // (no observed RT / calibration failed) maps to null so a run without
+            // RT is unchanged from the pre-RT baseline here.
+            if psm.features.predicted_rt_min != 0.0 {
+                predicted_rt.append_value(psm.features.predicted_rt_min as f64);
+            } else {
+                predicted_rt.append_null();
+            }
             reference_file_name.append_value(reference_file);
             cv_params.append_null();
             scan.append_value(scan_num);

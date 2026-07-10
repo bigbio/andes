@@ -203,6 +203,16 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("RawScore", f.strong_score as f64, Double),
         ("RawScoreCal", f.strong_score_cal as f64, Double),
         ("RankScoreFloat", f.rank_score_float as f64, Double),
+        // ── Engine-wide retention-time features (ADDITIVE; appended LAST so no
+        // existing column index shifts). Populated post-search by
+        // `crate::rt_wiring::populate_rt_features` after per-run calibration;
+        // 0.0 (neutral) when observed RT is unavailable or calibration failed,
+        // making a run without RT byte-identical to the pre-RT baseline here.
+        // DeltaRT = observed_rt_min − predicted_rt_min (signed, minutes);
+        // AbsDeltaRT = |DeltaRT|; DeltaRTNorm = DeltaRT / gradient span. ────────
+        ("DeltaRT", f.delta_rt as f64, Double),
+        ("AbsDeltaRT", f.abs_delta_rt as f64, Double),
+        ("DeltaRTNorm", f.delta_rt_norm as f64, Double),
     ]
 }
 
@@ -446,6 +456,15 @@ fn write_header<W: Write>(
         // integer rounding compresses on short low-evidence peptides. Ranking
         // unchanged; emitted alongside the integer RankScore.
         "RankScoreFloat".to_string(),
+        // ADDITIVE engine-wide retention-time columns (appended LAST, before
+        // Peptide/Proteins). 0.0 (neutral) without observed RT / calibration, so
+        // a run without RT is byte-identical to the pre-RT baseline here.
+        // DeltaRT = observed − predicted (min); AbsDeltaRT = |DeltaRT|;
+        // DeltaRTNorm = DeltaRT / gradient span. Populated by
+        // `crate::rt_wiring::populate_rt_features`.
+        "DeltaRT".to_string(),
+        "AbsDeltaRT".to_string(),
+        "DeltaRTNorm".to_string(),
     ]);
 
     cols.extend_from_slice(&[
@@ -955,6 +974,7 @@ mod tests {
             "RawScore",
             "RawScoreCal",
             "RankScoreFloat",
+            "DeltaRT", "AbsDeltaRT", "DeltaRTNorm",
             "Peptide", "Proteins",
         ];
 

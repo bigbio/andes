@@ -40,6 +40,38 @@ impl DecoyStrategy {
 /// Reverse each protein's sequence and prepend `<prefix>_` to its
 /// accession. `prefix` is normalized: trailing `_`s stripped; empty
 /// prefix → `DEFAULT_DECOY_PREFIX`.
+///
+/// KNOWN FDR CAVEAT (glyco search only, deferred — see glyco-phase1 adversarial
+/// review, 2026-07): plain sequence reversal does NOT preserve N-X-S/T
+/// sequon density. Reversing a sequence turns a forward "N-X-S/T" motif into
+/// "T/S-X-N" (read backward), so a decoy protein's sequon count is generally
+/// UNRELATED to (typically lower than) its target counterpart's. The glyco
+/// driver (`search::glyco_search`) gates ALL backbone candidates — target and
+/// decoy alike — on `andes_glyco::sequon::has_nxst_sequon`, so if target
+/// peptides pass that gate systematically more often than reverse decoys do,
+/// the effective decoy search space is smaller/different from the target
+/// space and Percolator's target/decoy competition is anti-conservative
+/// (FDR is UNDERESTIMATED) for glyco PSMs specifically.
+///
+/// This does NOT affect the standard (non-glyco) search path, which has no
+/// sequon gate. It also does not affect a benchmark run under
+/// `--decoy-strategy none` (externally supplied target+decoy FASTA, e.g. the
+/// the reference engine-matched comparison fixture) — this caveat only applies when
+/// andes generates its OWN reverse decoys for a `--glyco` run.
+///
+/// Not fixed in this pass: a sequon-preserving decoy generator (e.g. a
+/// pseudo-reversal that keeps N-X-S/T triplets anchored while permuting the
+/// rest of the sequence) is a nontrivial algorithmic change to a
+/// well-tested, shared decoy path used by every non-glyco search too;
+/// changing it here risked destabilizing that path for a glyco-only benefit.
+/// TODO before any glyco vs. non-andes FDR **parity** claim (not needed for
+/// this bugfix's find-rate/count re-measurement, which uses
+/// `--decoy-strategy none`): implement and validate a sequon-preserving decoy
+/// strategy for `--glyco`, or run glyco decoy generation under
+/// `DecoyStrategy::Shuffle` (which does not systematically deplete sequons
+/// the way reversal does, though it is not proven sequon-neutral either) and
+/// measure sequon-density parity target vs. decoy directly before trusting
+/// glyco q-values from an andes-generated decoy DB.
 pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
     let normalized = normalize_decoy_prefix(prefix);
     let proteins = db.proteins.iter().map(|p| Protein {

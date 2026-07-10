@@ -231,6 +231,24 @@ pub struct PsmFeatures {
     /// per-spectrum scored-candidate null pool. Uncalibrated `strong_score` when
     /// the spectrum has too few scored candidates.
     pub strong_score_cal: f32,
+
+    // ── Engine-wide retention-time features (additive PIN columns) ──────────
+    // Populated post-search by `output::rt_wiring::populate_rt_features` after
+    // per-run calibration. ALL default to 0.0 (Default), which is the NEUTRAL
+    // value: a run without observed RT, or one where calibration failed, leaves
+    // these at 0.0 so the PIN is byte-identical to the pre-RT baseline on these
+    // columns. See `docs/plans/glyco/50-roadmap/rt-prediction-design.md`.
+    /// Signed retention-time delta in minutes: `observed_rt_min − predicted_rt_min`.
+    pub delta_rt: f32,
+    /// Absolute retention-time delta in minutes: `|delta_rt|`.
+    pub abs_delta_rt: f32,
+    /// `delta_rt` normalised by the run's gradient span (max−min observed RT, in
+    /// minutes); 0.0 when the span is non-positive. Transfers across runs.
+    pub delta_rt_norm: f32,
+    /// Calibrated predicted retention time in minutes for this PSM's peptide, or
+    /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
+    /// surfaced only into the QPX `.idparquet` `predicted_rt` field.
+    pub predicted_rt_min: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).
@@ -409,6 +427,23 @@ impl Ord for PsmMatch {
     }
 }
 
+/// `rank_score`-DESCENDING comparator for sorting a `Vec<PsmMatch>` best-first —
+/// identical semantics to `b.cmp(a)` (NaN → worst), but written as an explicit
+/// inline float compare. The argument-swapped `sort_by(|a, b| b.cmp(a))` form
+/// produced an UNSORTED result under release optimisation on the pinned
+/// toolchain (regression caught by `queue_below_capacity_keeps_everything`);
+/// the direct `cmp` used by the heap (push/peek) is unaffected. Mirrors the
+/// working comparator already used by `into_rank_sorted_vec`.
+fn rank_score_desc(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
+    // NaN → worst (map to NEG_INFINITY), then `f32::total_cmp` — a well-defined
+    // TOTAL order. A `partial_cmp(..).unwrap_or(Equal)` comparator misbehaved
+    // under release-mode `sort_by` on the pinned toolchain (left the vec
+    // unsorted); total_cmp is codegen-robust and order-equivalent for finite values.
+    let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
+    let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+    br.total_cmp(&ar)
+}
+
 #[derive(Debug, Clone)]
 pub struct TopNQueue {
     capacity: u32,
@@ -557,7 +592,7 @@ impl TopNQueue {
             // reorders the queue without losing the rank-LLR.
             psm.rank_score = psm.features.strong_score;
         }
-        psms.sort_by(|a, b| b.cmp(a));
+        psms.sort_by(rank_score_desc);
         Self::retain_top_with_ties(&mut psms, cap);
         for psm in psms {
             self.heap.push(Reverse(psm));
@@ -582,7 +617,7 @@ impl TopNQueue {
             return;
         }
         let mut psms: Vec<PsmMatch> = self.heap.drain().map(|Reverse(m)| m).collect();
-        psms.sort_by(|a, b| b.cmp(a));
+        psms.sort_by(rank_score_desc);
         Self::retain_top_with_ties(&mut psms, cap);
         for psm in psms {
             self.heap.push(Reverse(psm));
@@ -603,7 +638,7 @@ impl TopNQueue {
     /// Drain into a Vec sorted best-first (largest `rank_score`).
     pub fn into_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
-        v.sort_by(|a, b| b.cmp(a));
+        v.sort_by(rank_score_desc);
         v
     }
 
@@ -614,14 +649,18 @@ impl TopNQueue {
     pub fn into_rank_sorted_vec(self) -> Vec<PsmMatch> {
         let mut v: Vec<PsmMatch> = self.heap.into_iter().map(|Reverse(m)| m).collect();
         v.sort_by(|a, b| {
+            // `total_cmp` (a TOTAL order), NOT `partial_cmp(..).unwrap_or(Equal)`:
+            // the latter left this sort UNORDERED under release optimisation on
+            // the pinned toolchain, so the PIN winner (the first element — see
+            // output/pin.rs) became wrong AND environment-dependent (a target vs
+            // decoy tie flipped between CI runners). NaN → worst (NEG_INFINITY).
             let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
             let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
-            br.partial_cmp(&ar)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            br.total_cmp(&ar)
                 .then_with(|| {
                     let asc = if a.score.is_nan() { f32::NEG_INFINITY } else { a.score };
                     let bsc = if b.score.is_nan() { f32::NEG_INFINITY } else { b.score };
-                    bsc.partial_cmp(&asc).unwrap_or(std::cmp::Ordering::Equal)
+                    bsc.total_cmp(&asc)
                 })
         });
         v

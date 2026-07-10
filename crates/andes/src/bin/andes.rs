@@ -18,6 +18,8 @@ use std::thread;
 
 #[path = "../rescore.rs"]
 mod rescore;
+#[path = "../glyco_seeds.rs"]
+mod glyco_seeds;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{
@@ -385,6 +387,32 @@ struct SearchArgs {
     #[arg(long = "candidate-index", hide = true, default_value = "auto")]
     candidate_index: CandidateIndexFlag,
 
+    /// Glycopeptide search mode: enumerate hybrid backbone candidates (DB + de-novo
+    /// Y-ladder), filter by N-X-S/T sequon, score bare backbones, and write a
+    /// `.glyco.pin` file instead of the standard PIN. Default off.
+    #[arg(long = "glyco", default_value_t = false)]
+    glyco: bool,
+
+    /// Maximum backbone candidates per spectrum in glyco mode (DB + de-novo
+    /// combined, after union-dedup). Hidden advanced knob; default 50.
+    /// Raised from 20: core-Y evidence ranking means the cap now cuts fewer
+    /// true positives, so more headroom is inexpensive and safe.
+    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 50usize)]
+    glyco_backbone_top_k: usize,
+
+    /// Limit glyco scoring to the first N spectra (0 = no limit). Hidden dev knob.
+    #[arg(long = "glyco-max-spectra", hide = true, default_value_t = 0usize)]
+    glyco_max_spectra: usize,
+
+    /// Enable cross-spectrum backbone transfer (single-invocation two-pass;
+    /// glyco mode only). Pass-1 glyco PSMs are native-GBDT-rescored in-process,
+    /// 1%-FDR confident backbones (target+decoy) are propagated to co-eluting
+    /// sibling spectra via a glycan-delta graph, and accepted transfers are
+    /// re-scored as `Source::Transferred` Pass-2 candidates before the final
+    /// `.glyco.pin` is written. Off by default — baseline output is unchanged.
+    #[arg(long = "glyco-transfer", default_value_t = false)]
+    glyco_transfer: bool,
+
     /// Enable the PTM-refinement cascade (Pass-2 over confident proteins). Default off.
     #[arg(long = "refine", default_value_t = false)]
     refine: bool,
@@ -489,6 +517,18 @@ struct TrainFromSearchArgs {
     /// given.
     #[arg(long)]
     database: Option<PathBuf>,
+
+    /// EXTERNAL LABELS (SP-B glyco training): a TSV with columns `scan`,
+    /// `peptide`, `charge`. When given, labels come from this file instead of a
+    /// seed search (`bootstrap_labels`), and `--database` is not required. The
+    /// `peptide` is the BARE backbone sequence (the glycan is stripped — the
+    /// rank model scores backbone b/y ions, which in HCD come from the
+    /// deglycosylated backbone); Cam-C and any `--mods` are applied via the
+    /// AminoAcidSet. Rows whose scan is absent from `--spectra` or whose peptide
+    /// fails to parse are skipped. Use to train a glyco-regime rank model from
+    /// the reference engine/a glyco search engine backbone IDs (see docs/plans/glyco/50-roadmap/spb-design.md).
+    #[arg(long = "labels")]
+    labels: Option<PathBuf>,
 
     /// Seed model: slug from the bundled store (e.g. `hcd_qexactive_tryp`).
     /// When omitted, the bundled `hcd_qexactive_tryp` model is used as the seed.
@@ -1682,10 +1722,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         CandidateIndexFlag::Ram => search::CandidateIndexMode::Ram,
         CandidateIndexFlag::Mmap => search::CandidateIndexMode::Mmap,
         CandidateIndexFlag::Auto => {
-            // mmap is not compatible with the chimeric / refine in-RAM passes
-            // (handled below); those are not the OOM-prone giant-mod-space case,
-            // so `auto` simply keeps them on RAM.
-            if params.chimeric || cli.refine {
+            // mmap is not compatible with the chimeric / refine / glyco in-RAM
+            // passes (handled below); those are not the OOM-prone giant-mod-space
+            // case, so `auto` simply keeps them on RAM.
+            if params.chimeric || cli.refine || cli.glyco {
                 search::CandidateIndexMode::Ram
             } else {
                 match available_memory_bytes() {
@@ -1731,6 +1771,65 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             return Err("--candidate-index mmap is not yet compatible with --refine \
                         (the refinement cascade needs the in-RAM candidate index)"
                 .into());
+        }
+        if cli.glyco {
+            return Err("--candidate-index mmap is not yet compatible with --glyco \
+                        (glyco_search_run needs the in-RAM candidate index/bucket_index)"
+                .into());
+        }
+    }
+    // --glyco is a standalone driver (see the `if cli.glyco` early-return block
+    // below): it writes its own `.glyco.pin` and skips the standard PIN/rescore/
+    // TSV/Parquet/refine machinery entirely. Silently ignoring those flags would
+    // mislead a user who expects them to apply, so fail fast instead.
+    if cli.glyco {
+        let mut unsupported: Vec<&str> = Vec::new();
+        if cli.output_tsv.is_some() {
+            unsupported.push("--output-tsv");
+        }
+        if cli.output_parquet.is_some() {
+            unsupported.push("--output-parquet");
+        }
+        if cli.rescore {
+            unsupported.push("--rescore");
+        }
+        if cli.rescore_native {
+            unsupported.push("--rescore-native");
+        }
+        if cli.refine {
+            unsupported.push("--refine");
+        }
+        if cli.fdr.is_some() {
+            unsupported.push("--fdr");
+        }
+        if cli.pep.is_some() {
+            unsupported.push("--pep");
+        }
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "--glyco does not support: {} (glyco mode writes a standalone \
+                 .glyco.pin and skips the standard PIN/rescore/TSV/Parquet/refine \
+                 pipeline; run Percolator on the .glyco.pin separately)",
+                unsupported.join(", ")
+            )
+            .into());
+        }
+        // FDR-TRUST GUARD (Codex review): reverse/shuffle decoys are generated from
+        // the TARGET proteome and do NOT preserve N-X-S/T sequon DENSITY, but glyco
+        // scoring gates BOTH targets and decoys on that sequon — so a generated
+        // decoy search space is systematically different and the glyco FDR is
+        // ANTI-CONSERVATIVE (q-values users should not trust). Trustworthy glyco FDR
+        // needs an EXTERNAL target+decoy FASTA consumed with `--decoy-strategy none`.
+        if !cli.decoy_strategy.eq_ignore_ascii_case("none") {
+            eprintln!(
+                "WARN: --glyco with --decoy-strategy {ds} GENERATES decoys ({ds} of the \
+                 target proteome), which does NOT preserve N-X-S/T sequon density that \
+                 glyco scoring gates on — the resulting .glyco.pin FDR is \
+                 ANTI-CONSERVATIVE and its q-values should NOT be trusted. For \
+                 trustworthy glyco FDR, supply an EXTERNAL target+decoy FASTA and use \
+                 `--decoy-strategy none --decoy-prefix <PREFIX>`.",
+                ds = cli.decoy_strategy
+            );
         }
     }
     // --refine + --chimeric run together correctly but do NOT currently STACK:
@@ -2073,12 +2172,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 for mut spec in chunk_spectra.into_iter() {
                     // Peaks are normally dropped post-scoring to bound memory
                     // (only the metadata is needed downstream). Under `--refine`
-                    // we RETAIN them: the Pass-2 cascade re-scores the
-                    // unidentified spectra and needs their peak lists. Memory
-                    // cost: the full peak buffer for every spectrum stays
-                    // resident through the refinement pass (acceptable; --refine
-                    // is opt-in and scoped to one search).
-                    if !cli.refine {
+                    // or `--glyco` we RETAIN them: refine's Pass-2 re-scores
+                    // unidentified spectra; glyco_search_run needs the full
+                    // peak lists for oxonium ion detection. Memory cost: full
+                    // peak buffer stays resident (acceptable; both are opt-in).
+                    if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -2162,9 +2260,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 all_queues.extend(queues);
                 for mut spec in chunk.into_iter() {
                     // See the chimeric-loop note above: normally peaks are
-                    // dropped post-scoring to bound memory, but `--refine` needs
-                    // them for the Pass-2 re-scoring of unidentified spectra.
-                    if !cli.refine {
+                    // dropped post-scoring to bound memory, but `--refine` or
+                    // `--glyco` needs the full peak lists retained.
+                    if !cli.refine && !cli.glyco {
                         spec.peaks = Vec::new();
                     }
                     all_spectra.push(spec);
@@ -2241,6 +2339,319 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         spectra.len(),
         search_elapsed.as_secs_f64()
     );
+
+    // ── 7a. Glyco mode: run glyco scoring and write .glyco.pin, then return ──
+    // When --glyco is active, we run the glyco-PSM scoring driver over ALL
+    // accumulated spectra (using the PreparedSearch from the standard search)
+    // and write a separate `.glyco.pin` file.  The standard PIN is skipped.
+    if cli.glyco {
+        let t_glyco = std::time::Instant::now();
+        // Use the curated common list (~600 glycans) by default so that ALL
+        // backbone candidates can be b/y-scored in phase-1 (avoids the
+        // Y-ladder pre-filter ceiling).  The full ~2510-entry list is available
+        // via n_glycan_list() for research/exhaustive searches.
+        // ANDES_GLYCO_FULL_GLYCANS=1 swaps to the full 2510-composition list:
+        // a gap-diagnostic showed the common list covers only 79.5% of truth
+        // glycans (loss 107/523) vs 85.5% for the full list — the extra
+        // coverage costs generation/scoring time (more backbones per spectrum).
+        let glycan_list = if std::env::var("ANDES_GLYCO_FULL_GLYCANS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            andes_glyco::glycan_db::n_glycan_list()
+        } else {
+            andes_glyco::glycan_db::n_glycan_list_common()
+        };
+        let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
+        let spectra_for_glyco: &[_] = if cli.glyco_max_spectra > 0 {
+            &spectra[..spectra.len().min(cli.glyco_max_spectra)]
+        } else {
+            &spectra
+        };
+        let pass1 = search::glyco_search::glyco_search_run(
+            spectra_for_glyco,
+            &prepared,
+            &glycan_list,
+            glyco_tol_ppm,
+            cli.glyco_backbone_top_k,
+        );
+        let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
+        eprintln!(
+            "[glyco] scored {} spectra → {} glyco-PSM rows [{:.2}s]",
+            pass1.len(),
+            total_pass1_rows,
+            t_glyco.elapsed().as_secs_f64()
+        );
+
+        // Derive glyco PIN path: `<output_pin>.glyco.pin` (or
+        // `<output_pin_stem>.glyco.pin` if it already ends in `.pin`).
+        let glyco_pin_path = {
+            let stem = output_pin_path.with_extension("");
+            stem.with_extension("glyco.pin")
+        };
+        // G3: opt-in glycan-axis decoy rows (2D-FDR discrimination on the glycan
+        // axis). Default off — no change to the shipping PIN.
+        let emit_glycan_decoy = std::env::var("ANDES_GLYCO_DECOY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        // ── Task 8d: single-invocation cross-spectrum backbone transfer ──
+        // Off by default (`--glyco-transfer`); when off, behave EXACTLY as
+        // before (write Pass-1 unchanged) — this is the gate.
+        let glyco_results = if cli.glyco_transfer {
+            let t_xfer = std::time::Instant::now();
+
+            // EXPERIMENTAL / NOT FDR-VALID. Codex adversarial review (2026-07-06)
+            // found this path does NOT preserve target/decoy identity: the
+            // TransferredCandidate -> BackboneHit conversion drops the seed's
+            // is_decoy, so a decoy seed can emit a TARGET-labeled row and the
+            // symmetric-decoy graph that final FDR relies on is broken. Also:
+            // scan-only q-join can mis-map on duplicate/MGF scans, dedup can
+            // erase transferred hits, and the RT gate is bypassed when RT is
+            // missing. See docs/plans/glyco/50-roadmap/cross-spectrum-transfer-design.md
+            // (§ Known soundness bugs). DO NOT use --glyco-transfer results for
+            // reported identifications until those are fixed.
+            eprintln!(
+                "[glyco-transfer] ⚠ EXPERIMENTAL — FDR NOT VALIDATED. Transferred \
+                 rows do not preserve target/decoy identity (Codex critical); counts \
+                 from this mode are NOT trustworthy. For research/development only."
+            );
+
+            // Step 2: write Pass-1 to an in-memory PIN, then (step 3)
+            // native-GBDT-rescore it in-process to get target+decoy q-values.
+            let mut buf: Vec<u8> = Vec::new();
+            output::glyco_pin::write_glyco_pin_to(
+                &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false,
+            )?;
+            let pin_text = String::from_utf8(buf)
+                .map_err(|e| format!("Pass-1 glyco PIN is not valid UTF-8: {e}"))?;
+            let q_rows = rescore::native_rescore_qvalues(&pin_text, 42)?;
+
+            // Step 4: seed lookup — reproduce write_glyco_pin's top-1-per-scan
+            // collapse winner EXACTLY (same comparator, same enumerated-only
+            // gate) so `scan -> peptide_idx/backbone_mass` matches the row the
+            // PIN (and thus the q-values above) actually describe.
+            let y_primary = andes_glyco::glyco_psm::y_primary_selection();
+            // scan (as emitted into ScanNr/SpecId, i.e. spec.scan.unwrap_or(0))
+            // -> (peptide_idx, backbone_mass, rt_seconds, spec_idx).
+            let mut seed_lookup: std::collections::BTreeMap<u32, (u32, f64, Option<f64>, usize)> =
+                std::collections::BTreeMap::new();
+            for r in &pass1 {
+                if r.spectrum_idx >= spectra.len() || r.hits.is_empty() {
+                    continue;
+                }
+                let winner = (0..r.hits.len())
+                    .max_by(|&a, &b| {
+                        andes_glyco::glyco_psm::collapse_cmp(
+                            r.hits[a].psm.rank_score,
+                            r.hits[a].glycan_key.y_ladder_intensity_score,
+                            r.hits[b].psm.rank_score,
+                            r.hits[b].glycan_key.y_ladder_intensity_score,
+                            y_primary,
+                        )
+                        .then(b.cmp(&a))
+                    })
+                    .expect("non-empty hits");
+                let hit = &r.hits[winner];
+                // enumerated-only gate: a de-novo (unenumerated) winner is not
+                // an emitted PIN row (see select_emitted_hits GI-1), so it
+                // cannot have a q-value to seed from either.
+                if hit.glycan_key.glycan.is_none() {
+                    continue;
+                }
+                let spec = &spectra[r.spectrum_idx];
+                let scan = spec.scan.unwrap_or(0) as u32;
+                seed_lookup.insert(
+                    scan,
+                    (
+                        hit.psm.primary_candidate_idx(),
+                        hit.glycan_key.backbone_mass,
+                        spec.rt_seconds,
+                        r.spectrum_idx,
+                    ),
+                );
+            }
+
+            // Step 5: SeedRow extraction. native_rescore_qvalues already
+            // derives is_decoy from the PIN's own fail-loud Label parse (see
+            // rescore::parse_pin), so ambiguity is impossible here — a
+            // malformed Label would already have failed loud inside
+            // native_rescore_qvalues above.
+            let rows: Vec<glyco_seeds::SeedRow> = q_rows
+                .iter()
+                .map(|(spec_id, is_decoy, q, score)| {
+                    let scan = glyco_seeds::extract_scan(spec_id).ok_or_else(|| {
+                        format!("Task 8d: could not extract scan from rescored SpecId {spec_id:?}")
+                    })?;
+                    Ok(glyco_seeds::SeedRow { scan, is_decoy: *is_decoy, q_value: *q, score: *score })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+
+            // Seed FDR threshold on the NATIVE-GBDT q-value. The in-process
+            // native rescorer ranks glyco PSMs as well as Percolator (≈258
+            // targets @ native-q≤0.05 vs Percolator's 253 @ q≤0.01 on the same
+            // PIN) but its plain target-decoy q-value is more CONSERVATIVE than
+            // Percolator's π₀/mix-max-corrected q (its best achievable q floors
+            // near ~0.028), so a 0.01 gate yields ZERO seeds even though the
+            // confident set exists. 0.05 recovers the Percolator-equivalent
+            // confident seed set; final FDR is still Percolator on the merged
+            // PIN (the symmetric decoy graph keeps that honest). Tunable for A/B.
+            let seed_q: f64 = std::env::var("ANDES_GLYCO_SEED_FDR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&q: &f64| q > 0.0 && q <= 1.0)
+                .unwrap_or(0.05);
+            let seeds = glyco_seeds::seeds_at_fdr(&rows, seed_q, |scan| {
+                seed_lookup.get(&scan).map(|&(pep_idx, bb, rt, _spec_idx)| (pep_idx, bb, rt))
+            });
+
+            // Step 7: oxonium-positive spectra as graph nodes, sorted by scan.
+            let mut nodes: Vec<andes_glyco::crossspectrum::GlycoNode> = Vec::new();
+            let mut scan_to_spec_idx: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            for (spec_idx, spec) in spectra_for_glyco.iter().enumerate() {
+                if spec.peaks.len() < params.min_peaks as usize {
+                    continue;
+                }
+                if !andes_glyco::oxonium::oxonium_gate(&spec.peaks, 0.10, glyco_tol_ppm).fired {
+                    continue;
+                }
+                let z = match spec.precursor_charge {
+                    Some(z) if z > 0 => z as f64,
+                    _ => continue,
+                };
+                let precursor_neutral = (spec.precursor_mz - model::mass::PROTON) * z - model::mass::H2O;
+                if precursor_neutral <= 0.0 {
+                    continue;
+                }
+                let scan = spec.scan.unwrap_or(0) as u32;
+                nodes.push(andes_glyco::crossspectrum::GlycoNode {
+                    scan,
+                    precursor_neutral,
+                    rt_seconds: spec.rt_seconds,
+                });
+                scan_to_spec_idx.insert(scan, spec_idx);
+            }
+            nodes.sort_by_key(|n| n.scan);
+
+            // Step 8/9: propagate transfers over the glycan-delta graph, then
+            // group provenance-bearing BackboneHits by acceptor spec_idx.
+            let glycan_sorted: Vec<(f64, usize)> = {
+                let mut v: Vec<(f64, usize)> =
+                    glycan_list.iter().enumerate().map(|(i, g)| (g.mass, i)).collect();
+                v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                v
+            };
+            let rt_window: f32 = std::env::var("ANDES_GLYCO_RT_WINDOW")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800.0);
+            const MIN_GLYCAN: f64 = 406.0;
+            // `propagate_transfers` takes one scalar tolerance for the whole
+            // batch (unlike the per-node `(mass * tol_ppm * 1e-6).max(0.02)`
+            // convention used elsewhere in this module), so scale it from a
+            // representative intact glycopeptide mass (~2500 Da: typical
+            // tryptic backbone + core N-glycan) with the same floor.
+            const REPRESENTATIVE_GLYCOPEPTIDE_MASS: f64 = 2500.0;
+            let tol = (REPRESENTATIVE_GLYCOPEPTIDE_MASS * glyco_tol_ppm * 1e-6).max(0.02);
+            let transferred = andes_glyco::crossspectrum::propagate_transfers(
+                &seeds, &nodes, &glycan_sorted, &glycan_list, rt_window, MIN_GLYCAN, tol,
+            );
+
+            // Min graph-support injection gate: only inject a transferred
+            // backbone corroborated by >= this many co-eluting, glycan-delta-
+            // linked sibling spectra (a real glycoform ladder), cutting the
+            // mass-coincidence singletons that the wide "any glycan-delta" edge
+            // otherwise floods in. Default 1 (no gate); tune via env for A/B.
+            let min_support: u32 = std::env::var("ANDES_GLYCO_MIN_SUPPORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1);
+            let mut injected: std::collections::BTreeMap<usize, Vec<andes_glyco::hybrid::BackboneHit>> =
+                std::collections::BTreeMap::new();
+            for tc in &transferred {
+                if tc.graph_support < min_support {
+                    continue;
+                }
+                let Some(&spec_idx) = scan_to_spec_idx.get(&tc.acceptor_scan) else {
+                    continue;
+                };
+                let charge = spectra_for_glyco[spec_idx]
+                    .precursor_charge
+                    .filter(|&z| z > 0)
+                    .map(|z| z as u8)
+                    .unwrap_or(*params.charge_range.start());
+                injected.entry(spec_idx).or_default().push(andes_glyco::hybrid::BackboneHit {
+                    backbone_mass: tc.backbone_mass,
+                    glycan: Some(tc.glycan.clone()),
+                    source: andes_glyco::hybrid::Source::Transferred,
+                    charge,
+                    isotope_offset: 0,
+                    glycan_mass_residual: tc.glycan.mass,
+                    is_transferred: true,
+                    transfer_graph_support: tc.graph_support,
+                    transfer_seed_score: tc.seed_score as f32,
+                    transfer_rt_delta: tc.rt_delta as f32,
+                    transfer_ungated: tc.ungated,
+                });
+            }
+
+            let injected_cands: usize = injected.values().map(|v| v.len()).sum();
+            eprintln!(
+                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @{:.1}% native-q ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}) onto {} acceptor spectra [{:.2}s]",
+                q_rows.len(),
+                seeds.len(),
+                seed_q * 100.0,
+                seeds.iter().filter(|s| s.is_decoy).count(),
+                nodes.len(),
+                transferred.len(),
+                injected_cands,
+                min_support,
+                injected.len(),
+                t_xfer.elapsed().as_secs_f64()
+            );
+
+            // Step 10: Pass-2 re-score only the acceptor spectra, superseding
+            // their Pass-1 entry; everything else keeps its Pass-1 result.
+            search::glyco_search::glyco_transfer_pass2(
+                &spectra,
+                &prepared,
+                &glycan_list,
+                glyco_tol_ppm,
+                cli.glyco_backbone_top_k,
+                pass1,
+                &injected,
+            )
+        } else {
+            pass1
+        };
+        let mut glyco_results = glyco_results;
+        let total_glyco_rows: usize = glyco_results.iter().map(|r| r.hits.len()).sum();
+
+        // Populate glyco RT PIN features (DeltaRT/AbsDeltaRT/DeltaRTNorm +
+        // predicted_rt_min) in place on each hit, using the engine-wide backbone
+        // RT index + per-monosaccharide offset + per-run self-calibration. The
+        // glyco PIN writer then also appends the within-scan DeltaRTRank. Neutral
+        // 0.0 without observed RT / <MIN_CALIBRATION_ANCHORS anchors (baseline-safe).
+        output::populate_glyco_rt_features(&spectra, &mut glyco_results, &prepared.candidates);
+
+        output::write_glyco_pin(
+            &glyco_pin_path,
+            &spectra,
+            &glyco_results,
+            &prepared.candidates,
+            &params,
+            &idx,
+            emit_glycan_decoy,
+        )?;
+        eprintln!(
+            "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",
+            glyco_pin_path.display(),
+            total_glyco_rows,
+            t_total.elapsed().as_secs_f64()
+        );
+        return Ok(());
+    }
 
     // ── 7b. PTM-refinement cascade (Pass-2) ───────────────────────────────────
     // Opt-in (`--refine`). Runs a scoped Pass-2 over the unidentified spectra
@@ -2329,6 +2740,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         pin_candidates = prepared.candidates;
         pin_index = idx;
     }
+
+    // Engine-wide retention-time features (additive): after all PSMs are scored
+    // and the final PIN candidate pool is fixed, run per-run RT self-calibration
+    // and populate DeltaRT/AbsDeltaRT/DeltaRTNorm (+ predicted_rt for the QPX)
+    // onto each PSM. Neutral 0.0 (baseline-identical) when observed RT is
+    // unavailable or calibration cannot be fit. See
+    // `docs/plans/glyco/50-roadmap/rt-prediction-design.md` (Commit 1).
+    output::populate_rt_features(&spectra, &mut queues, &pin_candidates);
+
     output::write_pin(&output_pin_path, &spectra, &queues, &pin_candidates, &params, &pin_index)?;
     eprintln!(
         "Wrote PIN: {} [PHASE pin_write: {:.2}s] [PHASE TOTAL: {:.2}s]",
@@ -2674,6 +3094,139 @@ fn build_train_search_params(
 ///
 /// When `args.update_model` is set, runs in incremental update mode (Part D).
 /// Otherwise runs the standard initial-training pipeline (Part A).
+/// Load external training labels from a `scan\tpeptide\tcharge` TSV (SP-B glyco
+/// training). Column order is discovered from the header (case-insensitive), so
+/// extra columns are ignored. The peptide is parsed with `aa_set` (Cam-C + any
+/// `--mods` applied). Rows with an unknown scan or an unparseable peptide/charge
+/// are skipped and counted. `confidence` is set to 0.0 (labels are pre-filtered
+/// by the external engine; the value is unused by the accumulator).
+fn load_labels_from_tsv(
+    path: &std::path::Path,
+    spectra: &[model::spectrum::Spectrum],
+    aa_set: &model::aa_set::AminoAcidSet,
+) -> Result<Vec<model_train::labeled::LabeledMatch>, Box<dyn std::error::Error>> {
+    use model::peptide::Peptide;
+    use std::collections::HashMap;
+
+    let mut scan_to_idx: HashMap<i32, usize> = HashMap::new();
+    for (i, s) in spectra.iter().enumerate() {
+        if let Some(sc) = s.scan {
+            scan_to_idx.entry(sc).or_insert(i);
+        }
+    }
+
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading labels {}: {e}", path.display()))?;
+    let mut lines = text.lines();
+    let header = lines.next().ok_or("labels file is empty")?;
+    let cols: Vec<String> = header.split('\t').map(|c| c.trim().to_ascii_lowercase()).collect();
+    let col = |names: &[&str]| -> Option<usize> {
+        cols.iter().position(|c| names.iter().any(|n| c == n))
+    };
+    let scan_c = col(&["scan", "scannr", "scan_number"]).ok_or("labels: no scan column")?;
+    let pep_c = col(&["peptide", "backbone", "sequence", "peptide_sequence"])
+        .ok_or("labels: no peptide column")?;
+    let chg_c = col(&["charge", "z", "precursor_charge"]).ok_or("labels: no charge column")?;
+    let max_c = scan_c.max(pep_c).max(chg_c);
+
+    // Fixed-mod deltas (e.g. Cam-C 57.02146) from the aa_set: the label peptides
+    // are BARE sequences, so we annotate each fixed-mod residue with `+delta` and
+    // wrap in `-.SEQ.-` flanking so `Peptide::from_str` mass-matches the fixed
+    // variant (a bare `C` would otherwise parse as UNMODIFIED — wrong b/y masses).
+    // Variable mods (Ox-M) are left off: the label doesn't say which are modified,
+    // and the unmodified form is the correct default for the rank corpus.
+    let fixed_deltas: std::collections::HashMap<u8, f64> =
+        aa_set.fixed_mod_deltas().into_iter().collect();
+    let decorate = |seq: &str| -> String {
+        let mut d = String::with_capacity(seq.len() + 4);
+        d.push_str("-.");
+        for &b in seq.as_bytes() {
+            d.push(b as char);
+            if let Some(delta) = fixed_deltas.get(&b) {
+                d.push_str(&format!("+{:.5}", delta));
+            }
+        }
+        d.push_str(".-");
+        d
+    };
+
+    let mut labels = Vec::new();
+    // ONE label per spectrum: the accumulator must not tally the same spectrum
+    // multiple times (it would over-weight that spectrum's rank/edge/charge
+    // histograms). External glyco exports can carry rank alternatives or
+    // glycoform/site alternatives for one scan, so reject duplicate scans loudly
+    // rather than silently double-counting (Codex adversarial-review finding).
+    let mut seen_scans: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let (mut miss_scan, mut miss_pep, mut miss_other) = (0usize, 0usize, 0usize);
+    let (mut dup_scan, mut charge_mismatch) = (0usize, 0usize);
+    for line in lines {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() <= max_c {
+            miss_other += 1;
+            continue;
+        }
+        let scan: i32 = match f[scan_c].trim().parse() {
+            Ok(v) => v,
+            Err(_) => { miss_other += 1; continue; }
+        };
+        let charge: u8 = match f[chg_c].trim().parse() {
+            Ok(v) => v,
+            Err(_) => { miss_other += 1; continue; }
+        };
+        let idx = match scan_to_idx.get(&scan) {
+            Some(&v) => v,
+            None => { miss_scan += 1; continue; }
+        };
+        // Parse the peptide BEFORE the dedup guard: an unparseable/rank-alternative
+        // row must not "claim" the scan and cause a later VALID row for the same
+        // scan to be dropped as a duplicate (Codex + code-review finding — external
+        // exports can order a weaker alternative first).
+        let peptide = match Peptide::from_str(&decorate(f[pep_c].trim()), aa_set) {
+            Ok(p) => p,
+            Err(_) => { miss_pep += 1; continue; }
+        };
+        if !seen_scans.insert(scan) {
+            // A second VALID row for a scan already labeled: skip (keep the first).
+            dup_scan += 1;
+            continue;
+        }
+        // Charge cross-check: a label charge that disagrees with the spectrum's
+        // own precursor charge signals a stale annotation or a scan-mapping error
+        // — count it for visibility (the label charge is used for scoring, so a
+        // systematic mismatch means the corpus is built on the wrong spectra).
+        if let Some(spec_z) = spectra[idx].precursor_charge {
+            if spec_z != charge as i32 {
+                charge_mismatch += 1;
+            }
+        }
+        labels.push(model_train::labeled::LabeledMatch {
+            spectrum_index: idx,
+            peptide,
+            charge,
+            confidence: 0.0,
+        });
+    }
+    eprintln!(
+        "train: loaded {} labels from {} ({} skipped: {} scan-not-found, {} dup-scan, {} unparseable-peptide, {} malformed; {} charge-mismatch vs mzML)",
+        labels.len(),
+        path.display(),
+        miss_scan + dup_scan + miss_pep + miss_other,
+        miss_scan,
+        dup_scan,
+        miss_pep,
+        miss_other,
+        charge_mismatch,
+    );
+    if charge_mismatch * 5 > labels.len().max(1) {
+        eprintln!(
+            "train: WARNING — {charge_mismatch} labels ({}%) disagree with the mzML precursor \
+             charge; the scan->spectrum mapping or the label charges may be wrong.",
+            charge_mismatch * 100 / labels.len().max(1),
+        );
+    }
+    Ok(labels)
+}
+
 fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::error::Error>> {
     let t0 = std::time::Instant::now();
 
@@ -2698,28 +3251,37 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
     let spectra = load_spectra_for_train(&spectra_path)?;
     eprintln!("train: loaded {} spectra", spectra.len());
 
-    let database = args.database.clone().ok_or("--database is required for initial training")?;
-
     // ── 3. Load seed Param + RankScorer ──────────────────────────────────────
     let (seed_model_id, seed_param): (String, Param) = load_seed_param(&args.seed_model)?;
     eprintln!("train: seed model = {seed_model_id}");
     let seed_scorer = RankScorer::new(&seed_param);
 
-    // ── 4-5. Build search params (charge span + NumMods) + bootstrap labels ───
-    let search_params = build_train_search_params(&args.mods)?;
-    eprintln!(
-        "train: running seed search (train-fdr = {}) ...",
-        args.train_fdr
-    );
-    let labels = bootstrap_labels(
-        &spectra,
-        &database,
-        &seed_scorer,
-        &search_params,
-        args.train_fdr,
-    )
-    .map_err(|e| format!("bootstrap_labels: {e}"))?;
-    eprintln!("train: {} confident labels at q <= {}", labels.len(), args.train_fdr);
+    // ── 4-5. Labels: external TSV (SP-B) OR a seed search (bootstrap) ──────────
+    let labels = if let Some(ref labels_path) = args.labels {
+        // SP-B glyco path: labels come from an external engine's backbone IDs.
+        // No seed search / database needed — the peptides are given directly.
+        let aa_set = build_aa_set(&args.mods)?;
+        load_labels_from_tsv(labels_path, &spectra, &aa_set)?
+    } else {
+        let database = args
+            .database
+            .clone()
+            .ok_or("--database is required for initial training (or pass --labels)")?;
+        let search_params = build_train_search_params(&args.mods)?;
+        eprintln!(
+            "train: running seed search (train-fdr = {}) ...",
+            args.train_fdr
+        );
+        bootstrap_labels(
+            &spectra,
+            &database,
+            &seed_scorer,
+            &search_params,
+            args.train_fdr,
+        )
+        .map_err(|e| format!("bootstrap_labels: {e}"))?
+    };
+    eprintln!("train: {} confident labels", labels.len());
 
     if labels.is_empty() {
         return Err(format!(

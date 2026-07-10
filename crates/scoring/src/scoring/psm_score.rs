@@ -370,30 +370,37 @@ pub fn score_psm(
 /// Count-rewarding hyperscore over matched backbone b/y ions (andes-glyco 2.0
 /// peptide channel `P`).
 ///
-/// `hyperscore = ln(N_matched!)`, where `N_matched` is the number of theoretical
-/// b/y positions that matched a peak (via the SAME `ion_match_facts` matcher as
-/// scoring). This is the the classic hyperscore engine / the reference engine factorial term: it rewards the
-/// NUMBER of matched fragments, the axis the intensity-weighted rank-LLR
-/// [`score_psm`] under-rewards. The the reference engine-gap audit found the residual
-/// gp-outranked truth backbones match MORE ions than the wrong winner yet score a
-/// LOWER rank-LLR — exactly what this term corrects, and (∝ Nb!·Ny!) exactly what
-/// the reference engine's hyperscore rewards. `ln(n!)` is summed directly (n is small,
-/// ≤ 2·peptide_len) to avoid a lgamma dependency. Additive; never modifies
-/// [`score_psm`].
+/// `hyperscore = ln(Nb! · Ny!) = ln(Nb!) + ln(Ny!)`, where `Nb`/`Ny` are the
+/// numbers of matched b-type (prefix) and y-type (suffix) theoretical ions (via
+/// the SAME `ion_match_facts` matcher as scoring). This is the the classic hyperscore engine /
+/// the reference engine factorial term: it rewards the NUMBER of matched fragments, the axis
+/// the intensity-weighted rank-LLR [`score_psm`] under-rewards. The the reference engine-gap
+/// audit found the residual gp-outranked truth backbones match MORE ions than the
+/// wrong winner yet score a LOWER rank-LLR — exactly what this term corrects.
+///
+/// The b and y factorials are computed SEPARATELY (`ln(Nb!)+ln(Ny!)`), NOT as
+/// `ln((Nb+Ny)!)`: the reference engine's hyperscore is the product `Nb!·Ny!`, and pooling
+/// the two ion series into one factorial over-rewards by the log binomial term.
+/// `ln(n!)` is summed directly (n is small, ≤ peptide_len) to avoid a lgamma
+/// dependency. Additive; never modifies [`score_psm`].
 pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &RankScorer) -> f32 {
     if peptide.length() < 2 {
         return 0.0;
     }
-    let n_matched = scored_spec
+    let (mut n_b, mut n_y) = (0usize, 0usize);
+    for f in scored_spec
         .ion_match_facts(peptide, scorer)
         .iter()
         .filter(|f| f.rank.is_some())
-        .count();
-    let mut ln_factorial = 0.0_f64;
-    for i in 2..=n_matched {
-        ln_factorial += (i as f64).ln();
+    {
+        if f.ion_type.is_prefix() {
+            n_b += 1;
+        } else {
+            n_y += 1;
+        }
     }
-    ln_factorial as f32
+    let ln_factorial = |n: usize| -> f64 { (2..=n).map(|i| (i as f64).ln()).sum() };
+    (ln_factorial(n_b) + ln_factorial(n_y)) as f32
 }
 
 /// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split

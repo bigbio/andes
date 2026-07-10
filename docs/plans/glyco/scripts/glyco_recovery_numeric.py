@@ -8,26 +8,71 @@ CalcMass - GlycanMass - H2O (the authoritative backbone convention).
 
 Usage: glyco_recovery_numeric.py <truth.tsv> <percolator_psms> <pin> [q=0.01] [tol=0.05]
 """
-import csv, re, sys
+import csv, math, re, sys
 H2O = 18.010565
-truth_f, psms_f, pin_f = sys.argv[1], sys.argv[2], sys.argv[3]
-Q = float(sys.argv[4]) if len(sys.argv) > 4 else 0.01
-TOL = float(sys.argv[5]) if len(sys.argv) > 5 else 0.05
 
-truth = {int(float(r["scan"])): float(r["backbone_mass"]) + H2O
-         for r in csv.DictReader(open(truth_f), delimiter="\t")}
+USAGE = ("usage: glyco_recovery_numeric.py <truth.tsv> <percolator_psms> <pin> "
+         "[q=0.01] [tol=0.05]")
+if len(sys.argv) < 4:
+    sys.exit(USAGE)
+truth_f, psms_f, pin_f = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    Q = float(sys.argv[4]) if len(sys.argv) > 4 else 0.01
+    TOL = float(sys.argv[5]) if len(sys.argv) > 5 else 0.05
+except ValueError:
+    sys.exit(USAGE)
+
+# Truth backbone_mass MUST be a RESIDUE mass (no water); we add one H2O to
+# compare against the PIN neutral peptide mass (CalcMass - GlycanMass).
+truth = {}
+with open(truth_f, newline="") as fh:
+    trd = csv.DictReader(fh, delimiter="\t")
+    if trd.fieldnames is None or "scan" not in trd.fieldnames or "backbone_mass" not in trd.fieldnames:
+        sys.exit(f"{truth_f}: truth TSV needs 'scan' and 'backbone_mass' columns")
+    for r in trd:
+        s, m = r.get("scan"), r.get("backbone_mass")
+        if not s or not m:
+            continue
+        try:
+            scan = int(float(s)); mass = float(m)
+        except ValueError:
+            continue
+        if not math.isfinite(mass):
+            continue
+        truth[scan] = mass + H2O
 
 # PIN: SpecId -> backbone_neutral (CalcMass - GlycanMass). Target rows only.
-H = open(pin_f).readline().rstrip("\n").split("\t"); idx = {h: i for i, h in enumerate(H)}
-def g(p, n):
-    try: return float(p[idx[n]])
-    except (KeyError, ValueError): return 0.0
+with open(pin_f) as fh:
+    H = fh.readline().rstrip("\n").split("\t")
+idx = {h: i for i, h in enumerate(H)}
+_required = ("SpecId", "Label", "CalcMass", "GlycanMass")
+_missing = [c for c in _required if c not in idx]
+if _missing:
+    sys.exit(f"{pin_f}: PIN missing required columns: {', '.join(_missing)}")
+
+def gnum(p, n):
+    """Required numeric PIN field; None if missing/malformed/non-finite."""
+    try:
+        v = float(p[idx[n]])
+    except (IndexError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
 bb_by_spec = {}
-for line in open(pin_f):
-    p = line.rstrip("\n").split("\t")
-    if len(p) < len(H) or p[0] == "SpecId": continue
-    if int(g(p, "Label")) < 0: continue  # skip decoys
-    bb_by_spec[p[0]] = g(p, "CalcMass") - g(p, "GlycanMass")
+with open(pin_f) as fh:
+    for line in fh:
+        p = line.rstrip("\n").split("\t")
+        if len(p) < len(H) or p[idx["SpecId"]] == "SpecId":
+            continue
+        label = gnum(p, "Label")
+        if label is None or label < 0:  # skip decoys and malformed-label rows
+            continue
+        # CalcMass and GlycanMass are an atomic pair; require both (never 0-default).
+        calc = gnum(p, "CalcMass")
+        gly = gnum(p, "GlycanMass")
+        if calc is None or gly is None:
+            continue
+        bb_by_spec[p[idx["SpecId"]]] = calc - gly
 
 # Percolator psms (tab): PSMId score q-value posterior_error_prob peptide proteinIds
 scan_re = re.compile(r"scan=(\d+)")
@@ -35,11 +80,14 @@ survived_scans = set(); correct_scans = set(); total_surv = 0; matched_pin = 0
 with open(psms_f) as fh:
     rd = csv.reader(fh, delimiter="\t"); header = next(rd)
     hi = {h: i for i, h in enumerate(header)}
-    qcol = hi.get("q-value", 2); idcol = hi.get("PSMId", 0)
+    if "q-value" not in hi or "PSMId" not in hi:
+        sys.exit(f"{psms_f}: percolator output needs 'q-value' and 'PSMId' columns")
+    qcol = hi["q-value"]; idcol = hi["PSMId"]
     for row in rd:
-        if len(row) <= qcol: continue
+        if len(row) <= max(qcol, idcol): continue
         try: q = float(row[qcol])
         except ValueError: continue
+        if not math.isfinite(q): continue
         if q > Q: continue
         total_surv += 1
         spec = row[idcol]; m = scan_re.search(spec)

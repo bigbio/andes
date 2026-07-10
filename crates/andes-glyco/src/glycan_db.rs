@@ -12,7 +12,8 @@
 //   plasma glycoproteomics truth sets at 20 ppm.  Used by default for `--glyco`
 //   because all backbone candidates can be b/y-scored in phase-1 (tractable).
 //
-// `n_glycan_list()` — the full broad enumeration (~2510 compositions) for exhaustive
+// `n_glycan_list()` — the full broad enumeration (~4034 compositions, after the
+//   2026-07-09 Fuc/Hex expansion and exact-composition dedup) for exhaustive
 //   research searches. Retains the previous plausibility constraints.
 //
 // Shared plausibility constraints (both lists):
@@ -93,14 +94,30 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
             .then(a.neuac.cmp(&b.neuac))
             .then(a.neugc.cmp(&b.neugc))
     });
+    dedup_by_composition(&mut out);
 
     out
+}
+
+/// Drop exact-composition duplicates from a mass-then-composition-sorted list.
+/// `add_paucimannose` re-emits HexNAc2Hex2 (± core Fuc), which the main `hx ≥ 2`
+/// loop already generates once its mass clears the ≥ 500 Da floor, so the same
+/// composition would otherwise appear twice. Only EXACT duplicates are removed
+/// (adjacent after the sort); isobaric but distinct compositions are kept.
+fn dedup_by_composition(out: &mut Vec<GlycanComp>) {
+    out.dedup_by(|a, b| {
+        a.hexnac == b.hexnac
+            && a.hex == b.hex
+            && a.fuc == b.fuc
+            && a.neuac == b.neuac
+            && a.neugc == b.neugc
+    });
 }
 
 /// Enumerate a curated set of common human N-glycan compositions.
 ///
 /// This is the default list for `--glyco` searches.  It is smaller than
-/// `n_glycan_list()` (~600 vs ~2510 entries) which makes it tractable to
+/// `n_glycan_list()` (~600 vs ~4034 entries) which makes it tractable to
 /// b/y-score every backbone candidate in phase-1 before applying the cap,
 /// avoiding the pre-filter ceiling caused by ranking on Y-ladder evidence alone.
 ///
@@ -168,6 +185,7 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
             .then(a.neuac.cmp(&b.neuac))
             .then(a.neugc.cmp(&b.neugc))
     });
+    dedup_by_composition(&mut out);
 
     out
 }
@@ -365,9 +383,11 @@ mod tests {
         let list = n_glycan_list();
         // HexNAc 2..=8, Hex 2..=14, Fuc 0..=4, NeuAc 0..=5, NeuGc 0..=2 (mass
         // ∈[500,6000], EXPANDED 2026-07-09 for gap coverage) PLUS the GI-3
-        // paucimannose block (HexNAc 1–2, Hex 0–2, ± Fuc; ~8 more, mass ≥ 150).
+        // paucimannose block (HexNAc 1–2, Hex 0–2, ± Fuc), minus exact-composition
+        // duplicates the paucimannose block shares with the main loop. Actual =
+        // 4034; a [3500, 4500] band guards against an accidental bound change.
         assert!(
-            list.len() >= 3000 && list.len() <= 5000,
+            list.len() >= 3500 && list.len() <= 4500,
             "unexpected glycan count: {}",
             list.len()
         );

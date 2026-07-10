@@ -8,6 +8,16 @@
 
 ## 0. The governing principle (why every past attempt failed)
 
+> **⚠️ SUPERSEDED (2026-07-10): see `BEAT-the reference engine-PLAN-2026-07-08.md` §correction-banner
+> and `SESSION-HANDOFF-2026-07-08.md` §2 for the corrected audit.** The corrected numeric
+> decomposition of the 523 truth is **148 absent / 280 top1-by-mass (only 97 survive @1%)
+> / 95 outranked** (outranked reason **92 "truth loses summed Y-ladder" + 3 ties**). Under
+> that audit **SCORING is the primary remaining gap** (the 280→97 @1% collapse plus the 95
+> outranked), not the "FDR-bound" thesis stated below; generation (leg 1) is real but ~half
+> the previously-believed size and lower priority than the selector. The FDR-bound framing
+> and priorities in this section are retained only for historical context — do not act on
+> them; follow BEAT-the reference engine-PLAN's corrected order and the reconciled Build order (§7).
+
 The gap is **FDR-bound, not scoring-bound or generation-bound in isolation.** Three
 hard experimental facts from this session define the design constraints:
 
@@ -26,6 +36,13 @@ hard experimental facts from this session define the design constraints:
 axis it could be wrong on. That is the crux; everything else andes already has.
 
 ## 1. The gap, fully attributed (what the architecture must recover)
+
+> **⚠️ SUPERSEDED (2026-07-10): the 57 / 67 / 81 bucket split below is a different-run
+> decomposition and is NOT the authoritative audit.** The authoritative corrected audit
+> (`BEAT-the reference engine-PLAN-2026-07-08.md`, `SESSION-HANDOFF-2026-07-08.md` §2) decomposes the
+> 523 truth as **148 absent / 280 top1-by-mass (97 survive @1%) / 95 outranked (92 "truth
+> loses summed Y-ladder" + 3 ties)**. Treat the 57/67/81 rows as illustrative of the
+> lever→bucket mapping only, not as current counts; the corrected counts govern.
 
 | bucket | count | current cause | 2.0 lever |
 |---|---:|---|---|
@@ -104,18 +121,29 @@ RankSVM / LambdaMART (andes has a GBDT engine) to learn `wP`, `wG`, `K`, `J`, an
 per-feature weights on a held-out split of the truth (avoid leakage on the eval set;
 fit the engine-wide ModelStore path, not a glyco-only fork).
 
-## 7. Build order (each gate = honest @1% + decoys, numeric recovery, never top1-alone)
+## 7. Build order (reconciled 2026-07-10 with `BEAT-the reference engine-PLAN-2026-07-08.md`
+## §Build-sequence and `SESSION-HANDOFF-2026-07-08.md` §5; each gate = honest @1% + decoys,
+## numeric recovery, never top1-alone)
 
-0. **[DONE] gp / gp2 selector** — FDR-safe re-ranking. 221→287→(gp2 validating).
-1. **Hyperscore peptide score `P`** — replace RankScore in the fusion. Attacks the 57.
-   FDR-safe (re-ranking). Expected: 287 → ~305–320.
-2. **Strengthen glycan-axis decoy features** (richer composition/Y-ladder) so the
-   glycan-decoy gap is large. Prerequisite for §4; no ID change yet, enables step 3.
-3. **Paired glycan-decoy + expanded glycan DB + peptide-first generation, JOINTLY.**
-   Never expansion without the decoy channel. This is the make-or-break step for the
-   81 + 67. Gate hard: @1%+decoys must exceed 287.
-4. **Group-FDR + RT transfer** for the residual weak-evidence 67.
-5. **Learn all weights.**
+0. **P0 candidate audit (no code)** — run `glyco_outrank_audit.py` on the all-hit PIN and
+   add the `truth_absent` cause decomposition. Decides small selector fix vs learned scorer.
+1. **Selector cleanup (small code)** — decouple `ANDES_GLYCO_SELECTOR` from the implicit
+   `YINDEX` flip; audit/remove `SELECTOR_SHORTLIST_K=24`; add a regression asserting driver
+   collapse and PIN `select_emitted_hits` pick the same winner. Land carrier-inert scaffolding
+   OFF. **Gate: byte-identical to baseline.**
+2. **Selector-only validation** (`SELECTOR=gp`, pool unchanged → FDR-safe, adds no
+   candidates). Attacks the outranked/summed-Y-ladder-loss cases. **Gate: honest @1% + decoys
+   exceeds baseline; never top1-alone.**
+3. **Precursor-mass generation** (`ANDES_GLYCO_PRECURSOR_MASS=1`, decoys OFF first) — add the
+   missing ungated `Source::Db` sweep (`precursor − glycan.mass → bucket_index`). Judge on
+   top-1 presence + the audit first, then joint with the selector. Never expansion by itself
+   (it dilutes @1%).
+4. **Learn all weights** (`wP`, `wG`, `K`, `J`) via RankSVM/LambdaMART on a held-out split
+   (engine-wide ModelStore path, not a glyco-only fork).
+5. **Glycan-decoy 2D FDR / richer glycan features (LAST).** The unified glycan-decoy pile
+   crashed because the glycan-axis features are underpowered; strengthen the composition/
+   Y-ladder features first, then revisit — every added target hypothesis matched 1:1 by a
+   glycan-axis decoy. Validate @1%+decoys with numeric recovery, never top1-alone.
 
 ## 8. Honest risk assessment
 
@@ -131,7 +159,10 @@ fit the engine-wide ModelStore path, not a glyco-only fork).
   ground truth (synthetic/entrapment). Re-measure the reference engine's set with
   `glyco_recovery_numeric.py` conventions before declaring victory.
 
-**One-line summary:** andes already has comprehensive generation (`db_branch`), a
+**One-line summary:** andes has the `db_branch`/`bucket_index` generation *primitives* —
+NOT yet comprehensive generation: the fragment-driven enumeration path and the ungated
+precursor-mass `Source::Db` block that would sweep DB peptides by `precursor − glycan.mass`
+are still **missing/proposed** (see BEAT-the reference engine-PLAN Leg 1) — plus a
 FDR-safe fused selector (gp/gp2), and a glycan-decoy scaffold (G3). The missing keystone
 is a **glycan-aware 2D FDR with a strong-enough glycan-decoy channel** that lets
 comprehensive generation self-control instead of dilute — plus a **count-rewarding

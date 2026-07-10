@@ -12,8 +12,10 @@ Cause attribution needs TWO all-hit PINs of the SAME run set:
   --pin-expanded  a max-retention / precursor-mass-on all-hit PIN (optional)
 
 For each truth scan absent in --pin:
-  * present in --pin-expanded  -> "retention_recoverable"
-        (top-k / SHORTLIST_K=24 / retention dropped it; the DB *can* enumerate it)
+  * present in --pin-expanded  -> "expanded_recoverable"
+        (the expanded PIN recovers it: top-k / SHORTLIST_K=24 / retention dropped it,
+         or a precursor-mass source enumerates it; a neutral label, not a claim of
+         retention-specific evidence)
   * absent in both             -> "never_enumerated"
         (no source proposed the backbone: no precursor-mass DB source, or truly
          unsearchable — needs leg-1 precursor-mass enumeration to even appear)
@@ -30,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import re
 import statistics
 from collections import Counter, defaultdict
@@ -105,10 +108,17 @@ def load_truth(path: Path, mass_kind: str) -> dict[int, Truth]:
         for row in reader:
             if not row.get(scan_col) or not row.get(mass_col):
                 continue
-            scan = int(float(row[scan_col]))
-            mass = float(row[mass_col])
+            try:
+                scan = int(float(row[scan_col]))
+                mass = float(row[mass_col])
+            except ValueError:
+                continue
+            if not math.isfinite(mass):
+                continue
             if mass_kind == "neutral":
                 mass -= H2O_MASS
+            if not math.isfinite(mass):
+                continue
             truth[scan] = Truth(scan=scan, backbone_mass=mass)
     return truth
 
@@ -158,9 +168,22 @@ def to_float(row: dict[str, str], name: str, default: float = 0.0) -> float:
     if not value:
         return default
     try:
-        return float(value)
+        parsed = float(value)
     except ValueError:
         return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def to_float_opt(row: dict[str, str], name: str) -> float | None:
+    """Parse a numeric field; None if missing/malformed/non-finite (no 0-default)."""
+    value = row.get(name)
+    if not value:
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def parse_charge(row: dict[str, str], charge_cols: list[tuple[str, int]]) -> int:
@@ -191,18 +214,23 @@ def load_candidates(
             if not include_decoys and int(to_float(row, "Label", 1)) < 0:
                 continue
             # Numeric backbone = CalcMass - GlycanMass - H2O (peptide residue mass),
-            # the authoritative convention. The residue_mass() string parser mis-parses
-            # ~46% of multi-mod/long peptides and produces false absents; use it only
-            # as a fallback when the numeric columns are missing.
-            gly = to_float(row, "GlycanMass")
-            calc = to_float(row, "CalcMass")
-            backbone = calc - gly - H2O_MASS if calc > 0.0 else residue_mass(row.get(pep_col, ""))
-            if backbone is None:
+            # the authoritative convention. CalcMass and GlycanMass are an ATOMIC PAIR:
+            # only use the numeric formula when BOTH are present and finite, otherwise a
+            # missing/malformed GlycanMass would be silently treated as 0. Fall back to
+            # the residue_mass() string parser (unreliable: mis-parses ~46% of multi-mod/
+            # long peptides) only when the numeric columns are unavailable.
+            calc = to_float_opt(row, "CalcMass")
+            gly = to_float_opt(row, "GlycanMass")
+            if calc is not None and calc > 0.0 and gly is not None:
+                backbone = calc - gly - H2O_MASS
+            else:
+                backbone = residue_mass(row.get(pep_col, ""))
+            if backbone is None or not math.isfinite(backbone):
                 continue
             by_scan[scan].append(
                 Cand(
                     backbone_mass=backbone,
-                    glycan_mass=gly,
+                    glycan_mass=gly if gly is not None else 0.0,
                     charge=parse_charge(row, charge_cols),
                 )
             )
@@ -234,13 +262,17 @@ def main() -> None:
         if present:
             continue  # covered by glyco_outrank_audit.py (top1_correct / truth_outranked)
 
-        # Best charge/mass-split context from the baseline winner-ish surface:
-        # use the strongest-glycan competitor as a stand-in for the wrong winner.
-        wrong = max(base_cands, key=lambda c: c.glycan_mass, default=None)
+        # Charge/mass-split context from the baseline surface. This is NOT the
+        # production selector's winner: as a diagnostic proxy we take the
+        # strongest-glycan competitor (max GlycanMass). Fields are named proxy_*
+        # so they never claim to be the actually-selected winner.
+        proxy = max(base_cands, key=lambda c: c.glycan_mass, default=None)
         cause = "unknown"
         if expanded is not None:
+            # Recovered by the expanded PIN; a neutral label — do NOT claim this is
+            # retention-specific evidence (reserve retention_* for retention-only proof).
             cause = (
-                "retention_recoverable"
+                "expanded_recoverable"
                 if truth_present(expanded.get(scan, []), t, args.tol_da)
                 else "never_enumerated"
             )
@@ -250,12 +282,12 @@ def main() -> None:
             "truth_backbone_mass": f"{t.backbone_mass:.4f}",
             "mass_bucket": mass_bucket(t.backbone_mass),
             "n_base_candidates": str(len(base_cands)),
-            "wrong_charge": str(wrong.charge if wrong else 0),
-            "wrong_backbone_mass": f"{wrong.backbone_mass:.4f}" if wrong else "",
-            "wrong_glycan_mass": f"{wrong.glycan_mass:.4f}" if wrong else "",
-            "short_backbone_big_glycan": str(
-                bool(wrong and wrong.backbone_mass < t.backbone_mass - args.tol_da
-                     and wrong.glycan_mass > 0.0)
+            "proxy_charge": str(proxy.charge if proxy else 0),
+            "proxy_backbone_mass": f"{proxy.backbone_mass:.4f}" if proxy else "",
+            "proxy_glycan_mass": f"{proxy.glycan_mass:.4f}" if proxy else "",
+            "proxy_maxglycan_winner": str(
+                bool(proxy and proxy.backbone_mass < t.backbone_mass - args.tol_da
+                     and proxy.glycan_mass > 0.0)
             ),
         })
 
@@ -265,24 +297,25 @@ def main() -> None:
     print(f"absent in baseline --pin    : {absent}  ({100 * absent / max(total_truth, 1):.1f}%)")
     if expanded is not None:
         causes = Counter(r["cause"] for r in rows)
-        for key in ("retention_recoverable", "never_enumerated"):
+        for key in ("expanded_recoverable", "never_enumerated"):
             n = causes[key]
             print(f"  {key:22s}: {n:4d}  ({100 * n / max(absent, 1):.1f}% of absent)")
-        print("  (retention_recoverable = leg-2 retention/shortlist fix; "
-              "never_enumerated = needs leg-1 precursor-mass source)")
+        print("  (expanded_recoverable = appears in the expanded PIN (retention/shortlist "
+              "or precursor-mass source recovers it); never_enumerated = needs leg-1 "
+              "precursor-mass source)")
     else:
-        print("  (pass --pin-expanded to split retention-loss vs never-enumerated)")
+        print("  (pass --pin-expanded to split expanded-recoverable vs never-enumerated)")
 
-    charges = Counter(r["wrong_charge"] for r in rows)
-    print("absent by wrong-winner charge:")
+    charges = Counter(r["proxy_charge"] for r in rows)
+    print("absent by proxy max-glycan charge:")
     for z, n in sorted(charges.items(), key=lambda t: int(t[0])):
         print(f"  z={z or '?'}: {n}")
     buckets = Counter(r["mass_bucket"] for r in rows)
     print("absent by truth backbone mass (Da):")
     for b, n in sorted(buckets.items(), key=lambda t: int(t[0].split('-')[0])):
         print(f"  {b:>10s}: {n}")
-    split = sum(1 for r in rows if r["short_backbone_big_glycan"] == "True")
-    print(f"short-backbone/big-glycan wrong winner: {split}/{absent}")
+    split = sum(1 for r in rows if r["proxy_maxglycan_winner"] == "True")
+    print(f"proxy max-glycan winner (short backbone): {split}/{absent}")
     masses = [float(r["truth_backbone_mass"]) for r in rows]
     if masses:
         print(f"absent truth backbone mass: median={statistics.median(masses):.1f} "
@@ -290,8 +323,8 @@ def main() -> None:
 
     if args.out:
         fields = ["scan", "cause", "truth_backbone_mass", "mass_bucket", "n_base_candidates",
-                  "wrong_charge", "wrong_backbone_mass", "wrong_glycan_mass",
-                  "short_backbone_big_glycan"]
+                  "proxy_charge", "proxy_backbone_mass", "proxy_glycan_mass",
+                  "proxy_maxglycan_winner"]
         with args.out.open("w", newline="") as handle:
             writer = csv.DictWriter(handle, delimiter="\t", fieldnames=fields, extrasaction="ignore")
             writer.writeheader()

@@ -41,8 +41,11 @@ self-defeating — but the *built* version of (3) is underpowered (its decoy row
 nearly all peptide features) and already crashed with expansion, so it is **blocked on
 richer glycan features and demoted to LAST**. They are **coupled** — every past
 single-lever A/B came back flat or crashed *because* the other legs were missing. The
-code-audit finding: legs (1) and (3) are **already built but dormant/gated** (so this is
-wire-up-and-validate, not build-from-scratch), and leg (2) is half-built. **Corrected
+code-audit finding: leg (1) is only **PARTIALLY implemented** — the `db_branch`/`bucket_index`
+primitives exist, but the DB-peptide-by-precursor-mass **`Source` itself is missing** (it
+must be *added*, not merely wired up; see Leg 1); leg (3)'s glycan-decoy channel is **built
+but dormant/gated**; and leg (2) is half-built. So this is add-source-plus-wire-and-validate,
+not pure build-from-scratch. **Corrected
 order (handoff §5): P0 candidate audit → leg 2 selector → leg 1 precursor-mass → leg 3
 decoys last.**
 
@@ -193,7 +196,8 @@ rises while honest @1% falls).
 
 The **outranked half already exists**: `glyco_outrank_audit.py --out per-scan.tsv` already
 emits, per outranked scan, truth-vs-winner `RankScore`(ScoreP) + `YLadderScore`/`CoreYHits`/
-`Y0Y1Anchor`/`SialicConsistency`(ScoreG) with per-term gaps and the 57/49 reason split.
+`Y0Y1Anchor`/`SialicConsistency`(ScoreG) with per-term gaps and the corrected reason split
+(**92 "truth loses summed Y-ladder" + 3 ties**, superseding the earlier 57/49 parser artifact).
 Run it and read the per-scan TSV first.
 
 The **missing half is the `truth_absent` decomposition** — distinguish, for the 148 absent:

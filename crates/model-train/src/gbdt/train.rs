@@ -176,6 +176,40 @@ fn auc(scores: &[f32], labels: &[u8]) -> f64 {
     (sum_pos_ranks - (n_pos * (n_pos + 1)) as f64 / 2.0) / (n_pos as f64 * n_neg as f64)
 }
 
+/// WITHIN-GROUP mean AUC for the pairwise (RankNet) early-stop metric, negated so
+/// smaller = better (matching the loss-minimisation convention). A global AUC
+/// over all rows is wrong for a ranking objective: RankNet only ever compares
+/// rows INSIDE a group, so cross-group order is neither optimised nor meaningful.
+/// This averages the per-group AUC over the validation groups that contain BOTH a
+/// positive and a negative (the only ones where rank quality is defined), in
+/// deterministic group order. Returns `None` when NO validation group is
+/// two-class — the metric is undefined there, so the caller must not early-stop
+/// on it (CodeRabbit).
+fn grouped_neg_auc(scores: &[f32], labels: &[u8], groups: &[u32]) -> Option<f32> {
+    use std::collections::BTreeMap;
+    let mut by_group: BTreeMap<u32, (Vec<f32>, Vec<u8>)> = BTreeMap::new();
+    for i in 0..scores.len() {
+        let e = by_group.entry(groups[i]).or_default();
+        e.0.push(scores[i]);
+        e.1.push(labels[i]);
+    }
+    let mut sum = 0.0f64;
+    let mut n_groups = 0usize;
+    for (_g, (s, y)) in by_group {
+        let has_pos = y.iter().any(|&v| v == 1);
+        let has_neg = y.iter().any(|&v| v == 0);
+        if has_pos && has_neg {
+            sum += auc(&s, &y);
+            n_groups += 1;
+        }
+    }
+    if n_groups == 0 {
+        None
+    } else {
+        Some(-(sum / n_groups as f64) as f32)
+    }
+}
+
 /// Build quantile bin upper edges for one feature column.
 ///
 /// Returns up to `n_bins` distinct upper edges at evenly-spaced quantiles.
@@ -383,6 +417,8 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
 
     let val_n = val_rows.len();
     let val_y: Vec<u8> = val_rows.iter().map(|&r| ds.y[r]).collect();
+    // Validation group ids, for the pairwise WITHIN-GROUP early-stop metric.
+    let val_groups: Vec<u32> = val_rows.iter().map(|&r| ds.groups[r]).collect();
 
     // Pairwise (RankNet) prep: group the active rows by their group id and split
     // pos/neg, keeping only groups that have BOTH (the only ones that produce pairs).
@@ -404,6 +440,16 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     } else {
         Vec::new()
     };
+    // Pairwise training with no group carrying BOTH a positive and a negative
+    // produces zero pairs → zero gradients → a degenerate all-zero model. Fail
+    // loudly instead of silently "training" nothing (CodeRabbit).
+    if p.pairwise && pair_groups.is_empty() {
+        return Err(TrainError::QualityGate(
+            "pairwise (RankNet) training requested but no training group contains \
+             both a positive and a negative row — no rank pairs can be formed"
+                .into(),
+        ));
+    }
 
     // --- Step 4: Boosting loop ------------------------------------------------
     // raw scores in logit space; init 0 (sigmoid(0) = 0.5).
@@ -481,21 +527,32 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         trees.push(tree);
 
         // Evaluate validation loss for early stopping. Pairwise raw scores are not
-        // logloss-calibrated, so track NEGATIVE validation AUC (maximize rank quality)
-        // there; pointwise keeps logloss.
-        let vloss = if p.pairwise {
-            -auc(&raw_val, &val_y) as f32
+        // logloss-calibrated, so track NEGATIVE WITHIN-GROUP AUC (maximize rank
+        // quality) there; pointwise keeps logloss. A global AUC would score
+        // cross-group order the RankNet loss never optimises — misleading.
+        let vloss_opt = if p.pairwise {
+            grouped_neg_auc(&raw_val, &val_y, &val_groups)
         } else {
-            logloss(&raw_val, &val_y)
+            Some(logloss(&raw_val, &val_y))
         };
-        if vloss < best_loss - 1e-8 {
-            best_loss = vloss;
-            best_round = trees.len(); // number of trees at best
-            no_improve = 0;
-        } else {
-            no_improve += 1;
-            if no_improve >= p.early_stop_rounds {
-                break;
+        match vloss_opt {
+            Some(vloss) => {
+                if vloss < best_loss - 1e-8 {
+                    best_loss = vloss;
+                    best_round = trees.len(); // number of trees at best
+                    no_improve = 0;
+                } else {
+                    no_improve += 1;
+                    if no_improve >= p.early_stop_rounds {
+                        break;
+                    }
+                }
+            }
+            // No two-class validation group → the pairwise rank metric is
+            // undefined; keep this round's tree and DON'T early-stop on a bogus
+            // metric (eligibility is fixed across rounds, so this is all-or-none).
+            None => {
+                best_round = trees.len();
             }
         }
     }

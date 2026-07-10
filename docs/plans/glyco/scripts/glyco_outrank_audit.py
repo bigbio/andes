@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import re
 import statistics
 from collections import Counter, defaultdict
@@ -126,10 +127,18 @@ def load_truth(path: Path, mass_kind: str) -> dict[int, Truth]:
         for row in reader:
             if not row.get(scan_col) or not row.get(mass_col):
                 continue
-            scan = int(float(row[scan_col]))
-            mass = float(row[mass_col])
+            try:
+                scan_val = float(row[scan_col])
+                mass = float(row[mass_col])
+            except ValueError:
+                continue
+            if not math.isfinite(scan_val) or not math.isfinite(mass):
+                continue
+            scan = int(scan_val)
             if mass_kind == "neutral":
                 mass -= H2O_MASS
+            if not math.isfinite(mass):
+                continue
             truth[scan] = Truth(scan=scan, backbone_mass=mass)
     return truth
 
@@ -185,9 +194,22 @@ def to_float(row: dict[str, str], name: str, default: float = 0.0) -> float:
     if value is None or value == "":
         return default
     try:
-        return float(value)
+        parsed = float(value)
     except ValueError:
         return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def to_float_opt(row: dict[str, str], name: str) -> float | None:
+    """Parse a numeric field; None if missing/malformed/non-finite (no 0-default)."""
+    value = row.get(name)
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def to_int(row: dict[str, str], name: str, default: int = 0) -> int:
@@ -219,15 +241,21 @@ def load_candidates(path: Path, truth_scans: set[int], include_decoys: bool) -> 
                 continue
             peptide = row.get(pep_col, "")
             # Backbone mass numerically as CalcMass - GlycanMass - H2O (the peptide
-            # residue mass), which is the authoritative convention. Re-parsing the
-            # peptide string with residue_mass() is unreliable — it mis-parses ~46%
-            # of multi-mod / long peptides (e.g. a 3947 Da backbone read as 146 Da),
-            # which inflates the truth_absent bucket with false absents. Fall back to
-            # string parsing only when the numeric columns are missing.
-            calc = to_float(row, "CalcMass")
-            gly = to_float(row, "GlycanMass")
-            backbone = calc - gly - H2O_MASS if calc > 0.0 else residue_mass(peptide)
-            if backbone is None:
+            # residue mass), which is the authoritative convention. CalcMass and
+            # GlycanMass are an ATOMIC PAIR: only use the numeric formula when BOTH are
+            # present and finite, otherwise a missing/malformed GlycanMass would be
+            # silently treated as 0. Re-parsing the peptide string with residue_mass()
+            # is unreliable — it mis-parses ~46% of multi-mod / long peptides (e.g. a
+            # 3947 Da backbone read as 146 Da), inflating truth_absent with false
+            # absents. Fall back to string parsing only when the numeric columns are
+            # missing/invalid.
+            calc = to_float_opt(row, "CalcMass")
+            gly = to_float_opt(row, "GlycanMass")
+            if calc is not None and calc > 0.0 and gly is not None:
+                backbone = calc - gly - H2O_MASS
+            else:
+                backbone = residue_mass(peptide)
+            if backbone is None or not math.isfinite(backbone):
                 continue
             by_scan[scan].append(
                 Candidate(
@@ -377,6 +405,7 @@ def row_for(
 
 def print_summary(rows: list[dict[str, str]], selector: str, tol_da: float) -> None:
     total = len(rows)
+    denom = total or 1  # guard against an empty truth file (no ZeroDivisionError)
     counts = Counter(row.get("status", "") for row in rows)
     reasons = Counter(row.get("reason", "") for row in rows if row.get("reason"))
     rank_correct = sum(1 for row in rows if row.get("rank_top_correct") == "True")
@@ -387,9 +416,9 @@ def print_summary(rows: list[dict[str, str]], selector: str, tol_da: float) -> N
     print(f"backbone tol             : {tol_da:g} Da")
     for key in ("no_candidates", "truth_absent", "top1_correct", "truth_outranked"):
         n = counts[key]
-        print(f"{key:24s}: {n:5d}  ({100 * n / total:5.1f}%)")
-    print(f"rank-top correct         : {rank_correct:5d}  ({100 * rank_correct / total:5.1f}%)")
-    print(f"yladder-top correct      : {y_correct:5d}  ({100 * y_correct / total:5.1f}%)")
+        print(f"{key:24s}: {n:5d}  ({100 * n / denom:5.1f}%)")
+    print(f"rank-top correct         : {rank_correct:5d}  ({100 * rank_correct / denom:5.1f}%)")
+    print(f"yladder-top correct      : {y_correct:5d}  ({100 * y_correct / denom:5.1f}%)")
 
     if reasons:
         print("outrank reasons:")
@@ -448,11 +477,19 @@ def write_rows(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def print_examples(rows: list[dict[str, str]], limit: int) -> None:
+def print_examples(rows: list[dict[str, str]], limit: int, selector: str) -> None:
     if limit <= 0:
         return
     outranked = [row for row in rows if row.get("status") == "truth_outranked"]
-    outranked.sort(key=lambda row: (float(row.get("y_ladder_gap") or 0.0), float(row.get("rank_gap") or 0.0)), reverse=True)
+    # Primary sort key follows the selector: rank_gap for the rank selector, else
+    # y_ladder_gap (the other stays as the descending secondary key).
+    primary, secondary = (
+        ("rank_gap", "y_ladder_gap") if selector == "rank" else ("y_ladder_gap", "rank_gap")
+    )
+    outranked.sort(
+        key=lambda row: (float(row.get(primary) or 0.0), float(row.get(secondary) or 0.0)),
+        reverse=True,
+    )
     if not outranked:
         return
     print("worst outranked examples:")
@@ -488,7 +525,7 @@ def main() -> None:
     rows = [row_for(t, candidates.get(t.scan, []), args.selector, args.tol_da) for t in truth.values()]
     rows.sort(key=lambda row: int(row["scan"]))
     print_summary(rows, args.selector, args.tol_da)
-    print_examples(rows, args.examples)
+    print_examples(rows, args.examples, args.selector)
     if args.out:
         write_rows(args.out, rows)
         print(f"wrote {args.out}")

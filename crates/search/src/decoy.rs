@@ -117,8 +117,12 @@ fn count_sequon_starts(s: &[u8]) -> usize {
 /// to the target's own count via composition-preserving swaps (pull a spare S/T
 /// into the third slot of an `N-X-·` window). The result is a PERMUTATION of `orig`
 /// (composition, tryptic peptide count and mass distribution preserved) whose sequon
-/// count matches the target's — density parity without over- or under-shoot.
-/// Deterministic: windows scanned ascending, donor residues scanned ascending.
+/// count is raised toward — but never above — the target's. Deterministic: windows
+/// scanned ascending, donor residues scanned ascending. Runs once per protein at
+/// DB-build time (not a hot path), so each accepted swap RE-COUNTS the actual sequon
+/// total: the swap's side effects (it can also break/create a sequon at the donor
+/// window) make a naive `+1` unreliable, so a swap is committed only if it strictly
+/// increases the real count and never overshoots the target (adversarial review).
 fn sequon_preserving_reverse(orig: &[u8]) -> Vec<u8> {
     let n = orig.len();
     let mut r: Vec<u8> = orig.iter().rev().copied().collect();
@@ -138,7 +142,15 @@ fn sequon_preserving_reverse(orig: &[u8]) -> Vec<u8> {
                     && !(j >= 2 && r[j - 2] == b'N' && r[j - 1] != b'P')
             }) {
                 r.swap(i + 2, j);
-                cur += 1; // window i is now a sequon; donor j no longer anchors one
+                // Verify the ACTUAL delta (the swap can break/create a sequon at the
+                // donor window too). Keep the swap only if it strictly increases the
+                // count without overshooting; otherwise revert.
+                let new_count = count_sequon_starts(&r);
+                if new_count > cur && new_count <= target {
+                    cur = new_count;
+                } else {
+                    r.swap(i + 2, j); // revert
+                }
             }
         }
         i += 1;

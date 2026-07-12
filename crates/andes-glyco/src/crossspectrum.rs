@@ -255,13 +255,21 @@ pub fn propagate_transfers(
             .map(|s| s.len() as u32)
             .unwrap_or(1);
     }
-    // Deterministic total order.
+    // Deterministic TOTAL order. Two independent donors can produce candidates with
+    // identical (acceptor, backbone, glycan, peptide_idx) but different seed_score /
+    // rt_delta / flags, so those fields are tiebreakers too — otherwise seed
+    // permutation could change the relative output order (adversarial + code review).
     out.sort_by(|a, b| {
         a.acceptor_scan
             .cmp(&b.acceptor_scan)
             .then(a.backbone_mass.total_cmp(&b.backbone_mass))
             .then(a.glycan.mass.total_cmp(&b.glycan.mass))
             .then(a.peptide_idx.cmp(&b.peptide_idx))
+            .then(a.graph_support.cmp(&b.graph_support))
+            .then(a.seed_score.total_cmp(&b.seed_score))
+            .then(a.rt_delta.total_cmp(&b.rt_delta))
+            .then(a.ungated.cmp(&b.ungated))
+            .then(a.is_decoy.cmp(&b.is_decoy))
     });
     out
 }
@@ -448,24 +456,30 @@ mod tests {
         let sorted = sorted_view(&glycans);
         let bb = 1500.0_f64;
         let g = 2.0 * HEXNAC + 3.0 * HEX;
-        let seeds = vec![
+        // Two donors of the SAME peptide with DIFFERENT seed_score, so identical
+        // (acceptor, backbone, glycan, peptide_idx) keys still differ on a tiebreaker
+        // field — the exact case the extra sort keys must order deterministically.
+        let base_seeds = [
             Seed { scan: 1, peptide_idx: 0, backbone_mass: bb, rt_seconds: Some(900.0), seed_score: 1.0, is_decoy: false },
+            Seed { scan: 2, peptide_idx: 0, backbone_mass: bb, rt_seconds: Some(905.0), seed_score: 9.0, is_decoy: false },
             Seed { scan: 9, peptide_idx: 1, backbone_mass: bb + 100.0, rt_seconds: Some(902.0), seed_score: 1.0, is_decoy: false },
         ];
-        let mk = |order: &[usize]| {
-            let base = [GlycoNode { scan: 2, precursor_neutral: bb + g, rt_seconds: Some(901.0) },
-                GlycoNode { scan: 3, precursor_neutral: bb + g, rt_seconds: Some(903.0) },
+        let mk = |sorder: &[usize], norder: &[usize]| {
+            let seeds: Vec<Seed> = sorder.iter().map(|&i| base_seeds[i].clone()).collect();
+            let base = [GlycoNode { scan: 3, precursor_neutral: bb + g, rt_seconds: Some(901.0) },
+                GlycoNode { scan: 5, precursor_neutral: bb + g, rt_seconds: Some(903.0) },
                 GlycoNode { scan: 4, precursor_neutral: bb + 100.0 + g, rt_seconds: Some(904.0) }];
-            let nodes: Vec<GlycoNode> = order.iter().map(|&i| base[i].clone()).collect();
+            let nodes: Vec<GlycoNode> = norder.iter().map(|&i| base[i].clone()).collect();
             propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 25.0, true)
         };
-        let a = mk(&[0, 1, 2]);
-        let b = mk(&[2, 0, 1]);
-        let c = mk(&[1, 2, 0]);
-        let key = |v: &[TransferredCandidate]| -> Vec<(u32, u64, u64)> {
-            v.iter().map(|t| (t.acceptor_scan, t.backbone_mass.to_bits(), t.glycan.mass.to_bits())).collect()
+        // Full-field key (all tiebreakers) across permutations of BOTH seeds and nodes.
+        let key = |v: &[TransferredCandidate]| -> Vec<(u32, u64, u64, u32, u32, u64, u64, bool, bool)> {
+            v.iter().map(|t| (t.acceptor_scan, t.backbone_mass.to_bits(), t.glycan.mass.to_bits(),
+                t.peptide_idx, t.graph_support, t.seed_score.to_bits(), t.rt_delta.to_bits(),
+                t.ungated, t.is_decoy)).collect()
         };
-        assert_eq!(key(&a), key(&b));
-        assert_eq!(key(&a), key(&c));
+        let a = key(&mk(&[0, 1, 2], &[0, 1, 2]));
+        assert_eq!(a, key(&mk(&[2, 1, 0], &[2, 0, 1])));
+        assert_eq!(a, key(&mk(&[1, 0, 2], &[1, 2, 0])));
     }
 }

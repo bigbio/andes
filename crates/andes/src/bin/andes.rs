@@ -1814,21 +1814,39 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        // FDR-TRUST GUARD (Codex review): reverse/shuffle decoys are generated from
+        // FDR-TRUST GUARD (adversarial review): reverse/shuffle decoys are generated from
         // the TARGET proteome and do NOT preserve N-X-S/T sequon DENSITY, but glyco
         // scoring gates BOTH targets and decoys on that sequon — so a generated
         // decoy search space is systematically different and the glyco FDR is
         // ANTI-CONSERVATIVE (q-values users should not trust). Trustworthy glyco FDR
         // needs an EXTERNAL target+decoy FASTA consumed with `--decoy-strategy none`.
-        if !cli.decoy_strategy.eq_ignore_ascii_case("none") {
+        // `sequon-reverse` was added precisely to preserve N-X-S/T sequon density, so
+        // it does NOT trip this warning; only the sequon-depleting strategies do.
+        if !cli.decoy_strategy.eq_ignore_ascii_case("none")
+            && !cli.decoy_strategy.eq_ignore_ascii_case("sequon-reverse")
+            && !cli.decoy_strategy.eq_ignore_ascii_case("sequon")
+        {
             eprintln!(
                 "WARN: --glyco with --decoy-strategy {ds} GENERATES decoys ({ds} of the \
                  target proteome), which does NOT preserve N-X-S/T sequon density that \
                  glyco scoring gates on — the resulting .glyco.pin FDR is \
-                 ANTI-CONSERVATIVE and its q-values should NOT be trusted. For \
-                 trustworthy glyco FDR, supply an EXTERNAL target+decoy FASTA and use \
-                 `--decoy-strategy none --decoy-prefix <PREFIX>`.",
+                 ANTI-CONSERVATIVE and its q-values should NOT be trusted. Use \
+                 `--decoy-strategy sequon-reverse`, or supply an EXTERNAL target+decoy \
+                 FASTA with `--decoy-strategy none --decoy-prefix <PREFIX>`.",
                 ds = cli.decoy_strategy
+            );
+        }
+        // Multi-file transfer guard (code review): the cross-spectrum transfer
+        // join is scan-keyed, and scan numbering conventionally restarts per file, so
+        // multiple --spectrum inputs would collide and the fail-loud duplicate-scan
+        // check would abort — but only AFTER the full (expensive) search. Warn up front.
+        if cli.glyco_transfer && spectrum_paths.len() > 1 {
+            eprintln!(
+                "WARN: --glyco-transfer with {} --spectrum inputs: the transfer join is \
+                 scan-keyed and per-file scan numbering (common in mzML/.raw) will \
+                 collide and ABORT the run after the full search. Run --glyco-transfer \
+                 per file, or pre-disambiguate scan ids across files.",
+                spectrum_paths.len()
             );
         }
     }

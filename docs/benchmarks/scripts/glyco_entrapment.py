@@ -33,8 +33,12 @@ discoveries, r = entrapment:target ratio):
         N_pst = # entrapment discoveries whose PAIRED TARGET was NOT discovered (< s)
         N_pts = # entrapment discoveries whose PAIRED TARGET was discovered but scored LOWER
 Ordering always: lower_bound <= paired <= combined. Verdict at the q=0.01 line:
-    paired <= 0.01           -> evidence andes controls FDR
+    combined <= 0.01         -> evidence andes controls FDR (conservative)
     lower_bound > 0.01       -> andes FAILS to control FDR
+NOTE: the exact paired estimator needs an explicit peptide<->entrapment map
+(--pairs, not yet wired); until then the tool reports the COMBINED upper bound as
+a conservative proxy in the paired column, so a <=1% reading still evidences
+control -- it is just looser than the true paired estimator would be.
 """
 import argparse
 import re
@@ -89,7 +93,11 @@ def _count_sequon_starts(s):
 
 def _restore_sequon_density(shuf, target_count):
     """Greedily raise the shuffle's sequon-start count toward target_count via
-    composition-preserving swaps (same rule as andes' SequonReverse decoy)."""
+    composition-preserving swaps (same rule as andes' SequonReverse decoy). Each
+    swap can also break/create a sequon at the donor window, so re-count the actual
+    total and keep the swap only if it strictly increases the count without
+    overshooting (a naive +1 is unreliable and would leave entrapment proteins with
+    FEWER sequons than targets, biasing the FDP optimistically -- adversarial review)."""
     r = list(shuf)
     n = len(r)
     cur = _count_sequon_starts(shuf)
@@ -100,7 +108,11 @@ def _restore_sequon_density(shuf, target_count):
             while j < n:
                 if r[j] in "ST" and not (j >= 2 and r[j - 2] == "N" and r[j - 1] != "P"):
                     r[i + 2], r[j] = r[j], r[i + 2]
-                    cur += 1
+                    new_count = _count_sequon_starts("".join(r))
+                    if new_count > cur and new_count <= target_count:
+                        cur = new_count
+                    else:
+                        r[i + 2], r[j] = r[j], r[i + 2]  # revert
                     break
                 j += 1
         i += 1
@@ -160,6 +172,8 @@ def fdp(args):
             hdr.index("Peptide") if "Peptide" in hdr else None)
         if qi is None or pi is None:
             sys.exit("need a Percolator .psms with q-value + proteinIds columns")
+        dec = args.decoy_prefix
+        n_decoy = 0
         for ln in f:
             p = ln.rstrip("\n").split("\t")
             if len(p) <= pi:
@@ -169,36 +183,41 @@ def fdp(args):
             except ValueError:
                 continue
             accs = [a for a in p[pi:] if a]
+            # Classify each discovery. DECOY rows (all accessions carry the decoy
+            # prefix) are EXCLUDED entirely — counting them in n_tau would inflate the
+            # denominator and understate the FDP (adversarial review). A Percolator
+            # --results-psms table already excludes decoys, but be robust if a raw
+            # combined table is passed.
+            if bool(accs) and all(a.startswith(dec) for a in accs):
+                n_decoy += 1
+                continue
             is_ent = bool(accs) and all(a.startswith("ENT_") for a in accs)
             pepkey = _bare_peptide(p[pepi]) if pepi is not None else str(len(rows))
             rows.append((q, is_ent, pepkey))
     rows.sort(key=lambda r: r[0])  # best (lowest q) first
+    if n_decoy:
+        print(f"# excluded {n_decoy} decoy rows (prefix '{dec}') from the target count")
 
-    # Paired bookkeeping needs, per entrapment discovery, whether its paired
-    # target was discovered and at what rank. With 1:1 shuffle pairing keyed by
-    # accession we approximate the pairing at the PSM level: a target discovery
-    # "covers" an entrapment discovery of the same backbone peptide is not
-    # directly available from accessions alone, so we use a standard PSM-level surrogate: pair target/entrapment by the
-    # discovery ORDER within each (already sorted) list. For a faithful paired
-    # estimate, pass --pairs to map peptide<->entrapment-peptide explicitly.
     r_ratio = args.ratio
-    print(f"{'q<=':>7} {'n_tau':>7} {'n_eps':>6} {'lower':>8} {'combined':>9} {'paired':>8}")
+    # NOTE: the third column is the COMBINED estimator, NOT the paired estimator —
+    # the exact paired terms (N_pst/N_pts) need an explicit peptide<->entrapment map
+    # (--pairs, not yet wired). Combined is a valid (conservative) upper bound, so a
+    # <=1% reading still evidences control; it is just looser than paired would be.
+    print(f"{'q<=':>7} {'n_tau':>7} {'n_eps':>6} {'lower':>8} {'combined':>9} {'comb(=paired proxy)':>20}")
     for thr in (0.005, 0.01, 0.02, 0.05):
         ntau = sum(1 for q, e, _ in rows if q <= thr and not e)
         neps = sum(1 for q, e, _ in rows if q <= thr and e)
         denom = neps + ntau
         lower = neps / denom if denom else 0.0
         combined = neps * (1 + 1.0 / r_ratio) / denom if denom else 0.0
-        # Paired (r=1) surrogate: without an explicit peptide<->entrapment map we
-        # report the combined bound as the paired upper bound's conservative proxy
-        # and flag it; supply --pairs + peptide keys for the exact N_pst/N_pts terms.
-        paired = combined
+        paired = combined  # conservative proxy; see note above
         flag = "  <-- 1% line" if abs(thr - 0.01) < 1e-9 else ""
         print(f"{thr:>7.3f} {ntau:>7d} {neps:>6d} {100*lower:>7.2f}% "
-              f"{100*combined:>8.2f}% {100*paired:>7.2f}%{flag}")
-    print("\nVerdict: paired<=1% at the 1% line -> evidence of FDR control; "
-          "lower>1% -> FDR NOT controlled. Average over >=20 random build-fasta "
-          "seeds for a stable empirical-FDR curve (mean +/- 1.96*SD).")
+              f"{100*combined:>8.2f}% {100*paired:>17.2f}%{flag}")
+    print("\nVerdict: combined<=1% at the 1% line -> evidence of FDR control; "
+          "lower>1% -> FDR NOT controlled. (Combined is the conservative proxy for "
+          "the tighter paired estimator, which needs --pairs.) Average over >=20 "
+          "random build-fasta seeds for a stable empirical-FDR curve (mean +/- 1.96*SD).")
 
 
 def main():
@@ -215,6 +234,8 @@ def main():
     f = sub.add_parser("fdp", help="compute entrapment FDP from an ID table")
     f.add_argument("--ids", required=True, help="Percolator .psms (q-value + proteinIds)")
     f.add_argument("--ratio", type=float, default=1.0, help="entrapment:target ratio r")
+    f.add_argument("--decoy-prefix", default="XXX_",
+                   help="accession prefix marking decoy rows to exclude from n_tau")
     f.set_defaults(func=fdp)
     args = ap.parse_args()
     args.func(args)

@@ -224,6 +224,7 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     partial_glycan_by: 0.0,
 ///     y0y1_anchor_score: 0.0,
 ///     sialic_consistency: 0.0,
+///     glycan_y_hit_frac: 0.0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
 ///     is_transferred: false,
@@ -269,6 +270,12 @@ pub struct GlycoPsmKey {
     /// the one oxonium-derived feature that discriminates glycans of different
     /// sialic content on one spectrum. 0.0 when no glycan is resolved.
     pub sialic_consistency: f32,
+    /// COMPLETENESS of the assigned composition's Y-ladder: fraction of its rungs
+    /// (Y0 + each cumulative monosaccharide add) matched in the spectrum, in [0,1].
+    /// Complementary to `y_ladder_intensity_score` (summed intensity): a wrong
+    /// composition of the same total mass matches fewer of its OWN rungs. Additive
+    /// glyco PIN feature; 0.0 when no glycan is resolved. (See `glycan_y_hit_frac`.)
+    pub glycan_y_hit_frac: f32,
     /// Number of core-Y ions matched in the spectrum.
     pub core_y_hits: u8,
     /// Pre-computed monoisotopic mass of the glycan (0.0 when `glycan` is None).
@@ -452,6 +459,7 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.4,
             sialic_consistency: 0.1,
+            glycan_y_hit_frac: 0.0,
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
@@ -488,6 +496,7 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.7,
             sialic_consistency: 0.2,
+            glycan_y_hit_frac: 0.0,
             core_y_hits: 5,
             backbone_mass: 1500.0,
             is_transferred: false,
@@ -513,6 +522,7 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
+            glycan_y_hit_frac: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
@@ -532,7 +542,7 @@ mod tests {
             spectrum_idx: 0, glycan: None, glycan_source: Source::Db,
             oxonium_summed_frac: 0.0, n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0, y_ladder_decoy_score: 0.0, partial_glycan_by: 0.0,
-            y0y1_anchor_score: 0.0, sialic_consistency: 0.0, core_y_hits: 0,
+            y0y1_anchor_score: 0.0, sialic_consistency: 0.0, glycan_y_hit_frac: 0.0, core_y_hits: 0,
             glycan_mass: 0.0, backbone_mass: 0.0,
             is_transferred: false, transfer_graph_support: 0,
             transfer_seed_score: 0.0, transfer_rt_delta: 0.0, transfer_ungated: false,

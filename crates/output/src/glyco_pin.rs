@@ -116,6 +116,7 @@ fn write_glyco_header<W: Write>(
         "OxoniumScore".to_string(),
         "NCoreOxoniumIons".to_string(),
         "YLadderScore".to_string(),
+        "GlycanYHitFrac".to_string(), // additive: Y-ladder completeness (matched-rung fraction)
         "PartialGlycanBY".to_string(), // idea B: sequence-specific partial-glycan b/y evidence
         "CoreYHits".to_string(),
         "GlycanMass".to_string(),
@@ -252,6 +253,11 @@ fn write_glyco_psm_row<W: Write>(
     // YLadderScore: the decoy score for a glycan-decoy row, else the target score.
     let y_ladder = glycan_decoy_override.unwrap_or(key.y_ladder_intensity_score);
     write_double_tab(writer, y_ladder as f64)?;
+    // GlycanYHitFrac (additive): fraction of the assigned composition's Y-ladder
+    // rungs matched — a completeness measure complementary to YLadderScore's summed
+    // intensity. Same value on a glycan-decoy row (peptide-axis-informative;
+    // symmetric on the glycan axis, so it can never inflate the 2D-FDR null).
+    write_double_tab(writer, key.glycan_y_hit_frac as f64)?;
     // PartialGlycanBY (idea B): sequence-specific partial-glycan b/y evidence.
     write_double_tab(writer, key.partial_glycan_by as f64)?;
     write!(writer, "\t{}", key.core_y_hits)?;
@@ -645,6 +651,7 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
+            glycan_y_hit_frac: 0.0,
             core_y_hits: 5,
             glycan_mass,
             backbone_mass: 1500.0,
@@ -859,6 +866,7 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
+            glycan_y_hit_frac: 0.0,
             core_y_hits: 3,
             glycan_mass,
             backbone_mass: peptide_neutral_mass,
@@ -1036,6 +1044,7 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
+            glycan_y_hit_frac: 0.0,
             core_y_hits: 4,
             glycan_mass,
             backbone_mass: candidates[0].peptide.mass(),

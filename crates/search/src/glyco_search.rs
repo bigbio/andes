@@ -31,7 +31,7 @@ use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
 use andes_glyco::backbone::{
-    core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
+    core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity, glycan_y_intensity_decoy,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
@@ -1467,6 +1467,12 @@ fn score_spectrum_glyco(
                         Some(g) => glycan_y_intensity(&spec.peaks, &stats, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
                         None => core_y_intensity(&spec.peaks, &stats, bb_neutral, tol_ppm, max_frag_charge) as f32,
                     },
+                    // Composition Y-ladder COMPLETENESS (additive): fraction of the
+                    // assigned glycan's rungs matched. 0.0 for de-novo (no composition).
+                    glycan_y_hit_frac: match &bb_hit.glycan {
+                        Some(g) => glycan_y_hit_frac(&spec.peaks, &stats, bb_neutral, g, tol_ppm, max_frag_charge, None) as f32,
+                        None => 0.0,
+                    },
                     // Glycan-axis decoy ladder (G3): same composition, intermediate
                     // Y-rungs shifted. Seed from the composition so the decoy ladder
                     // is stable per glycan (a fixed decoy "structure"). 0.0 for
@@ -2094,6 +2100,7 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
+            glycan_y_hit_frac: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

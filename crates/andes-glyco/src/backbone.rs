@@ -641,6 +641,49 @@ pub fn glycan_y_intensity_decoy(
     score
 }
 
+/// Fraction of a composition's Y-ladder rungs (Y0 + each cumulative add) that are
+/// MATCHED in the spectrum — a scale-free COMPLETENESS measure complementary to the
+/// intensity-weighted [`glycan_y_intensity`]: two compositions of the same total
+/// mass share Y0/Y1 and the top rung but differ on the interior, so a WRONG
+/// composition matches fewer of its own rungs even when its summed intensity looks
+/// similar. `decoy_seed = Some(seed)` corrupts the interior rungs exactly as
+/// [`glycan_y_intensity_decoy`] does (same shift, Y0/Y1/top kept), giving an
+/// exchangeable decoy counterpart so the feature can be emitted symmetrically for
+/// glycan-decoy PIN rows. Returns hits/total in `[0, 1]`.
+pub fn glycan_y_hit_frac(
+    peaks: &[(f64, f32)],
+    stats: &SpectrumStats,
+    bb_neutral: f64,
+    comp: &crate::glycan_db::GlycanComp,
+    tol_ppm: f64,
+    max_charge: u8,
+    decoy_seed: Option<u64>,
+) -> f64 {
+    let adds = glycan_cumulative_adds(comp);
+    let hit = |neutral: f64| -> bool {
+        best_frag_intensity(peaks, stats.sorted, neutral, tol_ppm, max_charge) > 0.0
+    };
+    let total = adds.len() + 1; // Y0 + one rung per cumulative add
+    let mut hits = usize::from(hit(bb_neutral)); // Y0
+    let last = adds.len().saturating_sub(1);
+    let mut cum = 0.0;
+    for (ai, m) in adds.iter().enumerate() {
+        cum += m;
+        // Decoy: shift interior rungs only (keep Y1 = ai 0 and the top rung = ai last).
+        let shift = match decoy_seed {
+            Some(seed) if ai != 0 && ai != last => {
+                let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                1.0 + (h % 29_000) as f64 / 1000.0
+            }
+            _ => 0.0,
+        };
+        if hit(bb_neutral + cum + shift) {
+            hits += 1;
+        }
+    }
+    hits as f64 / total as f64
+}
+
 /// G2 Y0/Y1 peptide-mass ANCHOR score.
 ///
 /// Y0 (the bare peptide backbone) and Y1 (peptide + one innermost HexNAc) are the
@@ -1024,6 +1067,34 @@ mod tests {
             count_core_y_hits(&peaks, &stats, residue, 20.0, 3) < 6,
             "residue mass (H2O too low) must NOT match the neutral-anchored ladder"
         );
+    }
+
+    /// Glycan-Y hit fraction: full ladder → 1.0; missing rungs → <1.0; the decoy
+    /// (shifted interior) matches fewer of the composition's rungs.
+    #[test]
+    fn glycan_y_hit_frac_full_vs_partial_vs_decoy() {
+        use crate::glycan_db::GlycanComp;
+        use crate::glycan_mass::{HEX, HEXNAC};
+        let bb = 1500.0_f64;
+        let g = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0, mass: 2.0 * HEXNAC + 3.0 * HEX };
+        // Full ladder present (Y0 + all 5 cumulative adds).
+        let mut full: Vec<(f64, f32)> = vec![(bb + PROTON, 1000.0)];
+        let mut cum = 0.0;
+        for m in [HEXNAC, HEXNAC, HEX, HEX, HEX] {
+            cum += m;
+            full.push((bb + cum + PROTON, 500.0));
+        }
+        full.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let sf = SpectrumStats::new(&full);
+        assert!((glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs() < 1e-9, "full ladder → 1.0");
+        // Only Y0 present → 1/6.
+        let p0 = vec![(bb + PROTON, 1000.0)];
+        let s0 = SpectrumStats::new(&p0);
+        let f0 = glycan_y_hit_frac(&p0, &s0, bb, &g, 20.0, 3, None);
+        assert!((f0 - 1.0 / 6.0).abs() < 1e-9, "Y0 only → 1/6, got {f0}");
+        // Decoy shifts interior rungs → fewer of ITS rungs match the true ladder.
+        let dec = glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, Some(123));
+        assert!(dec < 1.0, "decoy ladder must miss shifted interior rungs, got {dec}");
     }
 
     /// Transfer acceptor gate: ≥min_hits core-Y AND Y1 (bb+HexNAc) mandatory.

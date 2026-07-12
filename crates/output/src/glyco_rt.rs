@@ -319,7 +319,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
-            glycan_y_hit_frac: 0.0,
             core_y_hits: 0,
             backbone_mass: 0.0,
             is_transferred: false,

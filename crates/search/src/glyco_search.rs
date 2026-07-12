@@ -31,7 +31,7 @@ use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
 use andes_glyco::backbone::{
-    core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity, glycan_y_intensity_decoy,
+    core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
@@ -173,19 +173,36 @@ fn glycan_decoy_seed(g: &GlycanComp) -> u64 {
     s
 }
 
-/// Order peptide-first candidates for the per-spectrum cap: strongest b/y
-/// support first, ties broken by the unique candidate index.
+/// Deterministic, label-BLIND index hash used only to break `match_count` ties in
+/// [`order_peptide_first`]. A raw `cand_idx` tiebreak is target/decoy-CORRELATED
+/// (generated decoys are appended after all targets → higher indices), so at the
+/// `MAX_PF` cap boundary the kept subset would systematically favour targets over
+/// equal-count decoys — an anti-conservative FDR bias. Knuth's multiplicative hash
+/// is a bijection on `u32` that scatters the two index ranges into an interleaved
+/// order, decorrelating the kept subset from the target/decoy layout while staying
+/// fully deterministic (same input → same order).
+#[inline]
+fn pf_tiebreak_hash(idx: u32) -> u32 {
+    idx.wrapping_mul(0x9E37_79B1)
+}
+
+/// Order peptide-first candidates for the per-spectrum cap: strongest b/y support
+/// first, ties broken deterministically but label-BLIND (see [`pf_tiebreak_hash`]).
 ///
 /// DETERMINISM (critical): `frag_index.query` returns `(cand_idx, match_count)`
 /// pairs in an internally-unordered Vec. Sorting by `match_count` ALONE with an
-/// unstable sort leaves tied-count peptides in a non-deterministic order, and
-/// the downstream per-spectrum cap then keeps a different subset of tied
-/// peptides each run. Because the glyco target/decoy separation is marginal,
-/// that ~2% per-scan candidate jitter swung Percolator @1% FDR by ~40%
-/// run-to-run. The unique `cand_idx` secondary key makes the comparator a TOTAL
-/// order, so the sorted result — and thus the capped subset — is reproducible.
+/// unstable sort leaves tied-count peptides in a non-deterministic order, and the
+/// downstream per-spectrum cap then keeps a different subset of tied peptides each
+/// run (that ~2% per-scan jitter swung Percolator @1% FDR ~40% run-to-run). The
+/// hashed-index secondary key + raw `cand_idx` final key make the comparator a
+/// TOTAL order (reproducible) WITHOUT the target-enriching cap bias a raw-index
+/// tiebreak introduced (adversarial review finding).
 fn order_peptide_first(pf: &mut [(u32, u32)]) {
-    pf.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    pf.sort_unstable_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| pf_tiebreak_hash(a.0).cmp(&pf_tiebreak_hash(b.0)))
+            .then_with(|| a.0.cmp(&b.0))
+    });
 }
 
 fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<BackboneHit> {
@@ -1299,12 +1316,6 @@ fn score_spectrum_glyco(
                         Some(g) => glycan_y_intensity(&spec.peaks, &stats, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
                         None => core_y_intensity(&spec.peaks, &stats, bb_neutral, tol_ppm, max_frag_charge) as f32,
                     },
-                    // Composition Y-ladder COMPLETENESS (additive): fraction of the
-                    // assigned glycan's rungs matched. 0.0 for de-novo (no composition).
-                    glycan_y_hit_frac: match &bb_hit.glycan {
-                        Some(g) => glycan_y_hit_frac(&spec.peaks, &stats, bb_neutral, g, tol_ppm, max_frag_charge, None) as f32,
-                        None => 0.0,
-                    },
                     // Glycan-axis decoy ladder (G3): same composition, intermediate
                     // Y-rungs shifted. Seed from the composition so the decoy ladder
                     // is stable per glycan (a fixed decoy "structure"). 0.0 for
@@ -1695,39 +1706,35 @@ mod tests {
     fn order_peptide_first_is_deterministic_across_input_orders() {
         // Two peptides tied at count 9, two tied at 7, one unique at 5 — the
         // tied groups are where a single-key sort would be non-deterministic.
-        let canonical = vec![
-            (3u32, 9u32),
-            (8u32, 9u32),
-            (1u32, 7u32),
-            (5u32, 7u32),
-            (2u32, 5u32),
-        ];
-
-        // A few representative permutations of the SAME multiset of candidates.
+        // Representative permutations of the SAME multiset of candidates.
         let permutations = vec![
-            vec![(8, 9), (5, 7), (2, 5), (3, 9), (1, 7)],
+            vec![(8u32, 9u32), (5, 7), (2, 5), (3, 9), (1, 7)],
             vec![(1, 7), (3, 9), (2, 5), (8, 9), (5, 7)],
             vec![(2, 5), (1, 7), (5, 7), (8, 9), (3, 9)],
             vec![(5, 7), (8, 9), (3, 9), (1, 7), (2, 5)],
         ];
 
-        for perm in permutations {
+        // The order the sort produces (label-BLIND `pf_tiebreak_hash` within a tied
+        // count, NOT raw cand_idx) is the deterministic reference every permutation
+        // must collapse to.
+        let mut reference = permutations[0].clone();
+        order_peptide_first(&mut reference);
+
+        for perm in &permutations {
             let mut got = perm.clone();
             order_peptide_first(&mut got);
             assert_eq!(
-                got, canonical,
-                "input order {perm:?} must collapse to the canonical strongest-first, \
-                 cand_idx-tiebroken order"
+                &got, &reference,
+                "input order {perm:?} must collapse to the same deterministic order"
             );
         }
 
-        // Explicitly document the invariant: counts descending; within an equal
-        // count, cand_idx ascending.
-        assert_eq!(
-            canonical,
-            vec![(3, 9), (8, 9), (1, 7), (5, 7), (2, 5)],
-            "count DESC, then cand_idx ASC"
-        );
+        // Primary key invariant: counts grouped non-increasing (strongest first).
+        for w in reference.windows(2) {
+            assert!(w[0].1 >= w[1].1, "counts must be non-increasing: {reference:?}");
+        }
+        assert_eq!(reference[0].1, 9, "strongest count first");
+        assert_eq!(reference.last().unwrap().1, 5, "weakest count last");
     }
 
     /// Isotope-sweep GLYCAN ANNOTATION regression. Under the Y-ion-first
@@ -1931,7 +1938,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
-            glycan_y_hit_frac: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

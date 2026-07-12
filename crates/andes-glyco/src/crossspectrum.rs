@@ -473,7 +473,8 @@ mod tests {
             propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 25.0, true)
         };
         // Full-field key (all tiebreakers) across permutations of BOTH seeds and nodes.
-        let key = |v: &[TransferredCandidate]| -> Vec<(u32, u64, u64, u32, u32, u64, u64, bool, bool)> {
+        type CandKey = (u32, u64, u64, u32, u32, u64, u64, bool, bool);
+        let key = |v: &[TransferredCandidate]| -> Vec<CandKey> {
             v.iter().map(|t| (t.acceptor_scan, t.backbone_mass.to_bits(), t.glycan.mass.to_bits(),
                 t.peptide_idx, t.graph_support, t.seed_score.to_bits(), t.rt_delta.to_bits(),
                 t.ungated, t.is_decoy)).collect()

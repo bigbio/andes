@@ -125,7 +125,7 @@ Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1
 |---|---|---|---|---|
 | `--output-tsv` | path | *(off)* | Optional tab-separated PSM report (§3b). Skipped in bench mode (`--max-spectra > 0`). | Java `-outputFormat 1` with output path |
 
-**Environment variable:** set `MSGF_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use). The legacy name `MSGFRUST_RSS_PROBE=1` is still accepted with a one-line deprecation warning and will be removed in the next quality cleanup.
+**Environment variable:** set `ANDES_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use). See §9 for the full list of internal environment variables.
 
 ---
 
@@ -592,7 +592,43 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 
 ---
 
-## 9. License and citation
+## 9. Glycopeptide search (experimental) & advanced knobs
+
+Enable N-glycopeptide search with `--glyco` (requires a `.glyco.pin` output; the
+backbone model is the N-X-S/T sequon). Cross-spectrum backbone transfer is an
+opt-in second pass via `--glyco-transfer`. All glyco tuning is exposed as **hidden
+CLI flags** (advanced; the shipped defaults are validated and rarely need changing):
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--glyco-backbone-top-k` | 50 | Max backbone candidates per spectrum (set large to approximate an exhaustive ceiling). |
+| `--glyco-gp-k` / `-gp-j` / `-gp-h` | 50 / 5 / 1 | Weights of the `gp` fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (the shipped, default selector). |
+| `--glyco-pf-charge` | 2 | Charge states the peptide-first fragment index covers (b/y at 1..=N, clamped 1..=3); targets high-charge glycopeptides. |
+| `--glyco-max-pf` | 1024 | Max peptide-first candidates per spectrum. |
+| `--glyco-decoy` | off | Emit paired glycan-axis decoy rows for experimental 2D (peptide × glycan) FDR. |
+| `--glyco-transfer` | off | Enable cross-spectrum backbone transfer (two-pass). |
+| `--glyco-transfer-seed-fdr` | 0.05 | q-value threshold for confident donor seeds. |
+| `--glyco-rt-window` | 1800 | RT co-elution window (seconds) for transfer. |
+| `--glyco-transfer-ungated` | off | Skip the RT co-elution gate (unsafe research opt-in). |
+| `--glyco-transfer-min-support` | 1 | Minimum independent-donor graph support to inject a transfer. |
+| `--glyco-transfer-core-y` | 3 | Acceptor-side core-Y quorum (incl. mandatory Y1) to accept a transfer. |
+| `--debug-glyco` | off | **Diagnostic only:** emit all candidate rows per scan (incl. de-novo) + transfer diagnostics. The resulting PIN must NEVER be fed to an FDR tool. |
+
+FDR is always computed externally (Percolator) — andes never computes FDR itself.
+
+### Internal environment variables
+
+A few remaining `ANDES_*` environment variables are **internal / advanced** and are
+NOT part of the supported search interface. They do not change default search output.
+
+- **Model training** (only read by the hidden `train*` subcommands): `ANDES_GEO_SEGMENTS`, `ANDES_GEO_MAX_RANK`, `ANDES_GEO_OCCUPANCY`, `ANDES_GEO_MAX_TIERS`, `ANDES_GEO_MAX_FRAG_CHARGE` (partition-geometry derivation), `ANDES_SEED_GEOMETRY` (reuse seed geometry), `ANDES_DENSE_NOISE` (noise sampler), `ANDES_V1_STORE` / `ANDES_V1_OUT`, `ANDES_TRAIN_BENCH`.
+- **Advanced scoring**: `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` (windowed peak filtering; unset = model-tolerance default).
+- **Read-only developer instrumentation** (no effect on output): `ANDES_RSS_PROBE` (memory logging), `ANDES_CHIMERIC_OVERLAP` (fragment-overlap diagnostic), `Andes_TRACE_IONS` / `Andes_TRACE_PEP` (ion/peptide trace logging).
+- **Test harness only**: `ANDES_TEST_D`, `ANDES_TEST_RAW`, `ANDES_TEST_PERCOLATOR_BIN`.
+
+---
+
+## 10. License and citation
 
 andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution and the project's origin in MS-GF+.
 

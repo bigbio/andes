@@ -2364,22 +2364,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and write a separate `.glyco.pin` file.  The standard PIN is skipped.
     if cli.glyco {
         let t_glyco = std::time::Instant::now();
-        // Use the curated common list (~600 glycans) by default so that ALL
-        // backbone candidates can be b/y-scored in phase-1 (avoids the
-        // Y-ladder pre-filter ceiling).  The full ~2510-entry list is available
-        // via n_glycan_list() for research/exhaustive searches.
-        // ANDES_GLYCO_FULL_GLYCANS=1 swaps to the full 2510-composition list:
-        // a gap-diagnostic showed the common list covers only 79.5% of truth
-        // glycans (loss 107/523) vs 85.5% for the full list — the extra
-        // coverage costs generation/scoring time (more backbones per spectrum).
-        let glycan_list = if std::env::var("ANDES_GLYCO_FULL_GLYCANS")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
-            andes_glyco::glycan_db::n_glycan_list()
-        } else {
-            andes_glyco::glycan_db::n_glycan_list_common()
-        };
+        // Use the curated common list (~600 glycans) so that ALL backbone candidates
+        // can be b/y-scored in phase-1 (avoids the Y-ladder pre-filter ceiling). The
+        // full ~2510-entry list (n_glycan_list()) was A/B-refuted at 1% FDR — the
+        // extra decoys dilute separation faster than the added coverage helps.
+        let glycan_list = andes_glyco::glycan_db::n_glycan_list_common();
         let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
         let spectra_for_glyco: &[_] = if cli.glyco_max_spectra > 0 {
             &spectra[..spectra.len().min(cli.glyco_max_spectra)]

@@ -243,9 +243,7 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_k: f32,
     pub gp_j: f32,
     pub gp_h: f32,
-    /// Upward charge-set expansion (ANDES_GLYCO_CHARGE_EXPAND) and glycan-Y
-    /// primary selection (ANDES_GLYCO_SELECT). Same hoisting rationale.
-    pub charge_expand: u8,
+    /// Glycan-Y primary selection (ANDES_GLYCO_SELECT). Same hoisting rationale.
     pub y_primary: bool,
     pub glyco_decoy_on: bool,
     pub features_collapse: bool,
@@ -276,7 +274,6 @@ pub struct GlycoCtxOwned {
     gp_k: f32,
     gp_j: f32,
     gp_h: f32,
-    charge_expand: u8,
     y_primary: bool,
     glyco_decoy_on: bool,
     features_collapse: bool,
@@ -311,15 +308,9 @@ impl GlycoCtxOwned {
         // UNLOCKED backbones (transfer_peptide_idx: None), bypassing the seed
         // target/decoy lock (design bug #1) — anti-conservative. It is superseded by
         // the driver's `--glyco-transfer` path (peptide-locked, decoy-symmetric), so
-        // the in-driver path is force-DISABLED regardless of the env var. `black_box`
-        // keeps `false` opaque so the (retained, still-tested) legacy block below
-        // stays compiled rather than becoming provably-unreachable dead code.
-        if std::env::var("ANDES_GLYCO_CROSSSPECTRUM").as_deref() == Ok("1") {
-            eprintln!(
-                "[glyco] ANDES_GLYCO_CROSSSPECTRUM is DISABLED (FDR-unsound: target-only, \
-                 unlocked transfers). Use --glyco-transfer (peptide-locked, decoy-symmetric)."
-            );
-        }
+        // the in-driver path is force-DISABLED. `black_box` keeps `false` opaque so
+        // the (retained, still-tested) legacy block below stays compiled rather than
+        // becoming provably-unreachable dead code.
         let cross_spectrum_on = std::hint::black_box(false);
         // G3 glycan-axis decoy (default OFF). When off we must NOT compute the decoy
         // Y-ladder per hit — it is unused and ~doubles the glyco composition-ladder
@@ -351,13 +342,9 @@ impl GlycoCtxOwned {
                     .filter_map(|l| l.trim().parse::<i32>().ok())
                     .collect()
             });
-        // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
-        // core-Y cap and the driver's backbone_top_k — to measure the true findable
-        // ceiling. Large finite cap avoids the max_features usize overflow. SLOW.
-        let exhaustive = std::env::var("ANDES_GLYCO_EXHAUSTIVE")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
+        // The backbone candidate cap is `--glyco-backbone-top-k` (set a large value
+        // to approximate an exhaustive/no-truncation ceiling measurement).
+        let effective_top_k = backbone_top_k;
         // Phase G1: glycan-Y-first candidate SELECTION (a glycan-Y-complementary
         // index generates backbones from the strong glycan-Y ladder) + TWO-AXIS
         // retention (keep backbones in top_k by peptide-b/y OR by glycan-Y evidence),
@@ -374,7 +361,6 @@ impl GlycoCtxOwned {
         let gp_k = glyco_gp_k();
         let gp_j = glyco_gp_j();
         let gp_h = glyco_gp_h();
-        let charge_expand = glyco_charge_expand();
         let y_primary = y_primary_selection();
         // AXIS-2 Y-retention pairing (P0b): the combined selector can only rescue a
         // true backbone that SURVIVED top-k truncation. P0b showed Y-aware retention
@@ -486,7 +472,6 @@ impl GlycoCtxOwned {
             gp_k,
             gp_j,
             gp_h,
-            charge_expand,
             y_primary,
             glyco_decoy_on,
             features_collapse,
@@ -526,7 +511,6 @@ impl GlycoCtxOwned {
             gp_k: self.gp_k,
             gp_j: self.gp_j,
             gp_h: self.gp_h,
-            charge_expand: self.charge_expand,
             y_primary: self.y_primary,
             glyco_decoy_on: self.glyco_decoy_on,
             features_collapse: self.features_collapse,
@@ -549,18 +533,6 @@ impl GlycoCtxOwned {
 /// precursor mass is absorbed by an OVERSIZED glycan — exactly the R7 signature
 /// (winner backbone −688 Da median, oversized glycan). This is the same class of
 /// defect as the "charge-1-only blind spot" in the standard search.
-///
-/// Reads `ANDES_GLYCO_CHARGE_EXPAND` once; `N≥1` widens the tried charge set
-/// UPWARD by `N` (see [`glyco_charges_to_try`]). Default (unset / `0`) preserves
-/// the exact current behavior so the 253/97 baseline is byte-identical and the fix
-/// can be A/B'd on the VM.
-fn glyco_charge_expand() -> u8 {
-    std::env::var("ANDES_GLYCO_CHARGE_EXPAND")
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or(0)
-}
-
 /// Derive the charge states to enumerate for a glyco spectrum.
 ///
 /// - `expand == 0` (default): EXACT legacy behavior — trust the reported charge as
@@ -673,7 +645,7 @@ fn score_spectrum_glyco(
             // true higher charge (under-called by the acquisition) can be enumerated —
             // the P0 charge blind spot (R7: z5 = 100% absent). See its doc comment.
             let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, ctx.charge_expand);
+                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, 0);
             // Max fragment charge for Y-ladder matching: a fragment cannot exceed
             // the precursor charge, and glyco Y-ions are frequently 2+/3+ (matched
             // up to +3 inside the Y functions). Default 3 when the precursor charge
@@ -1697,7 +1669,7 @@ pub fn glyco_search_run(
                 None => return None,
             };
             let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, ctx.charge_expand);
+                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, 0);
             let mut transfer: Vec<BackboneHit> = Vec::new();
             for &z in &charges_to_try {
                 let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;

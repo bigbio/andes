@@ -410,8 +410,16 @@ impl GlycoCtxOwned {
                 has_nxst_sequon(&res)
             })
             .collect();
+        // CHARGE-AWARE peptide-first index (reviewer feedback): index b/y at charges
+        // 1..=PF_CHARGE so multiply-charged backbone ions of large/high-charge
+        // glycopeptides (z4/z5+, whose b/y land at +2/+3) can select their peptide.
+        // Default 2 (+1/+2); 1 = legacy +1-only. Clamped 1..=3 in the index.
+        let pf_charge: u8 = std::env::var("ANDES_GLYCO_PF_CHARGE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
         let frag_index = if !peptide_first_on {
-            FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01))
+            FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01), pf_charge)
         } else {
             let seq_entries: Vec<(u32, &model::peptide::Peptide)> = candidates
                 .iter()
@@ -437,7 +445,7 @@ impl GlycoCtxOwned {
                     est_mb
                 );
             }
-            FragmentIndex::build(seq_entries.iter().copied(), fragment_tolerance_da.max(0.01))
+            FragmentIndex::build(seq_entries.iter().copied(), fragment_tolerance_da.max(0.01), pf_charge)
         };
         // Sorted glycan masses for the peptide-first glycan-by-subtraction lookup.
         let glycan_sorted: Vec<(f64, usize)> = {

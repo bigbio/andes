@@ -1951,6 +1951,7 @@ pub(crate) fn compute_psm_features(
         abs_delta_rt: 0.0,
         delta_rt_norm: 0.0,
         predicted_rt_min: 0.0,
+        isobaric_rt_margin: 0.0, // glyco-only; set by populate_glyco_rt_features
     }
 }
 

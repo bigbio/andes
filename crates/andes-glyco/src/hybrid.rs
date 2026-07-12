@@ -58,6 +58,15 @@ pub struct BackboneHit {
     pub transfer_seed_score: f32,
     pub transfer_rt_delta: f32,
     pub transfer_ungated: bool,
+    /// FDR-soundness (design bug #1): a transferred backbone is LOCKED to the
+    /// exact Pass-1 seed peptide it was borrowed from. `Some(candidate_idx)` for
+    /// a transferred hit; `None` for every natively-generated hit. When set,
+    /// Pass-2 MUST score ONLY this candidate (not every mass-matching peptide),
+    /// so a decoy seed emits a decoy-labeled row and the target/decoy graph stays
+    /// symmetric. `transfer_seed_is_decoy` is the seed's label, asserted equal to
+    /// `candidates[transfer_peptide_idx].is_decoy` at scoring time (fail loud).
+    pub transfer_peptide_idx: Option<u32>,
+    pub transfer_seed_is_decoy: bool,
 }
 
 /// DB-branch backbone enumeration.
@@ -90,6 +99,8 @@ pub fn db_branch(
                     transfer_seed_score: 0.0,
                     transfer_rt_delta: 0.0,
                     transfer_ungated: false,
+                    transfer_peptide_idx: None,
+                    transfer_seed_is_decoy: false,
                 })
             } else {
                 None
@@ -323,6 +334,8 @@ pub fn hybrid_candidates_presolved(
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            transfer_peptide_idx: None,
+            transfer_seed_is_decoy: false,
         });
     }
 
@@ -994,9 +1007,12 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            transfer_peptide_idx: None,
+            transfer_seed_is_decoy: false,
         };
         assert!(!native.is_transferred);
         assert_eq!(native.transfer_graph_support, 0);
+        assert_eq!(native.transfer_peptide_idx, None);
 
         let transferred = BackboneHit {
             backbone_mass: 1500.0,
@@ -1010,11 +1026,15 @@ mod tests {
             transfer_seed_score: 0.87,
             transfer_rt_delta: 12.5,
             transfer_ungated: true,
+            transfer_peptide_idx: Some(42),
+            transfer_seed_is_decoy: true,
         };
         assert!(transferred.is_transferred);
         assert_eq!(transferred.transfer_graph_support, 5);
         assert_eq!(transferred.transfer_seed_score, 0.87);
         assert_eq!(transferred.transfer_rt_delta, 12.5);
         assert!(transferred.transfer_ungated);
+        assert_eq!(transferred.transfer_peptide_idx, Some(42));
+        assert!(transferred.transfer_seed_is_decoy);
     }
 }

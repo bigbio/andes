@@ -129,9 +129,14 @@ fn write_glyco_header<W: Write>(
         "TransferUngated".to_string(),      // 1 = RT gate skipped (no RT)
         // Glyco RT rank (ADDITIVE, appended LAST): within-scan rank of this
         // candidate's AbsDeltaRT among competing glycoforms, normalized to (0,1].
-        // The GlycReSoft isobaric-glycoform-disambiguation feature. 0.0 (neutral)
+        // The isobaric-glycoform-disambiguation feature. 0.0 (neutral)
         // when the scan has <2 candidate hits or RT is unavailable.
         "DeltaRTRank".to_string(),
+        // Isobaric-glycan RT margin (ADDITIVE): how much better the assigned
+        // composition fits the observed RT than the best near-isobaric alternative
+        // on the same backbone. >0 ⇒ composition RT-consistent. 0.0
+        // when RT unavailable / no isobaric alternative / de-novo hit.
+        "IsobaricRTMargin".to_string(),
         // Terminal columns
         "Peptide".to_string(),
         "Proteins".to_string(),
@@ -284,6 +289,12 @@ fn write_glyco_psm_row<W: Write>(
     // row shares the row_idx of its paired target, so it takes that hit's rank
     // (its AbsDeltaRT is the same peptide-axis RT delta). 0.0 when <2 candidates.
     write_double_tab(writer, crate::glyco_rt::delta_rt_rank(scan_hits, row_idx))?;
+
+    // Isobaric-glycan RT margin (ADDITIVE): from `psm.features`, populated by
+    // `populate_glyco_rt_features`. >0 ⇒ the assigned composition fits the observed
+    // RT better than the best near-isobaric alternative. A glycan-decoy
+    // row shares its paired target's psm, so it inherits the same value.
+    write_double_tab(writer, psm.features.isobaric_rt_margin as f64)?;
 
     // Peptide column: backbone sequence + optional glycan tag.
     let glycan_tag = match &key.glycan {
@@ -689,7 +700,10 @@ mod tests {
         assert!(cols.contains(&"DeltaRTRank"), "header missing DeltaRTRank");
         assert!(pos("DeltaRTNorm") < pos("DeltaRTRank"));
         assert!(pos("TransferUngated") < pos("DeltaRTRank"));
-        assert_eq!(pos("DeltaRTRank") + 1, pos("Peptide"), "DeltaRTRank must be last before Peptide");
+        // IsobaricRTMargin is appended after DeltaRTRank, immediately before Peptide.
+        assert!(cols.contains(&"IsobaricRTMargin"), "header missing IsobaricRTMargin");
+        assert!(pos("DeltaRTRank") < pos("IsobaricRTMargin"));
+        assert_eq!(pos("IsobaricRTMargin") + 1, pos("Peptide"), "IsobaricRTMargin must be last before Peptide");
         // Header column count == a written data row's column count (consistency).
     }
 

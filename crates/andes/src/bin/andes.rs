@@ -432,6 +432,35 @@ struct SearchArgs {
     #[arg(long = "debug-glyco", hide = true, default_value_t = false)]
     debug_glyco: bool,
 
+    /// Emit paired glycan-axis decoy rows for 2D (peptide × glycan) FDR
+    /// discrimination (experimental). Off by default. Hidden.
+    #[arg(long = "glyco-decoy", hide = true, default_value_t = false)]
+    glyco_decoy: bool,
+
+    /// Cross-spectrum transfer: q-value threshold for confident donor seeds
+    /// (--glyco-transfer only). Hidden; default 0.05 (native GBDT q is conservative).
+    #[arg(long = "glyco-transfer-seed-fdr", hide = true, default_value_t = 0.05f64)]
+    glyco_transfer_seed_fdr: f64,
+
+    /// Cross-spectrum transfer: RT co-elution window in seconds. Hidden; default 1800.
+    #[arg(long = "glyco-rt-window", hide = true, default_value_t = 1800.0f32)]
+    glyco_rt_window: f32,
+
+    /// Cross-spectrum transfer: skip the RT co-elution gate (unsafe research opt-in,
+    /// transfers across the whole run when RT is missing). Hidden; default off.
+    #[arg(long = "glyco-transfer-ungated", hide = true, default_value_t = false)]
+    glyco_transfer_ungated: bool,
+
+    /// Cross-spectrum transfer: minimum independent-donor graph support to inject a
+    /// transferred backbone. Hidden; default 1 (no gate).
+    #[arg(long = "glyco-transfer-min-support", hide = true, default_value_t = 1u32)]
+    glyco_transfer_min_support: u32,
+
+    /// Cross-spectrum transfer: acceptor-side core-Y quorum (incl. mandatory Y1) to
+    /// accept a transfer. Hidden; default 3 (0 disables the gate).
+    #[arg(long = "glyco-transfer-core-y", hide = true, default_value_t = 3u8)]
+    glyco_transfer_core_y: u8,
+
     /// Enable cross-spectrum backbone transfer (single-invocation two-pass;
     /// glyco mode only). Pass-1 glyco PSMs are native-GBDT-rescored in-process,
     /// 1%-FDR confident backbones (target+decoy) are propagated to co-eluting
@@ -2410,6 +2439,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
+            glyco_decoy: cli.glyco_decoy,
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
@@ -2434,10 +2464,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             stem.with_extension("glyco.pin")
         };
         // G3: opt-in glycan-axis decoy rows (2D-FDR discrimination on the glycan
-        // axis). Default off — no change to the shipping PIN.
-        let emit_glycan_decoy = std::env::var("ANDES_GLYCO_DECOY")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        // axis), from --glyco-decoy. Default off — no change to the shipping PIN.
+        let emit_glycan_decoy = cli.glyco_decoy;
 
         // ── Task 8d: single-invocation cross-spectrum backbone transfer ──
         // Off by default (`--glyco-transfer`); when off, behave EXACTLY as
@@ -2559,11 +2587,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // confident set exists. 0.05 recovers the Percolator-equivalent
             // confident seed set; final FDR is still Percolator on the merged
             // PIN (the symmetric decoy graph keeps that honest). Tunable for A/B.
-            let seed_q: f64 = std::env::var("ANDES_GLYCO_SEED_FDR")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&q: &f64| q > 0.0 && q <= 1.0)
-                .unwrap_or(0.05);
+            let seed_q: f64 = cli.glyco_transfer_seed_fdr.clamp(f64::MIN_POSITIVE, 1.0);
             let seeds = glyco_seeds::seeds_at_fdr(&rows, seed_q, |scan| {
                 seed_lookup.get(&scan).map(|&(pep_idx, bb, rt, _spec_idx)| (pep_idx, bb, rt))
             });
@@ -2622,10 +2646,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                 v
             };
-            let rt_window: f32 = std::env::var("ANDES_GLYCO_RT_WINDOW")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1800.0);
+            let rt_window: f32 = cli.glyco_rt_window;
             const MIN_GLYCAN: f64 = 406.0;
             // FDR-soundness (design bug #4): require an RT co-elution check on both
             // ends by default. `ANDES_GLYCO_TRANSFER_UNGATED=1` is the explicit
@@ -2633,9 +2654,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // (research only). `propagate_transfers` now scales the glycan-match
             // tolerance PER ACCEPTOR from `glyco_tol_ppm` (design bug #5), so no
             // fixed representative-mass tolerance is passed.
-            let require_rt = std::env::var("ANDES_GLYCO_TRANSFER_UNGATED")
-                .map(|v| v != "1")
-                .unwrap_or(true);
+            let require_rt = !cli.glyco_transfer_ungated;
             let transferred = andes_glyco::crossspectrum::propagate_transfers(
                 &seeds, &nodes, &glycan_sorted, &glycan_list, rt_window, MIN_GLYCAN,
                 glyco_tol_ppm, require_rt,
@@ -2646,19 +2665,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // linked sibling spectra (a real glycoform ladder), cutting the
             // mass-coincidence singletons that the wide "any glycan-delta" edge
             // otherwise floods in. Default 1 (no gate); tune via env for A/B.
-            let min_support: u32 = std::env::var("ANDES_GLYCO_MIN_SUPPORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1);
+            let min_support: u32 = cli.glyco_transfer_min_support;
             // Acceptor-side core-Y acceptance gate (a published spectrum-expansion
             // requirement): a transfer is accepted only if the acceptor spectrum
             // PHYSICALLY shows >= this many core-Y ions WITH Y1 (peptide+HexNAc)
             // present — otherwise transfer floods mass-coincidence candidates onto
             // spectra with no glycan evidence. Default 3; 0 disables the gate.
-            let transfer_core_y: u8 = std::env::var("ANDES_GLYCO_TRANSFER_CORE_Y")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3);
+            let transfer_core_y: u8 = cli.glyco_transfer_core_y;
             let mut gated_out = 0usize;
             let mut injected: std::collections::BTreeMap<usize, Vec<andes_glyco::hybrid::BackboneHit>> =
                 std::collections::BTreeMap::new();

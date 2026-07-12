@@ -61,6 +61,8 @@ pub struct GlycoConfig {
     /// (including de-novo mass-residual hits) instead of the honest top-1 collapse,
     /// and print transfer diagnostics. A debug PIN must NEVER be fed to an FDR tool.
     pub debug: bool,
+    /// Emit paired glycan-axis decoy rows for experimental 2D-FDR (`--glyco-decoy`).
+    pub glyco_decoy: bool,
 }
 
 impl Default for GlycoConfig {
@@ -72,6 +74,7 @@ impl Default for GlycoConfig {
             pf_charge: 2,
             max_pf: 1024,
             debug: false,
+            glyco_decoy: false,
         }
     }
 }
@@ -335,12 +338,10 @@ impl GlycoCtxOwned {
         // the (retained, still-tested) legacy block below stays compiled rather than
         // becoming provably-unreachable dead code.
         let cross_spectrum_on = std::hint::black_box(false);
-        // G3 glycan-axis decoy (default OFF). When off we must NOT compute the decoy
-        // Y-ladder per hit — it is unused and ~doubles the glyco composition-ladder
-        // cost, so leaving it on would slow the shipping default path.
-        let glyco_decoy_on = std::env::var("ANDES_GLYCO_DECOY")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        // G3 glycan-axis decoy (--glyco-decoy, default OFF). When off we must NOT
+        // compute the decoy Y-ladder per hit — it is unused and ~doubles the glyco
+        // composition-ladder cost, so leaving it on would slow the shipping default.
+        let glyco_decoy_on = cfg.glyco_decoy;
         // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
         // glyco_pin.rs), so computing the expensive ~40-feature vector
         // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
@@ -1440,13 +1441,10 @@ pub fn glyco_search_run(
     // masses from pass-1 PSMs with a strong core-Y ladder (well-fragmented
     // glycoforms), then transfer them to poorly-fragmenting sibling glycoforms.
     const CONF_MIN_CORE_Y: u8 = 3;
-    // G4 RT co-elution half-width (seconds). a cross-spectrum glyco engine uses ~±1800 s;
-    // tunable to tighten the gate on short gradients. RT gating is MANDATORY —
-    // it is why the un-gated NULL-v1 scaffold was OFF.
-    let rt_window: f32 = std::env::var("ANDES_GLYCO_RT_WINDOW")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1800.0);
+    // G4 RT co-elution half-width (seconds). Fixed default for this (dead, force-
+    // disabled) legacy in-driver transfer path; the live --glyco-transfer path uses
+    // the --glyco-rt-window flag. RT gating is MANDATORY.
+    let rt_window: f32 = 1800.0;
     // Confident donors carry their spectrum RT so transfer only fires to
     // co-eluting acceptors. Donors must be (a) strong-ladder (core_y_hits >=
     // CONF_MIN_CORE_Y), (b) a TARGET peptide (never a decoy — a decoy with a

@@ -8,92 +8,6 @@ use crate::glycan_db::GlycanComp;
 use crate::hybrid::Source;
 use std::cmp::Ordering;
 
-/// Collapse-selection mode, read ONCE from the environment (process-constant).
-///
-/// The top-1-per-scan collapse (required for honest per-scan TDC FDR) keeps a
-/// single PSM per spectrum, so *which* backbone/glycan it keeps determines the
-/// recovered ID. The DEFAULT selects by the core-Y ladder first (the reliable
-/// glyco evidence in HCD); `ANDES_GLYCO_SELECT=rank` forces the old peptide b/y
-/// `rank_score`-first rule (kept as an escape hatch for A/B and regression).
-///
-/// DETERMINISTIC RESULT (2026-07-05, PXD025455 Fc3_r1; clean1==clean2
-/// byte-identical): core-Y-ladder primary = 218 @1% FDR / 90 backbone-correct;
-/// b/y-rank primary = 128 / 53 — a +70% win. In stepped-HCD the peptide b/y
-/// ions are sparse and rank_score is noisy, so it lifts wrong backbones into the
-/// per-scan winner slot; the core-Y ladder is the stronger, more reliable
-/// evidence. The earlier "ladder is WORSE (260→197)" verdict was a
-/// NON-DETERMINISM artifact — it was measured on the pre-fix pipeline whose ±90
-/// run-to-run jitter swamped the real +90 signal (see order_peptide_first fix).
-pub fn y_primary_selection() -> bool {
-    y_primary_from_env(std::env::var("ANDES_GLYCO_SELECT").ok().as_deref())
-}
-
-/// Pure decision for [`y_primary_selection`], split out so the default/override
-/// logic is testable without racing on a process-global env var.
-fn y_primary_from_env(v: Option<&str>) -> bool {
-    match v {
-        // Explicit escape hatch to the OLD b/y-rank-primary collapse.
-        Some(s) if s.eq_ignore_ascii_case("rank") || s.eq_ignore_ascii_case("byrank") => false,
-        // Unset, "yladder", or any other value → core-Y ladder primary (default).
-        _ => true,
-    }
-}
-
-/// Selector mode, read ONCE from the environment (process-constant).
-///
-/// DEFAULT (`legacy`): the per-scan winner is chosen by the bare b/y rank-LLR
-/// (`collapse_cmp`), byte-identical to the shipping 253/97 baseline. When set to
-/// `combined`, a PEPTIDE-CONDITIONED re-rank of the accepted-backbone shortlist
-/// is applied (P1b + L4): the winner is chosen by [`glyco_combined_selector_score`],
-/// which folds the peptide-mass-conditioned Y0/Y1 anchor and (optionally) the
-/// frag/rich-ion intensity-model LLR into the b/y rank so a true backbone with a
-/// strong Y0/Y1 anchor but a weaker b/y rank than a competitor is selected #1.
-///
-/// P0b proved retention (YINDEX) surfaces the true backbone into the pool but the
-/// bare-rank selector still out-ranks it; the combined selector is the lever that
-/// converts a recovered candidate into a top-1 correct id.
-pub fn combined_selector_on() -> bool {
-    combined_selector_from_env(std::env::var("ANDES_GLYCO_SELECTOR").ok().as_deref())
-}
-
-/// Pure decision for [`combined_selector_on`], split out so the default/override
-/// logic is testable without racing on a process-global env var.
-fn combined_selector_from_env(v: Option<&str>) -> bool {
-    matches!(v, Some(s) if s.eq_ignore_ascii_case("combined"))
-}
-
-/// Seed weights for the combined peptide-conditioned selector (P1b/L4). These
-/// are SEED values only — the roadmap calls for learning them (a glyco search engine uses a
-/// RankSVM w=0.35 glycan / 0.65 peptide fusion). They are exposed as constants
-/// so the b/y-vs-anchor-vs-intensity balance is a single, tunable knob group.
-///
-/// - `W_BY` scales the bare b/y rank-LLR (the backbone-SEQUENCE axis; already the
-///   sole legacy selector). Kept at 1.0 so the combined score is an ADDITIVE
-///   composition on top of the existing rank, never a rewrite of `score_psm`.
-/// - `W_ANCHOR` scales the peptide-mass-conditioned Y0/Y1 anchor intensity
-///   (range ~0..4: 2 ions × ≤2 charges, each a base-peak fraction). Seeded high
-///   enough that a strong anchor (~2-4) overcomes the R7 median rank gap (~7) in
-///   favour of the true backbone — the exact failure P0b diagnosed.
-/// - `W_INTENSITY` scales the frag/rich-ion intensity-model LLR (0.0 when no
-///   frag/rich-ion model is loaded, so this term is inert on models without it).
-pub const GLYCO_SEL_W_BY: f32 = 1.0;
-pub const GLYCO_SEL_W_ANCHOR: f32 = 8.0;
-pub const GLYCO_SEL_W_INTENSITY: f32 = 4.0;
-
-/// Combined peptide-conditioned selector score (P1b + L4).
-///
-/// Additive composition of the three peptide-conditioned axes andes already
-/// computes: the bare b/y rank-LLR (`rank`), the peptide-mass-conditioned Y0/Y1
-/// anchor intensity (`y0y1_anchor`), and the frag/rich-ion intensity-model LLR
-/// (`intensity_llr`; pass 0.0 to disable that axis, e.g. when no model is loaded
-/// or to ship the anchor-only variant). Higher is better. This does NOT modify
-/// `score_psm`; it composes on top of its output.
-pub fn glyco_combined_selector_score(rank: f32, y0y1_anchor: f32, intensity_llr: f32) -> f32 {
-    GLYCO_SEL_W_BY * rank
-        + GLYCO_SEL_W_ANCHOR * y0y1_anchor
-        + GLYCO_SEL_W_INTENSITY * intensity_llr
-}
-
 /// Default balance constant for the `gp` fused selector (leg 2). K scales the
 /// glycan core-Y ladder term against the peptide b/y rank-LLR so the two
 /// comparably-ranged axes compete (RankScore ~0..63, YLadder ~0..1.5 on the
@@ -170,17 +84,6 @@ pub fn glyco_gp_fused_score(
     h: f32,
 ) -> f32 {
     rank + k * ladder + j * core_y_hits + h * hyperscore
-}
-
-/// True when `ANDES_GLYCO_SELECTOR=gp` — the leg-2 fused selector. Distinct from
-/// [`combined_selector_on`] (`=combined`); both default OFF → legacy `collapse_cmp`.
-pub fn gp_selector_on() -> bool {
-    gp_selector_from_env(std::env::var("ANDES_GLYCO_SELECTOR").ok().as_deref())
-}
-
-/// Pure decision for [`gp_selector_on`], testable without racing the env var.
-fn gp_selector_from_env(v: Option<&str>) -> bool {
-    matches!(v, Some(s) if s.eq_ignore_ascii_case("gp"))
 }
 
 /// Total order for the top-1-per-scan collapse: `max_by(collapse_cmp(...))`
@@ -302,81 +205,6 @@ mod tests {
     use crate::glycan_mass::{HEX, HEXNAC};
 
     #[test]
-    fn y_primary_default_is_yladder_and_rank_forces_off() {
-        // DETERMINISTIC RESULT (2026-07-05, PXD025455 Fc3_r1): core-Y-ladder
-        // primary collapse = 218 @1% / 90 bb-correct vs b/y-rank primary = 128 /
-        // 53 — a +70% win. The earlier "ladder is worse (260→197)" verdict was a
-        // non-determinism artifact. So the DEFAULT (env unset) is now yladder.
-        assert!(y_primary_from_env(None), "unset -> core-Y ladder primary (new default)");
-        assert!(y_primary_from_env(Some("yladder")), "explicit yladder -> true");
-        assert!(y_primary_from_env(Some("YLadder")), "case-insensitive");
-        // Escape hatch to force the OLD b/y-rank primary (for A/B / regression).
-        assert!(!y_primary_from_env(Some("rank")), "rank -> b/y-rank primary");
-        assert!(!y_primary_from_env(Some("byrank")), "byrank -> b/y-rank primary");
-        // Unknown values fall back to the default (yladder), not a silent error.
-        assert!(y_primary_from_env(Some("")), "empty -> default");
-        assert!(y_primary_from_env(Some("garbage")), "unknown -> default");
-    }
-
-    #[test]
-    fn combined_selector_off_by_default_and_only_combined_enables() {
-        assert!(!combined_selector_from_env(None), "unset -> legacy bare-rank selector");
-        assert!(!combined_selector_from_env(Some("")), "empty -> legacy");
-        assert!(!combined_selector_from_env(Some("legacy")), "legacy -> legacy");
-        assert!(!combined_selector_from_env(Some("rank")), "rank -> legacy");
-        assert!(combined_selector_from_env(Some("combined")), "combined -> on");
-        assert!(combined_selector_from_env(Some("Combined")), "case-insensitive");
-    }
-
-    /// The core P1b/L4 property: a true backbone whose PEPTIDE-CONDITIONED Y0/Y1
-    /// anchor is strong but whose bare b/y rank is BELOW a wrong competitor's must
-    /// be selected as top-1 by the combined score — the exact P0b failure where
-    /// the recovered true backbone lands in truth_OUTRANKED under the bare-rank
-    /// selector.
-    #[test]
-    fn combined_selector_recovers_true_backbone_that_loses_bare_rank() {
-        // Competitor: higher b/y rank, essentially no Y0/Y1 anchor (wrong
-        // short-backbone/big-glycan alternative that wins the noisy rank tiebreak).
-        let competitor_rank = 22.0_f32;
-        let competitor_anchor = 0.05_f32;
-        // Truth: LOWER b/y rank (loses the bare-rank selector, R7 median gap ~7)
-        // but a strong peptide-mass-conditioned Y0/Y1 anchor.
-        let truth_rank = 15.0_f32;
-        let truth_anchor = 2.4_f32;
-
-        // Bare-rank selector (the legacy path) picks the WRONG competitor.
-        assert!(
-            competitor_rank > truth_rank,
-            "precondition: truth loses the bare b/y rank (RED without the re-rank)"
-        );
-
-        // Combined selector (anchor-only, intensity_llr = 0.0) must flip it to truth.
-        let s_comp = glyco_combined_selector_score(competitor_rank, competitor_anchor, 0.0);
-        let s_truth = glyco_combined_selector_score(truth_rank, truth_anchor, 0.0);
-        assert!(
-            s_truth > s_comp,
-            "combined selector must rank the strong-anchor true backbone above the \
-             high-bare-rank competitor (GREEN): truth={s_truth} comp={s_comp}"
-        );
-    }
-
-    /// The intensity-model LLR axis also contributes: with equal rank + anchor, a
-    /// higher frag/rich-ion LLR wins; passing 0.0 for the LLR is inert (anchor-only
-    /// variant), so the two ship stages are separable.
-    #[test]
-    fn combined_selector_intensity_llr_breaks_ties_and_is_inert_at_zero() {
-        let base = glyco_combined_selector_score(10.0, 1.0, 0.0);
-        let with_llr = glyco_combined_selector_score(10.0, 1.0, 0.5);
-        assert!(with_llr > base, "positive intensity LLR must increase the combined score");
-        // Inert at 0.0: anchor-only ship stage is a strict special case.
-        assert_eq!(
-            glyco_combined_selector_score(7.0, 2.0, 0.0),
-            GLYCO_SEL_W_BY * 7.0 + GLYCO_SEL_W_ANCHOR * 2.0,
-            "intensity_llr=0.0 must reduce to the anchor-only combined score"
-        );
-    }
-
-    #[test]
     fn collapse_cmp_default_ranks_by_rank_score_then_ladder() {
         // default: higher rank_score wins even with a lower ladder.
         assert_eq!(collapse_cmp(5.0, 1.0, 3.0, 9.0, false), Ordering::Greater);
@@ -391,16 +219,6 @@ mod tests {
         assert_eq!(collapse_cmp(3.0, 9.0, 5.0, 1.0, true), Ordering::Greater);
         // ladder tie → higher rank_score wins.
         assert_eq!(collapse_cmp(5.0, 9.0, 3.0, 9.0, true), Ordering::Greater);
-    }
-
-    #[test]
-    fn gp_selector_from_env_matches_only_gp() {
-        assert!(gp_selector_from_env(Some("gp")));
-        assert!(gp_selector_from_env(Some("GP")));
-        assert!(!gp_selector_from_env(Some("combined")));
-        assert!(!gp_selector_from_env(Some("legacy")));
-        assert!(!gp_selector_from_env(Some("")));
-        assert!(!gp_selector_from_env(None));
     }
 
     #[test]

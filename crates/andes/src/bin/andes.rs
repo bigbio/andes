@@ -2438,7 +2438,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // collapse winner EXACTLY (same comparator, same enumerated-only
             // gate) so `scan -> peptide_idx/backbone_mass` matches the row the
             // PIN (and thus the q-values above) actually describe.
-            let y_primary = andes_glyco::glyco_psm::y_primary_selection();
+            // Transfer seed-selection proxy (ladder-primary collapse_cmp).
+            let y_primary = true;
             // scan (as emitted into ScanNr/SpecId, i.e. spec.scan.unwrap_or(0))
             // -> (peptide_idx, backbone_mass, rt_seconds, spec_idx).
             let mut seed_lookup: std::collections::BTreeMap<u32, (u32, f64, Option<f64>, usize)> =

@@ -22,7 +22,7 @@ use search::search_params::SearchParams;
 use model::spectrum::Spectrum;
 
 use andes_glyco::glyco_psm::{
-    collapse_cmp, glyco_gp_fused_score, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
+    glyco_gp_fused_score, glyco_gp_j, glyco_gp_k,
 };
 use andes_glyco::hybrid::Source;
 
@@ -392,17 +392,12 @@ pub(crate) fn select_emitted_hits(
     // Collapse over ALL hits first — the TDC winner is the best rank_score
     // REGARDLESS of enumeration (Codex: filtering first would promote a
     // 2nd-place enumerated hit when the real winner is de-novo, inflating IDs).
-    // Ordering is the SHARED `collapse_cmp` (single source of truth with the
-    // driver's pre-feature reduction). Default = core-Y ladder primary (+70%
-    // deterministic); ANDES_GLYCO_SELECT=rank forces the old b/y-rank primary.
-    // Leg-2 `gp` fused selector (ANDES_GLYCO_SELECTOR=gp): `rank + K·ladder`, MUST
-    // match the driver's glyco_search gp branch exactly (same rank/ladder/k) or the
-    // scored winner and the written row diverge (the collapse-parity bug). Falls
-    // back to the legacy lexicographic `collapse_cmp` when gp is off.
-    let gp_on = gp_selector_on();
+    // Ordering is the `gp` fused selector `rank + K·ladder + J·core_y`, the SHARED
+    // single source of truth with the driver's pre-feature reduction: it MUST match
+    // glyco_search's gp collapse exactly (same rank/ladder/core-Y/k/j) or the scored
+    // winner and the written row diverge (the collapse-parity bug).
     let gp_k = glyco_gp_k();
     let gp_j = glyco_gp_j();
-    let y_primary = y_primary_selection();
     // v2 hyperscore term: the driver (glyco_search) is the SOLE authority for the gp
     // winner — under the honest `collapse=true` path it already reduced each scan to a
     // SINGLE hit before feature extraction, so this max_by is over one element and its
@@ -411,37 +406,25 @@ pub(crate) fn select_emitted_hits(
     // stored fields, so the rest of the ordering stays consistent with the driver.)
     let winner = (0..hits.len())
         .max_by(|&a, &b| {
-            if gp_on {
-                let sa = glyco_gp_fused_score(
-                    hits[a].psm.rank_score,
-                    hits[a].glycan_key.y_ladder_intensity_score,
-                    hits[a].glycan_key.core_y_hits as f32,
-                    0.0,
-                    gp_k,
-                    gp_j,
-                    0.0,
-                );
-                let sb = glyco_gp_fused_score(
-                    hits[b].psm.rank_score,
-                    hits[b].glycan_key.y_ladder_intensity_score,
-                    hits[b].glycan_key.core_y_hits as f32,
-                    0.0,
-                    gp_k,
-                    gp_j,
-                    0.0,
-                );
-                sa.total_cmp(&sb).then(b.cmp(&a))
-            } else {
-                collapse_cmp(
-                    hits[a].psm.rank_score,
-                    hits[a].glycan_key.y_ladder_intensity_score,
-                    hits[b].psm.rank_score,
-                    hits[b].glycan_key.y_ladder_intensity_score,
-                    y_primary,
-                )
-                // lowest index wins a full tie (deterministic)
-                .then(b.cmp(&a))
-            }
+            let sa = glyco_gp_fused_score(
+                hits[a].psm.rank_score,
+                hits[a].glycan_key.y_ladder_intensity_score,
+                hits[a].glycan_key.core_y_hits as f32,
+                0.0,
+                gp_k,
+                gp_j,
+                0.0,
+            );
+            let sb = glyco_gp_fused_score(
+                hits[b].psm.rank_score,
+                hits[b].glycan_key.y_ladder_intensity_score,
+                hits[b].glycan_key.core_y_hits as f32,
+                0.0,
+                gp_k,
+                gp_j,
+                0.0,
+            );
+            sa.total_cmp(&sb).then(b.cmp(&a))
         })
         .expect("non-empty");
     // Emit only if the scan's actual winner has an enumerated glycan; if the
@@ -918,12 +901,12 @@ mod tests {
     }
 
     /// L1 (the core harness bug): the FDR PIN must emit ONE PSM per scan — the
-    /// top-1 TDC winner by the shared `collapse_cmp`. Emitting all ~4.5
+    /// top-1 TDC winner by the shared `gp` fused score. Emitting all ~4.5
     /// (peptide×glycan) alternatives fabricates the target/decoy balance and
     /// produced the fake ~30% recovery. `select_emitted_hits(_, true)` must
-    /// return only the best. NOTE: the default collapse key is the core-Y ladder
-    /// (see `y_primary_selection`; +70% deterministic), so the winner is the
-    /// highest-`y_ladder` hit, with `rank_score` as the tiebreak.
+    /// return only the best. The gp score `rank + K·ladder + J·core_y` (K=50)
+    /// is ladder-dominated, so the highest-`y_ladder` hit wins with `rank_score`
+    /// as the tiebreak.
     #[test]
     fn top1_collapse_keeps_only_the_best_hit_per_scan() {
         fn make_hit(rank: f32, ladder: f32) -> FullGlycoPsm {
@@ -944,13 +927,11 @@ mod tests {
         assert_eq!(select_emitted_hits(&tied, true, false), vec![1], "tie broken by rank_score then lowest index");
     }
 
-    /// Leg-2 gp selector: the fused `rank + K·ladder` collapse rescues a rank-strong
-    /// hit that the legacy ladder-primary collapse rejects for a spurious tiny ladder
-    /// edge (the P0 failure mode: a wrong mass-split wins on a coincidental summed
-    /// Y-ladder intensity despite truth's stronger b/y). This asserts the exact
-    /// ordering expression `select_emitted_hits` uses under gp; the env dispatch
-    /// (`gp_selector_on`) is covered by `gp_selector_from_env` in glyco_psm. With gp
-    /// OFF (default env), the legacy ladder-primary winner is unchanged.
+    /// The `gp` fused `rank + K·ladder` collapse (the shipped default selector)
+    /// rescues a rank-strong hit that a bare ladder-primary collapse would reject for
+    /// a spurious tiny ladder edge (the P0 failure mode: a wrong mass-split wins on a
+    /// coincidental summed Y-ladder intensity despite truth's stronger b/y). This
+    /// asserts the exact ordering expression `select_emitted_hits` uses.
     #[test]
     fn gp_fused_collapse_rescues_rank_strong_hit_over_spurious_ladder() {
         use andes_glyco::glyco_psm::{glyco_gp_fused_score, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT};
@@ -960,16 +941,17 @@ mod tests {
             FullGlycoPsm { glycan_key: key, psm: make_minimal_psm(0, rank) }
         }
         // idx 0 = truth (strong b/y rank, modest ladder); idx 1 = wrong split
-        // (spurious tiny ladder edge that the legacy ladder-primary collapse picks).
+        // (spurious tiny ladder edge that a bare ladder-primary collapse would pick).
         let hits = vec![make_hit(15.0, 0.05), make_hit(2.0, 0.06)];
-        // Legacy default (gp env unset) still picks the spurious-ladder hit → byte-identical.
+        // The shipped gp default rescues the rank-strong truth (idx 0):
+        // 15 + 50·0.05 = 17.5 > 2 + 50·0.06 = 5 (a bare ladder collapse would pick idx 1).
         assert_eq!(
             select_emitted_hits(&hits, true, false),
-            vec![1],
-            "legacy ladder-primary picks the spurious-ladder wrong split (unchanged)"
+            vec![0],
+            "gp default rescues the rank-strong truth over the spurious-ladder split"
         );
-        // The gp fused ordering (exactly what select_emitted_hits computes under gp)
-        // rescues the rank-strong truth (idx 0): 15 + 50·0.05 = 17.5 > 2 + 50·0.06 = 5.
+        // The gp fused ordering (exactly what select_emitted_hits computes) rescues
+        // the rank-strong truth (idx 0): 15 + 50·0.05 = 17.5 > 2 + 50·0.06 = 5.
         let (k, j) = (GLYCO_GP_K_DEFAULT, GLYCO_GP_J_DEFAULT);
         let gp_score = |h: &FullGlycoPsm| {
             glyco_gp_fused_score(

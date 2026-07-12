@@ -249,6 +249,16 @@ pub struct PsmFeatures {
     /// 0.0 when RT is unavailable / calibration failed. Not a PIN feature column;
     /// surfaced only into the QPX `.idparquet` `predicted_rt` field.
     pub predicted_rt_min: f32,
+    /// GLYCO-only: RT-based isobaric-glycan disambiguation margin (a published glyco engine,
+    /// prior work). `min_{G'} |obs − pred(bb, G')| − |obs − pred(bb, G)|`
+    /// over near-isobaric alternative glycan compositions `G'` (same backbone,
+    /// mass within a small window of the assigned `G`, different composition).
+    /// POSITIVE ⇒ the assigned composition fits the observed RT BETTER than any
+    /// isobaric alternative (evidence the composition — e.g. Hex+NeuAc vs
+    /// Fuc+NeuGc — is right), which fragmentation alone cannot separate. 0.0 when
+    /// RT is unavailable, no isobaric alternative exists, or for non-glyco PSMs.
+    /// Emitted only in the glyco PIN (`IsobaricRTMargin`), never the shared header.
+    pub isobaric_rt_margin: f32,
 }
 
 /// Number of candidates below which Tailor calibration is skipped (denom = 1.0).

@@ -25,7 +25,10 @@ pub mod tdc;
 
 // Convenience re-exports.
 pub use candidate_gen::enumerate_candidates;
-pub use decoy::{normalize_decoy_prefix, reverse_db, target_plus_decoy, DEFAULT_DECOY_PREFIX};
+pub use decoy::{
+    normalize_decoy_prefix, reverse_db, sequon_preserving_reverse_db, target_plus_decoy,
+    DEFAULT_DECOY_PREFIX,
+};
 pub use match_engine::{match_spectra, run_pass2_coisolation, CandidateBacking, PreparedSearch};
 pub use mass_calibrator::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,

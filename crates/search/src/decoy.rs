@@ -19,6 +19,12 @@ pub enum DecoyStrategy {
     /// Shuffle each target sequence with a seeded, reproducible RNG. Useful when
     /// reversal produces too-similar decoys (e.g. palindromic/low-complexity).
     Shuffle,
+    /// Sequon-preserving reverse (for `--glyco` FDR). Like [`Self::Reverse`] but
+    /// restores each target's N-X-S/T sequon at its mirrored position, so the
+    /// decoy carries the SAME sequon count/density as its target. Plain reversal
+    /// depletes sequons (N-X-S/T → S/T-X-N), which makes glyco FDR
+    /// anti-conservative because the sequon gate admits decoys at a lower rate.
+    SequonReverse,
     /// Generate no decoys: the search database is the input FASTA verbatim. For
     /// inputs that already contain decoys (accessions carrying the decoy prefix)
     /// or when FDR is computed externally downstream.
@@ -31,6 +37,7 @@ impl DecoyStrategy {
         match s.trim().to_ascii_lowercase().as_str() {
             "reverse" | "rev"     => Some(Self::Reverse),
             "shuffle" | "shuf"    => Some(Self::Shuffle),
+            "sequon-reverse" | "sequon" | "sequon_reverse" => Some(Self::SequonReverse),
             "none" | "off"        => Some(Self::None),
             _ => None,
         }
@@ -90,6 +97,84 @@ pub fn target_plus_decoy(target: &ProteinDb, prefix: &str) -> ProteinDb {
     ProteinDb { proteins }
 }
 
+/// Count N-X-S/T sequon start positions (X ≠ P) in a residue slice.
+fn count_sequon_starts(s: &[u8]) -> usize {
+    (0..s.len().saturating_sub(2))
+        .filter(|&i| s[i] == b'N' && s[i + 1] != b'P' && (s[i + 2] == b'S' || s[i + 2] == b'T'))
+        .count()
+}
+
+/// Sequon-density-matched reverse of one protein sequence.
+///
+/// Plain reversal does NOT drive the sequon count to zero — it produces a
+/// DIFFERENT set of (spurious) sequons at ~87% of the target's density on a human
+/// proteome (measured), a modest but real deficit that makes the glyco sequon gate
+/// admit decoys slightly less often than targets (anti-conservative FDR). A naive
+/// "restore every original sequon" over-corrects badly (~160%, over-conservative,
+/// costs real IDs), because it ADDS the originals on top of reversal's spurious set.
+///
+/// This instead reverses, then closes ONLY the deficit: greedily create sequons up
+/// to the target's own count via composition-preserving swaps (pull a spare S/T
+/// into the third slot of an `N-X-·` window). The result is a PERMUTATION of `orig`
+/// (composition, tryptic peptide count and mass distribution preserved) whose sequon
+/// count is raised toward — but never above — the target's. Deterministic: windows
+/// scanned ascending, donor residues scanned ascending. Runs once per protein at
+/// DB-build time (not a hot path), so each accepted swap RE-COUNTS the actual sequon
+/// total: the swap's side effects (it can also break/create a sequon at the donor
+/// window) make a naive `+1` unreliable, so a swap is committed only if it strictly
+/// increases the real count and never overshoots the target (adversarial review).
+fn sequon_preserving_reverse(orig: &[u8]) -> Vec<u8> {
+    let n = orig.len();
+    let mut r: Vec<u8> = orig.iter().rev().copied().collect();
+    if n < 3 {
+        return r;
+    }
+    let target = count_sequon_starts(orig);
+    let mut cur = count_sequon_starts(&r);
+    let mut i = 0usize;
+    while cur < target && i + 2 < n {
+        // A window that is one S/T away from being a sequon: N, X≠P, non-S/T.
+        if r[i] == b'N' && r[i + 1] != b'P' && r[i + 2] != b'S' && r[i + 2] != b'T' {
+            // Donor: a later S/T that is NOT the 3rd residue of an existing sequon
+            // (moving it would break that sequon, a net-zero swap). Scan ascending.
+            if let Some(j) = (i + 3..n).find(|&j| {
+                (r[j] == b'S' || r[j] == b'T')
+                    && !(j >= 2 && r[j - 2] == b'N' && r[j - 1] != b'P')
+            }) {
+                r.swap(i + 2, j);
+                // Verify the ACTUAL delta (the swap can break/create a sequon at the
+                // donor window too). Keep the swap only if it strictly increases the
+                // count without overshooting; otherwise revert.
+                let new_count = count_sequon_starts(&r);
+                if new_count > cur && new_count <= target {
+                    cur = new_count;
+                } else {
+                    r.swap(i + 2, j); // revert
+                }
+            }
+        }
+        i += 1;
+    }
+    r
+}
+
+/// Sequon-preserving reverse decoy database (glyco FDR). See
+/// [`sequon_preserving_reverse`] and [`DecoyStrategy::SequonReverse`]. Accession
+/// scheme matches [`reverse_db`].
+pub fn sequon_preserving_reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
+    let normalized = normalize_decoy_prefix(prefix);
+    let proteins = db
+        .proteins
+        .iter()
+        .map(|p| Protein {
+            accession: format!("{}_{}", normalized, p.accession),
+            description: p.description.clone(),
+            sequence: sequon_preserving_reverse(&p.sequence),
+        })
+        .collect();
+    ProteinDb { proteins }
+}
+
 /// Shuffle each protein's sequence with a per-protein, seed-derived RNG, and
 /// prepend `<prefix>_` to its accession (same accession scheme as [`reverse_db`]).
 ///
@@ -145,6 +230,12 @@ pub fn build_search_db(
         DecoyStrategy::Reverse => target_plus_decoy(target, prefix),
         DecoyStrategy::Shuffle => {
             let decoy = shuffle_db(target, prefix, seed);
+            let mut proteins = target.proteins.clone();
+            proteins.extend(decoy.proteins);
+            ProteinDb { proteins }
+        }
+        DecoyStrategy::SequonReverse => {
+            let decoy = sequon_preserving_reverse_db(target, prefix);
             let mut proteins = target.proteins.clone();
             proteins.extend(decoy.proteins);
             ProteinDb { proteins }
@@ -290,6 +381,35 @@ mod tests {
             assert_eq!(a.accession, b.accession);
             assert_eq!(a.sequence, b.sequence);
         }
+    }
+
+    #[test]
+    fn sequon_preserving_reverse_is_permutation_and_recovers_sequons() {
+        // Composition preserved (pure swaps), sequon count recovered toward target
+        // WITHOUT overshoot, and strictly better than plain reversal.
+        let orig = b"NISCDENLTKRSTNVTAAK";
+        let rev = super::sequon_preserving_reverse(orig);
+        let mut a: Vec<u8> = orig.to_vec();
+        a.sort();
+        let mut b = rev.clone();
+        b.sort();
+        assert_eq!(a, b, "must be a permutation of the target (composition preserved)");
+        let t = super::count_sequon_starts(orig);
+        let d = super::count_sequon_starts(&rev);
+        let plain: Vec<u8> = orig.iter().rev().copied().collect();
+        let p = super::count_sequon_starts(&plain);
+        // No overshoot, and at least as many as plain reversal.
+        assert!(d <= t, "must not overshoot the target count ({d} <= {t})");
+        assert!(d >= p, "must recover at least as many sequons as plain reversal ({d} >= {p})");
+    }
+
+    #[test]
+    fn build_search_db_sequon_reverse_appends_prefixed_decoys() {
+        let target = make_db(&[("P1", b"NISCDENLTKR"), ("P2", b"AANGSVVK")]);
+        let built = build_search_db(&target, "XXX", DecoyStrategy::SequonReverse, DEFAULT_DECOY_SEED);
+        assert_eq!(built.len(), 4, "target + 1:1 sequon-preserving decoy");
+        assert!(built.proteins[2].accession.starts_with("XXX_"));
+        assert!(built.proteins[3].accession.starts_with("XXX_"));
     }
 
     #[test]

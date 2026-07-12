@@ -14,7 +14,7 @@
 //!    today because the glyco path never calls `rt_wiring`).
 //! 3. A glyco-only `DeltaRTRank` feature (computed by the glyco PIN writer, not
 //!    here) ranks a scan's competing glycoform candidates by `AbsDeltaRT` — the
-//!    GlycReSoft isobaric-glycoform-disambiguation trick.
+//!    isobaric-glycoform-disambiguation trick.
 //!
 //! # Baseline safety (non-negotiable)
 //! With observed RT unavailable (`Spectrum.rt_seconds` is `None`) or the per-run
@@ -74,9 +74,15 @@ pub fn populate_glyco_rt_features(
     spectra: &[Spectrum],
     results: &mut [GlycoSpectrumResult],
     candidates: &[Candidate],
+    glycan_list: &[GlycanComp],
 ) {
     let model = RtIndexModel::seed();
     let coeffs = GlycanRtCoeffs::default();
+    // Near-isobaric mass window for the isobaric-glycan RT margin (design
+    // a published glyco engine): compositions within this many Da of the assigned glycan but of
+    // DIFFERENT composition. Captures the exact isobars (e.g. Hex+NeuAc vs
+    // Fuc+NeuGc, both ±15.9949 Da canceling) and tight near-isobars.
+    const ISOBARIC_TOL_DA: f64 = 0.05;
 
     // ── Step 1: gather calibration anchors from rank-1 TARGET glyco hits ─────
     // The scan's rank-1 hit is `hits[0]` (glyco_search emits per-scan hits in
@@ -156,12 +162,11 @@ pub fn populate_glyco_rt_features(
             if cand_idx >= candidates.len() {
                 continue;
             }
-            let index = predict_glyco_index(
-                &model,
-                &candidates[cand_idx].peptide,
-                hit.glycan_key.glycan.as_ref(),
-                &coeffs,
-            );
+            let backbone = model.predict_peptide(&candidates[cand_idx].peptide);
+            let index = match hit.glycan_key.glycan.as_ref() {
+                Some(comp) => glyco_index(backbone, comp, &coeffs),
+                None => backbone,
+            };
             let pred = slope * index + intercept;
             let delta = obs - pred;
             // Never emit a non-finite RT feature (leave the hit neutral 0.0).
@@ -173,6 +178,39 @@ pub fn populate_glyco_rt_features(
             hit.psm.features.delta_rt = delta as f32;
             hit.psm.features.abs_delta_rt = delta.abs() as f32;
             hit.psm.features.delta_rt_norm = norm as f32;
+
+            // Isobaric-glycan RT margin: how much better the assigned
+            // composition fits the observed RT than the best near-isobaric
+            // alternative on the SAME backbone. Fragmentation cannot separate these;
+            // RT can. Neutral 0.0 for de-novo hits (no composition) or when no
+            // isobaric alternative exists in the glycan list.
+            if let Some(g) = hit.glycan_key.glycan.as_ref() {
+                let assigned_res = delta.abs();
+                let mut best_alt_res = f64::INFINITY;
+                for alt in glycan_list {
+                    if (alt.mass - g.mass).abs() > ISOBARIC_TOL_DA {
+                        continue;
+                    }
+                    // Same composition (not an alternative). Compare counts, not
+                    // mass, so a true isobar with different counts still qualifies.
+                    if alt.hexnac == g.hexnac
+                        && alt.hex == g.hex
+                        && alt.fuc == g.fuc
+                        && alt.neuac == g.neuac
+                        && alt.neugc == g.neugc
+                    {
+                        continue;
+                    }
+                    let alt_pred = slope * glyco_index(backbone, alt, &coeffs) + intercept;
+                    let alt_res = (obs - alt_pred).abs();
+                    if alt_res.is_finite() && alt_res < best_alt_res {
+                        best_alt_res = alt_res;
+                    }
+                }
+                if best_alt_res.is_finite() {
+                    hit.psm.features.isobaric_rt_margin = (best_alt_res - assigned_res) as f32;
+                }
+            }
         }
     }
 }
@@ -182,7 +220,7 @@ pub fn populate_glyco_rt_features(
 /// Within a scan, rank the scan's candidate hits by `AbsDeltaRT` ascending
 /// (the best RT match ranks first). The returned value is the 1-based rank
 /// NORMALIZED by the candidate count (`rank / n`), so it lies in `(0, 1]` and is
-/// scale-free — the GlycReSoft isobaric-glycoform disambiguation feature.
+/// scale-free — the isobaric-glycoform disambiguation feature.
 ///
 /// Neutral `0.0` when the scan has fewer than 2 candidate hits (no competition)
 /// or when the emitted hit is not found in the candidate list.
@@ -339,7 +377,7 @@ mod tests {
                 ],
             });
         }
-        populate_glyco_rt_features(&spectra, &mut results, &candidates);
+        populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
         // Calibration succeeded via the skipped-decoy targets ⇒ RT populated.
         let populated = results
             .iter()
@@ -425,7 +463,7 @@ mod tests {
             });
         }
 
-        populate_glyco_rt_features(&spectra, &mut results, &candidates);
+        populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
 
         for r in &results {
             let f = &r.hits[0].psm.features;
@@ -475,7 +513,7 @@ mod tests {
         let idx0 = glyco_index(model.predict_peptide(&candidates[0].peptide), &gl0, &coeffs);
         spectra[0].rt_seconds = Some((slope * idx0 + intercept + 5.0) * SECONDS_PER_MINUTE);
 
-        populate_glyco_rt_features(&spectra, &mut results, &candidates);
+        populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
 
         let f = &results[0].hits[0].psm.features;
         assert!(
@@ -483,6 +521,44 @@ mod tests {
             "DeltaRT should be ≈ +5 on the perturbed scan, got {}",
             f.delta_rt
         );
+    }
+
+    /// Isobaric-glycan RT margin: when a scan's RT matches the ASSIGNED glycan's
+    /// prediction but not that of an isobaric ALTERNATIVE (same mass, different
+    /// composition — here Hex+NeuAc vs Fuc+NeuGc), the margin is positive.
+    #[test]
+    fn isobaric_rt_margin_positive_when_assigned_fits_better() {
+        let model = RtIndexModel::seed();
+        let coeffs = GlycanRtCoeffs::default();
+        let (slope, intercept) = (2.0_f64, 10.0_f64);
+        // Isobaric pair (mass-identical, different composition): swapping one
+        // Hex↔Fuc and one NeuAc↔NeuGc nets 0 Da but different RP offsets.
+        let assigned = glycan(2, 4, 0, 1, 0); // 2HexNAc 4Hex 1NeuAc
+        let alt = glycan(2, 3, 1, 0, 1); //      2HexNAc 3Hex 1Fuc 1NeuGc
+        let glycan_list = vec![assigned.clone(), alt.clone()];
+        // The two must actually differ in predicted index or the feature is 0.
+        assert!(
+            (glyco_index(1.0, &assigned, &coeffs) - glyco_index(1.0, &alt, &coeffs)).abs() > 1e-9,
+            "isobaric pair must have distinct RT offsets for the test to be meaningful"
+        );
+        let seqs: Vec<&[u8]> = vec![
+            b"LLIIVV", b"PEPTIDE", b"AAAAAA", b"WFWFWF", b"DEKRDE", b"GGGGGG", b"STSTST", b"MMMMMM",
+        ];
+        let (mut candidates, mut spectra, mut results) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, seq) in seqs.iter().enumerate() {
+            let p = pep(seq);
+            let idx = glyco_index(model.predict_peptide(&p), &assigned, &coeffs);
+            let rt_min = slope * idx + intercept; // exact fit → assigned residual ≈ 0
+            candidates.push(cand(p, false));
+            spectra.push(spec(i as i32, Some(rt_min * SECONDS_PER_MINUTE)));
+            results.push(GlycoSpectrumResult {
+                spectrum_idx: i,
+                hits: vec![hit(i as u32, Some(assigned.clone()))],
+            });
+        }
+        populate_glyco_rt_features(&spectra, &mut results, &candidates, &glycan_list);
+        let m = results[0].hits[0].psm.features.isobaric_rt_margin;
+        assert!(m > 0.0, "assigned fits RT better than the isobaric alternative → margin>0, got {m}");
     }
 
     // ── Neutral paths ────────────────────────────────────────────────────────
@@ -500,7 +576,7 @@ mod tests {
                 hits: vec![hit(i as u32, Some(glycan(2, 3, 0, 0, 0)))],
             });
         }
-        populate_glyco_rt_features(&spectra, &mut results, &candidates);
+        populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
         for r in &results {
             let f = &r.hits[0].psm.features;
             assert_eq!(f.delta_rt, 0.0);
@@ -530,7 +606,7 @@ mod tests {
                 hits: vec![hit(i as u32, Some(glycan(2, 3, 0, 0, 0)))],
             });
         }
-        populate_glyco_rt_features(&spectra, &mut results, &candidates);
+        populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
         for r in &results {
             let f = &r.hits[0].psm.features;
             assert_eq!(f.delta_rt, 0.0);
@@ -556,7 +632,7 @@ mod tests {
                 hits: vec![hit(i as u32, Some(glycan(2, 3, 0, 0, 0)))],
             });
         }
-        populate_glyco_rt_features(&spectra, &mut results, &candidates);
+        populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
         for r in &results {
             assert_eq!(r.hits[0].psm.features.delta_rt, 0.0, "decoy-only ⇒ no calibration");
         }

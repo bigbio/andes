@@ -580,64 +580,63 @@ fn splitmix64(mut x: u64) -> u64 {
 /// Glycan-axis DECOY of [`glycan_y_intensity`]: same composition (same TOTAL mass
 /// → still matches the precursor), same Y0 and Y1 (the bare-backbone anchor + the
 /// first HexNAc, shared by every N-glycan so preserving them keeps the decoy a
-/// plausible glycopeptide), but every INTERMEDIATE Y-rung (Y2..Y_{n-1}) is shifted
-/// by a deterministic pseudo-random offset in [1, 30] Da (a glyco search engine/an open-search PTM tool
-/// decoy-glycan recipe). On a real-glycan spectrum the shifted rungs miss the true
-/// Y-ions, so the decoy sums far less matched intensity than the target ladder —
-/// that target−decoy gap is the glycan-axis signal Percolator turns into 2D FDR.
+/// plausible glycopeptide), and the TOP rung (bb + full glycan = precursor mass,
+/// which a mass-preserving decoy also matches), but every INTERMEDIATE Y-rung
+/// (Y2..Y_{n-1}) is shifted by a deterministic pseudo-random offset in [1, 30) Da
+/// (a glyco search engine/an open-search PTM tool decoy-glycan recipe). On a
+/// real-glycan spectrum the shifted rungs miss the true Y-ions, so the decoy sums
+/// far less matched intensity than the target ladder — that target−decoy gap is
+/// the glycan-axis signal Percolator turns into 2D FDR.
 ///
-/// `seed` (e.g. the glycan index) makes the decoy reproducible. `bb_neutral` is
-/// the NEUTRAL peptide backbone (Y0 = bb_neutral + PROTON), as in the target.
+/// Matches with the SAME routine, charge search and normalization as the target
+/// ([`best_frag_intensity`] over 1..=`max_charge`, NEUTRAL mass, /`stats.base`),
+/// so the ONLY target/decoy difference is the interior-rung shift (exchangeable
+/// null). `seed` (e.g. the glycan index) makes the decoy reproducible.
 pub fn glycan_y_intensity_decoy(
     peaks: &[(f64, f32)],
     stats: &SpectrumStats,
     bb_neutral: f64,
     comp: &crate::glycan_db::GlycanComp,
     tol_ppm: f64,
+    max_charge: u8,
     seed: u64,
 ) -> f64 {
     // Same canonical cumulative-adds order as glycan_y_intensity (shared helper).
     let adds = glycan_cumulative_adds(comp);
 
-    let match_int = |ion_mz: f64| -> f64 {
-        let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
-        let (lo, hi) = (ion_mz - tol, ion_mz + tol);
-        let best = if stats.sorted {
-            let start = peaks.partition_point(|&(m, _)| m < lo);
-            peaks[start..]
-                .iter()
-                .take_while(|&&(m, _)| m <= hi)
-                .map(|&(_, i)| i)
-                .fold(0.0f32, f32::max)
-        } else {
-            peaks
-                .iter()
-                .filter(|&&(m, _)| m >= lo && m <= hi)
-                .map(|&(_, i)| i)
-                .fold(0.0f32, f32::max)
-        };
-        (best as f64) / stats.base
+    // EXCHANGEABLE null: match with the IDENTICAL routine and charge search as the
+    // target ladder ([`best_frag_intensity`], NEUTRAL mass, charges 1..=max_charge),
+    // so the ONLY target/decoy difference is the interior-rung mass shift. The
+    // previous local matcher searched a single +1 m/z with no charge loop, which
+    // under-matched the KEPT Y0/Y1 anchors on multiply-charged spectra and thereby
+    // confounded the glycan-axis target−decoy gap with a charge-coverage artifact
+    // (miscalibrated 2D-FDR null).
+    let match_int = |neutral: f64| -> f64 {
+        best_frag_intensity(peaks, stats.sorted, neutral, tol_ppm, max_charge) as f64 / stats.base
     };
 
-    // Y0 (bare backbone) is always kept.
-    let mut score = match_int(bb_neutral + PROTON);
+    // Y0 (bare backbone) is always kept — identical to the target ladder's Y0.
+    let mut score = match_int(bb_neutral);
     let mut cum = 0.0;
-    // `ai` is the add index: ai==0 → Y1 (kept, core anchor); ai>=1 → shifted.
+    let last = adds.len().saturating_sub(1);
+    // `ai` is the add index. Kept (unshifted, identical to the target ladder):
+    // ai==0 → Y1 (innermost HexNAc core anchor); ai==last → the top rung, which
+    // is bb + FULL glycan mass = the precursor. Because the decoy is
+    // mass-preserving (same total composition mass), its top rung sits at the SAME
+    // precursor mass as the target's, so it MUST be kept — shifting it would make
+    // the decoy miss a peak it should match, biasing the target−decoy gap. Only
+    // the true interior rungs Y2..Y_{n-1} (ai in 1..last) are shifted, so the gap
+    // reflects interior glycan-Y evidence alone.
     for (ai, m) in adds.iter().enumerate() {
         cum += m;
-        // The LAST cumulative add reconstructs the full glycan (= precursor − bb),
-        // which is the precursor, not a fragment; skip it as glycan_y_intensity's
-        // ladder does implicitly (it walks all adds, but the top rung coincides
-        // with the precursor and matches for target and decoy alike — so to make
-        // the decoy discriminate we only need the INTERMEDIATE rungs shifted).
-        let shift = if ai == 0 {
-            0.0 // keep Y1
+        let shift = if ai == 0 || ai == last {
+            0.0 // keep Y1 (core anchor) and the top rung (= precursor mass)
         } else {
-            // deterministic offset in [1, 30] Da at mDa resolution
+            // deterministic offset in [1, 30) Da at mDa resolution
             let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             1.0 + (h % 29_000) as f64 / 1000.0
         };
-        score += match_int(bb_neutral + cum + shift + PROTON);
+        score += match_int(bb_neutral + cum + shift);
     }
     score
 }
@@ -893,14 +892,82 @@ mod tests {
         let stats = SpectrumStats::new(&peaks);
 
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
-        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 12345);
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
         assert!(s_decoy < s_true,
             "decoy ladder ({s_decoy}) must score below the target ({s_true})");
         // Decoy still retains Y0 + Y1 (bb + first HexNAc), so it is > 0 but small.
         assert!(s_decoy > 0.0, "decoy keeps Y0/Y1 anchor, should be > 0");
         // Determinism: same seed → identical score.
-        let s_decoy2 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 12345);
+        let s_decoy2 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
         assert!((s_decoy - s_decoy2).abs() < 1e-12, "decoy must be deterministic");
+    }
+
+    /// EXCHANGEABILITY regression: on a spectrum whose kept Y0/Y1 anchors appear
+    /// ONLY at charge 2+ (common for large/high-charge glycopeptides), the decoy
+    /// must still match them — it uses the SAME multi-charge matcher as the target.
+    /// The previous decoy searched a single +1 m/z, so it scored ~0 here while the
+    /// target scored positive: that charge-coverage asymmetry (not the intended
+    /// interior-rung shift) confounded the 2D-FDR null. This locks the fix.
+    #[test]
+    fn glycan_y_intensity_decoy_matches_multicharge_anchors() {
+        use crate::glycan_db::GlycanComp;
+        use crate::glycan_mass::{HEX, HEXNAC};
+        let bb = 3200.0_f64; // large backbone → anchors observed at z=2
+        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
+                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        // Build the ladder as DOUBLY-charged ions only: m/z = (neutral + 2·PROTON)/2.
+        let mz2 = |neutral: f64| (neutral + 2.0 * PROTON) / 2.0;
+        let mut cum = 0.0;
+        let mut peaks: Vec<(f64, f32)> = vec![(mz2(bb), 1000.0)]; // Y0 at z=2
+        for m in [HEXNAC, HEXNAC, HEX, HEX, HEX] {
+            cum += m;
+            peaks.push((mz2(bb + cum), 500.0));
+        }
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let stats = SpectrumStats::new(&peaks);
+
+        // Target sees the z=2 ladder.
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
+        assert!(s_true > 0.0, "target must match the z=2 ladder");
+        // Fixed decoy keeps Y0 (z=2) + Y1 (z=2) → strictly positive. The OLD +1-only
+        // decoy would have scored 0.0 here (the bug this test guards against).
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 777);
+        assert!(s_decoy > 0.0,
+            "decoy must match multi-charge Y0/Y1 anchors (exchangeable null); got {s_decoy}");
+        assert!(s_decoy < s_true,
+            "decoy ({s_decoy}) still below target ({s_true}): interior rungs shifted away");
+        // With max_charge=1 the z=2-only anchors vanish for BOTH → both ~0 (proves the
+        // matcher, not a coincidence, drives the score).
+        let s_decoy_z1 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 1, 777);
+        assert!(s_decoy_z1 == 0.0, "z=1 matcher cannot see z=2 anchors; got {s_decoy_z1}");
+    }
+
+    /// Top-rung-KEPT regression: the decoy is mass-preserving, so its top rung sits
+    /// at the precursor mass the target also matches — it must be kept, not shifted.
+    /// On a spectrum with ONLY Y0, Y1 and the top (full-glycan) rung present (no
+    /// interior peaks), target and decoy must score IDENTICALLY (the shifted interior
+    /// rungs find nothing either way). Guards against re-introducing the top-rung shift.
+    #[test]
+    fn glycan_y_intensity_decoy_keeps_top_rung() {
+        use crate::glycan_db::GlycanComp;
+        use crate::glycan_mass::{HEX, HEXNAC};
+        let bb = 1500.0_f64;
+        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
+                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        let full = 2.0 * HEXNAC + 3.0 * HEX; // total glycan mass = last cumulative add
+        let hexnac = HEXNAC;
+        // Only Y0 (bb), Y1 (bb + HexNAc) and the TOP rung (bb + full) are present.
+        let mut peaks: Vec<(f64, f32)> = vec![
+            (bb + PROTON, 1000.0),
+            (bb + hexnac + PROTON, 500.0),
+            (bb + full + PROTON, 400.0),
+        ];
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let stats = SpectrumStats::new(&peaks);
+        let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
+        let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42);
+        assert!((s_true - s_decoy).abs() < 1e-12,
+            "target ({s_true}) and decoy ({s_decoy}) must match when only kept rungs are present");
     }
 
     /// Convention + intensity regression: the core-Y ladder ions live at the

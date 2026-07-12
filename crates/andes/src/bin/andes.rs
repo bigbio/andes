@@ -2401,20 +2401,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let glyco_results = if cli.glyco_transfer {
             let t_xfer = std::time::Instant::now();
 
-            // EXPERIMENTAL / NOT FDR-VALID. Codex adversarial review (2026-07-06)
-            // found this path does NOT preserve target/decoy identity: the
-            // TransferredCandidate -> BackboneHit conversion drops the seed's
-            // is_decoy, so a decoy seed can emit a TARGET-labeled row and the
-            // symmetric-decoy graph that final FDR relies on is broken. Also:
-            // scan-only q-join can mis-map on duplicate/MGF scans, dedup can
-            // erase transferred hits, and the RT gate is bypassed when RT is
-            // missing. See docs/plans/glyco/50-roadmap/cross-spectrum-transfer-design.md
-            // (§ Known soundness bugs). DO NOT use --glyco-transfer results for
-            // reported identifications until those are fixed.
+            // FDR-SOUND as of 2026-07-11 (all 5 design-doc soundness bugs fixed +
+            // Codex-reviewed): transferred hits are LOCKED to the seed peptide and
+            // carry the seed's target/decoy label (decoy seeds emit decoy rows →
+            // symmetric graph), the seed/node joins fail loud on duplicate scans,
+            // dedup preserves transfer provenance, the RT gate rejects missing RT by
+            // default, and the glycan tolerance is per-acceptor. Validated on
+            // PXD025455 Fc3_r1: decoys@1% unchanged (honest), but NET-NEUTRAL — the
+            // b/y-dominated winner selection does not promote weak-b/y transferred
+            // backbones to top-1 (the conversion wall). See the design doc.
             eprintln!(
-                "[glyco-transfer] ⚠ EXPERIMENTAL — FDR NOT VALIDATED. Transferred \
-                 rows do not preserve target/decoy identity (Codex critical); counts \
-                 from this mode are NOT trustworthy. For research/development only."
+                "[glyco-transfer] FDR-sound (peptide-locked, decoy-symmetric). \
+                 Net-neutral on Fc3_r1: transfer solves candidate existence but the \
+                 selector does not promote weak-b/y transferred backbones. \
+                 ANDES_GLYCO_TRANSFER_UNGATED=1 disables the RT gate (unsafe)."
             );
 
             // Step 2: write Pass-1 to an in-memory PIN, then (step 3)
@@ -2460,16 +2460,34 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let spec = &spectra[r.spectrum_idx];
-                let scan = spec.scan.unwrap_or(0) as u32;
-                seed_lookup.insert(
-                    scan,
-                    (
-                        hit.psm.primary_candidate_idx(),
-                        hit.glycan_key.backbone_mass,
-                        spec.rt_seconds,
-                        r.spectrum_idx,
-                    ),
-                );
+                // FDR-soundness (design bug #2): the seed→acceptor join is
+                // scan-keyed, so a duplicate scan would silently overwrite a seed
+                // and map it to the wrong spectrum. Fail loud on missing/duplicate.
+                let scan = spec.scan.ok_or_else(|| {
+                    format!(
+                        "glyco-transfer: Pass-1 winner spectrum {} has no scan number; \
+                         transfer requires unique scan ids (seed join is scan-keyed)",
+                        r.spectrum_idx
+                    )
+                })? as u32;
+                if seed_lookup
+                    .insert(
+                        scan,
+                        (
+                            hit.psm.primary_candidate_idx(),
+                            hit.glycan_key.backbone_mass,
+                            spec.rt_seconds,
+                            r.spectrum_idx,
+                        ),
+                    )
+                    .is_some()
+                {
+                    return Err(format!(
+                        "glyco-transfer: duplicate scan {scan} among Pass-1 glyco winners; \
+                         the scan-keyed seed join is not safe with duplicate scans."
+                    )
+                    .into());
+                }
             }
 
             // Step 5: SeedRow extraction. native_rescore_qvalues already
@@ -2524,13 +2542,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if precursor_neutral <= 0.0 {
                     continue;
                 }
-                let scan = spec.scan.unwrap_or(0) as u32;
+                // FDR-soundness (design bug #2): the transfer graph joins seeds and
+                // acceptors by scan number. If two spectra share a scan (multi-file
+                // input, or MGF without SCANS where scan defaults to 0), the
+                // scan→spec_idx map would silently last-wins and seed the WRONG
+                // spectrum. Fail loud instead of transferring onto a mislabelled scan.
+                let scan = spec.scan.ok_or_else(|| {
+                    format!(
+                        "glyco-transfer: spectrum {spec_idx} has no scan number; \
+                         transfer requires unique scan ids (join is scan-keyed)"
+                    )
+                })? as u32;
+                if let Some(prev) = scan_to_spec_idx.insert(scan, spec_idx) {
+                    return Err(format!(
+                        "glyco-transfer: duplicate scan {scan} (spectra {prev} and {spec_idx}); \
+                         the scan-keyed transfer join is not safe with duplicate scans. \
+                         Use single-file input with unique scan ids, or disable --glyco-transfer."
+                    )
+                    .into());
+                }
                 nodes.push(andes_glyco::crossspectrum::GlycoNode {
                     scan,
                     precursor_neutral,
                     rt_seconds: spec.rt_seconds,
                 });
-                scan_to_spec_idx.insert(scan, spec_idx);
             }
             nodes.sort_by_key(|n| n.scan);
 
@@ -2547,15 +2582,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1800.0);
             const MIN_GLYCAN: f64 = 406.0;
-            // `propagate_transfers` takes one scalar tolerance for the whole
-            // batch (unlike the per-node `(mass * tol_ppm * 1e-6).max(0.02)`
-            // convention used elsewhere in this module), so scale it from a
-            // representative intact glycopeptide mass (~2500 Da: typical
-            // tryptic backbone + core N-glycan) with the same floor.
-            const REPRESENTATIVE_GLYCOPEPTIDE_MASS: f64 = 2500.0;
-            let tol = (REPRESENTATIVE_GLYCOPEPTIDE_MASS * glyco_tol_ppm * 1e-6).max(0.02);
+            // FDR-soundness (design bug #4): require an RT co-elution check on both
+            // ends by default. `ANDES_GLYCO_TRANSFER_UNGATED=1` is the explicit
+            // unsafe opt-in that transfers across the whole run when RT is missing
+            // (research only). `propagate_transfers` now scales the glycan-match
+            // tolerance PER ACCEPTOR from `glyco_tol_ppm` (design bug #5), so no
+            // fixed representative-mass tolerance is passed.
+            let require_rt = std::env::var("ANDES_GLYCO_TRANSFER_UNGATED")
+                .map(|v| v != "1")
+                .unwrap_or(true);
             let transferred = andes_glyco::crossspectrum::propagate_transfers(
-                &seeds, &nodes, &glycan_sorted, &glycan_list, rt_window, MIN_GLYCAN, tol,
+                &seeds, &nodes, &glycan_sorted, &glycan_list, rt_window, MIN_GLYCAN,
+                glyco_tol_ppm, require_rt,
             );
 
             // Min graph-support injection gate: only inject a transferred
@@ -2593,6 +2631,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     transfer_seed_score: tc.seed_score as f32,
                     transfer_rt_delta: tc.rt_delta as f32,
                     transfer_ungated: tc.ungated,
+                    // FDR-soundness (design bug #1): lock the transferred hit to the
+                    // EXACT seed peptide + carry the seed's decoy label, so Pass-2
+                    // scores only that peptide and a decoy seed emits a decoy row.
+                    transfer_peptide_idx: Some(tc.peptide_idx),
+                    transfer_seed_is_decoy: tc.is_decoy,
                 });
             }
 
@@ -2633,7 +2676,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // RT index + per-monosaccharide offset + per-run self-calibration. The
         // glyco PIN writer then also appends the within-scan DeltaRTRank. Neutral
         // 0.0 without observed RT / <MIN_CALIBRATION_ANCHORS anchors (baseline-safe).
-        output::populate_glyco_rt_features(&spectra, &mut glyco_results, &prepared.candidates);
+        output::populate_glyco_rt_features(
+            &spectra,
+            &mut glyco_results,
+            &prepared.candidates,
+            &glycan_list,
+        );
 
         output::write_glyco_pin(
             &glyco_pin_path,

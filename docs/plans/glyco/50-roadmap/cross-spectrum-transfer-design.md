@@ -1,13 +1,27 @@
 # Cross-Spectrum Backbone Transfer — Design
 
-**Status:** implemented as an EXPERIMENTAL prototype (`--glyco-transfer`, off by
-default). ⚠ **NOT FDR-VALID — do not use for reported identifications.** See
-"Known soundness bugs" below. Implemented Tasks 1–8d (2026-07-05/06); A/B on
-Fc3_r1 was net-neutral, but that result is **confounded** by the bugs below.
-**Branch:** `glyco-phase1`
+**Status (2026-07-11):** ✅ **FDR-SOUND** (`--glyco-transfer`, off by default). All
+5 soundness bugs below are FIXED (commits `090d80cc` + `78ca7d8a` on `glyco-v2`)
+and Codex-reviewed: transferred hits are peptide-LOCKED and carry the seed's
+target/decoy label (symmetric graph), seed/node joins fail loud on duplicate
+scans, dedup preserves transfer provenance, the RT gate rejects missing RT by
+default, and the glycan tolerance is per-acceptor. The legacy in-driver
+`ANDES_GLYCO_CROSSSPECTRUM` path (target-only, unlocked) is force-DISABLED.
+**HONEST A/B on Fc3_r1: NET-NEUTRAL** — decoys@1% unchanged (2), 300/523
+backbone-correct with 0 transferred survivors. Transfer solves candidate
+EXISTENCE (403 seeds → 45,827 candidates onto 1,939 acceptors) but the
+b/y-dominated winner selection (`gp` = rank + K·ladder + J·coreY + H·hyper) does
+not PROMOTE a weak-b/y transferred backbone to top-1 — the same conversion wall
+the existence audit exposed (437/523 generated → 300 survive). NEXT LEVER: a
+within-scan selector that ranks on orthogonal evidence (transfer graph support,
+RT-delta, Y0/Y1 anchor, candidate-unique glycan-Y) so transferred candidates can
+win selection without leaning on b/y. **Original (superseded) status:**
+implemented as an EXPERIMENTAL prototype; the earlier net-neutral A/B was
+confounded by the bugs below.
+**Branch:** `glyco-v2`
 **Author:** brainstormed with the user, 2026-07-05
 
-## ⚠ Known soundness bugs (Codex adversarial review, 2026-07-06) — MUST fix before revival
+## ✅ Soundness bugs (Codex 2026-07-06) — ALL FIXED 2026-07-11 (commits 090d80cc, 78ca7d8a)
 
 The A/B (net-neutral, decoys@1%=1) looked benign only because transfer barely
 moved the top-1 winners; the mechanism that would keep it honest is broken.
@@ -49,7 +63,7 @@ In stepped-HCD N-glyco data a single peptide backbone appears as many glycoforms
 (≈6–7 per peptide in serum). Well-fragmented glycoforms (strong trimannosyl-core
 Y-ladder) are confidently identified; their poorly-fragmenting siblings are not,
 because per-spectrum candidate generation has no core-Y ladder to anchor the
-backbone. Single-spectrum engines (the reference glyco engine, an open-source glyco engine/O-Pair) leave
+backbone. Single-spectrum engines (the reference glyco engine, an open-source glyco engine) leave
 those siblings on the table.
 
 **Cross-spectrum transfer** borrows a *confident* backbone — learned from the
@@ -69,7 +83,7 @@ and beat the reference engine**, at honest FDR.
   (mokapot-style 3-fold target/decoy CV over the same PIN) is a supported
   fallback. The design is rescorer-agnostic (see §4).
 - **Additive PIN features only** — never modify existing features.
-- **Clean-room** — no borrowed a glyco search engine/a commercial glyco engine/O-Pair/a cross-spectrum glyco engine *code*;
+- **Clean-room** — no borrowed a glyco search engine/a commercial glyco engine/a cross-spectrum glyco engine *code*;
   the algorithm is reimplemented from first principles.
 - **Deterministic** — same input ⇒ byte-identical output (see §5).
 

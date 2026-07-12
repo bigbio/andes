@@ -171,6 +171,7 @@ fn nearest_glycan(
 /// Propagate confident seed backbones to co-eluting, glycan-consistent acceptor
 /// nodes. See module docs. Deterministic: output sorted by
 /// (acceptor_scan, backbone_mass, glycan mass) with an index tiebreak.
+#[allow(clippy::too_many_arguments)]
 pub fn propagate_transfers(
     seeds: &[Seed],
     nodes: &[GlycoNode],
@@ -178,20 +179,34 @@ pub fn propagate_transfers(
     glycans: &[GlycanComp],
     rt_window: f32,
     min_glycan: f64,
-    tol: f64,
+    tol_ppm: f64,
+    require_rt: bool,
 ) -> Vec<TransferredCandidate> {
+    // RT gate. FDR-soundness (design bug #4): with `require_rt` (the default), a
+    // missing RT on EITHER end is a REJECT — otherwise a backbone would transfer
+    // across the whole run on a bare precursor-mass coincidence, injecting
+    // unrelated peptides the final FDR cannot see. `require_rt = false` is the
+    // explicit unsafe opt-in that restores the old accept-and-flag-ungated
+    // behavior (research only).
     let co_elutes = |seed_rt: Option<f64>, node_rt: Option<f64>| -> (bool, bool) {
         // returns (passes_gate, ungated)
         match (seed_rt, node_rt) {
             (Some(s), Some(n)) => (((n - s).abs() as f32) <= rt_window, false),
-            _ => (true, true), // missing RT on either side: accept, flag ungated
+            _ if require_rt => (false, true), // missing RT: REJECT by default
+            _ => (true, true), // opt-in unsafe: accept, flag ungated
         }
     };
     let mut out: Vec<TransferredCandidate> = Vec::new();
+    // INDEPENDENT-DONOR support (reviewer feedback, issue #27): `graph_support`
+    // must be the number of DISTINCT confident donor glycoforms that converge on
+    // the SAME peptide hypothesis at an acceptor — NOT one seed's fanout
+    // (`accepted.len()`), which grows with run density / RT-window / glycan-list
+    // coverage / mass coincidences and inflates "support" even when no independent
+    // evidence exists. Key by (acceptor_scan, peptide_idx) → set of distinct donor
+    // seed scans; the count is filled in a second pass below.
+    let mut donor_seeds: std::collections::HashMap<(u32, u32), std::collections::HashSet<u32>> =
+        std::collections::HashMap::new();
     for seed in seeds {
-        // First pass over nodes: collect accepting (non-self) acceptors so we
-        // can attach the family-size support to each emitted candidate.
-        let mut accepted: Vec<(u32, GlycanComp, f64, bool)> = Vec::new();
         for node in nodes {
             if node.scan == seed.scan {
                 continue;
@@ -204,30 +219,43 @@ pub fn propagate_transfers(
             if glycan_mass < min_glycan {
                 continue;
             }
+            // Per-acceptor mass tolerance (design bug #5): scale from THIS
+            // acceptor's precursor mass, not a fixed representative mass, with the
+            // same 0.02 Da floor the rest of the module uses.
+            let tol = (node.precursor_neutral * tol_ppm * 1e-6).max(0.02);
             if let Some(g) = nearest_glycan(glycan_sorted, glycans, glycan_mass, tol) {
                 let rt_delta = match (seed.rt_seconds, node.rt_seconds) {
                     (Some(s), Some(n)) => (n - s).abs(),
                     _ => 0.0,
                 };
-                accepted.push((node.scan, g, rt_delta, ungated));
+                donor_seeds
+                    .entry((node.scan, seed.peptide_idx))
+                    .or_default()
+                    .insert(seed.scan);
+                out.push(TransferredCandidate {
+                    acceptor_scan: node.scan,
+                    peptide_idx: seed.peptide_idx,
+                    backbone_mass: seed.backbone_mass,
+                    glycan: g,
+                    graph_support: 0, // filled below with independent-donor count
+                    seed_score: seed.seed_score,
+                    rt_delta,
+                    ungated,
+                    is_decoy: seed.is_decoy,
+                });
             }
         }
-        let support = accepted.len() as u32;
-        for (acceptor_scan, glycan, rt_delta, ungated) in accepted {
-            out.push(TransferredCandidate {
-                acceptor_scan,
-                peptide_idx: seed.peptide_idx,
-                backbone_mass: seed.backbone_mass,
-                glycan,
-                graph_support: support,
-                seed_score: seed.seed_score,
-                rt_delta,
-                ungated,
-                is_decoy: seed.is_decoy,
-            });
-        }
     }
-    // Deterministic total order (no HashMap anywhere above).
+    // Second pass: independent-donor support per (acceptor, peptide hypothesis).
+    // The HashMap is used only for COUNTING (its iteration order never affects
+    // output); the deterministic total order is imposed by the sort below.
+    for tc in out.iter_mut() {
+        tc.graph_support = donor_seeds
+            .get(&(tc.acceptor_scan, tc.peptide_idx))
+            .map(|s| s.len() as u32)
+            .unwrap_or(1);
+    }
+    // Deterministic total order.
     out.sort_by(|a, b| {
         a.acceptor_scan
             .cmp(&b.acceptor_scan)
@@ -334,13 +362,41 @@ mod tests {
             GlycoNode { scan: 2, precursor_neutral: backbone + g_a, rt_seconds: Some(905.0) }, // sibling
             GlycoNode { scan: 3, precursor_neutral: backbone + g_b, rt_seconds: Some(910.0) }, // sibling
         ];
-        let out = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 0.05);
+        let out = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 25.0, true);
         // Two transfers (scan 2 and 3), NOT onto the seed's own scan 1.
         assert_eq!(out.len(), 2, "got {out:?}");
         assert!(out.iter().all(|t| t.acceptor_scan != 1));
         assert!(out.iter().all(|t| t.peptide_idx == 9 && (t.backbone_mass - backbone).abs() < 1e-6));
-        // graph_support = family size (2 accepting non-self nodes).
-        assert!(out.iter().all(|t| t.graph_support == 2), "support {out:?}");
+        // graph_support is INDEPENDENT-DONOR support (issue #27): ONE seed reaching
+        // two acceptors gives each acceptor exactly ONE distinct donor for this
+        // peptide → support 1 (NOT the old seed-fanout value of 2).
+        assert!(out.iter().all(|t| t.graph_support == 1), "donor support {out:?}");
+    }
+
+    /// Independent-donor support (issue #27): TWO distinct confident donor
+    /// glycoforms of the SAME peptide converging on one acceptor → support 2,
+    /// whereas a single seed reaching many acceptors stays at support 1. This is
+    /// what distinguishes real corroboration from seed fanout.
+    #[test]
+    fn graph_support_counts_independent_donors_not_fanout() {
+        let glycans = n_glycan_list();
+        let sorted = sorted_view(&glycans);
+        let bb = 1500.0_f64;
+        let g_a = 2.0 * HEXNAC + 3.0 * HEX;
+        // Two donor glycoforms of peptide 9 (scans 1 and 2, same backbone), plus one
+        // acceptor (scan 3) whose precursor matches bb+g_a.
+        let seeds = vec![
+            Seed { scan: 1, peptide_idx: 9, backbone_mass: bb, rt_seconds: Some(900.0), seed_score: 3.0, is_decoy: false },
+            Seed { scan: 2, peptide_idx: 9, backbone_mass: bb, rt_seconds: Some(905.0), seed_score: 3.0, is_decoy: false },
+        ];
+        let nodes = vec![
+            GlycoNode { scan: 3, precursor_neutral: bb + g_a, rt_seconds: Some(902.0) },
+        ];
+        let out = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 25.0, true);
+        // Both donors transfer to scan 3 → 2 candidates, each with donor support 2.
+        assert_eq!(out.len(), 2, "got {out:?}");
+        assert!(out.iter().all(|t| t.acceptor_scan == 3 && t.graph_support == 2),
+            "two independent donors → support 2, got {out:?}");
     }
 
     #[test]
@@ -357,13 +413,21 @@ mod tests {
             GlycoNode { scan: 3, precursor_neutral: backbone + g, rt_seconds: Some(5000.0) },
             GlycoNode { scan: 4, precursor_neutral: backbone + g, rt_seconds: None },
         ];
-        let out = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 0.05);
+        // require_rt=false (the unsafe opt-in) restores accept-and-flag-ungated.
+        let out = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 25.0, false);
         let scans: Vec<u32> = out.iter().map(|t| t.acceptor_scan).collect();
         assert!(scans.contains(&2), "co-eluting must transfer: {out:?}");
         assert!(!scans.contains(&3), "far RT must NOT transfer: {out:?}");
-        // ungated node (no RT) still receives, flagged ungated.
+        // ungated node (no RT) still receives under the opt-in, flagged ungated.
         let u = out.iter().find(|t| t.acceptor_scan == 4).expect("ungated transfer");
         assert!(u.ungated, "no-RT acceptor must be marked ungated");
+
+        // With require_rt=true (the default, FDR-safe) the no-RT acceptor (scan 4)
+        // is REJECTED — a backbone must not transfer without an RT co-elution check.
+        let safe = propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 25.0, true);
+        let safe_scans: Vec<u32> = safe.iter().map(|t| t.acceptor_scan).collect();
+        assert!(safe_scans.contains(&2), "co-eluting still transfers under require_rt: {safe:?}");
+        assert!(!safe_scans.contains(&4), "no-RT acceptor must be REJECTED under require_rt: {safe:?}");
     }
 
     #[test]
@@ -393,7 +457,7 @@ mod tests {
                 GlycoNode { scan: 3, precursor_neutral: bb + g, rt_seconds: Some(903.0) },
                 GlycoNode { scan: 4, precursor_neutral: bb + 100.0 + g, rt_seconds: Some(904.0) }];
             let nodes: Vec<GlycoNode> = order.iter().map(|&i| base[i].clone()).collect();
-            propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 0.05)
+            propagate_transfers(&seeds, &nodes, &sorted, &glycans, 300.0, 406.0, 25.0, true)
         };
         let a = mk(&[0, 1, 2]);
         let b = mk(&[2, 0, 1]);

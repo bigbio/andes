@@ -426,6 +426,12 @@ struct SearchArgs {
     #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
     glyco_max_pf: usize,
 
+    /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
+    /// mass-residual hits) and print transfer diagnostics. The resulting PIN is for
+    /// inspection ONLY and must never be fed to an FDR tool. Hidden dev flag.
+    #[arg(long = "debug-glyco", hide = true, default_value_t = false)]
+    debug_glyco: bool,
+
     /// Enable cross-spectrum backbone transfer (single-invocation two-pass;
     /// glyco mode only). Pass-1 glyco PSMs are native-GBDT-rescored in-process,
     /// 1%-FDR confident backbones (target+decoy) are propagated to co-eluting
@@ -2403,6 +2409,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_h: cli.glyco_gp_h,
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
+            debug: cli.debug_glyco,
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
@@ -2458,7 +2465,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // native-GBDT-rescore it in-process to get target+decoy q-values.
             let mut buf: Vec<u8> = Vec::new();
             output::glyco_pin::write_glyco_pin_to(
-                &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false,
+                &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false, false,
             )?;
             let pin_text = String::from_utf8(buf)
                 .map_err(|e| format!("Pass-1 glyco PIN is not valid UTF-8: {e}"))?;
@@ -2758,6 +2765,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &params,
             &idx,
             emit_glycan_decoy,
+            cli.debug_glyco,
         )?;
         eprintln!(
             "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",

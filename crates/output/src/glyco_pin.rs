@@ -336,6 +336,7 @@ fn write_glyco_psm_row<W: Write>(
 ///   GlycanMass, IsGlycanDb
 ///
 /// `Peptide` column appends `[HexNAc{n}Hex{m}...]` for DB glycan hits.
+#[allow(clippy::too_many_arguments)]
 pub fn write_glyco_pin(
     path: &Path,
     spectra: &[Spectrum],
@@ -344,6 +345,7 @@ pub fn write_glyco_pin(
     params: &SearchParams,
     search_index: &SearchIndex,
     emit_glycan_decoy: bool,
+    debug: bool,
 ) -> io::Result<()> {
     let file = std::fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
@@ -355,6 +357,7 @@ pub fn write_glyco_pin(
         params,
         search_index,
         emit_glycan_decoy,
+        debug,
     )
 }
 
@@ -440,6 +443,7 @@ pub(crate) fn select_emitted_hits(
 }
 
 /// Write glyco PIN to an arbitrary writer (useful for testing).
+#[allow(clippy::too_many_arguments)]
 pub fn write_glyco_pin_to<W: Write>(
     writer: &mut W,
     spectra: &[Spectrum],
@@ -448,23 +452,19 @@ pub fn write_glyco_pin_to<W: Write>(
     params: &SearchParams,
     search_index: &SearchIndex,
     emit_glycan_decoy: bool,
+    debug: bool,
 ) -> io::Result<()> {
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
 
     write_glyco_header(writer, min_charge, max_charge)?;
 
-    // Top-1-per-scan collapse is the honest default (see `select_emitted_hits`).
-    // ANDES_GLYCO_ALL_HITS=1 restores the full multi-row dump for DIAGNOSTICS ONLY
-    // (its PIN must never be fed to Percolator as an FDR input).
-    let collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
-        .map(|v| v != "1")
-        .unwrap_or(true);
-    // GI-1: emit only enumerated-composition glyco IDs by default; ANDES_GLYCO_DENOVO=1
-    // includes the de-novo mass-residual hits (diagnostic / open-search only).
-    let enumerated_only = std::env::var("ANDES_GLYCO_DENOVO")
-        .map(|v| v != "1")
-        .unwrap_or(true);
+    // Top-1-per-scan collapse + enumerated-only is the honest default (see
+    // `select_emitted_hits`). `--debug-glyco` restores the full multi-row / de-novo
+    // dump for DIAGNOSTICS ONLY (that PIN must never be fed to an FDR tool). MUST
+    // mirror the driver's `GlycoConfig.debug` so the kept row == the driver's hit.
+    let collapse = !debug;
+    let enumerated_only = !debug;
 
     let mut row_count = 0usize;
     for result in results {
@@ -866,7 +866,7 @@ mod tests {
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
 
         let mut buf = Vec::new();
-        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false)
+        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false, false)
             .expect("write_glyco_pin_to must succeed");
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -1044,7 +1044,7 @@ mod tests {
 
         let mut buf = Vec::new();
         // emit_glycan_decoy = true
-        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, true)
+        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, true, false)
             .expect("write must succeed");
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -1091,7 +1091,7 @@ mod tests {
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
 
         let mut buf = Vec::new();
-        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false)
+        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false, false)
             .expect("write must succeed");
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();

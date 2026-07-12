@@ -57,6 +57,10 @@ pub struct GlycoConfig {
     pub pf_charge: u8,
     /// Max peptide-first candidates kept per spectrum.
     pub max_pf: usize,
+    /// Diagnostic mode (`--debug-glyco`): emit ALL candidate rows per scan
+    /// (including de-novo mass-residual hits) instead of the honest top-1 collapse,
+    /// and print transfer diagnostics. A debug PIN must NEVER be fed to an FDR tool.
+    pub debug: bool,
 }
 
 impl Default for GlycoConfig {
@@ -67,6 +71,7 @@ impl Default for GlycoConfig {
             gp_h: GLYCO_GP_H_DEFAULT,
             pf_charge: 2,
             max_pf: 1024,
+            debug: false,
         }
     }
 }
@@ -339,27 +344,14 @@ impl GlycoCtxOwned {
         // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
         // glyco_pin.rs), so computing the expensive ~40-feature vector
         // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
-        // Compute features only for the winner that will actually be emitted. These
-        // mirror the PIN writer's defaults exactly (ANDES_GLYCO_ALL_HITS /
-        // ANDES_GLYCO_DENOVO) so the driver's kept hit == the PIN's kept row.
-        let features_collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
-            .map(|v| v != "1")
-            .unwrap_or(true);
-        let features_enumerated = std::env::var("ANDES_GLYCO_DENOVO")
-            .map(|v| v != "1")
-            .unwrap_or(true);
-        // Fast dev harness: ANDES_GLYCO_SCANS=<file> (one scan number per line)
-        // restricts the glyco driver to those scans (e.g. the truth-scan subset), so
-        // a redesign iteration is minutes not hours. The standard search still runs
-        // over all spectra; only glyco scoring is subset. Unset = all spectra.
-        let scan_filter: Option<std::collections::HashSet<i32>> = std::env::var("ANDES_GLYCO_SCANS")
-            .ok()
-            .and_then(|path| std::fs::read_to_string(&path).ok())
-            .map(|s| {
-                s.lines()
-                    .filter_map(|l| l.trim().parse::<i32>().ok())
-                    .collect()
-            });
+        // Compute features only for the winner that will actually be emitted. Under
+        // `--debug-glyco` (cfg.debug) the full multi-row / de-novo dump is restored;
+        // these MUST mirror the PIN writer's `write_glyco_pin(debug)` so the driver's
+        // kept hit == the PIN's kept row.
+        let features_collapse = !cfg.debug;
+        let features_enumerated = !cfg.debug;
+        // Scan subsetting removed: the standard search runs over all spectra.
+        let scan_filter: Option<std::collections::HashSet<i32>> = None;
         // The backbone candidate cap is `--glyco-backbone-top-k` (set a large value
         // to approximate an exhaustive/no-truncation ceiling measurement).
         let effective_top_k = backbone_top_k;
@@ -1637,12 +1629,11 @@ pub fn glyco_transfer_pass2(
                 return None;
             }
             let scored = score_spectrum_glyco(spec_idx, &spectra[spec_idx], transfer, &ctx)?;
-            // Diagnostic (ANDES_GLYCO_XFER_DIAG=1): for each transfer acceptor, report
-            // where the transferred candidate ranks vs the top-1 collapse winner, so we
-            // can see WHY transfers are net-neutral (outranked / de-novo-dropped / not
-            // scored). One line per acceptor; joined with truth on scan offline. No cost
-            // when the env var is unset.
-            if std::env::var("ANDES_GLYCO_XFER_DIAG").as_deref() == Ok("1") {
+            // Diagnostic (--debug-glyco): for each transfer acceptor, report where the
+            // transferred candidate ranks vs the top-1 collapse winner, so we can see
+            // WHY transfers are net-neutral (outranked / de-novo-dropped / not scored).
+            // One line per acceptor; joined with truth on scan offline.
+            if cfg.debug {
                 let scan = spectra[spec_idx].scan.unwrap_or(0);
                 // Diagnostic-only winner proxy (ladder-primary collapse_cmp); the
                 // shipped emitted winner is the gp fused score in select_emitted_hits.

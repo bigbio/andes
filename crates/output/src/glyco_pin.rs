@@ -22,7 +22,7 @@ use search::search_params::SearchParams;
 use model::spectrum::Spectrum;
 
 use andes_glyco::glyco_psm::{
-    glyco_gp_fused_score, glyco_gp_j, glyco_gp_k,
+    glyco_gp_fused_score, GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
 use andes_glyco::hybrid::Source;
 
@@ -396,8 +396,11 @@ pub(crate) fn select_emitted_hits(
     // single source of truth with the driver's pre-feature reduction: it MUST match
     // glyco_search's gp collapse exactly (same rank/ladder/core-Y/k/j) or the scored
     // winner and the written row diverge (the collapse-parity bug).
-    let gp_k = glyco_gp_k();
-    let gp_j = glyco_gp_j();
+    // The PIN-side collapse is over a SINGLE hit under the honest collapse path (the
+    // driver already reduced the scan), so these weights are never decisive here; use
+    // the default constants (the driver's --glyco-gp-* flags are the real authority).
+    let gp_k = GLYCO_GP_K_DEFAULT;
+    let gp_j = GLYCO_GP_J_DEFAULT;
     // v2 hyperscore term: the driver (glyco_search) is the SOLE authority for the gp
     // winner — under the honest `collapse=true` path it already reduced each scan to a
     // SINGLE hit before feature extraction, so this max_by is over one element and its

@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 /// Default balance constant for the `gp` fused selector (leg 2). K scales the
 /// glycan core-Y ladder term against the peptide b/y rank-LLR so the two
 /// comparably-ranged axes compete (RankScore ~0..63, YLadder ~0..1.5 on the
-/// Fc3_r1 test bed). Overridable via `ANDES_GLYCO_GP_K` for @1% tuning.
+/// Fc3_r1 test bed). The `--glyco-gp-k` flag overrides it.
 pub const GLYCO_GP_K_DEFAULT: f32 = 50.0;
 
 /// Default weight for the core-Y HIT-COUNT term (gp2, leg 2b). Scales the integer
@@ -20,42 +20,14 @@ pub const GLYCO_GP_K_DEFAULT: f32 = 50.0;
 /// matched b/y count) than the wrong winner but a LOWER intensity-weighted
 /// RankScore — i.e. andes' rank under-rewards COUNT, exactly what the reference engine's
 /// hyperscore (∝ Nb!·Ny!) rewards. Adding this count term recovers them.
-/// Overridable via `ANDES_GLYCO_GP_J`. Offline top1-by-mass: 318 → 334 at J=5.
+/// The `--glyco-gp-j` flag overrides it. Offline top1-by-mass: 318 -> 334 at J=5.
 pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
 
 /// Default weight for the count-rewarding hyperscore term (andes-glyco 2.0 peptide
 /// channel `P`). Scales `ln(N_matched!)` against the rank-LLR. Offline blend
-/// (rank + hyperscore + ladder + core-Y) top1-by-mass 334 → 344. Overridable via
-/// `ANDES_GLYCO_GP_H`; 0.0 disables the hyperscore term (gp2 behaviour).
+/// (rank + hyperscore + ladder + core-Y) top1-by-mass 334 → 344. The `--glyco-gp-h` flag
+/// overrides it; 0.0 disables the hyperscore term.
 pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
-
-/// Process-constant K for the `gp` selector, read ONCE by the caller (never per
-/// comparison — that would still be deterministic but wasteful) and passed into
-/// [`glyco_gp_fused_score`]. Falls back to [`GLYCO_GP_K_DEFAULT`] for a missing,
-/// unparseable, negative, or non-finite value.
-pub fn glyco_gp_k() -> f32 {
-    gp_weight_from_env("ANDES_GLYCO_GP_K", GLYCO_GP_K_DEFAULT)
-}
-
-/// Process-constant J (core-Y hit-count weight) for the `gp` selector; same
-/// read-once contract as [`glyco_gp_k`].
-pub fn glyco_gp_j() -> f32 {
-    gp_weight_from_env("ANDES_GLYCO_GP_J", GLYCO_GP_J_DEFAULT)
-}
-
-/// Process-constant H (hyperscore weight) for the `gp` selector; same read-once
-/// contract as [`glyco_gp_k`]. 0.0 disables the hyperscore term.
-pub fn glyco_gp_h() -> f32 {
-    gp_weight_from_env("ANDES_GLYCO_GP_H", GLYCO_GP_H_DEFAULT)
-}
-
-fn gp_weight_from_env(var: &str, default: f32) -> f32 {
-    std::env::var(var)
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .filter(|w| w.is_finite() && *w >= 0.0)
-        .unwrap_or(default)
-}
 
 /// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
 /// Higher is better.

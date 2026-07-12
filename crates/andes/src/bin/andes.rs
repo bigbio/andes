@@ -404,6 +404,28 @@ struct SearchArgs {
     #[arg(long = "glyco-max-spectra", hide = true, default_value_t = 0usize)]
     glyco_max_spectra: usize,
 
+    /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
+    /// Hidden tuning knob; validated default 50.
+    #[arg(long = "glyco-gp-k", hide = true, default_value_t = 50.0f32)]
+    glyco_gp_k: f32,
+
+    /// `gp` fused-selector core-Y hit-count weight J. Hidden tuning knob; default 5.
+    #[arg(long = "glyco-gp-j", hide = true, default_value_t = 5.0f32)]
+    glyco_gp_j: f32,
+
+    /// `gp` fused-selector hyperscore weight H (0 disables). Hidden tuning knob; default 1.
+    #[arg(long = "glyco-gp-h", hide = true, default_value_t = 1.0f32)]
+    glyco_gp_h: f32,
+
+    /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
+    /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
+    #[arg(long = "glyco-pf-charge", hide = true, default_value_t = 2u8)]
+    glyco_pf_charge: u8,
+
+    /// Max peptide-first candidates per spectrum. Hidden knob; default 1024.
+    #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
+    glyco_max_pf: usize,
+
     /// Enable cross-spectrum backbone transfer (single-invocation two-pass;
     /// glyco mode only). Pass-1 glyco PSMs are native-GBDT-rescored in-process,
     /// 1%-FDR confident backbones (target+decoy) are propagated to co-eluting
@@ -2375,12 +2397,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             &spectra
         };
+        let glyco_cfg = search::glyco_search::GlycoConfig {
+            gp_k: cli.glyco_gp_k,
+            gp_j: cli.glyco_gp_j,
+            gp_h: cli.glyco_gp_h,
+            pf_charge: cli.glyco_pf_charge,
+            max_pf: cli.glyco_max_pf,
+        };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
             &prepared,
             &glycan_list,
             glyco_tol_ppm,
             cli.glyco_backbone_top_k,
+            glyco_cfg,
         );
         let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
         eprintln!(
@@ -2698,6 +2728,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &glycan_list,
                 glyco_tol_ppm,
                 cli.glyco_backbone_top_k,
+                glyco_cfg,
                 pass1,
                 &injected,
             )

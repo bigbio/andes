@@ -36,9 +36,40 @@ use andes_glyco::backbone::{
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
-    collapse_cmp, glyco_gp_fused_score, glyco_gp_h, glyco_gp_j, glyco_gp_k,
-    GlycoPsmKey,
+    collapse_cmp, glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_H_DEFAULT, GLYCO_GP_J_DEFAULT,
+    GLYCO_GP_K_DEFAULT,
 };
+
+/// Glyco tuning knobs, threaded from the CLI (see the `--glyco-gp-*` /
+/// `--glyco-pf-charge` / `--glyco-max-pf` hidden flags in the `andes` binary).
+/// These were previously undocumented `ANDES_GLYCO_*` env vars; they are now
+/// discoverable flags with the same validated defaults. `Default` reproduces the
+/// shipped configuration exactly.
+#[derive(Clone, Copy, Debug)]
+pub struct GlycoConfig {
+    /// `gp` selector ladder weight (K).
+    pub gp_k: f32,
+    /// `gp` selector core-Y hit-count weight (J).
+    pub gp_j: f32,
+    /// `gp` selector hyperscore weight (H).
+    pub gp_h: f32,
+    /// Peptide-first fragment-index charge states (indexes b/y at 1..=pf_charge).
+    pub pf_charge: u8,
+    /// Max peptide-first candidates kept per spectrum.
+    pub max_pf: usize,
+}
+
+impl Default for GlycoConfig {
+    fn default() -> Self {
+        Self {
+            gp_k: GLYCO_GP_K_DEFAULT,
+            gp_j: GLYCO_GP_J_DEFAULT,
+            gp_h: GLYCO_GP_H_DEFAULT,
+            pf_charge: 2,
+            max_pf: 1024,
+        }
+    }
+}
 use andes_glyco::hybrid::{
     hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
 };
@@ -286,13 +317,11 @@ impl GlycoCtxOwned {
         glycan_list: &[GlycanComp],
         fragment_tolerance_da: f64,
         backbone_top_k: usize,
+        cfg: GlycoConfig,
     ) -> Self {
-        // Independent experiment toggles (one variable at a time): the peptide-first
-        // fragment-index path (default ON) and cross-spectrum glycoform transfer
-        // (default OFF, opt-in). Kept separable to isolate each lever + its cost.
-        let peptide_first_on = std::env::var("ANDES_GLYCO_PEPTIDE_FIRST")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+        // Peptide-first fragment-index candidate generation is always on under the
+        // shipped gp selector (it is the high-charge-glycopeptide recall path).
+        let peptide_first_on = true;
         // FDR-soundness: the legacy in-driver whitelist transfer injected TARGET-ONLY,
         // UNLOCKED backbones (transfer_peptide_idx: None), bypassing the seed
         // target/decoy lock (design bug #1) — anti-conservative. It is superseded by
@@ -339,12 +368,11 @@ impl GlycoCtxOwned {
         // retention (keep backbones in top_k by peptide-b/y OR by glycan-Y evidence),
         // so a weak-b/y / strong-glycan-Y spectrum survives truncation. Opt-in for a
         // clean A/B vs the b/y-only path.
-        // `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`). The
-        // `gp` selector is now the shipped default (no toggle); the weights remain
-        // tunable. Process constants; read ONCE here (not per spectrum in `par_iter`).
-        let gp_k = glyco_gp_k();
-        let gp_j = glyco_gp_j();
-        let gp_h = glyco_gp_h();
+        // `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`), from
+        // the CLI (--glyco-gp-k/j/h). The `gp` selector is the shipped default.
+        let gp_k = cfg.gp_k;
+        let gp_j = cfg.gp_j;
+        let gp_h = cfg.gp_h;
         // Glycan-Y-first candidate retention (P0b) is off by default under the gp
         // selector (matches the validated gp baseline).
         let yindex_on = false;
@@ -374,14 +402,11 @@ impl GlycoCtxOwned {
                 has_nxst_sequon(&res)
             })
             .collect();
-        // CHARGE-AWARE peptide-first index (reviewer feedback): index b/y at charges
+        // CHARGE-AWARE peptide-first index (--glyco-pf-charge): index b/y at charges
         // 1..=PF_CHARGE so multiply-charged backbone ions of large/high-charge
         // glycopeptides (z4/z5+, whose b/y land at +2/+3) can select their peptide.
         // Default 2 (+1/+2); 1 = legacy +1-only. Clamped 1..=3 in the index.
-        let pf_charge: u8 = std::env::var("ANDES_GLYCO_PF_CHARGE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(2);
+        let pf_charge: u8 = cfg.pf_charge;
         let frag_index = if !peptide_first_on {
             FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01), pf_charge)
         } else {
@@ -422,19 +447,13 @@ impl GlycoCtxOwned {
         // per-spectrum query cost — with negligible loss of real glycopeptides
         // (identifiable backbones carry several b/y ions).
         // Hard cap on peptide-first candidates per spectrum (strongest b/y support
-        // first) so a peak-dense spectrum can't blow up phase-1 scoring. Overridable
-        // via ANDES_GLYCO_MAX_PF. The deterministic collapse keeps a FIXED subset
-        // under this cap, so too low a cap truncates good backbones away. A cap
-        // sweep on PXD025455 Fc3_r1 (deterministic, honest FDR, 1 decoy@1% each):
-        // 64→218 @1%/90 bb-correct, 256→232/93, 1024→253/97, ∞→268/96. Default 1024
-        // = beats an open-source glyco engine (222) with the HIGHEST backbone-correct count (97)
-        // and best precision, while keeping a safety ceiling for pathological
-        // peak-dense spectra (∞ gains a few total IDs but slightly worse precision).
-        let max_peptide_first: usize = std::env::var("ANDES_GLYCO_MAX_PF")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(1024);
+        // first) so a peak-dense spectrum can't blow up phase-1 scoring, from the CLI
+        // (--glyco-max-pf). The deterministic collapse keeps a FIXED subset under this
+        // cap, so too low a cap truncates good backbones away. A cap sweep on
+        // PXD025455 Fc3_r1 (deterministic, honest FDR, 1 decoy@1% each): 64→218 @1%/90
+        // bb-correct, 256→232/93, 1024→253/97, ∞→268/96. Default 1024 keeps the
+        // HIGHEST backbone-correct count with best precision + a safety ceiling.
+        let max_peptide_first: usize = cfg.max_pf.max(1);
 
         GlycoCtxOwned {
             frag_index,
@@ -1400,6 +1419,7 @@ pub fn glyco_search_run(
     glycan_list: &[GlycanComp],
     tol_ppm: f64,
     backbone_top_k: usize,
+    cfg: GlycoConfig,
 ) -> Vec<GlycoSpectrumResult> {
     let params = prepared.params;
     let candidates = &prepared.candidates;
@@ -1409,7 +1429,7 @@ pub fn glyco_search_run(
     // full rationale of each; unchanged by the Task 8c extraction, just moved
     // out of this function so `glyco_transfer_pass2` can build an IDENTICAL
     // context from the same routine instead of a second hand-maintained copy.
-    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k);
+    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
     let cross_spectrum_on = owned.cross_spectrum_on;
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
 
@@ -1586,12 +1606,14 @@ pub fn glyco_search_run(
 /// Deterministic merge: `injected` is a `BTreeMap` (never `HashMap`) and the
 /// output is sorted by `spectrum_idx`, matching `glyco_search_run`'s own
 /// determinism convention.
+#[allow(clippy::too_many_arguments)]
 pub fn glyco_transfer_pass2(
     spectra: &[Spectrum],
     prepared: &PreparedSearch<'_>,
     glycan_list: &[GlycanComp],
     tol_ppm: f64,
     backbone_top_k: usize,
+    cfg: GlycoConfig,
     pass1: Vec<GlycoSpectrumResult>,
     injected: &std::collections::BTreeMap<usize, Vec<BackboneHit>>,
 ) -> Vec<GlycoSpectrumResult> {
@@ -1600,7 +1622,7 @@ pub fn glyco_transfer_pass2(
 
     // Same shared setup `glyco_search_run` uses — identical toggles/indices,
     // built once for this call (see `GlycoCtxOwned::build` doc comment).
-    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k);
+    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
 
     // Re-score only the spectra that actually received a transferred backbone.
@@ -2207,7 +2229,7 @@ mod tests {
         // Pass 1 (no transfer) on this fixture: nothing to find (no oxonium/Y-ladder
         // evidence, peptide-first path needs real b/y matches on real peaks), so an
         // empty Pass-1 result is the expected, honest starting point for Pass 2.
-        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50);
+        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default());
         assert!(
             pass1.iter().all(|r| r.hits.is_empty()) || pass1.is_empty(),
             "peakless fixture must not produce a Pass-1 hit on its own: {pass1:?}"
@@ -2245,7 +2267,7 @@ mod tests {
             std::collections::BTreeMap::new();
         injected.insert(0, vec![bb_hit]);
 
-        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, pass1, &injected);
+        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), pass1, &injected);
 
         assert_eq!(merged.len(), 1, "expected exactly one spectrum result: {merged:?}");
         let result = &merged[0];

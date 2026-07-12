@@ -722,6 +722,29 @@ pub fn count_core_y_hits(
     hits
 }
 
+/// Acceptor-side core-Y acceptance gate for cross-spectrum transfer.
+///
+/// A transferred backbone should only be accepted onto an acceptor spectrum that
+/// PHYSICALLY shows the glycan core ladder — a published spectrum-expansion method
+/// requires ≥3 matched N-glycan core-structure Y ions with Y1 (peptide+HexNAc)
+/// mandatory. This keeps transfer from injecting mass-coincidence candidates onto
+/// spectra that carry no glycan evidence (the fanout the transfer diagnostic found).
+/// Returns true iff ≥`min_hits` core-Y rungs match AND Y1 (`bb + HexNAc`) matches.
+pub fn acceptor_core_y_gate(
+    peaks: &[(f64, f32)],
+    stats: &SpectrumStats,
+    bb: f64,
+    tol_ppm: f64,
+    max_charge: u8,
+    min_hits: u8,
+) -> bool {
+    if count_core_y_hits(peaks, stats, bb, tol_ppm, max_charge) < min_hits {
+        return false;
+    }
+    // Y1 (peptide + innermost HexNAc) is mandatory among the matched rungs.
+    best_frag_intensity(peaks, stats.sorted, bb + CORE_Y_STEPS[0], tol_ppm, max_charge) > 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,6 +1024,33 @@ mod tests {
             count_core_y_hits(&peaks, &stats, residue, 20.0, 3) < 6,
             "residue mass (H2O too low) must NOT match the neutral-anchored ladder"
         );
+    }
+
+    /// Transfer acceptor gate: ≥min_hits core-Y AND Y1 (bb+HexNAc) mandatory.
+    #[test]
+    fn acceptor_core_y_gate_requires_min_hits_and_y1() {
+        let bb = 1500.0_f64; // neutral backbone
+        let mk = |rungs: &[usize]| {
+            // rung 0 = Y0 (bb), rung k>=1 = bb + CORE_Y_STEPS[k-1].
+            let mut peaks: Vec<(f64, f32)> = rungs.iter().map(|&k| {
+                let neutral = if k == 0 { bb } else { bb + CORE_Y_STEPS[k - 1] };
+                (neutral + PROTON, 500.0)
+            }).collect();
+            peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            peaks
+        };
+        // Y0, Y1, Y2 present (3 hits incl Y1) → PASS at min_hits=3.
+        let p = mk(&[0, 1, 2]);
+        let s = SpectrumStats::new(&p);
+        assert!(acceptor_core_y_gate(&p, &s, bb, 20.0, 3, 3), "3 rungs incl Y1 must pass");
+        // Only Y0, Y1 (2 hits) → FAIL at min_hits=3.
+        let p2 = mk(&[0, 1]);
+        let s2 = SpectrumStats::new(&p2);
+        assert!(!acceptor_core_y_gate(&p2, &s2, bb, 20.0, 3, 3), "<3 rungs must fail");
+        // Y0, Y2, Y3 (3 hits but NO Y1) → FAIL (Y1 mandatory).
+        let p3 = mk(&[0, 2, 3]);
+        let s3 = SpectrumStats::new(&p3);
+        assert!(!acceptor_core_y_gate(&p3, &s3, bb, 20.0, 3, 3), "missing Y1 must fail even with 3 rungs");
     }
 
     #[test]

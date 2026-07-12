@@ -2623,6 +2623,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1);
+            // Acceptor-side core-Y acceptance gate (a published spectrum-expansion
+            // requirement): a transfer is accepted only if the acceptor spectrum
+            // PHYSICALLY shows >= this many core-Y ions WITH Y1 (peptide+HexNAc)
+            // present — otherwise transfer floods mass-coincidence candidates onto
+            // spectra with no glycan evidence. Default 3; 0 disables the gate.
+            let transfer_core_y: u8 = std::env::var("ANDES_GLYCO_TRANSFER_CORE_Y")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3);
+            let mut gated_out = 0usize;
             let mut injected: std::collections::BTreeMap<usize, Vec<andes_glyco::hybrid::BackboneHit>> =
                 std::collections::BTreeMap::new();
             for tc in &transferred {
@@ -2637,6 +2647,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|&z| z > 0)
                     .map(|z| z as u8)
                     .unwrap_or(*params.charge_range.start());
+                // Core-Y acceptance gate on the acceptor spectrum (bb NEUTRAL = residue + H2O).
+                if transfer_core_y > 0 {
+                    let spec = &spectra_for_glyco[spec_idx];
+                    let stats = andes_glyco::backbone::SpectrumStats::new(&spec.peaks);
+                    if !andes_glyco::backbone::acceptor_core_y_gate(
+                        &spec.peaks,
+                        &stats,
+                        tc.backbone_mass + model::mass::H2O,
+                        glyco_tol_ppm,
+                        charge,
+                        transfer_core_y,
+                    ) {
+                        gated_out += 1;
+                        continue;
+                    }
+                }
                 injected.entry(spec_idx).or_default().push(andes_glyco::hybrid::BackboneHit {
                     backbone_mass: tc.backbone_mass,
                     glycan: Some(tc.glycan.clone()),
@@ -2659,7 +2685,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let injected_cands: usize = injected.values().map(|v| v.len()).sum();
             eprintln!(
-                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @{:.1}% native-q ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}) onto {} acceptor spectra [{:.2}s]",
+                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @{:.1}% native-q ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}, core_y_gate>={} dropped {}) onto {} acceptor spectra [{:.2}s]",
                 q_rows.len(),
                 seeds.len(),
                 seed_q * 100.0,
@@ -2668,6 +2694,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 transferred.len(),
                 injected_cands,
                 min_support,
+                transfer_core_y,
+                gated_out,
                 injected.len(),
                 t_xfer.elapsed().as_secs_f64()
             );

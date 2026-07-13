@@ -144,7 +144,6 @@ Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1
 | `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade: Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and searches the *residual* spectrum (primary's matched peaks removed) for a second peptide, emitted as an extra PSM. Forces top-1 per pass and always MS2. Entrapment-FDP validated. Experimental. |
 | `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors considered per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
-| `--isolation-halfwidth` | f64 | `1.5` | *(advanced)* Fallback isolation half-width (Da), used only when the file omits per-scan isolation offsets. |
 
 ### Refine — PTM discovery cascade
 
@@ -155,19 +154,19 @@ Opt-in second pass over confident proteins that opens the modification search sp
 | `--refine` | flag | *(off)* | Enable the PTM-refinement cascade (Pass-2 over confident proteins). |
 | `--refine-config` | path | *(tier default)* | *(advanced)* YAML tier config; the single extension point for the refine mod set and options. |
 | `--refine-select-psm-fdr` | fraction | `0.01` | *(advanced)* PSM-FDR threshold selecting the confident set that seeds Pass-2. Leave at default unless you have a measured reason. |
-| `--refine-max-mods` | u32 | *(from config)* | *(advanced)* Override the config's max variable mods per peptide for Pass-2. |
-| `--refine-high-res-only` | bool | *(from config)* | *(advanced)* Override the config's high-res-only gate. |
+
+(Max variable mods and the high-res-only gate for refinement are set inside the `--refine-config` YAML tier, not as separate flags.)
 
 ### Rescoring & FDR filtering
 
-andes writes a Percolator-ready `.pin` and, by design, **does not compute FDR itself** — feed the PIN to Percolator. These flags run rescoring in-process instead. In a pipeline that owns its own rescoring (e.g. quantms), leave them off.
+andes writes a Percolator-ready `.pin` and, by design, **does not compute FDR itself** — feed the PIN to Percolator. These flags run rescoring in-process instead. In a pipeline that owns its own rescoring (e.g. quantms), leave them off. Rescoring runs **only** when you pass `--rescore` (or `--rescore-native`); `--fdr`/`--pep` are just the thresholds applied *by* such a run and are ignored (with a warning) if set on their own.
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
 | `--rescore` | flag | *(off)* | Run Percolator in-process and write rescored, FDR-controlled output. |
 | `--rescore-native` | flag | *(off)* | *(advanced)* Use the built-in GBDT rescorer instead of Percolator — non-production fallback; Percolator is the production path. |
-| `--fdr` | fraction | *(off)* | q-value threshold for the filtered output (implies a rescoring run). |
-| `--pep` | fraction | *(off)* | *(advanced)* Posterior-error-probability threshold for the filtered output. |
+| `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run (requires `--rescore`/`--rescore-native`). |
+| `--pep` | fraction | *(off)* | *(advanced)* Posterior-error-probability threshold applied by a rescoring run. |
 | `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Percolator backend selection/passthrough; auto-resolution (`$PATH` then Docker) covers the common path. |
 | `--keep-pin` | bool | `true` | *(advanced)* Keep the intermediate PIN after rescoring. |
 

@@ -68,7 +68,6 @@ pub struct SearchCfg {
 pub struct ScoringCfg {
     pub score: Option<String>,
     pub precursor_cal: Option<String>,
-    pub cal_min_spec_keys: Option<usize>,
     pub threads: Option<usize>,
     pub fragmentation: Option<String>,
     pub protocol: Option<String>,
@@ -97,7 +96,6 @@ pub struct ChimericCfg {
     pub enabled: Option<bool>,
     pub max_coisolated: Option<usize>,
     pub max_kl: Option<f32>,
-    pub isolation_halfwidth: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -106,8 +104,6 @@ pub struct RefineCfg {
     pub enabled: Option<bool>,
     pub config: Option<PathBuf>,
     pub select_psm_fdr: Option<f64>,
-    pub max_mods: Option<u32>,
-    pub high_res_only: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -129,7 +125,6 @@ pub struct RescoringCfg {
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
     pub backbone_top_k: Option<usize>,
-    pub max_spectra: Option<usize>,
     pub gp_k: Option<f32>,
     pub gp_j: Option<f32>,
     pub gp_h: Option<f32>,
@@ -229,7 +224,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // ── scoring ──
     set_parsed!("score", score, cfg.scoring.score, parse_value_enum::<crate::ScoreFlag>);
     set_parsed!("precursor_cal", precursor_cal, cfg.scoring.precursor_cal, crate::parse_precursor_cal);
-    set!("cal_min_spec_keys", cal_min_spec_keys, cfg.scoring.cal_min_spec_keys);
     set!("threads", threads, cfg.scoring.threads);
     set_parsed!("fragmentation", fragmentation, cfg.scoring.fragmentation, crate::parse_fragmentation);
     set_parsed!("protocol", protocol, cfg.scoring.protocol, crate::parse_protocol);
@@ -252,14 +246,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("chimeric", chimeric, cfg.chimeric.enabled);
     set!("chimeric_max_coisolated", chimeric_max_coisolated, cfg.chimeric.max_coisolated);
     set!("chimeric_max_kl", chimeric_max_kl, cfg.chimeric.max_kl);
-    set!("isolation_halfwidth", isolation_halfwidth, cfg.chimeric.isolation_halfwidth);
 
     // ── refine ──
     set!("refine", refine, cfg.refine.enabled);
     set_opt!("refine_config", refine_config, cfg.refine.config);
     set!("refine_select_psm_fdr", refine_select_psm_fdr, cfg.refine.select_psm_fdr);
-    set_opt!("refine_max_mods", refine_max_mods, cfg.refine.max_mods);
-    set_opt!("refine_high_res_only", refine_high_res_only, cfg.refine.high_res_only);
 
     // ── rescoring ──
     set!("rescore", rescore, cfg.rescoring.enabled);
@@ -275,7 +266,6 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
     set!("glyco_backbone_top_k", glyco_backbone_top_k, cfg.glyco.backbone_top_k);
-    set!("glyco_max_spectra", glyco_max_spectra, cfg.glyco.max_spectra);
     set!("glyco_gp_k", glyco_gp_k, cfg.glyco.gp_k);
     set!("glyco_gp_j", glyco_gp_j, cfg.glyco.gp_j);
     set!("glyco_gp_h", glyco_gp_h, cfg.glyco.gp_h);

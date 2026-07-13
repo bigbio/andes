@@ -20,6 +20,8 @@ use std::thread;
 mod rescore;
 #[path = "../glyco_seeds.rs"]
 mod glyco_seeds;
+#[path = "../config.rs"]
+mod config;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{
@@ -149,6 +151,12 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
 /// manually and returns an early error if they are missing.
 #[derive(Args, Debug)]
 struct SearchArgs {
+    /// YAML run-configuration file. Any parameter can be set here (grouped by
+    /// experiment: io/search/scoring/decoys/chimeric/refine/rescoring/glyco; see
+    /// DOCS §1b). An explicit CLI flag always overrides the config value.
+    #[arg(long = "config", value_name = "FILE")]
+    config: Option<PathBuf>,
+
     /// Input spectrum file(s). Repeat `--spectrum` for multiple inputs (one PIN).
     /// Format is auto-detected per file by extension.
     #[arg(long)]
@@ -199,7 +207,7 @@ struct SearchArgs {
 
     /// Isotope-error offset range to try, as `MIN..MAX` (also accepts `MIN-MAX`).
     /// Negative offsets allowed. Default `-1..2`.
-    #[arg(long = "isotope-error", default_value = "-1..2", value_parser = parse_isotope_error_range)]
+    #[arg(long = "isotope-error", hide = true, default_value = "-1..2", value_parser = parse_isotope_error_range)]
     isotope_error: (i8, i8),
 
     /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
@@ -209,13 +217,6 @@ struct SearchArgs {
     #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
 
-    /// Minimum SpecKeys before precursor calibration runs (default 10000).
-    /// Lower it to calibrate small/targeted runs that would otherwise be
-    /// skipped; raising it is more conservative. Only consulted when
-    /// `--precursor-cal` is `auto`/`on`.
-    #[arg(long = "cal-min-spec-keys", hide = true, default_value_t = search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS)]
-    cal_min_spec_keys: usize,
-
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
     /// Default `20ppm`.
@@ -224,7 +225,7 @@ struct SearchArgs {
 
     /// Precursor charge range to try when not specified in the spectrum, as
     /// `MIN..MAX` (also accepts `MIN-MAX`). Default `2..5`.
-    #[arg(long = "charge", default_value = "2..5", value_parser = parse_charge_range)]
+    #[arg(long = "charge", hide = true, default_value = "2..5", value_parser = parse_charge_range)]
     charge: (u8, u8),
 
     /// Maximum number of PSMs to retain per spectrum.
@@ -236,7 +237,7 @@ struct SearchArgs {
     /// `semi`: at least one terminus must be a cleavage site. `non-specific`:
     /// neither terminus needs to be a cleavage site.
     #[arg(long = "enzyme-specificity", alias = "ntt",
-          default_value = "fully", value_parser = parse_enzyme_specificity)]
+          hide = true, default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
 
     /// Proteolytic enzyme for in-silico digestion. Named values: trypsin
@@ -255,7 +256,7 @@ struct SearchArgs {
     enzyme: String,
 
     /// Maximum number of missed cleavages per peptide.
-    #[arg(long, default_value = "1")]
+    #[arg(long, hide = true, default_value = "1")]
     max_missed_cleavages: u32,
 
     /// Minimum number of peaks an MS2 spectrum must have to be scored; spectra
@@ -264,17 +265,17 @@ struct SearchArgs {
     min_peaks: u32,
 
     /// Minimum peptide length, in residues.
-    #[arg(long, default_value = "6")]
+    #[arg(long, hide = true, default_value = "6")]
     min_length: u32,
 
     /// Maximum peptide length, in residues. (50 matches the reference engine/a comparison engine defaults;
     /// 40 dropped long tryptic peptides.)
-    #[arg(long, default_value = "50")]
+    #[arg(long, hide = true, default_value = "50")]
     max_length: u32,
 
     /// Maximum number of variable modifications per peptide. A `NumMods=N` line
     /// in a --mods file overrides this.
-    #[arg(long = "max-mods", default_value = "3")]
+    #[arg(long = "max-mods", hide = true, default_value = "3")]
     max_mods: u32,
 
     /// Path to a mods.txt file describing fixed and variable modifications.
@@ -338,11 +339,6 @@ struct SearchArgs {
     #[arg(long, default_value = "false")]
     chimeric: bool,
 
-    /// Chimeric mode: fallback isolation half-width in Da when the mzML omits the
-    /// per-scan isolation-window offsets.
-    #[arg(long, hide = true, default_value = "1.5")]
-    isolation_halfwidth: f64,
-
     /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
     /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
     /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.
@@ -400,9 +396,63 @@ struct SearchArgs {
     #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 50usize)]
     glyco_backbone_top_k: usize,
 
-    /// Limit glyco scoring to the first N spectra (0 = no limit). Hidden dev knob.
-    #[arg(long = "glyco-max-spectra", hide = true, default_value_t = 0usize)]
-    glyco_max_spectra: usize,
+
+    /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
+    /// Hidden tuning knob; validated default 50.
+    #[arg(long = "glyco-gp-k", hide = true, default_value_t = 50.0f32)]
+    glyco_gp_k: f32,
+
+    /// `gp` fused-selector core-Y hit-count weight J. Hidden tuning knob; default 5.
+    #[arg(long = "glyco-gp-j", hide = true, default_value_t = 5.0f32)]
+    glyco_gp_j: f32,
+
+    /// `gp` fused-selector hyperscore weight H (0 disables). Hidden tuning knob; default 1.
+    #[arg(long = "glyco-gp-h", hide = true, default_value_t = 1.0f32)]
+    glyco_gp_h: f32,
+
+    /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
+    /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
+    #[arg(long = "glyco-pf-charge", hide = true, default_value_t = 2u8)]
+    glyco_pf_charge: u8,
+
+    /// Max peptide-first candidates per spectrum. Hidden knob; default 1024.
+    #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
+    glyco_max_pf: usize,
+
+    /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
+    /// mass-residual hits) and print transfer diagnostics. The resulting PIN is for
+    /// inspection ONLY and must never be fed to an FDR tool. Hidden dev flag.
+    #[arg(long = "debug-glyco", hide = true, default_value_t = false)]
+    debug_glyco: bool,
+
+    /// Emit paired glycan-axis decoy rows for 2D (peptide × glycan) FDR
+    /// discrimination (experimental). Off by default. Hidden.
+    #[arg(long = "glyco-decoy", hide = true, default_value_t = false)]
+    glyco_decoy: bool,
+
+    /// Cross-spectrum transfer: q-value threshold for confident donor seeds
+    /// (--glyco-transfer only). Hidden; default 0.05 (native GBDT q is conservative).
+    #[arg(long = "glyco-transfer-seed-fdr", hide = true, default_value_t = 0.05f64)]
+    glyco_transfer_seed_fdr: f64,
+
+    /// Cross-spectrum transfer: RT co-elution window in seconds. Hidden; default 1800.
+    #[arg(long = "glyco-rt-window", hide = true, default_value_t = 1800.0f32)]
+    glyco_rt_window: f32,
+
+    /// Cross-spectrum transfer: skip the RT co-elution gate (unsafe research opt-in,
+    /// transfers across the whole run when RT is missing). Hidden; default off.
+    #[arg(long = "glyco-transfer-ungated", hide = true, default_value_t = false)]
+    glyco_transfer_ungated: bool,
+
+    /// Cross-spectrum transfer: minimum independent-donor graph support to inject a
+    /// transferred backbone. Hidden; default 1 (no gate).
+    #[arg(long = "glyco-transfer-min-support", hide = true, default_value_t = 1u32)]
+    glyco_transfer_min_support: u32,
+
+    /// Cross-spectrum transfer: acceptor-side core-Y quorum (incl. mandatory Y1) to
+    /// accept a transfer. Hidden; default 3 (0 disables the gate).
+    #[arg(long = "glyco-transfer-core-y", hide = true, default_value_t = 3u8)]
+    glyco_transfer_core_y: u8,
 
     /// Enable cross-spectrum backbone transfer (single-invocation two-pass;
     /// glyco mode only). Pass-1 glyco PSMs are native-GBDT-rescored in-process,
@@ -429,18 +479,6 @@ struct SearchArgs {
     #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true, value_parser = parse_unit_fraction)]
     refine_select_psm_fdr: f64,
 
-    /// Max variable mods per refined peptide. Overrides the value from
-    /// `--refine-config` YAML; when neither is given, the built-in tier's value (2).
-    #[arg(long = "refine-max-mods", hide = true)]
-    refine_max_mods: Option<u32>,
-
-    /// Require high-res data for refinement; on low-res, skip refine. Overrides the
-    /// `--refine-config` YAML `high_res_only`; when neither is given, the tier
-    /// default (true). e.g. `--refine-high-res-only false` forces the cascade on
-    /// low-res data.
-    #[arg(long = "refine-high-res-only", hide = true, action = clap::ArgAction::Set)]
-    refine_high_res_only: Option<bool>,
-
     /// Run Percolator on the PIN after the search and join its PEP/q-value back
     /// into the outputs (QPX `posterior_error_probability` + a `q-value` score,
     /// and a filtered `<stem>.q<fdr>.tsv`). Needs a Percolator backend (see
@@ -454,7 +492,7 @@ struct SearchArgs {
     /// FALLBACK for benchmarking / offline use — NOT production-grade FDR; prefer
     /// `--rescore` (Percolator) for production. Writes the same QPX q-value/PEP +
     /// filtered `<stem>.q<fdr>.tsv` outputs. Ignored if `--rescore` is also set.
-    #[arg(long = "rescore-native", default_value_t = false)]
+    #[arg(long = "rescore-native", hide = true, default_value_t = false)]
     rescore_native: bool,
 
     /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
@@ -903,14 +941,27 @@ type Cli = SearchArgs;
 fn main() -> ExitCode {
     #[cfg(feature = "thermo")]
     configure_bundled_dotnet();
-    let top = TopCli::parse();
-    let result = match top.command {
+    // Parse via get_matches so we can query each flag's ValueSource (for the
+    // --config merge: an explicit CLI flag must override the YAML value).
+    let matches = <TopCli as clap::CommandFactory>::command().get_matches();
+    let mut top = <TopCli as clap::FromArgMatches>::from_arg_matches(&matches)
+        .unwrap_or_else(|e| e.exit());
+    let result = match top.command.take() {
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
         None => {
+            // --config: fill any parameter the user did not type on the CLI.
+            if let Some(cfg_path) = top.search.config.clone() {
+                if let Err(e) = config::RunConfig::load(&cfg_path)
+                    .and_then(|c| config::apply(c, &mut top.search, &matches))
+                {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            }
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
             if search.spectrum.is_empty() {
@@ -927,14 +978,22 @@ fn main() -> ExitCode {
             // --output-pin is required UNLESS --rescore is set: rescore can route
             // the search through a temporary PIN (deleted afterwards when
             // --keep-pin false), so a PIN path is not mandatory in that mode.
-            if search.output_pin.is_none()
-                && !search.rescore
-                && !search.rescore_native
-                && search.fdr.is_none()
-                && search.pep.is_none()
-            {
+            if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
+            }
+            // --fdr / --pep are thresholds APPLIED BY a rescoring run; they do not
+            // start one on their own. Warn (don't silently launch a backend) if set
+            // without an explicit --rescore / --rescore-native.
+            if (search.fdr.is_some() || search.pep.is_some())
+                && !search.rescore
+                && !search.rescore_native
+            {
+                eprintln!(
+                    "warning: --fdr/--pep set without --rescore or --rescore-native; \
+                     they are ignored (add --rescore to run Percolator, or feed the PIN \
+                     to Percolator yourself)."
+                );
             }
             run(Cli {
                 database: Some(database),
@@ -1308,7 +1367,7 @@ fn run_precursor_calibration(
     if spec_keys.len() < params.cal_min_spec_keys {
         eprintln!(
             "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
-             Lower --cal-min-spec-keys to calibrate smaller/targeted runs.",
+             The sample is too small for a reliable calibration pre-pass.",
             spec_keys.len(),
             params.cal_min_spec_keys,
             t_cal.elapsed().as_secs_f64()
@@ -1677,7 +1736,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.chimeric = chimeric_active;
-    params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
+    // Fallback isolation half-width (Da) used only when the file omits per-scan
+    // isolation offsets; a fixed sensible default (was the --isolation-halfwidth flag).
+    params.chimeric_isolation_halfwidth_da = 1.5;
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
     // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
@@ -1700,7 +1761,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
-    params.cal_min_spec_keys = cli.cal_min_spec_keys;
+    // params.cal_min_spec_keys keeps its SearchParams default
+    // (MIN_SPECKEYS_FOR_PREPASS); it is an internal threshold, no longer a flag.
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {
@@ -2364,27 +2426,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // and write a separate `.glyco.pin` file.  The standard PIN is skipped.
     if cli.glyco {
         let t_glyco = std::time::Instant::now();
-        // Use the curated common list (~600 glycans) by default so that ALL
-        // backbone candidates can be b/y-scored in phase-1 (avoids the
-        // Y-ladder pre-filter ceiling).  The full ~2510-entry list is available
-        // via n_glycan_list() for research/exhaustive searches.
-        // ANDES_GLYCO_FULL_GLYCANS=1 swaps to the full 2510-composition list:
-        // a gap-diagnostic showed the common list covers only 79.5% of truth
-        // glycans (loss 107/523) vs 85.5% for the full list — the extra
-        // coverage costs generation/scoring time (more backbones per spectrum).
-        let glycan_list = if std::env::var("ANDES_GLYCO_FULL_GLYCANS")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
-            andes_glyco::glycan_db::n_glycan_list()
-        } else {
-            andes_glyco::glycan_db::n_glycan_list_common()
-        };
+        // Use the curated common list (~600 glycans) so that ALL backbone candidates
+        // can be b/y-scored in phase-1 (avoids the Y-ladder pre-filter ceiling). The
+        // full ~2510-entry list (n_glycan_list()) was A/B-refuted at 1% FDR — the
+        // extra decoys dilute separation faster than the added coverage helps.
+        let glycan_list = andes_glyco::glycan_db::n_glycan_list_common();
         let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
-        let spectra_for_glyco: &[_] = if cli.glyco_max_spectra > 0 {
-            &spectra[..spectra.len().min(cli.glyco_max_spectra)]
+        // Dev cap on glyco scoring uses the global --max-spectra (was the
+        // redundant --glyco-max-spectra).
+        let spectra_for_glyco: &[_] = if cli.max_spectra > 0 {
+            &spectra[..spectra.len().min(cli.max_spectra)]
         } else {
             &spectra
+        };
+        let glyco_cfg = search::glyco_search::GlycoConfig {
+            gp_k: cli.glyco_gp_k,
+            gp_j: cli.glyco_gp_j,
+            gp_h: cli.glyco_gp_h,
+            pf_charge: cli.glyco_pf_charge,
+            max_pf: cli.glyco_max_pf,
+            debug: cli.debug_glyco,
+            glyco_decoy: cli.glyco_decoy,
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
@@ -2392,6 +2454,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &glycan_list,
             glyco_tol_ppm,
             cli.glyco_backbone_top_k,
+            glyco_cfg,
         );
         let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
         eprintln!(
@@ -2408,10 +2471,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             stem.with_extension("glyco.pin")
         };
         // G3: opt-in glycan-axis decoy rows (2D-FDR discrimination on the glycan
-        // axis). Default off — no change to the shipping PIN.
-        let emit_glycan_decoy = std::env::var("ANDES_GLYCO_DECOY")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        // axis), from --glyco-decoy. Default off — no change to the shipping PIN.
+        let emit_glycan_decoy = cli.glyco_decoy;
 
         // ── Task 8d: single-invocation cross-spectrum backbone transfer ──
         // Off by default (`--glyco-transfer`); when off, behave EXACTLY as
@@ -2439,7 +2500,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // native-GBDT-rescore it in-process to get target+decoy q-values.
             let mut buf: Vec<u8> = Vec::new();
             output::glyco_pin::write_glyco_pin_to(
-                &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false,
+                &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false, false,
             )?;
             let pin_text = String::from_utf8(buf)
                 .map_err(|e| format!("Pass-1 glyco PIN is not valid UTF-8: {e}"))?;
@@ -2449,7 +2510,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // collapse winner EXACTLY (same comparator, same enumerated-only
             // gate) so `scan -> peptide_idx/backbone_mass` matches the row the
             // PIN (and thus the q-values above) actually describe.
-            let y_primary = andes_glyco::glyco_psm::y_primary_selection();
+            // Transfer seed-selection proxy (ladder-primary collapse_cmp).
+            let y_primary = true;
             // scan (as emitted into ScanNr/SpecId, i.e. spec.scan.unwrap_or(0))
             // -> (peptide_idx, backbone_mass, rt_seconds, spec_idx).
             let mut seed_lookup: std::collections::BTreeMap<u32, (u32, f64, Option<f64>, usize)> =
@@ -2532,11 +2594,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // confident set exists. 0.05 recovers the Percolator-equivalent
             // confident seed set; final FDR is still Percolator on the merged
             // PIN (the symmetric decoy graph keeps that honest). Tunable for A/B.
-            let seed_q: f64 = std::env::var("ANDES_GLYCO_SEED_FDR")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&q: &f64| q > 0.0 && q <= 1.0)
-                .unwrap_or(0.05);
+            let seed_q: f64 = cli.glyco_transfer_seed_fdr.clamp(f64::MIN_POSITIVE, 1.0);
             let seeds = glyco_seeds::seeds_at_fdr(&rows, seed_q, |scan| {
                 seed_lookup.get(&scan).map(|&(pep_idx, bb, rt, _spec_idx)| (pep_idx, bb, rt))
             });
@@ -2595,10 +2653,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                 v
             };
-            let rt_window: f32 = std::env::var("ANDES_GLYCO_RT_WINDOW")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1800.0);
+            let rt_window: f32 = cli.glyco_rt_window;
             const MIN_GLYCAN: f64 = 406.0;
             // FDR-soundness (design bug #4): require an RT co-elution check on both
             // ends by default. `ANDES_GLYCO_TRANSFER_UNGATED=1` is the explicit
@@ -2606,9 +2661,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // (research only). `propagate_transfers` now scales the glycan-match
             // tolerance PER ACCEPTOR from `glyco_tol_ppm` (design bug #5), so no
             // fixed representative-mass tolerance is passed.
-            let require_rt = std::env::var("ANDES_GLYCO_TRANSFER_UNGATED")
-                .map(|v| v != "1")
-                .unwrap_or(true);
+            let require_rt = !cli.glyco_transfer_ungated;
             let transferred = andes_glyco::crossspectrum::propagate_transfers(
                 &seeds, &nodes, &glycan_sorted, &glycan_list, rt_window, MIN_GLYCAN,
                 glyco_tol_ppm, require_rt,
@@ -2619,10 +2672,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // linked sibling spectra (a real glycoform ladder), cutting the
             // mass-coincidence singletons that the wide "any glycan-delta" edge
             // otherwise floods in. Default 1 (no gate); tune via env for A/B.
-            let min_support: u32 = std::env::var("ANDES_GLYCO_MIN_SUPPORT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1);
+            let min_support: u32 = cli.glyco_transfer_min_support;
+            // Acceptor-side core-Y acceptance gate (a published spectrum-expansion
+            // requirement): a transfer is accepted only if the acceptor spectrum
+            // PHYSICALLY shows >= this many core-Y ions WITH Y1 (peptide+HexNAc)
+            // present — otherwise transfer floods mass-coincidence candidates onto
+            // spectra with no glycan evidence. Default 3; 0 disables the gate.
+            let transfer_core_y: u8 = cli.glyco_transfer_core_y;
+            let mut gated_out = 0usize;
             let mut injected: std::collections::BTreeMap<usize, Vec<andes_glyco::hybrid::BackboneHit>> =
                 std::collections::BTreeMap::new();
             for tc in &transferred {
@@ -2637,6 +2694,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .filter(|&z| z > 0)
                     .map(|z| z as u8)
                     .unwrap_or(*params.charge_range.start());
+                // Core-Y acceptance gate on the acceptor spectrum (bb NEUTRAL = residue + H2O).
+                if transfer_core_y > 0 {
+                    let spec = &spectra_for_glyco[spec_idx];
+                    let stats = andes_glyco::backbone::SpectrumStats::new(&spec.peaks);
+                    if !andes_glyco::backbone::acceptor_core_y_gate(
+                        &spec.peaks,
+                        &stats,
+                        tc.backbone_mass + model::mass::H2O,
+                        glyco_tol_ppm,
+                        charge,
+                        transfer_core_y,
+                    ) {
+                        gated_out += 1;
+                        continue;
+                    }
+                }
                 injected.entry(spec_idx).or_default().push(andes_glyco::hybrid::BackboneHit {
                     backbone_mass: tc.backbone_mass,
                     glycan: Some(tc.glycan.clone()),
@@ -2659,7 +2732,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             let injected_cands: usize = injected.values().map(|v| v.len()).sum();
             eprintln!(
-                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @{:.1}% native-q ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}) onto {} acceptor spectra [{:.2}s]",
+                "[glyco-transfer] {} Pass-1 rows rescored, {} seeds @{:.1}% native-q ({} decoy), {} nodes, {} transferred candidates -> {} injected (min_support>={}, core_y_gate>={} dropped {}) onto {} acceptor spectra [{:.2}s]",
                 q_rows.len(),
                 seeds.len(),
                 seed_q * 100.0,
@@ -2668,6 +2741,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 transferred.len(),
                 injected_cands,
                 min_support,
+                transfer_core_y,
+                gated_out,
                 injected.len(),
                 t_xfer.elapsed().as_secs_f64()
             );
@@ -2680,6 +2755,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &glycan_list,
                 glyco_tol_ppm,
                 cli.glyco_backbone_top_k,
+                glyco_cfg,
                 pass1,
                 &injected,
             )
@@ -2709,6 +2785,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &params,
             &idx,
             emit_glycan_decoy,
+            cli.debug_glyco,
         )?;
         eprintln!(
             "Wrote glyco PIN: {} ({} PSM rows) [PHASE TOTAL: {:.2}s]",
@@ -2736,10 +2813,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
             None => search::RefineConfig::default_tier(),
         };
-        // CLI `--refine-max-mods` overrides the YAML/tier value only when explicitly
-        // passed; otherwise the config's own `max_mods` is honored.
+        // Max variable mods for refinement comes from the refine config/tier
+        // (set it in the `--refine-config` YAML; the former CLI override was removed).
         let cfg = search::RefineConfig {
-            max_mods: cli.refine_max_mods.unwrap_or(base_cfg.max_mods),
+            max_mods: base_cfg.max_mods,
             ..base_cfg
         };
 
@@ -2749,11 +2826,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // deamidation +0.984 vs a C13 isotope error) are resolvable.
         let high_res = param.data_type.instrument.is_high_resolution();
 
-        // CLI `--refine-high-res-only` overrides the YAML/tier value only when
-        // explicitly passed; otherwise the config's own `high_res_only` is honored.
-        let high_res_only = cli.refine_high_res_only.unwrap_or(cfg.high_res_only);
+        // `high_res_only` comes from the refine config/tier (set it in the
+        // `--refine-config` YAML; the former CLI overrides were removed).
+        let high_res_only = cfg.high_res_only;
         if high_res_only && !high_res {
-            eprintln!("WARN: --refine-high-res-only: data is low-res; skipping refinement.");
+            eprintln!("WARN: refine is high-res-only and the data is low-res; skipping refinement.");
             None
         } else {
             // Target-only db recovered from the Pass-1 combined index; the
@@ -2837,35 +2914,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `write_qpx` and the filtered TSV. `None` keeps every downstream output
     // identical to a non-rescore run.
     //
-    // Backend choice: `--rescore` forces Percolator; `--rescore-native` forces
-    // the native rescorer; an EXPLICIT `--fdr` with neither flag triggers
-    // rescoring and auto-picks — Percolator if a backend resolves, else native.
+    // Backend choice: rescoring runs ONLY when explicitly requested — `--rescore`
+    // forces Percolator, `--rescore-native` forces the native rescorer. `--fdr` /
+    // `--pep` are thresholds applied by such a run; they never start one on their
+    // own (that would silently launch a backend / the non-production native path).
     let fdr_threshold = cli.fdr.unwrap_or(0.01);
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
         (false, true)
-    } else if cli.fdr.is_some() || cli.pep.is_some() {
-        match output::resolve_backend(
-            cli.percolator_bin.as_deref(),
-            cli.percolator_docker,
-            &cli.percolator_image,
-        ) {
-            Ok(b) => {
-                eprintln!(
-                    "Rescore: --fdr set without a backend flag → Percolator found ({}), using it.",
-                    b.describe()
-                );
-                (true, false)
-            }
-            Err(_) => {
-                eprintln!(
-                    "Rescore: --fdr set without a backend flag and no Percolator available → \
-                     using the native rescorer. (Point to/install Percolator for production-grade FDR.)"
-                );
-                (false, true)
-            }
-        }
     } else {
         (false, false)
     };

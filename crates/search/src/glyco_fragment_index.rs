@@ -50,19 +50,27 @@ impl FragmentIndex {
     }
 
     /// Build the index over `(candidate_index, &Peptide)` entries, indexing each
-    /// peptide's singly-charged b/y ions. `tol` is the fragment match tolerance
-    /// in Da; `bin_width` should be ≥ `tol` (bins bucket coarsely, the stored
-    /// theoretical m/z is distance-checked at query time). A peptide is recorded
-    /// at most once per bin so a bin collision within one peptide does not bloat
-    /// the postings.
+    /// peptide's b/y ions at charges `1..=max_charge`. `tol` is the fragment match
+    /// tolerance in Da; `bin_width` should be ≥ `tol` (bins bucket coarsely, the
+    /// stored theoretical m/z is distance-checked at query time). A peptide is
+    /// recorded at most once per bin so a bin collision within one peptide does not
+    /// bloat the postings.
+    ///
+    /// CHARGE-AWARE (reviewer feedback): indexing ONLY +1 b/y misses the multiply-
+    /// charged backbone fragments of LARGE / HIGH-CHARGE glycopeptides (z4/z5+),
+    /// whose b/y ions land at +2/+3 — exactly the bucket peptide-first is meant to
+    /// rescue. `max_charge` (clamped 1..=3) indexes those too, so a +2 backbone ion
+    /// can select its peptide. `max_charge = 1` reproduces the legacy +1-only index.
     pub fn build<'a>(
         entries: impl IntoIterator<Item = (u32, &'a Peptide)>,
         tol: f64,
+        max_charge: u8,
     ) -> Self {
         let bin_width = tol.max(0.001);
+        let zmax = max_charge.clamp(1, 3);
         let mut bins: FxHashMap<i64, Vec<(u32, f64)>> = FxHashMap::default();
         for (idx, pep) in entries {
-            for ion in predict_by_ions(pep, 1..=1) {
+            for ion in predict_by_ions(pep, 1..=zmax) {
                 let b = Self::bin_of(ion.mz, bin_width);
                 bins.entry(b).or_default().push((idx, ion.mz));
             }
@@ -71,28 +79,51 @@ impl FragmentIndex {
     }
 
     /// Return `(candidate_index, matched_ion_count)` for candidates whose
-    /// theoretical b/y ions match at least `min_matches` DISTINCT spectrum peaks
-    /// within the fragment tolerance. Each theoretical ion is counted at most
-    /// once per candidate (a peak within tol of the ion "explains" it), so
-    /// noise clustered near one ion cannot inflate the count.
+    /// theoretical b/y ions match at least `min_matches` spectrum peaks within
+    /// the fragment tolerance, where each observed PEAK explains at most one
+    /// theoretical ion and each theoretical ion is explained by at most one peak
+    /// (a greedy 1:1 peak↔ion matching). So neither noise clustered near one ion
+    /// NOR one peak sitting on a cross-charge m/z coincidence can inflate the
+    /// count: the reported count never exceeds `min(#distinct ions, #peaks)`.
     pub fn query(&self, peaks: &[(f64, f32)], min_matches: u32) -> Vec<(u32, u32)> {
-        // Count DISTINCT (candidate, theoretical-ion) matches. `seen` dedups a
-        // theoretical ion matched by several peaks, keyed by the exact
-        // `(candidate_idx, ion_id)` pair; `count` tallies the first sighting per
-        // candidate. This replaces the previous `HashMap<u32, HashSet<i64>>`,
-        // which allocated a HashSet per matched candidate on every query — the
-        // profiled hotspot. Same distinct-ion semantics, no per-candidate alloc.
+        // Greedy 1:1 peak↔ion matching per candidate. Two dedup directions must
+        // both hold or the count inflates:
+        //   (a) several peaks near ONE theoretical ion  → count it once
+        //   (b) ONE peak near SEVERAL theoretical ions  → count it once
+        // Direction (b) is why multi-charge indexing needs the peak-side guard:
+        // a b_i⁺ and a y_j²⁺ of the SAME peptide can fall within tol of a single
+        // observed peak, and counting both would let a peptide pass `min_matches`
+        // on fewer real peaks than the threshold (an FDR-relevant inflation).
+        //
+        // `used_ion` enforces (a): a theoretical ion (keyed by candidate+ion_id)
+        // is consumed once. `matched_this_peak` enforces (b): within one peak's
+        // scan, a candidate accepts at most one of its ions. It is cleared (not
+        // reallocated) per peak, so the profiled per-candidate-HashSet alloc the
+        // old single-charge path removed does not return.
         // (A `(u32, i64)` key — not a packed `u64` — keeps the ion id lossless for
         // any accepted params: `--max-length` is uncapped and mod deltas reach
         // ±5000 Da, so `ion_id = round(mz·1000)` is not guaranteed to fit in 32 bits.)
-        let mut seen: FxHashSet<(u32, i64)> = FxHashSet::default();
+        let mut used_ion: FxHashSet<(u32, i64)> = FxHashSet::default();
+        let mut matched_this_peak: FxHashSet<u32> = FxHashSet::default();
         let mut count: FxHashMap<u32, u32> = FxHashMap::default();
         for &(mz, _) in peaks {
+            matched_this_peak.clear();
             let b = Self::bin_of(mz, self.bin_width);
             for nb in [b - 1, b, b + 1] {
                 if let Some(v) = self.bins.get(&nb) {
                     for &(idx, theo) in v {
-                        if (mz - theo).abs() <= self.tol && seen.insert((idx, Self::ion_id(theo))) {
+                        // Accept this (peak, ion) match only if the peak has not
+                        // yet been consumed by this candidate AND the ion has not
+                        // yet been consumed by any peak. Check both before either
+                        // insert, so a peak whose first-seen ion is already used
+                        // can still match a still-free ion of the same candidate.
+                        let ion_key = (idx, Self::ion_id(theo));
+                        if (mz - theo).abs() <= self.tol
+                            && !matched_this_peak.contains(&idx)
+                            && !used_ion.contains(&ion_key)
+                        {
+                            matched_this_peak.insert(idx);
+                            used_ion.insert(ion_key);
                             *count.entry(idx).or_insert(0) += 1;
                         }
                     }
@@ -124,7 +155,7 @@ mod tests {
         let aa = aa();
         let pep_a = Peptide::from_str("K.PEPTIDESK.R", &aa).expect("valid a");
         let pep_b = Peptide::from_str("K.ELVISLIVESR.K", &aa).expect("valid b");
-        let idx = FragmentIndex::build([(0u32, &pep_a), (1u32, &pep_b)], 0.02);
+        let idx = FragmentIndex::build([(0u32, &pep_a), (1u32, &pep_b)], 0.02, 1);
 
         // Spectrum = pep_a's own singly-charged b/y ions.
         let peaks: Vec<(f64, f32)> = predict_by_ions(&pep_a, 1..=1)
@@ -148,7 +179,7 @@ mod tests {
         let aa = aa();
         let pep = Peptide::from_str("K.PEPTIDESK.R", &aa).unwrap();
         let tol = 0.02;
-        let idx = FragmentIndex::build([(0u32, &pep)], tol);
+        let idx = FragmentIndex::build([(0u32, &pep)], tol, 1);
         let ions = predict_by_ions(&pep, 1..=1);
 
         // Take the first real ion; add: (a) an in-tolerance duplicate, (b) an
@@ -175,12 +206,81 @@ mod tests {
         assert!(idx.query(&peaks, 4).is_empty(), "must not inflate past distinct-ion count");
     }
 
+    /// Charge-aware: a spectrum of a peptide's +2 b/y ions selects it only when the
+    /// index was built with max_charge >= 2 — the high-charge glycopeptide bucket.
+    #[test]
+    fn fragment_index_is_charge_aware() {
+        let aa = aa();
+        let pep = Peptide::from_str("K.PEPTIDESKELVISR.R", &aa).unwrap();
+        // Spectrum = the peptide's DOUBLY-charged b/y ions.
+        let peaks: Vec<(f64, f32)> = predict_by_ions(&pep, 2..=2)
+            .iter()
+            .map(|i| (i.mz, 100.0))
+            .collect();
+        let cnt = |z: u8| FragmentIndex::build([(0u32, &pep)], 0.02, z)
+            .query(&peaks, 1)
+            .iter()
+            .find(|&&(i, _)| i == 0)
+            .map(|&(_, c)| c)
+            .unwrap_or(0);
+        let c1 = cnt(1);
+        let c2 = cnt(2);
+        // The +2 index selects the peptide from its +2 ladder, and finds strictly
+        // MORE +2 ions than the +1-only index (which can only match the rare +2/+1
+        // m/z coincidence). This is the high-charge-glycopeptide capability.
+        assert!(c2 >= 3, "+2 index must select the peptide from its +2 ladder (got {c2})");
+        assert!(c2 > c1, "+2 index must match more +2 ions than +1-only ({c2} > {c1})");
+    }
+
+    /// Regression (adversarial review): with a multi-charge index, one observed
+    /// peak can fall within tolerance of TWO theoretical ions of the SAME peptide
+    /// (e.g. a bᵢ⁺ and a yⱼ²⁺ coinciding). The distinct-ion count must NOT credit
+    /// both — the matched count can never exceed the number of observed peaks, or
+    /// a peptide would pass `min_matches` on fewer real peaks than the threshold.
+    #[test]
+    fn fragment_index_count_never_exceeds_peak_count() {
+        let aa = aa();
+        // Short peptide → dense, low-m/z ladder where +1 and +2 ions crowd and
+        // coincide within a 0.02 Da tolerance under a max_charge=2 index.
+        let pep = Peptide::from_str("K.SNSSGGVG.R", &aa).unwrap();
+        let idx = FragmentIndex::build([(0u32, &pep)], 0.02, 2);
+
+        // Feed the union of the peptide's +1 and +2 ions, then collapse any
+        // near-coincident theoretical m/z into a SINGLE observed peak (what a real
+        // spectrum would show): distinct observed peaks < distinct theoretical ions.
+        let mut theo: Vec<f64> = predict_by_ions(&pep, 1..=2).iter().map(|i| i.mz).collect();
+        theo.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+        for m in theo {
+            if peaks.last().map(|&(p, _)| (m - p).abs() > 0.02).unwrap_or(true) {
+                peaks.push((m, 100.0));
+            }
+        }
+
+        let n_peaks = peaks.len() as u32;
+        let c = idx
+            .query(&peaks, 1)
+            .iter()
+            .find(|&&(i, _)| i == 0)
+            .map(|&(_, c)| c)
+            .unwrap_or(0);
+        assert!(
+            c <= n_peaks,
+            "matched count {c} must not exceed observed peak count {n_peaks} (cross-charge inflation)"
+        );
+        // And the peptide must NOT pass a threshold above the real peak count.
+        assert!(
+            idx.query(&peaks, n_peaks + 1).is_empty(),
+            "must not pass a min_matches above the number of observed peaks"
+        );
+    }
+
     /// A spectrum of pure noise must select nothing at a sane threshold.
     #[test]
     fn fragment_index_rejects_noise() {
         let aa = aa();
         let pep = Peptide::from_str("K.PEPTIDESK.R", &aa).unwrap();
-        let idx = FragmentIndex::build([(0u32, &pep)], 0.02);
+        let idx = FragmentIndex::build([(0u32, &pep)], 0.02, 1);
         let noise: Vec<(f64, f32)> = vec![(123.456, 1.0), (777.111, 1.0), (1500.9, 1.0)];
         let hits = idx.query(&noise, 3);
         assert!(hits.is_empty(), "noise must not select the peptide, got {hits:?}");

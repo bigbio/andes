@@ -683,7 +683,7 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | Flag | Default | Purpose |
 |---|---|---|
 | `--glyco-backbone-top-k` | 50 | Max backbone candidates per spectrum (set large to approximate an exhaustive ceiling). |
-| `--glyco-gp-k` / `-gp-j` / `-gp-h` | 50 / 5 / 1 | Weights of the `gp` fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (the shipped, default selector). |
+| `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 50 / 5 / 1 | Weights of the `gp` fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (the shipped, default selector). |
 | `--glyco-pf-charge` | 2 | Charge states the peptide-first fragment index covers (b/y at 1..=N, clamped 1..=3); targets high-charge glycopeptides. |
 | `--glyco-max-pf` | 1024 | Max peptide-first candidates per spectrum. |
 | `--glyco-decoy` | off | Emit paired glycan-axis decoy rows for experimental 2D (peptide × glycan) FDR. |
@@ -695,7 +695,7 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-transfer-core-y` | 3 | Acceptor-side core-Y quorum (incl. mandatory Y1) to accept a transfer. |
 | `--debug-glyco` | off | **Diagnostic only:** emit all candidate rows per scan (incl. de-novo) + transfer diagnostics. The resulting PIN must NEVER be fed to an FDR tool. |
 
-FDR is always computed externally (Percolator) — andes never computes FDR itself.
+By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.
 
 ### Internal environment variables
 

@@ -35,10 +35,11 @@ discoveries, r = entrapment:target ratio):
 Ordering always: lower_bound <= paired <= combined. Verdict at the q=0.01 line:
     combined <= 0.01         -> evidence andes controls FDR (conservative)
     lower_bound > 0.01       -> andes FAILS to control FDR
-NOTE: the exact paired estimator needs an explicit peptide<->entrapment map
-(--pairs, not yet wired); until then the tool reports the COMBINED upper bound as
+NOTE: the exact paired estimator needs an explicit peptide<->entrapment map,
+supplied via `--pairs` (a two-column target_peptide<TAB>entrapment_peptide file
+from `build-pep`). Without `--pairs` the tool reports the COMBINED upper bound as
 a conservative proxy in the paired column, so a <=1% reading still evidences
-control -- it is just looser than the true paired estimator would be.
+control -- it is just looser than the true paired estimator.
 """
 import argparse
 import re
@@ -203,9 +204,14 @@ def fdp(args):
     ent_to_tgt = {}
     if args.pairs:
         for ln in open(args.pairs):
-            if not ln.strip() or ln.startswith("#") or ln.lower().startswith("target"):
+            if not ln.strip() or ln.startswith("#"):
                 continue
             a, b = ln.rstrip("\n").split("\t")[:2]
+            # Skip ONLY the exact header row (first column literally
+            # "target_peptide"); a real peptide sequence never equals that, so a
+            # genuine TARGET...-starting peptide is not dropped.
+            if a.strip().lower() == "target_peptide":
+                continue
             ent_to_tgt[re.sub(r"[^A-Z]", "", b.upper())] = re.sub(r"[^A-Z]", "", a.upper())
     # Best (lowest) q at which each TARGET peptide was discovered — for the paired terms.
     tgt_best_q = {}

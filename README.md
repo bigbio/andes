@@ -153,7 +153,7 @@ andes \
   --output-pin out.pin
 ```
 
-This runs a tryptic search with **zero configuration**: for mzML, Thermo `.raw`, and Bruker `.d`, the fragmentation, analyzer resolution, and labeling are read from the file metadata, the matching scoring model is selected automatically, and tolerances default sensibly (`--precursor-tol` 20ppm). It writes Percolator-format PSMs to `out.pin` and per-phase timings to stderr — feed `out.pin` straight into Percolator (Docker or native) to compute q-values.
+This runs a tryptic search with **zero configuration**: for mzML, Thermo `.raw`, and Bruker `.d`, the fragmentation, analyzer resolution, and labeling are read from the file metadata, the matching scoring model is selected automatically, and tolerances default sensibly (`--precursor-tol 20ppm`). It writes Percolator-format PSMs to `out.pin` and per-phase timings to stderr — feed `out.pin` straight into Percolator (Docker or native) to compute q-values.
 
 > **MGF has no instrument metadata**, so for `.mgf` inputs pass the activation explicitly with `--fragmentation <CID\|ETD\|HCD\|UVPD>` (plus `--fragment-tol-ppm`/`--fragment-tol-da`). See [Selecting the scoring model](#selecting-the-scoring-model) for `--protocol` (labeled/enriched samples) and `--model` (pick a model directly).
 

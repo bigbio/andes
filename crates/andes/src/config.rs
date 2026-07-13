@@ -280,12 +280,57 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("glyco_transfer_min_support", glyco_transfer_min_support, cfg.glyco.transfer_min_support);
     set!("glyco_transfer_core_y", glyco_transfer_core_y, cfg.glyco.transfer_core_y);
 
+    // Validate the resolved numeric fields that the CLI enforces via `value_parser`
+    // but the YAML path (plain assignment) would otherwise bypass. Re-checking the
+    // final value is a no-op for CLI-supplied values (already validated by clap) and
+    // rejects out-of-range values injected through `--config`.
+    if let Some(v) = args.fdr {
+        check_unit_fraction("fdr", v)?;
+    }
+    if let Some(v) = args.pep {
+        check_unit_fraction("pep", v)?;
+    }
+    check_unit_fraction("refine_select_psm_fdr", args.refine_select_psm_fdr)?;
+    if let Some(v) = args.fragment_tol_ppm {
+        check_positive("fragment_tol_ppm", v)?;
+    }
+    if let Some(v) = args.fragment_tol_da {
+        check_positive("fragment_tol_da", v)?;
+    }
+    // `--fragment-tol-ppm` / `--fragment-tol-da` are mutually exclusive on the CLI
+    // (clap `conflicts_with`); the config could set both, which is ambiguous.
+    if args.fragment_tol_ppm.is_some() && args.fragment_tol_da.is_some() {
+        return Err(
+            "config: `scoring.fragment_tol_ppm` and `scoring.fragment_tol_da` are mutually \
+             exclusive — set only one"
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
 /// Parse a string into a clap `ValueEnum` (reusing the CLI's accepted names).
 fn parse_value_enum<T: clap::ValueEnum>(s: &str) -> Result<T, String> {
     T::from_str(s, false).map_err(|e| e.to_string())
+}
+
+/// Same bound the CLI's `parse_unit_fraction` enforces: finite and within [0, 1].
+fn check_unit_fraction(field: &str, v: f64) -> Result<(), String> {
+    if !v.is_finite() || !(0.0..=1.0).contains(&v) {
+        return Err(format!(
+            "config: `{field}` must be finite and within [0, 1] (got {v})"
+        ));
+    }
+    Ok(())
+}
+
+/// Same bound the CLI's `parse_positive_tol` enforces: finite and > 0.
+fn check_positive(field: &str, v: f64) -> Result<(), String> {
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!("config: `{field}` must be finite and > 0 (got {v})"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -323,6 +368,45 @@ glyco:
         let c = RunConfig::from_yaml_str("{}").expect("empty ok");
         assert!(c.search.precursor_tol.is_none());
         assert!(c.glyco.enabled.is_none());
+    }
+
+    #[test]
+    fn unit_fraction_and_positive_bounds() {
+        assert!(check_unit_fraction("fdr", 0.01).is_ok());
+        assert!(check_unit_fraction("fdr", 0.0).is_ok());
+        assert!(check_unit_fraction("fdr", 1.0).is_ok());
+        assert!(check_unit_fraction("fdr", 5.0).is_err(), "fdr>1 must reject");
+        assert!(check_unit_fraction("fdr", -0.1).is_err());
+        assert!(check_unit_fraction("fdr", f64::NAN).is_err());
+        assert!(check_positive("frag", 20.0).is_ok());
+        assert!(check_positive("frag", 0.0).is_err(), "tol=0 must reject");
+        assert!(check_positive("frag", -1.0).is_err());
+    }
+
+    /// The YAML path must reject values the CLI would reject via `value_parser`.
+    #[test]
+    fn apply_rejects_out_of_range_and_conflicting_yaml() {
+        use clap::{CommandFactory, FromArgMatches};
+        let matches = crate::TopCli::command()
+            .try_get_matches_from(["andes", "--spectrum", "x", "--database", "y", "--output-pin", "o"])
+            .expect("parse baseline args");
+
+        // out-of-range fdr from YAML → error
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        let bad = RunConfig::from_yaml_str("rescoring:\n  fdr: 5.0\n").unwrap();
+        let e = apply(bad, &mut a, &matches).unwrap_err();
+        assert!(e.contains("fdr"), "expected fdr range error, got: {e}");
+
+        // both fragment tolerances from YAML → mutual-exclusion error
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        let both = RunConfig::from_yaml_str("scoring:\n  fragment_tol_ppm: 20\n  fragment_tol_da: 0.02\n").unwrap();
+        let e = apply(both, &mut a, &matches).unwrap_err();
+        assert!(e.contains("mutually exclusive"), "expected conflict error, got: {e}");
+
+        // a valid config still applies cleanly
+        let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
+        let ok = RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n").unwrap();
+        assert!(apply(ok, &mut a, &matches).is_ok());
     }
 
     /// The shipped `config.example.yaml` must parse against the current schema, so

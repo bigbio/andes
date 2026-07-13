@@ -9,6 +9,7 @@ Run `andes --help` for auto-generated help derived from the same `Cli` struct do
 ## Contents
 
 1. [CLI reference](#1-cli-reference)
+   - [1a. Workflow parameters (grouped by experimental design)](#1a-workflow-parameters-grouped-by-experimental-design)
 2. [Mods.txt format](#2-modstxt-format)
 3. [Output formats](#3-output-formats)
 4. [Auto-detection](#4-auto-detection)
@@ -97,16 +98,7 @@ Only tryptic enzyme models are in the store; other enzymes require `--param-file
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-cal` | enum | `off` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` skips the correction when the sample is too small to be reliable. Opt-in only (default `off`). No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
-
-### Chimeric cascade
-
-Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1 stream, so it runs on **mzML or Thermo `.raw`** only; on MGF/`.d` it warns and falls back to a normal search.
-
-| Flag | Type | Default | Description | Legacy form |
-|---|---|---|---|---|
-| `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade. Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. Forces top-1 per pass and always searches MS2 (`--ms-level` is ignored). Gains are entrapment-FDP validated. Experimental. | *(no Java equivalent)* |
-| `--isolation-halfwidth` | f64 | `1.5` | Fallback isolation-window half-width in Da, used only when the mzML/`.raw` omits the per-scan isolation-window offsets. | *(no Java equivalent)* |
+| `--precursor-cal` | enum | `auto` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` (the default) skips the correction when the sample is too small to be reliable, so it is safe to leave on. No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
 
 ### Runtime
 
@@ -115,15 +107,76 @@ Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1
 | `--threads` | usize | logical CPU count | Rayon worker threads for the search loop. Pool is initialised once per process. | Java `-thread N` |
 | `--ms-level` | u8 | `2` | MS level to search. Defaults to MS2 (identification); MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so they never enter the search loop. Applies to mzML. Native `.raw`/`.d` always search MS2 regardless of this flag (a warning is printed if overridden), as does the chimeric cascade. MGF has no MS-level metadata and is always MS2. | *(no Java equivalent)* |
 | `--max-spectra` | usize | `0` | Bench mode: process only the first N MS2 spectra. `0` = full input. When > 0, TSV output is skipped (PIN is still written). | *(no Java equivalent)* |
-| `--decoy-prefix` | string | `XXX_` | Prefix prepended to reversed decoy protein accessions during index construction. | Java decoy tag in `-tda` workflows |
 
 ### Output
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--output-tsv` | path | *(off)* | Optional tab-separated PSM report (§3b). Skipped in bench mode (`--max-spectra > 0`). | Java `-outputFormat 1` with output path |
+| `--output-parquet` | dir | *(off)* | Optional OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`); see §3e. | *(no Java equivalent)* |
 
 **Environment variable:** set `ANDES_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use). See §9 for the full list of internal environment variables.
+
+---
+
+## 1a. Workflow parameters (grouped by experimental design)
+
+The flags above apply to every run. The groups below are **opt-in experiment modes** — each is enabled by a single parent flag, with the rest of its knobs used only when that mode is on. Unless noted, the sub-knobs are advanced (hidden in `--help`) and the defaults are validated; reach for them only when tuning that specific experiment.
+
+### Decoys & FDR strategy
+
+How the target/decoy competition for FDR is set up. For an externally-built target+decoy database (e.g. from a quantms/OpenMS pipeline), use `--decoy-strategy none` and point andes at the existing decoys with `--decoy-prefix`/`--decoy-suffix` so it does not add a second decoy set.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--decoy-strategy` | enum | `reverse` | Decoy generation: `reverse`, `shuffle`, or `none` (input FASTA already contains decoys). |
+| `--decoy-prefix` | string | `XXX_` | Accession prefix that marks a decoy protein (generated, or recognised in an external DB). |
+| `--decoy-suffix` | string | *(off)* | Accession *suffix* that marks a decoy (the OpenMS/quantms `_rev` convention), as an alternative to a prefix. |
+| `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys; fixed so runs are reproducible. |
+
+### Chimeric cascade
+
+Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1 stream, so it runs on **mzML or Thermo `.raw`** only; on MGF/`.d` it warns and falls back to a normal search.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade: Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and searches the *residual* spectrum (primary's matched peaks removed) for a second peptide, emitted as an extra PSM. Forces top-1 per pass and always MS2. Entrapment-FDP validated. Experimental. |
+| `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors considered per scan. |
+| `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
+| `--isolation-halfwidth` | f64 | `1.5` | *(advanced)* Fallback isolation half-width (Da), used only when the file omits per-scan isolation offsets. |
+
+### Refine — PTM discovery cascade
+
+Opt-in second pass over confident proteins that opens the modification search space to discover PTMs.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--refine` | flag | *(off)* | Enable the PTM-refinement cascade (Pass-2 over confident proteins). |
+| `--refine-config` | path | *(tier default)* | *(advanced)* YAML tier config; the single extension point for the refine mod set and options. |
+| `--refine-select-psm-fdr` | fraction | `0.01` | *(advanced)* PSM-FDR threshold selecting the confident set that seeds Pass-2. Leave at default unless you have a measured reason. |
+| `--refine-max-mods` | u32 | *(from config)* | *(advanced)* Override the config's max variable mods per peptide for Pass-2. |
+| `--refine-high-res-only` | bool | *(from config)* | *(advanced)* Override the config's high-res-only gate. |
+
+### Rescoring & FDR filtering
+
+andes writes a Percolator-ready `.pin` and, by design, **does not compute FDR itself** — feed the PIN to Percolator. These flags run rescoring in-process instead. In a pipeline that owns its own rescoring (e.g. quantms), leave them off.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--rescore` | flag | *(off)* | Run Percolator in-process and write rescored, FDR-controlled output. |
+| `--rescore-native` | flag | *(off)* | *(advanced)* Use the built-in GBDT rescorer instead of Percolator — non-production fallback; Percolator is the production path. |
+| `--fdr` | fraction | *(off)* | q-value threshold for the filtered output (implies a rescoring run). |
+| `--pep` | fraction | *(off)* | *(advanced)* Posterior-error-probability threshold for the filtered output. |
+| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Percolator backend selection/passthrough; auto-resolution (`$PATH` then Docker) covers the common path. |
+| `--keep-pin` | bool | `true` | *(advanced)* Keep the intermediate PIN after rescoring. |
+
+### Glycopeptide search
+
+Intact N-glycopeptide search (`--glyco`) with an experimental cross-spectrum-transfer pass (`--glyco-transfer`). All tuning knobs are advanced (hidden). **See [§9](#9-glycopeptide-search-experimental--advanced-knobs)** for the full flag group.
+
+### Isobaric labeling (TMT / iTRAQ)
+
+Reporter-ion labeling is auto-detected; the mods are declared in the `--mods` file. **See [§7](#7-isobaric-labeling)** for worked TMT/iTRAQ examples.
 
 ---
 

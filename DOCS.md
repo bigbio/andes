@@ -49,16 +49,14 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-tol-ppm` | f64 | `20.0` | Symmetric precursor mass tolerance in parts per million. | Java `-t 20ppm` |
-| `--charge-min` | u8 | `2` | Minimum precursor charge to try when the spectrum record does not specify charge. Must be ≤ `--charge-max` (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
-| `--charge-max` | u8 | `5` | Maximum precursor charge to try when charge is missing from the spectrum. Must be ≥ `--charge-min`. The default range is **2–5**. | *(same)* |
+| `--precursor-tol` | string | `20ppm` | Symmetric precursor mass tolerance, e.g. `20ppm` or `0.02da`. | Java `-t 20ppm` |
+| `--charge` | `MIN..MAX` | `2..5` | Precursor charge range to try when the spectrum record does not specify charge (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
 | `--enzyme-specificity` | enum | `fully` | Enzymatic cleavage enforcement at peptide termini (Number of Tolerable Termini). `fully`: both termini must be cleavage sites (Java `-ntt 2`). `semi`: at least one terminus (Java `-ntt 1`). `non-specific`: neither required (Java `-ntt 0`). | `--ntt` alias; numeric `0`/`1`/`2` |
 | `--max-missed-cleavages` | u32 | `1` | Maximum missed enzymatic cleavages allowed per candidate peptide. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length in residues (excluding flanking context). | Java `-minLength 6` |
-| `--max-length` | u32 | `40` | Maximum peptide length in residues. | Java `-maxLength 40` |
+| `--max-length` | u32 | `50` | Maximum peptide length in residues. | Java `-maxLength 40` |
 | `--top-n` | u32 | `10` | Maximum PSMs retained per spectrum (ranked by `RawScore`, best-first). | Java `-n 10` |
-| `--isotope-error-min` | i8 | `-1` | Minimum isotope error offset to evaluate during precursor matching. Must be ≤ `--isotope-error-max`. | Java `-ti -1,2` (first value) |
-| `--isotope-error-max` | i8 | `2` | Maximum isotope error offset to evaluate. Must be ≥ `--isotope-error-min`. | Java `-ti -1,2` (second value) |
+| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offset range to evaluate during precursor matching. | Java `-ti -1,2` |
 | `--min-peaks` | u32 | `10` | Minimum number of MS2 peaks required to score a spectrum; spectra below this threshold are skipped. | Java `-minNumPeaks 10` |
 
 ### Modifications
@@ -196,7 +194,7 @@ andes writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge-min`…`--charge-max` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 66 columns listed below in emission order.
+Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 66 columns listed below in emission order.
 
 There are **two score columns**, easy to confuse:
 
@@ -220,7 +218,7 @@ Most of the columns after `matchedIonRatio` are **additive** features: extra evi
 | 9 | `peplen` | int | ≥6 | Residue count **+ 2** (includes flanking pre/post). |
 | 10 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
 | 11 | `absdm` | float | ≥0 | `\|dm\|`. |
-| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge; one column per state in `--charge-min`…`--charge-max`. |
+| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge; one column per state in `--charge`. |
 | 16 | `enzN` | 0/1 | one-hot | N-terminal boundary consistent with the enzyme rule. |
 | 17 | `enzC` | 0/1 | one-hot | C-terminal boundary consistent with the enzyme rule. |
 | 18 | `enzInt` | int | ≥0 | Count of internal positions matching the enzyme rule. |
@@ -238,11 +236,11 @@ Most of the columns after `matchedIonRatio` are **additive** features: extra evi
 | 30 | `MeanRelErrorTop7` | float | signed | Mean signed ppm error (top-7). |
 | 31 | `StdevRelErrorTop7` | float | ≥0 | Population stdev of signed ppm errors (top-7). |
 | 32 | `matchedIonRatio` | float | [0, 1] | `NumMatchedMainIons / peplen`. |
-| 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive (Kim et al. 2014). |
+| 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive. |
 | 34 | `PrecursorIsotopeKL` | float | ≥0 | KL divergence of precursor isotope envelope vs averagine. **0.0 unless `--chimeric`.** |
 | 35 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
 | 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
-| 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile (Yang et al. 2020); cross-spectrum comparability. |
+| 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile; cross-spectrum comparability. |
 | 38 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions — mass-accuracy evidence the rank score discards. |
 | 39 | `NeutralLossIonCount` | int | ≥0 | Matched b/y ions with −H₂O/−NH₃ partner peaks. |
 | 40 | `LongestComplementaryLadder` | int | [0, peplen−1] | Longest run of bonds where both bᵢ and y₍ₙ₋ᵢ₎ matched. |

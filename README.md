@@ -153,11 +153,11 @@ andes \
   --output-pin out.pin
 ```
 
-This runs a tryptic search with **zero configuration**: for mzML, Thermo `.raw`, and Bruker `.d`, the fragmentation, analyzer resolution, and labeling are read from the file metadata, the matching scoring model is selected automatically, and tolerances default sensibly (`--precursor-tol-ppm` 20). It writes Percolator-format PSMs to `out.pin` and per-phase timings to stderr — feed `out.pin` straight into Percolator (Docker or native) to compute q-values.
+This runs a tryptic search with **zero configuration**: for mzML, Thermo `.raw`, and Bruker `.d`, the fragmentation, analyzer resolution, and labeling are read from the file metadata, the matching scoring model is selected automatically, and tolerances default sensibly (`--precursor-tol` 20ppm). It writes Percolator-format PSMs to `out.pin` and per-phase timings to stderr — feed `out.pin` straight into Percolator (Docker or native) to compute q-values.
 
 > **MGF has no instrument metadata**, so for `.mgf` inputs pass the activation explicitly with `--fragmentation <CID\|ETD\|HCD\|UVPD>` (plus `--fragment-tol-ppm`/`--fragment-tol-da`). See [Selecting the scoring model](#selecting-the-scoring-model) for `--protocol` (labeled/enriched samples) and `--model` (pick a model directly).
 
-A row in `out.pin` is one peptide–spectrum match, with rich per-PSM features plus Rust-only additive columns before `Peptide`. The number of charge one-hot columns scales with `[--charge-min, --charge-max]` (default **2–5** ⇒ `charge2…charge5`).
+A row in `out.pin` is one peptide–spectrum match, with rich per-PSM features plus Rust-only additive columns before `Peptide`. The number of charge one-hot columns scales with `--charge` (default **2..5** ⇒ `charge2…charge5`).
 
 ### Output scores
 
@@ -310,10 +310,10 @@ Optional (default in **bold**):
 | `--output-tsv <FILE>` | Also write a TSV | **none** |
 | `--output-parquet <DIR>` | Also write an OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`) | **none** |
 | `--mods <FILE>` | mods.txt file | **Cam-C fixed + Ox-M variable** |
-| `--precursor-tol-ppm <FLOAT>` | Precursor mass tolerance (ppm) | **20.0** |
+| `--precursor-tol <VALUE>` | Precursor mass tolerance, e.g. `20ppm` or `0.02da` | **20ppm** |
 | `--precursor-cal <off\|auto\|on>` | Learn + apply a precursor ppm shift (`auto` skips it when the sample is too small) | **auto** |
-| `--isotope-error-min/-max <INT>` | Isotope-error range | **-1, 2** |
-| `--charge-min/-max <INT>` | Charge range when absent in the spectrum | **2, 5** |
+| `--isotope-error <MIN..MAX>` | Isotope-error range | **-1..2** |
+| `--charge <MIN..MAX>` | Charge range when absent in the spectrum | **2..5** |
 | `--enzyme-specificity <fully\|semi\|non-specific>` | Tolerable termini (NTT) | **fully** |
 | `--max-missed-cleavages <INT>` | Missed cleavages | **1** |
 | `--min-length/-max-length <INT>` | Peptide length range | **6, 50** |
@@ -387,7 +387,7 @@ ENTRYPOINT ["andes"]
 
 ## Reading Bruker timsTOF `.d` files
 
-andes reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate (the same reader [a comparison search engine](https://github.com/lazear/a comparison search engine) uses), so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
+andes reads native Bruker timsTOF `.d` (DDA-PASEF) data directly — pass `--spectrum sample.d`, no other flags; the format is auto-detected by extension just like mzML/MGF. A `.d` is a *directory* (a TDF SQLite database plus a binary blob); reading it uses the pure-Rust [`timsrust`](https://crates.io/crates/timsrust) crate, so there is **no vendor runtime and nothing to bundle** — unlike Thermo `.raw`.
 
 It is feature-gated to keep the default build pure-Rust. Build with `--features timstof` on a toolchain with a recent rustc (the `timsrust` dependency tree needs rustc ≥ 1.88):
 

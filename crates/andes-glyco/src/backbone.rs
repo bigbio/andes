@@ -641,6 +641,49 @@ pub fn glycan_y_intensity_decoy(
     score
 }
 
+/// Fraction of a composition's Y-ladder rungs (Y0 + each cumulative add) that are
+/// MATCHED in the spectrum — a scale-free COMPLETENESS measure complementary to the
+/// intensity-weighted [`glycan_y_intensity`]: two compositions of the same total
+/// mass share Y0/Y1 and the top rung but differ on the interior, so a WRONG
+/// composition matches fewer of its own rungs even when its summed intensity looks
+/// similar. `decoy_seed = Some(seed)` corrupts the interior rungs exactly as
+/// [`glycan_y_intensity_decoy`] does (same shift, Y0/Y1/top kept), giving an
+/// exchangeable decoy counterpart so the feature can be emitted symmetrically for
+/// glycan-decoy PIN rows. Returns hits/total in `[0, 1]`.
+pub fn glycan_y_hit_frac(
+    peaks: &[(f64, f32)],
+    stats: &SpectrumStats,
+    bb_neutral: f64,
+    comp: &crate::glycan_db::GlycanComp,
+    tol_ppm: f64,
+    max_charge: u8,
+    decoy_seed: Option<u64>,
+) -> f64 {
+    let adds = glycan_cumulative_adds(comp);
+    let hit = |neutral: f64| -> bool {
+        best_frag_intensity(peaks, stats.sorted, neutral, tol_ppm, max_charge) > 0.0
+    };
+    let total = adds.len() + 1; // Y0 + one rung per cumulative add
+    let mut hits = usize::from(hit(bb_neutral)); // Y0
+    let last = adds.len().saturating_sub(1);
+    let mut cum = 0.0;
+    for (ai, m) in adds.iter().enumerate() {
+        cum += m;
+        // Decoy: shift interior rungs only (keep Y1 = ai 0 and the top rung = ai last).
+        let shift = match decoy_seed {
+            Some(seed) if ai != 0 && ai != last => {
+                let h = splitmix64(seed ^ (ai as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                1.0 + (h % 29_000) as f64 / 1000.0
+            }
+            _ => 0.0,
+        };
+        if hit(bb_neutral + cum + shift) {
+            hits += 1;
+        }
+    }
+    hits as f64 / total as f64
+}
+
 /// G2 Y0/Y1 peptide-mass ANCHOR score.
 ///
 /// Y0 (the bare peptide backbone) and Y1 (peptide + one innermost HexNAc) are the
@@ -720,6 +763,29 @@ pub fn count_core_y_hits(
         }
     }
     hits
+}
+
+/// Acceptor-side core-Y acceptance gate for cross-spectrum transfer.
+///
+/// A transferred backbone should only be accepted onto an acceptor spectrum that
+/// PHYSICALLY shows the glycan core ladder — a published spectrum-expansion method
+/// requires ≥3 matched N-glycan core-structure Y ions with Y1 (peptide+HexNAc)
+/// mandatory. This keeps transfer from injecting mass-coincidence candidates onto
+/// spectra that carry no glycan evidence (the fanout the transfer diagnostic found).
+/// Returns true iff ≥`min_hits` core-Y rungs match AND Y1 (`bb + HexNAc`) matches.
+pub fn acceptor_core_y_gate(
+    peaks: &[(f64, f32)],
+    stats: &SpectrumStats,
+    bb: f64,
+    tol_ppm: f64,
+    max_charge: u8,
+    min_hits: u8,
+) -> bool {
+    if count_core_y_hits(peaks, stats, bb, tol_ppm, max_charge) < min_hits {
+        return false;
+    }
+    // Y1 (peptide + innermost HexNAc) is mandatory among the matched rungs.
+    best_frag_intensity(peaks, stats.sorted, bb + CORE_Y_STEPS[0], tol_ppm, max_charge) > 0.0
 }
 
 #[cfg(test)]
@@ -1001,6 +1067,61 @@ mod tests {
             count_core_y_hits(&peaks, &stats, residue, 20.0, 3) < 6,
             "residue mass (H2O too low) must NOT match the neutral-anchored ladder"
         );
+    }
+
+    /// Glycan-Y hit fraction: full ladder → 1.0; missing rungs → <1.0; the decoy
+    /// (shifted interior) matches fewer of the composition's rungs.
+    #[test]
+    fn glycan_y_hit_frac_full_vs_partial_vs_decoy() {
+        use crate::glycan_db::GlycanComp;
+        use crate::glycan_mass::{HEX, HEXNAC};
+        let bb = 1500.0_f64;
+        let g = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0, mass: 2.0 * HEXNAC + 3.0 * HEX };
+        // Full ladder present (Y0 + all 5 cumulative adds).
+        let mut full: Vec<(f64, f32)> = vec![(bb + PROTON, 1000.0)];
+        let mut cum = 0.0;
+        for m in [HEXNAC, HEXNAC, HEX, HEX, HEX] {
+            cum += m;
+            full.push((bb + cum + PROTON, 500.0));
+        }
+        full.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let sf = SpectrumStats::new(&full);
+        assert!((glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs() < 1e-9, "full ladder → 1.0");
+        // Only Y0 present → 1/6.
+        let p0 = vec![(bb + PROTON, 1000.0)];
+        let s0 = SpectrumStats::new(&p0);
+        let f0 = glycan_y_hit_frac(&p0, &s0, bb, &g, 20.0, 3, None);
+        assert!((f0 - 1.0 / 6.0).abs() < 1e-9, "Y0 only → 1/6, got {f0}");
+        // Decoy shifts interior rungs → fewer of ITS rungs match the true ladder.
+        let dec = glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, Some(123));
+        assert!(dec < 1.0, "decoy ladder must miss shifted interior rungs, got {dec}");
+    }
+
+    /// Transfer acceptor gate: ≥min_hits core-Y AND Y1 (bb+HexNAc) mandatory.
+    #[test]
+    fn acceptor_core_y_gate_requires_min_hits_and_y1() {
+        let bb = 1500.0_f64; // neutral backbone
+        let mk = |rungs: &[usize]| {
+            // rung 0 = Y0 (bb), rung k>=1 = bb + CORE_Y_STEPS[k-1].
+            let mut peaks: Vec<(f64, f32)> = rungs.iter().map(|&k| {
+                let neutral = if k == 0 { bb } else { bb + CORE_Y_STEPS[k - 1] };
+                (neutral + PROTON, 500.0)
+            }).collect();
+            peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            peaks
+        };
+        // Y0, Y1, Y2 present (3 hits incl Y1) → PASS at min_hits=3.
+        let p = mk(&[0, 1, 2]);
+        let s = SpectrumStats::new(&p);
+        assert!(acceptor_core_y_gate(&p, &s, bb, 20.0, 3, 3), "3 rungs incl Y1 must pass");
+        // Only Y0, Y1 (2 hits) → FAIL at min_hits=3.
+        let p2 = mk(&[0, 1]);
+        let s2 = SpectrumStats::new(&p2);
+        assert!(!acceptor_core_y_gate(&p2, &s2, bb, 20.0, 3, 3), "<3 rungs must fail");
+        // Y0, Y2, Y3 (3 hits but NO Y1) → FAIL (Y1 mandatory).
+        let p3 = mk(&[0, 2, 3]);
+        let s3 = SpectrumStats::new(&p3);
+        assert!(!acceptor_core_y_gate(&p3, &s3, bb, 20.0, 3, 3), "missing Y1 must fail even with 3 rungs");
     }
 
     #[test]

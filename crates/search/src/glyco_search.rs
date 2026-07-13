@@ -36,10 +36,48 @@ use andes_glyco::backbone::{
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
-    collapse_cmp, combined_selector_on, glyco_combined_selector_score, glyco_gp_fused_score,
-    glyco_gp_h, glyco_gp_j, glyco_gp_k, gp_selector_on, y_primary_selection,
-    GlycoPsmKey,
+    collapse_cmp, glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_H_DEFAULT, GLYCO_GP_J_DEFAULT,
+    GLYCO_GP_K_DEFAULT,
 };
+
+/// Glyco tuning knobs, threaded from the CLI (see the `--glyco-gp-*` /
+/// `--glyco-pf-charge` / `--glyco-max-pf` hidden flags in the `andes` binary).
+/// These were previously undocumented `ANDES_GLYCO_*` env vars; they are now
+/// discoverable flags with the same validated defaults. `Default` reproduces the
+/// shipped configuration exactly.
+#[derive(Clone, Copy, Debug)]
+pub struct GlycoConfig {
+    /// `gp` selector ladder weight (K).
+    pub gp_k: f32,
+    /// `gp` selector core-Y hit-count weight (J).
+    pub gp_j: f32,
+    /// `gp` selector hyperscore weight (H).
+    pub gp_h: f32,
+    /// Peptide-first fragment-index charge states (indexes b/y at 1..=pf_charge).
+    pub pf_charge: u8,
+    /// Max peptide-first candidates kept per spectrum.
+    pub max_pf: usize,
+    /// Diagnostic mode (`--debug-glyco`): emit ALL candidate rows per scan
+    /// (including de-novo mass-residual hits) instead of the honest top-1 collapse,
+    /// and print transfer diagnostics. A debug PIN must NEVER be fed to an FDR tool.
+    pub debug: bool,
+    /// Emit paired glycan-axis decoy rows for experimental 2D-FDR (`--glyco-decoy`).
+    pub glyco_decoy: bool,
+}
+
+impl Default for GlycoConfig {
+    fn default() -> Self {
+        Self {
+            gp_k: GLYCO_GP_K_DEFAULT,
+            gp_j: GLYCO_GP_J_DEFAULT,
+            gp_h: GLYCO_GP_H_DEFAULT,
+            pf_charge: 2,
+            max_pf: 1024,
+            debug: false,
+            glyco_decoy: false,
+        }
+    }
+}
 use andes_glyco::hybrid::{
     hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
 };
@@ -135,19 +173,36 @@ fn glycan_decoy_seed(g: &GlycanComp) -> u64 {
     s
 }
 
-/// Order peptide-first candidates for the per-spectrum cap: strongest b/y
-/// support first, ties broken by the unique candidate index.
+/// Deterministic, label-BLIND index hash used only to break `match_count` ties in
+/// [`order_peptide_first`]. A raw `cand_idx` tiebreak is target/decoy-CORRELATED
+/// (generated decoys are appended after all targets → higher indices), so at the
+/// `MAX_PF` cap boundary the kept subset would systematically favour targets over
+/// equal-count decoys — an anti-conservative FDR bias. Knuth's multiplicative hash
+/// is a bijection on `u32` that scatters the two index ranges into an interleaved
+/// order, decorrelating the kept subset from the target/decoy layout while staying
+/// fully deterministic (same input → same order).
+#[inline]
+fn pf_tiebreak_hash(idx: u32) -> u32 {
+    idx.wrapping_mul(0x9E37_79B1)
+}
+
+/// Order peptide-first candidates for the per-spectrum cap: strongest b/y support
+/// first, ties broken deterministically but label-BLIND (see [`pf_tiebreak_hash`]).
 ///
 /// DETERMINISM (critical): `frag_index.query` returns `(cand_idx, match_count)`
 /// pairs in an internally-unordered Vec. Sorting by `match_count` ALONE with an
-/// unstable sort leaves tied-count peptides in a non-deterministic order, and
-/// the downstream per-spectrum cap then keeps a different subset of tied
-/// peptides each run. Because the glyco target/decoy separation is marginal,
-/// that ~2% per-scan candidate jitter swung Percolator @1% FDR by ~40%
-/// run-to-run. The unique `cand_idx` secondary key makes the comparator a TOTAL
-/// order, so the sorted result — and thus the capped subset — is reproducible.
+/// unstable sort leaves tied-count peptides in a non-deterministic order, and the
+/// downstream per-spectrum cap then keeps a different subset of tied peptides each
+/// run (that ~2% per-scan jitter swung Percolator @1% FDR ~40% run-to-run). The
+/// hashed-index secondary key + raw `cand_idx` final key make the comparator a
+/// TOTAL order (reproducible) WITHOUT the target-enriching cap bias a raw-index
+/// tiebreak introduced (adversarial review finding).
 fn order_peptide_first(pf: &mut [(u32, u32)]) {
-    pf.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    pf.sort_unstable_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| pf_tiebreak_hash(a.0).cmp(&pf_tiebreak_hash(b.0)))
+            .then_with(|| a.0.cmp(&b.0))
+    });
 }
 
 fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<BackboneHit> {
@@ -232,21 +287,12 @@ pub struct GlycoScoreCtx<'a> {
     pub max_peptide_first: usize,
     pub peptide_first_on: bool,
     pub yindex_on: bool,
-    /// P1b + L4: use the peptide-conditioned combined selector (Y0/Y1 anchor +
-    /// frag/rich-ion intensity LLR) to re-rank the accepted-backbone shortlist.
-    pub combined_selector_on: bool,
-    /// Leg-2 `gp` fused selector toggle + weights (ANDES_GLYCO_SELECTOR=gp,
-    /// GP_K/J/H). Process-constant, so read ONCE in [`GlycoCtxOwned::build`]
-    /// rather than per spectrum — `score_spectrum_glyco` runs in `par_iter`
-    /// and per-spectrum `std::env::var` reads contend on the process env lock.
-    pub gp_selector_on: bool,
+    /// `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`).
+    /// Process-constant, so read ONCE in [`GlycoCtxOwned::build`] rather than per
+    /// spectrum — `score_spectrum_glyco` runs in `par_iter`.
     pub gp_k: f32,
     pub gp_j: f32,
     pub gp_h: f32,
-    /// Upward charge-set expansion (ANDES_GLYCO_CHARGE_EXPAND) and glycan-Y
-    /// primary selection (ANDES_GLYCO_SELECT). Same hoisting rationale.
-    pub charge_expand: u8,
-    pub y_primary: bool,
     pub glyco_decoy_on: bool,
     pub features_collapse: bool,
     pub features_enumerated: bool,
@@ -271,13 +317,9 @@ pub struct GlycoCtxOwned {
     max_peptide_first: usize,
     peptide_first_on: bool,
     yindex_on: bool,
-    combined_selector_on: bool,
-    gp_selector_on: bool,
     gp_k: f32,
     gp_j: f32,
     gp_h: f32,
-    charge_expand: u8,
-    y_primary: bool,
     glyco_decoy_on: bool,
     features_collapse: bool,
     features_enumerated: bool,
@@ -300,90 +342,50 @@ impl GlycoCtxOwned {
         glycan_list: &[GlycanComp],
         fragment_tolerance_da: f64,
         backbone_top_k: usize,
+        cfg: GlycoConfig,
     ) -> Self {
-        // Independent experiment toggles (one variable at a time): the peptide-first
-        // fragment-index path (default ON) and cross-spectrum glycoform transfer
-        // (default OFF, opt-in). Kept separable to isolate each lever + its cost.
-        let peptide_first_on = std::env::var("ANDES_GLYCO_PEPTIDE_FIRST")
-            .map(|v| v != "0")
-            .unwrap_or(true);
+        // Peptide-first fragment-index candidate generation is always on under the
+        // shipped gp selector (it is the high-charge-glycopeptide recall path).
+        let peptide_first_on = true;
         // FDR-soundness: the legacy in-driver whitelist transfer injected TARGET-ONLY,
         // UNLOCKED backbones (transfer_peptide_idx: None), bypassing the seed
         // target/decoy lock (design bug #1) — anti-conservative. It is superseded by
         // the driver's `--glyco-transfer` path (peptide-locked, decoy-symmetric), so
-        // the in-driver path is force-DISABLED regardless of the env var. `black_box`
-        // keeps `false` opaque so the (retained, still-tested) legacy block below
-        // stays compiled rather than becoming provably-unreachable dead code.
-        if std::env::var("ANDES_GLYCO_CROSSSPECTRUM").as_deref() == Ok("1") {
-            eprintln!(
-                "[glyco] ANDES_GLYCO_CROSSSPECTRUM is DISABLED (FDR-unsound: target-only, \
-                 unlocked transfers). Use --glyco-transfer (peptide-locked, decoy-symmetric)."
-            );
-        }
+        // the in-driver path is force-DISABLED. `black_box` keeps `false` opaque so
+        // the (retained, still-tested) legacy block below stays compiled rather than
+        // becoming provably-unreachable dead code.
         let cross_spectrum_on = std::hint::black_box(false);
-        // G3 glycan-axis decoy (default OFF). When off we must NOT compute the decoy
-        // Y-ladder per hit — it is unused and ~doubles the glyco composition-ladder
-        // cost, so leaving it on would slow the shipping default path.
-        let glyco_decoy_on = std::env::var("ANDES_GLYCO_DECOY")
-            .map(|v| v == "1")
-            .unwrap_or(false);
+        // G3 glycan-axis decoy (--glyco-decoy, default OFF). When off we must NOT
+        // compute the decoy Y-ladder per hit — it is unused and ~doubles the glyco
+        // composition-ladder cost, so leaving it on would slow the shipping default.
+        let glyco_decoy_on = cfg.glyco_decoy;
         // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
         // glyco_pin.rs), so computing the expensive ~40-feature vector
         // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
-        // Compute features only for the winner that will actually be emitted. These
-        // mirror the PIN writer's defaults exactly (ANDES_GLYCO_ALL_HITS /
-        // ANDES_GLYCO_DENOVO) so the driver's kept hit == the PIN's kept row.
-        let features_collapse = std::env::var("ANDES_GLYCO_ALL_HITS")
-            .map(|v| v != "1")
-            .unwrap_or(true);
-        let features_enumerated = std::env::var("ANDES_GLYCO_DENOVO")
-            .map(|v| v != "1")
-            .unwrap_or(true);
-        // Fast dev harness: ANDES_GLYCO_SCANS=<file> (one scan number per line)
-        // restricts the glyco driver to those scans (e.g. the truth-scan subset), so
-        // a redesign iteration is minutes not hours. The standard search still runs
-        // over all spectra; only glyco scoring is subset. Unset = all spectra.
-        let scan_filter: Option<std::collections::HashSet<i32>> = std::env::var("ANDES_GLYCO_SCANS")
-            .ok()
-            .and_then(|path| std::fs::read_to_string(&path).ok())
-            .map(|s| {
-                s.lines()
-                    .filter_map(|l| l.trim().parse::<i32>().ok())
-                    .collect()
-            });
-        // Experiment A (diagnostic): disable BOTH truncations — the hybrid DB-union
-        // core-Y cap and the driver's backbone_top_k — to measure the true findable
-        // ceiling. Large finite cap avoids the max_features usize overflow. SLOW.
-        let exhaustive = std::env::var("ANDES_GLYCO_EXHAUSTIVE")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let effective_top_k = if exhaustive { 100_000 } else { backbone_top_k };
+        // Compute features only for the winner that will actually be emitted. Under
+        // `--debug-glyco` (cfg.debug) the full multi-row / de-novo dump is restored;
+        // these MUST mirror the PIN writer's `write_glyco_pin(debug)` so the driver's
+        // kept hit == the PIN's kept row.
+        let features_collapse = !cfg.debug;
+        let features_enumerated = !cfg.debug;
+        // Scan subsetting removed: the standard search runs over all spectra.
+        let scan_filter: Option<std::collections::HashSet<i32>> = None;
+        // The backbone candidate cap is `--glyco-backbone-top-k` (set a large value
+        // to approximate an exhaustive/no-truncation ceiling measurement).
+        let effective_top_k = backbone_top_k;
         // Phase G1: glycan-Y-first candidate SELECTION (a glycan-Y-complementary
         // index generates backbones from the strong glycan-Y ladder) + TWO-AXIS
         // retention (keep backbones in top_k by peptide-b/y OR by glycan-Y evidence),
         // so a weak-b/y / strong-glycan-Y spectrum survives truncation. Opt-in for a
         // clean A/B vs the b/y-only path.
-        // P1b + L4: peptide-conditioned COMBINED selector (opt-in via
-        // ANDES_GLYCO_SELECTOR=combined). Default OFF → the bare b/y-rank selector,
-        // byte-identical to the 253/97 baseline.
-        let combined_selector_on = combined_selector_on();
-        // Leg-2 `gp` fused selector + its hand-tuned weights, the upward charge
-        // expansion, and the glycan-Y primary-selection toggle. All process
-        // constants; read ONCE here (not per spectrum in the `par_iter` hot loop).
-        let gp_selector_on = gp_selector_on();
-        let gp_k = glyco_gp_k();
-        let gp_j = glyco_gp_j();
-        let gp_h = glyco_gp_h();
-        let charge_expand = glyco_charge_expand();
-        let y_primary = y_primary_selection();
-        // AXIS-2 Y-retention pairing (P0b): the combined selector can only rescue a
-        // true backbone that SURVIVED top-k truncation. P0b showed Y-aware retention
-        // is what surfaces those large/weak-b/y true backbones into the pool. So when
-        // the combined selector is on, default YINDEX ON internally (still explicitly
-        // overridable to 0 for an isolation A/B).
-        let yindex_on = std::env::var("ANDES_GLYCO_YINDEX")
-            .map(|v| v == "1")
-            .unwrap_or(combined_selector_on);
+        // `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`), from
+        // the CLI (--glyco-gp-k/j/h). The `gp` selector is the shipped default.
+        let gp_k = cfg.gp_k;
+        let gp_j = cfg.gp_j;
+        let gp_h = cfg.gp_h;
+        // Glycan-Y-first candidate retention (P0b) is off by default under the gp
+        // selector (matches the validated gp baseline).
+        let yindex_on = false;
         let glycan_y_index = if yindex_on {
             GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
         } else {
@@ -410,8 +412,13 @@ impl GlycoCtxOwned {
                 has_nxst_sequon(&res)
             })
             .collect();
+        // CHARGE-AWARE peptide-first index (--glyco-pf-charge): index b/y at charges
+        // 1..=PF_CHARGE so multiply-charged backbone ions of large/high-charge
+        // glycopeptides (z4/z5+, whose b/y land at +2/+3) can select their peptide.
+        // Default 2 (+1/+2); 1 = legacy +1-only. Clamped 1..=3 in the index.
+        let pf_charge: u8 = cfg.pf_charge;
         let frag_index = if !peptide_first_on {
-            FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01))
+            FragmentIndex::build(std::iter::empty::<(u32, &model::peptide::Peptide)>(), fragment_tolerance_da.max(0.01), pf_charge)
         } else {
             let seq_entries: Vec<(u32, &model::peptide::Peptide)> = candidates
                 .iter()
@@ -437,7 +444,7 @@ impl GlycoCtxOwned {
                     est_mb
                 );
             }
-            FragmentIndex::build(seq_entries.iter().copied(), fragment_tolerance_da.max(0.01))
+            FragmentIndex::build(seq_entries.iter().copied(), fragment_tolerance_da.max(0.01), pf_charge)
         };
         // Sorted glycan masses for the peptide-first glycan-by-subtraction lookup.
         let glycan_sorted: Vec<(f64, usize)> = {
@@ -450,19 +457,13 @@ impl GlycoCtxOwned {
         // per-spectrum query cost — with negligible loss of real glycopeptides
         // (identifiable backbones carry several b/y ions).
         // Hard cap on peptide-first candidates per spectrum (strongest b/y support
-        // first) so a peak-dense spectrum can't blow up phase-1 scoring. Overridable
-        // via ANDES_GLYCO_MAX_PF. The deterministic collapse keeps a FIXED subset
-        // under this cap, so too low a cap truncates good backbones away. A cap
-        // sweep on PXD025455 Fc3_r1 (deterministic, honest FDR, 1 decoy@1% each):
-        // 64→218 @1%/90 bb-correct, 256→232/93, 1024→253/97, ∞→268/96. Default 1024
-        // = beats an open-source glyco engine (222) with the HIGHEST backbone-correct count (97)
-        // and best precision, while keeping a safety ceiling for pathological
-        // peak-dense spectra (∞ gains a few total IDs but slightly worse precision).
-        let max_peptide_first: usize = std::env::var("ANDES_GLYCO_MAX_PF")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(1024);
+        // first) so a peak-dense spectrum can't blow up phase-1 scoring, from the CLI
+        // (--glyco-max-pf). The deterministic collapse keeps a FIXED subset under this
+        // cap, so too low a cap truncates good backbones away. A cap sweep on
+        // PXD025455 Fc3_r1 (deterministic, honest FDR, 1 decoy@1% each): 64→218 @1%/90
+        // bb-correct, 256→232/93, 1024→253/97, ∞→268/96. Default 1024 keeps the
+        // HIGHEST backbone-correct count with best precision + a safety ceiling.
+        let max_peptide_first: usize = cfg.max_pf.max(1);
 
         GlycoCtxOwned {
             frag_index,
@@ -473,13 +474,9 @@ impl GlycoCtxOwned {
             max_peptide_first,
             peptide_first_on,
             yindex_on,
-            combined_selector_on,
-            gp_selector_on,
             gp_k,
             gp_j,
             gp_h,
-            charge_expand,
-            y_primary,
             glyco_decoy_on,
             features_collapse,
             features_enumerated,
@@ -513,13 +510,9 @@ impl GlycoCtxOwned {
             max_peptide_first: self.max_peptide_first,
             peptide_first_on: self.peptide_first_on,
             yindex_on: self.yindex_on,
-            combined_selector_on: self.combined_selector_on,
-            gp_selector_on: self.gp_selector_on,
             gp_k: self.gp_k,
             gp_j: self.gp_j,
             gp_h: self.gp_h,
-            charge_expand: self.charge_expand,
-            y_primary: self.y_primary,
             glyco_decoy_on: self.glyco_decoy_on,
             features_collapse: self.features_collapse,
             features_enumerated: self.features_enumerated,
@@ -541,18 +534,6 @@ impl GlycoCtxOwned {
 /// precursor mass is absorbed by an OVERSIZED glycan — exactly the R7 signature
 /// (winner backbone −688 Da median, oversized glycan). This is the same class of
 /// defect as the "charge-1-only blind spot" in the standard search.
-///
-/// Reads `ANDES_GLYCO_CHARGE_EXPAND` once; `N≥1` widens the tried charge set
-/// UPWARD by `N` (see [`glyco_charges_to_try`]). Default (unset / `0`) preserves
-/// the exact current behavior so the 253/97 baseline is byte-identical and the fix
-/// can be A/B'd on the VM.
-fn glyco_charge_expand() -> u8 {
-    std::env::var("ANDES_GLYCO_CHARGE_EXPAND")
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or(0)
-}
-
 /// Derive the charge states to enumerate for a glyco spectrum.
 ///
 /// - `expand == 0` (default): EXACT legacy behavior — trust the reported charge as
@@ -623,11 +604,8 @@ fn score_spectrum_glyco(
     let max_peptide_first = ctx.max_peptide_first;
     let peptide_first_on = ctx.peptide_first_on;
     let yindex_on = ctx.yindex_on;
-    let combined_selector_on = ctx.combined_selector_on;
-    // Leg-2 `gp` fused selector (ANDES_GLYCO_SELECTOR=gp) + weights, hoisted into
-    // the ctx (built once) — independent of `combined` and of YINDEX retention.
-    // `gp_k` scales the ladder term against the b/y rank in `glyco_gp_fused_score`.
-    let gp_selector_on = ctx.gp_selector_on;
+    // `gp` fused-selector weights, hoisted into the ctx (built once). `gp_k` scales
+    // the ladder term against the b/y rank in `glyco_gp_fused_score`.
     let gp_k = ctx.gp_k;
     let gp_j = ctx.gp_j;
     let gp_h = ctx.gp_h;
@@ -665,7 +643,7 @@ fn score_spectrum_glyco(
             // true higher charge (under-called by the acquisition) can be enumerated —
             // the P0 charge blind spot (R7: z5 = 100% absent). See its doc comment.
             let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, ctx.charge_expand);
+                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, 0);
             // Max fragment charge for Y-ladder matching: a fragment cannot exceed
             // the precursor charge, and glyco Y-ions are frequently 2+/3+ (matched
             // up to +3 inside the Y functions). Default 3 when the precursor charge
@@ -1196,128 +1174,27 @@ fn score_spectrum_glyco(
                 }
             };
 
-            // P1b + L4: PEPTIDE-CONDITIONED combined selector score for one accepted
-            // winner. Composes ADDITIVELY on top of the bare b/y rank-LLR (never a
-            // score_psm rewrite): + the peptide-mass-conditioned Y0/Y1 anchor
-            // intensity (already available, cheap) + the frag/rich-ion intensity-model
-            // LLR (0.0 when no model is loaded). Cost is bounded by only ever calling
-            // this on the top-`SELECTOR_SHORTLIST_K`-by-rank shortlist below, NOT on
-            // every accepted candidate × charge × glycan. `intensity_on` lets the
-            // caller ship the cheap anchor-only variant first (no GBDT eval).
-            let feat_tol = scorer.feature_match_tolerance();
-            let feat_tol_is_ppm =
-                matches!(feat_tol, model::tolerance::Tolerance::Ppm(_));
-            let feat_tol_val = feat_tol.raw_value();
-            let combined_score = |w: &CheapWinner, intensity_on: bool| -> f32 {
-                let cand = &candidates[w.cand_slot];
-                // Peptide-mass-conditioned Y0/Y1 anchor (bare peptide + peptide+HexNAc).
-                let anchor = y0y1_anchor_intensity(
-                    &spec.peaks,
-                    &stats,
-                    cand.peptide.mass(),
-                    w.z,
-                    tol_ppm,
-                ) as f32;
-                // Intensity-model LLR (frag_pred_chance_llr + rich_ion_llr), gated to
-                // the shortlist. Uses the SAME ScoredSpectrum the phase-1 scoring used.
-                let intensity_llr = if intensity_on {
-                    match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
-                        Some((_, ss)) => {
-                            let (_expl, chance_llr, _topk) =
-                                scoring_crate::scoring::frag_llr_battery(
-                                    scorer.param().frag_intensity_model.as_deref(),
-                                    ss,
-                                    &cand.peptide,
-                                    w.z,
-                                    feat_tol_val,
-                                    feat_tol_is_ppm,
-                                );
-                            let rich = scoring_crate::scoring::rich_ion_llr(
-                                scorer.param().rich_ion_model.as_deref(),
-                                ss,
-                                &cand.peptide,
-                                w.z,
-                                feat_tol_val,
-                                feat_tol_is_ppm,
-                            );
-                            chance_llr + rich
-                        }
-                        None => 0.0,
-                    }
-                } else {
-                    0.0
-                };
-                glyco_combined_selector_score(w.rank, anchor, intensity_llr)
-            };
-
-            // Cost bound (P1b): only the top-K accepted winners by bare rank are
-            // re-ranked by the (potentially GBDT-backed) combined score. K is a
-            // compile-time constant so the per-scan intensity-model eval count is
-            // bounded regardless of candidate fan-out.
-            const SELECTOR_SHORTLIST_K: usize = 24;
-
             let winners_for_features: Vec<(GlycanWinnerKey, CheapWinner)> =
                 if features_collapse {
-                    // Collapse ordering is the SHARED `collapse_cmp` (single source
-                    // of truth with the PIN writer's select_emitted_hits). Default
-                    // = core-Y ladder primary (+70% deterministic, see
-                    // y_primary_selection); ANDES_GLYCO_SELECT=rank forces the old
-                    // b/y-rank primary. Selected over ALL accepted candidates.
-                    let y_primary = ctx.y_primary;
-                    let best = if gp_selector_on {
-                        // Leg 2: fused score `rank + K·ladder` over ALL accepted
-                        // winners (NOT the rank-shortlist — a weak-b/y but strong-
-                        // ladder truth must not be pre-filtered by bare rank, the
-                        // SELECTOR_SHORTLIST_K trap). Cheap (rank + ladder both
-                        // already available), so no shortlist is needed. MUST match
-                        // the PIN writer's select_emitted_hits gp branch exactly.
-                        accepted_winners
-                            .iter()
-                            .map(|e| {
-                                let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                                let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
-                                );
-                                (e, s)
-                            })
-                            .max_by(|(ea, sa), (eb, sb)| {
-                                sa.total_cmp(sb)
-                                    .then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
-                            })
-                            .map(|(e, _)| e)
-                    } else if combined_selector_on {
-                        // P1b + L4: build a deterministic top-K-by-rank shortlist,
-                        // then pick the winner by the peptide-conditioned COMBINED
-                        // score. Total order: bare rank DESC then gl_key ASC selects
-                        // the shortlist; combined DESC then ladder DESC then gl_key
-                        // ASC selects the winner (no HashMap in any ordered path).
-                        let mut shortlist: Vec<&(GlycanWinnerKey, CheapWinner)> =
-                            accepted_winners.iter().collect();
-                        shortlist.sort_by(|a, b| {
-                            b.1.rank
-                                .total_cmp(&a.1.rank)
-                                .then_with(|| a.0.cmp(&b.0))
-                        });
-                        shortlist.truncate(SELECTOR_SHORTLIST_K);
-                        shortlist
-                            .into_iter()
-                            .map(|e| (e, combined_score(&e.1, true), ladder(&e.1)))
-                            .max_by(|(ea, ca, la), (eb, cb, lb)| {
-                                ca.total_cmp(cb)
-                                    .then_with(|| la.total_cmp(lb))
-                                    .then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
-                            })
-                            .map(|(e, _, _)| e)
-                    } else {
-                        accepted_winners
-                            .iter()
-                            .map(|e| (e, ladder(&e.1)))
-                            .max_by(|(ea, la), (eb, lb)| {
-                                collapse_cmp(ea.1.rank, *la, eb.1.rank, *lb, y_primary)
-                                    .then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
-                            })
-                            .map(|(e, _)| e)
-                    };
+                    // Top-1-per-scan collapse (required for honest per-scan TDC FDR),
+                    // chosen by the `gp` fused score `rank + K·ladder + J·core_y +
+                    // H·hyper` over ALL accepted candidates (NOT a rank-shortlist — a
+                    // weak-b/y but strong-ladder truth must not be pre-filtered by bare
+                    // rank). MUST match the PIN writer's select_emitted_hits gp branch
+                    // exactly (the shared collapse source of truth).
+                    let best = accepted_winners
+                        .iter()
+                        .map(|e| {
+                            let cy = core_y_counts[e.1.bb_hit_idx] as f32;
+                            let s = glyco_gp_fused_score(
+                                e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                            );
+                            (e, s)
+                        })
+                        .max_by(|(ea, sa), (eb, sb)| {
+                            sa.total_cmp(sb).then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
+                        })
+                        .map(|(e, _)| e);
                     match best {
                         Some((gl_key, w)) => {
                             let is_enum = deduped_backbone[w.bb_hit_idx].glycan.is_some();
@@ -1329,11 +1206,10 @@ fn score_spectrum_glyco(
                         }
                         None => Vec::new(),
                     }
-                } else if gp_selector_on {
-                    // Diagnostic multi-row dump (ANDES_GLYCO_ALL_HITS=1) UNDER the gp
-                    // selector: sort by the fused `rank + K·ladder` so the audit's
-                    // top-1 row reflects the selector under test. Deterministic total
-                    // order: fused DESC, then gl_key ASC.
+                } else {
+                    // Diagnostic multi-row dump (--debug-glyco): sort by the fused gp
+                    // score so the audit's top-1 row reflects the shipped selector.
+                    // Deterministic total order: fused DESC, then gl_key ASC.
                     let mut scored: Vec<(f32, (GlycanWinnerKey, CheapWinner))> =
                         accepted_winners
                             .into_iter()
@@ -1350,33 +1226,6 @@ fn score_spectrum_glyco(
                     });
                     scored.truncate(max_features);
                     scored.into_iter().map(|(_, e)| e).collect()
-                } else if combined_selector_on {
-                    // Diagnostic multi-row dump (ANDES_GLYCO_ALL_HITS=1) UNDER the
-                    // combined selector: sort by the peptide-conditioned combined
-                    // score so the audit's top-1 row reflects the selector under test.
-                    // Combined score is computed ONCE per row (Schwartzian transform)
-                    // so the GBDT eval count is O(n), not O(n log n) in the sort.
-                    // Deterministic total order: combined DESC, then gl_key ASC.
-                    let mut scored: Vec<(f32, (GlycanWinnerKey, CheapWinner))> =
-                        accepted_winners
-                            .into_iter()
-                            .map(|e| (combined_score(&e.1, true), e))
-                            .collect();
-                    scored.sort_by(|a, b| {
-                        b.0.total_cmp(&a.0).then_with(|| (a.1).0.cmp(&(b.1).0))
-                    });
-                    scored.truncate(max_features);
-                    scored.into_iter().map(|(_, e)| e).collect()
-                } else {
-                    // Diagnostic multi-row dump (ANDES_GLYCO_ALL_HITS=1): rank-sort
-                    // + truncate to bound the row count. Deterministic total order:
-                    // rank DESC, then gl_key ASC (never HashMap iteration order).
-                    let mut v = accepted_winners;
-                    v.sort_by(|a, b| {
-                        b.1.rank.total_cmp(&a.1.rank).then_with(|| a.0.cmp(&b.0))
-                    });
-                    v.truncate(max_features);
-                    v
                 };
 
             let mut best_hits: HashMap<GlycanWinnerKey, FullGlycoPsm> =
@@ -1574,6 +1423,7 @@ pub fn glyco_search_run(
     glycan_list: &[GlycanComp],
     tol_ppm: f64,
     backbone_top_k: usize,
+    cfg: GlycoConfig,
 ) -> Vec<GlycoSpectrumResult> {
     let params = prepared.params;
     let candidates = &prepared.candidates;
@@ -1583,7 +1433,7 @@ pub fn glyco_search_run(
     // full rationale of each; unchanged by the Task 8c extraction, just moved
     // out of this function so `glyco_transfer_pass2` can build an IDENTICAL
     // context from the same routine instead of a second hand-maintained copy.
-    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k);
+    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
     let cross_spectrum_on = owned.cross_spectrum_on;
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
 
@@ -1602,13 +1452,10 @@ pub fn glyco_search_run(
     // masses from pass-1 PSMs with a strong core-Y ladder (well-fragmented
     // glycoforms), then transfer them to poorly-fragmenting sibling glycoforms.
     const CONF_MIN_CORE_Y: u8 = 3;
-    // G4 RT co-elution half-width (seconds). a cross-spectrum glyco engine uses ~±1800 s;
-    // tunable to tighten the gate on short gradients. RT gating is MANDATORY —
-    // it is why the un-gated NULL-v1 scaffold was OFF.
-    let rt_window: f32 = std::env::var("ANDES_GLYCO_RT_WINDOW")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1800.0);
+    // G4 RT co-elution half-width (seconds). Fixed default for this (dead, force-
+    // disabled) legacy in-driver transfer path; the live --glyco-transfer path uses
+    // the --glyco-rt-window flag. RT gating is MANDATORY.
+    let rt_window: f32 = 1800.0;
     // Confident donors carry their spectrum RT so transfer only fires to
     // co-eluting acceptors. Donors must be (a) strong-ladder (core_y_hits >=
     // CONF_MIN_CORE_Y), (b) a TARGET peptide (never a decoy — a decoy with a
@@ -1683,7 +1530,7 @@ pub fn glyco_search_run(
                 None => return None,
             };
             let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, ctx.charge_expand);
+                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, 0);
             let mut transfer: Vec<BackboneHit> = Vec::new();
             for &z in &charges_to_try {
                 let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;
@@ -1760,12 +1607,14 @@ pub fn glyco_search_run(
 /// Deterministic merge: `injected` is a `BTreeMap` (never `HashMap`) and the
 /// output is sorted by `spectrum_idx`, matching `glyco_search_run`'s own
 /// determinism convention.
+#[allow(clippy::too_many_arguments)]
 pub fn glyco_transfer_pass2(
     spectra: &[Spectrum],
     prepared: &PreparedSearch<'_>,
     glycan_list: &[GlycanComp],
     tol_ppm: f64,
     backbone_top_k: usize,
+    cfg: GlycoConfig,
     pass1: Vec<GlycoSpectrumResult>,
     injected: &std::collections::BTreeMap<usize, Vec<BackboneHit>>,
 ) -> Vec<GlycoSpectrumResult> {
@@ -1774,7 +1623,7 @@ pub fn glyco_transfer_pass2(
 
     // Same shared setup `glyco_search_run` uses — identical toggles/indices,
     // built once for this call (see `GlycoCtxOwned::build` doc comment).
-    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k);
+    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
 
     // Re-score only the spectra that actually received a transferred backbone.
@@ -1789,19 +1638,18 @@ pub fn glyco_transfer_pass2(
                 return None;
             }
             let scored = score_spectrum_glyco(spec_idx, &spectra[spec_idx], transfer, &ctx)?;
-            // Diagnostic (ANDES_GLYCO_XFER_DIAG=1): for each transfer acceptor, report
-            // where the transferred candidate ranks vs the top-1 collapse winner, so we
-            // can see WHY transfers are net-neutral (outranked / de-novo-dropped / not
-            // scored). One line per acceptor; joined with truth on scan offline. No cost
-            // when the env var is unset.
-            if std::env::var("ANDES_GLYCO_XFER_DIAG").as_deref() == Ok("1") {
+            // Diagnostic (--debug-glyco): for each transfer acceptor, report where the
+            // transferred candidate ranks vs the top-1 collapse winner, so we can see
+            // WHY transfers are net-neutral (outranked / de-novo-dropped / not scored).
+            // One line per acceptor; joined with truth on scan offline.
+            if cfg.debug {
                 let scan = spectra[spec_idx].scan.unwrap_or(0);
-                let y_primary = andes_glyco::glyco_psm::y_primary_selection();
-                // Collapse winner by the SAME rule the PIN writer uses (collapse_cmp).
+                // Diagnostic-only winner proxy (ladder-primary collapse_cmp); the
+                // shipped emitted winner is the gp fused score in select_emitted_hits.
                 let winner = scored.hits.iter().max_by(|a, b| {
                     collapse_cmp(
                         a.psm.rank_score, a.glycan_key.y_ladder_intensity_score,
-                        b.psm.rank_score, b.glycan_key.y_ladder_intensity_score, y_primary,
+                        b.psm.rank_score, b.glycan_key.y_ladder_intensity_score, true,
                     )
                 });
                 let (w_bb, w_xfer, w_denovo) = winner
@@ -1858,39 +1706,35 @@ mod tests {
     fn order_peptide_first_is_deterministic_across_input_orders() {
         // Two peptides tied at count 9, two tied at 7, one unique at 5 — the
         // tied groups are where a single-key sort would be non-deterministic.
-        let canonical = vec![
-            (3u32, 9u32),
-            (8u32, 9u32),
-            (1u32, 7u32),
-            (5u32, 7u32),
-            (2u32, 5u32),
-        ];
-
-        // A few representative permutations of the SAME multiset of candidates.
+        // Representative permutations of the SAME multiset of candidates.
         let permutations = vec![
-            vec![(8, 9), (5, 7), (2, 5), (3, 9), (1, 7)],
+            vec![(8u32, 9u32), (5, 7), (2, 5), (3, 9), (1, 7)],
             vec![(1, 7), (3, 9), (2, 5), (8, 9), (5, 7)],
             vec![(2, 5), (1, 7), (5, 7), (8, 9), (3, 9)],
             vec![(5, 7), (8, 9), (3, 9), (1, 7), (2, 5)],
         ];
 
-        for perm in permutations {
+        // The order the sort produces (label-BLIND `pf_tiebreak_hash` within a tied
+        // count, NOT raw cand_idx) is the deterministic reference every permutation
+        // must collapse to.
+        let mut reference = permutations[0].clone();
+        order_peptide_first(&mut reference);
+
+        for perm in &permutations {
             let mut got = perm.clone();
             order_peptide_first(&mut got);
             assert_eq!(
-                got, canonical,
-                "input order {perm:?} must collapse to the canonical strongest-first, \
-                 cand_idx-tiebroken order"
+                &got, &reference,
+                "input order {perm:?} must collapse to the same deterministic order"
             );
         }
 
-        // Explicitly document the invariant: counts descending; within an equal
-        // count, cand_idx ascending.
-        assert_eq!(
-            canonical,
-            vec![(3, 9), (8, 9), (1, 7), (5, 7), (2, 5)],
-            "count DESC, then cand_idx ASC"
-        );
+        // Primary key invariant: counts grouped non-increasing (strongest first).
+        for w in reference.windows(2) {
+            assert!(w[0].1 >= w[1].1, "counts must be non-increasing: {reference:?}");
+        }
+        assert_eq!(reference[0].1, 9, "strongest count first");
+        assert_eq!(reference.last().unwrap().1, 5, "weakest count last");
     }
 
     /// Isotope-sweep GLYCAN ANNOTATION regression. Under the Y-ion-first
@@ -2380,7 +2224,7 @@ mod tests {
         // Pass 1 (no transfer) on this fixture: nothing to find (no oxonium/Y-ladder
         // evidence, peptide-first path needs real b/y matches on real peaks), so an
         // empty Pass-1 result is the expected, honest starting point for Pass 2.
-        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50);
+        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default());
         assert!(
             pass1.iter().all(|r| r.hits.is_empty()) || pass1.is_empty(),
             "peakless fixture must not produce a Pass-1 hit on its own: {pass1:?}"
@@ -2418,7 +2262,7 @@ mod tests {
             std::collections::BTreeMap::new();
         injected.insert(0, vec![bb_hit]);
 
-        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, pass1, &injected);
+        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), pass1, &injected);
 
         assert_eq!(merged.len(), 1, "expected exactly one spectrum result: {merged:?}");
         let result = &merged[0];

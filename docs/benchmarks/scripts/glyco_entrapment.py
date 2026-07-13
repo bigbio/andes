@@ -35,10 +35,11 @@ discoveries, r = entrapment:target ratio):
 Ordering always: lower_bound <= paired <= combined. Verdict at the q=0.01 line:
     combined <= 0.01         -> evidence andes controls FDR (conservative)
     lower_bound > 0.01       -> andes FAILS to control FDR
-NOTE: the exact paired estimator needs an explicit peptide<->entrapment map
-(--pairs, not yet wired); until then the tool reports the COMBINED upper bound as
+NOTE: the exact paired estimator needs an explicit peptide<->entrapment map,
+supplied via `--pairs` (a two-column target_peptide<TAB>entrapment_peptide file
+from `build-pep`). Without `--pairs` the tool reports the COMBINED upper bound as
 a conservative proxy in the paired column, so a <=1% reading still evidences
-control -- it is just looser than the true paired estimator would be.
+control -- it is just looser than the true paired estimator.
 """
 import argparse
 import re
@@ -198,26 +199,114 @@ def fdp(args):
     if n_decoy:
         print(f"# excluded {n_decoy} decoy rows (prefix '{dec}') from the target count")
 
+    # Optional peptide<->entrapment pairing (enables the EXACT paired estimator).
+    # File: two columns, target_peptide <TAB> entrapment_peptide (bare sequences).
+    ent_to_tgt = {}
+    if args.pairs:
+        for ln in open(args.pairs):
+            if not ln.strip() or ln.startswith("#"):
+                continue
+            a, b = ln.rstrip("\n").split("\t")[:2]
+            # Skip ONLY the exact header row (first column literally
+            # "target_peptide"); a real peptide sequence never equals that, so a
+            # genuine TARGET...-starting peptide is not dropped.
+            if a.strip().lower() == "target_peptide":
+                continue
+            ent_to_tgt[re.sub(r"[^A-Z]", "", b.upper())] = re.sub(r"[^A-Z]", "", a.upper())
+    # Best (lowest) q at which each TARGET peptide was discovered — for the paired terms.
+    tgt_best_q = {}
+    for q, e, pep in rows:
+        if not e:
+            if pep not in tgt_best_q or q < tgt_best_q[pep]:
+                tgt_best_q[pep] = q
+
     r_ratio = args.ratio
-    # NOTE: the third column is the COMBINED estimator, NOT the paired estimator —
-    # the exact paired terms (N_pst/N_pts) need an explicit peptide<->entrapment map
-    # (--pairs, not yet wired). Combined is a valid (conservative) upper bound, so a
-    # <=1% reading still evidences control; it is just looser than paired would be.
-    print(f"{'q<=':>7} {'n_tau':>7} {'n_eps':>6} {'lower':>8} {'combined':>9} {'comb(=paired proxy)':>20}")
+    have_paired = bool(ent_to_tgt)
+    col = "paired" if have_paired else "comb(=paired proxy)"
+    print(f"{'q<=':>7} {'n_tau':>7} {'n_eps':>6} {'lower':>8} {'combined':>9} {col:>20}")
     for thr in (0.005, 0.01, 0.02, 0.05):
         ntau = sum(1 for q, e, _ in rows if q <= thr and not e)
         neps = sum(1 for q, e, _ in rows if q <= thr and e)
         denom = neps + ntau
         lower = neps / denom if denom else 0.0
         combined = neps * (1 + 1.0 / r_ratio) / denom if denom else 0.0
-        paired = combined  # conservative proxy; see note above
+        if have_paired and denom:
+            # EXACT paired (r=1): for each entrapment discovery at q<=thr, inspect its
+            # PAIRED target. N_pst = paired target NOT discovered at thr; N_pts = paired
+            # target discovered but scored WORSE (higher q) than the entrapment.
+            n_pst = n_pts = 0
+            for q, e, pep in rows:
+                if not e or q > thr:
+                    continue
+                t = ent_to_tgt.get(pep)
+                tq = tgt_best_q.get(t) if t is not None else None
+                if tq is None or tq > thr:
+                    n_pst += 1
+                elif tq > q:
+                    n_pts += 1
+            paired = (neps + 2 * n_pts + n_pst) / denom
+        else:
+            paired = combined  # conservative proxy when no pairing supplied
         flag = "  <-- 1% line" if abs(thr - 0.01) < 1e-9 else ""
         print(f"{thr:>7.3f} {ntau:>7d} {neps:>6d} {100*lower:>7.2f}% "
               f"{100*combined:>8.2f}% {100*paired:>17.2f}%{flag}")
-    print("\nVerdict: combined<=1% at the 1% line -> evidence of FDR control; "
-          "lower>1% -> FDR NOT controlled. (Combined is the conservative proxy for "
-          "the tighter paired estimator, which needs --pairs.) Average over >=20 "
-          "random build-fasta seeds for a stable empirical-FDR curve (mean +/- 1.96*SD).")
+    v = "paired" if have_paired else "combined"
+    print(f"\nVerdict: {v}<=1% at the 1% line -> evidence of FDR control; "
+          "lower>1% -> FDR NOT controlled." + ("" if have_paired else
+          " (Combined is the conservative proxy for the tighter paired estimator, "
+          "which needs --pairs from a peptide-level entrapment build-pep.)") +
+          " Average over >=20 random draws for a stable empirical-FDR curve.")
+
+
+def _tryptic(seq):
+    peps, start = [], 0
+    for i, a in enumerate(seq):
+        if a in "KR" and (i + 1 >= len(seq) or seq[i + 1] != "P"):
+            peps.append(seq[start:i + 1])
+            start = i + 1
+    if start < len(seq):
+        peps.append(seq[start:])
+    return peps
+
+
+def build_pep(args):
+    """PEPTIDE-level 1:1 entrapment: for each unique tryptic SEQUON-bearing target
+    peptide, emit one shuffled entrapment peptide (C-term fixed, sequon density
+    preserved), each as a single-peptide protein `>ENT_pep_<i>`. Writes the search
+    FASTA (concatenate with the target) + a target_peptide<TAB>entrapment_peptide
+    pairing for the EXACT paired FDP estimator (`fdp --pairs`)."""
+    prots = _read_fasta(args.target)
+    tgt_peps = {}
+    for _, seq in prots:
+        for p in _tryptic(seq):
+            if 6 <= len(p) <= 50 and SEQUON.search(p) and p not in tgt_peps:
+                tgt_peps[p] = None
+    out = open(args.out_fasta, "w")
+    pair = open(args.out_pairs, "w")
+    pair.write("target_peptide\tentrapment_peptide\n")
+    seen = set(tgt_peps)
+    n = 0
+    for idx, tp in enumerate(tgt_peps):
+        tc = _count_sequon_starts(tp)
+        base = (args.seed ^ (idx * 0x9E3779B97F4A7C15)) & 0xFFFFFFFFFFFFFFFF
+        ep = None
+        for attempt in range(args.retries):
+            cand = _restore_sequon_density(
+                _seeded_shuffle_fix_cterm(tp, (base + attempt) & 0xFFFFFFFFFFFFFFFF), tc)
+            if cand not in seen:
+                ep = cand
+                break
+        if ep is None:
+            continue
+        seen.add(ep)
+        out.write(f">ENT_pep_{idx}\n{ep}\n")
+        pair.write(f"{tp}\t{ep}\n")
+        n += 1
+    out.close()
+    pair.close()
+    print(f"built {n}/{len(tgt_peps)} peptide-level entrapment peptides -> {args.out_fasta}")
+    print(f"pairing -> {args.out_pairs}. Search {args.target} + {args.out_fasta} (+ decoys), "
+          f"then: fdp --ids <psms> --pairs {args.out_pairs}")
 
 
 def main():
@@ -231,11 +320,21 @@ def main():
     b.add_argument("--seed", type=int, default=42)
     b.add_argument("--retries", type=int, default=20)
     b.set_defaults(func=build_fasta)
+    bp = sub.add_parser("build-pep", help="build a PEPTIDE-level 1:1 entrapment FASTA + pairing")
+    bp.add_argument("--target", required=True, help="target-only FASTA")
+    bp.add_argument("--out-fasta", required=True)
+    bp.add_argument("--out-pairs", required=True)
+    bp.add_argument("--seed", type=int, default=42)
+    bp.add_argument("--retries", type=int, default=20)
+    bp.set_defaults(func=build_pep)
     f = sub.add_parser("fdp", help="compute entrapment FDP from an ID table")
     f.add_argument("--ids", required=True, help="Percolator .psms (q-value + proteinIds)")
     f.add_argument("--ratio", type=float, default=1.0, help="entrapment:target ratio r")
     f.add_argument("--decoy-prefix", default="XXX_",
                    help="accession prefix marking decoy rows to exclude from n_tau")
+    f.add_argument("--pairs", default=None,
+                   help="target_peptide<TAB>entrapment_peptide map (from build-pep) "
+                        "→ enables the EXACT paired estimator instead of the combined proxy")
     f.set_defaults(func=fdp)
     args = ap.parse_args()
     args.func(args)

@@ -1,0 +1,81 @@
+# andes run configuration (YAML) — pass with `andes --config this-file.yaml`.
+#
+# Every key is OPTIONAL; omitted keys keep their built-in default. An explicit
+# CLI flag ALWAYS overrides the value here (precedence: CLI flag > config > default),
+# so this file sets the baseline and you tweak individual runs on the command line.
+#
+# Sections are grouped by experimental design (see DOCS §1a / §1b). Tolerances,
+# ranges, and enums are written exactly as on the CLI (e.g. "20ppm", "2..5", auto).
+# Unknown keys are a hard error, so typos never silently no-op.
+
+# ── Inputs / outputs ────────────────────────────────────────────────────────
+io:
+  spectrum: [sample.mzML]        # one or more files (mzML / MGF / .raw / .d)
+  database: human.fasta          # target-only FASTA (decoys generated per `decoys:`)
+  output_pin: out.pin            # Percolator PIN (required unless rescoring in-process)
+  # output_tsv: out.tsv          # optional human-readable PSM table
+  # output_parquet: out.idparquet
+
+# ── Core search ─────────────────────────────────────────────────────────────
+search:
+  precursor_tol: 20ppm           # e.g. 20ppm or 0.02da
+  charge: "2..5"                 # fallback charge range when the spectrum omits it
+  isotope_error: "-1..2"
+  enzyme: trypsin                # trypsin | lysc | gluc | ... | nonspecific | gluc,trypsin
+  enzyme_specificity: fully      # fully | semi | non-specific
+  max_missed_cleavages: 1
+  min_length: 6
+  max_length: 50
+  mods: mods.txt                 # Java-format mods.txt (TMT/iTRAQ/phospho/etc.)
+  # max_mods: 3
+  # min_peaks: 10                # advanced
+  # top_n: 10                    # advanced
+
+# ── Scoring / model / runtime ───────────────────────────────────────────────
+scoring:
+  score: auto                    # auto | strong | rank
+  precursor_cal: auto            # off | auto | on
+  threads: 8
+  # fragmentation: auto          # MGF only (no metadata): auto | CID | ETD | HCD | UVPD
+  # protocol: auto               # auto | TMT | iTRAQ | phospho | ...
+  # fragment_tol_ppm: 20         # MGF only, mutually exclusive with fragment_tol_da
+  # model_store: models.parquet  # custom / trained model store
+  # model: hcd_qexactive_tryp    # force a specific model id
+
+# ── Decoys & FDR strategy ───────────────────────────────────────────────────
+decoys:
+  strategy: reverse              # reverse | shuffle | none (input already has decoys)
+  prefix: XXX_
+  # suffix: _rev                 # for OpenMS/quantms-style suffixed decoy DBs
+
+# ── Experiment modes (each opt-in; sub-knobs are advanced) ───────────────────
+chimeric:
+  enabled: false                 # co-isolated / co-fragmented peptide cascade
+  # max_coisolated: 4
+  # max_kl: 0.3
+
+refine:
+  enabled: false                 # PTM-discovery second pass
+  # config: refine_tiers.yaml
+  # select_psm_fdr: 0.01
+
+rescoring:
+  enabled: false                 # run Percolator in-process (else feed out.pin to Percolator)
+  # fdr: 0.01                    # q-value threshold for filtered output
+  # native: false                # non-production built-in GBDT rescorer
+
+glyco:
+  enabled: false                 # intact N-glycopeptide search
+  # transfer: false              # experimental cross-spectrum backbone transfer
+  # --- advanced tuning (validated defaults; see DOCS §9) ---
+  # backbone_top_k: 50
+  # gp_k: 50.0
+  # gp_j: 5.0
+  # gp_h: 1.0
+  # pf_charge: 2
+  # max_pf: 1024
+  # decoy: false
+  # transfer_seed_fdr: 0.05
+  # rt_window: 1800
+  # transfer_min_support: 1
+  # transfer_core_y: 3

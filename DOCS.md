@@ -9,6 +9,8 @@ Run `andes --help` for auto-generated help derived from the same `Cli` struct do
 ## Contents
 
 1. [CLI reference](#1-cli-reference)
+   - [1a. Workflow parameters (grouped by experimental design)](#1a-workflow-parameters-grouped-by-experimental-design)
+   - [1b. Configuration file (`--config`)](#1b-configuration-file---config)
 2. [Mods.txt format](#2-modstxt-format)
 3. [Output formats](#3-output-formats)
 4. [Auto-detection](#4-auto-detection)
@@ -49,16 +51,14 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-tol-ppm` | f64 | `20.0` | Symmetric precursor mass tolerance in parts per million. | Java `-t 20ppm` |
-| `--charge-min` | u8 | `2` | Minimum precursor charge to try when the spectrum record does not specify charge. Must be ≤ `--charge-max` (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
-| `--charge-max` | u8 | `5` | Maximum precursor charge to try when charge is missing from the spectrum. Must be ≥ `--charge-min`. The default range is **2–5**. | *(same)* |
+| `--precursor-tol` | string | `20ppm` | Symmetric precursor mass tolerance, e.g. `20ppm` or `0.02da`. | Java `-t 20ppm` |
+| `--charge` | `MIN..MAX` | `2..5` | Precursor charge range to try when the spectrum record does not specify charge (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
 | `--enzyme-specificity` | enum | `fully` | Enzymatic cleavage enforcement at peptide termini (Number of Tolerable Termini). `fully`: both termini must be cleavage sites (Java `-ntt 2`). `semi`: at least one terminus (Java `-ntt 1`). `non-specific`: neither required (Java `-ntt 0`). | `--ntt` alias; numeric `0`/`1`/`2` |
 | `--max-missed-cleavages` | u32 | `1` | Maximum missed enzymatic cleavages allowed per candidate peptide. | Java `-maxMissedCleavages 1` |
 | `--min-length` | u32 | `6` | Minimum peptide length in residues (excluding flanking context). | Java `-minLength 6` |
-| `--max-length` | u32 | `40` | Maximum peptide length in residues. | Java `-maxLength 40` |
+| `--max-length` | u32 | `50` | Maximum peptide length in residues. | Java `-maxLength 40` |
 | `--top-n` | u32 | `10` | Maximum PSMs retained per spectrum (ranked by `RawScore`, best-first). | Java `-n 10` |
-| `--isotope-error-min` | i8 | `-1` | Minimum isotope error offset to evaluate during precursor matching. Must be ≤ `--isotope-error-max`. | Java `-ti -1,2` (first value) |
-| `--isotope-error-max` | i8 | `2` | Maximum isotope error offset to evaluate. Must be ≥ `--isotope-error-min`. | Java `-ti -1,2` (second value) |
+| `--isotope-error` | `MIN..MAX` | `-1..2` | Isotope-error offset range to evaluate during precursor matching. | Java `-ti -1,2` |
 | `--min-peaks` | u32 | `10` | Minimum number of MS2 peaks required to score a spectrum; spectra below this threshold are skipped. | Java `-minNumPeaks 10` |
 
 ### Modifications
@@ -99,16 +99,7 @@ Only tryptic enzyme models are in the store; other enzymes require `--param-file
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--precursor-cal` | enum | `off` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` skips the correction when the sample is too small to be reliable. Opt-in only (default `off`). No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
-
-### Chimeric cascade
-
-Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1 stream, so it runs on **mzML or Thermo `.raw`** only; on MGF/`.d` it warns and falls back to a normal search.
-
-| Flag | Type | Default | Description | Legacy form |
-|---|---|---|---|---|
-| `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade. Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. Forces top-1 per pass and always searches MS2 (`--ms-level` is ignored). Gains are entrapment-FDP validated. Experimental. | *(no Java equivalent)* |
-| `--isolation-halfwidth` | f64 | `1.5` | Fallback isolation-window half-width in Da, used only when the mzML/`.raw` omits the per-scan isolation-window offsets. | *(no Java equivalent)* |
+| `--precursor-cal` | enum | `auto` | Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` run a pre-pass that learns a systematic ppm shift from confident PSMs, then tighten the precursor tolerance for the main search; `auto` (the default) skips the correction when the sample is too small to be reliable, so it is safe to leave on. No effect on native `.raw` or `.d` input — calibration is not yet supported for those formats, so it is skipped (with a warning) and the search proceeds uncalibrated. | Java `-precursorCal auto\|on\|off` |
 
 ### Runtime
 
@@ -117,15 +108,104 @@ Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1
 | `--threads` | usize | logical CPU count | Rayon worker threads for the search loop. Pool is initialised once per process. | Java `-thread N` |
 | `--ms-level` | u8 | `2` | MS level to search. Defaults to MS2 (identification); MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so they never enter the search loop. Applies to mzML. Native `.raw`/`.d` always search MS2 regardless of this flag (a warning is printed if overridden), as does the chimeric cascade. MGF has no MS-level metadata and is always MS2. | *(no Java equivalent)* |
 | `--max-spectra` | usize | `0` | Bench mode: process only the first N MS2 spectra. `0` = full input. When > 0, TSV output is skipped (PIN is still written). | *(no Java equivalent)* |
-| `--decoy-prefix` | string | `XXX_` | Prefix prepended to reversed decoy protein accessions during index construction. | Java decoy tag in `-tda` workflows |
 
 ### Output
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--output-tsv` | path | *(off)* | Optional tab-separated PSM report (§3b). Skipped in bench mode (`--max-spectra > 0`). | Java `-outputFormat 1` with output path |
+| `--output-parquet` | dir | *(off)* | Optional OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`); see §3e. | *(no Java equivalent)* |
 
-**Environment variable:** set `MSGF_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use). The legacy name `MSGFRUST_RSS_PROBE=1` is still accepted with a one-line deprecation warning and will be removed in the next quality cleanup.
+**Environment variable:** set `ANDES_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use). See §9 for the full list of internal environment variables.
+
+---
+
+## 1a. Workflow parameters (grouped by experimental design)
+
+The flags above apply to every run. The groups below are **opt-in experiment modes** — each is enabled by a single parent flag, with the rest of its knobs used only when that mode is on. Unless noted, the sub-knobs are advanced (hidden in `--help`) and the defaults are validated; reach for them only when tuning that specific experiment.
+
+### Decoys & FDR strategy
+
+How the target/decoy competition for FDR is set up. For an externally-built target+decoy database (e.g. from a quantms/OpenMS pipeline), use `--decoy-strategy none` and point andes at the existing decoys with `--decoy-prefix`/`--decoy-suffix` so it does not add a second decoy set.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--decoy-strategy` | enum | `reverse` | Decoy generation: `reverse`, `shuffle`, or `none` (input FASTA already contains decoys). |
+| `--decoy-prefix` | string | `XXX_` | Accession prefix that marks a decoy protein (generated, or recognised in an external DB). |
+| `--decoy-suffix` | string | *(off)* | Accession *suffix* that marks a decoy (the OpenMS/quantms `_rev` convention), as an alternative to a prefix. |
+| `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys; fixed so runs are reproducible. |
+
+### Chimeric cascade
+
+Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1 stream, so it runs on **mzML or Thermo `.raw`** only; on MGF/`.d` it warns and falls back to a normal search.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade: Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and searches the *residual* spectrum (primary's matched peaks removed) for a second peptide, emitted as an extra PSM. Forces top-1 per pass and always MS2. Entrapment-FDP validated. Experimental. |
+| `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors considered per scan. |
+| `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
+
+### Refine — PTM discovery cascade
+
+Opt-in second pass over confident proteins that opens the modification search space to discover PTMs.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--refine` | flag | *(off)* | Enable the PTM-refinement cascade (Pass-2 over confident proteins). |
+| `--refine-config` | path | *(tier default)* | *(advanced)* YAML tier config; the single extension point for the refine mod set and options. |
+| `--refine-select-psm-fdr` | fraction | `0.01` | *(advanced)* PSM-FDR threshold selecting the confident set that seeds Pass-2. Leave at default unless you have a measured reason. |
+
+(Max variable mods and the high-res-only gate for refinement are set inside the `--refine-config` YAML tier, not as separate flags.)
+
+### Rescoring & FDR filtering
+
+andes writes a Percolator-ready `.pin` and, by design, **does not compute FDR itself** — feed the PIN to Percolator. These flags run rescoring in-process instead. In a pipeline that owns its own rescoring (e.g. quantms), leave them off. Rescoring runs **only** when you pass `--rescore` (or `--rescore-native`); `--fdr`/`--pep` are just the thresholds applied *by* such a run and are ignored (with a warning) if set on their own.
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--rescore` | flag | *(off)* | Run Percolator in-process and write rescored, FDR-controlled output. |
+| `--rescore-native` | flag | *(off)* | *(advanced)* Use the built-in GBDT rescorer instead of Percolator — non-production fallback; Percolator is the production path. |
+| `--fdr` | fraction | `0.01` | q-value threshold applied by a rescoring run (requires `--rescore`/`--rescore-native`). |
+| `--pep` | fraction | *(off)* | *(advanced)* Posterior-error-probability threshold applied by a rescoring run. |
+| `--percolator-bin` / `--percolator-docker` / `--percolator-image` / `--percolator-args` | — | auto | *(advanced)* Percolator backend selection/passthrough; auto-resolution (`$PATH` then Docker) covers the common path. |
+| `--keep-pin` | bool | `true` | *(advanced)* Keep the intermediate PIN after rescoring. |
+
+### Glycopeptide search
+
+Intact N-glycopeptide search (`--glyco`) with an experimental cross-spectrum-transfer pass (`--glyco-transfer`). All tuning knobs are advanced (hidden). **See [§9](#9-glycopeptide-search-experimental--advanced-knobs)** for the full flag group.
+
+### Isobaric labeling (TMT / iTRAQ)
+
+Reporter-ion labeling is auto-detected; the mods are declared in the `--mods` file. **See [§7](#7-isobaric-labeling)** for worked TMT/iTRAQ examples.
+
+---
+
+## 1b. Configuration file (`--config`)
+
+Instead of a long command line, pass a single YAML file with `andes --config run.yaml`. It can set **any** parameter, grouped into the same experiment sections as §1a (`io`, `search`, `scoring`, `decoys`, `chimeric`, `refine`, `rescoring`, `glyco`). See [`config.example.yaml`](config.example.yaml) in the repo root for a fully-commented template.
+
+**Rules:**
+
+- Every key is **optional** — omitted keys keep their built-in default.
+- **Precedence: an explicit CLI flag always overrides the config value, which overrides the default** (`CLI flag > --config > built-in default`). So the file sets a baseline and you tweak individual runs on the command line, e.g. `andes --config run.yaml --precursor-tol 30ppm`.
+- **Unknown keys are a hard error** (with a "did you mean" list), so a typo never silently no-ops.
+- Values that are non-scalar on the CLI are written as the **same strings** the CLI accepts: `precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `score: auto`, `enzyme: gluc,trypsin`.
+- Required inputs may live in the file too (`io.spectrum`, `io.database`, `io.output_pin`), so `andes --config run.yaml` can be a complete, reproducible run description.
+
+```yaml
+# run.yaml (minimal)
+io:
+  spectrum: [sample.mzML]
+  database: human.fasta
+  output_pin: out.pin
+search:
+  precursor_tol: 20ppm
+  enzyme: trypsin
+glyco:
+  enabled: true
+```
+
+Advanced/hidden flags (glyco tuning, chimeric/percolator sub-knobs, etc.) use the same section keys — see `config.example.yaml` for the full list.
 
 ---
 
@@ -196,7 +276,7 @@ andes writes Percolator `.pin` (always) and optionally `.tsv`. Implementation: `
 
 ### 3a. PIN columns
 
-Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge-min`…`--charge-max` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 66 columns listed below in emission order.
+Tab-separated, one header row, one row per PSM. Rows are sorted best-first within each spectrum by `RankScore` (the GF-free rank-LLR score) — the generating function and all of its derived score columns have been removed. The `chargeN` one-hots track the `--charge` range: one column per charge state, so narrowing/widening the range removes/adds one `chargeN` column each (e.g. a 2–3 range yields just `charge2 charge3`). With the default 2–5 range the full column set is the 66 columns listed below in emission order.
 
 There are **two score columns**, easy to confuse:
 
@@ -220,7 +300,7 @@ Most of the columns after `matchedIonRatio` are **additive** features: extra evi
 | 9 | `peplen` | int | ≥6 | Residue count **+ 2** (includes flanking pre/post). |
 | 10 | `dm` | float | signed | Precursor mass error (Da) after isotope correction. |
 | 11 | `absdm` | float | ≥0 | `\|dm\|`. |
-| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge; one column per state in `--charge-min`…`--charge-max`. |
+| 12–15 | `charge2`…`charge5` | 0/1 | one-hot | One-hot precursor charge; one column per state in `--charge`. |
 | 16 | `enzN` | 0/1 | one-hot | N-terminal boundary consistent with the enzyme rule. |
 | 17 | `enzC` | 0/1 | one-hot | C-terminal boundary consistent with the enzyme rule. |
 | 18 | `enzInt` | int | ≥0 | Count of internal positions matching the enzyme rule. |
@@ -238,11 +318,11 @@ Most of the columns after `matchedIonRatio` are **additive** features: extra evi
 | 30 | `MeanRelErrorTop7` | float | signed | Mean signed ppm error (top-7). |
 | 31 | `StdevRelErrorTop7` | float | ≥0 | Population stdev of signed ppm errors (top-7). |
 | 32 | `matchedIonRatio` | float | [0, 1] | `NumMatchedMainIons / peplen`. |
-| 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive (Kim et al. 2014). |
+| 33 | `EdgeScore` | int | unbounded | Per-bond edge-score sum (ion-existence + error); additive. |
 | 34 | `PrecursorIsotopeKL` | float | ≥0 | KL divergence of precursor isotope envelope vs averagine. **0.0 unless `--chimeric`.** |
 | 35 | `PrecursorSNR` | float | ≥0 | Precursor SNR from the MS1 envelope. **0.0 unless `--chimeric`.** |
 | 36 | `DeltaRankScore` | float | ≥0 | `RankScore(best) − RankScore(2nd-best distinct peptide)`; rank-1 row only, else 0.0. |
-| 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile (Yang et al. 2020); cross-spectrum comparability. |
+| 37 | `TailorScore` | float | ≥0 | `RankScore ÷` spectrum's top-1% quantile; cross-spectrum comparability. |
 | 38 | `PpmGaussianScore` | float | ≥0 | `Σ exp(−½(ppm/7)²)` over matched ions — mass-accuracy evidence the rank score discards. |
 | 39 | `NeutralLossIonCount` | int | ≥0 | Matched b/y ions with −H₂O/−NH₃ partner peaks. |
 | 40 | `LongestComplementaryLadder` | int | [0, peplen−1] | Longest run of bonds where both bᵢ and y₍ₙ₋ᵢ₎ matched. |
@@ -592,7 +672,43 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 
 ---
 
-## 9. License and citation
+## 9. Glycopeptide search (experimental) & advanced knobs
+
+Enable N-glycopeptide search with `--glyco` (requires a `.glyco.pin` output; the
+backbone model is the N-X-S/T sequon). Cross-spectrum backbone transfer is an
+opt-in second pass via `--glyco-transfer`. All glyco tuning is exposed as **hidden
+CLI flags** (advanced; the shipped defaults are validated and rarely need changing):
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--glyco-backbone-top-k` | 50 | Max backbone candidates per spectrum (set large to approximate an exhaustive ceiling). |
+| `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 50 / 5 / 1 | Weights of the `gp` fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (the shipped, default selector). |
+| `--glyco-pf-charge` | 2 | Charge states the peptide-first fragment index covers (b/y at 1..=N, clamped 1..=3); targets high-charge glycopeptides. |
+| `--glyco-max-pf` | 1024 | Max peptide-first candidates per spectrum. |
+| `--glyco-decoy` | off | Emit paired glycan-axis decoy rows for experimental 2D (peptide × glycan) FDR. |
+| `--glyco-transfer` | off | Enable cross-spectrum backbone transfer (two-pass). |
+| `--glyco-transfer-seed-fdr` | 0.05 | q-value threshold for confident donor seeds. |
+| `--glyco-rt-window` | 1800 | RT co-elution window (seconds) for transfer. |
+| `--glyco-transfer-ungated` | off | Skip the RT co-elution gate (unsafe research opt-in). |
+| `--glyco-transfer-min-support` | 1 | Minimum independent-donor graph support to inject a transfer. |
+| `--glyco-transfer-core-y` | 3 | Acceptor-side core-Y quorum (incl. mandatory Y1) to accept a transfer. |
+| `--debug-glyco` | off | **Diagnostic only:** emit all candidate rows per scan (incl. de-novo) + transfer diagnostics. The resulting PIN must NEVER be fed to an FDR tool. |
+
+By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.
+
+### Internal environment variables
+
+A few remaining `ANDES_*` environment variables are **internal / advanced** and are
+NOT part of the supported search interface. They do not change default search output.
+
+- **Model training** (only read by the hidden `train*` subcommands): `ANDES_GEO_SEGMENTS`, `ANDES_GEO_MAX_RANK`, `ANDES_GEO_OCCUPANCY`, `ANDES_GEO_MAX_TIERS`, `ANDES_GEO_MAX_FRAG_CHARGE` (partition-geometry derivation), `ANDES_SEED_GEOMETRY` (reuse seed geometry), `ANDES_DENSE_NOISE` (noise sampler), `ANDES_V1_STORE` / `ANDES_V1_OUT`, `ANDES_TRAIN_BENCH`.
+- **Advanced scoring**: `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` (windowed peak filtering; unset = model-tolerance default).
+- **Read-only developer instrumentation** (no effect on output): `ANDES_RSS_PROBE` (memory logging), `ANDES_CHIMERIC_OVERLAP` (fragment-overlap diagnostic), `Andes_TRACE_IONS` / `Andes_TRACE_PEP` (ion/peptide trace logging).
+- **Test harness only**: `ANDES_TEST_D`, `ANDES_TEST_RAW`, `ANDES_TEST_PERCOLATOR_BIN`.
+
+---
+
+## 10. License and citation
 
 andes is licensed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for the full text and [`NOTICE`](NOTICE) for attribution and the project's origin in MS-GF+.
 

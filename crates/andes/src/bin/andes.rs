@@ -20,6 +20,8 @@ use std::thread;
 mod rescore;
 #[path = "../glyco_seeds.rs"]
 mod glyco_seeds;
+#[path = "../config.rs"]
+mod config;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use model::{
@@ -149,6 +151,12 @@ fn report_search_progress(scored: usize, start: std::time::Instant) {
 /// manually and returns an early error if they are missing.
 #[derive(Args, Debug)]
 struct SearchArgs {
+    /// YAML run-configuration file. Any parameter can be set here (grouped by
+    /// experiment: io/search/scoring/decoys/chimeric/refine/rescoring/glyco; see
+    /// DOCS §1b). An explicit CLI flag always overrides the config value.
+    #[arg(long = "config", value_name = "FILE")]
+    config: Option<PathBuf>,
+
     /// Input spectrum file(s). Repeat `--spectrum` for multiple inputs (one PIN).
     /// Format is auto-detected per file by extension.
     #[arg(long)]
@@ -960,14 +968,27 @@ type Cli = SearchArgs;
 fn main() -> ExitCode {
     #[cfg(feature = "thermo")]
     configure_bundled_dotnet();
-    let top = TopCli::parse();
-    let result = match top.command {
+    // Parse via get_matches so we can query each flag's ValueSource (for the
+    // --config merge: an explicit CLI flag must override the YAML value).
+    let matches = <TopCli as clap::CommandFactory>::command().get_matches();
+    let mut top = <TopCli as clap::FromArgMatches>::from_arg_matches(&matches)
+        .unwrap_or_else(|e| e.exit());
+    let result = match top.command.take() {
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
         Some(Command::TrainIntensityGbdt(args)) => run_train_intensity_gbdt(*args),
         Some(Command::TrainRichIonLlr(args)) => run_train_rich_ion_llr(*args),
         None => {
+            // --config: fill any parameter the user did not type on the CLI.
+            if let Some(cfg_path) = top.search.config.clone() {
+                if let Err(e) = config::RunConfig::load(&cfg_path)
+                    .and_then(|c| config::apply(c, &mut top.search, &matches))
+                {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            }
             // Validate required search args that are Option<> at the clap level.
             let search = top.search;
             if search.spectrum.is_empty() {

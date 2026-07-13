@@ -207,7 +207,7 @@ struct SearchArgs {
 
     /// Isotope-error offset range to try, as `MIN..MAX` (also accepts `MIN-MAX`).
     /// Negative offsets allowed. Default `-1..2`.
-    #[arg(long = "isotope-error", default_value = "-1..2", value_parser = parse_isotope_error_range)]
+    #[arg(long = "isotope-error", hide = true, default_value = "-1..2", value_parser = parse_isotope_error_range)]
     isotope_error: (i8, i8),
 
     /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
@@ -217,13 +217,6 @@ struct SearchArgs {
     #[arg(long = "precursor-cal", default_value = "auto", value_parser = parse_precursor_cal)]
     precursor_cal: PrecursorCalMode,
 
-    /// Minimum SpecKeys before precursor calibration runs (default 10000).
-    /// Lower it to calibrate small/targeted runs that would otherwise be
-    /// skipped; raising it is more conservative. Only consulted when
-    /// `--precursor-cal` is `auto`/`on`.
-    #[arg(long = "cal-min-spec-keys", hide = true, default_value_t = search::precursor_cal::constants::MIN_SPECKEYS_FOR_PREPASS)]
-    cal_min_spec_keys: usize,
-
     /// Precursor mass tolerance as `VALUE+unit`. Accepts ppm (e.g. `20ppm`,
     /// high-res) or Da (e.g. `0.02da`/`0.02Da`, low-res precursor selection).
     /// Default `20ppm`.
@@ -232,7 +225,7 @@ struct SearchArgs {
 
     /// Precursor charge range to try when not specified in the spectrum, as
     /// `MIN..MAX` (also accepts `MIN-MAX`). Default `2..5`.
-    #[arg(long = "charge", default_value = "2..5", value_parser = parse_charge_range)]
+    #[arg(long = "charge", hide = true, default_value = "2..5", value_parser = parse_charge_range)]
     charge: (u8, u8),
 
     /// Maximum number of PSMs to retain per spectrum.
@@ -244,7 +237,7 @@ struct SearchArgs {
     /// `semi`: at least one terminus must be a cleavage site. `non-specific`:
     /// neither terminus needs to be a cleavage site.
     #[arg(long = "enzyme-specificity", alias = "ntt",
-          default_value = "fully", value_parser = parse_enzyme_specificity)]
+          hide = true, default_value = "fully", value_parser = parse_enzyme_specificity)]
     enzyme_specificity: EnzymeSpecificity,
 
     /// Proteolytic enzyme for in-silico digestion. Named values: trypsin
@@ -263,7 +256,7 @@ struct SearchArgs {
     enzyme: String,
 
     /// Maximum number of missed cleavages per peptide.
-    #[arg(long, default_value = "1")]
+    #[arg(long, hide = true, default_value = "1")]
     max_missed_cleavages: u32,
 
     /// Minimum number of peaks an MS2 spectrum must have to be scored; spectra
@@ -272,17 +265,17 @@ struct SearchArgs {
     min_peaks: u32,
 
     /// Minimum peptide length, in residues.
-    #[arg(long, default_value = "6")]
+    #[arg(long, hide = true, default_value = "6")]
     min_length: u32,
 
     /// Maximum peptide length, in residues. (50 matches the reference engine/a comparison engine defaults;
     /// 40 dropped long tryptic peptides.)
-    #[arg(long, default_value = "50")]
+    #[arg(long, hide = true, default_value = "50")]
     max_length: u32,
 
     /// Maximum number of variable modifications per peptide. A `NumMods=N` line
     /// in a --mods file overrides this.
-    #[arg(long = "max-mods", default_value = "3")]
+    #[arg(long = "max-mods", hide = true, default_value = "3")]
     max_mods: u32,
 
     /// Path to a mods.txt file describing fixed and variable modifications.
@@ -346,11 +339,6 @@ struct SearchArgs {
     #[arg(long, default_value = "false")]
     chimeric: bool,
 
-    /// Chimeric mode: fallback isolation half-width in Da when the mzML omits the
-    /// per-scan isolation-window offsets.
-    #[arg(long, hide = true, default_value = "1.5")]
-    isolation_halfwidth: f64,
-
     /// Chimeric mode: max co-isolated SECONDARY peptides to search per scan (the
     /// chimeric-N lever). Default 4 = the measured Astral sweet spot (+1.4% PSMs
     /// vs N=2 at flat FDP; saturates by N=4). Set 2 for the original behavior.
@@ -408,9 +396,6 @@ struct SearchArgs {
     #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 50usize)]
     glyco_backbone_top_k: usize,
 
-    /// Limit glyco scoring to the first N spectra (0 = no limit). Hidden dev knob.
-    #[arg(long = "glyco-max-spectra", hide = true, default_value_t = 0usize)]
-    glyco_max_spectra: usize,
 
     /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
     /// Hidden tuning knob; validated default 50.
@@ -494,18 +479,6 @@ struct SearchArgs {
     #[arg(long = "refine-select-psm-fdr", default_value_t = 0.01, hide = true, value_parser = parse_unit_fraction)]
     refine_select_psm_fdr: f64,
 
-    /// Max variable mods per refined peptide. Overrides the value from
-    /// `--refine-config` YAML; when neither is given, the built-in tier's value (2).
-    #[arg(long = "refine-max-mods", hide = true)]
-    refine_max_mods: Option<u32>,
-
-    /// Require high-res data for refinement; on low-res, skip refine. Overrides the
-    /// `--refine-config` YAML `high_res_only`; when neither is given, the tier
-    /// default (true). e.g. `--refine-high-res-only false` forces the cascade on
-    /// low-res data.
-    #[arg(long = "refine-high-res-only", hide = true, action = clap::ArgAction::Set)]
-    refine_high_res_only: Option<bool>,
-
     /// Run Percolator on the PIN after the search and join its PEP/q-value back
     /// into the outputs (QPX `posterior_error_probability` + a `q-value` score,
     /// and a filtered `<stem>.q<fdr>.tsv`). Needs a Percolator backend (see
@@ -519,7 +492,7 @@ struct SearchArgs {
     /// FALLBACK for benchmarking / offline use — NOT production-grade FDR; prefer
     /// `--rescore` (Percolator) for production. Writes the same QPX q-value/PEP +
     /// filtered `<stem>.q<fdr>.tsv` outputs. Ignored if `--rescore` is also set.
-    #[arg(long = "rescore-native", default_value_t = false)]
+    #[arg(long = "rescore-native", hide = true, default_value_t = false)]
     rescore_native: bool,
 
     /// FDR (q-value) threshold for the filtered `<stem>.q<fdr>.tsv` output
@@ -1005,14 +978,22 @@ fn main() -> ExitCode {
             // --output-pin is required UNLESS --rescore is set: rescore can route
             // the search through a temporary PIN (deleted afterwards when
             // --keep-pin false), so a PIN path is not mandatory in that mode.
-            if search.output_pin.is_none()
-                && !search.rescore
-                && !search.rescore_native
-                && search.fdr.is_none()
-                && search.pep.is_none()
-            {
+            if search.output_pin.is_none() && !search.rescore && !search.rescore_native {
                 eprintln!("error: --output-pin is required for search (or use --rescore)");
                 return ExitCode::from(2);
+            }
+            // --fdr / --pep are thresholds APPLIED BY a rescoring run; they do not
+            // start one on their own. Warn (don't silently launch a backend) if set
+            // without an explicit --rescore / --rescore-native.
+            if (search.fdr.is_some() || search.pep.is_some())
+                && !search.rescore
+                && !search.rescore_native
+            {
+                eprintln!(
+                    "warning: --fdr/--pep set without --rescore or --rescore-native; \
+                     they are ignored (add --rescore to run Percolator, or feed the PIN \
+                     to Percolator yourself)."
+                );
             }
             run(Cli {
                 database: Some(database),
@@ -1386,7 +1367,7 @@ fn run_precursor_calibration(
     if spec_keys.len() < params.cal_min_spec_keys {
         eprintln!(
             "Precursor mass calibration skipped ({} SpecKeys < {} threshold; elapsed: {:.2}s). \
-             Lower --cal-min-spec-keys to calibrate smaller/targeted runs.",
+             The sample is too small for a reliable calibration pre-pass.",
             spec_keys.len(),
             params.cal_min_spec_keys,
             t_cal.elapsed().as_secs_f64()
@@ -1755,7 +1736,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     params.chimeric = chimeric_active;
-    params.chimeric_isolation_halfwidth_da = cli.isolation_halfwidth;
+    // Fallback isolation half-width (Da) used only when the file omits per-scan
+    // isolation offsets; a fixed sensible default (was the --isolation-halfwidth flag).
+    params.chimeric_isolation_halfwidth_da = 1.5;
     params.chimeric_max_coisolated = cli.chimeric_max_coisolated;
     params.chimeric_max_kl = cli.chimeric_max_kl;
     // FORCE top-1 under the cascade: Pass 1 emits only the best primary per scan;
@@ -1778,7 +1761,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
-    params.cal_min_spec_keys = cli.cal_min_spec_keys;
+    // params.cal_min_spec_keys keeps its SearchParams default
+    // (MIN_SPECKEYS_FOR_PREPASS); it is an internal threshold, no longer a flag.
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {
@@ -2448,8 +2432,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // extra decoys dilute separation faster than the added coverage helps.
         let glycan_list = andes_glyco::glycan_db::n_glycan_list_common();
         let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
-        let spectra_for_glyco: &[_] = if cli.glyco_max_spectra > 0 {
-            &spectra[..spectra.len().min(cli.glyco_max_spectra)]
+        // Dev cap on glyco scoring uses the global --max-spectra (was the
+        // redundant --glyco-max-spectra).
+        let spectra_for_glyco: &[_] = if cli.max_spectra > 0 {
+            &spectra[..spectra.len().min(cli.max_spectra)]
         } else {
             &spectra
         };
@@ -2827,10 +2813,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("parsing --refine-config {}: {e}", p.display()))?,
             None => search::RefineConfig::default_tier(),
         };
-        // CLI `--refine-max-mods` overrides the YAML/tier value only when explicitly
-        // passed; otherwise the config's own `max_mods` is honored.
+        // Max variable mods for refinement comes from the refine config/tier
+        // (set it in the `--refine-config` YAML; the former CLI override was removed).
         let cfg = search::RefineConfig {
-            max_mods: cli.refine_max_mods.unwrap_or(base_cfg.max_mods),
+            max_mods: base_cfg.max_mods,
             ..base_cfg
         };
 
@@ -2840,11 +2826,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // deamidation +0.984 vs a C13 isotope error) are resolvable.
         let high_res = param.data_type.instrument.is_high_resolution();
 
-        // CLI `--refine-high-res-only` overrides the YAML/tier value only when
-        // explicitly passed; otherwise the config's own `high_res_only` is honored.
-        let high_res_only = cli.refine_high_res_only.unwrap_or(cfg.high_res_only);
+        // `high_res_only` comes from the refine config/tier (set it in the
+        // `--refine-config` YAML; the former CLI overrides were removed).
+        let high_res_only = cfg.high_res_only;
         if high_res_only && !high_res {
-            eprintln!("WARN: --refine-high-res-only: data is low-res; skipping refinement.");
+            eprintln!("WARN: refine is high-res-only and the data is low-res; skipping refinement.");
             None
         } else {
             // Target-only db recovered from the Pass-1 combined index; the
@@ -2928,35 +2914,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // `write_qpx` and the filtered TSV. `None` keeps every downstream output
     // identical to a non-rescore run.
     //
-    // Backend choice: `--rescore` forces Percolator; `--rescore-native` forces
-    // the native rescorer; an EXPLICIT `--fdr` with neither flag triggers
-    // rescoring and auto-picks — Percolator if a backend resolves, else native.
+    // Backend choice: rescoring runs ONLY when explicitly requested — `--rescore`
+    // forces Percolator, `--rescore-native` forces the native rescorer. `--fdr` /
+    // `--pep` are thresholds applied by such a run; they never start one on their
+    // own (that would silently launch a backend / the non-production native path).
     let fdr_threshold = cli.fdr.unwrap_or(0.01);
     let (use_percolator, use_native) = if cli.rescore {
         (true, false)
     } else if cli.rescore_native {
         (false, true)
-    } else if cli.fdr.is_some() || cli.pep.is_some() {
-        match output::resolve_backend(
-            cli.percolator_bin.as_deref(),
-            cli.percolator_docker,
-            &cli.percolator_image,
-        ) {
-            Ok(b) => {
-                eprintln!(
-                    "Rescore: --fdr set without a backend flag → Percolator found ({}), using it.",
-                    b.describe()
-                );
-                (true, false)
-            }
-            Err(_) => {
-                eprintln!(
-                    "Rescore: --fdr set without a backend flag and no Percolator available → \
-                     using the native rescorer. (Point to/install Percolator for production-grade FDR.)"
-                );
-                (false, true)
-            }
-        }
     } else {
         (false, false)
     };

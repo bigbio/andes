@@ -18,6 +18,8 @@ output = { path = "../output" }
 input = { path = "../input" }
 model-train = { path = "../model-train" }
 clap = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
 num_cpus = "1.16"
 rayon = "1.10"
 rustc-hash = "2"

@@ -10,6 +10,7 @@ Run `andes --help` for auto-generated help derived from the same `Cli` struct do
 
 1. [CLI reference](#1-cli-reference)
    - [1a. Workflow parameters (grouped by experimental design)](#1a-workflow-parameters-grouped-by-experimental-design)
+   - [1b. Configuration file (`--config`)](#1b-configuration-file---config)
 2. [Mods.txt format](#2-modstxt-format)
 3. [Output formats](#3-output-formats)
 4. [Auto-detection](#4-auto-detection)
@@ -177,6 +178,35 @@ Intact N-glycopeptide search (`--glyco`) with an experimental cross-spectrum-tra
 ### Isobaric labeling (TMT / iTRAQ)
 
 Reporter-ion labeling is auto-detected; the mods are declared in the `--mods` file. **See [§7](#7-isobaric-labeling)** for worked TMT/iTRAQ examples.
+
+---
+
+## 1b. Configuration file (`--config`)
+
+Instead of a long command line, pass a single YAML file with `andes --config run.yaml`. It can set **any** parameter, grouped into the same experiment sections as §1a (`io`, `search`, `scoring`, `decoys`, `chimeric`, `refine`, `rescoring`, `glyco`). See [`config.example.yaml`](config.example.yaml) in the repo root for a fully-commented template.
+
+**Rules:**
+
+- Every key is **optional** — omitted keys keep their built-in default.
+- **Precedence: an explicit CLI flag always overrides the config value, which overrides the default** (`CLI flag > --config > built-in default`). So the file sets a baseline and you tweak individual runs on the command line, e.g. `andes --config run.yaml --precursor-tol 30ppm`.
+- **Unknown keys are a hard error** (with a "did you mean" list), so a typo never silently no-ops.
+- Values that are non-scalar on the CLI are written as the **same strings** the CLI accepts: `precursor_tol: 20ppm`, `charge: "2..5"`, `isotope_error: "-1..2"`, `score: auto`, `enzyme: gluc,trypsin`.
+- Required inputs may live in the file too (`io.spectrum`, `io.database`, `io.output_pin`), so `andes --config run.yaml` can be a complete, reproducible run description.
+
+```yaml
+# run.yaml (minimal)
+io:
+  spectrum: [sample.mzML]
+  database: human.fasta
+  output_pin: out.pin
+search:
+  precursor_tol: 20ppm
+  enzyme: trypsin
+glyco:
+  enabled: true
+```
+
+Advanced/hidden flags (glyco tuning, chimeric/percolator sub-knobs, etc.) use the same section keys — see `config.example.yaml` for the full list.
 
 ---
 

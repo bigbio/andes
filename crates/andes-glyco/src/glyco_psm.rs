@@ -178,7 +178,9 @@ pub struct GlycoPsmKey {
     /// c/z ions of the glycopeptide backbone (glycan on glycosite-spanning
     /// fragments). 0.0 on collisional (HCD/CID) spectra — the orthogonal
     /// electron-transfer evidence that recovers the high-charge glycopeptides the
-    /// labile-glycan b/y ladder misses. Never folded into the ranker.
+    /// labile-glycan b/y ladder misses. On ETD spectra this same c/z hyperscore
+    /// ALSO contributes to the per-scan collapse selector (weighted by
+    /// `--glyco-gp-cz`); the peptide `rank_score`/`RawScore` are unchanged.
     pub cz_hyperscore: f32,
 }
 

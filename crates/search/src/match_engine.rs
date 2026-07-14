@@ -1514,7 +1514,12 @@ pub(crate) fn compute_psm_features(
         if let Some((rank, intensity, peak_mz)) =
             scored_spec.nearest_peak_full(p.mz, tol_da)
         {
-            // c-ions are N-terminal like b; z•-ions are C-terminal like y.
+            // c-ions are N-terminal like b; z•-ions are C-terminal like y. NOTE: this
+            // b/y feature path only ever sees `predict_by_ions` output (B/Y), so the
+            // C/Z arms here (and in the sibling b/y feature fns) are currently
+            // unreachable — kept for exhaustiveness and to stay correct if a future
+            // caller routes c/z through these features. ETD c/z scoring today uses the
+            // dedicated `cz_hyperscore_psm` path, not this one.
             let is_b = matches!(p.kind, IonKind::B | IonKind::C);
             matched_ions.push((intensity, peak_mz, p.mz, is_b));
             matched_ion_ranks.push(rank);

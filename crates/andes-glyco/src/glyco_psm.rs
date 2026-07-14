@@ -29,6 +29,16 @@ pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
 /// overrides it; 0.0 disables the hyperscore term.
 pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 
+/// Default weight for the ETD c/z backbone hyperscore term in the gp collapse
+/// selector (`--glyco-gp-cz`). Added to the fused score ONLY on ETD/AI-ETD
+/// spectra (the per-candidate c/z hyperscore is 0.0 on HCD/CID, so this term is
+/// inert on the closed-HCD path → byte-identical). On electron-transfer spectra
+/// the intact-glycan c/z ladder is the primary backbone evidence (the labile b/y
+/// ladder is sparse for high-charge glycopeptides), so the selector must weight
+/// it to pick the true backbone. Offline on PXD011533 Frac1 AI-ETD (467 truth,
+/// ceiling 356): gp alone top1-correct 218; `gp + 5·cz` = 250 (+32, z3/z4).
+pub const GLYCO_GP_CZ_DEFAULT: f32 = 5.0;
+
 /// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
 /// Higher is better.
 ///

@@ -98,8 +98,9 @@ use crate::psm::PsmFeatures;
 type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
 
 use scoring_crate::scoring::{
-    candidate_rank_entropy, fuse_strong_score, hyperscore_psm, listwise_score_gap, psm_edge_score,
-    score_psm, score_psm_float, ScoredSpectrum, StrongScoreInputs,
+    candidate_rank_entropy, cz_hyperscore_psm, fuse_strong_score, hyperscore_psm,
+    listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
+    StrongScoreInputs,
 };
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
@@ -1371,6 +1372,31 @@ fn score_spectrum_glyco(
                     transfer_seed_score: bb_hit.transfer_seed_score,
                     transfer_rt_delta: bb_hit.transfer_rt_delta,
                     transfer_ungated: bb_hit.transfer_ungated,
+                    // ETD c/z backbone evidence — computed ONLY on electron-transfer
+                    // spectra (AI-ETD/EThcD), where the intact glycan rides on the
+                    // glycosite-spanning c/z fragments. The naked-glycan b/y ladder
+                    // andes scores elsewhere is sparse for high-charge glycopeptides;
+                    // c/z recovers them. 0.0 on HCD/CID (no c/z ions).
+                    cz_hyperscore: if matches!(
+                        spec.activation_method,
+                        Some(model::activation::ActivationMethod::ETD)
+                    ) {
+                        let gsite = {
+                            let res: Vec<u8> =
+                                cand.peptide.residues.iter().map(|aa| aa.residue).collect();
+                            andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
+                        };
+                        cz_hyperscore_psm(
+                            ss,
+                            &cand.peptide,
+                            glycan_mass,
+                            gsite,
+                            max_frag_charge,
+                            fragment_tolerance_da,
+                        )
+                    } else {
+                        0.0
+                    },
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
@@ -1946,6 +1972,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key: key, psm };
         let cloned = hit.clone();

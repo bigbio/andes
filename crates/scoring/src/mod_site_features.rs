@@ -63,8 +63,9 @@ fn tol_da(mz: f64, feature_tol: f64, feature_tol_is_ppm: bool) -> f64 {
 #[inline]
 fn ion_is_shifted(kind: IonKind, position: u32, mod_pos: u32, n: u32) -> bool {
     match kind {
-        IonKind::B => mod_pos <= position,
-        IonKind::Y => mod_pos > n - position,
+        // c-ions carry the mod like b (prefix), z•-ions like y (suffix).
+        IonKind::B | IonKind::C => mod_pos <= position,
+        IonKind::Y | IonKind::Z => mod_pos > n - position,
     }
 }
 
@@ -146,12 +147,12 @@ pub fn mod_site_features(
             }
             let pos = ion.position as usize;
             match ion.kind {
-                IonKind::B => {
+                IonKind::B | IonKind::C => {
                     if pos < b_matched.len() {
                         b_matched[pos] = true;
                     }
                 }
-                IonKind::Y => {
+                IonKind::Y | IonKind::Z => {
                     if pos < y_matched.len() {
                         y_matched[pos] = true;
                     }

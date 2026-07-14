@@ -47,6 +47,9 @@ fn complement(kind: IonKind, position: u32, n: usize) -> Option<(IonKind, u32)> 
     let comp_kind = match kind {
         IonKind::B => IonKind::Y,
         IonKind::Y => IonKind::B,
+        // ETD complements: c ↔ z• (N/C-terminal partners across the same bond).
+        IonKind::C => IonKind::Z,
+        IonKind::Z => IonKind::C,
     };
     Some((comp_kind, comp_pos))
 }

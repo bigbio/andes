@@ -1514,14 +1514,15 @@ pub(crate) fn compute_psm_features(
         if let Some((rank, intensity, peak_mz)) =
             scored_spec.nearest_peak_full(p.mz, tol_da)
         {
-            let is_b = matches!(p.kind, IonKind::B);
+            // c-ions are N-terminal like b; z•-ions are C-terminal like y.
+            let is_b = matches!(p.kind, IonKind::B | IonKind::C);
             matched_ions.push((intensity, peak_mz, p.mz, is_b));
             matched_ion_ranks.push(rank);
 
             // position is 1-based (b1/y1 = index 0 in the matched arrays)
             let pos = (p.position - 1) as usize;
             match p.kind {
-                IonKind::B => {
+                IonKind::B | IonKind::C => {
                     if pos < b_matched.len() {
                         b_matched[pos] = true;
                         // Record the best (lowest) INTACT-ion rank per position
@@ -1531,7 +1532,7 @@ pub(crate) fn compute_psm_features(
                         }
                     }
                 }
-                IonKind::Y => {
+                IonKind::Y | IonKind::Z => {
                     if pos < y_matched.len() {
                         y_matched[pos] = true;
                         if !p.is_loss() && rank < y_rank[pos] {

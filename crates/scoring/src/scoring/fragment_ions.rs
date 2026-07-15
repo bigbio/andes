@@ -100,6 +100,10 @@ pub enum IonKind {
     B,
     /// C-terminal fragment (y-ion). Neutral mass = sum of suffix residues + H2O.
     Y,
+    /// N-terminal ETD fragment (c-ion). Neutral mass = b_neutral + NH3.
+    C,
+    /// C-terminal ETD radical fragment (z•-ion). Neutral mass = y_neutral − 16.018724.
+    Z,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -237,6 +241,76 @@ pub fn predict_by_ions_with_losses(
     out
 }
 
+/// Monoisotopic mass of NH3 (added to a b-ion to form a c-ion).
+pub const NH3: f64 = 17.026549;
+/// Neutral offset from a y-ion to a z•(radical)-ion: −(NH3 − H•) = −16.018724.
+pub const Z_DOT_OFFSET: f64 = -16.018724;
+
+/// Predict ETD c and z•-ions for a peptide backbone, glycopeptide-aware.
+///
+/// `c` ions (N-terminal) have neutral mass `b_neutral + NH3`; `z•` ions
+/// (C-terminal radical) have `y_neutral + Z_DOT_OFFSET`. Unlike collisional b/y
+/// — where the labile glycan strips off, leaving the backbone ladder NAKED —
+/// electron-transfer dissociation leaves the glycan INTACT on whichever fragment
+/// spans the glycosite. So `glycan_mass` is added to every c/z fragment whose
+/// residue span includes `glycosite` (0-based residue index into the backbone);
+/// non-spanning fragments are naked. Pass `glycan_mass = 0.0` for a non-glyco
+/// peptide (then `glycosite` is irrelevant). Produces `2·(n-1)·|charge_range|`
+/// ions (c1..c_{n-1} and z1..z_{n-1} at each charge), mirroring
+/// [`predict_by_ions`]. Never emits neutral-loss ions (ETD is loss-poor).
+pub fn predict_cz_ions(
+    peptide: &Peptide,
+    charge_range: RangeInclusive<u8>,
+    glycan_mass: f64,
+    glycosite: usize,
+) -> Vec<PredictedIon> {
+    let residues = &peptide.residues;
+    let n = residues.len();
+    if n < 2 || charge_range.is_empty() {
+        return Vec::new();
+    }
+    let mut cumulative: Vec<f64> = Vec::with_capacity(n + 1);
+    cumulative.push(0.0);
+    let mut acc = 0.0;
+    for aa in residues {
+        acc += residue_mass_with_mod(aa);
+        cumulative.push(acc);
+    }
+    let total_residue_mass = cumulative[n];
+    let mut out = Vec::with_capacity(
+        2 * (n - 1) * (charge_range.end() - charge_range.start() + 1) as usize,
+    );
+    for charge in charge_range.clone() {
+        let z = charge as f64;
+        for k in 1..n {
+            // c-ion at position k: prefix residues [0, k). Spans the glycosite
+            // (carries the intact glycan) when glycosite ∈ [0, k), i.e. glycosite < k.
+            let c_neutral =
+                cumulative[k] + NH3 + if glycosite < k { glycan_mass } else { 0.0 };
+            out.push(PredictedIon {
+                kind: IonKind::C,
+                position: k as u32,
+                charge,
+                mz: (c_neutral + z * PROTON) / z,
+                loss_class: 0,
+            });
+            // z•-ion at position k: suffix residues [n-k, n). Spans the glycosite
+            // when glycosite ∈ [n-k, n), i.e. glycosite >= n-k.
+            let z_neutral = (total_residue_mass - cumulative[n - k] + H2O)
+                + Z_DOT_OFFSET
+                + if glycosite >= n - k { glycan_mass } else { 0.0 };
+            out.push(PredictedIon {
+                kind: IonKind::Z,
+                position: k as u32,
+                charge,
+                mz: (z_neutral + z * PROTON) / z,
+                loss_class: 0,
+            });
+        }
+    }
+    out
+}
+
 /// Emit loss-shifted partners for an intact ion at `intact_mz`.
 ///
 /// For each loss-bearing residue whose index lies in `span`, push one ion per
@@ -300,6 +374,29 @@ mod tests {
 
     fn plain_peptide() -> Peptide {
         pep(b"PEPTIDE")
+    }
+
+    #[test]
+    fn predict_cz_ions_offsets_and_glycan_spanning() {
+        let p = pep(b"PEPTIDE"); // n=7
+        let by = predict_by_ions(&p, 1..=1);
+        // No glycan → c = b + NH3, z• = y + Z_DOT_OFFSET, position/charge preserved.
+        let cz = predict_cz_ions(&p, 1..=1, 0.0, 0);
+        let b_at = |k: u32| by.iter().find(|i| i.kind == IonKind::B && i.position == k).unwrap().mz;
+        let y_at = |k: u32| by.iter().find(|i| i.kind == IonKind::Y && i.position == k).unwrap().mz;
+        let c_at = |k: u32| cz.iter().find(|i| i.kind == IonKind::C && i.position == k).unwrap().mz;
+        let z_at = |k: u32| cz.iter().find(|i| i.kind == IonKind::Z && i.position == k).unwrap().mz;
+        for k in 1..=6 {
+            assert!((c_at(k) - (b_at(k) + NH3)).abs() < 1e-6, "c{k} != b{k}+NH3");
+            assert!((z_at(k) - (y_at(k) + Z_DOT_OFFSET)).abs() < 1e-6, "z{k} != y{k}+offset");
+        }
+        // Glycan on glycosite (index 2, the second P here as a stand-in): every c_k
+        // with k>2 and every z_k spanning index 2 gains exactly glycan_mass at z=1.
+        let g = 1000.0;
+        let czg = predict_cz_ions(&p, 1..=1, g, 2);
+        let cg = |k: u32| czg.iter().find(|i| i.kind == IonKind::C && i.position == k).unwrap().mz;
+        assert!((cg(2) - c_at(2)).abs() < 1e-6, "c2 must be naked (prefix [0,2) excludes site 2)");
+        assert!((cg(3) - (c_at(3) + g)).abs() < 1e-6, "c3 must carry glycan (prefix includes site 2)");
     }
 
     /// `PEPTIDE` with a loss-bearing mod (the declared losses + class) on the

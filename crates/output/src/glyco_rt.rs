@@ -326,6 +326,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         }
     }
 

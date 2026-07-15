@@ -36,8 +36,8 @@ use andes_glyco::backbone::{
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
-    collapse_cmp, glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_H_DEFAULT, GLYCO_GP_J_DEFAULT,
-    GLYCO_GP_K_DEFAULT,
+    collapse_cmp, glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
+    GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
 };
 
 /// Glyco tuning knobs, threaded from the CLI (see the `--glyco-gp-*` /
@@ -53,6 +53,7 @@ pub struct GlycoConfig {
     pub gp_j: f32,
     /// `gp` selector hyperscore weight (H).
     pub gp_h: f32,
+    pub gp_cz: f32,
     /// Peptide-first fragment-index charge states (indexes b/y at 1..=pf_charge).
     pub pf_charge: u8,
     /// Max peptide-first candidates kept per spectrum.
@@ -71,6 +72,7 @@ impl Default for GlycoConfig {
             gp_k: GLYCO_GP_K_DEFAULT,
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
+            gp_cz: GLYCO_GP_CZ_DEFAULT,
             pf_charge: 2,
             max_pf: 1024,
             debug: false,
@@ -98,8 +100,9 @@ use crate::psm::PsmFeatures;
 type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
 
 use scoring_crate::scoring::{
-    candidate_rank_entropy, fuse_strong_score, hyperscore_psm, listwise_score_gap, psm_edge_score,
-    score_psm, score_psm_float, ScoredSpectrum, StrongScoreInputs,
+    candidate_rank_entropy, cz_hyperscore_psm, fuse_strong_score, hyperscore_psm,
+    listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
+    StrongScoreInputs,
 };
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
@@ -293,6 +296,7 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_k: f32,
     pub gp_j: f32,
     pub gp_h: f32,
+    pub gp_cz: f32,
     pub glyco_decoy_on: bool,
     pub features_collapse: bool,
     pub features_enumerated: bool,
@@ -320,6 +324,7 @@ pub struct GlycoCtxOwned {
     gp_k: f32,
     gp_j: f32,
     gp_h: f32,
+    gp_cz: f32,
     glyco_decoy_on: bool,
     features_collapse: bool,
     features_enumerated: bool,
@@ -383,6 +388,7 @@ impl GlycoCtxOwned {
         let gp_k = cfg.gp_k;
         let gp_j = cfg.gp_j;
         let gp_h = cfg.gp_h;
+        let gp_cz = cfg.gp_cz;
         // Glycan-Y-first candidate retention (P0b) is off by default under the gp
         // selector (matches the validated gp baseline).
         let yindex_on = false;
@@ -477,6 +483,7 @@ impl GlycoCtxOwned {
             gp_k,
             gp_j,
             gp_h,
+            gp_cz,
             glyco_decoy_on,
             features_collapse,
             features_enumerated,
@@ -513,6 +520,7 @@ impl GlycoCtxOwned {
             gp_k: self.gp_k,
             gp_j: self.gp_j,
             gp_h: self.gp_h,
+            gp_cz: self.gp_cz,
             glyco_decoy_on: self.glyco_decoy_on,
             features_collapse: self.features_collapse,
             features_enumerated: self.features_enumerated,
@@ -609,6 +617,15 @@ fn score_spectrum_glyco(
     let gp_k = ctx.gp_k;
     let gp_j = ctx.gp_j;
     let gp_h = ctx.gp_h;
+    let gp_cz = ctx.gp_cz;
+    // ETD c/z collapse term: on electron-transfer spectra the intact-glycan c/z
+    // ladder is the primary backbone evidence, so the selector weights it to pick
+    // the true backbone. `cz(&w)` returns 0.0 on HCD/CID (activation gate), so
+    // `gp_cz·cz` is inert on the closed-HCD path.
+    let is_etd = matches!(
+        spec.activation_method,
+        Some(model::activation::ActivationMethod::ETD)
+    );
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -1174,6 +1191,33 @@ fn score_spectrum_glyco(
                 }
             };
 
+            // ETD c/z backbone hyperscore per candidate (0.0 unless the scan is an
+            // electron-transfer spectrum). Computed on the bounded accepted set at
+            // collapse, glycopeptide-aware (glycan on glycosite-spanning c/z), so a
+            // weak-b/y high-charge glycopeptide can still be selected by its c/z
+            // ladder. Skips the peak lookups entirely on HCD/CID (is_etd == false).
+            let cz = |w: &CheapWinner| -> f32 {
+                if !is_etd {
+                    return 0.0;
+                }
+                let ss = match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
+                    Some((_, ss)) => ss,
+                    None => return 0.0,
+                };
+                let bb = &deduped_backbone[w.bb_hit_idx];
+                let gmass = bb
+                    .glycan
+                    .as_ref()
+                    .map(|g| g.mass)
+                    .unwrap_or(bb.glycan_mass_residual);
+                let pep = &candidates[w.cand_slot].peptide;
+                let gsite = {
+                    let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
+                    andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
+                };
+                cz_hyperscore_psm(ss, pep, gmass, gsite, max_frag_charge, fragment_tolerance_da)
+            };
+
             let winners_for_features: Vec<(GlycanWinnerKey, CheapWinner)> =
                 if features_collapse {
                     // Top-1-per-scan collapse (required for honest per-scan TDC FDR),
@@ -1188,7 +1232,7 @@ fn score_spectrum_glyco(
                             let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                             let s = glyco_gp_fused_score(
                                 e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
-                            );
+                            ) + gp_cz * cz(&e.1);
                             (e, s)
                         })
                         .max_by(|(ea, sa), (eb, sb)| {
@@ -1217,7 +1261,7 @@ fn score_spectrum_glyco(
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
                                     e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
-                                );
+                                ) + gp_cz * cz(&e.1);
                                 (s, e)
                             })
                             .collect();
@@ -1371,6 +1415,10 @@ fn score_spectrum_glyco(
                     transfer_seed_score: bb_hit.transfer_seed_score,
                     transfer_rt_delta: bb_hit.transfer_rt_delta,
                     transfer_ungated: bb_hit.transfer_ungated,
+                    // ETD c/z backbone evidence (0.0 on HCD/CID) — reuse the SAME `cz`
+                    // closure the collapse selector used, so the emitted feature and
+                    // the selection score can never diverge (single source of truth).
+                    cz_hyperscore: cz(&w),
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
@@ -1946,6 +1994,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key: key, psm };
         let cloned = hit.clone();

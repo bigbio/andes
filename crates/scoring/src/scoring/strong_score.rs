@@ -65,8 +65,8 @@ pub fn flank_residues(seq: &[u8], kind: IonKind, idx: u32) -> Option<(u8, u8)> {
         return None;
     }
     match kind {
-        IonKind::B => Some((seq[i - 1], seq[i])),
-        IonKind::Y => {
+        IonKind::B | IonKind::C => Some((seq[i - 1], seq[i])),
+        IonKind::Y | IonKind::Z => {
             let left = n - i;
             Some((seq[left - 1], seq[left]))
         }
@@ -140,8 +140,8 @@ pub fn intensity_signal(
                 None => continue,
             };
             let ion_type = match ion.kind {
-                IonKind::B => IntensityIonType::B,
-                IonKind::Y => IntensityIonType::Y,
+                IonKind::B | IonKind::C => IntensityIonType::B,
+                IonKind::Y | IonKind::Z => IntensityIonType::Y,
             };
             // model is guaranteed Some when frag_model is None (checked above).
             #[allow(clippy::unwrap_used)]

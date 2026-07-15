@@ -41,8 +41,10 @@ fn flank_indices(n: usize, kind: IonKind, position: u32) -> Option<(usize, usize
         return None;
     }
     match kind {
-        IonKind::B => Some((i - 1, i)),
-        IonKind::Y => {
+        // c-ions are N-terminal like b; z•-ions are C-terminal like y — they
+        // flank the same backbone bond, so map C→b-like and Z→y-like.
+        IonKind::B | IonKind::C => Some((i - 1, i)),
+        IonKind::Y | IonKind::Z => {
             let left = n - i;
             Some((left - 1, left))
         }
@@ -121,8 +123,8 @@ pub fn extract_frag_features(
 
     // ---- Original features (indices 0-9, semantics unchanged) ----
     f[FEAT_ION_TYPE] = match kind {
-        IonKind::B => 0.0,
-        IonKind::Y => 1.0,
+        IonKind::B | IonKind::C => 0.0,
+        IonKind::Y | IonKind::Z => 1.0,
     };
     f[FEAT_PRECURSOR_CHARGE] = precursor_charge as f32;
     f[FEAT_NFLANK] = res_idx(p.residues[ni].residue);

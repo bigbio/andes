@@ -122,6 +122,7 @@ fn write_glyco_header<W: Write>(
         "IsGlycanDb".to_string(),
         "Y0Y1Anchor".to_string(), // G2 peptide-mass anchor (additive, peptide-discriminating)
         "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
+        "CzHyperscore".to_string(), // ETD c/z backbone hyperscore (additive; ETD/AI-ETD only, else 0)
         "IsTransferred".to_string(),        // cross-spectrum transfer provenance (additive)
         "TransferGraphSupport".to_string(), // # corroborating co-eluting siblings
         "TransferSeedScore".to_string(),    // donor seed Pass-1 discriminant
@@ -274,6 +275,11 @@ fn write_glyco_psm_row<W: Write>(
         key.sialic_consistency
     };
     write_double_tab(writer, sialic as f64)?;
+
+    // ETD c/z backbone hyperscore (additive; ETD/AI-ETD spectra only, else 0.0).
+    // A peptide-axis feature (backbone c/z ladder), so a glycan-decoy row emits the
+    // SAME value as its paired target — like Y0Y1Anchor above.
+    write_double_tab(writer, key.cz_hyperscore as f64)?;
 
     // Transfer columns (additive; inert 0 for native candidates). Bools mirror
     // the `is_glycan_db` 1/0 idiom above; numerics use write_double_tab.
@@ -639,6 +645,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         }
     }
 
@@ -853,6 +860,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
@@ -1029,6 +1037,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];

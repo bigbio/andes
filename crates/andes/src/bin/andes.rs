@@ -410,6 +410,11 @@ struct SearchArgs {
     #[arg(long = "glyco-gp-h", hide = true, default_value_t = 1.0f32)]
     glyco_gp_h: f32,
 
+    /// `gp` selector ETD c/z-hyperscore weight (added ONLY on ETD/AI-ETD spectra;
+    /// inert on HCD). Hidden knob; default 5. 0 disables ETD c/z selection.
+    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = 5.0f32)]
+    glyco_gp_cz: f32,
+
     /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
     /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
     #[arg(long = "glyco-pf-charge", hide = true, default_value_t = 2u8)]
@@ -2443,6 +2448,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_k: cli.glyco_gp_k,
             gp_j: cli.glyco_gp_j,
             gp_h: cli.glyco_gp_h,
+            gp_cz: cli.glyco_gp_cz,
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,

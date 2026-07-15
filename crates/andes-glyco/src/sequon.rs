@@ -26,9 +26,31 @@ pub fn has_nxst_sequon(residues: &[u8]) -> bool {
     false
 }
 
+/// Returns the 0-based index of the N in the FIRST N-X-S/T sequon (X ≠ P), or
+/// `None` if there is none. This is the presumptive glycosylation site — used to
+/// place the intact glycan on glycosite-spanning ETD c/z fragments.
+pub fn first_nxst_site(residues: &[u8]) -> Option<usize> {
+    let n = residues.len();
+    if n < 3 {
+        return None;
+    }
+    (0..n.saturating_sub(2)).find(|&i| {
+        residues[i] == b'N'
+            && residues[i + 1] != b'P'
+            && (residues[i + 2] == b'S' || residues[i + 2] == b'T')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_site_index() {
+        assert_eq!(first_nxst_site(b"SVNLTK"), Some(2));
+        assert_eq!(first_nxst_site(b"SVNPLTK"), None);
+        assert_eq!(first_nxst_site(b"AANDSNKTQ"), Some(2)); // first of two sequons
+    }
 
     #[test]
     fn svnltk_has_sequon() {

@@ -18,6 +18,7 @@ use std::sync::OnceLock;
 use model::mass::nominal_from;
 use model::peptide::Peptide;
 use crate::param_model::Partition;
+use crate::scoring::fragment_ions::{predict_cz_ions, IonKind};
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 
@@ -401,6 +402,47 @@ pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &
     }
     let ln_factorial = |n: usize| -> f64 { (2..=n).map(|i| (i as f64).ln()).sum() };
     (ln_factorial(n_b) + ln_factorial(n_y)) as f32
+}
+
+/// Model-free c/z (ETD) backbone hyperscore for EThcD/AI-ETD glyco spectra.
+///
+/// No trained rank model exists for electron-transfer ions, so this mirrors
+/// [`hyperscore_psm`] with a count-based `ln(N_c!) + ln(N_z!)` over the DISTINCT
+/// backbone positions matched by a c or z• ion (a position counts once even if it
+/// matches at several charges). Ions are the glycopeptide-aware c/z ladder from
+/// [`predict_cz_ions`] — the glycan rides on glycosite-spanning fragments, so this
+/// discriminates the true backbone on ETD spectra where the labile-glycan HCD b/y
+/// ladder is sparse (the high-charge wall). `glycan_mass = 0.0` scores a naked
+/// peptide; `max_frag_charge` bounds the fragment charge sweep (ETD c/z of a
+/// z-charged precursor reach ~z-1). Returns 0.0 for peptides shorter than 2.
+pub fn cz_hyperscore_psm(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    glycan_mass: f64,
+    glycosite: usize,
+    max_frag_charge: u8,
+    tol_da: f64,
+) -> f32 {
+    let n = peptide.length();
+    if n < 2 || max_frag_charge == 0 {
+        return 0.0;
+    }
+    let mut c_hit = vec![false; n];
+    let mut z_hit = vec![false; n];
+    for ion in predict_cz_ions(peptide, 1..=max_frag_charge, glycan_mass, glycosite) {
+        if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
+            let pos = ion.position as usize;
+            match ion.kind {
+                IonKind::C if pos < n => c_hit[pos] = true,
+                IonKind::Z if pos < n => z_hit[pos] = true,
+                _ => {}
+            }
+        }
+    }
+    let n_c = c_hit.iter().filter(|&&h| h).count();
+    let n_z = z_hit.iter().filter(|&&h| h).count();
+    let ln_factorial = |m: usize| -> f64 { (2..=m).map(|i| (i as f64).ln()).sum() };
+    (ln_factorial(n_c) + ln_factorial(n_z)) as f32
 }
 
 /// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split

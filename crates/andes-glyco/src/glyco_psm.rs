@@ -29,6 +29,16 @@ pub const GLYCO_GP_J_DEFAULT: f32 = 5.0;
 /// overrides it; 0.0 disables the hyperscore term.
 pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 
+/// Default weight for the ETD c/z backbone hyperscore term in the gp collapse
+/// selector (`--glyco-gp-cz`). Added to the fused score ONLY on ETD/AI-ETD
+/// spectra (the per-candidate c/z hyperscore is 0.0 on HCD/CID, so this term is
+/// inert on the closed-HCD path → byte-identical). On electron-transfer spectra
+/// the intact-glycan c/z ladder is the primary backbone evidence (the labile b/y
+/// ladder is sparse for high-charge glycopeptides), so the selector must weight
+/// it to pick the true backbone. Offline on PXD011533 Frac1 AI-ETD (467 truth,
+/// ceiling 356): gp alone top1-correct 218; `gp + 5·cz` = 250 (+32, z3/z4).
+pub const GLYCO_GP_CZ_DEFAULT: f32 = 5.0;
+
 /// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
 /// Higher is better.
 ///
@@ -106,6 +116,7 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     transfer_seed_score: 0.0,
 ///     transfer_rt_delta: 0.0,
 ///     transfer_ungated: false,
+///     cz_hyperscore: 0.0,
 /// };
 /// assert_eq!(key.glycan_mass, 0.0);
 /// ```
@@ -162,6 +173,15 @@ pub struct GlycoPsmKey {
     pub transfer_rt_delta: f32,
     /// RT unavailable ⇒ co-elution gate skipped (distrust signal).
     pub transfer_ungated: bool,
+    /// ETD c/z backbone hyperscore (additive PIN feature `CzHyperscore`), computed
+    /// only on ETD/AI-ETD spectra: `ln(N_c!) + ln(N_z!)` over distinct matched
+    /// c/z ions of the glycopeptide backbone (glycan on glycosite-spanning
+    /// fragments). 0.0 on collisional (HCD/CID) spectra — the orthogonal
+    /// electron-transfer evidence that recovers the high-charge glycopeptides the
+    /// labile-glycan b/y ladder misses. On ETD spectra this same c/z hyperscore
+    /// ALSO contributes to the per-scan collapse selector (weighted by
+    /// `--glyco-gp-cz`); the peptide `rank_score`/`RawScore` are unchanged.
+    pub cz_hyperscore: f32,
 }
 
 #[cfg(test)]
@@ -250,6 +270,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         assert_eq!(key.glycan_mass, 0.0);
         assert!(key.glycan.is_none());
@@ -285,6 +306,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         assert!((key.glycan_mass - expected_mass).abs() < 1e-6);
         assert!(key.glycan.is_some());
@@ -311,6 +333,7 @@ mod tests {
             transfer_seed_score: 0.0,
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         let cloned = key.clone();
         assert_eq!(cloned.spectrum_idx, key.spectrum_idx);
@@ -326,6 +349,7 @@ mod tests {
             glycan_mass: 0.0, backbone_mass: 0.0,
             is_transferred: false, transfer_graph_support: 0,
             transfer_seed_score: 0.0, transfer_rt_delta: 0.0, transfer_ungated: false,
+            cz_hyperscore: 0.0,
         };
         assert!(!key.is_transferred);
         assert_eq!(key.transfer_graph_support, 0);

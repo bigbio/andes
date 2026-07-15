@@ -1836,6 +1836,41 @@ mod tests {
     // Smoke test: verify the public types compile and are accessible.
     use super::*;
 
+    /// B1: `build_hcd_partners` pairs each ETD spectrum to the nearest HCD
+    /// spectrum with a matching precursor m/z; non-ETD spectra and ETD spectra
+    /// with no in-window HCD partner get `None`.
+    #[test]
+    fn build_hcd_partners_pairs_etd_to_precursor_matched_hcd() {
+        use model::activation::ActivationMethod;
+        let sp = |mz: f64, am: ActivationMethod| Spectrum {
+            title: String::new(),
+            precursor_mz: mz,
+            precursor_intensity: None,
+            precursor_charge: Some(3),
+            rt_seconds: None,
+            scan: None,
+            peaks: vec![],
+            activation_method: Some(am),
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+        use ActivationMethod::{ETD, HCD};
+        // 0:HCD@500  1:ETD@500  2:HCD@600  3:ETD@600.005 (within tol)  4:ETD@999 (no partner)
+        let spectra = vec![
+            sp(500.0, HCD),
+            sp(500.0, ETD),
+            sp(600.0, HCD),
+            sp(600.005, ETD),
+            sp(999.0, ETD),
+        ];
+        let p = build_hcd_partners(&spectra);
+        assert_eq!(p[0], None, "HCD spectra never get a partner");
+        assert_eq!(p[1], Some(0), "ETD@500 pairs to HCD@500");
+        assert_eq!(p[2], None);
+        assert_eq!(p[3], Some(2), "ETD@600.005 pairs to HCD@600 within m/z tol");
+        assert_eq!(p[4], None, "ETD@999 has no precursor-matched HCD partner");
+    }
+
     /// DETERMINISM regression (the 40%-FDR-swing bug): `frag_index.query`
     /// returns `(cand_idx, match_count)` pairs in an unspecified order. The
     /// per-spectrum cap keeps only a PREFIX of the ordered list, so if the

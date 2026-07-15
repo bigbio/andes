@@ -701,10 +701,17 @@ fn score_spectrum_glyco(
             } else {
                 None
             };
-            let gen_peaks: &[(f64, f32)] = match paired_hcd {
-                Some(p) => &ctx.all_spectra[p].peaks,
-                None => &spec.peaks,
+            // The HCD partner is a full `Spectrum` (same precursor), so both the raw
+            // peaks (for de-novo / index generation) and a `ScoredSpectrum` (for the
+            // Phase-1 b/y backbone ranking that gates `backbone_top_k`) can be built
+            // from it. B1.1: rank Phase-1 on `gen_spec` too — otherwise a backbone
+            // correctly generated from the HCD partner is still ranked on the ETD
+            // scan's weak b/y evidence and can be capped out before c/z scoring.
+            let gen_spec: &Spectrum = match paired_hcd {
+                Some(p) => &ctx.all_spectra[p],
+                None => spec,
             };
+            let gen_peaks: &[(f64, f32)] = &gen_spec.peaks;
             let gen_stats_owned = paired_hcd.map(|_| SpectrumStats::new(gen_peaks));
             let gen_stats: &SpectrumStats = gen_stats_owned.as_ref().unwrap_or(&stats);
 
@@ -916,12 +923,38 @@ fn score_spectrum_glyco(
             // (compute_psm_features) is bounded by that cap.
 
             // Build ScoredSpectrum per unique charge (cached, cheap amortized).
+            // This scorer is on THIS ETD scan (`spec`) and drives all EMITTED scoring
+            // (c/z hyperscore, rank features) below.
             let mut scored_per_charge: Vec<(u8, ScoredSpectrum<'_>)> = Vec::new();
             for &z in &charges_to_try {
                 if scored_per_charge.iter().all(|(c, _)| *c != z) {
                     scored_per_charge.push((z, ScoredSpectrum::new(spec, scorer, z)));
                 }
             }
+            // B1.1: a SEPARATE scorer on the generation spectrum (the HCD partner when
+            // paired) used ONLY for the Phase-1 b/y backbone ranking that gates
+            // `backbone_top_k` and picks the cheap winner. Without this, a backbone
+            // correctly generated from the HCD partner is still ranked on the ETD
+            // scan's weak b/y evidence and can be capped out before c/z scoring. Built
+            // only when paired; unpaired runs reuse `scored_per_charge` (gen == spec),
+            // so the default path is unchanged. Emitted features stay on the ETD scan.
+            let gen_scored_per_charge: Vec<(u8, ScoredSpectrum<'_>)> = if paired_hcd.is_some()
+            {
+                let mut v: Vec<(u8, ScoredSpectrum<'_>)> = Vec::new();
+                for &z in &charges_to_try {
+                    if v.iter().all(|(c, _)| *c != z) {
+                        v.push((z, ScoredSpectrum::new(gen_spec, scorer, z)));
+                    }
+                }
+                v
+            } else {
+                Vec::new()
+            };
+            let phase1_scored = if paired_hcd.is_some() {
+                &gen_scored_per_charge
+            } else {
+                &scored_per_charge
+            };
 
             // Collect core-Y hit counts for all backbones (cheap, used as tiebreaker
             // after b/y ranking; avoids a second pass over deduped_backbone later).
@@ -1045,7 +1078,9 @@ fn score_spectrum_glyco(
                         .collect(),
                 };
 
-                let ss = match scored_per_charge.iter().find(|(c, _)| *c == z) {
+                // Phase-1 gating/selection ranks on the generation spectrum (HCD
+                // partner when paired; ETD scan otherwise — see `phase1_scored`).
+                let ss = match phase1_scored.iter().find(|(c, _)| *c == z) {
                     Some((_, s)) => s,
                     // The backbone's charge fell outside `charges_to_try`
                     // (shouldn't happen since `hybrid_candidates_with_isotope`

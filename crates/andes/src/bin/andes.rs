@@ -1922,6 +1922,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 spectrum_paths.len()
             );
         }
+        // Multi-file paired-scan guard (code review): --glyco-hcd-pair pairs each
+        // ETD spectrum to a nearby HCD spectrum by position + precursor m/z over the
+        // concatenated `all_spectra`. Across multiple --spectrum inputs the pairing
+        // window would straddle file boundaries and silently mis-pair, so disable it
+        // (rather than warn-and-continue) for multi-file runs. Validated per-file.
+        if cli.glyco_hcd_pair && spectrum_paths.len() > 1 {
+            eprintln!(
+                "WARN: --glyco-hcd-pair is disabled for {} --spectrum inputs: paired-scan \
+                 generation pairs ETD<->HCD over the concatenated spectra and would cross \
+                 file boundaries. Run one file at a time to use paired generation.",
+                spectrum_paths.len()
+            );
+        }
     }
     // --refine + --chimeric run together correctly but do NOT currently STACK:
     // the chimeric secondary (co-isolated) PSMs collapse the refinement's
@@ -2459,7 +2472,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
             glyco_decoy: cli.glyco_decoy,
-            hcd_pair: cli.glyco_hcd_pair,
+            // Single-file only: cross-file pairing is unsound (see guard above).
+            hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,

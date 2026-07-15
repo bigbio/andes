@@ -314,7 +314,8 @@ pub struct GlycoScoreCtx<'a> {
     /// precomputed once so the scoring hot loop is an O(1) lookup.
     pub sequon_membership: &'a [bool],
     /// B1: all spectra of the run, so an ETD spectrum can read its paired HCD
-    /// partner's peaks for GENERATION. Empty slice when paired-scan is off.
+    /// partner's peaks for GENERATION. Always the full run slice; pairing is
+    /// gated by `hcd_pair_on` + a `Some` entry in `hcd_partner`, not by this.
     pub all_spectra: &'a [Spectrum],
     /// B1: per-spectrum HCD partner index (`hcd_partner[i]` = the HCD spectrum
     /// paired to ETD spectrum `i`, by precursor m/z within a small scan window),
@@ -680,11 +681,21 @@ fn score_spectrum_glyco(
             // B1 paired-scan generation: on an ETD/AI-ETD spectrum with an HCD
             // partner (same precursor), GENERATE candidate backbones from the HCD
             // scan's peaks — it carries the oxonium / core-Y / b/y evidence the ETD
-            // scan lacks — while SCORING (c/z, rank, features) stays on THIS ETD
-            // spectrum. `gen_peaks`/`gen_stats` drive every generation call
+            // scan lacks. `gen_peaks`/`gen_stats` drive every generation call
             // (oxonium gate, de-novo solver, db_branch, peptide-first, glycan-Y
-            // index, and the core-Y prefilter counts); when unpaired they are this
-            // spectrum's own peaks, so the default path is byte-identical.
+            // index, core-Y counts). The c/z LADDER scoring (hyperscore, rank) is
+            // always measured on THIS ETD scan (`spec.peaks`/`stats`).
+            // NOTE ON PROVENANCE: the glycan-level evidence derived during
+            // generation — `ox_ev` and `core_y_counts` — is a property of the
+            // precursor, so it is deliberately REUSED downstream: as the `core_y`
+            // term of the fused collapse selector and as the emitted
+            // `oxonium_summed_frac` / `n_core_oxonium_ions` / `core_y_hits` PIN
+            // features. When paired, those three features therefore reflect the HCD
+            // partner, not the ETD scan (the ETD scan lacks oxonium by design). The
+            // peak swap is per-spectrum — applied identically to target and decoy
+            // candidates — so the decoy null stays symmetric and FDR is unaffected.
+            // When unpaired, `gen_peaks` == `spec.peaks`, so the default path is
+            // byte-identical.
             let paired_hcd: Option<usize> = if ctx.hcd_pair_on && is_etd {
                 ctx.hcd_partner.get(spec_idx).copied().flatten()
             } else {

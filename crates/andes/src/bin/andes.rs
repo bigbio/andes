@@ -1851,6 +1851,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .into());
         }
     }
+    // --glyco-hcd-pair only takes effect inside the glyco driver; without --glyco
+    // it is silently inert, which would mislead a user who set it on purpose (code
+    // review). Warn rather than error so it stays a no-op knob outside glyco mode.
+    if cli.glyco_hcd_pair && !cli.glyco {
+        eprintln!(
+            "WARN: --glyco-hcd-pair has no effect without --glyco (it only drives \
+             paired-scan candidate generation in glyco mode); ignoring it."
+        );
+    }
     // --glyco is a standalone driver (see the `if cli.glyco` early-return block
     // below): it writes its own `.glyco.pin` and skips the standard PIN/rescore/
     // TSV/Parquet/refine machinery entirely. Silently ignoring those flags would
@@ -1933,6 +1942,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  generation pairs ETD<->HCD over the concatenated spectra and would cross \
                  file boundaries. Run one file at a time to use paired generation.",
                 spectrum_paths.len()
+            );
+        }
+        // Paired-scan + transfer guard (code review): --glyco-hcd-pair pairing is a
+        // Pass-1 property; the --glyco-transfer Pass-2 rescore rebuilds its context
+        // WITHOUT the partner map, so an ETD acceptor spectrum would be re-scored
+        // unpaired and lose its Pass-1 paired-generation result. Warn so the user
+        // knows the combination does not stack for acceptor spectra.
+        if cli.glyco_hcd_pair && cli.glyco_transfer {
+            eprintln!(
+                "WARN: --glyco-hcd-pair with --glyco-transfer: paired-scan generation is \
+                 Pass-1 only; the transfer Pass-2 rescores acceptor spectra unpaired, so \
+                 pairing does not carry through transfer for those spectra."
             );
         }
     }

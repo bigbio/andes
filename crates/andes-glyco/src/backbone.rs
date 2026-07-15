@@ -404,11 +404,14 @@ impl SpectrumStats {
 }
 
 /// Best raw (un-normalised) intensity of a fragment of NEUTRAL mass `neutral`,
-/// searched at charges 1..=`max_charge.clamp(1,3)`. Multiply-charged Y-ions are
-/// common in stepped-HCD glyco spectra — the intact glycopeptide is 2–6+, so its
-/// glycan-retaining Y-ions are frequently 2+/3+; matching only +1 leaves that
-/// signal unmatched. `sorted` = peaks are m/z-ascending (enables binary search).
-/// Returns 0.0 for no match at any charge.
+/// searched at charges 1..=`max_charge.clamp(1,5)`. Multiply-charged Y-ions are
+/// common in stepped-HCD glyco spectra — the intact glycopeptide is 2–7+, so its
+/// glycan-retaining Y-ions are frequently 2+/3+ (and 4+/5+ for high-charge
+/// precursors); matching only +1..3 leaves the high-charge signal unmatched, which
+/// blinds the de-novo solver / core-Y prefilter on z4–z7 glycopeptides (Q1). The
+/// cap only bites for max_charge > 3, so z≤3 spectra are byte-identical.
+/// `sorted` = peaks are m/z-ascending (enables binary search). Returns 0.0 for no
+/// match at any charge.
 #[inline]
 fn best_frag_intensity(
     peaks: &[(f64, f32)],
@@ -417,7 +420,7 @@ fn best_frag_intensity(
     tol_ppm: f64,
     max_charge: u8,
 ) -> f32 {
-    let zmax = max_charge.clamp(1, 3);
+    let zmax = max_charge.clamp(1, 5);
     let mut best = 0.0f32;
     for z in 1..=zmax {
         let ion_mz = (neutral + z as f64 * PROTON) / z as f64;

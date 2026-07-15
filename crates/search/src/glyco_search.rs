@@ -64,6 +64,12 @@ pub struct GlycoConfig {
     pub debug: bool,
     /// Emit paired glycan-axis decoy rows for experimental 2D-FDR (`--glyco-decoy`).
     pub glyco_decoy: bool,
+    /// EXPERIMENTAL paired-scan generation (`--glyco-hcd-pair`, B1): on ETD/AI-ETD
+    /// spectra, GENERATE candidate backbones from the paired HCD scan (same
+    /// precursor, strong oxonium/core-Y/b/y) while SCORING c/z on the ETD scan.
+    /// Attacks the high-charge generation wall (z4-z7). Default false; inert on the
+    /// closed-HCD path (only ETD spectra with an HCD partner are affected).
+    pub hcd_pair: bool,
 }
 
 impl Default for GlycoConfig {
@@ -75,6 +81,7 @@ impl Default for GlycoConfig {
             gp_cz: GLYCO_GP_CZ_DEFAULT,
             pf_charge: 2,
             max_pf: 1024,
+            hcd_pair: false,
             debug: false,
             glyco_decoy: false,
         }
@@ -298,12 +305,21 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_h: f32,
     pub gp_cz: f32,
     pub glyco_decoy_on: bool,
+    /// B1 paired-scan generation toggle (`--glyco-hcd-pair`). Process-constant.
+    pub hcd_pair_on: bool,
     pub features_collapse: bool,
     pub features_enumerated: bool,
     pub scan_filter: Option<&'a std::collections::HashSet<i32>>,
     /// Per-candidate N-X-S/T sequon membership (indexed by candidate slot),
     /// precomputed once so the scoring hot loop is an O(1) lookup.
     pub sequon_membership: &'a [bool],
+    /// B1: all spectra of the run, so an ETD spectrum can read its paired HCD
+    /// partner's peaks for GENERATION. Empty slice when paired-scan is off.
+    pub all_spectra: &'a [Spectrum],
+    /// B1: per-spectrum HCD partner index (`hcd_partner[i]` = the HCD spectrum
+    /// paired to ETD spectrum `i`, by precursor m/z within a small scan window),
+    /// or `None`. Empty slice when paired-scan is off.
+    pub hcd_partner: &'a [Option<usize>],
 }
 
 /// Owns the pieces of [`GlycoScoreCtx`] that are built once per run (indices,
@@ -326,6 +342,7 @@ pub struct GlycoCtxOwned {
     gp_h: f32,
     gp_cz: f32,
     glyco_decoy_on: bool,
+    hcd_pair_on: bool,
     features_collapse: bool,
     features_enumerated: bool,
     sequon_membership: Vec<bool>,
@@ -364,6 +381,7 @@ impl GlycoCtxOwned {
         // compute the decoy Y-ladder per hit — it is unused and ~doubles the glyco
         // composition-ladder cost, so leaving it on would slow the shipping default.
         let glyco_decoy_on = cfg.glyco_decoy;
+        let hcd_pair_on = cfg.hcd_pair;
         // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
         // glyco_pin.rs), so computing the expensive ~40-feature vector
         // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
@@ -485,6 +503,7 @@ impl GlycoCtxOwned {
             gp_h,
             gp_cz,
             glyco_decoy_on,
+            hcd_pair_on,
             features_collapse,
             features_enumerated,
             sequon_membership,
@@ -495,11 +514,14 @@ impl GlycoCtxOwned {
     /// Borrow a [`GlycoScoreCtx`] referencing this owned state plus the
     /// per-call `prepared`/`glycan_list`/`tol_ppm` — the same values
     /// `glyco_search_run` closes over.
+    #[allow(clippy::too_many_arguments)]
     pub fn as_ctx<'a>(
         &'a self,
         prepared: &'a PreparedSearch<'_>,
         glycan_list: &'a [GlycanComp],
         tol_ppm: f64,
+        all_spectra: &'a [Spectrum],
+        hcd_partner: &'a [Option<usize>],
     ) -> GlycoScoreCtx<'a> {
         GlycoScoreCtx {
             params: prepared.params,
@@ -522,10 +544,13 @@ impl GlycoCtxOwned {
             gp_h: self.gp_h,
             gp_cz: self.gp_cz,
             glyco_decoy_on: self.glyco_decoy_on,
+            hcd_pair_on: self.hcd_pair_on,
             features_collapse: self.features_collapse,
             features_enumerated: self.features_enumerated,
             scan_filter: self.scan_filter.as_ref(),
             sequon_membership: &self.sequon_membership,
+            all_spectra,
+            hcd_partner,
         }
     }
 }
@@ -652,8 +677,28 @@ fn score_spectrum_glyco(
             // recomputing them O(#peaks) — the dominant glyco-scoring cost.
             let stats = SpectrumStats::new(&spec.peaks);
 
+            // B1 paired-scan generation: on an ETD/AI-ETD spectrum with an HCD
+            // partner (same precursor), GENERATE candidate backbones from the HCD
+            // scan's peaks — it carries the oxonium / core-Y / b/y evidence the ETD
+            // scan lacks — while SCORING (c/z, rank, features) stays on THIS ETD
+            // spectrum. `gen_peaks`/`gen_stats` drive every generation call
+            // (oxonium gate, de-novo solver, db_branch, peptide-first, glycan-Y
+            // index, and the core-Y prefilter counts); when unpaired they are this
+            // spectrum's own peaks, so the default path is byte-identical.
+            let paired_hcd: Option<usize> = if ctx.hcd_pair_on && is_etd {
+                ctx.hcd_partner.get(spec_idx).copied().flatten()
+            } else {
+                None
+            };
+            let gen_peaks: &[(f64, f32)] = match paired_hcd {
+                Some(p) => &ctx.all_spectra[p].peaks,
+                None => &spec.peaks,
+            };
+            let gen_stats_owned = paired_hcd.map(|_| SpectrumStats::new(gen_peaks));
+            let gen_stats: &SpectrumStats = gen_stats_owned.as_ref().unwrap_or(&stats);
+
             // Oxonium evidence for the whole spectrum (charge-independent).
-            let ox_ev = oxonium_gate(&spec.peaks, 0.10, tol_ppm);
+            let ox_ev = oxonium_gate(gen_peaks, 0.10, tol_ppm);
 
             // Determine which charges to try. `glyco_charges_to_try` expands the set
             // UPWARD by `ANDES_GLYCO_CHARGE_EXPAND` (default 0 = exact legacy set) so a
@@ -700,7 +745,7 @@ fn score_spectrum_glyco(
                     // `--glyco-backbone-top-k` only perturbs near-precursor
                     // (fully-glycosylated, gated-out) candidates. Honors the cap
                     // (Codex finding #2 — was hardcoded to 50).
-                    solve_backbones_for_charge(&spec.peaks, widest_precursor, z, tol_ppm, effective_top_k)
+                    solve_backbones_for_charge(gen_peaks, widest_precursor, z, tol_ppm, effective_top_k)
                 } else {
                     None
                 };
@@ -711,7 +756,7 @@ fn score_spectrum_glyco(
                     }
                     let hits = hybrid_candidates_presolved(
                         presolved.as_deref(),
-                        &spec.peaks,
+                        gen_peaks,
                         precursor_neutral,
                         z,
                         iso,
@@ -736,7 +781,7 @@ fn score_spectrum_glyco(
                 // (peptide, charge, isotope, glycan) hypotheses — NOT raw b/y
                 // count — so high-count peptides that cannot form a known glycan
                 // don't evict a lower-count peptide that can (Codex re-review #1).
-                let mut pf = frag_index.query(&spec.peaks, MIN_BY_MATCHES);
+                let mut pf = frag_index.query(gen_peaks, MIN_BY_MATCHES);
                 // Deterministic strongest-b/y-first order (see order_peptide_first):
                 // the per-spectrum cap below keeps a prefix of this list, so a
                 // non-total order would make the kept subset non-reproducible.
@@ -804,7 +849,7 @@ fn score_spectrum_glyco(
                         if pf <= 0.0 {
                             continue;
                         }
-                        for (gid, _core) in glycan_y_index.query(&spec.peaks, pf, z, 2) {
+                        for (gid, _core) in glycan_y_index.query(gen_peaks, pf, z, 2) {
                             let g = &glycan_list[gid as usize];
                             let backbone_residue = pf - H2O - g.mass;
                             if backbone_residue < 500.0 {
@@ -875,7 +920,7 @@ fn score_spectrum_glyco(
             // measured near-noise. Phase-1 convention fix.)
             let core_y_counts: Vec<u8> = deduped_backbone
                 .iter()
-                .map(|h| count_core_y_hits(&spec.peaks, &stats, h.backbone_mass + H2O, tol_ppm, max_frag_charge))
+                .map(|h| count_core_y_hits(gen_peaks, gen_stats, h.backbone_mass + H2O, tol_ppm, max_frag_charge))
                 .collect();
 
             // Phase 1: cheap b/y scoring for ALL backbones.
@@ -1463,6 +1508,47 @@ fn score_spectrum_glyco(
 ///    mass matches the backbone and has a N-X-S/T sequon.
 /// 5. Score each (peptide, glycan) pair and emit a `FullGlycoPsm`.
 ///
+/// B1 paired-scan generation map. For each ETD/AI-ETD spectrum, find its paired
+/// HCD scan — the nearest HCD spectrum (by slice-index distance, inside a small
+/// window) whose precursor m/z matches within `MZ_TOL`. Returns `partner[i] =
+/// Some(hcd_idx)` for ETD spectra with a partner, else `None`; non-ETD spectra are
+/// always `None`. The m/z match supplies the precision; the window only bounds the
+/// search (see `eth_pairing.py`: precursor-matched pairing is 100% within ±3 MS2
+/// scans on HCD-pd-AI-ETD data, vs only 12% for strict scan-N−1 adjacency).
+#[allow(clippy::needless_range_loop)]
+fn build_hcd_partners(spectra: &[Spectrum]) -> Vec<Option<usize>> {
+    use model::activation::ActivationMethod;
+    const WINDOW: usize = 12;
+    const MZ_TOL: f64 = 0.02;
+    let n = spectra.len();
+    let mut partner = vec![None; n];
+    for i in 0..n {
+        if spectra[i].activation_method != Some(ActivationMethod::ETD) {
+            continue;
+        }
+        let mz = spectra[i].precursor_mz;
+        if mz <= 0.0 {
+            continue;
+        }
+        let lo = i.saturating_sub(WINDOW);
+        let hi = (i + WINDOW + 1).min(n);
+        let mut best: Option<(usize, usize)> = None; // (index-distance, hcd_idx)
+        for j in lo..hi {
+            if j == i || spectra[j].activation_method != Some(ActivationMethod::HCD) {
+                continue;
+            }
+            if (mz - spectra[j].precursor_mz).abs() <= MZ_TOL {
+                let d = i.abs_diff(j);
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, j));
+                }
+            }
+        }
+        partner[i] = best.map(|(_, j)| j);
+    }
+    partner
+}
+
 /// Results are serialized (rayon is not used here to keep v1 simple; the
 /// standard search path handles parallelism separately).
 pub fn glyco_search_run(
@@ -1476,6 +1562,12 @@ pub fn glyco_search_run(
     let params = prepared.params;
     let candidates = &prepared.candidates;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
+    // B1: pair each ETD spectrum to its HCD partner (same precursor) before scoring.
+    let hcd_partner: Vec<Option<usize>> = if cfg.hcd_pair {
+        build_hcd_partners(spectra)
+    } else {
+        Vec::new()
+    };
 
     // Shared setup (toggles + indices) — see `GlycoCtxOwned::build` for the
     // full rationale of each; unchanged by the Task 8c extraction, just moved
@@ -1483,7 +1575,7 @@ pub fn glyco_search_run(
     // context from the same routine instead of a second hand-maintained copy.
     let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
     let cross_spectrum_on = owned.cross_spectrum_on;
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner);
 
     // PASS 1: baseline candidate gen (+ peptide-first if on), no transfer.
     let pass1: Vec<GlycoSpectrumResult> = spectra
@@ -1672,7 +1764,9 @@ pub fn glyco_transfer_pass2(
     // Same shared setup `glyco_search_run` uses — identical toggles/indices,
     // built once for this call (see `GlycoCtxOwned::build` doc comment).
     let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
+    // B1 paired-scan generation is a Pass-1 concern; the transfer pass passes an
+    // empty partner map (inert — score_spectrum_glyco falls back to spec.peaks).
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &[]);
 
     // Re-score only the spectra that actually received a transferred backbone.
     // Deterministic order: BTreeMap iteration is already key-sorted, and rayon

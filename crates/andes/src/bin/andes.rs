@@ -435,6 +435,12 @@ struct SearchArgs {
     #[arg(long = "glyco-decoy", hide = true, default_value_t = false)]
     glyco_decoy: bool,
 
+    /// EXPERIMENTAL (B1): on ETD/AI-ETD spectra, generate candidate backbones from
+    /// the paired HCD scan (same precursor) while scoring c/z on the ETD scan —
+    /// targets high-charge glycopeptides. Off by default. Hidden.
+    #[arg(long = "glyco-hcd-pair", hide = true, default_value_t = false)]
+    glyco_hcd_pair: bool,
+
     /// Cross-spectrum transfer: q-value threshold for confident donor seeds
     /// (--glyco-transfer only). Hidden; default 0.05 (native GBDT q is conservative).
     #[arg(long = "glyco-transfer-seed-fdr", hide = true, default_value_t = 0.05f64)]
@@ -2453,6 +2459,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
             glyco_decoy: cli.glyco_decoy,
+            hcd_pair: cli.glyco_hcd_pair,
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,

@@ -652,6 +652,13 @@ fn score_spectrum_glyco(
         spec.activation_method,
         Some(model::activation::ActivationMethod::ETD)
     );
+    // EXPERIMENT (ANDES_GLYCO_ETD_DBFALLBACK): ETD/AI-ETD scans structurally lack
+    // oxonium (glycosidic cleavage needs a collisional component), so the oxonium
+    // gate wrongly drops real glycopeptide ETD scans that have no paired-HCD
+    // evidence — they emit nothing. When set, run the mass-only DB branch on ETD
+    // scans even if oxonium didn't fire. Gated to ETD only (per code review) so
+    // plain-peptide HCD spectra keep the gate and aren't false-annotated as glyco.
+    let etd_db_fallback = is_etd && std::env::var_os("ANDES_GLYCO_ETD_DBFALLBACK").is_some();
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -781,6 +788,7 @@ fn score_spectrum_glyco(
                         glycan_list,
                         tol_ppm,
                         effective_top_k,
+                        etd_db_fallback,
                     );
                     for h in hits {
                         all_backbone.push(h);

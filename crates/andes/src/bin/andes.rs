@@ -3326,19 +3326,13 @@ fn load_labels_from_tsv(
     // and the unmodified form is the correct default for the rank corpus.
     let fixed_deltas: std::collections::HashMap<u8, f64> =
         aa_set.fixed_mod_deltas().into_iter().collect();
-    // `glyco` = (glycosite_0based, glycan_mass) to bake the glycan onto that N.
-    let decorate = |seq: &str, glyco: Option<(usize, f64)>| -> String {
-        let mut d = String::with_capacity(seq.len() + 12);
+    let decorate = |seq: &str| -> String {
+        let mut d = String::with_capacity(seq.len() + 4);
         d.push_str("-.");
-        for (i, &b) in seq.as_bytes().iter().enumerate() {
+        for &b in seq.as_bytes() {
             d.push(b as char);
             if let Some(delta) = fixed_deltas.get(&b) {
                 d.push_str(&format!("+{:.5}", delta));
-            }
-            if let Some((site, gmass)) = glyco {
-                if i == site {
-                    d.push_str(&format!("+{gmass:.5}"));
-                }
             }
         }
         d.push_str(".-");
@@ -3389,10 +3383,30 @@ fn load_labels_from_tsv(
                 .or_else(|| first_nglyco_site(seq.as_bytes()))?;
             (site < seq.len()).then_some((site, gmass))
         });
-        let peptide = match Peptide::from_str(&decorate(seq, glyco), aa_set) {
+        let mut peptide = match Peptide::from_str(&decorate(seq), aa_set) {
             Ok(p) => p,
             Err(_) => { miss_pep += 1; continue; }
         };
+        // Bake the glycan directly onto the glycosite residue. We do NOT put it in
+        // the peptide string: Peptide::from_str only accepts `+delta` mods that
+        // match a REGISTERED variant, and per-PSM glycan masses aren't registered
+        // (that dropped ~96% of glyco labels as "unparseable"). The glycan delta on
+        // the N flows into every glycosite-spanning c/z fragment mass generically.
+        if let Some((site, gmass)) = glyco {
+            if let Some(res) = peptide.residues.get_mut(site) {
+                let base = res.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+                res.mod_ = Some(std::sync::Arc::new(model::modification::Modification {
+                    name: "Glycan".to_string(),
+                    mass_delta: base + gmass,
+                    residue: model::modification::ResidueSpec::Specific(res.residue),
+                    location: model::modification::ModLocation::Anywhere,
+                    fixed: false,
+                    accession: None,
+                    neutral_losses: Vec::new(),
+                    loss_class: 1,
+                }));
+            }
+        }
         if !seen_scans.insert(scan) {
             // A second VALID row for a scan already labeled: skip (keep the first).
             dup_scan += 1;

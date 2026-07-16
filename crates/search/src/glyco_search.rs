@@ -1314,7 +1314,7 @@ fn score_spectrum_glyco(
                     let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
                     andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
                 };
-                cz_hyperscore_psm(ss, pep, gmass, gsite, max_frag_charge, fragment_tolerance_da)
+                cz_hyperscore_psm(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
             };
 
             let winners_for_features: Vec<(GlycanWinnerKey, CheapWinner)> =

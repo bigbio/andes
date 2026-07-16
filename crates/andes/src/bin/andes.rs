@@ -2473,9 +2473,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let t_glyco = std::time::Instant::now();
         // Use the curated common list (~600 glycans) so that ALL backbone candidates
         // can be b/y-scored in phase-1 (avoids the Y-ladder pre-filter ceiling). The
-        // full ~2510-entry list (n_glycan_list()) was A/B-refuted at 1% FDR — the
-        // extra decoys dilute separation faster than the added coverage helps.
-        let glycan_list = andes_glyco::glycan_db::n_glycan_list_common();
+        // full ~4034-entry list (n_glycan_list()) was A/B-refuted at 1% FDR when
+        // the cz collapse scoring was buggy (long/decoy candidates won). The bug
+        // hunt (2026-07-16) showed the default ~612 list MISSES the mouse-brain
+        // glycome at high charge (z5 69%/z6 38% coverage) — a generation ceiling.
+        // ANDES_GLYCO_FULL_GLYCANS re-tests the full list now that cz is fixable.
+        let glycan_list = if std::env::var_os("ANDES_GLYCO_FULL_GLYCANS").is_some() {
+            andes_glyco::glycan_db::n_glycan_list()
+        } else {
+            andes_glyco::glycan_db::n_glycan_list_common()
+        };
         let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
         // Dev cap on glyco scoring uses the global --max-spectra (was the
         // redundant --glyco-max-spectra).

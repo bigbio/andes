@@ -3271,6 +3271,18 @@ fn build_train_search_params(
 /// `--mods` applied). Rows with an unknown scan or an unparseable peptide/charge
 /// are skipped and counted. `confidence` is set to 0.0 (labels are pre-filtered
 /// by the external engine; the value is unused by the accumulator).
+/// First N-X-S/T sequon position (0-based index of the N; X != P), or None.
+/// Used to place the glycan mass for training an ETD c/z model: the glycan rides
+/// on glycosite-spanning c/z fragments, so it must be baked onto the sequon N.
+fn first_nglyco_site(seq: &[u8]) -> Option<usize> {
+    (0..seq.len()).find(|&i| {
+        seq[i] == b'N'
+            && i + 2 < seq.len()
+            && seq[i + 1] != b'P'
+            && (seq[i + 2] == b'S' || seq[i + 2] == b'T')
+    })
+}
+
 fn load_labels_from_tsv(
     path: &std::path::Path,
     spectra: &[model::spectrum::Spectrum],
@@ -3298,6 +3310,12 @@ fn load_labels_from_tsv(
     let pep_c = col(&["peptide", "backbone", "sequence", "peptide_sequence"])
         .ok_or("labels: no peptide column")?;
     let chg_c = col(&["charge", "z", "precursor_charge"]).ok_or("labels: no charge column")?;
+    // Optional glyco columns: when present, the glycan mass is baked onto the
+    // glycosite N so glycosite-spanning c/z fragments carry the intact glycan
+    // (required to train a correct ETD c/z model — without it the model learns
+    // that glycosite c/z ions are "usually missing", which is false).
+    let gly_c = col(&["glycan_mass", "glycan", "glycan_neutral"]);
+    let site_c = col(&["glycosite", "site", "glyco_site"]);
     let max_c = scan_c.max(pep_c).max(chg_c);
 
     // Fixed-mod deltas (e.g. Cam-C 57.02146) from the aa_set: the label peptides
@@ -3308,13 +3326,19 @@ fn load_labels_from_tsv(
     // and the unmodified form is the correct default for the rank corpus.
     let fixed_deltas: std::collections::HashMap<u8, f64> =
         aa_set.fixed_mod_deltas().into_iter().collect();
-    let decorate = |seq: &str| -> String {
-        let mut d = String::with_capacity(seq.len() + 4);
+    // `glyco` = (glycosite_0based, glycan_mass) to bake the glycan onto that N.
+    let decorate = |seq: &str, glyco: Option<(usize, f64)>| -> String {
+        let mut d = String::with_capacity(seq.len() + 12);
         d.push_str("-.");
-        for &b in seq.as_bytes() {
+        for (i, &b) in seq.as_bytes().iter().enumerate() {
             d.push(b as char);
             if let Some(delta) = fixed_deltas.get(&b) {
                 d.push_str(&format!("+{:.5}", delta));
+            }
+            if let Some((site, gmass)) = glyco {
+                if i == site {
+                    d.push_str(&format!("+{gmass:.5}"));
+                }
             }
         }
         d.push_str(".-");
@@ -3352,7 +3376,20 @@ fn load_labels_from_tsv(
         // row must not "claim" the scan and cause a later VALID row for the same
         // scan to be dropped as a duplicate (Codex + code-review finding — external
         // exports can order a weaker alternative first).
-        let peptide = match Peptide::from_str(&decorate(f[pep_c].trim()), aa_set) {
+        let seq = f[pep_c].trim();
+        // Resolve the glycan placement (if this is a glyco corpus): glycan mass
+        // from the column, glycosite from an explicit column or the first sequon.
+        let glyco: Option<(usize, f64)> = gly_c.and_then(|gc| {
+            let gmass: f64 = f.get(gc)?.trim().parse().ok()?;
+            if gmass <= 0.0 {
+                return None;
+            }
+            let site = site_c
+                .and_then(|sc| f.get(sc)?.trim().parse::<usize>().ok())
+                .or_else(|| first_nglyco_site(seq.as_bytes()))?;
+            (site < seq.len()).then_some((site, gmass))
+        });
+        let peptide = match Peptide::from_str(&decorate(seq, glyco), aa_set) {
             Ok(p) => p,
             Err(_) => { miss_pep += 1; continue; }
         };

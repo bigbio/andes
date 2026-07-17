@@ -1763,7 +1763,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         EnzymeSpecificity::Semi => 1,
         EnzymeSpecificity::NonSpecific => 0,
     };
-    params.max_missed_cleavages = cli.max_missed_cleavages;
+    // Glycopeptides frequently carry >=2 missed cleavages (the glycan sterically
+    // protects the nearby cleavage site), so the general default of 1 silently
+    // drops ~6% of true glycopeptides from the digest — concentrated at high
+    // charge. Validated: raising to 2 for --glyco gave z5 22->54 (+2.5x) and
+    // +116 backbone-correct @1% on the pooled AI-ETD benchmark. Floor glyco at 2.
+    params.max_missed_cleavages = if cli.glyco {
+        cli.max_missed_cleavages.max(2)
+    } else {
+        cli.max_missed_cleavages
+    };
     params.min_peaks = cli.min_peaks;
     params.min_length = cli.min_length;
     params.max_length = cli.max_length;

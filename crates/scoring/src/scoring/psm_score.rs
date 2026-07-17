@@ -415,15 +415,17 @@ pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &
 /// ladder is sparse (the high-charge wall). `glycan_mass = 0.0` scores a naked
 /// peptide; `max_frag_charge` bounds the fragment charge sweep (ETD c/z of a
 /// z-charged precursor reach ~z-1). Returns 0.0 for peptides shorter than 2.
-/// `ANDES_GLYCO_CZ_FIX`: enable the two cz_hyperscore correctness fixes (bug hunt
-/// 2026-07-16): (1) match c/z with a PER-ION PPM tolerance instead of a flat 0.5 Da
-/// window (0.5 Da is 6-83x too loose on high-res AI-ETD → noise-dominated); (2)
-/// NORMALIZE the score by peptide length so a longer wrong/decoy peptide can't
-/// out-count a shorter true one in the per-scan collapse (traced: a 45-mer decoy
-/// beat a 19-mer target). Off = old behavior (flat 0.5 Da, unnormalized count).
+/// The two cz_hyperscore correctness fixes (bug hunt 2026-07-16/17), now DEFAULT
+/// ON after validation (6-frac pooled AI-ETD: +251 backbone-correct @1%, +11%,
+/// 43%→48% of Byonic, decoy-safe): (1) match c/z with a PER-ION PPM tolerance
+/// instead of a flat 0.5 Da window (0.5 Da is 6-83x too loose on high-res AI-ETD →
+/// noise-dominated); (2) NORMALIZE the score by peptide length so a longer
+/// wrong/decoy peptide can't out-count a shorter true one in the per-scan collapse
+/// (traced: a 45-mer decoy beat a 19-mer target). `ANDES_GLYCO_CZ_FIX_OFF` restores
+/// the old buggy behavior (flat 0.5 Da, unnormalized count) for A/B/rollback.
 fn cz_fix_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_CZ_FIX").is_some())
+    *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_CZ_FIX_OFF").is_none())
 }
 
 pub fn cz_hyperscore_psm(

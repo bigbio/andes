@@ -398,8 +398,10 @@ struct SearchArgs {
 
 
     /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
-    /// Hidden tuning knob; validated default 50.
-    #[arg(long = "glyco-gp-k", hide = true, default_value_t = 50.0f32)]
+    /// Hidden tuning knob; default 10 (lowered from 50 in round-2 — K·ladder is
+    /// per-backbone and non-discriminating between isobaric peptides; see
+    /// GLYCO_GP_K_DEFAULT).
+    #[arg(long = "glyco-gp-k", hide = true, default_value_t = 10.0f32)]
     glyco_gp_k: f32,
 
     /// `gp` fused-selector core-Y hit-count weight J. Hidden tuning knob; default 5.
@@ -411,9 +413,18 @@ struct SearchArgs {
     glyco_gp_h: f32,
 
     /// `gp` selector ETD c/z-hyperscore weight (added ONLY on ETD/AI-ETD spectra;
-    /// inert on HCD). Hidden knob; default 5. 0 disables ETD c/z selection.
-    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = 5.0f32)]
+    /// inert on HCD). Hidden knob; default 15 (raised from 5 in round-2 — c/z is
+    /// the only per-candidate discriminator on ETD). 0 disables ETD c/z selection.
+    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = 15.0f32)]
     glyco_gp_cz: f32,
+
+    /// c/z truncation gate: keep the top-k backbones by glycosite-spanning c/z
+    /// evidence (AXIS 4) so high-charge ETD glycopeptides supported mainly by c/z
+    /// survive Phase-1 truncation. Default ON; ETD-only (inert on HCD/CID). Pass
+    /// `--glyco-cz-gate false` to disable. `action = Set` so the bool takes an
+    /// explicit value (a bare bool arg would be an un-disableable set-true flag).
+    #[arg(long = "glyco-cz-gate", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
+    glyco_cz_gate: bool,
 
     /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
     /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
@@ -440,6 +451,33 @@ struct SearchArgs {
     /// targets high-charge glycopeptides. Off by default. Hidden.
     #[arg(long = "glyco-hcd-pair", hide = true, default_value_t = false)]
     glyco_hcd_pair: bool,
+
+    /// BUG2 fix, EXPERIMENTAL: on ETD/AI-ETD spectra, score the rank/edge/
+    /// hyperscore path (RawScore, EdgeScore, hyperscore, RankScoreFloat) against a
+    /// peptide clone carrying the intact glycan on its glycosite instead of the
+    /// bare backbone, so glycosite-spanning c/z fragments are computed at the real
+    /// (glycan-carrying) mass. Off by default; inert on HCD/CID. Combine with
+    /// `--model`/`--model-store` pointing at a c/z-trained model for the
+    /// configuration where this is expected to matter most. Hidden.
+    #[arg(long = "glyco-etd-rank-glycan", hide = true, default_value_t = false)]
+    glyco_etd_rank_glycan: bool,
+
+    /// BUG5, EXPERIMENTAL: per-spectrum-activation model dispatch. andes normally
+    /// selects ONE scoring model for the whole file by majority vote over the
+    /// first 64 mzML spectra (`detect_dominant_activation`), so on a mixed
+    /// HCD/ETD (EThcD / AI-ETD) file every scan is scored with the dominant
+    /// model regardless of its own activation. When this is on, the glyco driver
+    /// ALSO loads the ETD-family model (same instrument/protocol/enzyme lookup,
+    /// activation forced to ETD) and dispatches each spectrum's own rank/edge/
+    /// hyperscore/RankScoreFloat scoring to whichever model matches ITS OWN
+    /// activation method — an ETD/AI-ETD scan scores against the ETD model, an
+    /// HCD scan (including an HCD partner read for `--glyco-hcd-pair`
+    /// candidate generation) still scores against the file's dominant model.
+    /// Off by default (byte-identical to the pre-dispatch single-model path).
+    /// Falls back to the single-model behavior with a WARN if no ETD-family
+    /// model exists in the store. Hidden.
+    #[arg(long = "glyco-per-spectrum-model", hide = true, default_value_t = false)]
+    glyco_per_spectrum_model: bool,
 
     /// Cross-spectrum transfer: q-value threshold for confident donor seeds
     /// (--glyco-transfer only). Hidden; default 0.05 (native GBDT q is conservative).
@@ -1716,6 +1754,58 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
+    // BUG5 (per-spectrum model dispatch prototype, `--glyco-per-spectrum-model`):
+    // load a SECOND model, forcing activation=ETD (same instrument/protocol/
+    // enzyme lookup that just resolved the primary `param`/`scorer`), so the
+    // glyco driver can dispatch each spectrum's rank/edge/hyperscore scoring to
+    // whichever model matches ITS OWN activation, instead of the single
+    // whole-file majority model every scan uses today (`detect_dominant_
+    // activation` picks one model for the whole file by majority vote over the
+    // first 64 spectra). `None` (the default — flag off, or no ETD-family model
+    // in the store) reproduces the prior single-model behavior exactly; only the
+    // glyco path reads this (see `GlycoScoreCtx::etd_scorer`).
+    let etd_scorer_owned: Option<RankScorer> = if cli.glyco && cli.glyco_per_spectrum_model {
+        let etd_instrument = detected_activation_instrument.and_then(|(_, inst)| inst);
+        match load_param_from_store(
+            ActivationMethod::ETD,
+            etd_instrument,
+            cli.protocol,
+            search_enzyme,
+            cli.model_store.as_deref(),
+            None,
+        ) {
+            Ok((etd_model_id, mut etd_param)) => {
+                // Reuse the resolved protocol (the auto-detected TMT/iTRAQ handling
+                // applied to the primary `param` above) rather than raw `cli.protocol`,
+                // so the ETD scorer's isobaric handling matches the primary scorer.
+                etd_param.data_type.protocol = param.data_type.protocol;
+                eprintln!(
+                    "[glyco] --glyco-per-spectrum-model: loaded ETD model '{etd_model_id}' — \
+                     ETD/AI-ETD spectra dispatch to this model for their own rank/edge/\
+                     hyperscore/RankScoreFloat scoring; HCD spectra (and the HCD partner read \
+                     for --glyco-hcd-pair candidate generation) keep the file's dominant model"
+                );
+                let mut etd_scorer = RankScorer::new(&etd_param);
+                // Apply the same MGF fragment-tol override the primary scorer got
+                // (ignored when the instrument was auto-detected from metadata).
+                if frag_tol_override.is_some() && !instrument_was_detected {
+                    etd_scorer.set_fragment_tol_override(frag_tol_override);
+                }
+                Some(etd_scorer)
+            }
+            Err(e) => {
+                eprintln!(
+                    "WARN: --glyco-per-spectrum-model: failed to load an ETD-family model \
+                     ({e}) — falling back to the whole-file dominant model for every spectrum \
+                     (no per-spectrum dispatch)"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
@@ -1724,6 +1814,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     params.charge_range = charge_min..=charge_max;
     let (iso_min, iso_max) = cli.isotope_error;
     params.isotope_error_range = iso_min..=iso_max;
+    // Glyco high-mass precursors (backbone + multi-kDa glycan) frequently have the
+    // monoisotopic peak mis-picked several 13C low, so the true neutral mass falls
+    // outside the default -1..=2 sweep. Widen the upper bound for glyco so that
+    // candidate mass is reachable. A/B-gated: ANDES_GLYCO_ISO_WIDE only.
+    if cli.glyco && std::env::var_os("ANDES_GLYCO_ISO_WIDE").is_some() {
+        params.isotope_error_range = iso_min..=iso_max.max(5);
+    }
     // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
     // `.raw` readers. MGF (no MS1) and the Bruker `.d` reader (DDA MS2 only;
     // chimeric on `.d` is out of scope) make `--chimeric` inert, so keep
@@ -2389,9 +2486,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(prefix) = &title_prefix {
                     prefix_spectrum_titles(&mut chunk, prefix);
                 }
-                let offset = all_spectra.len();
-                let queues = prepared.run_chunk(&chunk, offset);
-                all_queues.extend(queues);
+                // SPEED (--glyco): the per-spectrum PEPTIDE search is pure waste in
+                // glyco mode — glyco_search_run re-derives its own candidates from
+                // `prepared` + the retained peaks and writes its own `.glyco.pin`
+                // (the standard PIN is skipped), so these PSM queues are discarded.
+                // Skip the scoring (parsing + peak retention below still run); ~16%
+                // faster on glyco. Non-glyco path is unchanged.
+                if !cli.glyco {
+                    let offset = all_spectra.len();
+                    let queues = prepared.run_chunk(&chunk, offset);
+                    all_queues.extend(queues);
+                }
                 for mut spec in chunk.into_iter() {
                     // See the chimeric-loop note above: normally peaks are
                     // dropped post-scoring to bound memory, but `--refine` or
@@ -2467,12 +2572,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let spectra = all_spectra;
     let mut queues = all_queues;
 
-    let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
-    eprintln!(
-        "Search complete: {non_empty} / {} spectra have PSMs (match_spectra wall: {:.2}s)",
-        spectra.len(),
-        search_elapsed.as_secs_f64()
-    );
+    if cli.glyco {
+        eprintln!(
+            "Standard peptide search skipped in --glyco mode (PSMs unused; glyco driver \
+             derives its own candidates); {} spectra loaded ({:.2}s)",
+            spectra.len(),
+            search_elapsed.as_secs_f64()
+        );
+    } else {
+        let non_empty = queues.iter().filter(|q| !q.is_empty()).count();
+        eprintln!(
+            "Search complete: {non_empty} / {} spectra have PSMs (match_spectra wall: {:.2}s)",
+            spectra.len(),
+            search_elapsed.as_secs_f64()
+        );
+    }
 
     // ── 7a. Glyco mode: run glyco scoring and write .glyco.pin, then return ──
     // When --glyco is active, we run the glyco-PSM scoring driver over ALL
@@ -2511,6 +2625,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             glyco_decoy: cli.glyco_decoy,
             // Single-file only: cross-file pairing is unsound (see guard above).
             hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
+            etd_rank_glycan: cli.glyco_etd_rank_glycan,
+            cz_gate: cli.glyco_cz_gate,
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
@@ -2519,6 +2635,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             glyco_tol_ppm,
             cli.glyco_backbone_top_k,
             glyco_cfg,
+            etd_scorer_owned.as_ref(),
         );
         let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
         eprintln!(
@@ -2822,6 +2939,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 glyco_cfg,
                 pass1,
                 &injected,
+                etd_scorer_owned.as_ref(),
             )
         } else {
             pass1

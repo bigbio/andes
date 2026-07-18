@@ -480,6 +480,45 @@ pub fn cz_hyperscore_psm(
     }
 }
 
+/// Fraction of base-peak intensity captured by MATCHED glycopeptide-aware c/z ions
+/// (additive PIN feature `CzIntensity`). Where [`cz_hyperscore_psm`] counts distinct
+/// matched backbone positions (presence only — the round-4 audit's "intensity
+/// blindness"), this SUMS the intensity of the matched c/z peaks, normalised by the
+/// base peak — the intensity signal reference glyco scorers weight and andes'
+/// count-only hyperscore discards. A distinct (kind,position) contributes its best
+/// matched intensity once (mirrors the distinct-hit convention of `cz_hyperscore`).
+/// 0.0 on short peptides / when no c/z peak matches. Per-ion ppm tolerance.
+pub fn cz_matched_intensity_frac(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    glycan_mass: f64,
+    glycosite: usize,
+    max_frag_charge: u8,
+    tol_ppm: f64,
+) -> f32 {
+    let n = peptide.length();
+    if n < 2 || max_frag_charge == 0 {
+        return 0.0;
+    }
+    let (peaks, _) = scored_spec.active_peaks_and_ranks();
+    let base = peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9);
+    let mut c_int = vec![0.0f32; n];
+    let mut z_int = vec![0.0f32; n];
+    for ion in predict_cz_ions(peptide, 1..=max_frag_charge, glycan_mass, glycosite) {
+        let tol_da = (ion.mz * tol_ppm * 1e-6).max(0.01);
+        if let Some((_, intensity, _)) = scored_spec.nearest_peak_full(ion.mz, tol_da) {
+            let pos = ion.position as usize;
+            match ion.kind {
+                IonKind::C if pos < n => c_int[pos] = c_int[pos].max(intensity),
+                IonKind::Z if pos < n => z_int[pos] = z_int[pos].max(intensity),
+                _ => {}
+            }
+        }
+    }
+    let summed: f32 = c_int.iter().chain(z_int.iter()).sum();
+    summed / base
+}
+
 /// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split
 /// node scores (`prefix_score + suffix_score`) instead of rounding each split to
 /// `i32` before accumulation.

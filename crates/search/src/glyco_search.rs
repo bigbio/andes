@@ -122,7 +122,8 @@ use crate::psm::PsmFeatures;
 type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
 
 use scoring_crate::scoring::{
-    candidate_rank_entropy, cz_hyperscore_psm, fuse_strong_score, hyperscore_psm,
+    candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, fuse_strong_score,
+    hyperscore_psm,
     listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
     StrongScoreInputs,
 };
@@ -1634,6 +1635,28 @@ fn score_spectrum_glyco(
                 cz_score_best_site(ss, pep, gmass, max_frag_charge, tol_ppm, cz_multisite)
             };
 
+            // INTENSITY companion to `cz` (additive PIN feature `CzIntensity`): the
+            // matched-c/z intensity fraction the count-only `cz_hyperscore` discards
+            // (round-4 intensity-blindness audit). PIN-only; not in the collapse.
+            let cz_int = |w: &CheapWinner| -> f32 {
+                if !is_etd {
+                    return 0.0;
+                }
+                let ss = match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
+                    Some((_, ss)) => ss,
+                    None => return 0.0,
+                };
+                let bb = &deduped_backbone[w.bb_hit_idx];
+                let gmass = bb
+                    .glycan
+                    .as_ref()
+                    .map(|g| g.mass)
+                    .unwrap_or(bb.glycan_mass_residual);
+                let pep = &candidates[w.cand_slot].peptide;
+                let gsite = glyco_site_for(pep);
+                cz_matched_intensity_frac(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
+            };
+
             let winners_for_features: Vec<(GlycanWinnerKey, CheapWinner)> =
                 if features_collapse {
                     // Top-1-per-scan collapse (required for honest per-scan TDC FDR),
@@ -1855,6 +1878,7 @@ fn score_spectrum_glyco(
                     // closure the collapse selector used, so the emitted feature and
                     // the selection score can never diverge (single source of truth).
                     cz_hyperscore: cz(&w),
+                    cz_intensity: cz_int(&w),
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
@@ -2522,6 +2546,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key: key, psm };
         let cloned = hit.clone();

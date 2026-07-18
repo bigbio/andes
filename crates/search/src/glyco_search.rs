@@ -64,6 +64,25 @@ pub struct GlycoConfig {
     pub debug: bool,
     /// Emit paired glycan-axis decoy rows for experimental 2D-FDR (`--glyco-decoy`).
     pub glyco_decoy: bool,
+    /// EXPERIMENTAL paired-scan generation (`--glyco-hcd-pair`, B1): on ETD/AI-ETD
+    /// spectra, GENERATE candidate backbones from the paired HCD scan (same
+    /// precursor, strong oxonium/core-Y/b/y) while SCORING c/z on the ETD scan.
+    /// Attacks the high-charge generation wall (z4-z7). Default false; inert on the
+    /// closed-HCD path (only ETD spectra with an HCD partner are affected).
+    pub hcd_pair: bool,
+    /// BUG2 fix, EXPERIMENTAL (`--glyco-etd-rank-glycan`): on ETD/AI-ETD spectra,
+    /// score the rank/edge/hyperscore path (`score_psm` / `psm_edge_score` /
+    /// `hyperscore_psm` / `score_psm_float`) against a peptide clone carrying the
+    /// intact glycan on its glycosite instead of the bare backbone — see
+    /// `glyco_aware_peptide`. Default false (byte-identical to the pre-fix path);
+    /// inert on HCD/CID. Hot-loop cost: one `Vec<AminoAcid>` clone + `Peptide::new`
+    /// per (backbone, candidate) pair on ETD scans when on.
+    pub etd_rank_glycan: bool,
+    /// c/z truncation gate (`--glyco-cz-gate`, default ON). Adds AXIS 4 to the
+    /// Phase-1 backbone truncation: keep the top-k backbones by glycosite-spanning
+    /// c/z evidence too, so high-charge ETD glycopeptides supported mainly by c/z
+    /// (weak b/y, weak core-Y) survive to the collapse. ETD-only (inert on HCD/CID).
+    pub cz_gate: bool,
 }
 
 impl Default for GlycoConfig {
@@ -75,6 +94,9 @@ impl Default for GlycoConfig {
             gp_cz: GLYCO_GP_CZ_DEFAULT,
             pf_charge: 2,
             max_pf: 1024,
+            hcd_pair: false,
+            etd_rank_glycan: false,
+            cz_gate: true,
             debug: false,
             glyco_decoy: false,
         }
@@ -208,6 +230,96 @@ fn order_peptide_first(pf: &mut [(u32, u32)]) {
     });
 }
 
+/// BUG2 fix — build a glyco-aware peptide clone for ETD rank/edge/hyperscore
+/// scoring (opt-in via `--glyco-etd-rank-glycan`).
+///
+/// The audit (995 truth peptides) found that `score_psm` / `psm_edge_score` /
+/// `hyperscore_psm` / `score_psm_float` are always handed the BARE
+/// deglycosylated backbone, even on ETD/AI-ETD scans. Every c/z (or b/y)
+/// fragment whose cleavage site is on the far side of the glycosite from the
+/// N-terminus carries the intact glycan in the REAL spectrum, but is computed
+/// at the bare (glycan-free) mass by these scorers — so it can never match the
+/// real peak. Because a glycosite splits a peptide's `n-1` cleavage sites into
+/// two sides, this is a combinatorial invariant: on average HALF of a peptide's
+/// c/z (or b/y) evidence is invisible to the dominant rank/hyperscore path.
+///
+/// This mirrors the training-label recipe in `andes.rs::load_labels_from_tsv`
+/// (which bakes the glycan onto the glycosite so a c/z model trains correctly)
+/// so the same glycan-aware peptide shape is used at both train and search time.
+///
+/// CRITICAL: this reconstructs via `Peptide::new` rather than mutating
+/// `residues` on an already-built `Peptide` in place. `Peptide`'s
+/// `neutral_mass` / `nominal_mass` / `nominal_residue_mass` fields are cached
+/// at construction time and are PRIVATE (no public setter) — mutating only the
+/// public `residues` field (as the training-label recipe does) leaves those
+/// caches at the stale BARE value. `score_psm` computes
+/// `suffix_nominal = peptide_nominal - prefix_nominal`, where `peptide_nominal`
+/// is the CACHED total and `prefix_nominal` is freshly re-accumulated from
+/// `residues` on every call — so a stale (bare) cache makes every suffix mass
+/// downstream of the glycosite wrong (even sign-flipped) the moment the fresh
+/// prefix accumulator picks up the glycan delta. Reconstructing via
+/// `Peptide::new` keeps the cached total and the per-split walk consistent.
+fn glyco_aware_peptide(
+    pep: &model::peptide::Peptide,
+    gsite: usize,
+    gmass: f64,
+) -> model::peptide::Peptide {
+    if gmass <= 0.0 || gsite >= pep.residues.len() {
+        return pep.clone();
+    }
+    let mut residues = pep.residues.clone();
+    if let Some(res) = residues.get_mut(gsite) {
+        let base = res.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
+        res.mod_ = Some(std::sync::Arc::new(model::modification::Modification {
+            name: "Glycan".to_string(),
+            mass_delta: base + gmass,
+            residue: model::modification::ResidueSpec::Specific(res.residue),
+            location: model::modification::ModLocation::Anywhere,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 1,
+        }));
+    }
+    model::peptide::Peptide::new(residues, pep.pre, pep.post)
+}
+
+/// First N-X-S/T sequon position in `pep`, defaulting to 0 when none is found
+/// (matches the existing model-free `cz` closure's site convention in
+/// [`score_spectrum_glyco`] — factored out so the ETD rank-glycan path uses the
+/// identical glycosite).
+fn glyco_site_for(pep: &model::peptide::Peptide) -> usize {
+    let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
+    andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
+}
+
+/// c/z hyperscore for a glycopeptide, placing the intact glycan at its glycosite.
+/// With `multisite`, a peptide carrying >1 sequon is scored at EVERY sequon site
+/// and the MAX is returned (the true glycosite is otherwise assumed to be the
+/// first, deflating c/z for ~8% of multi-sequon glycopeptides). `multisite=false`
+/// reproduces the first-site-only behavior exactly.
+fn cz_score_best_site(
+    ss: &ScoredSpectrum<'_>,
+    pep: &model::peptide::Peptide,
+    gmass: f64,
+    max_frag_charge: u8,
+    tol_ppm: f64,
+    multisite: bool,
+) -> f32 {
+    let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
+    if multisite {
+        let sites = andes_glyco::sequon::all_nxst_sites(&res);
+        if sites.len() > 1 {
+            return sites
+                .iter()
+                .map(|&s| cz_hyperscore_psm(ss, pep, gmass, s, max_frag_charge, tol_ppm))
+                .fold(f32::NEG_INFINITY, f32::max);
+        }
+    }
+    let gsite = andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0);
+    cz_hyperscore_psm(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
+}
+
 fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<BackboneHit> {
     if all_backbone.is_empty() {
         return Vec::new();
@@ -277,6 +389,14 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
 pub struct GlycoScoreCtx<'a> {
     pub params: &'a crate::search_params::SearchParams,
     pub scorer: &'a scoring_crate::scoring::RankScorer,
+    /// BUG5 (per-spectrum model dispatch prototype): an optional ETD-specific
+    /// `RankScorer`, used INSTEAD of `scorer` when the spectrum being scored
+    /// (or, for paired-scan generation, the spectrum being READ) is itself
+    /// ETD/AI-ETD. `None` unless the driver explicitly loaded a second model
+    /// (`--glyco-per-spectrum-model`) — so leaving this `None` reproduces the
+    /// prior whole-file single-model behavior byte-for-byte. See
+    /// `score_spectrum_glyco`'s `spec_scorer`/`gen_scorer`/`phase1_scorer`.
+    pub etd_scorer: Option<&'a scoring_crate::scoring::RankScorer>,
     pub candidates: &'a [crate::candidate_gen::Candidate],
     pub bucket_index: &'a std::collections::BTreeMap<i32, Vec<usize>>,
     pub fragment_tolerance_da: f64,
@@ -298,12 +418,26 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_h: f32,
     pub gp_cz: f32,
     pub glyco_decoy_on: bool,
+    /// B1 paired-scan generation toggle (`--glyco-hcd-pair`). Process-constant.
+    pub hcd_pair_on: bool,
+    /// BUG2 fix toggle (`--glyco-etd-rank-glycan`). Process-constant.
+    pub etd_rank_glycan: bool,
+    /// c/z truncation gate (`--glyco-cz-gate`, default ON). Process-constant.
+    pub cz_gate: bool,
     pub features_collapse: bool,
     pub features_enumerated: bool,
     pub scan_filter: Option<&'a std::collections::HashSet<i32>>,
     /// Per-candidate N-X-S/T sequon membership (indexed by candidate slot),
     /// precomputed once so the scoring hot loop is an O(1) lookup.
     pub sequon_membership: &'a [bool],
+    /// B1: all spectra of the run, so an ETD spectrum can read its paired HCD
+    /// partner's peaks for GENERATION. Always the full run slice; pairing is
+    /// gated by `hcd_pair_on` + a `Some` entry in `hcd_partner`, not by this.
+    pub all_spectra: &'a [Spectrum],
+    /// B1: per-spectrum HCD partner index (`hcd_partner[i]` = the HCD spectrum
+    /// paired to ETD spectrum `i`, by precursor m/z within a small scan window),
+    /// or `None`. Empty slice when paired-scan is off.
+    pub hcd_partner: &'a [Option<usize>],
 }
 
 /// Owns the pieces of [`GlycoScoreCtx`] that are built once per run (indices,
@@ -326,6 +460,9 @@ pub struct GlycoCtxOwned {
     gp_h: f32,
     gp_cz: f32,
     glyco_decoy_on: bool,
+    hcd_pair_on: bool,
+    etd_rank_glycan: bool,
+    cz_gate: bool,
     features_collapse: bool,
     features_enumerated: bool,
     sequon_membership: Vec<bool>,
@@ -364,6 +501,9 @@ impl GlycoCtxOwned {
         // compute the decoy Y-ladder per hit — it is unused and ~doubles the glyco
         // composition-ladder cost, so leaving it on would slow the shipping default.
         let glyco_decoy_on = cfg.glyco_decoy;
+        let hcd_pair_on = cfg.hcd_pair;
+        let etd_rank_glycan = cfg.etd_rank_glycan;
+        let cz_gate = cfg.cz_gate;
         // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
         // glyco_pin.rs), so computing the expensive ~40-feature vector
         // (compute_psm_features) for all ~max_features winners/scan is ~100× wasted.
@@ -485,6 +625,9 @@ impl GlycoCtxOwned {
             gp_h,
             gp_cz,
             glyco_decoy_on,
+            hcd_pair_on,
+            etd_rank_glycan,
+            cz_gate,
             features_collapse,
             features_enumerated,
             sequon_membership,
@@ -495,15 +638,20 @@ impl GlycoCtxOwned {
     /// Borrow a [`GlycoScoreCtx`] referencing this owned state plus the
     /// per-call `prepared`/`glycan_list`/`tol_ppm` — the same values
     /// `glyco_search_run` closes over.
+    #[allow(clippy::too_many_arguments)]
     pub fn as_ctx<'a>(
         &'a self,
         prepared: &'a PreparedSearch<'_>,
         glycan_list: &'a [GlycanComp],
         tol_ppm: f64,
+        all_spectra: &'a [Spectrum],
+        hcd_partner: &'a [Option<usize>],
+        etd_scorer: Option<&'a scoring_crate::scoring::RankScorer>,
     ) -> GlycoScoreCtx<'a> {
         GlycoScoreCtx {
             params: prepared.params,
             scorer: prepared.scorer,
+            etd_scorer,
             candidates: &prepared.candidates,
             bucket_index: &prepared.bucket_index,
             fragment_tolerance_da: prepared.fragment_tolerance_da,
@@ -522,10 +670,15 @@ impl GlycoCtxOwned {
             gp_h: self.gp_h,
             gp_cz: self.gp_cz,
             glyco_decoy_on: self.glyco_decoy_on,
+            hcd_pair_on: self.hcd_pair_on,
+            etd_rank_glycan: self.etd_rank_glycan,
+            cz_gate: self.cz_gate,
             features_collapse: self.features_collapse,
             features_enumerated: self.features_enumerated,
             scan_filter: self.scan_filter.as_ref(),
             sequon_membership: &self.sequon_membership,
+            all_spectra,
+            hcd_partner,
         }
     }
 }
@@ -626,6 +779,47 @@ fn score_spectrum_glyco(
         spec.activation_method,
         Some(model::activation::ActivationMethod::ETD)
     );
+    // EXPERIMENT (ANDES_GLYCO_ETD_DBFALLBACK): ETD/AI-ETD scans structurally lack
+    // oxonium (glycosidic cleavage needs a collisional component), so the oxonium
+    // gate wrongly drops real glycopeptide ETD scans that have no paired-HCD
+    // evidence — they emit nothing. When set, run the mass-only DB branch on ETD
+    // scans even if oxonium didn't fire. Gated to ETD only (per code review) so
+    // plain-peptide HCD spectra keep the gate and aren't false-annotated as glyco.
+    let etd_db_fallback = is_etd && std::env::var_os("ANDES_GLYCO_ETD_DBFALLBACK").is_some();
+    // EXPERIMENT (ANDES_GLYCO_CZ_GATE): add a c/z evidence AXIS to the Phase-1
+    // backbone truncation gate. The gate keeps top-k backbones by b/y rank
+    // (AXIS 1) and glycan-Y count (AXIS 2) but NOT by c/z, so on ETD/AI-ETD scans
+    // a backbone supported mainly by glycosite-spanning c/z ions (weak b/y, weak
+    // core-Y) is truncated BEFORE the `gp_cz·cz` selector ever votes for it —
+    // exactly the high-charge ETD regime where the c/z scoring fix couldn't help
+    // because its candidates were already dropped. When set, compute a
+    // per-backbone best c/z hyperscore in Phase-1 and ALSO keep the top-k
+    // backbones by that axis. Gated to ETD only; inert on HCD/CID and when unset
+    // (byte-identical default path).
+    // c/z truncation gate (AXIS 4): default ON (`--glyco-cz-gate`, ctx.cz_gate).
+    // ETD-only (inert on HCD/CID). `ANDES_GLYCO_CZ_GATE_OFF` force-disables it
+    // (A/B / debugging escape hatch) regardless of the flag.
+    let cz_gate_on =
+        is_etd && ctx.cz_gate && std::env::var_os("ANDES_GLYCO_CZ_GATE_OFF").is_none();
+    // EXPERIMENT (ANDES_GLYCO_CZ_MULTISITE): when a peptide carries >1 N-X-S/T
+    // sequon (~8% of tryptic N-glycopeptides), the glycosite is ambiguous and
+    // `first_nxst_site` may place the intact glycan on the WRONG split point,
+    // deflating cz_hyperscore for a true positive. When set, the c/z score is the
+    // MAX over all sequon sites (both the AXIS-4 gate and the scoring closure).
+    // Inert (first-site only, byte-identical) when unset.
+    //
+    // FDR NOTE: a MAX over k sites is a "best-of-k" that inflates c/z, which could
+    // bias the null if targets carry more sequons than decoys. This is why it is
+    // DEFAULT-OFF (first-site-only when unset, as the FDR-safe fallback) and why
+    // both TARGET and DECOY candidates traverse this SAME path (decoys are scored
+    // by `cz_score_best_site` too — the max-over-sites is applied symmetrically, so
+    // the per-candidate null is matched). Enabling it is gated on a decoy-controlled
+    // @1% A/B that would surface any residual sequon-count asymmetry.
+    let cz_multisite = std::env::var_os("ANDES_GLYCO_CZ_MULTISITE").is_some();
+    // BUG2 fix toggle (`--glyco-etd-rank-glycan`): feed the rank/edge/hyperscore
+    // path a glycan-aware peptide clone on ETD scans instead of the bare backbone
+    // (see `glyco_aware_peptide`). Inert (false) unless explicitly enabled.
+    let etd_rank_glycan = ctx.etd_rank_glycan;
     let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
@@ -652,8 +846,72 @@ fn score_spectrum_glyco(
             // recomputing them O(#peaks) — the dominant glyco-scoring cost.
             let stats = SpectrumStats::new(&spec.peaks);
 
+            // B1 paired-scan generation: on an ETD/AI-ETD spectrum with an HCD
+            // partner (same precursor), GENERATE candidate backbones from the HCD
+            // scan's peaks — it carries the oxonium / core-Y / b/y evidence the ETD
+            // scan lacks. `gen_peaks`/`gen_stats` drive every generation call
+            // (oxonium gate, de-novo solver, db_branch, peptide-first, glycan-Y
+            // index, core-Y counts). The c/z LADDER scoring (hyperscore, rank) is
+            // always measured on THIS ETD scan (`spec.peaks`/`stats`).
+            // NOTE ON PROVENANCE: the glycan-level evidence derived during
+            // generation — `ox_ev` and `core_y_counts` — is a property of the
+            // precursor, so it is deliberately REUSED downstream: as the `core_y`
+            // term of the fused collapse selector and as the emitted
+            // `oxonium_summed_frac` / `n_core_oxonium_ions` / `core_y_hits` PIN
+            // features. When paired, those three features therefore reflect the HCD
+            // partner, not the ETD scan (the ETD scan lacks oxonium by design). The
+            // peak swap is per-spectrum — applied identically to target and decoy
+            // candidates — so the decoy null stays symmetric and FDR is unaffected.
+            // When unpaired, `gen_peaks` == `spec.peaks`, so the default path is
+            // byte-identical.
+            let paired_hcd: Option<usize> = if ctx.hcd_pair_on && is_etd {
+                ctx.hcd_partner.get(spec_idx).copied().flatten()
+            } else {
+                None
+            };
+            // The HCD partner is a full `Spectrum` (same precursor), so both the raw
+            // peaks (for de-novo / index generation) and a `ScoredSpectrum` (for the
+            // Phase-1 b/y backbone ranking that gates `backbone_top_k`) can be built
+            // from it. B1.1: rank Phase-1 on `gen_spec` too — otherwise a backbone
+            // correctly generated from the HCD partner is still ranked on the ETD
+            // scan's weak b/y evidence and can be capped out before c/z scoring.
+            let gen_spec: &Spectrum = match paired_hcd {
+                Some(p) => &ctx.all_spectra[p],
+                None => spec,
+            };
+            let gen_peaks: &[(f64, f32)] = &gen_spec.peaks;
+            let gen_stats_owned = paired_hcd.map(|_| SpectrumStats::new(gen_peaks));
+            let gen_stats: &SpectrumStats = gen_stats_owned.as_ref().unwrap_or(&stats);
+
+            // BUG5 (per-spectrum model dispatch prototype): score each spectrum's
+            // OWN evidence with the model matching ITS OWN activation method,
+            // instead of the single whole-file majority model (`scorer`) that was
+            // previously used for every scan regardless of activation.
+            //
+            // `spec_scorer` scores `spec` itself (`scored_per_charge` — the ETD
+            // scan's own b/y evidence, and every EMITTED PIN feature below).
+            // `gen_scorer` scores `gen_spec` — the spectrum candidate GENERATION
+            // and Phase-1 ranking read peaks from (the HCD partner when
+            // `--glyco-hcd-pair` is paired, else `spec` itself again). These are
+            // deliberately independent: in paired mode `gen_spec` is a genuine
+            // HCD spectrum, so it must stay on an HCD-appropriate model even
+            // while `spec` (the ETD scan) dispatches to the ETD model.
+            //
+            // `ctx.etd_scorer` is `None` unless the driver opted in
+            // (`--glyco-per-spectrum-model`); when `None`, both fall back to
+            // `scorer` (the file-level model), so this is byte-identical to the
+            // pre-dispatch behavior by default.
+            let spec_scorer: &scoring_crate::scoring::RankScorer =
+                if is_etd { ctx.etd_scorer.unwrap_or(scorer) } else { scorer };
+            let gen_is_etd = matches!(
+                gen_spec.activation_method,
+                Some(model::activation::ActivationMethod::ETD)
+            );
+            let gen_scorer: &scoring_crate::scoring::RankScorer =
+                if gen_is_etd { ctx.etd_scorer.unwrap_or(scorer) } else { scorer };
+
             // Oxonium evidence for the whole spectrum (charge-independent).
-            let ox_ev = oxonium_gate(&spec.peaks, 0.10, tol_ppm);
+            let ox_ev = oxonium_gate(gen_peaks, 0.10, tol_ppm);
 
             // Determine which charges to try. `glyco_charges_to_try` expands the set
             // UPWARD by `ANDES_GLYCO_CHARGE_EXPAND` (default 0 = exact legacy set) so a
@@ -700,7 +958,7 @@ fn score_spectrum_glyco(
                     // `--glyco-backbone-top-k` only perturbs near-precursor
                     // (fully-glycosylated, gated-out) candidates. Honors the cap
                     // (Codex finding #2 — was hardcoded to 50).
-                    solve_backbones_for_charge(&spec.peaks, widest_precursor, z, tol_ppm, effective_top_k)
+                    solve_backbones_for_charge(gen_peaks, widest_precursor, z, tol_ppm, effective_top_k)
                 } else {
                     None
                 };
@@ -711,13 +969,14 @@ fn score_spectrum_glyco(
                     }
                     let hits = hybrid_candidates_presolved(
                         presolved.as_deref(),
-                        &spec.peaks,
+                        gen_peaks,
                         precursor_neutral,
                         z,
                         iso,
                         glycan_list,
                         tol_ppm,
                         effective_top_k,
+                        etd_db_fallback,
                     );
                     for h in hits {
                         all_backbone.push(h);
@@ -736,7 +995,7 @@ fn score_spectrum_glyco(
                 // (peptide, charge, isotope, glycan) hypotheses — NOT raw b/y
                 // count — so high-count peptides that cannot form a known glycan
                 // don't evict a lower-count peptide that can (Codex re-review #1).
-                let mut pf = frag_index.query(&spec.peaks, MIN_BY_MATCHES);
+                let mut pf = frag_index.query(gen_peaks, MIN_BY_MATCHES);
                 // Deterministic strongest-b/y-first order (see order_peptide_first):
                 // the per-spectrum cap below keeps a prefix of this list, so a
                 // non-total order would make the kept subset non-reproducible.
@@ -804,7 +1063,7 @@ fn score_spectrum_glyco(
                         if pf <= 0.0 {
                             continue;
                         }
-                        for (gid, _core) in glycan_y_index.query(&spec.peaks, pf, z, 2) {
+                        for (gid, _core) in glycan_y_index.query(gen_peaks, pf, z, 2) {
                             let g = &glycan_list[gid as usize];
                             let backbone_residue = pf - H2O - g.mass;
                             if backbone_residue < 500.0 {
@@ -860,12 +1119,43 @@ fn score_spectrum_glyco(
             // (compute_psm_features) is bounded by that cap.
 
             // Build ScoredSpectrum per unique charge (cached, cheap amortized).
+            // This scorer is on THIS ETD scan (`spec`) and drives all EMITTED scoring
+            // (c/z hyperscore, rank features) below.
             let mut scored_per_charge: Vec<(u8, ScoredSpectrum<'_>)> = Vec::new();
             for &z in &charges_to_try {
                 if scored_per_charge.iter().all(|(c, _)| *c != z) {
-                    scored_per_charge.push((z, ScoredSpectrum::new(spec, scorer, z)));
+                    scored_per_charge.push((z, ScoredSpectrum::new(spec, spec_scorer, z)));
                 }
             }
+            // B1.1: a SEPARATE scorer on the generation spectrum (the HCD partner when
+            // paired) used ONLY for the Phase-1 b/y backbone ranking that gates
+            // `backbone_top_k` and picks the cheap winner. Without this, a backbone
+            // correctly generated from the HCD partner is still ranked on the ETD
+            // scan's weak b/y evidence and can be capped out before c/z scoring. Built
+            // only when paired; unpaired runs reuse `scored_per_charge` (gen == spec),
+            // so the default path is unchanged. Emitted features stay on the ETD scan.
+            let gen_scored_per_charge: Vec<(u8, ScoredSpectrum<'_>)> = if paired_hcd.is_some()
+            {
+                let mut v: Vec<(u8, ScoredSpectrum<'_>)> = Vec::new();
+                for &z in &charges_to_try {
+                    if v.iter().all(|(c, _)| *c != z) {
+                        v.push((z, ScoredSpectrum::new(gen_spec, gen_scorer, z)));
+                    }
+                }
+                v
+            } else {
+                Vec::new()
+            };
+            let phase1_scored = if paired_hcd.is_some() {
+                &gen_scored_per_charge
+            } else {
+                &scored_per_charge
+            };
+            // The scorer that built `phase1_scored`'s ScoredSpectrum entries — MUST
+            // match (self-consistent partition/rank tables) whatever is passed to
+            // `score_psm`/`psm_edge_score` below, which read from `phase1_scored`.
+            let phase1_scorer: &scoring_crate::scoring::RankScorer =
+                if paired_hcd.is_some() { gen_scorer } else { spec_scorer };
 
             // Collect core-Y hit counts for all backbones (cheap, used as tiebreaker
             // after b/y ranking; avoids a second pass over deduped_backbone later).
@@ -875,7 +1165,7 @@ fn score_spectrum_glyco(
             // measured near-noise. Phase-1 convention fix.)
             let core_y_counts: Vec<u8> = deduped_backbone
                 .iter()
-                .map(|h| count_core_y_hits(&spec.peaks, &stats, h.backbone_mass + H2O, tol_ppm, max_frag_charge))
+                .map(|h| count_core_y_hits(gen_peaks, gen_stats, h.backbone_mass + H2O, tol_ppm, max_frag_charge))
                 .collect();
 
             // Phase 1: cheap b/y scoring for ALL backbones.
@@ -907,6 +1197,14 @@ fn score_spectrum_glyco(
             let mut backbone_best_rank: Vec<f32> =
                 vec![f32::NEG_INFINITY; deduped_backbone.len()];
 
+            // Per-backbone best c/z hyperscore (ANDES_GLYCO_CZ_GATE only). Tracks
+            // the strongest glycosite-spanning c/z evidence over all peptides that
+            // matched this backbone, so AXIS 4 (below) can retain c/z-strong
+            // backbones that AXIS 1 (b/y) and AXIS 2 (glycan-Y) would truncate.
+            // Left all-NEG_INFINITY (unused) when the gate is off.
+            let mut backbone_best_cz: Vec<f32> =
+                vec![f32::NEG_INFINITY; deduped_backbone.len()];
+
             // SPEED (Codex evidence prefilter): the dominant phase-1 cost is fully
             // b/y-scoring raw DB-branch backbones (precursor − glycan) that are
             // spurious mass coincidences with NO glycan evidence. A real
@@ -926,10 +1224,17 @@ fn score_spectrum_glyco(
                 // donor), so it is NEVER dropped by the core-Y prefilter — otherwise
                 // it would be skipped before it can produce a CheapWinner and AXIS 3
                 // could not retain it (code review).
+                // The cz-gate (AXIS 4) rescues backbones with weak b/y AND weak
+                // core-Y but STRONG glycosite-spanning c/z — exactly the class this
+                // prefilter would drop. When the gate is on, a zero-core-Y Db
+                // backbone MUST still be scored so its `backbone_best_cz` is computed
+                // and AXIS 4 can retain it (otherwise the gate is silently defeated
+                // for its target population). Default path (gate off) unchanged.
                 if scan_has_evidence
                     && !bb_hit.is_transferred
                     && bb_hit.source == Source::Db
                     && core_y_counts[bb_idx] == 0
+                    && !cz_gate_on
                 {
                     continue;
                 }
@@ -989,7 +1294,9 @@ fn score_spectrum_glyco(
                         .collect(),
                 };
 
-                let ss = match scored_per_charge.iter().find(|(c, _)| *c == z) {
+                // Phase-1 gating/selection ranks on the generation spectrum (HCD
+                // partner when paired; ETD scan otherwise — see `phase1_scored`).
+                let ss = match phase1_scored.iter().find(|(c, _)| *c == z) {
                     Some((_, s)) => s,
                     // The backbone's charge fell outside `charges_to_try`
                     // (shouldn't happen since `hybrid_candidates_with_isotope`
@@ -1016,13 +1323,77 @@ fn score_spectrum_glyco(
                         None => (cand_slot as u32, 255, 255, 255, 255, 255),
                     };
 
-                    let sc = score_psm(ss, &cand.peptide, scorer, z, fragment_tolerance_da);
-                    let ei = psm_edge_score(ss, &cand.peptide, scorer, z);
+                    // BUG2 fix (opt-in --glyco-etd-rank-glycan): score the rank/edge
+                    // model against a peptide clone carrying the intact glycan on its
+                    // glycosite, not the bare backbone — see `glyco_aware_peptide` for
+                    // why glycosite-spanning c/z fragments are otherwise silently
+                    // unmatchable. Gated on `gen_is_etd` (NOT `is_etd`): this scores
+                    // against `ss` = phase-1 GENERATION spectrum, which under
+                    // --glyco-hcd-pair is the HCD PARTNER (no c/z) even when the ETD
+                    // scan is_etd — a glycan-aware clone there would only mis-score the
+                    // bare HCD backbone. Bare on HCD/CID gen and when the flag is off.
+                    let scoring_pep: std::borrow::Cow<'_, model::peptide::Peptide> =
+                        if gen_is_etd && etd_rank_glycan {
+                            let gmass = bb_hit
+                                .glycan
+                                .as_ref()
+                                .map(|g| g.mass)
+                                .unwrap_or(bb_hit.glycan_mass_residual);
+                            if gmass > 0.0 {
+                                let gsite = glyco_site_for(&cand.peptide);
+                                std::borrow::Cow::Owned(glyco_aware_peptide(
+                                    &cand.peptide,
+                                    gsite,
+                                    gmass,
+                                ))
+                            } else {
+                                std::borrow::Cow::Borrowed(&cand.peptide)
+                            }
+                        } else {
+                            std::borrow::Cow::Borrowed(&cand.peptide)
+                        };
+
+                    let sc = score_psm(ss, &scoring_pep, phase1_scorer, z, fragment_tolerance_da);
+                    let ei = psm_edge_score(ss, &scoring_pep, phase1_scorer, z);
                     let rk = sc + ei as f32;
 
                     // Update per-backbone best rank.
                     if rk > backbone_best_rank[bb_idx] {
                         backbone_best_rank[bb_idx] = rk;
+                    }
+
+                    // ANDES_GLYCO_CZ_GATE: track the best glycosite-spanning c/z
+                    // hyperscore for this backbone so AXIS 4 can keep c/z-strong
+                    // backbones. c/z MUST be scored on the ETD scan itself
+                    // (`scored_per_charge`, scored on `spec`) — NOT on `ss`
+                    // (`phase1_scored`), which is the HCD PARTNER under
+                    // `--glyco-hcd-pair` and carries no c/z ions. Mirrors the
+                    // scoring cz closure (which also reads `scored_per_charge`).
+                    // Uses the BARE peptide (c/z ion prediction adds the intact
+                    // glycan at the glycosite internally via `glycan_mass`).
+                    if cz_gate_on {
+                        let gmass = bb_hit
+                            .glycan
+                            .as_ref()
+                            .map(|g| g.mass)
+                            .unwrap_or(bb_hit.glycan_mass_residual);
+                        if gmass > 0.0 {
+                            if let Some((_, etd_ss)) =
+                                scored_per_charge.iter().find(|(c, _)| *c == z)
+                            {
+                                let czs = cz_score_best_site(
+                                    etd_ss,
+                                    &cand.peptide,
+                                    gmass,
+                                    max_frag_charge,
+                                    tol_ppm,
+                                    cz_multisite,
+                                );
+                                if czs > backbone_best_cz[bb_idx] {
+                                    backbone_best_cz[bb_idx] = czs;
+                                }
+                            }
+                        }
                     }
 
                     let w = CheapWinner {
@@ -1105,6 +1476,33 @@ fn score_spectrum_glyco(
                 accepted_backbones.extend(by_gy);
             }
 
+            // AXIS 4 (ANDES_GLYCO_CZ_GATE, ETD only) — also keep the top_k
+            // backbones by glycosite-spanning c/z evidence. On ETD/AI-ETD scans a
+            // real high-charge glycopeptide's backbone can be supported almost
+            // entirely by c/z ions (weak b/y, weak core-Y), so AXIS 1 + AXIS 2
+            // truncate it out before the `gp_cz·cz` selector ever sees it. Only
+            // backbones with POSITIVE c/z evidence are eligible (an all-NEG_INFINITY
+            // or 0 backbone carries no c/z signal and must not evict a fragment
+            // winner). Union-only, so it can never drop an AXIS 1/2 survivor.
+            if cz_gate_on {
+                let mut by_cz: Vec<usize> = (0..deduped_backbone.len())
+                    .filter(|&i| backbone_best_cz[i] > 0.0)
+                    .collect();
+                by_cz.sort_by(|&ai, &bi| {
+                    backbone_best_cz[bi]
+                        .total_cmp(&backbone_best_cz[ai])
+                        .then_with(|| backbone_best_rank[bi].total_cmp(&backbone_best_rank[ai]))
+                        .then_with(|| {
+                            deduped_backbone[bi]
+                                .backbone_mass
+                                .total_cmp(&deduped_backbone[ai].backbone_mass)
+                        })
+                        .then_with(|| bi.cmp(&ai))
+                });
+                by_cz.truncate(effective_top_k);
+                accepted_backbones.extend(by_cz);
+            }
+
             // AXIS 3 (cross-spectrum transfer) — ALWAYS accept transferred backbones.
             // A transferred backbone has weak b/y AND zero core-Y by construction
             // (that is precisely WHY it was borrowed from a confident sibling), so
@@ -1184,9 +1582,31 @@ fn score_spectrum_glyco(
             // v2 peptide channel: count-rewarding hyperscore over the naked-backbone
             // b/y ions (ln N_matched!). Computed only inside the gp branch below, on
             // the accepted set (bounded), from the SAME ScoredSpectrum phase-1 used.
+            // BUG2 fix (opt-in --glyco-etd-rank-glycan): on ETD winners, score against
+            // the glycan-aware peptide clone so glycosite-spanning fragments are
+            // matchable (see `glyco_aware_peptide`); bare otherwise.
             let hyper = |w: &CheapWinner| -> f32 {
                 match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
-                    Some((_, ss)) => hyperscore_psm(ss, &candidates[w.cand_slot].peptide, scorer),
+                    Some((_, ss)) => {
+                        let pep = &candidates[w.cand_slot].peptide;
+                        if is_etd && etd_rank_glycan {
+                            let bb = &deduped_backbone[w.bb_hit_idx];
+                            let gmass = bb
+                                .glycan
+                                .as_ref()
+                                .map(|g| g.mass)
+                                .unwrap_or(bb.glycan_mass_residual);
+                            if gmass > 0.0 {
+                                let gsite = glyco_site_for(pep);
+                                let modified = glyco_aware_peptide(pep, gsite, gmass);
+                                hyperscore_psm(ss, &modified, spec_scorer)
+                            } else {
+                                hyperscore_psm(ss, pep, spec_scorer)
+                            }
+                        } else {
+                            hyperscore_psm(ss, pep, spec_scorer)
+                        }
+                    }
                     None => 0.0,
                 }
             };
@@ -1211,11 +1631,7 @@ fn score_spectrum_glyco(
                     .map(|g| g.mass)
                     .unwrap_or(bb.glycan_mass_residual);
                 let pep = &candidates[w.cand_slot].peptide;
-                let gsite = {
-                    let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
-                    andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
-                };
-                cz_hyperscore_psm(ss, pep, gmass, gsite, max_frag_charge, fragment_tolerance_da)
+                cz_score_best_site(ss, pep, gmass, max_frag_charge, tol_ppm, cz_multisite)
             };
 
             let winners_for_features: Vec<(GlycanWinnerKey, CheapWinner)> =
@@ -1289,7 +1705,7 @@ fn score_spectrum_glyco(
                 let mut features = compute_psm_features(
                     ss,
                     &cand.peptide,
-                    scorer,
+                    spec_scorer,
                     w.z,
                     ctx.intensity_model,
                 );
@@ -1297,8 +1713,28 @@ fn score_spectrum_glyco(
                 // at 0.0 for glyco (the glyco path skips the standard fill_post_topn).
                 // Additive PIN features; give Percolator the calibration signals + the
                 // strongest fused score it was previously denied on glycopeptides.
+                // BUG2 fix (opt-in --glyco-etd-rank-glycan): RankScoreFloat is the
+                // float-precision companion of the same score_psm the selector used —
+                // keep it glycan-aware on ETD winners for consistency with the
+                // selection that already happened above.
+                let rank_float_pep: std::borrow::Cow<'_, model::peptide::Peptide> =
+                    if is_etd && etd_rank_glycan {
+                        let gmass = bb_hit
+                            .glycan
+                            .as_ref()
+                            .map(|g| g.mass)
+                            .unwrap_or(bb_hit.glycan_mass_residual);
+                        if gmass > 0.0 {
+                            let gsite = glyco_site_for(&cand.peptide);
+                            std::borrow::Cow::Owned(glyco_aware_peptide(&cand.peptide, gsite, gmass))
+                        } else {
+                            std::borrow::Cow::Borrowed(&cand.peptide)
+                        }
+                    } else {
+                        std::borrow::Cow::Borrowed(&cand.peptide)
+                    };
                 features.rank_score_float =
-                    score_psm_float(ss, &cand.peptide, scorer, w.z, fragment_tolerance_da);
+                    score_psm_float(ss, &rank_float_pep, spec_scorer, w.z, fragment_tolerance_da);
                 features.tailor_score = if tailor_denom > 0.0 {
                     w.score / tailor_denom
                 } else {
@@ -1327,7 +1763,7 @@ fn score_spectrum_glyco(
                     score: w.score,
                     rank_score: w.rank,
                     edge_score: w.edge,
-                    activation_method: Some(scorer.param().data_type.activation),
+                    activation_method: Some(spec_scorer.param().data_type.activation),
                     features,
                     // The isotope offset that was actually subtracted when this
                     // backbone was derived (BUG 1 fix — previously hardcoded 0
@@ -1463,8 +1899,50 @@ fn score_spectrum_glyco(
 ///    mass matches the backbone and has a N-X-S/T sequon.
 /// 5. Score each (peptide, glycan) pair and emit a `FullGlycoPsm`.
 ///
+/// B1 paired-scan generation map. For each ETD/AI-ETD spectrum, find its paired
+/// HCD scan — the nearest HCD spectrum (by slice-index distance, inside a small
+/// window) whose precursor m/z matches within `MZ_TOL`. Returns `partner[i] =
+/// Some(hcd_idx)` for ETD spectra with a partner, else `None`; non-ETD spectra are
+/// always `None`. The m/z match supplies the precision; the window only bounds the
+/// search (see `eth_pairing.py`: precursor-matched pairing is 100% within ±3 MS2
+/// scans on HCD-pd-AI-ETD data, vs only 12% for strict scan-N−1 adjacency).
+#[allow(clippy::needless_range_loop)]
+fn build_hcd_partners(spectra: &[Spectrum]) -> Vec<Option<usize>> {
+    use model::activation::ActivationMethod;
+    const WINDOW: usize = 12;
+    const MZ_TOL: f64 = 0.02;
+    let n = spectra.len();
+    let mut partner = vec![None; n];
+    for i in 0..n {
+        if spectra[i].activation_method != Some(ActivationMethod::ETD) {
+            continue;
+        }
+        let mz = spectra[i].precursor_mz;
+        if mz <= 0.0 {
+            continue;
+        }
+        let lo = i.saturating_sub(WINDOW);
+        let hi = (i + WINDOW + 1).min(n);
+        let mut best: Option<(usize, usize)> = None; // (index-distance, hcd_idx)
+        for j in lo..hi {
+            if j == i || spectra[j].activation_method != Some(ActivationMethod::HCD) {
+                continue;
+            }
+            if (mz - spectra[j].precursor_mz).abs() <= MZ_TOL {
+                let d = i.abs_diff(j);
+                if best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, j));
+                }
+            }
+        }
+        partner[i] = best.map(|(_, j)| j);
+    }
+    partner
+}
+
 /// Results are serialized (rayon is not used here to keep v1 simple; the
 /// standard search path handles parallelism separately).
+#[allow(clippy::too_many_arguments)]
 pub fn glyco_search_run(
     spectra: &[Spectrum],
     prepared: &PreparedSearch<'_>,
@@ -1472,10 +1950,20 @@ pub fn glyco_search_run(
     tol_ppm: f64,
     backbone_top_k: usize,
     cfg: GlycoConfig,
+    // BUG5 per-spectrum model dispatch prototype: an optional ETD-specific
+    // RankScorer loaded by the driver (`--glyco-per-spectrum-model`). `None`
+    // reproduces the prior whole-file single-model behavior byte-for-byte.
+    etd_scorer: Option<&scoring_crate::scoring::RankScorer>,
 ) -> Vec<GlycoSpectrumResult> {
     let params = prepared.params;
     let candidates = &prepared.candidates;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
+    // B1: pair each ETD spectrum to its HCD partner (same precursor) before scoring.
+    let hcd_partner: Vec<Option<usize>> = if cfg.hcd_pair {
+        build_hcd_partners(spectra)
+    } else {
+        Vec::new()
+    };
 
     // Shared setup (toggles + indices) — see `GlycoCtxOwned::build` for the
     // full rationale of each; unchanged by the Task 8c extraction, just moved
@@ -1483,7 +1971,7 @@ pub fn glyco_search_run(
     // context from the same routine instead of a second hand-maintained copy.
     let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
     let cross_spectrum_on = owned.cross_spectrum_on;
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner, etd_scorer);
 
     // PASS 1: baseline candidate gen (+ peptide-first if on), no transfer.
     let pass1: Vec<GlycoSpectrumResult> = spectra
@@ -1665,6 +2153,8 @@ pub fn glyco_transfer_pass2(
     cfg: GlycoConfig,
     pass1: Vec<GlycoSpectrumResult>,
     injected: &std::collections::BTreeMap<usize, Vec<BackboneHit>>,
+    // BUG5 per-spectrum model dispatch prototype (see `glyco_search_run`).
+    etd_scorer: Option<&scoring_crate::scoring::RankScorer>,
 ) -> Vec<GlycoSpectrumResult> {
     let candidates = &prepared.candidates;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
@@ -1672,7 +2162,9 @@ pub fn glyco_transfer_pass2(
     // Same shared setup `glyco_search_run` uses — identical toggles/indices,
     // built once for this call (see `GlycoCtxOwned::build` doc comment).
     let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm);
+    // B1 paired-scan generation is a Pass-1 concern; the transfer pass passes an
+    // empty partner map (inert — score_spectrum_glyco falls back to spec.peaks).
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &[], etd_scorer);
 
     // Re-score only the spectra that actually received a transferred backbone.
     // Deterministic order: BTreeMap iteration is already key-sorted, and rayon
@@ -1741,6 +2233,41 @@ mod tests {
     //
     // Smoke test: verify the public types compile and are accessible.
     use super::*;
+
+    /// B1: `build_hcd_partners` pairs each ETD spectrum to the nearest HCD
+    /// spectrum with a matching precursor m/z; non-ETD spectra and ETD spectra
+    /// with no in-window HCD partner get `None`.
+    #[test]
+    fn build_hcd_partners_pairs_etd_to_precursor_matched_hcd() {
+        use model::activation::ActivationMethod;
+        let sp = |mz: f64, am: ActivationMethod| Spectrum {
+            title: String::new(),
+            precursor_mz: mz,
+            precursor_intensity: None,
+            precursor_charge: Some(3),
+            rt_seconds: None,
+            scan: None,
+            peaks: vec![],
+            activation_method: Some(am),
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        };
+        use ActivationMethod::{ETD, HCD};
+        // 0:HCD@500  1:ETD@500  2:HCD@600  3:ETD@600.005 (within tol)  4:ETD@999 (no partner)
+        let spectra = vec![
+            sp(500.0, HCD),
+            sp(500.0, ETD),
+            sp(600.0, HCD),
+            sp(600.005, ETD),
+            sp(999.0, ETD),
+        ];
+        let p = build_hcd_partners(&spectra);
+        assert_eq!(p[0], None, "HCD spectra never get a partner");
+        assert_eq!(p[1], Some(0), "ETD@500 pairs to HCD@500");
+        assert_eq!(p[2], None);
+        assert_eq!(p[3], Some(2), "ETD@600.005 pairs to HCD@600 within m/z tol");
+        assert_eq!(p[4], None, "ETD@999 has no precursor-matched HCD partner");
+    }
 
     /// DETERMINISM regression (the 40%-FDR-swing bug): `frag_index.query`
     /// returns `(cand_idx, match_count)` pairs in an unspecified order. The
@@ -2273,7 +2800,7 @@ mod tests {
         // Pass 1 (no transfer) on this fixture: nothing to find (no oxonium/Y-ladder
         // evidence, peptide-first path needs real b/y matches on real peaks), so an
         // empty Pass-1 result is the expected, honest starting point for Pass 2.
-        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default());
+        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), None);
         assert!(
             pass1.iter().all(|r| r.hits.is_empty()) || pass1.is_empty(),
             "peakless fixture must not produce a Pass-1 hit on its own: {pass1:?}"
@@ -2311,7 +2838,7 @@ mod tests {
             std::collections::BTreeMap::new();
         injected.insert(0, vec![bb_hit]);
 
-        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), pass1, &injected);
+        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), pass1, &injected, None);
 
         assert_eq!(merged.len(), 1, "expected exactly one spectrum result: {merged:?}");
         let result = &merged[0];

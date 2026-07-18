@@ -205,6 +205,7 @@ pub fn hybrid_candidates_with_isotope(
         glycans,
         tol_ppm,
         top_k,
+        false,
     )
 }
 
@@ -277,6 +278,7 @@ pub fn hybrid_candidates_presolved(
     glycans: &[GlycanComp],
     tol_ppm: f64,
     top_k: usize,
+    force_db_on_none: bool,
 ) -> Vec<BackboneHit> {
     const MIN_BACKBONE: f64 = 500.0;
     // Must match `solve_backbone_min`'s MIN_GLYCAN so the widest-precursor
@@ -284,9 +286,25 @@ pub fn hybrid_candidates_presolved(
     const MIN_GLYCAN: f64 = 406.0;
 
     let dn = match presolved {
-        // Oxonium did not fire → not a glyco spectrum, no candidates (and no DB
-        // fallback — matches the original early return).
-        None => return Vec::new(),
+        // Oxonium did not fire. Normally (HCD glyco) that means "not a glyco
+        // spectrum" → no candidates. But ETD/AI-ETD scans STRUCTURALLY lack
+        // oxonium (glycosidic-bond cleavage needs a collisional component), so an
+        // oxonium-negative ETD scan can still be a real glycopeptide. When
+        // `force_db_on_none` is set (caller passes it only for ETD scans), still
+        // run the fragment-free DB branch (precursor − known-glycan mass) so those
+        // scans get candidates to score c/z against, rather than emitting nothing.
+        None => {
+            if force_db_on_none {
+                return db_branch(
+                    precursor_neutral,
+                    glycans,
+                    MIN_BACKBONE,
+                    precursor_z,
+                    isotope_offset,
+                );
+            }
+            return Vec::new();
+        }
         Some(v) => v,
     };
 
@@ -655,6 +673,7 @@ mod tests {
                 &glycans,
                 tol,
                 top_k,
+                false,
             ));
         }
 

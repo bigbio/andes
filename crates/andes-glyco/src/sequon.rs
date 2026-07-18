@@ -41,6 +41,25 @@ pub fn first_nxst_site(residues: &[u8]) -> Option<usize> {
     })
 }
 
+/// Returns the 0-based indices of the N in EVERY N-X-S/T sequon (X ≠ P), in
+/// ascending order. Used to place the glycan at each candidate glycosite when a
+/// peptide carries more than one sequon (~8% of tryptic N-glycopeptides), so the
+/// c/z hyperscore can be maximized over sites instead of assuming the first —
+/// [`first_nxst_site`] silently mis-places the glycan on multi-sequon peptides.
+pub fn all_nxst_sites(residues: &[u8]) -> Vec<usize> {
+    let n = residues.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    (0..n.saturating_sub(2))
+        .filter(|&i| {
+            residues[i] == b'N'
+                && residues[i + 1] != b'P'
+                && (residues[i + 2] == b'S' || residues[i + 2] == b'T')
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +69,14 @@ mod tests {
         assert_eq!(first_nxst_site(b"SVNLTK"), Some(2));
         assert_eq!(first_nxst_site(b"SVNPLTK"), None);
         assert_eq!(first_nxst_site(b"AANDSNKTQ"), Some(2)); // first of two sequons
+    }
+
+    #[test]
+    fn all_sites_multi_and_single() {
+        assert_eq!(all_nxst_sites(b"SVNLTK"), vec![2]); // single sequon
+        assert_eq!(all_nxst_sites(b"AANDSNKTQ"), vec![2, 5]); // two sequons: NDS + NKT
+        assert_eq!(all_nxst_sites(b"SVNPLTK"), Vec::<usize>::new()); // X=P excluded
+        assert_eq!(all_nxst_sites(b"AAA"), Vec::<usize>::new()); // none
     }
 
     #[test]

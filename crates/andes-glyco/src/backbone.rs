@@ -408,7 +408,43 @@ impl SpectrumStats {
 /// common in stepped-HCD glyco spectra — the intact glycopeptide is 2–6+, so its
 /// glycan-retaining Y-ions are frequently 2+/3+; matching only +1 leaves that
 /// signal unmatched. `sorted` = peaks are m/z-ascending (enables binary search).
-/// Returns 0.0 for no match at any charge.
+/// Returns 0.0 for no match at any charge. (Q1 tried un-clamping to 5 for high-
+/// charge core-Y; it lifted generation slightly but net −24 @1% from false
+/// high-charge matches — reverted. z3/z4 core-Y is ≤3+ so the cap does not bind
+/// them; the high-charge lever is paired-scan generation (B1), not this cap.)
+/// EXPERIMENT (ANDES_GLYCO_Y_HICHARGE): raise the Y-ion fragment-charge ceiling
+/// from 3 to 5 so the DOMINANT K=50 Y-ladder selection term can see the 4+/5+
+/// glycan-retaining Y-ions that high-charge (z5/z6) glycopeptides produce (~30%
+/// of true high-charge fragment evidence is only visible at charge >=2, and large
+/// Y-ions skew higher still). A naive uncap (Q1) was net -24 @1% because a bare
+/// tolerance window at high charge accepts noise; here the ADDED charges (>3)
+/// require ISOTOPE CONFIRMATION (a +1 isotope peak at the matching charge spacing)
+/// before crediting a match, which is what made the b/y deconvolution uncap safe.
+/// charges 1..=3 are unchanged, so this is inert unless the flag is set.
+fn y_hicharge_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_Y_HICHARGE").is_some())
+}
+
+/// Max intensity of any peak in `[lo, hi]` (binary-searched when `sorted`).
+#[inline]
+fn max_intensity_in_window(peaks: &[(f64, f32)], sorted: bool, lo: f64, hi: f64) -> f32 {
+    if sorted {
+        let start = peaks.partition_point(|&(m, _)| m < lo);
+        peaks[start..]
+            .iter()
+            .take_while(|&&(m, _)| m <= hi)
+            .map(|&(_, i)| i)
+            .fold(0.0f32, f32::max)
+    } else {
+        peaks
+            .iter()
+            .filter(|&&(m, _)| m >= lo && m <= hi)
+            .map(|&(_, i)| i)
+            .fold(0.0f32, f32::max)
+    }
+}
+
 #[inline]
 fn best_frag_intensity(
     peaks: &[(f64, f32)],
@@ -417,26 +453,27 @@ fn best_frag_intensity(
     tol_ppm: f64,
     max_charge: u8,
 ) -> f32 {
-    let zmax = max_charge.clamp(1, 3);
+    const ISOTOPE: f64 = 1.003_354_83;
+    let hi_charge = y_hicharge_enabled();
+    let zmax = if hi_charge {
+        max_charge.clamp(1, 5)
+    } else {
+        max_charge.clamp(1, 3)
+    };
     let mut best = 0.0f32;
     for z in 1..=zmax {
         let ion_mz = (neutral + z as f64 * PROTON) / z as f64;
         let tol = (ion_mz * tol_ppm / 1e6).max(0.01);
-        let (lo, hi) = (ion_mz - tol, ion_mz + tol);
-        let found = if sorted {
-            let start = peaks.partition_point(|&(m, _)| m < lo);
-            peaks[start..]
-                .iter()
-                .take_while(|&&(m, _)| m <= hi)
-                .map(|&(_, i)| i)
-                .fold(0.0f32, f32::max)
-        } else {
-            peaks
-                .iter()
-                .filter(|&&(m, _)| m >= lo && m <= hi)
-                .map(|&(_, i)| i)
-                .fold(0.0f32, f32::max)
-        };
+        let found = max_intensity_in_window(peaks, sorted, ion_mz - tol, ion_mz + tol);
+        // For the newly-added high charges (z>3), require a +1 isotope peak at the
+        // charge-appropriate spacing to reject bare-tolerance noise (the Q1 lesson).
+        if hi_charge && z > 3 && found > 0.0 {
+            let iso_mz = ion_mz + ISOTOPE / z as f64;
+            let iso_tol = (iso_mz * tol_ppm / 1e6).max(0.01);
+            if max_intensity_in_window(peaks, sorted, iso_mz - iso_tol, iso_mz + iso_tol) <= 0.0 {
+                continue; // no isotope confirmation → not a real z>3 ion
+            }
+        }
         best = best.max(found);
     }
     best

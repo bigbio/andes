@@ -9,10 +9,19 @@ use crate::hybrid::Source;
 use std::cmp::Ordering;
 
 /// Default balance constant for the `gp` fused selector (leg 2). K scales the
-/// glycan core-Y ladder term against the peptide b/y rank-LLR so the two
-/// comparably-ranged axes compete (RankScore ~0..63, YLadder ~0..1.5 on the
-/// Fc3_r1 test bed). The `--glyco-gp-k` flag overrides it.
-pub const GLYCO_GP_K_DEFAULT: f32 = 50.0;
+/// glycan core-Y ladder term against the peptide b/y rank-LLR. The `--glyco-gp-k`
+/// flag overrides it.
+///
+/// LOWERED 50 → 10 (2026-07-17 round-2). A data-backed collapse audit showed the
+/// `K·ladder` term is computed PER-BACKBONE (identical for every isobaric peptide
+/// at a given backbone mass), so at K=50 it dominated the fused score while
+/// providing ZERO discrimination between the competing peptides — and its value
+/// was empirically ANTI-CORRELATED with correctness (higher on wrong winners). A
+/// 2×2 factorial on PXD011533 AI-ETD (6-frac pooled, seed-42 Percolator vs 5088
+/// truth): lowering K to 10 while raising c/z to 15 took backbone-correct @1% from
+/// 1912 (38%) to 2207 (43%), and combined with the c/z truncation gate to 2453
+/// (48%) — z4 32→45%, z5 16→23%, decoy-safe.
+pub const GLYCO_GP_K_DEFAULT: f32 = 10.0;
 
 /// Default weight for the core-Y HIT-COUNT term (gp2, leg 2b). Scales the integer
 /// `core_y_hits` against rank/ladder. The the reference engine-gap audit found the residual
@@ -37,7 +46,14 @@ pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 /// ladder is sparse for high-charge glycopeptides), so the selector must weight
 /// it to pick the true backbone. Offline on PXD011533 Frac1 AI-ETD (467 truth,
 /// ceiling 356): gp alone top1-correct 218; `gp + 5·cz` = 250 (+32, z3/z4).
-pub const GLYCO_GP_CZ_DEFAULT: f32 = 5.0;
+///
+/// RAISED 5 → 15 (2026-07-17 round-2). The collapse audit measured c/z as the
+/// ONLY per-candidate term that discriminates the true backbone (~12× separation
+/// of correct vs wrong winners when it fires), yet at weight 5 it was dominated by
+/// the non-discriminating `K·ladder`. Raising c/z to 15 (with K lowered to 10)
+/// lets c/z decide the winner on ETD/AI-ETD. Inert on HCD/CID (the per-candidate
+/// c/z hyperscore is 0.0 there), so this is byte-identical on the closed-HCD path.
+pub const GLYCO_GP_CZ_DEFAULT: f32 = 15.0;
 
 /// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
 /// Higher is better.
@@ -211,14 +227,16 @@ mod tests {
         // Leg-2 mechanism (the exact P0 failure): a wrong mass-split with a
         // SPURIOUS TINY ladder edge beats truth under the legacy ladder-primary
         // collapse, even though truth has the stronger b/y rank.
-        let (k, j, h) = (GLYCO_GP_K_DEFAULT, 0.0, 0.0); // isolate rank/ladder
-        let truth = glyco_gp_fused_score(15.0, 0.05, 0.0, 0.0, k, j, h); // 15 + 2.5 = 17.5
-        let wrong = glyco_gp_fused_score(2.0, 0.06, 0.0, 0.0, k, j, h); //  2 + 3.0 =  5.0
+        let (k, j, h) = (GLYCO_GP_K_DEFAULT, 0.0, 0.0); // isolate rank/ladder (K=10)
+        let truth = glyco_gp_fused_score(15.0, 0.05, 0.0, 0.0, k, j, h); // 15 + 0.5 = 15.5
+        let wrong = glyco_gp_fused_score(2.0, 0.06, 0.0, 0.0, k, j, h); //  2 + 0.6 =  2.6
         // Legacy y_primary would pick `wrong` (0.06 > 0.05); gp fusion rescues truth.
         assert!(collapse_cmp(15.0, 0.05, 2.0, 0.06, true) == Ordering::Less);
         assert!(truth > wrong, "a real b/y-rank advantage rescues truth under gp");
-        // But a LARGE ladder difference (real glycan-Y evidence) still wins.
-        let strong_glycan = glyco_gp_fused_score(2.0, 1.0, 0.0, 0.0, k, j, h); // 2 + 50 = 52
+        // A GENUINELY large ladder difference (strong glycan-Y evidence) still wins —
+        // at the round-2 K=10 the ladder no longer dominates a small edge (by design),
+        // but a real ladder gap does. (2 + 10·2.0 = 22 > 15.5.)
+        let strong_glycan = glyco_gp_fused_score(2.0, 2.0, 0.0, 0.0, k, j, h); // 2 + 20 = 22
         assert!(strong_glycan > truth, "a large ladder difference still wins under gp");
     }
 
@@ -238,9 +256,10 @@ mod tests {
 
     #[test]
     fn glyco_gp_weights_default_and_fusion_is_monotone() {
-        assert_eq!(GLYCO_GP_K_DEFAULT, 50.0);
+        assert_eq!(GLYCO_GP_K_DEFAULT, 10.0);
         assert_eq!(GLYCO_GP_J_DEFAULT, 5.0);
         assert_eq!(GLYCO_GP_H_DEFAULT, 1.0);
+        assert_eq!(GLYCO_GP_CZ_DEFAULT, 15.0);
         // Monotone in each term (rank, ladder, core-Y, hyperscore).
         let f = |rk, yl, cy, hs| glyco_gp_fused_score(rk, yl, cy, hs, 50.0, 5.0, 1.0);
         assert!(f(10.0, 0.2, 0.0, 0.0) > f(10.0, 0.1, 0.0, 0.0));

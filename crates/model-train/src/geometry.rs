@@ -60,6 +60,18 @@ fn b_offset_bits() -> u32 {
 fn y_offset_bits() -> u32 {
     ((model::mass::H2O + model::mass::PROTON) as f32).to_bits()
 }
+/// c-ion m/z offset: b + NH3. z•-ion m/z offset: y + Z_DOT_OFFSET (radical). These
+/// are the ETD/ECD backbone ions (N-Cα cleavage). Values mirror the scoring-side
+/// `predict_cz_ions` chemistry (NH3 = 17.026549, Z_DOT_OFFSET = -16.018724) so a
+/// trained ETD c/z model and the c/z hyperscore agree on ion masses.
+fn c_offset_bits() -> u32 {
+    const NH3: f64 = 17.026549;
+    ((model::mass::PROTON + NH3) as f32).to_bits()
+}
+fn z_offset_bits() -> u32 {
+    const Z_DOT_OFFSET: f64 = -16.018724;
+    ((model::mass::H2O + model::mass::PROTON + Z_DOT_OFFSET) as f32).to_bits()
+}
 
 /// Equal-occupancy `parent_mass` tier lower-bounds for one charge.
 ///
@@ -141,9 +153,20 @@ pub fn build_partition_skeleton(
 pub fn build_frag_off_table(
     partitions: &[Partition],
     max_fragment_charge: i32,
+    activation: model::activation::ActivationMethod,
 ) -> FxHashMap<Partition, Vec<FragmentOffsetFrequency>> {
     let mut table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = FxHashMap::default();
     let cap = max_fragment_charge.max(1);
+    // ETD/ECD cleave N-Cα → c/z• backbone ions; collisional (HCD/CID) give b/y.
+    // The Prefix/Suffix ion type is generic (chemistry lives in `offset_bits`), so
+    // selecting the right offsets here is all that's needed for the whole trained
+    // pipeline (accumulator, estimator, RankScorer, node-DP) to model c/z.
+    let is_etd = activation == model::activation::ActivationMethod::ETD;
+    let (prefix_off, suffix_off) = if is_etd {
+        (c_offset_bits(), z_offset_bits())
+    } else {
+        (b_offset_bits(), y_offset_bits())
+    };
     for &part in partitions {
         // Bound the fragment charge by both chemistry (<= precursor-1) and the
         // configured cap, with a floor of 1. Capping avoids the per-candidate
@@ -152,11 +175,11 @@ pub fn build_frag_off_table(
         let mut frags: Vec<FragmentOffsetFrequency> = Vec::new();
         for fc in 1..=max_frag_charge {
             frags.push(FragmentOffsetFrequency {
-                ion_type: IonType::Prefix { charge: fc, offset_bits: b_offset_bits(), loss_class: 0 },
+                ion_type: IonType::Prefix { charge: fc, offset_bits: prefix_off, loss_class: 0 },
                 frequency: 0.0,
             });
             frags.push(FragmentOffsetFrequency {
-                ion_type: IonType::Suffix { charge: fc, offset_bits: y_offset_bits(), loss_class: 0 },
+                ion_type: IonType::Suffix { charge: fc, offset_bits: suffix_off, loss_class: 0 },
                 frequency: 0.0,
             });
         }
@@ -185,8 +208,20 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
     // deconvolved, so genuine 2+/3+ fragments survive and must be modelled (the
     // low-res TMT seed uses charges 1,2,3). Derive the bound from the corpus's
     // own deconvolution setting rather than copying a seed's ion set.
-    let effective_frag_charge = if base.apply_deconvolution { 1 } else { cfg.max_fragment_charge };
-    let frag_off_table = build_frag_off_table(&partitions, effective_frag_charge);
+    //
+    // ETD carve-out: intact glycopeptides carry the glycan's protons, so at high
+    // precursor charge a large fraction of true c/z ions are multiply-charged and
+    // deconvolution (capped at 3) does not reduce all of them — the charge-1-only
+    // assumption is false for the ETD/AI-ETD glyco regime. Model multi-charge c/z
+    // for ETD (bounded by `cfg.max_fragment_charge`) instead of forcing 1.
+    let is_etd = base.data_type.activation == model::activation::ActivationMethod::ETD;
+    let effective_frag_charge = if base.apply_deconvolution && !is_etd {
+        1
+    } else {
+        cfg.max_fragment_charge
+    };
+    let frag_off_table =
+        build_frag_off_table(&partitions, effective_frag_charge, base.data_type.activation);
 
     // Charge histogram + span from the corpus.
     let mut charge_counts: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
@@ -323,6 +358,50 @@ mod tests {
             assert!(ion_charges(frags, true).iter().all(|&c| c == 1), "deconv -> b charge 1 only");
             assert!(ion_charges(frags, false).iter().all(|&c| c == 1), "deconv -> y charge 1 only");
         }
+    }
+
+    #[test]
+    fn derive_geometry_etd_models_multicharge_cz() {
+        // ETD + deconvolution: the charge-1-only carve-out does NOT apply, so a
+        // z5 precursor partition gets multi-charge ions up to min(C-1, cap), and
+        // the offsets are c/z (not b/y).
+        let mut base = base_param();
+        base.apply_deconvolution = true;
+        base.data_type.activation = ActivationMethod::ETD;
+        let charge_masses = vec![(2, 1000.0), (5, 3000.0)];
+        let cfg = GeometryConfig {
+            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
+            max_mass_tiers: 1, max_fragment_charge: 5,
+        };
+        let p = derive_geometry(&charge_masses, &base, &cfg);
+        // c-offset = PROTON + NH3; z-offset = H2O + PROTON + Z_DOT_OFFSET.
+        let c_off = ((model::mass::PROTON + 17.026549) as f32).to_bits();
+        let z_off = ((model::mass::H2O + model::mass::PROTON - 16.018724) as f32).to_bits();
+        let mut saw_multicharge = false;
+        for (part, frags) in &p.frag_off_table {
+            for f in frags {
+                match f.ion_type {
+                    IonType::Prefix { charge, offset_bits, .. } => {
+                        assert_eq!(offset_bits, c_off, "ETD prefix must be c-ion");
+                        if charge > 1 {
+                            saw_multicharge = true;
+                        }
+                    }
+                    IonType::Suffix { offset_bits, .. } => {
+                        assert_eq!(offset_bits, z_off, "ETD suffix must be z-ion");
+                    }
+                    IonType::Noise => {}
+                }
+            }
+            // z5 partition should reach fragment charge 4 (min(5-1, cap=5)).
+            if part.charge == 5 {
+                assert!(
+                    ion_charges(frags, true).contains(&4),
+                    "z5 ETD partition models charge-4 c ions"
+                );
+            }
+        }
+        assert!(saw_multicharge, "ETD must model multi-charge c/z ions");
     }
 
     #[test]
@@ -468,13 +547,13 @@ mod tests {
 
         // cap=1 (seed-matching, fast): every partition gets charge-1 b/y only,
         // even the charge-3 precursor — this is what kept the seed at ~298 spec/s.
-        let t1 = build_frag_off_table(&[p2, p3], 1);
+        let t1 = build_frag_off_table(&[p2, p3], 1, ActivationMethod::HCD);
         assert_eq!(ion_charges(t1.get(&p2).unwrap(), true), vec![1]);
         assert_eq!(ion_charges(t1.get(&p3).unwrap(), true), vec![1], "charge-3 capped to frag 1");
         assert_eq!(t1.get(&p3).unwrap().len(), 3, "b1,y1,Noise");
 
         // cap=2: charge-3 precursor gets b/y at {1,2}; charge-2 still bounded by C-1=1.
-        let t2 = build_frag_off_table(&[p2, p3], 2);
+        let t2 = build_frag_off_table(&[p2, p3], 2, ActivationMethod::HCD);
         assert_eq!(ion_charges(t2.get(&p2).unwrap(), true), vec![1], "charge-2 bounded by C-1");
         assert_eq!(ion_charges(t2.get(&p3).unwrap(), true), vec![1, 2]);
         assert_eq!(t2.get(&p3).unwrap().len(), 5, "b1,b2,y1,y2,Noise");

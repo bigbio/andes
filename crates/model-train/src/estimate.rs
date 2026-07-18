@@ -243,6 +243,12 @@ impl Estimator {
         // across all seg_num values.
         let seg_collapsed = build_seg_collapsed(&counts.rank, n_slots);
 
+        // Charge-neighbourhood pool: per-(charge_bucket, ion), sum across all
+        // partitions in the bucket. Used as a Level-1.5 backoff for SPARSE HIGH
+        // charges (z4+), so a z5/z6 c/z partition (few hundred PSMs) backs off to
+        // pooled z4-z6 statistics rather than the z2/z3-dominated global pool.
+        let charge_neighbor = build_charge_neighbor_pool(&counts.rank, n_slots);
+
         let mut out: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> =
             FxHashMap::default();
 
@@ -279,6 +285,18 @@ impl Estimator {
                 // Level 1: segment-collapse.
                 if let Some(seg_map) = seg_parent {
                     if let Some(raw) = seg_map.get(&ion) {
+                        let n: u64 = raw.iter().sum();
+                        if n >= min_count {
+                            return normalize_with_pseudo(raw, n_slots, ps);
+                        }
+                    }
+                }
+                // Level 1.5: charge-neighbourhood pool, HIGH CHARGE ONLY (bucket 4
+                // = z4+). Lets a sparse z5/z6 partition back off to pooled z4-z6
+                // counts before the z2/z3-dominated global pool. Inert for z<=3
+                // (byte-identical to prior behaviour for existing b/y models).
+                if charge_bucket(part.charge) == 4 {
+                    if let Some(raw) = charge_neighbor.get(&(4, ion)) {
                         let n: u64 = raw.iter().sum();
                         if n >= min_count {
                             return normalize_with_pseudo(raw, n_slots, ps);
@@ -587,6 +605,41 @@ fn build_seg_collapsed(
         let key = (part.charge, part.parent_mass.to_bits());
         let ion_map = out.entry(key).or_default();
         let entry = ion_map.entry(ion).or_insert_with(|| vec![0u64; n_slots]);
+        if entry.len() < n_slots {
+            entry.resize(n_slots, 0);
+        }
+        for (i, &c) in v.iter().enumerate() {
+            if i < n_slots {
+                entry[i] = entry[i].saturating_add(c);
+            }
+        }
+    }
+    out
+}
+
+/// Charge bucket for high-charge partition pooling. `{2}`, `{3}`, and `{4,5,6,7+}`
+/// so sparse high charges share statistics (see `build_charge_neighbor_pool`).
+fn charge_bucket(charge: i32) -> i32 {
+    match charge {
+        c if c <= 2 => 2,
+        3 => 3,
+        _ => 4,
+    }
+}
+
+/// Charge-neighbourhood pool: per `(charge_bucket, IonType)`, sum rank counts
+/// across all partitions whose charge falls in the same bucket. The high-charge
+/// bucket (z4+) pools z4/z5/z6/z7 so a data-sparse c/z partition can borrow the
+/// bucket's aggregate distribution shape.
+fn build_charge_neighbor_pool(
+    rank: &FxHashMap<(Partition, IonType), Vec<u64>>,
+    n_slots: usize,
+) -> FxHashMap<(i32, IonType), Vec<u64>> {
+    let mut out: FxHashMap<(i32, IonType), Vec<u64>> = FxHashMap::default();
+    for (&(part, ion), v) in rank {
+        let entry = out
+            .entry((charge_bucket(part.charge), ion))
+            .or_insert_with(|| vec![0u64; n_slots]);
         if entry.len() < n_slots {
             entry.resize(n_slots, 0);
         }

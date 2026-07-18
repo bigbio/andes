@@ -133,6 +133,7 @@ pub struct GlycoCfg {
     pub max_pf: Option<usize>,
     pub debug: Option<bool>,
     pub decoy: Option<bool>,
+    pub hcd_pair: Option<bool>,
     pub transfer: Option<bool>,
     pub transfer_seed_fdr: Option<f64>,
     pub rt_window: Option<f32>,
@@ -275,6 +276,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("glyco_max_pf", glyco_max_pf, cfg.glyco.max_pf);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);
     set!("glyco_decoy", glyco_decoy, cfg.glyco.decoy);
+    set!("glyco_hcd_pair", glyco_hcd_pair, cfg.glyco.hcd_pair);
     set!("glyco_transfer", glyco_transfer, cfg.glyco.transfer);
     set!("glyco_transfer_seed_fdr", glyco_transfer_seed_fdr, cfg.glyco.transfer_seed_fdr);
     set!("glyco_rt_window", glyco_rt_window, cfg.glyco.rt_window);

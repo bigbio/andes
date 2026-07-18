@@ -415,21 +415,41 @@ pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &
 /// ladder is sparse (the high-charge wall). `glycan_mass = 0.0` scores a naked
 /// peptide; `max_frag_charge` bounds the fragment charge sweep (ETD c/z of a
 /// z-charged precursor reach ~z-1). Returns 0.0 for peptides shorter than 2.
+/// The two cz_hyperscore correctness fixes (bug hunt 2026-07-16/17), now DEFAULT
+/// ON after validation (6-frac pooled AI-ETD: +251 backbone-correct @1%, +11%,
+/// 43%→48% of Byonic, decoy-safe): (1) match c/z with a PER-ION PPM tolerance
+/// instead of a flat 0.5 Da window (0.5 Da is 6-83x too loose on high-res AI-ETD →
+/// noise-dominated); (2) NORMALIZE the score by peptide length so a longer
+/// wrong/decoy peptide can't out-count a shorter true one in the per-scan collapse
+/// (traced: a 45-mer decoy beat a 19-mer target). `ANDES_GLYCO_CZ_FIX_OFF` restores
+/// the old buggy behavior (flat 0.5 Da, unnormalized count) for A/B/rollback.
+fn cz_fix_enabled() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_CZ_FIX_OFF").is_none())
+}
+
 pub fn cz_hyperscore_psm(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
     glycan_mass: f64,
     glycosite: usize,
     max_frag_charge: u8,
-    tol_da: f64,
+    tol_ppm: f64,
 ) -> f32 {
     let n = peptide.length();
     if n < 2 || max_frag_charge == 0 {
         return 0.0;
     }
+    let fix = cz_fix_enabled();
     let mut c_hit = vec![false; n];
     let mut z_hit = vec![false; n];
     for ion in predict_cz_ions(peptide, 1..=max_frag_charge, glycan_mass, glycosite) {
+        // Bug 1: ppm-scaled per-ion tolerance (was a flat 0.5 Da for every ion).
+        let tol_da = if fix {
+            (ion.mz * tol_ppm * 1e-6).max(0.01)
+        } else {
+            0.5
+        };
         if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
             let pos = ion.position as usize;
             match ion.kind {
@@ -442,7 +462,22 @@ pub fn cz_hyperscore_psm(
     let n_c = c_hit.iter().filter(|&&h| h).count();
     let n_z = z_hit.iter().filter(|&&h| h).count();
     let ln_factorial = |m: usize| -> f64 { (2..=m).map(|i| (i as f64).ln()).sum() };
-    (ln_factorial(n_c) + ln_factorial(n_z)) as f32
+    let raw = ln_factorial(n_c) + ln_factorial(n_z);
+    if fix {
+        // Bug 7: normalize by the max attainable score for THIS peptide length so
+        // the term measures FRACTION of the ladder matched, not absolute count —
+        // removing the length bias that let long wrong/decoy peptides win the
+        // collapse. Rescaled to ~0..10 to stay comparable to the gp_cz weight.
+        let max_sites = n.saturating_sub(1).max(1);
+        let norm = 2.0 * ln_factorial(max_sites);
+        if norm > 0.0 {
+            (10.0 * raw / norm) as f32
+        } else {
+            0.0
+        }
+    } else {
+        raw as f32
+    }
 }
 
 /// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split

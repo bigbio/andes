@@ -55,6 +55,7 @@ fn write_glyco_header<W: Write>(
     for c in min_charge..=max_charge {
         cols.push(format!("charge{}", c));
     }
+    cols.push("chargeHi".to_string()); // overflow flag for z > max_charge (z6/z7)
 
     cols.extend_from_slice(&[
         "enzN".to_string(),
@@ -223,6 +224,12 @@ fn write_glyco_psm_row<W: Write>(
         let flag: u8 = if c == psm.charge_used { b'1' } else { b'0' };
         writer.write_all(&[b'\t', flag])?;
     }
+    // chargeHi overflow: 1 when the glycopeptide's charge exceeds the one-hot range
+    // (glyco tries the spectrum's own charge, which reaches z6/z7 on high-charge
+    // glycopeptides — otherwise those get an ALL-ZERO charge vector and Percolator
+    // cannot isolate them from lower charges with different target/decoy separation).
+    let charge_hi: u8 = if psm.charge_used > max_charge { b'1' } else { b'0' };
+    writer.write_all(&[b'\t', charge_hi])?;
 
     // enzN, enzC, enzInt
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();

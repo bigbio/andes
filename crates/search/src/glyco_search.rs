@@ -718,7 +718,12 @@ fn glyco_charges_to_try(
     let mut out: Vec<u8> = match spec_charge {
         Some(z) if z > 0 => {
             let z = z as u8;
-            (0..=expand).map(|d| z.saturating_add(d)).collect()
+            // Instrument charge mis-calls put the true backbone mass off the grid
+            // (concentrated at z4-z6). When `expand > 0`, also try one charge BELOW
+            // (over-call) in addition to `expand` above (under-call). expand=0 =
+            // exact legacy set (single reported charge).
+            let lo = if expand > 0 { z.saturating_sub(1).max(1) } else { z };
+            (lo..=z.saturating_add(expand)).collect()
         }
         _ => {
             let hi = charge_range.end().saturating_add(expand);
@@ -780,13 +785,22 @@ fn score_spectrum_glyco(
         spec.activation_method,
         Some(model::activation::ActivationMethod::ETD)
     );
-    // EXPERIMENT (ANDES_GLYCO_ETD_DBFALLBACK): ETD/AI-ETD scans structurally lack
-    // oxonium (glycosidic cleavage needs a collisional component), so the oxonium
-    // gate wrongly drops real glycopeptide ETD scans that have no paired-HCD
-    // evidence — they emit nothing. When set, run the mass-only DB branch on ETD
-    // scans even if oxonium didn't fire. Gated to ETD only (per code review) so
-    // plain-peptide HCD spectra keep the gate and aren't false-annotated as glyco.
-    let etd_db_fallback = is_etd && std::env::var_os("ANDES_GLYCO_ETD_DBFALLBACK").is_some();
+    // ETD/AI-ETD scans structurally lack oxonium (glycosidic cleavage needs a
+    // collisional component), so the oxonium gate wrongly drops real glycopeptide
+    // ETD scans with no paired-HCD evidence — they emit NOTHING (round-4 empirical:
+    // 75% of the "nothing emitted" gap scans are ETD). Run the mass-only DB branch
+    // on ETD scans even if oxonium didn't fire. DEFAULT ON for ETD (validated
+    // 3-frac AI-ETD: +19 backbone-correct @1%, decoy-safe, z4 +14); `ANDES_GLYCO_
+    // ETD_DBFALLBACK_OFF` disables it. ETD-only, so plain-peptide HCD spectra keep
+    // the gate and aren't false-annotated as glyco.
+    let etd_db_fallback =
+        is_etd && std::env::var_os("ANDES_GLYCO_ETD_DBFALLBACK_OFF").is_none();
+    // EXPERIMENT (ANDES_GLYCO_CHARGE_PM1): also enumerate backbones at charge z-1
+    // and z+1 around the reported precursor charge — instrument charge mis-calls
+    // (concentrated at z4-z6) otherwise put the true backbone mass off the grid so
+    // it is NEVER generated. expand=0 (unset) = exact legacy single-charge set.
+    let charge_expand: u8 =
+        if std::env::var_os("ANDES_GLYCO_CHARGE_PM1").is_some() { 1 } else { 0 };
     // EXPERIMENT (ANDES_GLYCO_CZ_GATE): add a c/z evidence AXIS to the Phase-1
     // backbone truncation gate. The gate keeps top-k backbones by b/y rank
     // (AXIS 1) and glycan-Y count (AXIS 2) but NOT by c/z, so on ETD/AI-ETD scans
@@ -919,7 +933,7 @@ fn score_spectrum_glyco(
             // true higher charge (under-called by the acquisition) can be enumerated —
             // the P0 charge blind spot (R7: z5 = 100% absent). See its doc comment.
             let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, 0);
+                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, charge_expand);
             // Max fragment charge for Y-ladder matching: a fragment cannot exceed
             // the precursor charge, and glyco Y-ions are frequently 2+/3+ (matched
             // up to +3 inside the Y functions). Default 3 when the precursor charge
@@ -2454,13 +2468,14 @@ mod tests {
     fn charges_to_try_expands_upward_to_reach_true_higher_charge() {
         let range = 2u8..=3u8;
 
-        // A z4-reported spectrum whose TRUE charge is z5: expand=1 must include z5.
+        // A z4-reported spectrum whose TRUE charge is z5 (under-call) OR z3
+        // (over-call): expand=1 tries z±1 = [3,4,5].
         let got = glyco_charges_to_try(Some(4), &range, 1);
-        assert_eq!(got, vec![4, 5], "expand=1 on reported z4 must also try z5");
+        assert_eq!(got, vec![3, 4, 5], "expand=1 on reported z4 must try z3..z5");
         assert!(got.contains(&5), "the true higher charge (z5) must be enumerated");
 
-        // Larger expansion window, still sorted + deduped + no zero.
-        assert_eq!(glyco_charges_to_try(Some(3), &range, 3), vec![3, 4, 5, 6]);
+        // Larger expansion window: one below (z-1) + `expand` above; sorted/deduped.
+        assert_eq!(glyco_charges_to_try(Some(3), &range, 3), vec![2, 3, 4, 5, 6]);
 
         // Charge-missing: the fallback range is widened UP by N so z4/z5 become
         // reachable when the acquisition assigned no charge at all.
@@ -2469,7 +2484,7 @@ mod tests {
         // Determinism / saturation edge: near u8::MAX the window collapses to a
         // single deduped, ordered charge (no panic, no duplicates, no zero).
         let hi = glyco_charges_to_try(Some(255), &range, 3);
-        assert_eq!(hi, vec![255], "saturation must dedup to a single ordered charge");
+        assert_eq!(hi, vec![254, 255], "saturation dedups the upward window; z-1 kept");
         for w in hi.windows(2) {
             assert!(w[0] < w[1], "output must be strictly increasing (sorted + deduped)");
         }

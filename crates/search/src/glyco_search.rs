@@ -106,7 +106,7 @@ use andes_glyco::hybrid::{
     hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
 };
 use andes_glyco::oxonium::{oxonium_gate, sialic_consistency};
-use andes_glyco::sequon::has_nxst_sequon;
+use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
 
 use crate::glyco_fragment_index::FragmentIndex;
 use andes_glyco::crossspectrum::GlycoformWhitelist;
@@ -291,7 +291,15 @@ fn glyco_aware_peptide(
 /// identical glycosite).
 fn glyco_site_for(pep: &model::peptide::Peptide) -> usize {
     let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
-    andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
+    // Internal sequon; else the boundary-sequon N (…N-X | S/T-…, the N at len-2)
+    // so the glycan is placed on the right residue for boundary glycopeptides
+    // (post was validated S/T at sequon-membership time; here we only need the N).
+    andes_glyco::sequon::first_nxst_site(&res)
+        .or_else(|| {
+            let n = res.len();
+            (n >= 2 && res[n - 2] == b'N' && res[n - 1] != b'P').then_some(n - 2)
+        })
+        .unwrap_or(0)
 }
 
 /// c/z hyperscore for a glycopeptide, placing the intact glycan at its glycosite.
@@ -552,11 +560,17 @@ impl GlycoCtxOwned {
         // candidate) scoring loop filter on this predicate; recomputing the
         // `residues → Vec<u8> → has_nxst_sequon` scan in the hot loop was pure
         // waste (it depends only on the candidate). O(1) slot lookup instead.
+        // ANDES_GLYCO_SEQUON_BOUNDARY: also treat a peptide whose N-X-S/T sequon is
+        // completed by the C-terminal FLANKING residue (…N-X | S/T-…) as a glyco
+        // candidate. A/B-gated (default off = peptide-internal only, byte-identical).
+        let sequon_boundary_on = std::env::var_os("ANDES_GLYCO_SEQUON_BOUNDARY").is_some();
         let sequon_membership: Vec<bool> = candidates
             .iter()
             .map(|c| {
                 let res: Vec<u8> = c.peptide.residues.iter().map(|aa| aa.residue).collect();
                 has_nxst_sequon(&res)
+                    || (sequon_boundary_on
+                        && boundary_nxst_site(&res, c.peptide.post).is_some())
             })
             .collect();
         // CHARGE-AWARE peptide-first index (--glyco-pf-charge): index b/y at charges

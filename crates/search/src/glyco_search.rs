@@ -1975,12 +1975,24 @@ fn build_hcd_partners(spectra: &[Spectrum]) -> Vec<Option<usize>> {
         }
         let lo = i.saturating_sub(WINDOW);
         let hi = (i + WINDOW + 1).min(n);
+        let etd_z = spectra[i].precursor_charge;
         let mut best: Option<(usize, usize)> = None; // (index-distance, hcd_idx)
         for j in lo..hi {
             if j == i || spectra[j].activation_method != Some(ActivationMethod::HCD) {
                 continue;
             }
-            if (mz - spectra[j].precursor_mz).abs() <= MZ_TOL {
+            // CHARGE-RECONCILED pairing: the HCD and AI-ETD scans of one precursor
+            // share BOTH m/z and charge. Matching on m/z ALONE mis-pairs a high-
+            // charge ETD scan (e.g. z5 @ m/z 600) to a same-m/z DIFFERENT-charge HCD
+            // scan (z4 @ m/z 600 = a different molecule), so the partner generates
+            // candidates for the wrong backbone mass — the z5 pairing regression.
+            // Require equal precursor charge when both are known; fall back to m/z
+            // only when either charge is unknown (don't drop otherwise-valid pairs).
+            let charge_ok = match (etd_z, spectra[j].precursor_charge) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            };
+            if charge_ok && (mz - spectra[j].precursor_mz).abs() <= MZ_TOL {
                 let d = i.abs_diff(j);
                 if best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, j));

@@ -911,6 +911,20 @@ fn score_spectrum_glyco(
             let gen_peaks: &[(f64, f32)] = &gen_spec.peaks;
             let gen_stats_owned = paired_hcd.map(|_| SpectrumStats::new(gen_peaks));
             let gen_stats: &SpectrumStats = gen_stats_owned.as_ref().unwrap_or(&stats);
+            // EXPERIMENT (ANDES_GLYCO_PAIR_Y_ON_GEN): the glycan-Y ladder is a
+            // GLYCOSIDIC-cleavage product — strong on HCD, near-absent on ETD. Under
+            // pairing, generation reads core-Y from the HCD partner (gen_peaks) but
+            // the collapse K·ladder term + PIN YLadderScore still read `spec.peaks`
+            // (the ETD scan), discarding the strong HCD glycan channel — the likely
+            // z5-pairing regression. When set, read the glycan-Y ladder from the HCD
+            // partner too. Inert unless paired AND flag set.
+            let pair_y_on_gen =
+                paired_hcd.is_some() && std::env::var_os("ANDES_GLYCO_PAIR_Y_ON_GEN").is_some();
+            let (y_peaks, y_stats): (&[(f64, f32)], &SpectrumStats) = if pair_y_on_gen {
+                (gen_peaks, gen_stats)
+            } else {
+                (&spec.peaks, &stats)
+            };
 
             // BUG5 (per-spectrum model dispatch prototype): score each spectrum's
             // OWN evidence with the model matching ITS OWN activation method,
@@ -1602,9 +1616,11 @@ fn score_spectrum_glyco(
             let ladder = |w: &CheapWinner| -> f32 {
                 let bb = &deduped_backbone[w.bb_hit_idx];
                 let bbn = bb.backbone_mass + H2O;
+                // y_peaks/y_stats = HCD partner under ANDES_GLYCO_PAIR_Y_ON_GEN, else
+                // the scored (ETD) spectrum — glycan-Y is a glycosidic product.
                 match &bb.glycan {
-                    Some(g) => glycan_y_intensity(&spec.peaks, &stats, bbn, g, tol_ppm, max_frag_charge) as f32,
-                    None => core_y_intensity(&spec.peaks, &stats, bbn, tol_ppm, max_frag_charge) as f32,
+                    Some(g) => glycan_y_intensity(y_peaks, y_stats, bbn, g, tol_ppm, max_frag_charge) as f32,
+                    None => core_y_intensity(y_peaks, y_stats, bbn, tol_ppm, max_frag_charge) as f32,
                 }
             };
 
@@ -1844,8 +1860,8 @@ fn score_spectrum_glyco(
                     // glycan fall back to the composition-independent core-Y
                     // ladder. (Was hardcoded 0.0 = dead before Phase 1.)
                     y_ladder_intensity_score: match &bb_hit.glycan {
-                        Some(g) => glycan_y_intensity(&spec.peaks, &stats, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
-                        None => core_y_intensity(&spec.peaks, &stats, bb_neutral, tol_ppm, max_frag_charge) as f32,
+                        Some(g) => glycan_y_intensity(y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
+                        None => core_y_intensity(y_peaks, y_stats, bb_neutral, tol_ppm, max_frag_charge) as f32,
                     },
                     // Glycan-axis decoy ladder (G3): same composition, intermediate
                     // Y-rungs shifted. Seed from the composition so the decoy ladder
@@ -1872,15 +1888,15 @@ fn score_spectrum_glyco(
                             .iter()
                             .map(|aa| aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta))
                             .collect();
-                        partial_glycan_by_intensity(&spec.peaks, &stats, &residues, tol_ppm, max_frag_charge)
+                        partial_glycan_by_intensity(y_peaks, y_stats, &residues, tol_ppm, max_frag_charge)
                             as f32
                     },
                     // G2 Y0/Y1 anchor: peptide-mass-conditioned (uses THIS
                     // candidate's neutral mass, so it discriminates competing
                     // peptides). Additive PIN feature only — not in the ranker.
                     y0y1_anchor_score: y0y1_anchor_intensity(
-                        &spec.peaks,
-                        &stats,
+                        y_peaks,
+                        y_stats,
                         cand.peptide.mass(),
                         w.z,
                         tol_ppm,

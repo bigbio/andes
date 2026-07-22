@@ -133,6 +133,7 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     transfer_rt_delta: 0.0,
 ///     transfer_ungated: false,
 ///     cz_hyperscore: 0.0,
+///     cz_intensity: 0.0,
 /// };
 /// assert_eq!(key.glycan_mass, 0.0);
 /// ```
@@ -198,6 +199,13 @@ pub struct GlycoPsmKey {
     /// ALSO contributes to the per-scan collapse selector (weighted by
     /// `--glyco-gp-cz`); the peptide `rank_score`/`RawScore` are unchanged.
     pub cz_hyperscore: f32,
+    /// Fraction of base-peak intensity captured by matched glycopeptide-aware c/z
+    /// ions (additive PIN feature `CzIntensity`), ETD/AI-ETD only (0.0 on HCD/CID).
+    /// The INTENSITY companion to `cz_hyperscore` (which is count-only) — reference
+    /// glyco scorers weight the matched-fragment intensity that the count-only
+    /// hyperscore discards (round-4 "intensity blindness" audit). PIN feature only;
+    /// not (yet) in the collapse selector.
+    pub cz_intensity: f32,
 }
 
 #[cfg(test)]
@@ -290,6 +298,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         };
         assert_eq!(key.glycan_mass, 0.0);
         assert!(key.glycan.is_none());
@@ -326,6 +335,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         };
         assert!((key.glycan_mass - expected_mass).abs() < 1e-6);
         assert!(key.glycan.is_some());
@@ -353,6 +363,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         };
         let cloned = key.clone();
         assert_eq!(cloned.spectrum_idx, key.spectrum_idx);
@@ -369,6 +380,7 @@ mod tests {
             is_transferred: false, transfer_graph_support: 0,
             transfer_seed_score: 0.0, transfer_rt_delta: 0.0, transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         };
         assert!(!key.is_transferred);
         assert_eq!(key.transfer_graph_support, 0);

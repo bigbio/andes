@@ -55,6 +55,7 @@ fn write_glyco_header<W: Write>(
     for c in min_charge..=max_charge {
         cols.push(format!("charge{}", c));
     }
+    cols.push("chargeHi".to_string()); // overflow flag for z > max_charge (z6/z7)
 
     cols.extend_from_slice(&[
         "enzN".to_string(),
@@ -123,6 +124,7 @@ fn write_glyco_header<W: Write>(
         "Y0Y1Anchor".to_string(), // G2 peptide-mass anchor (additive, peptide-discriminating)
         "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
         "CzHyperscore".to_string(), // ETD c/z backbone hyperscore (additive; ETD/AI-ETD only, else 0)
+        "CzIntensity".to_string(), // ETD c/z matched-intensity fraction (additive; ETD/AI-ETD only, else 0)
         "IsTransferred".to_string(),        // cross-spectrum transfer provenance (additive)
         "TransferGraphSupport".to_string(), // # corroborating co-eluting siblings
         "TransferSeedScore".to_string(),    // donor seed Pass-1 discriminant
@@ -222,6 +224,12 @@ fn write_glyco_psm_row<W: Write>(
         let flag: u8 = if c == psm.charge_used { b'1' } else { b'0' };
         writer.write_all(&[b'\t', flag])?;
     }
+    // chargeHi overflow: 1 when the glycopeptide's charge exceeds the one-hot range
+    // (glyco tries the spectrum's own charge, which reaches z6/z7 on high-charge
+    // glycopeptides — otherwise those get an ALL-ZERO charge vector and Percolator
+    // cannot isolate them from lower charges with different target/decoy separation).
+    let charge_hi: u8 = if psm.charge_used > max_charge { b'1' } else { b'0' };
+    writer.write_all(&[b'\t', charge_hi])?;
 
     // enzN, enzC, enzInt
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
@@ -280,6 +288,7 @@ fn write_glyco_psm_row<W: Write>(
     // A peptide-axis feature (backbone c/z ladder), so a glycan-decoy row emits the
     // SAME value as its paired target — like Y0Y1Anchor above.
     write_double_tab(writer, key.cz_hyperscore as f64)?;
+    write_double_tab(writer, key.cz_intensity as f64)?;
 
     // Transfer columns (additive; inert 0 for native candidates). Bools mirror
     // the `is_glycan_db` 1/0 idiom above; numerics use write_double_tab.
@@ -646,6 +655,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         }
     }
 
@@ -861,6 +871,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
@@ -1038,6 +1049,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];

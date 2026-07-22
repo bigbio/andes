@@ -8,7 +8,8 @@ pub mod strong_score;
 
 pub use fragment_ions::{predict_by_ions, predict_cz_ions, PredictedIon};
 pub use psm_score::{
-    cz_hyperscore_psm, hyperscore_psm, psm_edge_existence_facts, psm_edge_score, score_psm,
+    cz_hyperscore_psm, cz_matched_intensity_frac, hyperscore_psm, psm_edge_existence_facts,
+    psm_edge_score, score_psm,
     score_psm_float,
 };
 pub use rank_scorer::RankScorer;

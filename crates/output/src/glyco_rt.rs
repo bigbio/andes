@@ -327,6 +327,7 @@ mod tests {
             transfer_rt_delta: 0.0,
             transfer_ungated: false,
             cz_hyperscore: 0.0,
+            cz_intensity: 0.0,
         }
     }
 

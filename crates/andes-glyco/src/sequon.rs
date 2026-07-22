@@ -41,6 +41,25 @@ pub fn first_nxst_site(residues: &[u8]) -> Option<usize> {
     })
 }
 
+/// Boundary sequon: the N-X-S/T motif completed by the peptide's C-terminal
+/// FLANKING residue `post` (the next residue in the protein). Returns `Some(n-2)`
+/// — the glycosite N position inside the peptide — when `residues[n-2]=N`,
+/// `residues[n-1]≠P`, and `post ∈ {S,T}`. A fully-tryptic peptide `…N-K` whose
+/// completing S/T is the first residue of the next tryptic peptide carries the
+/// glycan on that N but is invisible to a peptide-internal-only sequon scan
+/// (round-4 candidate-gen audit: silently never generated). `None` otherwise.
+pub fn boundary_nxst_site(residues: &[u8], post: u8) -> Option<usize> {
+    let n = residues.len();
+    if n < 2 {
+        return None;
+    }
+    if residues[n - 2] == b'N' && residues[n - 1] != b'P' && (post == b'S' || post == b'T') {
+        Some(n - 2)
+    } else {
+        None
+    }
+}
+
 /// Returns the 0-based indices of the N in EVERY N-X-S/T sequon (X ≠ P), in
 /// ascending order. Used to place the glycan at each candidate glycosite when a
 /// peptide carries more than one sequon (~8% of tryptic N-glycopeptides), so the
@@ -69,6 +88,17 @@ mod tests {
         assert_eq!(first_nxst_site(b"SVNLTK"), Some(2));
         assert_eq!(first_nxst_site(b"SVNPLTK"), None);
         assert_eq!(first_nxst_site(b"AANDSNKTQ"), Some(2)); // first of two sequons
+    }
+
+    #[test]
+    fn boundary_sequon_uses_c_flank() {
+        // …N-K | S-…  : N at len-2, X=K≠P, post=S → glycosite at n-2.
+        assert_eq!(boundary_nxst_site(b"AAANK", b'S'), Some(3));
+        assert_eq!(boundary_nxst_site(b"AAANK", b'T'), Some(3));
+        assert_eq!(boundary_nxst_site(b"AAANK", b'A'), None); // post not S/T
+        assert_eq!(boundary_nxst_site(b"AAANP", b'S'), None); // X=P excluded
+        assert_eq!(boundary_nxst_site(b"AAAKN", b'S'), None); // last is N, n-2 is K
+        assert_eq!(boundary_nxst_site(b"N", b'S'), None); // too short
     }
 
     #[test]

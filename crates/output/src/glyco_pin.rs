@@ -443,10 +443,44 @@ pub(crate) fn select_emitted_hits(
         })
         .expect("non-empty");
     // Emit only if the scan's actual winner has an enumerated glycan; if the
-    // winner is de-novo, the scan has NO enumerated ID → drop it (not promote a
-    // loser).
+    // winner is de-novo, the scan has NO enumerated ID → drop it by default.
+    // Opt-in ANDES_GLYCO_ENUM_FALLBACK mirrors the driver's collapse fallback:
+    // emit the best-scoring enumerated hit instead of discarding the scan. Under
+    // the honest collapse path the driver already reduced the scan to a single
+    // hit, so this is a safety mirror to keep the two collapse sites consistent.
     if enumerated_only && hits[winner].glycan_key.glycan.is_none() {
-        return Vec::new();
+        let enum_fallback = std::env::var("ANDES_GLYCO_ENUM_FALLBACK")
+            .ok()
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !enum_fallback {
+            return Vec::new();
+        }
+        return (0..hits.len())
+            .filter(|&i| hits[i].glycan_key.glycan.is_some())
+            .max_by(|&a, &b| {
+                let sa = glyco_gp_fused_score(
+                    hits[a].psm.rank_score,
+                    hits[a].glycan_key.y_ladder_intensity_score,
+                    hits[a].glycan_key.core_y_hits as f32,
+                    0.0,
+                    gp_k,
+                    gp_j,
+                    0.0,
+                );
+                let sb = glyco_gp_fused_score(
+                    hits[b].psm.rank_score,
+                    hits[b].glycan_key.y_ladder_intensity_score,
+                    hits[b].glycan_key.core_y_hits as f32,
+                    0.0,
+                    gp_k,
+                    gp_j,
+                    0.0,
+                );
+                sa.total_cmp(&sb).then(b.cmp(&a))
+            })
+            .map(|w| vec![w])
+            .unwrap_or_default();
     }
     vec![winner]
 }

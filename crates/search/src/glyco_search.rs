@@ -560,10 +560,14 @@ impl GlycoCtxOwned {
         // candidate) scoring loop filter on this predicate; recomputing the
         // `residues → Vec<u8> → has_nxst_sequon` scan in the hot loop was pure
         // waste (it depends only on the candidate). O(1) slot lookup instead.
-        // ANDES_GLYCO_SEQUON_BOUNDARY: also treat a peptide whose N-X-S/T sequon is
-        // completed by the C-terminal FLANKING residue (…N-X | S/T-…) as a glyco
-        // candidate. A/B-gated (default off = peptide-internal only, byte-identical).
-        let sequon_boundary_on = std::env::var_os("ANDES_GLYCO_SEQUON_BOUNDARY").is_some();
+        // Also treat a peptide whose N-X-S/T sequon is completed by the C-terminal
+        // FLANKING residue (…N-X | S/T-…) as a glyco candidate. DEFAULT ON (validated
+        // +27 backbone-correct @1%, decoy-safe; #9 candidate-gen audit hole); disable
+        // with ANDES_GLYCO_SEQUON_BOUNDARY=0 (peptide-internal sequon only).
+        let sequon_boundary_on = !matches!(
+            std::env::var("ANDES_GLYCO_SEQUON_BOUNDARY").ok().as_deref(),
+            Some("0") | Some("false") | Some("off")
+        );
         let sequon_membership: Vec<bool> = candidates
             .iter()
             .map(|c| {
@@ -1701,6 +1705,47 @@ fn score_spectrum_glyco(
                 cz_matched_intensity_frac(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
             };
 
+            // When the fused collapse winner is a de-novo candidate (glycan not in
+            // the DB), the scan has no enumerated ID and would be dropped. The
+            // data-flow audit measured this zeroing ~22% of already-generated truth
+            // scans (of which ~half carry the correct backbone), so instead we emit the
+            // best-scoring ENUMERATED candidate. DEFAULT ON (validated +143
+            // backbone-correct @1%, decoy-safe); disable with ANDES_GLYCO_ENUM_FALLBACK=0.
+            let enum_fallback: bool = !matches!(
+                std::env::var("ANDES_GLYCO_ENUM_FALLBACK").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            );
+
+            // FIX #4 (ANDES_GLYCO_PAIR_RANK_ETD): under --glyco-hcd-pair the collapse
+            // `rank` term is w.rank = the HCD-PARTNER b/y rank (phase1_scored). The HCD
+            // b/y model is charge-1-capped, so at high charge that per-candidate term
+            // goes noisy and DILUTES the ETD c/z discriminator (the z5 pairing
+            // regression, audit #16). When set, recompute the SELECTION rank on the ETD
+            // scan itself (scored_per_charge / spec_scorer); backbone truncation still
+            // used w.rank (HCD), preserving the generation-recovery that makes pairing a
+            // net win. Unpaired → returns w.rank verbatim. DEFAULT ON when paired
+            // (validated +12 backbone-correct @1%, decoy-safe); disable with
+            // ANDES_GLYCO_PAIR_RANK_ETD=0.
+            let pair_rank_etd = paired_hcd.is_some()
+                && !matches!(
+                    std::env::var("ANDES_GLYCO_PAIR_RANK_ETD").ok().as_deref(),
+                    Some("0") | Some("false") | Some("off")
+                );
+            let rank_sel = |w: &CheapWinner| -> f32 {
+                if !pair_rank_etd {
+                    return w.rank;
+                }
+                match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
+                    Some((_, ss)) => {
+                        let pep = &candidates[w.cand_slot].peptide;
+                        let sc = score_psm(ss, pep, spec_scorer, w.z, fragment_tolerance_da);
+                        let ei = psm_edge_score(ss, pep, spec_scorer, w.z);
+                        sc + ei as f32
+                    }
+                    None => w.rank,
+                }
+            };
+
             let winners_for_features: Vec<(GlycanWinnerKey, CheapWinner)> =
                 if features_collapse {
                     // Top-1-per-scan collapse (required for honest per-scan TDC FDR),
@@ -1714,7 +1759,7 @@ fn score_spectrum_glyco(
                         .map(|e| {
                             let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                             let s = glyco_gp_fused_score(
-                                e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                                rank_sel(&e.1), ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
                             ) + gp_cz * cz(&e.1);
                             (e, s)
                         })
@@ -1726,7 +1771,38 @@ fn score_spectrum_glyco(
                         Some((gl_key, w)) => {
                             let is_enum = deduped_backbone[w.bb_hit_idx].glycan.is_some();
                             if features_enumerated && !is_enum {
-                                Vec::new()
+                                // De-novo winner. Default: drop the scan. Opt-in
+                                // fallback: emit the best-scoring ENUMERATED candidate
+                                // (same fused score as `best`, restricted to enumerated).
+                                // Fires symmetrically on target/decoy scans → decoy-safe;
+                                // MUST be VM-validated @1% before becoming default.
+                                if enum_fallback {
+                                    accepted_winners
+                                        .iter()
+                                        .filter(|e| {
+                                            deduped_backbone[e.1.bb_hit_idx].glycan.is_some()
+                                        })
+                                        .map(|e| {
+                                            let cy = core_y_counts[e.1.bb_hit_idx] as f32;
+                                            let s = glyco_gp_fused_score(
+                                                rank_sel(&e.1),
+                                                ladder(&e.1),
+                                                cy,
+                                                hyper(&e.1),
+                                                gp_k,
+                                                gp_j,
+                                                gp_h,
+                                            ) + gp_cz * cz(&e.1);
+                                            (e, s)
+                                        })
+                                        .max_by(|(ea, sa), (eb, sb)| {
+                                            sa.total_cmp(sb).then_with(|| eb.0.cmp(&ea.0))
+                                        })
+                                        .map(|(e, _)| vec![(e.0, e.1)])
+                                        .unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                }
                             } else {
                                 vec![(*gl_key, *w)]
                             }
@@ -1743,7 +1819,7 @@ fn score_spectrum_glyco(
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
                                 let s = glyco_gp_fused_score(
-                                    e.1.rank, ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                                    rank_sel(&e.1), ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
                                 ) + gp_cz * cz(&e.1);
                                 (s, e)
                             })
@@ -1828,7 +1904,11 @@ fn score_spectrum_glyco(
                     charge_used: w.z,
                     mass_error_ppm,
                     score: w.score,
-                    rank_score: w.rank,
+                    // Split-brain fix (audit #16): under ANDES_GLYCO_PAIR_RANK_ETD the
+                    // emitted RankScore is drawn from the ETD scan too, so it matches
+                    // RankScoreFloat (which is already ETD-computed) instead of the
+                    // HCD-partner w.rank. Off / unpaired → w.rank (byte-identical).
+                    rank_score: if pair_rank_etd { rank_sel(&w) } else { w.rank },
                     edge_score: w.edge,
                     activation_method: Some(spec_scorer.param().data_type.activation),
                     features,

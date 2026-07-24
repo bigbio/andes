@@ -258,6 +258,49 @@ pub const Z_DOT_OFFSET: f64 = -16.018724;
 /// peptide (then `glycosite` is irrelevant). Produces `2·(n-1)·|charge_range|`
 /// ions (c1..c_{n-1} and z1..z_{n-1} at each charge), mirroring
 /// [`predict_by_ions`]. Never emits neutral-loss ions (ETD is loss-poor).
+/// Cached `ANDES_GLYCO_CZ_REMNANT` flag (read once).
+fn cz_remnant_enabled() -> bool {
+    use std::sync::OnceLock;
+    static F: OnceLock<bool> = OnceLock::new();
+    *F.get_or_init(|| {
+        std::env::var("ANDES_GLYCO_CZ_REMNANT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// Neutral glycan-mass shifts to place on a glycosite-SPANNING c/z fragment.
+/// Default = `[glycan_mass]` (the intact glycan — historical behavior, so
+/// [`predict_cz_ions`] is byte-identical when the flag is off, and non-glyco
+/// peptides with `glycan_mass == 0.0` are untouched). With `ANDES_GLYCO_CZ_REMNANT`
+/// the glycosidic-cleavage remnant ladder is appended (bare backbone + common
+/// N-glycan core remnants): in AI-ETD the supplemental HCD strips the glycan to a
+/// PARTIAL before c/z cleavage, so spanning c/z overwhelmingly carry a remnant, not
+/// the intact glycan (#20 audit — full-glycan spanning c/z match at ~noise, worst at
+/// z5/z6; the remnant union recovers them). Consumers dedup by position, so a
+/// spanning position counts as matched if ANY of these forms is present.
+fn cz_spanning_shifts(glycan_mass: f64, remnant: bool) -> Vec<f64> {
+    if glycan_mass == 0.0 || !remnant {
+        return vec![glycan_mass];
+    }
+    // Monoisotopic neutral remnant masses retained on the peptide backbone.
+    const REMNANTS: [f64; 5] = [
+        0.0,        // bare backbone (glycan fully cleaved)
+        203.079373, // HexNAc (Y1)
+        365.132196, // HexNAc + Hex
+        406.158746, // 2 × HexNAc (chitobiose)
+        892.317218, // Man3GlcNAc2 core (trimannosyl chitobiose)
+    ];
+    let mut v = Vec::with_capacity(1 + REMNANTS.len());
+    v.push(glycan_mass);
+    for &r in &REMNANTS {
+        if (r - glycan_mass).abs() > 1e-6 {
+            v.push(r);
+        }
+    }
+    v
+}
+
 pub fn predict_cz_ions(
     peptide: &Peptide,
     charge_range: RangeInclusive<u8>,
@@ -277,35 +320,61 @@ pub fn predict_cz_ions(
         cumulative.push(acc);
     }
     let total_residue_mass = cumulative[n];
+    // Glycan-mass shift(s) for glycosite-spanning c/z. Default `[glycan_mass]`
+    // (byte-identical); with ANDES_GLYCO_CZ_REMNANT this is the remnant ladder.
+    let span_shifts = cz_spanning_shifts(glycan_mass, cz_remnant_enabled());
     let mut out = Vec::with_capacity(
-        2 * (n - 1) * (charge_range.end() - charge_range.start() + 1) as usize,
+        2 * (n - 1)
+            * (charge_range.end() - charge_range.start() + 1) as usize
+            * span_shifts.len(),
     );
     for charge in charge_range.clone() {
         let z = charge as f64;
         for k in 1..n {
             // c-ion at position k: prefix residues [0, k). Spans the glycosite
-            // (carries the intact glycan) when glycosite ∈ [0, k), i.e. glycosite < k.
-            let c_neutral =
-                cumulative[k] + NH3 + if glycosite < k { glycan_mass } else { 0.0 };
-            out.push(PredictedIon {
-                kind: IonKind::C,
-                position: k as u32,
-                charge,
-                mz: (c_neutral + z * PROTON) / z,
-                loss_class: 0,
-            });
+            // (carries the glycan/remnant) when glycosite ∈ [0, k), i.e. glycosite < k.
+            let c_prefix = cumulative[k] + NH3;
+            if glycosite < k {
+                for &shift in &span_shifts {
+                    out.push(PredictedIon {
+                        kind: IonKind::C,
+                        position: k as u32,
+                        charge,
+                        mz: (c_prefix + shift + z * PROTON) / z,
+                        loss_class: 0,
+                    });
+                }
+            } else {
+                out.push(PredictedIon {
+                    kind: IonKind::C,
+                    position: k as u32,
+                    charge,
+                    mz: (c_prefix + z * PROTON) / z,
+                    loss_class: 0,
+                });
+            }
             // z•-ion at position k: suffix residues [n-k, n). Spans the glycosite
             // when glycosite ∈ [n-k, n), i.e. glycosite >= n-k.
-            let z_neutral = (total_residue_mass - cumulative[n - k] + H2O)
-                + Z_DOT_OFFSET
-                + if glycosite >= n - k { glycan_mass } else { 0.0 };
-            out.push(PredictedIon {
-                kind: IonKind::Z,
-                position: k as u32,
-                charge,
-                mz: (z_neutral + z * PROTON) / z,
-                loss_class: 0,
-            });
+            let z_suffix = (total_residue_mass - cumulative[n - k] + H2O) + Z_DOT_OFFSET;
+            if glycosite >= n - k {
+                for &shift in &span_shifts {
+                    out.push(PredictedIon {
+                        kind: IonKind::Z,
+                        position: k as u32,
+                        charge,
+                        mz: (z_suffix + shift + z * PROTON) / z,
+                        loss_class: 0,
+                    });
+                }
+            } else {
+                out.push(PredictedIon {
+                    kind: IonKind::Z,
+                    position: k as u32,
+                    charge,
+                    mz: (z_suffix + z * PROTON) / z,
+                    loss_class: 0,
+                });
+            }
         }
     }
     out
@@ -397,6 +466,28 @@ mod tests {
         let cg = |k: u32| czg.iter().find(|i| i.kind == IonKind::C && i.position == k).unwrap().mz;
         assert!((cg(2) - c_at(2)).abs() < 1e-6, "c2 must be naked (prefix [0,2) excludes site 2)");
         assert!((cg(3) - (c_at(3) + g)).abs() < 1e-6, "c3 must carry glycan (prefix includes site 2)");
+    }
+
+    #[test]
+    fn cz_spanning_shifts_remnant_ladder() {
+        // Flag OFF → only the intact glycan (byte-identical historical behavior).
+        assert_eq!(cz_spanning_shifts(1000.0, false), vec![1000.0]);
+        // Non-glyco (glycan_mass == 0) → naked regardless of the flag.
+        assert_eq!(cz_spanning_shifts(0.0, true), vec![0.0]);
+        // Flag ON → intact glycan first, then the remnant ladder (bare + core remnants).
+        let s = cz_spanning_shifts(1000.0, true);
+        assert_eq!(s[0], 1000.0, "intact glycan must be first");
+        assert_eq!(s.len(), 6, "intact glycan + 5 remnants, no collision");
+        for r in [0.0, 203.079373, 365.132196, 406.158746, 892.317218] {
+            assert!(s.iter().any(|&x| (x - r).abs() < 1e-9), "missing remnant {r}");
+        }
+        // Dedup: when glycan_mass equals a remnant, it appears exactly once.
+        let s2 = cz_spanning_shifts(203.079373, true);
+        assert_eq!(
+            s2.iter().filter(|&&x| (x - 203.079373).abs() < 1e-6).count(),
+            1,
+            "remnant equal to the intact glycan must not be duplicated"
+        );
     }
 
     /// `PEPTIDE` with a loss-bearing mod (the declared losses + class) on the

@@ -446,10 +446,12 @@ struct SearchArgs {
     #[arg(long = "glyco-decoy", hide = true, default_value_t = false)]
     glyco_decoy: bool,
 
-    /// EXPERIMENTAL (B1): on ETD/AI-ETD spectra, generate candidate backbones from
-    /// the paired HCD scan (same precursor) while scoring c/z on the ETD scan —
-    /// targets high-charge glycopeptides. Off by default. Hidden.
-    #[arg(long = "glyco-hcd-pair", hide = true, default_value_t = false)]
+    /// On ETD/AI-ETD spectra, generate candidate backbones from the paired HCD scan
+    /// (same precursor) while scoring c/z on the ETD scan — targets high-charge
+    /// glycopeptides (validated +153 backbone-correct @1%). DEFAULT ON; scans with no
+    /// HCD partner (and multi-file runs) fall back to unpaired automatically. Disable
+    /// with `--glyco-hcd-pair false`. `action = Set` so the bool takes an explicit value.
+    #[arg(long = "glyco-hcd-pair", default_value_t = true, action = clap::ArgAction::Set)]
     glyco_hcd_pair: bool,
 
     /// BUG2 fix, EXPERIMENTAL: on ETD/AI-ETD spectra, score the rank/edge/

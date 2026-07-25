@@ -125,6 +125,8 @@ fn write_glyco_header<W: Write>(
         "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
         "CzHyperscore".to_string(), // ETD c/z backbone hyperscore (additive; ETD/AI-ETD only, else 0)
         "CzIntensity".to_string(), // ETD c/z matched-intensity fraction (additive; ETD/AI-ETD only, else 0)
+        "CzExplained".to_string(), // ETD c/z analytical explained-intensity LLR (additive; graded-model de-risk; ETD only, else 0)
+        "CzChanceLlr".to_string(), // ETD c/z prior-weighted chance-match surprise (additive; graded-model de-risk; ETD only, else 0)
         "IsTransferred".to_string(),        // cross-spectrum transfer provenance (additive)
         "TransferGraphSupport".to_string(), // # corroborating co-eluting siblings
         "TransferSeedScore".to_string(),    // donor seed Pass-1 discriminant
@@ -289,6 +291,10 @@ fn write_glyco_psm_row<W: Write>(
     // SAME value as its paired target — like Y0Y1Anchor above.
     write_double_tab(writer, key.cz_hyperscore as f64)?;
     write_double_tab(writer, key.cz_intensity as f64)?;
+    // Discriminative c/z STRUCTURE features (additive; gated to real values by
+    // ANDES_GLYCO_CZ_STRUCT at compute time, else 0.0 = ignored by Percolator).
+    write_double_tab(writer, key.cz_comp_frac as f64)?;
+    write_double_tab(writer, key.cz_run_frac as f64)?;
 
     // Transfer columns (additive; inert 0 for native candidates). Bools mirror
     // the `is_glycan_db` 1/0 idiom above; numerics use write_double_tab.
@@ -690,6 +696,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         }
     }
 
@@ -906,6 +914,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
@@ -1084,6 +1094,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];

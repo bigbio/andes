@@ -122,7 +122,8 @@ use crate::psm::PsmFeatures;
 type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
 
 use scoring_crate::scoring::{
-    candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, fuse_strong_score,
+    candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features,
+    fuse_strong_score,
     hyperscore_psm,
     listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
     StrongScoreInputs,
@@ -1705,6 +1706,36 @@ fn score_spectrum_glyco(
                 cz_matched_intensity_frac(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
             };
 
+            // Discriminative c/z STRUCTURE features (additive PIN CzComplementaryFrac /
+            // CzLongestRunFrac). Gated ANDES_GLYCO_CZ_STRUCT (default off → 0.0, ignored
+            // by Percolator as a constant column). Round-6 audit: complementarity/run
+            // GEOMETRY separates target/decoy where c/z PRESENCE (remnant, refuted) did not.
+            // DEFAULT ON (round-6: analytical graded-c/z explained/chance LLR features
+            // validated +31 backbone-correct @1%, decoy-safe). Disable with
+            // ANDES_GLYCO_CZ_STRUCT=0.
+            let cz_struct_on = !matches!(
+                std::env::var("ANDES_GLYCO_CZ_STRUCT").ok().as_deref(),
+                Some("0") | Some("false") | Some("off")
+            );
+            let cz_struct = |w: &CheapWinner| -> (f32, f32) {
+                if !is_etd || !cz_struct_on {
+                    return (0.0, 0.0);
+                }
+                let ss = match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
+                    Some((_, ss)) => ss,
+                    None => return (0.0, 0.0),
+                };
+                let bb = &deduped_backbone[w.bb_hit_idx];
+                let gmass = bb
+                    .glycan
+                    .as_ref()
+                    .map(|g| g.mass)
+                    .unwrap_or(bb.glycan_mass_residual);
+                let pep = &candidates[w.cand_slot].peptide;
+                let gsite = glyco_site_for(pep);
+                cz_structure_features(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
+            };
+
             // When the fused collapse winner is a de-novo candidate (glycan not in
             // the DB), the scan has no enumerated ID and would be dropped. The
             // data-flow audit measured this zeroing ~22% of already-generated truth
@@ -1927,6 +1958,7 @@ fn score_spectrum_glyco(
                     .as_ref()
                     .map(|g| g.mass)
                     .unwrap_or(bb_hit.glycan_mass_residual);
+                let cz_struct_vals = cz_struct(&w);
                 let glycan_key = GlycoPsmKey {
                     spectrum_idx: spec_idx,
                     glycan: bb_hit.glycan.clone(),
@@ -2003,6 +2035,8 @@ fn score_spectrum_glyco(
                     // the selection score can never diverge (single source of truth).
                     cz_hyperscore: cz(&w),
                     cz_intensity: cz_int(&w),
+                    cz_comp_frac: cz_struct_vals.0,
+                    cz_run_frac: cz_struct_vals.1,
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
@@ -2684,6 +2718,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key: key, psm };
         let cloned = hit.clone();

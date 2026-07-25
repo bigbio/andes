@@ -519,6 +519,68 @@ pub fn cz_matched_intensity_frac(
     summed / base
 }
 
+/// Analytical graded-c/z LLR features (additive PIN; the reviewer-10 DE-RISK gate for
+/// a trained ETD c/z intensity model). Uses an ANALYTICAL intensity prior — non-spanning
+/// c/z (bare backbone, reliably observed) weighted high, glycan-SPANNING c/z (near-noise
+/// under intact-glycan placement) weighted low, high fragment charges down-weighted
+/// (peaks deconvolve only to ~z3) — and returns the asymmetric "explained-intensity LLR"
+/// form that paid for b/y in `strong_score` (NOT cosine, NOT the refuted presence/geometry):
+/// - `explained` = Σ(matched·p)/Σp — fraction of PRIOR-weighted c/z intensity observed;
+///   asymmetric, so a true peptide explains its predicted-bright (bare) c/z and a decoy does not.
+/// - `chance_llr` = Σ matched·p·max(0,−ln p_chance) — prior-weighted local-noise surprise
+///   (a match in a sparse region is more informative) — the piece the refuted structure
+///   features lacked. If graded intensity can't separate here, a trained model won't either.
+///
+/// Both 0.0 on short peptides / no match. Per-ion ppm tolerance.
+pub fn cz_structure_features(
+    scored_spec: &ScoredSpectrum,
+    peptide: &Peptide,
+    glycan_mass: f64,
+    glycosite: usize,
+    max_frag_charge: u8,
+    tol_ppm: f64,
+) -> (f32, f32) {
+    const DENSITY_HW: f64 = 50.0;
+    let n = peptide.length();
+    if n < 2 || max_frag_charge == 0 {
+        return (0.0, 0.0);
+    }
+    // Cap the fragment-charge sweep at 3: peaks deconvolve only to ~z3, so higher
+    // predicted c/z are mostly random matches (audit finding F6).
+    let zmax = max_frag_charge.min(3);
+    let mut sum_p = 0.0f64;
+    let mut sum_matched_p = 0.0f64;
+    let mut sum_chance_llr = 0.0f64;
+    for ion in predict_cz_ions(peptide, 1..=zmax, glycan_mass, glycosite) {
+        let pos = ion.position as usize;
+        // Spanning c/z carry the (near-noise) intact glycan; non-spanning are bare.
+        let spanning = match ion.kind {
+            IonKind::C => glycosite < pos,
+            IonKind::Z => glycosite >= n.saturating_sub(pos),
+            _ => false,
+        };
+        // Analytical intensity prior: bare c/z reliably present; spanning near-noise;
+        // higher charges rarer (deconv ceiling ~z3).
+        let charge_w = if ion.charge <= 2 { 1.0 } else { 0.4 };
+        let p = if spanning { 0.15 } else { 1.0 } * charge_w;
+        sum_p += p;
+        let tol_da = (ion.mz * tol_ppm * 1e-6).max(0.01);
+        if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
+            sum_matched_p += p;
+            let rho = scored_spec.local_peak_density(ion.mz, DENSITY_HW);
+            let p_chance = (rho * 2.0 * tol_da).clamp(1e-12, 1.0);
+            let surprise = (-p_chance.ln()).max(0.0);
+            sum_chance_llr += p * surprise;
+        }
+    }
+    let explained = if sum_p > 0.0 {
+        (sum_matched_p / sum_p) as f32
+    } else {
+        0.0
+    };
+    (explained, sum_chance_llr as f32)
+}
+
 /// Float-precision companion to [`score_psm`]: sums the **unrounded** per-split
 /// node scores (`prefix_score + suffix_score`) instead of rounding each split to
 /// `i32` before accumulation.

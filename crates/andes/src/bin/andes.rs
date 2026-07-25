@@ -458,10 +458,9 @@ struct SearchArgs {
     /// hyperscore path (RawScore, EdgeScore, hyperscore, RankScoreFloat) against a
     /// peptide clone carrying the intact glycan on its glycosite instead of the
     /// bare backbone, so glycosite-spanning c/z fragments are computed at the real
-    /// (glycan-carrying) mass. Off by default; inert on HCD/CID. Combine with
-    /// `--model`/`--model-store` pointing at a c/z-trained model for the
-    /// configuration where this is expected to matter most. Hidden.
-    #[arg(long = "glyco-etd-rank-glycan", hide = true, default_value_t = false)]
+    /// (glycan-carrying) mass. DEFAULT ON (round-6: validated +33 backbone-correct @1%,
+    /// decoy-safe); inert on HCD/CID. Disable with `--glyco-etd-rank-glycan false`.
+    #[arg(long = "glyco-etd-rank-glycan", default_value_t = true, action = clap::ArgAction::Set)]
     glyco_etd_rank_glycan: bool,
 
     /// BUG5, EXPERIMENTAL: per-spectrum-activation model dispatch. andes normally

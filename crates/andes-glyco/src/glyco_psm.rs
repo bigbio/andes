@@ -206,6 +206,10 @@ pub struct GlycoPsmKey {
     /// hyperscore discards (round-4 "intensity blindness" audit). PIN feature only;
     /// not (yet) in the collapse selector.
     pub cz_intensity: f32,
+    /// Discriminative c/z complementary-pair fraction (additive; ETD only, else 0).
+    pub cz_comp_frac: f32,
+    /// Discriminative c/z longest-consecutive-run fraction (additive; ETD only, else 0).
+    pub cz_run_frac: f32,
 }
 
 #[cfg(test)]
@@ -299,6 +303,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         };
         assert_eq!(key.glycan_mass, 0.0);
         assert!(key.glycan.is_none());
@@ -336,6 +342,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         };
         assert!((key.glycan_mass - expected_mass).abs() < 1e-6);
         assert!(key.glycan.is_some());
@@ -364,6 +372,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         };
         let cloned = key.clone();
         assert_eq!(cloned.spectrum_idx, key.spectrum_idx);
@@ -381,6 +391,8 @@ mod tests {
             transfer_seed_score: 0.0, transfer_rt_delta: 0.0, transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         };
         assert!(!key.is_transferred);
         assert_eq!(key.transfer_graph_support, 0);

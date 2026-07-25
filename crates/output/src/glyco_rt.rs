@@ -328,6 +328,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_comp_frac: 0.0,
+            cz_run_frac: 0.0,
         }
     }
 

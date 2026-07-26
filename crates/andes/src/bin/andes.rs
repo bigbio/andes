@@ -1821,6 +1821,19 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // candidate mass is reachable. A/B-gated: ANDES_GLYCO_ISO_WIDE only.
     if cli.glyco && std::env::var_os("ANDES_GLYCO_ISO_WIDE").is_some() {
         params.isotope_error_range = iso_min..=iso_max.max(5);
+    } else if cli.glyco
+        && (iso_min, iso_max) == (-1, 2) // untouched CLI default only
+        && std::env::var_os("ANDES_GLYCO_ISO_NEG").is_none()
+    {
+        // Round-7 measurement: an MS1 envelope audit found the firmware mis-picks the
+        // monoisotopic peak in ~2.8% of scans (6.5% in the 3.5-4.5 kDa glyco range) but
+        // ONLY ever picks too HIGH — 0 of 23,907 scans needed a negative shift. Yet the
+        // `iso = -1` arm was emitting 28.5% of all candidate rows for 0.29% of the
+        // correct answers, at a ~53:47 target:decoy ratio (i.e. noise) — pure FDR
+        // dilution. Dropping it is the single largest measured lever in the campaign
+        // (+81 backbone-correct @1%, 3-fraction pool). Glyco-only, and only when the
+        // user did not set --isotope-error explicitly. ANDES_GLYCO_ISO_NEG=1 restores.
+        params.isotope_error_range = iso_min.max(0)..=iso_max;
     }
     // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
     // `.raw` readers. MGF (no MS1) and the Bruker `.d` reader (DDA MS2 only;

@@ -134,6 +134,8 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     transfer_ungated: false,
 ///     cz_hyperscore: 0.0,
 ///     cz_intensity: 0.0,
+///     cz_comp_frac: 0.0,
+///     cz_run_frac: 0.0,
 /// };
 /// assert_eq!(key.glycan_mass, 0.0);
 /// ```

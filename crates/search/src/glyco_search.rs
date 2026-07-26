@@ -326,7 +326,18 @@ fn cz_score_best_site(
                 .fold(f32::NEG_INFINITY, f32::max);
         }
     }
-    let gsite = andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0);
+    // Round-7 fix: use the SAME glycosite resolver as every other c/z consumer.
+    // `first_nxst_site(..).unwrap_or(0)` had no boundary fallback, so a
+    // boundary-sequon candidate (…N-X | S/T-…, default-ON since round-5, glycosite
+    // at n-2) had the intact glycan placed on residue 0 — which flips the spanning
+    // predicate to a near-complement (every c spans, no z does) and evaluates the
+    // dominant gp_cz selector term against the wrong theoretical ladder.
+    // ANDES_GLYCO_CZ_SITE_LEGACY=1 restores the pre-fix resolver for A/B.
+    let gsite = if std::env::var_os("ANDES_GLYCO_CZ_SITE_LEGACY").is_some() {
+        andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
+    } else {
+        glyco_site_for(pep)
+    };
     cz_hyperscore_psm(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
 }
 
@@ -1769,8 +1780,46 @@ fn score_spectrum_glyco(
                 match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
                     Some((_, ss)) => {
                         let pep = &candidates[w.cand_slot].peptide;
-                        let sc = score_psm(ss, pep, spec_scorer, w.z, fragment_tolerance_da);
-                        let ei = psm_edge_score(ss, pep, spec_scorer, w.z);
+                        // Round-7 (audit F1): `--glyco-etd-rank-glycan` decorates the
+                        // hyperscore and RankScoreFloat, but NOT this term — the
+                        // unit-weight base of the fused score. On the default paired
+                        // path that made `rank` a BARE-backbone b/y score measured on a
+                        // c/z spectrum (near-noise at full weight), diluting the gp_cz
+                        // term. Decorate it with the same helper/site resolver so the
+                        // glycosite-spanning half of the ladder is matchable.
+                        // ANDES_GLYCO_PAIR_RANK_GLYCAN=0 reverts for A/B.
+                        // MEASURED NEGATIVE (round-8 leave-one-out: -16 backbone-correct
+                        // @1%), despite three independent audits predicting it would
+                        // help. Decorating this term evidently costs more (by pulling
+                        // the full-weight base term toward the sparse glycosite-spanning
+                        // half of the ladder) than the mass correction gains. Kept as an
+                        // opt-in for re-testing: ANDES_GLYCO_PAIR_RANK_GLYCAN=1.
+                        let decorate = is_etd
+                            && etd_rank_glycan
+                            && matches!(
+                                std::env::var("ANDES_GLYCO_PAIR_RANK_GLYCAN").ok().as_deref(),
+                                Some("1") | Some("true") | Some("on")
+                            );
+                        let scoring_pep: std::borrow::Cow<'_, model::peptide::Peptide> = if decorate
+                        {
+                            let bb = &deduped_backbone[w.bb_hit_idx];
+                            let gmass = bb
+                                .glycan
+                                .as_ref()
+                                .map(|g| g.mass)
+                                .unwrap_or(bb.glycan_mass_residual);
+                            if gmass > 0.0 {
+                                let gsite = glyco_site_for(pep);
+                                std::borrow::Cow::Owned(glyco_aware_peptide(pep, gsite, gmass))
+                            } else {
+                                std::borrow::Cow::Borrowed(pep)
+                            }
+                        } else {
+                            std::borrow::Cow::Borrowed(pep)
+                        };
+                        let sc =
+                            score_psm(ss, &scoring_pep, spec_scorer, w.z, fragment_tolerance_da);
+                        let ei = psm_edge_score(ss, &scoring_pep, spec_scorer, w.z);
                         sc + ei as f32
                     }
                     None => w.rank,
@@ -1980,9 +2029,16 @@ fn score_spectrum_glyco(
                     // is stable per glycan (a fixed decoy "structure"). 0.0 for
                     // de-novo hits (no composition → no glycan-axis decoy row).
                     y_ladder_decoy_score: match &bb_hit.glycan {
+                        // Round-7 (audit F13): this read `spec.peaks` (always the ETD
+                        // scan) while its TARGET sibling above reads `y_peaks`. Under
+                        // ANDES_GLYCO_PAIR_Y_ON_GEN the target ladder moves to the
+                        // glycan-rich HCD partner and the decoy stays on the
+                        // glycan-poor ETD scan — the glycan-axis decoy stops being a
+                        // control and the 2D FDR goes anti-conservative. The decoy
+                        // must be measured on the SAME spectrum as its target.
                         Some(g) if glyco_decoy_on => glycan_y_intensity_decoy(
-                            &spec.peaks,
-                            &stats,
+                            y_peaks,
+                            y_stats,
                             bb_neutral,
                             g,
                             tol_ppm,

@@ -428,6 +428,35 @@ fn cz_fix_enabled() -> bool {
     *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_CZ_FIX_OFF").is_none())
 }
 
+/// Optional override for the c/z fragment-charge ceiling (`ANDES_GLYCO_CZ_ZMAX`).
+///
+/// Round-6 audit finding: the bundled models ship `apply_deconvolution = true`, and
+/// [`ScoredSpectrum::nearest_peak_full`] resolves against the DECONVOLUTED peak list —
+/// in which detected z2/z3 isotope clusters have already been charge-reduced to their
+/// z1 m/z. Predicting c/z at charge ≥2 therefore probes m/z that deconvolution has
+/// vacated, adding chance matches rather than evidence. `ANDES_GLYCO_CZ_ZMAX=1` caps
+/// every c/z predictor at singly-charged, letting deconvolution do the charge work.
+/// Unset = each call site's historical ceiling (byte-identical).
+fn cz_zmax_override() -> Option<u8> {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<Option<u8>> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        std::env::var("ANDES_GLYCO_CZ_ZMAX")
+            .ok()
+            .and_then(|s| s.parse::<u8>().ok())
+            .filter(|&z| z >= 1)
+    })
+}
+
+/// Apply [`cz_zmax_override`] on top of a call site's default ceiling.
+fn cz_effective_zmax(default_zmax: u8) -> u8 {
+    // DEFAULT 1 (round-7, validated +12 backbone-correct @1%): deconvolution has
+    // already charge-reduced every DETECTED z2/z3 cluster to its z1 m/z, so probing
+    // z>=2 hunts vacated positions and only accumulates chance matches. Override with
+    // ANDES_GLYCO_CZ_ZMAX=<n> (e.g. =3 restores the pre-round-7 ceiling).
+    default_zmax.min(cz_zmax_override().unwrap_or(1))
+}
+
 pub fn cz_hyperscore_psm(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,
@@ -443,7 +472,7 @@ pub fn cz_hyperscore_psm(
     let fix = cz_fix_enabled();
     let mut c_hit = vec![false; n];
     let mut z_hit = vec![false; n];
-    for ion in predict_cz_ions(peptide, 1..=max_frag_charge, glycan_mass, glycosite) {
+    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax(max_frag_charge), glycan_mass, glycosite) {
         // Bug 1: ppm-scaled per-ion tolerance (was a flat 0.5 Da for every ion).
         let tol_da = if fix {
             (ion.mz * tol_ppm * 1e-6).max(0.01)
@@ -504,7 +533,7 @@ pub fn cz_matched_intensity_frac(
     let base = peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9);
     let mut c_int = vec![0.0f32; n];
     let mut z_int = vec![0.0f32; n];
-    for ion in predict_cz_ions(peptide, 1..=max_frag_charge, glycan_mass, glycosite) {
+    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax(max_frag_charge), glycan_mass, glycosite) {
         let tol_da = (ion.mz * tol_ppm * 1e-6).max(0.01);
         if let Some((_, intensity, _)) = scored_spec.nearest_peak_full(ion.mz, tol_da) {
             let pos = ion.position as usize;
@@ -547,7 +576,21 @@ pub fn cz_structure_features(
     }
     // Cap the fragment-charge sweep at 3: peaks deconvolve only to ~z3, so higher
     // predicted c/z are mostly random matches (audit finding F6).
-    let zmax = max_frag_charge.min(3);
+    let zmax = cz_effective_zmax(max_frag_charge.min(3));
+    // Round-7 (audit D1): the shipped form discarded the matched peak's INTENSITY
+    // (`nearest_peak_full(..).is_some()`), making `explained` a prior-weighted
+    // PRESENCE fraction — not the intensity-explained ratio it is documented as, and
+    // not evidence that graded intensity separates on the c/z channel. With
+    // ANDES_GLYCO_CZ_INTENSITY set, weight each matched ion by its observed
+    // base-peak-normalised intensity, making this a true explained-INTENSITY ratio.
+    // Unset = byte-identical to the shipped feature.
+    let use_intensity = std::env::var_os("ANDES_GLYCO_CZ_INTENSITY").is_some();
+    let base = if use_intensity {
+        let (peaks, _) = scored_spec.active_peaks_and_ranks();
+        peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9)
+    } else {
+        1.0
+    };
     let mut sum_p = 0.0f64;
     let mut sum_matched_p = 0.0f64;
     let mut sum_chance_llr = 0.0f64;
@@ -565,12 +608,18 @@ pub fn cz_structure_features(
         let p = if spanning { 0.15 } else { 1.0 } * charge_w;
         sum_p += p;
         let tol_da = (ion.mz * tol_ppm * 1e-6).max(0.01);
-        if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
-            sum_matched_p += p;
+        if let Some((_, intensity, _)) = scored_spec.nearest_peak_full(ion.mz, tol_da) {
+            // Presence (shipped) vs observed-intensity weighting (D1 A/B).
+            let obs_w = if use_intensity {
+                ((intensity / base) as f64).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            sum_matched_p += p * obs_w;
             let rho = scored_spec.local_peak_density(ion.mz, DENSITY_HW);
             let p_chance = (rho * 2.0 * tol_da).clamp(1e-12, 1.0);
             let surprise = (-p_chance.ln()).max(0.0);
-            sum_chance_llr += p * surprise;
+            sum_chance_llr += p * obs_w * surprise;
         }
     }
     let explained = if sum_p > 0.0 {

@@ -597,12 +597,39 @@ pub fn glycan_y_intensity(
 
     let mut score = match_int(bb_neutral); // Y0 (bare backbone), neutral = bb_neutral
     let mut cum = 0.0;
+    let mut n_rungs = 1usize; // Y0
     for m in adds {
         cum += m;
         score += match_int(bb_neutral + cum);
+        n_rungs += 1;
     }
-    score
+    // Round-7 (audit F2): this is an UNNORMALISED sum over `1 + Σ(monosaccharides)`
+    // rungs — 6 for the trimannosyl core, up to 23 for a large composition. So
+    // E[score | noise] grows with glycan SIZE, and the term structurally rewards
+    // assigning a bigger glycan. That is the mechanism behind the measured K·ladder
+    // inversion (76.5 on wrong winners vs 53.1 on correct) and the "oversized
+    // glycan" failure signature; round-2 suppressed the symptom by cutting K 50→10
+    // but the estimator is still biased. Dividing by the rung count makes it a mean
+    // matched intensity per predicted rung, comparable across compositions — and
+    // across the de-novo branch, which always has exactly 6 rungs.
+    // ANDES_GLYCO_LADDER_NORM=1 enables; unset = byte-identical.
+    let norm = {
+        use std::sync::OnceLock;
+        static CELL: OnceLock<bool> = OnceLock::new();
+        *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_LADDER_NORM").is_some())
+    };
+    if norm && n_rungs > 0 {
+        // Rescale to the core-ladder rung count so the term keeps its historical
+        // magnitude (and the tuned gp_k stays meaningful) instead of shrinking ~4x.
+        score * (CORE_RUNGS as f64) / (n_rungs as f64)
+    } else {
+        score
+    }
 }
+
+/// Rung count of the trimannosyl-core ladder (`core_y_intensity`), used to keep the
+/// rung-normalised `glycan_y_intensity` on the same scale as the de-novo branch.
+const CORE_RUNGS: usize = 6;
 
 /// Deterministic mixing (splitmix64) → a reproducible per-(seed,rung) offset.
 #[inline]

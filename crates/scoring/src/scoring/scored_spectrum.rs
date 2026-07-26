@@ -251,10 +251,33 @@ impl<'a> ScoredSpectrum<'a> {
         let n = spec.peaks.len();
 
         // Collect filter m/z values from param.precursor_off_map for this charge.
+        // Round-7 (audit): this lookup had NO clamp, unlike `find_partition` which
+        // clamps out-of-range charge into [min_charge, max_charge]. The bundled models
+        // carry precursor_off_map keys {2..5} at most, so z6/z7/z8 precursors received
+        // an EMPTY filter set — i.e. zero precursor filtering on exactly the highest
+        // charges. On ETD the charge-reduced precursor is typically the base peak, so
+        // leaving it unfiltered deflates every real fragment's rank. Clamp to the
+        // nearest available charge. ANDES_PRECOFF_NOCLAMP=1 restores legacy for A/B.
         let filter_entries: &[PrecursorOffsetFrequency] = param
             .precursor_off_map
             .get(&(charge as i32))
             .map(Vec::as_slice)
+            .or_else(|| {
+                let noclamp = {
+                    use std::sync::OnceLock;
+                    static CELL: OnceLock<bool> = OnceLock::new();
+                    *CELL.get_or_init(|| std::env::var_os("ANDES_PRECOFF_NOCLAMP").is_some())
+                };
+                if noclamp || param.precursor_off_map.is_empty() {
+                    return None;
+                }
+                // Nearest available charge key (deterministic: min |Δ|, then lower key).
+                param
+                    .precursor_off_map
+                    .iter()
+                    .min_by_key(|(k, _)| ((**k - charge as i32).abs(), **k))
+                    .map(|(_, v)| v.as_slice())
+            })
             .unwrap_or(&[]);
 
         // Compute each filter m/z:
@@ -732,7 +755,24 @@ impl<'a> ScoredSpectrum<'a> {
         if hw <= 0.0 {
             return 0.0;
         }
-        let peaks = &self.spec.peaks;
+        // Round-7 (audit, 3 independent agents): matches are resolved against the
+        // ACTIVE (deconvoluted) list via `nearest_peak_full`, but the density was
+        // measured on the RAW list. Deconvolution moves detected z2/z3 clusters UP to
+        // their z1 m/z, so a match above the raw list's m/z ceiling sees rho = 0 →
+        // p_chance clamps to 1e-12 → surprise = 27.6 nats vs a typical ~2 — a ~13x
+        // artifact that fires preferentially on the high-m/z, glycan-bearing spanning
+        // c/z. Measuring the density on the list that produced the match removes it.
+        // ANDES_DENSITY_RAW=1 restores the legacy behaviour for A/B.
+        let use_raw = {
+            use std::sync::OnceLock;
+            static CELL: OnceLock<bool> = OnceLock::new();
+            *CELL.get_or_init(|| std::env::var_os("ANDES_DENSITY_RAW").is_some())
+        };
+        let peaks = if use_raw {
+            &self.spec.peaks
+        } else {
+            self.active_peaks_and_ranks().0
+        };
         let lo = peaks.partition_point(|&(m, _)| m < mz - hw);
         let hi = peaks.partition_point(|&(m, _)| m <= mz + hw);
         (hi - lo) as f64 / (2.0 * hw)

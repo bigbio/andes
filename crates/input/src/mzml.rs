@@ -169,11 +169,21 @@ fn log_ethcd_once() {
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
-        eprintln!(
-            "INFO: EThcD/ETciD detected (electron-transfer + supplemental collisional \
-             activation) — no EThcD model exists, routing these spectra to the HCD (b/y) \
-             model rather than pure ETD. Pass --fragmentation to override."
-        );
+        if std::env::var_os("ANDES_ETHCD_AS_ETD").is_some() {
+            eprintln!(
+                "INFO: EThcD/ETciD detected; ANDES_ETHCD_AS_ETD is set, so these spectra \
+                 stay classified as ETD (c/z stack active)."
+            );
+        } else {
+            eprintln!(
+                "WARN: EThcD/ETciD detected (electron-transfer + supplemental collisional \
+                 activation) — no EThcD model exists, so these spectra are routed to the \
+                 HCD (b/y) model. IN --glyco THIS DISABLES THE WHOLE c/z STACK: c/z \
+                 generation and scoring, the c/z truncation gate, the ETD DB fallback, and \
+                 --glyco-hcd-pair all become inert. Set ANDES_ETHCD_AS_ETD=1 to keep them \
+                 active, or pass --fragmentation to override."
+            );
+        }
     }
 }
 
@@ -854,10 +864,20 @@ impl<R: BufRead> MzMLReader<R> {
                             // No EThcD model exists, so route to HCD (b/y) rather than the
                             // pure-ETD c/z model; the instrument fallback then picks the
                             // resolution tier. Logged once.
+                            // ANDES_ETHCD_AS_ETD=1 keeps EThcD/ETciD classified as ETD.
+                            // The HCD relabel silently disables the ENTIRE electron-
+                            // transfer stack for such files — glyco c/z generation and
+                            // scoring, the c/z truncation gate, the ETD DB fallback, and
+                            // `--glyco-hcd-pair` (which finds zero ETD scans and becomes
+                            // a no-op). On a genuine EThcD glyco dataset that silently
+                            // reverts a whole campaign's worth of gains with no error, so
+                            // the escape hatch and a loud warning are both required.
                             if let Some(sb) = self.current.as_mut() {
                                 if sb.act_saw_electron && sb.act_saw_collisional {
                                     log_ethcd_once();
-                                    sb.activation_method = Some(ActivationMethod::HCD);
+                                    if std::env::var_os("ANDES_ETHCD_AS_ETD").is_none() {
+                                        sb.activation_method = Some(ActivationMethod::HCD);
+                                    }
                                 }
                             }
                             self.state = State::Spectrum;

@@ -998,6 +998,10 @@ enum Command {
 #[derive(Parser, Debug)]
 #[command(
     name = "andes",
+    // `--version` / `-V` from the crate version. Every CLI is expected to answer it,
+    // and a search result is only reproducible if you can record which build produced
+    // it — so this is provenance, not just convention.
+    version = env!("CARGO_PKG_VERSION"),
     about = "andes: database search of MGF/mzML spectra against FASTA",
     allow_hyphen_values = true,
 )]

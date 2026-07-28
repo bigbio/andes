@@ -130,7 +130,7 @@ How the target/decoy competition for FDR is set up. For an externally-built targ
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--decoy-strategy` | enum | `reverse` | Decoy generation: `reverse`, `shuffle`, or `none` (input FASTA already contains decoys). |
+| `--decoy-strategy` | enum | `reverse` | Decoy generation: `reverse`, `shuffle`, `sequon-reverse`, or `none` (input FASTA already contains decoys). **Use `sequon-reverse` with `--glyco`** — plain reversal maps N-X-S/T to S/T-X-N, so reversed decoys reach the glyco sequon gate at a lower rate than targets and the resulting q-values are anti-conservative. `sequon-reverse` restores each target's sequon at its mirrored position. |
 | `--decoy-prefix` | string | `XXX_` | Accession prefix that marks a decoy protein (generated, or recognised in an external DB). |
 | `--decoy-suffix` | string | *(off)* | Accession *suffix* that marks a decoy (the OpenMS/quantms `_rev` convention), as an alternative to a prefix. |
 | `--decoy-seed` | u64 | fixed | *(advanced)* RNG seed for `shuffle` decoys; fixed so runs are reproducible. |
@@ -682,7 +682,14 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | Flag | Default | Purpose |
 |---|---|---|
 | `--glyco-backbone-top-k` | 50 | Max backbone candidates per spectrum (set large to approximate an exhaustive ceiling). |
-| `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 50 / 5 / 1 | Weights of the `gp` fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (the shipped, default selector). |
+| `--glyco-gp-k` | 10 | Weight `K` on the glycan-Y ladder term of the fused per-scan selector `rank + K·ladder + J·core_y + H·hyper + [ETD only] Cz·cz`. Lowered 50 → 10 in round-2: the ladder term is per-backbone and so cannot discriminate between isobaric peptides sharing a backbone mass. A sweep confirms both per-backbone terms are load-bearing for choosing the backbone/glycan-mass split (`gp_k=0` −20, `gp_j=0` −139, both 0 −248 backbone-correct @1%) — do not zero them. |
+| `--glyco-gp-j` | 5 | Weight `J` on the core-Y hit count. |
+| `--glyco-gp-h` | 1 | Weight `H` on the b/y hyperscore (`0` disables the term). |
+| `--glyco-gp-cz` | 15 | Weight on the ETD c/z hyperscore. Added **only** on ETD/AI-ETD spectra and inert on HCD/CID. Raised 5 → 15 in round-2 — c/z is the only *per-candidate* discriminator on ETD. |
+| `--glyco-cz-gate` | **on** | ETD only. Adds a c/z-evidence axis to the Phase-1 backbone-truncation gate, so a backbone supported mainly by glycosite-spanning c/z survives truncation. Union-only, so it cannot drop a candidate the other axes kept. Inert on HCD/CID. Disable with `--glyco-cz-gate false`. |
+| `--glyco-hcd-pair` | **on** | ETD only, single-file runs only. Generates candidate backbones from the paired HCD scan of the same precursor while scoring c/z on the ETD scan. Falls back to unpaired when a scan has no partner; **silently disabled (with a warning) for multi-file runs** — run one file per invocation and merge the PINs before Percolator. Disable with `--glyco-hcd-pair false`. |
+| `--glyco-etd-rank-glycan` | **on** | ETD only. Scores the rank/edge/hyperscore path against a peptide clone carrying the intact glycan at its glycosite, so glycosite-spanning fragments are predicted at their real (glycan-carrying) mass rather than the bare-backbone mass. Inert on HCD/CID. |
+| `--glyco-per-spectrum-model` | off | Mixed HCD/ETD files. andes otherwise picks ONE model per file by majority vote over the first 64 MS2 scans; with this set, each scan is scored by the model matching its own activation. |
 | `--glyco-pf-charge` | 2 | Charge states the peptide-first fragment index covers (b/y at 1..=N, clamped 1..=3); targets high-charge glycopeptides. |
 | `--glyco-max-pf` | 1024 | Max peptide-first candidates per spectrum. |
 | `--glyco-decoy` | off | Emit paired glycan-axis decoy rows for experimental 2D (peptide × glycan) FDR. |
@@ -699,7 +706,9 @@ By default FDR is computed **externally**: andes writes the glyco `.pin` and you
 ### Internal environment variables
 
 A few remaining `ANDES_*` environment variables are **internal / advanced** and are
-NOT part of the supported search interface. They do not change default search output.
+NOT part of the supported search interface. Most do not change default search output — the training-only, instrumentation and test-harness variables listed below are inert for a normal search.
+
+**However, a number of `ANDES_GLYCO_*` variables (and the engine-wide `ANDES_PRECOFF_NOCLAMP`, `ANDES_DENSITY_RAW`, `ANDES_ETHCD_AS_ETD`) are escape hatches that REVERT a shipped default and therefore DO change results.** They exist for A/B testing and rollback. Setting any of them means your run is no longer the configuration this release was validated against, and the engine-wide ones affect non-glyco searches too. They are not covered by semantic versioning and may be removed without notice; do not use them in production pipelines.
 
 - **Model training** (only read by the hidden `train*` subcommands): `ANDES_GEO_SEGMENTS`, `ANDES_GEO_MAX_RANK`, `ANDES_GEO_OCCUPANCY`, `ANDES_GEO_MAX_TIERS`, `ANDES_GEO_MAX_FRAG_CHARGE` (partition-geometry derivation), `ANDES_SEED_GEOMETRY` (reuse seed geometry), `ANDES_DENSE_NOISE` (noise sampler), `ANDES_V1_STORE` / `ANDES_V1_OUT`, `ANDES_TRAIN_BENCH`.
 - **Advanced scoring**: `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` (windowed peak filtering; unset = model-tolerance default).

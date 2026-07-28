@@ -330,7 +330,17 @@ fn cz_best_site(
 ) -> usize {
     if multisite {
         let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
-        let sites = andes_glyco::sequon::all_nxst_sites(&res);
+        let mut sites = andes_glyco::sequon::all_nxst_sites(&res);
+        // A sequon completed by the following residue (…N-X | S/T-…) is admitted as
+        // a glycosite everywhere else since round-5, so it must be a candidate here
+        // too. Omitting it meant a peptide whose ONLY other site was a boundary
+        // sequon never entered this branch, and one with both silently scored the
+        // internal site as if the boundary site did not exist.
+        if let Some(b) = andes_glyco::sequon::boundary_nxst_site(&res, pep.post) {
+            if !sites.contains(&b) {
+                sites.push(b);
+            }
+        }
         if sites.len() > 1 {
             return sites
                 .iter()
@@ -349,7 +359,10 @@ fn cz_best_site(
     // at n-2) had the intact glycan placed on residue 0 — which flips the spanning
     // predicate to a near-complement and evaluated the dominant gp_cz selector term
     // against the wrong theoretical ladder.
-    if std::env::var_os("ANDES_GLYCO_CZ_SITE_LEGACY").is_some() {
+    // Requires an explicit "1" (matching `ladder_norm_enabled`): with a bare
+    // `is_some()`, `ANDES_GLYCO_CZ_SITE_LEGACY=0` would ENABLE the legacy resolver,
+    // which is the opposite of what anyone typing that means.
+    if std::env::var("ANDES_GLYCO_CZ_SITE_LEGACY").ok().as_deref() == Some("1") {
         let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
         andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
     } else {

@@ -11,43 +11,47 @@ does that. They prepare its input and interpret its output.
 
 | Script | What it does |
 | --- | --- |
-| `eth_combine.py` | Concatenates per-fraction `.glyco.pin` files into one pooled PIN (single header, fraction-tagged `SpecId`). **Pooling is mandatory**, see below. |
+| `pool_pins.py` | Concatenates per-fraction `.glyco.pin` files into one pooled PIN (single header, fraction-tagged `SpecId`). **Pooling is mandatory**, see below. Errors out if the headers differ rather than silently misaligning columns. |
 | `eval_honest.py` | Scores a pooled Percolator result against a reference identification set. Compares the peptide **sequence**, not just the precursor mass, and reports the A/B/C/D decomposition. |
 | `eval_yield.py` | Absolute yield: glycoPSMs, distinct glycopeptides, compositions and glycosites at 1% q-value, with no reference set. Use for datasets that have no truth. |
-| `build_entrap.py` | Appends an unrelated proteome (yeast / E. coli) to the search FASTA as **targets**. Any glyco ID landing there is false by construction, so the rate measures the real false-discovery proportion. |
+| `build_entrap.py` | Appends an unrelated proteome (yeast / E. coli) to the search FASTA as **targets**. Any glyco ID landing there is false by construction. Writes targets only — run andes with `--decoy-strategy sequon-reverse` so the decoys are built correctly for the whole database. |
+| `eval_entrap.py` | Counts the entrapment hits that survive the q-value cut and reports the false-discovery proportion, with a conservative/optimistic verdict against the nominal threshold. |
 
 ## Two rules these scripts encode
 
 **Pool fractions before Percolator.** A single fraction yields on the order of 0-2 glyco
 decoys, so a per-fraction 1% q-value is estimated from almost no data and swings wildly
 between runs. Differences measured that way are noise. Run each file separately, combine
-with `eth_combine.py`, then run Percolator once.
+with `pool_pins.py`, then run Percolator once.
 
 **Yield alone will ship a bad change.** Expanding the search space raises the number of
 IDs at a nominal 1% whether or not the new IDs are real. The full 4034-composition glycan
 list looked like +59 compositions by yield and turned out to inflate the entrapment error
-5.4x. Always pair `eval_yield.py` with an entrapment run from `build_entrap.py`.
+5.4x. Always pair `eval_yield.py` with `build_entrap.py` + `eval_entrap.py`.
 
 ## Typical run
 
 ```bash
-# once: build a search database with entrapment targets
-python3 build_entrap.py mouse.fasta yeast.fasta > mouse_entrap.fasta
+# once: build a search database with entrapment targets appended
+python3 build_entrap.py mouse.fasta yeast.fasta mouse_entrap.fasta
 
-# per fraction
+# per fraction. --glyco writes the glyco PSMs to <output-pin stem>.glyco.pin,
+# so this produces frac1.glyco.pin ... frac6.glyco.pin alongside the peptide PINs.
 for f in 1 2 3 4 5 6; do
   andes --spectrum Frac${f}.mzML --database mouse_entrap.fasta \
         --decoy-strategy sequon-reverse --glyco \
         --output-pin frac${f}.pin
 done
 
-# pool, then a single Percolator run over the pooled PIN
-python3 eth_combine.py frac*.glyco.pin > pooled.pin
+# pool, then a SINGLE Percolator run over the pooled PIN
+python3 pool_pins.py frac1.glyco.pin frac2.glyco.pin frac3.glyco.pin \
+                    frac4.glyco.pin frac5.glyco.pin frac6.glyco.pin > pooled.pin
 percolator --seed 42 --results-psms out.psms --decoy-results-psms out.dpsms pooled.pin
 
-# interpret
-python3 eval_honest.py pooled.pin out.psms out.dpsms   # against a reference set
-python3 eval_yield.py  out.psms                        # absolute yield
+# interpret — always read yield and entrapment together
+python3 eval_honest.py pooled.pin out.psms out.dpsms   # vs a reference set
+python3 eval_yield.py  pooled.pin out.psms             # absolute yield
+python3 eval_entrap.py pooled.pin out.psms             # false-discovery proportion
 ```
 
 ## Reading `eval_honest.py`

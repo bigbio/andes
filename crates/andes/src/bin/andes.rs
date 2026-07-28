@@ -2671,8 +2671,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             andes_glyco::glycan_db::n_glycan_list_common()
         };
         let glyco_tol_ppm = cli.glyco_tol_ppm;
-        if glyco_tol_ppm <= 0.0 {
-            eprintln!("error: --glyco-tol-ppm must be > 0 (got {glyco_tol_ppm})");
+        // `!(x > 0.0)` rather than `x <= 0.0` so NaN is rejected too: every
+        // comparison against NaN is false, so a NaN tolerance would sail past a
+        // `<= 0.0` check and then match nothing, silently, for the whole run.
+        if !(glyco_tol_ppm.is_finite() && glyco_tol_ppm > 0.0) {
+            eprintln!("error: --glyco-tol-ppm must be a finite value > 0 (got {glyco_tol_ppm})");
             std::process::exit(2);
         }
         if glyco_tol_ppm < 20.0 {

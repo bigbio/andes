@@ -372,7 +372,8 @@ andes --spectrum sample.mzML \
       --database proteins.fasta \
       --decoy-strategy sequon-reverse \
       --glyco \
-      --output results.tsv
+      --output-pin results.pin \
+      --output-tsv results.tsv
 ```
 
 Two things differ from a normal run:

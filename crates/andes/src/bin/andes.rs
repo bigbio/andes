@@ -402,6 +402,16 @@ struct SearchArgs {
     glyco_backbone_top_k: usize,
 
 
+    /// Cap the peaks the glyco GENERATION stage considers, keeping the most
+    /// intense N. The backbone solver is superlinear in peak count, so an
+    /// uncentroided profile scan or a very dense wide-window scan can take tens of
+    /// seconds while a normal scan takes milliseconds — the run looks hung.
+    /// Scoring always reads the full spectrum, so a generated candidate is never
+    /// scored on truncated evidence. Default 0 = no cap; 300-500 is a reasonable
+    /// value if you hit this. Changing it changes results.
+    #[arg(long = "glyco-max-peaks", default_value_t = 0usize)]
+    glyco_max_peaks: usize,
+
     /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
     /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
     /// suits Orbitrap MS2. **Raise this for low-resolution (ion-trap) MS2** —
@@ -2684,6 +2694,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_j: cli.glyco_gp_j,
             gp_h: cli.glyco_gp_h,
             gp_cz: cli.glyco_gp_cz,
+            max_gen_peaks: cli.glyco_max_peaks,
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,

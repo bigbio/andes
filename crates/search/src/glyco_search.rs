@@ -54,6 +54,10 @@ pub struct GlycoConfig {
     /// `gp` selector hyperscore weight (H).
     pub gp_h: f32,
     pub gp_cz: f32,
+    /// Cap on the number of peaks the GENERATION stage sees (the most intense N),
+    /// as a guard against pathological scans. 0 = no cap. Scoring always reads the
+    /// full spectrum, so a generated candidate is never scored on truncated evidence.
+    pub max_gen_peaks: usize,
     /// Peptide-first fragment-index charge states (indexes b/y at 1..=pf_charge).
     pub pf_charge: u8,
     /// Max peptide-first candidates kept per spectrum.
@@ -92,6 +96,7 @@ impl Default for GlycoConfig {
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
             gp_cz: GLYCO_GP_CZ_DEFAULT,
+            max_gen_peaks: 0,
             pf_charge: 2,
             max_pf: 1024,
             hcd_pair: false,
@@ -461,6 +466,8 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_j: f32,
     pub gp_h: f32,
     pub gp_cz: f32,
+    /// See `GlycoConfig::max_gen_peaks`.
+    pub max_gen_peaks: usize,
     pub glyco_decoy_on: bool,
     /// B1 paired-scan generation toggle (`--glyco-hcd-pair`). Process-constant.
     pub hcd_pair_on: bool,
@@ -503,6 +510,7 @@ pub struct GlycoCtxOwned {
     gp_j: f32,
     gp_h: f32,
     gp_cz: f32,
+    max_gen_peaks: usize,
     glyco_decoy_on: bool,
     hcd_pair_on: bool,
     etd_rank_glycan: bool,
@@ -573,6 +581,7 @@ impl GlycoCtxOwned {
         let gp_j = cfg.gp_j;
         let gp_h = cfg.gp_h;
         let gp_cz = cfg.gp_cz;
+        let max_gen_peaks = cfg.max_gen_peaks;
         // Glycan-Y-first candidate retention (P0b) is off by default under the gp
         // selector (matches the validated gp baseline).
         let yindex_on = false;
@@ -678,6 +687,7 @@ impl GlycoCtxOwned {
             gp_j,
             gp_h,
             gp_cz,
+            max_gen_peaks,
             glyco_decoy_on,
             hcd_pair_on,
             etd_rank_glycan,
@@ -723,6 +733,7 @@ impl GlycoCtxOwned {
             gp_j: self.gp_j,
             gp_h: self.gp_h,
             gp_cz: self.gp_cz,
+            max_gen_peaks: self.max_gen_peaks,
             glyco_decoy_on: self.glyco_decoy_on,
             hcd_pair_on: self.hcd_pair_on,
             etd_rank_glycan: self.etd_rank_glycan,
@@ -947,8 +958,35 @@ fn score_spectrum_glyco(
                 Some(p) => &ctx.all_spectra[p],
                 None => spec,
             };
-            let gen_peaks: &[(f64, f32)] = &gen_spec.peaks;
-            let gen_stats_owned = paired_hcd.map(|_| SpectrumStats::new(gen_peaks));
+            // Optional guard on generation cost. The backbone solver is superlinear
+            // in peak count (bin construction plus a windowed complement sweep), so a
+            // pathological scan — an uncentroided profile spectrum, or a very wide
+            // isolation window on a dense sample — can take tens of seconds while a
+            // normal scan takes milliseconds, and the run looks hung. `max_gen_peaks`
+            // caps the peaks the GENERATION stage sees to the most intense N; scoring
+            // still reads the full spectrum, so a candidate that is generated is
+            // scored on all its evidence. Default 0 = no cap (results unchanged).
+            let capped_gen_peaks: Option<Vec<(f64, f32)>> =
+                match ctx.max_gen_peaks {
+                    n if n > 0 && gen_spec.peaks.len() > n => {
+                        let mut by_intensity: Vec<(f64, f32)> = gen_spec.peaks.clone();
+                        // `total_cmp` so equal-intensity ties break identically on
+                        // every platform and the cap stays reproducible.
+                        by_intensity
+                            .sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.total_cmp(&b.0)));
+                        by_intensity.truncate(n);
+                        // Restore m/z order: every downstream consumer assumes it.
+                        by_intensity.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                        Some(by_intensity)
+                    }
+                    _ => None,
+                };
+            let gen_peaks: &[(f64, f32)] =
+                capped_gen_peaks.as_deref().unwrap_or(&gen_spec.peaks);
+            // Stats must describe the peaks actually used, so recompute whenever the
+            // list differs from `spec.peaks` — under pairing OR under a cap.
+            let gen_stats_owned = (paired_hcd.is_some() || capped_gen_peaks.is_some())
+                .then(|| SpectrumStats::new(gen_peaks));
             let gen_stats: &SpectrumStats = gen_stats_owned.as_ref().unwrap_or(&stats);
             // EXPERIMENT (ANDES_GLYCO_PAIR_Y_ON_GEN): the glycan-Y ladder is a
             // GLYCOSIDIC-cleavage product — strong on HCD, near-absent on ETD. Under

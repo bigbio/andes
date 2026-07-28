@@ -683,6 +683,7 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | Flag | Default | Purpose |
 |---|---|---|
 | `--glyco-backbone-top-k` | 50 | Max backbone candidates per spectrum (set large to approximate an exhaustive ceiling). |
+| `--glyco-tol-ppm` | 20 | Fragment tolerance for **glyco-specific** matching — oxonium ions, the core-Y ladder, backbone mass search and c/z. Separate from `--fragment-tol-ppm`, which the scoring model owns. 20 ppm suits Orbitrap MS2; **raise it for low-resolution (ion-trap) MS2**, where a 0.3–0.5 Da peak can never match at 20 ppm, the oxonium gate never fires, and glyco IDs collapse to near zero. |
 | `--glyco-gp-k` | 10 | Weight `K` on the glycan-Y ladder term of the fused per-scan selector `rank + K·ladder + J·core_y + H·hyper + [ETD only] Cz·cz`. Lowered 50 → 10 in round-2: the ladder term is per-backbone and so cannot discriminate between isobaric peptides sharing a backbone mass. A sweep confirms both per-backbone terms are load-bearing for choosing the backbone/glycan-mass split (`gp_k=0` −20, `gp_j=0` −139, both 0 −248 backbone-correct @1%) — do not zero them. |
 | `--glyco-gp-j` | 5 | Weight `J` on the core-Y hit count. |
 | `--glyco-gp-h` | 1 | Weight `H` on the b/y hyperscore (`0` disables the term). |

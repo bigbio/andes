@@ -402,6 +402,15 @@ struct SearchArgs {
     glyco_backbone_top_k: usize,
 
 
+    /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
+    /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
+    /// suits Orbitrap MS2. **Raise this for low-resolution (ion-trap) MS2** —
+    /// at 20 ppm a 0.3-0.5 Da ion-trap peak never matches, so the oxonium gate
+    /// never fires and glyco IDs collapse to near zero. This is separate from
+    /// `--fragment-tol-ppm`, which the scoring model owns.
+    #[arg(long = "glyco-tol-ppm", default_value_t = 20.0f64)]
+    glyco_tol_ppm: f64,
+
     /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
     /// Hidden tuning knob; default 10 (lowered from 50 in round-2 — K·ladder is
     /// per-backbone and non-discriminating between isobaric peptides; see
@@ -2651,7 +2660,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             andes_glyco::glycan_db::n_glycan_list_common()
         };
-        let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
+        let glyco_tol_ppm = cli.glyco_tol_ppm;
+        if glyco_tol_ppm <= 0.0 {
+            eprintln!("error: --glyco-tol-ppm must be > 0 (got {glyco_tol_ppm})");
+            std::process::exit(2);
+        }
+        if glyco_tol_ppm < 20.0 {
+            eprintln!(
+                "warning: --glyco-tol-ppm {glyco_tol_ppm} is tighter than the 20 ppm the \
+                 glyco defaults were validated at; oxonium, core-Y and c/z matching may \
+                 under-fire"
+            );
+        }
         // Dev cap on glyco scoring uses the global --max-spectra (was the
         // redundant --glyco-max-spectra).
         let spectra_for_glyco: &[_] = if cli.max_spectra > 0 {

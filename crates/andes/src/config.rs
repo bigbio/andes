@@ -129,6 +129,7 @@ pub struct GlycoCfg {
     pub gp_j: Option<f32>,
     pub gp_h: Option<f32>,
     pub gp_cz: Option<f32>,
+    pub tol_ppm: Option<f64>,
     pub pf_charge: Option<u8>,
     pub max_pf: Option<usize>,
     pub debug: Option<bool>,
@@ -279,6 +280,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("glyco_gp_j", glyco_gp_j, cfg.glyco.gp_j);
     set!("glyco_gp_h", glyco_gp_h, cfg.glyco.gp_h);
     set!("glyco_gp_cz", glyco_gp_cz, cfg.glyco.gp_cz);
+    set!("glyco_tol_ppm", glyco_tol_ppm, cfg.glyco.tol_ppm);
     set!("glyco_pf_charge", glyco_pf_charge, cfg.glyco.pf_charge);
     set!("glyco_max_pf", glyco_max_pf, cfg.glyco.max_pf);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);

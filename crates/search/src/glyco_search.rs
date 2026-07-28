@@ -308,6 +308,50 @@ fn glyco_site_for(pep: &model::peptide::Peptide) -> usize {
 /// and the MAX is returned (the true glycosite is otherwise assumed to be the
 /// first, deflating c/z for ~8% of multi-sequon glycopeptides). `multisite=false`
 /// reproduces the first-site-only behavior exactly.
+/// The glycosite every c/z feature on a row must agree on.
+///
+/// With `multisite`, a peptide carrying >1 sequon is scored at EVERY sequon and the
+/// ARGMAX site is returned, so `CzHyperscore`, `CzIntensity`, `CzExplained` and
+/// `CzChanceLlr` all describe the SAME localization. Returning the score alone (as
+/// this did) let the selector's `cz` term pick one site while the emitted companion
+/// features used another.
+fn cz_best_site(
+    ss: &ScoredSpectrum<'_>,
+    pep: &model::peptide::Peptide,
+    gmass: f64,
+    max_frag_charge: u8,
+    tol_ppm: f64,
+    multisite: bool,
+) -> usize {
+    if multisite {
+        let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
+        let sites = andes_glyco::sequon::all_nxst_sites(&res);
+        if sites.len() > 1 {
+            return sites
+                .iter()
+                .copied()
+                .max_by(|&a, &b| {
+                    cz_hyperscore_psm(ss, pep, gmass, a, max_frag_charge, tol_ppm).total_cmp(
+                        &cz_hyperscore_psm(ss, pep, gmass, b, max_frag_charge, tol_ppm),
+                    )
+                })
+                .unwrap_or_else(|| glyco_site_for(pep));
+        }
+    }
+    // ANDES_GLYCO_CZ_SITE_LEGACY=1 restores the pre-round-7 resolver for A/B.
+    // `first_nxst_site(..).unwrap_or(0)` had no boundary fallback, so a
+    // boundary-sequon candidate (…N-X | S/T-…, default-ON since round-5, glycosite
+    // at n-2) had the intact glycan placed on residue 0 — which flips the spanning
+    // predicate to a near-complement and evaluated the dominant gp_cz selector term
+    // against the wrong theoretical ladder.
+    if std::env::var_os("ANDES_GLYCO_CZ_SITE_LEGACY").is_some() {
+        let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
+        andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
+    } else {
+        glyco_site_for(pep)
+    }
+}
+
 fn cz_score_best_site(
     ss: &ScoredSpectrum<'_>,
     pep: &model::peptide::Peptide,
@@ -316,28 +360,7 @@ fn cz_score_best_site(
     tol_ppm: f64,
     multisite: bool,
 ) -> f32 {
-    let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
-    if multisite {
-        let sites = andes_glyco::sequon::all_nxst_sites(&res);
-        if sites.len() > 1 {
-            return sites
-                .iter()
-                .map(|&s| cz_hyperscore_psm(ss, pep, gmass, s, max_frag_charge, tol_ppm))
-                .fold(f32::NEG_INFINITY, f32::max);
-        }
-    }
-    // Round-7 fix: use the SAME glycosite resolver as every other c/z consumer.
-    // `first_nxst_site(..).unwrap_or(0)` had no boundary fallback, so a
-    // boundary-sequon candidate (…N-X | S/T-…, default-ON since round-5, glycosite
-    // at n-2) had the intact glycan placed on residue 0 — which flips the spanning
-    // predicate to a near-complement (every c spans, no z does) and evaluates the
-    // dominant gp_cz selector term against the wrong theoretical ladder.
-    // ANDES_GLYCO_CZ_SITE_LEGACY=1 restores the pre-fix resolver for A/B.
-    let gsite = if std::env::var_os("ANDES_GLYCO_CZ_SITE_LEGACY").is_some() {
-        andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
-    } else {
-        glyco_site_for(pep)
-    };
+    let gsite = cz_best_site(ss, pep, gmass, max_frag_charge, tol_ppm, multisite);
     cz_hyperscore_psm(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
 }
 
@@ -1713,7 +1736,9 @@ fn score_spectrum_glyco(
                     .map(|g| g.mass)
                     .unwrap_or(bb.glycan_mass_residual);
                 let pep = &candidates[w.cand_slot].peptide;
-                let gsite = glyco_site_for(pep);
+                // Same glycosite the selector's `cz` term scored (multisite-aware),
+                // so every c/z column on this row describes ONE localization.
+                let gsite = cz_best_site(ss, pep, gmass, max_frag_charge, tol_ppm, cz_multisite);
                 cz_matched_intensity_frac(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
             };
 
@@ -1743,7 +1768,9 @@ fn score_spectrum_glyco(
                     .map(|g| g.mass)
                     .unwrap_or(bb.glycan_mass_residual);
                 let pep = &candidates[w.cand_slot].peptide;
-                let gsite = glyco_site_for(pep);
+                // Same glycosite the selector's `cz` term scored (multisite-aware),
+                // so every c/z column on this row describes ONE localization.
+                let gsite = cz_best_site(ss, pep, gmass, max_frag_charge, tol_ppm, cz_multisite);
                 cz_structure_features(ss, pep, gmass, gsite, max_frag_charge, tol_ppm)
             };
 
@@ -2091,8 +2118,8 @@ fn score_spectrum_glyco(
                     // the selection score can never diverge (single source of truth).
                     cz_hyperscore: cz(&w),
                     cz_intensity: cz_int(&w),
-                    cz_comp_frac: cz_struct_vals.0,
-                    cz_run_frac: cz_struct_vals.1,
+                    cz_explained: cz_struct_vals.0,
+                    cz_chance_llr: cz_struct_vals.1,
                 };
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
@@ -2774,8 +2801,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
-            cz_comp_frac: 0.0,
-            cz_run_frac: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key: key, psm };
         let cloned = hit.clone();

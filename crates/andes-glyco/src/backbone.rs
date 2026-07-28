@@ -612,24 +612,39 @@ pub fn glycan_y_intensity(
     // but the estimator is still biased. Dividing by the rung count makes it a mean
     // matched intensity per predicted rung, comparable across compositions — and
     // across the de-novo branch, which always has exactly 6 rungs.
-    // ANDES_GLYCO_LADDER_NORM=1 enables; unset = byte-identical.
-    let norm = {
-        use std::sync::OnceLock;
-        static CELL: OnceLock<bool> = OnceLock::new();
-        *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_LADDER_NORM").is_some())
-    };
-    if norm && n_rungs > 0 {
-        // Rescale to the core-ladder rung count so the term keeps its historical
-        // magnitude (and the tuned gp_k stays meaningful) instead of shrinking ~4x.
-        score * (CORE_RUNGS as f64) / (n_rungs as f64)
-    } else {
-        score
-    }
+    // ANDES_GLYCO_LADDER_NORM=1 enables; anything else (including unset) = byte-identical.
+    ladder_norm_scale(score, n_rungs)
 }
 
 /// Rung count of the trimannosyl-core ladder (`core_y_intensity`), used to keep the
 /// rung-normalised `glycan_y_intensity` on the same scale as the de-novo branch.
 const CORE_RUNGS: usize = 6;
+
+/// `ANDES_GLYCO_LADDER_NORM=1` — opt-in rung normalisation, read once.
+///
+/// Must be an explicit `"1"`: an earlier `var_os(..).is_some()` form meant that
+/// setting the variable to `0` silently ENABLED it.
+fn ladder_norm_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| matches!(std::env::var("ANDES_GLYCO_LADDER_NORM").as_deref(), Ok("1")))
+}
+
+/// Apply the optional rung normalisation to a Y-ladder sum.
+///
+/// Shared by [`glycan_y_intensity`] and [`glycan_y_intensity_decoy`]: the decoy is an
+/// EXCHANGEABLE null whose only permitted difference from the target is the
+/// interior-rung mass shift, so normalising one ladder and not the other would make
+/// the glycan-axis target/decoy gap an artifact of composition size and corrupt the
+/// 2D FDR. Rescaled to `CORE_RUNGS` so the term keeps its historical magnitude (and
+/// the tuned `gp_k` stays meaningful) rather than shrinking ~4x.
+fn ladder_norm_scale(score: f64, n_rungs: usize) -> f64 {
+    if ladder_norm_enabled() && n_rungs > 0 {
+        score * (CORE_RUNGS as f64) / (n_rungs as f64)
+    } else {
+        score
+    }
+}
 
 /// Deterministic mixing (splitmix64) → a reproducible per-(seed,rung) offset.
 #[inline]
@@ -702,7 +717,8 @@ pub fn glycan_y_intensity_decoy(
         };
         score += match_int(bb_neutral + cum + shift);
     }
-    score
+    // Same normalisation as the target ladder — see `ladder_norm_scale`.
+    ladder_norm_scale(score, 1 + adds.len())
 }
 
 /// Fraction of a composition's Y-ladder rungs (Y0 + each cumulative add) that are

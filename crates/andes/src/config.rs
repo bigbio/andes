@@ -212,7 +212,14 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     // ── search ──
     set_parsed!("precursor_tol", precursor_tol, cfg.search.precursor_tol, crate::parse_precursor_tol);
     set_parsed!("charge", charge, cfg.search.charge, crate::parse_charge_range);
-    set_parsed!("isotope_error", isotope_error, cfg.search.isotope_error, crate::parse_isotope_error_range);
+    // isotope_error is Option<(i8,i8)> on the CLI so an EXPLICIT range is
+    // distinguishable from the default (which is mode-dependent: 0..2 under --glyco).
+    // A config-file value counts as explicit, so wrap it in Some.
+    if let Some(s) = cfg.search.isotope_error {
+        if !cli_set(m, "isotope_error") {
+            args.isotope_error = Some(crate::parse_isotope_error_range(&s)?);
+        }
+    }
     set!("enzyme", enzyme, cfg.search.enzyme);
     set_parsed!("enzyme_specificity", enzyme_specificity, cfg.search.enzyme_specificity, crate::parse_enzyme_specificity);
     set!("max_missed_cleavages", max_missed_cleavages, cfg.search.max_missed_cleavages);

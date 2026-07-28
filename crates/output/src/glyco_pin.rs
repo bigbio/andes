@@ -293,8 +293,8 @@ fn write_glyco_psm_row<W: Write>(
     write_double_tab(writer, key.cz_intensity as f64)?;
     // Discriminative c/z STRUCTURE features (additive; gated to real values by
     // ANDES_GLYCO_CZ_STRUCT at compute time, else 0.0 = ignored by Percolator).
-    write_double_tab(writer, key.cz_comp_frac as f64)?;
-    write_double_tab(writer, key.cz_run_frac as f64)?;
+    write_double_tab(writer, key.cz_explained as f64)?;
+    write_double_tab(writer, key.cz_chance_llr as f64)?;
 
     // Transfer columns (additive; inert 0 for native candidates). Bools mirror
     // the `is_glycan_db` 1/0 idiom above; numerics use write_double_tab.
@@ -696,8 +696,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
-            cz_comp_frac: 0.0,
-            cz_run_frac: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         }
     }
 
@@ -914,8 +914,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
-            cz_comp_frac: 0.0,
-            cz_run_frac: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
@@ -1094,8 +1094,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
-            cz_comp_frac: 0.0,
-            cz_run_frac: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         };
         let hit = FullGlycoPsm { glycan_key, psm };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];

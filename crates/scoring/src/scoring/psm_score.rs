@@ -434,9 +434,10 @@ fn cz_fix_enabled() -> bool {
 /// [`ScoredSpectrum::nearest_peak_full`] resolves against the DECONVOLUTED peak list —
 /// in which detected z2/z3 isotope clusters have already been charge-reduced to their
 /// z1 m/z. Predicting c/z at charge ≥2 therefore probes m/z that deconvolution has
-/// vacated, adding chance matches rather than evidence. `ANDES_GLYCO_CZ_ZMAX=1` caps
-/// every c/z predictor at singly-charged, letting deconvolution do the charge work.
-/// Unset = each call site's historical ceiling (byte-identical).
+/// vacated, adding chance matches rather than evidence. The effective ceiling therefore
+/// DEFAULTS TO 1 (see [`cz_effective_zmax`]), letting deconvolution do the charge work —
+/// validated +12 backbone-correct @1%. `ANDES_GLYCO_CZ_ZMAX=<n>` raises it back toward
+/// the call site's own ceiling (`=3` restores the pre-round-7 behaviour).
 fn cz_zmax_override() -> Option<u8> {
     use std::sync::OnceLock;
     static CELL: OnceLock<Option<u8>> = OnceLock::new();

@@ -424,8 +424,10 @@ activation type, glycan class, and how the reference set itself was filtered.
 ### Status
 
 `--glyco` is **experimental**. Its flags, defaults and PIN feature set may change between
-releases, and the glycosite position is not yet reported in the output (the glycan
-composition and backbone are). The full flag list, the fused-selector weights, and the
+releases. The glycosite is reported in the Peptide column's glycan tag as `@N<pos>`
+(1-based Asn position) **only when the backbone contains a single N-X-S/T sequon**;
+with several sequons andes does not localize between them by default and emits `@N?`
+rather than a guess. The full flag list, the fused-selector weights, and the
 `ANDES_GLYCO_*` rollback switches are documented in
 [DOCS.md §9](DOCS.md#9-glycopeptide-search-experimental--advanced-knobs).
 

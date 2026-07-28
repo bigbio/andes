@@ -10,7 +10,10 @@
 //   GlycanMass, IsGlycanDb
 //
 // The `Peptide` column appends a glycan composition tag for DB hits:
-//   `[HexNAc{n}Hex{m}Fuc{f}NeuAc{a}NeuGc{g}]`
+//   `[HexNAc{n}Hex{m}Fuc{f}NeuAc{a}NeuGc{g}@N{site}]`
+// where `@N{site}` is the 1-based position of the sequon Asn in the backbone
+// when the backbone has exactly one N-X-S/T, and `@N?` when it has zero or
+// several (andes does not localize between sequons by default).
 
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -318,11 +321,21 @@ fn write_glyco_psm_row<W: Write>(
     write_double_tab(writer, psm.features.isobaric_rt_margin as f64)?;
 
     // Peptide column: backbone sequence + optional glycan tag.
+    //
+    // The tag carries the glycosite as `@N<pos>` (1-based position of the sequon
+    // Asn in the backbone) ONLY when the backbone has exactly one N-X-S/T sequon,
+    // in which case the site is a fact about the sequence and needs no evidence.
+    // With two or more sequons it emits `@N?`: andes does not localize between
+    // them by default (the site used internally for c/z scoring is the first
+    // sequon, a positional convention, not a localization), and printing that
+    // heuristic choice as if it were an assignment would be a false claim. Runs
+    // with `--glyco-cz-multisite` pick the site by c/z evidence, but that is
+    // opt-in and its choice is not threaded here, so `@N?` stays.
+    //
+    // Target and glycan-decoy rows are tagged identically, so this is symmetric
+    // on the FDR axis; and PSM-level q-values do not depend on the Peptide string.
     let glycan_tag = match &key.glycan {
-        Some(g) => format!(
-            "[HexNAc{}Hex{}Fuc{}NeuAc{}NeuGc{}]",
-            g.hexnac, g.hex, g.fuc, g.neuac, g.neugc
-        ),
+        Some(g) => glycan_tag_with_site(g, &residues),
         None => String::new(),
     };
     write!(writer, "\t{}{}", cand.peptide, glycan_tag)?;
@@ -339,6 +352,20 @@ fn write_glyco_psm_row<W: Write>(
         }
     }
     writeln!(writer)
+}
+
+/// Render the Peptide-column glycan tag, including the glycosite when the
+/// backbone determines it. See the call site for why an ambiguous backbone
+/// emits `@N?` rather than andes's internal first-sequon convention.
+fn glycan_tag_with_site(g: &andes_glyco::glycan_db::GlycanComp, residues: &[u8]) -> String {
+    let site = match andes_glyco::sequon::all_nxst_sites(residues).as_slice() {
+        [only] => format!("@N{}", only + 1),
+        _ => "@N?".to_string(),
+    };
+    format!(
+        "[HexNAc{}Hex{}Fuc{}NeuAc{}NeuGc{}{}]",
+        g.hexnac, g.hex, g.fuc, g.neuac, g.neugc, site
+    )
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
@@ -699,6 +726,28 @@ mod tests {
             cz_explained: 0.0,
             cz_chance_llr: 0.0,
         }
+    }
+
+    #[test]
+    fn glycan_tag_reports_an_unambiguous_glycosite_and_refuses_an_ambiguous_one() {
+        let g = GlycanComp {
+            hexnac: 2,
+            hex: 5,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 0.0,
+        };
+        // exactly one N-X-S/T: the site is a fact about the sequence.
+        assert!(glycan_tag_with_site(&g, b"AANLTK").ends_with("@N3]"));
+        // the sequon may sit at the very start; positions are 1-based.
+        assert!(glycan_tag_with_site(&g, b"NLTAAK").ends_with("@N1]"));
+        // two sequons: andes does not localize by default, so it must not pick.
+        assert!(glycan_tag_with_site(&g, b"ANLTANCSK").ends_with("@N?]"));
+        // no sequon at all is also "not a site andes assigned".
+        assert!(glycan_tag_with_site(&g, b"AAAAK").ends_with("@N?]"));
+        // the composition itself is unchanged by the site suffix.
+        assert!(glycan_tag_with_site(&g, b"AANLTK").starts_with("[HexNAc2Hex5Fuc0NeuAc0NeuGc0"));
     }
 
     #[test]

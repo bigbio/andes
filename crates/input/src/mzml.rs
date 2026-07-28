@@ -162,7 +162,7 @@ impl BinaryArrayCtx {
 
 /// Emit the EThcD→HCD routing notice at most once per process (the detection
 /// fires per-spectrum and would otherwise spam thousands of identical lines).
-fn log_ethcd_once() {
+pub(crate) fn log_ethcd_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
     if WARNED
@@ -180,8 +180,9 @@ fn log_ethcd_once() {
                  activation) — no EThcD model exists, so these spectra are routed to the \
                  HCD (b/y) model. IN --glyco THIS DISABLES THE WHOLE c/z STACK: c/z \
                  generation and scoring, the c/z truncation gate, the ETD DB fallback, and \
-                 --glyco-hcd-pair all become inert. Set ANDES_ETHCD_AS_ETD=1 to keep them \
-                 active, or pass --fragmentation to override."
+                 --glyco-hcd-pair all become inert. Set ANDES_ETHCD_AS_ETD=1 to keep these \
+                 spectra classified as ETD (this is the reliable override; --fragmentation \
+                 selects the scoring model but does NOT restore per-spectrum ETD routing)."
             );
         }
     }
@@ -1408,7 +1409,8 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     if !ms2_counts.is_empty() {
         return ms2_counts
             .iter()
-            .max_by_key(|(_, &n)| n)
+            // Deterministic tie-break (HashMap order is randomised per process).
+            .max_by_key(|(&k, &n)| (n, std::cmp::Reverse(k as u8)))
             .map(|(&t, _)| t);
     }
 

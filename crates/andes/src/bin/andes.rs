@@ -1651,12 +1651,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // (cid_lowres_tryp).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected_activation_instrument {
+                // An EXPLICIT --fragmentation must win over detection. It previously
+                // only applied when detection returned no instrument, so on any normal
+                // mzML it was silently discarded — including the EThcD case, where the
+                // reader relabels ETD to HCD and the warning tells the user to "pass
+                // --fragmentation to override". It could not override anything.
                 Some((method, Some(inst))) => {
-                    eprintln!(
-                        "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
-                        method.name(), inst.name(), spectrum_path.display()
-                    );
-                    (method, Some(inst))
+                    let chosen = match cli.fragmentation {
+                        Fragmentation::Auto => method,
+                        Fragmentation::Cid => ActivationMethod::CID,
+                        Fragmentation::Etd => ActivationMethod::ETD,
+                        Fragmentation::Hcd => ActivationMethod::HCD,
+                        Fragmentation::Uvpd => ActivationMethod::UVPD,
+                    };
+                    if chosen != method {
+                        eprintln!(
+                            "Param resolver: auto-detected activation = {} (instrument = {}) from {}, \
+                             OVERRIDDEN by --fragmentation {}",
+                            method.name(), inst.name(), spectrum_path.display(), chosen.name()
+                        );
+                    } else {
+                        eprintln!(
+                            "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
+                            method.name(), inst.name(), spectrum_path.display()
+                        );
+                    }
+                    (chosen, Some(inst))
                 }
                 Some((method, None)) => resolve_metadataless_selection(
                     Some(method), cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
@@ -5510,7 +5530,12 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
     // declaration order via match below, which is stable.
     let dominant = counts
         .iter()
-        .max_by_key(|(_, &n)| n)
+        // Deterministic on ties: HashMap iteration order is randomised per
+        // process, so a bare `max_by_key(count)` picks an ARBITRARY maximum. A
+        // 1:1 interleaved HCD/ETD acquisition ties exactly at 32/32 over the
+        // peeked window and flipped the selected model run-to-run on identical
+        // input. Tie-break on the discriminant so the choice is reproducible.
+        .max_by_key(|(&m, &n)| (n, std::cmp::Reverse(m as u8)))
         .map(|(&m, _)| m)?;
 
     // Warn on mixed activation. The dominant method still wins; this is

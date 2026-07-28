@@ -193,10 +193,13 @@ struct SearchArgs {
     decoy_suffix: Option<String>,
 
     /// How to generate decoys: `reverse` (default; reverse each sequence),
-    /// `shuffle` (seeded reproducible shuffle), or `none` (no decoys — for a
-    /// FASTA that already contains decoys, or external FDR). `none` with a
-    /// target-only FASTA leaves the search without decoys (FDR can't be
-    /// estimated) and warns.
+    /// `shuffle` (seeded reproducible shuffle), `sequon-reverse` (reverse but
+    /// restore each N-X-S/T sequon at its mirrored position — RECOMMENDED with
+    /// `--glyco`: plain reversal maps N-X-S/T to S/T-X-N, so reversed decoys reach
+    /// the glyco sequon gate at a lower rate than targets and the resulting
+    /// q-values are anti-conservative), or `none` (no decoys — for a FASTA that
+    /// already contains decoys, or external FDR). `none` with a target-only FASTA
+    /// leaves the search without decoys (FDR can't be estimated) and warns.
     #[arg(long = "decoy-strategy", default_value = "reverse")]
     decoy_strategy: String,
 
@@ -395,7 +398,7 @@ struct SearchArgs {
     /// combined, after union-dedup). Hidden advanced knob; default 50.
     /// Raised from 20: core-Y evidence ranking means the cap now cuts fewer
     /// true positives, so more headroom is inexpensive and safe.
-    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 50usize)]
+    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 150usize)]
     glyco_backbone_top_k: usize,
 
 
@@ -1549,7 +1552,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
     let decoy_strategy = search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy)
         .ok_or_else(|| format!(
-            "unknown --decoy-strategy '{}' (expected reverse/shuffle/none)",
+            "unknown --decoy-strategy '{}' (expected reverse/shuffle/sequon-reverse/none)",
             cli.decoy_strategy
         ))?;
     let t_phase = std::time::Instant::now();
@@ -2667,12 +2670,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             t_glyco.elapsed().as_secs_f64()
         );
 
-        // Derive glyco PIN path: `<output_pin>.glyco.pin` (or
-        // `<output_pin_stem>.glyco.pin` if it already ends in `.pin`).
+        // Derive the glyco PIN path: strip a trailing `.pin` (only), then append
+        // `.glyco.pin`.
+        //
+        // The previous form was `with_extension("").with_extension("glyco.pin")`,
+        // which strips at the LAST dot TWICE — so `PXD011533.Frac1.pin` and
+        // `PXD011533.Frac2.pin` both collapsed to `PXD011533.glyco.pin` and the
+        // second run silently overwrote the first. Pooling fractions is the
+        // recommended practice for stable glyco FDR, so `dataset.FracN.pin` is
+        // exactly the naming users reach for, and the data loss was silent.
         let glyco_pin_path = {
-            let stem = output_pin_path.with_extension("");
-            stem.with_extension("glyco.pin")
+            let mut s = if output_pin_path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("pin"))
+            {
+                output_pin_path.with_extension("").into_os_string()
+            } else {
+                output_pin_path.clone().into_os_string()
+            };
+            s.push(".glyco.pin");
+            std::path::PathBuf::from(s)
         };
+        eprintln!("Glyco PIN will be written to: {}", glyco_pin_path.display());
         // G3: opt-in glycan-axis decoy rows (2D-FDR discrimination on the glycan
         // axis), from --glyco-decoy. Default off — no change to the shipping PIN.
         let emit_glycan_decoy = cli.glyco_decoy;

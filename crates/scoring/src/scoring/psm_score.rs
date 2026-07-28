@@ -458,6 +458,22 @@ fn cz_effective_zmax(default_zmax: u8) -> u8 {
     default_zmax.min(cz_zmax_override().unwrap_or(1))
 }
 
+/// Deconvolution-aware form of [`cz_effective_zmax`].
+///
+/// The z1 ceiling is only correct when the active model sets
+/// `apply_deconvolution = true`, because it relies on deconvolution having already
+/// charge-reduced detected z2/z3 clusters to their z1 m/z. With deconvolution OFF
+/// (e.g. `etd_lowres_tryp_phosphorylation`) multiply-charged c/z remain at their
+/// true m/z and a ceiling of 1 would make them unmatchable, so the call site's own
+/// ceiling is kept. An explicit `ANDES_GLYCO_CZ_ZMAX` still wins in both cases.
+pub fn cz_effective_zmax_for(default_zmax: u8, apply_deconvolution: bool) -> u8 {
+    match cz_zmax_override() {
+        Some(z) => default_zmax.min(z),
+        None if apply_deconvolution => default_zmax.min(1),
+        None => default_zmax,
+    }
+}
+
 pub fn cz_hyperscore_psm(
     scored_spec: &ScoredSpectrum,
     peptide: &Peptide,

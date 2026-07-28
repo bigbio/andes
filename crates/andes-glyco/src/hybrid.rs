@@ -293,6 +293,16 @@ pub fn hybrid_candidates_presolved(
         // `force_db_on_none` is set (caller passes it only for ETD scans), still
         // run the fragment-free DB branch (precursor − known-glycan mass) so those
         // scans get candidates to score c/z against, rather than emitting nothing.
+        // NOTE ON `top_k`: this branch deliberately ignores it. `top_k` truncation
+        // everywhere else in this function ranks by core-Y intensity, and the
+        // defining property of this path is that there is NO core-Y evidence to
+        // rank by — oxonium did not fire. Truncating an unranked DB branch would
+        // drop candidates by glycan-table order, i.e. arbitrarily, and can discard
+        // the true backbone. The driver instead keeps the full set through Phase-1
+        // and truncates it with `effective_top_k` once b/y and c/z have scored it,
+        // which is a real ranking. The cost is that every known glycan is Phase-1
+        // scored on an oxonium-negative ETD scan; `--glyco-max-peaks` bounds the
+        // other half of that cost.
         None => {
             if force_db_on_none {
                 return db_branch(

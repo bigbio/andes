@@ -18,7 +18,8 @@ Run `andes --help` for auto-generated help derived from the same `Cli` struct do
 6. [Training new scoring models](#6-training-new-scoring-models)
 7. [Isobaric labeling](#7-isobaric-labeling)
 8. [Legacy numeric values & behavior notes](#8-legacy-numeric-values--behavior-notes)
-9. [License and citation](#9-license-and-citation)
+9. [Glycopeptide search (experimental) & advanced knobs](#9-glycopeptide-search-experimental--advanced-knobs)
+10. [License and citation](#10-license-and-citation)
 
 ---
 

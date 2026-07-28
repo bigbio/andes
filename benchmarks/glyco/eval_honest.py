@@ -9,7 +9,7 @@ Fixes three defects in eth_bench_eval.py:
      (~40 ppm) and never compared the peptide SEQUENCE, which both files carry.
      We do I/L-equivalent sequence matching and report the mass-only overcount.
   3. UNCOUNTED IDs: it silently ignored every PSM that did not land on a truth
-     scan. We report them, since the reference (Byonic, no glycan FDR) is known
+     scan. We report them, since the reference identification set (no glycan-level FDR) is known
      to miss a large fraction of what other engines find on these files.
 
 Usage: eval_honest.py <pooled.pin> <psms> [dpsms]

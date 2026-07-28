@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Build an entrapment FASTA: mouse (target+decoy, unchanged) + yeast/E.coli entrapment
 (target+decoy). Any glycopeptide identified on an ENTRAP_ protein at 1% FDR is a
-false positive, giving an absolute error estimate that does not depend on the Byonic
-reference. Yeast/E.coli are near-orthogonal to mouse brain, and prokaryotes lack the
+false positive, giving an absolute error estimate that does not depend on the reference
+identification set. Yeast/E.coli are near-orthogonal to mouse brain, and prokaryotes lack the
 mammalian N-glycosylation machinery, so a glyco ID there is unambiguously wrong."""
 import re
-HYE = "/srv/data/msgf-bench/astral-data/ProteoBenchFASTA_MixedSpecies_HYE.fasta"
-MOUSE = "/srv/data/msgf-bench/ethcd/mouse-decoy.fasta"
-OUT = "/srv/data/msgf-bench/ethcd/mouse-entrap.fasta"
+import os
+import sys
+
+# Usage: build_entrap.py <target.fasta> <entrapment.fasta> <out.fasta>
+# Defaults kept only so the script still runs bare on the benchmark host.
+MOUSE = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("ENTRAP_TARGET", "target-decoy.fasta")
+HYE = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("ENTRAP_SOURCE", "entrapment.fasta")
+OUT = sys.argv[3] if len(sys.argv) > 3 else os.environ.get("ENTRAP_OUT", "target-entrap.fasta")
 
 def read_fasta(p):
     acc, seq = None, []

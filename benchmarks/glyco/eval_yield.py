@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """ABSOLUTE yield metrics - what andes actually finds, independent of the reference.
 
-The benchmark scores agreement with Byonic. That structurally cannot reward a real
+The benchmark scores agreement with the reference identification set. That
+structurally cannot reward a real
 glycopeptide the reference never reported, and entrapment puts andes's true error at
 ~0.45%, so the uncredited IDs are overwhelmingly genuine. These are the numbers that
 answer "more IDs / more glycans":

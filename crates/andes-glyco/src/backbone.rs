@@ -57,8 +57,22 @@ fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
 
     let mut score = 0.0_f64;
 
-    // For each candidate b-ion (mz ∈ [b_lo, b_hi]), look up its complement y at
-    // y_mz = target - b_mz using a binary search into the sorted peak list.
+    // For each candidate b-ion (mz ∈ [b_lo, b_hi]), accumulate its complement y at
+    // y_mz = target - b_mz.
+    //
+    // TWO-POINTER SWEEP. `b_mz` ascends over the sorted peak list, so
+    // `y_mz = target - b_mz` DESCENDS, and therefore both window bounds
+    // `y_lo = y_mz - tol` and `y_hi = y_mz + tol` descend monotonically. The two
+    // `partition_point` binary searches per b-ion (the profiled hot spot — this
+    // function measured 65-96% of the de-novo solver, which scaled ~n^2.85 in peak
+    // count) collapse to two cursors that only ever move DOWN, making the whole
+    // sweep amortised O(n) instead of O(n log n) per b-ion.
+    //
+    // Output-identical: the cursors land on exactly the indices the binary searches
+    // returned, so the visited `j` range, the visit ORDER, and hence the f64
+    // accumulation order are all unchanged (see `complement_score_two_pointer_matches_bruteforce`).
+    let mut lo_cur = n; // first index with m >= y_lo
+    let mut hi_cur = n; // first index with m >  y_hi
     for (i, &(b_mz, _)) in peaks.iter().enumerate() {
         if b_mz < b_lo {
             continue;
@@ -71,12 +85,19 @@ fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
         if y_mz <= b_mz || y_mz <= 0.0 {
             continue;
         }
-        // Binary search for y_mz ± tol in sorted peaks (skip self)
         let y_lo = y_mz - tol;
         let y_hi = y_mz + tol;
-        let start = peaks.partition_point(|&(m, _)| m < y_lo);
-        let end = peaks.partition_point(|&(m, _)| m <= y_hi);
-        for j in start..end {
+        // Both bounds descend, so walk the cursors down (never up).
+        while hi_cur > 0 && peaks[hi_cur - 1].0 > y_hi {
+            hi_cur -= 1;
+        }
+        if lo_cur > hi_cur {
+            lo_cur = hi_cur;
+        }
+        while lo_cur > 0 && peaks[lo_cur - 1].0 >= y_lo {
+            lo_cur -= 1;
+        }
+        for j in lo_cur..hi_cur {
             if j == i {
                 continue; // self-pair guard (shouldn't happen given b<y constraint)
             }
@@ -870,6 +891,80 @@ pub fn acceptor_core_y_gate(
 
 #[cfg(test)]
 mod tests {
+    /// Brute-force reference for `complement_score`, mirroring the pre-optimisation
+    /// binary-search form. The two-pointer sweep must match it exactly (same pairs,
+    /// same order ⇒ bit-identical f64 sum).
+    #[test]
+    fn complement_score_two_pointer_matches_bruteforce() {
+        use super::{complement_score, BY_COMPLEMENT_OFFSET};
+        fn reference(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
+            let target = bb + BY_COMPLEMENT_OFFSET;
+            let tol = (target * 20e-6).max(0.02);
+            let n = peaks.len();
+            if n < 2 {
+                return 0.0;
+            }
+            let (b_lo, b_hi) = (50.0_f64, bb / 2.0);
+            let mut score = 0.0_f64;
+            for (i, &(b_mz, _)) in peaks.iter().enumerate() {
+                if b_mz < b_lo {
+                    continue;
+                }
+                if b_mz > b_hi {
+                    break;
+                }
+                let y_mz = target - b_mz;
+                if y_mz <= b_mz || y_mz <= 0.0 {
+                    continue;
+                }
+                let start = peaks.partition_point(|&(m, _)| m < y_mz - tol);
+                let end = peaks.partition_point(|&(m, _)| m <= y_mz + tol);
+                for j in start..end {
+                    if j == i {
+                        continue;
+                    }
+                    score += norm_sqrt[i].min(norm_sqrt[j]);
+                }
+            }
+            score
+        }
+        // Deterministic pseudo-random peak lists across a range of densities and
+        // backbone masses, including exact complements that land on the window edge.
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for &npk in &[2usize, 5, 50, 400] {
+            for &bb in &[800.0_f64, 1500.0, 2600.0, 4200.0] {
+                let mut peaks: Vec<(f64, f32)> = (0..npk)
+                    .map(|_| {
+                        let m = 40.0 + (next() % 5_000_000) as f64 / 1000.0;
+                        (m, 1.0 + (next() % 1000) as f32)
+                    })
+                    .collect();
+                // plant exact complements so the tolerance edges are exercised
+                let target = bb + BY_COMPLEMENT_OFFSET;
+                for k in 1..=3 {
+                    let b = 100.0 * k as f64;
+                    peaks.push((b, 500.0));
+                    peaks.push((target - b, 500.0));
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let norm: Vec<f64> = peaks.iter().map(|&(_, it)| (it as f64).sqrt()).collect();
+                let got = complement_score(&peaks, &norm, bb);
+                let want = reference(&peaks, &norm, bb);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "npk={npk} bb={bb}: two-pointer {got} != bruteforce {want}"
+                );
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -372,9 +372,13 @@ andes --spectrum sample.mzML \
       --database proteins.fasta \
       --decoy-strategy sequon-reverse \
       --glyco \
-      --output-pin results.pin \
-      --output-tsv results.tsv
+      --output-pin results.pin
 ```
+
+`--glyco` writes **only** `results.glyco.pin`. It is a standalone pipeline: the standard
+PIN, TSV, Parquet, rescore and refine outputs are all skipped, and passing
+`--output-tsv`, `--output-parquet`, `--rescore` or `--refine` alongside `--glyco` is a
+hard error rather than a silently ignored flag.
 
 Two things differ from a normal run:
 

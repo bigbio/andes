@@ -578,8 +578,36 @@ impl GlycoCtxOwned {
         // kept hit == the PIN's kept row.
         let features_collapse = !cfg.debug;
         let features_enumerated = !cfg.debug;
-        // Scan subsetting removed: the standard search runs over all spectra.
-        let scan_filter: Option<std::collections::HashSet<i32>> = None;
+        // Scan subsetting: normally None (every spectrum is scored). `ANDES_GLYCO_SCANS`
+        // points at a file of scan numbers, one per line, and restricts the glyco driver
+        // to those scans. This exists for DIAGNOSTICS — it makes a `--debug-glyco` dump
+        // of a specific set of scans (e.g. the ones a reference identified) cheap enough
+        // to run repeatedly, instead of dumping every candidate for the whole file.
+        // Unset = previous behaviour exactly.
+        let scan_filter: Option<std::collections::HashSet<i32>> =
+            std::env::var_os("ANDES_GLYCO_SCANS").and_then(|path| {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let set: std::collections::HashSet<i32> = text
+                            .lines()
+                            .filter_map(|l| l.trim().parse::<i32>().ok())
+                            .collect();
+                        eprintln!(
+                            "[glyco] ANDES_GLYCO_SCANS: restricting to {} scans from {}",
+                            set.len(),
+                            std::path::Path::new(&path).display()
+                        );
+                        if set.is_empty() { None } else { Some(set) }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "WARN: ANDES_GLYCO_SCANS={} could not be read ({e}); scoring all scans",
+                            std::path::Path::new(&path).display()
+                        );
+                        None
+                    }
+                }
+            });
         // The backbone candidate cap is `--glyco-backbone-top-k` (set a large value
         // to approximate an exhaustive/no-truncation ceiling measurement).
         let effective_top_k = backbone_top_k;

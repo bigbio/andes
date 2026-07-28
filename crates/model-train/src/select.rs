@@ -249,8 +249,9 @@ pub fn select<'a>(
 /// far more to the scoring tables than the enzyme, so we deliberately do NOT
 /// cross activation here — a same-activation standard base (`hcd_qexactive_tryp`,
 /// b/y) is a better fallback for an HCD/CID query than an ETD (c/z) model at a
-/// matching instrument would be. (Activation-aware nearest-matching across
-/// resolutions is a future refinement.)
+/// matching instrument would be. Activation-aware nearest-matching across
+/// resolutions IS now done: see step 3, which relaxes the instrument before
+/// giving up and crossing activation.
 ///
 /// Returns `(model_id, substituted)` — `substituted` is `true` when an inexact
 /// (nearest or standard) model was chosen, so the caller can WARN which model
@@ -276,7 +277,36 @@ pub fn select_nearest<'a>(
             return (id, true);
         }
     }
-    // 3. Standard base — guaranteed present in the bundled store.
+    // 3. Relax the INSTRUMENT, keeping the ACTIVATION. Activation is the ion
+    //    chemistry (b/y vs c/z) and is the axis that must not be crossed; the
+    //    instrument only sets resolution. Without this step an ETD query with no
+    //    matching-resolution ETD model fell straight through to the HCD standard
+    //    base, i.e. c/z spectra scored with a b/y model — the exact swap the
+    //    "never cross activation" rule above exists to prevent, just arriving by
+    //    the back door. Observed in the wild on a public EThcD dataset:
+    //    (activation=ETD, instrument=LowRes) resolved to `hcd_qexactive_tryp`
+    //    while `etd_highres_tryp` sat unused in the store.
+    //
+    //    Only fires where step 4 would otherwise return the standard base, so no
+    //    selection that already resolved can change. The candidate set is sorted
+    //    by model_id so the choice is deterministic across runs and platforms.
+    {
+        let mut same_activation: Vec<&SelectionEntry> = entries
+            .iter()
+            .filter(|e| e.activation == key.activation)
+            .collect();
+        if !same_activation.is_empty() {
+            same_activation.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+            // Prefer one that also matches the enzyme, else take the first by id.
+            let pick = same_activation
+                .iter()
+                .find(|e| e.enzyme == key.enzyme)
+                .or_else(|| same_activation.first())
+                .unwrap();
+            return (pick.model_id.as_str(), true);
+        }
+    }
+    // 4. Standard base — guaranteed present in the bundled store.
     (standard_id, true)
 }
 
@@ -299,6 +329,44 @@ pub fn parse_experiment_class(s: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn etd_query_prefers_an_etd_model_at_another_resolution_over_an_hcd_base() {
+        // Reproduces a public EThcD dataset: the resolver detected
+        // (activation=ETD, instrument=LowRes) and there is no ETD+LowRes model,
+        // but an ETD model at another resolution exists in the store. Scoring c/z
+        // spectra with the b/y standard base is the failure this guards.
+        let entries = vec![
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e("etd_highres_tryp", "ETD", "QExactive", "Tryp", &[]),
+        ];
+        let k = key("ETD", "LowRes", "Tryp", &[]);
+        let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
+        assert_eq!(id, "etd_highres_tryp", "an ETD query must not land on a b/y model");
+        assert!(substituted, "an inexact match must still warn");
+    }
+
+    #[test]
+    fn instrument_relaxation_does_not_disturb_a_query_that_already_resolves() {
+        let entries = vec![
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e("etd_highres_tryp", "ETD", "QExactive", "Tryp", &[]),
+        ];
+        let k = key("HCD", "QExactive", "Tryp", &[]);
+        let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
+        assert_eq!(id, "hcd_qexactive_tryp");
+        assert!(!substituted, "an exact hit must not be reported as substituted");
+    }
+
+    #[test]
+    fn falls_back_to_the_standard_base_when_no_model_shares_the_activation() {
+        let entries = vec![e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[])];
+        let k = key("UVPD", "LowRes", "Tryp", &[]);
+        let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
+        assert_eq!(id, "hcd_qexactive_tryp");
+        assert!(substituted);
+    }
+
 
     fn set(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|s| s.to_string()).collect()

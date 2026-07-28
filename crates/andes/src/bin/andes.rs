@@ -1024,6 +1024,15 @@ fn main() -> ExitCode {
     let matches = <TopCli as clap::CommandFactory>::command().get_matches();
     let mut top = <TopCli as clap::FromArgMatches>::from_arg_matches(&matches)
         .unwrap_or_else(|e| e.exit());
+    // Record whether the user typed --max-missed-cleavages. `--glyco` raises the
+    // floor to 3, which costs real memory (measured +4.4 GB on a 20k-protein human
+    // FASTA), so an explicit lower value must be allowed to win. The default (1) is
+    // itself a plausible explicit value, so comparing against it cannot distinguish
+    // the two cases — only the ValueSource can.
+    let _ = EXPLICIT_MISSED_CLEAVAGES.set(matches!(
+        matches.value_source("max_missed_cleavages"),
+        Some(clap::parser::ValueSource::CommandLine)
+    ));
     let result = match top.command.take() {
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
@@ -1502,6 +1511,60 @@ mod format_routing_tests {
     }
 }
 
+/// Warn BEFORE scoring when the in-RAM candidate index is unlikely to fit.
+///
+/// Without this, a large database (a whole human proteome at three missed cleavages)
+/// runs for half an hour and is then killed by the OOM killer with no message from
+/// andes at all — the user sees only a dead process and no output. Measured on a
+/// 20k-protein human FASTA: ~0.65 KB resident per candidate for a plain search and
+/// ~0.92 KB under `--glyco`, which holds per-spectrum glyco state on top.
+///
+/// This warns rather than aborts: the estimate is a linear fit, machines differ, and
+/// refusing to start a run that would have succeeded is worse than a noisy warning.
+/// Only Linux exposes MemAvailable cheaply; elsewhere the check is skipped.
+fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
+    const BYTES_PER_CANDIDATE_PLAIN: f64 = 665.0;
+    const BYTES_PER_CANDIDATE_GLYCO: f64 = 940.0;
+
+    let available = match std::fs::read_to_string("/proc/meminfo") {
+        Ok(text) => text
+            .lines()
+            .find_map(|l| l.strip_prefix("MemAvailable:"))
+            .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+            .map(|kb| kb * 1024),
+        Err(_) => None,
+    };
+    let Some(available) = available else { return };
+
+    let per = if glyco { BYTES_PER_CANDIDATE_GLYCO } else { BYTES_PER_CANDIDATE_PLAIN };
+    let estimate = (n_candidates as f64 * per) as u64;
+    if estimate <= available {
+        return;
+    }
+    let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
+    eprintln!(
+        "WARNING: this search needs roughly {:.1} GB for the in-RAM candidate index \
+         ({} candidates) but only {:.1} GB is available. The process is likely to be \
+         killed by the operating system partway through, with no result written.",
+        gb(estimate), n_candidates, gb(available)
+    );
+    if glyco {
+        eprintln!(
+            "  --glyco cannot use the out-of-core index yet (--candidate-index mmap is \
+             rejected in glyco mode), so reduce the search space instead: pass \
+             --max-missed-cleavages 1 or 2 (glyco defaults to 3), restrict the FASTA to \
+             the proteins of interest, or split the database and merge the .glyco.pin \
+             files afterwards."
+        );
+    } else {
+        eprintln!("  Re-run with --candidate-index mmap to page the index from disk instead.");
+    }
+}
+
+/// Set in `main` from clap's `ValueSource`: did the user type
+/// `--max-missed-cleavages` themselves? See the glyco floor below.
+static EXPLICIT_MISSED_CLEAVAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
@@ -1934,7 +1997,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // measurement (yeast/E.coli, where a glyco ID is false by construction) puts the
     // true error at 0.14%, i.e. it buys IDs without spending error budget.
     params.max_missed_cleavages = if cli.glyco {
-        cli.max_missed_cleavages.max(3)
+        // The floor is a default, not a mandate. Raising it to 3 grows the candidate
+        // index by ~40% (13.2M -> 18.8M candidates on a 20k-protein human FASTA,
+        // +4.4 GB resident), which is the difference between running and being
+        // OOM-killed on a 16 GB machine. A user who asked for fewer gets fewer.
+        let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
+        if explicit && cli.max_missed_cleavages < 3 {
+            eprintln!(
+                "note: --glyco normally raises missed cleavages to 3 (sequon-bearing \
+                 tryptic peptides often need a third to reach a scoreable length); \
+                 honouring your explicit --max-missed-cleavages {}. Expect fewer \
+                 glycopeptide IDs in exchange for a smaller candidate index.",
+                cli.max_missed_cleavages
+            );
+            cli.max_missed_cleavages
+        } else {
+            cli.max_missed_cleavages.max(3)
+        }
     } else {
         cli.max_missed_cleavages
     };
@@ -2325,11 +2404,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     .with_intensity_model(intensity_model);
     log_rss("after_prepared_search");
     match params.candidate_index {
-        search::CandidateIndexMode::Ram => eprintln!(
-            "PreparedSearch: {} candidates, {} mass buckets (candidate-index: ram)",
-            prepared.candidates.len(),
-            prepared.bucket_index.len(),
-        ),
+        search::CandidateIndexMode::Ram => {
+            eprintln!(
+                "PreparedSearch: {} candidates, {} mass buckets (candidate-index: ram)",
+                prepared.candidates.len(),
+                prepared.bucket_index.len(),
+            );
+            warn_if_index_will_not_fit(prepared.candidates.len(), cli.glyco);
+        }
         search::CandidateIndexMode::Mmap => eprintln!(
             "PreparedSearch: out-of-core candidate-index: mmap \
              (base peptides resolved lazily per spectrum)"

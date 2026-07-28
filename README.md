@@ -426,6 +426,25 @@ at 5+ and above, where multiply-charged fragment evidence dominates.
 Treat these as a calibration point, not a guarantee. Glyco results depend heavily on
 activation type, glycan class, and how the reference set itself was filtered.
 
+### Memory
+
+The glyco path holds the candidate index in RAM; `--candidate-index mmap` is **not yet
+supported under `--glyco`** and is rejected rather than silently ignored. Measured on a
+20,411-protein human FASTA (whole reviewed proteome):
+
+| Search | Candidates | Peak resident |
+| --- | --- | --- |
+| plain, 1 missed cleavage | 13.2 M | ~7.8 GB |
+| plain, 3 missed cleavages | 18.8 M | ~12.3 GB |
+| `--glyco` (raises missed cleavages to 3) | 18.8 M | ~17.3 GB |
+
+So a whole-proteome glyco search wants **~20 GB**. andes now estimates this before
+scoring and warns if it will not fit, instead of being killed by the OOM killer half an
+hour in with nothing written. If you are short of memory, restrict the FASTA to the
+proteins of interest, or pass `--max-missed-cleavages 1` or `2` explicitly — `--glyco`
+raises the floor to 3, but an explicit lower value is honoured, and it costs
+~4.4 GB less at the price of some IDs.
+
 ### Status
 
 `--glyco` is **experimental**. Its flags, defaults and PIN feature set may change between

@@ -215,18 +215,64 @@ enum PeakFilterEnv {
     Unset,
 }
 
+/// Scoring settings supplied by the caller instead of the environment.
+///
+/// These reach per-spectrum and per-ion code that would need them threaded through many
+/// signatures, so the binary installs them once at startup. Every field has a documented
+/// default that applies when nothing installs them — library consumers and tests get the
+/// shipped behaviour without doing anything.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoringSettings {
+    /// Windowed peak filtering: `Some((window_da, peaks_per_window))` forces it on with
+    /// those values, `Some((w, _))` with `w <= 0.0` forces it off, `None` uses the
+    /// protocol-driven default (on for isobaric-labelled data, off otherwise).
+    pub peak_filter: Option<(f64, usize)>,
+    /// Clamp the precursor-offset lookup to the nearest available charge key rather than
+    /// dropping the correction when the exact charge is missing. Default true.
+    pub precursor_offset_clamp: bool,
+    /// Measure local peak density on the active (deconvoluted) peak list. Default true;
+    /// false restores measuring it on the raw list.
+    pub density_on_active_list: bool,
+    /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
+    /// with, rather than the model's stored `mme` (0.5 Da for every bundled model).
+    /// Default false pending the non-glyco regression triad; see docs/ENV_VARS.md.
+    pub tight_highres_scoring: bool,
+}
+
+impl Default for ScoringSettings {
+    fn default() -> Self {
+        Self {
+            peak_filter: None,
+            precursor_offset_clamp: true,
+            density_on_active_list: true,
+            tight_highres_scoring: false,
+        }
+    }
+}
+
+static SCORING_SETTINGS: OnceLock<ScoringSettings> = OnceLock::new();
+
+/// Install the scoring settings. Call once, before scoring; a later call is ignored so a
+/// consumer's configuration cannot be replaced mid-run.
+pub fn init_scoring_settings(settings: ScoringSettings) {
+    let _ = SCORING_SETTINGS.set(settings);
+}
+
+#[inline]
+pub(crate) fn scoring_settings() -> ScoringSettings {
+    SCORING_SETTINGS.get().copied().unwrap_or_default()
+}
+
 /// Read the env override once (it is process-wide and constant for a run) rather
 /// than on every `ScoredSpectrum::new` — `std::env::var` takes a global lock and
 /// allocates, and `new` is called once per spectrum per charge.
 fn peak_filter_env() -> &'static PeakFilterEnv {
     static CACHE: OnceLock<PeakFilterEnv> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let w = std::env::var("ANDES_PEAK_WINDOW")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok());
-        let k = std::env::var("ANDES_PEAK_PER_WINDOW")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok());
+        let (w, k) = match scoring_settings().peak_filter {
+            Some((w, k)) => (Some(w), Some(k)),
+            None => (None, None),
+        };
         match (w, k) {
             (Some(w), _) if w <= 0.0 => PeakFilterEnv::Disabled,
             (Some(w), Some(k)) => PeakFilterEnv::Override(w, k),
@@ -263,11 +309,7 @@ impl<'a> ScoredSpectrum<'a> {
             .get(&(charge as i32))
             .map(Vec::as_slice)
             .or_else(|| {
-                let noclamp = {
-                    use std::sync::OnceLock;
-                    static CELL: OnceLock<bool> = OnceLock::new();
-                    *CELL.get_or_init(|| std::env::var_os("ANDES_PRECOFF_NOCLAMP").is_some())
-                };
+                let noclamp = !scoring_settings().precursor_offset_clamp;
                 if noclamp || param.precursor_off_map.is_empty() {
                     return None;
                 }
@@ -774,11 +816,7 @@ impl<'a> ScoredSpectrum<'a> {
         // artifact that fires preferentially on the high-m/z, glycan-bearing spanning
         // c/z. Measuring the density on the list that produced the match removes it.
         // ANDES_DENSITY_RAW=1 restores the legacy behaviour for A/B.
-        let use_raw = {
-            use std::sync::OnceLock;
-            static CELL: OnceLock<bool> = OnceLock::new();
-            *CELL.get_or_init(|| std::env::var_os("ANDES_DENSITY_RAW").is_some())
-        };
+        let use_raw = !scoring_settings().density_on_active_list;
         let peaks = if use_raw {
             &self.spec.peaks
         } else {
@@ -1546,7 +1584,7 @@ impl<'a> ScoredSpectrum<'a> {
 fn tight_highres_scoring() -> bool {
     use std::sync::OnceLock;
     static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| matches!(std::env::var("ANDES_TIGHT_HIGHRES").as_deref(), Ok("1")))
+    *CELL.get_or_init(|| scoring_settings().tight_highres_scoring)
 }
 
 fn visit_directional_node_ion_matches<F>(

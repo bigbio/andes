@@ -301,7 +301,7 @@ fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
         // diagnostic — and `.raw` is the path most users take.
         5 | 6 | 9 | 10 => {
             crate::mzml::log_ethcd_once();
-            if std::env::var_os("ANDES_ETHCD_AS_ETD").is_some() {
+            if crate::mzml::ethcd_as_etd_policy() {
                 Some(ActivationMethod::ETD)
             } else {
                 Some(ActivationMethod::HCD)

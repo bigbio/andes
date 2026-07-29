@@ -169,7 +169,7 @@ pub(crate) fn log_ethcd_once() {
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
-        if std::env::var_os("ANDES_ETHCD_AS_ETD").is_some() {
+        if ethcd_as_etd() {
             eprintln!(
                 "INFO: EThcD/ETciD detected; ANDES_ETHCD_AS_ETD is set, so these spectra \
                  stay classified as ETD (c/z stack active)."
@@ -876,7 +876,7 @@ impl<R: BufRead> MzMLReader<R> {
                             if let Some(sb) = self.current.as_mut() {
                                 if sb.act_saw_electron && sb.act_saw_collisional {
                                     log_ethcd_once();
-                                    if std::env::var_os("ANDES_ETHCD_AS_ETD").is_none() {
+                                    if !ethcd_as_etd() {
                                         sb.activation_method = Some(ActivationMethod::HCD);
                                     }
                                 }
@@ -1153,6 +1153,30 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
 /// instrument-detection path as a separate, one-shot pre-pass so the main
 /// streaming reader stays focused on per-spectrum data and remains
 /// peak-memory-friendly.
+/// How an EThcD/ETciD spectrum (electron transfer WITH a supplemental collisional term)
+/// should be labelled.
+///
+/// Default `false` labels it HCD, which is what model routing expects since no EThcD
+/// model exists. That label is also read as "has no c/z ions", which is wrong for EThcD —
+/// see docs. `--ethcd-activation etd` flips it.
+static ETHCD_AS_ETD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Install the EThcD labelling policy. Call once, before reading spectra.
+pub fn init_ethcd_as_etd(as_etd: bool) {
+    let _ = ETHCD_AS_ETD.set(as_etd);
+}
+
+/// The installed EThcD labelling policy, shared with the Thermo reader.
+#[inline]
+pub fn ethcd_as_etd_policy() -> bool {
+    ethcd_as_etd()
+}
+
+#[inline]
+fn ethcd_as_etd() -> bool {
+    *ETHCD_AS_ETD.get().unwrap_or(&false)
+}
+
 pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     let mut xml = Reader::from_reader(reader);
     xml.trim_text(true);

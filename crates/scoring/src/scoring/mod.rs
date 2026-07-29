@@ -15,7 +15,7 @@ pub use psm_score::{
     init_cz_settings, CzSettings,
 };
 pub use rank_scorer::RankScorer;
-pub use scored_spectrum::{IonMatchFact, ScoredSpectrum};
+pub use scored_spectrum::{init_scoring_settings, IonMatchFact, ScoredSpectrum, ScoringSettings};
 pub use strong_score::{
     candidate_rank_entropy, frag_llr_battery, fuse_strong_score, intensity_signal, listwise_score_gap,
     rich_ion_llr,

@@ -18,6 +18,24 @@ use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 
 use crate::counts::CountStats;
 
+/// Dense random-position noise sampling for training, installed by the caller.
+///
+/// `None` (the default) uses reversed-peptide decoy ions. `Some(n)` samples `n` random
+/// positions per spectrum instead — sharper missing-slot-dominated noise
+/// (Kim et al., Nat Commun 5:5277, 2014).
+static DENSE_NOISE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+
+/// Install the noise-sampling mode. Call once, before accumulating.
+pub fn init_dense_noise(n: Option<usize>) {
+    let _ = DENSE_NOISE.set(n.filter(|&n| n > 0));
+}
+
+#[inline]
+fn dense_noise_sampling() -> Option<usize> {
+    DENSE_NOISE.get().copied().flatten()
+}
+
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -103,16 +121,13 @@ impl<'a> StatsAccumulator<'a> {
         // by the "missing" slot) calibrates the ion-vs-noise likelihood ratio.
         // Without this the missing-ion penalty inverts and the model scores
         // target and decoy alike (0 PSMs at 1% FDR).
-        // Noise model: default = reversed-peptide decoy ions; opt-in env
-        // ANDES_DENSE_NOISE=<n> = dense random-position noise sampling
+        // Noise model: default = reversed-peptide decoy ions; `--dense-noise <n>`
+        // selects dense random-position noise sampling
         // (Kim et al., Nat Commun 5:5277, 2014 — sharper missing-slot-dominated
         // noise; see dense_noise_facts).
-        let noise_facts = match std::env::var("ANDES_DENSE_NOISE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-        {
-            Some(n) if n > 0 => scored_spec.dense_noise_facts(peptide, self.scorer, n),
-            _ => scored_spec.noise_match_facts(peptide, self.scorer),
+        let noise_facts = match dense_noise_sampling() {
+            Some(n) => scored_spec.dense_noise_facts(peptide, self.scorer, n),
+            None => scored_spec.noise_match_facts(peptide, self.scorer),
         };
         for (partition, rank, error_bin) in noise_facts {
             let rank_idx = match rank {

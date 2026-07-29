@@ -437,6 +437,49 @@ struct SearchArgs {
     #[arg(long = "glyco-cz-multisite", default_value_t = false)]
     glyco_cz_multisite: bool,
 
+    /// Windowed peak filtering as `WINDOW_DA:PEAKS` (e.g. `100:20`). Unset uses the
+    /// protocol default — on for isobaric-labelled data, off otherwise. A window of 0
+    /// forces it off.
+    #[arg(long = "peak-filter")]
+    peak_filter: Option<String>,
+
+    /// Clamp the precursor-offset lookup to the nearest available charge when the exact
+    /// charge is missing from the model, rather than dropping the correction.
+    #[arg(long = "precursor-offset-clamp", default_value_t = true, action = clap::ArgAction::Set)]
+    precursor_offset_clamp: bool,
+
+    /// Measure local peak density on the active (deconvoluted) peak list rather than the
+    /// raw list.
+    #[arg(long = "density-on-active-list", default_value_t = true, action = clap::ArgAction::Set)]
+    density_on_active_list: bool,
+
+    /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
+    /// with instead of the model's stored tolerance (0.5 Da for every bundled model, so
+    /// ~50x wider at m/z 500). Off by default pending the non-glyco regression triad.
+    #[arg(long = "tight-highres-scoring", default_value_t = false)]
+    tight_highres_scoring: bool,
+
+    /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
+    /// Off by default: the residual spectrum has the primary's peaks removed, and
+    /// permitting overlap lets the same evidence support two PSMs.
+    #[arg(long = "chimeric-allow-overlap", default_value_t = false)]
+    chimeric_allow_overlap: bool,
+
+    /// How to label EThcD/ETciD spectra (electron transfer with a supplemental
+    /// collisional term). `hcd` is the default and is what model routing expects, since
+    /// no EThcD model exists; `etd` labels them ETD so the c/z scoring path engages.
+    #[arg(long = "ethcd-activation", value_enum, default_value_t = EthcdActivationFlag::Hcd)]
+    ethcd_activation: EthcdActivationFlag,
+
+    /// Diagnostic: restrict `--glyco` scoring to the scan numbers in this file, one per
+    /// line. Makes a `--debug-glyco` dump of a chosen set of scans affordable.
+    #[arg(long = "glyco-scans")]
+    glyco_scans: Option<PathBuf>,
+
+    /// Diagnostic: log resident set size at each phase boundary.
+    #[arg(long = "rss-probe", default_value_t = false)]
+    rss_probe: bool,
+
     /// Glycan composition list for `--glyco`: `common` (~600 curated N-glycans,
     /// the default and what the benchmarks were run with) or `full` (the complete
     /// list, ~4000). `full` widens coverage but inflates the candidate space; it was
@@ -653,6 +696,11 @@ struct SearchArgs {
 /// Training arguments for `andes train-from-search`.
 #[derive(Args, Debug)]
 struct TrainFromSearchArgs {
+
+    /// Reuse the seed model's geometry instead of deriving one from the corpus.
+    /// Deriving (the default) fits segments and mass tiers to the training data.
+    #[arg(long = "seed-geometry", default_value_t = false)]
+    seed_geometry: bool,
     /// Input spectrum file (training data). Same format dispatch as for search:
     /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
     ///
@@ -778,6 +826,11 @@ struct TrainFromSearchArgs {
 /// learned distributions come from the input data.
 #[derive(Args, Debug)]
 struct TrainArgs {
+
+    /// Reuse the seed model's geometry instead of deriving one from the corpus.
+    /// Deriving (the default) fits segments and mass tiers to the training data.
+    #[arg(long = "seed-geometry", default_value_t = false)]
+    seed_geometry: bool,
     /// Input flat training parquet(s). Repeatable; stats accumulate across all
     /// inputs into a single model.
     #[arg(long = "in", required = true)]
@@ -1164,7 +1217,7 @@ fn configure_bundled_dotnet() {
 /// We gate behind an env var so production runs stay quiet; flip the var on
 /// when debugging memory regressions.
 fn log_rss(tag: &str) {
-    let probe_set = std::env::var_os("ANDES_RSS_PROBE").is_some();
+    let probe_set = RSS_PROBE.get().copied().unwrap_or(false);
     if !probe_set {
         return;
     }
@@ -1241,24 +1294,45 @@ fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
 /// Build the geometry-derivation [`GeometryConfig`], honouring `ANDES_GEO_*`
 /// env overrides so the structural knobs can be swept before settling on fixed
 /// defaults. Unset vars fall back to the validated defaults.
-fn geo_config_from_env() -> GeometryConfig {
-    // Parse an override, but only accept it when `is_valid` (every geometry knob
-    // must be strictly positive — a zero/negative tier count or rank would
-    // produce a degenerate geometry). Invalid values fall back to the default
-    // rather than reaching `derive_geometry`.
-    fn envp<T: Copy + std::str::FromStr>(key: &str, default: T, is_valid: impl Fn(&T) -> bool) -> T {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.parse::<T>().ok())
-            .filter(&is_valid)
-            .unwrap_or(default)
+/// Derived-geometry parameters for model training.
+///
+/// Every field has the default the training pipeline shipped with; the `train`
+/// subcommands expose them as flags so a run can be reproduced from its command line
+/// rather than from an environment the command line does not record.
+#[derive(Debug, Clone, Copy, clap::Args)]
+pub struct GeometryArgs {
+    /// Number of score segments.
+    #[arg(long = "geo-segments", default_value_t = 2i32)]
+    pub segments: i32,
+    /// Maximum peak rank considered.
+    #[arg(long = "geo-max-rank", default_value_t = 150i32)]
+    pub max_rank: i32,
+    /// Target peptides per mass tier.
+    #[arg(long = "geo-occupancy", default_value_t = 2500usize)]
+    pub occupancy: usize,
+    /// Maximum number of mass tiers.
+    #[arg(long = "geo-max-tiers", default_value_t = 33usize)]
+    pub max_tiers: usize,
+    /// Maximum fragment charge modelled.
+    #[arg(long = "geo-max-fragment-charge", default_value_t = 3i32)]
+    pub max_fragment_charge: i32,
+}
+
+impl Default for GeometryArgs {
+    fn default() -> Self {
+        Self { segments: 2, max_rank: 150, occupancy: 2500, max_tiers: 33, max_fragment_charge: 3 }
     }
-    GeometryConfig {
-        num_segments: envp("ANDES_GEO_SEGMENTS", 2, |v| *v > 0),
-        max_rank: envp("ANDES_GEO_MAX_RANK", 150, |v| *v > 0),
-        mass_tier_occupancy: envp("ANDES_GEO_OCCUPANCY", 2500, |v| *v > 0),
-        max_mass_tiers: envp("ANDES_GEO_MAX_TIERS", 33, |v| *v > 0),
-        max_fragment_charge: envp("ANDES_GEO_MAX_FRAG_CHARGE", 3, |v| *v > 0),
+}
+
+impl GeometryArgs {
+    fn to_config(self) -> GeometryConfig {
+        GeometryConfig {
+            num_segments: self.segments.max(1),
+            max_rank: self.max_rank.max(1),
+            mass_tier_occupancy: self.occupancy.max(1),
+            max_mass_tiers: self.max_tiers.max(1),
+            max_fragment_charge: self.max_fragment_charge.max(1),
+        }
     }
 }
 
@@ -1602,6 +1676,14 @@ fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum EthcdActivationFlag {
+    /// Label EThcD/ETciD as HCD (default; matches model routing).
+    Hcd,
+    /// Label them ETD so the c/z scoring path engages.
+    Etd,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum GlycanListFlag {
     /// ~600 curated N-glycan compositions (default; what the benchmarks used).
     Common,
@@ -1618,6 +1700,9 @@ enum GlycoIsotopeFlag {
     /// 0..=5 — reaches candidates far above the monoisotopic peak.
     Wide,
 }
+
+/// Diagnostic RSS logging, installed from `--rss-probe`.
+static RSS_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Set in `main` from clap's `ValueSource`: did the user type
 /// `--max-missed-cleavages` themselves? See the glyco floor below.
@@ -2054,6 +2139,29 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // glycoPSMs, +19 unique glycopeptides, +19 glycosites — and an ENTRAPMENT
     // measurement (yeast/E.coli, where a glyco ID is false by construction) puts the
     // true error at 0.14%, i.e. it buys IDs without spending error budget.
+    // Install engine-wide scoring settings from validated CLI values. Done once, before
+    // any spectrum is scored, so no scoring code reads the environment.
+    let peak_filter = match cli.peak_filter.as_deref() {
+        None => None,
+        Some(spec) => {
+            let (w, k) = spec.split_once(':').ok_or_else(|| {
+                format!("--peak-filter expects WINDOW_DA:PEAKS (e.g. 100:20), got `{spec}`")
+            })?;
+            let w: f64 = w.trim().parse().map_err(|_| format!("--peak-filter window `{w}` is not a number"))?;
+            let k: usize = k.trim().parse().map_err(|_| format!("--peak-filter count `{k}` is not an integer"))?;
+            Some((w, k))
+        }
+    };
+    let _ = RSS_PROBE.set(cli.rss_probe);
+    scoring_crate::scoring::init_scoring_settings(scoring_crate::scoring::ScoringSettings {
+        peak_filter,
+        precursor_offset_clamp: cli.precursor_offset_clamp,
+        density_on_active_list: cli.density_on_active_list,
+        tight_highres_scoring: cli.tight_highres_scoring,
+    });
+    input::mzml::init_ethcd_as_etd(cli.ethcd_activation == EthcdActivationFlag::Etd);
+    params.chimeric_allow_overlap = cli.chimeric_allow_overlap;
+
     params.max_missed_cleavages = if cli.glyco {
         // The floor is a default, not a mandate. Raising it to 3 grows the candidate
         // index by ~40% (13.2M -> 18.8M candidates on a 20k-protein human FASTA,
@@ -2851,6 +2959,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_cz: cli.glyco_gp_cz,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,
+            scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
@@ -2866,7 +2975,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &glycan_list,
             glyco_tol_ppm,
             cli.glyco_backbone_top_k,
-            glyco_cfg,
+            glyco_cfg.clone(),
             etd_scorer_owned.as_ref(),
         );
         let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
@@ -3902,14 +4011,14 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
     // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
     // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
     // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
-    let use_seed_geometry = std::env::var("ANDES_SEED_GEOMETRY").is_ok();
+    let use_seed_geometry = args.seed_geometry;
     let template: Param = if !use_seed_geometry {
         eprintln!(
             "train: deriving own partition geometry from {} PSMs (set ANDES_SEED_GEOMETRY=1 to reuse seed geometry)",
             labels.len()
         );
         let corpus = corpus_charge_masses(&labels);
-        let geo_cfg = geo_config_from_env();
+        let geo_cfg = GeometryArgs::default().to_config();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
@@ -4974,7 +5083,7 @@ fn run_train(
     // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
     // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
     // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
-    let use_seed_geometry = std::env::var("ANDES_SEED_GEOMETRY").is_ok();
+    let use_seed_geometry = args.seed_geometry;
     let template: Param = if !use_seed_geometry {
         eprintln!(
             "train: deriving own partition geometry from {} PSMs (set ANDES_SEED_GEOMETRY=1 to reuse seed geometry)",
@@ -4984,7 +5093,7 @@ fn run_train(
             .iter()
             .map(|p| (p.charge as i32, p.peptide.mass() as f32))
             .collect();
-        let geo_cfg = geo_config_from_env();
+        let geo_cfg = GeometryArgs::default().to_config();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");

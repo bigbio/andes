@@ -45,7 +45,7 @@ use andes_glyco::glyco_psm::{
 /// These were previously undocumented `ANDES_GLYCO_*` env vars; they are now
 /// discoverable flags with the same validated defaults. `Default` reproduces the
 /// shipped configuration exactly.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GlycoConfig {
     /// `gp` selector ladder weight (K).
     pub gp_k: f32,
@@ -56,6 +56,9 @@ pub struct GlycoConfig {
     pub gp_cz: f32,
     /// Choose the glycosite by c/z evidence when a peptide has >1 N-X-S/T sequon.
     pub cz_multisite: bool,
+    /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
+    /// line. `None` scores every spectrum.
+    pub scan_filter_path: Option<std::path::PathBuf>,
     /// Cap on the number of peaks the GENERATION stage sees (the most intense N),
     /// as a guard against pathological scans. 0 = no cap. Scoring always reads the
     /// full spectrum, so a generated candidate is never scored on truncated evidence.
@@ -100,6 +103,7 @@ impl Default for GlycoConfig {
             gp_cz: GLYCO_GP_CZ_DEFAULT,
             max_gen_peaks: 0,
             cz_multisite: false,
+            scan_filter_path: None,
             pf_charge: 2,
             max_pf: 1024,
             hcd_pair: false,
@@ -582,31 +586,31 @@ impl GlycoCtxOwned {
         // kept hit == the PIN's kept row.
         let features_collapse = !cfg.debug;
         let features_enumerated = !cfg.debug;
-        // Scan subsetting: normally None (every spectrum is scored). `ANDES_GLYCO_SCANS`
-        // points at a file of scan numbers, one per line, and restricts the glyco driver
-        // to those scans. This exists for DIAGNOSTICS — it makes a `--debug-glyco` dump
-        // of a specific set of scans (e.g. the ones a reference identified) cheap enough
-        // to run repeatedly, instead of dumping every candidate for the whole file.
-        // Unset = previous behaviour exactly.
+        // Scan subsetting: normally None (every spectrum is scored). `--glyco-scans`
+        // points at a file of scan numbers, one per line. DIAGNOSTIC — it makes a
+        // `--debug-glyco` dump of a chosen set of scans (e.g. the ones a reference
+        // identified) cheap enough to run repeatedly, instead of dumping every candidate
+        // for the whole file.
+        let ctx_scan_filter_path = cfg.scan_filter_path.clone();
         let scan_filter: Option<std::collections::HashSet<i32>> =
-            std::env::var_os("ANDES_GLYCO_SCANS").and_then(|path| {
-                match std::fs::read_to_string(&path) {
+            ctx_scan_filter_path.as_ref().and_then(|path| {
+                match std::fs::read_to_string(path) {
                     Ok(text) => {
                         let set: std::collections::HashSet<i32> = text
                             .lines()
                             .filter_map(|l| l.trim().parse::<i32>().ok())
                             .collect();
                         eprintln!(
-                            "[glyco] ANDES_GLYCO_SCANS: restricting to {} scans from {}",
+                            "[glyco] restricting to {} scans from {}",
                             set.len(),
-                            std::path::Path::new(&path).display()
+                            path.display()
                         );
                         if set.is_empty() { None } else { Some(set) }
                     }
                     Err(e) => {
                         eprintln!(
-                            "WARN: ANDES_GLYCO_SCANS={} could not be read ({e}); scoring all scans",
-                            std::path::Path::new(&path).display()
+                            "WARN: --glyco-scans {} could not be read ({e}); scoring all scans",
+                            path.display()
                         );
                         None
                     }
@@ -2354,7 +2358,8 @@ pub fn glyco_search_run(
     // full rationale of each; unchanged by the Task 8c extraction, just moved
     // out of this function so `glyco_transfer_pass2` can build an IDENTICAL
     // context from the same routine instead of a second hand-maintained copy.
-    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
+    let owned =
+        GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg.clone());
     let cross_spectrum_on = owned.cross_spectrum_on;
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner, etd_scorer);
 
@@ -2546,7 +2551,7 @@ pub fn glyco_transfer_pass2(
 
     // Same shared setup `glyco_search_run` uses — identical toggles/indices,
     // built once for this call (see `GlycoCtxOwned::build` doc comment).
-    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg);
+    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg.clone());
     // B1 paired-scan generation is a Pass-1 concern; the transfer pass passes an
     // empty partner map (inert — score_spectrum_glyco falls back to spec.peaks).
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &[], etd_scorer);

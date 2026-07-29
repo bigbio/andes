@@ -455,7 +455,14 @@ struct SearchArgs {
 
     /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
     /// with instead of the model's stored tolerance (0.5 Da for every bundled model, so
-    /// ~50x wider at m/z 500). Off by default pending the non-glyco regression triad.
+    /// ~50x wider at m/z 500).
+    ///
+    /// MEASURED AND NOT RECOMMENDED. It is a real train/serve mismatch and it does help
+    /// glyco (+4.9% on the AI-ETD benchmark), but on ordinary peptide search it is
+    /// catastrophic: Astral fell 36,719 -> 28,894 identifications at 1% FDR, a 21% loss.
+    /// The wide window is evidently load-bearing for the rank tables as trained, so
+    /// closing the mismatch requires retraining the models, not re-serving them. Kept as
+    /// a flag only so the experiment is repeatable.
     #[arg(long = "tight-highres-scoring", default_value_t = false)]
     tight_highres_scoring: bool,
 

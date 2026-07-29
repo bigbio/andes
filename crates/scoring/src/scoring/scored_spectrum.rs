@@ -235,7 +235,9 @@ pub struct ScoringSettings {
     pub density_on_active_list: bool,
     /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
     /// with, rather than the model's stored `mme` (0.5 Da for every bundled model).
-    /// Default false pending the non-glyco regression triad; see docs/ENV_VARS.md.
+    /// Default false, and measurement says keep it that way: it gains +4.9% on the glyco
+    /// benchmark but costs 21% of ordinary Astral identifications (36,719 -> 28,894 @1%).
+    /// The mismatch is real; closing it needs retrained models, not a re-served window.
     pub tight_highres_scoring: bool,
 }
 

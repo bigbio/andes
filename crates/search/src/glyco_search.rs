@@ -1705,7 +1705,7 @@ fn score_spectrum_glyco(
             // selector. Compute them ONCE per spectrum over the accepted candidate scores
             // — the same signals Percolator cannot derive from per-PSM features. `.score`
             // is the same RawScore the standard Tailor histogram bins.
-            let (tailor_denom, spectrum_listwise_gap, spectrum_rank_entropy) = {
+            let (tailor_denom, spectrum_listwise_gap, spectrum_rank_entropy, spectrum_delta_raw) = {
                 let mut hist: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
                 let mut scores: Vec<f32> = Vec::with_capacity(accepted_winners.len());
                 for (_, w) in &accepted_winners {
@@ -1714,7 +1714,28 @@ fn score_spectrum_glyco(
                 }
                 let denom = crate::psm::tailor_denominator(&hist, accepted_winners.len() as u32) as f32;
                 scores.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
-                (denom, listwise_score_gap(&scores), candidate_rank_entropy(&scores))
+                // Spectrum-level DeltaRawScore: the winner's lead over the best
+                // DISTINCT runner-up. The standard search sets this in
+                // `fill_post_topn` (match_engine.rs); the glyco driver never runs
+                // that fill, and the 2026-07-09 pass that mirrored the missing
+                // fields wired five of them and missed this one — so every glyco
+                // PIN has shipped with DeltaRankScore hard 0.0, i.e. Percolator
+                // has had no top-1-versus-runner-up evidence at all. That is one
+                // of the strongest classical discriminators, and the competitor
+                // scores were already materialised right here.
+                //
+                // "Distinct" mirrors the standard path: ties at the top are not a
+                // lead. 0.0 when every candidate scored identically or only one
+                // was scored (uncontested), which is also the standard fallback.
+                let delta_raw = match scores.first() {
+                    Some(&best) => scores
+                        .iter()
+                        .find(|&&v| v < best)
+                        .map(|&second| best - second)
+                        .unwrap_or(0.0),
+                    None => 0.0,
+                };
+                (denom, listwise_score_gap(&scores), candidate_rank_entropy(&scores), delta_raw)
             };
 
             // SPEED: reduce to the winner the PIN will actually emit BEFORE the
@@ -2070,6 +2091,7 @@ fn score_spectrum_glyco(
                     w.score
                 };
                 features.candidate_rank_entropy = spectrum_rank_entropy;
+                features.delta_raw_score = spectrum_delta_raw;
                 features.listwise_score_gap = spectrum_listwise_gap;
                 features.strong_score = fuse_strong_score(&StrongScoreInputs {
                     intensity_signal: features.intensity_signal,

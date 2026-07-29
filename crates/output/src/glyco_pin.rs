@@ -482,10 +482,13 @@ pub(crate) fn select_emitted_hits(
     // the honest collapse path the driver already reduced the scan to a single
     // hit, so this is a safety mirror to keep the two collapse sites consistent.
     if enumerated_only && hits[winner].glycan_key.glycan.is_none() {
-        // Always on, matching the driver's collapse fallback. These two sites read the
-        // same switch with OPPOSITE defaults until this change: the driver treated it as
-        // on (its validated setting) and the writer as off.
-        let enum_fallback = true;
+        // Deliberately OFF here, even though the driver's collapse fallback is ON. The
+        // asymmetry is not a split-brain default, it is the FDR boundary: the driver may
+        // promote an enumerated candidate while CHOOSING a winner, but once a de-novo
+        // candidate has won target-decoy competition the scan has no enumerated
+        // identification, and promoting the losing runner-up would add a target that did
+        // not win. See `enumerated_only_drops_de_novo_hits`, which asserts exactly this.
+        let enum_fallback = false;
         if !enum_fallback {
             return Vec::new();
         }

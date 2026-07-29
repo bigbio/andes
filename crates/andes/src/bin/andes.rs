@@ -549,6 +549,11 @@ struct SearchArgs {
     #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
     glyco_max_pf: usize,
 
+    /// MEASURED AND NOT RECOMMENDED: dispatching ETD scans to `etd_highres_tryp`
+    /// instead of the file's dominant HCD model LOSES identifications — mouse frac2
+    /// 707 -> 692 at 1% FDR. The bundled ETD model is evidently a poorer fit for these
+    /// spectra than the HCD model, so the long-standing "ETD scans are scored by an HCD
+    /// model" behaviour is benign, not the bug it looked like.
     /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
     /// mass-residual hits) and print transfer diagnostics. The resulting PIN is for
     /// inspection ONLY and must never be fed to an FDR tool. Hidden dev flag.

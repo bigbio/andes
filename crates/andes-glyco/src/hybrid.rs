@@ -441,10 +441,10 @@ pub fn hybrid_candidates_presolved(
     // collision on Y-ladder evidence changes which composition is annotated but the
     // backbone mass is identical either way, so the peptide-level outcome barely moves
     // and the net is slightly worse. Kept opt-in: ANDES_GLYCO_ISOBAR_REP=1.
-    let isobar_rep = matches!(
-        std::env::var("ANDES_GLYCO_ISOBAR_REP").ok().as_deref(),
-        Some("1") | Some("true") | Some("on")
-    );
+    // Evidence-based isobaric-composition representative: MEASURED at -8 and removed.
+    // The backbone mass is identical either way, so the peptide-level outcome barely
+    // moves while the net is slightly worse.
+    let isobar_rep = false;
     let iso_stats = isobar_rep.then(|| SpectrumStats::new(peaks));
     // Y-ladder evidence for a hit's own composition (0.0 for de-novo / no comp).
     let comp_evidence = |h: &BackboneHit| -> f64 {

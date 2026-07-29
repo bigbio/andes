@@ -412,6 +412,21 @@ struct SearchArgs {
     #[arg(long = "glyco-max-peaks", default_value_t = 0usize)]
     glyco_max_peaks: usize,
 
+    /// Glycan composition list for `--glyco`: `common` (~600 curated N-glycans,
+    /// the default and what the benchmarks were run with) or `full` (the complete
+    /// list, ~4000). `full` widens coverage but inflates the candidate space; it was
+    /// measured to raise the entrapment error 5.4x on a benchmark where it looked
+    /// like a gain on yield alone, so prefer `common` unless you know you need it.
+    #[arg(long = "glyco-glycan-list", value_enum, default_value_t = GlycanListFlag::Common)]
+    glyco_glycan_list: GlycanListFlag,
+
+    /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
+    /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
+    /// and dropping it measured +81 backbone-correct @1%. `negative` restores
+    /// -1..=2; `wide` extends the upper bound to 5 for heavily-labelled precursors.
+    #[arg(long = "glyco-isotope-error", value_enum, default_value_t = GlycoIsotopeFlag::Default)]
+    glyco_isotope_error: GlycoIsotopeFlag,
+
     /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
     /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
     /// suits Orbitrap MS2. **Raise this for low-resolution (ion-trap) MS2** —
@@ -1561,6 +1576,24 @@ fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum GlycanListFlag {
+    /// ~600 curated N-glycan compositions (default; what the benchmarks used).
+    Common,
+    /// The full ~4000-composition list.
+    Full,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum GlycoIsotopeFlag {
+    /// 0..=2 — drops the -1 offset, which is pure FDR dilution for glyco.
+    Default,
+    /// -1..=2 — the pre-round-6 behaviour.
+    Negative,
+    /// 0..=5 — reaches candidates far above the monoisotopic peak.
+    Wide,
+}
+
 /// Set in `main` from clap's `ValueSource`: did the user type
 /// `--max-missed-cleavages` themselves? See the glyco floor below.
 static EXPLICIT_MISSED_CLEAVAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1931,7 +1964,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // negative shift), while the iso=-1 arm emitted 28.5% of all candidate rows for
     // 0.29% of the correct answers at a ~53:47 target:decoy ratio - pure FDR dilution.
     // Dropping it measured +81 backbone-correct @1%. ANDES_GLYCO_ISO_NEG=1 restores it.
-    let iso_default = if cli.glyco && std::env::var_os("ANDES_GLYCO_ISO_NEG").is_none() {
+    let iso_default = if cli.glyco && cli.glyco_isotope_error != GlycoIsotopeFlag::Negative {
         (0, 2)
     } else {
         (-1, 2)
@@ -1942,7 +1975,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // monoisotopic peak mis-picked several 13C low, so the true neutral mass falls
     // outside the default -1..=2 sweep. Widen the upper bound for glyco so that
     // candidate mass is reachable. A/B-gated: ANDES_GLYCO_ISO_WIDE only.
-    if cli.glyco && std::env::var_os("ANDES_GLYCO_ISO_WIDE").is_some() {
+    if cli.glyco && cli.glyco_isotope_error == GlycoIsotopeFlag::Wide {
         params.isotope_error_range = iso_min..=iso_max.max(5);
     }
     // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
@@ -2751,7 +2784,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // hunt (2026-07-16) showed the default ~612 list MISSES the mouse-brain
         // glycome at high charge (z5 69%/z6 38% coverage) — a generation ceiling.
         // ANDES_GLYCO_FULL_GLYCANS re-tests the full list now that cz is fixable.
-        let glycan_list = if std::env::var_os("ANDES_GLYCO_FULL_GLYCANS").is_some() {
+        let glycan_list = if cli.glyco_glycan_list == GlycanListFlag::Full {
             andes_glyco::glycan_db::n_glycan_list()
         } else {
             andes_glyco::glycan_db::n_glycan_list_common()

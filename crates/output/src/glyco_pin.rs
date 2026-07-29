@@ -482,10 +482,10 @@ pub(crate) fn select_emitted_hits(
     // the honest collapse path the driver already reduced the scan to a single
     // hit, so this is a safety mirror to keep the two collapse sites consistent.
     if enumerated_only && hits[winner].glycan_key.glycan.is_none() {
-        let enum_fallback = std::env::var("ANDES_GLYCO_ENUM_FALLBACK")
-            .ok()
-            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // Always on, matching the driver's collapse fallback. These two sites read the
+        // same switch with OPPOSITE defaults until this change: the driver treated it as
+        // on (its validated setting) and the writer as off.
+        let enum_fallback = true;
         if !enum_fallback {
             return Vec::new();
         }

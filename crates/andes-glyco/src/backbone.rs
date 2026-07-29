@@ -658,7 +658,8 @@ fn ladder_norm_enabled() -> bool {
     // Leaving a validated correction off by default is how the selector weights came to be
     // tuned around a bias whose fix was already in the tree; `ANDES_GLYCO_LADDER_NORM=0`
     // restores the biased estimator for A/B only.
-    *CELL.get_or_init(|| !matches!(std::env::var("ANDES_GLYCO_LADDER_NORM").as_deref(), Ok("0")))
+    // Kept as a named constant rather than an env switch: the A/B is settled.
+    *CELL.get_or_init(|| true)
 }
 
 /// Apply the optional rung normalisation to a Y-ladder sum.

@@ -263,9 +263,10 @@ fn cz_remnant_enabled() -> bool {
     use std::sync::OnceLock;
     static F: OnceLock<bool> = OnceLock::new();
     *F.get_or_init(|| {
-        std::env::var("ANDES_GLYCO_CZ_REMNANT")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+        // Remnant c/z ions were MEASURED at -14 backbone-correct @1% and are not
+        // generated. Removed rather than left opt-in: a refuted experiment behind a
+        // switch is indistinguishable from an unfinished feature.
+        false
     })
 }
 

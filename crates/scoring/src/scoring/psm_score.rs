@@ -425,7 +425,10 @@ pub fn hyperscore_psm(scored_spec: &ScoredSpectrum, peptide: &Peptide, scorer: &
 /// the old buggy behavior (flat 0.5 Da, unnormalized count) for A/B/rollback.
 fn cz_fix_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_CZ_FIX_OFF").is_none())
+    // Always enabled. Without it a long decoy out-counts a shorter true peptide in the
+    // per-scan collapse (traced: a 45-mer decoy beat a 19-mer target). Restoring that is
+    // not a configuration anyone should have.
+    *CELL.get_or_init(|| true)
 }
 
 /// Optional override for the c/z fragment-charge ceiling (`ANDES_GLYCO_CZ_ZMAX`).

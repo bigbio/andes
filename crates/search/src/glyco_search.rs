@@ -649,10 +649,10 @@ impl GlycoCtxOwned {
         // FLANKING residue (…N-X | S/T-…) as a glyco candidate. DEFAULT ON (validated
         // +27 backbone-correct @1%, decoy-safe; #9 candidate-gen audit hole); disable
         // with ANDES_GLYCO_SEQUON_BOUNDARY=0 (peptide-internal sequon only).
-        let sequon_boundary_on = !matches!(
-            std::env::var("ANDES_GLYCO_SEQUON_BOUNDARY").ok().as_deref(),
-            Some("0") | Some("false") | Some("off")
-        );
+        // Always on: validated at +27 backbone-correct @1%, decoy-safe. A sequon
+        // completed by the following residue is a real glycosite; excluding it was a
+        // candidate-generation hole, not a tunable preference.
+        let sequon_boundary_on = true;
         let sequon_membership: Vec<bool> = candidates
             .iter()
             .map(|c| {
@@ -1036,8 +1036,9 @@ fn score_spectrum_glyco(
             // (the ETD scan), discarding the strong HCD glycan channel — the likely
             // z5-pairing regression. When set, read the glycan-Y ladder from the HCD
             // partner too. Inert unless paired AND flag set.
-            let pair_y_on_gen =
-                paired_hcd.is_some() && std::env::var_os("ANDES_GLYCO_PAIR_Y_ON_GEN").is_some();
+            // Reading the glycan-Y ladder from the HCD partner under pairing was tried
+            // and not adopted; the ladder stays on the scan being scored.
+            let pair_y_on_gen = false;
             let (y_peaks, y_stats): (&[(f64, f32)], &SpectrumStats) = if pair_y_on_gen {
                 (gen_peaks, gen_stats)
             } else {
@@ -1849,10 +1850,9 @@ fn score_spectrum_glyco(
             // DEFAULT ON (round-6: analytical graded-c/z explained/chance LLR features
             // validated +31 backbone-correct @1%, decoy-safe). Disable with
             // ANDES_GLYCO_CZ_STRUCT=0.
-            let cz_struct_on = !matches!(
-                std::env::var("ANDES_GLYCO_CZ_STRUCT").ok().as_deref(),
-                Some("0") | Some("false") | Some("off")
-            );
+            // Always on: the additive c/z structure features are the shipped,
+            // validated configuration and the disable switch had no remaining use.
+            let cz_struct_on = true;
             let cz_struct = |w: &CheapWinner| -> (f32, f32) {
                 if !is_etd || !cz_struct_on {
                     return (0.0, 0.0);
@@ -1880,10 +1880,11 @@ fn score_spectrum_glyco(
             // scans (of which ~half carry the correct backbone), so instead we emit the
             // best-scoring ENUMERATED candidate. DEFAULT ON (validated +143
             // backbone-correct @1%, decoy-safe); disable with ANDES_GLYCO_ENUM_FALLBACK=0.
-            let enum_fallback: bool = !matches!(
-                std::env::var("ANDES_GLYCO_ENUM_FALLBACK").ok().as_deref(),
-                Some("0") | Some("false") | Some("off")
-            );
+            // Always on: validated at +143 backbone-correct @1%, decoy-safe. Must stay
+            // identical to the PIN writer's copy in glyco_pin.rs — the two previously
+            // disagreed (driver on, writer off), which is exactly the kind of split-brain
+            // default an env switch invites.
+            let enum_fallback: bool = true;
 
             // FIX #4 (ANDES_GLYCO_PAIR_RANK_ETD): under --glyco-hcd-pair the collapse
             // `rank` term is w.rank = the HCD-PARTNER b/y rank (phase1_scored). The HCD
@@ -1895,11 +1896,9 @@ fn score_spectrum_glyco(
             // net win. Unpaired → returns w.rank verbatim. DEFAULT ON when paired
             // (validated +12 backbone-correct @1%, decoy-safe); disable with
             // ANDES_GLYCO_PAIR_RANK_ETD=0.
-            let pair_rank_etd = paired_hcd.is_some()
-                && !matches!(
-                    std::env::var("ANDES_GLYCO_PAIR_RANK_ETD").ok().as_deref(),
-                    Some("0") | Some("false") | Some("off")
-                );
+            // Under pairing the collapse must rank on the ETD scan being scored, not the
+            // HCD partner used only for generation. Always on; not a preference.
+            let pair_rank_etd = paired_hcd.is_some();
             let rank_sel = |w: &CheapWinner| -> f32 {
                 if !pair_rank_etd {
                     return w.rank;
@@ -1921,12 +1920,11 @@ fn score_spectrum_glyco(
                         // the full-weight base term toward the sparse glycosite-spanning
                         // half of the ladder) than the mass correction gains. Kept as an
                         // opt-in for re-testing: ANDES_GLYCO_PAIR_RANK_GLYCAN=1.
-                        let decorate = is_etd
-                            && etd_rank_glycan
-                            && matches!(
-                                std::env::var("ANDES_GLYCO_PAIR_RANK_GLYCAN").ok().as_deref(),
-                                Some("1") | Some("true") | Some("on")
-                            );
+                        // Decorating this term with the intact glycan was MEASURED at
+                        // -16 backbone-correct @1% and is not enabled. Removed rather
+                        // than left as an opt-in switch: a refuted experiment kept behind
+                        // a flag is indistinguishable from an unfinished feature.
+                        let decorate = false;
                         let scoring_pep: std::borrow::Cow<'_, model::peptide::Peptide> = if decorate
                         {
                             let bb = &deduped_backbone[w.bb_hit_idx];

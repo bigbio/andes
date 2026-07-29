@@ -412,6 +412,31 @@ struct SearchArgs {
     #[arg(long = "glyco-max-peaks", default_value_t = 0usize)]
     glyco_max_peaks: usize,
 
+    /// Maximum c/z fragment charge to probe in `--glyco` ETD scoring. Unset derives it
+    /// from whether the spectrum was deconvoluted, which is correct in almost all cases:
+    /// after deconvolution multiply-charged fragments have already been moved to 1+.
+    /// Set this only for data known to carry unresolved high-charge c/z ions.
+    #[arg(long = "glyco-cz-max-charge")]
+    glyco_cz_max_charge: Option<u8>,
+
+    /// Weight the explained-c/z terms by observed peak intensity instead of treating a
+    /// match as presence-only. Off by default: it measured -48 backbone-correct @1% on
+    /// the benchmark, though presence-only scoring is a known weakness for large glycans.
+    #[arg(long = "glyco-cz-intensity", default_value_t = false)]
+    glyco_cz_intensity: bool,
+
+    /// Maximum glycan-Y fragment charge. Default 3; raising it reaches 4+/5+ Y ions on
+    /// highly-charged precursors at the cost of more chance matches.
+    #[arg(long = "glyco-y-max-charge", default_value_t = 3u8)]
+    glyco_y_max_charge: u8,
+
+    /// Choose the glycosite by c/z evidence when a peptide carries more than one
+    /// N-X-S/T sequon (~8% of tryptic N-glycopeptides). Off by default: the default
+    /// positional convention is decoy-symmetric, and enabling this is gated on a
+    /// decoy-controlled A/B that would surface any sequon-count asymmetry.
+    #[arg(long = "glyco-cz-multisite", default_value_t = false)]
+    glyco_cz_multisite: bool,
+
     /// Glycan composition list for `--glyco`: `common` (~600 curated N-glycans,
     /// the default and what the benchmarks were run with) or `full` (the complete
     /// list, ~4000). `full` widens coverage but inflates the candidate space; it was
@@ -2784,6 +2809,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // hunt (2026-07-16) showed the default ~612 list MISSES the mouse-brain
         // glycome at high charge (z5 69%/z6 38% coverage) — a generation ceiling.
         // ANDES_GLYCO_FULL_GLYCANS re-tests the full list now that cz is fixable.
+        // Install scoring settings that reach hot inner functions. Done once here, from
+        // validated CLI values, so no scoring code has to read the environment.
+        scoring_crate::scoring::init_cz_settings(scoring_crate::scoring::CzSettings {
+            zmax_override: cli.glyco_cz_max_charge,
+            use_intensity: cli.glyco_cz_intensity,
+        });
+        andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
+
         let glycan_list = if cli.glyco_glycan_list == GlycanListFlag::Full {
             andes_glyco::glycan_db::n_glycan_list()
         } else {
@@ -2817,6 +2850,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_h: cli.glyco_gp_h,
             gp_cz: cli.glyco_gp_cz,
             max_gen_peaks: cli.glyco_max_peaks,
+            cz_multisite: cli.glyco_cz_multisite,
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,

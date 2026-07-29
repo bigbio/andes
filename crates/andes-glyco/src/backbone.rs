@@ -442,9 +442,20 @@ impl SpectrumStats {
 /// require ISOTOPE CONFIRMATION (a +1 isotope peak at the matching charge spacing)
 /// before crediting a match, which is what made the b/y deconvolution uncap safe.
 /// charges 1..=3 are unchanged, so this is inert unless the flag is set.
+/// Maximum glycan-Y fragment charge to probe, installed by the caller.
+///
+/// Default 3. Raising it reaches 4+/5+ Y ions on highly-charged precursors at the cost
+/// of more chance matches, so it is a deliberate choice rather than a default.
+static Y_MAX_CHARGE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+
+/// Install the glycan-Y charge ceiling. Call once, before scoring; a second call is
+/// ignored so a library consumer's configuration cannot be replaced mid-run.
+pub fn init_y_max_charge(zmax: u8) {
+    let _ = Y_MAX_CHARGE.set(zmax.max(1));
+}
+
 fn y_hicharge_enabled() -> bool {
-    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_Y_HICHARGE").is_some())
+    *Y_MAX_CHARGE.get().unwrap_or(&3) > 3
 }
 
 /// Max intensity of any peak in `[lo, hi]` (binary-searched when `sorted`).

@@ -12,6 +12,7 @@ pub use psm_score::{
     psm_edge_existence_facts,
     psm_edge_score, score_psm,
     score_psm_float,
+    init_cz_settings, CzSettings,
 };
 pub use rank_scorer::RankScorer;
 pub use scored_spectrum::{IonMatchFact, ScoredSpectrum};

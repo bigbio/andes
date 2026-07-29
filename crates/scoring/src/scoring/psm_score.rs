@@ -431,6 +431,44 @@ fn cz_fix_enabled() -> bool {
     *CELL.get_or_init(|| true)
 }
 
+/// Glyco c/z scoring settings, supplied by the caller instead of the environment.
+///
+/// These reach a hot inner function that would otherwise need them threaded through
+/// several signatures, so they are installed once at startup by the binary. Unlike an
+/// environment variable they are typed, validated at the CLI boundary, visible in
+/// `--help`, and have a documented default that applies when nothing installs them
+/// (every library consumer and every test).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CzSettings {
+    /// Override for the c/z fragment-charge ceiling. `None` derives it from the
+    /// spectrum's deconvolution state, which is the correct behaviour in almost all
+    /// cases; set it only to probe higher charges on data known to carry them.
+    pub zmax_override: Option<u8>,
+    /// Weight the explained-c/z terms by observed peak intensity rather than treating
+    /// a match as presence-only. Off by default: it measured -48 on the benchmark,
+    /// though the presence-only form is a known weakness for large glycans.
+    pub use_intensity: bool,
+}
+
+impl Default for CzSettings {
+    fn default() -> Self {
+        Self { zmax_override: None, use_intensity: false }
+    }
+}
+
+static CZ_SETTINGS: OnceLock<CzSettings> = OnceLock::new();
+
+/// Install the c/z settings. Call once, before scoring. A second call is ignored, so a
+/// library consumer cannot have its configuration silently replaced mid-run.
+pub fn init_cz_settings(settings: CzSettings) {
+    let _ = CZ_SETTINGS.set(settings);
+}
+
+#[inline]
+fn cz_settings() -> CzSettings {
+    CZ_SETTINGS.get().copied().unwrap_or_default()
+}
+
 /// Optional override for the c/z fragment-charge ceiling (`ANDES_GLYCO_CZ_ZMAX`).
 ///
 /// Round-6 audit finding: the bundled models ship `apply_deconvolution = true`, and
@@ -445,10 +483,7 @@ fn cz_zmax_override() -> Option<u8> {
     use std::sync::OnceLock;
     static CELL: OnceLock<Option<u8>> = OnceLock::new();
     *CELL.get_or_init(|| {
-        std::env::var("ANDES_GLYCO_CZ_ZMAX")
-            .ok()
-            .and_then(|s| s.parse::<u8>().ok())
-            .filter(|&z| z >= 1)
+        cz_settings().zmax_override.filter(|&z| z >= 1)
     })
 }
 
@@ -597,7 +632,7 @@ pub fn cz_structure_features(
     // ANDES_GLYCO_CZ_INTENSITY set, weight each matched ion by its observed
     // base-peak-normalised intensity, making this a true explained-INTENSITY ratio.
     // Unset = byte-identical to the shipped feature.
-    let use_intensity = std::env::var_os("ANDES_GLYCO_CZ_INTENSITY").is_some();
+    let use_intensity = cz_settings().use_intensity;
     let base = if use_intensity {
         let (peaks, _) = scored_spec.active_peaks_and_ranks();
         peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9)

@@ -24,26 +24,18 @@ use `value` form.
 | `ANDES_CHIMERIC_OVERLAP` | ALGORITHM | value | `crates/search/src/match_engine.rs:526` |
 | `ANDES_DENSITY_RAW` | ALGORITHM | presence | `crates/scoring/src/scoring/scored_spectrum.rs:780` |
 | `ANDES_ETHCD_AS_ETD` | ALGORITHM | presence | `crates/input/src/mzml.rs:172` |
-| `ANDES_GLYCO_CHARGE_PM1` | ALGORITHM | presence | `crates/search/src/glyco_search.rs:908` |
-| `ANDES_GLYCO_CZ_GATE_OFF` | ALGORITHM | presence | `crates/search/src/glyco_search.rs:923` |
-| `ANDES_GLYCO_CZ_INTENSITY` | ALGORITHM | presence | `crates/scoring/src/scoring/psm_score.rs:600` |
-| `ANDES_GLYCO_CZ_MULTISITE` | ALGORITHM | presence | `crates/search/src/glyco_search.rs:938` |
-| `ANDES_GLYCO_CZ_SITE_LEGACY` | ALGORITHM | value | `crates/search/src/glyco_search.rs:365` |
-| `ANDES_GLYCO_CZ_ZMAX` | ALGORITHM | value | `crates/scoring/src/scoring/psm_score.rs:448` |
-| `ANDES_GLYCO_ETD_DBFALLBACK_OFF` | ALGORITHM | presence | `crates/search/src/glyco_search.rs:902` |
-| `ANDES_GLYCO_Y_HICHARGE` | ALGORITHM | presence | `crates/andes-glyco/src/backbone.rs:447` |
 | `ANDES_PEAK_PER_WINDOW` | ALGORITHM | value | `crates/scoring/src/scoring/scored_spectrum.rs:227` |
 | `ANDES_PEAK_WINDOW` | ALGORITHM | value | `crates/scoring/src/scoring/scored_spectrum.rs:224` |
 | `ANDES_PRECOFF_NOCLAMP` | ALGORITHM | presence | `crates/scoring/src/scoring/scored_spectrum.rs:269` |
 | `ANDES_TIGHT_HIGHRES` | ALGORITHM | value | `crates/scoring/src/scoring/scored_spectrum.rs:1549` |
-| `ANDES_GLYCO_SCANS` | diagnostic | presence | `crates/search/src/glyco_search.rs:588` |
-| `ANDES_RSS_PROBE` | diagnostic | presence | `crates/andes/src/bin/andes.rs:1142` |
+| `ANDES_GLYCO_SCANS` | diagnostic | presence | `crates/search/src/glyco_search.rs:592` |
+| `ANDES_RSS_PROBE` | diagnostic | presence | `crates/andes/src/bin/andes.rs:1167` |
 | `ANDES_DENSE_NOISE` | model training | value | `crates/model-train/src/accumulate.rs:110` |
-| `ANDES_GEO_MAX_FRAG_CHARGE` | model training | ? | `crates/andes/src/bin/andes.rs:1236` |
-| `ANDES_GEO_MAX_RANK` | model training | ? | `crates/andes/src/bin/andes.rs:1233` |
-| `ANDES_GEO_MAX_TIERS` | model training | ? | `crates/andes/src/bin/andes.rs:1235` |
-| `ANDES_GEO_OCCUPANCY` | model training | ? | `crates/andes/src/bin/andes.rs:1234` |
-| `ANDES_GEO_SEGMENTS` | model training | ? | `crates/andes/src/bin/andes.rs:1232` |
+| `ANDES_GEO_MAX_FRAG_CHARGE` | model training | ? | `crates/andes/src/bin/andes.rs:1261` |
+| `ANDES_GEO_MAX_RANK` | model training | ? | `crates/andes/src/bin/andes.rs:1258` |
+| `ANDES_GEO_MAX_TIERS` | model training | ? | `crates/andes/src/bin/andes.rs:1260` |
+| `ANDES_GEO_OCCUPANCY` | model training | ? | `crates/andes/src/bin/andes.rs:1259` |
+| `ANDES_GEO_SEGMENTS` | model training | ? | `crates/andes/src/bin/andes.rs:1257` |
 | `ANDES_SEED_GEOMETRY` | model training | ? | `crates/andes/tests/train_from_msnet.rs:288` |
 | `ANDES_V1_OUT` | model training | value | `crates/model-train/tests/partition_parity.rs:208` |
 | `ANDES_V1_STORE` | model training | value | `crates/model-train/tests/partition_parity.rs:179` |

@@ -54,6 +54,8 @@ pub struct GlycoConfig {
     /// `gp` selector hyperscore weight (H).
     pub gp_h: f32,
     pub gp_cz: f32,
+    /// Choose the glycosite by c/z evidence when a peptide has >1 N-X-S/T sequon.
+    pub cz_multisite: bool,
     /// Cap on the number of peaks the GENERATION stage sees (the most intense N),
     /// as a guard against pathological scans. 0 = no cap. Scoring always reads the
     /// full spectrum, so a generated candidate is never scored on truncated evidence.
@@ -97,6 +99,7 @@ impl Default for GlycoConfig {
             gp_h: GLYCO_GP_H_DEFAULT,
             gp_cz: GLYCO_GP_CZ_DEFAULT,
             max_gen_peaks: 0,
+            cz_multisite: false,
             pf_charge: 2,
             max_pf: 1024,
             hcd_pair: false,
@@ -362,12 +365,10 @@ fn cz_best_site(
     // Requires an explicit "1" (matching `ladder_norm_enabled`): with a bare
     // `is_some()`, `ANDES_GLYCO_CZ_SITE_LEGACY=0` would ENABLE the legacy resolver,
     // which is the opposite of what anyone typing that means.
-    if std::env::var("ANDES_GLYCO_CZ_SITE_LEGACY").ok().as_deref() == Some("1") {
-        let res: Vec<u8> = pep.residues.iter().map(|aa| aa.residue).collect();
-        andes_glyco::sequon::first_nxst_site(&res).unwrap_or(0)
-    } else {
-        glyco_site_for(pep)
-    }
+    // The pre-round-7 resolver had no boundary fallback, so a boundary-sequon candidate
+    // had the intact glycan placed on residue 0 — a known-wrong result. Its revert path
+    // is removed rather than kept configurable.
+    glyco_site_for(pep)
 }
 
 fn cz_score_best_site(
@@ -481,6 +482,8 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_cz: f32,
     /// See `GlycoConfig::max_gen_peaks`.
     pub max_gen_peaks: usize,
+    /// See `GlycoConfig::cz_multisite`.
+    pub cz_multisite: bool,
     pub glyco_decoy_on: bool,
     /// B1 paired-scan generation toggle (`--glyco-hcd-pair`). Process-constant.
     pub hcd_pair_on: bool,
@@ -524,6 +527,7 @@ pub struct GlycoCtxOwned {
     gp_h: f32,
     gp_cz: f32,
     max_gen_peaks: usize,
+    cz_multisite: bool,
     glyco_decoy_on: bool,
     hcd_pair_on: bool,
     etd_rank_glycan: bool,
@@ -623,6 +627,7 @@ impl GlycoCtxOwned {
         let gp_h = cfg.gp_h;
         let gp_cz = cfg.gp_cz;
         let max_gen_peaks = cfg.max_gen_peaks;
+        let cz_multisite_cfg = cfg.cz_multisite;
         // Glycan-Y-first candidate retention (P0b) is off by default under the gp
         // selector (matches the validated gp baseline).
         let yindex_on = false;
@@ -729,6 +734,7 @@ impl GlycoCtxOwned {
             gp_h,
             gp_cz,
             max_gen_peaks,
+            cz_multisite: cz_multisite_cfg,
             glyco_decoy_on,
             hcd_pair_on,
             etd_rank_glycan,
@@ -775,6 +781,7 @@ impl GlycoCtxOwned {
             gp_h: self.gp_h,
             gp_cz: self.gp_cz,
             max_gen_peaks: self.max_gen_peaks,
+            cz_multisite: self.cz_multisite,
             glyco_decoy_on: self.glyco_decoy_on,
             hcd_pair_on: self.hcd_pair_on,
             etd_rank_glycan: self.etd_rank_glycan,
@@ -898,14 +905,16 @@ fn score_spectrum_glyco(
     // 3-frac AI-ETD: +19 backbone-correct @1%, decoy-safe, z4 +14); `ANDES_GLYCO_
     // ETD_DBFALLBACK_OFF` disables it. ETD-only, so plain-peptide HCD spectra keep
     // the gate and aren't false-annotated as glyco.
-    let etd_db_fallback =
-        is_etd && std::env::var_os("ANDES_GLYCO_ETD_DBFALLBACK_OFF").is_none();
+    // Always on for ETD: validated +19 backbone-correct @1%, decoy-safe. ETD scans
+    // structurally lack oxonium, so gating them on it drops real glycopeptides.
+    let etd_db_fallback = is_etd;
     // EXPERIMENT (ANDES_GLYCO_CHARGE_PM1): also enumerate backbones at charge z-1
     // and z+1 around the reported precursor charge — instrument charge mis-calls
     // (concentrated at z4-z6) otherwise put the true backbone mass off the grid so
     // it is NEVER generated. expand=0 (unset) = exact legacy single-charge set.
-    let charge_expand: u8 =
-        if std::env::var_os("ANDES_GLYCO_CHARGE_PM1").is_some() { 1 } else { 0 };
+    // Enumerating backbones at z-1/z+1 was tried for instrument charge mis-calls and
+    // never adopted; the single-charge set is the shipped behaviour.
+    let charge_expand: u8 = 0;
     // EXPERIMENT (ANDES_GLYCO_CZ_GATE): add a c/z evidence AXIS to the Phase-1
     // backbone truncation gate. The gate keeps top-k backbones by b/y rank
     // (AXIS 1) and glycan-Y count (AXIS 2) but NOT by c/z, so on ETD/AI-ETD scans
@@ -919,8 +928,8 @@ fn score_spectrum_glyco(
     // c/z truncation gate (AXIS 4): default ON (`--glyco-cz-gate`, ctx.cz_gate).
     // ETD-only (inert on HCD/CID). `ANDES_GLYCO_CZ_GATE_OFF` force-disables it
     // (A/B / debugging escape hatch) regardless of the flag.
-    let cz_gate_on =
-        is_etd && ctx.cz_gate && std::env::var_os("ANDES_GLYCO_CZ_GATE_OFF").is_none();
+    // `--glyco-cz-gate` is the supported control; the env override was a duplicate.
+    let cz_gate_on = is_etd && ctx.cz_gate;
     // EXPERIMENT (ANDES_GLYCO_CZ_MULTISITE): when a peptide carries >1 N-X-S/T
     // sequon (~8% of tryptic N-glycopeptides), the glycosite is ambiguous and
     // `first_nxst_site` may place the intact glycan on the WRONG split point,
@@ -935,7 +944,7 @@ fn score_spectrum_glyco(
     // by `cz_score_best_site` too — the max-over-sites is applied symmetrically, so
     // the per-candidate null is matched). Enabling it is gated on a decoy-controlled
     // @1% A/B that would surface any residual sequon-count asymmetry.
-    let cz_multisite = std::env::var_os("ANDES_GLYCO_CZ_MULTISITE").is_some();
+    let cz_multisite = ctx.cz_multisite;
     // BUG2 fix toggle (`--glyco-etd-rank-glycan`): feed the rank/edge/hyperscore
     // path a glycan-aware peptide clone on ETD scans instead of the bare backbone
     // (see `glyco_aware_peptide`). Inert (false) unless explicitly enabled.

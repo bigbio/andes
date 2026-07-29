@@ -435,7 +435,7 @@ fn cz_fix_enabled() -> bool {
 /// in which detected z2/z3 isotope clusters have already been charge-reduced to their
 /// z1 m/z. Predicting c/z at charge ≥2 therefore probes m/z that deconvolution has
 /// vacated, adding chance matches rather than evidence. The effective ceiling therefore
-/// DEFAULTS TO 1 (see [`cz_effective_zmax`]), letting deconvolution do the charge work —
+/// DEFAULTS TO 1 when the spectrum was deconvoluted (see [`cz_effective_zmax_for`]),
 /// validated +12 backbone-correct @1%. `ANDES_GLYCO_CZ_ZMAX=<n>` raises it back toward
 /// the call site's own ceiling (`=3` restores the pre-round-7 behaviour).
 fn cz_zmax_override() -> Option<u8> {
@@ -450,15 +450,8 @@ fn cz_zmax_override() -> Option<u8> {
 }
 
 /// Apply [`cz_zmax_override`] on top of a call site's default ceiling.
-fn cz_effective_zmax(default_zmax: u8) -> u8 {
-    // DEFAULT 1 (round-7, validated +12 backbone-correct @1%): deconvolution has
-    // already charge-reduced every DETECTED z2/z3 cluster to its z1 m/z, so probing
-    // z>=2 hunts vacated positions and only accumulates chance matches. Override with
-    // ANDES_GLYCO_CZ_ZMAX=<n> (e.g. =3 restores the pre-round-7 ceiling).
-    default_zmax.min(cz_zmax_override().unwrap_or(1))
-}
 
-/// Deconvolution-aware form of [`cz_effective_zmax`].
+/// Effective c/z fragment-charge ceiling.
 ///
 /// The z1 ceiling is only correct when the active model sets
 /// `apply_deconvolution = true`, because it relies on deconvolution having already
@@ -489,7 +482,7 @@ pub fn cz_hyperscore_psm(
     let fix = cz_fix_enabled();
     let mut c_hit = vec![false; n];
     let mut z_hit = vec![false; n];
-    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax(max_frag_charge), glycan_mass, glycosite) {
+    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax_for(max_frag_charge, scored_spec.is_deconvoluted()), glycan_mass, glycosite) {
         // Bug 1: ppm-scaled per-ion tolerance (was a flat 0.5 Da for every ion).
         let tol_da = if fix {
             (ion.mz * tol_ppm * 1e-6).max(0.01)
@@ -550,7 +543,7 @@ pub fn cz_matched_intensity_frac(
     let base = peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9);
     let mut c_int = vec![0.0f32; n];
     let mut z_int = vec![0.0f32; n];
-    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax(max_frag_charge), glycan_mass, glycosite) {
+    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax_for(max_frag_charge, scored_spec.is_deconvoluted()), glycan_mass, glycosite) {
         let tol_da = (ion.mz * tol_ppm * 1e-6).max(0.01);
         if let Some((_, intensity, _)) = scored_spec.nearest_peak_full(ion.mz, tol_da) {
             let pos = ion.position as usize;
@@ -593,7 +586,7 @@ pub fn cz_structure_features(
     }
     // Cap the fragment-charge sweep at 3: peaks deconvolve only to ~z3, so higher
     // predicted c/z are mostly random matches (audit finding F6).
-    let zmax = cz_effective_zmax(max_frag_charge.min(3));
+    let zmax = cz_effective_zmax_for(max_frag_charge.min(3), scored_spec.is_deconvoluted());
     // Round-7 (audit D1): the shipped form discarded the matched peak's INTENSITY
     // (`nearest_peak_full(..).is_some()`), making `explained` a prior-weighted
     // PRESENCE fraction — not the intensity-explained ratio it is documented as, and

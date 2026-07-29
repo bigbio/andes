@@ -643,6 +643,17 @@ impl<'a> ScoredSpectrum<'a> {
         }
     }
 
+    /// Whether this spectrum's active peak list has been charge-reduced.
+    ///
+    /// Callers that assume a fragment charge state need this: when deconvolution ran,
+    /// detected 2+/3+ clusters have already been rewritten to their 1+ m/z, so probing
+    /// above 1+ is redundant. When it did NOT run, genuine multiply-charged fragments
+    /// sit at their true m/z and a 1+-only probe cannot match them at all.
+    #[inline]
+    pub fn is_deconvoluted(&self) -> bool {
+        self.deconv_peaks.is_some()
+    }
+
     /// Spectrum-level parent mass (= `(precursor_mz - PROTON) * charge`).
     /// This is the OBSERVED neutral mass of the spectrum at the charge
     /// state used to construct this `ScoredSpectrum`, NOT the candidate

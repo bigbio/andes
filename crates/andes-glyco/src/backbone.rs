@@ -643,12 +643,22 @@ const CORE_RUNGS: usize = 6;
 
 /// `ANDES_GLYCO_LADDER_NORM=1` — opt-in rung normalisation, read once.
 ///
-/// Must be an explicit `"1"`: an earlier `var_os(..).is_some()` form meant that
-/// setting the variable to `0` silently ENABLED it.
+/// Default ON; `ANDES_GLYCO_LADDER_NORM=0` disables for A/B. Reads the VALUE, not
+/// mere presence: an earlier `var_os(..).is_some()` form meant `=0` silently ENABLED it.
 fn ladder_norm_enabled() -> bool {
     use std::sync::OnceLock;
     static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| matches!(std::env::var("ANDES_GLYCO_LADDER_NORM").as_deref(), Ok("1")))
+    // DEFAULT ON since the bias was measured. The unnormalised sum's expectation grows
+    // with glycan size (see `glycan_y_intensity`), which structurally rewards assigning a
+    // bigger glycan — the documented K·ladder inversion, 76.5 on wrong winners vs 53.1 on
+    // correct. Measured A/B with the correction enabled: mouse AI-ETD benchmark 664 -> 683
+    // identifications at 1% FDR, and on a large-glycan human plasma set the decoy fraction
+    // in the score's top 150 fell 12.7% -> 12.0%. Neither regime regressed.
+    //
+    // Leaving a validated correction off by default is how the selector weights came to be
+    // tuned around a bias whose fix was already in the tree; `ANDES_GLYCO_LADDER_NORM=0`
+    // restores the biased estimator for A/B only.
+    *CELL.get_or_init(|| !matches!(std::env::var("ANDES_GLYCO_LADDER_NORM").as_deref(), Ok("0")))
 }
 
 /// Apply the optional rung normalisation to a Y-ladder sum.

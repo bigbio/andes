@@ -993,7 +993,21 @@ impl<'a> ScoredSpectrum<'a> {
             is_prefix,
             charge,
             parent_mass,
-            false, // scoring: keep the model's wide mme (0.5 Da)
+            // TRAIN/SERVE TOLERANCE. Training matches high-res ions at 20 ppm (the two
+            // accumulator call sites below pass `true`), but scoring has always passed
+            // `false`, i.e. the model's `mme` — and EVERY bundled model carries
+            // mme = 0.5 Da, including the high-resolution ones. At m/z 500 that window
+            // is ~50x too wide (a fact match_engine.rs:1493 already records), so the
+            // rank tables are consulted with a window far looser than the one they were
+            // built from. On dense spectra — a glycopeptide scan is mostly oxonium and
+            // glycan-Y — nearly every theoretical position finds SOMETHING, and the
+            // score saturates toward noise.
+            //
+            // ANDES_TIGHT_HIGHRES=1 serves high-res models at the training window so the
+            // two can be compared. Default (unset) is byte-identical to before. This is
+            // an A/B switch, not a fix: it changes EVERY high-res search, so it must
+            // clear the Astral/TMT/UPS1 triad before any default moves.
+            tight_highres_scoring(),
             |_, _, matched_peak, logs, theo_mz, tol_da| {
                 let missing = if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 };
                 let score = match matched_peak {
@@ -1515,6 +1529,15 @@ impl<'a> ScoredSpectrum<'a> {
 /// `ion_match_facts`. Invokes `visit` once per (segment, ion) that passes the
 /// directional filter and `segment_num` check.
 #[allow(clippy::too_many_arguments, reason = "mirrors the scoring loop's argument bundle")]
+/// Serve high-resolution models at the training match window instead of the model's
+/// `mme`. See the call site in `node_score` for why this exists. Requires an explicit
+/// "1" so that setting the variable to "0" cannot silently enable it.
+fn tight_highres_scoring() -> bool {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| matches!(std::env::var("ANDES_TIGHT_HIGHRES").as_deref(), Ok("1")))
+}
+
 fn visit_directional_node_ion_matches<F>(
     peaks: &[(f64, f32)],
     ranks: &[u32],

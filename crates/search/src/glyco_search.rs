@@ -37,7 +37,8 @@ use andes_glyco::backbone::{
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
     collapse_cmp, glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
-    GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT,
+    GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT, glyco_gp_fused_score_with_matches,
+    GLYCO_GP_M_DEFAULT,
 };
 
 /// Glyco tuning knobs, threaded from the CLI (see the `--glyco-gp-*` /
@@ -54,6 +55,16 @@ pub struct GlycoConfig {
     /// `gp` selector hyperscore weight (H).
     pub gp_h: f32,
     pub gp_cz: f32,
+    /// Weight on the matched-b/y-ion count in the collapse selector. 0.0 reproduces the
+    /// previous score exactly; the count is the best per-candidate discriminator the
+    /// collapse can see, since the strong score is computed only after it runs.
+    pub gp_m: f32,
+    /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
+    /// (previous behaviour). The field standard is 2 (pGlyco3, O-Pair).
+    pub min_core_y: u32,
+    /// Minimum matched b/y sequence ions required to emit a glyco PSM. 0 = no
+    /// requirement. MSFragger requires 4 matched fragments with >=2 non-Y.
+    pub min_matched_by: u32,
     /// Choose the glycosite by c/z evidence when a peptide has >1 N-X-S/T sequon.
     pub cz_multisite: bool,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
@@ -101,6 +112,9 @@ impl Default for GlycoConfig {
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
             gp_cz: GLYCO_GP_CZ_DEFAULT,
+            gp_m: GLYCO_GP_M_DEFAULT,
+            min_core_y: 0,
+            min_matched_by: 0,
             max_gen_peaks: 0,
             cz_multisite: false,
             scan_filter_path: None,
@@ -138,7 +152,7 @@ use scoring_crate::scoring::{
     fuse_strong_score,
     hyperscore_psm,
     listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
-    StrongScoreInputs,
+    StrongScoreInputs, hyperscore_psm_with_matches,
 };
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
@@ -484,6 +498,12 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_j: f32,
     pub gp_h: f32,
     pub gp_cz: f32,
+    /// See `GlycoConfig::gp_m`.
+    pub gp_m: f32,
+    /// See `GlycoConfig::min_core_y`.
+    pub min_core_y: u32,
+    /// See `GlycoConfig::min_matched_by`.
+    pub min_matched_by: u32,
     /// See `GlycoConfig::max_gen_peaks`.
     pub max_gen_peaks: usize,
     /// See `GlycoConfig::cz_multisite`.
@@ -530,6 +550,9 @@ pub struct GlycoCtxOwned {
     gp_j: f32,
     gp_h: f32,
     gp_cz: f32,
+    gp_m: f32,
+    min_core_y: u32,
+    min_matched_by: u32,
     max_gen_peaks: usize,
     cz_multisite: bool,
     glyco_decoy_on: bool,
@@ -630,6 +653,9 @@ impl GlycoCtxOwned {
         let gp_j = cfg.gp_j;
         let gp_h = cfg.gp_h;
         let gp_cz = cfg.gp_cz;
+        let gp_m_cfg = cfg.gp_m;
+        let min_core_y_cfg = cfg.min_core_y;
+        let min_matched_by_cfg = cfg.min_matched_by;
         let max_gen_peaks = cfg.max_gen_peaks;
         let cz_multisite_cfg = cfg.cz_multisite;
         // Glycan-Y-first candidate retention (P0b) is off by default under the gp
@@ -737,6 +763,9 @@ impl GlycoCtxOwned {
             gp_j,
             gp_h,
             gp_cz,
+            gp_m: gp_m_cfg,
+            min_core_y: min_core_y_cfg,
+            min_matched_by: min_matched_by_cfg,
             max_gen_peaks,
             cz_multisite: cz_multisite_cfg,
             glyco_decoy_on,
@@ -784,6 +813,9 @@ impl GlycoCtxOwned {
             gp_j: self.gp_j,
             gp_h: self.gp_h,
             gp_cz: self.gp_cz,
+            gp_m: self.gp_m,
+            min_core_y: self.min_core_y,
+            min_matched_by: self.min_matched_by,
             max_gen_peaks: self.max_gen_peaks,
             cz_multisite: self.cz_multisite,
             glyco_decoy_on: self.glyco_decoy_on,
@@ -893,6 +925,9 @@ fn score_spectrum_glyco(
     let gp_j = ctx.gp_j;
     let gp_h = ctx.gp_h;
     let gp_cz = ctx.gp_cz;
+    let gp_m = ctx.gp_m;
+    let min_core_y = ctx.min_core_y;
+    let min_matched_by = ctx.min_matched_by;
     // ETD c/z collapse term: on electron-transfer spectra the intact-glycan c/z
     // ladder is the primary backbone evidence, so the selector weights it to pick
     // the true backbone. `cz(&w)` returns 0.0 on HCD/CID (activation gate), so
@@ -1783,7 +1818,7 @@ fn score_spectrum_glyco(
             // BUG2 fix (opt-in --glyco-etd-rank-glycan): on ETD winners, score against
             // the glycan-aware peptide clone so glycosite-spanning fragments are
             // matchable (see `glyco_aware_peptide`); bare otherwise.
-            let hyper = |w: &CheapWinner| -> f32 {
+            let hyper_m = |w: &CheapWinner| -> (f32, u32) {
                 match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
                     Some((_, ss)) => {
                         let pep = &candidates[w.cand_slot].peptide;
@@ -1797,17 +1832,22 @@ fn score_spectrum_glyco(
                             if gmass > 0.0 {
                                 let gsite = glyco_site_for(pep);
                                 let modified = glyco_aware_peptide(pep, gsite, gmass);
-                                hyperscore_psm(ss, &modified, spec_scorer)
+                                hyperscore_psm_with_matches(ss, &modified, spec_scorer)
                             } else {
-                                hyperscore_psm(ss, pep, spec_scorer)
+                                hyperscore_psm_with_matches(ss, pep, spec_scorer)
                             }
                         } else {
-                            hyperscore_psm(ss, pep, spec_scorer)
+                            hyperscore_psm_with_matches(ss, pep, spec_scorer)
                         }
                     }
-                    None => 0.0,
+                    None => (0.0, 0),
                 }
             };
+            // The hyperscore alone, for the existing `H * hyper` term.
+            let hyper = |w: &CheapWinner| -> f32 { hyper_m(w).0 };
+            // Matched b/y ion COUNT — the same evidence before the two log-factorials
+            // flatten it. Feeds the additive `M * matched` term.
+            let matched_ions = |w: &CheapWinner| -> f32 { hyper_m(w).1 as f32 };
 
             // ETD c/z backbone hyperscore per candidate (0.0 unless the scan is an
             // electron-transfer spectrum). Computed on the bounded accepted set at
@@ -1976,8 +2016,9 @@ fn score_spectrum_glyco(
                         .iter()
                         .map(|e| {
                             let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                            let s = glyco_gp_fused_score(
-                                rank_sel(&e.1), ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                            let s = glyco_gp_fused_score_with_matches(
+                                rank_sel(&e.1), ladder(&e.1), cy, hyper(&e.1),
+                                matched_ions(&e.1), gp_k, gp_j, gp_h, gp_m,
                             ) + gp_cz * cz(&e.1);
                             (e, s)
                         })
@@ -2002,14 +2043,16 @@ fn score_spectrum_glyco(
                                         })
                                         .map(|e| {
                                             let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                                            let s = glyco_gp_fused_score(
+                                            let s = glyco_gp_fused_score_with_matches(
                                                 rank_sel(&e.1),
                                                 ladder(&e.1),
                                                 cy,
                                                 hyper(&e.1),
+                                                matched_ions(&e.1),
                                                 gp_k,
                                                 gp_j,
                                                 gp_h,
+                                                gp_m,
                                             ) + gp_cz * cz(&e.1);
                                             (e, s)
                                         })
@@ -2027,6 +2070,39 @@ fn score_spectrum_glyco(
                         }
                         None => Vec::new(),
                     }
+                    .into_iter()
+                    // MINIMUM-EVIDENCE GATE. andes previously emitted a best guess for
+                    // every gated scan — 7304 of 24857 on a human plasma file, of which
+                    // ~2% were correct. Every other engine in the field refuses to answer
+                    // without structural evidence: MSFragger requires >=2 non-Y sequence
+                    // ions and >=4 matched fragments, pGlyco3 and O-Pair require >=2
+                    // trimannosyl-core Y ions, Glyco-Decipher requires >=3 with Y1
+                    // mandatory. We required nothing.
+                    //
+                    // This matters because the reportable count is bounded by the number
+                    // of targets ranked above the FIRST decoy (Percolator's concatenated
+                    // q floor is 1/T_top). Measured on that plasma file, the decoys
+                    // sitting in the top 150 carry a median of 1 core-Y hit and 4 matched
+                    // b/y ions, against 6 and 7 for the true positives — so they are
+                    // exactly what a structural gate removes.
+                    //
+                    // Label-blind by construction: reads only spectral evidence, never
+                    // `is_decoy`, so it fires symmetrically on target and decoy scans and
+                    // cannot bias the target/decoy ratio. Defaults are 0 (gate off,
+                    // byte-identical) until measured.
+                    .filter(|(_, w)| {
+                        // Applied uniformly. Exempting ETD scans was tried, on the
+                        // theory that core-Y is a collisional product and electron-
+                        // transfer spectra cannot produce it: it made things WORSE.
+                        // Both benchmark datasets are mixed HCD/ETD, so the exemption
+                        // does not separate the regimes — it simply lets the ungated
+                        // scans back in. Measured: plasma correct identifications
+                        // 87 -> 0 (the ETD file's 14372 rows return, 2049 -> 15755
+                        // pooled), mouse 546 -> 628 but still short of 707 ungated.
+                        core_y_counts[w.bb_hit_idx] as u32 >= min_core_y
+                            && matched_ions(w) as u32 >= min_matched_by
+                    })
+                    .collect::<Vec<_>>()
                 } else {
                     // Diagnostic multi-row dump (--debug-glyco): sort by the fused gp
                     // score so the audit's top-1 row reflects the shipped selector.
@@ -2036,8 +2112,9 @@ fn score_spectrum_glyco(
                             .into_iter()
                             .map(|e| {
                                 let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                                let s = glyco_gp_fused_score(
-                                    rank_sel(&e.1), ladder(&e.1), cy, hyper(&e.1), gp_k, gp_j, gp_h,
+                                let s = glyco_gp_fused_score_with_matches(
+                                    rank_sel(&e.1), ladder(&e.1), cy, hyper(&e.1),
+                                    matched_ions(&e.1), gp_k, gp_j, gp_h, gp_m,
                                 ) + gp_cz * cz(&e.1);
                                 (s, e)
                             })

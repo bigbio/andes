@@ -84,6 +84,36 @@ pub fn glyco_gp_fused_score(
     rank + k * ladder + j * core_y_hits + h * hyperscore
 }
 
+/// Default weight for the matched-b/y-ion term, `M` in
+/// [`glyco_gp_fused_score_with_matches`].
+///
+/// The collapse runs BEFORE feature extraction, so it cannot see the strong score — the
+/// best discriminator the engine computes. Measured over a benchmark's reference
+/// identifications, the terms it does see rank the correct candidate at median 15
+/// (`rank`) and median 44 (`ladder`, the heaviest weight), while the raw count of
+/// matched b/y ions ranks it at median 1-2. That count falls out of the hyperscore the
+/// selector already evaluates per candidate, so including it costs nothing.
+pub const GLYCO_GP_M_DEFAULT: f32 = 0.0;
+
+/// [`glyco_gp_fused_score`] plus `M * matched_b_y_ions`.
+///
+/// Additive: `m = 0.0` reproduces the previous score exactly, so the term can be
+/// switched on by measurement rather than by assumption.
+#[allow(clippy::too_many_arguments)]
+pub fn glyco_gp_fused_score_with_matches(
+    rank: f32,
+    ladder: f32,
+    core_y_hits: f32,
+    hyperscore: f32,
+    matched_ions: f32,
+    k: f32,
+    j: f32,
+    h: f32,
+    m: f32,
+) -> f32 {
+    glyco_gp_fused_score(rank, ladder, core_y_hits, hyperscore, k, j, h) + m * matched_ions
+}
+
 /// Total order for the top-1-per-scan collapse: `max_by(collapse_cmp(...))`
 /// yields the emitted winner. This ordering is the SINGLE SOURCE OF TRUTH shared
 /// by the driver's pre-feature reduction (glyco_search) and the PIN writer's

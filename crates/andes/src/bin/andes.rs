@@ -532,6 +532,38 @@ struct SearchArgs {
     #[arg(long = "glyco-gp-cz", hide = true, default_value_t = 15.0f32)]
     glyco_gp_cz: f32,
 
+    /// `gp` selector weight on the COUNT of matched b/y ions. The collapse runs before
+    /// feature extraction, so it cannot see the strong score — the engine's best
+    /// discriminator. Measured over a benchmark's reference identifications, the terms it
+    /// can see rank the correct candidate at median 15 (rank) and median 44 (ladder, the
+    /// heaviest weight), while this count ranks it at median 1-2. It is free: the count
+    /// falls out of the hyperscore the selector already computes per candidate.
+    /// Default 0 reproduces the previous selector exactly.
+    #[arg(long = "glyco-gp-m", hide = true, default_value_t = 0.0f32)]
+    glyco_gp_m: f32,
+
+    /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
+    /// scan. andes historically reported a best guess for every scan clearing the
+    /// oxonium gate, so most reported rows had no glycan evidence at all. Every other
+    /// engine requires this: pGlyco3 and O-Pair require 2 core Y ions, Glyco-Decipher 3
+    /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
+    /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
+    ///
+    /// MEASURED TRADE-OFF, which is why the default is 0. On a pooled human plasma set
+    /// (stepped-collision HCD) `2` took verified-correct identifications from 0 to 87 at
+    /// 1% FDR with a measured 0.75% false-discovery proportion — the ungated run
+    /// accepted 102 PSMs of which NONE were correct. On a mouse AI-ETD benchmark the
+    /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
+    /// leave it off for electron-transfer data. Exempting ETD scans automatically was
+    /// tried and made both regimes worse, because real files are mixed.
+    #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
+    glyco_min_core_y: u32,
+
+    /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
+    /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
+    #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
+    glyco_min_matched_ions: u32,
+
     /// c/z truncation gate: keep the top-k backbones by glycosite-spanning c/z
     /// evidence (AXIS 4) so high-charge ETD glycopeptides supported mainly by c/z
     /// survive Phase-1 truncation. Default ON; ETD-only (inert on HCD/CID). Pass
@@ -1058,8 +1090,53 @@ struct TrainRichIonLlrArgs {
 }
 
 /// Available subcommands.
+#[derive(clap::Args, Debug)]
+struct RescorePinArgs {
+    /// Input PIN.
+    #[arg(long = "in")]
+    input: PathBuf,
+    /// Output target PSMs (Percolator `.psms` shape: PSMId, score, q-value, PEP).
+    #[arg(long = "out-psms")]
+    out_psms: PathBuf,
+    /// Output decoy PSMs.
+    #[arg(long = "out-dpsms")]
+    out_dpsms: PathBuf,
+    /// Cross-validation seed.
+    #[arg(long = "seed", default_value_t = 42u64)]
+    seed: u64,
+}
+
+fn run_rescore_pin(args: RescorePinArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let pin_text = std::fs::read_to_string(&args.input)
+        .map_err(|e| format!("reading {}: {e}", args.input.display()))?;
+    let rows = rescore::native_rescore_qvalues(&pin_text, args.seed)?;
+    let mut t = std::io::BufWriter::new(std::fs::File::create(&args.out_psms)?);
+    let mut d = std::io::BufWriter::new(std::fs::File::create(&args.out_dpsms)?);
+    use std::io::Write;
+    for w in [&mut t, &mut d] {
+        writeln!(w, "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds")?;
+    }
+    let (mut nt, mut nd) = (0usize, 0usize);
+    for (id, is_decoy, q, score) in &rows {
+        let w: &mut dyn Write = if *is_decoy { &mut d } else { &mut t };
+        writeln!(w, "{id}\t{score}\t{q}\t{q}\t-\t-")?;
+        if *is_decoy { nd += 1 } else { nt += 1 }
+    }
+    eprintln!("rescore-pin: {nt} target and {nd} decoy rows written");
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Rescore an existing PIN with the built-in rescorer and write Percolator-shaped
+    /// `.psms` / `.dpsms` files.
+    ///
+    /// Exists so two rescorers can be compared on IDENTICAL input: without it the only
+    /// way to try the native rescorer was to re-run the whole search, which changes the
+    /// PIN as well as the rescoring and confounds the comparison.
+    #[command(name = "rescore-pin", hide = true)]
+    RescorePin(RescorePinArgs),
+
     /// Train a scoring model directly from externally-labeled, high-confidence
     /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
     /// search. This is the primary training path for the Phase-3 "own models".
@@ -1139,6 +1216,7 @@ fn main() -> ExitCode {
         Some(clap::parser::ValueSource::CommandLine)
     ));
     let result = match top.command.take() {
+        Some(Command::RescorePin(args)) => run_rescore_pin(args),
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
@@ -2969,6 +3047,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_j: cli.glyco_gp_j,
             gp_h: cli.glyco_gp_h,
             gp_cz: cli.glyco_gp_cz,
+            gp_m: cli.glyco_gp_m,
+            min_core_y: cli.glyco_min_core_y,
+            min_matched_by: cli.glyco_min_matched_ions,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,
             scan_filter_path: cli.glyco_scans.clone(),

@@ -84,6 +84,36 @@ pub fn glyco_gp_fused_score(
     rank + k * ladder + j * core_y_hits + h * hyperscore
 }
 
+/// Default weight for the matched-b/y-ion term, `M` in
+/// [`glyco_gp_fused_score_with_matches`].
+///
+/// The collapse runs BEFORE feature extraction, so it cannot see the strong score — the
+/// best discriminator the engine computes. Measured over a benchmark's reference
+/// identifications, the terms it does see rank the correct candidate at median 15
+/// (`rank`) and median 44 (`ladder`, the heaviest weight), while the raw count of
+/// matched b/y ions ranks it at median 1-2. That count falls out of the hyperscore the
+/// selector already evaluates per candidate, so including it costs nothing.
+pub const GLYCO_GP_M_DEFAULT: f32 = 0.0;
+
+/// [`glyco_gp_fused_score`] plus `M * matched_b_y_ions`.
+///
+/// Additive: `m = 0.0` reproduces the previous score exactly, so the term can be
+/// switched on by measurement rather than by assumption.
+#[allow(clippy::too_many_arguments)]
+pub fn glyco_gp_fused_score_with_matches(
+    rank: f32,
+    ladder: f32,
+    core_y_hits: f32,
+    hyperscore: f32,
+    matched_ions: f32,
+    k: f32,
+    j: f32,
+    h: f32,
+    m: f32,
+) -> f32 {
+    glyco_gp_fused_score(rank, ladder, core_y_hits, hyperscore, k, j, h) + m * matched_ions
+}
+
 /// Total order for the top-1-per-scan collapse: `max_by(collapse_cmp(...))`
 /// yields the emitted winner. This ordering is the SINGLE SOURCE OF TRUTH shared
 /// by the driver's pre-feature reduction (glyco_search) and the PIN writer's
@@ -134,6 +164,8 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     transfer_ungated: false,
 ///     cz_hyperscore: 0.0,
 ///     cz_intensity: 0.0,
+///     cz_explained: 0.0,
+///     cz_chance_llr: 0.0,
 /// };
 /// assert_eq!(key.glycan_mass, 0.0);
 /// ```
@@ -206,6 +238,11 @@ pub struct GlycoPsmKey {
     /// hyperscore discards (round-4 "intensity blindness" audit). PIN feature only;
     /// not (yet) in the collapse selector.
     pub cz_intensity: f32,
+    /// c/z prior-weighted EXPLAINED fraction (additive PIN `CzExplained`; ETD only,
+    /// else 0). See `cz_structure_features`.
+    pub cz_explained: f32,
+    /// c/z local-noise chance LLR (additive PIN `CzChanceLlr`; ETD only, else 0).
+    pub cz_chance_llr: f32,
 }
 
 #[cfg(test)]
@@ -299,6 +336,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         };
         assert_eq!(key.glycan_mass, 0.0);
         assert!(key.glycan.is_none());
@@ -336,6 +375,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         };
         assert!((key.glycan_mass - expected_mass).abs() < 1e-6);
         assert!(key.glycan.is_some());
@@ -364,6 +405,8 @@ mod tests {
             transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         };
         let cloned = key.clone();
         assert_eq!(cloned.spectrum_idx, key.spectrum_idx);
@@ -381,6 +424,8 @@ mod tests {
             transfer_seed_score: 0.0, transfer_rt_delta: 0.0, transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
+            cz_explained: 0.0,
+            cz_chance_llr: 0.0,
         };
         assert!(!key.is_transferred);
         assert_eq!(key.transfer_graph_support, 0);

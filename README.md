@@ -362,6 +362,99 @@ DDA scans frequently co-isolate more than one precursor, and the second peptide 
 
 andes replaces the hard fragment-tolerance cliff with a smooth Gaussian weighting of each matched peak by its mass error, blended toward the missing-ion score — so an off-centre (likely-noise) peak inside a wide low-res window is discounted instead of counting in full. It is **on by default and parameter-free**: the Gaussian width is the model's own match tolerance (`σ = tolerance`), so it scales per regime automatically (meaningful on low-res, ~inert on high-res, which deconvolves to a tight window) with nothing to tune. Net-positive across all three regimes at 1% entrapment-FDP (UPS1 +0.8%, TMT +0.3%, Astral +0.5%). See [docs/soft-fragment-matching.md](docs/soft-fragment-matching.md).
 
+## Intact N-glycopeptide search (`--glyco`, experimental)
+
+`--glyco` searches **intact N-glycopeptides**: it identifies the peptide backbone and the
+attached glycan composition together, from the same MS2 scan, without deglycosylation.
+
+```bash
+andes --spectrum sample.mzML \
+      --database proteins.fasta \
+      --decoy-strategy sequon-reverse \
+      --glyco \
+      --output-pin results.pin
+```
+
+`--glyco` writes **only** `results.glyco.pin`. It is a standalone pipeline: the standard
+PIN, TSV, Parquet, rescore and refine outputs are all skipped, and passing
+`--output-tsv`, `--output-parquet`, `--rescore` or `--refine` alongside `--glyco` is a
+hard error rather than a silently ignored flag.
+
+Two things differ from a normal run:
+
+- **`--decoy-strategy sequon-reverse` is strongly recommended.** Plain reversal maps an
+  N-X-S/T sequon to S/T-X-N, so reversed decoys reach the glyco sequon gate at a lower
+  rate than targets and q-values come out anti-conservative. `sequon-reverse` restores
+  each sequon at its mirrored position, so targets and decoys compete symmetrically.
+- **A second PIN is written**, `results.glyco.pin`, alongside the normal peptide PIN.
+  Glycopeptide PSMs carry glyco-specific features (oxonium evidence, core-Y ladder,
+  glycan-mass agreement, ETD c/z coverage) and must be run through Percolator
+  *separately* from the unmodified-peptide PIN — mixing the two feature sets in one
+  Percolator run is not valid. andes never computes FDR itself.
+
+Searching several fractions of one experiment? **Run each file separately, concatenate
+the `.glyco.pin` files (one header), and run Percolator once on the pooled result.**
+A single fraction typically yields only a handful of glyco decoys, which makes a
+per-fraction 1% q-value estimate almost pure noise.
+
+### Fragmentation
+
+Both HCD/CID and ETD-family activation are supported, and andes adapts to what it finds:
+
+| Activation | What andes uses |
+| --- | --- |
+| HCD / CID | oxonium ions, the core-Y ladder, and b/y fragments of the backbone |
+| ETD / EThcD / AI-ETD | the above **plus** c/z fragments, which retain the glycan and so localize the glycosite |
+
+On ETD-family data three ETD-only behaviours are on by default and inert on HCD/CID:
+`--glyco-cz-gate` (c/z evidence can rescue a backbone from truncation),
+`--glyco-etd-rank-glycan` (fragments are predicted at their glycan-carrying mass), and
+`--glyco-hcd-pair` (candidate backbones are generated from the paired HCD scan of the
+same precursor while c/z is scored on the ETD scan). `--glyco-hcd-pair` needs both scans
+in one file and is disabled with a warning for multi-file runs — another reason to search
+one file per invocation.
+
+### What to expect
+
+On a public AI-ETD mouse-brain dataset (PXD011533, 6 fractions, ~5,090 distinct
+glycopeptides in the reference identification set), andes recovers **~71% of that
+reference set** at 1% PSM-level q-value from Percolator, at a measured entrapment
+false-discovery proportion of **0.45%** — i.e. the reported 1% is conservative, not
+optimistic. Recovery is strongly charge-dependent: it is highest at 2+/3+ and falls off
+at 5+ and above, where multiply-charged fragment evidence dominates.
+
+Treat these as a calibration point, not a guarantee. Glyco results depend heavily on
+activation type, glycan class, and how the reference set itself was filtered.
+
+### Memory
+
+The glyco path holds the candidate index in RAM; `--candidate-index mmap` is **not yet
+supported under `--glyco`** and is rejected rather than silently ignored. Measured on a
+20,411-protein human FASTA (whole reviewed proteome):
+
+| Search | Candidates | Peak resident |
+| --- | --- | --- |
+| plain, 1 missed cleavage | 13.2 M | ~7.8 GB |
+| plain, 3 missed cleavages | 18.8 M | ~12.3 GB |
+| `--glyco` (raises missed cleavages to 3) | 18.8 M | ~17.3 GB |
+
+So a whole-proteome glyco search wants **~20 GB**. andes now estimates this before
+scoring and warns if it will not fit, instead of being killed by the OOM killer half an
+hour in with nothing written. If you are short of memory, restrict the FASTA to the
+proteins of interest, or pass `--max-missed-cleavages 1` or `2` explicitly — `--glyco`
+raises the floor to 3, but an explicit lower value is honoured, and it costs
+~4.4 GB less at the price of some IDs.
+
+### Status
+
+`--glyco` is **experimental**. Its flags, defaults and PIN feature set may change between
+releases. The glycosite is reported in the Peptide column's glycan tag as `@N<pos>`
+(1-based Asn position) **only when the backbone contains a single N-X-S/T sequon**;
+with several sequons andes does not localize between them by default and emits `@N?`
+rather than a guess. The full flag list, the fused-selector weights, and the
+`ANDES_GLYCO_*` rollback switches are documented in
+[DOCS.md §9](DOCS.md#9-glycopeptide-search-experimental--advanced-knobs).
+
 ## Reading Thermo `.raw` files
 
 andes reads native Thermo `.raw` directly — pass `--spectrum sample.raw`, no other flags; the format is auto-detected by extension just like mzML/MGF, and `--chimeric` works on `.raw` too. Output is parity-identical to searching the equivalent mzML (validated scan-for-scan on a 2.4 GB Orbitrap Astral run).

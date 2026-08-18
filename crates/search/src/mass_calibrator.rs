@@ -438,6 +438,7 @@ mod tests {
             chimeric_isolation_halfwidth_da: 1.5,
             chimeric_max_coisolated: 2,
             chimeric_max_kl: 0.3,
+            chimeric_allow_overlap: false,
             score_mode: crate::search_params::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             candidate_index: crate::search_params::CandidateIndexMode::Ram,

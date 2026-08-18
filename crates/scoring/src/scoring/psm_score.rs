@@ -458,7 +458,7 @@ fn cz_fix_enabled() -> bool {
 /// environment variable they are typed, validated at the CLI boundary, visible in
 /// `--help`, and have a documented default that applies when nothing installs them
 /// (every library consumer and every test).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CzSettings {
     /// Override for the c/z fragment-charge ceiling. `None` derives it from the
     /// spectrum's deconvolution state, which is the correct behaviour in almost all
@@ -470,11 +470,6 @@ pub struct CzSettings {
     pub use_intensity: bool,
 }
 
-impl Default for CzSettings {
-    fn default() -> Self {
-        Self { zmax_override: None, use_intensity: false }
-    }
-}
 
 static CZ_SETTINGS: OnceLock<CzSettings> = OnceLock::new();
 
@@ -506,8 +501,6 @@ fn cz_zmax_override() -> Option<u8> {
         cz_settings().zmax_override.filter(|&z| z >= 1)
     })
 }
-
-/// Apply [`cz_zmax_override`] on top of a call site's default ceiling.
 
 /// Effective c/z fragment-charge ceiling.
 ///

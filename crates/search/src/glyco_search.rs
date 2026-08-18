@@ -36,7 +36,7 @@ use andes_glyco::backbone::{
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
-    collapse_cmp, glyco_gp_fused_score, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
+    collapse_cmp, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
     GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT, glyco_gp_fused_score_with_matches,
     GLYCO_GP_M_DEFAULT,
 };
@@ -150,7 +150,6 @@ type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
 use scoring_crate::scoring::{
     candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features,
     fuse_strong_score,
-    hyperscore_psm,
     listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
     StrongScoreInputs, hyperscore_psm_with_matches,
 };

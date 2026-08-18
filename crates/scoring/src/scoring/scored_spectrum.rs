@@ -1589,6 +1589,7 @@ fn tight_highres_scoring() -> bool {
     *CELL.get_or_init(|| scoring_settings().tight_highres_scoring)
 }
 
+#[allow(clippy::too_many_arguments, reason = "private inner matcher for the node-scoring hot path; every argument is an orthogonal, already-resolved input and bundling them would add a struct build per call")]
 fn visit_directional_node_ion_matches<F>(
     peaks: &[(f64, f32)],
     ranks: &[u32],

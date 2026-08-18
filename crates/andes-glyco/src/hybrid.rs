@@ -293,6 +293,16 @@ pub fn hybrid_candidates_presolved(
         // `force_db_on_none` is set (caller passes it only for ETD scans), still
         // run the fragment-free DB branch (precursor − known-glycan mass) so those
         // scans get candidates to score c/z against, rather than emitting nothing.
+        // NOTE ON `top_k`: this branch deliberately ignores it. `top_k` truncation
+        // everywhere else in this function ranks by core-Y intensity, and the
+        // defining property of this path is that there is NO core-Y evidence to
+        // rank by — oxonium did not fire. Truncating an unranked DB branch would
+        // drop candidates by glycan-table order, i.e. arbitrarily, and can discard
+        // the true backbone. The driver instead keeps the full set through Phase-1
+        // and truncates it with `effective_top_k` once b/y and c/z have scored it,
+        // which is a real ranking. The cost is that every known glycan is Phase-1
+        // scored on an oxonium-negative ETD scan; `--glyco-max-peaks` bounds the
+        // other half of that cost.
         None => {
             if force_db_on_none {
                 return db_branch(
@@ -409,8 +419,51 @@ pub fn hybrid_candidates_presolved(
         return combined;
     }
 
+    // Round-7 (audit F5): this clustered on backbone mass ALONE and kept whichever
+    // member sorted first, which is composition-blind. The monosaccharide constants
+    // make that systematic rather than random:
+    //     HEX - FUC   = 15.994915
+    //     NEUGC - NEUAC = 15.994914
+    // so {hex=h, fuc=f, neuac=a, neugc=g} and {hex=h-1, fuc=f+1, neuac=a-1, neugc=g+1}
+    // are isobaric to ~1 uDa. In the default 600-composition list that collapses ~23%
+    // of entries, and because the Hex+NeuAc twin has the (1 uDa) larger glycan mass it
+    // always sorts first, so the Fuc+NeuGc twin is ALWAYS the one deleted. PXD011533 is
+    // mouse, which expresses NeuGc — i.e. the biologically correct member was being
+    // dropped by sort order. The backbone mass is identical either way, but the
+    // surviving composition drives the glycan-Y ladder (gp_k, the largest selector
+    // weight) and sialic_consistency, so a wrong composition depresses the ladder for
+    // the TRUE backbone and can lose it the argmax.
+    // Fix: when a cluster holds >1 DISTINCT composition, pick the representative by
+    // composition-specific Y-ladder evidence instead of sort order. Peptide-independent,
+    // so target/decoy symmetric. Candidate count is unchanged (still one per cluster).
+    // ANDES_GLYCO_ISOBAR_REP=0 restores the sort-order behaviour.
+    // MEASURED NEGATIVE (-8 backbone-correct @1%, 3-fraction pool): resolving the
+    // collision on Y-ladder evidence changes which composition is annotated but the
+    // backbone mass is identical either way, so the peptide-level outcome barely moves
+    // and the net is slightly worse. Kept opt-in: ANDES_GLYCO_ISOBAR_REP=1.
+    // Evidence-based isobaric-composition representative: MEASURED at -8 and removed.
+    // The backbone mass is identical either way, so the peptide-level outcome barely
+    // moves while the net is slightly worse.
+    let isobar_rep = false;
+    let iso_stats = isobar_rep.then(|| SpectrumStats::new(peaks));
+    // Y-ladder evidence for a hit's own composition (0.0 for de-novo / no comp).
+    let comp_evidence = |h: &BackboneHit| -> f64 {
+        match (&h.glycan, iso_stats.as_ref()) {
+            (Some(g), Some(st)) => crate::backbone::glycan_y_intensity(
+                peaks,
+                st,
+                h.backbone_mass + H2O,
+                g,
+                tol_ppm,
+                precursor_z,
+            ),
+            _ => 0.0,
+        }
+    };
+
     let mut deduped: Vec<BackboneHit> = Vec::with_capacity(combined.len());
     let mut rep = combined.remove(0);
+    let mut rep_ev: Option<f64> = None; // lazily computed only on a real collision
 
     for next in combined {
         let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.01);
@@ -421,11 +474,25 @@ pub fn hybrid_candidates_presolved(
             // but guard defensively):
             if rep.source == Source::DeNovo && next.source == Source::Db {
                 rep = next;
+                rep_ev = None;
+            } else if isobar_rep
+                && rep.source == Source::Db
+                && next.source == Source::Db
+                && rep.glycan != next.glycan
+            {
+                // Isobaric composition collision — resolve on evidence, not order.
+                let r = *rep_ev.get_or_insert_with(|| comp_evidence(&rep));
+                let n = comp_evidence(&next);
+                if n > r {
+                    rep = next;
+                    rep_ev = Some(n);
+                }
             }
             // else keep rep as-is
         } else {
             deduped.push(rep);
             rep = next;
+            rep_ev = None;
         }
     }
     deduped.push(rep);

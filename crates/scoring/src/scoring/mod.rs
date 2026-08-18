@@ -8,12 +8,15 @@ pub mod strong_score;
 
 pub use fragment_ions::{predict_by_ions, predict_cz_ions, PredictedIon};
 pub use psm_score::{
-    cz_hyperscore_psm, cz_matched_intensity_frac, hyperscore_psm, psm_edge_existence_facts,
+    cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features, hyperscore_psm,
+    hyperscore_psm_with_matches,
+    psm_edge_existence_facts,
     psm_edge_score, score_psm,
     score_psm_float,
+    init_cz_settings, CzSettings,
 };
 pub use rank_scorer::RankScorer;
-pub use scored_spectrum::{IonMatchFact, ScoredSpectrum};
+pub use scored_spectrum::{init_scoring_settings, IonMatchFact, ScoredSpectrum, ScoringSettings};
 pub use strong_score::{
     candidate_rank_entropy, frag_llr_battery, fuse_strong_score, intensity_signal, listwise_score_gap,
     rich_ion_llr,

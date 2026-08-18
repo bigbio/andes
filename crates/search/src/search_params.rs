@@ -95,6 +95,10 @@ pub struct SearchParams {
     /// residual (Astral wide windows co-isolate 3-5+). Only consulted when
     /// `chimeric` is true.
     pub chimeric_max_coisolated: usize,
+    /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
+    /// Default false: the residual spectrum normally has the primary's peaks removed,
+    /// and permitting overlap lets the same evidence support two PSMs.
+    pub chimeric_allow_overlap: bool,
     /// Averagine-envelope KL gate for accepting a co-isolated MS1 envelope as a
     /// secondary precursor — lower = stricter/cleaner → fewer spurious
     /// secondaries. Default 0.3. Only consulted when `chimeric` is true.
@@ -165,6 +169,7 @@ impl SearchParams {
             // setting; deeper co-fragments are the diminishing tail.
             chimeric_max_coisolated: 4,
             chimeric_max_kl: 0.3,
+            chimeric_allow_overlap: false,
             score_mode: ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             candidate_index: CandidateIndexMode::Ram,

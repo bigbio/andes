@@ -215,18 +215,66 @@ enum PeakFilterEnv {
     Unset,
 }
 
+/// Scoring settings supplied by the caller instead of the environment.
+///
+/// These reach per-spectrum and per-ion code that would need them threaded through many
+/// signatures, so the binary installs them once at startup. Every field has a documented
+/// default that applies when nothing installs them — library consumers and tests get the
+/// shipped behaviour without doing anything.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoringSettings {
+    /// Windowed peak filtering: `Some((window_da, peaks_per_window))` forces it on with
+    /// those values, `Some((w, _))` with `w <= 0.0` forces it off, `None` uses the
+    /// protocol-driven default (on for isobaric-labelled data, off otherwise).
+    pub peak_filter: Option<(f64, usize)>,
+    /// Clamp the precursor-offset lookup to the nearest available charge key rather than
+    /// dropping the correction when the exact charge is missing. Default true.
+    pub precursor_offset_clamp: bool,
+    /// Measure local peak density on the active (deconvoluted) peak list. Default true;
+    /// false restores measuring it on the raw list.
+    pub density_on_active_list: bool,
+    /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
+    /// with, rather than the model's stored `mme` (0.5 Da for every bundled model).
+    /// Default false, and measurement says keep it that way: it gains +4.9% on the glyco
+    /// benchmark but costs 21% of ordinary Astral identifications (36,719 -> 28,894 @1%).
+    /// The mismatch is real; closing it needs retrained models, not a re-served window.
+    pub tight_highres_scoring: bool,
+}
+
+impl Default for ScoringSettings {
+    fn default() -> Self {
+        Self {
+            peak_filter: None,
+            precursor_offset_clamp: true,
+            density_on_active_list: true,
+            tight_highres_scoring: false,
+        }
+    }
+}
+
+static SCORING_SETTINGS: OnceLock<ScoringSettings> = OnceLock::new();
+
+/// Install the scoring settings. Call once, before scoring; a later call is ignored so a
+/// consumer's configuration cannot be replaced mid-run.
+pub fn init_scoring_settings(settings: ScoringSettings) {
+    let _ = SCORING_SETTINGS.set(settings);
+}
+
+#[inline]
+pub(crate) fn scoring_settings() -> ScoringSettings {
+    SCORING_SETTINGS.get().copied().unwrap_or_default()
+}
+
 /// Read the env override once (it is process-wide and constant for a run) rather
 /// than on every `ScoredSpectrum::new` — `std::env::var` takes a global lock and
 /// allocates, and `new` is called once per spectrum per charge.
 fn peak_filter_env() -> &'static PeakFilterEnv {
     static CACHE: OnceLock<PeakFilterEnv> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let w = std::env::var("ANDES_PEAK_WINDOW")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok());
-        let k = std::env::var("ANDES_PEAK_PER_WINDOW")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok());
+        let (w, k) = match scoring_settings().peak_filter {
+            Some((w, k)) => (Some(w), Some(k)),
+            None => (None, None),
+        };
         match (w, k) {
             (Some(w), _) if w <= 0.0 => PeakFilterEnv::Disabled,
             (Some(w), Some(k)) => PeakFilterEnv::Override(w, k),
@@ -251,10 +299,29 @@ impl<'a> ScoredSpectrum<'a> {
         let n = spec.peaks.len();
 
         // Collect filter m/z values from param.precursor_off_map for this charge.
+        // Round-7 (audit): this lookup had NO clamp, unlike `find_partition` which
+        // clamps out-of-range charge into [min_charge, max_charge]. The bundled models
+        // carry precursor_off_map keys {2..5} at most, so z6/z7/z8 precursors received
+        // an EMPTY filter set — i.e. zero precursor filtering on exactly the highest
+        // charges. On ETD the charge-reduced precursor is typically the base peak, so
+        // leaving it unfiltered deflates every real fragment's rank. Clamp to the
+        // nearest available charge. ANDES_PRECOFF_NOCLAMP=1 restores legacy for A/B.
         let filter_entries: &[PrecursorOffsetFrequency] = param
             .precursor_off_map
             .get(&(charge as i32))
             .map(Vec::as_slice)
+            .or_else(|| {
+                let noclamp = !scoring_settings().precursor_offset_clamp;
+                if noclamp || param.precursor_off_map.is_empty() {
+                    return None;
+                }
+                // Nearest available charge key (deterministic: min |Δ|, then lower key).
+                param
+                    .precursor_off_map
+                    .iter()
+                    .min_by_key(|(k, _)| ((**k - charge as i32).abs(), **k))
+                    .map(|(_, v)| v.as_slice())
+            })
             .unwrap_or(&[]);
 
         // Compute each filter m/z:
@@ -620,6 +687,17 @@ impl<'a> ScoredSpectrum<'a> {
         }
     }
 
+    /// Whether this spectrum's active peak list has been charge-reduced.
+    ///
+    /// Callers that assume a fragment charge state need this: when deconvolution ran,
+    /// detected 2+/3+ clusters have already been rewritten to their 1+ m/z, so probing
+    /// above 1+ is redundant. When it did NOT run, genuine multiply-charged fragments
+    /// sit at their true m/z and a 1+-only probe cannot match them at all.
+    #[inline]
+    pub fn is_deconvoluted(&self) -> bool {
+        self.deconv_peaks.is_some()
+    }
+
     /// Spectrum-level parent mass (= `(precursor_mz - PROTON) * charge`).
     /// This is the OBSERVED neutral mass of the spectrum at the charge
     /// state used to construct this `ScoredSpectrum`, NOT the candidate
@@ -732,7 +810,20 @@ impl<'a> ScoredSpectrum<'a> {
         if hw <= 0.0 {
             return 0.0;
         }
-        let peaks = &self.spec.peaks;
+        // Round-7 (audit, 3 independent agents): matches are resolved against the
+        // ACTIVE (deconvoluted) list via `nearest_peak_full`, but the density was
+        // measured on the RAW list. Deconvolution moves detected z2/z3 clusters UP to
+        // their z1 m/z, so a match above the raw list's m/z ceiling sees rho = 0 →
+        // p_chance clamps to 1e-12 → surprise = 27.6 nats vs a typical ~2 — a ~13x
+        // artifact that fires preferentially on the high-m/z, glycan-bearing spanning
+        // c/z. Measuring the density on the list that produced the match removes it.
+        // ANDES_DENSITY_RAW=1 restores the legacy behaviour for A/B.
+        let use_raw = !scoring_settings().density_on_active_list;
+        let peaks = if use_raw {
+            &self.spec.peaks
+        } else {
+            self.active_peaks_and_ranks().0
+        };
         let lo = peaks.partition_point(|&(m, _)| m < mz - hw);
         let hi = peaks.partition_point(|&(m, _)| m <= mz + hw);
         (hi - lo) as f64 / (2.0 * hw)
@@ -953,7 +1044,21 @@ impl<'a> ScoredSpectrum<'a> {
             is_prefix,
             charge,
             parent_mass,
-            false, // scoring: keep the model's wide mme (0.5 Da)
+            // TRAIN/SERVE TOLERANCE. Training matches high-res ions at 20 ppm (the two
+            // accumulator call sites below pass `true`), but scoring has always passed
+            // `false`, i.e. the model's `mme` — and EVERY bundled model carries
+            // mme = 0.5 Da, including the high-resolution ones. At m/z 500 that window
+            // is ~50x too wide (a fact match_engine.rs:1493 already records), so the
+            // rank tables are consulted with a window far looser than the one they were
+            // built from. On dense spectra — a glycopeptide scan is mostly oxonium and
+            // glycan-Y — nearly every theoretical position finds SOMETHING, and the
+            // score saturates toward noise.
+            //
+            // ANDES_TIGHT_HIGHRES=1 serves high-res models at the training window so the
+            // two can be compared. Default (unset) is byte-identical to before. This is
+            // an A/B switch, not a fix: it changes EVERY high-res search, so it must
+            // clear the Astral/TMT/UPS1 triad before any default moves.
+            tight_highres_scoring(),
             |_, _, matched_peak, logs, theo_mz, tol_da| {
                 let missing = if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 };
                 let score = match matched_peak {
@@ -1475,6 +1580,16 @@ impl<'a> ScoredSpectrum<'a> {
 /// `ion_match_facts`. Invokes `visit` once per (segment, ion) that passes the
 /// directional filter and `segment_num` check.
 #[allow(clippy::too_many_arguments, reason = "mirrors the scoring loop's argument bundle")]
+/// Serve high-resolution models at the training match window instead of the model's
+/// `mme`. See the call site in `node_score` for why this exists. Requires an explicit
+/// "1" so that setting the variable to "0" cannot silently enable it.
+fn tight_highres_scoring() -> bool {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| scoring_settings().tight_highres_scoring)
+}
+
+#[allow(clippy::too_many_arguments, reason = "private inner matcher for the node-scoring hot path; every argument is an orthogonal, already-resolved input and bundling them would add a struct build per call")]
 fn visit_directional_node_ion_matches<F>(
     peaks: &[(f64, f32)],
     ranks: &[u32],

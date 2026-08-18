@@ -57,8 +57,22 @@ fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
 
     let mut score = 0.0_f64;
 
-    // For each candidate b-ion (mz ∈ [b_lo, b_hi]), look up its complement y at
-    // y_mz = target - b_mz using a binary search into the sorted peak list.
+    // For each candidate b-ion (mz ∈ [b_lo, b_hi]), accumulate its complement y at
+    // y_mz = target - b_mz.
+    //
+    // TWO-POINTER SWEEP. `b_mz` ascends over the sorted peak list, so
+    // `y_mz = target - b_mz` DESCENDS, and therefore both window bounds
+    // `y_lo = y_mz - tol` and `y_hi = y_mz + tol` descend monotonically. The two
+    // `partition_point` binary searches per b-ion (the profiled hot spot — this
+    // function measured 65-96% of the de-novo solver, which scaled ~n^2.85 in peak
+    // count) collapse to two cursors that only ever move DOWN, making the whole
+    // sweep amortised O(n) instead of O(n log n) per b-ion.
+    //
+    // Output-identical: the cursors land on exactly the indices the binary searches
+    // returned, so the visited `j` range, the visit ORDER, and hence the f64
+    // accumulation order are all unchanged (see `complement_score_two_pointer_matches_bruteforce`).
+    let mut lo_cur = n; // first index with m >= y_lo
+    let mut hi_cur = n; // first index with m >  y_hi
     for (i, &(b_mz, _)) in peaks.iter().enumerate() {
         if b_mz < b_lo {
             continue;
@@ -71,12 +85,19 @@ fn complement_score(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
         if y_mz <= b_mz || y_mz <= 0.0 {
             continue;
         }
-        // Binary search for y_mz ± tol in sorted peaks (skip self)
         let y_lo = y_mz - tol;
         let y_hi = y_mz + tol;
-        let start = peaks.partition_point(|&(m, _)| m < y_lo);
-        let end = peaks.partition_point(|&(m, _)| m <= y_hi);
-        for j in start..end {
+        // Both bounds descend, so walk the cursors down (never up).
+        while hi_cur > 0 && peaks[hi_cur - 1].0 > y_hi {
+            hi_cur -= 1;
+        }
+        if lo_cur > hi_cur {
+            lo_cur = hi_cur;
+        }
+        while lo_cur > 0 && peaks[lo_cur - 1].0 >= y_lo {
+            lo_cur -= 1;
+        }
+        for j in lo_cur..hi_cur {
             if j == i {
                 continue; // self-pair guard (shouldn't happen given b<y constraint)
             }
@@ -421,9 +442,20 @@ impl SpectrumStats {
 /// require ISOTOPE CONFIRMATION (a +1 isotope peak at the matching charge spacing)
 /// before crediting a match, which is what made the b/y deconvolution uncap safe.
 /// charges 1..=3 are unchanged, so this is inert unless the flag is set.
+/// Maximum glycan-Y fragment charge to probe, installed by the caller.
+///
+/// Default 3. Raising it reaches 4+/5+ Y ions on highly-charged precursors at the cost
+/// of more chance matches, so it is a deliberate choice rather than a default.
+static Y_MAX_CHARGE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+
+/// Install the glycan-Y charge ceiling. Call once, before scoring; a second call is
+/// ignored so a library consumer's configuration cannot be replaced mid-run.
+pub fn init_y_max_charge(zmax: u8) {
+    let _ = Y_MAX_CHARGE.set(zmax.max(1));
+}
+
 fn y_hicharge_enabled() -> bool {
-    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CELL.get_or_init(|| std::env::var_os("ANDES_GLYCO_Y_HICHARGE").is_some())
+    *Y_MAX_CHARGE.get().unwrap_or(&3) > 3
 }
 
 /// Max intensity of any peak in `[lo, hi]` (binary-searched when `sorted`).
@@ -597,11 +629,64 @@ pub fn glycan_y_intensity(
 
     let mut score = match_int(bb_neutral); // Y0 (bare backbone), neutral = bb_neutral
     let mut cum = 0.0;
+    let mut n_rungs = 1usize; // Y0
     for m in adds {
         cum += m;
         score += match_int(bb_neutral + cum);
+        n_rungs += 1;
     }
-    score
+    // Round-7 (audit F2): this is an UNNORMALISED sum over `1 + Σ(monosaccharides)`
+    // rungs — 6 for the trimannosyl core, up to 23 for a large composition. So
+    // E[score | noise] grows with glycan SIZE, and the term structurally rewards
+    // assigning a bigger glycan. That is the mechanism behind the measured K·ladder
+    // inversion (76.5 on wrong winners vs 53.1 on correct) and the "oversized
+    // glycan" failure signature; round-2 suppressed the symptom by cutting K 50→10
+    // but the estimator is still biased. Dividing by the rung count makes it a mean
+    // matched intensity per predicted rung, comparable across compositions — and
+    // across the de-novo branch, which always has exactly 6 rungs.
+    // ANDES_GLYCO_LADDER_NORM=1 enables; anything else (including unset) = byte-identical.
+    ladder_norm_scale(score, n_rungs)
+}
+
+/// Rung count of the trimannosyl-core ladder (`core_y_intensity`), used to keep the
+/// rung-normalised `glycan_y_intensity` on the same scale as the de-novo branch.
+const CORE_RUNGS: usize = 6;
+
+/// `ANDES_GLYCO_LADDER_NORM=1` — opt-in rung normalisation, read once.
+///
+/// Default ON; `ANDES_GLYCO_LADDER_NORM=0` disables for A/B. Reads the VALUE, not
+/// mere presence: an earlier `var_os(..).is_some()` form meant `=0` silently ENABLED it.
+fn ladder_norm_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<bool> = OnceLock::new();
+    // DEFAULT ON since the bias was measured. The unnormalised sum's expectation grows
+    // with glycan size (see `glycan_y_intensity`), which structurally rewards assigning a
+    // bigger glycan — the documented K·ladder inversion, 76.5 on wrong winners vs 53.1 on
+    // correct. Measured A/B with the correction enabled: mouse AI-ETD benchmark 664 -> 683
+    // identifications at 1% FDR, and on a large-glycan human plasma set the decoy fraction
+    // in the score's top 150 fell 12.7% -> 12.0%. Neither regime regressed.
+    //
+    // Leaving a validated correction off by default is how the selector weights came to be
+    // tuned around a bias whose fix was already in the tree; `ANDES_GLYCO_LADDER_NORM=0`
+    // restores the biased estimator for A/B only.
+    // Kept as a named constant rather than an env switch: the A/B is settled.
+    *CELL.get_or_init(|| true)
+}
+
+/// Apply the optional rung normalisation to a Y-ladder sum.
+///
+/// Shared by [`glycan_y_intensity`] and [`glycan_y_intensity_decoy`]: the decoy is an
+/// EXCHANGEABLE null whose only permitted difference from the target is the
+/// interior-rung mass shift, so normalising one ladder and not the other would make
+/// the glycan-axis target/decoy gap an artifact of composition size and corrupt the
+/// 2D FDR. Rescaled to `CORE_RUNGS` so the term keeps its historical magnitude (and
+/// the tuned `gp_k` stays meaningful) rather than shrinking ~4x.
+fn ladder_norm_scale(score: f64, n_rungs: usize) -> f64 {
+    if ladder_norm_enabled() && n_rungs > 0 {
+        score * (CORE_RUNGS as f64) / (n_rungs as f64)
+    } else {
+        score
+    }
 }
 
 /// Deterministic mixing (splitmix64) → a reproducible per-(seed,rung) offset.
@@ -675,7 +760,8 @@ pub fn glycan_y_intensity_decoy(
         };
         score += match_int(bb_neutral + cum + shift);
     }
-    score
+    // Same normalisation as the target ladder — see `ladder_norm_scale`.
+    ladder_norm_scale(score, 1 + adds.len())
 }
 
 /// Fraction of a composition's Y-ladder rungs (Y0 + each cumulative add) that are
@@ -827,6 +913,80 @@ pub fn acceptor_core_y_gate(
 
 #[cfg(test)]
 mod tests {
+    /// Brute-force reference for `complement_score`, mirroring the pre-optimisation
+    /// binary-search form. The two-pointer sweep must match it exactly (same pairs,
+    /// same order ⇒ bit-identical f64 sum).
+    #[test]
+    fn complement_score_two_pointer_matches_bruteforce() {
+        use super::{complement_score, BY_COMPLEMENT_OFFSET};
+        fn reference(peaks: &[(f64, f32)], norm_sqrt: &[f64], bb: f64) -> f64 {
+            let target = bb + BY_COMPLEMENT_OFFSET;
+            let tol = (target * 20e-6).max(0.02);
+            let n = peaks.len();
+            if n < 2 {
+                return 0.0;
+            }
+            let (b_lo, b_hi) = (50.0_f64, bb / 2.0);
+            let mut score = 0.0_f64;
+            for (i, &(b_mz, _)) in peaks.iter().enumerate() {
+                if b_mz < b_lo {
+                    continue;
+                }
+                if b_mz > b_hi {
+                    break;
+                }
+                let y_mz = target - b_mz;
+                if y_mz <= b_mz || y_mz <= 0.0 {
+                    continue;
+                }
+                let start = peaks.partition_point(|&(m, _)| m < y_mz - tol);
+                let end = peaks.partition_point(|&(m, _)| m <= y_mz + tol);
+                for j in start..end {
+                    if j == i {
+                        continue;
+                    }
+                    score += norm_sqrt[i].min(norm_sqrt[j]);
+                }
+            }
+            score
+        }
+        // Deterministic pseudo-random peak lists across a range of densities and
+        // backbone masses, including exact complements that land on the window edge.
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for &npk in &[2usize, 5, 50, 400] {
+            for &bb in &[800.0_f64, 1500.0, 2600.0, 4200.0] {
+                let mut peaks: Vec<(f64, f32)> = (0..npk)
+                    .map(|_| {
+                        let m = 40.0 + (next() % 5_000_000) as f64 / 1000.0;
+                        (m, 1.0 + (next() % 1000) as f32)
+                    })
+                    .collect();
+                // plant exact complements so the tolerance edges are exercised
+                let target = bb + BY_COMPLEMENT_OFFSET;
+                for k in 1..=3 {
+                    let b = 100.0 * k as f64;
+                    peaks.push((b, 500.0));
+                    peaks.push((target - b, 500.0));
+                }
+                peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let norm: Vec<f64> = peaks.iter().map(|&(_, it)| (it as f64).sqrt()).collect();
+                let got = complement_score(&peaks, &norm, bb);
+                let want = reference(&peaks, &norm, bb);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "npk={npk} bb={bb}: two-pointer {got} != bruteforce {want}"
+                );
+            }
+        }
+    }
+
     use super::*;
 
     #[test]

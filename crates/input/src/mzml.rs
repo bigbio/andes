@@ -162,18 +162,29 @@ impl BinaryArrayCtx {
 
 /// Emit the EThcD→HCD routing notice at most once per process (the detection
 /// fires per-spectrum and would otherwise spam thousands of identical lines).
-fn log_ethcd_once() {
+pub(crate) fn log_ethcd_once() {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
     if WARNED
         .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
     {
-        eprintln!(
-            "INFO: EThcD/ETciD detected (electron-transfer + supplemental collisional \
-             activation) — no EThcD model exists, routing these spectra to the HCD (b/y) \
-             model rather than pure ETD. Pass --fragmentation to override."
-        );
+        if ethcd_as_etd() {
+            eprintln!(
+                "INFO: EThcD/ETciD detected; ANDES_ETHCD_AS_ETD is set, so these spectra \
+                 stay classified as ETD (c/z stack active)."
+            );
+        } else {
+            eprintln!(
+                "WARN: EThcD/ETciD detected (electron-transfer + supplemental collisional \
+                 activation) — no EThcD model exists, so these spectra are routed to the \
+                 HCD (b/y) model. IN --glyco THIS DISABLES THE WHOLE c/z STACK: c/z \
+                 generation and scoring, the c/z truncation gate, the ETD DB fallback, and \
+                 --glyco-hcd-pair all become inert. Set ANDES_ETHCD_AS_ETD=1 to keep these \
+                 spectra classified as ETD (this is the reliable override; --fragmentation \
+                 selects the scoring model but does NOT restore per-spectrum ETD routing)."
+            );
+        }
     }
 }
 
@@ -854,10 +865,20 @@ impl<R: BufRead> MzMLReader<R> {
                             // No EThcD model exists, so route to HCD (b/y) rather than the
                             // pure-ETD c/z model; the instrument fallback then picks the
                             // resolution tier. Logged once.
+                            // ANDES_ETHCD_AS_ETD=1 keeps EThcD/ETciD classified as ETD.
+                            // The HCD relabel silently disables the ENTIRE electron-
+                            // transfer stack for such files — glyco c/z generation and
+                            // scoring, the c/z truncation gate, the ETD DB fallback, and
+                            // `--glyco-hcd-pair` (which finds zero ETD scans and becomes
+                            // a no-op). On a genuine EThcD glyco dataset that silently
+                            // reverts a whole campaign's worth of gains with no error, so
+                            // the escape hatch and a loud warning are both required.
                             if let Some(sb) = self.current.as_mut() {
                                 if sb.act_saw_electron && sb.act_saw_collisional {
                                     log_ethcd_once();
-                                    sb.activation_method = Some(ActivationMethod::HCD);
+                                    if !ethcd_as_etd() {
+                                        sb.activation_method = Some(ActivationMethod::HCD);
+                                    }
                                 }
                             }
                             self.state = State::Spectrum;
@@ -1132,6 +1153,30 @@ impl<R: BufRead> Iterator for MzMLReader<R> {
 /// instrument-detection path as a separate, one-shot pre-pass so the main
 /// streaming reader stays focused on per-spectrum data and remains
 /// peak-memory-friendly.
+/// How an EThcD/ETciD spectrum (electron transfer WITH a supplemental collisional term)
+/// should be labelled.
+///
+/// Default `false` labels it HCD, which is what model routing expects since no EThcD
+/// model exists. That label is also read as "has no c/z ions", which is wrong for EThcD —
+/// see docs. `--ethcd-activation etd` flips it.
+static ETHCD_AS_ETD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Install the EThcD labelling policy. Call once, before reading spectra.
+pub fn init_ethcd_as_etd(as_etd: bool) {
+    let _ = ETHCD_AS_ETD.set(as_etd);
+}
+
+/// The installed EThcD labelling policy, shared with the Thermo reader.
+#[inline]
+pub fn ethcd_as_etd_policy() -> bool {
+    ethcd_as_etd()
+}
+
+#[inline]
+fn ethcd_as_etd() -> bool {
+    *ETHCD_AS_ETD.get().unwrap_or(&false)
+}
+
 pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     let mut xml = Reader::from_reader(reader);
     xml.trim_text(true);
@@ -1388,7 +1433,8 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
     if !ms2_counts.is_empty() {
         return ms2_counts
             .iter()
-            .max_by_key(|(_, &n)| n)
+            // Deterministic tie-break (HashMap order is randomised per process).
+            .max_by_key(|(&k, &n)| (n, std::cmp::Reverse(k as u8)))
             .map(|(&t, _)| t);
     }
 

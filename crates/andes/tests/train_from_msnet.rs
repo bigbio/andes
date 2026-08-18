@@ -281,11 +281,13 @@ fn geometry_derived_by_default_differs_from_seed() {
 
     // OPT-OUT: reuse the bundled seed's full partition geometry.
     let store_seed = dir.path().join("seed.parquet");
+    // `--seed-geometry` replaced the ANDES_SEED_GEOMETRY environment variable: the
+    // engine reads no environment, so the opt-out has to travel on the command line.
     run_train_env(
         &in_parquet,
         &store_seed,
-        &["--fragment-tol-ppm", "20"],
-        &[("ANDES_SEED_GEOMETRY", "1")],
+        &["--fragment-tol-ppm", "20", "--seed-geometry"],
+        &[],
     );
 
     let derived = ModelStore::open(&store_derived).unwrap().load_param("default").unwrap();

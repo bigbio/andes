@@ -193,10 +193,13 @@ struct SearchArgs {
     decoy_suffix: Option<String>,
 
     /// How to generate decoys: `reverse` (default; reverse each sequence),
-    /// `shuffle` (seeded reproducible shuffle), or `none` (no decoys — for a
-    /// FASTA that already contains decoys, or external FDR). `none` with a
-    /// target-only FASTA leaves the search without decoys (FDR can't be
-    /// estimated) and warns.
+    /// `shuffle` (seeded reproducible shuffle), `sequon-reverse` (reverse but
+    /// restore each N-X-S/T sequon at its mirrored position — RECOMMENDED with
+    /// `--glyco`: plain reversal maps N-X-S/T to S/T-X-N, so reversed decoys reach
+    /// the glyco sequon gate at a lower rate than targets and the resulting
+    /// q-values are anti-conservative), or `none` (no decoys — for a FASTA that
+    /// already contains decoys, or external FDR). `none` with a target-only FASTA
+    /// leaves the search without decoys (FDR can't be estimated) and warns.
     #[arg(long = "decoy-strategy", default_value = "reverse")]
     decoy_strategy: String,
 
@@ -206,9 +209,11 @@ struct SearchArgs {
     decoy_seed: u64,
 
     /// Isotope-error offset range to try, as `MIN..MAX` (also accepts `MIN-MAX`).
-    /// Negative offsets allowed. Default `-1..2`.
-    #[arg(long = "isotope-error", hide = true, default_value = "-1..2", value_parser = parse_isotope_error_range)]
-    isotope_error: (i8, i8),
+    /// Negative offsets allowed. Unset defaults to `-1..2`, or `0..2` under `--glyco`
+    /// (see the resolution site). Left as an `Option` so an EXPLICIT `-1..2` is
+    /// distinguishable from the default and is never silently overridden.
+    #[arg(long = "isotope-error", hide = true, value_parser = parse_isotope_error_range)]
+    isotope_error: Option<(i8, i8)>,
 
     /// Precursor-mass calibration: `off`, `auto`, or `on`. `auto`/`on` learn a
     /// systematic ppm shift from confident PSMs in a pre-pass and tighten the
@@ -393,9 +398,118 @@ struct SearchArgs {
     /// combined, after union-dedup). Hidden advanced knob; default 50.
     /// Raised from 20: core-Y evidence ranking means the cap now cuts fewer
     /// true positives, so more headroom is inexpensive and safe.
-    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 50usize)]
+    #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 150usize)]
     glyco_backbone_top_k: usize,
 
+
+    /// Cap the peaks the glyco GENERATION stage considers, keeping the most
+    /// intense N. The backbone solver is superlinear in peak count, so an
+    /// uncentroided profile scan or a very dense wide-window scan can take tens of
+    /// seconds while a normal scan takes milliseconds — the run looks hung.
+    /// Scoring always reads the full spectrum, so a generated candidate is never
+    /// scored on truncated evidence. Default 0 = no cap; 300-500 is a reasonable
+    /// value if you hit this. Changing it changes results.
+    #[arg(long = "glyco-max-peaks", default_value_t = 0usize)]
+    glyco_max_peaks: usize,
+
+    /// Maximum c/z fragment charge to probe in `--glyco` ETD scoring. Unset derives it
+    /// from whether the spectrum was deconvoluted, which is correct in almost all cases:
+    /// after deconvolution multiply-charged fragments have already been moved to 1+.
+    /// Set this only for data known to carry unresolved high-charge c/z ions.
+    #[arg(long = "glyco-cz-max-charge")]
+    glyco_cz_max_charge: Option<u8>,
+
+    /// Weight the explained-c/z terms by observed peak intensity instead of treating a
+    /// match as presence-only. Off by default: it measured -48 backbone-correct @1% on
+    /// the benchmark, though presence-only scoring is a known weakness for large glycans.
+    #[arg(long = "glyco-cz-intensity", default_value_t = false)]
+    glyco_cz_intensity: bool,
+
+    /// Maximum glycan-Y fragment charge. Default 3; raising it reaches 4+/5+ Y ions on
+    /// highly-charged precursors at the cost of more chance matches.
+    #[arg(long = "glyco-y-max-charge", default_value_t = 3u8)]
+    glyco_y_max_charge: u8,
+
+    /// Choose the glycosite by c/z evidence when a peptide carries more than one
+    /// N-X-S/T sequon (~8% of tryptic N-glycopeptides). Off by default: the default
+    /// positional convention is decoy-symmetric, and enabling this is gated on a
+    /// decoy-controlled A/B that would surface any sequon-count asymmetry.
+    #[arg(long = "glyco-cz-multisite", default_value_t = false)]
+    glyco_cz_multisite: bool,
+
+    /// Windowed peak filtering as `WINDOW_DA:PEAKS` (e.g. `100:20`). Unset uses the
+    /// protocol default — on for isobaric-labelled data, off otherwise. A window of 0
+    /// forces it off.
+    #[arg(long = "peak-filter")]
+    peak_filter: Option<String>,
+
+    /// Clamp the precursor-offset lookup to the nearest available charge when the exact
+    /// charge is missing from the model, rather than dropping the correction.
+    #[arg(long = "precursor-offset-clamp", default_value_t = true, action = clap::ArgAction::Set)]
+    precursor_offset_clamp: bool,
+
+    /// Measure local peak density on the active (deconvoluted) peak list rather than the
+    /// raw list.
+    #[arg(long = "density-on-active-list", default_value_t = true, action = clap::ArgAction::Set)]
+    density_on_active_list: bool,
+
+    /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
+    /// with instead of the model's stored tolerance (0.5 Da for every bundled model, so
+    /// ~50x wider at m/z 500).
+    ///
+    /// MEASURED AND NOT RECOMMENDED. It is a real train/serve mismatch and it does help
+    /// glyco (+4.9% on the AI-ETD benchmark), but on ordinary peptide search it is
+    /// catastrophic: Astral fell 36,719 -> 28,894 identifications at 1% FDR, a 21% loss.
+    /// The wide window is evidently load-bearing for the rank tables as trained, so
+    /// closing the mismatch requires retraining the models, not re-serving them. Kept as
+    /// a flag only so the experiment is repeatable.
+    #[arg(long = "tight-highres-scoring", default_value_t = false)]
+    tight_highres_scoring: bool,
+
+    /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
+    /// Off by default: the residual spectrum has the primary's peaks removed, and
+    /// permitting overlap lets the same evidence support two PSMs.
+    #[arg(long = "chimeric-allow-overlap", default_value_t = false)]
+    chimeric_allow_overlap: bool,
+
+    /// How to label EThcD/ETciD spectra (electron transfer with a supplemental
+    /// collisional term). `hcd` is the default and is what model routing expects, since
+    /// no EThcD model exists; `etd` labels them ETD so the c/z scoring path engages.
+    #[arg(long = "ethcd-activation", value_enum, default_value_t = EthcdActivationFlag::Hcd)]
+    ethcd_activation: EthcdActivationFlag,
+
+    /// Diagnostic: restrict `--glyco` scoring to the scan numbers in this file, one per
+    /// line. Makes a `--debug-glyco` dump of a chosen set of scans affordable.
+    #[arg(long = "glyco-scans")]
+    glyco_scans: Option<PathBuf>,
+
+    /// Diagnostic: log resident set size at each phase boundary.
+    #[arg(long = "rss-probe", default_value_t = false)]
+    rss_probe: bool,
+
+    /// Glycan composition list for `--glyco`: `common` (~600 curated N-glycans,
+    /// the default and what the benchmarks were run with) or `full` (the complete
+    /// list, ~4000). `full` widens coverage but inflates the candidate space; it was
+    /// measured to raise the entrapment error 5.4x on a benchmark where it looked
+    /// like a gain on yield alone, so prefer `common` unless you know you need it.
+    #[arg(long = "glyco-glycan-list", value_enum, default_value_t = GlycanListFlag::Common)]
+    glyco_glycan_list: GlycanListFlag,
+
+    /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
+    /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
+    /// and dropping it measured +81 backbone-correct @1%. `negative` restores
+    /// -1..=2; `wide` extends the upper bound to 5 for heavily-labelled precursors.
+    #[arg(long = "glyco-isotope-error", value_enum, default_value_t = GlycoIsotopeFlag::Default)]
+    glyco_isotope_error: GlycoIsotopeFlag,
+
+    /// Fragment tolerance (ppm) for the glyco-specific matching: oxonium ions,
+    /// the core-Y ladder, backbone mass search, and c/z. Default 20 ppm, which
+    /// suits Orbitrap MS2. **Raise this for low-resolution (ion-trap) MS2** —
+    /// at 20 ppm a 0.3-0.5 Da ion-trap peak never matches, so the oxonium gate
+    /// never fires and glyco IDs collapse to near zero. This is separate from
+    /// `--fragment-tol-ppm`, which the scoring model owns.
+    #[arg(long = "glyco-tol-ppm", default_value_t = 20.0f64)]
+    glyco_tol_ppm: f64,
 
     /// `gp` fused-selector ladder weight K (`rank + K·ladder + J·core_y + H·hyper`).
     /// Hidden tuning knob; default 10 (lowered from 50 in round-2 — K·ladder is
@@ -418,6 +532,38 @@ struct SearchArgs {
     #[arg(long = "glyco-gp-cz", hide = true, default_value_t = 15.0f32)]
     glyco_gp_cz: f32,
 
+    /// `gp` selector weight on the COUNT of matched b/y ions. The collapse runs before
+    /// feature extraction, so it cannot see the strong score — the engine's best
+    /// discriminator. Measured over a benchmark's reference identifications, the terms it
+    /// can see rank the correct candidate at median 15 (rank) and median 44 (ladder, the
+    /// heaviest weight), while this count ranks it at median 1-2. It is free: the count
+    /// falls out of the hyperscore the selector already computes per candidate.
+    /// Default 0 reproduces the previous selector exactly.
+    #[arg(long = "glyco-gp-m", hide = true, default_value_t = 0.0f32)]
+    glyco_gp_m: f32,
+
+    /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
+    /// scan. andes historically reported a best guess for every scan clearing the
+    /// oxonium gate, so most reported rows had no glycan evidence at all. Every other
+    /// engine requires this: pGlyco3 and O-Pair require 2 core Y ions, Glyco-Decipher 3
+    /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
+    /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
+    ///
+    /// MEASURED TRADE-OFF, which is why the default is 0. On a pooled human plasma set
+    /// (stepped-collision HCD) `2` took verified-correct identifications from 0 to 87 at
+    /// 1% FDR with a measured 0.75% false-discovery proportion — the ungated run
+    /// accepted 102 PSMs of which NONE were correct. On a mouse AI-ETD benchmark the
+    /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
+    /// leave it off for electron-transfer data. Exempting ETD scans automatically was
+    /// tried and made both regimes worse, because real files are mixed.
+    #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
+    glyco_min_core_y: u32,
+
+    /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
+    /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
+    #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
+    glyco_min_matched_ions: u32,
+
     /// c/z truncation gate: keep the top-k backbones by glycosite-spanning c/z
     /// evidence (AXIS 4) so high-charge ETD glycopeptides supported mainly by c/z
     /// survive Phase-1 truncation. Default ON; ETD-only (inert on HCD/CID). Pass
@@ -435,6 +581,11 @@ struct SearchArgs {
     #[arg(long = "glyco-max-pf", hide = true, default_value_t = 1024usize)]
     glyco_max_pf: usize,
 
+    /// MEASURED AND NOT RECOMMENDED: dispatching ETD scans to `etd_highres_tryp`
+    /// instead of the file's dominant HCD model LOSES identifications — mouse frac2
+    /// 707 -> 692 at 1% FDR. The bundled ETD model is evidently a poorer fit for these
+    /// spectra than the HCD model, so the long-standing "ETD scans are scored by an HCD
+    /// model" behaviour is benign, not the bug it looked like.
     /// Diagnostic glyco mode: emit ALL candidate rows per scan (including de-novo
     /// mass-residual hits) and print transfer diagnostics. The resulting PIN is for
     /// inspection ONLY and must never be fed to an FDR tool. Hidden dev flag.
@@ -458,10 +609,9 @@ struct SearchArgs {
     /// hyperscore path (RawScore, EdgeScore, hyperscore, RankScoreFloat) against a
     /// peptide clone carrying the intact glycan on its glycosite instead of the
     /// bare backbone, so glycosite-spanning c/z fragments are computed at the real
-    /// (glycan-carrying) mass. Off by default; inert on HCD/CID. Combine with
-    /// `--model`/`--model-store` pointing at a c/z-trained model for the
-    /// configuration where this is expected to matter most. Hidden.
-    #[arg(long = "glyco-etd-rank-glycan", hide = true, default_value_t = false)]
+    /// (glycan-carrying) mass. DEFAULT ON (round-6: validated +33 backbone-correct @1%,
+    /// decoy-safe); inert on HCD/CID. Disable with `--glyco-etd-rank-glycan false`.
+    #[arg(long = "glyco-etd-rank-glycan", default_value_t = true, action = clap::ArgAction::Set)]
     glyco_etd_rank_glycan: bool,
 
     /// BUG5, EXPERIMENTAL: per-spectrum-activation model dispatch. andes normally
@@ -590,6 +740,11 @@ struct SearchArgs {
 /// Training arguments for `andes train-from-search`.
 #[derive(Args, Debug)]
 struct TrainFromSearchArgs {
+
+    /// Reuse the seed model's geometry instead of deriving one from the corpus.
+    /// Deriving (the default) fits segments and mass tiers to the training data.
+    #[arg(long = "seed-geometry", default_value_t = false)]
+    seed_geometry: bool,
     /// Input spectrum file (training data). Same format dispatch as for search:
     /// `.mzML`/`.mzml` → mzML reader; anything else → MGF reader.
     ///
@@ -715,6 +870,11 @@ struct TrainFromSearchArgs {
 /// learned distributions come from the input data.
 #[derive(Args, Debug)]
 struct TrainArgs {
+
+    /// Reuse the seed model's geometry instead of deriving one from the corpus.
+    /// Deriving (the default) fits segments and mass tiers to the training data.
+    #[arg(long = "seed-geometry", default_value_t = false)]
+    seed_geometry: bool,
     /// Input flat training parquet(s). Repeatable; stats accumulate across all
     /// inputs into a single model.
     #[arg(long = "in", required = true)]
@@ -930,8 +1090,53 @@ struct TrainRichIonLlrArgs {
 }
 
 /// Available subcommands.
+#[derive(clap::Args, Debug)]
+struct RescorePinArgs {
+    /// Input PIN.
+    #[arg(long = "in")]
+    input: PathBuf,
+    /// Output target PSMs (Percolator `.psms` shape: PSMId, score, q-value, PEP).
+    #[arg(long = "out-psms")]
+    out_psms: PathBuf,
+    /// Output decoy PSMs.
+    #[arg(long = "out-dpsms")]
+    out_dpsms: PathBuf,
+    /// Cross-validation seed.
+    #[arg(long = "seed", default_value_t = 42u64)]
+    seed: u64,
+}
+
+fn run_rescore_pin(args: RescorePinArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let pin_text = std::fs::read_to_string(&args.input)
+        .map_err(|e| format!("reading {}: {e}", args.input.display()))?;
+    let rows = rescore::native_rescore_qvalues(&pin_text, args.seed)?;
+    let mut t = std::io::BufWriter::new(std::fs::File::create(&args.out_psms)?);
+    let mut d = std::io::BufWriter::new(std::fs::File::create(&args.out_dpsms)?);
+    use std::io::Write;
+    for w in [&mut t, &mut d] {
+        writeln!(w, "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds")?;
+    }
+    let (mut nt, mut nd) = (0usize, 0usize);
+    for (id, is_decoy, q, score) in &rows {
+        let w: &mut dyn Write = if *is_decoy { &mut d } else { &mut t };
+        writeln!(w, "{id}\t{score}\t{q}\t{q}\t-\t-")?;
+        if *is_decoy { nd += 1 } else { nt += 1 }
+    }
+    eprintln!("rescore-pin: {nt} target and {nd} decoy rows written");
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Rescore an existing PIN with the built-in rescorer and write Percolator-shaped
+    /// `.psms` / `.dpsms` files.
+    ///
+    /// Exists so two rescorers can be compared on IDENTICAL input: without it the only
+    /// way to try the native rescorer was to re-run the whole search, which changes the
+    /// PIN as well as the rescoring and confounds the comparison.
+    #[command(name = "rescore-pin", hide = true)]
+    RescorePin(RescorePinArgs),
+
     /// Train a scoring model directly from externally-labeled, high-confidence
     /// PSMs supplied as flat training parquet(s), bypassing the bootstrap
     /// search. This is the primary training path for the Phase-3 "own models".
@@ -975,6 +1180,10 @@ enum Command {
 #[derive(Parser, Debug)]
 #[command(
     name = "andes",
+    // `--version` / `-V` from the crate version. Every CLI is expected to answer it,
+    // and a search result is only reproducible if you can record which build produced
+    // it — so this is provenance, not just convention.
+    version = env!("CARGO_PKG_VERSION"),
     about = "andes: database search of MGF/mzML spectra against FASTA",
     allow_hyphen_values = true,
 )]
@@ -997,7 +1206,17 @@ fn main() -> ExitCode {
     let matches = <TopCli as clap::CommandFactory>::command().get_matches();
     let mut top = <TopCli as clap::FromArgMatches>::from_arg_matches(&matches)
         .unwrap_or_else(|e| e.exit());
+    // Record whether the user typed --max-missed-cleavages. `--glyco` raises the
+    // floor to 3, which costs real memory (measured +4.4 GB on a 20k-protein human
+    // FASTA), so an explicit lower value must be allowed to win. The default (1) is
+    // itself a plausible explicit value, so comparing against it cannot distinguish
+    // the two cases — only the ValueSource can.
+    let _ = EXPLICIT_MISSED_CLEAVAGES.set(matches!(
+        matches.value_source("max_missed_cleavages"),
+        Some(clap::parser::ValueSource::CommandLine)
+    ));
     let result = match top.command.take() {
+        Some(Command::RescorePin(args)) => run_rescore_pin(args),
         Some(Command::Train(args)) => run_train(*args),
         Some(Command::TrainFromSearch(args)) => run_train_from_search(*args),
         Some(Command::TrainIntensity(args)) => run_train_intensity(*args),
@@ -1088,7 +1307,7 @@ fn configure_bundled_dotnet() {
 /// We gate behind an env var so production runs stay quiet; flip the var on
 /// when debugging memory regressions.
 fn log_rss(tag: &str) {
-    let probe_set = std::env::var_os("ANDES_RSS_PROBE").is_some();
+    let probe_set = RSS_PROBE.get().copied().unwrap_or(false);
     if !probe_set {
         return;
     }
@@ -1165,24 +1384,45 @@ fn prefix_spectrum_titles(chunk: &mut [Spectrum], prefix: &str) {
 /// Build the geometry-derivation [`GeometryConfig`], honouring `ANDES_GEO_*`
 /// env overrides so the structural knobs can be swept before settling on fixed
 /// defaults. Unset vars fall back to the validated defaults.
-fn geo_config_from_env() -> GeometryConfig {
-    // Parse an override, but only accept it when `is_valid` (every geometry knob
-    // must be strictly positive — a zero/negative tier count or rank would
-    // produce a degenerate geometry). Invalid values fall back to the default
-    // rather than reaching `derive_geometry`.
-    fn envp<T: Copy + std::str::FromStr>(key: &str, default: T, is_valid: impl Fn(&T) -> bool) -> T {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.parse::<T>().ok())
-            .filter(&is_valid)
-            .unwrap_or(default)
+/// Derived-geometry parameters for model training.
+///
+/// Every field has the default the training pipeline shipped with; the `train`
+/// subcommands expose them as flags so a run can be reproduced from its command line
+/// rather than from an environment the command line does not record.
+#[derive(Debug, Clone, Copy, clap::Args)]
+pub struct GeometryArgs {
+    /// Number of score segments.
+    #[arg(long = "geo-segments", default_value_t = 2i32)]
+    pub segments: i32,
+    /// Maximum peak rank considered.
+    #[arg(long = "geo-max-rank", default_value_t = 150i32)]
+    pub max_rank: i32,
+    /// Target peptides per mass tier.
+    #[arg(long = "geo-occupancy", default_value_t = 2500usize)]
+    pub occupancy: usize,
+    /// Maximum number of mass tiers.
+    #[arg(long = "geo-max-tiers", default_value_t = 33usize)]
+    pub max_tiers: usize,
+    /// Maximum fragment charge modelled.
+    #[arg(long = "geo-max-fragment-charge", default_value_t = 3i32)]
+    pub max_fragment_charge: i32,
+}
+
+impl Default for GeometryArgs {
+    fn default() -> Self {
+        Self { segments: 2, max_rank: 150, occupancy: 2500, max_tiers: 33, max_fragment_charge: 3 }
     }
-    GeometryConfig {
-        num_segments: envp("ANDES_GEO_SEGMENTS", 2, |v| *v > 0),
-        max_rank: envp("ANDES_GEO_MAX_RANK", 150, |v| *v > 0),
-        mass_tier_occupancy: envp("ANDES_GEO_OCCUPANCY", 2500, |v| *v > 0),
-        max_mass_tiers: envp("ANDES_GEO_MAX_TIERS", 33, |v| *v > 0),
-        max_fragment_charge: envp("ANDES_GEO_MAX_FRAG_CHARGE", 3, |v| *v > 0),
+}
+
+impl GeometryArgs {
+    fn to_config(self) -> GeometryConfig {
+        GeometryConfig {
+            num_segments: self.segments.max(1),
+            max_rank: self.max_rank.max(1),
+            mass_tier_occupancy: self.occupancy.max(1),
+            max_mass_tiers: self.max_tiers.max(1),
+            max_fragment_charge: self.max_fragment_charge.max(1),
+        }
     }
 }
 
@@ -1475,6 +1715,89 @@ mod format_routing_tests {
     }
 }
 
+/// Warn BEFORE scoring when the in-RAM candidate index is unlikely to fit.
+///
+/// Without this, a large database (a whole human proteome at three missed cleavages)
+/// runs for half an hour and is then killed by the OOM killer with no message from
+/// andes at all — the user sees only a dead process and no output. Measured on a
+/// 20k-protein human FASTA: ~0.65 KB resident per candidate for a plain search and
+/// ~0.92 KB under `--glyco`, which holds per-spectrum glyco state on top.
+///
+/// This warns rather than aborts: the estimate is a linear fit, machines differ, and
+/// refusing to start a run that would have succeeded is worse than a noisy warning.
+/// Only Linux exposes MemAvailable cheaply; elsewhere the check is skipped.
+fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
+    const BYTES_PER_CANDIDATE_PLAIN: f64 = 665.0;
+    const BYTES_PER_CANDIDATE_GLYCO: f64 = 940.0;
+
+    let available = match std::fs::read_to_string("/proc/meminfo") {
+        Ok(text) => text
+            .lines()
+            .find_map(|l| l.strip_prefix("MemAvailable:"))
+            .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
+            .map(|kb| kb * 1024),
+        Err(_) => None,
+    };
+    let Some(available) = available else { return };
+
+    let per = if glyco { BYTES_PER_CANDIDATE_GLYCO } else { BYTES_PER_CANDIDATE_PLAIN };
+    let estimate = (n_candidates as f64 * per) as u64;
+    if estimate <= available {
+        return;
+    }
+    let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
+    eprintln!(
+        "WARNING: this search needs roughly {:.1} GB for the in-RAM candidate index \
+         ({} candidates) but only {:.1} GB is available. The process is likely to be \
+         killed by the operating system partway through, with no result written.",
+        gb(estimate), n_candidates, gb(available)
+    );
+    if glyco {
+        eprintln!(
+            "  --glyco cannot use the out-of-core index yet (--candidate-index mmap is \
+             rejected in glyco mode), so reduce the search space instead: pass \
+             --max-missed-cleavages 1 or 2 (glyco defaults to 3), restrict the FASTA to \
+             the proteins of interest, or split the database and merge the .glyco.pin \
+             files afterwards."
+        );
+    } else {
+        eprintln!("  Re-run with --candidate-index mmap to page the index from disk instead.");
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum EthcdActivationFlag {
+    /// Label EThcD/ETciD as HCD (default; matches model routing).
+    Hcd,
+    /// Label them ETD so the c/z scoring path engages.
+    Etd,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum GlycanListFlag {
+    /// ~600 curated N-glycan compositions (default; what the benchmarks used).
+    Common,
+    /// The full ~4000-composition list.
+    Full,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum GlycoIsotopeFlag {
+    /// 0..=2 — drops the -1 offset, which is pure FDR dilution for glyco.
+    Default,
+    /// -1..=2 — the pre-round-6 behaviour.
+    Negative,
+    /// 0..=5 — reaches candidates far above the monoisotopic peak.
+    Wide,
+}
+
+/// Diagnostic RSS logging, installed from `--rss-probe`.
+static RSS_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Set in `main` from clap's `ValueSource`: did the user type
+/// `--max-missed-cleavages` themselves? See the glyco floor below.
+static EXPLICIT_MISSED_CLEAVAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // These three were validated as Some(..) by main() before calling run().
     if cli.spectrum.is_empty() {
@@ -1548,7 +1871,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // ── 2. Build SearchIndex (targets + strategy-generated decoys) ────────────
     let decoy_strategy = search::decoy::DecoyStrategy::from_name(&cli.decoy_strategy)
         .ok_or_else(|| format!(
-            "unknown --decoy-strategy '{}' (expected reverse/shuffle/none)",
+            "unknown --decoy-strategy '{}' (expected reverse/shuffle/sequon-reverse/none)",
             cli.decoy_strategy
         ))?;
     let t_phase = std::time::Instant::now();
@@ -1647,12 +1970,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // (cid_lowres_tryp).
         let (activation, instrument_opt): (ActivationMethod, Option<InstrumentType>) =
             match detected_activation_instrument {
+                // An EXPLICIT --fragmentation must win over detection. It previously
+                // only applied when detection returned no instrument, so on any normal
+                // mzML it was silently discarded — including the EThcD case, where the
+                // reader relabels ETD to HCD and the warning tells the user to "pass
+                // --fragmentation to override". It could not override anything.
                 Some((method, Some(inst))) => {
-                    eprintln!(
-                        "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
-                        method.name(), inst.name(), spectrum_path.display()
-                    );
-                    (method, Some(inst))
+                    let chosen = match cli.fragmentation {
+                        Fragmentation::Auto => method,
+                        Fragmentation::Cid => ActivationMethod::CID,
+                        Fragmentation::Etd => ActivationMethod::ETD,
+                        Fragmentation::Hcd => ActivationMethod::HCD,
+                        Fragmentation::Uvpd => ActivationMethod::UVPD,
+                    };
+                    if chosen != method {
+                        eprintln!(
+                            "Param resolver: auto-detected activation = {} (instrument = {}) from {}, \
+                             OVERRIDDEN by --fragmentation {}",
+                            method.name(), inst.name(), spectrum_path.display(), chosen.name()
+                        );
+                    } else {
+                        eprintln!(
+                            "Param resolver: auto-detected activation = {} (instrument = {}) from {}",
+                            method.name(), inst.name(), spectrum_path.display()
+                        );
+                    }
+                    (chosen, Some(inst))
                 }
                 Some((method, None)) => resolve_metadataless_selection(
                     Some(method), cli.fragmentation, cli.fragment_tol_ppm, cli.fragment_tol_da,
@@ -1814,13 +2157,25 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Ranges are validated (min <= max) by the clap value parsers.
     let (charge_min, charge_max) = cli.charge;
     params.charge_range = charge_min..=charge_max;
-    let (iso_min, iso_max) = cli.isotope_error;
+    // Round-8: resolve the default by MODE, not by sniffing the value. An explicit
+    // `--isotope-error` (any range, including -1..2) is always honoured verbatim.
+    // Unset under --glyco defaults to 0..=2: an MS1 envelope audit found the firmware
+    // mis-picks the monoisotopic peak only ever too HIGH (0 of 23,907 scans needed a
+    // negative shift), while the iso=-1 arm emitted 28.5% of all candidate rows for
+    // 0.29% of the correct answers at a ~53:47 target:decoy ratio - pure FDR dilution.
+    // Dropping it measured +81 backbone-correct @1%. ANDES_GLYCO_ISO_NEG=1 restores it.
+    let iso_default = if cli.glyco && cli.glyco_isotope_error != GlycoIsotopeFlag::Negative {
+        (0, 2)
+    } else {
+        (-1, 2)
+    };
+    let (iso_min, iso_max) = cli.isotope_error.unwrap_or(iso_default);
     params.isotope_error_range = iso_min..=iso_max;
     // Glyco high-mass precursors (backbone + multi-kDa glycan) frequently have the
     // monoisotopic peak mis-picked several 13C low, so the true neutral mass falls
     // outside the default -1..=2 sweep. Widen the upper bound for glyco so that
     // candidate mass is reachable. A/B-gated: ANDES_GLYCO_ISO_WIDE only.
-    if cli.glyco && std::env::var_os("ANDES_GLYCO_ISO_WIDE").is_some() {
+    if cli.glyco && cli.glyco_isotope_error == GlycoIsotopeFlag::Wide {
         params.isotope_error_range = iso_min..=iso_max.max(5);
     }
     // Pass 2 co-isolation requires MS1 scans, captured by the mzML and Thermo
@@ -1867,8 +2222,54 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // drops ~6% of true glycopeptides from the digest — concentrated at high
     // charge. Validated: raising to 2 for --glyco gave z5 22->54 (+2.5x) and
     // +116 backbone-correct @1% on the pooled AI-ETD benchmark. Floor glyco at 2.
+    // Round-8: raised again 2 -> 3. A sequon-bearing tryptic peptide often needs a
+    // third missed cleavage to reach a length the glyco path can score, and the
+    // reference identification set for this benchmark was itself produced with 3.
+    // Validated on the pooled AI-ETD benchmark: +44 backbone-correct @1%, +91
+    // glycoPSMs, +19 unique glycopeptides, +19 glycosites — and an ENTRAPMENT
+    // measurement (yeast/E.coli, where a glyco ID is false by construction) puts the
+    // true error at 0.14%, i.e. it buys IDs without spending error budget.
+    // Install engine-wide scoring settings from validated CLI values. Done once, before
+    // any spectrum is scored, so no scoring code reads the environment.
+    let peak_filter = match cli.peak_filter.as_deref() {
+        None => None,
+        Some(spec) => {
+            let (w, k) = spec.split_once(':').ok_or_else(|| {
+                format!("--peak-filter expects WINDOW_DA:PEAKS (e.g. 100:20), got `{spec}`")
+            })?;
+            let w: f64 = w.trim().parse().map_err(|_| format!("--peak-filter window `{w}` is not a number"))?;
+            let k: usize = k.trim().parse().map_err(|_| format!("--peak-filter count `{k}` is not an integer"))?;
+            Some((w, k))
+        }
+    };
+    let _ = RSS_PROBE.set(cli.rss_probe);
+    scoring_crate::scoring::init_scoring_settings(scoring_crate::scoring::ScoringSettings {
+        peak_filter,
+        precursor_offset_clamp: cli.precursor_offset_clamp,
+        density_on_active_list: cli.density_on_active_list,
+        tight_highres_scoring: cli.tight_highres_scoring,
+    });
+    input::mzml::init_ethcd_as_etd(cli.ethcd_activation == EthcdActivationFlag::Etd);
+    params.chimeric_allow_overlap = cli.chimeric_allow_overlap;
+
     params.max_missed_cleavages = if cli.glyco {
-        cli.max_missed_cleavages.max(2)
+        // The floor is a default, not a mandate. Raising it to 3 grows the candidate
+        // index by ~40% (13.2M -> 18.8M candidates on a 20k-protein human FASTA,
+        // +4.4 GB resident), which is the difference between running and being
+        // OOM-killed on a 16 GB machine. A user who asked for fewer gets fewer.
+        let explicit = *EXPLICIT_MISSED_CLEAVAGES.get().unwrap_or(&false);
+        if explicit && cli.max_missed_cleavages < 3 {
+            eprintln!(
+                "note: --glyco normally raises missed cleavages to 3 (sequon-bearing \
+                 tryptic peptides often need a third to reach a scoreable length); \
+                 honouring your explicit --max-missed-cleavages {}. Expect fewer \
+                 glycopeptide IDs in exchange for a smaller candidate index.",
+                cli.max_missed_cleavages
+            );
+            cli.max_missed_cleavages
+        } else {
+            cli.max_missed_cleavages.max(3)
+        }
     } else {
         cli.max_missed_cleavages
     };
@@ -2259,11 +2660,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     .with_intensity_model(intensity_model);
     log_rss("after_prepared_search");
     match params.candidate_index {
-        search::CandidateIndexMode::Ram => eprintln!(
-            "PreparedSearch: {} candidates, {} mass buckets (candidate-index: ram)",
-            prepared.candidates.len(),
-            prepared.bucket_index.len(),
-        ),
+        search::CandidateIndexMode::Ram => {
+            eprintln!(
+                "PreparedSearch: {} candidates, {} mass buckets (candidate-index: ram)",
+                prepared.candidates.len(),
+                prepared.bucket_index.len(),
+            );
+            warn_if_index_will_not_fit(prepared.candidates.len(), cli.glyco);
+        }
         search::CandidateIndexMode::Mmap => eprintln!(
             "PreparedSearch: out-of-core candidate-index: mmap \
              (base peptides resolved lazily per spectrum)"
@@ -2603,12 +3007,34 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // hunt (2026-07-16) showed the default ~612 list MISSES the mouse-brain
         // glycome at high charge (z5 69%/z6 38% coverage) — a generation ceiling.
         // ANDES_GLYCO_FULL_GLYCANS re-tests the full list now that cz is fixable.
-        let glycan_list = if std::env::var_os("ANDES_GLYCO_FULL_GLYCANS").is_some() {
+        // Install scoring settings that reach hot inner functions. Done once here, from
+        // validated CLI values, so no scoring code has to read the environment.
+        scoring_crate::scoring::init_cz_settings(scoring_crate::scoring::CzSettings {
+            zmax_override: cli.glyco_cz_max_charge,
+            use_intensity: cli.glyco_cz_intensity,
+        });
+        andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
+
+        let glycan_list = if cli.glyco_glycan_list == GlycanListFlag::Full {
             andes_glyco::glycan_db::n_glycan_list()
         } else {
             andes_glyco::glycan_db::n_glycan_list_common()
         };
-        let glyco_tol_ppm = 20.0_f64; // 20 ppm oxonium + backbone tolerance
+        let glyco_tol_ppm = cli.glyco_tol_ppm;
+        // `!(x > 0.0)` rather than `x <= 0.0` so NaN is rejected too: every
+        // comparison against NaN is false, so a NaN tolerance would sail past a
+        // `<= 0.0` check and then match nothing, silently, for the whole run.
+        if !(glyco_tol_ppm.is_finite() && glyco_tol_ppm > 0.0) {
+            eprintln!("error: --glyco-tol-ppm must be a finite value > 0 (got {glyco_tol_ppm})");
+            std::process::exit(2);
+        }
+        if glyco_tol_ppm < 20.0 {
+            eprintln!(
+                "warning: --glyco-tol-ppm {glyco_tol_ppm} is tighter than the 20 ppm the \
+                 glyco defaults were validated at; oxonium, core-Y and c/z matching may \
+                 under-fire"
+            );
+        }
         // Dev cap on glyco scoring uses the global --max-spectra (was the
         // redundant --glyco-max-spectra).
         let spectra_for_glyco: &[_] = if cli.max_spectra > 0 {
@@ -2621,6 +3047,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_j: cli.glyco_gp_j,
             gp_h: cli.glyco_gp_h,
             gp_cz: cli.glyco_gp_cz,
+            gp_m: cli.glyco_gp_m,
+            min_core_y: cli.glyco_min_core_y,
+            min_matched_by: cli.glyco_min_matched_ions,
+            max_gen_peaks: cli.glyco_max_peaks,
+            cz_multisite: cli.glyco_cz_multisite,
+            scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
@@ -2636,7 +3068,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &glycan_list,
             glyco_tol_ppm,
             cli.glyco_backbone_top_k,
-            glyco_cfg,
+            glyco_cfg.clone(),
             etd_scorer_owned.as_ref(),
         );
         let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
@@ -2647,12 +3079,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             t_glyco.elapsed().as_secs_f64()
         );
 
-        // Derive glyco PIN path: `<output_pin>.glyco.pin` (or
-        // `<output_pin_stem>.glyco.pin` if it already ends in `.pin`).
+        // Derive the glyco PIN path: strip a trailing `.pin` (only), then append
+        // `.glyco.pin`.
+        //
+        // The previous form was `with_extension("").with_extension("glyco.pin")`,
+        // which strips at the LAST dot TWICE — so `PXD011533.Frac1.pin` and
+        // `PXD011533.Frac2.pin` both collapsed to `PXD011533.glyco.pin` and the
+        // second run silently overwrote the first. Pooling fractions is the
+        // recommended practice for stable glyco FDR, so `dataset.FracN.pin` is
+        // exactly the naming users reach for, and the data loss was silent.
         let glyco_pin_path = {
-            let stem = output_pin_path.with_extension("");
-            stem.with_extension("glyco.pin")
+            let mut s = if output_pin_path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("pin"))
+            {
+                output_pin_path.with_extension("").into_os_string()
+            } else {
+                output_pin_path.clone().into_os_string()
+            };
+            s.push(".glyco.pin");
+            std::path::PathBuf::from(s)
         };
+        eprintln!("Glyco PIN will be written to: {}", glyco_pin_path.display());
         // G3: opt-in glycan-axis decoy rows (2D-FDR discrimination on the glycan
         // axis), from --glyco-decoy. Default off — no change to the shipping PIN.
         let emit_glycan_decoy = cli.glyco_decoy;
@@ -3656,14 +4104,14 @@ fn run_train_from_search(args: TrainFromSearchArgs) -> Result<(), Box<dyn std::e
     // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
     // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
     // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
-    let use_seed_geometry = std::env::var("ANDES_SEED_GEOMETRY").is_ok();
+    let use_seed_geometry = args.seed_geometry;
     let template: Param = if !use_seed_geometry {
         eprintln!(
             "train: deriving own partition geometry from {} PSMs (set ANDES_SEED_GEOMETRY=1 to reuse seed geometry)",
             labels.len()
         );
         let corpus = corpus_charge_masses(&labels);
-        let geo_cfg = geo_config_from_env();
+        let geo_cfg = GeometryArgs::default().to_config();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
@@ -4728,7 +5176,7 @@ fn run_train(
     // seed's geometry (e.g. to reproduce a legacy model). Own geometry is
     // entrapment-FDP-validated to beat seed geometry on honest PSMs AND speed
     // across Astral (+57%), UPS1 (+15%) and TMT (+50%).
-    let use_seed_geometry = std::env::var("ANDES_SEED_GEOMETRY").is_ok();
+    let use_seed_geometry = args.seed_geometry;
     let template: Param = if !use_seed_geometry {
         eprintln!(
             "train: deriving own partition geometry from {} PSMs (set ANDES_SEED_GEOMETRY=1 to reuse seed geometry)",
@@ -4738,7 +5186,7 @@ fn run_train(
             .iter()
             .map(|p| (p.charge as i32, p.peptide.mass() as f32))
             .collect();
-        let geo_cfg = geo_config_from_env();
+        let geo_cfg = GeometryArgs::default().to_config();
         derive_geometry(&corpus, &seed_param, &geo_cfg)
     } else {
         eprintln!("train: ANDES_SEED_GEOMETRY set — reusing seed partition geometry");
@@ -5471,7 +5919,12 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
     // declaration order via match below, which is stable.
     let dominant = counts
         .iter()
-        .max_by_key(|(_, &n)| n)
+        // Deterministic on ties: HashMap iteration order is randomised per
+        // process, so a bare `max_by_key(count)` picks an ARBITRARY maximum. A
+        // 1:1 interleaved HCD/ETD acquisition ties exactly at 32/32 over the
+        // peeked window and flipped the selected model run-to-run on identical
+        // input. Tie-break on the discriminant so the choice is reproducible.
+        .max_by_key(|(&m, &n)| (n, std::cmp::Reverse(m as u8)))
         .map(|(&m, _)| m)?;
 
     // Warn on mixed activation. The dominant method still wins; this is

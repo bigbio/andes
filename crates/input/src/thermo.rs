@@ -293,7 +293,20 @@ fn map_dissociation(d: DissociationMethod) -> Option<ActivationMethod> {
         4 | 8 | 16 => Some(ActivationMethod::ETD),
         // Supplemental activation (EThcD/ETciD/EChcD/ECciD): electron + beam/
         // resonant collision in one step → route to HCD (b/y), not pure ETD.
-        5 | 6 | 9 | 10 => Some(ActivationMethod::HCD),
+        //
+        // This mirrors the mzML reader, INCLUDING its warning and its
+        // ANDES_ETHCD_AS_ETD escape hatch. Previously the `.raw` path did the
+        // relabel silently and could not be overridden at all, so an EThcD
+        // glyco run on native Thermo input lost the entire c/z stack with no
+        // diagnostic — and `.raw` is the path most users take.
+        5 | 6 | 9 | 10 => {
+            crate::mzml::log_ethcd_once();
+            if crate::mzml::ethcd_as_etd_policy() {
+                Some(ActivationMethod::ETD)
+            } else {
+                Some(ActivationMethod::HCD)
+            }
+        }
         _ => None,
     }
 }
@@ -348,7 +361,11 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
             }
         }
     }
-    let dominant_act = act.into_iter().max_by_key(|&(_, n)| n).map(|(k, _)| k)?;
+    // Deterministic tie-break (HashMap order is randomised per process).
+    let dominant_act = act
+        .into_iter()
+        .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k as u8)))
+        .map(|(k, _)| k)?;
     let activation = match dominant_act {
         x if x == ActivationMethod::CID as u8 => ActivationMethod::CID,
         x if x == ActivationMethod::HCD as u8 => ActivationMethod::HCD,
@@ -362,7 +379,8 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
     };
     let instrument = inst
         .into_iter()
-        .max_by_key(|&(_, n)| n)
+        // Deterministic tie-break (HashMap order is randomised per process).
+        .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k as u8)))
         .map(|(k, _)| match k {
             x if x == InstrumentType::LowRes as u8         => InstrumentType::LowRes,
             x if x == InstrumentType::TOF as u8            => InstrumentType::TOF,

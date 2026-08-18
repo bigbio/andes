@@ -523,7 +523,7 @@ impl<'a> PreparedSearch<'a> {
         // per scan. Tests the "fragment theft" hypothesis behind chimeric FDR
         // inflation. Zero cost unless ANDES_CHIMERIC_OVERLAP is set AND --chimeric.
         let chim_overlap = params.chimeric
-            && std::env::var("ANDES_CHIMERIC_OVERLAP").is_ok();
+            && params.chimeric_allow_overlap;
 
         // Parallel per-spectrum search. All inputs above are `&` immutable; the
         // closure owns its TopNQueue, scored_per_charge cache, and per-bin GF state.

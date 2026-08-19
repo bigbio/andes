@@ -1501,9 +1501,9 @@ impl<'a> ScoredSpectrum<'a> {
             if emit_losses {
                 let prefix_losses = span_losses(peptide, 0..split);
                 let suffix_losses = span_losses(peptide, split..n);
-                for &(is_prefix, nominal_mass, losses) in &[
-                    (true, prefix_nom, &prefix_losses),
-                    (false, suffix_nom, &suffix_losses),
+                for &(is_prefix, nominal_mass, exact_mass, losses) in &[
+                    (true, prefix_nom, prefix_real, &prefix_losses),
+                    (false, suffix_nom, suffix_real, &suffix_losses),
                 ] {
                     visit_directional_loss_ion_facts(
                         peaks,
@@ -1511,11 +1511,17 @@ impl<'a> ScoredSpectrum<'a> {
                         &self.segment_partition_cache,
                         scorer,
                         nominal_mass,
+                        Some(exact_mass),
                         is_prefix,
                         self.charge,
                         self.parent_mass,
                         losses,
-                        true, // training: tight high-res match, same as intact
+                        // Matches the intact-ion path: exact theoretical m/z matched at the
+                        // model's own `mme`. Previously `true` (a 20 ppm window) against a
+                        // nominal reconstruction displaced by a median 52 ppm, so the
+                        // neutral-loss tables were learned through the same ~50x-too-tight
+                        // window the intact tables were.
+                        false,
                         |partition, loss_ion, rank, theo_mz, tol_da| {
                             let (rank, error_bin) = ion_fact_rank_and_error(
                                 rank, peaks, ranks, theo_mz, tol_da, max_rank, esf,
@@ -1957,6 +1963,10 @@ fn visit_directional_loss_ion_facts<F>(
     segment_partition_cache: SegmentPartitionSlice<'_>,
     scorer: &RankScorer,
     nominal_mass: f64,
+    // EXACT (unquantised) neutral mass of this fragment, same contract as
+    // `visit_directional_node_ion_matches`: `Some` on the training path, `None` when the
+    // caller has only a nominal cache index.
+    exact_mass: Option<f64>,
     is_prefix: bool,
     charge: u8,
     parent_mass: f64,
@@ -1994,7 +2004,10 @@ fn visit_directional_loss_ion_facts<F>(
                 _ => continue,
             };
             let ion_charge = icharge.max(1) as f64;
-            let base_mz = ion.mz(nominal_mass);
+            let base_mz = match exact_mass {
+                Some(m) => ion.mz_exact(m),
+                None => ion.mz(nominal_mass),
+            };
             for &(loss, cls) in active_losses {
                 let theo_mz = base_mz - loss / ion_charge;
                 if theo_mz <= 0.0 || param.segment_num(theo_mz, parent_mass) != seg {

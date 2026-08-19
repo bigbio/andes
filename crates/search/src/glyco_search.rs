@@ -70,6 +70,10 @@ pub struct GlycoConfig {
     /// Resolve isobaric-composition collisions on Y-ladder evidence instead of
     /// `to_bits()` sort order (`--glyco-isobar-rep`).
     pub isobar_rep: bool,
+    /// Glycan-Y-first candidate generation plus TWO-AXIS backbone retention
+    /// (`--glyco-y-index`): also keep the top-k backbones by glycan-Y evidence, so a
+    /// backbone strong on the glycan axis but weak on peptide b/y survives truncation.
+    pub y_index: bool,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
     pub scan_filter_path: Option<std::path::PathBuf>,
@@ -112,6 +116,7 @@ impl Default for GlycoConfig {
     fn default() -> Self {
         Self {
             isobar_rep: false,
+            y_index: false,
             gp_k: GLYCO_GP_K_DEFAULT,
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
@@ -667,9 +672,19 @@ impl GlycoCtxOwned {
         let min_matched_by_cfg = cfg.min_matched_by;
         let max_gen_peaks = cfg.max_gen_peaks;
         let cz_multisite_cfg = cfg.cz_multisite;
-        // Glycan-Y-first candidate retention (P0b) is off by default under the gp
-        // selector (matches the validated gp baseline).
-        let yindex_on = false;
+        // Glycan-Y-first candidate retention (P0b). The block comment above promised
+        // this was "opt-in for a clean A/B vs the b/y-only path" -- but no flag existed,
+        // so the A/B was impossible and the code below was unreachable. It is now
+        // `--glyco-y-index`, default off (the validated gp baseline).
+        //
+        // What it gates matters most on HCD: without it, `accepted_backbones` is
+        // AXIS 1 (best peptide b/y rank) plus AXIS 4 (c/z, ETD-ONLY) plus AXIS 3
+        // (transfer, off by default). So on an HCD-only run -- which is the human
+        // plasma regime -- peptide b/y is the ONLY surviving retention axis, and that
+        // is precisely the axis that is weakest for large glycopeptides. The glycan-Y
+        // evidence is computed (`core_y_counts`) and then used only as a tiebreak
+        // inside AXIS 1.
+        let yindex_on = cfg.y_index;
         let glycan_y_index = if yindex_on {
             GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
         } else {

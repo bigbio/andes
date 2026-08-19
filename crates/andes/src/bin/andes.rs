@@ -502,11 +502,19 @@ struct SearchArgs {
     #[arg(long = "rss-probe", default_value_t = false)]
     rss_probe: bool,
 
-    /// Glycan composition list for `--glyco`: `common` (~600 curated N-glycans,
-    /// the default and what the benchmarks were run with) or `full` (the complete
-    /// list, ~4000). `full` widens coverage but inflates the candidate space; it was
-    /// measured to raise the entrapment error 5.4x on a benchmark where it looked
-    /// like a gain on yield alone, so prefer `common` unless you know you need it.
+    /// Glycan composition list for `--glyco`.
+    ///
+    /// `common` (~600, default) is the MEASURED-BEST list and what the benchmarks were
+    /// run with. `reference-human` (~2,300) reaches high-antennary glycans `common`
+    /// cannot name -- 100% of a curated 160-composition human reference vs `common`'s
+    /// 68% -- but measured WORSE overall on human plasma with an entrapment database
+    /// (228 glycoPSMs at 0.00% entrapment FDP, vs 365 at 0.55%). `full` (~7,900) is
+    /// wider still and was measured to raise entrapment error 5.4x on a benchmark where
+    /// it looked like a gain on yield alone.
+    ///
+    /// Bigger is not better here: a larger candidate space gives decoys more places to
+    /// fit, which tightens Percolator's threshold and leaves real identifications
+    /// behind. Prefer `common` unless you have measured otherwise on your own data.
     #[arg(long = "glyco-glycan-list", value_enum, default_value_t = GlycanListFlag::Common)]
     glyco_glycan_list: GlycanListFlag,
 
@@ -613,6 +621,21 @@ struct SearchArgs {
     /// see this. Judge it on compositions-per-mass, not on ID count.
     #[arg(long = "glyco-isobar-rep", default_value_t = false)]
     glyco_isobar_rep: bool,
+
+    /// Keep backbones by GLYCAN-Y evidence as well as by peptide b/y ("two-axis
+    /// retention"), and enable glycan-Y-first candidate generation.
+    ///
+    /// Without this, backbone truncation retains on peptide b/y rank (axis 1), c/z
+    /// (axis 4, ETD-ONLY) and transfer (axis 3, off by default). On an HCD-only run --
+    /// the human plasma regime -- peptide b/y is therefore the ONLY surviving axis, and
+    /// it is the weakest one for large glycopeptides: a backbone anchored by a strong
+    /// core-Y ladder but with few b/y ions is truncated before the fused selector ever
+    /// sees it. The glycan-Y evidence is already computed and is otherwise used only as
+    /// a tiebreak.
+    ///
+    /// Default off (the validated baseline). Costs a second top-k retention pass.
+    #[arg(long = "glyco-y-index", default_value_t = false)]
+    glyco_y_index: bool,
 
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
@@ -1873,9 +1896,15 @@ enum GlycoTaxonFlag {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum GlycanListFlag {
-    /// ~600 curated N-glycan compositions (default; what the benchmarks used).
+    /// Reference-fitted human list (HexNAc up to 11, high-antennary reachable). Covers
+    /// 100% of a curated 160-composition human reference vs `common`'s 68% -- but MEASURED
+    /// WORSE overall on human plasma (228 glycoPSMs @0.00% entrapment FDP vs `common`'s
+    /// 365 @0.55%), because the larger space tightens Percolator's threshold. Use only
+    /// when the sample genuinely carries high-antennary glycans, and measure.
+    ReferenceHuman,
+    /// ~600 compositions. The measured-best default; what the benchmarks used..
     Common,
-    /// The full ~4000-composition list.
+    /// The full ~7,900-composition list. Widest coverage, worst error control.
     Full,
 }
 
@@ -3139,10 +3168,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
         andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-        let mut glycan_list = if cli.glyco_glycan_list == GlycanListFlag::Full {
-            andes_glyco::glycan_db::n_glycan_list()
-        } else {
-            andes_glyco::glycan_db::n_glycan_list_common()
+        let mut glycan_list = match cli.glyco_glycan_list {
+            GlycanListFlag::Full => andes_glyco::glycan_db::n_glycan_list(),
+            GlycanListFlag::ReferenceHuman => {
+                andes_glyco::glycan_db::n_glycan_list_reference_human()
+            }
+            GlycanListFlag::Common => andes_glyco::glycan_db::n_glycan_list_common(),
         };
         // Decide whether NeuGc belongs in the search space. NeuGc is the sole source of
         // isobaric mass degeneracy in this list (Fuc+NeuGc and Hex+NeuAc are the SAME
@@ -3252,6 +3283,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,
             isobar_rep: cli.glyco_isobar_rep,
+            y_index: cli.glyco_y_index,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,

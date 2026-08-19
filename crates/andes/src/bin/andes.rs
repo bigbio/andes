@@ -529,6 +529,17 @@ struct SearchArgs {
     #[arg(long = "glyco-no-neugc", default_value_t = false)]
     glyco_no_neugc: bool,
 
+    /// Glycan biology to assume for the search space.
+    ///
+    /// `auto` (default) surveys the NeuGc/NeuAc oxonium ratio across the run and
+    /// cross-checks `OX=` taxon ids in the FASTA, then narrows the list only when both
+    /// point the same way; it prints what it found and how to override. `human` forces
+    /// NeuGc out, `mammal` forces it in.
+    ///
+    /// `--glyco-no-neugc` is the explicit override and wins over this.
+    #[arg(long = "glyco-taxon", value_enum, default_value_t = GlycoTaxonFlag::Auto)]
+    glyco_taxon: GlycoTaxonFlag,
+
 
     /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
     /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
@@ -1848,6 +1859,18 @@ enum EthcdActivationFlag {
     Etd,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, clap::ValueEnum)]
+enum GlycoTaxonFlag {
+    /// Decide from the data: the NeuGc/NeuAc oxonium ratio across the run, cross-checked
+    /// against `OX=` taxon ids in the FASTA. Conservative — only narrows the list when
+    /// the evidence supports it, and always says what it decided.
+    Auto,
+    /// CMAH-inactivated (human and the great apes): exclude NeuGc.
+    Human,
+    /// CMAH-competent (mouse, rat, pig, bovine, CHO...): keep NeuGc.
+    Mammal,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum GlycanListFlag {
     /// ~600 curated N-glycan compositions (default; what the benchmarks used).
@@ -3121,12 +3144,76 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             andes_glyco::glycan_db::n_glycan_list_common()
         };
-        if cli.glyco_no_neugc {
+        // Decide whether NeuGc belongs in the search space. NeuGc is the sole source of
+        // isobaric mass degeneracy in this list (Fuc+NeuGc and Hex+NeuAc are the SAME
+        // elemental formula), so getting this right is worth more than any downstream
+        // scoring fix -- you cannot resolve from fragments what should not be enumerated.
+        let drop_neugc = if cli.glyco_no_neugc {
+            eprintln!("--glyco-no-neugc: NeuGc excluded (explicit).");
+            true
+        } else {
+            match cli.glyco_taxon {
+                GlycoTaxonFlag::Human => {
+                    eprintln!("--glyco-taxon human: NeuGc excluded (CMAH-inactivated lineage).");
+                    true
+                }
+                GlycoTaxonFlag::Mammal => {
+                    eprintln!("--glyco-taxon mammal: NeuGc kept (CMAH-competent lineage).");
+                    false
+                }
+                GlycoTaxonFlag::Auto => {
+                    // Signal 1: the spectra themselves. Stronger than the FASTA, because it
+                    // measures what is in the tube rather than what was searched.
+                    let survey = andes_glyco::oxonium::survey_sialic_oxonium(
+                        spectra.iter().map(|s| s.peaks.as_slice()),
+                        cli.glyco_tol_ppm,
+                        0.10,
+                    );
+                    // Signal 2: OX= taxon ids in the database.
+                    let (taxon, n_hu, n_nh, n_ox) = andes_glyco::glycan_db::taxon_from_headers(
+                        target_db.proteins.iter().map(|p| p.description.as_str()),
+                    );
+                    eprintln!(
+                        "--glyco-taxon auto: sialylated spectra {} ({} with NeuGc oxonium >=10% of \
+                         NeuAc = {:.2}%, {}), FASTA OX= {:?} ({} CMAH-null / {} competent of {})",
+                        survey.neuac_spectra,
+                        survey.neugc_spectra,
+                        100.0 * survey.neugc_fraction,
+                        if survey.conclusive { "conclusive" } else { "INCONCLUSIVE" },
+                        taxon,
+                        n_hu,
+                        n_nh,
+                        n_ox
+                    );
+                    // Narrow only when BOTH signals agree, and never on an inconclusive
+                    // survey. A CMAH-competent FASTA vetoes: mouse genuinely has NeuGc, and
+                    // recombinant human protein from a murine/CHO host does too.
+                    let spectra_say_no = survey.conclusive && survey.neugc_fraction < 0.01;
+                    let fasta_objects = taxon == andes_glyco::glycan_db::Taxon::CmahCompetent;
+                    let decide = spectra_say_no && !fasta_objects;
+                    eprintln!(
+                        "--glyco-taxon auto: {} (override with --glyco-taxon human|mammal or \
+                         --glyco-no-neugc)",
+                        if decide {
+                            "NeuGc EXCLUDED - no NeuGc oxonium evidence in this run"
+                        } else if !survey.conclusive {
+                            "NeuGc kept - too little sialic signal to judge"
+                        } else if fasta_objects {
+                            "NeuGc kept - FASTA is a CMAH-competent organism"
+                        } else {
+                            "NeuGc kept - NeuGc oxonium evidence present"
+                        }
+                    );
+                    decide
+                }
+            }
+        };
+        if drop_neugc {
             let before = glycan_list.len();
             glycan_list.retain(|g| g.neugc == 0);
             eprintln!(
-                "--glyco-no-neugc: {} -> {} glycan compositions (NeuGc excluded; humans lack CMAH, \
-                 and NeuGc is the sole source of isobaric mass degeneracy in this list)",
+                "glycan list: {} -> {} compositions (NeuGc removed; it is the only source of \
+                 isobaric mass degeneracy here)",
                 before,
                 glycan_list.len()
             );

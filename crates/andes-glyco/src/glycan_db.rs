@@ -456,3 +456,104 @@ mod tests {
         }
     }
 }
+
+/// Which glycan biology the search space should assume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taxon {
+    /// CMAH-inactivated: cannot synthesise NeuGc.
+    Human,
+    /// CMAH-competent (mouse, rat, pig, bovine, CHO...): NeuGc is genuine.
+    CmahCompetent,
+    /// Could not be determined from the database.
+    Unknown,
+}
+
+/// Detect the source organism from UniProt-style FASTA headers (`OX=<taxid>`).
+///
+/// Returns the majority taxon plus (human_headers, nonhuman_headers, headers_with_ox).
+/// Only `OX=` is used: `OS=` free text is not worth parsing when the numeric taxon id
+/// is present in every UniProt header, and a database with no `OX=` at all should
+/// report `Unknown` rather than guess.
+///
+/// Taxon ids: 9606 human. 9598/9597/9593/9601 are the great apes, which share the
+/// human CMAH inactivation (Chou et al. PNAS 1998) and so belong on the human side.
+pub fn taxon_from_headers<'a, I: IntoIterator<Item = &'a str>>(
+    descriptions: I,
+) -> (Taxon, usize, usize, usize) {
+    // Great apes share the human CMAH lesion; everything else is treated as competent.
+    const CMAH_NULL_TAXA: [u32; 5] = [9606, 9598, 9597, 9593, 9601];
+    let mut human = 0usize;
+    let mut nonhuman = 0usize;
+    let mut with_ox = 0usize;
+    for d in descriptions {
+        let Some(i) = d.find("OX=") else { continue };
+        let rest = &d[i + 3..];
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        if end == 0 {
+            continue;
+        }
+        let Ok(tax) = rest[..end].parse::<u32>() else { continue };
+        with_ox += 1;
+        if CMAH_NULL_TAXA.contains(&tax) {
+            human += 1;
+        } else {
+            nonhuman += 1;
+        }
+    }
+    // Require a clear majority; a mixed database (e.g. host + expression system) is
+    // exactly the case where guessing is dangerous, so report Unknown and let the
+    // spectra decide.
+    let taxon = if with_ox == 0 {
+        Taxon::Unknown
+    } else if human * 10 >= with_ox * 9 {
+        Taxon::Human
+    } else if nonhuman * 10 >= with_ox * 9 {
+        Taxon::CmahCompetent
+    } else {
+        Taxon::Unknown
+    };
+    (taxon, human, nonhuman, with_ox)
+}
+
+#[cfg(test)]
+mod taxon_tests {
+    use super::*;
+
+    #[test]
+    fn detects_human_from_uniprot_headers() {
+        let h = vec![
+            "Serum albumin OS=Homo sapiens OX=9606 GN=ALB PE=1 SV=2",
+            "Complement factor H OS=Homo sapiens OX=9606 GN=CFH PE=1 SV=4",
+        ];
+        let (t, hu, nh, ox) = taxon_from_headers(h);
+        assert_eq!((t, hu, nh, ox), (Taxon::Human, 2, 0, 2));
+    }
+
+    #[test]
+    fn detects_mouse_as_cmah_competent() {
+        let h = vec!["Albumin OS=Mus musculus OX=10090 GN=Alb PE=1 SV=3"];
+        assert_eq!(taxon_from_headers(h).0, Taxon::CmahCompetent);
+    }
+
+    #[test]
+    fn great_apes_share_the_human_cmah_lesion() {
+        let h = vec!["X OS=Pan troglodytes OX=9598 GN=X PE=1 SV=1"];
+        assert_eq!(taxon_from_headers(h).0, Taxon::Human);
+    }
+
+    #[test]
+    fn mixed_database_refuses_to_guess() {
+        let h = vec![
+            "A OS=Homo sapiens OX=9606 GN=A PE=1 SV=1",
+            "B OS=Mus musculus OX=10090 GN=B PE=1 SV=1",
+        ];
+        assert_eq!(taxon_from_headers(h).0, Taxon::Unknown);
+    }
+
+    #[test]
+    fn no_ox_field_is_unknown() {
+        let h = vec!["some plain fasta description", "another"];
+        let (t, _, _, ox) = taxon_from_headers(h);
+        assert_eq!((t, ox), (Taxon::Unknown, 0));
+    }
+}

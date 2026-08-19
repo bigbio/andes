@@ -234,7 +234,8 @@ pub(crate) fn search_secondary(
     let mut tailor_hist: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
     let mut tailor_total: u32 = 0;
     let mut best_raw: i32 = i32::MIN;
-    let mut best_mass_key: i32 = i32::MIN;
+    let mut best_pep_key: u64 = 0;
+    let mut have_best = false;
     let mut second_raw: i32 = i32::MIN;
     let mut secondary_scores: Vec<f32> = Vec::new();
     for (_nm, idxs) in bucket_index.range(lo..=hi) {
@@ -263,15 +264,24 @@ pub(crate) fn search_secondary(
             let s = raw_score.round() as i32;
             *tailor_hist.entry(s).or_insert(0) += 1;
             tailor_total += 1;
-            let mkey = cand.peptide.nominal_residue_mass();
-            if mkey == best_mass_key {
+            // Keyed on PEPTIDOFORM identity, not nominal mass. On this path the
+            // nominal key was not merely coarse but inert: the exact-mass gate above
+            // admits only candidates within `tol` of `co_neutral`, so EVERY surviving
+            // candidate shares one nominal mass, every one took the
+            // `mkey == best_mass_key` branch, `second_raw` was never written, and
+            // `delta_raw_score` below was identically 0.0 on every chimeric secondary
+            // row — the exact "zeros give Percolator inconsistent rows" outcome this
+            // block's own comment says it exists to prevent.
+            let mkey = crate::match_engine::peptidoform_key(&cand.peptide);
+            if have_best && mkey == best_pep_key {
                 if s > best_raw {
                     best_raw = s;
                 }
             } else if s > best_raw {
                 second_raw = second_raw.max(best_raw);
                 best_raw = s;
-                best_mass_key = mkey;
+                best_pep_key = mkey;
+                have_best = true;
             } else {
                 second_raw = second_raw.max(s);
             }

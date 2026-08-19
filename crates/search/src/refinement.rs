@@ -110,6 +110,28 @@ pub fn confident_base_peptides(
     candidates: &[Candidate],
     select_q: f64,
 ) -> Vec<Vec<u8>> {
+    confident_base_peptides_with_source(queues, candidates, select_q)
+        .into_iter()
+        .map(|(seq, _)| seq)
+        .collect()
+}
+
+/// As [`confident_base_peptides`], but also returns the PROTEIN INDEX each backbone was
+/// seen on in Pass 1.
+///
+/// Pass 2 anchors on bare backbones and searches them as synthetic mini-proteins. Without
+/// this provenance the Pass-2 winners are emitted with a fabricated `BASEPEP_<n>`
+/// accession and cannot be attributed to a protein at all -- which orphans exactly the
+/// MODIFIED PSMs that a refinement run exists to find.
+///
+/// A backbone shared by several proteins keeps the LOWEST protein index, deterministically
+/// (Pass-1 candidate order is stable). That is a real limitation for shared peptides, but
+/// it is strictly better than a synthetic accession that names nothing.
+pub fn confident_base_peptides_with_source(
+    queues: &[TopNQueue],
+    candidates: &[Candidate],
+    select_q: f64,
+) -> Vec<(Vec<u8>, usize)> {
     // One (label, candidate_idx) per spectrum that produced a PSM, using that
     // spectrum's best PSM — identical to `confident_protein_indices`.
     let mut labels: Vec<ScoredLabel> = Vec::new();
@@ -128,14 +150,17 @@ pub fn confident_base_peptides(
     // Confident TARGETs → their candidate peptide's UNMODIFIED backbone bytes.
     // `AminoAcid::residue` is the bare residue letter regardless of `mod_`, so
     // collecting it per residue yields the modification-free backbone.
-    let mut seqs: HashSet<Vec<u8>> = HashSet::new();
+    let mut seqs: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
     for li in confident_target_indices(&labels, select_q) {
         let cand = &candidates[cand_idx_of[li]];
         let backbone: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
-        seqs.insert(backbone);
+        let pi = cand.protein_index;
+        seqs.entry(backbone)
+            .and_modify(|e| *e = (*e).min(pi))
+            .or_insert(pi);
     }
 
-    let mut out: Vec<Vec<u8>> = seqs.into_iter().collect();
+    let mut out: Vec<(Vec<u8>, usize)> = seqs.into_iter().collect();
     out.sort(); // deterministic order
     out
 }
@@ -243,6 +268,9 @@ pub fn build_refinement_index(
 /// mods. `base_seqs` are the UNMODIFIED backbones from [`confident_base_peptides`].
 pub fn build_peptide_anchored_index(
     base_seqs: &[Vec<u8>],
+    // Accession of the Pass-1 protein each backbone came from, parallel to `base_seqs`.
+    // Empty falls back to the historical synthetic `BASEPEP_<i>` naming.
+    base_accessions: &[String],
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
@@ -252,7 +280,21 @@ pub fn build_peptide_anchored_index(
             .iter()
             .enumerate()
             .map(|(i, seq)| model::protein::Protein {
-                accession: format!("BASEPEP_{i}"),
+                // Name the mini-protein after the REAL Pass-1 protein. Previously this
+                // was a synthetic `BASEPEP_<i>`, and `merge_into_pass1` only offsets
+                // `protein_index` into the concatenated DB -- it never maps back -- so
+                // every --refine PSM was emitted with an accession that names nothing and
+                // could only be attributed by re-matching the sequence against the FASTA
+                // externally. Those are precisely the MODIFIED PSMs the cascade exists to
+                // find.
+                //
+                // NOTE the mini-protein's SEQUENCE is still just the peptide, so QPX
+                // start/end coordinates remain peptide-local for Pass-2 rows; and a
+                // backbone shared across proteins keeps only its lowest-indexed source.
+                accession: base_accessions
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("BASEPEP_{i}")),
                 description: String::new(),
                 sequence: seq.clone(),
             })
@@ -544,11 +586,15 @@ pub fn run_refinement(
 
     // 1. Confident base peptides from Pass-1 (PEPTIDE-anchored scoping gate).
     //    Empty ⇒ nothing to refine.
-    let base_seqs = confident_base_peptides(
+    let base_with_src = confident_base_peptides_with_source(
         pass1_queues,
         pass1_candidates,
         base_params.refine_select_psm_fdr,
     );
+    let base_seqs: Vec<Vec<u8>> = base_with_src.iter().map(|(seq, _)| seq.clone()).collect();
+    // Real Pass-1 protein index per anchored backbone, so Pass-2 winners can be
+    // attributed to a protein instead of a synthetic BASEPEP_ accession.
+    let base_src: Vec<usize> = base_with_src.iter().map(|(_, pi)| *pi).collect();
     if base_seqs.is_empty() {
         return None;
     }
@@ -596,7 +642,26 @@ pub fn run_refinement(
     //    into the returned `RefinementOutput` once the `PreparedSearch` borrow of
     //    it ends (see below).
     let refine_idx =
-        build_peptide_anchored_index(&base_seqs, decoy_prefix, decoy_strategy, seed);
+        {
+            // Map each anchored backbone to its Pass-1 protein's real accession.
+            let base_accs: Vec<String> = base_src
+                .iter()
+                .map(|&pi| {
+                    full_target_db
+                        .proteins
+                        .get(pi)
+                        .map(|p| p.accession.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+            build_peptide_anchored_index(
+                &base_seqs,
+                &base_accs,
+                decoy_prefix,
+                decoy_strategy,
+                seed,
+            )
+        };
 
     // 4. Pass-2 params: refinement variable-mod tier + the tier's mod cap.
     //    Bound the per-peptide mod cap: the candidate count grows combinatorially
@@ -1121,7 +1186,7 @@ mod tests {
     #[test]
     fn build_peptide_anchored_index_one_mini_protein_per_base_seq_plus_decoys() {
         let base_seqs = vec![b"PEPTIK".to_vec(), b"SAMPLER".to_vec()];
-        let idx = build_peptide_anchored_index(&base_seqs, "XXX", DecoyStrategy::Reverse, 42);
+        let idx = build_peptide_anchored_index(&base_seqs, &[], "XXX", DecoyStrategy::Reverse, 42);
 
         // 2 target mini-proteins + 2 paired Reverse decoys.
         assert_eq!(idx.db.len(), 4);

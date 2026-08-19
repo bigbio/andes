@@ -74,6 +74,9 @@ pub struct GlycoConfig {
     /// (`--glyco-y-index`): also keep the top-k backbones by glycan-Y evidence, so a
     /// backbone strong on the glycan axis but weak on peptide b/y survives truncation.
     pub y_index: bool,
+    /// Compute the ~40-column PIN feature vector against the GLYCAN-DECORATED backbone
+    /// rather than the bare deglycosylated peptide (`--glyco-decorated-features`).
+    pub decorated_features: bool,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
     pub scan_filter_path: Option<std::path::PathBuf>,
@@ -117,6 +120,7 @@ impl Default for GlycoConfig {
         Self {
             isobar_rep: false,
             y_index: false,
+            decorated_features: false,
             gp_k: GLYCO_GP_K_DEFAULT,
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
@@ -499,6 +503,8 @@ pub struct GlycoScoreCtx<'a> {
     pub max_peptide_first: usize,
     pub peptide_first_on: bool,
     pub yindex_on: bool,
+    /// See `GlycoConfig::decorated_features`.
+    pub decorated_features: bool,
     /// Resolve isobaric-composition collisions on Y-ladder evidence rather than sort
     /// order (`--glyco-isobar-rep`). Off by default: the original A/B measured -8 on
     /// peptide YIELD, a metric structurally blind to which composition gets named.
@@ -558,6 +564,7 @@ pub struct GlycoCtxOwned {
     max_peptide_first: usize,
     peptide_first_on: bool,
     yindex_on: bool,
+    decorated_features: bool,
     isobar_rep: bool,
     gp_k: f32,
     gp_j: f32,
@@ -685,6 +692,7 @@ impl GlycoCtxOwned {
         // evidence is computed (`core_y_counts`) and then used only as a tiebreak
         // inside AXIS 1.
         let yindex_on = cfg.y_index;
+        let decorated_features = cfg.decorated_features;
         let glycan_y_index = if yindex_on {
             GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
         } else {
@@ -784,6 +792,7 @@ impl GlycoCtxOwned {
             peptide_first_on,
             yindex_on,
             isobar_rep,
+            decorated_features,
             gp_k,
             gp_j,
             gp_h,
@@ -834,6 +843,7 @@ impl GlycoCtxOwned {
             max_peptide_first: self.max_peptide_first,
             peptide_first_on: self.peptide_first_on,
             yindex_on: self.yindex_on,
+            decorated_features: self.decorated_features,
             isobar_rep: self.isobar_rep,
             gp_k: self.gp_k,
             gp_j: self.gp_j,
@@ -2167,9 +2177,41 @@ fn score_spectrum_glyco(
                     .map(|(_, s)| s)
                     .expect("ScoredSpectrum must exist for winning charge");
                 let cand = &candidates[w.cand_slot];
+                // The ~40-column PIN feature vector is computed against the BARE
+                // deglycosylated backbone by default, so every glycosite-spanning
+                // fragment sits at the wrong theoretical mass -- on average about half
+                // the b/y ladder of a glycopeptide. IntensitySignal, MatchedIonRatio,
+                // ExplainedIonCurrentRatio, LongestComplementaryLadder, FragPredExplained
+                // and strong_score are therefore all measuring a molecule that was never
+                // in the tube, and those are the columns Percolator weights most heavily.
+                //
+                // `--glyco-decorated-features` measures them against the decorated
+                // backbone instead. Default off pending measurement: note that decorating
+                // the SCORING peptide (a different consumer, above) was measured at -16
+                // backbone-correct, so this is not assumed to be a win.
+                let feat_pep: std::borrow::Cow<'_, model::peptide::Peptide> =
+                    if ctx.decorated_features {
+                        let gmass = bb_hit
+                            .glycan
+                            .as_ref()
+                            .map(|g| g.mass)
+                            .unwrap_or(bb_hit.glycan_mass_residual);
+                        if gmass > 0.0 {
+                            let gsite = glyco_site_for(&cand.peptide);
+                            std::borrow::Cow::Owned(glyco_aware_peptide(
+                                &cand.peptide,
+                                gsite,
+                                gmass,
+                            ))
+                        } else {
+                            std::borrow::Cow::Borrowed(&cand.peptide)
+                        }
+                    } else {
+                        std::borrow::Cow::Borrowed(&cand.peptide)
+                    };
                 let mut features = compute_psm_features(
                     ss,
-                    &cand.peptide,
+                    &feat_pep,
                     spec_scorer,
                     w.z,
                     ctx.intensity_model,

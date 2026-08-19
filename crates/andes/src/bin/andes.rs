@@ -637,6 +637,21 @@ struct SearchArgs {
     #[arg(long = "glyco-y-index", default_value_t = false)]
     glyco_y_index: bool,
 
+    /// Compute the PIN feature vector against the GLYCAN-DECORATED backbone instead of
+    /// the bare deglycosylated peptide.
+    ///
+    /// By default the ~40 feature columns are computed on the bare backbone, so every
+    /// glycosite-spanning fragment sits at the wrong theoretical mass -- roughly half the
+    /// b/y ladder of a glycopeptide. IntensitySignal, MatchedIonRatio,
+    /// ExplainedIonCurrentRatio, LongestComplementaryLadder and strong_score therefore
+    /// describe a molecule that was never in the tube, and those are the columns
+    /// Percolator weights most heavily.
+    ///
+    /// Default off pending measurement: decorating the SCORING peptide (a different
+    /// consumer) was measured at -16 backbone-correct, so this is not assumed to help
+    #[arg(long = "glyco-decorated-features", default_value_t = false)]
+    glyco_decorated_features: bool,
+
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
 
@@ -3284,6 +3299,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cz_multisite: cli.glyco_cz_multisite,
             isobar_rep: cli.glyco_isobar_rep,
             y_index: cli.glyco_y_index,
+            decorated_features: cli.glyco_decorated_features,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,

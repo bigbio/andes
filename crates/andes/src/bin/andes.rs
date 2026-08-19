@@ -510,6 +510,26 @@ struct SearchArgs {
     #[arg(long = "glyco-glycan-list", value_enum, default_value_t = GlycanListFlag::Common)]
     glyco_glycan_list: GlycanListFlag,
 
+    /// Exclude NeuGc (N-glycolylneuraminic acid) glycans from the search list.
+    ///
+    /// Humans do not synthesise NeuGc — CMAH is inactivated in the human lineage, so
+    /// NeuGc in a human sample is trace dietary only. Most other mammals (mouse
+    /// included) DO make it, which is why the mouse-developed glyco benchmarks never
+    /// surfaced this.
+    ///
+    /// NeuGc is also the ENTIRE source of isobaric ambiguity in the default list:
+    /// `NeuGc - NeuAc = 15.994914` and `Hex - Fuc = 15.994915`, so a NeuGc composition
+    /// is mass-degenerate with a NeuAc one. Measured on the default list: 600
+    /// compositions over only 460 distinct masses, 140 masses (30%) carrying more than
+    /// one composition, and 100% of those collisions involve NeuGc. Excluding it gives
+    /// 360 compositions over 360 masses — zero collisions, by construction — and a 40%
+    /// smaller list to search.
+    ///
+    /// Use for human samples. Leave off for mouse and other CMAH-competent species.
+    #[arg(long = "glyco-no-neugc", default_value_t = false)]
+    glyco_no_neugc: bool,
+
+
     /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
     /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
     /// and dropping it measured +81 backbone-correct @1%. `negative` restores
@@ -571,6 +591,18 @@ struct SearchArgs {
     /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
     /// leave it off for electron-transfer data. Exempting ETD scans automatically was
     /// tried and made both regimes worse, because real files are mixed.
+    /// Resolve isobaric glycan-composition collisions on Y-ladder evidence rather
+    /// than sort order. Two compositions can be isobaric to ~1 uDa (Hex-Fuc and
+    /// NeuGc-NeuAc both = 15.9949), and above 2000 Da more than half of the default
+    /// list has such a twin; without this the survivor is chosen by `to_bits()`
+    /// ordering, so the SAME glycan mass can be annotated with DIFFERENT compositions
+    /// on different spectra. Measured on PXD030622 plasma: andes emitted 131
+    /// composition strings over 53 distinct masses (~2.5 per mass) where Byonic was
+    /// 1.0. Off by default: the original A/B scored peptide YIELD (-8), which cannot
+    /// see this. Judge it on compositions-per-mass, not on ID count.
+    #[arg(long = "glyco-isobar-rep", default_value_t = false)]
+    glyco_isobar_rep: bool,
+
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
 
@@ -3084,11 +3116,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
         andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-        let glycan_list = if cli.glyco_glycan_list == GlycanListFlag::Full {
+        let mut glycan_list = if cli.glyco_glycan_list == GlycanListFlag::Full {
             andes_glyco::glycan_db::n_glycan_list()
         } else {
             andes_glyco::glycan_db::n_glycan_list_common()
         };
+        if cli.glyco_no_neugc {
+            let before = glycan_list.len();
+            glycan_list.retain(|g| g.neugc == 0);
+            eprintln!(
+                "--glyco-no-neugc: {} -> {} glycan compositions (NeuGc excluded; humans lack CMAH, \
+                 and NeuGc is the sole source of isobaric mass degeneracy in this list)",
+                before,
+                glycan_list.len()
+            );
+        }
+        let glycan_list = glycan_list;
         let glyco_tol_ppm = cli.glyco_tol_ppm;
         // `!(x > 0.0)` rather than `x <= 0.0` so NaN is rejected too: every
         // comparison against NaN is false, so a NaN tolerance would sail past a
@@ -3121,6 +3164,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             min_matched_by: cli.glyco_min_matched_ions,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,
+            isobar_rep: cli.glyco_isobar_rep,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,

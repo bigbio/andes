@@ -206,6 +206,7 @@ pub fn hybrid_candidates_with_isotope(
         tol_ppm,
         top_k,
         false,
+        false, // isobar_rep: convenience wrapper keeps the historical default
     )
 }
 
@@ -279,6 +280,9 @@ pub fn hybrid_candidates_presolved(
     tol_ppm: f64,
     top_k: usize,
     force_db_on_none: bool,
+    // Resolve isobaric-composition collisions on Y-ladder evidence instead of sort
+    // order. See the block below for why the original A/B under-measured this.
+    isobar_rep: bool,
 ) -> Vec<BackboneHit> {
     const MIN_BACKBONE: f64 = 500.0;
     // Must match `solve_backbone_min`'s MIN_GLYCAN so the widest-precursor
@@ -436,15 +440,22 @@ pub fn hybrid_candidates_presolved(
     // Fix: when a cluster holds >1 DISTINCT composition, pick the representative by
     // composition-specific Y-ladder evidence instead of sort order. Peptide-independent,
     // so target/decoy symmetric. Candidate count is unchanged (still one per cluster).
-    // ANDES_GLYCO_ISOBAR_REP=0 restores the sort-order behaviour.
-    // MEASURED NEGATIVE (-8 backbone-correct @1%, 3-fraction pool): resolving the
-    // collision on Y-ladder evidence changes which composition is annotated but the
-    // backbone mass is identical either way, so the peptide-level outcome barely moves
-    // and the net is slightly worse. Kept opt-in: ANDES_GLYCO_ISOBAR_REP=1.
-    // Evidence-based isobaric-composition representative: MEASURED at -8 and removed.
-    // The backbone mass is identical either way, so the peptide-level outcome barely
-    // moves while the net is slightly worse.
-    let isobar_rep = false;
+    // MEASURED NEGATIVE ON THE WRONG METRIC (-8 backbone-correct @1%, 3-fraction pool)
+    // and disabled. That A/B scored peptide-level yield, and as the original note itself
+    // observed, "the backbone mass is identical either way, so the peptide-level outcome
+    // barely moves" — i.e. the metric was structurally unable to see what this changes.
+    //
+    // What it changes is WHICH COMPOSITION is named for a given glycan mass, and that is
+    // measurably broken. Head-to-head against the depositors' own Byonic results on
+    // PXD030622 human plasma (their FASTA, their published QC): andes emits 131 distinct
+    // composition strings over only 53 distinct glycan MASSES (~2.5 compositions per mass)
+    // where Byonic is 1.0 — i.e. two spectra of the same glycan can be annotated with
+    // different compositions, because the survivor among isobaric twins is chosen by
+    // `to_bits()` sort order. The masses themselves are largely right: 74% of andes PSMs
+    // carry a mass Byonic also observed and the median is 2205 Da in both.
+    //
+    // So this is now a flag (`--glyco-isobar-rep`), to be judged on
+    // COMPOSITIONS-PER-MASS against a reference distribution, not on yield.
     let iso_stats = isobar_rep.then(|| SpectrumStats::new(peaks));
     // Y-ladder evidence for a hit's own composition (0.0 for de-novo / no comp).
     let comp_evidence = |h: &BackboneHit| -> f64 {
@@ -741,6 +752,7 @@ mod tests {
                 tol,
                 top_k,
                 false,
+                false, // isobar_rep: this test pins isotope-sweep equivalence only
             ));
         }
 

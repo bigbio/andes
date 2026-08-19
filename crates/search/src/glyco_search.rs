@@ -67,6 +67,9 @@ pub struct GlycoConfig {
     pub min_matched_by: u32,
     /// Choose the glycosite by c/z evidence when a peptide has >1 N-X-S/T sequon.
     pub cz_multisite: bool,
+    /// Resolve isobaric-composition collisions on Y-ladder evidence instead of
+    /// `to_bits()` sort order (`--glyco-isobar-rep`).
+    pub isobar_rep: bool,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
     pub scan_filter_path: Option<std::path::PathBuf>,
@@ -108,6 +111,7 @@ pub struct GlycoConfig {
 impl Default for GlycoConfig {
     fn default() -> Self {
         Self {
+            isobar_rep: false,
             gp_k: GLYCO_GP_K_DEFAULT,
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
@@ -490,6 +494,10 @@ pub struct GlycoScoreCtx<'a> {
     pub max_peptide_first: usize,
     pub peptide_first_on: bool,
     pub yindex_on: bool,
+    /// Resolve isobaric-composition collisions on Y-ladder evidence rather than sort
+    /// order (`--glyco-isobar-rep`). Off by default: the original A/B measured -8 on
+    /// peptide YIELD, a metric structurally blind to which composition gets named.
+    pub isobar_rep: bool,
     /// `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`).
     /// Process-constant, so read ONCE in [`GlycoCtxOwned::build`] rather than per
     /// spectrum — `score_spectrum_glyco` runs in `par_iter`.
@@ -545,6 +553,7 @@ pub struct GlycoCtxOwned {
     max_peptide_first: usize,
     peptide_first_on: bool,
     yindex_on: bool,
+    isobar_rep: bool,
     gp_k: f32,
     gp_j: f32,
     gp_h: f32,
@@ -597,6 +606,7 @@ impl GlycoCtxOwned {
         // composition-ladder cost, so leaving it on would slow the shipping default.
         let glyco_decoy_on = cfg.glyco_decoy;
         let hcd_pair_on = cfg.hcd_pair;
+        let isobar_rep = cfg.isobar_rep;
         let etd_rank_glycan = cfg.etd_rank_glycan;
         let cz_gate = cfg.cz_gate;
         // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
@@ -758,6 +768,7 @@ impl GlycoCtxOwned {
             max_peptide_first,
             peptide_first_on,
             yindex_on,
+            isobar_rep,
             gp_k,
             gp_j,
             gp_h,
@@ -808,6 +819,7 @@ impl GlycoCtxOwned {
             max_peptide_first: self.max_peptide_first,
             peptide_first_on: self.peptide_first_on,
             yindex_on: self.yindex_on,
+            isobar_rep: self.isobar_rep,
             gp_k: self.gp_k,
             gp_j: self.gp_j,
             gp_h: self.gp_h,
@@ -1186,6 +1198,7 @@ fn score_spectrum_glyco(
                         tol_ppm,
                         effective_top_k,
                         etd_db_fallback,
+                        ctx.isobar_rep,
                     );
                     for h in hits {
                         all_backbone.push(h);

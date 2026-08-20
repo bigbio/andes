@@ -1388,12 +1388,6 @@ impl<'a> ScoredSpectrum<'a> {
         let mut prefix_nominal_arr: Vec<i32> = Vec::with_capacity(n + 1);
         prefix_nominal_arr.push(0);
         let mut prefix_acc = 0.0_f64;
-        // EXACT prefix masses, kept alongside the nominal ones. The nominal array
-        // drives partition/cache-key selection exactly as before; the exact array
-        // drives the theoretical m/z, so a recorded match error reflects the
-        // instrument rather than the nominal rounding (median 52 ppm).
-        let mut prefix_real_arr: Vec<f64> = Vec::with_capacity(n + 1);
-        prefix_real_arr.push(0.0);
         for s in 1..n {
             let aa = &peptide.residues[s - 1];
             prefix_acc += aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
@@ -1434,7 +1428,9 @@ impl<'a> ScoredSpectrum<'a> {
                     &self.segment_partition_cache,
                     scorer,
                     nominal_mass,
-                    // `None`, NOT `Some(exact_mass)` — deliberately, see below.
+                    // `None`, not the exact mass: training must record errors against the
+                    // SAME reference serving uses (serving has only the nominal cache
+                    // index). See the `exact_mass` parameter doc.
                     None,
                     is_prefix,
                     self.charge,
@@ -1502,7 +1498,8 @@ impl<'a> ScoredSpectrum<'a> {
                         &self.segment_partition_cache,
                         scorer,
                         nominal_mass,
-                        // `None`, NOT `Some(exact_mass)` — deliberately, see below.
+                        // `None`, not the exact mass — same reason as the intact path:
+                        // train and serve must share a theoretical-m/z reference.
                         None,
                         is_prefix,
                         self.charge,

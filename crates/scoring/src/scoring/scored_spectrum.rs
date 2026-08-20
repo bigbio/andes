@@ -1398,15 +1398,11 @@ impl<'a> ScoredSpectrum<'a> {
             let aa = &peptide.residues[s - 1];
             prefix_acc += aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
             prefix_nominal_arr.push(nominal_from(prefix_acc));
-            prefix_real_arr.push(prefix_acc);
         }
         // The last internal split uses the accumulated value.
         let last_aa = &peptide.residues[n - 1];
         prefix_acc += last_aa.mass + last_aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
         prefix_nominal_arr.push(nominal_from(prefix_acc));
-        prefix_real_arr.push(prefix_acc);
-        // Total residue mass (exact); suffix_real = total - prefix_real.
-        let peptide_real_total = prefix_acc;
 
         let mut out: Vec<IonMatchFact> = Vec::new();
 
@@ -1430,19 +1426,16 @@ impl<'a> ScoredSpectrum<'a> {
         for split in 1..n {
             let prefix_nom = prefix_nominal_arr[split] as f64;
             let suffix_nom = (peptide_nominal - prefix_nominal_arr[split]) as f64;
-            let prefix_real = prefix_real_arr[split];
-            let suffix_real = peptide_real_total - prefix_real;
 
-            for &(is_prefix, nominal_mass, exact_mass) in
-                &[(true, prefix_nom, prefix_real), (false, suffix_nom, suffix_real)]
-            {
+            for &(is_prefix, nominal_mass) in &[(true, prefix_nom), (false, suffix_nom)] {
                 visit_directional_node_ion_matches(
                     peaks,
                     ranks,
                     &self.segment_partition_cache,
                     scorer,
                     nominal_mass,
-                    Some(exact_mass),
+                    // `None`, NOT `Some(exact_mass)` — deliberately, see below.
+                    None,
                     is_prefix,
                     self.charge,
                     self.parent_mass,
@@ -1499,9 +1492,9 @@ impl<'a> ScoredSpectrum<'a> {
             if emit_losses {
                 let prefix_losses = span_losses(peptide, 0..split);
                 let suffix_losses = span_losses(peptide, split..n);
-                for &(is_prefix, nominal_mass, exact_mass, losses) in &[
-                    (true, prefix_nom, prefix_real, &prefix_losses),
-                    (false, suffix_nom, suffix_real, &suffix_losses),
+                for &(is_prefix, nominal_mass, losses) in &[
+                    (true, prefix_nom, &prefix_losses),
+                    (false, suffix_nom, &suffix_losses),
                 ] {
                     visit_directional_loss_ion_facts(
                         peaks,
@@ -1509,7 +1502,8 @@ impl<'a> ScoredSpectrum<'a> {
                         &self.segment_partition_cache,
                         scorer,
                         nominal_mass,
-                        Some(exact_mass),
+                        // `None`, NOT `Some(exact_mass)` — deliberately, see below.
+                        None,
                         is_prefix,
                         self.charge,
                         self.parent_mass,
@@ -1679,14 +1673,27 @@ fn visit_directional_node_ion_matches<F>(
     segment_partition_cache: SegmentPartitionSlice<'_>,
     scorer: &RankScorer,
     nominal_mass: f64,
-    // EXACT (unquantised) neutral mass of this fragment when the caller knows it.
-    // `Some` on the TRAINING signal path, which walks real peptides; `None` on SERVING
-    // (its node-score cache is indexed by nominal mass, so no exact value exists) and
-    // `None` on the dense NOISE lattice, which samples nominal positions by design.
-    // When `Some`, theo m/z comes from `IonType::mz_exact` rather than the nominal
-    // reconstruction, which is displaced by a MEDIAN 52 ppm — enough that the recorded
-    // mass error became the rounding artifact instead of the instrument's accuracy,
-    // leaving `ion_err` and `noise_err` indistinguishable by construction.
+    // EXACT (unquantised) neutral mass of this fragment. Plumbed and TESTED, but every
+    // caller currently passes `None`, on purpose.
+    //
+    // The tempting change is to pass `Some(..)` on the training path so recorded mass
+    // errors reflect the instrument rather than the nominal rounding (median 52 ppm).
+    // That is a TRAP while serving cannot do the same. Serving derives theo m/z from the
+    // node-score cache, which is INDEXED BY NOMINAL MASS, so it has no exact value to
+    // offer. Train on exact and serve on nominal and the `ion_err` table is learned from
+    // a distribution genuine fragments cannot sit in at scoring time — reintroducing
+    // "real ions look like noise" in a new place, and only AFTER a retrain, which is the
+    // worst time to discover it.
+    //
+    // The fix that DOES work without that hazard is the window: training now matches at
+    // the model's own `mme` instead of 20 ppm, which repairs the presence/absence
+    // collapse (the large defect: absent-ion penalty ~-0.04 nats vs ~-0.8 on low-res)
+    // and leaves both sides on the same nominal reference. The error channel stays as
+    // uninformative as it is today — no regression, no new mismatch.
+    //
+    // To finish the job, serving must carry the exact mass too, which means reworking the
+    // nominal-indexed cache. `mz_exact` and its tests are kept as the specification for
+    // that work.
     exact_mass: Option<f64>,
     is_prefix: bool,
     charge: u8,

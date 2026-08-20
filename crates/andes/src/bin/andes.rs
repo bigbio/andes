@@ -663,7 +663,15 @@ struct SearchArgs {
     ///
     /// Deliberately a threshold, not a presence test: Chalkley & Baker (MCP 2025) found
     /// ~70% of spectra carrying a NeuGc oxonium contained no NeuGc, from co-isolation, so
-    /// a binary test admits almost everything. 0.02 (2% of base peak) is a sane start.
+    /// a binary test admits almost everything.
+    ///
+    /// MEASURED on PXD030622 plasma with an E. coli entrapment database: it fixes
+    /// CALIBRATION, not yield. 2% gives 267 glycoPSMs @0.00% entrapment FDP and 5% gives
+    /// 241 @0.00%, against an ungated 268 @1.87% -- so it flips the verdict from
+    /// OPTIMISTIC to CONSERVATIVE at no yield cost, but buys no identifications, and an
+    /// FDP pinned at 0.00% means the threshold has tightened past the useful point.
+    /// Species exclusion (`--glyco-no-neugc`) still wins on yield there: 365 @0.55%.
+    /// If you tune this, go LOOSER (0.005-0.01), not stricter.
     ///
     /// Gates SIALIC only, never fucose -- PTM-Shepherd's published hit/miss ratios weight
     /// absence of a fucose oxonium 10x weaker than absence of a sialic one

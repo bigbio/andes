@@ -174,7 +174,10 @@ where
         }
         neuac_spectra += 1;
         let g = best(&NEUGC_OXONIUM_MZ);
-        if g >= ratio_floor * a {
+        // BOTH tests must pass. The ratio rejects co-isolation bleed-through; the absolute
+        // floor rejects a ratio computed from two noise-level peaks (a weak NeuAc signal
+        // makes `ratio_floor * a` trivially small, so the ratio alone is not enough).
+        if g >= floor && g >= ratio_floor * a {
             neugc_spectra += 1;
         }
     }

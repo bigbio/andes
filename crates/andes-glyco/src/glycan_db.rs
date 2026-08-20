@@ -44,8 +44,9 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
     // EXPANDED 2026-07-09: Fuc 3→4, Hex 3..12 → 2..14 to cover high-Fuc / extended- and
     // truncated-Hex gap compositions (+~11 truth backbones on PXD025455 Fc3_r1); HexNAc/
     // NeuAc/NeuGc bounds held to limit candidate bloat.
-    // Bounds must remain a SUPERSET of `n_glycan_list_common`, which reaches HexNAc 11
-    // and (on the high-mannose arm) Hex 1 — the subset invariant is asserted by
+    // Bounds must remain a SUPERSET of both generated lists. HexNAc 11 is required by
+    // `n_glycan_list_reference_human`; Hex 1 is required by the paucimannose block that
+    // both lists append. The subset invariant for the default list is asserted by
     // `n_glycan_list_common_is_subset_of_full_list`.
     for hn in 2u8..=11 {
         for hx in 1u8..=14 {
@@ -365,11 +366,10 @@ mod tests {
     #[test]
     fn n_glycan_list_common_size_in_expected_range() {
         let list = n_glycan_list_common();
-        // HexNAc 2..=11; Hex 1..=12 on the high-mannose arm (HexNAc 2) and
-        // 3..=HexNAc+5 for complex/hybrid; Fuc 0..=2, NeuAc 0..=4, NeuGc 0..=1.
-        // Fitted to reach 100% of a curated 160-composition human reference list
-        // (was 68% under the old HexNAc 2..=6 / Hex 3..=10 box) → ~2,400 with NeuGc,
-        // ~1,220 once NeuGc is excluded by --glyco-taxon.
+        // HexNAc 2..=6, Hex 3..=10, Fuc 0..=2, NeuAc 0..=4, NeuGc 0..=1, plus the GI-3
+        // paucimannose block. This is the MEASURED-BEST default box; the reference-fitted
+        // widening (~2,400 with NeuGc) lives in `n_glycan_list_reference_human` and
+        // measured WORSE as a default (-37% IDs on plasma with entrapment).
         assert!(
             list.len() >= 400 && list.len() <= 800,
             "unexpected common glycan count: {}",

@@ -269,8 +269,11 @@ pub fn build_refinement_index(
 pub fn build_peptide_anchored_index(
     base_seqs: &[Vec<u8>],
     // Accession of the Pass-1 protein each backbone came from, parallel to `base_seqs`.
-    // Empty falls back to the historical synthetic `BASEPEP_<i>` naming.
-    base_accessions: &[String],
+    // `None` (or a short slice) falls back to the historical synthetic `BASEPEP_<i>`.
+    // Deliberately `Option`, not `String`: an EMPTY accession would satisfy `.get(i)` and
+    // silently defeat the fallback, emitting a blank Proteins column -- worse than a
+    // synthetic name, because it names nothing AND looks like data.
+    base_accessions: &[Option<String>],
     decoy_prefix: &str,
     decoy_strategy: DecoyStrategy,
     seed: u64,
@@ -293,7 +296,7 @@ pub fn build_peptide_anchored_index(
                 // backbone shared across proteins keeps only its lowest-indexed source.
                 accession: base_accessions
                     .get(i)
-                    .cloned()
+                    .and_then(|a| a.clone())
                     .unwrap_or_else(|| format!("BASEPEP_{i}")),
                 description: String::new(),
                 sequence: seq.clone(),
@@ -644,15 +647,9 @@ pub fn run_refinement(
     let refine_idx =
         {
             // Map each anchored backbone to its Pass-1 protein's real accession.
-            let base_accs: Vec<String> = base_src
+            let base_accs: Vec<Option<String>> = base_src
                 .iter()
-                .map(|&pi| {
-                    full_target_db
-                        .proteins
-                        .get(pi)
-                        .map(|p| p.accession.clone())
-                        .unwrap_or_default()
-                })
+                .map(|&pi| full_target_db.proteins.get(pi).map(|p| p.accession.clone()))
                 .collect();
             build_peptide_anchored_index(
                 &base_seqs,

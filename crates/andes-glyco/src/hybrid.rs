@@ -369,7 +369,13 @@ pub fn hybrid_candidates_presolved(
         // Annotate the glycan by subtraction. `precursor_neutral` and `bb` are
         // both residue-convention, so `precursor_neutral − bb` = glycan mass.
         let residual = precursor_neutral - bb;
-        let glycan = nearest_glycan(glycans, residual, tol_ppm);
+        // Gate this path too. `db_branch` is not the only route a composition takes to
+        // Source::Db -- the Y-first branch annotates via `nearest_glycan`, and leaving it
+        // ungated would let exactly the sialic claims the gate exists to reject enter
+        // through the side door.
+        let glycan = nearest_glycan(glycans, residual, tol_ppm).filter(|g| {
+            sialic_gate.is_none_or(|(ev, min_frac)| ev.admits(g.neuac, g.neugc, min_frac))
+        });
         let source = if glycan.is_some() {
             Source::Db
         } else {

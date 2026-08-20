@@ -668,7 +668,8 @@ struct SearchArgs {
     ///
     /// Gates SIALIC only, never fucose -- PTM-Shepherd's published hit/miss ratios weight
     /// absence of a fucose oxonium 10x weaker than absence of a sialic one
-    #[arg(long = "glyco-sialic-oxonium-min-frac", default_value_t = 0.0f32)]
+    #[arg(long = "glyco-sialic-oxonium-min-frac", default_value_t = 0.0f32,
+          value_parser = parse_unit_fraction_f32)]
     glyco_sialic_oxonium_min_frac: f32,
 
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
@@ -1936,7 +1937,7 @@ enum GlycanListFlag {
     /// 365 @0.55%), because the larger space tightens Percolator's threshold. Use only
     /// when the sample genuinely carries high-antennary glycans, and measure.
     ReferenceHuman,
-    /// ~600 compositions. The measured-best default; what the benchmarks used..
+    /// ~600 compositions. The measured-best default; what the benchmarks used.
     Common,
     /// The full ~7,900-composition list. Widest coverage, worst error control.
     Full,
@@ -6538,6 +6539,13 @@ fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
 /// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
 /// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
 /// bad value is rejected at parse time with a clear message.
+/// f32 companion to [`parse_unit_fraction`], for CLI fractions stored as `f32`.
+/// Rejects NaN, negatives and values above 1 at PARSE time rather than letting a nonsense
+/// threshold silently disable or invert a gate.
+fn parse_unit_fraction_f32(s: &str) -> Result<f32, String> {
+    parse_unit_fraction(s).map(|v| v as f32)
+}
+
 fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()

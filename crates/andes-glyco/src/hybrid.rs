@@ -79,10 +79,20 @@ pub fn db_branch(
     min_backbone: f64,
     charge: u8,
     isotope_offset: i8,
+    // When Some, a composition may only claim NeuAc/NeuGc if the matching oxonium reaches
+    // `min_frac` of base peak in this spectrum. This is the evidence-based alternative to
+    // excluding NeuGc by species: NeuAc and NeuGc are degenerate in PRECURSOR mass but not
+    // in oxonium ions. See `SialicEvidence`.
+    sialic_gate: Option<(crate::oxonium::SialicEvidence, f32)>,
 ) -> Vec<BackboneHit> {
     let mut out: Vec<BackboneHit> = glycans
         .iter()
         .filter_map(|g| {
+            if let Some((ev, min_frac)) = sialic_gate {
+                if !ev.admits(g.neuac, g.neugc, min_frac) {
+                    return None;
+                }
+            }
             let bb = precursor_neutral - g.mass;
             if bb >= min_backbone {
                 Some(BackboneHit {
@@ -207,6 +217,7 @@ pub fn hybrid_candidates_with_isotope(
         top_k,
         false,
         false, // isobar_rep: convenience wrapper keeps the historical default
+        0.0,   // sialic oxonium gate: off
     )
 }
 
@@ -283,8 +294,19 @@ pub fn hybrid_candidates_presolved(
     // Resolve isobaric-composition collisions on Y-ladder evidence instead of sort
     // order. See the block below for why the original A/B under-measured this.
     isobar_rep: bool,
+    // When > 0, a composition may only claim NeuAc/NeuGc if the matching oxonium reaches
+    // this fraction of base peak. 0 disables the gate (historical behaviour).
+    sialic_oxonium_min_frac: f32,
 ) -> Vec<BackboneHit> {
     const MIN_BACKBONE: f64 = 500.0;
+    let sialic_gate = if sialic_oxonium_min_frac > 0.0 {
+        Some((
+            crate::oxonium::sialic_evidence(peaks, tol_ppm),
+            sialic_oxonium_min_frac,
+        ))
+    } else {
+        None
+    };
     // Must match `solve_backbone_min`'s MIN_GLYCAN so the widest-precursor
     // superset re-tightens to this isotope's exact candidate set.
     const MIN_GLYCAN: f64 = 406.0;
@@ -315,6 +337,7 @@ pub fn hybrid_candidates_presolved(
                     MIN_BACKBONE,
                     precursor_z,
                     isotope_offset,
+                    sialic_gate,
                 );
             }
             return Vec::new();
@@ -393,9 +416,17 @@ pub fn hybrid_candidates_presolved(
             MIN_BACKBONE,
             precursor_z,
             isotope_offset,
+            sialic_gate,
         ));
     } else {
-        combined = db_branch(precursor_neutral, glycans, MIN_BACKBONE, precursor_z, isotope_offset);
+        combined = db_branch(
+            precursor_neutral,
+            glycans,
+            MIN_BACKBONE,
+            precursor_z,
+            isotope_offset,
+            sialic_gate,
+        );
     }
 
     // --- Sort all candidates by backbone_mass for dedup pass ---
@@ -550,7 +581,7 @@ mod tests {
         let true_backbone = 1500.0_f64;
         let precursor = true_backbone + glycan_mass;
 
-        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
         assert!(!hits.is_empty(), "expected DB branch hits");
 
         // Must include a hit within ±0.01 Da of true_backbone.
@@ -566,7 +597,7 @@ mod tests {
         let glycans = n_glycan_list();
         // Very small precursor so backbone would be < 500 Da.
         let precursor = 600.0; // glycan of ~100 Da not in list; backbone ~100 Da
-        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
         for h in &hits {
             assert!(h.backbone_mass >= 500.0, "backbone below min: {}", h.backbone_mass);
         }
@@ -577,7 +608,7 @@ mod tests {
     fn db_branch_is_sorted() {
         let glycans = n_glycan_list();
         let precursor = 4000.0;
-        let hits = db_branch(precursor, &glycans, 500.0, 2, 0);
+        let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
         for w in hits.windows(2) {
             assert!(
                 w[0].backbone_mass <= w[1].backbone_mass + 1e-9,
@@ -753,6 +784,7 @@ mod tests {
                 top_k,
                 false,
                 false, // isobar_rep: this test pins isotope-sweep equivalence only
+                0.0,   // sialic oxonium gate: off
             ));
         }
 
@@ -991,7 +1023,7 @@ mod tests {
         let true_backbone = 1500.0_f64;
         let precursor = true_backbone + glycan_mass;
 
-        let hits = db_branch(precursor, &glycans, 500.0, 3, -1);
+        let hits = db_branch(precursor, &glycans, 500.0, 3, -1, None);
         assert!(!hits.is_empty());
         for h in &hits {
             assert_eq!(h.charge, 3, "charge must be threaded onto BackboneHit");

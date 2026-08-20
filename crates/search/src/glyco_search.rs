@@ -77,6 +77,9 @@ pub struct GlycoConfig {
     /// Compute the ~40-column PIN feature vector against the GLYCAN-DECORATED backbone
     /// rather than the bare deglycosylated peptide (`--glyco-decorated-features`).
     pub decorated_features: bool,
+    /// A glycan composition may only claim NeuAc/NeuGc if the matching oxonium reaches
+    /// this fraction of base peak (`--glyco-sialic-oxonium-min-frac`). 0 disables.
+    pub sialic_oxonium_min_frac: f32,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
     pub scan_filter_path: Option<std::path::PathBuf>,
@@ -121,6 +124,7 @@ impl Default for GlycoConfig {
             isobar_rep: false,
             y_index: false,
             decorated_features: false,
+            sialic_oxonium_min_frac: 0.0,
             gp_k: GLYCO_GP_K_DEFAULT,
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
@@ -505,6 +509,8 @@ pub struct GlycoScoreCtx<'a> {
     pub yindex_on: bool,
     /// See `GlycoConfig::decorated_features`.
     pub decorated_features: bool,
+    /// See `GlycoConfig::sialic_oxonium_min_frac`.
+    pub sialic_oxonium_min_frac: f32,
     /// Resolve isobaric-composition collisions on Y-ladder evidence rather than sort
     /// order (`--glyco-isobar-rep`). Off by default: the original A/B measured -8 on
     /// peptide YIELD, a metric structurally blind to which composition gets named.
@@ -565,6 +571,7 @@ pub struct GlycoCtxOwned {
     peptide_first_on: bool,
     yindex_on: bool,
     decorated_features: bool,
+    sialic_oxonium_min_frac: f32,
     isobar_rep: bool,
     gp_k: f32,
     gp_j: f32,
@@ -693,6 +700,7 @@ impl GlycoCtxOwned {
         // inside AXIS 1.
         let yindex_on = cfg.y_index;
         let decorated_features = cfg.decorated_features;
+        let sialic_oxonium_min_frac = cfg.sialic_oxonium_min_frac;
         let glycan_y_index = if yindex_on {
             GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
         } else {
@@ -793,6 +801,7 @@ impl GlycoCtxOwned {
             yindex_on,
             isobar_rep,
             decorated_features,
+            sialic_oxonium_min_frac,
             gp_k,
             gp_j,
             gp_h,
@@ -844,6 +853,7 @@ impl GlycoCtxOwned {
             peptide_first_on: self.peptide_first_on,
             yindex_on: self.yindex_on,
             decorated_features: self.decorated_features,
+            sialic_oxonium_min_frac: self.sialic_oxonium_min_frac,
             isobar_rep: self.isobar_rep,
             gp_k: self.gp_k,
             gp_j: self.gp_j,
@@ -1224,6 +1234,7 @@ fn score_spectrum_glyco(
                         effective_top_k,
                         etd_db_fallback,
                         ctx.isobar_rep,
+                        ctx.sialic_oxonium_min_frac,
                     );
                     for h in hits {
                         all_backbone.push(h);

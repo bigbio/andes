@@ -233,3 +233,106 @@ mod sialic_survey_tests {
         assert!(!r.conclusive, "must refuse to judge on 10 spectra");
     }
 }
+
+/// Per-spectrum sialic-acid oxonium evidence, used to gate which SIALIC content a glycan
+/// composition may claim.
+///
+/// NeuAc and NeuGc are indistinguishable by precursor mass when traded against Hex/Fuc
+/// (`Hex1NeuAc1` and `Fuc1NeuGc1` are the same elemental formula), but they are NOT
+/// indistinguishable in oxonium ions: NeuAc gives m/z 274.092/292.103 and NeuGc gives
+/// 290.087/308.098. Requiring the matching oxonium before a composition may claim that
+/// sialic is the mechanism the field uses to break the degeneracy — pGlyco3/pGlycoNovo:
+/// "if there are no pre-defined X-diagnostic B ions found for the X-containing glycan
+/// ... the glycan will also be removed".
+///
+/// ⚠ INTENSITY-THRESHOLDED, NOT PRESENCE-BASED. Chalkley & Baker (Mol Cell Proteomics
+/// 2025, doi:10.1016/j.mcpro.2025.100903) measured 40,466 mouse-liver spectra carrying the
+/// m/z 290 NeuGc oxonium among glycopeptides containing NO NeuGc — roughly 70% of spectra
+/// with a NeuGc oxonium had none — because co-isolated glycopeptides contribute it. A
+/// binary presence test would therefore admit almost everything.
+#[derive(Debug, Clone, Copy)]
+pub struct SialicEvidence {
+    /// Max NeuAc oxonium intensity as a fraction of base peak.
+    pub neuac_frac: f32,
+    /// Max NeuGc oxonium intensity as a fraction of base peak.
+    pub neugc_frac: f32,
+}
+
+/// Measure sialic oxonium evidence in one spectrum.
+pub fn sialic_evidence(peaks: &[(f64, f32)], tol_ppm: f64) -> SialicEvidence {
+    let base = peaks.iter().map(|p| p.1).fold(0.0f32, f32::max).max(1e-9);
+    let best = |ions: &[f64]| -> f32 {
+        let mut acc = 0.0f32;
+        for &mz in ions {
+            let tol = (mz * tol_ppm / 1e6).max(0.01);
+            for &(pmz, pi) in peaks {
+                if (pmz - mz).abs() <= tol && pi > acc {
+                    acc = pi;
+                }
+            }
+        }
+        acc / base
+    };
+    SialicEvidence {
+        neuac_frac: best(&NEUAC_OXONIUM_MZ),
+        neugc_frac: best(&NEUGC_OXONIUM_MZ),
+    }
+}
+
+impl SialicEvidence {
+    /// Should a composition claiming this sialic content be admitted?
+    ///
+    /// `min_frac` is the base-peak fraction the matching oxonium must reach. Compositions
+    /// claiming no sialic are always admitted — absence of a sialic oxonium is evidence
+    /// against a sialylated composition, never against an unsialylated one.
+    ///
+    /// The asymmetry is deliberate and follows PTM-Shepherd's published hit/miss ratios
+    /// (NeuAc 2/0.05, NeuGc 2/0.05, dHex 2/0.5): ABSENCE of a sialic oxonium is strong
+    /// evidence, whereas absence of a fucose oxonium is weak — so this gates sialic only
+    /// and never fucose.
+    #[inline]
+    pub fn admits(&self, neuac: u8, neugc: u8, min_frac: f32) -> bool {
+        if neuac > 0 && self.neuac_frac < min_frac {
+            return false;
+        }
+        if neugc > 0 && self.neugc_frac < min_frac {
+            return false;
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod sialic_gate_tests {
+    use super::*;
+
+    #[test]
+    fn unsialylated_compositions_are_never_gated_out() {
+        let ev = sialic_evidence(&[(500.0, 100.0)], 20.0);
+        assert!(ev.admits(0, 0, 0.02), "a composition claiming no sialic needs no oxonium");
+    }
+
+    #[test]
+    fn neuac_claim_requires_neuac_oxonium() {
+        let none = sialic_evidence(&[(500.0, 100.0)], 20.0);
+        assert!(!none.admits(2, 0, 0.02));
+        let seen = sialic_evidence(&[(500.0, 100.0), (292.10267, 20.0)], 20.0);
+        assert!(seen.admits(2, 0, 0.02));
+    }
+
+    #[test]
+    fn neugc_claim_requires_neugc_oxonium_not_neuac() {
+        // A NeuAc oxonium must NOT license a NeuGc claim -- that is the whole degeneracy.
+        let ac_only = sialic_evidence(&[(500.0, 100.0), (292.10267, 40.0)], 20.0);
+        assert!(ac_only.admits(1, 0, 0.02));
+        assert!(!ac_only.admits(0, 1, 0.02), "NeuAc oxonium must not admit a NeuGc claim");
+    }
+
+    #[test]
+    fn trace_oxonium_below_threshold_does_not_admit() {
+        // Chalkley: co-isolation puts a trace NeuGc oxonium on most spectra.
+        let trace = sialic_evidence(&[(500.0, 100.0), (290.08702, 0.5)], 20.0);
+        assert!(!trace.admits(0, 1, 0.02), "0.5% of base peak is co-isolation bleed");
+        assert!(trace.admits(0, 1, 0.001), "and it is admitted if the bar is set that low");
+    }
+}

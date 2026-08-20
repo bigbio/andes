@@ -652,6 +652,25 @@ struct SearchArgs {
     #[arg(long = "glyco-decorated-features", default_value_t = false)]
     glyco_decorated_features: bool,
 
+    /// Require a matching sialic OXONIUM ion before a glycan composition may claim
+    /// NeuAc or NeuGc, as a fraction of base-peak intensity. 0 disables the gate.
+    ///
+    /// NeuAc and NeuGc are indistinguishable by precursor mass when traded against
+    /// Hex/Fuc -- Hex1NeuAc1 and Fuc1NeuGc1 are the SAME elemental formula -- but they
+    /// are distinguishable in oxonium ions: NeuAc gives m/z 274.092/292.103, NeuGc gives
+    /// 290.087/308.098. Gating on those is how pGlyco3 breaks the degeneracy, and it is
+    /// the evidence-based alternative to excluding NeuGc by species
+    /// (`--glyco-taxon` / `--glyco-no-neugc`), so it also works where NeuGc is real.
+    ///
+    /// Deliberately a threshold, not a presence test: Chalkley & Baker (MCP 2025) found
+    /// ~70% of spectra carrying a NeuGc oxonium contained no NeuGc, from co-isolation, so
+    /// a binary test admits almost everything. 0.02 (2% of base peak) is a sane start.
+    ///
+    /// Gates SIALIC only, never fucose -- PTM-Shepherd's published hit/miss ratios weight
+    /// absence of a fucose oxonium 10x weaker than absence of a sialic one
+    #[arg(long = "glyco-sialic-oxonium-min-frac", default_value_t = 0.0f32)]
+    glyco_sialic_oxonium_min_frac: f32,
+
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
 
@@ -3300,6 +3319,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             isobar_rep: cli.glyco_isobar_rep,
             y_index: cli.glyco_y_index,
             decorated_features: cli.glyco_decorated_features,
+            sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,

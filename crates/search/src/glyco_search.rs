@@ -1351,6 +1351,28 @@ fn score_spectrum_glyco(
             // glycoforms (empty on pass 1). Added to the same dedup/score path.
             all_backbone.extend_from_slice(transfer);
 
+            // SIALIC OXONIUM GATE, APPLIED ONCE OVER EVERY GENERATOR.
+            //
+            // `db_branch` and the Y-first `nearest_glycan` route are NOT the only ways a
+            // composition reaches `Source::Db`: the peptide-first union (on by DEFAULT) and
+            // the glycan-Y-first G1 block both annotate and push independently. Gating only
+            // inside `hybrid.rs` left the flag largely inert on HCD — precisely the regime
+            // it was written for, where peptide-first is the productive generator — and
+            // worse, biased WHICH generator won by pruning one of them only.
+            //
+            // Applying it here, after the union and before dedup, is structurally immune to
+            // the next generator someone adds. This is the `path_parity` rule: a feature
+            // filled on one path must be filled on all.
+            if ctx.sialic_oxonium_min_frac > 0.0 {
+                let ev = andes_glyco::oxonium::sialic_evidence(gen_peaks, tol_ppm);
+                all_backbone.retain(|h| match &h.glycan {
+                    Some(g) => ev.admits(g.neuac, g.neugc, ctx.sialic_oxonium_min_frac),
+                    // De-novo hits carry no composition, so there is no sialic claim to
+                    // check; they are unaffected by a composition-level gate.
+                    None => true,
+                });
+            }
+
             if all_backbone.is_empty() {
                 return None;
             }
@@ -2197,9 +2219,10 @@ fn score_spectrum_glyco(
                 // in the tube, and those are the columns Percolator weights most heavily.
                 //
                 // `--glyco-decorated-features` measures them against the decorated
-                // backbone instead. Default off pending measurement: note that decorating
-                // the SCORING peptide (a different consumer, above) was measured at -16
-                // backbone-correct, so this is not assumed to be a win.
+                // backbone instead. MEASURED AT -41% (365 -> 215 glycoPSMs on plasma with
+                // entrapment) and left off: under HCD the glycan is lost BEFORE backbone
+                // fragmentation, so the bare backbone is the correct b/y ladder and
+                // decorating moves half of it to masses with no peaks.
                 let feat_pep: std::borrow::Cow<'_, model::peptide::Peptide> =
                     if ctx.decorated_features {
                         let gmass = bb_hit

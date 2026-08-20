@@ -329,18 +329,6 @@ impl IonType {
     /// True if this is a neutral-loss-shifted fragment ion (any loss class).
     pub fn is_loss(&self) -> bool { self.loss_class() != 0 }
 
-    /// Compute the predicted m/z for this ion type given a **nominal** node mass.
-    ///
-    /// Formula:
-    ///   `real_mass = node_nominal / INTEGER_MASS_SCALER`
-    ///   `mz = real_mass / charge + offset`
-    ///
-    /// The `offset` field already includes the proton mass contribution
-    /// (for b-ions: `offset = PROTON ≈ 1.00728`; for y-ions: `offset = H2O + PROTON ≈ 19.018`).
-    /// The `INTEGER_MASS_SCALER` division converts integer nominal mass back to real
-    /// monoisotopic mass before dividing by charge.
-    ///
-    /// For `Noise`, returns 0.0.
     /// [`mz`](Self::mz) computed from the EXACT (unquantised) fragment neutral mass.
     ///
     /// [`mz`](Self::mz) recovers the mass from the INTEGER nominal node index
@@ -355,6 +343,8 @@ impl IonType {
     ///
     /// Training walks actual peptides and therefore has the exact accumulated fragment
     /// mass; it uses this. Serving keeps [`mz`](Self::mz).
+    ///
+    /// For `Noise`, returns 0.0.
     pub fn mz_exact(&self, real_mass: f64) -> f64 {
         match self {
             IonType::Prefix { charge, offset_bits, .. } | IonType::Suffix { charge, offset_bits, .. } => {
@@ -365,6 +355,23 @@ impl IonType {
         }
     }
 
+    /// Compute the predicted m/z for this ion type given a **nominal** node mass.
+    ///
+    /// Formula:
+    ///   `real_mass = node_nominal / INTEGER_MASS_SCALER`
+    ///   `mz = real_mass / charge + offset`
+    ///
+    /// The `offset` field already includes the proton mass contribution
+    /// (for b-ions: `offset = PROTON ≈ 1.00728`; for y-ions: `offset = H2O + PROTON ≈ 19.018`).
+    /// The `INTEGER_MASS_SCALER` division converts integer nominal mass back to real
+    /// monoisotopic mass before dividing by charge.
+    ///
+    /// For `Noise`, returns 0.0.
+    ///
+    /// ⚠ The nominal round-trip displaces the result by a median 52 ppm. That is
+    /// harmless for SERVING, whose `mme` window absorbs it, and unavoidable there
+    /// because the node-score cache is indexed by nominal mass — but training should
+    /// use [`mz_exact`](Self::mz_exact) instead.
     pub fn mz(&self, node_nominal: f64) -> f64 {
         match self {
             IonType::Prefix { charge, offset_bits, .. } | IonType::Suffix { charge, offset_bits, .. } => {

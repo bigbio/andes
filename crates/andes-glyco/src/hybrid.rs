@@ -369,13 +369,26 @@ pub fn hybrid_candidates_presolved(
         // Annotate the glycan by subtraction. `precursor_neutral` and `bb` are
         // both residue-convention, so `precursor_neutral − bb` = glycan mass.
         let residual = precursor_neutral - bb;
-        // Gate this path too. `db_branch` is not the only route a composition takes to
-        // Source::Db -- the Y-first branch annotates via `nearest_glycan`, and leaving it
-        // ungated would let exactly the sialic claims the gate exists to reject enter
-        // through the side door.
-        let glycan = nearest_glycan(glycans, residual, tol_ppm).filter(|g| {
-            sialic_gate.is_none_or(|(ev, min_frac)| ev.admits(g.neuac, g.neugc, min_frac))
-        });
+        // Gate this path too -- `db_branch` is not the only route to Source::Db.
+        //
+        // The gate must be applied BEFORE the argmin, not after it. Filtering the winner
+        // (`nearest_glycan(..).filter(..)`) would drop the annotation entirely whenever the
+        // closest composition happens to be a gated-out sialic claim, instead of falling
+        // through to the non-sialic isobaric twin that is also inside the tolerance window.
+        // That is precisely the "shadow steals the argmax" failure that motivated the
+        // species gate in the first place: a wrong-but-mass-matching candidate wins and the
+        // real composition never gets considered.
+        let glycan = match sialic_gate {
+            Some((ev, min_frac)) => {
+                let admitted: Vec<GlycanComp> = glycans
+                    .iter()
+                    .filter(|g| ev.admits(g.neuac, g.neugc, min_frac))
+                    .cloned()
+                    .collect();
+                nearest_glycan(&admitted, residual, tol_ppm)
+            }
+            None => nearest_glycan(glycans, residual, tol_ppm),
+        };
         let source = if glycan.is_some() {
             Source::Db
         } else {

@@ -569,10 +569,9 @@ pub fn run_refinement(
     decoy_strategy: DecoyStrategy,
     seed: u64,
 ) -> Option<RefinementOutput> {
-    // `full_target_db` is no longer consulted (the refinement db is anchored on
+    // `full_target_db` is consulted for the anchored backbones' real accessions (the refinement db is anchored on
     // confident PEPTIDES, not a protein subset); keep the param so the andes call
     // site is untouched.
-    let _ = full_target_db;
 
     // Pass-2 builds its own scoped target+decoy index for TDC. With
     // DecoyStrategy::None that index is target-only, so every Pass-2 winner is a

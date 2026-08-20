@@ -539,10 +539,12 @@ struct SearchArgs {
 
     /// Glycan biology to assume for the search space.
     ///
-    /// `auto` (default) surveys the NeuGc/NeuAc oxonium ratio across the run and
-    /// cross-checks `OX=` taxon ids in the FASTA, then narrows the list only when both
-    /// point the same way; it prints what it found and how to override. `human` forces
-    /// NeuGc out, `mammal` forces it in.
+    /// `auto` (default) surveys the NeuGc/NeuAc oxonium ratio across the run, and treats
+    /// the FASTA's `OX=` taxon ids as a VETO rather than a second vote: it narrows the
+    /// list when the spectra show no NeuGc, unless the database is a CMAH-competent
+    /// organism. A database with no `OX=` headers, or a mixed one, does not block
+    /// narrowing. It prints both signals and the decision. `human` forces NeuGc out,
+    /// `mammal` forces it in.
     ///
     /// `--glyco-no-neugc` is the explicit override and wins over this.
     #[arg(long = "glyco-taxon", value_enum, default_value_t = GlycoTaxonFlag::Auto)]
@@ -596,13 +598,6 @@ struct SearchArgs {
     #[arg(long = "glyco-gp-m", hide = true, default_value_t = 0.0f32)]
     glyco_gp_m: f32,
 
-    /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
-    /// scan. andes historically reported a best guess for every scan clearing the
-    /// oxonium gate, so most reported rows had no glycan evidence at all. Every other
-    /// engine requires this: pGlyco3 and O-Pair require 2 core Y ions, Glyco-Decipher 3
-    /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
-    /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
-    ///
     /// MEASURED TRADE-OFF, which is why the default is 0. On a pooled human plasma set
     /// (stepped-collision HCD) `2` took verified-correct identifications from 0 to 87 at
     /// 1% FDR with a measured 0.75% false-discovery proportion — the ungated run
@@ -647,8 +642,12 @@ struct SearchArgs {
     /// describe a molecule that was never in the tube, and those are the columns
     /// Percolator weights most heavily.
     ///
-    /// Default off pending measurement: decorating the SCORING peptide (a different
-    /// consumer) was measured at -16 backbone-correct, so this is not assumed to help
+    /// MEASURED AT -41% AND LEFT OFF. On PXD030622 plasma with an E. coli entrapment
+    /// database this took 365 glycoPSMs @0.55% FDP down to 215 @0.00%. The premise was
+    /// wrong: under HCD a glycopeptide fragments at the GLYCOSIDIC bonds first, so b/y
+    /// ions come from the backbone AFTER the glycan is lost -- the BARE backbone is the
+    /// correct theoretical ladder, and decorating moves half the predicted ladder to
+    /// masses with no peaks. Consistent with the -16 measured on the scoring peptide
     #[arg(long = "glyco-decorated-features", default_value_t = false)]
     glyco_decorated_features: bool,
 
@@ -672,6 +671,13 @@ struct SearchArgs {
           value_parser = parse_unit_fraction_f32)]
     glyco_sialic_oxonium_min_frac: f32,
 
+    /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
+    /// scan. andes historically reported a best guess for every scan clearing the
+    /// oxonium gate, so most reported rows had no glycan evidence at all. Every other
+    /// engine requires this: pGlyco3 and O-Pair require 2 core Y ions, Glyco-Decipher 3
+    /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
+    /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
+    ///
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
 
@@ -6536,9 +6542,6 @@ fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
     Ok(if is_ppm { Tolerance::Ppm(v) } else { Tolerance::Da(v) })
 }
 
-/// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
-/// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
-/// bad value is rejected at parse time with a clear message.
 /// f32 companion to [`parse_unit_fraction`], for CLI fractions stored as `f32`.
 /// Rejects NaN, negatives and values above 1 at PARSE time rather than letting a nonsense
 /// threshold silently disable or invert a gate.
@@ -6546,6 +6549,9 @@ fn parse_unit_fraction_f32(s: &str) -> Result<f32, String> {
     parse_unit_fraction(s).map(|v| v as f32)
 }
 
+/// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a
+/// finite number in `[0, 1]` (finding 3.8). Used as a clap `value_parser` so a
+/// bad value is rejected at parse time with a clear message.
 fn parse_unit_fraction(s: &str) -> Result<f64, String> {
     let v: f64 = s
         .trim()

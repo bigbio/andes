@@ -2675,18 +2675,6 @@ pub(crate) fn dedup_pepseq_score(
     out
 }
 
-/// Number of raw base-peptide records in the mmap index that share `cand`'s
-/// `(protein_index, start_offset, length, decoy/n-term/c-term flags)` identity —
-/// i.e. how many times the in-RAM `enumerate_candidates` emits this base peptide
-/// at these exact coordinates (≥1; >1 only for the N-terminal-Met
-/// re-enumeration that produces identical-coordinate spans). Used by the `Mmap`
-/// path to replicate each lazily-expanded peptidoform so the per-spectrum
-/// candidate set (and thus the `dedup_pepseq_score`-aggregated `candidate_idxs`,
-/// hence the PIN `Proteins` column) matches the in-RAM path copy-for-copy.
-///
-/// The base mass (unmodified residue masses + water) is recovered from the
-/// candidate by subtracting each residue's mod delta; the index is queried at
-/// that exact `mass_milli`.
 /// Allocation-free peptidoform identity for the per-spectrum DeltaRankScore tracker:
 /// residues plus per-residue modification deltas, quantised to 1e-5 Da exactly as
 /// [`PepDedupKey`] quantises them, so the two agree on what "the same peptidoform"
@@ -2708,6 +2696,18 @@ pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
     h.finish()
 }
 
+/// Number of raw base-peptide records in the mmap index that share `cand`'s
+/// `(protein_index, start_offset, length, decoy/n-term/c-term flags)` identity —
+/// i.e. how many times the in-RAM `enumerate_candidates` emits this base peptide
+/// at these exact coordinates (≥1; >1 only for the N-terminal-Met
+/// re-enumeration that produces identical-coordinate spans). Used by the `Mmap`
+/// path to replicate each lazily-expanded peptidoform so the per-spectrum
+/// candidate set (and thus the `dedup_pepseq_score`-aggregated `candidate_idxs`,
+/// hence the PIN `Proteins` column) matches the in-RAM path copy-for-copy.
+///
+/// The base mass (unmodified residue masses + water) is recovered from the
+/// candidate by subtracting each residue's mod delta; the index is queried at
+/// that exact `mass_milli`.
 fn base_record_multiplicity(mi: &MmapCandidateIndex, cand: &Candidate) -> u32 {
     use crate::candidate_index::flags as rec_flags;
     // Base mass = peptide neutral mass with every mod delta removed.

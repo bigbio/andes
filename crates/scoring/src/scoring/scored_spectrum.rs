@@ -1045,20 +1045,18 @@ impl<'a> ScoredSpectrum<'a> {
             is_prefix,
             charge,
             parent_mass,
-            // TRAIN/SERVE TOLERANCE. Training matches high-res ions at 20 ppm (the two
-            // accumulator call sites below pass `true`), but scoring has always passed
-            // `false`, i.e. the model's `mme` — and EVERY bundled model carries
-            // mme = 0.5 Da, including the high-resolution ones. At m/z 500 that window
-            // is ~50x too wide (a fact match_engine.rs:1493 already records), so the
-            // rank tables are consulted with a window far looser than the one they were
-            // built from. On dense spectra — a glycopeptide scan is mostly oxonium and
-            // glycan-Y — nearly every theoretical position finds SOMETHING, and the
-            // score saturates toward noise.
-            //
-            // ANDES_TIGHT_HIGHRES=1 serves high-res models at the training window so the
-            // two can be compared. Default (unset) is byte-identical to before. This is
-            // an A/B switch, not a fix: it changes EVERY high-res search, so it must
-            // clear the Astral/TMT/UPS1 triad before any default moves.
+            // TRAIN/SERVE TOLERANCE — HISTORICAL NOTE, NO LONGER THE CONTRACT.
+    // This block used to read "training matches high-res ions at 20 ppm (the two
+    // accumulator call sites below pass true)". All THREE accumulator call sites now pass
+    // `false`, i.e. training matches at the model's own `mme`, the same window serving
+    // uses. The 20 ppm training window was the defect: `IonType::mz` rebuilds theo m/z
+    // from the integer nominal mass (median 52 ppm displacement), so a 20 ppm window
+    // recorded ~80% of real fragments as missing and collapsed the absent-ion penalty.
+    //
+    // ⚠ `ANDES_TIGHT_HIGHRES` therefore now does the OPPOSITE of its original purpose:
+    // it no longer aligns serving to the training window, it CREATES a mismatch. It is
+    // retained only as an A/B escape hatch against pre-existing models and should be
+    // removed once the high-res store is retrained.
             tight_highres_scoring(),
             |_, _, matched_peak, logs, theo_mz, tol_da| {
                 let missing = if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 };

@@ -131,7 +131,8 @@ mod tests {
 pub struct SialicSurvey {
     /// Spectra showing a NeuAc oxonium above the intensity floor.
     pub neuac_spectra: usize,
-    /// Of those, how many also show NeuGc oxonium at >= `ratio_floor` of the NeuAc signal.
+    /// Of those, how many also show NeuGc oxonium clearing BOTH the absolute intensity
+    /// floor (1% of base peak) AND `ratio_floor` of the NeuAc signal.
     pub neugc_spectra: usize,
     /// `neugc_spectra / neuac_spectra`, or 0.0 when there is no sialic evidence at all.
     pub neugc_fraction: f32,

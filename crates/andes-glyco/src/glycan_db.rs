@@ -44,12 +44,22 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
     // EXPANDED 2026-07-09: Fuc 3→4, Hex 3..12 → 2..14 to cover high-Fuc / extended- and
     // truncated-Hex gap compositions (+~11 truth backbones on PXD025455 Fc3_r1); HexNAc/
     // NeuAc/NeuGc bounds held to limit candidate bloat.
-    // Bounds must remain a SUPERSET of both generated lists. HexNAc 11 is required by
-    // `n_glycan_list_reference_human`; Hex 1 is required by the paucimannose block that
-    // both lists append. The subset invariant for the default list is asserted by
-    // `n_glycan_list_common_is_subset_of_full_list`.
-    for hn in 2u8..=11 {
-        for hx in 1u8..=14 {
+    // Bounds unchanged from before the 2026-08-19 glyco campaign. They were briefly
+    // widened to HexNAc 2..=11 / Hex 1..=14 to preserve `common ⊆ full` while the COMMON
+    // list was fitted to a curated human reference -- but that fitting was then reverted
+    // (it measured -37% on plasma with entrapment), so the justification evaporated and
+    // the widening is undone here.
+    //
+    // Two reasons not to leave it widened: it took this list 4,034 -> 7,903 against a
+    // list the CLI help itself describes as "measured to raise entrapment error 5.4x" at
+    // the smaller size; and because this generator has no `Hex >= 3` rule, it multiplied
+    // the compositions with antennae but no trimannosyl core -- not N-glycans at all --
+    // from 307 to 1,154.
+    //
+    // `n_glycan_list_reference_human` is deliberately NOT a subset of this list: it is a
+    // differently-shaped curated fit, not a widening, and nothing asserts that invariant.
+    for hn in 2u8..=8 {
+        for hx in 2u8..=14 {
             for fc in 0u8..=4 {
                 if fc > hn {
                     continue; // fuc ≤ hexnac
@@ -472,7 +482,7 @@ mod tests {
     #[test]
     fn n_glycan_list_nonempty_and_in_expected_range() {
         let list = n_glycan_list();
-        // HexNAc 2..=11, Hex 1..=14, Fuc 0..=4, NeuAc 0..=5, NeuGc 0..=2 (mass
+        // HexNAc 2..=8, Hex 2..=14, Fuc 0..=4, NeuAc 0..=5, NeuGc 0..=2 (mass
         // ∈[500,6000]) PLUS the GI-3 paucimannose block (HexNAc 1–2, Hex 0–2, ± Fuc),
         // minus exact-composition duplicates the paucimannose block shares with the
         // main loop.
@@ -484,7 +494,7 @@ mod tests {
         // 5.4x at 4034 entries; at 7903 it is larger still, so the existing "prefer
         // `common`" guidance applies with more force, not less.
         assert!(
-            list.len() >= 7000 && list.len() <= 9000,
+            list.len() >= 3500 && list.len() <= 4500,
             "unexpected glycan count: {}",
             list.len()
         );
@@ -722,8 +732,36 @@ mod coverage_tests {
 
     /// Excluding NeuGc must leave a list with NO isobaric mass collisions at all --
     /// that is the whole point of the species gate, and it should hold by construction.
+    ///
+    /// Guards BOTH generated lists. The `--glyco-no-neugc` / `--glyco-taxon` measurement
+    /// (+36% IDs at 3.4x lower entrapment error) was made on `n_glycan_list_common`, so
+    /// testing only the opt-in reference list would leave the default unguarded.
     #[test]
     fn neuac_only_list_has_no_isobaric_collisions() {
+        for (name, list) in [
+            ("common", n_glycan_list_common()),
+            ("reference_human", n_glycan_list_reference_human()),
+        ] {
+            use std::collections::HashMap;
+            let mut by_mass: HashMap<u64, Vec<(u8, u8, u8, u8)>> = HashMap::new();
+            for g in list.into_iter().filter(|g| g.neugc == 0) {
+                by_mass
+                    .entry((g.mass * 1000.0).round() as u64)
+                    .or_default()
+                    .push((g.hexnac, g.hex, g.fuc, g.neuac));
+            }
+            let clashes: Vec<_> = by_mass.values().filter(|v| v.len() > 1).collect();
+            assert!(
+                clashes.is_empty(),
+                "{name}: NeuAc-only list must be collision-free; found {} shared masses, e.g. {:?}",
+                clashes.len(),
+                clashes.first()
+            );
+        }
+    }
+
+    #[test]
+    fn _superseded_reference_only_collision_check() {
         use std::collections::HashMap;
         let mut by_mass: HashMap<u64, Vec<(u8, u8, u8, u8)>> = HashMap::new();
         for g in n_glycan_list_reference_human().into_iter().filter(|g| g.neugc == 0) {

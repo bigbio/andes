@@ -759,23 +759,4 @@ mod coverage_tests {
             );
         }
     }
-
-    #[test]
-    fn _superseded_reference_only_collision_check() {
-        use std::collections::HashMap;
-        let mut by_mass: HashMap<u64, Vec<(u8, u8, u8, u8)>> = HashMap::new();
-        for g in n_glycan_list_reference_human().into_iter().filter(|g| g.neugc == 0) {
-            by_mass
-                .entry((g.mass * 1000.0).round() as u64)
-                .or_default()
-                .push((g.hexnac, g.hex, g.fuc, g.neuac));
-        }
-        let clashes: Vec<_> = by_mass.values().filter(|v| v.len() > 1).collect();
-        assert!(
-            clashes.is_empty(),
-            "NeuAc-only list must be collision-free; found {} shared masses, e.g. {:?}",
-            clashes.len(),
-            clashes.first()
-        );
-    }
 }

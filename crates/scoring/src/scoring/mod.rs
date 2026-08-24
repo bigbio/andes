@@ -19,6 +19,7 @@ pub use rank_scorer::RankScorer;
 pub use scored_spectrum::{init_scoring_settings, IonMatchFact, ScoredSpectrum, ScoringSettings};
 pub use strong_score::{
     candidate_rank_entropy, frag_llr_battery, fuse_strong_score, intensity_signal, listwise_score_gap,
+    predict_frag_intensities,
     rich_ion_llr,
     mass_competition_evidence, strong_score_calibrated, strong_score_calibrated_loo,
     strong_score_zscore, OnlineStats, StrongScoreInputs, DENSITY_HW, STRONG_CAL_MIN_CANDIDATES,

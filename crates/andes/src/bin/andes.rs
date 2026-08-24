@@ -368,6 +368,18 @@ struct SearchArgs {
     #[arg(long = "model", hide = true)]
     model_id_override: Option<String>,
 
+    /// Evaluate only the first N trees of the fragment-intensity GBDT (0 = all).
+    ///
+    /// `Tree::eval` on this ensemble is the single hottest operation in the search.
+    /// Truncating the ensemble trades prediction fidelity for speed: the GBDT is
+    /// additive, so the first trees carry the bulk of the signal and later ones
+    /// refine it. UNLIKE the per-candidate de-duplication (which is byte-identical),
+    /// this CHANGES the predicted intensities and therefore the emitted PIN feature
+    /// values, so it can move identifications. Leave at 0 unless you have measured
+    /// the identification cost on your own data.
+    #[arg(long = "gbdt-max-trees", default_value_t = 0usize)]
+    gbdt_max_trees: usize,
+
     /// Path to a trained intensity model parquet (`andes train-intensity` output).
     /// Populates the additive `IntensitySignal` PIN column; ranking stays on RawScore
     /// until `--score strong` is enabled in a later phase. When unset, the column is 0.0.
@@ -2034,6 +2046,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         p
     };
+    // Optional GBDT truncation (`--gbdt-max-trees`). Applied to the loaded model
+    // before any scoring so every code path sees the same ensemble.
+    if cli.gbdt_max_trees > 0 {
+        if let Some(g) = param.frag_intensity_model.as_ref() {
+            let before = g.trees.len();
+            if cli.gbdt_max_trees < before {
+                let mut truncated = (**g).clone();
+                truncated.trees.truncate(cli.gbdt_max_trees);
+                param.frag_intensity_model = Some(Arc::new(truncated));
+                eprintln!(
+                    "--gbdt-max-trees {}: frag-intensity ensemble {} -> {} trees \
+                     (changes predicted intensities; not byte-identical)",
+                    cli.gbdt_max_trees, before, cli.gbdt_max_trees
+                );
+            }
+        }
+    }
     // Stamp the requested isobaric protocol onto the loaded model so the dense-
     // spectrum windowed peak filter (ScoredSpectrum) engages on TMT/iTRAQ
     // searches even when model selection fell back to a non-isobaric table

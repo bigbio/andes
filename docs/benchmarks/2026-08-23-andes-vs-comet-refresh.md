@@ -48,9 +48,10 @@ andes leads by **+22.3% PSMs / +21.2% peptides** on Astral and **+17.2% / +21.9%
 | dataset | andes (before) | andes (after opt) | Comet |
 |---|---|---|---|
 | Astral | 899 s | **555 s** | 217 s |
-| TMT | 193 s | **117 s** (K=100) | 80 s |
+| TMT | 193 s | **143 s** default / 117 s with `--gbdt-max-trees 100` | 80 s |
 
-**Comet was 3.9x faster on Astral and 2.0x on TMT** as originally measured. This contradicts
+**Comet was 4.1x faster on Astral and 2.4x on TMT** as originally measured (899/217 and
+193/80 from the table above). This contradicts
 the claim in earlier benchmark notes that andes is the fastest engine; that figure was for
 native `.raw` input, whereas these runs are mzML. The numbers above are as measured.
 
@@ -59,12 +60,21 @@ Two optimisations closed most of the gap (see `docs/` history and the commits):
 1. **GBDT de-duplication** — the fragment-intensity ensemble was being walked twice per
    candidate for identical inputs. Removing the second walk is **byte-identical output** and
    gave −38.3% (Astral) / −23.8% (TMT).
-2. **`--gbdt-max-trees`** (default off) — truncating the ensemble to 100 of 300 trees gave a
-   further −18.2% on TMT with **no measurable identification cost** (5 seeds; largest deviation
-   7.8 PSMs against a control spread of 25.7). Measured on TMT only; not yet validated on
-   high-res, which is why it ships off.
+2. **`--gbdt-max-trees`** (default off) — truncating to 100 of 300 trees gave a further −18.2%
+   on TMT with **no measurable identification cost** (5 seeds; largest deviation 7.8 PSMs
+   against a control spread of 25.7). Two caveats: measured on TMT only, and measured *before*
+   the flag was widened to truncate both shipped ensembles — so the current flag should be
+   faster than −18.2% and its identification cost at that setting is UNMEASURED. It ships off.
 
-Gap after optimisation: **2.6x (Astral)**, **1.5x (TMT)**, with the identification lead intact.
+   On high-res the flag is also riskier than on low-res: `--score auto` resolves to `strong`
+   there, and `StrongScore` consumes the frag-intensity GBDT, so truncation changes the
+   *ranking* and not merely PIN feature values. The Astral K-sweep confirms this — row counts
+   shifted (1,213,883 → 1,213,884 at K=200) where TMT's were identical at every K.
+
+Gap after optimisation **at shipped defaults** (de-duplication only; `--gbdt-max-trees` is off):
+**2.6x (Astral, 555/217)** and **1.8x (TMT, 143/80)**, with the identification lead intact.
+Enabling `--gbdt-max-trees 100` takes TMT to 1.5x (117/80), but that is not the default and is
+not what a user gets out of the box.
 
 ## 5. Reproducing
 

@@ -41,18 +41,33 @@ pub fn predict_frag_intensities(
     peptide: &Peptide,
     precursor_charge: u8,
 ) -> Vec<f64> {
-    predict_by_ions(peptide, 1..=2)
+    let ions = predict_by_ions(peptide, 1..=2);
+    // Build every feature row first, then walk the ensemble ONCE with trees on the
+    // outside (see `GbdtPeakModel::predict_value_batch`). Bit-identical to the
+    // per-ion call it replaces.
+    let feats: Vec<[f32; crate::frag_features::N_FRAG_FEATURES]> = ions
         .iter()
         .map(|ion| {
-            let feats = extract_frag_features(
+            extract_frag_features(
                 peptide,
                 ion.kind,
                 ion.position,
                 precursor_charge,
                 ion.charge,
                 0.0,
-            );
-            predicted_linear_intensity(frag_model, &feats)
+            )
+        })
+        .collect();
+    let rows: Vec<&[f32]> = feats.iter().map(|f| f.as_slice()).collect();
+    let mut raw = vec![0.0f32; rows.len()];
+    frag_model.predict_value_batch(&rows, &mut raw);
+    raw.iter()
+        .map(|&log_rel| {
+            let v = f64::from(log_rel);
+            if !v.is_finite() {
+                return 0.0;
+            }
+            v.clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP).exp()
         })
         .collect()
 }
@@ -512,7 +527,11 @@ pub fn rich_ion_llr(
     if peptide.length() < 2 {
         return 0.0;
     }
-    let mut sum = 0.0f64;
+    // Collect the feature rows for MATCHED ions first, then walk the rich-ion
+    // ensemble once with trees on the outside. Bit-identical: the rows are gathered
+    // in the same ion order the per-ion loop used, and the f64 sum below adds the
+    // per-row logits in that same order.
+    let mut rows_buf: Vec<Vec<f32>> = Vec::new();
     for ion in predict_by_ions(peptide, 1..=2) {
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
@@ -520,7 +539,7 @@ pub fn rich_ion_llr(
             feature_tol
         };
         if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
-            let feats = extract_ion_features(
+            rows_buf.push(extract_ion_features(
                 peptide,
                 scored_spec,
                 ion.kind,
@@ -529,9 +548,18 @@ pub fn rich_ion_llr(
                 ion.charge,
                 feature_tol,
                 feature_tol_is_ppm,
-            );
-            sum += f64::from(g.predict_logit(&feats));
+            ).to_vec());
         }
+    }
+    if rows_buf.is_empty() {
+        return 0.0;
+    }
+    let rows: Vec<&[f32]> = rows_buf.iter().map(|r| r.as_slice()).collect();
+    let mut logits = vec![0.0f32; rows.len()];
+    g.predict_logit_batch(&rows, &mut logits);
+    let mut sum = 0.0f64;
+    for l in &logits {
+        sum += f64::from(*l);
     }
     sum as f32
 }

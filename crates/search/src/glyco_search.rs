@@ -169,6 +169,7 @@ use scoring_crate::scoring::{
     fuse_strong_score,
     listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
     StrongScoreInputs, hyperscore_psm_with_matches,
+    strong_score_calibrated_loo,
 };
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
@@ -2438,6 +2439,25 @@ fn score_spectrum_glyco(
                         .total_cmp(&a.1.psm.rank_score)
                         .then_with(|| a.0.cmp(&b.0))
                 });
+                // Per-spectrum calibration of StrongScore (PIN column `RawScoreCal`).
+                //
+                // The standard path does this in `fill_post_topn` (match_engine.rs); the
+                // glyco driver never runs that pass, so `strong_score_cal` stayed at its
+                // 0.0 default and `RawScoreCal` was a STRUCTURALLY CONSTANT column in
+                // every glyco PIN ever written — measured: constant 0 across all 22,592
+                // rows of a pooled 3-replicate plasma run.
+                //
+                // It has to happen HERE, after every hit for the scan has its features,
+                // because it z-scores a candidate against its within-spectrum
+                // competitors. That within-spectrum contrast is precisely the
+                // discrimination the glyco path is short of, so a constant 0 was not a
+                // cosmetic gap.
+                let retained_strong: Vec<f32> =
+                    hits.iter().map(|(_, h)| h.psm.features.strong_score).collect();
+                for (_, h) in hits.iter_mut() {
+                    h.psm.features.strong_score_cal =
+                        strong_score_calibrated_loo(&retained_strong, h.psm.features.strong_score);
+                }
                 Some(GlycoSpectrumResult {
                     spectrum_idx: spec_idx,
                     hits: hits.into_iter().map(|(_, h)| h).collect(),

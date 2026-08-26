@@ -844,7 +844,7 @@ mod tests {
                 left: vec![-1],
                 right: vec![-1],
                 value: vec![leaf_value],
-                default_left: vec![1], packed: Vec::new(), }],
+                default_left: vec![1] }],
             iso_x: vec![],
             iso_y: vec![],
         };

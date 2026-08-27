@@ -47,3 +47,38 @@ across seeds before believing any glyco delta.
   lower true error.
 - The headroom is **separation**, not coverage: the fused selector's heaviest terms are
   per-backbone and cannot discriminate between peptides competing for one scan.
+
+## 2026-08-27 (later) — NeuGc arm replicated, and the design's detection floor
+
+Same protocol applied to the campaign's one "validated" win. Same binary, same entrapment
+FASTA, three fractions pooled; the only variable is `--glyco-taxon mammal` (NeuGc kept)
+against the shipped `auto` (which excludes NeuGc on this data).
+
+| arm | mean PSMs | sd | range | mean FDP |
+|---|---|---|---|---|
+| excl — NeuGc dropped (shipped default) | 223.8 | 56.4 | 128-267 | 0.81% |
+| incl — NeuGc kept | 200.6 | 75.4 | 113-264 | 1.63% |
+
+excl − incl = **+23.2 PSMs (+11.6%), effect/SE +0.55**. The single-replicate figure was
+268 → 365 (+36%); five seeds give 201 → 224.
+
+### The detection floor
+
+Pooled within-arm sd ≈ 66 PSMs, so at 5 seeds/arm (80% power, α=0.05) the smallest
+detectable effect is **~117 PSMs, i.e. ~58% relative change**. Detecting the observed
+23-PSM difference would need ~129 seeds/arm; a 50-PSM difference still needs ~27.
+
+This **corrects the framing in the entry above**: `gp_m 10` and `min-matched-ions 2` are
+*not demonstrable at this power* rather than *refuted*. The design cannot separate a real
++10-20% effect from zero. Only `combo` (−73.8) approached the floor.
+
+**Consequence for how this campaign is run:** stop spending seeds on sub-50-PSM glyco
+effects — the instrument cannot resolve them at any sane cost. Use measures without
+Percolator's `q_min = 1/T_top` step function: external agreement (Byonic mass-agreement
+moved 74% → 91% under NeuGc exclusion — orthogonal, and far more decisive than any yield
+delta), entrapment FDP at matched yield, or fixed-score-threshold counts.
+
+**NeuGc exclusion stays the default.** The +36% yield claim is retired, but the change is
+justified independently of Percolator: humans lack functional CMAH, every mainstream
+human glycan list ships zero NeuGc, Byonic agreement improves sharply, and FDP direction
+favours it. Right call, wrong headline number.

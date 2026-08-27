@@ -26,6 +26,52 @@ const LOG_INTENSITY_CLAMP: f64 = 50.0;
 /// `[-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP]` (a no-op for real outputs) and
 /// substitutes `0.0` for a non-finite prediction so callers never propagate
 /// `inf`/`NaN`.
+/// Predict the linear relative intensity of every `predict_by_ions(peptide, 1..=2)`
+/// fragment ONCE, in that iteration order.
+///
+/// `intensity_signal` and `frag_llr_battery` are called back-to-back on the same
+/// `(peptide, precursor_charge, frag_model)` and each used to walk the identical ion
+/// list, extract byte-identical features, and run the identical 300-tree GBDT — so the
+/// single most expensive thing in the search (`Tree::eval`, ~50% of wall) was being done
+/// twice per candidate for the same numbers. Callers compute this once and hand the slice
+/// to both. Values are positionally aligned with `predict_by_ions(peptide, 1..=2)`; a
+/// caller passing a slice built any other way will silently mis-attribute intensities.
+pub fn predict_frag_intensities(
+    frag_model: &GbdtPeakModel,
+    peptide: &Peptide,
+    precursor_charge: u8,
+) -> Vec<f64> {
+    let ions = predict_by_ions(peptide, 1..=2);
+    // Build every feature row first, then walk the ensemble ONCE with trees on the
+    // outside (see `GbdtPeakModel::predict_value_batch`). Bit-identical to the
+    // per-ion call it replaces.
+    let feats: Vec<[f32; crate::frag_features::N_FRAG_FEATURES]> = ions
+        .iter()
+        .map(|ion| {
+            extract_frag_features(
+                peptide,
+                ion.kind,
+                ion.position,
+                precursor_charge,
+                ion.charge,
+                0.0,
+            )
+        })
+        .collect();
+    let rows: Vec<&[f32]> = feats.iter().map(|f| f.as_slice()).collect();
+    let mut raw = vec![0.0f32; rows.len()];
+    frag_model.predict_value_batch(&rows, &mut raw);
+    raw.iter()
+        .map(|&log_rel| {
+            let v = f64::from(log_rel);
+            if !v.is_finite() {
+                return 0.0;
+            }
+            v.clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP).exp()
+        })
+        .collect()
+}
+
 #[inline]
 fn predicted_linear_intensity(g: &GbdtPeakModel, feats: &[f32]) -> f64 {
     let log_rel = f64::from(g.predict_value(feats));
@@ -98,6 +144,9 @@ pub fn intensity_signal(
     nce_bin: &str,
     feature_tol: f64,
     feature_tol_is_ppm: bool,
+    // Predictions from `predict_frag_intensities`, positionally aligned with
+    // `predict_by_ions(peptide, 1..=2)`. `None` recomputes them inline.
+    precomputed: Option<&[f64]>,
 ) -> f32 {
     // Require at least one predictor.
     if model.is_none() && frag_model.is_none() {
@@ -125,14 +174,22 @@ pub fn intensity_signal(
     let mut pred_vec = Vec::with_capacity(predicted.len());
     let mut obs_vec = Vec::with_capacity(predicted.len());
 
-    for ion in &predicted {
+    for (ion_idx, ion) in predicted.iter().enumerate() {
         // Predicted LINEAR relative intensity, kept finite (finding 3.4): the
         // GBDT/intensity-model paths emit a log-relative value; an extreme
         // prediction would otherwise `exp` to `+inf` and corrupt the cosine.
         let pred_intensity = if let Some(g) = frag_model {
             // Frag-intensity regressor path (precursor charge, nce=0.0 matches training).
-            let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, ion.charge, 0.0);
-            predicted_linear_intensity(g, &feats)
+            // Reuse the caller's predictions when supplied — same ion order, same
+            // features, same model, so this is the identical value without a second
+            // 300-tree walk.
+            match precomputed.and_then(|p| p.get(ion_idx).copied()) {
+                Some(v) => v,
+                None => {
+                    let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, ion.charge, 0.0);
+                    predicted_linear_intensity(g, &feats)
+                }
+            }
         } else {
             // Existing coarse table path (fallback; model is Some here).
             let (flank_n, flank_c) = match flank_residues(&seq, ion.kind, ion.position) {
@@ -206,6 +263,9 @@ pub fn frag_llr_battery(
     precursor_charge: u8,
     feature_tol: f64,
     feature_tol_is_ppm: bool,
+    // Predictions from `predict_frag_intensities`, positionally aligned with
+    // `predict_by_ions(peptide, 1..=2)`. `None` recomputes them inline.
+    precomputed: Option<&[f64]>,
 ) -> (f32, f32, f32) {
     const FRAG_TOPK: usize = 6;
     let g = match frag_model {
@@ -222,16 +282,22 @@ pub fn frag_llr_battery(
     // (predicted intensity, matched?) for the top-K observed-fraction feature.
     let mut pred_matched: Vec<(f64, bool)> = Vec::with_capacity(predicted.len());
 
-    for ion in &predicted {
-        let feats = extract_frag_features(
-            peptide,
-            ion.kind,
-            ion.position,
-            precursor_charge,
-            ion.charge,
-            0.0,
-        );
-        let p = predicted_linear_intensity(g, &feats);
+    for (ion_idx, ion) in predicted.iter().enumerate() {
+        // Reuse the caller's predictions when supplied (see `predict_frag_intensities`).
+        let p = match precomputed.and_then(|pp| pp.get(ion_idx).copied()) {
+            Some(v) => v,
+            None => {
+                let feats = extract_frag_features(
+                    peptide,
+                    ion.kind,
+                    ion.position,
+                    precursor_charge,
+                    ion.charge,
+                    0.0,
+                );
+                predicted_linear_intensity(g, &feats)
+            }
+        };
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
         } else {
@@ -461,7 +527,11 @@ pub fn rich_ion_llr(
     if peptide.length() < 2 {
         return 0.0;
     }
-    let mut sum = 0.0f64;
+    // Collect the feature rows for MATCHED ions first, then walk the rich-ion
+    // ensemble once with trees on the outside. Bit-identical: the rows are gathered
+    // in the same ion order the per-ion loop used, and the f64 sum below adds the
+    // per-row logits in that same order.
+    let mut rows_buf: Vec<Vec<f32>> = Vec::new();
     for ion in predict_by_ions(peptide, 1..=2) {
         let tol_da = if feature_tol_is_ppm {
             ion.mz * feature_tol / 1e6
@@ -469,7 +539,7 @@ pub fn rich_ion_llr(
             feature_tol
         };
         if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
-            let feats = extract_ion_features(
+            rows_buf.push(extract_ion_features(
                 peptide,
                 scored_spec,
                 ion.kind,
@@ -478,9 +548,18 @@ pub fn rich_ion_llr(
                 ion.charge,
                 feature_tol,
                 feature_tol_is_ppm,
-            );
-            sum += f64::from(g.predict_logit(&feats));
+            ).to_vec());
         }
+    }
+    if rows_buf.is_empty() {
+        return 0.0;
+    }
+    let rows: Vec<&[f32]> = rows_buf.iter().map(|r| r.as_slice()).collect();
+    let mut logits = vec![0.0f32; rows.len()];
+    g.predict_logit_batch(&rows, &mut logits);
+    let mut sum = 0.0f64;
+    for l in &logits {
+        sum += f64::from(*l);
     }
     sum as f32
 }
@@ -574,7 +653,7 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let signal = intensity_signal(None, None, &ss, &pep(b"AR"), 2, "unknown", 20.0, true);
+        let signal = intensity_signal(None, None, &ss, &pep(b"AR"), 2, "unknown", 20.0, true, None);
         assert_eq!(signal, 0.0);
     }
 
@@ -601,10 +680,10 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let good = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true);
+        let good = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true, None);
 
         let wrong_pep = pep(b"FGHIK");
-        let bad = intensity_signal(Some(&model), None, &ss, &wrong_pep, 2, "unknown", 20.0, true);
+        let bad = intensity_signal(Some(&model), None, &ss, &wrong_pep, 2, "unknown", 20.0, true, None);
         assert!(good > bad, "good={good} bad={bad}");
         assert!(good > 0.1);
     }
@@ -714,13 +793,13 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let partial = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true);
+        let partial = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true, None);
         let empty_spec = Spectrum {
             peaks: vec![(400.0, 1000.0)],
             ..Default::default()
         };
         let ss_empty = ScoredSpectrum::new_without_filtering(&empty_spec);
-        let none = intensity_signal(Some(&model), None, &ss_empty, &peptide, 2, "unknown", 20.0, true);
+        let none = intensity_signal(Some(&model), None, &ss_empty, &peptide, 2, "unknown", 20.0, true, None);
         assert!(partial > none);
     }
 
@@ -771,7 +850,7 @@ mod tests {
         let peptide = pep(b"ARCDE");
         let spec = Spectrum { peaks: vec![(300.0, 1000.0)], ..Default::default() };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let (explained, chance, topk) = frag_llr_battery(Some(&g), &ss, &peptide, 2, 20.0, true);
+        let (explained, chance, topk) = frag_llr_battery(Some(&g), &ss, &peptide, 2, 20.0, true, None);
         for (name, v) in [("explained", explained), ("chance", chance), ("topk", topk)] {
             assert!(v.is_finite(), "{name} must be finite, got {v}");
         }
@@ -796,7 +875,7 @@ mod tests {
         let ss = ScoredSpectrum::new_without_filtering(&spec);
 
         // frag_model Some, table model None => should still compute cosine > 0.
-        let sig = intensity_signal(None, Some(&g), &ss, &peptide, 2, "unknown", 20.0, true);
+        let sig = intensity_signal(None, Some(&g), &ss, &peptide, 2, "unknown", 20.0, true, None);
         assert!(sig > 0.0, "expected signal > 0 with frag model, got {sig}");
     }
 
@@ -821,7 +900,7 @@ mod tests {
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
 
-        let with_table = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true);
+        let with_table = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true, None);
         // Same call was already exercised in `missing_observed_ions_reduce_signal`;
         // just verify it's > 0 (table path active, not early-return).
         assert!(with_table > 0.0, "table fallback expected > 0, got {with_table}");
@@ -846,7 +925,7 @@ mod tests {
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         // Both None => must return 0.0 exactly.
-        let sig = intensity_signal(None, None, &ss, &pep(b"ARCDE"), 2, "unknown", 20.0, true);
+        let sig = intensity_signal(None, None, &ss, &pep(b"ARCDE"), 2, "unknown", 20.0, true, None);
         assert_eq!(sig, 0.0, "no predictor must yield 0.0");
     }
 }

@@ -368,6 +368,21 @@ struct SearchArgs {
     #[arg(long = "model", hide = true)]
     model_id_override: Option<String>,
 
+    /// Evaluate only the first N trees of each GBDT ensemble (0 = all).
+    ///
+    /// Applies to BOTH shipped ensembles — fragment-intensity and rich-ion — which are
+    /// of comparable size and are each walked per fragment per candidate.
+    ///
+    /// `Tree::eval` on these ensembles is the single hottest operation in the search.
+    /// Truncating the ensemble trades prediction fidelity for speed: the GBDT is
+    /// additive, so the first trees carry the bulk of the signal and later ones
+    /// refine it. UNLIKE the per-candidate de-duplication (which is byte-identical),
+    /// this CHANGES the predicted intensities and therefore the emitted PIN feature
+    /// values, so it can move identifications. Leave at 0 unless you have measured
+    /// the identification cost on your own data.
+    #[arg(long = "gbdt-max-trees", default_value_t = 0usize)]
+    gbdt_max_trees: usize,
+
     /// Path to a trained intensity model parquet (`andes train-intensity` output).
     /// Populates the additive `IntensitySignal` PIN column; ranking stays on RawScore
     /// until `--score strong` is enabled in a later phase. When unset, the column is 0.0.
@@ -2034,6 +2049,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         p
     };
+    // Optional GBDT truncation (`--gbdt-max-trees`). Applied to the loaded model
+    // before any scoring so every code path sees the same ensemble.
+    //
+    // BOTH ensembles are truncated. The shipped models carry a frag-intensity
+    // GBDT (~799 KB) *and* a rich-ion GBDT (~842 KB) of comparable size, each
+    // walked per fragment per candidate, so truncating only the first would
+    // leave about half the ensemble cost untouched.
+    if cli.gbdt_max_trees > 0 {
+        let k = cli.gbdt_max_trees;
+        let truncate = |slot: &mut Option<Arc<scoring_crate::gbdt_eval::GbdtPeakModel>>, name: &str| {
+            if let Some(g) = slot.as_ref() {
+                let before = g.trees.len();
+                if k < before {
+                    let mut t = (**g).clone();
+                    t.trees.truncate(k);
+                    *slot = Some(Arc::new(t));
+                    eprintln!(
+                        "--gbdt-max-trees {k}: {name} ensemble {before} -> {k} trees \
+                         (changes predictions; not byte-identical)"
+                    );
+                }
+            }
+        };
+        truncate(&mut param.frag_intensity_model, "frag-intensity");
+        truncate(&mut param.rich_ion_model, "rich-ion");
+    }
     // Stamp the requested isobaric protocol onto the loaded model so the dense-
     // spectrum windowed peak filter (ScoredSpectrum) engages on TMT/iTRAQ
     // searches even when model selection fell back to a non-isobaric table

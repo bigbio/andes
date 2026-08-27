@@ -30,6 +30,7 @@ use scoring_crate::mod_site_features::{
 };
 use scoring_crate::scoring::{
     frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
+    predict_frag_intensities,
     psm_edge_score, rich_ion_llr, score_psm, score_psm_float,
     strong_score_calibrated, RankScorer, OnlineStats, ScoredSpectrum, StrongScoreInputs,
     DENSITY_HW,
@@ -1859,6 +1860,15 @@ pub(crate) fn compute_psm_features(
     // When a v3 frag-intensity regressor is present on the param it takes
     // precedence; the coarse IntensityModel table is the fallback.
     let frag_intensity_model = scorer.param().frag_intensity_model.as_deref();
+    // Walk the GBDT ONCE for this candidate. `intensity_signal` and
+    // `frag_llr_battery` below both need the identical per-ion predictions
+    // (same peptide, same charge, same model, same ion order), and each used to
+    // recompute the whole 300-tree ensemble for every fragment — the single
+    // hottest thing in the search, done twice for the same numbers.
+    let frag_pred: Option<Vec<f64>> = frag_intensity_model
+        .filter(|_| peptide.length() >= 2)
+        .map(|g| predict_frag_intensities(g, peptide, charge));
+    let frag_pred_slice = frag_pred.as_deref();
     let intensity_signal_val = intensity_signal(
         intensity_model,
         frag_intensity_model,
@@ -1868,6 +1878,7 @@ pub(crate) fn compute_psm_features(
         "unknown",
         feature_tol,
         feature_tol_is_ppm,
+        frag_pred_slice,
     );
 
     // Tier-2 frag-intensity LLR battery (additive PIN features; 0.0 when no
@@ -1879,6 +1890,7 @@ pub(crate) fn compute_psm_features(
         charge,
         feature_tol,
         feature_tol_is_ppm,
+        frag_pred_slice,
     );
 
     // Decoy-aware rich-ion LLR (additive PIN feature; 0.0 when no rich-ion model).

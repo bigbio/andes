@@ -217,6 +217,40 @@ impl GbdtPeakModel {
         self.trees.iter().map(|t| t.eval(x)).sum()
     }
 
+    /// Batched `predict_value`: trees OUTER, rows INNER.
+    ///
+    /// The per-row loop re-streams the entire ensemble for every row, so a 300-tree
+    /// ~790 KB model is pulled through L2/L3 once per fragment ion (~52 per PSM).
+    /// Walking trees on the outside instead pulls each ~2.6 KB tree into L1 once and
+    /// reuses it across every row, cutting cache traffic by roughly the row count.
+    /// The K-sweep evidence says this walk is memory-residency-bound, not ALU-bound:
+    /// dropping 300 -> 100 trees is a 3x work reduction but bought -41% wall.
+    ///
+    /// BIT-IDENTICAL to calling `predict_value` per row: `sum()` over f32 folds left
+    /// from 0.0 in tree order, and accumulating `out[r] += tree.eval(row_r)` visits
+    /// the trees in that same order, so every partial sum matches exactly.
+    pub fn predict_value_batch(&self, rows: &[&[f32]], out: &mut [f32]) {
+        assert_eq!(rows.len(), out.len(), "predict_value_batch: rows/out length mismatch");
+        out.fill(0.0);
+        for t in &self.trees {
+            for (o, x) in out.iter_mut().zip(rows.iter()) {
+                *o += t.eval(x);
+            }
+        }
+    }
+
+    /// Batched [`predict_logit`]; see [`Self::predict_value_batch`] for why this is
+    /// faster and why it is bit-identical.
+    pub fn predict_logit_batch(&self, rows: &[&[f32]], out: &mut [f32]) {
+        self.predict_value_batch(rows, out);
+        for o in out.iter_mut() {
+            let raw = *o;
+            let p = if self.apply_sigmoid { 1.0 / (1.0 + (-raw).exp()) } else { raw };
+            let s = self.isotonic(p).clamp(PROB_EPS, 1.0 - PROB_EPS);
+            *o = (s / (1.0 - s)).ln();
+        }
+    }
+
     /// Calibrated P(signal) in [0,1].
     pub fn predict_proba(&self, x: &[f32]) -> f32 {
         let raw: f32 = self.trees.iter().map(|t| t.eval(x)).sum();

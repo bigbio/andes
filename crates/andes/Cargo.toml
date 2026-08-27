@@ -43,6 +43,9 @@ timstof = ["input/timstof"]
 
 [dev-dependencies]
 tempfile = "3.10"
+# used by tests/gzip_instrument_detection.rs to inflate the fixture in-process
+# (portable: CI runs on windows-latest, so shelling out to gzip is not an option)
+flate2 = { workspace = true }
 arrow = "53"
 parquet = "53"
 scoring_crate = { path = "../scoring", package = "scoring" }

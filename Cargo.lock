@@ -64,6 +64,7 @@ dependencies = [
  "andes-glyco",
  "arrow",
  "clap",
+ "flate2",
  "input",
  "model",
  "model-train",

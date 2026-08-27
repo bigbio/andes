@@ -1353,6 +1353,34 @@ struct ParseStats {
     first_errors: Vec<String>,
 }
 
+/// Lowercased spectrum-file extension with a trailing `.gz` stripped, so
+/// `run.mzML.gz` reports `mzml` rather than `gz`.
+///
+/// `Path::extension` returns `gz` for a double extension, which silently
+/// defeated the `== "mzml"` guards on the metadata-detection helpers below:
+/// a gzipped mzML skipped instrument and activation detection entirely and
+/// fell back to the low-res default model. The readers those guards protect
+/// all use `open_buf_maybe_gz`, so the guard -- not the reader -- was the
+/// limitation. Mirrors the `.gz` handling in `input_format_flags`.
+fn spectrum_ext_lower(path: &std::path::Path) -> Option<String> {
+    let is_gz = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gz"))
+        .unwrap_or(false);
+    let effective: std::path::PathBuf = if is_gz {
+        path.file_stem()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    effective
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+}
+
 fn input_format_flags(path: &Path) -> (bool, bool, bool, bool) {
     // Strip a trailing `.gz` so the format is detected from the underlying
     // extension (`spectra.mzML.gz` → mzML, `spectra.mgf.gz` → MGF). `.raw`/`.d`
@@ -3785,10 +3813,7 @@ fn write_filtered_tsv(
 fn load_spectra_for_train(
     path: &Path,
 ) -> Result<Vec<Spectrum>, Box<dyn std::error::Error>> {
-    let ext_lower = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase());
+    let ext_lower = spectrum_ext_lower(path);
     let mut spectra = Vec::new();
     match ext_lower.as_deref() {
         Some("mzml") => {
@@ -5926,10 +5951,7 @@ fn resolve_metadataless_selection(
 /// `eprintln!` warning naming the runner-up and its count.
 fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<ActivationMethod> {
     // Only mzML carries `<activation>`. Other formats: caller falls back.
-    let ext_lower = spectrum_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase());
+    let ext_lower = spectrum_ext_lower(spectrum_path);
     if ext_lower.as_deref() != Some("mzml") {
         return None;
     }
@@ -6005,10 +6027,7 @@ fn detect_dominant_activation(spectrum_path: &std::path::Path) -> Option<Activat
 /// detection passes look symmetric at the call site. Returns `None` for
 /// non-mzML inputs or when the mzML has no recoverable instrument metadata.
 fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<InstrumentType> {
-    let ext_lower = spectrum_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase());
+    let ext_lower = spectrum_ext_lower(spectrum_path);
     if ext_lower.as_deref() != Some("mzml") {
         return None;
     }

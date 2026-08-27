@@ -571,21 +571,21 @@ struct SearchArgs {
     /// Hidden tuning knob; default 10 (lowered from 50 in round-2 — K·ladder is
     /// per-backbone and non-discriminating between isobaric peptides; see
     /// GLYCO_GP_K_DEFAULT).
-    #[arg(long = "glyco-gp-k", hide = true, default_value_t = 10.0f32)]
+    #[arg(long = "glyco-gp-k", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_K_DEFAULT)]
     glyco_gp_k: f32,
 
     /// `gp` fused-selector core-Y hit-count weight J. Hidden tuning knob; default 5.
-    #[arg(long = "glyco-gp-j", hide = true, default_value_t = 5.0f32)]
+    #[arg(long = "glyco-gp-j", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_J_DEFAULT)]
     glyco_gp_j: f32,
 
     /// `gp` fused-selector hyperscore weight H (0 disables). Hidden tuning knob; default 1.
-    #[arg(long = "glyco-gp-h", hide = true, default_value_t = 1.0f32)]
+    #[arg(long = "glyco-gp-h", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_H_DEFAULT)]
     glyco_gp_h: f32,
 
     /// `gp` selector ETD c/z-hyperscore weight (added ONLY on ETD/AI-ETD spectra;
     /// inert on HCD). Hidden knob; default 15 (raised from 5 in round-2 — c/z is
     /// the only per-candidate discriminator on ETD). 0 disables ETD c/z selection.
-    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = 15.0f32)]
+    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_CZ_DEFAULT)]
     glyco_gp_cz: f32,
 
     /// `gp` selector weight on the COUNT of matched b/y ions. The collapse runs before
@@ -595,7 +595,7 @@ struct SearchArgs {
     /// heaviest weight), while this count ranks it at median 1-2. It is free: the count
     /// falls out of the hyperscore the selector already computes per candidate.
     /// Default 0 reproduces the previous selector exactly.
-    #[arg(long = "glyco-gp-m", hide = true, default_value_t = 0.0f32)]
+    #[arg(long = "glyco-gp-m", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_M_DEFAULT)]
     glyco_gp_m: f32,
 
     /// MEASURED TRADE-OFF, which is why the default is 0. On a pooled human plasma set

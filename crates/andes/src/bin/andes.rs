@@ -502,13 +502,54 @@ struct SearchArgs {
     #[arg(long = "rss-probe", default_value_t = false)]
     rss_probe: bool,
 
-    /// Glycan composition list for `--glyco`: `common` (~600 curated N-glycans,
-    /// the default and what the benchmarks were run with) or `full` (the complete
-    /// list, ~4000). `full` widens coverage but inflates the candidate space; it was
-    /// measured to raise the entrapment error 5.4x on a benchmark where it looked
-    /// like a gain on yield alone, so prefer `common` unless you know you need it.
+    /// Glycan composition list for `--glyco`.
+    ///
+    /// `common` (~600, default) is the MEASURED-BEST list and what the benchmarks were
+    /// run with. `reference-human` (~2,300) reaches high-antennary glycans `common`
+    /// cannot name -- 100% of a curated 160-composition human reference vs `common`'s
+    /// 68% -- but measured WORSE overall on human plasma with an entrapment database
+    /// (228 glycoPSMs at 0.00% entrapment FDP, vs 365 at 0.55%). `full` (~4,034) is
+    /// wider still and was measured to raise entrapment error 5.4x on a benchmark where
+    /// it looked like a gain on yield alone.
+    ///
+    /// Bigger is not better here: a larger candidate space gives decoys more places to
+    /// fit, which tightens Percolator's threshold and leaves real identifications
+    /// behind. Prefer `common` unless you have measured otherwise on your own data.
     #[arg(long = "glyco-glycan-list", value_enum, default_value_t = GlycanListFlag::Common)]
     glyco_glycan_list: GlycanListFlag,
+
+    /// Exclude NeuGc (N-glycolylneuraminic acid) glycans from the search list.
+    ///
+    /// Humans do not synthesise NeuGc — CMAH is inactivated in the human lineage, so
+    /// NeuGc in a human sample is trace dietary only. Most other mammals (mouse
+    /// included) DO make it, which is why the mouse-developed glyco benchmarks never
+    /// surfaced this.
+    ///
+    /// NeuGc is also the ENTIRE source of isobaric ambiguity in the default list:
+    /// `NeuGc - NeuAc = 15.994914` and `Hex - Fuc = 15.994915`, so a NeuGc composition
+    /// is mass-degenerate with a NeuAc one. Measured on the default list: 600
+    /// compositions over only 460 distinct masses, 140 masses (30%) carrying more than
+    /// one composition, and 100% of those collisions involve NeuGc. Excluding it gives
+    /// 360 compositions over 360 masses — zero collisions, by construction — and a 40%
+    /// smaller list to search.
+    ///
+    /// Use for human samples. Leave off for mouse and other CMAH-competent species.
+    #[arg(long = "glyco-no-neugc", default_value_t = false)]
+    glyco_no_neugc: bool,
+
+    /// Glycan biology to assume for the search space.
+    ///
+    /// `auto` (default) surveys the NeuGc/NeuAc oxonium ratio across the run, and treats
+    /// the FASTA's `OX=` taxon ids as a VETO rather than a second vote: it narrows the
+    /// list when the spectra show no NeuGc, unless the database is a CMAH-competent
+    /// organism. A database with no `OX=` headers, or a mixed one, does not block
+    /// narrowing. It prints both signals and the decision. `human` forces NeuGc out,
+    /// `mammal` forces it in.
+    ///
+    /// `--glyco-no-neugc` is the explicit override and wins over this.
+    #[arg(long = "glyco-taxon", value_enum, default_value_t = GlycoTaxonFlag::Auto)]
+    glyco_taxon: GlycoTaxonFlag,
+
 
     /// Isotope-error range for `--glyco`. `default` uses 0..=2 — the -1 offset costs
     /// 0.29% of correct answers at a ~53:47 target:decoy ratio (pure FDR dilution),
@@ -530,21 +571,21 @@ struct SearchArgs {
     /// Hidden tuning knob; default 10 (lowered from 50 in round-2 — K·ladder is
     /// per-backbone and non-discriminating between isobaric peptides; see
     /// GLYCO_GP_K_DEFAULT).
-    #[arg(long = "glyco-gp-k", hide = true, default_value_t = 10.0f32)]
+    #[arg(long = "glyco-gp-k", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_K_DEFAULT)]
     glyco_gp_k: f32,
 
     /// `gp` fused-selector core-Y hit-count weight J. Hidden tuning knob; default 5.
-    #[arg(long = "glyco-gp-j", hide = true, default_value_t = 5.0f32)]
+    #[arg(long = "glyco-gp-j", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_J_DEFAULT)]
     glyco_gp_j: f32,
 
     /// `gp` fused-selector hyperscore weight H (0 disables). Hidden tuning knob; default 1.
-    #[arg(long = "glyco-gp-h", hide = true, default_value_t = 1.0f32)]
+    #[arg(long = "glyco-gp-h", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_H_DEFAULT)]
     glyco_gp_h: f32,
 
     /// `gp` selector ETD c/z-hyperscore weight (added ONLY on ETD/AI-ETD spectra;
     /// inert on HCD). Hidden knob; default 15 (raised from 5 in round-2 — c/z is
     /// the only per-candidate discriminator on ETD). 0 disables ETD c/z selection.
-    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = 15.0f32)]
+    #[arg(long = "glyco-gp-cz", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_CZ_DEFAULT)]
     glyco_gp_cz: f32,
 
     /// `gp` selector weight on the COUNT of matched b/y ions. The collapse runs before
@@ -554,8 +595,82 @@ struct SearchArgs {
     /// heaviest weight), while this count ranks it at median 1-2. It is free: the count
     /// falls out of the hyperscore the selector already computes per candidate.
     /// Default 0 reproduces the previous selector exactly.
-    #[arg(long = "glyco-gp-m", hide = true, default_value_t = 0.0f32)]
+    #[arg(long = "glyco-gp-m", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_M_DEFAULT)]
     glyco_gp_m: f32,
+
+    /// Resolve isobaric glycan-composition collisions on Y-ladder evidence rather
+    /// than sort order. Two compositions can be isobaric to ~1 uDa (Hex-Fuc and
+    /// NeuGc-NeuAc both = 15.9949), and above 2000 Da more than half of the default
+    /// list has such a twin; without this the survivor is chosen by `to_bits()`
+    /// ordering, so the SAME glycan mass can be annotated with DIFFERENT compositions
+    /// on different spectra. Measured on PXD030622 plasma: andes emitted 131
+    /// composition strings over 53 distinct masses (~2.5 per mass) where Byonic was
+    /// 1.0. Off by default: the original A/B scored peptide YIELD (-8), which cannot
+    /// see this. Judge it on compositions-per-mass, not on ID count.
+    #[arg(long = "glyco-isobar-rep", default_value_t = false)]
+    glyco_isobar_rep: bool,
+
+    /// Keep backbones by GLYCAN-Y evidence as well as by peptide b/y ("two-axis
+    /// retention"), and enable glycan-Y-first candidate generation.
+    ///
+    /// Without this, backbone truncation retains on peptide b/y rank (axis 1), c/z
+    /// (axis 4, ETD-ONLY) and transfer (axis 3, off by default). On an HCD-only run --
+    /// the human plasma regime -- peptide b/y is therefore the ONLY surviving axis, and
+    /// it is the weakest one for large glycopeptides: a backbone anchored by a strong
+    /// core-Y ladder but with few b/y ions is truncated before the fused selector ever
+    /// sees it. The glycan-Y evidence is already computed and is otherwise used only as
+    /// a tiebreak.
+    ///
+    /// Default off (the validated baseline). Costs a second top-k retention pass.
+    #[arg(long = "glyco-y-index", default_value_t = false)]
+    glyco_y_index: bool,
+
+    /// Compute the PIN feature vector against the GLYCAN-DECORATED backbone instead of
+    /// the bare deglycosylated peptide.
+    ///
+    /// By default the ~40 feature columns are computed on the bare backbone, so every
+    /// glycosite-spanning fragment sits at the wrong theoretical mass -- roughly half the
+    /// b/y ladder of a glycopeptide. IntensitySignal, MatchedIonRatio,
+    /// ExplainedIonCurrentRatio, LongestComplementaryLadder and strong_score therefore
+    /// describe a molecule that was never in the tube, and those are the columns
+    /// Percolator weights most heavily.
+    ///
+    /// MEASURED AT -41% AND LEFT OFF. On PXD030622 plasma with an E. coli entrapment
+    /// database this took 365 glycoPSMs @0.55% FDP down to 215 @0.00%. The premise was
+    /// wrong: under HCD a glycopeptide fragments at the GLYCOSIDIC bonds first, so b/y
+    /// ions come from the backbone AFTER the glycan is lost -- the BARE backbone is the
+    /// correct theoretical ladder, and decorating moves half the predicted ladder to
+    /// masses with no peaks. Consistent with the -16 measured on the scoring peptide
+    #[arg(long = "glyco-decorated-features", default_value_t = false)]
+    glyco_decorated_features: bool,
+
+    /// Require a matching sialic OXONIUM ion before a glycan composition may claim
+    /// NeuAc or NeuGc, as a fraction of base-peak intensity. 0 disables the gate.
+    ///
+    /// NeuAc and NeuGc are indistinguishable by precursor mass when traded against
+    /// Hex/Fuc -- Hex1NeuAc1 and Fuc1NeuGc1 are the SAME elemental formula -- but they
+    /// are distinguishable in oxonium ions: NeuAc gives m/z 274.092/292.103, NeuGc gives
+    /// 290.087/308.098. Gating on those is how pGlyco3 breaks the degeneracy, and it is
+    /// the evidence-based alternative to excluding NeuGc by species
+    /// (`--glyco-taxon` / `--glyco-no-neugc`), so it also works where NeuGc is real.
+    ///
+    /// Deliberately a threshold, not a presence test: Chalkley & Baker (MCP 2025) found
+    /// ~70% of spectra carrying a NeuGc oxonium contained no NeuGc, from co-isolation, so
+    /// a binary test admits almost everything.
+    ///
+    /// MEASURED on PXD030622 plasma with an E. coli entrapment database: it fixes
+    /// CALIBRATION, not yield. 2% gives 267 glycoPSMs @0.00% entrapment FDP and 5% gives
+    /// 241 @0.00%, against an ungated 268 @1.87% -- so it flips the verdict from
+    /// OPTIMISTIC to CONSERVATIVE at no yield cost, but buys no identifications, and an
+    /// FDP pinned at 0.00% means the threshold has tightened past the useful point.
+    /// Species exclusion (`--glyco-no-neugc`) still wins on yield there: 365 @0.55%.
+    /// If you tune this, go LOOSER (0.005-0.01), not stricter.
+    ///
+    /// Gates SIALIC only, never fucose -- PTM-Shepherd's published hit/miss ratios weight
+    /// absence of a fucose oxonium 10x weaker than absence of a sialic one
+    #[arg(long = "glyco-sialic-oxonium-min-frac", default_value_t = 0.0f32,
+          value_parser = parse_unit_fraction_f32)]
+    glyco_sialic_oxonium_min_frac: f32,
 
     /// Minimum trimannosyl-core Y ions required before `--glyco` reports a PSM for a
     /// scan. andes historically reported a best guess for every scan clearing the
@@ -1816,11 +1931,29 @@ enum EthcdActivationFlag {
     Etd,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, clap::ValueEnum)]
+enum GlycoTaxonFlag {
+    /// Decide from the data: the NeuGc/NeuAc oxonium ratio across the run, cross-checked
+    /// against `OX=` taxon ids in the FASTA. Conservative — only narrows the list when
+    /// the evidence supports it, and always says what it decided.
+    Auto,
+    /// CMAH-inactivated (human and the great apes): exclude NeuGc.
+    Human,
+    /// CMAH-competent (mouse, rat, pig, bovine, CHO...): keep NeuGc.
+    Mammal,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
 enum GlycanListFlag {
-    /// ~600 curated N-glycan compositions (default; what the benchmarks used).
+    /// Reference-fitted human list (HexNAc up to 11, high-antennary reachable). Covers
+    /// 100% of a curated 160-composition human reference vs `common`'s 68% -- but MEASURED
+    /// WORSE overall on human plasma (228 glycoPSMs @0.00% entrapment FDP vs `common`'s
+    /// 365 @0.55%), because the larger space tightens Percolator's threshold. Use only
+    /// when the sample genuinely carries high-antennary glycans, and measure.
+    ReferenceHuman,
+    /// ~600 compositions. The measured-best default; what the benchmarks used.
     Common,
-    /// The full ~4000-composition list.
+    /// The full ~4,034-composition list. Widest coverage, worst error control.
     Full,
 }
 
@@ -3084,11 +3217,88 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         });
         andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
-        let glycan_list = if cli.glyco_glycan_list == GlycanListFlag::Full {
-            andes_glyco::glycan_db::n_glycan_list()
-        } else {
-            andes_glyco::glycan_db::n_glycan_list_common()
+        let mut glycan_list = match cli.glyco_glycan_list {
+            GlycanListFlag::Full => andes_glyco::glycan_db::n_glycan_list(),
+            GlycanListFlag::ReferenceHuman => {
+                andes_glyco::glycan_db::n_glycan_list_reference_human()
+            }
+            GlycanListFlag::Common => andes_glyco::glycan_db::n_glycan_list_common(),
         };
+        // Decide whether NeuGc belongs in the search space. NeuGc is the sole source of
+        // isobaric mass degeneracy in this list (Fuc+NeuGc and Hex+NeuAc are the SAME
+        // elemental formula), so getting this right is worth more than any downstream
+        // scoring fix -- you cannot resolve from fragments what should not be enumerated.
+        let drop_neugc = if cli.glyco_no_neugc {
+            eprintln!("--glyco-no-neugc: NeuGc excluded (explicit).");
+            true
+        } else {
+            match cli.glyco_taxon {
+                GlycoTaxonFlag::Human => {
+                    eprintln!("--glyco-taxon human: NeuGc excluded (CMAH-inactivated lineage).");
+                    true
+                }
+                GlycoTaxonFlag::Mammal => {
+                    eprintln!("--glyco-taxon mammal: NeuGc kept (CMAH-competent lineage).");
+                    false
+                }
+                GlycoTaxonFlag::Auto => {
+                    // Signal 1: the spectra themselves. Stronger than the FASTA, because it
+                    // measures what is in the tube rather than what was searched.
+                    let survey = andes_glyco::oxonium::survey_sialic_oxonium(
+                        spectra.iter().map(|s| s.peaks.as_slice()),
+                        cli.glyco_tol_ppm,
+                        0.10,
+                    );
+                    // Signal 2: OX= taxon ids in the database.
+                    let (taxon, n_hu, n_nh, n_ox) = andes_glyco::glycan_db::taxon_from_headers(
+                        target_db.proteins.iter().map(|p| p.description.as_str()),
+                    );
+                    eprintln!(
+                        "--glyco-taxon auto: sialylated spectra {} ({} with NeuGc oxonium >=10% of \
+                         NeuAc = {:.2}%, {}), FASTA OX= {:?} ({} CMAH-null / {} competent of {})",
+                        survey.neuac_spectra,
+                        survey.neugc_spectra,
+                        100.0 * survey.neugc_fraction,
+                        if survey.conclusive { "conclusive" } else { "INCONCLUSIVE" },
+                        taxon,
+                        n_hu,
+                        n_nh,
+                        n_ox
+                    );
+                    // Narrow only when BOTH signals agree, and never on an inconclusive
+                    // survey. A CMAH-competent FASTA vetoes: mouse genuinely has NeuGc, and
+                    // recombinant human protein from a murine/CHO host does too.
+                    let spectra_say_no = survey.conclusive && survey.neugc_fraction < 0.01;
+                    let fasta_objects = taxon == andes_glyco::glycan_db::Taxon::CmahCompetent;
+                    let decide = spectra_say_no && !fasta_objects;
+                    eprintln!(
+                        "--glyco-taxon auto: {} (override with --glyco-taxon human|mammal or \
+                         --glyco-no-neugc)",
+                        if decide {
+                            "NeuGc EXCLUDED - no NeuGc oxonium evidence in this run"
+                        } else if !survey.conclusive {
+                            "NeuGc kept - too little sialic signal to judge"
+                        } else if fasta_objects {
+                            "NeuGc kept - FASTA is a CMAH-competent organism"
+                        } else {
+                            "NeuGc kept - NeuGc oxonium evidence present"
+                        }
+                    );
+                    decide
+                }
+            }
+        };
+        if drop_neugc {
+            let before = glycan_list.len();
+            glycan_list.retain(|g| g.neugc == 0);
+            eprintln!(
+                "glycan list: {} -> {} compositions (NeuGc removed; it is the only source of \
+                 isobaric mass degeneracy here)",
+                before,
+                glycan_list.len()
+            );
+        }
+        let glycan_list = glycan_list;
         let glyco_tol_ppm = cli.glyco_tol_ppm;
         // `!(x > 0.0)` rather than `x <= 0.0` so NaN is rejected too: every
         // comparison against NaN is false, so a NaN tolerance would sail past a
@@ -3121,6 +3331,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             min_matched_by: cli.glyco_min_matched_ions,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,
+            isobar_rep: cli.glyco_isobar_rep,
+            y_index: cli.glyco_y_index,
+            decorated_features: cli.glyco_decorated_features,
+            sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
             max_pf: cli.glyco_max_pf,
@@ -6334,6 +6548,13 @@ fn parse_precursor_tol(s: &str) -> Result<Tolerance, String> {
         ));
     }
     Ok(if is_ppm { Tolerance::Ppm(v) } else { Tolerance::Da(v) })
+}
+
+/// f32 companion to [`parse_unit_fraction`], for CLI fractions stored as `f32`.
+/// Rejects NaN, negatives and values above 1 at PARSE time rather than letting a nonsense
+/// threshold silently disable or invert a gate.
+fn parse_unit_fraction_f32(s: &str) -> Result<f32, String> {
+    parse_unit_fraction(s).map(|v| v as f32)
 }
 
 /// Parse a probability-domain CLI value (FDR / PEP / refine-FDR) — must be a

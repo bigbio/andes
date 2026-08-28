@@ -480,13 +480,40 @@ pub fn strong_score_calibrated_loo(retained_strong: &[f32], this: f32) -> f32 {
     let n = retained_strong.len();
     let this_d = f64::from(this);
     let sum: f64 = retained_strong.iter().map(|&s| f64::from(s)).sum();
-    let sum_sq: f64 = retained_strong.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
     // Leave exactly ONE copy of `this` out, so mean and variance are over the
     // same subset.
     let n_others = (n - 1) as f64;
     let mean_others = (sum - this_d) / n_others;
-    let var_others = ((sum_sq - this_d * this_d) / n_others - mean_others * mean_others).max(0.0);
-    let sigma = var_others.sqrt().max(1e-6);
+    // Two-pass variance about the mean. The previous `E[x^2] - E[x]^2` form
+    // cancels catastrophically when the retained scores are large and tightly
+    // clustered: both terms are big and nearly equal, so the difference keeps
+    // only the low-order bits and can land at or below zero. Measured on a real
+    // 55,171-row PIN: 53 rows blew past |1e6| and inflated the column's stdev
+    // 72x over the inliers, which after Percolator's standardisation leaves the
+    // feature carrying almost nothing but those spikes.
+    let mut ss = 0.0f64;
+    let mut skipped_self = false;
+    for &v in retained_strong {
+        let d = f64::from(v);
+        if !skipped_self && d == this_d {
+            skipped_self = true;
+            continue;
+        }
+        let dev = d - mean_others;
+        ss += dev * dev;
+    }
+    let var_others = (ss / n_others).max(0.0);
+    // A degenerate spectrum - every retained score effectively identical - carries
+    // NO discriminative information about this candidate, and the honest encoding
+    // of that is 0.0, not a huge z-score. The previous code floored sigma at an
+    // absolute 1e-6 and divided a non-zero numerator by it, manufacturing values
+    // in the millions out of nothing. Judge degeneracy RELATIVE to the score
+    // scale so the test is not itself scale-blind.
+    let scale = mean_others.abs().max(1.0);
+    let sigma = var_others.sqrt();
+    if sigma <= 1e-9 * scale {
+        return 0.0;
+    }
     ((this_d - mean_others) / sigma) as f32
 }
 
@@ -817,8 +844,7 @@ mod tests {
                 left: vec![-1],
                 right: vec![-1],
                 value: vec![leaf_value],
-                default_left: vec![1],
-            }],
+                default_left: vec![1] }],
             iso_x: vec![],
             iso_y: vec![],
         };

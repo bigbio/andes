@@ -171,7 +171,7 @@ fn main() {
         // --- DB-branch-only ceiling (precursor − each known glycan), swept ---
         {
             let searchable = iso_neutrals.iter().any(|&(iso, pn)| {
-                db_branch(pn, &glycans, 500.0, prec_z, iso)
+                db_branch(pn, &glycans, 500.0, prec_z, iso, None)
                     .iter()
                     .any(|h| in_window(h.backbone_mass, t.backbone_mass))
             });

@@ -44,6 +44,20 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
     // EXPANDED 2026-07-09: Fuc 3→4, Hex 3..12 → 2..14 to cover high-Fuc / extended- and
     // truncated-Hex gap compositions (+~11 truth backbones on PXD025455 Fc3_r1); HexNAc/
     // NeuAc/NeuGc bounds held to limit candidate bloat.
+    // Bounds unchanged from before the 2026-08-19 glyco campaign. They were briefly
+    // widened to HexNAc 2..=11 / Hex 1..=14 to preserve `common ⊆ full` while the COMMON
+    // list was fitted to a curated human reference -- but that fitting was then reverted
+    // (it measured -37% on plasma with entrapment), so the justification evaporated and
+    // the widening is undone here.
+    //
+    // Two reasons not to leave it widened: it took this list 4,034 -> 7,903 against a
+    // list the CLI help itself describes as "measured to raise entrapment error 5.4x" at
+    // the smaller size; and because this generator has no `Hex >= 3` rule, it multiplied
+    // the compositions with antennae but no trimannosyl core -- not N-glycans at all --
+    // from 307 to 1,154.
+    //
+    // `n_glycan_list_reference_human` is deliberately NOT a subset of this list: it is a
+    // differently-shaped curated fit, not a widening, and nothing asserts that invariant.
     for hn in 2u8..=8 {
         for hx in 2u8..=14 {
             for fc in 0u8..=4 {
@@ -99,6 +113,76 @@ pub fn n_glycan_list() -> Vec<GlycanComp> {
     out
 }
 
+/// Reference-fitted human N-glycan list: HexNAc 2..=11 with a high-mannose arm at
+/// HexNAc 2 (Hex 1..=12) and complex/hybrid bounded by the trimannosyl core and antennal
+/// galactose (Hex 3..=HexNAc+5).
+///
+/// Fitted to the 160-composition human list the PXD030622 depositors searched with Byonic,
+/// which it covers 100% (the default [`n_glycan_list_common`] box covers 68%; the 52 it
+/// misses are mostly HexNAc > 6 high-antennary / poly-LacNAc glycans such as
+/// HexNAc(10)Hex(10)Fuc(1)).
+///
+/// ⚠ MEASURED WORSE AS A DEFAULT: on human plasma with an E. coli entrapment database this
+/// list returned 228 glycoPSMs at 0.00% entrapment FDP against the default box's 365 at
+/// 0.55% -- a 37% loss. Reach for it only when the sample genuinely carries high-antennary
+/// glycans the default box cannot name, and measure rather than assume.
+///
+/// Two structural rules keep it from being brute-force: complex/hybrid glycans must carry
+/// the trimannosyl core (`Hex >= 3`), and Hex is bounded by core plus roughly one galactose
+/// per antenna plus poly-LacNAc slack. Together they prune 15% of what naive widening would
+/// emit while losing none of the reference list.
+pub fn n_glycan_list_reference_human() -> Vec<GlycanComp> {
+    let mut out: Vec<GlycanComp> = Vec::with_capacity(2400);
+    const HEXNAC_MAX: u8 = 11;
+    const HIGH_MANNOSE_HEX_MAX: u8 = 12;
+    const COMPLEX_HEX_SLACK: u8 = 5;
+
+    for hn in 2u8..=HEXNAC_MAX {
+        let (hx_lo, hx_hi) = if hn == 2 {
+            (1u8, HIGH_MANNOSE_HEX_MAX)
+        } else {
+            (3u8, (hn + COMPLEX_HEX_SLACK).min(14))
+        };
+        for hx in hx_lo..=hx_hi {
+            for fc in 0u8..=2 {
+                if fc > hn {
+                    continue;
+                }
+                let max_sialic = hn.saturating_sub(2);
+                for na in 0u8..=4 {
+                    for ng in 0u8..=1 {
+                        if na + ng > max_sialic {
+                            continue;
+                        }
+                        let mass = hn as f64 * HEXNAC
+                            + hx as f64 * HEX
+                            + fc as f64 * FUC
+                            + na as f64 * NEUAC
+                            + ng as f64 * NEUGC;
+                        if !(500.0..=6000.0).contains(&mass) {
+                            continue;
+                        }
+                        out.push(GlycanComp {
+                            hexnac: hn, hex: hx, fuc: fc, neuac: na, neugc: ng, mass,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    add_paucimannose(&mut out);
+    out.sort_by(|a, b| {
+        a.mass.total_cmp(&b.mass)
+            .then_with(|| a.hexnac.cmp(&b.hexnac))
+            .then_with(|| a.hex.cmp(&b.hex))
+            .then_with(|| a.fuc.cmp(&b.fuc))
+            .then_with(|| a.neuac.cmp(&b.neuac))
+            .then_with(|| a.neugc.cmp(&b.neugc))
+    });
+    dedup_by_composition(&mut out);
+    out
+}
+
 /// Drop exact-composition duplicates from a mass-then-composition-sorted list.
 /// `add_paucimannose` re-emits HexNAc2Hex2 (± core Fuc), which the main `hx ≥ 2`
 /// loop already generates once its mass clears the ≥ 500 Da floor, so the same
@@ -136,17 +220,32 @@ fn dedup_by_composition(out: &mut Vec<GlycanComp>) {
 pub fn n_glycan_list_common() -> Vec<GlycanComp> {
     let mut out: Vec<GlycanComp> = Vec::with_capacity(700);
 
+    // MEASURED-BEST DEFAULT. A reference-fitted, much wider box was tried and LOST:
+    // fitting to a curated 160-composition human list (HexNAc<=11, Hex<=HexNAc+5) raised
+    // reference coverage 68% -> 100% and this list 312 -> 1,229 NeuAc-only compositions,
+    // and cost 37% of identifications on human plasma with an E. coli entrapment database
+    // (365 -> 228 glycoPSMs), with entrapment FDP collapsing 0.55% -> 0.00%. The larger
+    // space gives decoys more places to fit, Percolator's threshold tightens, and real IDs
+    // are left on the table -- pGlyco's "the glycan database is not the larger the better"
+    // (182 -> 0.8% vs 1,234 -> 4.0% glycan FDR) reproduced on this stack.
+    //
+    // The 32% coverage gap is therefore REAL BUT NOT THE BINDING CONSTRAINT. The wider box
+    // is available as `n_glycan_list_reference_human` / `--glyco-glycan-list reference-human`
+    // for samples that genuinely need high-antennary coverage.
+    //
+    // NeuGc is generated here and removed downstream by --glyco-taxon / --glyco-no-neugc:
+    // it is the sole source of isobaric mass degeneracy in this list.
     for hn in 2u8..=6 {
         for hx in 3u8..=10 {
             for fc in 0u8..=2 {
                 if fc > hn {
-                    continue; // fuc ≤ hexnac
+                    continue; // each fucose needs a GlcNAc to sit on
                 }
                 let max_sialic = hn.saturating_sub(2);
                 for na in 0u8..=4 {
                     for ng in 0u8..=1 {
                         if na + ng > max_sialic {
-                            continue; // sialic ≤ antennae HexNAc
+                            continue; // sialic acids cap at one per antennal HexNAc
                         }
                         let mass = hn as f64 * HEXNAC
                             + hx as f64 * HEX
@@ -277,8 +376,10 @@ mod tests {
     #[test]
     fn n_glycan_list_common_size_in_expected_range() {
         let list = n_glycan_list_common();
-        // HexNAc 2..=6, Hex 3..=10, Fuc 0..=2, NeuAc 0..=4, NeuGc 0..=1
-        // with plausibility + mass filter → ~600 compositions.
+        // HexNAc 2..=6, Hex 3..=10, Fuc 0..=2, NeuAc 0..=4, NeuGc 0..=1, plus the GI-3
+        // paucimannose block. This is the MEASURED-BEST default box; the reference-fitted
+        // widening (~2,400 with NeuGc) lives in `n_glycan_list_reference_human` and
+        // measured WORSE as a default (-37% IDs on plasma with entrapment).
         assert!(
             list.len() >= 400 && list.len() <= 800,
             "unexpected common glycan count: {}",
@@ -382,10 +483,16 @@ mod tests {
     fn n_glycan_list_nonempty_and_in_expected_range() {
         let list = n_glycan_list();
         // HexNAc 2..=8, Hex 2..=14, Fuc 0..=4, NeuAc 0..=5, NeuGc 0..=2 (mass
-        // ∈[500,6000], EXPANDED 2026-07-09 for gap coverage) PLUS the GI-3
-        // paucimannose block (HexNAc 1–2, Hex 0–2, ± Fuc), minus exact-composition
-        // duplicates the paucimannose block shares with the main loop. Actual =
-        // 4034; a [3500, 4500] band guards against an accidental bound change.
+        // ∈[500,6000]) PLUS the GI-3 paucimannose block (HexNAc 1–2, Hex 0–2, ± Fuc),
+        // minus exact-composition duplicates the paucimannose block shares with the
+        // main loop.
+        //
+        // WIDENED 2026-08-19 from HexNAc 2..=8 / Hex 2..=14 (which gave 4034) purely to
+        // preserve the `common ⊆ full` invariant after the common list was fitted to a
+        // curated human reference and grew to HexNAc 11 / Hex 1. This list is opt-in via
+        // `--glyco-glycan-list full` and was already measured to inflate entrapment error
+        // 5.4x at 4034 entries; at 7903 it is larger still, so the existing "prefer
+        // `common`" guidance applies with more force, not less.
         assert!(
             list.len() >= 3500 && list.len() <= 4500,
             "unexpected glycan count: {}",
@@ -452,6 +559,203 @@ mod tests {
                 g.neuac + g.neugc <= max_sialic,
                 "sialic > antennae HexNAc: {:?}",
                 g
+            );
+        }
+    }
+}
+
+/// Which glycan biology the search space should assume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taxon {
+    /// CMAH-inactivated: cannot synthesise NeuGc.
+    Human,
+    /// CMAH-competent (mouse, rat, pig, bovine, CHO...): NeuGc is genuine.
+    CmahCompetent,
+    /// Could not be determined from the database.
+    Unknown,
+}
+
+/// Detect the source organism from UniProt-style FASTA headers (`OX=<taxid>`).
+///
+/// Returns the majority taxon plus (human_headers, nonhuman_headers, headers_with_ox).
+/// Only `OX=` is used: `OS=` free text is not worth parsing when the numeric taxon id
+/// is present in every UniProt header, and a database with no `OX=` at all should
+/// report `Unknown` rather than guess.
+///
+/// Taxon ids: 9606 human. 9598/9597/9593/9601 are the great apes, which share the
+/// human CMAH inactivation (Chou et al. PNAS 1998) and so belong on the human side.
+pub fn taxon_from_headers<'a, I: IntoIterator<Item = &'a str>>(
+    descriptions: I,
+) -> (Taxon, usize, usize, usize) {
+    // Great apes share the human CMAH lesion; everything else is treated as competent.
+    const CMAH_NULL_TAXA: [u32; 5] = [9606, 9598, 9597, 9593, 9601];
+    let mut human = 0usize;
+    let mut nonhuman = 0usize;
+    let mut with_ox = 0usize;
+    for d in descriptions {
+        let Some(i) = d.find("OX=") else { continue };
+        let rest = &d[i + 3..];
+        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        if end == 0 {
+            continue;
+        }
+        let Ok(tax) = rest[..end].parse::<u32>() else { continue };
+        with_ox += 1;
+        if CMAH_NULL_TAXA.contains(&tax) {
+            human += 1;
+        } else {
+            nonhuman += 1;
+        }
+    }
+    // Require a clear majority; a mixed database (e.g. host + expression system) is
+    // exactly the case where guessing is dangerous, so report Unknown and let the
+    // spectra decide.
+    let taxon = if with_ox == 0 {
+        Taxon::Unknown
+    } else if human * 10 >= with_ox * 9 {
+        Taxon::Human
+    } else if nonhuman * 10 >= with_ox * 9 {
+        Taxon::CmahCompetent
+    } else {
+        Taxon::Unknown
+    };
+    (taxon, human, nonhuman, with_ox)
+}
+
+#[cfg(test)]
+mod taxon_tests {
+    use super::*;
+
+    #[test]
+    fn detects_human_from_uniprot_headers() {
+        let h = vec![
+            "Serum albumin OS=Homo sapiens OX=9606 GN=ALB PE=1 SV=2",
+            "Complement factor H OS=Homo sapiens OX=9606 GN=CFH PE=1 SV=4",
+        ];
+        let (t, hu, nh, ox) = taxon_from_headers(h);
+        assert_eq!((t, hu, nh, ox), (Taxon::Human, 2, 0, 2));
+    }
+
+    #[test]
+    fn detects_mouse_as_cmah_competent() {
+        let h = vec!["Albumin OS=Mus musculus OX=10090 GN=Alb PE=1 SV=3"];
+        assert_eq!(taxon_from_headers(h).0, Taxon::CmahCompetent);
+    }
+
+    #[test]
+    fn great_apes_share_the_human_cmah_lesion() {
+        let h = vec!["X OS=Pan troglodytes OX=9598 GN=X PE=1 SV=1"];
+        assert_eq!(taxon_from_headers(h).0, Taxon::Human);
+    }
+
+    #[test]
+    fn mixed_database_refuses_to_guess() {
+        let h = vec![
+            "A OS=Homo sapiens OX=9606 GN=A PE=1 SV=1",
+            "B OS=Mus musculus OX=10090 GN=B PE=1 SV=1",
+        ];
+        assert_eq!(taxon_from_headers(h).0, Taxon::Unknown);
+    }
+
+    #[test]
+    fn no_ox_field_is_unknown() {
+        let h = vec!["some plain fasta description", "another"];
+        let (t, _, _, ox) = taxon_from_headers(h);
+        assert_eq!((t, ox), (Taxon::Unknown, 0));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    /// The gap this widening closed: high-antennary compositions a curated human list
+    /// searches and the previous box (hexnac 2..=6) could not name at any score.
+    #[test]
+    fn reaches_high_antennary_compositions() {
+        let l = n_glycan_list_reference_human();
+        for &(hn, hx, fc, na) in &[(10u8, 10u8, 1u8, 0u8), (11, 11, 0, 1), (7, 8, 1, 2)] {
+            assert!(
+                l.iter().any(|g| g.hexnac == hn
+                    && g.hex == hx
+                    && g.fuc == fc
+                    && g.neuac == na
+                    && g.neugc == 0),
+                "HexNAc({hn})Hex({hx})Fuc({fc})NeuAc({na}) must be reachable"
+            );
+        }
+    }
+
+    /// The high-mannose arm: HexNAc2 carries no antennae, so Hex ranges freely.
+    #[test]
+    fn covers_the_high_mannose_series() {
+        let l = n_glycan_list_reference_human();
+        for hx in 3u8..=12 {
+            assert!(
+                l.iter().any(|g| g.hexnac == 2 && g.hex == hx && g.fuc == 0 && g.neuac == 0),
+                "Man{hx} (HexNAc2Hex{hx}) must be reachable"
+            );
+        }
+    }
+
+    /// A complex/hybrid glycan without the trimannosyl core is not an N-glycan.
+    /// This rule is what keeps the widening from emitting nonsense.
+    #[test]
+    fn never_emits_complex_glycans_without_a_trimannosyl_core() {
+        for g in n_glycan_list_reference_human() {
+            if g.hexnac > 2 {
+                assert!(
+                    g.hex >= 3,
+                    "HexNAc({})Hex({}) has antennae but no trimannosyl core",
+                    g.hexnac,
+                    g.hex
+                );
+            }
+        }
+    }
+
+    /// Hex is bounded by core + antennal galactose + poly-LacNAc slack. Without this the
+    /// generator emits implausible Hex-heavy complex glycans and inflates the space.
+    #[test]
+    fn hex_is_bounded_by_antennae_for_complex_glycans() {
+        for g in n_glycan_list_reference_human() {
+            if g.hexnac > 2 {
+                assert!(
+                    g.hex <= g.hexnac + 5,
+                    "HexNAc({})Hex({}) exceeds core + one Gal per antenna + slack",
+                    g.hexnac,
+                    g.hex
+                );
+            }
+        }
+    }
+
+    /// Excluding NeuGc must leave a list with NO isobaric mass collisions at all --
+    /// that is the whole point of the species gate, and it should hold by construction.
+    ///
+    /// Guards BOTH generated lists. The `--glyco-no-neugc` / `--glyco-taxon` measurement
+    /// (+36% IDs at 3.4x lower entrapment error) was made on `n_glycan_list_common`, so
+    /// testing only the opt-in reference list would leave the default unguarded.
+    #[test]
+    fn neuac_only_list_has_no_isobaric_collisions() {
+        for (name, list) in [
+            ("common", n_glycan_list_common()),
+            ("reference_human", n_glycan_list_reference_human()),
+        ] {
+            use std::collections::HashMap;
+            let mut by_mass: HashMap<u64, Vec<(u8, u8, u8, u8)>> = HashMap::new();
+            for g in list.into_iter().filter(|g| g.neugc == 0) {
+                by_mass
+                    .entry((g.mass * 1000.0).round() as u64)
+                    .or_default()
+                    .push((g.hexnac, g.hex, g.fuc, g.neuac));
+            }
+            let clashes: Vec<_> = by_mass.values().filter(|v| v.len() > 1).collect();
+            assert!(
+                clashes.is_empty(),
+                "{name}: NeuAc-only list must be collision-free; found {} shared masses, e.g. {:?}",
+                clashes.len(),
+                clashes.first()
             );
         }
     }

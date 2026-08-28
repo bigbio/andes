@@ -329,6 +329,32 @@ impl IonType {
     /// True if this is a neutral-loss-shifted fragment ion (any loss class).
     pub fn is_loss(&self) -> bool { self.loss_class() != 0 }
 
+    /// [`mz`](Self::mz) computed from the EXACT (unquantised) fragment neutral mass.
+    ///
+    /// [`mz`](Self::mz) recovers the mass from the INTEGER nominal node index
+    /// (`real = node_nominal / INTEGER_MASS_SCALER`), which displaces the theoretical
+    /// m/z by a median 52 ppm (90th pct 133 ppm) for real peptide compositions —
+    /// measured over 300,333 simulated b-ion positions. That is fine for SERVING,
+    /// whose `mme` window (0.5 Da) absorbs it, and it is unavoidable there because the
+    /// node-score cache is indexed by nominal mass. It is NOT fine for TRAINING, which
+    /// records the mass error of each match: the recorded error became the rounding
+    /// artifact rather than the instrument's accuracy, leaving `ion_err` and
+    /// `noise_err` indistinguishable by construction.
+    ///
+    /// Training walks actual peptides and therefore has the exact accumulated fragment
+    /// mass; it uses this. Serving keeps [`mz`](Self::mz).
+    ///
+    /// For `Noise`, returns 0.0.
+    pub fn mz_exact(&self, real_mass: f64) -> f64 {
+        match self {
+            IonType::Prefix { charge, offset_bits, .. } | IonType::Suffix { charge, offset_bits, .. } => {
+                let offset = f32::from_bits(*offset_bits) as f64;
+                real_mass / (*charge as f64) + offset
+            }
+            IonType::Noise => 0.0,
+        }
+    }
+
     /// Compute the predicted m/z for this ion type given a **nominal** node mass.
     ///
     /// Formula:
@@ -341,6 +367,11 @@ impl IonType {
     /// monoisotopic mass before dividing by charge.
     ///
     /// For `Noise`, returns 0.0.
+    ///
+    /// ⚠ The nominal round-trip displaces the result by a median 52 ppm. That is
+    /// harmless for SERVING, whose `mme` window absorbs it, and unavoidable there
+    /// because the node-score cache is indexed by nominal mass — but training should
+    /// use [`mz_exact`](Self::mz_exact) instead.
     pub fn mz(&self, node_nominal: f64) -> f64 {
         match self {
             IonType::Prefix { charge, offset_bits, .. } | IonType::Suffix { charge, offset_bits, .. } => {
@@ -718,5 +749,66 @@ mod tests {
         // Segment 1 has no partitions → empty.
         let seg1 = param.ion_types_for_segment(1);
         assert!(seg1.is_empty());
+    }
+}
+#[cfg(test)]
+mod exact_mass_tests {
+    use super::*;
+
+    fn b_ion() -> IonType {
+        IonType::Prefix { charge: 1, offset_bits: (model::mass::PROTON as f32).to_bits(), loss_class: 0 }
+    }
+
+    /// The defect this guards: `mz` recovers the fragment mass from the INTEGER nominal
+    /// node index, so its theoretical m/z is displaced from the truth. Training matched
+    /// that displaced position inside a 20 ppm window and therefore recorded ~80% of
+    /// real fragments as "missing", collapsing the absent-ion penalty on every
+    /// high-resolution model (measured in the shipped store: missing-slot frequency
+    /// 0.93 for hcd_qexactive_tryp vs 0.45 for cid_lowres_tryp).
+    #[test]
+    fn nominal_reconstruction_is_displaced_far_beyond_a_highres_window() {
+        // A real tryptic b-ion mass (PEPTIDE-like accumulation), not a round number.
+        let real_mass = 1043.487_f64;
+        let ion = b_ion();
+        let nominal = model::mass::nominal_from(real_mass) as f64;
+
+        let exact = ion.mz_exact(real_mass);
+        let quantised = ion.mz(nominal);
+        let ppm = 1e6 * (quantised - exact).abs() / exact;
+
+        assert!(
+            ppm > 20.0,
+            "nominal reconstruction is supposed to be far outside a 20 ppm window \
+             (that is the whole defect); got {ppm:.1} ppm"
+        );
+    }
+
+    /// `mz_exact` must be exactly the textbook fragment m/z, so training records the
+    /// instrument's error rather than a rounding artifact.
+    #[test]
+    fn mz_exact_is_the_true_fragment_mz() {
+        let real_mass = 1043.487_f64;
+        // `offset` is stored as f32 bits so IonType can derive Eq/Hash — a deliberate
+        // design choice, so the expectation uses the same round-trip. What matters is
+        // that the MASS is not quantised, which is what this asserts.
+        let ion = b_ion();
+        let expected = real_mass + ion.offset().expect("prefix ion has an offset") as f64;
+        let got = ion.mz_exact(real_mass);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "mz_exact must not quantise the mass: expected {expected}, got {got}"
+        );
+        // And it must be within a few ppm of the textbook value.
+        let textbook = real_mass + 1.007_276_49_f64;
+        assert!(1e6 * (got - textbook).abs() / textbook < 1.0);
+    }
+
+    /// Charge scaling must divide the neutral mass, not the m/z.
+    #[test]
+    fn mz_exact_scales_with_charge() {
+        let m = 2000.0_f64;
+        let z2 = IonType::Prefix { charge: 2, offset_bits: (model::mass::PROTON as f32).to_bits(), loss_class: 0 };
+        let got = z2.mz_exact(m);
+        assert!((got - (m / 2.0 + z2.offset().expect("prefix ion has an offset") as f64)).abs() < 1e-9);
     }
 }

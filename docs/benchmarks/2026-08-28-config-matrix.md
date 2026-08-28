@@ -16,14 +16,17 @@ the count, because a q-value is a claim and an entrapment FDP is a measurement.
 | Astral (high-res LFQ, PXD070049) | default | 450 s | 38,402 | — |
 | | `--chimeric` | 478 s | **64,958** | +69.2% |
 | | `--refine` | 627 s | 46,410 | +20.9% |
+| | `--chimeric --refine` | 689 s | **68,955** | +79.6% (see §2b) |
 | | *Comet 2025.01* | *217 s* | *31,435* | *−18.1%* |
 | TMT (low-res CID, PXD007683 `a05058`) | default | 124 s | 12,278 | — |
 | | `--chimeric` | 82 s | 12,477 | +1.6% |
 | | `--refine` | 123 s | 12,278 | skipped, see §3 |
+| | `--chimeric --refine` | 110 s | 12,477 | = chimeric exactly |
 | | *Comet 2025.01* | *80 s* | *10,504* | *−14.5%* |
 | UPS1 (low-res LFQ, PXD001819) | default | 89 s | 15,938 | — |
 | | `--chimeric` | — † | 17,294 | +8.5% |
 | | `--refine` | 82 s | 15,938 | skipped, see §3 |
+| | `--chimeric --refine` | 59 s † | 17,294 | = chimeric exactly |
 
 † The UPS1 chimeric run shared the host with another job, so its wall time is not
 comparable and is omitted rather than reported misleadingly. Identification counts are
@@ -64,6 +67,37 @@ Two honest qualifications:
   something `--chimeric` introduced — but it means the q≤0.01 counts in §1 are optimistic
   by roughly 2.5x in absolute terms. They remain valid for comparing configurations and
   engines under one methodology, which is what the table is for.
+
+## 2b. Do `--refine` and `--chimeric` stack?
+
+Not fully — and the reason the source gave for that was wrong.
+
+| Astral config | PSMs @ q≤0.01 | vs default |
+|---|---|---|
+| default | 38,402 | — |
+| `--chimeric` | 64,958 | +69.2% |
+| `--refine` | 46,410 | +20.9% |
+| **both** | **68,955** | **+79.6%** |
+
+The combination gains **+6.2% over `--chimeric` alone**, against roughly +13% if the two
+gains were additive. So the conclusion in the source — that these do not stack — holds.
+
+**The stated mechanism does not.** The comment claimed the chimeric secondary PSMs
+*collapse* the refinement's confident-anchor set. Measured:
+
+| | `--refine` alone | both |
+|---|---|---|
+| confident anchors | 14,813 | **15,762** (+6.4%) |
+| unidentified spectra | 101,664 | **94,294** (−7.2%) |
+| Pass-2 candidates | 504,040 | 527,915 |
+
+The anchor set **grew**. What shrank is the pool of spectra left to rescue: chimeric
+already explains 7,370 of them. Refinement has less work available, not worse anchors.
+The comment has been corrected in `crates/andes/src/bin/andes.rs`.
+
+On low-res data the combination degenerates cleanly to chimeric alone — TMT and UPS1 both
+returned byte-identical row counts and PSM counts to their `--chimeric` runs, and UPS1 held
+the same entrapment FDP (2.44%), since `--refine` skips there.
 
 ## 3. `--refine` is high-res only, by design
 

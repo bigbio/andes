@@ -689,6 +689,17 @@ struct SearchArgs {
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
 
+    /// Minimum winner RawScore for a `--glyco` scan to emit a PIN row at all.
+    /// Unset = emit a best guess for every gated scan (historical behaviour).
+    ///
+    /// Measured on plasma (2026-08-28): 90.5% of emitted rows sit on scans with no
+    /// glycopeptide in them (median RawScore −2.5 vs +9.4 on real glyco scans);
+    /// that stratum is what Percolator trains on. At 3, it removes 83% of those
+    /// rows while keeping every measured agreement with an external engine.
+    /// Label-blind: reads only the winner's spectral match quality.
+    #[arg(long = "glyco-min-raw-score")]
+    glyco_min_raw_score: Option<f32>,
+
     /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
     /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
     #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
@@ -3328,6 +3339,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_cz: cli.glyco_gp_cz,
             gp_m: cli.glyco_gp_m,
             min_core_y: cli.glyco_min_core_y,
+            min_raw_score: cli.glyco_min_raw_score,
             min_matched_by: cli.glyco_min_matched_ions,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,

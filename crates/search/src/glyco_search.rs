@@ -63,6 +63,18 @@ pub struct GlycoConfig {
     /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
     /// (previous behaviour). The field standard is 2 (pGlyco3, O-Pair).
     pub min_core_y: u32,
+    /// Minimum winner RawScore (`w.score`, the value the PIN's RawScore column
+    /// rounds) for a scan to emit a row at all. `None` = off (ship default).
+    ///
+    /// MEASURED MOTIVE (2026-08-28 forensics, plasma R1): 90.5% of emitted rows
+    /// sit on scans where MSFragger has no PSM of ANY kind — target fraction
+    /// 0.558 (a coin flip), median RawScore −2.5 vs +9.4 on real glyco scans.
+    /// That stratum inverts every PIN AUC (RawScore 0.663 on real scans → 0.471
+    /// over the full PIN) and is what Percolator trains on. Scan-level
+    /// junk-vs-real AUC of this quantity: 0.863 — the best single gate measured
+    /// (CoreYHits 0.828, YHitFrac 0.805, Oxonium 0.747). At >3: −83% junk rows,
+    /// keeps 485/605 real-glyco scans and every current agreement.
+    pub min_raw_score: Option<f32>,
     /// Minimum matched b/y sequence ions required to emit a glyco PSM. 0 = no
     /// requirement. MSFragger requires 4 matched fragments with >=2 non-Y.
     pub min_matched_by: u32,
@@ -132,6 +144,7 @@ impl Default for GlycoConfig {
             gp_cz: GLYCO_GP_CZ_DEFAULT,
             gp_m: GLYCO_GP_M_DEFAULT,
             min_core_y: 0,
+            min_raw_score: None,
             min_matched_by: 0,
             max_gen_peaks: 0,
             cz_multisite: false,
@@ -528,6 +541,8 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_m: f32,
     /// See `GlycoConfig::min_core_y`.
     pub min_core_y: u32,
+    /// See `GlycoConfig::min_raw_score`.
+    pub min_raw_score: Option<f32>,
     /// See `GlycoConfig::min_matched_by`.
     pub min_matched_by: u32,
     /// See `GlycoConfig::max_gen_peaks`.
@@ -581,6 +596,7 @@ pub struct GlycoCtxOwned {
     gp_cz: f32,
     gp_m: f32,
     min_core_y: u32,
+    min_raw_score: Option<f32>,
     min_matched_by: u32,
     max_gen_peaks: usize,
     cz_multisite: bool,
@@ -685,6 +701,7 @@ impl GlycoCtxOwned {
         let gp_cz = cfg.gp_cz;
         let gp_m_cfg = cfg.gp_m;
         let min_core_y_cfg = cfg.min_core_y;
+        let min_raw_score_cfg = cfg.min_raw_score;
         let min_matched_by_cfg = cfg.min_matched_by;
         let max_gen_peaks = cfg.max_gen_peaks;
         let cz_multisite_cfg = cfg.cz_multisite;
@@ -810,6 +827,7 @@ impl GlycoCtxOwned {
             gp_cz,
             gp_m: gp_m_cfg,
             min_core_y: min_core_y_cfg,
+            min_raw_score: min_raw_score_cfg,
             min_matched_by: min_matched_by_cfg,
             max_gen_peaks,
             cz_multisite: cz_multisite_cfg,
@@ -863,6 +881,7 @@ impl GlycoCtxOwned {
             gp_cz: self.gp_cz,
             gp_m: self.gp_m,
             min_core_y: self.min_core_y,
+            min_raw_score: self.min_raw_score,
             min_matched_by: self.min_matched_by,
             max_gen_peaks: self.max_gen_peaks,
             cz_multisite: self.cz_multisite,
@@ -975,6 +994,7 @@ fn score_spectrum_glyco(
     let gp_cz = ctx.gp_cz;
     let gp_m = ctx.gp_m;
     let min_core_y = ctx.min_core_y;
+    let min_raw_score = ctx.min_raw_score;
     let min_matched_by = ctx.min_matched_by;
     // ETD c/z collapse term: on electron-transfer spectra the intact-glycan c/z
     // ladder is the primary backbone evidence, so the selector weights it to pick
@@ -2173,6 +2193,10 @@ fn score_spectrum_glyco(
                         // pooled), mouse 546 -> 628 but still short of 707 ungated.
                         core_y_counts[w.bb_hit_idx] as u32 >= min_core_y
                             && matched_ions(w) as u32 >= min_matched_by
+                            // Emission floor on the winner's RawScore (the PIN value):
+                            // reads only spectral match quality, identically for target
+                            // and decoy, so it stays label-blind like its siblings.
+                            && min_raw_score.is_none_or(|f| w.score >= f)
                     })
                     .collect::<Vec<_>>()
                 } else {

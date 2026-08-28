@@ -72,6 +72,22 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
         }
         match (gf.parse::<f64>(), af.parse::<f64>()) {
             (Ok(gv), Ok(av)) => {
+                // `f64::from_str` accepts "NaN"/"inf", and every ordered comparison
+                // against NaN is false -- so a naive `(gv - av).abs() > tol` would
+                // report a NaN where a number belongs as EQUAL and wave a real
+                // regression through. Handle the non-finite cases explicitly.
+                if gv.is_nan() || av.is_nan() {
+                    if gv.is_nan() != av.is_nan() {
+                        return Some(format!("field {i}: {gf} vs {af} (NaN mismatch)"));
+                    }
+                    continue;
+                }
+                if gv.is_infinite() || av.is_infinite() {
+                    if gv != av {
+                        return Some(format!("field {i}: {gf} vs {af} (infinity mismatch)"));
+                    }
+                    continue;
+                }
                 // The PIN is TEXT with ~6 significant figures, so the comparison
                 // cannot be tighter than the print precision: two values that agree
                 // to within float noise still print differently when they straddle a

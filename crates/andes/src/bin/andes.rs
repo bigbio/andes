@@ -508,7 +508,7 @@ struct SearchArgs {
     /// run with. `reference-human` (~2,300) reaches high-antennary glycans `common`
     /// cannot name -- 100% of a curated 160-composition human reference vs `common`'s
     /// 68% -- but measured WORSE overall on human plasma with an entrapment database
-    /// (228 glycoPSMs at 0.00% entrapment FDP, vs 365 at 0.55%). `full` (~7,900) is
+    /// (228 glycoPSMs at 0.00% entrapment FDP, vs 365 at 0.55%). `full` (~4,034) is
     /// wider still and was measured to raise entrapment error 5.4x on a benchmark where
     /// it looked like a gain on yield alone.
     ///
@@ -598,13 +598,6 @@ struct SearchArgs {
     #[arg(long = "glyco-gp-m", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_M_DEFAULT)]
     glyco_gp_m: f32,
 
-    /// MEASURED TRADE-OFF, which is why the default is 0. On a pooled human plasma set
-    /// (stepped-collision HCD) `2` took verified-correct identifications from 0 to 87 at
-    /// 1% FDR with a measured 0.75% false-discovery proportion — the ungated run
-    /// accepted 102 PSMs of which NONE were correct. On a mouse AI-ETD benchmark the
-    /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
-    /// leave it off for electron-transfer data. Exempting ETD scans automatically was
-    /// tried and made both regimes worse, because real files are mixed.
     /// Resolve isobaric glycan-composition collisions on Y-ladder evidence rather
     /// than sort order. Two compositions can be isobaric to ~1 uDa (Hex-Fuc and
     /// NeuGc-NeuAc both = 15.9949), and above 2000 Da more than half of the default
@@ -686,6 +679,13 @@ struct SearchArgs {
     /// with Y1 mandatory. Reads only spectral evidence, so it applies equally to target
     /// and decoy scans and cannot skew the target/decoy ratio. 0 disables.
     ///
+    /// MEASURED TRADE-OFF, which is why the default is 0. On a pooled human plasma set
+    /// (stepped-collision HCD) `2` took verified-correct identifications from 0 to 87 at
+    /// 1% FDR with a measured 0.75% false-discovery proportion — the ungated run
+    /// accepted 102 PSMs of which NONE were correct. On a mouse AI-ETD benchmark the
+    /// same value cost 161 of 707 identifications. Set it for collision-dominant data;
+    /// leave it off for electron-transfer data. Exempting ETD scans automatically was
+    /// tried and made both regimes worse, because real files are mixed.
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
 
@@ -1953,7 +1953,7 @@ enum GlycanListFlag {
     ReferenceHuman,
     /// ~600 compositions. The measured-best default; what the benchmarks used.
     Common,
-    /// The full ~7,900-composition list. Widest coverage, worst error control.
+    /// The full ~4,034-composition list. Widest coverage, worst error control.
     Full,
 }
 

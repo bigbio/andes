@@ -680,13 +680,13 @@ mod tests {
     }
 
     /// Phase 2b (DB-union): when the Y-ladder solver has evidence, the DB branch
-    /// is unioned (~2510 candidates) but the result stays bounded to `top_k`, and
+    /// is unioned (~4034 candidates) but the result stays bounded to `top_k`, and
     /// the true backbone — which carries the real core-Y ladder — survives the
     /// core-Y-ranked truncation. This is what lifts find-rate toward the DB
     /// ceiling without a phase-1 blowup.
     #[test]
     fn db_union_stays_bounded_and_keeps_true_backbone() {
-        let glycans = n_glycan_list(); // full list (~2510)
+        let glycans = n_glycan_list(); // full list (~4034)
         let proton = PROTON;
         let steps = crate::glycan_mass::CORE_Y_STEPS;
         let glycan_mass = 2.0 * HEXNAC + 3.0 * HEX; // HexNAc2Hex3

@@ -1,7 +1,12 @@
-# andes vs Comet — rebuilt 3-dataset benchmark (2026-08-23)
+# andes vs Comet — rebuilt benchmark, Astral + TMT (2026-08-23)
 
 Rebuilt from scratch: the previous benchmark data had been purged from scratch storage on
 both hosts, so every raw file, database and result below was re-acquired and re-run.
+
+**Scope: the head-to-head covers Astral and TMT only.** UPS1 is listed in the dataset table
+below because it was re-acquired alongside the others, but it was NOT re-run against Comet in
+this refresh, so it appears in no results table. Do not read the two-row identification and
+speed tables as a three-dataset comparison.
 
 ## 1. Datasets
 
@@ -9,7 +14,7 @@ both hosts, so every raw file, database and result below was re-acquired and re-
 |---|---|---|---|
 | Astral (high-res LFQ) | PXD070049 | `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` (2.58 GB) | ProteoBench mixed-species HYE (31,889 seqs) |
 | TMT (low-res ion-trap CID) | PXD007683, run `a05058` | `a05058.raw` (0.54 GB) | UniProt human + yeast reviewed (26,483 seqs) |
-| UPS1 (low-res) | PXD001819 | `UPS1_5000amol_R1.mzML` | `yeast_entrap.fasta` (entrapment) |
+| UPS1 (low-res) — *re-acquired, not re-run here* | PXD001819 | `UPS1_5000amol_R1.mzML` | `yeast_entrap.fasta` (entrapment) |
 
 The HYE FASTA is served from `proteobench.cubimed.rub.de/fasta/`, not GitHub.
 
@@ -59,11 +64,25 @@ Two optimisations closed most of the gap (see `docs/` history and the commits):
 
 1. **GBDT de-duplication** — the fragment-intensity ensemble was being walked twice per
    candidate for identical inputs. Removing the second walk is **byte-identical output** and
-   gave −38.3% (Astral) / −23.8% (TMT).
-2. **`--gbdt-max-trees`** (default off) — truncating to 100 of 300 trees gave a further −18.2%
-   on TMT with **no measurable identification cost** (5 seeds; largest deviation 7.8 PSMs
-   against a control spread of 25.7). Two caveats: measured on TMT only, and measured *before*
-   the flag was widened to truncate both shipped ensembles — so the current flag should be
+   gave −38.3% (Astral) / −23.8% (TMT) in the dedicated A/B. (The headline table's own
+   figures, 193 s → 143 s, imply −25.9%; the A/B and the headline runs are separate
+   executions, and the gap is run-to-run variance, not a different optimisation.)
+2. **`--gbdt-max-trees`** (default off) — truncating to 100 of 300 trees. **Superseded
+   measurement (2026-08-27):** both regimes have since been swept at 5 seeds each against the
+   current flag, which truncates both shipped ensembles:
+
+   | regime | K=0 | K=100 | ΔPSMs | effect/SE | wall |
+   |---|---|---|---|---|---|
+   | Astral (high-res) | 38,436.8 | 38,444.4 | +7.6 (+0.020%) | +0.25 | 574 s → 338 s (−41%) |
+   | TMT (low-res) | 11,935.2 | 11,900.6 | −34.6 (−0.290%) | −1.14 | 167 s → 99 s (−41%) |
+
+   The speedup replicates exactly (−41% both) but the identification effect **does not**:
+   Astral is flat, TMT's point estimate is negative. The TMT difference is below this
+   design's resolution (~0.71% at n=5), but "below the detection floor" is not "zero", and
+   the sign differs from Astral. **This is why the flag stays off by default** — buying 41%
+   at a possible ~0.3% low-res identification loss, for every user, is the wrong default when
+   they can opt in. The earlier "no measurable identification cost" claim rested on TMT alone
+   and on a narrower version of the flag; it is superseded by the table above. The flag should be
    faster than −18.2% and its identification cost at that setting is UNMEASURED. It ships off.
 
    On high-res the flag is also riskier than on low-res: `--score auto` resolves to `strong`

@@ -294,9 +294,15 @@ pub fn build_peptide_anchored_index(
                 // NOTE the mini-protein's SEQUENCE is still just the peptide, so QPX
                 // start/end coordinates remain peptide-local for Pass-2 rows; and a
                 // backbone shared across proteins keeps only its lowest-indexed source.
+                // An EMPTY accession is not an accession: `Some(String::new())`
+                // would otherwise satisfy `and_then` and emit a blank protein
+                // column, losing attribution for the row. Treat it as absent so
+                // the `BASEPEP_<i>` fallback applies.
                 accession: base_accessions
                     .get(i)
-                    .and_then(|a| a.clone())
+                    .and_then(|a| a.as_ref())
+                    .filter(|acc| !acc.is_empty())
+                    .cloned()
                     .unwrap_or_else(|| format!("BASEPEP_{i}")),
                 description: String::new(),
                 sequence: seq.clone(),

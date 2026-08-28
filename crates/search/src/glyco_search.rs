@@ -31,7 +31,8 @@ use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
 use andes_glyco::backbone::{
-    core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
+    core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity,
+    glycan_y_intensity_decoy,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
@@ -2367,6 +2368,36 @@ fn score_spectrum_glyco(
                         ) as f32,
                         _ => 0.0,
                     },
+                    // COMPLETENESS of the assigned composition's own Y ladder: the
+                    // fraction of the rungs it PREDICTS that were matched, in [0,1].
+                    //
+                    // `y_ladder_intensity_score` above is an unnormalised intensity SUM,
+                    // so it grows with glycan size and a wrong larger composition can
+                    // beat a right smaller one. A fraction cannot be inflated that way.
+                    // This targets the measured failing stage: 96.9% of decoy winners
+                    // sit at a DIFFERENT backbone mass than the truth, i.e. we pick the
+                    // wrong mass split / composition.
+                    //
+                    // De-novo hits carry no composition, so there is nothing whose
+                    // completeness could be scored -> 0.0, as for the ladder decoy.
+                    y_hit_frac: match &bb_hit.glycan {
+                        Some(g) => glycan_y_hit_frac(
+                            y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge, None,
+                        ) as f32,
+                        None => 0.0,
+                    },
+                    // Glycan-axis decoy twin. Measured on the SAME spectrum as its
+                    // target (round-7 audit F13: reading a different scan here turns the
+                    // decoy from a control into an anti-conservative artefact), and
+                    // seeded identically to the ladder decoy so both describe one decoy
+                    // "structure" per composition.
+                    y_hit_frac_decoy: match &bb_hit.glycan {
+                        Some(g) if glyco_decoy_on => glycan_y_hit_frac(
+                            y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge,
+                            Some(glycan_decoy_seed(g)),
+                        ) as f32,
+                        _ => 0.0,
+                    },
                     // Idea B: partial-glycan b/y — sequence-specific evidence for the
                     // weak large/high-charge glycopeptides (b_i/y_i + core glycan).
                     partial_glycan_by: {
@@ -3101,6 +3132,8 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,

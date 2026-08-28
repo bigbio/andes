@@ -315,6 +315,8 @@ mod tests {
             oxonium_summed_frac: 0.0,
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             y_ladder_decoy_score: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,

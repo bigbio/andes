@@ -20,7 +20,7 @@
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
 //!
 //!   ./target/release/andes \
-//!     --spectrum test-fixtures/glyco_fixture.mzML.gz \
+//!     --spectrum test-fixtures/orbitrap_lumos_120.mzML.gz \
 //!     --database test-fixtures/glyco_fixture.fasta \
 //!     --glyco --glyco-tol-ppm 20 --glyco-taxon human \
 //!     --output-pin <tmp>/out.pin
@@ -40,7 +40,7 @@ fn repo_root() -> PathBuf {
 #[test]
 fn glyco_highres_pin_matches_golden() {
     let root = repo_root();
-    let spectra = root.join("test-fixtures/glyco_fixture.mzML.gz");
+    let spectra = root.join("test-fixtures/orbitrap_lumos_120.mzML.gz");
     let fasta = root.join("test-fixtures/glyco_fixture.fasta");
     let golden = root.join("test-fixtures/parity/goldens/glyco_highres.pin");
     for f in [&spectra, &fasta, &golden] {

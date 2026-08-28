@@ -2193,10 +2193,6 @@ fn score_spectrum_glyco(
                         // pooled), mouse 546 -> 628 but still short of 707 ungated.
                         core_y_counts[w.bb_hit_idx] as u32 >= min_core_y
                             && matched_ions(w) as u32 >= min_matched_by
-                            // Emission floor on the winner's RawScore (the PIN value):
-                            // reads only spectral match quality, identically for target
-                            // and decoy, so it stays label-blind like its siblings.
-                            && min_raw_score.is_none_or(|f| w.score >= f)
                     })
                     .collect::<Vec<_>>()
                 } else {
@@ -2469,6 +2465,17 @@ fn score_spectrum_glyco(
                     cz_explained: cz_struct_vals.0,
                     cz_chance_llr: cz_struct_vals.1,
                 };
+                // Emission floor (--glyco-min-raw-score): gate on the SAME value the
+                // PIN's RawScore column carries -- features.strong_score, the phase-2
+                // model re-score of the winner. The first cut of this gate read the
+                // phase-1 `w.score` (which feeds the RankScore column, min 0) and
+                // removed 5.6% of rows where the measured operating point removes
+                // ~80%: same word "raw score", different quantity, found because the
+                // measurement was checked against the prediction. Label-blind: reads
+                // only spectral match quality, identically for target and decoy.
+                if min_raw_score.is_some_and(|f| psm.features.strong_score < f) {
+                    continue;
+                }
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
 

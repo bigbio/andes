@@ -67,6 +67,19 @@ pub struct GlycoConfig {
     pub min_matched_by: u32,
     /// Choose the glycosite by c/z evidence when a peptide has >1 N-X-S/T sequon.
     pub cz_multisite: bool,
+    /// Resolve isobaric-composition collisions on Y-ladder evidence instead of
+    /// `to_bits()` sort order (`--glyco-isobar-rep`).
+    pub isobar_rep: bool,
+    /// Glycan-Y-first candidate generation plus TWO-AXIS backbone retention
+    /// (`--glyco-y-index`): also keep the top-k backbones by glycan-Y evidence, so a
+    /// backbone strong on the glycan axis but weak on peptide b/y survives truncation.
+    pub y_index: bool,
+    /// Compute the ~40-column PIN feature vector against the GLYCAN-DECORATED backbone
+    /// rather than the bare deglycosylated peptide (`--glyco-decorated-features`).
+    pub decorated_features: bool,
+    /// A glycan composition may only claim NeuAc/NeuGc if the matching oxonium reaches
+    /// this fraction of base peak (`--glyco-sialic-oxonium-min-frac`). 0 disables.
+    pub sialic_oxonium_min_frac: f32,
     /// Diagnostic: restrict scoring to the scan numbers listed in this file, one per
     /// line. `None` scores every spectrum.
     pub scan_filter_path: Option<std::path::PathBuf>,
@@ -108,6 +121,10 @@ pub struct GlycoConfig {
 impl Default for GlycoConfig {
     fn default() -> Self {
         Self {
+            isobar_rep: false,
+            y_index: false,
+            decorated_features: false,
+            sialic_oxonium_min_frac: 0.0,
             gp_k: GLYCO_GP_K_DEFAULT,
             gp_j: GLYCO_GP_J_DEFAULT,
             gp_h: GLYCO_GP_H_DEFAULT,
@@ -152,6 +169,7 @@ use scoring_crate::scoring::{
     fuse_strong_score,
     listwise_score_gap, psm_edge_score, score_psm, score_psm_float, ScoredSpectrum,
     StrongScoreInputs, hyperscore_psm_with_matches,
+    strong_score_calibrated_loo,
 };
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
@@ -490,6 +508,14 @@ pub struct GlycoScoreCtx<'a> {
     pub max_peptide_first: usize,
     pub peptide_first_on: bool,
     pub yindex_on: bool,
+    /// See `GlycoConfig::decorated_features`.
+    pub decorated_features: bool,
+    /// See `GlycoConfig::sialic_oxonium_min_frac`.
+    pub sialic_oxonium_min_frac: f32,
+    /// Resolve isobaric-composition collisions on Y-ladder evidence rather than sort
+    /// order (`--glyco-isobar-rep`). Off by default: the original A/B measured -8 on
+    /// peptide YIELD, a metric structurally blind to which composition gets named.
+    pub isobar_rep: bool,
     /// `gp` fused-selector weights (`rank + K·ladder + J·core_y + H·hyper`).
     /// Process-constant, so read ONCE in [`GlycoCtxOwned::build`] rather than per
     /// spectrum — `score_spectrum_glyco` runs in `par_iter`.
@@ -545,6 +571,9 @@ pub struct GlycoCtxOwned {
     max_peptide_first: usize,
     peptide_first_on: bool,
     yindex_on: bool,
+    decorated_features: bool,
+    sialic_oxonium_min_frac: f32,
+    isobar_rep: bool,
     gp_k: f32,
     gp_j: f32,
     gp_h: f32,
@@ -597,6 +626,7 @@ impl GlycoCtxOwned {
         // composition-ladder cost, so leaving it on would slow the shipping default.
         let glyco_decoy_on = cfg.glyco_decoy;
         let hcd_pair_on = cfg.hcd_pair;
+        let isobar_rep = cfg.isobar_rep;
         let etd_rank_glycan = cfg.etd_rank_glycan;
         let cz_gate = cfg.cz_gate;
         // SPEED: the PIN keeps only the top-1-per-scan enumerated PSM (see
@@ -657,9 +687,21 @@ impl GlycoCtxOwned {
         let min_matched_by_cfg = cfg.min_matched_by;
         let max_gen_peaks = cfg.max_gen_peaks;
         let cz_multisite_cfg = cfg.cz_multisite;
-        // Glycan-Y-first candidate retention (P0b) is off by default under the gp
-        // selector (matches the validated gp baseline).
-        let yindex_on = false;
+        // Glycan-Y-first candidate retention (P0b). The block comment above promised
+        // this was "opt-in for a clean A/B vs the b/y-only path" -- but no flag existed,
+        // so the A/B was impossible and the code below was unreachable. It is now
+        // `--glyco-y-index`, default off (the validated gp baseline).
+        //
+        // What it gates matters most on HCD: without it, `accepted_backbones` is
+        // AXIS 1 (best peptide b/y rank) plus AXIS 4 (c/z, ETD-ONLY) plus AXIS 3
+        // (transfer, off by default). So on an HCD-only run -- which is the human
+        // plasma regime -- peptide b/y is the ONLY surviving retention axis, and that
+        // is precisely the axis that is weakest for large glycopeptides. The glycan-Y
+        // evidence is computed (`core_y_counts`) and then used only as a tiebreak
+        // inside AXIS 1.
+        let yindex_on = cfg.y_index;
+        let decorated_features = cfg.decorated_features;
+        let sialic_oxonium_min_frac = cfg.sialic_oxonium_min_frac;
         let glycan_y_index = if yindex_on {
             GlycanYIndex::build(glycan_list, fragment_tolerance_da.max(0.02))
         } else {
@@ -758,6 +800,9 @@ impl GlycoCtxOwned {
             max_peptide_first,
             peptide_first_on,
             yindex_on,
+            isobar_rep,
+            decorated_features,
+            sialic_oxonium_min_frac,
             gp_k,
             gp_j,
             gp_h,
@@ -808,6 +853,9 @@ impl GlycoCtxOwned {
             max_peptide_first: self.max_peptide_first,
             peptide_first_on: self.peptide_first_on,
             yindex_on: self.yindex_on,
+            decorated_features: self.decorated_features,
+            sialic_oxonium_min_frac: self.sialic_oxonium_min_frac,
+            isobar_rep: self.isobar_rep,
             gp_k: self.gp_k,
             gp_j: self.gp_j,
             gp_h: self.gp_h,
@@ -1186,6 +1234,8 @@ fn score_spectrum_glyco(
                         tol_ppm,
                         effective_top_k,
                         etd_db_fallback,
+                        ctx.isobar_rep,
+                        ctx.sialic_oxonium_min_frac,
                     );
                     for h in hits {
                         all_backbone.push(h);
@@ -1301,6 +1351,28 @@ fn score_spectrum_glyco(
             // Cross-spectrum transfer: backbones borrowed from confident sibling
             // glycoforms (empty on pass 1). Added to the same dedup/score path.
             all_backbone.extend_from_slice(transfer);
+
+            // SIALIC OXONIUM GATE, APPLIED ONCE OVER EVERY GENERATOR.
+            //
+            // `db_branch` and the Y-first `nearest_glycan` route are NOT the only ways a
+            // composition reaches `Source::Db`: the peptide-first union (on by DEFAULT) and
+            // the glycan-Y-first G1 block both annotate and push independently. Gating only
+            // inside `hybrid.rs` left the flag largely inert on HCD — precisely the regime
+            // it was written for, where peptide-first is the productive generator — and
+            // worse, biased WHICH generator won by pruning one of them only.
+            //
+            // Applying it here, after the union and before dedup, is structurally immune to
+            // the next generator someone adds. This is the `path_parity` rule: a feature
+            // filled on one path must be filled on all.
+            if ctx.sialic_oxonium_min_frac > 0.0 {
+                let ev = andes_glyco::oxonium::sialic_evidence(gen_peaks, tol_ppm);
+                all_backbone.retain(|h| match &h.glycan {
+                    Some(g) => ev.admits(g.neuac, g.neugc, ctx.sialic_oxonium_min_frac),
+                    // De-novo hits carry no composition, so there is no sialic claim to
+                    // check; they are unaffected by a composition-level gate.
+                    None => true,
+                });
+            }
 
             if all_backbone.is_empty() {
                 return None;
@@ -2139,9 +2211,42 @@ fn score_spectrum_glyco(
                     .map(|(_, s)| s)
                     .expect("ScoredSpectrum must exist for winning charge");
                 let cand = &candidates[w.cand_slot];
+                // The ~40-column PIN feature vector is computed against the BARE
+                // deglycosylated backbone by default, so every glycosite-spanning
+                // fragment sits at the wrong theoretical mass -- on average about half
+                // the b/y ladder of a glycopeptide. IntensitySignal, MatchedIonRatio,
+                // ExplainedIonCurrentRatio, LongestComplementaryLadder, FragPredExplained
+                // and strong_score are therefore all measuring a molecule that was never
+                // in the tube, and those are the columns Percolator weights most heavily.
+                //
+                // `--glyco-decorated-features` measures them against the decorated
+                // backbone instead. MEASURED AT -41% (365 -> 215 glycoPSMs on plasma with
+                // entrapment) and left off: under HCD the glycan is lost BEFORE backbone
+                // fragmentation, so the bare backbone is the correct b/y ladder and
+                // decorating moves half of it to masses with no peaks.
+                let feat_pep: std::borrow::Cow<'_, model::peptide::Peptide> =
+                    if ctx.decorated_features {
+                        let gmass = bb_hit
+                            .glycan
+                            .as_ref()
+                            .map(|g| g.mass)
+                            .unwrap_or(bb_hit.glycan_mass_residual);
+                        if gmass > 0.0 {
+                            let gsite = glyco_site_for(&cand.peptide);
+                            std::borrow::Cow::Owned(glyco_aware_peptide(
+                                &cand.peptide,
+                                gsite,
+                                gmass,
+                            ))
+                        } else {
+                            std::borrow::Cow::Borrowed(&cand.peptide)
+                        }
+                    } else {
+                        std::borrow::Cow::Borrowed(&cand.peptide)
+                    };
                 let mut features = compute_psm_features(
                     ss,
-                    &cand.peptide,
+                    &feat_pep,
                     spec_scorer,
                     w.z,
                     ctx.intensity_model,
@@ -2334,6 +2439,25 @@ fn score_spectrum_glyco(
                         .total_cmp(&a.1.psm.rank_score)
                         .then_with(|| a.0.cmp(&b.0))
                 });
+                // Per-spectrum calibration of StrongScore (PIN column `RawScoreCal`).
+                //
+                // The standard path does this in `fill_post_topn` (match_engine.rs); the
+                // glyco driver never runs that pass, so `strong_score_cal` stayed at its
+                // 0.0 default and `RawScoreCal` was a STRUCTURALLY CONSTANT column in
+                // every glyco PIN ever written — measured: constant 0 across all 22,592
+                // rows of a pooled 3-replicate plasma run.
+                //
+                // It has to happen HERE, after every hit for the scan has its features,
+                // because it z-scores a candidate against its within-spectrum
+                // competitors. That within-spectrum contrast is precisely the
+                // discrimination the glyco path is short of, so a constant 0 was not a
+                // cosmetic gap.
+                let retained_strong: Vec<f32> =
+                    hits.iter().map(|(_, h)| h.psm.features.strong_score).collect();
+                for (_, h) in hits.iter_mut() {
+                    h.psm.features.strong_score_cal =
+                        strong_score_calibrated_loo(&retained_strong, h.psm.features.strong_score);
+                }
                 Some(GlycoSpectrumResult {
                     spectrum_idx: spec_idx,
                     hits: hits.into_iter().map(|(_, h)| h).collect(),

@@ -20,7 +20,7 @@
 //! ```text
 //! cargo build --release -p andes
 //! ./target/release/andes \
-//!   --spectrum test-fixtures/test.mgf \
+//!   --spectrum test-fixtures/test.mgf.gz \
 //!   --database test-fixtures/BSA.fasta \
 //!   --output-pin test-fixtures/parity/goldens/precursor_cal_off.pin \
 //!   --output-tsv test-fixtures/parity/goldens/precursor_cal_off.tsv

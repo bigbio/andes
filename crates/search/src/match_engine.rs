@@ -553,14 +553,29 @@ impl<'a> PreparedSearch<'a> {
             // mass-matching candidates for this spectrum — independent of the
             // TopNQueue, so it survives `top_n = 1` (where the runner-up is
             // evicted) AND never feeds the GF `min_score` (so no emitted PSM's
-            // SpecEValue is perturbed). Distinct-peptide keyed by nominal
-            // residue mass: collapses the same peptide scored at multiple
-            // charges / matched in multiple proteins (which share a neutral
-            // mass) so a shared peptide doesn't zero the delta. Isobaric
-            // different-sequence peptides at the same nominal mass are rare and
-            // only make the delta conservative (slightly understated).
+            // SpecEValue is perturbed). Distinctness is keyed on the
+            // PEPTIDOFORM (residues + per-residue mod deltas), NOT on nominal mass.
+            //
+            // It was previously keyed on `nominal_residue_mass()`, on the stated
+            // assumption that isobaric different-sequence peptides at the same
+            // nominal mass are "rare". That is inverted: the candidate window IS a
+            // nominal-mass window (`bucket_index.range(min_nominal..=max_nominal)` —
+            // four buckets at the default 20 ppm / -1..=2), so EVERY genuine sequence
+            // competitor shares the winner's nominal mass. They all took the
+            // `mkey == best_mass_key` branch, which only ever raises `best_raw` and
+            // never writes `second_raw` — so the emitted delta was the lead over a
+            // candidate one or two Da away (a different isotope hypothesis), not over
+            // the runner-up peptide. DeltaRankScore is one of Percolator's strongest
+            // classical features and it reported maximum confidence on genuine ties.
+            //
+            // The peptidoform key still collapses the same peptide matched in multiple
+            // proteins or at multiple charges, which is what the mass key was reaching
+            // for. A 64-bit hash collision would merge two unrelated peptides, leaving
+            // the delta unchanged or slightly overstated; the probability against the
+            // single stored `best_pep_key` is negligible.
             let mut best_raw = i32::MIN;
-            let mut best_mass_key = i32::MIN;
+            let mut best_pep_key: u64 = 0;
+            let mut have_best = false;
             let mut second_raw = i32::MIN;
 
             // Tailor per-spectrum score calibration (additive PIN feature):
@@ -919,15 +934,18 @@ impl<'a> PreparedSearch<'a> {
                         *tailor_hist.entry(s).or_insert(0) += 1;
                         tailor_total += 1;
                         strong_null_stats.push(pin_score);
-                        let mkey = cand.peptide.nominal_residue_mass();
-                        if mkey == best_mass_key {
+                        let mkey = peptidoform_key(&cand.peptide);
+                        if have_best && mkey == best_pep_key {
+                            // Same peptidoform (another protein / another charge):
+                            // not a competitor, so it may only raise the best.
                             if s > best_raw {
                                 best_raw = s;
                             }
                         } else if s > best_raw {
                             second_raw = second_raw.max(best_raw);
                             best_raw = s;
-                            best_mass_key = mkey;
+                            best_pep_key = mkey;
+                            have_best = true;
                         } else {
                             second_raw = second_raw.max(s);
                         }
@@ -2655,6 +2673,27 @@ pub(crate) fn dedup_pepseq_score(
     let mut out = Vec::with_capacity(groups.len());
     out.extend(groups.into_values());
     out
+}
+
+/// Allocation-free peptidoform identity for the per-spectrum DeltaRankScore tracker:
+/// residues plus per-residue modification deltas, quantised to 1e-5 Da exactly as
+/// [`PepDedupKey`] quantises them, so the two agree on what "the same peptidoform"
+/// means. `PepDedupKey` allocates two `Vec`s and runs once per RETAINED PSM; this
+/// runs once per SCORED CANDIDATE, so it must not allocate.
+#[inline]
+pub(crate) fn peptidoform_key(peptide: &model::Peptide) -> u64 {
+    use std::hash::Hasher;
+    let mut h = rustc_hash::FxHasher::default();
+    for aa in &peptide.residues {
+        h.write_u8(aa.residue);
+        let units = aa
+            .mod_
+            .as_ref()
+            .map(|m| (m.mass_delta * 100_000.0).round() as i64)
+            .unwrap_or(0);
+        h.write_i64(units);
+    }
+    h.finish()
 }
 
 /// Number of raw base-peptide records in the mmap index that share `cand`'s

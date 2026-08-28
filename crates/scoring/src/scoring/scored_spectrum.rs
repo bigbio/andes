@@ -1041,23 +1041,22 @@ impl<'a> ScoredSpectrum<'a> {
             segment_partition_cache,
             scorer,
             nominal_mass,
+            None,
             is_prefix,
             charge,
             parent_mass,
-            // TRAIN/SERVE TOLERANCE. Training matches high-res ions at 20 ppm (the two
-            // accumulator call sites below pass `true`), but scoring has always passed
-            // `false`, i.e. the model's `mme` — and EVERY bundled model carries
-            // mme = 0.5 Da, including the high-resolution ones. At m/z 500 that window
-            // is ~50x too wide (a fact match_engine.rs:1493 already records), so the
-            // rank tables are consulted with a window far looser than the one they were
-            // built from. On dense spectra — a glycopeptide scan is mostly oxonium and
-            // glycan-Y — nearly every theoretical position finds SOMETHING, and the
-            // score saturates toward noise.
-            //
-            // ANDES_TIGHT_HIGHRES=1 serves high-res models at the training window so the
-            // two can be compared. Default (unset) is byte-identical to before. This is
-            // an A/B switch, not a fix: it changes EVERY high-res search, so it must
-            // clear the Astral/TMT/UPS1 triad before any default moves.
+            // TRAIN/SERVE TOLERANCE — HISTORICAL NOTE, NO LONGER THE CONTRACT.
+    // This block used to read "training matches high-res ions at 20 ppm (the two
+    // accumulator call sites below pass true)". All THREE accumulator call sites now pass
+    // `false`, i.e. training matches at the model's own `mme`, the same window serving
+    // uses. The 20 ppm training window was the defect: `IonType::mz` rebuilds theo m/z
+    // from the integer nominal mass (median 52 ppm displacement), so a 20 ppm window
+    // recorded ~80% of real fragments as missing and collapsed the absent-ion penalty.
+    //
+    // ⚠ `ANDES_TIGHT_HIGHRES` therefore now does the OPPOSITE of its original purpose:
+    // it no longer aligns serving to the training window, it CREATES a mismatch. It is
+    // retained only as an A/B escape hatch against pre-existing models and should be
+    // removed once the high-res store is retrained.
             tight_highres_scoring(),
             |_, _, matched_peak, logs, theo_mz, tol_da| {
                 let missing = if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 };
@@ -1429,10 +1428,45 @@ impl<'a> ScoredSpectrum<'a> {
                     &self.segment_partition_cache,
                     scorer,
                     nominal_mass,
+                    // `None`, not the exact mass: training must record errors against the
+                    // SAME reference serving uses (serving has only the nominal cache
+                    // index). See the `exact_mass` parameter doc.
+                    None,
                     is_prefix,
                     self.charge,
                     self.parent_mass,
-                    true, // training: tight high-res match -> consistent sharp tables
+                    // TRAINING NOW MATCHES AT THE MODEL'S OWN `mme`, as serving does.
+                    //
+                    // This used to pass `true` (a 20 ppm window on high-res instruments).
+                    // But `IonType::mz` reconstructs the theoretical m/z from the INTEGER
+                    // NOMINAL node mass (`real = node_nominal / INTEGER_MASS_SCALER`), which
+                    // displaces it by a MEDIAN 52 ppm (90th pct 133 ppm) for real peptide
+                    // compositions — measured over 300,333 simulated b-ion positions. Only
+                    // 20.0% of theoretical positions land inside a 20 ppm window, so ~80%
+                    // were recorded as "missing" DURING TRAINING even when the peak was there.
+                    //
+                    // Measured consequence in the shipped store (rank_dist missing-slot
+                    // frequency, prefix/suffix): hcd_qexactive_tryp 0.928/0.828 and
+                    // hcd_astral_tryp 0.854/0.773, against cid_lowres_tryp 0.452/0.421 —
+                    // a clean split on `is_high_resolution()`, i.e. exactly the models that
+                    // took this branch. The learned absent-ion penalty collapsed to ~-0.04
+                    // nats (vs ~-0.8 low-res), so a candidate could miss nearly every
+                    // predicted fragment almost for free and the score degenerated into a
+                    // sum of positive matched evidence only.
+                    //
+                    // Serving already uses `mme` (0.5 Da), which comfortably absorbs a
+                    // 0.036 Da displacement at m/z 700 — so SERVING was never the broken
+                    // side, and the earlier `ANDES_TIGHT_HIGHRES` experiment that tightened
+                    // SERVING (Astral 36,719 -> 28,894) was treating the symptom on the
+                    // wrong path. Matching train to serve here makes high-res models learn
+                    // the same way the low-res ones already do.
+                    //
+                    // NOTE: this changes TRAINING ONLY. Serving is untouched and every
+                    // existing model still scores byte-identically; the benefit requires a
+                    // RETRAIN. A genuine tight high-res window is still the better endpoint,
+                    // but it needs `IonType::mz` to carry the unquantised fragment mass
+                    // first (the nominal value is only needed as a cache KEY).
+                    false,
                     |partition, ion, matched_peak, _logs, theo_mz, _tol_da| {
                         // Reuse the matched peak's m/z from the driver's single
                         // window scan (no re-scan via `matched_peak_mz`).
@@ -1464,11 +1498,19 @@ impl<'a> ScoredSpectrum<'a> {
                         &self.segment_partition_cache,
                         scorer,
                         nominal_mass,
+                        // `None`, not the exact mass — same reason as the intact path:
+                        // train and serve must share a theoretical-m/z reference.
+                        None,
                         is_prefix,
                         self.charge,
                         self.parent_mass,
                         losses,
-                        true, // training: tight high-res match, same as intact
+                        // Matches the intact-ion path: exact theoretical m/z matched at the
+                        // model's own `mme`. Previously `true` (a 20 ppm window) against a
+                        // nominal reconstruction displaced by a median 52 ppm, so the
+                        // neutral-loss tables were learned through the same ~50x-too-tight
+                        // window the intact tables were.
+                        false,
                         |partition, loss_ion, rank, theo_mz, tol_da| {
                             let (rank, error_bin) = ion_fact_rank_and_error(
                                 rank, peaks, ranks, theo_mz, tol_da, max_rank, esf,
@@ -1558,10 +1600,42 @@ impl<'a> ScoredSpectrum<'a> {
                     &self.segment_partition_cache,
                     scorer,
                     nominal,
+                    None,
                     is_prefix,
                     self.charge,
                     self.parent_mass,
-                    true, // training: tight high-res match -> consistent sharp tables
+                    // TRAINING NOW MATCHES AT THE MODEL'S OWN `mme`, as serving does.
+                    //
+                    // This used to pass `true` (a 20 ppm window on high-res instruments).
+                    // But `IonType::mz` reconstructs the theoretical m/z from the INTEGER
+                    // NOMINAL node mass (`real = node_nominal / INTEGER_MASS_SCALER`), which
+                    // displaces it by a MEDIAN 52 ppm (90th pct 133 ppm) for real peptide
+                    // compositions — measured over 300,333 simulated b-ion positions. Only
+                    // 20.0% of theoretical positions land inside a 20 ppm window, so ~80%
+                    // were recorded as "missing" DURING TRAINING even when the peak was there.
+                    //
+                    // Measured consequence in the shipped store (rank_dist missing-slot
+                    // frequency, prefix/suffix): hcd_qexactive_tryp 0.928/0.828 and
+                    // hcd_astral_tryp 0.854/0.773, against cid_lowres_tryp 0.452/0.421 —
+                    // a clean split on `is_high_resolution()`, i.e. exactly the models that
+                    // took this branch. The learned absent-ion penalty collapsed to ~-0.04
+                    // nats (vs ~-0.8 low-res), so a candidate could miss nearly every
+                    // predicted fragment almost for free and the score degenerated into a
+                    // sum of positive matched evidence only.
+                    //
+                    // Serving already uses `mme` (0.5 Da), which comfortably absorbs a
+                    // 0.036 Da displacement at m/z 700 — so SERVING was never the broken
+                    // side, and the earlier `ANDES_TIGHT_HIGHRES` experiment that tightened
+                    // SERVING (Astral 36,719 -> 28,894) was treating the symptom on the
+                    // wrong path. Matching train to serve here makes high-res models learn
+                    // the same way the low-res ones already do.
+                    //
+                    // NOTE: this changes TRAINING ONLY. Serving is untouched and every
+                    // existing model still scores byte-identically; the benefit requires a
+                    // RETRAIN. A genuine tight high-res window is still the better endpoint,
+                    // but it needs `IonType::mz` to carry the unquantised fragment mass
+                    // first (the nominal value is only needed as a cache KEY).
+                    false,
                     |partition, _ion, matched_peak, _logs, theo_mz, _tol_da| {
                         // Reuse the matched peak's m/z from the driver's single
                         // window scan (no re-scan via `matched_peak_mz`).
@@ -1596,6 +1670,28 @@ fn visit_directional_node_ion_matches<F>(
     segment_partition_cache: SegmentPartitionSlice<'_>,
     scorer: &RankScorer,
     nominal_mass: f64,
+    // EXACT (unquantised) neutral mass of this fragment. Plumbed and TESTED, but every
+    // caller currently passes `None`, on purpose.
+    //
+    // The tempting change is to pass `Some(..)` on the training path so recorded mass
+    // errors reflect the instrument rather than the nominal rounding (median 52 ppm).
+    // That is a TRAP while serving cannot do the same. Serving derives theo m/z from the
+    // node-score cache, which is INDEXED BY NOMINAL MASS, so it has no exact value to
+    // offer. Train on exact and serve on nominal and the `ion_err` table is learned from
+    // a distribution genuine fragments cannot sit in at scoring time — reintroducing
+    // "real ions look like noise" in a new place, and only AFTER a retrain, which is the
+    // worst time to discover it.
+    //
+    // The fix that DOES work without that hazard is the window: training now matches at
+    // the model's own `mme` instead of 20 ppm, which repairs the presence/absence
+    // collapse (the large defect: absent-ion penalty ~-0.04 nats vs ~-0.8 on low-res)
+    // and leaves both sides on the same nominal reference. The error channel stays as
+    // uninformative as it is today — no regression, no new mismatch.
+    //
+    // To finish the job, serving must carry the exact mass too, which means reworking the
+    // nominal-indexed cache. `mz_exact` and its tests are kept as the specification for
+    // that work.
+    exact_mass: Option<f64>,
     is_prefix: bool,
     charge: u8,
     parent_mass: f64,
@@ -1645,8 +1741,14 @@ fn visit_directional_node_ion_matches<F>(
             // the ion types that carry learned LLR tables. UNCHANGED hot path.
             for (ion, logs) in ion_logs_slice {
                 let theo_mz = match (is_prefix, *ion) {
-                    (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
-                    (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                    (true, IonType::Prefix { .. }) => match exact_mass {
+                        Some(m) => ion.mz_exact(m),
+                        None => ion.mz(nominal_mass),
+                    },
+                    (false, IonType::Suffix { .. }) => match exact_mass {
+                        Some(m) => ion.mz_exact(m),
+                        None => ion.mz(nominal_mass),
+                    },
                     _ => continue,
                 };
                 if param.segment_num(theo_mz, parent_mass) != seg {
@@ -1672,8 +1774,14 @@ fn visit_directional_node_ion_matches<F>(
             // trained cache is always populated (so this branch never runs).
             for &ion in param.ion_types_for_partition_slice(charge, parent_mass, seg) {
                 let theo_mz = match (is_prefix, ion) {
-                    (true, IonType::Prefix { .. }) => ion.mz(nominal_mass),
-                    (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
+                    (true, IonType::Prefix { .. }) => match exact_mass {
+                        Some(m) => ion.mz_exact(m),
+                        None => ion.mz(nominal_mass),
+                    },
+                    (false, IonType::Suffix { .. }) => match exact_mass {
+                        Some(m) => ion.mz_exact(m),
+                        None => ion.mz(nominal_mass),
+                    },
                     _ => continue,
                 };
                 if param.segment_num(theo_mz, parent_mass) != seg {
@@ -1857,6 +1965,10 @@ fn visit_directional_loss_ion_facts<F>(
     segment_partition_cache: SegmentPartitionSlice<'_>,
     scorer: &RankScorer,
     nominal_mass: f64,
+    // EXACT (unquantised) neutral mass of this fragment, same contract as
+    // `visit_directional_node_ion_matches`: `Some` on the training path, `None` when the
+    // caller has only a nominal cache index.
+    exact_mass: Option<f64>,
     is_prefix: bool,
     charge: u8,
     parent_mass: f64,
@@ -1894,7 +2006,10 @@ fn visit_directional_loss_ion_facts<F>(
                 _ => continue,
             };
             let ion_charge = icharge.max(1) as f64;
-            let base_mz = ion.mz(nominal_mass);
+            let base_mz = match exact_mass {
+                Some(m) => ion.mz_exact(m),
+                None => ion.mz(nominal_mass),
+            };
             for &(loss, cls) in active_losses {
                 let theo_mz = base_mz - loss / ion_charge;
                 if theo_mz <= 0.0 || param.segment_num(theo_mz, parent_mass) != seg {

@@ -12,10 +12,18 @@
 //! window commit 539a3857 ("fix(train)") changed while asserting "Serving is untouched".
 //!
 //! It guards two things at once:
-//!   1. the high-res glyco scoring path (the PIN comparison), and
+//!   1. the high-res glyco serve path, as a pinned output (the PIN comparison), and
 //!   2. that instrument detection survives a `.gz` input (the model assertion) --
 //!      a gzipped mzML used to skip detection entirely and silently fall back to
 //!      `cid_lowres_tryp`, i.e. the low-res model on high-res Orbitrap data.
+//!
+//! MEASURED LIMIT, so nobody assumes more of this test than it delivers: on this
+//! fixture the high-res configuration is NOT sensitive to the fused-selector
+//! weights -- `--glyco-gp-m 0` vs `10` produces 0 differing lines, where the same
+//! sweep moves all 120 rows on the low-res path in `glyco_golden.rs`. The 20 ppm
+//! window leaves too little candidate competition for the weight to change a
+//! winner. So selector regressions are caught by the LOW-RES golden; this one
+//! catches model/detection regressions and any gross change to the emitted rows.
 //!
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
 //!
@@ -35,6 +43,47 @@ fn repo_root() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("repo root")
         .to_path_buf()
+}
+
+/// Compare one PIN row field-by-field.
+///
+/// Identity and integer fields must match EXACTLY; floating-point fields are
+/// compared with a relative tolerance. An optimised build vectorises differently
+/// on different targets (this golden passed on Linux and Windows and failed on
+/// macOS in release), so a last-digit difference in a derived score is a property
+/// of the host, not a regression. Anything a real change moves -- a different
+/// peptide, a different glycan, a different winner -- is either a non-numeric
+/// field or a numeric one that moves far more than 1e-6.
+fn row_diff(golden: &str, actual: &str) -> Option<String> {
+    let g: Vec<&str> = golden.split('\t').collect();
+    let a: Vec<&str> = actual.split('\t').collect();
+    if g.len() != a.len() {
+        return Some(format!("field count {} vs {}", g.len(), a.len()));
+    }
+    for (i, (gf, af)) in g.iter().zip(a.iter()).enumerate() {
+        if gf == af {
+            continue;
+        }
+        match (gf.parse::<f64>(), af.parse::<f64>()) {
+            (Ok(gv), Ok(av)) => {
+                // Relative, with an absolute floor so values near zero do not
+                // demand exact equality of denormal-ish noise.
+                let tol = 1e-6 * gv.abs().max(av.abs()).max(1.0);
+                if (gv - av).abs() > tol {
+                    return Some(format!("field {i}: {gf} vs {af}"));
+                }
+            }
+            _ => return Some(format!("field {i}: {gf} vs {af}")),
+        }
+    }
+    None
+}
+
+/// Sort key for aligning rows: the SpecId column, which is scan-derived and
+/// stable. Sorting by the whole line would let a last-digit float difference
+/// reorder rows and produce a spurious mismatch.
+fn spec_id(row: &str) -> &str {
+    row.split('\t').next().unwrap_or(row)
 }
 
 #[test]
@@ -111,9 +160,13 @@ fn glyco_highres_pin_matches_golden() {
         a_lines.len()
     );
 
-    g_lines.sort_unstable();
-    a_lines.sort_unstable();
+    g_lines.sort_unstable_by_key(|r| spec_id(r));
+    a_lines.sort_unstable_by_key(|r| spec_id(r));
     for (i, (g, a)) in g_lines.iter().zip(a_lines.iter()).enumerate() {
-        assert_eq!(g, a, "glyco high-res PIN row mismatch at sorted index {i}");
+        if let Some(d) = row_diff(g, a) {
+            panic!("glyco PIN row mismatch at sorted index {i} ({d})
+ golden: {g}
+ actual: {a}");
+        }
     }
 }

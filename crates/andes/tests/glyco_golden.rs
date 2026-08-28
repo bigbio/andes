@@ -44,8 +44,52 @@ fn read_sorted_rows(p: &std::path::Path) -> (String, Vec<String>) {
     let mut lines = text.lines();
     let header = lines.next().unwrap_or_default().to_string();
     let mut rows: Vec<String> = lines.filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
-    rows.sort();
+    // Sort on the SpecId column, not the whole line: a last-digit float
+    // difference in a later column would otherwise reorder rows and produce a
+    // spurious mismatch against the golden.
+    rows.sort_by(|x, y| spec_id(x).cmp(spec_id(y)));
     (header, rows)
+}
+
+/// Compare one PIN row field-by-field.
+///
+/// Identity and integer fields must match EXACTLY; floating-point fields are
+/// compared with a relative tolerance. An optimised build vectorises differently
+/// on different targets (this golden passed on Linux and Windows and failed on
+/// macOS in release), so a last-digit difference in a derived score is a property
+/// of the host, not a regression. Anything a real change moves -- a different
+/// peptide, a different glycan, a different winner -- is either a non-numeric
+/// field or a numeric one that moves far more than 1e-6.
+fn row_diff(golden: &str, actual: &str) -> Option<String> {
+    let g: Vec<&str> = golden.split('\t').collect();
+    let a: Vec<&str> = actual.split('\t').collect();
+    if g.len() != a.len() {
+        return Some(format!("field count {} vs {}", g.len(), a.len()));
+    }
+    for (i, (gf, af)) in g.iter().zip(a.iter()).enumerate() {
+        if gf == af {
+            continue;
+        }
+        match (gf.parse::<f64>(), af.parse::<f64>()) {
+            (Ok(gv), Ok(av)) => {
+                // Relative, with an absolute floor so values near zero do not
+                // demand exact equality of denormal-ish noise.
+                let tol = 1e-6 * gv.abs().max(av.abs()).max(1.0);
+                if (gv - av).abs() > tol {
+                    return Some(format!("field {i}: {gf} vs {af}"));
+                }
+            }
+            _ => return Some(format!("field {i}: {gf} vs {af}")),
+        }
+    }
+    None
+}
+
+/// Sort key for aligning rows: the SpecId column, which is scan-derived and
+/// stable. Sorting by the whole line would let a last-digit float difference
+/// reorder rows and produce a spurious mismatch.
+fn spec_id(row: &str) -> &str {
+    row.split('\t').next().unwrap_or(row)
 }
 
 #[test]
@@ -103,6 +147,8 @@ fn glyco_pin_matches_golden_after_sort() {
         a_rows.len()
     );
     for (i, (g, a)) in g_rows.iter().zip(a_rows.iter()).enumerate() {
-        assert_eq!(g, a, "glyco PIN row mismatch at sorted index {i}");
+        if let Some(d) = row_diff(g, a) {
+            panic!("glyco PIN row mismatch at sorted index {i} ({d})\n golden: {g}\n actual: {a}");
+        }
     }
 }

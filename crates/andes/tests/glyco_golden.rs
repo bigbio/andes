@@ -72,9 +72,17 @@ fn row_diff(golden: &str, actual: &str) -> Option<String> {
         }
         match (gf.parse::<f64>(), af.parse::<f64>()) {
             (Ok(gv), Ok(av)) => {
-                // Relative, with an absolute floor so values near zero do not
-                // demand exact equality of denormal-ish noise.
-                let tol = 1e-6 * gv.abs().max(av.abs()).max(1.0);
+                // The PIN is TEXT with ~6 significant figures, so the comparison
+                // cannot be tighter than the print precision: two values that agree
+                // to within float noise still print differently when they straddle a
+                // rounding boundary (macOS CI produced `0.45316` vs `0.453159`, a
+                // relative difference of 2.2e-6, from arithmetic that is otherwise
+                // identical). 1e-5 relative clears that with room to spare and is
+                // still five orders of magnitude tighter than any real change --
+                // flipping a selector weight moves this same column from -2.02 to
+                // -3.40. The absolute floor keeps near-zero values from being held
+                // to denormal noise.
+                let tol = 1e-5 * gv.abs().max(av.abs()).max(1.0);
                 if (gv - av).abs() > tol {
                     return Some(format!("field {i}: {gf} vs {af}"));
                 }

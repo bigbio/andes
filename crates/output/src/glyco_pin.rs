@@ -120,6 +120,11 @@ fn write_glyco_header<W: Write>(
         "OxoniumScore".to_string(),
         "NCoreOxoniumIons".to_string(),
         "YLadderScore".to_string(),
+        // Completeness of the assigned composition's OWN predicted Y ladder,
+        // in [0,1]. Unlike YLadderScore (an unnormalised intensity sum that
+        // grows with glycan size), predicting rungs you cannot support LOWERS
+        // this. Targets the measured failing stage: choosing the mass split.
+        "YHitFrac".to_string(),
         "PartialGlycanBY".to_string(), // idea B: sequence-specific partial-glycan b/y evidence
         "CoreYHits".to_string(),
         "GlycanMass".to_string(),
@@ -259,13 +264,21 @@ fn write_glyco_psm_row<W: Write>(
         }
     }
 
-    // Glyco-specific columns (7, incl. Y0Y1Anchor).
+    // Glyco-specific columns (8, incl. Y0Y1Anchor and YHitFrac).
     let is_glycan_db: u8 = if key.glycan_source == Source::Db { 1 } else { 0 };
     write_double_tab(writer, key.oxonium_summed_frac as f64)?;
     write!(writer, "\t{}", key.n_core_oxonium_ions)?;
     // YLadderScore: the decoy score for a glycan-decoy row, else the target score.
     let y_ladder = glycan_decoy_override.unwrap_or(key.y_ladder_intensity_score);
     write_double_tab(writer, y_ladder as f64)?;
+    // YHitFrac: on a glycan-decoy row report the decoy twin's completeness, so the
+    // row is a like-for-like control of its target rather than a copy of it.
+    let y_frac = if glycan_decoy_override.is_some() {
+        key.y_hit_frac_decoy
+    } else {
+        key.y_hit_frac
+    };
+    write_double_tab(writer, y_frac as f64)?;
     // PartialGlycanBY (idea B): sequence-specific partial-glycan b/y evidence.
     write_double_tab(writer, key.partial_glycan_by as f64)?;
     write!(writer, "\t{}", key.core_y_hits)?;
@@ -713,6 +726,8 @@ mod tests {
             n_core_oxonium_ions: 3,
             y_ladder_intensity_score: 1.2,
             y_ladder_decoy_score: 0.3,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
@@ -953,6 +968,8 @@ mod tests {
             oxonium_summed_frac: 0.2,
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 0.0,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             y_ladder_decoy_score: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
@@ -1134,6 +1151,8 @@ mod tests {
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 1.2,
             y_ladder_decoy_score: 0.3,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,

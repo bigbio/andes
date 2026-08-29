@@ -151,6 +151,8 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     oxonium_summed_frac: 0.0,
 ///     n_core_oxonium_ions: 0,
 ///     y_ladder_intensity_score: 0.0,
+///     y_hit_frac: 0.0,
+///     y_hit_frac_decoy: 0.0,
 ///     y_ladder_decoy_score: 0.0,
 ///     partial_glycan_by: 0.0,
 ///     y0y1_anchor_score: 0.0,
@@ -188,6 +190,25 @@ pub struct GlycoPsmKey {
     /// spectrum this scores below the target; the gap is what a glycan-decoy PIN
     /// row exposes to Percolator for 2D FDR. 0.0 when no glycan is resolved.
     pub y_ladder_decoy_score: f32,
+    /// COMPLETENESS of this composition's own Y ladder: the fraction of the Y rungs
+    /// the assigned composition PREDICTS that were actually matched, in [0,1].
+    ///
+    /// Distinct from `y_ladder_intensity_score`, which is an unnormalised sum of
+    /// observed intensity and therefore grows with glycan size: a wrong, larger
+    /// composition can out-score a right, smaller one by predicting more rungs and
+    /// matching a few extra. A fraction cannot be inflated that way — predicting
+    /// rungs you cannot support LOWERS it. This is the form the field converged on
+    /// (pGlyco's coverage ratios, StrucGP's `matched_branchY_ratio`,
+    /// PTM-Shepherd's explicit miss penalty).
+    ///
+    /// Measured motivation: 96.9% of our decoy winners sit at a DIFFERENT backbone
+    /// mass than the truth, i.e. the failing decision is which mass split /
+    /// composition to believe — exactly what a completeness fraction scores.
+    pub y_hit_frac: f32,
+    /// Glycan-AXIS decoy of `y_hit_frac`: same composition, interior rungs shifted.
+    /// A correct composition should hold its completeness while its shifted twin
+    /// collapses; the gap is what a glycan-decoy PIN row exposes to Percolator.
+    pub y_hit_frac_decoy: f32,
     /// PARTIAL-GLYCAN b/y evidence (idea B): matched intensity of peptide b/y fragments
     /// bearing the innermost core glycan (b_i/y_i + {HexNAc, 2HexNAc, ...}). Unlike the
     /// mass-based Y-ladder, this is SEQUENCE-specific → discriminates the true backbone
@@ -323,6 +344,8 @@ mod tests {
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 0.88,
             y_ladder_decoy_score: 0.2,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.4,
             sialic_consistency: 0.1,
@@ -363,6 +386,8 @@ mod tests {
             n_core_oxonium_ions: 3,
             y_ladder_intensity_score: 1.5,
             y_ladder_decoy_score: 0.5,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.7,
             sialic_consistency: 0.2,
@@ -391,6 +416,8 @@ mod tests {
             oxonium_summed_frac: 0.0,
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             y_ladder_decoy_score: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
@@ -417,7 +444,9 @@ mod tests {
         let key = GlycoPsmKey {
             spectrum_idx: 0, glycan: None, glycan_source: Source::Db,
             oxonium_summed_frac: 0.0, n_core_oxonium_ions: 0,
-            y_ladder_intensity_score: 0.0, y_ladder_decoy_score: 0.0, partial_glycan_by: 0.0,
+            y_ladder_intensity_score: 0.0,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0, y_ladder_decoy_score: 0.0, partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0, sialic_consistency: 0.0, core_y_hits: 0,
             glycan_mass: 0.0, backbone_mass: 0.0,
             is_transferred: false, transfer_graph_support: 0,

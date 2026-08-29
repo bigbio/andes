@@ -2688,15 +2688,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    // --refine + --chimeric run together correctly but do NOT currently STACK:
-    // the chimeric secondary (co-isolated) PSMs collapse the refinement's
-    // confident-anchor set, so refinement adds little on top of chimeric. Warn so
-    // the user isn't surprised that the combination ≈ chimeric alone.
+    // --refine + --chimeric run together correctly but do NOT fully STACK.
+    //
+    // MEASURED 2026-08-28 on Astral (PXD070049), same host and build:
+    //   default 38,402 PSMs | --chimeric 64,958 | --refine 46,410 | both 68,955
+    // The combination gains +6.2% over --chimeric alone, against roughly +13%
+    // if the two gains were additive.
+    //
+    // ⚠ The mechanism this comment previously asserted -- that the chimeric
+    // secondary PSMs COLLAPSE the refinement's confident-anchor set -- is
+    // REFUTED. The anchor set GREW: 14,813 anchors with --refine alone vs 15,762
+    // with both. What shrinks is the pool of spectra left to rescue: chimeric
+    // already explains 7,370 of them, so unidentified spectra fall from 101,664
+    // to 94,294. Refinement has less work available, not worse anchors.
+    //
+    // Warn so the user isn't surprised that the combination is much closer to
+    // chimeric alone than to the sum.
     if params.chimeric && cli.refine {
         eprintln!(
-            "WARN: --refine + --chimeric do not stack in this release — the chimeric \
-             secondary PSMs shrink the refinement's confident-anchor set, so refinement \
-             contributes little on top of chimeric. Consider running them separately."
+            "WARN: --refine + --chimeric do not fully stack in this release — chimeric \
+             already explains many of the spectra refinement would otherwise rescue, so \
+             refinement adds much less on top of chimeric than it does alone (measured: \
+             +6.2% over chimeric on Astral). Consider running them separately."
         );
     }
     if params.score_mode == search::ScoreMode::Strong {

@@ -700,6 +700,15 @@ struct SearchArgs {
     #[arg(long = "glyco-min-raw-score")]
     glyco_min_raw_score: Option<f32>,
 
+    /// Run-ADAPTIVE emission floor: drop scans whose winner scores below this
+    /// quantile of the run's own decoy winners (e.g. 0.95). Self-calibrating --
+    /// unlike an absolute --glyco-min-raw-score, it transfers across datasets,
+    /// instruments and models, because the decoy winners ARE the run's null.
+    /// The derived threshold is printed and applied identically to target and
+    /// decoy scans. Mutually exclusive with --glyco-min-raw-score.
+    #[arg(long = "glyco-min-raw-score-quantile")]
+    glyco_min_raw_score_quantile: Option<f64>,
+
     /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
     /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
     #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
@@ -3697,6 +3706,37 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // RT index + per-monosaccharide offset + per-run self-calibration. The
         // glyco PIN writer then also appends the within-scan DeltaRTRank. Neutral
         // 0.0 without observed RT / <MIN_CALIBRATION_ANCHORS anchors (baseline-safe).
+        if let Some(q) = cli.glyco_min_raw_score_quantile {
+            if cli.glyco_min_raw_score.is_some() {
+                return Err("--glyco-min-raw-score and --glyco-min-raw-score-quantile are \
+                            mutually exclusive: one is an absolute floor, the other derives \
+                            the floor from this run's decoy winners"
+                    .into());
+            }
+            let cands = &prepared.candidates;
+            let is_decoy = |h: &search::glyco_search::FullGlycoPsm| -> bool {
+                h.psm
+                    .candidate_idxs
+                    .first()
+                    .map(|&i| cands[i as usize].is_decoy)
+                    .unwrap_or(false)
+            };
+            match search::glyco_search::apply_adaptive_emission_floor(
+                &mut glyco_results,
+                &is_decoy,
+                q,
+            ) {
+                Some((floor, before, kept)) => eprintln!(
+                    "--glyco-min-raw-score-quantile {q}: derived RawScore floor {floor:.3} \
+                     from this run's decoy winners; scans {before} -> {kept}"
+                ),
+                None => eprintln!(
+                    "WARN: --glyco-min-raw-score-quantile {q} did nothing: this run has no \
+                     decoy winners to calibrate on (tiny input?); emitting ungated"
+                ),
+            }
+        }
+
         output::populate_glyco_rt_features(
             &spectra,
             &mut glyco_results,

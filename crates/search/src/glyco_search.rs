@@ -195,6 +195,52 @@ pub struct FullGlycoPsm {
     pub psm: PsmMatch,
 }
 
+/// Run-adaptive emission floor: drop every scan whose winner scores below the
+/// `q`-quantile of the run's own DECOY winners' strong score (the PIN RawScore).
+///
+/// WHY A QUANTILE AND NOT A NUMBER. An absolute floor tuned on one dataset does
+/// not transfer: RawScore's scale moves with the model, instrument and spectrum
+/// quality (the July `min-core-y 2` "plasma fix" cost mouse 161 of 707 IDs the
+/// same way). Decoy winners are the run's own null -- junk-emission scans score
+/// like decoys (measured target fraction 0.558 on scans with no confirmed
+/// glycopeptide) -- so "beat all but (1-q) of the decoy winners" self-calibrates
+/// to whatever scale the run produces. The threshold is derived from decoys but
+/// applied IDENTICALLY to target and decoy scans, so target/decoy competition
+/// stays symmetric (same contract as tailor-score normalisation).
+///
+/// Measured basis (plasma R1 sweep): every one of the 130 externally-agreed
+/// correct answers survives an absolute floor of 10, while 83-93% of junk rows
+/// fall -- correct winners live far above the decoy distribution, so a wide
+/// band of quantiles is safe.
+///
+/// Returns (threshold, scans_before, scans_kept); no-ops (returning None) when
+/// the run has no decoy winners to calibrate on.
+pub fn apply_adaptive_emission_floor(
+    results: &mut Vec<GlycoSpectrumResult>,
+    is_decoy_for: &dyn Fn(&FullGlycoPsm) -> bool,
+    q: f64,
+) -> Option<(f32, usize, usize)> {
+    let mut decoy_scores: Vec<f32> = results
+        .iter()
+        .flat_map(|r| r.hits.iter())
+        .filter(|h| is_decoy_for(h))
+        .map(|h| h.psm.features.strong_score)
+        .collect();
+    if decoy_scores.is_empty() {
+        return None;
+    }
+    decoy_scores.sort_by(|a, b| a.total_cmp(b));
+    let idx = ((decoy_scores.len() as f64 - 1.0) * q.clamp(0.0, 1.0)).round() as usize;
+    let floor = decoy_scores[idx];
+    let before = results.len();
+    results.retain(|r| {
+        r.hits
+            .iter()
+            .any(|h| h.psm.features.strong_score >= floor)
+    });
+    Some((floor, before, results.len()))
+}
+
 /// Per-spectrum result: the spectrum's global index + all scored glyco PSMs.
 #[derive(Debug, Clone)]
 pub struct GlycoSpectrumResult {

@@ -709,6 +709,12 @@ struct SearchArgs {
     #[arg(long = "glyco-min-raw-score-quantile")]
     glyco_min_raw_score_quantile: Option<f64>,
 
+    /// Diagnostic TSV of per-candidate split evidence with sampled shifted-ladder
+    /// nulls (the LLR-calibration probe). Requires --debug-glyco; never affects
+    /// the PIN.
+    #[arg(long = "glyco-diag-splits", requires = "debug_glyco")]
+    glyco_diag_splits: Option<std::path::PathBuf>,
+
     /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
     /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
     #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
@@ -3349,6 +3355,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_m: cli.glyco_gp_m,
             min_core_y: cli.glyco_min_core_y,
             min_raw_score: cli.glyco_min_raw_score,
+            diag_splits: cli.glyco_diag_splits.clone(),
             min_matched_by: cli.glyco_min_matched_ions,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,

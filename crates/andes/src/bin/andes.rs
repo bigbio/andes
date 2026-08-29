@@ -709,6 +709,15 @@ struct SearchArgs {
     #[arg(long = "glyco-min-raw-score-quantile")]
     glyco_min_raw_score_quantile: Option<f64>,
 
+    /// Emit the CURATED glyco PIN column set (52 columns) instead of the full
+    /// one. Validated on pooled human plasma: 384.6 +/- 23 glycoPSMs @1% with
+    /// entrapment FDP 0.00% on all five seeds, vs 256.8 +/- 16.5 for the full
+    /// set (+50%). Drops per-scan spectrum-level columns the small-sample SVM
+    /// misuses, plus the ETD-only Cz* and opt-in Transfer* columns -- intended
+    /// for HCD-style runs. Pair with `percolator --trainFDR 0.05` (see docs).
+    #[arg(long = "glyco-pin-curated", default_value_t = false)]
+    glyco_pin_curated: bool,
+
     /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
     /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
     #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
@@ -3435,6 +3444,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // native-GBDT-rescore it in-process to get target+decoy q-values.
             let mut buf: Vec<u8> = Vec::new();
             output::glyco_pin::write_glyco_pin_to(
+                cli.glyco_pin_curated,
                 &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false, false,
             )?;
             let pin_text = String::from_utf8(buf)
@@ -3745,6 +3755,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
 
         output::write_glyco_pin(
+            cli.glyco_pin_curated,
             &glyco_pin_path,
             &spectra,
             &glyco_results,

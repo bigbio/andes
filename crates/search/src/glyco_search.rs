@@ -31,7 +31,8 @@ use model::spectrum::Spectrum;
 use rayon::prelude::*;
 
 use andes_glyco::backbone::{
-    core_y_intensity, count_core_y_hits, glycan_y_intensity, glycan_y_intensity_decoy,
+    core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity,
+    glycan_y_intensity_decoy,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
@@ -62,6 +63,18 @@ pub struct GlycoConfig {
     /// Minimum trimannosyl-core Y ions required to emit a glyco PSM. 0 = no requirement
     /// (previous behaviour). The field standard is 2 (pGlyco3, O-Pair).
     pub min_core_y: u32,
+    /// Minimum winner RawScore (`w.score`, the value the PIN's RawScore column
+    /// rounds) for a scan to emit a row at all. `None` = off (ship default).
+    ///
+    /// MEASURED MOTIVE (2026-08-28 forensics, plasma R1): 90.5% of emitted rows
+    /// sit on scans where MSFragger has no PSM of ANY kind — target fraction
+    /// 0.558 (a coin flip), median RawScore −2.5 vs +9.4 on real glyco scans.
+    /// That stratum inverts every PIN AUC (RawScore 0.663 on real scans → 0.471
+    /// over the full PIN) and is what Percolator trains on. Scan-level
+    /// junk-vs-real AUC of this quantity: 0.863 — the best single gate measured
+    /// (CoreYHits 0.828, YHitFrac 0.805, Oxonium 0.747). At >3: −83% junk rows,
+    /// keeps 485/605 real-glyco scans and every current agreement.
+    pub min_raw_score: Option<f32>,
     /// Minimum matched b/y sequence ions required to emit a glyco PSM. 0 = no
     /// requirement. MSFragger requires 4 matched fragments with >=2 non-Y.
     pub min_matched_by: u32,
@@ -131,6 +144,7 @@ impl Default for GlycoConfig {
             gp_cz: GLYCO_GP_CZ_DEFAULT,
             gp_m: GLYCO_GP_M_DEFAULT,
             min_core_y: 0,
+            min_raw_score: None,
             min_matched_by: 0,
             max_gen_peaks: 0,
             cz_multisite: false,
@@ -179,6 +193,52 @@ pub struct FullGlycoPsm {
     pub glycan_key: GlycoPsmKey,
     /// Standard PSM (bare backbone, scored as if unmodified).
     pub psm: PsmMatch,
+}
+
+/// Run-adaptive emission floor: drop every scan whose winner scores below the
+/// `q`-quantile of the run's own DECOY winners' strong score (the PIN RawScore).
+///
+/// WHY A QUANTILE AND NOT A NUMBER. An absolute floor tuned on one dataset does
+/// not transfer: RawScore's scale moves with the model, instrument and spectrum
+/// quality (the July `min-core-y 2` "plasma fix" cost mouse 161 of 707 IDs the
+/// same way). Decoy winners are the run's own null -- junk-emission scans score
+/// like decoys (measured target fraction 0.558 on scans with no confirmed
+/// glycopeptide) -- so "beat all but (1-q) of the decoy winners" self-calibrates
+/// to whatever scale the run produces. The threshold is derived from decoys but
+/// applied IDENTICALLY to target and decoy scans, so target/decoy competition
+/// stays symmetric (same contract as tailor-score normalisation).
+///
+/// Measured basis (plasma R1 sweep): every one of the 130 externally-agreed
+/// correct answers survives an absolute floor of 10, while 83-93% of junk rows
+/// fall -- correct winners live far above the decoy distribution, so a wide
+/// band of quantiles is safe.
+///
+/// Returns (threshold, scans_before, scans_kept); no-ops (returning None) when
+/// the run has no decoy winners to calibrate on.
+pub fn apply_adaptive_emission_floor(
+    results: &mut Vec<GlycoSpectrumResult>,
+    is_decoy_for: &dyn Fn(&FullGlycoPsm) -> bool,
+    q: f64,
+) -> Option<(f32, usize, usize)> {
+    let mut decoy_scores: Vec<f32> = results
+        .iter()
+        .flat_map(|r| r.hits.iter())
+        .filter(|h| is_decoy_for(h))
+        .map(|h| h.psm.features.strong_score)
+        .collect();
+    if decoy_scores.is_empty() {
+        return None;
+    }
+    decoy_scores.sort_by(|a, b| a.total_cmp(b));
+    let idx = ((decoy_scores.len() as f64 - 1.0) * q.clamp(0.0, 1.0)).round() as usize;
+    let floor = decoy_scores[idx];
+    let before = results.len();
+    results.retain(|r| {
+        r.hits
+            .iter()
+            .any(|h| h.psm.features.strong_score >= floor)
+    });
+    Some((floor, before, results.len()))
 }
 
 /// Per-spectrum result: the spectrum's global index + all scored glyco PSMs.
@@ -527,6 +587,8 @@ pub struct GlycoScoreCtx<'a> {
     pub gp_m: f32,
     /// See `GlycoConfig::min_core_y`.
     pub min_core_y: u32,
+    /// See `GlycoConfig::min_raw_score`.
+    pub min_raw_score: Option<f32>,
     /// See `GlycoConfig::min_matched_by`.
     pub min_matched_by: u32,
     /// See `GlycoConfig::max_gen_peaks`.
@@ -580,6 +642,7 @@ pub struct GlycoCtxOwned {
     gp_cz: f32,
     gp_m: f32,
     min_core_y: u32,
+    min_raw_score: Option<f32>,
     min_matched_by: u32,
     max_gen_peaks: usize,
     cz_multisite: bool,
@@ -684,6 +747,7 @@ impl GlycoCtxOwned {
         let gp_cz = cfg.gp_cz;
         let gp_m_cfg = cfg.gp_m;
         let min_core_y_cfg = cfg.min_core_y;
+        let min_raw_score_cfg = cfg.min_raw_score;
         let min_matched_by_cfg = cfg.min_matched_by;
         let max_gen_peaks = cfg.max_gen_peaks;
         let cz_multisite_cfg = cfg.cz_multisite;
@@ -809,6 +873,7 @@ impl GlycoCtxOwned {
             gp_cz,
             gp_m: gp_m_cfg,
             min_core_y: min_core_y_cfg,
+            min_raw_score: min_raw_score_cfg,
             min_matched_by: min_matched_by_cfg,
             max_gen_peaks,
             cz_multisite: cz_multisite_cfg,
@@ -862,6 +927,7 @@ impl GlycoCtxOwned {
             gp_cz: self.gp_cz,
             gp_m: self.gp_m,
             min_core_y: self.min_core_y,
+            min_raw_score: self.min_raw_score,
             min_matched_by: self.min_matched_by,
             max_gen_peaks: self.max_gen_peaks,
             cz_multisite: self.cz_multisite,
@@ -974,6 +1040,7 @@ fn score_spectrum_glyco(
     let gp_cz = ctx.gp_cz;
     let gp_m = ctx.gp_m;
     let min_core_y = ctx.min_core_y;
+    let min_raw_score = ctx.min_raw_score;
     let min_matched_by = ctx.min_matched_by;
     // ETD c/z collapse term: on electron-transfer spectra the intact-glycan c/z
     // ladder is the primary backbone evidence, so the selector weights it to pick
@@ -2367,6 +2434,36 @@ fn score_spectrum_glyco(
                         ) as f32,
                         _ => 0.0,
                     },
+                    // COMPLETENESS of the assigned composition's own Y ladder: the
+                    // fraction of the rungs it PREDICTS that were matched, in [0,1].
+                    //
+                    // `y_ladder_intensity_score` above is an unnormalised intensity SUM,
+                    // so it grows with glycan size and a wrong larger composition can
+                    // beat a right smaller one. A fraction cannot be inflated that way.
+                    // This targets the measured failing stage: 96.9% of decoy winners
+                    // sit at a DIFFERENT backbone mass than the truth, i.e. we pick the
+                    // wrong mass split / composition.
+                    //
+                    // De-novo hits carry no composition, so there is nothing whose
+                    // completeness could be scored -> 0.0, as for the ladder decoy.
+                    y_hit_frac: match &bb_hit.glycan {
+                        Some(g) => glycan_y_hit_frac(
+                            y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge, None,
+                        ) as f32,
+                        None => 0.0,
+                    },
+                    // Glycan-axis decoy twin. Measured on the SAME spectrum as its
+                    // target (round-7 audit F13: reading a different scan here turns the
+                    // decoy from a control into an anti-conservative artefact), and
+                    // seeded identically to the ladder decoy so both describe one decoy
+                    // "structure" per composition.
+                    y_hit_frac_decoy: match &bb_hit.glycan {
+                        Some(g) if glyco_decoy_on => glycan_y_hit_frac(
+                            y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge,
+                            Some(glycan_decoy_seed(g)),
+                        ) as f32,
+                        _ => 0.0,
+                    },
                     // Idea B: partial-glycan b/y — sequence-specific evidence for the
                     // weak large/high-charge glycopeptides (b_i/y_i + core glycan).
                     partial_glycan_by: {
@@ -2414,6 +2511,17 @@ fn score_spectrum_glyco(
                     cz_explained: cz_struct_vals.0,
                     cz_chance_llr: cz_struct_vals.1,
                 };
+                // Emission floor (--glyco-min-raw-score): gate on the SAME value the
+                // PIN's RawScore column carries -- features.strong_score, the phase-2
+                // model re-score of the winner. The first cut of this gate read the
+                // phase-1 `w.score` (which feeds the RankScore column, min 0) and
+                // removed 5.6% of rows where the measured operating point removes
+                // ~80%: same word "raw score", different quantity, found because the
+                // measurement was checked against the prediction. Label-blind: reads
+                // only spectral match quality, identically for target and decoy.
+                if min_raw_score.is_some_and(|f| psm.features.strong_score < f) {
+                    continue;
+                }
                 best_hits.insert(gl_key, FullGlycoPsm { glycan_key, psm });
             }
 
@@ -3101,6 +3209,8 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_ladder_decoy_score: 0.0,
+            y_hit_frac: 0.0,
+            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,

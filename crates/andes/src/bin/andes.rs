@@ -689,6 +689,26 @@ struct SearchArgs {
     #[arg(long = "glyco-min-core-y", default_value_t = 0u32)]
     glyco_min_core_y: u32,
 
+    /// Minimum winner RawScore for a `--glyco` scan to emit a PIN row at all.
+    /// Unset = emit a best guess for every gated scan (historical behaviour).
+    ///
+    /// Measured on plasma (2026-08-28): 90.5% of emitted rows sit on scans with no
+    /// glycopeptide in them (median RawScore −2.5 vs +9.4 on real glyco scans);
+    /// that stratum is what Percolator trains on. At 3, it removes 83% of those
+    /// rows while keeping every measured agreement with an external engine.
+    /// Label-blind: reads only the winner's spectral match quality.
+    #[arg(long = "glyco-min-raw-score")]
+    glyco_min_raw_score: Option<f32>,
+
+    /// Run-ADAPTIVE emission floor: drop scans whose winner scores below this
+    /// quantile of the run's own decoy winners (e.g. 0.95). Self-calibrating --
+    /// unlike an absolute --glyco-min-raw-score, it transfers across datasets,
+    /// instruments and models, because the decoy winners ARE the run's null.
+    /// The derived threshold is printed and applied identically to target and
+    /// decoy scans. Mutually exclusive with --glyco-min-raw-score.
+    #[arg(long = "glyco-min-raw-score-quantile")]
+    glyco_min_raw_score_quantile: Option<f64>,
+
     /// Minimum matched b/y sequence ions required before `--glyco` reports a PSM.
     /// MSFragger's equivalents are 4 matched fragments with at least 2 non-Y. 0 disables.
     #[arg(long = "glyco-min-matched-ions", default_value_t = 0u32)]
@@ -3328,6 +3348,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_cz: cli.glyco_gp_cz,
             gp_m: cli.glyco_gp_m,
             min_core_y: cli.glyco_min_core_y,
+            min_raw_score: cli.glyco_min_raw_score,
             min_matched_by: cli.glyco_min_matched_ions,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,
@@ -3685,6 +3706,37 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // RT index + per-monosaccharide offset + per-run self-calibration. The
         // glyco PIN writer then also appends the within-scan DeltaRTRank. Neutral
         // 0.0 without observed RT / <MIN_CALIBRATION_ANCHORS anchors (baseline-safe).
+        if let Some(q) = cli.glyco_min_raw_score_quantile {
+            if cli.glyco_min_raw_score.is_some() {
+                return Err("--glyco-min-raw-score and --glyco-min-raw-score-quantile are \
+                            mutually exclusive: one is an absolute floor, the other derives \
+                            the floor from this run's decoy winners"
+                    .into());
+            }
+            let cands = &prepared.candidates;
+            let is_decoy = |h: &search::glyco_search::FullGlycoPsm| -> bool {
+                h.psm
+                    .candidate_idxs
+                    .first()
+                    .map(|&i| cands[i as usize].is_decoy)
+                    .unwrap_or(false)
+            };
+            match search::glyco_search::apply_adaptive_emission_floor(
+                &mut glyco_results,
+                &is_decoy,
+                q,
+            ) {
+                Some((floor, before, kept)) => eprintln!(
+                    "--glyco-min-raw-score-quantile {q}: derived RawScore floor {floor:.3} \
+                     from this run's decoy winners; scans {before} -> {kept}"
+                ),
+                None => eprintln!(
+                    "WARN: --glyco-min-raw-score-quantile {q} did nothing: this run has no \
+                     decoy winners to calibrate on (tiny input?); emitting ungated"
+                ),
+            }
+        }
+
         output::populate_glyco_rt_features(
             &spectra,
             &mut glyco_results,

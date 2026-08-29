@@ -132,3 +132,18 @@ recommended setting is **0.75**, leaning toward retention because the starvation
 is steeper than the junk cost. Both flags default OFF pending the cross-dataset (mouse)
 check; the starvation boundary depends on absolute pooled row count, so larger datasets
 likely tolerate higher quantiles.
+
+### Confirmation of the adaptive operating point (2026-08-29, pooled, 5 seeds)
+
+`--glyco-min-raw-score-quantile 0.775` independently derived floors of 3.081 / 3.159 /
+3.089 on the three fractions (2.5% spread — the per-run calibration is stable) and
+reproduced the absolute floor-3 arm: 5,022 pooled rows, **243.0 mean glycoPSMs @1%
+(sd 16.3, range 229–264)** against the absolute arm's 256.8 (sd 16.5) — within noise.
+Seed stability, the demonstrated effect of the gate, is fully retained.
+
+Caveat, recorded rather than glossed: the mean entrapment FDP point estimate is higher
+in the adaptive arm (4.36% vs 1.76%), but at ~240 accepted PSMs one entrapment hit moves
+FDP by ~2%, the per-seed values span 0–8.35% in both arms' lineages, and the difference
+is ~1.5σ — statistically indistinguishable. FDP calibration at this yield scale remains
+seed-unstable and unresolved; it is the main reason both flags stay OFF by default until
+the mouse cross-check.

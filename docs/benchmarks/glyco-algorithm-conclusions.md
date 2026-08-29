@@ -82,3 +82,53 @@ delta), entrapment FDP at matched yield, or fixed-score-threshold counts.
 justified independently of Percolator: humans lack functional CMAH, every mainstream
 human glycan list ships zero NeuGc, Byonic agreement improves sharply, and FDP direction
 favours it. Right call, wrong headline number.
+
+## 2026-08-29 — the primary defect was junk emission, not the selector
+
+A four-way diagnostic (per-scan join against MSFragger on identical plasma data; data
+forensics; a line-verified pipeline audit; the MSFragger mechanism from its paper and
+docs) converged on one fact: **90.5% of andes's emitted glyco rows sit on scans that
+contain no glycopeptide at all.** andes emitted a best guess for every scan clearing the
+oxonium gate, with no evidence floor of any kind. Those rows are target/decoy coin flips
+(measured target fraction 0.558), and Percolator learns its scoring model from them:
+over the full PIN every feature's target/decoy AUC collapses to ~0.5 — RawScore INVERTS
+to 0.471 — while on real glyco scans the same features separate fine (RawScore 0.663).
+This one mechanism explains the immovable ~43% decoy-winner rate and why sixteen
+selector-reweighting ablation arms all measured null.
+
+Two corrections to earlier numbers, found during the same forensics: agreement with
+MSFragger is 130/605 scans (21.5%), not 81 — the old comparator counted every
+modified peptide as a disagreement — and 33% of MSFragger's rank-1 "glyco scans" are
+its own decoys. On scans MSFragger is confident about (hyperscore ≥ 20), andes already
+agrees ~82%; the engine was never catastrophically wrong on well-determined spectra.
+
+### The emission floor, and its dose-response (pooled 3 fractions, 5 seeds, entrapment)
+
+| floor (RawScore) | pooled rows | mean glycoPSMs @1% | sd | range | mean FDP |
+|---|---|---|---|---|---|
+| off | 22,592 | 244.4 | 93.7 | 101–363 | 1.72% |
+| **3** | **5,072** | **256.8** | **16.5** | **236–277** | 1.76% |
+| 6 | 2,884 | 192.0 | 59.0 | 119–246 | 0.88% |
+| 10 | 1,714 | 153.0 | ~103 | 0–249 | erratic |
+
+**The response is non-monotonic: the gate must clean without starving.** No floor
+drowns Percolator in junk (seed sd 93.7); a moderate floor removes the junk bulk while
+leaving ~5,000 pooled rows to train on (sd collapses to 16.5 — the demonstrated effect;
+the +12 PSM yield delta is inside noise); harsher floors starve the training set, the
+instability returns, and at floor 10 one seed returned zero (the `q_min = 1/T_top` step
+function reappears at small row counts). At the R1 level, every one of the 130
+externally-agreed correct answers survives even floor 10 — correct winners live far
+above the decoy score distribution.
+
+### The shippable form is run-adaptive, not a constant
+
+An absolute score floor tuned on one dataset does not transfer (the July `min-core-y 2`
+"plasma fix" cost mouse 161 of 707 IDs the same way). `--glyco-min-raw-score-quantile`
+derives the floor from the run's own decoy winners — the run's null — and applies it
+identically to target and decoy scans. Validated on R1: q=0.90 → derived floor 6.96,
+q=0.95 → 12.23, q=0.99 → 20.76, holding 130/130, 129, and 116 agreements respectively.
+The measured yield optimum (absolute floor ≈ 3) corresponds to **q = 0.775**; the
+recommended setting is **0.75**, leaning toward retention because the starvation cliff
+is steeper than the junk cost. Both flags default OFF pending the cross-dataset (mouse)
+check; the starvation boundary depends on absolute pooled row count, so larger datasets
+likely tolerate higher quantiles.

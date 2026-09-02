@@ -477,8 +477,12 @@ fn max_intensity_in_window(peaks: &[(f64, f32)], sorted: bool, lo: f64, hi: f64)
     }
 }
 
+/// Exposed so the composition-specific Y-tree scorer in `glycan_y_tree` matches its
+/// nodes through the SAME matcher (charge sweep, isotope confirmation above z3,
+/// tolerance floor) as the linear ladder it is measured against. Two matchers would
+/// make any A/B between them a comparison of matchers.
 #[inline]
-fn best_frag_intensity(
+pub fn best_frag_intensity(
     peaks: &[(f64, f32)],
     sorted: bool,
     neutral: f64,

@@ -731,6 +731,68 @@ struct SearchArgs {
     #[arg(long = "glyco-cz-gate", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     glyco_cz_gate: bool,
 
+    /// Read the glycan-Y ladder from the paired HCD partner instead of the ETD scan
+    /// being scored. Under --glyco-hcd-pair the core-Y hit COUNT is already taken
+    /// from the HCD partner while the ladder INTENSITY, YHitFrac and the glycan-axis
+    /// decoy are taken from the ETD scan, so one selector score sums two spectra.
+    /// Inert unless paired.
+    #[arg(long = "glyco-pair-y-on-gen", hide = true)]
+    glyco_pair_y_on_gen: bool,
+
+    /// Promote the best enumerated candidate when the argmax picks a de-novo one.
+    /// Default true (shipped behaviour). The promoted row lost the argmax and is
+    /// emitted anyway on roughly a fifth of scans; `false` runs that A/B.
+    #[arg(long = "glyco-enum-fallback", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
+    glyco_enum_fallback: bool,
+
+    /// Require the oxonium gate to fire before an ETD/AI-ETD scan enumerates the full
+    /// glycan-database split lattice. ETD scans otherwise bypass every glycan gate.
+    #[arg(long = "glyco-etd-require-oxonium", hide = true)]
+    glyco_etd_require_oxonium: bool,
+
+    /// Emit the composition-specific Y-ion-tree log-likelihood columns. The shipped
+    /// ladder is a single linear chain that appends fucose after every antenna, so the
+    /// core-fucose Y ions a true fucosylated composition should claim are never
+    /// predicted. Additive PIN columns only.
+    #[arg(long = "glyco-y-tree", hide = true)]
+    glyco_y_tree: bool,
+
+    /// Emit the per-candidate oxonium-composition log-likelihood columns, including the
+    /// penalty for a composition that claims a monosaccharide whose diagnostic ion is
+    /// absent. No diagnostic oxonium ion currently influences which composition wins.
+    #[arg(long = "glyco-oxonium-llr", hide = true)]
+    glyco_oxonium_llr: bool,
+
+    /// Emit the peptide-channel rank score, computed after masking oxonium and Y-ladder
+    /// peaks so the rank model is not reading a spectrum whose most intense peaks are
+    /// all glycan-derived. Additive PIN column only.
+    #[arg(long = "glyco-rank-masked", hide = true)]
+    glyco_rank_masked: bool,
+
+    /// Emit the peptide-channel backbone chance LLR: on the same masked spectrum as
+    /// --glyco-rank-masked, every glycosite-spanning b/y ion is scored as the best of
+    /// its bare, +HexNAc and +2HexNAc forms, and fragment charges run to z-1 with an
+    /// isotope check from z3. Additive PIN columns only.
+    #[arg(long = "glyco-chance-llr-masked", hide = true)]
+    glyco_chance_llr_masked: bool,
+
+    /// Peptide-first candidate RETRIEVAL tolerance in ppm. Unset = the fragment
+    /// index inherits the rank model's fixed 0.5 Da window even on high-resolution
+    /// data. Retrieval only; the rank scorer is unchanged (roadmap Stage S1A A/B).
+    #[arg(long = "glyco-retrieval-tol-ppm", hide = true, value_parser = parse_positive_tol)]
+    glyco_retrieval_tol_ppm: Option<f64>,
+
+    /// Elect the backbone mass split first, with multiplicity control, then elect the
+    /// glycoform and peptide inside it, instead of one global argmax over every
+    /// (peptide, composition) pair. Measured: 96.9% of decoy winners on contested scans
+    /// sit at a different backbone mass than the truth.
+    #[arg(long = "glyco-split-election", hide = true)]
+    glyco_split_election: bool,
+
+    /// Weight on the per-candidate glycan log-likelihood ratio in the election.
+    #[arg(long = "glyco-gp-g", hide = true)]
+    glyco_gp_g: Option<f32>,
+
     /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
     /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
     #[arg(long = "glyco-pf-charge", hide = true, default_value_t = 2u8)]
@@ -3367,6 +3429,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
+            retrieval_tol_ppm: cli.glyco_retrieval_tol_ppm,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
             glyco_decoy: cli.glyco_decoy,
@@ -3374,6 +3437,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
             etd_rank_glycan: cli.glyco_etd_rank_glycan,
             cz_gate: cli.glyco_cz_gate,
+            pair_y_on_gen: cli.glyco_pair_y_on_gen,
+            enum_fallback: cli.glyco_enum_fallback,
+            etd_require_oxonium: cli.glyco_etd_require_oxonium,
+            y_tree: cli.glyco_y_tree,
+            ox_llr: cli.glyco_oxonium_llr,
+            rank_masked: cli.glyco_rank_masked,
+            chance_llr_masked: cli.glyco_chance_llr_masked,
+            split_election: cli.glyco_split_election,
+            gp_g: cli.glyco_gp_g.unwrap_or(search::glyco_search::GlycoConfig::default().gp_g),
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,

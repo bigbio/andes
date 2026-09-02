@@ -85,6 +85,8 @@ Rebuild the plasma comparison before using it for any design decision:
 
 **Gate:** the baseline must be reproducible and comparable to the 384.6 setup, with no seed collapsing to zero because of the step-function floor. If that cannot be achieved, plasma remains a descriptive dataset rather than a decision benchmark.
 
+**Result (2026-09-02, commit `b9f25527`, yeast entrapment database, routing fixed, three sceHCD files pooled, five seeds):** curated baseline 392 / 378 / 376 / 381 / 371 glycoPSMs (mean 380 ± 8, FDP 0-1.6%), no seed at the floor — this reproduces the 384.6 ± 23 reference. Default-policy baseline 374 / 352 / 284 / 342 / 364 (mean 343 ± 35): the curated policy is the better one on plasma, the reverse of mouse. Gate passed; plasma is a decision benchmark again. Comparability note: the reference used E. coli entrapment (10.77× sequon correction), this database uses yeast (3.19×).
+
 ### Stage 4 — Fix model fallback independently
 
 Every current glyco run in both regimes falls back to the Astral model because the model store has no matching high-resolution HCD tryptic model. This is pre-existing and equal across benchmark arms, so it does not explain the arm-to-arm election result; it can still miscalibrate the entire benchmark.
@@ -324,7 +326,7 @@ Every completed experiment should add one row to a durable summary:
 1. ~~Let the current v2 matrix and chained evaluations finish; read it at 36/36.~~ Done (2026-09-02 evening).
 2. ~~Write the v2 result into this plan and the redesign document's implementation-status section.~~ Done.
 3. ~~Close or reopen the election strictly by the Stage 2 gate.~~ Closed as refuted.
-4. Reconstruct the like-for-like plasma entrapment benchmark. Database built (`fasta/plasma_entrap_yeast.fasta`: deposited human + 6733 reviewed yeast as `ENTRAP_`; sequon correction 3.19×); baseline-only seed sweep queued.
+4. ~~Reconstruct the like-for-like plasma entrapment benchmark.~~ Done: baseline 380 ± 8 reproduces 384.6. Database built (`fasta/plasma_entrap_yeast.fasta`: deposited human + 6733 reviewed yeast as `ENTRAP_`; sequon correction 3.19×); baseline-only seed sweep queued.
 5. ~~Fix and independently benchmark high-resolution HCD model routing.~~ Done: +46 correct, see Stage 4.
 6. Verify and commit the current tree with an honest experimental-status message.
 7. Define the named speed target, then add Stage S1 instrumentation before changing inference or candidate generation.

@@ -186,6 +186,8 @@ Implement the experiment as a clean decoupling, not by changing the rank model:
 
 **Gate:** adopt the decoupled tolerance only if it preserves at least 99% of independently correct baseline candidates before final scoring and does not reduce correct IDs at matched true FDP. If recall falls, inspect the lost spectra by fragment charge, peptide length, and fragmentation regime before widening the window.
 
+**Result on plasma (yeast entrapment database, three files pooled, five seeds):** curated policy 380 ± 8 → 399 ± 23 with the 20 ppm window, default policy 343 ± 35 → 365 ± 25; wall time per file 6.6-8.5 min → 1.1 min (**7×**). Identifications neutral to slightly up on both policies; entrapment hits are 0-5 per seed, so FDP is not resolvable at this scale. The additive-column arms are neutral on plasma as well (374 ± 50 and 373 ± 36 against 343 ± 35).
+
 **Result (2026-09-02, commit `b9f25527`, mouse, five seeds, `--glyco-retrieval-tol-ppm 20` vs the same binary at 0.5 Da):** correct identifications 3198 vs 3183 (overlapping seeds, neutral to slightly positive), true FDP 0.97% vs 0.92%, and **wall time 21 min vs 144 min over the six fractions (6.9× faster)**. The identification half of the gate is met; the candidate-recall diagnostic (step 5) is still to be produced before the ppm window becomes the high-resolution default.
 
 ### Stage S2 — Quick semantics-preserving reductions (time-boxed)

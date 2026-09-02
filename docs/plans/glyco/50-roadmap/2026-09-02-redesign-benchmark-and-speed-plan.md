@@ -97,6 +97,8 @@ Every current glyco run in both regimes falls back to the Astral model because t
 
 **Gate:** correct model selection is regression-tested, and the model-only A/B reports correct IDs and true FDP. Do not attribute a model-routing change to the scoring redesign.
 
+**Result (2026-09-02, commit `b9f25527`, mouse, five seeds):** the cause was routing, not a missing model — the generic `HighRes` key fell through to the alphabetically first same-activation model. With the sibling-resolution step (`HighRes` ↔ `QExactive`) the baseline resolves to `hcd_qexactive_tryp`: correct identifications 3137 → 3183, true FDP 1.04% → 0.92%, all five seeds above the previous maximum. Gate passed; regression test in `select.rs`.
+
 ### Stage 5 — Preserve and commit the verified work
 
 The current tree contains the redesign, two review passes, the actual-pairing guard, and the entrapment evaluator fix. Before committing:
@@ -181,6 +183,8 @@ Implement the experiment as a clean decoupling, not by changing the rank model:
 6. Report the interaction with the existing per-spectrum peptide-first candidate cap: a narrower window changes WHICH candidates survive the cap, not only how many, so record recall both before and after the cap.
 
 **Gate:** adopt the decoupled tolerance only if it preserves at least 99% of independently correct baseline candidates before final scoring and does not reduce correct IDs at matched true FDP. If recall falls, inspect the lost spectra by fragment charge, peptide length, and fragmentation regime before widening the window.
+
+**Result (2026-09-02, commit `b9f25527`, mouse, five seeds, `--glyco-retrieval-tol-ppm 20` vs the same binary at 0.5 Da):** correct identifications 3198 vs 3183 (overlapping seeds, neutral to slightly positive), true FDP 0.97% vs 0.92%, and **wall time 21 min vs 144 min over the six fractions (6.9× faster)**. The identification half of the gate is met; the candidate-recall diagnostic (step 5) is still to be produced before the ppm window becomes the high-resolution default.
 
 ### Stage S2 — Quick semantics-preserving reductions (time-boxed)
 
@@ -320,11 +324,11 @@ Every completed experiment should add one row to a durable summary:
 1. ~~Let the current v2 matrix and chained evaluations finish; read it at 36/36.~~ Done (2026-09-02 evening).
 2. ~~Write the v2 result into this plan and the redesign document's implementation-status section.~~ Done.
 3. ~~Close or reopen the election strictly by the Stage 2 gate.~~ Closed as refuted.
-4. Reconstruct the like-for-like plasma entrapment benchmark.
-5. Fix and independently benchmark high-resolution HCD model routing.
+4. Reconstruct the like-for-like plasma entrapment benchmark. Database built (`fasta/plasma_entrap_yeast.fasta`: deposited human + 6733 reviewed yeast as `ENTRAP_`; sequon correction 3.19×); baseline-only seed sweep queued.
+5. ~~Fix and independently benchmark high-resolution HCD model routing.~~ Done: +46 correct, see Stage 4.
 6. Verify and commit the current tree with an honest experimental-status message.
 7. Define the named speed target, then add Stage S1 instrumentation before changing inference or candidate generation.
-8. Run the Stage S1A retrieval-only tolerance A/B on mouse; keep the rank model unchanged.
+8. ~~Run the Stage S1A retrieval-only tolerance A/B on mouse; keep the rank model unchanged.~~ Done: 6.9× faster, IDs neutral; recall diagnostic still owed.
 9. Produce the Stage S5 oracle table before implementing a primary fragment-first cascade.
 
 ## 7. Primary algorithm references

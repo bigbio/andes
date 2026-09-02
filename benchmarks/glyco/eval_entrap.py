@@ -94,7 +94,15 @@ def space_ratio(path):
         if hdr is None:
             return
         n = len(pat.findall(seq))
-        if hdr.startswith(">ENTRAP_"):
+        # SUBSTRING, not prefix: the accession that carries the tag may be inside a
+        # UniProt-style header (`>sp|ENTRAP_Q9XXXX|...`), which is what the cluster's
+        # entrapment databases emit. The hit-counting pass below already tests
+        # `"ENTRAP_" in accession`, so a prefix test here made the two halves of this
+        # script disagree: entrapment hits were counted while the space that sizes
+        # their correction factor came out empty, and every run silently reported
+        # `entrapment FDP: UNKNOWN` / `NO VERDICT` on a database that plainly had
+        # entrapment proteins in it.
+        if "ENTRAP_" in hdr:
             e_prot += 1
             e_seq += n
         elif not hdr.startswith(">XXX_") and not hdr.startswith(">DECOY"):

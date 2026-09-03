@@ -108,10 +108,12 @@ pub struct GlycoConfig {
     pub pf_charge: u8,
     /// Peptide-first RETRIEVAL tolerance in ppm (`--glyco-retrieval-tol-ppm`).
     /// `None` = the fragment index keeps the rank-scoring model's fixed-Da window
-    /// (0.5 Da for the low-res models), which on high-resolution data admits b/y
-    /// matches ~50x wider than the ppm window every glycan-side matcher uses.
-    /// Retrieval only: the rank scorer and its tolerance are untouched, so this
-    /// A/B tests candidate RETRIEVAL, not scoring (roadmap Stage S1A).
+    /// (0.5 Da for the low-res models). The binary sets this to the glyco ppm
+    /// tolerance on high-resolution MS2 by default: at 0.5 Da the index admitted b/y
+    /// matches ~50x wider than the ppm window every glycan-side matcher uses, and
+    /// that was the dominant glyco cost on high-res data (measured 6.9-7x faster
+    /// at 20 ppm with identifications neutral, mouse and plasma, five seeds).
+    /// Retrieval only: the rank scorer and its tolerance are untouched.
     pub retrieval_tol_ppm: Option<f64>,
     /// Max peptide-first candidates kept per spectrum.
     pub max_pf: usize,

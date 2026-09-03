@@ -776,10 +776,11 @@ struct SearchArgs {
     #[arg(long = "glyco-chance-llr-masked", hide = true)]
     glyco_chance_llr_masked: bool,
 
-    /// Peptide-first candidate RETRIEVAL tolerance in ppm. Unset = the fragment
-    /// index inherits the rank model's fixed 0.5 Da window even on high-resolution
-    /// data. Retrieval only; the rank scorer is unchanged (roadmap Stage S1A A/B).
-    #[arg(long = "glyco-retrieval-tol-ppm", hide = true, value_parser = parse_positive_tol)]
+    /// Peptide-first candidate RETRIEVAL tolerance in ppm. Default: --glyco-tol-ppm
+    /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
+    /// Retrieval only; the rank scorer and its tolerance are unchanged. Measured
+    /// 7x faster than 0.5 Da on high-res data with identifications neutral.
+    #[arg(long = "glyco-retrieval-tol-ppm", value_parser = parse_positive_tol)]
     glyco_retrieval_tol_ppm: Option<f64>,
 
     /// Elect the backbone mass split first, with multiplicity control, then elect the
@@ -3429,7 +3430,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
-            retrieval_tol_ppm: cli.glyco_retrieval_tol_ppm,
+            // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the
+            // glyco ppm tolerance; low-resolution keeps the rank model's 0.5 Da.
+            // Measured 2026-09-02 (Codon, five seeds): on high-res data the 0.5 Da
+            // window admitted b/y matches ~50x wider than every glycan-side matcher
+            // and was the dominant glyco cost — 20 ppm was 6.9x faster on mouse
+            // PXD011533 and 7x on plasma PXD030622 with identifications neutral
+            // (mouse 3198 vs 3183 correct; plasma 399 vs 380). An explicit
+            // --glyco-retrieval-tol-ppm overrides the auto default either way.
+            retrieval_tol_ppm: cli.glyco_retrieval_tol_ppm.or_else(|| {
+                param.data_type.instrument.is_high_resolution().then_some(glyco_tol_ppm)
+            }),
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
             glyco_decoy: cli.glyco_decoy,

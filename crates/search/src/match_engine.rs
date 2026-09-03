@@ -30,7 +30,7 @@ use scoring_crate::mod_site_features::{
 };
 use scoring_crate::scoring::{
     frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
-    predict_frag_intensities,
+    predict_frag_intensities_cached,
     psm_edge_score, rich_ion_llr, score_psm, score_psm_float,
     strong_score_calibrated, RankScorer, OnlineStats, ScoredSpectrum, StrongScoreInputs,
     DENSITY_HW,
@@ -1888,10 +1888,10 @@ pub(crate) fn compute_psm_features(
     // (same peptide, same charge, same model, same ion order), and each used to
     // recompute the whole 300-tree ensemble for every fragment — the single
     // hottest thing in the search, done twice for the same numbers.
-    let frag_pred: Option<Vec<f64>> = frag_intensity_model
+    let frag_pred: Option<std::rc::Rc<Vec<f64>>> = frag_intensity_model
         .filter(|_| peptide.length() >= 2)
-        .map(|g| predict_frag_intensities(g, peptide, charge));
-    let frag_pred_slice = frag_pred.as_deref();
+        .map(|g| predict_frag_intensities_cached(g, peptide, charge));
+    let frag_pred_slice: Option<&[f64]> = frag_pred.as_ref().map(|v| v.as_slice());
     let intensity_signal_val = intensity_signal(
         intensity_model,
         frag_intensity_model,

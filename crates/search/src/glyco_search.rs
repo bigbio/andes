@@ -79,6 +79,14 @@ pub struct GlycoConfig {
     /// (CoreYHits 0.828, YHitFrac 0.805, Oxonium 0.747). At >3: −83% junk rows,
     /// keeps 485/605 real-glyco scans and every current agreement.
     pub min_raw_score: Option<f32>,
+    /// Diagnostic side-file (`--glyco-diag-splits`, requires `--debug-glyco`):
+    /// per-candidate split diagnostics for the LLR-calibration probe. One TSV row
+    /// per emitted candidate: scan, label, backbone mass, composition,
+    /// `y_hit_frac`, and the mean/sd of k=8 shifted-ladder NULL draws of the same
+    /// quantity on the same spectrum. Exists to falsify (or confirm) cheaply that
+    /// per-scan null calibration ranks the true split better than the raw
+    /// fraction, BEFORE any selector restructuring. Never touches the PIN.
+    pub diag_splits: Option<std::path::PathBuf>,
     /// Minimum matched b/y sequence ions required to emit a glyco PSM. 0 = no
     /// requirement. MSFragger requires 4 matched fragments with >=2 non-Y.
     pub min_matched_by: u32,
@@ -205,6 +213,7 @@ impl Default for GlycoConfig {
             gp_m: GLYCO_GP_M_DEFAULT,
             min_core_y: 0,
             min_raw_score: None,
+            diag_splits: None,
             min_matched_by: 0,
             max_gen_peaks: 0,
             cz_multisite: false,
@@ -679,6 +688,8 @@ pub struct GlycoScoreCtx<'a> {
     pub min_core_y: u32,
     /// See `GlycoConfig::min_raw_score`.
     pub min_raw_score: Option<f32>,
+    /// Open writer for the `--glyco-diag-splits` side-file (debug mode only).
+    pub diag_splits: Option<std::sync::Arc<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>>,
     /// See `GlycoConfig::min_matched_by`.
     pub min_matched_by: u32,
     /// See `GlycoConfig::max_gen_peaks`.
@@ -742,6 +753,7 @@ pub struct GlycoCtxOwned {
     split_election: bool,
     min_core_y: u32,
     min_raw_score: Option<f32>,
+    diag_splits: Option<std::sync::Arc<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>>,
     min_matched_by: u32,
     max_gen_peaks: usize,
     cz_multisite: bool,
@@ -864,6 +876,18 @@ impl GlycoCtxOwned {
         let split_election_cfg = cfg.split_election;
         let min_core_y_cfg = cfg.min_core_y;
         let min_raw_score_cfg = cfg.min_raw_score;
+        let diag_splits_cfg = cfg.diag_splits.as_ref().map(|path| {
+            let mut w = std::io::BufWriter::new(
+                std::fs::File::create(path).expect("--glyco-diag-splits: create file"),
+            );
+            use std::io::Write as _;
+            writeln!(
+                w,
+                "scan\tcharge\tlabel\tbackbone_mass\tcomposition\ty_hit_frac\tnull_mean\tnull_sd\trank\tscore\tcore_y"
+            )
+            .expect("--glyco-diag-splits: write header");
+            std::sync::Arc::new(std::sync::Mutex::new(w))
+        });
         let min_matched_by_cfg = cfg.min_matched_by;
         let max_gen_peaks = cfg.max_gen_peaks;
         let cz_multisite_cfg = cfg.cz_multisite;
@@ -1011,6 +1035,7 @@ impl GlycoCtxOwned {
             split_election: split_election_cfg,
             min_core_y: min_core_y_cfg,
             min_raw_score: min_raw_score_cfg,
+            diag_splits: diag_splits_cfg,
             min_matched_by: min_matched_by_cfg,
             max_gen_peaks,
             cz_multisite: cz_multisite_cfg,
@@ -1074,6 +1099,7 @@ impl GlycoCtxOwned {
             split_election: self.split_election,
             min_core_y: self.min_core_y,
             min_raw_score: self.min_raw_score,
+            diag_splits: self.diag_splits.clone(),
             min_matched_by: self.min_matched_by,
             max_gen_peaks: self.max_gen_peaks,
             cz_multisite: self.cz_multisite,
@@ -1195,6 +1221,7 @@ fn score_spectrum_glyco(
     let ox_llr_on = ctx.ox_llr;
     let split_election_on = ctx.split_election;
     let gp_g = ctx.gp_g;
+    let diag_splits = ctx.diag_splits.clone();
     let min_matched_by = ctx.min_matched_by;
     // ETD c/z collapse term: on electron-transfer spectra the intact-glycan c/z
     // ladder is the primary backbone evidence, so the selector weights it to pick
@@ -3069,6 +3096,61 @@ fn score_spectrum_glyco(
                     cz_explained: cz_struct_vals.0,
                     cz_chance_llr: cz_struct_vals.1,
                 };
+                // LLR-calibration probe (--glyco-diag-splits, debug mode only): one
+                // TSV row per candidate with y_hit_frac plus k=8 shifted-ladder NULL
+                // draws on the SAME spectrum. The nulls reuse the glycan-decoy rung
+                // shift with k distinct seeds, so "how does a wrong composition of the
+                // same size score here" is sampled rather than assumed. Offline this
+                // decides, on externally labelled scans, whether (frac - null_mean)/
+                // null_sd ranks the true split better than raw frac -- the falsifiable
+                // first step of the calibrated-score design, taken before any selector
+                // restructuring.
+                if let Some(dw) = &diag_splits {
+                    if !features_collapse {
+                        let (nmean, nsd) = match &bb_hit.glycan {
+                            Some(g) => {
+                                const K: u64 = 8;
+                                let mut vals = [0.0f64; 8];
+                                for (i, v) in vals.iter_mut().enumerate() {
+                                    *v = glycan_y_hit_frac(
+                                        y_peaks, y_stats, bb_neutral, g, tol_ppm,
+                                        max_frag_charge,
+                                        Some(glycan_decoy_seed(g) ^ (0x9E37_79B9 + i as u64)),
+                                    );
+                                }
+                                let m = vals.iter().sum::<f64>() / K as f64;
+                                let var = vals.iter().map(|v| (v - m) * (v - m)).sum::<f64>()
+                                    / (K - 1) as f64;
+                                (m, var.sqrt())
+                            }
+                            None => (0.0, 0.0),
+                        };
+                        let comp = match &bb_hit.glycan {
+                            Some(g) => format!(
+                                "N{}H{}F{}S{}G{}",
+                                g.hexnac, g.hex, g.fuc, g.neuac, g.neugc
+                            ),
+                            None => "denovo".to_string(),
+                        };
+                        use std::io::Write as _;
+                        let mut wtr = dw.lock().expect("diag_splits lock");
+                        let _ = writeln!(
+                            wtr,
+                            "{}\t{}\t{}\t{:.4}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.3}\t{:.3}\t{}",
+                            spec.title,
+                            w.z,
+                            if cand.is_decoy { -1 } else { 1 },
+                            bb_hit.backbone_mass,
+                            comp,
+                            glycan_key.y_hit_frac,
+                            nmean,
+                            nsd,
+                            w.rank,
+                            w.score,
+                            core_y_counts[w.bb_hit_idx],
+                        );
+                    }
+                }
                 // Emission floor (--glyco-min-raw-score): gate on the SAME value the
                 // PIN's RawScore column carries -- features.strong_score, the phase-2
                 // model re-score of the winner. The first cut of this gate read the

@@ -25,6 +25,7 @@ fixtures at `cargo test` time and are never read by the shipped binary.
 
 | Variable | Kind | Defined at |
 | --- | --- | --- |
+| `ANDES_GBDT_DIR` | test-harness | `crates/scoring/tests/gbdt_bench.rs:17` |
 | `ANDES_TEST_D` | test-harness | `crates/input/tests/timstof_d_loads.rs:18` |
 | `ANDES_TEST_PERCOLATOR_BIN` | test-harness | `crates/output/tests/percolator_integration.rs:18` |
 | `ANDES_TEST_RAW` | test-harness | `crates/input/tests/thermo_raw.rs:16` |

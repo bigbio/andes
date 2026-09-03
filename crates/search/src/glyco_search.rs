@@ -1751,11 +1751,16 @@ fn score_spectrum_glyco(
                 edge: i32,
                 cand_residue_mass: f64,
             }
-            // FxHash + preallocation: the profile attributes ~55% of the glyco driver's
-            // time to hash-table work and 11% to rehashing, on integer-tuple keys where
-            // SipHash's strength buys nothing. Order-independent by construction here -
-            // this map is consumed into `accepted_winners`, whose only order-sensitive
-            // consumer picks a maximum under a TOTAL comparator (score, then key).
+            // FxHash + preallocation on integer-tuple keys, where SipHash's collision
+            // resistance buys nothing. MEASURED NEUTRAL (mouse Frac1, two interleaved
+            // repetitions, byte-identical PIN: 179.3 s vs 178.3 s for the std-hasher
+            // parent), so this is kept for the determinism fix on the election's split
+            // map below, not for speed. The inlined-callee profile that motivated it
+            // read ~55% of driver time as hash work; `perf --children` credits an
+            // inlined frame with its caller's whole subtree, so that share is an upper
+            // bound, not a cost that removing the hasher can recover. Order-independent
+            // here - this map is consumed into `accepted_winners`, whose only
+            // order-sensitive consumer takes a maximum under a TOTAL comparator.
             let mut cheap_winners: FxHashMap<GlycanWinnerKey, CheapWinner> =
                 FxHashMap::with_capacity_and_hasher(1024, Default::default());
 

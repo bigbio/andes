@@ -645,9 +645,24 @@ impl<'a> ScoredSpectrum<'a> {
                     &param.mme,
                 );
                 let feats = extract_peak_features(cache_peaks, cache_ranks, &ctx);
-                for (i, &r) in cache_ranks.iter().enumerate() {
-                    if r != u32::MAX && (r as usize) < by_rank.len() {
-                        by_rank[r as usize] = model.predict_logit(&feats[i]);
+                // Batched, trees-outer (see `GbdtPeakModel::predict_logit_batch`):
+                // the per-peak call re-streamed the whole ~770 KB ensemble through
+                // cache once per peak. Bit-identical: the batch accumulates each
+                // row's tree sum in the same tree order from the same 0.0 start
+                // as the per-row fold, then applies the same sigmoid / isotonic /
+                // clamp / ln per row.
+                let live: Vec<usize> = cache_ranks
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &r)| r != u32::MAX && (r as usize) < by_rank.len())
+                    .map(|(i, _)| i)
+                    .collect();
+                if !live.is_empty() {
+                    let rows: Vec<&[f32]> = live.iter().map(|&i| feats[i].as_slice()).collect();
+                    let mut out = vec![0.0_f32; rows.len()];
+                    model.predict_logit_batch(&rows, &mut out);
+                    for (&i, &v) in live.iter().zip(out.iter()) {
+                        by_rank[cache_ranks[i] as usize] = v;
                     }
                 }
                 by_rank

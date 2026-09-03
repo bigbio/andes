@@ -44,6 +44,8 @@ The glyco path has the opposite shape. It is candidate-generation and repeated e
 
 This architecture explains why the retrieval-tolerance change had such large leverage and why selector-weight experiments did not.
 
+**Native profile at the new 20 ppm default (2026-09-03, mouse Frac1, 149 s glyco phase, 8 threads):** the fragment index no longer appears in the profile at all (`FragmentIndex::build` 0.26%, query below the noise); 64% of self time is the inlined body of `score_spectrum_glyco` itself, 12% is `hashbrown` rehashing (per-spectrum maps growing without capacity), `score_psm` 3.5%, `ion_match_facts` 3.2%, `nearest_peak_full` 2.5%, `best_frag_intensity` 1.9%, allocator ~2.5%. **Item 5 (CSR postings) is therefore withdrawn as a speed item** — it targets a cost the ppm window already removed. The next glyco speed targets are the driver's own per-candidate loops and the map growth; a source-line profile is being taken to attribute the 64%.
+
 ## Review of the updated high-resolution retrieval default
 
 The change is directionally correct and its low-resolution behavior is preserved, but four gates remain before calling it production-ready.
@@ -232,7 +234,7 @@ This can increase glycopeptide coverage, but it must not be used to claim more s
 | 2 | Produce retrieval oracle and candidate-recall/rank dump on mouse and pooled plasma. **Mouse Frac1 measured 2026-09-03**: true-candidate recall 97.0% at 20-30 ppm, 97.7% at 40, 98.5% at 60 (the four lost sit >60 ppm off, none ever won; pool size unchanged at 473/scan; shipped top-1 111-112 at every width). The 99% line is not reached at any ppm width; the default was promoted on the end-to-end result and the deviation is recorded in the glyco roadmap. Still owed: plasma, rank distributions, before/after the cap. | decision-enabling | >=99% truth-candidate recall for default |
 | 3 | Rebenchmark against Comet 2026.02.2 FI and MSFragger 4.4.1/FragPipe | establishes real gap | reproducible cold/warm harness |
 | 4 | Batch peak GBDT and add per-worker scratch in standard search. **Measured 2026-09-03** (Codon, 5,760-spectrum standard fixture vs E. coli, 8 threads, 3 interleaved reps, identical output checksum on every run): batching the per-peak model (`cc3743d7`) and recovering the cleavage credit instead of re-walking `score_psm` (`8be751de`) are byte-identical and **speed-neutral** (5.1-5.25 s throughout); the per-worker fragment-prediction cache (A2 lazy variant) was also neutral (5.08-5.48 s vs 5.11-6.10 s) and was reverted. The per-spectrum peak model and the second score walk were not material; the remaining scratch-buffer and compact-node items should be profiled on a production-sized workload before implementation. | high standard speed | byte-identical output, repeated timing win |
-| 5 | CSR glyco postings plus generation-stamped counters | high glyco speed | identical retrieval, bounded RSS |
+| 5 | ~~CSR glyco postings plus generation-stamped counters~~ **Withdrawn 2026-09-03**: at the 20 ppm default the index is below profile noise (see the glyco-path profile note above); the cost moved to the driver body (64%) and map rehashing (12%). | high glyco speed | identical retrieval, bounded RSS |
 | 6 | Mass-conditioned fragment voting in shadow mode | very high glyco speed/precision | recall and true-FDP gate |
 | 7 | Activate bounded two-route cascade with exhaustive fallback | transformative | no correct-ID loss; large exact-score reduction |
 | 8 | Offline exclusive-evidence and separate glycan-score study | high glyco IDs | improves correct IDs at matched peptide+glycan FDP |
@@ -258,6 +260,7 @@ This can increase glycopeptide coverage, but it must not be used to claim more s
 
 - Do not build a standard-search fragment index unless a new profile shows candidate work has become material.
 - Do not hand-write SIMD/bitvector tree traversal before the exact compiled ensemble benchmark shows it beats batching, scratch reuse, and compact nodes.
+  **Measured 2026-09-03** (Codon, AMD EPYC 9555, one thread, the shipped `hcd_astral_tryp` fragment-intensity ensemble: 300 trees, 37,614 nodes, 19 features, 36,864 rows sampled between each feature's split-threshold range; every evaluator within 8e-6 of the Rust reference): our `predict_value_batch` 8.7 µs/row at PSM-sized batches (48 rows) and 7.4 µs/row whole-set; treelite/tl2cgen compiled C 9.8 / 8.6 µs/row; LightGBM's predictor 11.9 / 11.4 µs/row. **Compiling the trees does not beat the existing batched walker**; lleaves (LLVM) pending. The standard-path lever is therefore the QuickScorer-family layout (all shipped trees ≤ 64 leaves) or a smaller model (A3), not compilation. Scaffolding: `scripts/gbdt_bench/`, `crates/scoring/tests/gbdt_bench.rs`.
 - Do not ship the split election in its current form.
 - Do not activate glyco pruning until shadow-mode truth recall is measured.
 - Do not count nominal Percolator gains when entrapment FDP worsens.

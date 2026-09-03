@@ -25,6 +25,7 @@
 // candidate_nominal_bounds) are reachable without visibility changes.
 
 use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
 use model::spectrum::Spectrum;
@@ -1750,8 +1751,13 @@ fn score_spectrum_glyco(
                 edge: i32,
                 cand_residue_mass: f64,
             }
-            let mut cheap_winners: HashMap<GlycanWinnerKey, CheapWinner> =
-                HashMap::new();
+            // FxHash + preallocation: the profile attributes ~55% of the glyco driver's
+            // time to hash-table work and 11% to rehashing, on integer-tuple keys where
+            // SipHash's strength buys nothing. Order-independent by construction here -
+            // this map is consumed into `accepted_winners`, whose only order-sensitive
+            // consumer picks a maximum under a TOTAL comparator (score, then key).
+            let mut cheap_winners: FxHashMap<GlycanWinnerKey, CheapWinner> =
+                FxHashMap::with_capacity_and_hasher(1024, Default::default());
 
             // Per-backbone best b/y rank (index = backbone index in deduped_backbone).
             let mut backbone_best_rank: Vec<f32> =
@@ -2012,8 +2018,7 @@ fn score_spectrum_glyco(
                     .then_with(|| bi.cmp(&ai))
             });
             by_by.truncate(effective_top_k);
-            let mut accepted_backbones: std::collections::HashSet<usize> =
-                by_by.into_iter().collect();
+            let mut accepted_backbones: FxHashSet<usize> = by_by.into_iter().collect();
 
             // AXIS 2 (Phase G1, TWO-AXIS retention) — also keep the top_k by
             // GLYCAN-Y evidence (core_y_hits), so a backbone that is strong on the
@@ -2105,7 +2110,8 @@ fn score_spectrum_glyco(
             // — the same signals Percolator cannot derive from per-PSM features. `.score`
             // is the same RawScore the standard Tailor histogram bins.
             let (tailor_denom, spectrum_listwise_gap, spectrum_rank_entropy, spectrum_delta_raw) = {
-                let mut hist: std::collections::HashMap<i32, u32> = std::collections::HashMap::new();
+                // `tailor_denominator` is generic over the hasher and sorts the keys.
+                let mut hist: FxHashMap<i32, u32> = FxHashMap::default();
                 let mut scores: Vec<f32> = Vec::with_capacity(accepted_winners.len());
                 for (_, w) in &accepted_winners {
                     *hist.entry(w.score.round() as i32).or_insert(0) += 1;
@@ -2200,8 +2206,8 @@ fn score_spectrum_glyco(
             // candidate. The result is a pure function of the key (the spectrum,
             // backbone glycan mass and peptide are all fixed by it), so caching is
             // byte-identical by construction.
-            type HyperMemo = std::cell::RefCell<HashMap<(usize, usize, u8), (f32, u32)>>;
-            let hyper_memo: HyperMemo = std::cell::RefCell::new(HashMap::new());
+            type HyperMemo = std::cell::RefCell<FxHashMap<(usize, usize, u8), (f32, u32)>>;
+            let hyper_memo: HyperMemo = std::cell::RefCell::new(FxHashMap::default());
             let hyper_m = |w: &CheapWinner| -> (f32, u32) {
                 let key = (w.bb_hit_idx, w.cand_slot, w.z);
                 if let Some(v) = hyper_memo.borrow().get(&key) {
@@ -2506,7 +2512,10 @@ fn score_spectrum_glyco(
                 // — the draws in the max-order-statistic lottery — not the number of
                 // (peptide × composition) rows, which would penalise an isobar-dense
                 // mass for its composition count on top of the logsumexp.
-                let mut by_split: HashMap<usize, HashMap<usize, f32>> = HashMap::new();
+                // Also removes a latent nondeterminism: `log_mean_exp` sums these values,
+                // and float addition is order-dependent, so the std map's per-process random
+                // iteration order made the election's split score vary run to run.
+                let mut by_split: FxHashMap<usize, FxHashMap<usize, f32>> = FxHashMap::default();
                 for (e, &sc) in electable.iter().zip(&scores) {
                     let per_pep = by_split.entry(split_key(&e.1)).or_default();
                     per_pep
@@ -2709,14 +2718,14 @@ fn score_spectrum_glyco(
                     scored.into_iter().map(|(_, e)| e).collect()
                 };
 
-            let mut best_hits: HashMap<GlycanWinnerKey, FullGlycoPsm> =
-                HashMap::with_capacity(winners_for_features.len());
+            let mut best_hits: FxHashMap<GlycanWinnerKey, FullGlycoPsm> =
+                FxHashMap::with_capacity_and_hasher(winners_for_features.len(), Default::default());
             // Under `--debug-glyco` the dump's row order IS the shipped selector's
             // order (fused score DESC, sorted above), and the offline re-rank gate
             // reads it as such. The HashMap below would discard it, so remember each
             // key's fused position and restore it when the rows are emitted.
-            let fused_pos: HashMap<GlycanWinnerKey, usize> = if features_collapse {
-                HashMap::new()
+            let fused_pos: FxHashMap<GlycanWinnerKey, usize> = if features_collapse {
+                FxHashMap::default()
             } else {
                 winners_for_features
                     .iter()

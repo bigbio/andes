@@ -53,7 +53,9 @@ def main():
         m = lleaves.Model(model_file=txt); m.compile()
         report("lleaves", lambda x: m.predict(x, n_jobs=1), rows, ref)
     except Exception as e:
+        import traceback
         print(f"lleaves: skipped ({type(e).__name__}: {str(e)[:120]})")
+        print("lleaves traceback:\n" + "".join(traceback.format_exc().splitlines(True)[-8:]))
     try:
         import treelite, tl2cgen
         model = treelite.frontend.load_lightgbm_model(txt) if hasattr(treelite.frontend, "load_lightgbm_model") else treelite.Model.load(txt, model_format="lightgbm")

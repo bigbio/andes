@@ -36,51 +36,6 @@ const LOG_INTENSITY_CLAMP: f64 = 50.0;
 /// twice per candidate for the same numbers. Callers compute this once and hand the slice
 /// to both. Values are positionally aligned with `predict_by_ions(peptide, 1..=2)`; a
 /// caller passing a slice built any other way will silently mis-attribute intensities.
-/// [`predict_frag_intensities`] memoised per worker thread across spectra.
-///
-/// The prediction is a pure function of (peptide, precursor charge, model): the
-/// NCE input is the constant 0.0 and nothing spectrum-specific enters it, so a
-/// peptide that is a finalist for several spectra in a worker's chunk gets its
-/// ~4(n-1) ion predictions computed once (competitive plan item A2, the bounded
-/// per-worker lazy cache variant). Bit-identical by construction — the cached
-/// vector IS the first call's result. The cache is keyed on the full `Peptide`
-/// (`Eq`/`Hash` cover flanks, charge field, residues and modification masses) and
-/// on the model's address; it is cleared when the model changes or when it grows
-/// past `FRAG_PRED_CACHE_MAX` entries, so memory stays bounded per thread.
-pub fn predict_frag_intensities_cached(
-    frag_model: &GbdtPeakModel,
-    peptide: &Peptide,
-    precursor_charge: u8,
-) -> std::rc::Rc<Vec<f64>> {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::rc::Rc;
-    const FRAG_PRED_CACHE_MAX: usize = 20_000;
-    type Key = (Peptide, u8);
-    type Cache = (usize, HashMap<Key, Rc<Vec<f64>>>);
-    thread_local! {
-        static CACHE: RefCell<Cache> = RefCell::new((0, HashMap::new()));
-    }
-    let model_id = frag_model as *const GbdtPeakModel as usize;
-    CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.0 != model_id || c.1.len() >= FRAG_PRED_CACHE_MAX {
-            c.1.clear();
-            c.0 = model_id;
-        }
-        // Borrow-free lookup would need a borrowed key type; the clone below is
-        // only paid on a MISS (the peptide is cloned into the key), a hit costs
-        // one hash of the borrowed peptide plus an Rc clone.
-        let key = (peptide.clone(), precursor_charge);
-        if let Some(v) = c.1.get(&key) {
-            return Rc::clone(v);
-        }
-        let v = Rc::new(predict_frag_intensities(frag_model, peptide, precursor_charge));
-        c.1.insert(key, Rc::clone(&v));
-        v
-    })
-}
-
 pub fn predict_frag_intensities(
     frag_model: &GbdtPeakModel,
     peptide: &Peptide,

@@ -245,6 +245,8 @@ This can increase glycopeptide coverage, but it must not be used to claim more s
 
 ### Standard search
 
+**Measured 2026-09-03 — A3 (model simplification) resolved before A1/A2 mattered.** The ensembles never touch the winner-selecting score; they only make Percolator features. Five seeds per point: on Astral 300 trees give 38,437 PSMs at 1% FDR and 100 trees give 38,444, with 50/25/10/1 at 38,357/38,094/37,769/37,533 against Comet's 31,435; on UPS1 low-res, 300 trees give 15,813 at 1.99% entrapment FDP and 100 give 15,832 at 2.01%. So the last 200 trees are free to remove (33-41% of wall time) on both resolution classes, and the entire ensemble is worth ~2% of identifications — one tree still beats Comet by 19%. Shipped as the default for standard search, glyco exempt. **This makes the compiled/JIT tree work optional rather than the plan:** the cheap 41% is banked, and compilation would buy the remaining ensemble cost only if a future target needs it.
+
 - **Milestone 1:** preserve the existing +17-22% PSM lead and reach classic-Comet wall-time parity.
 - **Milestone 2:** reach current Comet-FI warm-search parity on two named workloads.
 - **Milestone 3:** beat Comet-FI by at least 10% wall time with no lower correct-PSM count and no higher empirical FDP.

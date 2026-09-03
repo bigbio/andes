@@ -55,7 +55,10 @@ def to_lgbm(trees, nfeat, lo=None, hi=None):
             body = ["Tree=%d" % ti, "num_leaves=%d" % len(leaves), "num_cat=0",
                     "split_feature=" + " ".join(str(t["feature"][i]) for i in internal),
                     "split_gain=" + " ".join("0" for _ in internal),
-                    "threshold=" + " ".join("%.17g" % t["threshold"][i] for i in internal),
+                    # lleaves asserts every threshold is truthy (a parser quirk), so a split
+                    # at exactly 0.0 (binary features) becomes 1e-300: identical for any
+                    # value outside (0, 1e-300], and the exactness check guards the rest.
+                    "threshold=" + " ".join("%.17g" % (t["threshold"][i] if t["threshold"][i] != 0.0 else 1e-300) for i in internal),
                     # bit1 (=2): default_left; bits 2-3 (=8): missing type NaN
                     "decision_type=" + " ".join(str(8 | (2 if t["default_left"][i] else 0)) for i in internal),
                     "left_child=" + " ".join(str(child(t["left"][i])) for i in internal),

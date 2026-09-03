@@ -115,6 +115,10 @@ pub struct GlycoConfig {
     /// at 20 ppm with identifications neutral, mouse and plasma, five seeds).
     /// Retrieval only: the rank scorer and its tolerance are untouched.
     pub retrieval_tol_ppm: Option<f64>,
+    /// Explicit fixed-Da peptide-first RETRIEVAL window (`--glyco-retrieval-tol-da`).
+    /// Wins over `retrieval_tol_ppm`. Exists so the old 0.5 Da behaviour stays
+    /// reachable for A/Bs now that high-resolution runs default to ppm.
+    pub retrieval_tol_da: Option<f64>,
     /// Max peptide-first candidates kept per spectrum.
     pub max_pf: usize,
     /// Diagnostic mode (`--debug-glyco`): emit ALL candidate rows per scan
@@ -207,6 +211,7 @@ impl Default for GlycoConfig {
             scan_filter_path: None,
             pf_charge: 2,
             retrieval_tol_ppm: None,
+            retrieval_tol_da: None,
             max_pf: 1024,
             hcd_pair: false,
             etd_rank_glycan: false,
@@ -945,8 +950,11 @@ impl GlycoCtxOwned {
                     est_mb
                 );
             }
-            match cfg.retrieval_tol_ppm {
-                Some(ppm) if ppm > 0.0 => {
+            match (cfg.retrieval_tol_da, cfg.retrieval_tol_ppm) {
+                (Some(da), _) if da > 0.0 => {
+                    FragmentIndex::build(seq_entries.iter().copied(), da.max(0.01), pf_charge)
+                }
+                (_, Some(ppm)) if ppm > 0.0 => {
                     FragmentIndex::build_ppm(seq_entries.iter().copied(), ppm, pf_charge)
                 }
                 _ => FragmentIndex::build(

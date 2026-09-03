@@ -102,13 +102,35 @@ impl FragmentIndex {
         tol_ppm: f64,
         max_charge: u8,
     ) -> Self {
+        Self::build_ppm_sized(entries, tol_ppm, max_charge, PPM_BIN_MAX_MZ)
+    }
+
+    /// [`Self::build_ppm`] with an explicit m/z the bin width is sized for. The
+    /// query walks `ceil(window / bin_width)` neighbouring bins on each side, so a
+    /// fragment ABOVE `bin_max_mz` still matches exactly (it just visits more bins);
+    /// the parameter only trades bin count against per-bin posting length. Exposed
+    /// so a test can force the multi-bin path at ordinary m/z.
+    pub fn build_ppm_sized<'a>(
+        entries: impl IntoIterator<Item = (u32, &'a Peptide)>,
+        tol_ppm: f64,
+        max_charge: u8,
+        bin_max_mz: f64,
+    ) -> Self {
         if tol_ppm.is_nan() || tol_ppm <= 0.0 {
             return Self::build(entries, 0.5, max_charge);
         }
-        let widest = (PPM_BIN_MAX_MZ * tol_ppm * 1e-6).max(PPM_FLOOR_DA);
+        let widest = (bin_max_mz * tol_ppm * 1e-6).max(PPM_FLOOR_DA);
         let mut idx = Self::build(entries, widest, max_charge);
         idx.tol_ppm = Some(tol_ppm);
         idx
+    }
+
+    /// Bins to visit on each side of a peak's own bin so every theoretical ion
+    /// within the acceptance window at that m/z is reachable. 1 for the fixed-Da
+    /// index (bin_width >= tol) and for ppm queries below the sizing m/z.
+    #[inline]
+    fn neighbourhood(&self, mz: f64) -> i64 {
+        ((self.window_da(mz) / self.bin_width).ceil() as i64).max(1)
     }
 
     /// Acceptance half-window (Da) for a theoretical ion at `theo` m/z.
@@ -151,7 +173,8 @@ impl FragmentIndex {
         for &(mz, _) in peaks {
             matched_this_peak.clear();
             let b = Self::bin_of(mz, self.bin_width);
-            for nb in [b - 1, b, b + 1] {
+            let k = self.neighbourhood(mz);
+            for nb in (b - k)..=(b + k) {
                 if let Some(v) = self.bins.get(&nb) {
                     for &(idx, theo) in v {
                         // Accept this (peak, ion) match only if the peak has not
@@ -181,6 +204,25 @@ impl FragmentIndex {
 
 #[cfg(test)]
 mod tests {
+    /// A fragment above the bin-sizing m/z must still match within its ppm window:
+    /// the query widens its bin neighbourhood instead of silently missing it.
+    /// Forced at ordinary m/z by sizing the bins for 300 m/z.
+    #[test]
+    fn ppm_query_reaches_matches_beyond_the_bin_sizing_mz() {
+        let aa = aa();
+        let pep = Peptide::from_str("K.PEPTIDENK.R", &aa).expect("valid");
+        let theo = predict_by_ions(&pep, 1..=1).iter().map(|i| i.mz).fold(0.0f64, f64::max);
+        assert!(theo > 300.0, "test premise: heaviest ion above the sizing m/z");
+        let idx = FragmentIndex::build_ppm_sized([(0u32, &pep)], 20.0, 1, 300.0);
+        assert!(idx.neighbourhood(theo) > 1, "must need more than one bin per side here");
+        // +18 ppm: inside the window, but several bins away at this bin width.
+        let peaks = vec![(theo * (1.0 + 18e-6), 100.0f32)];
+        assert_eq!(idx.query(&peaks, 1), vec![(0, 1)]);
+        // and still rejects +30 ppm
+        let far = vec![(theo * (1.0 + 30e-6), 100.0f32)];
+        assert!(idx.query(&far, 1).is_empty());
+    }
+
     /// Stage S1A: a ppm index rejects a peak the 0.5 Da index accepts, and still
     /// accepts a peak inside its own window, for the same peptide.
     #[test]

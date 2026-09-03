@@ -780,8 +780,14 @@ struct SearchArgs {
     /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
     /// Retrieval only; the rank scorer and its tolerance are unchanged. Measured
     /// 7x faster than 0.5 Da on high-res data with identifications neutral.
-    #[arg(long = "glyco-retrieval-tol-ppm", value_parser = parse_positive_tol)]
+    #[arg(long = "glyco-retrieval-tol-ppm", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_da")]
     glyco_retrieval_tol_ppm: Option<f64>,
+
+    /// Fixed-Da peptide-first candidate RETRIEVAL window, e.g. 0.5 to reproduce the
+    /// pre-2026-09 behaviour on high-resolution data for an A/B. Mutually exclusive
+    /// with --glyco-retrieval-tol-ppm; retrieval only, scoring unchanged.
+    #[arg(long = "glyco-retrieval-tol-da", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_ppm")]
+    glyco_retrieval_tol_da: Option<f64>,
 
     /// Elect the backbone mass split first, with multiplicity control, then elect the
     /// glycoform and peptide inside it, instead of one global argmax over every
@@ -3413,6 +3419,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             &spectra
         };
+        // Peptide-first RETRIEVAL window, resolved from the ACQUISITION, not from the
+        // selected scoring model: model routing deliberately sends some high-res CID
+        // and ETD acquisitions to a low-res model (`build_selection_key`), and the
+        // scoring window that routing chooses is not the retrieval window the index
+        // should use. Detected analyzer metadata decides; metadata-less input falls
+        // back to the `--fragment-tol-*` unit, the same rule the model resolver uses.
+        // An explicit --glyco-retrieval-tol-{ppm,da} overrides either way.
+        let acquisition_high_res = match detected_activation_instrument.and_then(|(_, i)| i) {
+            Some(i) => i.is_high_resolution(),
+            None => cli.fragment_tol_ppm.is_some(),
+        };
+        let retrieval_ppm: Option<f64> = cli.glyco_retrieval_tol_ppm.or_else(|| {
+            (acquisition_high_res && cli.glyco_retrieval_tol_da.is_none()).then_some(glyco_tol_ppm)
+        });
+        match (cli.glyco_retrieval_tol_da, retrieval_ppm) {
+            (Some(da), _) => eprintln!("glyco retrieval window: {da} Da (--glyco-retrieval-tol-da)"),
+            (None, Some(ppm)) => eprintln!(
+                "glyco retrieval window: {ppm} ppm ({})",
+                if cli.glyco_retrieval_tol_ppm.is_some() { "--glyco-retrieval-tol-ppm" } else { "high-resolution acquisition" }
+            ),
+            (None, None) => eprintln!("glyco retrieval window: 0.5 Da (low-resolution acquisition)"),
+        }
         let glyco_cfg = search::glyco_search::GlycoConfig {
             gp_k: cli.glyco_gp_k,
             gp_j: cli.glyco_gp_j,
@@ -3438,9 +3466,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // PXD011533 and 7x on plasma PXD030622 with identifications neutral
             // (mouse 3198 vs 3183 correct; plasma 399 vs 380). An explicit
             // --glyco-retrieval-tol-ppm overrides the auto default either way.
-            retrieval_tol_ppm: cli.glyco_retrieval_tol_ppm.or_else(|| {
-                param.data_type.instrument.is_high_resolution().then_some(glyco_tol_ppm)
-            }),
+            retrieval_tol_ppm: retrieval_ppm,
+            retrieval_tol_da: cli.glyco_retrieval_tol_da,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
             glyco_decoy: cli.glyco_decoy,

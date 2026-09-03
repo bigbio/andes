@@ -226,8 +226,8 @@ This can increase glycopeptide coverage, but it must not be used to claim more s
 
 | Order | Deliverable | Expected leverage | Promotion gate |
 |---|---|---:|---|
-| 1 | Fix acquisition-resolution default, >5000 m/z ppm lookup, explicit fixed-Da A/B, resolved-tolerance logging | correctness | all glyco goldens + randomized boundary tests |
-| 2 | Produce retrieval oracle and candidate-recall/rank dump on mouse and pooled plasma | decision-enabling | >=99% truth-candidate recall for default |
+| 1 | ~~Fix acquisition-resolution default, >5000 m/z ppm lookup, explicit fixed-Da A/B, resolved-tolerance logging~~ **Done 2026-09-03**: window resolved from detected analyzer metadata (metadata-less input falls back to the `--fragment-tol-*` unit); query walks `ceil(window/bin_width)` bins each side, with a forced multi-bin unit test; `--glyco-retrieval-tol-da` added, mutually exclusive with the ppm flag; one `glyco retrieval window:` line per run. Goldens unchanged. | correctness | all glyco goldens + randomized boundary tests |
+| 2 | Produce retrieval oracle and candidate-recall/rank dump on mouse and pooled plasma. **Mouse Frac1 measured 2026-09-03**: true-candidate recall 97.0% at 20-30 ppm, 97.7% at 40, 98.5% at 60 (the four lost sit >60 ppm off, none ever won; pool size unchanged at 473/scan; shipped top-1 111-112 at every width). The 99% line is not reached at any ppm width; the default was promoted on the end-to-end result and the deviation is recorded in the glyco roadmap. Still owed: plasma, rank distributions, before/after the cap. | decision-enabling | >=99% truth-candidate recall for default |
 | 3 | Rebenchmark against Comet 2026.02.2 FI and MSFragger 4.4.1/FragPipe | establishes real gap | reproducible cold/warm harness |
 | 4 | Batch peak GBDT and add per-worker scratch in standard search | high standard speed | byte-identical output, repeated timing win |
 | 5 | CSR glyco postings plus generation-stamped counters | high glyco speed | identical retrieval, bounded RSS |

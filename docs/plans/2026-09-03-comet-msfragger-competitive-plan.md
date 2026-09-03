@@ -28,6 +28,8 @@ The measured profile says approximately 89% of standard-search time is tree infe
 
 Conclusion: adding a standard peptide fragment index is not the first speed move. It attacks the measured 2% while leaving the 89% intact.
 
+**Native profile of the current binary (2026-09-03, Codon, `perf record -g --call-graph=dwarf`, 5,760-spectrum fixture vs E. coli, 8 threads, 4.8 s total, 3.4 s in the search):** `GbdtPeakModel::predict_value_batch` is **77.0% self time**; 82% of wall sits under the finalist feature fill (`fill_post_topn` → `compute_psm_features`), of which 52.6% is the fragment-intensity ensemble and the remainder the rich-ion ensemble; the candidate loop closure is 4.7% self, node scoring 3.4%, nearest-peak lookup 1.5%, allocation under 2% in total. The premise above is confirmed on the current code: standard search is ensemble-evaluation-bound. That is also why every item in A1/A2 measured neutral — none of them is inside the 77%. The only standard-path levers left are the ensemble evaluation itself (compiled/bitvector inference; every shipped tree has ≤ 64 leaves, measured) and the model's size (A3).
+
 ### Glyco path
 
 The glyco path has the opposite shape. It is candidate-generation and repeated exact-scoring bound:

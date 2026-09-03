@@ -41,7 +41,8 @@ def to_lgbm(trees, nfeat):
            "max_feature_idx=%d" % (nfeat - 1), "objective=regression",
            "feature_names=" + " ".join("f%d" % i for i in range(nfeat)),
            "feature_infos=" + " ".join("[-inf:inf]" for _ in range(nfeat)),
-           "tree_sizes=" + " ".join("0" for _ in trees), ""]
+           ""]  # no tree_sizes line: LightGBM then splits on "Tree=" sequentially; a
+                #  zero-filled tree_sizes made it mis-locate every tree after the first
     for ti, t in enumerate(trees):
         n = len(t["feature"])
         internal = [i for i in range(n) if t["feature"][i] >= 0]

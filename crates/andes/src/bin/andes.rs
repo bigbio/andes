@@ -376,12 +376,30 @@ struct SearchArgs {
     /// in a native profile). The GBDT is additive, so the early trees carry the signal
     /// and later ones only refine it.
     ///
+    /// WHAT TRUNCATION ACTUALLY AFFECTS, by score mode -- these differ, and conflating
+    /// them is a documented past error:
+    ///   `rank` (low-res default): the ensembles feed PIN feature columns only, never
+    ///     the ranking score, so the emitted PSM row SET is byte-identical at every K
+    ///     (verified: UPS1 emitted 382,703 rows at K=0, 100 and 25 alike).
+    ///   `strong` (high-res default): `reorder_by_strong_score` ranks by StrongScore,
+    ///     which consumes `intensity_signal` and therefore the frag-intensity ensemble.
+    ///     Truncation there CHANGES WHICH PEPTIDE WINS, not just feature values
+    ///     (verified: Astral emitted 1,214,417 / 1,214,757 / 1,214,892 / 1,215,148 rows
+    ///     at K=50 / 25 / 10 / 1). The identification counts below are still flat at
+    ///     K=100, but that is an empirical result about yield, NOT evidence that the
+    ///     model is inert to selection.
+    ///
     /// DEFAULT 100 for standard search, measured, not guessed. Five Percolator seeds
     /// per point, identical data and protocol:
     ///   Astral high-res: 300 trees 38,437 PSMs @1% FDR; 100 trees 38,444; 50 trees
     ///     38,357; 25 trees 38,094; 10 trees 37,769; 1 tree 37,533.
-    ///   UPS1 low-res (yeast entrapment): 300 trees 15,813 PSMs at 1.99% true FDP;
-    ///     100 trees 15,832 at 2.01%; 25 trees 15,779 at 2.11%.
+    ///   UPS1 low-res (yeast target + E. coli entrapment): 300 trees 15,813 PSMs at
+    ///     3.39% true FDP; 100 trees 15,832 at 3.44%; 25 trees 15,779 at 3.61%.
+    ///     (FDP = entrapment_hits * (1 + T/E) / n with T/E = 2.419 measured over the
+    ///     searchable tryptic space, 734,280 yeast vs 303,537 E. coli peptides. An
+    ///     earlier revision of this comment printed ~2% here from a 1:1 assumption
+    ///     that does not hold for this FASTA; the ARM-TO-ARM comparison is unaffected
+    ///     because the scale factor is common to all three.)
     /// So the last 200 trees buy nothing on either resolution class while costing
     /// 33–41% of wall time, and true error is unchanged. Below ~50 the loss becomes
     /// real. (For scale: even ONE tree still beats Comet by ~19% on Astral, so the

@@ -147,3 +147,42 @@ FDP by ~2%, the per-seed values span 0–8.35% in both arms' lineages, and the d
 is ~1.5σ — statistically indistinguishable. FDP calibration at this yield scale remains
 seed-unstable and unresolved; it is the main reason both flags stay OFF by default until
 the mouse cross-check.
+
+## 2026-08-29 (later) — the fit was starved and confounded: +50% from model-side fixes
+
+With the emission gate in place, an autopsy of the remaining losses on an external
+engine's confident scans found the 90 largest-bucket rows ALREADY carry the correct
+peptide and dominate the threshold-setting decoys on every feature (RawScore 67 vs 7) —
+the failure was Percolator's fit, not the evidence. Two mechanisms, both measured on the
+same pooled PIN with no new searches:
+
+1. **Training starvation.** Default `--trainFDR 0.01` leaves ~250 positives per
+   iteration; `-F 0.05` trains on ~400 and the cross-validated fit stabilises.
+   Single-feature TDC exposes the tail: RawScore alone yields 0 at 1% (a few decoys
+   ride high in the tail) while the chance-calibrated ChanceMatchSurprise yields 201.
+2. **Column confounds.** 19 columns were structurally constant or byte-identical
+   duplicates (RawScoreCal ≡ RawScore under the collapse), and several per-scan
+   spectrum-level columns (MS2IonCurrent, CandidateRankEntropy, ListwiseScoreGap,
+   DeltaRankScore) let the small-sample SVM fit scan-quality confounds.
+
+| arm (same PIN, 5 seeds) | mean @1% | sd | entrapment FDP |
+|---|---|---|---|
+| gate baseline, full PIN, `-F 0.01` | 256.8 | 16.5 | 1.76% |
+| dead columns dropped + `-F 0.05` | 348.4 | 47 | 0.00 ×5 |
+| **curated 52 columns + `-F 0.05`** | **384.6** | **23** | **0.00 ×5** |
+
+**+128 PSMs (+50%) at ~10σ; 65% of the external engine (384.6/589), from 43% at the
+start of the day.** Confident-scan recount: 131 → 210 accepted with the identical
+peptide; wrong-peptide accepts stayed ≈0 (1); the ranking bucket (19 decoy winners) was
+untouched, exactly as the mechanism predicts.
+
+Shipped as: the glyco PIN always drops the 14 structurally-dead columns, and
+`--glyco-pin-curated` (default off, HCD-oriented) emits the validated 52-column set.
+Recommended pairing: `percolator --trainFDR 0.05` — rescoring remains pipeline-side;
+this is a documented recommendation, not an andes feature. Guarded by
+`crates/output/tests/glyco_pin_no_dead_columns.rs`.
+
+Also closed today, measured post-gate: `--glyco-decorated-features` confirmed negative
+(−29%, −2.3σ; under HCD backbone fragments LOSE the glycan, so bare-mass features are
+the correct model), and `--glyco-decoy` through single-axis TDC breaks Percolator
+outright (decoy twins near-tie their targets; needs a separate glycan-axis FDR consumer).

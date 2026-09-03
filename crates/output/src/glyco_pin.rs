@@ -40,6 +40,7 @@ fn write_glyco_header<W: Write>(
     writer: &mut W,
     min_charge: u8,
     max_charge: u8,
+    curated: bool,
 ) -> io::Result<()> {
     let mut cols: Vec<String> = vec![
         "SpecId".to_string(),
@@ -131,6 +132,43 @@ fn write_glyco_header<W: Write>(
         "IsGlycanDb".to_string(),
         "Y0Y1Anchor".to_string(), // G2 peptide-mass anchor (additive, peptide-discriminating)
         "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
+        // Composition-specific Y-ion-TREE block (`--glyco-y-tree`; all 0.0 when off).
+        // YLadderScore walks ONE linear chain that appends fucose after every antenna,
+        // so a core-fucosylated composition can never claim its own Y1+Fuc / Y2+Fuc
+        // diagnostic rungs while an afucosylated isobar loses nothing. These score the
+        // nodes a composition's topology actually permits, hits AND misses.
+        "YTreeLLR".to_string(),
+        "YTreeHitFrac".to_string(),
+        // Missed nodes with class prior >= 0.5 (Y0 and the trimannosyl core). Positive
+        // alongside a positive YTreeLLR is the "fits by antenna coincidence" signature.
+        "YTreeHighPriorMissing".to_string(),
+        // Target minus mass-shifted-Y twin on the SAME node set and spectrum. A GAP,
+        // not a second row: the shipped glycan-decoy ROW copies 45 of ~48 columns from
+        // its target, which measured as Percolator finding no direction on five seeds.
+        "YTreeDecoyGap".to_string(),
+        // Per-candidate oxonium-COMPOSITION log-likelihood (`--glyco-oxonium-llr`).
+        // OxoniumScore is a spectrum constant (one distinct value per 600 candidates)
+        // and SialicConsistency only flips the sign of observed intensity, so neither
+        // penalises a composition claiming a monosaccharide whose diagnostic ion is
+        // absent. This does, per class, with the fucose asymmetry the chemistry requires.
+        "OxoniumCompLLR".to_string(),
+        // Election margins (`--glyco-split-election`; 0.0 otherwise). One axis each,
+        // where the shipped DeltaRankScore conflated all three.
+        // Peptide-channel rank (`--glyco-rank-masked`; 0.0 otherwise): the winner
+        // re-scored after oxonium and Y-ladder peaks are masked and ranks recomputed.
+        "RankScoreMasked".to_string(),
+        "MaskedPeakCount".to_string(),
+        // Peptide-channel chance LLR with HexNAc-stub max-over-forms and isotope-gated
+        // fragment charges to z-1 (`--glyco-chance-llr-masked`; 0.0 otherwise).
+        "ChanceLlrMasked".to_string(),
+        "ExplainedMasked".to_string(),
+        "DeltaBackbone".to_string(),
+        "DeltaGlycan".to_string(),
+        "DeltaPeptide".to_string(),
+        // Distinct backbone-mass splits that reached the election. A dense split
+        // lattice is the measured plasma failure mechanism: with large glycans many
+        // compositions fit the precursor, so a decoy always occupies one of them.
+        "NSplitsConsidered".to_string(),
         "CzHyperscore".to_string(), // ETD c/z backbone hyperscore (additive; ETD/AI-ETD only, else 0)
         "CzIntensity".to_string(), // ETD c/z matched-intensity fraction (additive; ETD/AI-ETD only, else 0)
         "CzExplained".to_string(), // ETD c/z analytical explained-intensity LLR (additive; graded-model de-risk; ETD only, else 0)
@@ -155,6 +193,9 @@ fn write_glyco_header<W: Write>(
         "Proteins".to_string(),
     ]);
 
+    // Apply the column policy LAST, so header and row writer share one source
+    // of truth (`glyco_col_kept`) and cannot drift positionally.
+    cols.retain(|c| glyco_col_kept(c, curated));
     writeln!(writer, "{}", cols.join("\t"))
 }
 
@@ -162,6 +203,7 @@ fn write_glyco_header<W: Write>(
 
 #[allow(clippy::too_many_arguments)]
 fn write_glyco_psm_row<W: Write>(
+    curated: bool,
     writer: &mut W,
     spec: &Spectrum,
     hit: &FullGlycoPsm,
@@ -220,8 +262,10 @@ fn write_glyco_psm_row<W: Write>(
     write_double(writer, exp_mass)?;
     writer.write_all(b"\t")?;
     write_double(writer, calc_mass)?;
-    writer.write_all(b"\t")?;
-    write_double(writer, mass)?;
+    if glyco_col_kept("mass", curated) {
+        writer.write_all(b"\t")?;
+        write_double(writer, mass)?;
+    }
 
     // RankScore, isotope_error, peplen, dm, absdm
     write!(writer, "\t{}\t{}\t{}\t", raw_score, isotope_error, peplen)?;
@@ -255,7 +299,10 @@ fn write_glyco_psm_row<W: Write>(
     let features = psm_feature_values(psm, 1);
     debug_assert_eq!(features[0].0, "RankScore");
     debug_assert_eq!(features[1].0, "isotope_error");
-    for &(_name, value, fmt) in &features[2..] {
+    for &(name, value, fmt) in &features[2..] {
+        if !glyco_col_kept(name, curated) {
+            continue;
+        }
         writer.write_all(b"\t")?;
         match fmt {
             FeatureFmt::Int => write!(writer, "{}", value.round() as i64)?,
@@ -266,11 +313,11 @@ fn write_glyco_psm_row<W: Write>(
 
     // Glyco-specific columns (8, incl. Y0Y1Anchor and YHitFrac).
     let is_glycan_db: u8 = if key.glycan_source == Source::Db { 1 } else { 0 };
-    write_double_tab(writer, key.oxonium_summed_frac as f64)?;
-    write!(writer, "\t{}", key.n_core_oxonium_ions)?;
+    if glyco_col_kept("OxoniumScore", curated) { write_double_tab(writer, key.oxonium_summed_frac as f64)?; }
+    if glyco_col_kept("NCoreOxoniumIons", curated) { write!(writer, "\t{}", key.n_core_oxonium_ions)?; }
     // YLadderScore: the decoy score for a glycan-decoy row, else the target score.
     let y_ladder = glycan_decoy_override.unwrap_or(key.y_ladder_intensity_score);
-    write_double_tab(writer, y_ladder as f64)?;
+if glyco_col_kept("YLadderScore", curated) { write_double_tab(writer, y_ladder as f64)?; }
     // YHitFrac: on a glycan-decoy row report the decoy twin's completeness, so the
     // row is a like-for-like control of its target rather than a copy of it.
     let y_frac = if glycan_decoy_override.is_some() {
@@ -278,15 +325,15 @@ fn write_glyco_psm_row<W: Write>(
     } else {
         key.y_hit_frac
     };
-    write_double_tab(writer, y_frac as f64)?;
+if glyco_col_kept("YHitFrac", curated) { write_double_tab(writer, y_frac as f64)?; }
     // PartialGlycanBY (idea B): sequence-specific partial-glycan b/y evidence.
-    write_double_tab(writer, key.partial_glycan_by as f64)?;
-    write!(writer, "\t{}", key.core_y_hits)?;
-    write_double_tab(writer, key.glycan_mass)?;
-    write!(writer, "\t{}", is_glycan_db)?;
+    if glyco_col_kept("PartialGlycanBY", curated) { write_double_tab(writer, key.partial_glycan_by as f64)?; }
+    if glyco_col_kept("CoreYHits", curated) { write!(writer, "\t{}", key.core_y_hits)?; }
+    if glyco_col_kept("GlycanMass", curated) { write_double_tab(writer, key.glycan_mass)?; }
+    if glyco_col_kept("IsGlycanDb", curated) { write!(writer, "\t{}", is_glycan_db)?; }
     // G2 Y0/Y1 anchor (additive, peptide-mass-conditioned). Same value on a
     // glycan-decoy row (it is a peptide-axis feature, independent of the glycan).
-    write_double_tab(writer, key.y0y1_anchor_score as f64)?;
+    if glyco_col_kept("Y0Y1Anchor", curated) { write_double_tab(writer, key.y0y1_anchor_score as f64)?; }
     // GI-2 sialic consistency (composition-conditioned). On a glycan-decoy row we
     // emit the NEGATED value: the decoy models an isobaric glycan whose sialic
     // claim is flipped, and flipping each `±obs` term negates the whole score
@@ -300,32 +347,65 @@ fn write_glyco_psm_row<W: Write>(
     } else {
         key.sialic_consistency
     };
-    write_double_tab(writer, sialic as f64)?;
+if glyco_col_kept("SialicConsistency", curated) { write_double_tab(writer, sialic as f64)?; }
+    // Y-tree block. On a glycan-decoy ROW report the twin's own values, so the row
+    // stays a like-for-like control of its target rather than a copy of it (the same
+    // rule YHitFrac follows above). The gap is NEGATED on the decoy row, as
+    // SialicConsistency is: writing 0.0 there would let Percolator learn
+    // `gap == 0 => decoy`, a label leak rather than a feature.
+    let (y_tree_llr, y_tree_gap, y_tree_hit_frac, y_tree_hpm) = if glycan_decoy_override.is_some() {
+        (
+            key.y_tree_llr_decoy,
+            key.y_tree_llr_decoy - key.y_tree_llr,
+            key.y_tree_hit_frac_decoy,
+            key.y_tree_high_prior_missing_decoy,
+        )
+    } else {
+        (
+            key.y_tree_llr,
+            key.y_tree_llr - key.y_tree_llr_decoy,
+            key.y_tree_hit_frac,
+            key.y_tree_high_prior_missing,
+        )
+    };
+    if glyco_col_kept("YTreeLLR", curated) { write_double_tab(writer, y_tree_llr as f64)?; }
+    if glyco_col_kept("YTreeHitFrac", curated) { write_double_tab(writer, y_tree_hit_frac as f64)?; }
+    if glyco_col_kept("YTreeHighPriorMissing", curated) { write!(writer, "\t{}", y_tree_hpm)?; }
+    if glyco_col_kept("YTreeDecoyGap", curated) { write_double_tab(writer, y_tree_gap as f64)?; }
+    if glyco_col_kept("OxoniumCompLLR", curated) { write_double_tab(writer, key.oxonium_comp_llr as f64)?; }
+    if glyco_col_kept("RankScoreMasked", curated) { write_double_tab(writer, key.rank_score_masked as f64)?; }
+    if glyco_col_kept("MaskedPeakCount", curated) { write!(writer, "\t{}", key.masked_peak_count)?; }
+    if glyco_col_kept("ChanceLlrMasked", curated) { write_double_tab(writer, key.chance_llr_masked as f64)?; }
+    if glyco_col_kept("ExplainedMasked", curated) { write_double_tab(writer, key.explained_masked as f64)?; }
+    if glyco_col_kept("DeltaBackbone", curated) { write_double_tab(writer, key.delta_backbone as f64)?; }
+    if glyco_col_kept("DeltaGlycan", curated) { write_double_tab(writer, key.delta_glycan as f64)?; }
+    if glyco_col_kept("DeltaPeptide", curated) { write_double_tab(writer, key.delta_peptide as f64)?; }
+    if glyco_col_kept("NSplitsConsidered", curated) { write!(writer, "\t{}", key.n_splits_considered)?; }
 
     // ETD c/z backbone hyperscore (additive; ETD/AI-ETD spectra only, else 0.0).
     // A peptide-axis feature (backbone c/z ladder), so a glycan-decoy row emits the
     // SAME value as its paired target — like Y0Y1Anchor above.
-    write_double_tab(writer, key.cz_hyperscore as f64)?;
-    write_double_tab(writer, key.cz_intensity as f64)?;
+    if glyco_col_kept("CzHyperscore", curated) { write_double_tab(writer, key.cz_hyperscore as f64)?; }
+    if glyco_col_kept("CzIntensity", curated) { write_double_tab(writer, key.cz_intensity as f64)?; }
     // Discriminative c/z STRUCTURE features (additive; gated to real values by
     // ANDES_GLYCO_CZ_STRUCT at compute time, else 0.0 = ignored by Percolator).
-    write_double_tab(writer, key.cz_explained as f64)?;
-    write_double_tab(writer, key.cz_chance_llr as f64)?;
+    if glyco_col_kept("CzExplained", curated) { write_double_tab(writer, key.cz_explained as f64)?; }
+    if glyco_col_kept("CzChanceLlr", curated) { write_double_tab(writer, key.cz_chance_llr as f64)?; }
 
     // Transfer columns (additive; inert 0 for native candidates). Bools mirror
     // the `is_glycan_db` 1/0 idiom above; numerics use write_double_tab.
-    write!(writer, "\t{}", if key.is_transferred { 1 } else { 0 })?;
-    write_double_tab(writer, key.transfer_graph_support as f64)?;
-    write_double_tab(writer, key.transfer_seed_score as f64)?;
-    write_double_tab(writer, key.transfer_rt_delta as f64)?;
-    write!(writer, "\t{}", if key.transfer_ungated { 1 } else { 0 })?;
+    if glyco_col_kept("IsTransferred", curated) { write!(writer, "\t{}", if key.is_transferred { 1 } else { 0 })?; }
+    if glyco_col_kept("TransferGraphSupport", curated) { write_double_tab(writer, key.transfer_graph_support as f64)?; }
+    if glyco_col_kept("TransferSeedScore", curated) { write_double_tab(writer, key.transfer_seed_score as f64)?; }
+    if glyco_col_kept("TransferRTDelta", curated) { write_double_tab(writer, key.transfer_rt_delta as f64)?; }
+    if glyco_col_kept("TransferUngated", curated) { write!(writer, "\t{}", if key.transfer_ungated { 1 } else { 0 })?; }
 
     // Glyco RT rank (ADDITIVE, LAST): within-scan AbsDeltaRT rank of THIS hit
     // among the scan's competing glycoforms, normalized to (0,1]. Reuses the
     // `abs_delta_rt` populated by `populate_glyco_rt_features`. A glycan-decoy
     // row shares the row_idx of its paired target, so it takes that hit's rank
     // (its AbsDeltaRT is the same peptide-axis RT delta). 0.0 when <2 candidates.
-    write_double_tab(writer, crate::glyco_rt::delta_rt_rank(scan_hits, row_idx))?;
+    if glyco_col_kept("DeltaRTRank", curated) { write_double_tab(writer, crate::glyco_rt::delta_rt_rank(scan_hits, row_idx))?; }
 
     // Isobaric-glycan RT margin (ADDITIVE): from `psm.features`, populated by
     // `populate_glyco_rt_features`. >0 ⇒ the assigned composition fits the observed
@@ -391,8 +471,87 @@ fn glycan_tag_with_site(g: &andes_glyco::glycan_db::GlycanComp, residues: &[u8])
 ///   GlycanMass, IsGlycanDb
 ///
 /// `Peptide` column appends `[HexNAc{n}Hex{m}...]` for DB glycan hits.
+/// Column policy for the glyco PIN.
+///
+/// ALWAYS dropped (structurally dead on every glyco path, verified in data):
+/// `mass` duplicates ExpMass; IsolationWindowEfficiency / PrecursorIsotopeKL /
+/// PrecursorSNR are chimeric-only and hardcoded 0 here; IsRefinement / NumMods /
+/// RefinementModClass are refinement-only; the five ModSite* columns are 0
+/// because the glycan is never a variable mod on the feature peptide;
+/// RawScoreCal is byte-identical to RawScore under the 1-hit collapse
+/// (strong_score_calibrated_loo returns its input for len<2); DeltaRTRank is
+/// structurally 0 under the collapse (delta_rt_rank returns 0 for <2 hits).
+///
+/// CURATED mode (`--glyco-pin-curated`) additionally reduces to the exact
+/// 52-column set validated on pooled human plasma: 384.6 +/- 23 glycoPSMs @1%
+/// with entrapment FDP 0.00% on all five seeds, against 256.8 +/- 16.5 for the
+/// full set (+50%, ~10 sigma). The extra drops are per-scan spectrum-level
+/// columns (MS2IonCurrent, CandidateRankEntropy, ListwiseScoreGap,
+/// DeltaRankScore) that cannot separate target from decoy on a scan but let
+/// the small-sample SVM latch onto scan-quality confounds, plus low-signal
+/// counts superseded by their calibrated forms. Curated mode also drops the
+/// ETD-only Cz* and opt-in Transfer* columns, so it is intended for
+/// HCD-style runs; it is OFF by default.
+const GLYCO_PIN_ALWAYS_DROP: &[&str] = &[
+    "mass",
+    "IsolationWindowEfficiency",
+    "PrecursorIsotopeKL",
+    "PrecursorSNR",
+    "IsRefinement",
+    "NumMods",
+    "RefinementModClass",
+    "ModSiteShiftedMatched",
+    "ModSiteShiftedFrac",
+    "ModSiteIntensFrac",
+    "ModSiteLocalized",
+    "ModSiteDetCount",
+    "RawScoreCal",
+    "DeltaRTRank",
+];
+
+const GLYCO_PIN_CURATED_KEEP: &[&str] = &[
+    "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass",
+    "RankScore", "RankScoreFloat", "RawScore", "TailorScore", "EdgeScore",
+    "NumMatchedMainIons", "matchedIonRatio", "longest_y_pct",
+    "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
+    "ComplementaryIonBalance", "MeanMatchedIntensityRank", "PpmGaussianScore",
+    "ChanceMatchSurprise", "MassCompetitionEvidence", "RichIonLLR",
+    "FragPredExplained", "FragPredChanceLLR", "IntensitySignal",
+    "dm", "absdm", "peplen", "isotope_error",
+    "enzN", "enzC", "enzInt",
+    "DeltaRT", "AbsDeltaRT", "DeltaRTNorm", "IsobaricRTMargin",
+    "OxoniumScore", "NCoreOxoniumIons", "YLadderScore", "YHitFrac", "CoreYHits",
+    "PartialGlycanBY", "Y0Y1Anchor", "SialicConsistency", "GlycanMass",
+    "Peptide", "Proteins",
+];
+
+/// Is `name` emitted under the current policy? Charge one-hots are always kept.
+fn glyco_col_kept(name: &str, curated: bool) -> bool {
+    if name.starts_with("charge") {
+        return true;
+    }
+    if curated {
+        GLYCO_PIN_CURATED_KEEP.contains(&name)
+    } else {
+        !GLYCO_PIN_ALWAYS_DROP.contains(&name)
+    }
+}
+
+/// Test-only wrapper so the column-policy guard can inspect headers without a
+/// full search. Not part of the public API surface for callers.
+#[doc(hidden)]
+pub fn write_glyco_header_for_test<W: Write>(
+    writer: &mut W,
+    min_charge: u8,
+    max_charge: u8,
+    curated: bool,
+) -> io::Result<()> {
+    write_glyco_header(writer, min_charge, max_charge, curated)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn write_glyco_pin(
+    curated: bool,
     path: &Path,
     spectra: &[Spectrum],
     results: &[GlycoSpectrumResult],
@@ -405,6 +564,7 @@ pub fn write_glyco_pin(
     let file = std::fs::File::create(path)?;
     let mut writer = BufWriter::new(file);
     write_glyco_pin_to(
+        curated,
         &mut writer,
         spectra,
         results,
@@ -537,6 +697,7 @@ pub(crate) fn select_emitted_hits(
 /// Write glyco PIN to an arbitrary writer (useful for testing).
 #[allow(clippy::too_many_arguments)]
 pub fn write_glyco_pin_to<W: Write>(
+    curated: bool,
     writer: &mut W,
     spectra: &[Spectrum],
     results: &[GlycoSpectrumResult],
@@ -549,7 +710,7 @@ pub fn write_glyco_pin_to<W: Write>(
     let min_charge = *params.charge_range.start();
     let max_charge = *params.charge_range.end();
 
-    write_glyco_header(writer, min_charge, max_charge)?;
+    write_glyco_header(writer, min_charge, max_charge, curated)?;
 
     // Top-1-per-scan collapse + enumerated-only is the honest default (see
     // `select_emitted_hits`). `--debug-glyco` restores the full multi-row / de-novo
@@ -573,6 +734,7 @@ pub fn write_glyco_pin_to<W: Write>(
             }
             let cand = &candidates[cand_idx];
             write_glyco_psm_row(
+                curated,
                 writer, spec, hit, cand, hit_idx, min_charge, max_charge, candidates,
                 search_index, params, &result.hits, None,
             )?;
@@ -584,6 +746,7 @@ pub fn write_glyco_pin_to<W: Write>(
             // glycan-decoy of a decoy peptide adds no glycan-axis signal).
             if emit_glycan_decoy && !cand.is_decoy && hit.glycan_key.glycan.is_some() {
                 write_glyco_psm_row(
+                curated,
                     writer, spec, hit, cand, hit_idx, min_charge, max_charge, candidates,
                     search_index, params, &result.hits, Some(hit.glycan_key.y_ladder_decoy_score),
                 )?;
@@ -731,6 +894,21 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
+            y_tree_llr: 0.0,
+            y_tree_hit_frac: 0.0,
+            y_tree_high_prior_missing: 0,
+            y_tree_llr_decoy: 0.0,
+            y_tree_hit_frac_decoy: 0.0,
+            y_tree_high_prior_missing_decoy: 0,
+            oxonium_comp_llr: 0.0,
+            rank_score_masked: 0.0,
+            masked_peak_count: 0,
+            chance_llr_masked: 0.0,
+            explained_masked: 0.0,
+            delta_backbone: 0.0,
+            delta_glycan: 0.0,
+            delta_peptide: 0.0,
+            n_splits_considered: 0,
             core_y_hits: 5,
             glycan_mass,
             backbone_mass: 1500.0,
@@ -774,7 +952,7 @@ mod tests {
         // We can't call write_glyco_pin_to without real candidates + index,
         // so we test the header directly.
         let mut buf = Vec::new();
-        write_glyco_header(&mut buf, 2, 4).unwrap();
+        write_glyco_header(&mut buf, 2, 4, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
         assert!(header.contains("OxoniumScore"), "header missing OxoniumScore");
         assert!(header.contains("NCoreOxoniumIons"), "header missing NCoreOxoniumIons");
@@ -789,7 +967,7 @@ mod tests {
     #[test]
     fn glyco_pin_header_has_transfer_columns_after_sialic() {
         let mut buf = Vec::new();
-        write_glyco_header(&mut buf, 2, 4).unwrap();
+        write_glyco_header(&mut buf, 2, 4, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
         let cols: Vec<&str> = header.trim().split('\t').collect();
         for c in ["IsTransferred","TransferGraphSupport","TransferSeedScore","TransferRTDelta","TransferUngated"] {
@@ -803,18 +981,18 @@ mod tests {
     #[test]
     fn glyco_pin_header_deltartrank_is_last_before_peptide() {
         let mut buf = Vec::new();
-        write_glyco_header(&mut buf, 2, 4).unwrap();
+        write_glyco_header(&mut buf, 2, 4, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
         let cols: Vec<&str> = header.trim().split('\t').collect();
         let pos = |c: &str| cols.iter().position(|&h| h == c).unwrap();
-        // DeltaRT/AbsDeltaRT/DeltaRTNorm keep their in-place positions; DeltaRTRank
-        // is APPENDED last after TransferUngated, immediately before Peptide.
-        assert!(cols.contains(&"DeltaRTRank"), "header missing DeltaRTRank");
-        assert!(pos("DeltaRTNorm") < pos("DeltaRTRank"));
-        assert!(pos("TransferUngated") < pos("DeltaRTRank"));
-        // IsobaricRTMargin is appended after DeltaRTRank, immediately before Peptide.
+        // DeltaRTRank is structurally 0 under the 1-hit collapse (delta_rt_rank
+        // returns 0.0 for <2 hits), so the column policy drops it ALWAYS -- the
+        // 2026-08-29 plasma measurement that motivated the policy. This test now
+        // pins its ABSENCE; resurrecting it must be a deliberate act.
+        assert!(!cols.contains(&"DeltaRTRank"), "structurally dead DeltaRTRank is back");
+        assert!(pos("DeltaRTNorm") < pos("TransferUngated"));
+        // IsobaricRTMargin is the live RT-evidence column, immediately before Peptide.
         assert!(cols.contains(&"IsobaricRTMargin"), "header missing IsobaricRTMargin");
-        assert!(pos("DeltaRTRank") < pos("IsobaricRTMargin"));
         assert_eq!(pos("IsobaricRTMargin") + 1, pos("Peptide"), "IsobaricRTMargin must be last before Peptide");
         // Header column count == a written data row's column count (consistency).
     }
@@ -822,7 +1000,7 @@ mod tests {
     #[test]
     fn glyco_pin_header_glyco_columns_before_peptide() {
         let mut buf = Vec::new();
-        write_glyco_header(&mut buf, 2, 3).unwrap();
+        write_glyco_header(&mut buf, 2, 3, false).unwrap();
         let header = String::from_utf8(buf).unwrap();
         let cols: Vec<&str> = header.trim().split('\t').collect();
         let glycan_pos = cols.iter().position(|&c| c == "GlycanMass").unwrap();
@@ -974,6 +1152,21 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
+            y_tree_llr: 0.0,
+            y_tree_hit_frac: 0.0,
+            y_tree_high_prior_missing: 0,
+            y_tree_llr_decoy: 0.0,
+            y_tree_hit_frac_decoy: 0.0,
+            y_tree_high_prior_missing_decoy: 0,
+            oxonium_comp_llr: 0.0,
+            rank_score_masked: 0.0,
+            masked_peak_count: 0,
+            chance_llr_masked: 0.0,
+            explained_masked: 0.0,
+            delta_backbone: 0.0,
+            delta_glycan: 0.0,
+            delta_peptide: 0.0,
+            n_splits_considered: 0,
             core_y_hits: 3,
             glycan_mass,
             backbone_mass: peptide_neutral_mass,
@@ -991,7 +1184,7 @@ mod tests {
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
 
         let mut buf = Vec::new();
-        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false, false)
+        write_glyco_pin_to(false, &mut buf, &spectra, &results, &candidates, &params, &search_index, false, false)
             .expect("write_glyco_pin_to must succeed");
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -1156,6 +1349,21 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
+            y_tree_llr: 0.0,
+            y_tree_hit_frac: 0.0,
+            y_tree_high_prior_missing: 0,
+            y_tree_llr_decoy: 0.0,
+            y_tree_hit_frac_decoy: 0.0,
+            y_tree_high_prior_missing_decoy: 0,
+            oxonium_comp_llr: 0.0,
+            rank_score_masked: 0.0,
+            masked_peak_count: 0,
+            chance_llr_masked: 0.0,
+            explained_masked: 0.0,
+            delta_backbone: 0.0,
+            delta_glycan: 0.0,
+            delta_peptide: 0.0,
+            n_splits_considered: 0,
             core_y_hits: 4,
             glycan_mass,
             backbone_mass: candidates[0].peptide.mass(),
@@ -1174,7 +1382,7 @@ mod tests {
 
         let mut buf = Vec::new();
         // emit_glycan_decoy = true
-        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, true, false)
+        write_glyco_pin_to(false, &mut buf, &spectra, &results, &candidates, &params, &search_index, true, false)
             .expect("write must succeed");
         let text = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = text.lines().collect();
@@ -1217,24 +1425,63 @@ mod tests {
         key.glycan = Some(GlycanComp {
             hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0, mass: glycan_mass,
         });
+        // Distinctive values on columns near the redesign block, so a header/writer
+        // ORDER drift (not just a count drift) is caught: the value must appear
+        // under its own header name.
+        key.y_ladder_intensity_score = 1.25;
+        key.core_y_hits = 3;
+        key.oxonium_comp_llr = -0.75;
+        key.n_splits_considered = 7;
+        key.cz_hyperscore = 2.5;
         let hit = FullGlycoPsm { glycan_key: key, psm: make_minimal_psm(0, 10.0) };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
 
-        let mut buf = Vec::new();
-        write_glyco_pin_to(&mut buf, &spectra, &results, &candidates, &params, &search_index, false, false)
-            .expect("write must succeed");
-        let text = String::from_utf8(buf).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        let header: Vec<&str> = lines[0].split('\t').collect();
-        let ncols = header.len();
-        for (i, row) in lines[1..].iter().enumerate() {
-            let cols: Vec<&str> = row.split('\t').collect();
-            assert_eq!(cols.len(), ncols, "row {i} has {} cols, header has {ncols}", cols.len());
+        // Every policy x decoy-row combination: the curated policy and the glycan-decoy
+        // row are separate code paths through the same gated writer, and the golden
+        // only covers the default policy without decoy rows.
+        for curated in [false, true] {
+            for emit_decoy in [false, true] {
+                let mut buf = Vec::new();
+                write_glyco_pin_to(
+                    curated, &mut buf, &spectra, &results, &candidates, &params,
+                    &search_index, emit_decoy, false,
+                )
+                .expect("write must succeed");
+                let text = String::from_utf8(buf).unwrap();
+                let lines: Vec<&str> = text.lines().collect();
+                let header: Vec<&str> = lines[0].split('\t').collect();
+                let ncols = header.len();
+                assert!(lines.len() >= if emit_decoy { 3 } else { 2 }, "rows missing");
+                for (i, row) in lines[1..].iter().enumerate() {
+                    let cols: Vec<&str> = row.split('\t').collect();
+                    assert_eq!(
+                        cols.len(), ncols,
+                        "curated={curated} decoy={emit_decoy}: row {i} has {} cols, header has {ncols}",
+                        cols.len()
+                    );
+                }
+                let target: Vec<&str> = lines[1].split('\t').collect();
+                let at = |name: &str| -> Option<&str> {
+                    header.iter().position(|h| *h == name).map(|i| target[i])
+                };
+                assert_eq!(at("YLadderScore"), Some("1.25"), "curated={curated}");
+                assert_eq!(at("CoreYHits"), Some("3"), "curated={curated}");
+                if curated {
+                    assert_eq!(at("OxoniumCompLLR"), None);
+                    assert_eq!(at("NSplitsConsidered"), None);
+                    assert_eq!(at("CzHyperscore"), None);
+                } else {
+                    assert_eq!(at("OxoniumCompLLR"), Some("-0.75"));
+                    assert_eq!(at("NSplitsConsidered"), Some("7"));
+                    assert_eq!(at("CzHyperscore"), Some("2.5"));
+                }
+                // DeltaRTRank is dropped by the column policy (structurally 0 under the
+                // collapse); the consistency loop above is the real guard here.
+                assert!(
+                    !header.contains(&"DeltaRTRank"),
+                    "structurally dead DeltaRTRank is back in the row schema"
+                );
+            }
         }
-        // DeltaRTRank present; single-hit scan ⇒ neutral 0.0 (parseable).
-        let rank_col = header.iter().position(|&c| c == "DeltaRTRank").unwrap();
-        let row: Vec<&str> = lines[1].split('\t').collect();
-        let rank: f64 = row[rank_col].parse().unwrap();
-        assert_eq!(rank, 0.0, "single-hit scan ⇒ DeltaRTRank neutral 0.0");
     }
 }

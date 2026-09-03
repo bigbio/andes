@@ -33,8 +33,21 @@ use scoring_crate::scoring::fragment_ions::predict_by_ions;
 pub struct FragmentIndex {
     bin_width: f64,
     tol: f64,
+    /// When set, the per-ion acceptance window is `theo_mz * tol_ppm * 1e-6`
+    /// (floored at `PPM_FLOOR_DA`) instead of the fixed `tol` in Da. `bin_width`
+    /// is then sized for the widest window in the indexed m/z range so the
+    /// `b-1..=b+1` neighbourhood still covers every admissible match.
+    tol_ppm: Option<f64>,
     bins: FxHashMap<i64, Vec<(u32, f64)>>,
 }
+
+/// Absolute floor (Da) on the ppm acceptance window, so a very light fragment is
+/// not held to a sub-millidalton tolerance no instrument delivers.
+pub const PPM_FLOOR_DA: f64 = 0.005;
+/// Upper m/z the ppm bin width is sized for; a heavier fragment still matches
+/// exactly because the distance check is per ion, only the bin neighbourhood
+/// might miss it, and b/y ions above this m/z are rare in DDA glycopeptide scans.
+const PPM_BIN_MAX_MZ: f64 = 5000.0;
 
 impl FragmentIndex {
     #[inline]
@@ -75,7 +88,58 @@ impl FragmentIndex {
                 bins.entry(b).or_default().push((idx, ion.mz));
             }
         }
-        FragmentIndex { bin_width, tol, bins }
+        FragmentIndex { bin_width, tol, tol_ppm: None, bins }
+    }
+
+    /// [`Self::build`] with a RELATIVE (ppm) acceptance window per ion. This is
+    /// the retrieval-tolerance decoupling the roadmap's Stage S1A asks for: the
+    /// fixed-Da `tol` the engine passes here is the rank-scoring model's window
+    /// (0.5 Da for the low-res models), which on high-resolution data admits b/y
+    /// matches ~50x wider than the 20 ppm every glycan-side matcher uses.
+    /// `tol_ppm <= 0` falls back to [`Self::build`].
+    pub fn build_ppm<'a>(
+        entries: impl IntoIterator<Item = (u32, &'a Peptide)>,
+        tol_ppm: f64,
+        max_charge: u8,
+    ) -> Self {
+        Self::build_ppm_sized(entries, tol_ppm, max_charge, PPM_BIN_MAX_MZ)
+    }
+
+    /// [`Self::build_ppm`] with an explicit m/z the bin width is sized for. The
+    /// query walks `ceil(window / bin_width)` neighbouring bins on each side, so a
+    /// fragment ABOVE `bin_max_mz` still matches exactly (it just visits more bins);
+    /// the parameter only trades bin count against per-bin posting length. Exposed
+    /// so a test can force the multi-bin path at ordinary m/z.
+    pub fn build_ppm_sized<'a>(
+        entries: impl IntoIterator<Item = (u32, &'a Peptide)>,
+        tol_ppm: f64,
+        max_charge: u8,
+        bin_max_mz: f64,
+    ) -> Self {
+        if tol_ppm.is_nan() || tol_ppm <= 0.0 {
+            return Self::build(entries, 0.5, max_charge);
+        }
+        let widest = (bin_max_mz * tol_ppm * 1e-6).max(PPM_FLOOR_DA);
+        let mut idx = Self::build(entries, widest, max_charge);
+        idx.tol_ppm = Some(tol_ppm);
+        idx
+    }
+
+    /// Bins to visit on each side of a peak's own bin so every theoretical ion
+    /// within the acceptance window at that m/z is reachable. 1 for the fixed-Da
+    /// index (bin_width >= tol) and for ppm queries below the sizing m/z.
+    #[inline]
+    fn neighbourhood(&self, mz: f64) -> i64 {
+        ((self.window_da(mz) / self.bin_width).ceil() as i64).max(1)
+    }
+
+    /// Acceptance half-window (Da) for a theoretical ion at `theo` m/z.
+    #[inline]
+    fn window_da(&self, theo: f64) -> f64 {
+        match self.tol_ppm {
+            Some(p) => (theo * p * 1e-6).max(PPM_FLOOR_DA),
+            None => self.tol,
+        }
     }
 
     /// Return `(candidate_index, matched_ion_count)` for candidates whose
@@ -109,7 +173,8 @@ impl FragmentIndex {
         for &(mz, _) in peaks {
             matched_this_peak.clear();
             let b = Self::bin_of(mz, self.bin_width);
-            for nb in [b - 1, b, b + 1] {
+            let k = self.neighbourhood(mz);
+            for nb in (b - k)..=(b + k) {
                 if let Some(v) = self.bins.get(&nb) {
                     for &(idx, theo) in v {
                         // Accept this (peak, ion) match only if the peak has not
@@ -118,7 +183,7 @@ impl FragmentIndex {
                         // insert, so a peak whose first-seen ion is already used
                         // can still match a still-free ion of the same candidate.
                         let ion_key = (idx, Self::ion_id(theo));
-                        if (mz - theo).abs() <= self.tol
+                        if (mz - theo).abs() <= self.window_da(theo)
                             && !matched_this_peak.contains(&idx)
                             && !used_ion.contains(&ion_key)
                         {
@@ -139,6 +204,49 @@ impl FragmentIndex {
 
 #[cfg(test)]
 mod tests {
+    /// A fragment above the bin-sizing m/z must still match within its ppm window:
+    /// the query widens its bin neighbourhood instead of silently missing it.
+    /// Forced at ordinary m/z by sizing the bins for 300 m/z.
+    #[test]
+    fn ppm_query_reaches_matches_beyond_the_bin_sizing_mz() {
+        let aa = aa();
+        let pep = Peptide::from_str("K.PEPTIDENK.R", &aa).expect("valid");
+        let theo = predict_by_ions(&pep, 1..=1).iter().map(|i| i.mz).fold(0.0f64, f64::max);
+        assert!(theo > 300.0, "test premise: heaviest ion above the sizing m/z");
+        let idx = FragmentIndex::build_ppm_sized([(0u32, &pep)], 20.0, 1, 300.0);
+        assert!(idx.neighbourhood(theo) > 1, "must need more than one bin per side here");
+        // +18 ppm: inside the window, but several bins away at this bin width.
+        let peaks = vec![(theo * (1.0 + 18e-6), 100.0f32)];
+        assert_eq!(idx.query(&peaks, 1), vec![(0, 1)]);
+        // and still rejects +30 ppm
+        let far = vec![(theo * (1.0 + 30e-6), 100.0f32)];
+        assert!(idx.query(&far, 1).is_empty());
+    }
+
+    /// Stage S1A: a ppm index rejects a peak the 0.5 Da index accepts, and still
+    /// accepts a peak inside its own window, for the same peptide.
+    #[test]
+    fn ppm_window_is_per_ion_and_much_narrower_than_the_da_window() {
+        let aa = aa();
+        let pep = Peptide::from_str("K.PEPTIDENK.R", &aa).expect("valid");
+        let ions = predict_by_ions(&pep, 1..=1);
+        let theo = ions.iter().map(|i| i.mz).fold(0.0f64, f64::max); // heaviest y ion
+        let da = FragmentIndex::build([(0u32, &pep)], 0.5, 1);
+        let ppm = FragmentIndex::build_ppm([(0u32, &pep)], 20.0, 1);
+        let off_by_0_3 = vec![(theo + 0.3, 100.0f32)];
+        assert_eq!(da.query(&off_by_0_3, 1), vec![(0, 1)], "0.5 Da index must accept +0.3 Da");
+        assert!(ppm.query(&off_by_0_3, 1).is_empty(), "20 ppm index must reject +0.3 Da");
+        let inside = vec![(theo * (1.0 + 10e-6), 100.0f32)];
+        assert_eq!(ppm.query(&inside, 1), vec![(0, 1)], "20 ppm index must accept +10 ppm");
+        // Floor: a light fragment at +4 mDa is inside the 5 mDa floor.
+        let light = ions.iter().map(|i| i.mz).fold(f64::MAX, f64::min);
+        let near_light = vec![(light + 0.004, 100.0f32)];
+        assert_eq!(ppm.query(&near_light, 1), vec![(0, 1)], "floor must admit +4 mDa on a light ion");
+        // tol_ppm <= 0 degrades to the Da index.
+        let zero = FragmentIndex::build_ppm([(0u32, &pep)], 0.0, 1);
+        assert_eq!(zero.query(&off_by_0_3, 1), vec![(0, 1)]);
+    }
+
     use super::*;
     use model::aa_set::AminoAcidSetBuilder;
 

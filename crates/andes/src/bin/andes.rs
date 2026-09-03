@@ -709,6 +709,14 @@ struct SearchArgs {
     #[arg(long = "glyco-min-raw-score-quantile")]
     glyco_min_raw_score_quantile: Option<f64>,
 
+    /// Emit the CURATED glyco PIN column set (52 columns) instead of the full
+    /// one. Validated on pooled human plasma: 384.6 +/- 23 glycoPSMs @1% with
+    /// entrapment FDP 0.00% on all five seeds, vs 256.8 +/- 16.5 for the full
+    /// set (+50%). Drops per-scan spectrum-level columns the small-sample SVM
+    /// misuses, plus the ETD-only Cz* and opt-in Transfer* columns -- intended
+    /// for HCD-style runs. Pair with `percolator --trainFDR 0.05` (see docs).
+    #[arg(long = "glyco-pin-curated", default_value_t = false)]
+    glyco_pin_curated: bool,
     /// Diagnostic TSV of per-candidate split evidence with sampled shifted-ladder
     /// nulls (the LLR-calibration probe). Requires --debug-glyco; never affects
     /// the PIN.
@@ -727,6 +735,75 @@ struct SearchArgs {
     /// explicit value (a bare bool arg would be an un-disableable set-true flag).
     #[arg(long = "glyco-cz-gate", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
     glyco_cz_gate: bool,
+
+    /// Read the glycan-Y ladder from the paired HCD partner instead of the ETD scan
+    /// being scored. Under --glyco-hcd-pair the core-Y hit COUNT is already taken
+    /// from the HCD partner while the ladder INTENSITY, YHitFrac and the glycan-axis
+    /// decoy are taken from the ETD scan, so one selector score sums two spectra.
+    /// Inert unless paired.
+    #[arg(long = "glyco-pair-y-on-gen", hide = true)]
+    glyco_pair_y_on_gen: bool,
+
+    /// Promote the best enumerated candidate when the argmax picks a de-novo one.
+    /// Default true (shipped behaviour). The promoted row lost the argmax and is
+    /// emitted anyway on roughly a fifth of scans; `false` runs that A/B.
+    #[arg(long = "glyco-enum-fallback", hide = true, default_value_t = true, action = clap::ArgAction::Set)]
+    glyco_enum_fallback: bool,
+
+    /// Require the oxonium gate to fire before an ETD/AI-ETD scan enumerates the full
+    /// glycan-database split lattice. ETD scans otherwise bypass every glycan gate.
+    #[arg(long = "glyco-etd-require-oxonium", hide = true)]
+    glyco_etd_require_oxonium: bool,
+
+    /// Emit the composition-specific Y-ion-tree log-likelihood columns. The shipped
+    /// ladder is a single linear chain that appends fucose after every antenna, so the
+    /// core-fucose Y ions a true fucosylated composition should claim are never
+    /// predicted. Additive PIN columns only.
+    #[arg(long = "glyco-y-tree", hide = true)]
+    glyco_y_tree: bool,
+
+    /// Emit the per-candidate oxonium-composition log-likelihood columns, including the
+    /// penalty for a composition that claims a monosaccharide whose diagnostic ion is
+    /// absent. No diagnostic oxonium ion currently influences which composition wins.
+    #[arg(long = "glyco-oxonium-llr", hide = true)]
+    glyco_oxonium_llr: bool,
+
+    /// Emit the peptide-channel rank score, computed after masking oxonium and Y-ladder
+    /// peaks so the rank model is not reading a spectrum whose most intense peaks are
+    /// all glycan-derived. Additive PIN column only.
+    #[arg(long = "glyco-rank-masked", hide = true)]
+    glyco_rank_masked: bool,
+
+    /// Emit the peptide-channel backbone chance LLR: on the same masked spectrum as
+    /// --glyco-rank-masked, every glycosite-spanning b/y ion is scored as the best of
+    /// its bare, +HexNAc and +2HexNAc forms, and fragment charges run to z-1 with an
+    /// isotope check from z3. Additive PIN columns only.
+    #[arg(long = "glyco-chance-llr-masked", hide = true)]
+    glyco_chance_llr_masked: bool,
+
+    /// Peptide-first candidate RETRIEVAL tolerance in ppm. Default: --glyco-tol-ppm
+    /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
+    /// Retrieval only; the rank scorer and its tolerance are unchanged. Measured
+    /// 7x faster than 0.5 Da on high-res data with identifications neutral.
+    #[arg(long = "glyco-retrieval-tol-ppm", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_da")]
+    glyco_retrieval_tol_ppm: Option<f64>,
+
+    /// Fixed-Da peptide-first candidate RETRIEVAL window, e.g. 0.5 to reproduce the
+    /// pre-2026-09 behaviour on high-resolution data for an A/B. Mutually exclusive
+    /// with --glyco-retrieval-tol-ppm; retrieval only, scoring unchanged.
+    #[arg(long = "glyco-retrieval-tol-da", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_ppm")]
+    glyco_retrieval_tol_da: Option<f64>,
+
+    /// Elect the backbone mass split first, with multiplicity control, then elect the
+    /// glycoform and peptide inside it, instead of one global argmax over every
+    /// (peptide, composition) pair. Measured: 96.9% of decoy winners on contested scans
+    /// sit at a different backbone mass than the truth.
+    #[arg(long = "glyco-split-election", hide = true)]
+    glyco_split_election: bool,
+
+    /// Weight on the per-candidate glycan log-likelihood ratio in the election.
+    #[arg(long = "glyco-gp-g", hide = true)]
+    glyco_gp_g: Option<f32>,
 
     /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
     /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
@@ -3360,6 +3437,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             &spectra
         };
+        // Peptide-first RETRIEVAL window, resolved from the ACQUISITION, not from the
+        // selected scoring model: model routing deliberately sends some high-res CID
+        // and ETD acquisitions to a low-res model (`build_selection_key`), and the
+        // scoring window that routing chooses is not the retrieval window the index
+        // should use. Detected analyzer metadata decides; metadata-less input falls
+        // back to the `--fragment-tol-*` unit, the same rule the model resolver uses.
+        // An explicit --glyco-retrieval-tol-{ppm,da} overrides either way.
+        let acquisition_high_res = match detected_activation_instrument.and_then(|(_, i)| i) {
+            Some(i) => i.is_high_resolution(),
+            None => cli.fragment_tol_ppm.is_some(),
+        };
+        let retrieval_ppm: Option<f64> = cli.glyco_retrieval_tol_ppm.or_else(|| {
+            (acquisition_high_res && cli.glyco_retrieval_tol_da.is_none()).then_some(glyco_tol_ppm)
+        });
+        match (cli.glyco_retrieval_tol_da, retrieval_ppm) {
+            (Some(da), _) => eprintln!("glyco retrieval window: {da} Da (--glyco-retrieval-tol-da)"),
+            (None, Some(ppm)) => eprintln!(
+                "glyco retrieval window: {ppm} ppm ({})",
+                if cli.glyco_retrieval_tol_ppm.is_some() { "--glyco-retrieval-tol-ppm" } else { "high-resolution acquisition" }
+            ),
+            (None, None) => eprintln!("glyco retrieval window: 0.5 Da (low-resolution acquisition)"),
+        }
         let glyco_cfg = search::glyco_search::GlycoConfig {
             gp_k: cli.glyco_gp_k,
             gp_j: cli.glyco_gp_j,
@@ -3378,6 +3477,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
+            // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the
+            // glyco ppm tolerance; low-resolution keeps the rank model's 0.5 Da.
+            // Measured 2026-09-02 (Codon, five seeds): on high-res data the 0.5 Da
+            // window admitted b/y matches ~50x wider than every glycan-side matcher
+            // and was the dominant glyco cost — 20 ppm was 6.9x faster on mouse
+            // PXD011533 and 7x on plasma PXD030622 with identifications neutral
+            // (mouse 3198 vs 3183 correct; plasma 399 vs 380). An explicit
+            // --glyco-retrieval-tol-ppm overrides the auto default either way.
+            retrieval_tol_ppm: retrieval_ppm,
+            retrieval_tol_da: cli.glyco_retrieval_tol_da,
             max_pf: cli.glyco_max_pf,
             debug: cli.debug_glyco,
             glyco_decoy: cli.glyco_decoy,
@@ -3385,6 +3494,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hcd_pair: cli.glyco_hcd_pair && spectrum_paths.len() == 1,
             etd_rank_glycan: cli.glyco_etd_rank_glycan,
             cz_gate: cli.glyco_cz_gate,
+            pair_y_on_gen: cli.glyco_pair_y_on_gen,
+            enum_fallback: cli.glyco_enum_fallback,
+            etd_require_oxonium: cli.glyco_etd_require_oxonium,
+            y_tree: cli.glyco_y_tree,
+            ox_llr: cli.glyco_oxonium_llr,
+            rank_masked: cli.glyco_rank_masked,
+            chance_llr_masked: cli.glyco_chance_llr_masked,
+            split_election: cli.glyco_split_election,
+            gp_g: cli.glyco_gp_g.unwrap_or(search::glyco_search::GlycoConfig::default().gp_g),
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
@@ -3455,6 +3573,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // native-GBDT-rescore it in-process to get target+decoy q-values.
             let mut buf: Vec<u8> = Vec::new();
             output::glyco_pin::write_glyco_pin_to(
+                cli.glyco_pin_curated,
                 &mut buf, &spectra, &pass1, &prepared.candidates, &params, &idx, false, false,
             )?;
             let pin_text = String::from_utf8(buf)
@@ -3765,6 +3884,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         );
 
         output::write_glyco_pin(
+            cli.glyco_pin_curated,
             &glyco_pin_path,
             &spectra,
             &glyco_results,

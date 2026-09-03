@@ -202,6 +202,58 @@ pub struct ScoredSpectrum<'a> {
     /// whose rank is `r`. Empty when the model carries no GBDT (then the term
     /// is never added and scoring is byte-identical). Index 0 is unused.
     gbdt_logit_by_rank: Vec<f32>,
+    /// How many peaks the caller-supplied m/z exclusion windows removed before
+    /// ranking (see [`ScoredSpectrum::new_with_excluded_mz`]). Always 0 for the
+    /// ordinary constructors. Exposed so a caller can emit it as a diagnostic
+    /// PIN column and tell "the mask fired" apart from "the mask matched nothing".
+    excluded_count: usize,
+}
+
+/// Collapse caller-supplied exclusion windows into a sorted, non-overlapping,
+/// half-inclusive-free list so membership is one binary search per peak instead
+/// of an O(peaks x windows) scan.
+///
+/// The documented contract is that windows arrive sorted by `low_mz`, but the
+/// sort here is defensive and costs O(W log W) ONCE per spectrum against O(P)
+/// lookups (P = peaks, typically 10^3-10^4, W = 20-60 oxonium + Y-ladder rungs),
+/// so an unsorted or overlapping list from a caller cannot silently drop the
+/// wrong peaks. Degenerate entries (non-finite, or `high < low`) are discarded.
+fn merge_exclusion_windows(excluded: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if excluded.is_empty() {
+        return Vec::new();
+    }
+    let mut w: Vec<(f64, f64)> = excluded
+        .iter()
+        .copied()
+        .filter(|&(lo, hi)| lo.is_finite() && hi.is_finite() && hi >= lo)
+        .collect();
+    w.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(w.len());
+    for (lo, hi) in w {
+        match out.last_mut() {
+            // Touching windows merge too (`lo == last.1`): both bounds are
+            // inclusive, so the peak at the shared bound is excluded either way.
+            Some(last) if lo <= last.1 => {
+                if hi > last.1 {
+                    last.1 = hi;
+                }
+            }
+            _ => out.push((lo, hi)),
+        }
+    }
+    out
+}
+
+/// Inclusive membership test against the output of [`merge_exclusion_windows`].
+/// Windows are disjoint and sorted, so the only candidate is the last window
+/// whose low bound is at or below `mz`.
+#[inline]
+fn mz_in_merged_windows(windows: &[(f64, f64)], mz: f64) -> bool {
+    if windows.is_empty() {
+        return false;
+    }
+    let idx = windows.partition_point(|&(lo, _)| lo <= mz);
+    idx > 0 && mz <= windows[idx - 1].1
 }
 
 /// Parsed `ANDES_PEAK_WINDOW` / `ANDES_PEAK_PER_WINDOW` override for the windowed
@@ -295,8 +347,52 @@ impl<'a> ScoredSpectrum<'a> {
     /// Any peak whose m/z is within the tolerance of a precursor filter m/z
     /// gets rank `u32::MAX` and is effectively invisible to `nearest_peak_rank`.
     pub fn new(spec: &'a Spectrum, scorer: &RankScorer, charge: u8) -> Self {
+        // Empty window list => `mz_in_merged_windows` short-circuits on an empty
+        // slice and `excluded_count` stays 0, so this is the pre-existing code
+        // path unchanged, not a re-derivation of it.
+        Self::new_inner(spec, scorer, charge, &[])
+    }
+
+    /// Construct over the PEPTIDE-CHANNEL view of the spectrum: identical to
+    /// [`new`](Self::new) except that peaks falling inside any of the
+    /// caller-supplied inclusive `[low_mz, high_mz]` windows are removed BEFORE
+    /// ranking, so intensity ranks, the fragment ion current, `prob_peak` and
+    /// the base peak are all recomputed on the survivors.
+    ///
+    /// Motivation (measured audit finding): on an intact-glycopeptide spectrum
+    /// 20-40 oxonium and Y-ion peaks sit among the most intense peaks, so every
+    /// backbone b/y ion is displaced 20-40 rank positions. The rank tables were
+    /// trained on unmodified tryptic peptides, where backbone ions occupy the
+    /// top ranks, so a true backbone ion is scored through the LLR slot of a
+    /// mediocre peak; the same kept list also feeds the noise-density and
+    /// `prob_peak` estimates, inflating both. Masking the glycan-derived m/z
+    /// gives the rank model the spectrum it was trained on.
+    ///
+    /// `excluded` is expected sorted ascending by `low_mz`; overlapping,
+    /// unsorted or degenerate entries are tolerated (see
+    /// `merge_exclusion_windows`). Lookup is O(log W) per peak.
+    ///
+    /// [`excluded_peak_count`](Self::excluded_peak_count) reports how many peaks
+    /// the windows actually removed.
+    pub fn new_with_excluded_mz(
+        spec: &'a Spectrum,
+        scorer: &RankScorer,
+        charge: u8,
+        excluded: &[(f64, f64)],
+    ) -> Self {
+        Self::new_inner(spec, scorer, charge, excluded)
+    }
+
+    fn new_inner(
+        spec: &'a Spectrum,
+        scorer: &RankScorer,
+        charge: u8,
+        excluded: &[(f64, f64)],
+    ) -> Self {
         let param = scorer.param();
         let n = spec.peaks.len();
+        let excl_windows = merge_exclusion_windows(excluded);
+        let mut excluded_count = 0usize;
 
         // Collect filter m/z values from param.precursor_off_map for this charge.
         // Round-7 (audit): this lookup had NO clamp, unlike `find_partition` which
@@ -345,8 +441,17 @@ impl<'a> ScoredSpectrum<'a> {
 
         // Determine which peaks survive filtering.
         let mut ranks = vec![u32::MAX; n];
+        let mut masked = vec![false; n];
         let mut kept: Vec<(usize, f32, f64)> = Vec::with_capacity(n);
         for (i, &(mz, intensity)) in spec.peaks.iter().enumerate() {
+            // Caller-supplied mask first: a glycan-derived peak must not reach
+            // the rank sort, the ion-current sum, the density estimate, or the
+            // isotope-cluster deconvolution.
+            if mz_in_merged_windows(&excl_windows, mz) {
+                excluded_count += 1;
+                masked[i] = true;
+                continue;
+            }
             let filtered = filter_mzs
                 .iter()
                 .any(|&(fmz, tol)| (mz - fmz).abs() <= tol);
@@ -442,7 +547,25 @@ impl<'a> ScoredSpectrum<'a> {
         let (deconv_peaks, deconv_ranks): DeconvResult =
             if param.apply_deconvolution {
                 let tol = param.deconvolution_error_tolerance as f64;
-                let (dp, dr) = deconvolute_spectrum(&spec.peaks, &ranks, charge, tol);
+                let (dp, dr) = if excluded_count == 0 {
+                    // `new`: the pre-existing call, byte-identical.
+                    deconvolute_spectrum(&spec.peaks, &ranks, charge, tol)
+                } else {
+                    // Masked spectrum: deconvolute the SURVIVING peaks only. A masked
+                    // peak left in the list could still seed an isotope cluster, be
+                    // consumed as the +1 isotope of a real peak (charge-reducing it),
+                    // or shift a neighbour's m/z, so marking it unmatchable is not
+                    // enough to keep it out of the peptide channel.
+                    let (pk, rk): (Vec<(f64, f32)>, Vec<u32>) = spec
+                        .peaks
+                        .iter()
+                        .zip(ranks.iter())
+                        .enumerate()
+                        .filter(|(i, _)| !masked[*i])
+                        .map(|(_, (p, r))| (*p, *r))
+                        .unzip();
+                    deconvolute_spectrum(&pk, &rk, charge, tol)
+                };
                 (Some(dp), Some(dr))
             } else {
                 (None, None)
@@ -460,6 +583,10 @@ impl<'a> ScoredSpectrum<'a> {
         let mme_raw = param.mme.raw_value();
         let approx_num_bins = if mme_raw > 0.0 { parent_mass / (mme_raw * 2.0) } else { 1.0 };
         let active_count = match &deconv_peaks {
+            // Masked peaks never enter the deconvolution (filtered above), so the
+            // post-deconvolution list is already the peptide channel's density.
+            // Precursor-filtered peaks ride along with rank `u32::MAX` exactly as
+            // in `new`.
             Some(dp) => dp.len(),
             None => kept_count,
         };
@@ -518,9 +645,24 @@ impl<'a> ScoredSpectrum<'a> {
                     &param.mme,
                 );
                 let feats = extract_peak_features(cache_peaks, cache_ranks, &ctx);
-                for (i, &r) in cache_ranks.iter().enumerate() {
-                    if r != u32::MAX && (r as usize) < by_rank.len() {
-                        by_rank[r as usize] = model.predict_logit(&feats[i]);
+                // Batched, trees-outer (see `GbdtPeakModel::predict_logit_batch`):
+                // the per-peak call re-streamed the whole ~770 KB ensemble through
+                // cache once per peak. Bit-identical: the batch accumulates each
+                // row's tree sum in the same tree order from the same 0.0 start
+                // as the per-row fold, then applies the same sigmoid / isotonic /
+                // clamp / ln per row.
+                let live: Vec<usize> = cache_ranks
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &r)| r != u32::MAX && (r as usize) < by_rank.len())
+                    .map(|(i, _)| i)
+                    .collect();
+                if !live.is_empty() {
+                    let rows: Vec<&[f32]> = live.iter().map(|&i| feats[i].as_slice()).collect();
+                    let mut out = vec![0.0_f32; rows.len()];
+                    model.predict_logit_batch(&rows, &mut out);
+                    for (&i, &v) in live.iter().zip(out.iter()) {
+                        by_rank[cache_ranks[i] as usize] = v;
                     }
                 }
                 by_rank
@@ -578,6 +720,7 @@ impl<'a> ScoredSpectrum<'a> {
             deconv_ranks,
             observed_mass_cache,
             gbdt_logit_by_rank,
+            excluded_count,
         }
     }
 
@@ -664,6 +807,8 @@ impl<'a> ScoredSpectrum<'a> {
             // No GBDT term in the rank_kept / new_without_filtering path
             // (no scorer in scope). Empty vec → byte-identical no-model scoring.
             gbdt_logit_by_rank: Vec::new(),
+            // This path applies no caller-supplied m/z mask.
+            excluded_count: 0,
         }
     }
 
@@ -797,6 +942,14 @@ impl<'a> ScoredSpectrum<'a> {
     /// Number of peaks that survived precursor-peak filtering (and were ranked).
     pub fn peak_count_after_filtering(&self) -> usize {
         self.kept_count
+    }
+
+    /// Number of peaks removed by the caller-supplied m/z exclusion windows of
+    /// [`new_with_excluded_mz`](Self::new_with_excluded_mz), before ranking.
+    /// 0 for every other constructor. Intended as a diagnostic PIN column: it
+    /// separates "no glycan peaks were masked" from "the mask was never applied".
+    pub fn excluded_peak_count(&self) -> usize {
+        self.excluded_count
     }
 
     /// Local peak density (peaks per Da) in the window `[mz - hw, mz + hw]`.
@@ -3455,5 +3608,262 @@ mod precursor_filter_tests {
         let ss = ScoredSpectrum::new(&s, &scorer, 2);
         // No filtering occurred (c <= 0 was skipped) → both peaks kept.
         assert_eq!(ss.peak_count_after_filtering(), 2);
+    }
+}
+
+#[cfg(test)]
+mod excluded_mz_tests {
+    //! Coverage for the peptide-channel view (`new_with_excluded_mz`).
+    //!
+    //! Rationale for the feature under test: on an intact-glycopeptide spectrum
+    //! the oxonium and Y-ion peaks are among the most intense, so a backbone b/y
+    //! ion is displaced 20-40 rank slots and scored through the rank table entry
+    //! of a mediocre peak. These tests pin the mechanism (ranks improve), and pin
+    //! that the unmasked path is untouched.
+
+    use super::*;
+    use crate::scoring::rank_scorer::RankScorer;
+    use crate::testutil::tiny_param_with_ions;
+
+    fn spec_of(peaks: &[(f64, f32)]) -> Spectrum {
+        Spectrum {
+            title: "glyco-fixture".into(),
+            precursor_mz: 900.0,
+            precursor_intensity: None,
+            precursor_charge: Some(2),
+            rt_seconds: None,
+            scan: None,
+            peaks: peaks.to_vec(),
+            activation_method: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
+        }
+    }
+
+    /// Backbone peaks (weak) plus glycan-derived peaks (strong), interleaved in
+    /// m/z and sorted ascending as the readers guarantee.
+    fn glyco_like_spectrum() -> (Spectrum, Vec<f64>, Vec<(f64, f64)>) {
+        // Real oxonium m/z values; the Y-ladder rungs stand in for
+        // backbone+glycan species above the backbone ions.
+        let glycan_mz = [
+            138.055, 163.060, 168.066, 186.076, 204.087, 274.092, 292.103, 366.140,
+        ];
+        let backbone_mz = [420.21, 533.29, 648.32, 761.40, 875.44];
+        let mut peaks: Vec<(f64, f32)> = Vec::new();
+        for (i, &m) in glycan_mz.iter().enumerate() {
+            // Glycan peaks dominate: 1000 down to 300.
+            peaks.push((m, 1000.0 - 100.0 * i as f32));
+        }
+        for (i, &m) in backbone_mz.iter().enumerate() {
+            peaks.push((m, 50.0 - 5.0 * i as f32));
+        }
+        peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        // +-0.02 Da windows around each glycan peak, sorted by low bound.
+        let windows: Vec<(f64, f64)> = glycan_mz.iter().map(|&m| (m - 0.02, m + 0.02)).collect();
+        (spec_of(&peaks), backbone_mz.to_vec(), windows)
+    }
+
+    /// Compare every reachable piece of per-spectrum state between two
+    /// `ScoredSpectrum`s.
+    fn assert_same_state(a: &ScoredSpectrum<'_>, b: &ScoredSpectrum<'_>) {
+        assert_eq!(a.ranks, b.ranks, "per-peak ranks must be identical");
+        assert_eq!(
+            a.deconv_peaks, b.deconv_peaks,
+            "deconvoluted peaks must be identical"
+        );
+        assert_eq!(
+            a.deconv_ranks, b.deconv_ranks,
+            "deconvoluted ranks must be identical"
+        );
+        assert_eq!(a.kept_count, b.kept_count, "kept count must be identical");
+        assert_eq!(
+            a.total_intensity, b.total_intensity,
+            "ion current must be identical"
+        );
+        assert_eq!(a.prob_peak, b.prob_peak, "prob_peak must be identical");
+        assert_eq!(a.parent_mass, b.parent_mass);
+        assert_eq!(a.charge, b.charge);
+        assert_eq!(
+            a.prefix_score_cache, b.prefix_score_cache,
+            "prefix node cache must be identical"
+        );
+        assert_eq!(
+            a.suffix_score_cache, b.suffix_score_cache,
+            "suffix node cache must be identical"
+        );
+        assert_eq!(a.gbdt_logit_by_rank, b.gbdt_logit_by_rank);
+        assert_eq!(
+            a.dump_active_peaks(),
+            b.dump_active_peaks(),
+            "active peak dump must be identical"
+        );
+    }
+
+    /// The mechanism under test: masking the glycan m/z moves every backbone
+    /// peak to a numerically smaller (better) intensity rank.
+    #[test]
+    fn masking_glycan_peaks_lifts_backbone_ranks() {
+        let (s, backbone_mz, windows) = glyco_like_spectrum();
+        let scorer = RankScorer::new(&tiny_param_with_ions());
+
+        let plain = ScoredSpectrum::new(&s, &scorer, 2);
+        let masked = ScoredSpectrum::new_with_excluded_mz(&s, &scorer, 2, &windows);
+
+        assert_eq!(
+            masked.excluded_peak_count(),
+            8,
+            "all 8 glycan peaks must be masked"
+        );
+        assert_eq!(plain.excluded_peak_count(), 0);
+        assert_eq!(masked.peak_count_after_filtering(), backbone_mz.len());
+
+        for (i, &mz) in backbone_mz.iter().enumerate() {
+            let before = plain
+                .nearest_peak_rank(mz, 0.01)
+                .expect("backbone peak present unmasked");
+            let after = masked
+                .nearest_peak_rank(mz, 0.01)
+                .expect("backbone peak present masked");
+            // Unmasked, the 8 glycan peaks occupy ranks 1..8, so the i-th
+            // backbone ion sits at rank 9+i; masked, it sits at rank 1+i.
+            assert_eq!(before, 9 + i as u32, "unmasked rank at {mz}");
+            assert_eq!(after, 1 + i as u32, "masked rank at {mz}");
+            assert!(
+                after < before,
+                "mask must improve the backbone rank at {mz}"
+            );
+        }
+
+        // Masked peaks are invisible to the matching path.
+        assert_eq!(
+            masked.nearest_peak_rank(204.087, 0.01),
+            None,
+            "masked oxonium must not match"
+        );
+        assert!(plain.nearest_peak_rank(204.087, 0.01).is_some());
+    }
+
+    /// An empty exclusion list must reproduce `new` exactly — the golden-output
+    /// suite depends on `new` being untouched.
+    #[test]
+    fn empty_exclusion_reproduces_new_exactly() {
+        let (s, _, _) = glyco_like_spectrum();
+        let scorer = RankScorer::new(&tiny_param_with_ions());
+        let plain = ScoredSpectrum::new(&s, &scorer, 2);
+        let empty = ScoredSpectrum::new_with_excluded_mz(&s, &scorer, 2, &[]);
+        assert_same_state(&plain, &empty);
+        assert_eq!(empty.excluded_peak_count(), 0);
+        for n in 0..200i32 {
+            assert_eq!(
+                plain.cached_split_score(n, 200 - n),
+                empty.cached_split_score(n, 200 - n),
+                "cached split score must agree at prefix nominal {n}"
+            );
+        }
+    }
+
+    /// A window that contains no peak leaves the result identical to `new`.
+    #[test]
+    fn window_matching_no_peak_changes_nothing() {
+        let (s, _, _) = glyco_like_spectrum();
+        let scorer = RankScorer::new(&tiny_param_with_ions());
+        let plain = ScoredSpectrum::new(&s, &scorer, 2);
+        // Below the lowest peak and between two peaks: neither holds a peak.
+        let masked =
+            ScoredSpectrum::new_with_excluded_mz(&s, &scorer, 2, &[(50.0, 60.0), (400.0, 410.0)]);
+        assert_eq!(
+            masked.excluded_peak_count(),
+            0,
+            "no peak lies in these windows"
+        );
+        assert_same_state(&plain, &masked);
+    }
+
+    /// A window covering the whole m/z range degenerates to an empty peptide
+    /// channel and must not panic anywhere in construction or lookup.
+    #[test]
+    fn window_covering_everything_is_degenerate_not_panic() {
+        let (s, _, _) = glyco_like_spectrum();
+        let scorer = RankScorer::new(&tiny_param_with_ions());
+        let masked = ScoredSpectrum::new_with_excluded_mz(&s, &scorer, 2, &[(0.0, 10_000.0)]);
+        assert_eq!(masked.excluded_peak_count(), s.peaks.len());
+        assert_eq!(masked.peak_count_after_filtering(), 0);
+        assert_eq!(masked.total_intensity(), 0.0);
+        assert!(masked.dump_active_peaks().is_empty(), "no peak may survive");
+        assert_eq!(masked.nearest_peak_rank(204.087, 0.01), None);
+        assert_eq!(masked.nearest_peak_full(420.21, 0.01), None);
+        // The node caches are still built and queryable.
+        assert!(masked.cached_split_score(10, 20).is_some());
+    }
+
+    /// The base peak (rank 1) is recomputed over the survivors, not carried over
+    /// from the unmasked spectrum.
+    #[test]
+    fn base_peak_is_recomputed_on_survivors() {
+        let (s, backbone_mz, windows) = glyco_like_spectrum();
+        let scorer = RankScorer::new(&tiny_param_with_ions());
+
+        let plain_base = ScoredSpectrum::new(&s, &scorer, 2).dump_active_peaks()[0];
+        assert!(
+            (plain_base.1 - 138.055).abs() < 1e-9,
+            "unmasked base peak is the oxonium"
+        );
+        assert_eq!(plain_base.0, 1);
+
+        let masked = ScoredSpectrum::new_with_excluded_mz(&s, &scorer, 2, &windows);
+        let masked_base = masked.dump_active_peaks()[0];
+        assert_eq!(masked_base.0, 1);
+        assert!(
+            (masked_base.1 - backbone_mz[0]).abs() < 1e-9,
+            "masked base peak must be the most intense survivor, got {}",
+            masked_base.1
+        );
+        // The ion current denominator drops to the survivors' sum as well.
+        let survivor_sum: f64 = backbone_mz
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (50.0 - 5.0 * i as f32) as f64)
+            .sum();
+        assert!((masked.total_intensity() - survivor_sum).abs() < 1e-6);
+    }
+
+    /// Unsorted, overlapping and degenerate windows are tolerated: the merge
+    /// step normalises them, so a caller cannot silently mask the wrong peaks.
+    #[test]
+    fn unsorted_overlapping_and_degenerate_windows_are_normalised() {
+        let (s, _, windows) = glyco_like_spectrum();
+        let scorer = RankScorer::new(&tiny_param_with_ions());
+        let sorted = ScoredSpectrum::new_with_excluded_mz(&s, &scorer, 2, &windows);
+
+        let mut scrambled: Vec<(f64, f64)> = windows.clone();
+        scrambled.reverse();
+        // Overlapping duplicate + an inverted (degenerate) window that must be
+        // discarded rather than masking everything between its bounds.
+        scrambled.push((204.08, 204.10));
+        scrambled.push((900.0, 400.0));
+        scrambled.push((f64::NAN, 1.0));
+        let normalised = ScoredSpectrum::new_with_excluded_mz(&s, &scorer, 2, &scrambled);
+        assert_eq!(
+            normalised.excluded_peak_count(),
+            sorted.excluded_peak_count()
+        );
+        assert_same_state(&sorted, &normalised);
+    }
+
+    #[test]
+    fn merge_and_lookup_are_exact_at_window_bounds() {
+        let merged = merge_exclusion_windows(&[(10.0, 20.0), (15.0, 25.0), (30.0, 31.0)]);
+        assert_eq!(merged, vec![(10.0, 25.0), (30.0, 31.0)]);
+        // Bounds are inclusive on both ends.
+        assert!(mz_in_merged_windows(&merged, 10.0));
+        assert!(mz_in_merged_windows(&merged, 25.0));
+        assert!(mz_in_merged_windows(&merged, 17.5));
+        assert!(!mz_in_merged_windows(&merged, 9.999));
+        assert!(!mz_in_merged_windows(&merged, 25.001));
+        assert!(!mz_in_merged_windows(&merged, 29.0));
+        assert!(
+            !mz_in_merged_windows(&[], 25.0),
+            "empty mask excludes nothing"
+        );
     }
 }

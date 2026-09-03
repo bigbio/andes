@@ -277,6 +277,35 @@ pub fn select_nearest<'a>(
             return (id, true);
         }
     }
+    // 2b. Same RESOLUTION CLASS, keeping activation, enzyme and class. The
+    //    auto-detected generic `HighRes` instrument is not a store instrument
+    //    name for most models (the bundled high-res HCD tryptic model is keyed
+    //    `QExactive`), so a high-res Orbitrap run that is not a recognised family
+    //    fell through to step 3 below, which picks the alphabetically-FIRST
+    //    same-activation model — `hcd_astral_tryp`, an Astral-specific model —
+    //    for every generic high-res HCD file. Measured 2026-09-02: every run of
+    //    the glyco benchmark, both regimes, all arms, scored with that fallback
+    //    and warned "scores may be mis-calibrated". Swap within the high-res
+    //    class first; only then relax the instrument arbitrarily.
+    {
+        let sibling: Option<&str> = match key.instrument.as_str() {
+            "HighRes" => Some("QExactive"),
+            "QExactive" => Some("HighRes"),
+            _ => None,
+        };
+        if let Some(inst) = sibling {
+            let k = SelectionKey { instrument: inst.to_string(), ..key.clone() };
+            if let Some(id) = select(entries, &k, instrument_family, None) {
+                return (id, true);
+            }
+            if key.enzyme != "Tryp" {
+                let k2 = SelectionKey { enzyme: "Tryp".to_string(), ..k };
+                if let Some(id) = select(entries, &k2, instrument_family, None) {
+                    return (id, true);
+                }
+            }
+        }
+    }
     // 3. Relax the INSTRUMENT, keeping the ACTIVATION. Activation is the ion
     //    chemistry (b/y vs c/z) and is the axis that must not be crossed; the
     //    instrument only sets resolution. Without this step an ETD query with no
@@ -556,6 +585,35 @@ mod tests {
     }
 
     // ---- select_nearest (own-only store fallback) ----
+
+    /// Step 2b: a generic high-res HCD query (auto-detected `HighRes`, the name
+    /// no bundled HCD tryptic model carries) must resolve to the high-res
+    /// Orbitrap model `hcd_qexactive_tryp`, not to whichever same-activation
+    /// model sorts first by id (`hcd_astral_tryp`, an Astral-specific model).
+    /// Measured 2026-09-02: every glyco benchmark run took the alphabetical path.
+    #[test]
+    fn generic_highres_hcd_prefers_qexactive_over_alphabetical_astral() {
+        let m = vec![
+            e("hcd_astral_tryp", "HCD", "OrbitrapAstral", "Tryp", &[]),
+            e("hcd_highres_nocleavage", "HCD", "HighRes", "NoCleavage", &[]),
+            e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
+            e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[]),
+        ];
+        let (id, sub) = select_nearest(
+            &m,
+            &key("HCD", "HighRes", "Tryp", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
+        assert_eq!(id, "hcd_qexactive_tryp");
+        assert!(sub, "a resolution-class swap is still a substitution and must WARN");
+        // The reverse swap holds too, and the exact ladder still wins when present.
+        let m2 = vec![e("hcd_highres_tryp_x", "HCD", "HighRes", "Tryp", &[])];
+        let (id2, _) = select_nearest(&m2, &key("HCD", "QExactive", "Tryp", &[]), fam, "hcd_qexactive_tryp");
+        assert_eq!(id2, "hcd_highres_tryp_x");
+        let (id3, sub3) = select_nearest(&m, &key("HCD", "QExactive", "Tryp", &[]), fam, "hcd_qexactive_tryp");
+        assert_eq!((id3, sub3), ("hcd_qexactive_tryp", false));
+    }
 
     /// The 17-own store has cid_lowres_tryp but NOT cid_lowres_tryp_phosphorylation
     /// (dropped seed-copy). A CID phospho query routes to cid_lowres_tryp via the

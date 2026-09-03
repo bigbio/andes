@@ -22,9 +22,17 @@
 //!   --spectrum test-fixtures/glyco_fixture.mgf.gz \
 //!   --database test-fixtures/glyco_fixture.fasta \
 //!   --glyco --glyco-tol-ppm 20 --fragmentation HCD \
+//!   --glyco-taxon human \
 //!   --output-pin /tmp/g.pin
 //! cp /tmp/g.glyco.pin test-fixtures/parity/goldens/glyco.pin
 //! ```
+//!
+//! `--glyco-taxon human` is NOT optional: the recipe omitted it while the test below
+//! passes it, so a regeneration followed the recipe, kept NeuGc, and produced 25 rows
+//! that differ from what the test asks for. Diff the regenerated file against the old
+//! golden column by column before copying it — a positional drift between the header
+//! list and the row writer shows up as several UNRELATED columns changing on every row,
+//! which is what caught exactly that mistake here.
 //!
 //! Regenerating is a deliberate act: diff the columns first and know which ones moved.
 

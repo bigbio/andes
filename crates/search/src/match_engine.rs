@@ -1103,11 +1103,16 @@ impl<'a> PreparedSearch<'a> {
                 // node sum for the unrounded `score_psm_float` yields the float
                 // RawScore. Computed only for emitted PSMs. (b/y-only: for the rare
                 // loss-bearing peptide it omits RawScore's neutral-loss term.)
-                let rounded_node =
-                    score_psm(ss, &cand.peptide, scorer, psm.charge_used, fragment_tolerance_da);
+                // The credit is an i32 and the rounded node sum is integer-valued, so
+                // `psm.score = node + credit` is exact in f32 and the credit is
+                // recoverable from the candidate alone; re-walking `score_psm` here
+                // only to subtract it out again was one of the two full cache walks
+                // per emitted PSM (competitive plan item 4.3). `cleavage_credit_for`
+                // mirrors `compute_cleavage_credit` branch for branch.
+                let credit = cleavage_credit_for(cand, enz, aa_set_for_scoring) as f32;
                 features.rank_score_float = score_psm_float(
                     ss, &cand.peptide, scorer, psm.charge_used, fragment_tolerance_da,
-                ) + (psm.score - rounded_node);
+                ) + credit;
                 features.strong_score = fuse_strong_score(&StrongScoreInputs {
                     intensity_signal: features.intensity_signal,
                     chance_match_surprise: features.chance_match_surprise,

@@ -1,5 +1,14 @@
 //! HIGH-RES glyco serve-path golden.
 //!
+//! REGENERATED 2026-09-03 when the peptide-first RETRIEVAL window became the glyco
+//! ppm tolerance on high-resolution MS2 (it had inherited the rank model's 0.5 Da).
+//! Verified before copying: same 120 scans, all 120 winning peptides identical, 0
+//! decoy winners before and after, header identical; only the five per-spectrum
+//! competition statistics moved (RawScore, TailorScore, DeltaRankScore,
+//! CandidateRankEntropy, ListwiseScoreGap), which is the signature of a smaller
+//! candidate pool and nothing else. Measured on the benchmarks: 7x faster with
+//! identifications neutral (mouse 3198 vs 3183 correct; plasma 399 vs 380).
+//!
 //! Companion to `glyco_golden.rs`, which guards the LOW-RES path. This one exists
 //! because an MGF fixture *cannot* reach the high-res branch: selecting a high-res
 //! model for MGF requires `--fragment-tol-ppm`, which calls

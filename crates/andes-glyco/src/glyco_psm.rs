@@ -55,6 +55,53 @@ pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 /// c/z hyperscore is 0.0 there), so this is byte-identical on the closed-HCD path.
 pub const GLYCO_GP_CZ_DEFAULT: f32 = 15.0;
 
+/// Assign a split id to every backbone mass by single-linkage clustering within
+/// `tol_ppm`: masses sorted ascending start a new split whenever the gap to the
+/// previous mass exceeds the tolerance at that mass. Returns one id per input in
+/// input order; ids are dense from 0 in ascending-mass order.
+///
+/// WHY clustering and not a grid. The first split key divided the mass by a
+/// mass-PROPORTIONAL tolerance, which is the constant `1/ppm` at every mass, so the
+/// whole lattice collapsed into one split (caught only because the emitted split
+/// count was constant 1 on a fixture holding 123). Its replacement, a fixed grid in
+/// log-mass space, put two masses 5 ppm apart in different buckets whenever they
+/// straddled a boundary (about a quarter of such pairs at a 20 ppm width) and at
+/// `tol_ppm = 0` saturated back into one bucket. Clustering has neither edge.
+/// Non-finite or non-positive masses each get their own split.
+pub fn split_ids_by_clustering(masses: &[f64], tol_ppm: f64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..masses.len()).collect();
+    order.sort_by(|&a, &b| masses[a].total_cmp(&masses[b]));
+    let mut ids = vec![0usize; masses.len()];
+    let mut current = 0usize;
+    let mut prev: Option<f64> = None;
+    for &i in &order {
+        let m = masses[i];
+        let joins = match prev {
+            Some(p) if m.is_finite() && p.is_finite() && m > 0.0 => {
+                (m - p).abs() <= m * tol_ppm.max(0.0) * 1e-6
+            }
+            _ => false,
+        };
+        if prev.is_some() && !joins {
+            current += 1;
+        }
+        ids[i] = current;
+        prev = Some(m);
+    }
+    ids
+}
+
+/// Default weight `G` on the per-candidate GLYCAN log-likelihood ratio (Y-ion tree
+/// plus oxonium-composition consistency) when a glycan-LLR path is enabled.
+///
+/// 1.0 because the term is already a log-odds: it shares the natural-log scale of
+/// the peptide rank LLR, so no rescaling constant is justified before the weight is
+/// fitted. pGlyco fits the analogous backbone/glycan balance by ranking SVM and
+/// reports `Score_GP = 0.35*Score_G + 0.65*Score_P` (Liu et al., Nat Commun 8:438,
+/// 2017), which is the measurement this default is a placeholder for. Inert unless
+/// `--glyco-split-election` or a glycan-LLR column flag is set.
+pub const GLYCO_GP_G_DEFAULT: f32 = 1.0;
+
 /// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
 /// Higher is better.
 ///
@@ -124,11 +171,21 @@ pub fn glyco_gp_fused_score_with_matches(
 ///
 /// - `y_primary=false`: `rank_score` DESC, then `y_ladder` DESC.
 /// - `y_primary=true` (default): `y_ladder` DESC, then `rank_score` DESC.
-pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_primary: bool) -> Ordering {
+pub fn collapse_cmp(
+    a_rank: f32,
+    a_ladder: f32,
+    b_rank: f32,
+    b_ladder: f32,
+    y_primary: bool,
+) -> Ordering {
     if y_primary {
-        a_ladder.total_cmp(&b_ladder).then(a_rank.total_cmp(&b_rank))
+        a_ladder
+            .total_cmp(&b_ladder)
+            .then(a_rank.total_cmp(&b_rank))
     } else {
-        a_rank.total_cmp(&b_rank).then(a_ladder.total_cmp(&b_ladder))
+        a_rank
+            .total_cmp(&b_rank)
+            .then(a_ladder.total_cmp(&b_ladder))
     }
 }
 
@@ -157,6 +214,21 @@ pub fn collapse_cmp(a_rank: f32, a_ladder: f32, b_rank: f32, b_ladder: f32, y_pr
 ///     partial_glycan_by: 0.0,
 ///     y0y1_anchor_score: 0.0,
 ///     sialic_consistency: 0.0,
+///     y_tree_llr: 0.0,
+///     y_tree_hit_frac: 0.0,
+///     y_tree_high_prior_missing: 0,
+///     y_tree_llr_decoy: 0.0,
+///     y_tree_hit_frac_decoy: 0.0,
+///     y_tree_high_prior_missing_decoy: 0,
+///     oxonium_comp_llr: 0.0,
+///     rank_score_masked: 0.0,
+///     masked_peak_count: 0,
+///     chance_llr_masked: 0.0,
+///     explained_masked: 0.0,
+///     delta_backbone: 0.0,
+///     delta_glycan: 0.0,
+///     delta_peptide: 0.0,
+///     n_splits_considered: 0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
 ///     is_transferred: false,
@@ -226,6 +298,83 @@ pub struct GlycoPsmKey {
     /// sialic content on one spectrum. 0.0 when no glycan is resolved.
     pub sialic_consistency: f32,
     /// Number of core-Y ions matched in the spectrum.
+    /// Composition-specific Y-ion-TREE evidence (`--glyco-y-tree`), all zero when the
+    /// flag is off or the hit carries no composition.
+    ///
+    /// The shipped `y_ladder_intensity_score` walks ONE linear chain that appends
+    /// fucose after every antenna, so a core-fucosylated composition can never claim
+    /// the Y1+Fuc / Y2+Fuc rungs that are its own strongest diagnostic ions, while an
+    /// afucosylated isobar loses nothing. The tree predicts the nodes a composition's
+    /// topology actually permits and scores hits AND misses, in the form the field
+    /// converged on (Polasky et al., Mol Cell Proteomics 2022; Liu et al., Nat Commun
+    /// 8:438, 2017).
+    pub y_tree_llr: f32,
+    /// Fraction of the composition's OWN predicted tree nodes that matched, in [0,1].
+    /// Size-free companion to `y_tree_llr`, which is not zero-mean in composition size.
+    pub y_tree_hit_frac: f32,
+    /// Count of MISSED nodes whose class prior is >= 0.5 (Y0 and the trimannosyl core).
+    /// A positive value alongside a positive `y_tree_llr` is the "fits by antenna
+    /// coincidence" signature — a composition accumulating score from peripheral nodes
+    /// while missing the ions every true N-glycan produces.
+    pub y_tree_high_prior_missing: u16,
+    /// Mass-shifted-Y decoy twin of `y_tree_llr` on the SAME node set and the SAME
+    /// spectrum, so the pair is exchangeable. Emitted as a GAP feature rather than a
+    /// separate PIN row: the previous glycan-decoy row copied 45 of ~48 columns
+    /// verbatim from its target, leaving Percolator no direction to find.
+    pub y_tree_llr_decoy: f32,
+    /// The twin's own `hit_frac` / `high_prior_missing`, so a glycan-decoy ROW reports
+    /// the decoy's completeness, not a copy of its target's.
+    pub y_tree_hit_frac_decoy: f32,
+    pub y_tree_high_prior_missing_decoy: u16,
+    /// Per-candidate oxonium-COMPOSITION log-likelihood (`--glyco-oxonium-llr`), 0.0
+    /// when off or composition-less. The shipped `oxonium_summed_frac` is a spectrum
+    /// constant (measured: one distinct value per 600 candidates), and
+    /// `sialic_consistency` only flips the sign of observed intensity, so neither can
+    /// penalise a composition that CLAIMS a monosaccharide whose diagnostic ion is
+    /// absent. This term does, per class, with the fucose asymmetry the ion chemistry
+    /// requires.
+    pub oxonium_comp_llr: f32,
+    /// Rank LLR of the winning peptide re-scored on the PEPTIDE-CHANNEL spectrum
+    /// (`--glyco-rank-masked`), i.e. after oxonium and this backbone's Y-ladder m/z are
+    /// removed and per-peak ranks, base peak and noise density are recomputed on the
+    /// survivors. 0.0 when the flag is off.
+    ///
+    /// The rank model is trained on unmodified tryptic peptides, where b/y ions occupy
+    /// the top intensity ranks. On a glycopeptide spectrum the most intense peaks are
+    /// glycan-derived, so every backbone ion is ranked 20-40 places lower than the model
+    /// expects. The mask depends on the backbone MASS only, never on the sequence, so it
+    /// is identical for a target and its reversed decoy.
+    pub rank_score_masked: f32,
+    /// Peaks the mask removed. Distinguishes "mask applied, nothing matched" from "mask
+    /// never wired" — the silent-defect shape the repo's path-parity guards exist for.
+    pub masked_peak_count: u32,
+    /// Peptide-channel backbone chance LLR (`--glyco-chance-llr-masked`), 0.0 when
+    /// off: mean over predicted b/y (ion, charge) pairs of the matched peak's
+    /// intensity-weighted local-density surprise on the SAME masked spectrum as
+    /// `rank_score_masked`, with glycosite-spanning ions scored as the max over the
+    /// bare / +HexNAc / +2HexNAc stub forms and z>=3 fragments isotope-confirmed.
+    pub chance_llr_masked: f32,
+    /// Fraction of predicted b/y (ion, charge) pairs matched under the same rules.
+    pub explained_masked: f32,
+    /// Election margins (`--glyco-split-election`), 0.0 otherwise. Each names ONE
+    /// axis, unlike the shipped `DeltaRankScore`, whose runner-up may be a different
+    /// peptide, a different composition, or a different backbone mass — a conflation
+    /// that is why the curated column set drops it.
+    ///
+    /// `delta_backbone` is the elected split's multiplicity-controlled score minus the
+    /// runner-up SPLIT's. This is the axis the forensics point at: 96.9% of decoy
+    /// winners on contested scans sit at a different backbone mass than the truth.
+    pub delta_backbone: f32,
+    /// Winner minus the best competitor carrying a DIFFERENT composition at the same
+    /// backbone mass — the glycoform-axis margin, which no shipped column reports.
+    pub delta_glycan: f32,
+    /// Winner minus the best competitor carrying a different PEPTIDE at the same
+    /// backbone mass.
+    pub delta_peptide: f32,
+    /// Number of distinct backbone-mass splits that reached the election. A dense
+    /// split lattice is the plasma failure mechanism: large glycans make many
+    /// compositions fit the precursor, so some decoy always occupies one of them.
+    pub n_splits_considered: u32,
     pub core_y_hits: u8,
     /// Pre-computed monoisotopic mass of the glycan (0.0 when `glycan` is None).
     pub glycan_mass: f64,
@@ -298,12 +447,18 @@ mod tests {
         let wrong = glyco_gp_fused_score(2.0, 0.06, 0.0, 0.0, k, j, h); //  2 + 0.6 =  2.6
         // Legacy y_primary would pick `wrong` (0.06 > 0.05); gp fusion rescues truth.
         assert!(collapse_cmp(15.0, 0.05, 2.0, 0.06, true) == Ordering::Less);
-        assert!(truth > wrong, "a real b/y-rank advantage rescues truth under gp");
+        assert!(
+            truth > wrong,
+            "a real b/y-rank advantage rescues truth under gp"
+        );
         // A GENUINELY large ladder difference (strong glycan-Y evidence) still wins —
         // at the round-2 K=10 the ladder no longer dominates a small edge (by design),
         // but a real ladder gap does. (2 + 10·2.0 = 22 > 15.5.)
         let strong_glycan = glyco_gp_fused_score(2.0, 2.0, 0.0, 0.0, k, j, h); // 2 + 20 = 22
-        assert!(strong_glycan > truth, "a large ladder difference still wins under gp");
+        assert!(
+            strong_glycan > truth,
+            "a large ladder difference still wins under gp"
+        );
     }
 
     #[test]
@@ -314,10 +469,15 @@ mod tests {
         // truth: rank 8, ladder 0.1, core-Y 6 ; winner: rank 12, ladder 0.1, core-Y 2
         let truth = glyco_gp_fused_score(8.0, 0.1, 6.0, 0.0, k, j, h); // 8 + 5 + 30 = 43
         let winner = glyco_gp_fused_score(12.0, 0.1, 2.0, 0.0, k, j, h); // 12 + 5 + 10 = 27
-        assert!(truth > winner, "core-Y hit count rescues the coverage-strong truth");
+        assert!(
+            truth > winner,
+            "core-Y hit count rescues the coverage-strong truth"
+        );
         // Without the count term (j=0) the higher-rank winner would win.
-        assert!(glyco_gp_fused_score(8.0, 0.1, 6.0, 0.0, k, 0.0, h)
-            < glyco_gp_fused_score(12.0, 0.1, 2.0, 0.0, k, 0.0, h));
+        assert!(
+            glyco_gp_fused_score(8.0, 0.1, 6.0, 0.0, k, 0.0, h)
+                < glyco_gp_fused_score(12.0, 0.1, 2.0, 0.0, k, 0.0, h)
+        );
     }
 
     #[test]
@@ -349,6 +509,21 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.4,
             sialic_consistency: 0.1,
+            y_tree_llr: 0.0,
+            y_tree_hit_frac: 0.0,
+            y_tree_high_prior_missing: 0,
+            y_tree_llr_decoy: 0.0,
+            y_tree_hit_frac_decoy: 0.0,
+            y_tree_high_prior_missing_decoy: 0,
+            oxonium_comp_llr: 0.0,
+            rank_score_masked: 0.0,
+            masked_peak_count: 0,
+            chance_llr_masked: 0.0,
+            explained_masked: 0.0,
+            delta_backbone: 0.0,
+            delta_glycan: 0.0,
+            delta_peptide: 0.0,
+            n_splits_considered: 0,
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
@@ -391,6 +566,21 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.7,
             sialic_consistency: 0.2,
+            y_tree_llr: 0.0,
+            y_tree_hit_frac: 0.0,
+            y_tree_high_prior_missing: 0,
+            y_tree_llr_decoy: 0.0,
+            y_tree_hit_frac_decoy: 0.0,
+            y_tree_high_prior_missing_decoy: 0,
+            oxonium_comp_llr: 0.0,
+            rank_score_masked: 0.0,
+            masked_peak_count: 0,
+            chance_llr_masked: 0.0,
+            explained_masked: 0.0,
+            delta_backbone: 0.0,
+            delta_glycan: 0.0,
+            delta_peptide: 0.0,
+            n_splits_considered: 0,
             core_y_hits: 5,
             backbone_mass: 1500.0,
             is_transferred: false,
@@ -422,6 +612,21 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
+            y_tree_llr: 0.0,
+            y_tree_hit_frac: 0.0,
+            y_tree_high_prior_missing: 0,
+            y_tree_llr_decoy: 0.0,
+            y_tree_hit_frac_decoy: 0.0,
+            y_tree_high_prior_missing_decoy: 0,
+            oxonium_comp_llr: 0.0,
+            rank_score_masked: 0.0,
+            masked_peak_count: 0,
+            chance_llr_masked: 0.0,
+            explained_masked: 0.0,
+            delta_backbone: 0.0,
+            delta_glycan: 0.0,
+            delta_peptide: 0.0,
+            n_splits_considered: 0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
@@ -442,15 +647,41 @@ mod tests {
     #[test]
     fn glyco_psm_key_defaults_to_non_transferred() {
         let key = GlycoPsmKey {
-            spectrum_idx: 0, glycan: None, glycan_source: Source::Db,
-            oxonium_summed_frac: 0.0, n_core_oxonium_ions: 0,
+            spectrum_idx: 0,
+            glycan: None,
+            glycan_source: Source::Db,
+            oxonium_summed_frac: 0.0,
+            n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_hit_frac: 0.0,
-            y_hit_frac_decoy: 0.0, y_ladder_decoy_score: 0.0, partial_glycan_by: 0.0,
-            y0y1_anchor_score: 0.0, sialic_consistency: 0.0, core_y_hits: 0,
-            glycan_mass: 0.0, backbone_mass: 0.0,
-            is_transferred: false, transfer_graph_support: 0,
-            transfer_seed_score: 0.0, transfer_rt_delta: 0.0, transfer_ungated: false,
+            y_hit_frac_decoy: 0.0,
+            y_ladder_decoy_score: 0.0,
+            partial_glycan_by: 0.0,
+            y0y1_anchor_score: 0.0,
+            sialic_consistency: 0.0,
+            y_tree_llr: 0.0,
+            y_tree_hit_frac: 0.0,
+            y_tree_high_prior_missing: 0,
+            y_tree_llr_decoy: 0.0,
+            y_tree_hit_frac_decoy: 0.0,
+            y_tree_high_prior_missing_decoy: 0,
+            oxonium_comp_llr: 0.0,
+            rank_score_masked: 0.0,
+            masked_peak_count: 0,
+            chance_llr_masked: 0.0,
+            explained_masked: 0.0,
+            delta_backbone: 0.0,
+            delta_glycan: 0.0,
+            delta_peptide: 0.0,
+            n_splits_considered: 0,
+            core_y_hits: 0,
+            glycan_mass: 0.0,
+            backbone_mass: 0.0,
+            is_transferred: false,
+            transfer_graph_support: 0,
+            transfer_seed_score: 0.0,
+            transfer_rt_delta: 0.0,
+            transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
             cz_explained: 0.0,
@@ -458,5 +689,64 @@ mod tests {
         };
         assert!(!key.is_transferred);
         assert_eq!(key.transfer_graph_support, 0);
+    }
+}
+
+#[cfg(test)]
+mod split_id_tests {
+    use super::split_ids_by_clustering;
+
+    /// The defect the first key had: `mass / (mass * ppm)` is the constant `1/ppm`,
+    /// so every backbone mass in a scan collapsed into one split.
+    #[test]
+    fn distinct_masses_get_distinct_splits() {
+        let ids = split_ids_by_clustering(&[1000.0, 1500.0, 2000.0, 2500.0, 3000.0], 20.0);
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    /// Masses inside one tolerance share a split REGARDLESS of where they fall: the
+    /// grid key failed this for pairs straddling a bucket boundary.
+    #[test]
+    fn masses_within_tolerance_always_share_a_split() {
+        let tol = 20.0;
+        for k in 0..2000 {
+            let m = 1000.0 + k as f64 * 1.001;
+            let within = m * (1.0 + 5e-6);
+            let ids = split_ids_by_clustering(&[within, m], tol);
+            assert_eq!(ids[0], ids[1], "5 ppm apart at {m} Da split into two");
+        }
+    }
+
+    /// Resolution is constant in RELATIVE terms: 40 ppm separates at 1000 and 4000 Da.
+    #[test]
+    fn resolution_is_constant_in_relative_terms() {
+        for &m in &[1000.0_f64, 4000.0] {
+            let ids = split_ids_by_clustering(&[m, m * (1.0 + 40e-6)], 20.0);
+            assert_ne!(ids[0], ids[1], "40 ppm apart at {m} Da should be two splits");
+        }
+    }
+
+    /// Ids are assigned in input order but numbered in ascending-mass order, and
+    /// chaining is single-linkage: a-b within tol and b-c within tol => one split.
+    #[test]
+    fn input_order_preserved_and_single_linkage_chains() {
+        let m = 2000.0;
+        let ids = split_ids_by_clustering(&[m * (1.0 + 30e-6), m, m * (1.0 + 15e-6)], 20.0);
+        assert_eq!(ids, vec![0, 0, 0]);
+        let ids = split_ids_by_clustering(&[3000.0, 1000.0, 2000.0], 20.0);
+        assert_eq!(ids, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn degenerate_inputs_do_not_panic_or_collapse() {
+        assert!(split_ids_by_clustering(&[], 20.0).is_empty());
+        let ids = split_ids_by_clustering(&[0.0, -1.0, 1.0, f64::NAN, 1500.0], 20.0);
+        let mut uniq = ids.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ids.len(), "degenerate masses merged: {ids:?}");
+        // Zero tolerance: only EXACT duplicates share a split, never everything.
+        let ids = split_ids_by_clustering(&[1000.0, 1000.0, 1000.001], 0.0);
+        assert_eq!(ids, vec![0, 0, 1]);
     }
 }

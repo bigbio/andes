@@ -34,16 +34,14 @@ def parse(blob):
         trees.append(dict(feature=feat, threshold=thr, left=left, right=right, value=val, default_left=dl))
     return nfeat, flags, trees
 
-def to_lgbm(trees, nfeat):
-    """LightGBM model text. Internal nodes get indices 0..num_leaves-2 in preorder of OUR
-    node array; leaves get ~index (LightGBM encodes a leaf child as -(leaf_idx+1))."""
-    out = ["tree", "version=v4", "num_class=1", "num_tree_per_iteration=1", "label_index=0",
-           "max_feature_idx=%d" % (nfeat - 1), "objective=regression",
-           "feature_names=" + " ".join("f%d" % i for i in range(nfeat)),
-           "feature_infos=" + " ".join("[-inf:inf]" for _ in range(nfeat)),
-           ""]  # no tree_sizes line: LightGBM then splits on "Tree=" sequentially; a
-                #  zero-filled tree_sizes made it mis-locate every tree after the first
-    for ti, t in enumerate(trees):
+def to_lgbm(trees, nfeat, lo=None, hi=None):
+    """LightGBM model text, mirroring `Booster.model_to_string()` line for line (lleaves'
+    parser is strict about it): a real `tree_sizes=` line (byte length of each tree block,
+    which is how LightGBM locates trees - a zero-filled line mis-located every tree after
+    the first, and omitting it breaks lleaves), one blank line after each tree, the
+    feature_importances and parameters sections. Internal nodes are numbered in our node-
+    array order; a leaf child is encoded as -(leaf_idx+1)."""
+    def tree_block(ti, t):
         n = len(t["feature"])
         internal = [i for i in range(n) if t["feature"][i] >= 0]
         leaves = [i for i in range(n) if t["feature"][i] < 0]
@@ -51,26 +49,38 @@ def to_lgbm(trees, nfeat):
         lmap = {node: k for k, node in enumerate(leaves)}
         def child(node):
             return imap[node] if t["feature"][node] >= 0 else -(lmap[node] + 1)
-        if not internal:  # single-leaf tree
-            out += ["Tree=%d" % ti, "num_leaves=1", "num_cat=0", "leaf_value=%.9g" % t["value"][leaves[0]], "shrinkage=1", ""]
-            continue
-        out += ["Tree=%d" % ti, "num_leaves=%d" % len(leaves), "num_cat=0",
-                "split_feature=" + " ".join(str(t["feature"][i]) for i in internal),
-                "split_gain=" + " ".join("0" for _ in internal),
-                "threshold=" + " ".join("%.9g" % t["threshold"][i] for i in internal),
-                # bit1 (=2): default_left; bits 2-3 (=8): missing type NaN
-                "decision_type=" + " ".join(str(8 | (2 if t["default_left"][i] else 0)) for i in internal),
-                "left_child=" + " ".join(str(child(t["left"][i])) for i in internal),
-                "right_child=" + " ".join(str(child(t["right"][i])) for i in internal),
-                "leaf_value=" + " ".join("%.9g" % t["value"][i] for i in leaves),
-                "leaf_weight=" + " ".join("1" for _ in leaves),
-                "leaf_count=" + " ".join("1" for _ in leaves),
-                "internal_value=" + " ".join("0" for _ in internal),
-                "internal_weight=" + " ".join("1" for _ in internal),
-                "internal_count=" + " ".join("1" for _ in internal),
-                "is_linear=0", "shrinkage=1", ""]
-    out += ["end of trees", "", "feature_importances:", "", "parameters:", "[objective: regression]", "end of parameters", "", "pandas_categorical:null"]
-    return "\n".join(out) + "\n"
+        if not internal:
+            body = ["Tree=%d" % ti, "num_leaves=1", "num_cat=0", "leaf_value=%.17g" % t["value"][leaves[0]], "is_linear=0", "shrinkage=1"]
+        else:
+            body = ["Tree=%d" % ti, "num_leaves=%d" % len(leaves), "num_cat=0",
+                    "split_feature=" + " ".join(str(t["feature"][i]) for i in internal),
+                    "split_gain=" + " ".join("0" for _ in internal),
+                    "threshold=" + " ".join("%.17g" % t["threshold"][i] for i in internal),
+                    # bit1 (=2): default_left; bits 2-3 (=8): missing type NaN
+                    "decision_type=" + " ".join(str(8 | (2 if t["default_left"][i] else 0)) for i in internal),
+                    "left_child=" + " ".join(str(child(t["left"][i])) for i in internal),
+                    "right_child=" + " ".join(str(child(t["right"][i])) for i in internal),
+                    "leaf_value=" + " ".join("%.17g" % t["value"][i] for i in leaves),
+                    "leaf_weight=" + " ".join("1" for _ in leaves),
+                    "leaf_count=" + " ".join("1" for _ in leaves),
+                    "internal_value=" + " ".join("0" for _ in internal),
+                    "internal_weight=" + " ".join("1" for _ in internal),
+                    "internal_count=" + " ".join("1" for _ in internal),
+                    "is_linear=0", "shrinkage=1"]
+        return "\n".join(body) + "\n\n\n"
+    blocks = [tree_block(ti, t) for ti, t in enumerate(trees)]
+    if lo is None:
+        infos = " ".join("[-1e300:1e300]" for _ in range(nfeat))
+    else:
+        infos = " ".join("[%.17g:%.17g]" % (lo[f], hi[f]) for f in range(nfeat))
+    head = ["tree", "version=v4", "num_class=1", "num_tree_per_iteration=1", "label_index=0",
+            "max_feature_idx=%d" % (nfeat - 1), "objective=regression",
+            "feature_names=" + " ".join("Column_%d" % i for i in range(nfeat)),
+            "feature_infos=" + infos,
+            "tree_sizes=" + " ".join(str(len(b.encode())) for b in blocks), "", ""]
+    tail = ["end of trees", "", "feature_importances:", "", "parameters:", "[boosting: gbdt]", "[objective: regression]",
+            "[num_leaves: 64]", "end of parameters", "", "pandas_categorical:null", ""]
+    return "\n".join(head) + "".join(blocks) + "\n".join(tail)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -87,8 +97,7 @@ def main():
     nfeat, flags, trees = parse(blob)
     os.makedirs(a.out, exist_ok=True)
     open(os.path.join(a.out, "frag.agbd"), "wb").write(bytes(blob))
-    open(os.path.join(a.out, "frag_lgbm.txt"), "w").write(to_lgbm(trees, nfeat))
-    # per-feature threshold ranges -> realistic rows
+        # per-feature threshold ranges -> realistic rows
     lo = np.full(nfeat, np.inf); hi = np.full(nfeat, -np.inf)
     for tr in trees:
         for f, th in zip(tr["feature"], tr["threshold"]):
@@ -99,6 +108,7 @@ def main():
         span = hi[f] - lo[f]; lo[f] -= 0.1 * span + 1e-3; hi[f] += 0.1 * span + 1e-3
     rng = np.random.default_rng(a.seed)
     rows = (lo + rng.random((a.rows, nfeat)) * (hi - lo)).astype("<f4")
+    open(os.path.join(a.out, "frag_lgbm.txt"), "w").write(to_lgbm(trees, nfeat, lo, hi))
     rows.tofile(os.path.join(a.out, "rows.f32"))
     leaves = [sum(1 for f in tr["feature"] if f < 0) for tr in trees]
     meta = dict(model_id=a.model_id, column=a.column, n_trees=len(trees), n_nodes=sum(len(t["feature"]) for t in trees),

@@ -368,19 +368,50 @@ struct SearchArgs {
     #[arg(long = "model", hide = true)]
     model_id_override: Option<String>,
 
-    /// Evaluate only the first N trees of each GBDT ensemble (0 = all).
+    /// Evaluate only the first N trees of each GBDT ensemble (0 = all trees).
     ///
     /// Applies to BOTH shipped ensembles — fragment-intensity and rich-ion — which are
-    /// of comparable size and are each walked per fragment per candidate.
+    /// of comparable size and are each walked per fragment per candidate. `Tree::eval`
+    /// on them is the single hottest operation in a standard search (77% of self time
+    /// in a native profile). The GBDT is additive, so the early trees carry the signal
+    /// and later ones only refine it.
     ///
-    /// `Tree::eval` on these ensembles is the single hottest operation in the search.
-    /// Truncating the ensemble trades prediction fidelity for speed: the GBDT is
-    /// additive, so the first trees carry the bulk of the signal and later ones
-    /// refine it. UNLIKE the per-candidate de-duplication (which is byte-identical),
-    /// this CHANGES the predicted intensities and therefore the emitted PIN feature
-    /// values, so it can move identifications. Leave at 0 unless you have measured
-    /// the identification cost on your own data.
-    #[arg(long = "gbdt-max-trees", default_value_t = 0usize)]
+    /// WHAT TRUNCATION ACTUALLY AFFECTS, by score mode -- these differ, and conflating
+    /// them is a documented past error:
+    ///   `rank` (low-res default): the ensembles feed PIN feature columns only, never
+    ///     the ranking score, so the emitted PSM row SET is byte-identical at every K
+    ///     (verified: UPS1 emitted 382,703 rows at K=0, 100 and 25 alike).
+    ///   `strong` (high-res default): `reorder_by_strong_score` ranks by StrongScore,
+    ///     which consumes `intensity_signal` and therefore the frag-intensity ensemble.
+    ///     Truncation there CHANGES WHICH PEPTIDE WINS, not just feature values
+    ///     (verified: Astral emitted 1,214,417 / 1,214,757 / 1,214,892 / 1,215,148 rows
+    ///     at K=50 / 25 / 10 / 1). The identification counts below are still flat at
+    ///     K=100, but that is an empirical result about yield, NOT evidence that the
+    ///     model is inert to selection.
+    ///
+    /// DEFAULT 100 for standard search, measured, not guessed. Five Percolator seeds
+    /// per point, identical data and protocol:
+    ///   Astral high-res: 300 trees 38,437 PSMs @1% FDR; 100 trees 38,444; 50 trees
+    ///     38,357; 25 trees 38,094; 10 trees 37,769; 1 tree 37,533.
+    ///   UPS1 low-res (yeast target + E. coli entrapment): 300 trees 15,813 PSMs at
+    ///     3.39% true FDP; 100 trees 15,832 at 3.44%; 25 trees 15,779 at 3.61%.
+    ///     (FDP = entrapment_hits * (1 + T/E) / n with T/E = 2.419 measured over the
+    ///     searchable tryptic space, 734,280 yeast vs 303,537 E. coli peptides. An
+    ///     earlier revision of this comment printed ~2% here from a 1:1 assumption
+    ///     that does not hold for this FASTA; the ARM-TO-ARM comparison is unaffected
+    ///     because the scale factor is common to all three.)
+    /// So the last 200 trees buy nothing on either resolution class while costing
+    /// 33–41% of wall time, and true error is unchanged. Below ~50 the loss becomes
+    /// real. (For scale: even ONE tree still beats Comet by ~19% on Astral, so the
+    /// whole ensemble is worth ~2% of identifications for 77% of the runtime.)
+    ///
+    /// GLYCO IS EXEMPT: under `--glyco` the ensembles are ~0.3% of wall time, so
+    /// truncation would trade identification fidelity for nothing. Pass the flag
+    /// explicitly to truncate there anyway.
+    ///
+    /// This CHANGES predicted intensities and therefore the emitted PIN feature
+    /// values; `--gbdt-max-trees 0` restores the full ensembles.
+    #[arg(long = "gbdt-max-trees", default_value_t = 100usize)]
     gbdt_max_trees: usize,
 
     /// Path to a trained intensity model parquet (`andes train-intensity` output).
@@ -1987,6 +2018,13 @@ mod format_routing_tests {
 /// This warns rather than aborts: the estimate is a linear fit, machines differ, and
 /// refusing to start a run that would have succeeded is worse than a noisy warning.
 /// Only Linux exposes MemAvailable cheaply; elsewhere the check is skipped.
+/// True when `flag` appears literally in the process arguments. Used to tell a
+/// user-supplied value from a clap default, where the default itself is
+/// context-dependent (see `--gbdt-max-trees`, which is exempt under `--glyco`).
+fn arg_present(flag: &str) -> bool {
+    std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+}
+
 fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
     const BYTES_PER_CANDIDATE_PLAIN: f64 = 665.0;
     const BYTES_PER_CANDIDATE_GLYCO: f64 = 940.0;
@@ -2320,8 +2358,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // GBDT (~799 KB) *and* a rich-ion GBDT (~842 KB) of comparable size, each
     // walked per fragment per candidate, so truncating only the first would
     // leave about half the ensemble cost untouched.
-    if cli.gbdt_max_trees > 0 {
-        let k = cli.gbdt_max_trees;
+    // Glyco keeps the full ensembles: the glyco path is candidate-generation bound
+    // (the ensembles profile at ~0.3% of its wall time), so truncating there would
+    // give up prediction fidelity for no speed. An explicit flag still applies.
+    let gbdt_k = if cli.glyco && !arg_present("--gbdt-max-trees") { 0 } else { cli.gbdt_max_trees };
+    if gbdt_k > 0 {
+        let k = gbdt_k;
         let truncate = |slot: &mut Option<Arc<scoring_crate::gbdt_eval::GbdtPeakModel>>, name: &str| {
             if let Some(g) = slot.as_ref() {
                 let before = g.trees.len();
@@ -3457,7 +3499,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "glyco retrieval window: {ppm} ppm ({})",
                 if cli.glyco_retrieval_tol_ppm.is_some() { "--glyco-retrieval-tol-ppm" } else { "high-resolution acquisition" }
             ),
-            (None, None) => eprintln!("glyco retrieval window: 0.5 Da (low-resolution acquisition)"),
+            (None, None) => eprintln!(
+                // The Da fallback builds the index with the resolved MODEL fragment
+                // tolerance, not a constant, so naming a number here would put a
+                // fabricated provenance value into the benchmark record.
+                "glyco retrieval window: model fragment tolerance in Da (low-resolution acquisition)"
+            ),
         }
         let glyco_cfg = search::glyco_search::GlycoConfig {
             gp_k: cli.glyco_gp_k,

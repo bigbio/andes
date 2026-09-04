@@ -102,10 +102,18 @@ def space_ratio(path):
         # their correction factor came out empty, and every run silently reported
         # `entrapment FDP: UNKNOWN` / `NO VERDICT` on a database that plainly had
         # entrapment proteins in it.
+        # ORDER MATTERS: exclude decoys FIRST. A decoy built from an entrapment
+        # protein keeps the tag inside the accession (">XXX_sp|ENTRAP_Q9XXXX|...");
+        # testing "ENTRAP_" before the decoy prefixes counted those decoys as
+        # entrapment SPACE, which inflates the denominator that sizes the
+        # correction factor and therefore reports every FDP too LOW -- a run would
+        # silently pass a verdict it should fail.
+        if hdr.startswith(">XXX_") or hdr.startswith(">DECOY"):
+            return
         if "ENTRAP_" in hdr:
             e_prot += 1
             e_seq += n
-        elif not hdr.startswith(">XXX_") and not hdr.startswith(">DECOY"):
+        else:
             s_prot += 1
             s_seq += n
 

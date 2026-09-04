@@ -243,7 +243,7 @@ impl Default for GlycoConfig {
 use andes_glyco::hybrid::{
     hybrid_candidates_presolved, solve_backbones_for_charge, BackboneHit, Source,
 };
-use andes_glyco::oxonium::{oxonium_gate, sialic_consistency};
+use andes_glyco::oxonium::{oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FRAC};
 use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
 
 use crate::glyco_fragment_index::FragmentIndex;
@@ -1434,7 +1434,7 @@ fn score_spectrum_glyco(
                 if gen_is_etd { ctx.etd_scorer.unwrap_or(scorer) } else { scorer };
 
             // Oxonium evidence for the whole spectrum (charge-independent).
-            let ox_ev = oxonium_gate(gen_peaks, 0.10, tol_ppm);
+            let ox_ev = oxonium_gate(gen_peaks, OXONIUM_GATE_MIN_FRAC, tol_ppm);
             // Per-class diagnostic-oxonium intensities, computed ONCE per spectrum on
             // the same peaks as the gate. The per-CANDIDATE term consumes this profile;
             // the profile itself is a spectrum constant and carries no candidate
@@ -3413,7 +3413,7 @@ pub fn glyco_search_run(
                 return None;
             }
             // Transfer only to glyco-plausible (oxonium-positive) spectra.
-            if !oxonium_gate(&spec.peaks, 0.10, tol_ppm).fired {
+            if !oxonium_gate(&spec.peaks, OXONIUM_GATE_MIN_FRAC, tol_ppm).fired {
                 return None;
             }
             // RT gate: an acceptor without an RT cannot be co-elution-checked, so

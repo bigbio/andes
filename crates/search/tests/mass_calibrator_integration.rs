@@ -1,7 +1,8 @@
 //! Integration tests for the MassCalibrator pre-pass.
 //!
-//! Closes the "no isolated cal integration test" gap documented in
-//! `docs/superpowers/specs/2026-05-25-precursor-cal-ship-design.md`.
+//! Closes the "no isolated cal integration test" gap identified during the
+//! `--precursor-cal` ship review. (The design document this line used to cite was never
+//! committed to the repository, so the pointer is dropped rather than left dangling.)
 //!
 //! Asserts the contracts of each calibrator helper layer (threshold skip,
 //! mode-aware shift application, mass-correction round-trip, tightening

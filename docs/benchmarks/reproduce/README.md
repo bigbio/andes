@@ -12,7 +12,7 @@ DATA=~/andes-bench                     # anywhere with ~200 GB free for the raw 
 ```
 
 Add `glyco-mouse` or `glyco-plasma` to `fetch_spectra.sh` for the glyco datasets; those are
-run through the harness in [`../../../benchmarks/glyco/`](../../../benchmarks/glyco/)
+run through the harness in [`../glyco/`](../glyco/)
 rather than `run.sh`, because they must be pooled before Percolator.
 
 ## What each script does

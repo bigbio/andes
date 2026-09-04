@@ -1,6 +1,8 @@
 # PXD001819 benchmark inputs (public)
 
-Used by `benchmark/ci/PXD001819/run_ci.sh`; see [`benchmark/ci/README.md`](../../../../../benchmark/ci/README.md) for CI usage.
+Standalone fixture: a single scan extracted from PXD001819, kept for manual inspection.
+It was once driven by a `benchmark/ci/` harness that is no longer part of this repository;
+the current benchmark tooling lives in [`docs/benchmarks/`](../../../docs/benchmarks/README.md).
 
 ## Public data (downloaded in CI, not committed)
 

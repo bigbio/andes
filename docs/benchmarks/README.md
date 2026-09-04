@@ -51,7 +51,7 @@ fresh andes time against a competitor time from a different session is not a mea
 ## 2. Glyco
 
 Intact N-glycopeptide search (`--glyco`). The harness is
-[`../../benchmarks/glyco/`](../../benchmarks/glyco/); its README documents each script.
+[`glyco/`](glyco/); its README documents each script.
 
 **Mouse brain, PXD011533**, 6 fractions pooled, 5 Percolator seeds, entrapment-controlled
 (commit `6b37bb2c`, Codon): **4,915 ± 14 glycoPSMs**, 3,197 ± 8 backbone-correct against
@@ -124,18 +124,33 @@ for f in Frac1 Frac2 Frac3 Frac4 Frac5 Frac6; do
   andes --spectrum $f.mzML --database mouse_entrap.fasta --glyco \
         --threads 8 --output-pin $f.pin            # writes $f.glyco.pin
 done
-python3 ../../benchmarks/glyco/pool_pins.py *.glyco.pin > pooled.pin
+python3 glyco/pool_pins.py *.glyco.pin > pooled.pin
 perc pooled
-python3 ../../benchmarks/glyco/eval_yield.py pooled.t.psms
-python3 ../../benchmarks/glyco/gap_decompose.py     # per-scan, vs Byonic
+python3 glyco/eval_yield.py pooled.t.psms
+python3 glyco/gap_decompose.py     # per-scan, vs Byonic
 ```
 
 **To reproduce any of this from scratch**, see [`reproduce/`](reproduce/) — three scripts that
 pull the data from PRIDE, rebuild the databases from UniProt, and run the whole thing with no
 hardcoded paths. It also documents what will *not* reproduce exactly, and why.
 
-Per-engine configuration files are in [`configs/`](configs/); the original driver scripts in
-[`scripts/`](scripts/) still contain absolute paths from our hosts and are kept for reference only.
+## Layout
+
+    docs/benchmarks/
+      README.md      this file - current results, method, gaps
+      reproduce/     the maintained, path-independent way to run everything
+      glyco/         the glyco harness (pooling, yield, entrapment, gap decomposition)
+      configs/       per-engine parameter files
+      scripts/       historical driver scripts, kept for reference
+
+Benchmark material used to be spread across three directories -- `benchmarks/` and
+`docs/benchmarks/` in the repository, plus an unversioned `benchmark/` at the workspace
+root. They were consolidated here on 2026-09-04. Bulk spectra and third-party engine
+binaries deliberately stay outside git; the workspace-root README says what remains and
+how to re-fetch it.
+
+Many scripts under `scripts/` carry absolute paths from our hosts and predate
+`reproduce/` — prefer `reproduce/` for anything new.
 
 ---
 

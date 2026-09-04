@@ -63,7 +63,6 @@ __pycache__/
 
 # Benchmark: keep only CI scaffold, ignore heavy local artifacts.
 # Parity scripts + fixtures are local-only context; not part of the tool code.
-benchmark/*
 !benchmark/README.md
 !benchmark/ci/
 !benchmark/capture-references.sh

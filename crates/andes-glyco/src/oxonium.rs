@@ -38,6 +38,25 @@ pub fn sialic_consistency(peaks: &[(f64, f32)], comp: &GlycanComp, tol_ppm: f64)
     a + g
 }
 
+/// Default `min_frac` for [`oxonium_gate`]: the summed core-oxonium intensity must reach
+/// this fraction of the spectrum's base peak (and at least 2 core ions must be present)
+/// for a spectrum to be treated as glyco-plausible.
+///
+/// Single source of truth. This value was previously written as a bare `0.10` literal at
+/// each of the two call sites in `glyco_search`, which is the shape of a bug this codebase
+/// has already hit once: two sites that must agree, duplicated, free to drift apart (see
+/// the collapse-parity note on `glyco_gp_fused_score`).
+///
+/// MEASURED 2026-09-03, human plasma (PXD030622 R1-R3, pure-HCD): this gate is NOWHERE
+/// NEAR binding on that data. Across the truth spectra the summed oxonium fraction has a
+/// median of ~3.1 — i.e. thirty times the threshold — and the gate fires for 595/595
+/// spectra andes emitted a row for, and for 33 of the 34 truth spectra it emitted NOTHING
+/// for. So the gate is not what rejects those spectra, and raising or lowering it near
+/// 0.10 would change nothing on that dataset. It is left as a cheap guard against
+/// obviously non-glyco spectra rather than tuned. Do not "fix" it without a dataset where
+/// it actually binds.
+pub const OXONIUM_GATE_MIN_FRAC: f32 = 0.10;
+
 #[derive(Debug, Clone)]
 pub struct OxoniumEvidence {
     pub fired: bool,

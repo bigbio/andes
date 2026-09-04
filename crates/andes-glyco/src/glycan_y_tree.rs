@@ -403,6 +403,17 @@ fn shift_decoy_nodes(mut nodes: Vec<YNode>, seed: u64, target_masses: &[f64]) ->
         // lands on another TARGET node (adjacent nodes can sit 16 Da apart, e.g.
         // N2+Fuc vs N2H1) is re-drawn so the decoy never scores a real target ion.
         let original = n.neutral_add;
+        // Best-of-N by collision MARGIN. The previous form assigned `shifted` before
+        // testing `collides` and never restored it, so when all 8 draws collided the
+        // node was left at the last colliding mass -- inside DECOY_COLLISION_DA of a
+        // real target node, or below HEXNAC. Such a decoy node scores a genuine target
+        // Y ion, inflating the decoy LLR and shrinking YTreeDecoyGap exactly for the
+        // dense, large compositions (the plasma regime) where re-draws exhaust most
+        // often. Restoring `original` on exhaustion would be WORSE, not better: the
+        // original IS the target mass, a perfect collision rather than a near one. So
+        // keep the draw that lands FURTHEST from any target node and commit that.
+        let mut committed = false;
+        let mut best: Option<(f64, f64)> = None; // (margin, shifted)
         for attempt in 0..8u64 {
             let r = splitmix64(seed ^ splitmix64(i as u64 + 1 + attempt * 0x9E37));
             // 53-bit mantissa fraction -> uniform in [0,1), then 1.0..30.0 Da, sign
@@ -412,13 +423,28 @@ fn shift_decoy_nodes(mut nodes: Vec<YNode>, seed: u64, target_masses: &[f64]) ->
             let frac = (r >> 11) as f64 / (1u64 << 53) as f64;
             let mag = 1.0 + frac * 29.0;
             let shifted = if r & 1 == 0 { original + mag } else { original - mag };
-            let collides = shifted < HEXNAC
-                || target_masses
+            // Distance to the nearest target node; below HEXNAC is disqualifying, so
+            // score it as the worst possible margin rather than a real distance.
+            let margin = if shifted < HEXNAC {
+                f64::NEG_INFINITY
+            } else {
+                target_masses
                     .iter()
-                    .any(|&m| (m - shifted).abs() < DECOY_COLLISION_DA);
-            n.neutral_add = shifted;
-            if !collides {
+                    .map(|&m| (m - shifted).abs())
+                    .fold(f64::INFINITY, f64::min)
+            };
+            if margin >= DECOY_COLLISION_DA {
+                n.neutral_add = shifted;
+                committed = true;
                 break;
+            }
+            if best.is_none_or(|(bm, _)| margin > bm) {
+                best = Some((margin, shifted));
+            }
+        }
+        if !committed {
+            if let Some((_, shifted)) = best {
+                n.neutral_add = shifted;
             }
         }
     }
@@ -520,6 +546,100 @@ fn splitmix64(mut x: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)
+}
+
+#[cfg(test)]
+mod shift_decoy_tests {
+    use super::*;
+
+    fn node(mass: f64) -> YNode {
+        YNode { neutral_add: mass, class: YClass::Antenna, prior: YClass::Antenna.prior() }
+    }
+
+    fn nearest(masses: &[f64], v: f64) -> f64 {
+        masses.iter().map(|&m| (m - v).abs()).fold(f64::INFINITY, f64::min)
+    }
+
+    /// Happy path: with sparse targets a collision-free shift is found and committed.
+    #[test]
+    fn shifted_decoy_node_clears_every_target_when_a_free_slot_exists() {
+        let original = 1000.0;
+        let targets = vec![original];
+        let out = shift_decoy_nodes(vec![node(original)], 0xDEAD_BEEF, &targets);
+        let got = out[0].neutral_add;
+        assert!(got >= HEXNAC, "decoy node fell below HEXNAC: {got}");
+        assert!(
+            nearest(&targets, got) >= DECOY_COLLISION_DA,
+            "decoy node {got} sits within {DECOY_COLLISION_DA} Da of a target",
+        );
+    }
+
+    /// Replicate the 8 deterministic draws the shifter makes for node index 0, so the
+    /// test can name the candidate it must choose. Mirrors the draw arithmetic exactly.
+    fn draws(seed: u64, original: f64) -> Vec<f64> {
+        (0..8u64)
+            .map(|attempt| {
+                let r = splitmix64(seed ^ splitmix64(1 + attempt * 0x9E37));
+                let frac = (r >> 11) as f64 / (1u64 << 53) as f64;
+                let mag = 1.0 + frac * 29.0;
+                if r & 1 == 0 { original + mag } else { original - mag }
+            })
+            .collect()
+    }
+
+    /// Regression: when EVERY draw collides, the committed node must be the draw that
+    /// lands FURTHEST from any target -- not the last draw, which is what the original
+    /// code left behind because it assigned before testing and never restored.
+    ///
+    /// This asserts the exact chosen value, and first asserts that best != last for
+    /// this seed, so the test genuinely discriminates the two behaviours rather than
+    /// passing under both.
+    #[test]
+    fn exhausted_draws_commit_the_furthest_candidate_not_the_last() {
+        let original = 5000.0;
+        // Dense grid across the whole +/-30 Da window: every draw collides.
+        let targets: Vec<f64> = (-700..=700).map(|k| original + k as f64 * 0.05).collect();
+
+        let cand = draws(0x1234_5678, original);
+        let margins: Vec<f64> = cand.iter().map(|&v| nearest(&targets, v)).collect();
+        assert!(
+            margins.iter().all(|&m| m < DECOY_COLLISION_DA),
+            "test setup is wrong: some draw was collision-free, so exhaustion is untested",
+        );
+        let (best_i, _) = margins
+            .iter()
+            .enumerate()
+            .fold((0usize, f64::NEG_INFINITY), |(bi, bm), (i, &m)| {
+                if m > bm { (i, m) } else { (bi, bm) }
+            });
+        assert_ne!(
+            best_i, 7,
+            "seed chosen badly: the best draw IS the last one, so this test cannot \
+             distinguish the fixed behaviour from the bug it guards",
+        );
+
+        let out = shift_decoy_nodes(vec![node(original)], 0x1234_5678, &targets);
+        let got = out[0].neutral_add;
+        assert_eq!(
+            got, cand[best_i],
+            "expected the furthest candidate {} (draw {best_i}), got {got}; the last \
+             draw was {} -- committing that is the bug this test guards",
+            cand[best_i], cand[7],
+        );
+    }
+
+    /// Anchors (Y0, Y1, intact) are never moved, collision or not.
+    #[test]
+    fn anchor_nodes_are_never_shifted() {
+        let anchors = vec![
+            YNode { neutral_add: 0.0, class: YClass::Y0, prior: YClass::Y0.prior() },
+            YNode { neutral_add: HEXNAC, class: YClass::Core, prior: YClass::Core.prior() },
+        ];
+        let before: Vec<f64> = anchors.iter().map(|n| n.neutral_add).collect();
+        let out = shift_decoy_nodes(anchors, 42, &[0.0, HEXNAC]);
+        let after: Vec<f64> = out.iter().map(|n| n.neutral_add).collect();
+        assert_eq!(before, after, "an anchor node was shifted");
+    }
 }
 
 #[cfg(test)]

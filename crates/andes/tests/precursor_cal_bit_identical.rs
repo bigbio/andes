@@ -1,3 +1,10 @@
+//! REGENERATED 2026-09-03: `--gbdt-max-trees` now defaults to 100 for standard search
+//! (measured ID-neutral on Astral and UPS1, 33-41% faster; see the flag's doc comment).
+//! Verified before copying: identical header, identical 635 SpecIds, all 635 winning
+//! peptides unchanged, 319 decoy winners before and after; only the model-derived
+//! columns moved (IntensitySignal, FragPredExplained, FragPredChanceLLR, RichIonLLR,
+//! FragTopKObserved) and the scores that consume them (RawScore, RawScoreCal).
+//!
 //! Regression gate: `--precursor-cal off` (PR-A's default) must produce
 //! the same PIN and TSV row-set as the committed golden, byte-equal after
 //! sorting rows by SpecId.

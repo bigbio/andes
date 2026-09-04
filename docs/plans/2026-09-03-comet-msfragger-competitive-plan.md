@@ -274,8 +274,8 @@ This can increase glycopeptide coverage, but it must not be used to claim more s
 
 ### Repository evidence
 
-- Standard benchmark: [`docs/benchmarks/2026-08-23-andes-vs-comet-refresh.md`](../benchmarks/2026-08-23-andes-vs-comet-refresh.md)
-- Glyco conclusions: [`docs/benchmarks/glyco-algorithm-conclusions.md`](../benchmarks/glyco-algorithm-conclusions.md)
+- Standard benchmark: [`docs/benchmarks/`](../benchmarks/README.md)
+- Glyco conclusions: [`docs/benchmarks/`](../benchmarks/README.md)
 - Current glyco speed roadmap and measured 20 ppm result: [`docs/plans/glyco/50-roadmap/2026-09-02-redesign-benchmark-and-speed-plan.md`](glyco/50-roadmap/2026-09-02-redesign-benchmark-and-speed-plan.md)
 - Failed election design/results: [`docs/glyco-scoring-redesign-2026-09.md`](../glyco-scoring-redesign-2026-09.md)
 - GBDT evaluator: [`crates/scoring/src/gbdt_eval.rs`](../../crates/scoring/src/gbdt_eval.rs)

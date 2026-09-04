@@ -78,4 +78,21 @@ print(f"    target peptides {len(T)}  entrapment peptides {len(E)}")
 print(f"    T/E = {r:.3f}  ->  FDP = (hits/total) x {1+r:.3f}")
 print(f"    NOTE: this factor is a property of YOUR build. Never assume 1:1 (factor 2).")
 PY
+# ---------------------------------------------------------------- glyco databases
+# These were MISSING: the glyco recipe referenced mouse_entrap.fasta, which no script in
+# this repository produced. An independent reproduction therefore had to invent one, built
+# a foreign-proteome entrapment instead of the 1:1 shuffled design the published numbers
+# used, and came out ~21% high. Both halves of that are now buildable here.
+if [ "${GLYCO:-0}" = "1" ]; then
+  echo "==> glyco: mouse target proteome"
+  get UP000000589 "$DB/mouse.fasta" "mouse (reviewed)"
+  echo "==> glyco: 1:1 SHUFFLED entrapment (the design behind the published numbers)"
+  python3 "$(dirname "$0")/../glyco/build_shuffled_entrap.py" \
+          "$DB/mouse.fasta" "$DB/mouse_entrap.fasta" 1
+  report "$DB/mouse_entrap.fasta"
+  echo "    NOTE: 1:1 by construction, so the FDP correction factor is exactly 2.0."
+  echo "    Do NOT substitute a foreign proteome here without re-deriving that factor."
+fi
+
 echo "done. Databases in $DB"
+[ "${GLYCO:-0}" = "1" ] || echo "(re-run with GLYCO=1 to also build the glyco mouse database)"

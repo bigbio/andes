@@ -57,6 +57,22 @@ Validation that the re-run reproduces the original: Comet's Astral count of 31,4
 the stored artifact from the earlier benchmark exactly, and its 209 s is close to the 217 s
 published on 2026-08-28.
 
+### Matched output depth — the fair speed comparison
+
+The comparison above is **not** like-for-like on I/O: andes `--top-n` defaults to 10 while
+Comet's params set `num_output_lines = 5`, so andes was writing roughly twice the PIN rows.
+Re-run with `--top-n 5` (measured 2026-09-04, same session):
+
+| dataset | andes `--top-n 5` | Comet 2025.01 | PSM gain | andes speed |
+|---|---|---|---|---|
+| Astral | 38,607 / 259 s (4.9 rows/spec) | 31,435 / 209 s (4.9) | **+22.8%** | 1.24x slower |
+| TMT a05058 | 12,402 / 80 s (6.0) | 10,504 / 77 s (4.9) | **+18.1%** | 1.04x slower |
+| UPS1 | 15,723 / 40 s (5.3) | 14,734 / 48 s (4.9) | **+6.7%** | **0.83x — faster** |
+
+At matched depth andes ranges from 1.24x slower to **1.2x faster** than Comet depending on
+regime, while finding 6.7-22.8% more PSMs. Output depth barely moves Astral (PIN write is
+~4 s of ~250 s) but is worth ~20% on the two smaller, low-res sets.
+
 Two honest caveats. Astral and TMT reuse the original Comet parameter files verbatim, with
 only `database_name` repointed; **UPS1 had no stored Comet parameters**, so they were
 derived here from the TMT low-res CID parameters with the TMT-specific fixed modifications
@@ -65,6 +81,31 @@ are single runs on a host with ~8% measured run-to-run variance, so read the tim
 approximate.
 
 ---
+
+### Opt-in modes
+
+All nine arms in one session, 2026-09-04:
+
+| dataset | baseline | `--chimeric` | `--refine` |
+|---|---|---|---|
+| Astral | 38,394 / 269 s | **65,028** / 322 s | 43,929 / 345 s |
+| TMT | 12,281 / 90 s | 12,540 / 72 s | — *(skipped: high-res only)* |
+| UPS1 | 15,838 / 52 s, 166 entrap | **17,112** / 48 s, 167 entrap | — *(skipped)* |
+
+**`--chimeric` gains are real and conservatively stated.** On UPS1, the one dataset here
+with a measurable error rate, +1,274 PSMs came with entrapment hits flat (166 -> 167). And
+the mode **forces `top_n = 1`** (against a baseline default of 10) to avoid blind
+multi-emission inflating FDR — so it wins while retaining a tenth of the pass-1 candidates.
+That also makes its *wall time* non-comparable to baseline: it is not "baseline plus a
+second pass", it is a shallower pass 1 plus a second pass, which is why it can finish
+faster on the smaller sets.
+
+**`--refine` is gated to high-resolution data** and skips on both low-res sets by design,
+logging `refine is high-res-only and the data is low-res; skipping refinement`. At low
+resolution a deamidation (+0.984) is not separable from a C13 isotope error, so identical
+counts there are correct behaviour, not a silent no-op. Its Astral gain is **not**
+entrapment-validatable: pass 2 is anchored to already-accepted proteins, so it cannot land
+on an entrapment sequence by the mechanism the metric relies on.
 
 ## 2. Glyco
 
@@ -138,15 +179,41 @@ since precursor calibration can tighten a window mid-run.
 ### Glyco
 
 ```bash
+# 0. Build the database FIRST. It is 1:1 SHUFFLED-SELF entrapment, not a foreign proteome.
+GLYCO=1 ./reproduce/build_databases.sh "$DATA"     # writes databases/mouse_entrap.fasta
+
+# 1. One search per fraction. --decoy-strategy sequon-reverse is REQUIRED, not optional:
+#    plain reversal maps an N-X-S/T sequon to S/T-X-N, so reversed decoys sail through the
+#    glyco sequon gate and q-values come out anti-conservative.
 for f in Frac1 Frac2 Frac3 Frac4 Frac5 Frac6; do
-  andes --spectrum $f.mzML --database mouse_entrap.fasta --glyco \
+  andes --spectrum $f.mzML --database "$DATA/databases/mouse_entrap.fasta" --glyco \
+        --decoy-strategy sequon-reverse \
         --threads 8 --output-pin $f.pin            # writes $f.glyco.pin
 done
+
+# 2. Pool BEFORE Percolator (one fraction has 0-2 glyco decoys; see the rules below).
 python3 glyco/pool_pins.py *.glyco.pin > pooled.pin
 perc pooled
-python3 glyco/eval_yield.py pooled.t.psms
-python3 glyco/gap_decompose.py     # per-scan, vs Byonic
+
+# 3. Evaluate. eval_yield.py takes TWO arguments: the pooled PIN and the psms.
+python3 glyco/eval_yield.py  pooled.pin pooled.t.psms
+python3 glyco/eval_entrap.py pooled.pin pooled.t.psms 0.01 "$DATA/databases/mouse_entrap.fasta"
 ```
+
+**The entrapment database is 1:1 shuffled-self, and swapping it changes the answer.**
+`mouse_entrap.fasta` is 17,537 mouse targets plus a shuffled twin of each — same length,
+same amino-acid composition, scrambled order — tagged `ENTRAP_` *inside* the accession:
+`>sp|ENTRAP_Q99JY4|ENTRAP_TRABD_MOUSE`. Build it with `glyco/build_shuffled_entrap.py`, not
+`glyco/build_entrap.py`; the latter appends a *foreign* proteome, which is a different
+experiment. An independent reproduction that used mouse + E. coli measured **~21% more
+glycoPSMs**, because a foreign proteome changes three things at once: the ratio (~3.9:1, so
+the FDP factor is ~4.9 rather than 2), the sequon density of the entrapment space, and the
+total search-space size. Detect entrapment by SUBSTRING, not prefix — the tag is inside the
+accession, not at the start of the header.
+
+`gap_decompose.py` is **plasma-only**: it hardcodes the plasma paths and three replicates,
+and needs a Byonic reference exported to CSV, because PXD011533 ships proprietary `.byrslt`
+files that no parser in this harness reads. It cannot run on the mouse dataset.
 
 **To reproduce any of this from scratch**, see [`reproduce/`](reproduce/) — three scripts that
 pull the data from PRIDE, rebuild the databases from UniProt, and run the whole thing with no

@@ -1,40 +1,213 @@
-# Benchmarks
+# andes benchmarks
 
-How andes is measured, and what the current numbers are. Start with
-**[HOWTO.md](HOWTO.md)** — it has the exact commands for all four datasets, the shared
-Percolator protocol, how to compute an entrapment FDP correctly, and the mistakes that
-have produced wrong published numbers here before.
+Everything about how andes is measured, and what it currently measures at. One file: the
+folder previously held eight documents spanning June to September, most of them superseded,
+which made it unclear which numbers were live. History is in git.
 
-## Current
+**Provenance rule.** Every figure below names the commit, host, thread count and date that
+produced it. A number without that is not a result. Where something has *not* been
+re-measured, this document says so rather than carrying the old value forward silently.
 
-| Document | Date | What it establishes |
+---
+
+## 1. Current results
+
+Commit `1b8520f8` (merged `main`), benchmark VM, 8 threads, Percolator 3.7.1
+(`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`), counts at
+`q ≤ 0.01`, all measured **2026-09-04 in one session** so the three datasets are mutually
+comparable.
+
+| dataset | regime | wall | PSMs @ q≤0.01 |
+|---|---|---:|---:|
+| Astral (PXD070049) | high-res HCD LFQ | **244 s** | **38,394** |
+| TMT a05058 (PXD007683) | low-res ion-trap CID, TMT | **97 s** | **12,281** |
+| UPS1 (PXD001819) | low-res CID LFQ | **50 s** | **15,838** |
+
+### Effect of the tree-count default (`--gbdt-max-trees`, now 100)
+
+Same binary, same host, same session; the default is the only variable:
+
+| dataset | all trees (previous) | 100 trees (current) | speedup | ΔPSMs |
+|---|---:|---:|---:|---:|
+| Astral | 400 s / 38,402 | 244 s / 38,394 | **1.64x** | −8 (−0.02%) |
+| TMT | 111 s / 12,278 | 97 s / 12,281 | **1.14x** | +3 (+0.02%) |
+
+Identification-neutral on both. The gap between 1.64x and 1.14x is expected: Astral runs in
+`strong` score mode where the ensembles both rank candidates and build features, while
+low-res TMT runs in `rank` mode where they only build features. A repeat Astral run the
+same day gave 262 s, so treat wall times as ±8%, not single-second figures.
+
+### Against Comet
+
+Comet on Astral, same Percolator protocol, from stored artifacts: **31,435 PSMs**. andes
+at 38,394 is **+22.1%**.
+
+**No current speed comparison against Comet is claimed.** Comet is not installed on the
+benchmark host, so its previously published 217 s cannot be re-verified, and pairing a
+fresh andes time against a competitor time from a different session is not a measurement.
+
+---
+
+## 2. Glyco
+
+Intact N-glycopeptide search (`--glyco`). The harness is
+[`../../benchmarks/glyco/`](../../benchmarks/glyco/); its README documents each script.
+
+**Mouse brain, PXD011533**, 6 fractions pooled, 5 Percolator seeds, entrapment-controlled
+(commit `6b37bb2c`, Codon): **4,915 ± 14 glycoPSMs**, 3,197 ± 8 backbone-correct against
+the depositors' Byonic reference, entrapment FDP ~0.97%.
+
+**Human plasma, PXD030622** (R1–R3, pure-HCD), decomposed per scan against the depositors'
+own Byonic results — 629 truth spectra, 2026-09-04:
+
+| outcome | share |
+|---|---:|
+| confirmed | **47.7%** |
+| wrong target won the collapse | 21.3% |
+| **a decoy won the collapse** | 15.6% |
+| rejected at 1% FDR | 9.1% |
+| no row emitted at all | 5.4% |
+| peptide not reachable by the digest | 1.0% |
+
+**Selection, not evidence, is the dominant loss** — 37% of truth is generated and scored
+but loses the per-scan collapse. Reproduce with `benchmarks/glyco/gap_decompose.py`, which
+asserts its own preconditions.
+
+### Refuted — do not re-try without new evidence
+
+Each was measured, not argued: the matched-ion selector term `--glyco-gp-m` (every weight
+worse on plasma, and the selection buckets do not move); the two-stage split election
+(fewer correct identifications at higher error); generation-side expansion in general —
+wider glycan box, two-axis Y retention, isobar resolution all moved yield **down**; and the
+oxonium gate as an explanation for unemitted spectra (it fires for 33 of the 34).
+
+---
+
+## 3. How to reproduce
+
+```bash
+PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
+perc () { docker run --rm --platform linux/amd64 -v "$PWD":/r $PIMG percolator \
+            --seed 42 -Y --only-psms=false \
+            --results-psms /r/$1.t.psms --decoy-results-psms /r/$1.d.psms /r/$1.pin; }
+count () { awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i=="q-value") q=i; next} $q<=0.01{c++} END{print c+0}' "$1"; }
+```
+
+| dataset | file | database |
 |---|---|---|
-| **[HOWTO.md](HOWTO.md)** | 2026-09-04 | How to run every benchmark: the three standard datasets, the glyco datasets, the FDR protocol, the entrapment arithmetic, and the pitfalls. |
-| [Tree-count default + entrapment audit](2026-09-04-tree-count-default-and-entrapment-audit.md) | 2026-09-04 | Astral **1.64x faster** at unchanged identifications (400 s → 244 s, −8 PSMs) on merged `main`. Audits the entrapment metric: Astral has no entrapment component, UPS1's is not 1:1. |
-| [Configuration matrix](2026-08-28-config-matrix.md) | 2026-08-28 | Per-configuration counts, and the corrected UPS1 entrapment FDP (~2.5% at a nominal 1%). |
-| [andes vs Comet refresh](2026-08-23-andes-vs-comet-refresh.md) | 2026-08-23 | Dataset, file and database provenance for the three standard sets. |
+| Astral | `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` | ProteoBench HYE, 31,889 seqs |
+| TMT a05058 | `a05058.raw` | `tmt_db.fasta`, human + yeast reviewed, 26,483 seqs |
+| UPS1 | `UPS1_5000amol_R1.mzML` | `yeast_entrap.fasta` (yeast + E. coli entrapment) |
 
-## Glyco
+```bash
+andes --spectrum astral.mzML --database hye.fasta \
+      --mods configs/astral_mods.txt --precursor-tol 10ppm --enzyme trypsin \
+      --threads 8 --output-pin astral.pin
+perc astral && count astral.t.psms
 
-| Document | Date | What it establishes |
-|---|---|---|
-| [Glyco benchmark summary](2026-08-27-benchmark-summary.md) | 2026-08-27 | Where andes stands on intact N-glycopeptides, and where it loses. |
-| [Glyco algorithm conclusions](glyco-algorithm-conclusions.md) | 2026-09-03 | What has been tried on the glyco path and what the measurements refuted. |
+andes --spectrum a05058.mzML --database tmt_db.fasta \
+      --mods configs/mods-tmt.txt --threads 8 --output-pin tmt.pin
 
-The harness that produces these is [`../../benchmarks/glyco/`](../../benchmarks/glyco/);
-its README documents each script and the two rules they encode (pool before Percolator;
-never ship on yield alone).
+andes --spectrum UPS1_5000amol_R1.mzML --database yeast_entrap.fasta \
+      --threads 8 --output-pin ups1.pin
+```
 
-## Historical
+andes auto-detects activation, analyser resolution and labelling from the file, so
+tolerances and the model usually need no flags. It prints the parameters it actually
+resolved and writes them to `statistics.log` — **quote those, not the ones you intended**,
+since precursor calibration can tighten a window mid-run.
 
-| Document | Date | Note |
-|---|---|---|
-| [Public benchmark](2026-06-15-public-benchmark.md) | 2026-06-15 | The three-engine comparison as it stood in June. Predates the 2026-09-04 speedup and the entrapment-metric correction — read those first. |
-| [Own-geometry A/B](2026-06-26-owngeometry-ab.md) | 2026-06-26 | Sole record of the geometry retrain that shipped. |
+### Glyco
 
-Four early multi-engine validation reports (2026-06-01 to 2026-06-04) were removed on
-2026-09-04: they were already banner-marked superseded, used anonymised engine names that
-made them uninformative outside the project, and are recoverable from git history.
+```bash
+for f in Frac1 Frac2 Frac3 Frac4 Frac5 Frac6; do
+  andes --spectrum $f.mzML --database mouse_entrap.fasta --glyco \
+        --threads 8 --output-pin $f.pin            # writes $f.glyco.pin
+done
+python3 ../../benchmarks/glyco/pool_pins.py *.glyco.pin > pooled.pin
+perc pooled
+python3 ../../benchmarks/glyco/eval_yield.py pooled.t.psms
+python3 ../../benchmarks/glyco/gap_decompose.py     # per-scan, vs Byonic
+```
 
 Per-engine configuration files are in [`configs/`](configs/); driver scripts in
 [`scripts/`](scripts/).
+
+---
+
+## 4. Methodology, and the traps
+
+**One rescorer for every engine.** Percolator 3.7.1, pinned, `--seed 42 -Y`. Comparing one
+engine's own score against another's rescored q-value is not a comparison. Percolator also
+auto-detects concatenated vs separate target-decoy *from the PIN's shape*, so two engines
+can silently end up rescored under different modes — check the mode line in each
+`.perc.log`.
+
+**Pool glyco fractions before Percolator.** A single fraction yields on the order of 0–2
+glyco decoys, so a per-fraction 1% q-value is estimated from almost nothing and swings
+between runs. Differences measured that way are noise.
+
+**Percolator's q has a floor of `1/T_top`.** Identifications at 1% are therefore a *step
+function* of any threshold you sweep, and plateaus in such a sweep are artifacts. Below
+~101 targets the answer is always zero.
+
+**Filter the comparator.** Byonic's `PQMs` table emits one row per (PSM, protein), so a
+peptide in several proteins is counted several times unless deduped by `(fraction, scan)` —
+that mistake once inflated a truth set from 629 spectra to 1,068 rows and manufactured a
+false finding. A raw MSFragger `psm.tsv` is pre-FDR, and roughly a third of its rank-1
+glyco rows are that engine's own decoys.
+
+**Replicate over seeds.** Single-seed glyco differences are routinely inside seed noise;
+the 5-seed design here has a floor of about 117 PSMs, below which an effect is *not
+demonstrable* rather than refuted.
+
+### Entrapment FDP
+
+An entrapment database adds a proteome the sample cannot contain; a target PSM matching
+only those sequences is false by construction, which makes true error measurable rather
+than assumed.
+
+```
+FDP = (entrapment hits / total accepted) x (1 + T/E)
+```
+
+`T/E` is the ratio of **searchable space** and must be measured for the database in front
+of you — never assumed to be 1:
+
+| database | T : E | factor |
+|---|---|---:|
+| `yeast_entrap.fasta` (UPS1) | 734,280 : 303,537 tryptic peptides | **3.42** |
+| plasma `human_entrap.fasta` | 20,411 : 4,531 proteins | **9.81** |
+| a genuine 1:1 database | 1 : 1 | 2.00 |
+
+Assuming 1:1 has produced wrong published numbers here **twice** — understating UPS1's true
+error and understating plasma's roughly fivefold. Peptide space is the better basis: it is
+what the search samples, and entrapment proteomes usually have a different length
+distribution from the target.
+
+**Measured on UPS1** (2026-09-04): 166 entrapment hits on 15,838 PSMs ⇒ **3.58% true FDP**
+at a nominal 1% (3.42 factor), or 2.61% on the cruder protein-count basis. Either way the
+nominal 1% is not 1%.
+
+**Know the estimator's resolution.** At ~380 accepted PSMs with 1–2 entrapment hits, one
+hit moves the estimate by ~2.6 points — such a design cannot distinguish 1% from 5%, and a
+reported "FDP 0.00" means *too few hits to measure*, not *clean*.
+
+**Not every database here has an entrapment component.** The Astral HYE database has none,
+so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.01` only.
+
+---
+
+## 5. Known gaps
+
+- **The README's headline table is untraceable.** Its counts (36,873 / 11,163 / 15,061 for
+  andes, 28,401 for Comet) appear in no recorded run; the closest documented figures are
+  36,730 / 11,215 / 14,919. They need re-deriving or replacing.
+- **No current competitor numbers.** Java MS-GF+ and Comet have not been re-run under the
+  current default. The Comet Astral count above is from stored artifacts; everything else
+  attributed to a competitor is historical.
+- **Two of three databases cannot support an entrapment claim.** Astral has no entrapment
+  component; UPS1's is not 1:1. Rebuilding both near 1:1 is the fix.
+- **Glyco selection is the open problem**, and whether those 37% are recoverable by scoring
+  at all is unknown — it needs a candidate-pool dump taken at retention time under
+  production settings, which does not exist yet.

@@ -36,6 +36,7 @@ Benchmarked at 1% FDR across three reference datasets. **Read the metric note be
 <summary>Bench methodology</summary>
 
 - **Hardware:** 8-thread Intel Xeon Gold 6238 VM, Linux x86_64. Same machine for every engine.
+- **Reproducing these:** exact commands, the shared Percolator protocol and the entrapment arithmetic are in [`docs/benchmarks/HOWTO.md`](docs/benchmarks/HOWTO.md).
 - **Engines:** andes (this repo), Java MS-GF+ [v20240326](https://github.com/MSGFPlus/msgfplus/releases/tag/v2024.03.26), Comet 2025.01 (via OpenMS). Parameters harmonized per dataset (trypsin, ≤2 missed cleavages, matched fixed/variable mods and precursor/fragment tolerances).
 - **Uniform FDR:** every engine's PSMs re-scored through the **same** Percolator (`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`), counts at `q ≤ 0.01`. One methodology for every row: plain FASTA, andes `XXX_` decoys, Percolator `-Y` target-decoy competition — which is what makes the rows comparable. Where an entrapment database exists, the true FDP is measured alongside using `ENT/total × (1 + T/E)`; note that `T/E` must be measured per database rather than assumed to be 1, and that not every benchmark database here has an entrapment component (see the metric note under the table).
 - **PIN building:** andes and Comet write Percolator PIN directly; Java MS-GF+ via `MzIDToTsv` + `build_pins.py` (its concatenated-TDA mzid crashes `msgf2pin`).

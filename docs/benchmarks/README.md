@@ -1,33 +1,40 @@
 # Benchmarks
 
-Reproducible engine comparisons for andes against the open-source field. Each
-benchmark documents the datasets, the exact per-engine parameters, and the FDR
-methodology so the numbers can be regenerated.
+How andes is measured, and what the current numbers are. Start with
+**[HOWTO.md](HOWTO.md)** — it has the exact commands for all four datasets, the shared
+Percolator protocol, how to compute an entrapment FDP correctly, and the mistakes that
+have produced wrong published numbers here before.
 
-**Canonical public benchmark — andes vs Java MS-GF+ vs a comparison engine:**
+## Current
 
-| Benchmark | Date | Engines | Datasets |
-|---|---|---|---|
-| [Tree-count default + entrapment audit](2026-09-04-tree-count-default-and-entrapment-audit.md) | 2026-09-04 | andes (merged `main`) | Astral, UPS1 — measured 1.64x speedup at unchanged IDs, plus an audit of the entrapment metric |
-| [Public benchmark](2026-06-15-public-benchmark.md) | 2026-06-15 | andes (top-1 + `--chimeric`), Java MS-GF+, a comparison engine | Astral (HCD high-res), TMT a05058 (CID low-res), UPS1/PXD001819 (CID low-res) |
+| Document | Date | What it establishes |
+|---|---|---|
+| **[HOWTO.md](HOWTO.md)** | 2026-09-04 | How to run every benchmark: the three standard datasets, the glyco datasets, the FDR protocol, the entrapment arithmetic, and the pitfalls. |
+| [Tree-count default + entrapment audit](2026-09-04-tree-count-default-and-entrapment-audit.md) | 2026-09-04 | Astral **1.64x faster** at unchanged identifications (400 s → 244 s, −8 PSMs) on merged `main`. Audits the entrapment metric: Astral has no entrapment component, UPS1's is not 1:1. |
+| [Configuration matrix](2026-08-28-config-matrix.md) | 2026-08-28 | Per-configuration counts, and the corrected UPS1 entrapment FDP (~2.5% at a nominal 1%). |
+| [andes vs Comet refresh](2026-08-23-andes-vs-comet-refresh.md) | 2026-08-23 | Dataset, file and database provenance for the three standard sets. |
 
-Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`).
-FDR honesty is checked against entrapment databases **where one exists** — but not
-uniformly, and not always at the ratio once assumed. A 2026-09-04 audit
-([`2026-09-04-tree-count-default-and-entrapment-audit.md`](2026-09-04-tree-count-default-and-entrapment-audit.md))
-found the Astral benchmark database carries no entrapment component at all, and the UPS1
-one is 6,733:4,531 rather than 1:1 — so its true FDP at a nominal 1% is 2.6–3.6%, not ~1%.
-Size `T/E` per database; never assume it is 1. Per-engine configuration files live under
-[`configs/`](configs/); reproducibility scripts under [`scripts/`](scripts/).
+## Glyco
 
-<details><summary>Internal / superseded development reports</summary>
+| Document | Date | What it establishes |
+|---|---|---|
+| [Glyco benchmark summary](2026-08-27-benchmark-summary.md) | 2026-08-27 | Where andes stands on intact N-glycopeptides, and where it loses. |
+| [Glyco algorithm conclusions](glyco-algorithm-conclusions.md) | 2026-09-03 | What has been tried on the glyco path and what the measurements refuted. |
 
-Early multi-engine validation runs (include the reference engine / a comparison search engine / ProSE for development
-context), kept for reproducibility but superseded by the public benchmark above:
+The harness that produces these is [`../../benchmarks/glyco/`](../../benchmarks/glyco/);
+its README documents each script and the two rules they encode (pool before Percolator;
+never ship on yield alone).
 
-- [2026-06-04 · Astral 7-engine](2026-06-04-astral-7engine.md)
-- [2026-06-04 · TMT a05058 6-engine](2026-06-04-tmt-a05058-6engine.md)
-- [2026-06-03 · PXD016999 TMT 4-engine](2026-06-03-pxd016999-tmt-4engine.md)
-- [2026-06-01 · 4-engine native-format](2026-06-01-4engine-native-format.md)
+## Historical
 
-</details>
+| Document | Date | Note |
+|---|---|---|
+| [Public benchmark](2026-06-15-public-benchmark.md) | 2026-06-15 | The three-engine comparison as it stood in June. Predates the 2026-09-04 speedup and the entrapment-metric correction — read those first. |
+| [Own-geometry A/B](2026-06-26-owngeometry-ab.md) | 2026-06-26 | Sole record of the geometry retrain that shipped. |
+
+Four early multi-engine validation reports (2026-06-01 to 2026-06-04) were removed on
+2026-09-04: they were already banner-marked superseded, used anonymised engine names that
+made them uninformative outside the project, and are recoverable from git history.
+
+Per-engine configuration files are in [`configs/`](configs/); driver scripts in
+[`scripts/`](scripts/).

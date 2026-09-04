@@ -1,7 +1,7 @@
 # How to run MSFragger (for the andes VM benchmark) — verified 2026-06-13/14
 
 Practical, gotcha-aware recipe for running **MSFragger 4.2** on the benchmark VM
-(`pride-linux-vm:/srv/data/msgf-bench`) and getting a valid PSM@1% count via
+(`bench-host:/srv/data/msgf-bench`) and getting a valid PSM@1% count via
 Percolator, **matched** to an andes run. Every step below was failure-debugged.
 
 ## 0. Where it is

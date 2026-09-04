@@ -41,7 +41,7 @@ A final `resources/models.parquet` that is:
 
 - **Local repo** (`/Users/yperez/work/msgfplus-workspace/msgf-rust`): all Rust code changes (F2, F3, A1-packing, E3, W1, W3), the gate script, the consolidated PR. Build the release binary here, ship to Codon/VM.
 - **Codon** (`/hps/nobackup/juan/pride/reanalysis/andes-training`, codon-cluster skill): harvesting (F1 python edit), training (`cluster_slug.sh`/`submit_array.sh`, fixed), `andes-bin` (rebuild from main after each code change), stores, flats, seed-models.parquet, assembler.
-- **VM** (`pride-linux-vm`, `~/.ssh/andes-vm`): the benchmark (`ab_a05058.sh`, Percolator 3.7.1, `compute_entrapment_fdp.py`, `TMPDIR=/srv/data/msgf-bench/abtmp`).
+- **VM** (`<bench-host>` (ssh key path omitted)): the benchmark (`ab_a05058.sh`, Percolator 3.7.1, `compute_entrapment_fdp.py`, `TMPDIR=/srv/data/msgf-bench/abtmp`).
 - **Provenance rule:** one binary commit → rsync crates + `cargo build --release -p andes` on Codon AND VM; never let the two hosts drift (experiment-hygiene memory).
 
 ---

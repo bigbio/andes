@@ -16,7 +16,7 @@ Stop pursuing RS³ (per-spectrum decoy-calibrated empirical-null significance, e
 - The adversarial review + judge **explicitly predicted RS³ might land flat**, for two reasons (see below). The user chose to skip the cheap Gate-0 proxy and test directly on the 3 gold datasets — the authoritative test.
 
 ## Evidence (the benchmark that decided it)
-Single-variable A/B (baseline vs `--rs3`, identical params, bundled-store model auto-selection, Percolator q≤0.01, on `pride-linux-vm`, results in `/srv/data/msgf-bench/rs3ab/`). Rs3 columns verified populated in `--rs3` arms, exactly 0 in baseline → clean A/B, Percolator genuinely saw the features.
+Single-variable A/B (baseline vs `--rs3`, identical params, bundled-store model auto-selection, Percolator q≤0.01, on `bench-host`, results in `/srv/data/msgf-bench/rs3ab/`). Rs3 columns verified populated in `--rs3` arms, exactly 0 in baseline → clean A/B, Percolator genuinely saw the features.
 
 | Dataset | baseline PSMs@1% | `--rs3` PSMs@1% | Δ | wall |
 |---|---|---|---|---|

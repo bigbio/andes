@@ -142,10 +142,13 @@ hardcoded paths. It also documents what will *not* reproduce exactly, and why.
       glyco/         the glyco harness (pooling, yield, entrapment, gap decomposition)
       configs/       per-engine parameter files
       scripts/       historical driver scripts, kept for reference
+      scripts/vm/    the bench-VM sign-off harness (was gitignored until 2026-09-04)
 
-Benchmark material used to be spread across three directories -- `benchmarks/` and
+Benchmark material used to be spread across five directories -- `benchmarks/` and
 `docs/benchmarks/` in the repository, plus an unversioned `benchmark/` at the workspace
-root. They were consolidated here on 2026-09-04. Bulk spectra and third-party engine
+root, a `benchmark/` inside the repository whose real contents were gitignored, and a
+`test-fixtures/benchmark/` fixture. All the documentation and tooling was consolidated here
+on 2026-09-04; only the test fixture stayed where it was, being a fixture rather than docs. Bulk spectra and third-party engine
 binaries deliberately stay outside git; the workspace-root README says what remains and
 how to re-fetch it.
 

@@ -130,8 +130,12 @@ python3 ../../benchmarks/glyco/eval_yield.py pooled.t.psms
 python3 ../../benchmarks/glyco/gap_decompose.py     # per-scan, vs Byonic
 ```
 
-Per-engine configuration files are in [`configs/`](configs/); driver scripts in
-[`scripts/`](scripts/).
+**To reproduce any of this from scratch**, see [`reproduce/`](reproduce/) — three scripts that
+pull the data from PRIDE, rebuild the databases from UniProt, and run the whole thing with no
+hardcoded paths. It also documents what will *not* reproduce exactly, and why.
+
+Per-engine configuration files are in [`configs/`](configs/); the original driver scripts in
+[`scripts/`](scripts/) still contain absolute paths from our hosts and are kept for reference only.
 
 ---
 
@@ -203,6 +207,11 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 - **The README's headline table is untraceable.** Its counts (36,873 / 11,163 / 15,061 for
   andes, 28,401 for Comet) appear in no recorded run; the closest documented figures are
   36,730 / 11,215 / 14,919. They need re-deriving or replacing.
+- **The Astral dataset is not reproducible from its documented accession.** Our records
+  name `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` in PXD070049; that project's
+  complete 100-file listing does not contain it (checked 2026-09-04). Either the accession
+  or the filename is wrong, and until that is resolved the Astral row cannot be regenerated
+  by anyone outside this project — including us, on a fresh machine.
 - **No current competitor numbers.** Java MS-GF+ and Comet have not been re-run under the
   current default. The Comet Astral count above is from stored artifacts; everything else
   attributed to a competitor is historical.

@@ -109,6 +109,68 @@ on an entrapment sequence by the mechanism the metric relies on.
 
 ## 2. Glyco
 
+Two tiers, because glyco cannot be benchmarked from a single file the way the standard
+datasets can — see the q-floor note below.
+
+### Quick tier — 3 files, 0.39 GB, ~8 min on 8 threads
+
+Human plasma PXD030622, the three **sceHCD replicates** (R1-R3). This is the smallest
+configuration that produces a valid 1% FDR answer.
+
+| | measured |
+|---|---|
+| glycoPSMs @1% | **385** (5 seeds, 384.6 ± 22) |
+| wall | ~460 s search + Percolator, VM, 8 threads |
+| download | 0.39 GB |
+| reference | `truth/byonic_plasma.tsv.gz` (Byonic, 629 spectra) |
+
+### Deep tier — pGlyco2 mouse liver, 5 fractions, cluster-scale
+
+PXD005553, ~25 min per fraction on 16 cores. Commit `6b37bb2c`, 5 Percolator seeds,
+against a 1:1 shuffled-mouse entrapment database built by `glyco/build_shuffled_entrap.py`:
+
+| | measured |
+|---|---|
+| glycoPSMs @1% | **31,658 ± 34** |
+| **true FDP** | **1.02% ± 0.03** (1:1 database, factor exactly 2) |
+| confirmed vs pGlyco2 | **14,072 / 17,855 = 78.8%** |
+| wrong target won | 1,692 (9.5%) |
+| decoy won | 1,972 (11.0%) |
+| rejected at FDR | 98 (0.5%) |
+| never emitted | **21 (0.1%)** |
+
+**The FDR is right where it claims to be** — 1.02% measured against a nominal 1%, on a
+database where the correction factor is exactly 2 and there is nothing to get wrong.
+**Generation is not the bottleneck here**: 0.1% of reference spectra produce no row, against
+5.4% on plasma. **Selection is**, at 20.5% — the same failure mode as plasma but half the
+size, and decoys win 1,972 of those.
+
+andes accepts 31,602 spectra of which 17,530 are not in the pGlyco2 reference. At 1.02%
+measured true FDP those are mostly not false positives, but the two searches used different
+databases (UniProt mouse reviewed + shuffled twin here; pGlyco2's own there), so read this
+as "accepts substantially more at comparable measured error", not as a clean gain.
+
+### ⚠ Why a single glyco file cannot be benchmarked
+
+Percolator's smallest attainable q is `1/T_top`, so a run with too few confident targets
+cannot reach `q = 0.01` **at all** — the answer is 0 regardless of data quality. Measured on
+one plasma replicate each:
+
+| configuration | PIN rows | glycoPSMs @1% |
+|---|---:|---:|
+| sceHCD, 1 file | 7,257 | **0** |
+| EThcD, 1 file | 14,349 | **0** |
+| sceHCD-EThcD, 1 file | 12,701 | 112 |
+| three different regimes pooled | 34,307 | 143 |
+| **three sceHCD replicates pooled** | 22,590 | **385** |
+
+Two rules follow. **Pool at least three files** — one is not a benchmark, it is a zero. And
+**pool replicates of ONE acquisition regime, not different regimes**: mixing sceHCD with
+EThcD gave 143 against 385 for the same number of files, because Percolator fits a single
+model and the feature distributions differ between fragmentation chemistries.
+
+
+
 Intact N-glycopeptide search (`--glyco`). The harness is
 [`glyco/`](glyco/); its README documents each script.
 
@@ -195,9 +257,11 @@ done
 python3 glyco/pool_pins.py *.glyco.pin > pooled.pin
 perc pooled
 
-# 3. Evaluate. eval_yield.py takes TWO arguments: the pooled PIN and the psms.
+# 3. Evaluate. eval_yield.py takes TWO arguments: the pooled PIN and the psms;
+#    score_vs_truth.py attributes every miss to a stage against a committed reference.
 python3 glyco/eval_yield.py  pooled.pin pooled.t.psms
 python3 glyco/eval_entrap.py pooled.pin pooled.t.psms 0.01 "$DATA/databases/mouse_entrap.fasta"
+python3 glyco/score_vs_truth.py glyco/truth/pglyco2_mouse_liver.tsv.gz pooled.pin pooled.t.psms
 ```
 
 **The entrapment database is 1:1 shuffled-self, and swapping it changes the answer.**

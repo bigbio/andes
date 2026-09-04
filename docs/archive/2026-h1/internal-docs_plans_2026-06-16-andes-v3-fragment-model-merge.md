@@ -38,8 +38,8 @@ Design boundary: `frag_features.rs` is the single source of the feature vector (
 
 No code; establishes the honest baseline AFTER the 64710d17 clobber fix changed strong-mode PIN content.
 
-- [ ] **Step 1:** Wait for the Java-Astral run (`b6qav62q3`) to free the VM. Then re-sync the VM repo to committed HEAD **whole-tree** (kill drift): from Mac, `git -C msgf-rust archive HEAD | ssh pride-linux-vm 'tar -x -C /srv/data/msgf-bench/repo/msgf-rust'` (or `git fetch+checkout` if the VM repo is a clone). Record `git rev-parse --short HEAD`.
-- [ ] **Step 2:** Rebuild: `ssh pride-linux-vm 'cd <repo> && cargo +1.95.0 build --release -p andes --features thermo'`.
+- [ ] **Step 1:** Wait for the Java-Astral run (`b6qav62q3`) to free the VM. Then re-sync the VM repo to committed HEAD **whole-tree** (kill drift): from Mac, `git -C msgf-rust archive HEAD | ssh bench-host 'tar -x -C /srv/data/msgf-bench/repo/msgf-rust'` (or `git fetch+checkout` if the VM repo is a clone). Record `git rev-parse --short HEAD`.
+- [ ] **Step 2:** Rebuild: `ssh bench-host 'cd <repo> && cargo +1.95.0 build --release -p andes --features thermo'`.
 - [ ] **Step 3:** Print a provenance banner (`internal-docs/scripts/prov.sh`: `prov_bin` the andes binary, `prov_file model` the corpus43 store + the HCD intensity model, `prov_file data` the Astral mzML).
 - [ ] **Step 4:** Re-run Astral `--score rank` and `--score strong` (store `store_corpus43_off.parquet`, `--intensity-model intensity_model.parquet`, entrapment DB) → Percolator → PSMs@1% + ENT-FDP. Record the NEW strong baseline (expected ≈ 38,909; the RankScore column is now the distinct rank-LLR, so it may shift slightly).
 - [ ] **Step 5:** Log the result + provenance in `internal-docs/MILESTONES.md`. This number is the v3 gate target.

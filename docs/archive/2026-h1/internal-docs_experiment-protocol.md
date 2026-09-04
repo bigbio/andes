@@ -9,7 +9,7 @@ data, and script. If you can't state it, you don't have a result — you have a 
 
 ## Host model (caches, not sources)
 - **Mac** = the only source of truth (git). `git rev-parse HEAD` defines "the code".
-- **VM** (`pride-linux-vm`) = benchmark cache. Its repo/models are STALE until re-verified against a commit.
+- **VM** (`bench-host`) = benchmark cache. Its repo/models are STALE until re-verified against a commit.
 - **Codon** = train cache. `andes-bin` builds from the REMOTE branch `feat/enzyme-support`; unpushed local
   commits are NOT there until pushed or rsync'd into `andes-src` via a compute-node job.
 

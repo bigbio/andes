@@ -29,7 +29,7 @@ Run andes on Astral entrapment, CLOSED vs --chimeric vs --refine; rescore (Perco
 ### Iter 2 (2026-06-22) — richer refine tier on Astral — PARTIAL (VPN outage blocked final read)
 - default (5 mods, max2): 522,048 Pass-2 candidates -> 48,631 winners; refine 16.9s; total 312.9s.
 - expanded (+Methyl/Dimethyl K,R + Trimethyl K, max3): 1,989,209 candidates (3.8x) -> 62,685 winners (+29%, +14,054); refine 27.8s; total 325.6s. Ran clean (exit 0), validated config, under 31GB.
-- ★ DECISIVE NUMBER PENDING: the expanded-tier Pass-2 honest FDP (peptide-remap) + percolator total q<=0.01 — NOT yet read (Mac VPN/DNS outage hit at the final percolator step). Job done + persisted on VM. Retrieve: `ssh pride-linux-vm 'tail -32 /srv/data/msgf-bench/refine_iter2.out'` or re-run `python3 /srv/data/msgf-bench/refine_trace_fdp2.py refine-iter2 {default,expanded}`.
+- ★ DECISIVE NUMBER PENDING: the expanded-tier Pass-2 honest FDP (peptide-remap) + percolator total q<=0.01 — NOT yet read (Mac VPN/DNS outage hit at the final percolator step). Job done + persisted on VM. Retrieve: `ssh <bench-host> 'tail -32 /srv/data/msgf-bench/refine_iter2.out'` or re-run `python3 /srv/data/msgf-bench/refine_trace_fdp2.py refine-iter2 {default,expanded}`.
 - PRELIM read (cautionary): +14,054 winners but Methyl(+14.016 near-isobaric) + Trimethyl(+42.047 ~ Acetyl +42.011) are FDR-inflation risks at max_mods 3 -> likely PARTIAL BLOAT (higher Pass-2 FDP). DON'T flip default until expanded Pass-2 FDP confirmed <=~1%. Provisional: keep 5-mod default; expanded = opt-in --refine-config for methylation studies. Binary a77e2aa3.
 
 ### Iter 2 FINAL — richer refine tier REFUTED

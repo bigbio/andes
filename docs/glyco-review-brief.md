@@ -33,7 +33,7 @@ Coarse space widening (full 4036-glycan list, isotope-range widening, charge z±
 6. **Additive own-data glyco intensity / c/z model** (unknown, high cost). New PIN + fused term only — never replace rank. Do after 1–3.
 
 ## Validation rig
-`ssh pride-linux-vm`, dir `/srv/data/msgf-bench/ethcd` — 6-fraction mzML, truth TSVs, `mouse-decoy.fasta`, `eth_bench_eval.py` (@1% evaluator), dockerized Percolator. Build: `cd /srv/data/msgf-bench/cz-src && cargo build --release -p andes`. Run: `andes --spectrum FracN.mzML --database mouse-decoy.fasta --decoy-strategy none --decoy-prefix DECOY_ --glyco --glyco-backbone-top-k 150 --output-pin OUT.glyco.pin` (`--debug-glyco` for all candidate rows → never-generated vs outranked). Access is VPN-dependent and drops.
+`ssh <bench-host>`, dir `<bench-root>/ethcd` — 6-fraction mzML, truth TSVs, `mouse-decoy.fasta`, `eth_bench_eval.py` (@1% evaluator), dockerized Percolator. Build: `cd /srv/data/msgf-bench/cz-src && cargo build --release -p andes`. Run: `andes --spectrum FracN.mzML --database mouse-decoy.fasta --decoy-strategy none --decoy-prefix DECOY_ --glyco --glyco-backbone-top-k 150 --output-pin OUT.glyco.pin` (`--debug-glyco` for all candidate rows → never-generated vs outranked). Access is VPN-dependent and drops.
 
 ## Output expected from a review
 A ranked list, each avenue with: mechanism, reference-tool precedent + citation, code location, expected magnitude *and why*, additive/FDR-safe check, and a concrete one-variable first experiment. Distinguish likely-ceiling from genuinely-open. Prefer "measure X to decide" over confident claims.

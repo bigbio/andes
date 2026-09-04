@@ -777,7 +777,7 @@ echo "=== TRANSFER_AB_DONE ===" | tee -a $LOG
 
 - [ ] **Step 2: Run it on the VM** (background; ~70 min for two arms)
 
-Run: `scp … run_transfer_ab.sh pride-linux-vm:… && ssh pride-linux-vm 'cd … && nohup ./run_transfer_ab.sh &'`
+Run: `scp … run_transfer_ab.sh <bench-host>:… && ssh <bench-host> 'cd … && nohup ./run_transfer_ab.sh &'`
 
 - [ ] **Step 3: Evaluate against the bar**
 

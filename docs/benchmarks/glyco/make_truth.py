@@ -68,8 +68,18 @@ def pglyco2(paths):
             if len(spec) < 4:
                 continue
             pep = re.sub(r"[^A-Z]", "", r.get("Peptide", "").upper().replace("J", "N"))
-            out.append([run, spec[1], spec[3], pep,
-                        (r.get("Glycan") or "").strip(), r.get("GlySite", "")])
+            # pGlyco2's Glycan column is a count vector in the order Hex HexNAc Fuc NeuAc
+            # NeuGc -- verified against its own GlyMass column, where the alternative
+            # HexNAc-first reading matches 0/200 rows and this one matches 156/200 (the
+            # remainder carry modifications outside the five-vector). Normalise to the
+            # canonical HexNAc/Hex/Fuc/NeuAc/NeuGc string so it can be compared with what
+            # andes writes.
+            v = (r.get("Glycan") or "").split()
+            gly = ""
+            if len(v) == 5:
+                h, n, f, a, g = v
+                gly = f"HexNAc{n}Hex{h}Fuc{f}NeuAc{a}NeuGc{g}"
+            out.append([run, spec[1], spec[3], pep, gly, r.get("GlySite", "")])
     return out, "GlyDecoy=0 AND PepDecoy=0 AND TotalFDR<=0.01"
 
 
@@ -123,7 +133,56 @@ def strucgp(paths):
     return out, "as published (depositor-filtered result table)"
 
 
-READERS = {"pglyco2": pglyco2, "byonic": byonic, "strucgp": strucgp}
+def byonic_mzid(paths):
+    """Byonic mzIdentML — the OPEN alternative to `.byrslt`, needing no proprietary reader
+    and no SQLite. Parsed with the standard library; mzIdentML is plain XML.
+
+    Two details that are easy to get wrong:
+      * `spectrumID` is an INDEX (`index=40`), not a scan number. The scan is in the
+        `spectrum title` cvParam, in the classic `file.scan.scan` form.
+      * the glycan appears as a modification MASS DELTA, not a composition, so tables from
+        this reader carry `glycan` as `mass:<delta>` and compare by mass rather than by
+        composition. That is a weaker comparison than pGlyco2 allows, and is labelled so.
+    """
+    import xml.etree.ElementTree as ET
+    out = []
+    for path in paths:
+        run = os.path.basename(path).replace(".raw.mzid", "").replace(".mzid", "")
+        root = ET.parse(path).getroot()
+        ns = root.tag.split("}")[0].strip("{")
+        peps = {}
+        for p in root.iter(f"{{{ns}}}Peptide"):
+            seq = p.find(f"{{{ns}}}PeptideSequence")
+            deltas = [float(m.get("monoisotopicMassDelta", 0))
+                      for m in p.findall(f"{{{ns}}}Modification")]
+            peps[p.get("id")] = (seq.text if seq is not None else "", deltas)
+        for sr in root.iter(f"{{{ns}}}SpectrumIdentificationResult"):
+            title = next((c.get("value") for c in sr.findall(f"{{{ns}}}cvParam")
+                          if c.get("name") == "spectrum title"), "")
+            # `file.SCAN.SCAN.charge_INDEXn` -- do NOT anchor at end; an earlier version
+            # did, having only seen the value truncated to 60 chars in a terminal, and
+            # matched nothing. Anchor on the repeated scan number instead.
+            m = re.search(r"\.(\d+)\.\1\.", title or "")
+            if not m:
+                continue
+            scan = m.group(1)
+            for it in sr.findall(f"{{{ns}}}SpectrumIdentificationItem"):
+                if it.get("passThreshold") != "true":
+                    continue
+                seq, deltas = peps.get(it.get("peptide_ref"), ("", []))
+                if not seq:
+                    continue
+                # the glycan is the largest delta; anything under 300 Da is a chemical mod
+                gly = max(deltas) if deltas else 0.0
+                out.append([run, scan, it.get("chargeState", ""),
+                            re.sub(r"[^A-Z]", "", seq.upper()),
+                            f"mass:{gly:.3f}" if gly > 300 else "", ""])
+                break
+    return out, "passThreshold=true (Byonic's own 2D-FDR threshold); glycan as MASS DELTA"
+
+
+READERS = {"pglyco2": pglyco2, "byonic": byonic, "byonic_mzid": byonic_mzid,
+           "strucgp": strucgp}
 
 if __name__ == "__main__":
     if len(sys.argv) < 3 or sys.argv[1] not in READERS:

@@ -126,7 +126,7 @@ configuration that produces a valid 1% FDR answer.
 
 ### Deep tier — pGlyco2 mouse liver, 5 fractions, cluster-scale
 
-PXD005553, ~25 min per fraction on 16 cores. Commit `6b37bb2c`, 5 Percolator seeds,
+PXD005553, ~25 min per fraction on 16 cores, **ThermoRawFileParser 1.4.3**. Commit `6b37bb2c`, 5 Percolator seeds,
 against a 1:1 shuffled-mouse entrapment database built by `glyco/build_shuffled_entrap.py`:
 
 | | measured |
@@ -149,6 +149,14 @@ andes accepts 31,602 spectra of which 17,530 are not in the pGlyco2 reference. A
 measured true FDP those are mostly not false positives, but the two searches used different
 databases (UniProt mouse reviewed + shuffled twin here; pGlyco2's own there), so read this
 as "accepts substantially more at comparable measured error", not as a clean gain.
+
+### Development tier — one fraction, VM-local, but slow
+
+One pGlyco2 liver fraction on a VM at 8 threads: **4,592 s search (76 min)**, 6,554
+glycoPSMs @1%, 1.04% true FDP. It needs no cluster, which is the point, but 76 minutes is
+too slow to run after every change — treat it as a pre-merge check, not an inner loop. It
+is 17x richer than the 3-file plasma set (6,554 against 385), so it can actually resolve a
+1% effect, which the plasma set cannot.
 
 ### ⚠ Why a single glyco file cannot be benchmarked
 
@@ -307,6 +315,11 @@ Many scripts under `scripts/` carry absolute paths from our hosts and predate
 ---
 
 ## 4. Methodology, and the traps
+
+**Pin the raw converter.** ThermoRawFileParser 1.4.3 and 2.0.0 write different numbers of
+spectra from the same `.raw` — measured on one pGlyco2 file, 45,905 MS2 against 33,893, and
+30% fewer identifications as a result. All figures here used **1.4.3**. Report the converter
+version with any number; it moves results more than any engine change measured this year.
 
 **One rescorer for every engine.** Percolator 3.7.1, pinned, `--seed 42 -Y`. Comparing one
 engine's own score against another's rescored q-value is not a comparison. Percolator also

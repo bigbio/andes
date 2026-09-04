@@ -3499,7 +3499,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "glyco retrieval window: {ppm} ppm ({})",
                 if cli.glyco_retrieval_tol_ppm.is_some() { "--glyco-retrieval-tol-ppm" } else { "high-resolution acquisition" }
             ),
-            (None, None) => eprintln!("glyco retrieval window: 0.5 Da (low-resolution acquisition)"),
+            (None, None) => eprintln!(
+                // The Da fallback builds the index with the resolved MODEL fragment
+                // tolerance, not a constant, so naming a number here would put a
+                // fabricated provenance value into the benchmark record.
+                "glyco retrieval window: model fragment tolerance in Da (low-resolution acquisition)"
+            ),
         }
         let glyco_cfg = search::glyco_search::GlycoConfig {
             gp_k: cli.glyco_gp_k,

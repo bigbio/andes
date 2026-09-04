@@ -8,11 +8,16 @@ methodology so the numbers can be regenerated.
 
 | Benchmark | Date | Engines | Datasets |
 |---|---|---|---|
+| [Tree-count default + entrapment audit](2026-09-04-tree-count-default-and-entrapment-audit.md) | 2026-09-04 | andes (merged `main`) | Astral, UPS1 — measured 1.64x speedup at unchanged IDs, plus an audit of the entrapment metric |
 | [Public benchmark](2026-06-15-public-benchmark.md) | 2026-06-15 | andes (top-1 + `--chimeric`), Java MS-GF+, a comparison engine | Astral (HCD high-res), TMT a05058 (CID low-res), UPS1/PXD001819 (CID low-res) |
 
-Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`),
-and FDR honesty is verified independently with a 1:1 entrapment search (true FDP
-≈ 1% at the nominal 1% q-value). Per-engine configuration files live under
+Every engine is re-scored through one uniform Percolator (3.7.1, `--seed 42 -Y`).
+FDR honesty is checked against entrapment databases **where one exists** — but not
+uniformly, and not always at the ratio once assumed. A 2026-09-04 audit
+([`2026-09-04-tree-count-default-and-entrapment-audit.md`](2026-09-04-tree-count-default-and-entrapment-audit.md))
+found the Astral benchmark database carries no entrapment component at all, and the UPS1
+one is 6,733:4,531 rather than 1:1 — so its true FDP at a nominal 1% is 2.6–3.6%, not ~1%.
+Size `T/E` per database; never assume it is 1. Per-engine configuration files live under
 [`configs/`](configs/); reproducibility scripts under [`scripts/`](scripts/).
 
 <details><summary>Internal / superseded development reports</summary>

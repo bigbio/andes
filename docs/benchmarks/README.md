@@ -37,14 +37,32 @@ Identification-neutral on both. The gap between 1.64x and 1.14x is expected: Ast
 low-res TMT runs in `rank` mode where they only build features. A repeat Astral run the
 same day gave 262 s, so treat wall times as ±8%, not single-second figures.
 
-### Against Comet
+### Against Comet — measured head-to-head, 2026-09-04
 
-Comet on Astral, same Percolator protocol, from stored artifacts: **31,435 PSMs**. andes
-at 38,394 is **+22.1%**.
+Comet 2025.01 rev 1 (`4181df6`) was reinstalled and re-run on the same host, same 8 threads,
+same Percolator protocol, the same day as the andes numbers above. So this is a real
+head-to-head rather than two figures from different sessions:
 
-**No current speed comparison against Comet is claimed.** Comet is not installed on the
-benchmark host, so its previously published 217 s cannot be re-verified, and pairing a
-fresh andes time against a competitor time from a different session is not a measurement.
+| dataset | andes | Comet 2025.01 | PSM gain | andes speed |
+|---|---|---|---|---|
+| Astral | 38,394 / 244 s | 31,435 / 209 s | **+22.1%** | 1.17x slower |
+| TMT a05058 | 12,281 / 97 s | 10,504 / 77 s | **+16.9%** | 1.26x slower |
+| UPS1 | 15,838 / 50 s | 14,734 / 48 s | **+7.5%** | 1.04x slower |
+
+**andes finds 7.5–22.1% more PSMs for 1.04–1.26x the wall time.** Note how much smaller
+that speed gap is than the previously published "2.07x slower on Astral" — that figure
+predates the tree-count default, and the gap on UPS1 is now within run-to-run noise.
+
+Validation that the re-run reproduces the original: Comet's Astral count of 31,435 matches
+the stored artifact from the earlier benchmark exactly, and its 209 s is close to the 217 s
+published on 2026-08-28.
+
+Two honest caveats. Astral and TMT reuse the original Comet parameter files verbatim, with
+only `database_name` repointed; **UPS1 had no stored Comet parameters**, so they were
+derived here from the TMT low-res CID parameters with the TMT-specific fixed modifications
+removed — a defensible derivation, but ours rather than the original benchmark's. And these
+are single runs on a host with ~8% measured run-to-run variance, so read the times as
+approximate.
 
 ---
 
@@ -230,9 +248,9 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
   complete 100-file listing does not contain it (checked 2026-09-04). Either the accession
   or the filename is wrong, and until that is resolved the Astral row cannot be regenerated
   by anyone outside this project — including us, on a fresh machine.
-- **No current competitor numbers.** Java MS-GF+ and Comet have not been re-run under the
-  current default. The Comet Astral count above is from stored artifacts; everything else
-  attributed to a competitor is historical.
+- **Java MS-GF+ has not been re-run** under the current default; every Java figure is
+  historical. Comet 2025.01 *was* re-run head-to-head on 2026-09-04 (above). Neither
+  Comet's newer fragment-index mode nor MSFragger has been benchmarked here at all.
 - **Two of three databases cannot support an entrapment claim.** Astral has no entrapment
   component; UPS1's is not 1:1. Rebuilding both near 1:1 is the fix.
 - **Glyco selection is the open problem**, and whether those 37% are recoverable by scoring

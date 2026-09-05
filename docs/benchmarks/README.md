@@ -345,8 +345,6 @@ hardcoded paths. It also documents what will *not* reproduce exactly, and why.
       reproduce/     the maintained, path-independent way to run everything
       glyco/         the glyco harness (pooling, yield, entrapment, gap decomposition)
       configs/       per-engine parameter files
-      scripts/       historical driver scripts, kept for reference
-      scripts/vm/    the bench-VM sign-off harness (was gitignored until 2026-09-04)
 
 Benchmark material used to be spread across five directories -- `benchmarks/` and
 `docs/benchmarks/` in the repository, plus an unversioned `benchmark/` at the workspace
@@ -356,8 +354,6 @@ on 2026-09-04; only the test fixture stayed where it was, being a fixture rather
 binaries deliberately stay outside git; the workspace-root README says what remains and
 how to re-fetch it.
 
-Many scripts under `scripts/` carry absolute paths from our hosts and predate
-`reproduce/` — prefer `reproduce/` for anything new.
 
 ---
 
@@ -434,9 +430,10 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 
 ## 5. Known gaps
 
-- **The README's headline table is untraceable.** Its counts (36,873 / 11,163 / 15,061 for
-  andes, 28,401 for Comet) appear in no recorded run; the closest documented figures are
-  36,730 / 11,215 / 14,919. They need re-deriving or replacing.
+- **The README's headline table is historical.** Its andes counts (36,873 / 11,163 /
+  15,061) come from the soft-fragment-matching validation in `docs/soft-fragment-matching.md`
+  and predate the 2026-09 tree-count default; the Comet 28,401 has no recorded source found.
+  They should be re-measured under the current default and the native-read protocol.
 - **The Astral dataset is not reproducible from its documented accession.** Our records
   name `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` in PXD070049; that project's
   complete 100-file listing does not contain it (checked 2026-09-04). Either the accession

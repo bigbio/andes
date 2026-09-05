@@ -1,8 +1,35 @@
 # andes benchmarks
 
-Everything about how andes is measured, and what it currently measures at. One file: the
-folder previously held eight documents spanning June to September, most of them superseded,
-which made it unclear which numbers were live. History is in git.
+## Start here (contributors)
+
+```bash
+DATA=~/andes-bench                                  # ~200 GB free for the standard sets
+
+./reproduce/build_databases.sh "$DATA"              # databases from UniProt, ~1 min
+GLYCO=1 ./reproduce/build_databases.sh "$DATA"      # ...plus the mouse glyco database
+./reproduce/fetch_spectra.sh   "$DATA" tmt ups1     # spectra from PRIDE (see caveat on astral)
+./reproduce/run.sh             "$DATA" tmt ups1     # search + Percolator + results table
+```
+
+**Four rules that are not optional.** Each exists because breaking it produced a wrong
+published number in this project, and each is explained where it applies below.
+
+1. **Pin the raw converter.** ThermoRawFileParser 1.4.3 and 2.0.0 differ by 26% of MS2
+   scans and 30% of identifications on the same file. Everything here used **1.4.3**.
+2. **Measure the entrapment ratio; never assume 1:1.** `FDP = hits/total x (1 + T/E)`,
+   and `T/E` is a property of the database you built.
+3. **Pool at least three files for glyco, all from ONE acquisition regime.** A single file
+   returns zero at 1% FDR because Percolator's floor is `1/T_top`.
+4. **Report the metric you computed.** `q <= 0.01` is a claim; an entrapment FDP is a
+   measurement. On these datasets they differ by 2-3x.
+
+Reference identifications for scoring ship in [`glyco/truth/`](glyco/truth/) — no
+re-download, no proprietary parser.
+
+
+Below: current results, how to reproduce them, the methodology, and the known gaps.
+This folder was consolidated from eight documents in September 2026; the superseded ones
+are in git history.
 
 **Provenance rule.** Every figure below names the commit, host, thread count and date that
 produced it. A number without that is not a result. Where something has *not* been
@@ -199,8 +226,8 @@ own Byonic results — 629 truth spectra, 2026-09-04:
 | peptide not reachable by the digest | 1.0% |
 
 **Selection, not evidence, is the dominant loss** — 37% of truth is generated and scored
-but loses the per-scan collapse. Reproduce with `benchmarks/glyco/gap_decompose.py`, which
-asserts its own preconditions.
+but loses the per-scan collapse. Reproduce with `glyco/score_vs_truth.py`, which asserts
+its own preconditions.
 
 ### Refuted — do not re-try without new evidence
 
@@ -283,9 +310,10 @@ the FDP factor is ~4.9 rather than 2), the sequon density of the entrapment spac
 total search-space size. Detect entrapment by SUBSTRING, not prefix — the tag is inside the
 accession, not at the start of the header.
 
-`gap_decompose.py` is **plasma-only**: it hardcodes the plasma paths and three replicates,
-and needs a Byonic reference exported to CSV, because PXD011533 ships proprietary `.byrslt`
-files that no parser in this harness reads. It cannot run on the mouse dataset.
+`score_vs_truth.py` works on **any** dataset with a committed reference in `truth/`; it
+replaced a plasma-only script that hardcoded one dataset's paths and could not run
+elsewhere. `make_truth.py` builds those references from pGlyco2 TSV, Byonic `.byrslt`
+(SQLite) or Byonic mzIdentML, and StrucGP xlsx.
 
 **To reproduce any of this from scratch**, see [`reproduce/`](reproduce/) — three scripts that
 pull the data from PRIDE, rebuild the databases from UniProt, and run the whole thing with no

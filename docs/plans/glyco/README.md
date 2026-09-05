@@ -12,5 +12,4 @@ scripts) is kept outside the repository.
 | `20-theory/why-andes-fails-and-succeed.md` | backbone and cross-spectrum code (the SP-B lever) |
 | `50-roadmap/spb-design.md` | the backbone-first design |
 | `50-roadmap/rt-prediction-design.md` | RT model and the RT PIN columns |
-| `50-roadmap/cross-spectrum-transfer-{design,plan}.md` | `--glyco-transfer` |
 | `50-roadmap/2026-09-02-redesign-benchmark-and-speed-plan.md` | the current plan, from `docs/plans/2026-09-03-comet-msfragger-competitive-plan.md` |

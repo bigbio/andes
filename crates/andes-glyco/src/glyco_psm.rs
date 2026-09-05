@@ -132,18 +132,11 @@ pub fn collapse_cmp(
 ///     n_core_oxonium_ions: 0,
 ///     y_ladder_intensity_score: 0.0,
 ///     y_hit_frac: 0.0,
-///     y_hit_frac_decoy: 0.0,
-///     y_ladder_decoy_score: 0.0,
 ///     partial_glycan_by: 0.0,
 ///     y0y1_anchor_score: 0.0,
 ///     sialic_consistency: 0.0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
-///     is_transferred: false,
-///     transfer_graph_support: 0,
-///     transfer_seed_score: 0.0,
-///     transfer_rt_delta: 0.0,
-///     transfer_ungated: false,
 ///     cz_hyperscore: 0.0,
 ///     cz_intensity: 0.0,
 ///     cz_explained: 0.0,
@@ -165,11 +158,6 @@ pub struct GlycoPsmKey {
     pub n_core_oxonium_ions: u8,
     /// Intensity-weighted score from the core-Y ladder match.
     pub y_ladder_intensity_score: f32,
-    /// Glycan-AXIS decoy of `y_ladder_intensity_score`: the same composition's
-    /// ladder with intermediate Y-rungs shifted (Y0/Y1 kept). On a true-glycan
-    /// spectrum this scores below the target; the gap is what a glycan-decoy PIN
-    /// row exposes to Percolator for 2D FDR. 0.0 when no glycan is resolved.
-    pub y_ladder_decoy_score: f32,
     /// COMPLETENESS of this composition's own Y ladder: the fraction of the Y rungs
     /// the assigned composition PREDICTS that were actually matched, in [0,1].
     ///
@@ -185,10 +173,6 @@ pub struct GlycoPsmKey {
     /// mass than the truth, i.e. the failing decision is which mass split /
     /// composition to believe — exactly what a completeness fraction scores.
     pub y_hit_frac: f32,
-    /// Glycan-AXIS decoy of `y_hit_frac`: same composition, interior rungs shifted.
-    /// A correct composition should hold its completeness while its shifted twin
-    /// collapses; the gap is what a glycan-decoy PIN row exposes to Percolator.
-    pub y_hit_frac_decoy: f32,
     /// PARTIAL-GLYCAN b/y evidence (idea B): matched intensity of peptide b/y fragments
     /// bearing the innermost core glycan (b_i/y_i + {HexNAc, 2HexNAc, ...}). Unlike the
     /// mass-based Y-ladder, this is SEQUENCE-specific → discriminates the true backbone
@@ -211,18 +195,6 @@ pub struct GlycoPsmKey {
     pub glycan_mass: f64,
     /// Pre-computed monoisotopic mass of the peptide backbone.
     pub backbone_mass: f64,
-    /// Cross-spectrum transfer provenance + evidence (additive PIN features).
-    /// All inert (false/0) for natively-generated candidates.
-    pub is_transferred: bool,
-    /// # co-eluting, glycan-delta-linked sibling spectra corroborating this
-    /// backbone (the discriminative transfer signal).
-    pub transfer_graph_support: u32,
-    /// Pass-1 discriminant of the donor seed.
-    pub transfer_seed_score: f32,
-    /// |RT(acceptor) − RT(seed)| seconds; 0 = perfect co-elution.
-    pub transfer_rt_delta: f32,
-    /// RT unavailable ⇒ co-elution gate skipped (distrust signal).
-    pub transfer_ungated: bool,
     /// ETD c/z backbone hyperscore (additive PIN feature `CzHyperscore`), computed
     /// only on ETD/AI-ETD spectra: `ln(N_c!) + ln(N_z!)` over distinct matched
     /// c/z ions of the glycopeptide backbone (glycan on glycosite-spanning
@@ -334,20 +306,13 @@ mod tests {
             oxonium_summed_frac: 0.15,
             n_core_oxonium_ions: 2,
             y_ladder_intensity_score: 0.88,
-            y_ladder_decoy_score: 0.2,
             y_hit_frac: 0.0,
-            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.4,
             sialic_consistency: 0.1,
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
             cz_explained: 0.0,
@@ -376,19 +341,12 @@ mod tests {
             oxonium_summed_frac: 0.30,
             n_core_oxonium_ions: 3,
             y_ladder_intensity_score: 1.5,
-            y_ladder_decoy_score: 0.5,
             y_hit_frac: 0.0,
-            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.7,
             sialic_consistency: 0.2,
             core_y_hits: 5,
             backbone_mass: 1500.0,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
             cz_explained: 0.0,
@@ -408,19 +366,12 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_hit_frac: 0.0,
-            y_hit_frac_decoy: 0.0,
-            y_ladder_decoy_score: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
             cz_explained: 0.0,
@@ -428,37 +379,5 @@ mod tests {
         };
         let cloned = key.clone();
         assert_eq!(cloned.spectrum_idx, key.spectrum_idx);
-    }
-
-    #[test]
-    fn glyco_psm_key_defaults_to_non_transferred() {
-        let key = GlycoPsmKey {
-            spectrum_idx: 0,
-            glycan: None,
-            glycan_source: Source::Db,
-            oxonium_summed_frac: 0.0,
-            n_core_oxonium_ions: 0,
-            y_ladder_intensity_score: 0.0,
-            y_hit_frac: 0.0,
-            y_hit_frac_decoy: 0.0,
-            y_ladder_decoy_score: 0.0,
-            partial_glycan_by: 0.0,
-            y0y1_anchor_score: 0.0,
-            sialic_consistency: 0.0,
-            core_y_hits: 0,
-            glycan_mass: 0.0,
-            backbone_mass: 0.0,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
-            cz_hyperscore: 0.0,
-            cz_intensity: 0.0,
-            cz_explained: 0.0,
-            cz_chance_llr: 0.0,
-        };
-        assert!(!key.is_transferred);
-        assert_eq!(key.transfer_graph_support, 0);
     }
 }

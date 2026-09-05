@@ -24,7 +24,6 @@
 // Placement: inside the search crate so `pub(crate)` items (compute_psm_features,
 // candidate_nominal_bounds) are reachable without visibility changes.
 
-use std::collections::HashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use model::mass::{nominal_from, H2O, ISOTOPE, PROTON};
@@ -33,12 +32,11 @@ use rayon::prelude::*;
 
 use andes_glyco::backbone::{
     core_y_intensity, count_core_y_hits, glycan_y_hit_frac, glycan_y_intensity,
-    glycan_y_intensity_decoy,
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
 use andes_glyco::glyco_psm::{
-    collapse_cmp, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
+    GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
     GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT, glyco_gp_fused_score,
 };
 
@@ -112,11 +110,9 @@ pub struct GlycoConfig {
     /// Max peptide-first candidates kept per spectrum.
     pub max_pf: usize,
     /// Diagnostic mode (`--debug-glyco`): emit ALL candidate rows per scan
-    /// (including de-novo mass-residual hits) instead of the honest top-1 collapse,
-    /// and print transfer diagnostics. A debug PIN must NEVER be fed to an FDR tool.
+    /// (including de-novo mass-residual hits) instead of the honest top-1 collapse.
+    /// A debug PIN must NEVER be fed to an FDR tool.
     pub debug: bool,
-    /// Emit paired glycan-axis decoy rows for experimental 2D-FDR (`--glyco-decoy`).
-    pub glyco_decoy: bool,
     /// EXPERIMENTAL paired-scan generation (`--glyco-hcd-pair`, B1): on ETD/AI-ETD
     /// spectra, GENERATE candidate backbones from the paired HCD scan (same
     /// precursor, strong oxonium/core-Y/b/y) while SCORING c/z on the ETD scan.
@@ -183,7 +179,6 @@ impl Default for GlycoConfig {
             enum_fallback: true,
             etd_require_oxonium: false,
             debug: false,
-            glyco_decoy: false,
         }
     }
 }
@@ -194,7 +189,6 @@ use andes_glyco::oxonium::{oxonium_gate, sialic_consistency, OXONIUM_GATE_MIN_FR
 use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
 
 use crate::glyco_fragment_index::FragmentIndex;
-use andes_glyco::crossspectrum::GlycoformWhitelist;
 
 use crate::match_engine::{compute_psm_features, PreparedSearch};
 use crate::psm::PsmMatch;
@@ -530,16 +524,8 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
     for next in all_backbone {
         let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.02);
         let same_backbone = (next.backbone_mass - rep.backbone_mass).abs() < tol;
-        // Same candidate iff same backbone AND same glycan hypothesis AND same
-        // transfer identity. FDR-soundness (design bug #3): a transferred hit is
-        // LOCKED to a specific seed peptide, so two hits with different
-        // `transfer_peptide_idx` (or a transferred vs a native hit) are DIFFERENT
-        // candidates even at an identical backbone mass + glycan — never collapse
-        // them, or the transferred hit (and its is_transferred/label provenance)
-        // is silently erased on exactly the weak-ladder spectra it targets.
-        let same_transfer = rep.transfer_peptide_idx == next.transfer_peptide_idx;
-        let same_hypothesis = same_transfer
-            && match (&rep.glycan, &next.glycan) {
+        // Same candidate iff same backbone AND same glycan hypothesis.
+        let same_hypothesis = match (&rep.glycan, &next.glycan) {
                 (Some(g1), Some(g2)) => g1 == g2,
                 // Unannotated: the residual is isotope-specific, so only the same
                 // offset is the same candidate.
@@ -562,15 +548,9 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
     deduped
 }
 
-/// Per-run context needed to score any single spectrum's glyco candidates.
-///
-/// Every field here was previously a captured variable of the `process_one`
-/// closure that used to live inside `glyco_search_run` (Task 8c extraction).
-/// This struct is a straight capture-list-to-fields translation — no field
-/// changes behavior. It lets [`score_spectrum_glyco`] be called both from
-/// `glyco_search_run`'s own two passes and from the standalone
-/// [`glyco_transfer_pass2`] entry point used by the driver's cross-spectrum
-/// orchestration.
+/// Per-run context needed to score any single spectrum's glyco candidates:
+/// the search parameters, scorers, indexes and settings that every spectrum
+/// shares, borrowed for the duration of the run.
 pub struct GlycoScoreCtx<'a> {
     pub params: &'a crate::search_params::SearchParams,
     pub scorer: &'a scoring_crate::scoring::RankScorer,
@@ -612,7 +592,6 @@ pub struct GlycoScoreCtx<'a> {
     pub max_gen_peaks: usize,
     /// See `GlycoConfig::cz_multisite`.
     pub cz_multisite: bool,
-    pub glyco_decoy_on: bool,
     /// B1 paired-scan generation toggle (`--glyco-hcd-pair`). Process-constant.
     pub hcd_pair_on: bool,
     /// BUG2 fix toggle (`--glyco-etd-rank-glycan`). Process-constant.
@@ -636,11 +615,7 @@ pub struct GlycoScoreCtx<'a> {
 }
 
 /// Owns the pieces of [`GlycoScoreCtx`] that are built once per run (indices,
-/// toggle values, the resolved scan filter) so both `glyco_search_run`'s
-/// internal passes and the standalone [`glyco_transfer_pass2`] entry point
-/// build IDENTICAL context from ONE shared setup routine
-/// ([`GlycoCtxOwned::build`]) instead of two independently-maintained copies
-/// of the toggle/index construction logic.
+/// toggle values, the resolved scan filter) via [`GlycoCtxOwned::build`].
 pub struct GlycoCtxOwned {
     frag_index: FragmentIndex,
     glycan_sorted: Vec<(f64, usize)>,
@@ -662,19 +637,12 @@ pub struct GlycoCtxOwned {
     min_matched_by: u32,
     max_gen_peaks: usize,
     cz_multisite: bool,
-    glyco_decoy_on: bool,
     hcd_pair_on: bool,
     etd_rank_glycan: bool,
     cz_gate: bool,
     features_collapse: bool,
     features_enumerated: bool,
     sequon_membership: Vec<bool>,
-    /// Cross-spectrum transfer toggle (legacy in-driver `ANDES_GLYCO_CROSSSPECTRUM`
-    /// path). Not part of `GlycoScoreCtx` (it gates `glyco_search_run`'s own
-    /// Pass-2, not per-spectrum scoring), but built alongside the other toggles
-    /// so callers who need it (only `glyco_search_run` today) don't re-read the
-    /// env var separately.
-    pub cross_spectrum_on: bool,
 }
 
 impl GlycoCtxOwned {
@@ -692,18 +660,6 @@ impl GlycoCtxOwned {
         // Peptide-first fragment-index candidate generation is always on under the
         // shipped gp selector (it is the high-charge-glycopeptide recall path).
         let peptide_first_on = true;
-        // FDR-soundness: the legacy in-driver whitelist transfer injected TARGET-ONLY,
-        // UNLOCKED backbones (transfer_peptide_idx: None), bypassing the seed
-        // target/decoy lock (design bug #1) — anti-conservative. It is superseded by
-        // the driver's `--glyco-transfer` path (peptide-locked, decoy-symmetric), so
-        // the in-driver path is force-DISABLED. `black_box` keeps `false` opaque so
-        // the (retained, still-tested) legacy block below stays compiled rather than
-        // becoming provably-unreachable dead code.
-        let cross_spectrum_on = std::hint::black_box(false);
-        // G3 glycan-axis decoy (--glyco-decoy, default OFF). When off we must NOT
-        // compute the decoy Y-ladder per hit — it is unused and ~doubles the glyco
-        // composition-ladder cost, so leaving it on would slow the shipping default.
-        let glyco_decoy_on = cfg.glyco_decoy;
         let hcd_pair_on = cfg.hcd_pair;
         let etd_rank_glycan = cfg.etd_rank_glycan;
         let cz_gate = cfg.cz_gate;
@@ -893,14 +849,12 @@ impl GlycoCtxOwned {
             min_matched_by: min_matched_by_cfg,
             max_gen_peaks,
             cz_multisite: cz_multisite_cfg,
-            glyco_decoy_on,
             hcd_pair_on,
             etd_rank_glycan,
             cz_gate,
             features_collapse,
             features_enumerated,
             sequon_membership,
-            cross_spectrum_on,
         }
     }
 
@@ -944,7 +898,6 @@ impl GlycoCtxOwned {
             min_matched_by: self.min_matched_by,
             max_gen_peaks: self.max_gen_peaks,
             cz_multisite: self.cz_multisite,
-            glyco_decoy_on: self.glyco_decoy_on,
             hcd_pair_on: self.hcd_pair_on,
             etd_rank_glycan: self.etd_rank_glycan,
             cz_gate: self.cz_gate,
@@ -1016,19 +969,9 @@ fn glyco_charges_to_try(
 /// generation (backbone-first hybrid DB/de-novo, peptide-first fragment-index,
 /// and glycan-Y-first, per the `ctx` toggles), dedup, b/y-ranked truncation, and
 /// phase-2 feature extraction for the surviving winners.
-///
-/// `transfer` carries extra backbones injected by cross-spectrum transfer
-/// (empty for ordinary Pass-1 scoring).
-///
-/// Extracted from the former `process_one` closure inside `glyco_search_run`
-/// (Task 8c) so it can also be driven from [`glyco_transfer_pass2`], which
-/// lives outside `glyco_search_run`'s own Pass-1/legacy-Pass-2 call sites. The
-/// body below is BYTE-FOR-BYTE identical to the former closure body except
-/// that captured variables now read from `ctx` — no scoring-logic change.
 fn score_spectrum_glyco(
     spec_idx: usize,
     spec: &Spectrum,
-    transfer: &[BackboneHit],
     ctx: &GlycoScoreCtx<'_>,
 ) -> Option<GlycoSpectrumResult> {
     let params = ctx.params;
@@ -1122,7 +1065,6 @@ fn score_spectrum_glyco(
     // path a glycan-aware peptide clone on ETD scans instead of the bare backbone
     // (see `glyco_aware_peptide`). Inert (false) unless explicitly enabled.
     let etd_rank_glycan = ctx.etd_rank_glycan;
-    let glyco_decoy_on = ctx.glyco_decoy_on;
     let features_collapse = ctx.features_collapse;
     let features_enumerated = ctx.features_enumerated;
     let scan_filter = ctx.scan_filter;
@@ -1371,13 +1313,6 @@ fn score_spectrum_glyco(
                                     charge: z,
                                     isotope_offset: iso,
                                     glycan_mass_residual: precursor_neutral - bb,
-                                    is_transferred: false,
-                                    transfer_graph_support: 0,
-                                    transfer_seed_score: 0.0,
-                                    transfer_rt_delta: 0.0,
-                                    transfer_ungated: false,
-                                    transfer_peptide_idx: None,
-                                    transfer_seed_is_decoy: false,
                                 });
                                 pf_added += 1;
                                 if pf_added >= max_peptide_first {
@@ -1388,10 +1323,6 @@ fn score_spectrum_glyco(
                     }
                 }
             }
-
-            // Cross-spectrum transfer: backbones borrowed from confident sibling
-            // glycoforms (empty on pass 1). Added to the same dedup/score path.
-            all_backbone.extend_from_slice(transfer);
 
             // SIALIC OXONIUM GATE, APPLIED ONCE OVER EVERY GENERATOR.
             //
@@ -1544,7 +1475,7 @@ fn score_spectrum_glyco(
             // Y0/Y1). So skip full scoring of a `Source::Db` backbone with
             // core_y_counts == 0 — UNLESS the scan has no evidence backbone at all,
             // in which case we score everything (non-dropping fallback preserves
-            // recall on genuinely weak spectra). De-novo / peptide-first / transfer
+            // recall on genuinely weak spectra). De-novo / peptide-first
             // backbones carry their own evidence and are never skipped.
             let scan_has_evidence = deduped_backbone
                 .iter()
@@ -1552,10 +1483,6 @@ fn score_spectrum_glyco(
                 .any(|(i, h)| h.source != Source::Db || core_y_counts[i] > 0);
 
             for (bb_idx, bb_hit) in deduped_backbone.iter().enumerate() {
-                // A transferred hit carries cross-spectrum evidence (its confident
-                // donor), so it is NEVER dropped by the core-Y prefilter — otherwise
-                // it would be skipped before it can produce a CheapWinner and AXIS 3
-                // could not retain it (code review).
                 // The cz-gate (AXIS 4) rescues backbones with weak b/y AND weak
                 // core-Y but STRONG glycosite-spanning c/z — exactly the class this
                 // prefilter would drop. When the gate is on, a zero-core-Y Db
@@ -1563,7 +1490,6 @@ fn score_spectrum_glyco(
                 // and AXIS 4 can retain it (otherwise the gate is silently defeated
                 // for its target population). Default path (gate off) unchanged.
                 if scan_has_evidence
-                    && !bb_hit.is_transferred
                     && bb_hit.source == Source::Db
                     && core_y_counts[bb_idx] == 0
                     && !cz_gate_on
@@ -1584,47 +1510,10 @@ fn score_spectrum_glyco(
                 let tol_da = (bb_residue * tol_ppm * 1e-6_f64).max(0.01);
                 let widen = (tol_da - 0.4999_f64).max(0.0_f64).round() as i32;
 
-                let candidate_slots: Vec<usize> = match (bb_hit.is_transferred, bb_hit.transfer_peptide_idx) {
-                    // FDR-soundness (design bug #1): a transferred backbone is LOCKED
-                    // to the exact Pass-1 seed peptide — score ONLY that candidate,
-                    // never every mass-matching peptide. Otherwise a decoy seed's
-                    // backbone mass could match a target peptide and emit a
-                    // target-labeled row, breaking the symmetric target/decoy graph
-                    // the final FDR relies on. `is_transferred` and
-                    // `transfer_peptide_idx` are ONE invariant — a transferred hit
-                    // without a lock is rejected (below), never scored unlocked.
-                    (true, Some(pi)) => {
-                        let pi = pi as usize;
-                        // Stale index, or the seed's recorded label disagrees with the
-                        // candidate it points at: the symmetric-decoy invariant is
-                        // broken upstream. DROP the transfer (FDR-safe: emit no row)
-                        // rather than panic (`glyco_transfer_pass2` is public and can
-                        // receive arbitrary injected hits) or emit a mislabelled row.
-                        // The debug_assert flags it loudly in dev/CI.
-                        if pi >= candidates.len()
-                            || candidates[pi].is_decoy != bb_hit.transfer_seed_is_decoy
-                        {
-                            debug_assert!(
-                                pi < candidates.len()
-                                    && candidates[pi].is_decoy == bb_hit.transfer_seed_is_decoy,
-                                "transfer seed label/index mismatch at candidate {pi}"
-                            );
-                            continue;
-                        }
-                        vec![pi]
-                    }
-                    // A transferred hit MUST carry a peptide lock. Without one, unlocked
-                    // mass-bucket scoring would recreate the FDR-unsound path (a decoy
-                    // seed could emit a target row). Drop it (adversarial + code review).
-                    (true, None) => {
-                        debug_assert!(false, "transferred hit missing its peptide lock");
-                        continue;
-                    }
-                    (false, _) => bucket_index
-                        .range((nb - widen)..=(nb + widen))
-                        .flat_map(|(_, v)| v.iter().copied())
-                        .collect(),
-                };
+                let candidate_slots: Vec<usize> = bucket_index
+                    .range((nb - widen)..=(nb + widen))
+                    .flat_map(|(_, v)| v.iter().copied())
+                    .collect();
 
                 // Phase-1 gating/selection ranks on the generation spectrum (HCD
                 // partner when paired; ETD scan otherwise — see `phase1_scored`).
@@ -1741,15 +1630,8 @@ fn score_spectrum_glyco(
                     cheap_winners
                         .entry(gl_key)
                         .and_modify(|existing| {
-                            // Higher rank wins; on a TIE, prefer the TRANSFERRED hit so
-                            // an equal-ranked native entry cannot erase a transferred
-                            // CheapWinner (and its provenance) before AXIS 3 selection
-                            // (code review). Same (cand_slot, glycan) ⇒ same
-                            // peptide+label, so this never changes target/decoy balance.
-                            let tie_prefer_transfer = w.rank == existing.rank
-                                && deduped_backbone[w.bb_hit_idx].is_transferred
-                                && !deduped_backbone[existing.bb_hit_idx].is_transferred;
-                            if w.rank > existing.rank || tie_prefer_transfer {
+                            // Higher rank wins; the first entry keeps a tie.
+                            if w.rank > existing.rank {
                                 *existing = w;
                             }
                         })
@@ -1811,20 +1693,6 @@ fn score_spectrum_glyco(
                 });
                 by_cz.truncate(effective_top_k);
                 accepted_backbones.extend(by_cz);
-            }
-
-            // AXIS 3 (cross-spectrum transfer) — ALWAYS accept transferred backbones.
-            // A transferred backbone has weak b/y AND zero core-Y by construction
-            // (that is precisely WHY it was borrowed from a confident sibling), so
-            // both fragment axes above truncate it out before its ORTHOGONAL
-            // evidence (glycan-Y ladder + graph support + RT) can compete in the
-            // selector. Accepting it only ADDS to the set (never evicts a fragment
-            // winner) and is target/decoy SYMMETRIC because transferred hits are
-            // label-locked (a decoy seed yields a decoy-labeled candidate).
-            for (i, h) in deduped_backbone.iter().enumerate() {
-                if h.is_transferred {
-                    accepted_backbones.insert(i);
-                }
             }
 
             // Phase 2: expensive feature extraction for top-K winners only.
@@ -2374,29 +2242,6 @@ fn score_spectrum_glyco(
                         Some(g) => glycan_y_intensity(y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge) as f32,
                         None => core_y_intensity(y_peaks, y_stats, bb_neutral, tol_ppm, max_frag_charge) as f32,
                     },
-                    // Glycan-axis decoy ladder (G3): same composition, intermediate
-                    // Y-rungs shifted. Seed from the composition so the decoy ladder
-                    // is stable per glycan (a fixed decoy "structure"). 0.0 for
-                    // de-novo hits (no composition → no glycan-axis decoy row).
-                    y_ladder_decoy_score: match &bb_hit.glycan {
-                        // Round-7 (audit F13): this read `spec.peaks` (always the ETD
-                        // scan) while its TARGET sibling above reads `y_peaks`. Under
-                        // ANDES_GLYCO_PAIR_Y_ON_GEN the target ladder moves to the
-                        // glycan-rich HCD partner and the decoy stays on the
-                        // glycan-poor ETD scan — the glycan-axis decoy stops being a
-                        // control and the 2D FDR goes anti-conservative. The decoy
-                        // must be measured on the SAME spectrum as its target.
-                        Some(g) if glyco_decoy_on => glycan_y_intensity_decoy(
-                            y_peaks,
-                            y_stats,
-                            bb_neutral,
-                            g,
-                            tol_ppm,
-                            max_frag_charge,
-                            glycan_decoy_seed(g),
-                        ) as f32,
-                        _ => 0.0,
-                    },
                     // COMPLETENESS of the assigned composition's own Y ladder: the
                     // fraction of the rungs it PREDICTS that were matched, in [0,1].
                     //
@@ -2414,18 +2259,6 @@ fn score_spectrum_glyco(
                             y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge, None,
                         ) as f32,
                         None => 0.0,
-                    },
-                    // Glycan-axis decoy twin. Measured on the SAME spectrum as its
-                    // target (round-7 audit F13: reading a different scan here turns the
-                    // decoy from a control into an anti-conservative artefact), and
-                    // seeded identically to the ladder decoy so both describe one decoy
-                    // "structure" per composition.
-                    y_hit_frac_decoy: match &bb_hit.glycan {
-                        Some(g) if glyco_decoy_on => glycan_y_hit_frac(
-                            y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge,
-                            Some(glycan_decoy_seed(g)),
-                        ) as f32,
-                        _ => 0.0,
                     },
                     // Idea B: partial-glycan b/y — sequence-specific evidence for the
                     // weak large/high-charge glycopeptides (b_i/y_i + core glycan).
@@ -2467,11 +2300,6 @@ fn score_spectrum_glyco(
                     core_y_hits: core_y_counts[w.bb_hit_idx],
                     glycan_mass,
                     backbone_mass: bb_neutral,
-                    is_transferred: bb_hit.is_transferred,
-                    transfer_graph_support: bb_hit.transfer_graph_support,
-                    transfer_seed_score: bb_hit.transfer_seed_score,
-                    transfer_rt_delta: bb_hit.transfer_rt_delta,
-                    transfer_ungated: bb_hit.transfer_ungated,
                     // ETD c/z backbone evidence (0.0 on HCD/CID) — reuse the SAME `cz`
                     // closure the collapse selector used, so the emitted feature and
                     // the selection score can never diverge (single source of truth).
@@ -2677,7 +2505,6 @@ pub fn glyco_search_run(
     backbone_top_k: usize,
     cfg: GlycoConfig,
 ) -> Vec<GlycoSpectrumResult> {
-    let params = prepared.params;
     let candidates = &prepared.candidates;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
     // B1: pair each ETD spectrum to its HCD partner (same precursor) before scoring.
@@ -2687,262 +2514,16 @@ pub fn glyco_search_run(
         Vec::new()
     };
 
-    // Shared setup (toggles + indices) — see `GlycoCtxOwned::build` for the
-    // full rationale of each; unchanged by the Task 8c extraction, just moved
-    // out of this function so `glyco_transfer_pass2` can build an IDENTICAL
-    // context from the same routine instead of a second hand-maintained copy.
+    // Shared setup (toggles + indices) — see `GlycoCtxOwned::build`.
     let owned =
         GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg.clone());
-    let cross_spectrum_on = owned.cross_spectrum_on;
     let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner);
 
-    // PASS 1: baseline candidate gen (+ peptide-first if on), no transfer.
-    let pass1: Vec<GlycoSpectrumResult> = spectra
+    spectra
         .par_iter()
         .enumerate()
-        .filter_map(|(spec_idx, spec)| score_spectrum_glyco(spec_idx, spec, &[], &ctx))
-        .collect();
-
-    if !cross_spectrum_on {
-        return pass1;
-    }
-
-    // CROSS-SPECTRUM TRANSFER. Build a whitelist of CONFIDENT backbone (residue)
-    // masses from pass-1 PSMs with a strong core-Y ladder (well-fragmented
-    // glycoforms), then transfer them to poorly-fragmenting sibling glycoforms.
-    const CONF_MIN_CORE_Y: u8 = 3;
-    // G4 RT co-elution half-width (seconds). Fixed default for this (dead, force-
-    // disabled) legacy in-driver transfer path; the live --glyco-transfer path uses
-    // the --glyco-rt-window flag. RT gating is MANDATORY.
-    let rt_window: f32 = 1800.0;
-    // Confident donors carry their spectrum RT so transfer only fires to
-    // co-eluting acceptors. Donors must be (a) strong-ladder (core_y_hits >=
-    // CONF_MIN_CORE_Y), (b) a TARGET peptide (never a decoy — a decoy with a
-    // strong glycan ladder would otherwise seed transfer and inject noise; Codex
-    // review), and (c) RT-bearing (a donor without RT cannot be co-elution-gated).
-    let rt_bearing = spectra.iter().filter(|s| s.rt_seconds.is_some()).count();
-    let confident_bb: Vec<(f64, f32)> = pass1
-        .iter()
-        .flat_map(|r| {
-            let rt = spectra[r.spectrum_idx].rt_seconds;
-            r.hits
-                .iter()
-                .filter(|h| h.glycan_key.core_y_hits >= CONF_MIN_CORE_Y)
-                .filter(|h| {
-                    let ci = h.psm.primary_candidate_idx() as usize;
-                    ci < candidates.len() && !candidates[ci].is_decoy
-                })
-                .filter_map(move |h| rt.map(|t| (h.glycan_key.backbone_mass - H2O, t as f32)))
-        })
-        .collect();
-    let n_donor_obs = confident_bb.len();
-    let whitelist = GlycoformWhitelist::new(confident_bb, 0.02);
-    // Loud diagnostics: a silently-empty whitelist (esp. from missing RT) would
-    // make a disabled transfer look like a biological ceiling (adversarial review).
-    eprintln!(
-        "[glyco-xspec] cross-spectrum ON: {}/{} spectra carry RT; {} confident target donors → {} whitelist backbones (rt_window ±{}s)",
-        rt_bearing,
-        spectra.len(),
-        n_donor_obs,
-        whitelist.len(),
-        rt_window,
-    );
-    if whitelist.is_empty() {
-        if rt_bearing == 0 {
-            eprintln!(
-                "[glyco-xspec] WARNING: NO spectra carry retention time — cross-spectrum transfer is DISABLED (needs mzML/raw or MGF with RTINSECONDS). Pass 2 skipped."
-            );
-        } else {
-            eprintln!("[glyco-xspec] no confident target donors → pass 2 skipped");
-        }
-        return pass1;
-    }
-    // Spectra that already have a confident ID need no transfer (bounds pass 2).
-    let confident_scans: std::collections::HashSet<usize> = pass1
-        .iter()
-        .filter(|r| r.hits.iter().any(|h| h.glycan_key.core_y_hits >= CONF_MIN_CORE_Y))
-        .map(|r| r.spectrum_idx)
-        .collect();
-    let mut by_idx: HashMap<usize, GlycoSpectrumResult> =
-        pass1.into_iter().map(|r| (r.spectrum_idx, r)).collect();
-
-    // PASS 2: only the non-confident (weak-ladder) spectra; inject transferred
-    // backbones and re-score. Results supersede their pass-1 entry.
-    let iso_min = *params.isotope_error_range.start();
-    let iso_max = *params.isotope_error_range.end();
-    let pass2: Vec<GlycoSpectrumResult> = spectra
-        .par_iter()
-        .enumerate()
-        .filter(|(spec_idx, _)| !confident_scans.contains(spec_idx))
-        .filter_map(|(spec_idx, spec)| {
-            if spec.peaks.len() < params.min_peaks as usize {
-                return None;
-            }
-            // Transfer only to glyco-plausible (oxonium-positive) spectra.
-            if !oxonium_gate(&spec.peaks, OXONIUM_GATE_MIN_FRAC, tol_ppm).fired {
-                return None;
-            }
-            // RT gate: an acceptor without an RT cannot be co-elution-checked, so
-            // it is skipped (conservative — no un-gated transfer).
-            let acceptor_rt = match spec.rt_seconds {
-                Some(t) => t as f32,
-                None => return None,
-            };
-            let charges_to_try: Vec<u8> =
-                glyco_charges_to_try(spec.precursor_charge, &params.charge_range, 0);
-            let mut transfer: Vec<BackboneHit> = Vec::new();
-            for &z in &charges_to_try {
-                let observed_neutral = (spec.precursor_mz - PROTON) * z as f64 - H2O;
-                for iso in iso_min..=iso_max {
-                    let pn = observed_neutral - iso as f64 * ISOTOPE;
-                    if pn <= 0.0 {
-                        continue;
-                    }
-                    let tol = (pn * tol_ppm * 1e-6_f64).max(0.02);
-                    for (_bb, g) in whitelist.transfer(
-                        pn,
-                        acceptor_rt,
-                        rt_window,
-                        ctx.glycan_sorted,
-                        glycan_list,
-                        MIN_GLYCAN,
-                        tol,
-                    ) {
-                        // Observed backbone = precursor − theoretical glycan (real
-                        // mass error), matching the DB/peptide-first convention.
-                        let bb_obs = pn - g.mass;
-                        transfer.push(BackboneHit {
-                            backbone_mass: bb_obs,
-                            glycan: Some(g),
-                            source: Source::Db,
-                            charge: z,
-                            isotope_offset: iso,
-                            glycan_mass_residual: pn - bb_obs,
-                            is_transferred: false,
-                            transfer_graph_support: 0,
-                            transfer_seed_score: 0.0,
-                            transfer_rt_delta: 0.0,
-                            transfer_ungated: false,
-                            transfer_peptide_idx: None,
-                            transfer_seed_is_decoy: false,
-                        });
-                    }
-                }
-            }
-            if transfer.is_empty() {
-                return None;
-            }
-            score_spectrum_glyco(spec_idx, spec, &transfer, &ctx)
-        })
-        .collect();
-
-    eprintln!(
-        "[glyco-xspec] pass 2: {} spectra received a transferred backbone and superseded pass 1",
-        pass2.len()
-    );
-    for r in pass2 {
-        by_idx.insert(r.spectrum_idx, r);
-    }
-    // Deterministic output order (CodeRabbit): HashMap iteration is unordered,
-    // so sort by spectrum_idx for reproducibility.
-    let mut out: Vec<GlycoSpectrumResult> = by_idx.into_values().collect();
-    out.sort_by_key(|r| r.spectrum_idx);
-    out
-}
-
-/// Cross-spectrum transfer Pass 2 (Task 8c/8d entry point): re-score every
-/// spectrum that received one or more transferred backbones (`injected`),
-/// using the SAME [`score_spectrum_glyco`] path Pass 1 uses, and supersede
-/// that spectrum's Pass-1 entry with the re-scored result. Spectra absent
-/// from `injected` keep their Pass-1 result byte-for-byte.
-///
-/// Unlike `glyco_search_run`'s legacy in-driver `ANDES_GLYCO_CROSSSPECTRUM`
-/// path (a same-process whitelist built from Pass-1's own strong-ladder
-/// donors), this entry point is driven by the DRIVER: `injected` is expected
-/// to already carry `BackboneHit`s with `is_transferred`/`transfer_*`
-/// provenance populated by the driver's seed-extraction + `propagate_transfers`
-/// pipeline (Tasks 7/8b/8d), independent of this module's own Pass-1/Pass-2.
-///
-/// Deterministic merge: `injected` is a `BTreeMap` (never `HashMap`) and the
-/// output is sorted by `spectrum_idx`, matching `glyco_search_run`'s own
-/// determinism convention.
-#[allow(clippy::too_many_arguments)]
-pub fn glyco_transfer_pass2(
-    spectra: &[Spectrum],
-    prepared: &PreparedSearch<'_>,
-    glycan_list: &[GlycanComp],
-    tol_ppm: f64,
-    backbone_top_k: usize,
-    cfg: GlycoConfig,
-    pass1: Vec<GlycoSpectrumResult>,
-    injected: &std::collections::BTreeMap<usize, Vec<BackboneHit>>,
-) -> Vec<GlycoSpectrumResult> {
-    let candidates = &prepared.candidates;
-    let fragment_tolerance_da = prepared.fragment_tolerance_da;
-
-    // Same shared setup `glyco_search_run` uses — identical toggles/indices,
-    // built once for this call (see `GlycoCtxOwned::build` doc comment).
-    let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg.clone());
-    // B1 paired-scan generation is a Pass-1 concern; the transfer pass passes an
-    // empty partner map (inert — score_spectrum_glyco falls back to spec.peaks).
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &[]);
-
-    // Re-score only the spectra that actually received a transferred backbone.
-    // Deterministic order: BTreeMap iteration is already key-sorted, and rayon
-    // reduces over an explicit index list rather than an unordered iterator.
-    let acceptor_idxs: Vec<usize> = injected.keys().copied().collect();
-    let superseded: std::collections::BTreeMap<usize, GlycoSpectrumResult> = acceptor_idxs
-        .par_iter()
-        .filter_map(|&spec_idx| {
-            let transfer = injected.get(&spec_idx)?;
-            if transfer.is_empty() || spec_idx >= spectra.len() {
-                return None;
-            }
-            let scored = score_spectrum_glyco(spec_idx, &spectra[spec_idx], transfer, &ctx)?;
-            // Diagnostic (--debug-glyco): for each transfer acceptor, report where the
-            // transferred candidate ranks vs the top-1 collapse winner, so we can see
-            // WHY transfers are net-neutral (outranked / de-novo-dropped / not scored).
-            // One line per acceptor; joined with truth on scan offline.
-            if cfg.debug {
-                let scan = spectra[spec_idx].scan.unwrap_or(0);
-                // Diagnostic-only winner proxy (ladder-primary collapse_cmp); the
-                // shipped emitted winner is the gp fused score in select_emitted_hits.
-                let winner = scored.hits.iter().max_by(|a, b| {
-                    collapse_cmp(
-                        a.psm.rank_score, a.glycan_key.y_ladder_intensity_score,
-                        b.psm.rank_score, b.glycan_key.y_ladder_intensity_score, true,
-                    )
-                });
-                let (w_bb, w_xfer, w_denovo) = winner
-                    .map(|h| (h.glycan_key.backbone_mass, h.glycan_key.is_transferred as u8,
-                              h.glycan_key.glycan.is_none() as u8))
-                    .unwrap_or((0.0, 0, 0));
-                // Best transferred candidate present in the accepted hit set.
-                let best_x = scored.hits.iter().filter(|h| h.glycan_key.is_transferred)
-                    .max_by(|a, b| a.psm.rank_score.total_cmp(&b.psm.rank_score));
-                let (x_bb, x_rank) = best_x
-                    .map(|h| (h.glycan_key.backbone_mass, h.psm.rank_score))
-                    .unwrap_or((0.0, f32::NAN));
-                eprintln!(
-                    "XFERDIAG scan={scan} nhits={} winner_bb={w_bb:.4} winner_xfer={w_xfer} winner_denovo={w_denovo} best_xfer_bb={x_bb:.4} best_xfer_rank={x_rank:.3}",
-                    scored.hits.len()
-                );
-            }
-            Some((spec_idx, scored))
-        })
-        .collect();
-
-    // Merge: superseded entries win; everything else keeps its Pass-1 result.
-    // BTreeMap keyed by spectrum_idx guarantees a deterministic merge order
-    // independent of `pass1`'s incoming order or rayon's completion order.
-    let mut merged: std::collections::BTreeMap<usize, GlycoSpectrumResult> = pass1
-        .into_iter()
-        .map(|r| (r.spectrum_idx, r))
-        .collect();
-    for (spec_idx, result) in superseded {
-        merged.insert(spec_idx, result);
-    }
-    merged.into_values().collect()
+        .filter_map(|(spec_idx, spec)| score_spectrum_glyco(spec_idx, spec, &ctx))
+        .collect()
 }
 
 #[cfg(test)]
@@ -3187,13 +2768,6 @@ mod tests {
             charge: 3,
             isotope_offset: iso,
             glycan_mass_residual: residual,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
-            transfer_peptide_idx: None,
-            transfer_seed_is_decoy: false,
         };
         // Two isotope hypotheses at the same backbone → both must survive.
         let out = dedup_backbone_hits(vec![mk(0, 892.317), mk(1, 891.313)], 20.0);
@@ -3231,20 +2805,13 @@ mod tests {
             oxonium_summed_frac: 0.0,
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
-            y_ladder_decoy_score: 0.0,
             y_hit_frac: 0.0,
-            y_hit_frac_decoy: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
             cz_explained: 0.0,
@@ -3395,216 +2962,6 @@ mod tests {
             order[1], 0,
             "expected noise_bb (idx=0) ranked second, got idx={}",
             order[1]
-        );
-    }
-
-    /// Task 8c REQUIRED test (carries forward Task 8a coverage): a transferred
-    /// `BackboneHit` injected via `glyco_transfer_pass2` must reach the emitted
-    /// PSM's `GlycoPsmKey` with ALL FIVE non-default provenance fields intact.
-    /// This guards two things at once:
-    ///   (1) the `process_one` → `score_spectrum_glyco` extraction (Task 8c)
-    ///       did not drop the `bb_hit.transfer_*` → `GlycoPsmKey` copies wired
-    ///       in Task 8a (glyco_search.rs ~929-933 in the pre-extraction file);
-    ///   (2) `glyco_transfer_pass2` actually threads its `injected` map through
-    ///       to real scoring instead of a no-op.
-    #[test]
-    fn glyco_transfer_pass2_carries_all_five_provenance_fields_into_emitted_key() {
-        use model::aa_set::AminoAcidSetBuilder;
-        use model::instrument::InstrumentType;
-        use model::protocol::Protocol;
-        use model::{activation::ActivationMethod, AminoAcid, Protein, ProteinDb, Tolerance, PROTON as MODEL_PROTON};
-        use rustc_hash::FxHashMap;
-        use scoring_crate::param_model::{IonType, Partition, SpecDataType};
-        use scoring_crate::{Param, RankScorer};
-        use crate::search_index::SearchIndex;
-
-        // Minimal RankScorer fixture (mirrors crates/search/tests/match_engine_smoke.rs's tiny_scorer()).
-        fn tiny_scorer() -> RankScorer {
-            let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-            let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
-            let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
-            let noise = IonType::Noise;
-            let mut ion_table = FxHashMap::default();
-            ion_table.insert(prefix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
-            ion_table.insert(suffix1, vec![0.5_f32, 0.1, 0.05, 0.01]);
-            ion_table.insert(noise, vec![0.05_f32, 0.05, 0.05, 0.05]);
-            let mut rank_dist_table = FxHashMap::default();
-            rank_dist_table.insert(part, ion_table);
-            let mut frag_off_table = FxHashMap::default();
-            frag_off_table.insert(part, vec![]);
-            let mut param = Param {
-                version: 10001,
-                data_type: SpecDataType {
-                    activation: ActivationMethod::HCD,
-                    instrument: InstrumentType::QExactive,
-                    enzyme: None,
-                    protocol: Protocol::Automatic,
-                },
-                mme: Tolerance::Ppm(20.0),
-                apply_deconvolution: false,
-                deconvolution_error_tolerance: 0.0,
-                charge_hist: vec![(2, 100)],
-                min_charge: 2,
-                max_charge: 2,
-                num_segments: 1,
-                partitions: vec![part],
-                num_precursor_off: 0,
-                precursor_off_map: FxHashMap::default(),
-                frag_off_table,
-                max_rank: 3,
-                rank_dist_table,
-                error_scaling_factor: 0,
-                ion_err_dist_table: FxHashMap::default(),
-                noise_err_dist_table: FxHashMap::default(),
-                ion_existence_table: FxHashMap::default(),
-                partition_ion_types_cache: FxHashMap::default(),
-                gbdt_peak_model: None,
-                frag_intensity_model: None,
-                rich_ion_model: None,
-            };
-            param.rebuild_cache();
-            RankScorer::new(&param)
-        }
-
-        // Protein carrying a tryptic peptide with an N-X-S/T sequon (N-E-S):
-        // "MKNESVVR" -> tryptic peptide "NESVVR" after cleavage at K (pos 1).
-        let target = ProteinDb {
-            proteins: vec![Protein {
-                accession: "P1".into(),
-                description: "".into(),
-                sequence: b"MKNESVVR".to_vec(),
-            }],
-        };
-        let idx = SearchIndex::from_target_db(&target, "XXX");
-        let aa_set = AminoAcidSetBuilder::new_standard().build().unwrap();
-        let mut params = crate::search_params::SearchParams::default_tryptic(aa_set);
-        params.min_peaks = 0; // peakless fixture spectrum; not exercising the min-peaks filter
-        params.charge_range = 2..=2;
-        params.isotope_error_range = 0..=0;
-
-        let scorer = tiny_scorer();
-        let prepared = PreparedSearch::prepare(&idx, &params, &scorer, 0.05, "XXX");
-
-        // Locate the target "NESVVR" candidate and its residue (backbone) mass.
-        let residues: Vec<AminoAcid> =
-            b"NESVVR".iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
-        let backbone_peptide = model::peptide::Peptide::new(residues, b'K', b'-');
-        let backbone_residue_mass = backbone_peptide.mass() - H2O;
-        assert!(
-            prepared.candidates.iter().any(|c| {
-                !c.is_decoy
-                    && (c.peptide.mass() - H2O - backbone_residue_mass).abs() < 1e-6
-            }),
-            "fixture candidate set must contain the target NESVVR backbone"
-        );
-
-        // A known glycan composition (core: 2 HexNAc + 3 Hex).
-        let glycan_list = andes_glyco::glycan_db::n_glycan_list();
-        let glycan = glycan_list
-            .iter()
-            .find(|g| g.hexnac == 2 && g.hex == 3 && g.fuc == 0 && g.neuac == 0 && g.neugc == 0)
-            .cloned()
-            .expect("n_glycan_list must contain the core HexNAc2Hex3 composition");
-
-        // Spectrum precursor consistent with backbone + glycan at charge 2, iso 0.
-        let charge = 2u8;
-        let precursor_neutral = backbone_residue_mass + H2O + glycan.mass;
-        let precursor_mz = (precursor_neutral + charge as f64 * MODEL_PROTON) / charge as f64;
-        let spec = Spectrum {
-            title: "xfer-fixture".into(),
-            precursor_mz,
-            precursor_intensity: None,
-            precursor_charge: Some(charge as i32),
-            rt_seconds: Some(900.0),
-            scan: Some(1),
-            peaks: vec![],
-            activation_method: None,
-            isolation_lower_offset: None,
-            isolation_upper_offset: None,
-        };
-        let spectra = vec![spec];
-
-        // Pass 1 (no transfer) on this fixture: nothing to find (no oxonium/Y-ladder
-        // evidence, peptide-first path needs real b/y matches on real peaks), so an
-        // empty Pass-1 result is the expected, honest starting point for Pass 2.
-        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default());
-        assert!(
-            pass1.iter().all(|r| r.hits.is_empty()) || pass1.is_empty(),
-            "peakless fixture must not produce a Pass-1 hit on its own: {pass1:?}"
-        );
-
-        // Inject a TRANSFERRED BackboneHit for spectrum 0 with ALL 5 non-default
-        // provenance fields set — this is the exact fixture Task 8a's key-wiring
-        // (bb_hit.transfer_* -> GlycoPsmKey.transfer_*) must preserve through the
-        // Task 8c extraction.
-        // FDR-soundness (design bug #1): a transferred hit is LOCKED to the exact
-        // seed peptide index, so Pass-2 scores only that candidate.
-        let primary_idx = prepared
-            .candidates
-            .iter()
-            .position(|c| {
-                !c.is_decoy && (c.peptide.mass() - H2O - backbone_residue_mass).abs() < 1e-6
-            })
-            .expect("target NESVVR candidate index") as u32;
-        let bb_hit = BackboneHit {
-            backbone_mass: backbone_residue_mass,
-            glycan: Some(glycan.clone()),
-            source: Source::Db,
-            charge,
-            isotope_offset: 0,
-            glycan_mass_residual: glycan.mass,
-            is_transferred: true,
-            transfer_graph_support: 5,
-            transfer_seed_score: 2.5,
-            transfer_rt_delta: 12.0,
-            transfer_ungated: true,
-            transfer_peptide_idx: Some(primary_idx as u32),
-            transfer_seed_is_decoy: false,
-        };
-        let mut injected: std::collections::BTreeMap<usize, Vec<BackboneHit>> =
-            std::collections::BTreeMap::new();
-        injected.insert(0, vec![bb_hit]);
-
-        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), pass1, &injected);
-
-        assert_eq!(merged.len(), 1, "expected exactly one spectrum result: {merged:?}");
-        let result = &merged[0];
-        assert_eq!(result.spectrum_idx, 0);
-        assert!(!result.hits.is_empty(), "transferred backbone must produce a winning hit");
-
-        let key = &result.hits[0].glycan_key;
-        assert!(key.is_transferred, "IsTransferred must carry through to the emitted key");
-        assert_eq!(key.transfer_graph_support, 5, "TransferGraphSupport must carry through");
-        assert!(
-            (key.transfer_seed_score - 2.5).abs() < 1e-6,
-            "TransferSeedScore must carry through: got {}",
-            key.transfer_seed_score
-        );
-        assert!(
-            (key.transfer_rt_delta - 12.0).abs() < 1e-6,
-            "TransferRTDelta must carry through: got {}",
-            key.transfer_rt_delta
-        );
-        assert!(key.transfer_ungated, "TransferUngated must carry through to the emitted key");
-
-        // FDR-soundness (design bug #1): Pass-2 must have scored ONLY the locked
-        // seed peptide, not every mass-matching candidate. The winning hit's
-        // candidate index therefore equals the seed's `transfer_peptide_idx`. This
-        // is what guarantees a transferred row inherits the SEED's target/decoy
-        // label (the emitted candidate IS the locked one, so its `is_decoy` is the
-        // seed's): a decoy seed → decoy candidate → decoy-labeled row, keeping the
-        // target/decoy graph symmetric. (A natural reverse-decoy end-to-end fixture
-        // is awkward here precisely because reversal does not preserve N-X-S/T
-        // sequon density, so most decoy peptides never pass the sequon filter — the
-        // known reverse-decoy limitation; the lock invariant is the honest test.)
-        assert_eq!(
-            result.hits[0].psm.primary_candidate_idx(),
-            primary_idx,
-            "transferred hit must be locked to the seed peptide index"
-        );
-        assert!(
-            !prepared.candidates[primary_idx as usize].is_decoy,
-            "sanity: this fixture's locked seed is the target candidate"
         );
     }
 }

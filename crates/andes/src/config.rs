@@ -134,14 +134,7 @@ pub struct GlycoCfg {
     pub pf_charge: Option<u8>,
     pub max_pf: Option<usize>,
     pub debug: Option<bool>,
-    pub decoy: Option<bool>,
     pub hcd_pair: Option<bool>,
-    pub transfer: Option<bool>,
-    pub transfer_seed_fdr: Option<f64>,
-    pub rt_window: Option<f32>,
-    pub transfer_ungated: Option<bool>,
-    pub transfer_min_support: Option<u32>,
-    pub transfer_core_y: Option<u8>,
 }
 
 impl RunConfig {
@@ -286,14 +279,7 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set!("glyco_pf_charge", glyco_pf_charge, cfg.glyco.pf_charge);
     set!("glyco_max_pf", glyco_max_pf, cfg.glyco.max_pf);
     set!("debug_glyco", debug_glyco, cfg.glyco.debug);
-    set!("glyco_decoy", glyco_decoy, cfg.glyco.decoy);
     set!("glyco_hcd_pair", glyco_hcd_pair, cfg.glyco.hcd_pair);
-    set!("glyco_transfer", glyco_transfer, cfg.glyco.transfer);
-    set!("glyco_transfer_seed_fdr", glyco_transfer_seed_fdr, cfg.glyco.transfer_seed_fdr);
-    set!("glyco_rt_window", glyco_rt_window, cfg.glyco.rt_window);
-    set!("glyco_transfer_ungated", glyco_transfer_ungated, cfg.glyco.transfer_ungated);
-    set!("glyco_transfer_min_support", glyco_transfer_min_support, cfg.glyco.transfer_min_support);
-    set!("glyco_transfer_core_y", glyco_transfer_core_y, cfg.glyco.transfer_core_y);
 
     // Validate the resolved numeric fields that the CLI enforces via `value_parser`
     // but the YAML path (plain assignment) would otherwise bypass. Re-checking the

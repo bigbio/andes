@@ -28,7 +28,7 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
         );
     }
     // and the live ones the policy must NOT have taken with it
-    for live in ["RawScore", "RankScore", "YHitFrac", "CzHyperscore", "IsTransferred"] {
+    for live in ["RawScore", "RankScore", "YHitFrac", "CzHyperscore"] {
         assert!(cols.contains(&live), "live column {live} missing from default header");
     }
 }
@@ -68,7 +68,7 @@ fn glyco_pin_curated_header_is_exactly_the_validated_set() {
     for k in keep {
         assert!(cols.contains(k), "validated column {k} missing from curated PIN");
     }
-    for gone in ["CzHyperscore", "IsTransferred", "MS2IonCurrent",
+    for gone in ["CzHyperscore", "MS2IonCurrent",
                  "CandidateRankEntropy", "ListwiseScoreGap", "DeltaRankScore"] {
         assert!(!cols.contains(&gone), "{gone} must not appear in curated mode");
     }

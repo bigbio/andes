@@ -66,7 +66,6 @@ rescoring:
 
 glyco:
   enabled: false                 # intact N-glycopeptide search
-  # transfer: false              # experimental cross-spectrum backbone transfer
   # --- advanced tuning (validated defaults; see DOCS §9) ---
   # backbone_top_k: 150
   # gp_k: 10.0                   # glycan-Y ladder weight
@@ -79,8 +78,3 @@ glyco:
   # gp_h: 1.0
   # pf_charge: 2
   # max_pf: 1024
-  # decoy: false
-  # transfer_seed_fdr: 0.05
-  # rt_window: 1800
-  # transfer_min_support: 1
-  # transfer_core_y: 3

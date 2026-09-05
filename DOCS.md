@@ -166,7 +166,7 @@ andes writes a Percolator-ready `.pin` and, by design, **does not compute FDR it
 
 ### Glycopeptide search
 
-Intact N-glycopeptide search (`--glyco`) with an experimental cross-spectrum-transfer pass (`--glyco-transfer`). All tuning knobs are advanced (hidden). **See [§9](#9-glycopeptide-search-experimental--advanced-knobs)** for the full flag group.
+Intact N-glycopeptide search (`--glyco`). All tuning knobs are advanced (hidden). **See [§9](#9-glycopeptide-search-experimental--advanced-knobs)** for the full flag group.
 
 ### Isobaric labeling (TMT / iTRAQ)
 
@@ -663,8 +663,7 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 ## 9. Glycopeptide search (experimental) & advanced knobs
 
 Enable N-glycopeptide search with `--glyco` (requires a `.glyco.pin` output; the
-backbone model is the N-X-S/T sequon). Cross-spectrum backbone transfer is an
-opt-in second pass via `--glyco-transfer`. All glyco tuning is exposed as **hidden
+backbone model is the N-X-S/T sequon). All glyco tuning is exposed as **hidden
 CLI flags** (advanced; the shipped defaults are validated and rarely need changing):
 
 **Everyday flags** (visible in `--help`):
@@ -688,7 +687,6 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-min-raw-score` / `--glyco-min-raw-score-quantile` | unset | Absolute or run-adaptive (quantile of the run's decoy winners) emission floor. Unset emits a best guess for every gated scan. |
 | `--glyco-sialic-oxonium-min-frac` | 0 | Require a sialic oxonium ion (as a fraction of base peak) before a composition may claim NeuAc/NeuGc. 0 disables. |
 | `--glyco-pin-curated` | off | Write the curated 52-column glyco PIN instead of the full one. On pooled plasma it measured 385 vs 257 glycoPSMs @1% (+50%) at 0.00% entrapment on every seed; the benchmarks in `docs/benchmarks/` use it. |
-| `--glyco-transfer` | off | Cross-spectrum backbone transfer (two-pass, single invocation). |
 | `--glyco-scans <FILE>` / `--glyco-diag-splits <FILE>` / `--debug-glyco` | off | Diagnostics: restrict scoring to listed scans; dump per-candidate split evidence; emit all candidate rows. A `--debug-glyco` PIN must never be fed to an FDR tool. |
 
 **Hidden tuning knobs** (`hide = true`; the shipped values are validated and rarely need changing):
@@ -702,15 +700,15 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-enum-fallback` | on | Promote the best enumerated candidate when the argmax picks a de-novo one. |
 | `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium` | off | ETD generation variants: read the Y ladder from the HCD partner; require the oxonium gate before full glycan enumeration on ETD scans. |
 | `--glyco-pf-charge` / `--glyco-max-pf` | 2 / 1024 | Peptide-first fragment-index charge coverage and candidate cap. |
-| `--glyco-decoy` | off | Paired glycan-axis decoy rows for experimental 2D FDR. |
-| `--glyco-transfer-seed-fdr` / `--glyco-rt-window` / `--glyco-transfer-min-support` / `--glyco-transfer-core-y` / `--glyco-transfer-ungated` | 0.05 / 1800 s / 1 / 3 / off | Cross-spectrum transfer knobs. |
 
 Flags that an A/B measured as losing have been **deleted** rather than left behind a
 default (`--glyco-split-election`, `--glyco-gp-g`, `--glyco-gp-m`, `--glyco-isobar-rep`,
 `--glyco-y-index`, `--glyco-decorated-features`, `--glyco-cz-intensity`,
 `--glyco-per-spectrum-model`, the engine-wide `--tight-highres-scoring`, and the four
 identification-neutral column emitters `--glyco-y-tree`, `--glyco-oxonium-llr`,
-`--glyco-rank-masked`, `--glyco-chance-llr-masked`, all removed 2026-09-05). The measurements are in
+`--glyco-rank-masked`, `--glyco-chance-llr-masked`, the net-neutral cross-spectrum transfer
+pass `--glyco-transfer` with its five knobs, and the never-validated `--glyco-decoy`, all
+removed 2026-09-05). The measurements are in
 `docs/benchmarks/README.md` → *Refuted*.
 
 By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.

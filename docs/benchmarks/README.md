@@ -77,7 +77,7 @@ one session**. Glyco rows: commit `6b37bb2c` (see the caveat in §2), 5 Percolat
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions | glycoPSMs @1% | **31,658 ± 34** | pGlyco2 17,855: **78.8% confirmed**, 92.2% of its peptides found | **1.02% ± 0.03 true FDP** (1:1 shuffled database) | ~25 min / fraction, 16 cores |
 | | | same-scan agreement | 83.8% peptidoform · 99.1% backbone | (`glyco/agreement.py`) | | |
-| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`) | glycoPSMs @1% | 6,554 | — | 1.04% true FDP (1:1 database) | 4,592 s, 8 threads |
+| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, commit `7f8ea03e` | glycoPSMs @1% | **6,532** | pGlyco2 77.9% confirmed · **MSFragger 87.8% confirmed**, 95.6% peptidoform agreement | **1.10% true FDP** (CI 0.76–1.54) | 6,335 s, 8 threads |
 
 † Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
@@ -188,19 +188,40 @@ on an entrapment sequence by the mechanism the metric relies on.
 Two tiers of one dataset, pGlyco2 mouse liver (PXD005553). Two independent references for
 the same spectra ship in `glyco/truth/`: the depositors' pGlyco2 identifications (17,855)
 and MSFragger-Glyco's, from the Philosopher-filtered table deposited in PXD031032
-(14,626). The MSFragger comparison has not been measured yet; the recipe below scores
-against both. Quick is one fraction on a VM; Deep is all five
+(14,626). The recipe below scores against both; the quick tier is measured against both. Quick is one fraction on a VM; Deep is all five
 fractions on a cluster. The earlier human-plasma set was retired: its reference was a
 proprietary Byonic `.byrslt` export, which cannot be rebuilt from public artifacts.
 
-### Quick tier — one pGlyco2 liver fraction, VM-local, 76 min
+### Quick tier — one pGlyco2 liver fraction, VM-local, ~105 min
 
-`MouseLiver-Z-T-1.raw` from PXD005553 (2.7 GB) against the 1:1 shuffled mouse database, on
-a VM at 8 threads: **4,592 s search**, **6,554 glycoPSMs @1%**, **1.04% true FDP**. It
-needs no cluster, which is the point, but 76 minutes is a pre-merge check, not an inner
-loop. One fraction clears Percolator's q floor here because a liver fraction carries
-thousands of confident targets; see the floor rule below before assuming that of any
-other single file.
+`MouseLiver-Z-T-1.raw` (PXD005553, 2.70 GB, sha256 `2f0142b7…`) read natively, against
+`mouse_entrap.fasta` (34,554 sequences = 17,277 UniProt reviewed mouse + shuffled twins,
+sha256 `5ee15d8d…`), `--glyco --decoy-strategy sequon-reverse`, 8 threads, Percolator
+`--seed 42 -Y`. Measured 2026-09-05 at branch commit `7f8ea03e` (the glyco default path
+is unchanged through the later flag deletions, which removed only default-off switches):
+
+| | measured |
+|---|---|
+| search wall | **6,335 s** (105 min) — 45,905 MS2, 41,929 glyco rows |
+| glycoPSMs @1% | **6,532** (2,843 glycopeptides, 902 compositions) |
+| **true FDP** | **1.10%** (95% CI 0.76–1.54%, 34 entrapment hits, 1:1 database) |
+
+Scored against both deposited references for this fraction:
+
+| reference (fraction 1) | spectra | confirmed | wrong target | decoy won | never emitted | peptide coverage | same-scan backbone | same-scan **peptidoform** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pGlyco2 (depositors) | 3,877 | **77.9%** | 9.5% | 12.1% | 0.1% | 91.5% | 99.1% | 83.3% |
+| MSFragger-Glyco (PXD031032) | 3,040 | **87.8%** | 5.4% | 6.6% | 0.1% | 94.3% | 99.7% | **95.6%** |
+
+Where both engines identify a scan, andes and MSFragger agree on the full peptidoform
+95.6% of the time; against pGlyco2 it is 83.3%, the difference being pGlyco2's
+composition calls rather than the backbone (99.1% agree). andes accepts 6,532 spectra of
+which roughly 3,500–3,900 are in neither reference at a measured 1.1% FDP.
+
+This number needs no cluster, which is the point, but 105 minutes is a pre-merge check,
+not an inner loop. One fraction clears Percolator's q floor here because a liver fraction
+carries thousands of confident targets; see the floor rule below before assuming that of
+any other single file.
 
 ### Deep tier — pGlyco2 mouse liver, 5 fractions, cluster-scale
 
@@ -444,8 +465,8 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 - **The deep glyco tier was measured off-`main`** (commit `6b37bb2c`) and must be
   re-measured on a `main` commit before it is quoted as current. The quick tier is measured
   on this branch with the scripted database (above), so it no longer has that problem.
-- **andes has not yet been scored against the MSFragger liver reference**; the table is
-  committed and the recipe scores it, but no run has been done since it was added.
+- **The deep tier has not been scored against the MSFragger reference** (only the quick
+  tier has); that happens with its re-measurement on `main`.
 - **No PTM-enriched benchmark exists.** `--refine` is measured only on Astral, and the four
   bundled phosphorylation models have never been scored against a reference dataset. A
   public phospho-enrichment set with a deposited identification list is the next dataset

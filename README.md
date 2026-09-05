@@ -437,7 +437,9 @@ and **confirms 78.8% of the reference** (same scan, same backbone), at a measure
 false-discovery proportion of **1.02% ± 0.03** against a 1:1 shuffled entrapment database
 — the reported 1% is where it claims to be. Where andes and pGlyco2 identify the same scan,
 99.1% agree on the backbone and 83.8% on the full peptidoform (backbone + glycan
-composition).
+composition). Against MSFragger-Glyco's deposited identifications for the same spectra
+(PXD031032), andes confirms 87.8% of its glycoPSMs on the first fraction and agrees on the
+full peptidoform 95.6% of the time where both identify a scan.
 
 Treat these as a calibration point, not a guarantee. Glyco results depend heavily on
 activation type, glycan class, and how the reference set itself was filtered.

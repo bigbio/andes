@@ -107,12 +107,14 @@ def main():
     qcut = float(sys.argv[4]) if len(sys.argv) > 4 else 0.01
     truth = load_truth(truth_p)
     full, tails = run_matchers({k[0] for k in truth})
+    keyfn = key_of
     if forced_run is not None:
         if forced_run not in full:
             sys.exit(f"--run {forced_run!r} is not a run in the reference: {sorted(full)}")
         truth = {k: v for k, v in truth.items() if k[0] == forced_run}
         full, tails = {forced_run: forced_run}, {}
-        def key_of(specid, full, tails):  # noqa: F811 -- deliberate override
+
+        def keyfn(specid, full, tails):
             m = re.search(r"scan=(\d+)", specid)
             return (forced_run, int(m.group(1))) if m else None
 
@@ -122,7 +124,7 @@ def main():
         hdr = next(rd)
         si, li, pi = hdr.index("SpecId"), hdr.index("Label"), hdr.index("Peptide")
         for r in rd:
-            k = key_of(r[si], full, tails)
+            k = keyfn(r[si], full, tails)
             if k:
                 # The production glyco PIN is collapsed to ONE row per scan by the search;
                 # a second row for the same (run, scan) means a --debug-glyco dump or a
@@ -140,7 +142,7 @@ def main():
         for r in rd:
             if len(r) <= pi:
                 continue
-            k = key_of(r[0], full, tails)
+            k = keyfn(r[0], full, tails)
             try:
                 q = float(r[qi])
             except ValueError:

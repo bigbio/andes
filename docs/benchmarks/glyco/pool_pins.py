@@ -6,9 +6,11 @@ typical glyco run yields on the order of 0-2 decoy glycopeptides, so a per-fract
 q-value is estimated from almost no data and swings between runs; differences measured
 that way are noise. Search each file separately, pool here, run Percolator once.
 
-Scan numbers collide across fractions, so each SpecId is prefixed with a per-file tag
-(`f1_`, `f2_`, ...) derived from input order. Downstream evaluators recover the fraction
-from that prefix.
+Scan numbers collide across fractions, so each SpecId is prefixed with the input file's
+stem (`MouseLiver-Z-T-1_...` for `MouseLiver-Z-T-1.glyco.pin`). That stem is what
+score_vs_truth.py and agreement.py match against the reference's `run` column, so name
+the per-fraction PINs after the raw files. (An earlier version tagged `f1_`, `f2_`, ...,
+which nothing downstream could join to a run name.)
 
 Usage:
     pool_pins.py frac1.glyco.pin frac2.glyco.pin ... > pooled.pin
@@ -16,6 +18,7 @@ Usage:
 All inputs must share a header; a mismatch is an error rather than a silent
 column-misalignment in the pooled file.
 """
+import os
 import sys
 
 pins = sys.argv[1:]
@@ -25,6 +28,11 @@ if not pins:
 header = None
 rows = 0
 for i, path in enumerate(pins, start=1):
+    tag = os.path.basename(path)
+    for ext in (".glyco.pin", ".pin"):
+        if tag.endswith(ext):
+            tag = tag[: -len(ext)]
+            break
     with open(path) as fh:
         hdr = fh.readline().rstrip("\n")
         if not hdr:
@@ -41,7 +49,7 @@ for i, path in enumerate(pins, start=1):
         for line in fh:
             if not line.strip():
                 continue
-            print(f"f{i}_{line.rstrip()}")
+            print(f"{tag}_{line.rstrip()}")
             rows += 1
 
 print(f"pooled {rows} rows from {len(pins)} files", file=sys.stderr)

@@ -72,7 +72,14 @@ mod tests {
     use super::*;
 
     fn comp(hexnac: u8, hex: u8, fuc: u8, neuac: u8, neugc: u8) -> GlycanComp {
-        GlycanComp { hexnac, hex, fuc, neuac, neugc, mass: 0.0 }
+        GlycanComp {
+            hexnac,
+            hex,
+            fuc,
+            neuac,
+            neugc,
+            mass: 0.0,
+        }
     }
 
     #[test]
@@ -89,7 +96,10 @@ mod tests {
         // A purely neutral glycan (HexNAc/Hex/Fuc) shifts the index DOWN (earlier).
         let neutral = comp(2, 3, 1, 0, 0);
         let neutral_offset = glycan_index_offset(&neutral, &coeffs);
-        assert!(neutral_offset < 0.0, "neutral offset {neutral_offset} should be negative");
+        assert!(
+            neutral_offset < 0.0,
+            "neutral offset {neutral_offset} should be negative"
+        );
 
         // Adding NeuAc must push the index UP relative to the same glycan
         // without NeuAc (opposite sign contribution).
@@ -116,7 +126,13 @@ mod tests {
     #[test]
     fn custom_coeffs_are_honored() {
         // Coefficients are fittable/passed-in, not hardcoded magnitudes.
-        let coeffs = GlycanRtCoeffs { hexnac: 1.0, hex: 0.0, fuc: 0.0, neuac: 0.0, neugc: 0.0 };
+        let coeffs = GlycanRtCoeffs {
+            hexnac: 1.0,
+            hex: 0.0,
+            fuc: 0.0,
+            neuac: 0.0,
+            neugc: 0.0,
+        };
         let c = comp(4, 5, 2, 1, 0);
         assert_eq!(glycan_index_offset(&c, &coeffs), 4.0);
     }

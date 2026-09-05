@@ -2,12 +2,12 @@
 """Convert a published glyco reference into this harness's canonical truth table.
 
     make_truth.py pglyco2  <*-FDR.txt> ...      > truth.tsv
-    make_truth.py byonic   <*.byrslt>  ...      > truth.tsv
     make_truth.py strucgp  <*_result.xlsx> ...  > truth.tsv
+    make_truth.py msfragger <psm.tsv> [RUN-PREFIX]  > truth.tsv
 
 WHY THIS EXISTS
 Reference identifications ship in whatever format the original engine emitted: pGlyco2 in
-plain TSV, Byonic in a proprietary SQLite `.byrslt`, StrucGP in `.xlsx`. Re-parsing those
+plain TSV, StrucGP in `.xlsx`, MSFragger-Glyco in a Philosopher-filtered `psm.tsv`. Re-parsing those
 every time is slow, needs the multi-GB originals, and re-invites the two mistakes that have
 already produced wrong numbers here:
 
@@ -30,7 +30,7 @@ One row per (run, scan): a reference may list several proteins or glycoforms for
 spectrum, and counting those as separate truth entries inflated a truth set from 629
 spectra to 1,068 rows once already.
 """
-import csv, os, re, sqlite3, sys
+import csv, os, re, sys
 
 
 def emit(rows, source, filt):
@@ -83,35 +83,6 @@ def pglyco2(paths):
     return out, "GlyDecoy=0 AND PepDecoy=0 AND TotalFDR<=0.01"
 
 
-def byonic(paths):
-    """Byonic `.byrslt` is SQLite. PQMs is the filtered set; keep target rows at 1% FDR
-    carrying an N-glycan ('ngly' modification class)."""
-    out = []
-    for p in paths:
-        run = os.path.basename(p).replace(".byrslt", "")
-        con = sqlite3.connect(p)
-        cur = con.cursor()
-        ngly = {i for (i,) in cur.execute("select Id from Modifications where Classification='ngly'")}
-        links = {}
-        for pqm, mod in cur.execute("select PQMsId, ModificationsId from PQMsPeptideToModifications"):
-            links.setdefault(pqm, []).append(mod)
-        scan = {}
-        for qid, sl in cur.execute("select Id, ScanNumberList from Queries"):
-            m = re.search(r"scan=(\d+)", sl or "")
-            if m:
-                scan[qid] = m.group(1)
-        for pid, qid, pep, ch in cur.execute(
-                "select Id, QueriesId, Peptide, Charge from PQMs "
-                "where IsDecoy=0 and FalseDiscoveryRate1<=0.01"):
-            if not any(m in ngly for m in links.get(pid, [])):
-                continue
-            if qid not in scan:
-                continue
-            out.append([run, scan[qid], ch, re.sub(r"[^A-Z]", "", (pep or "").upper()), "", ""])
-        con.close()
-    return out, "IsDecoy=0 AND FalseDiscoveryRate1<=0.01 AND has an 'ngly' modification"
-
-
 def strucgp(paths):
     """StrucGP `*_result.xlsx` (already FDR-filtered by the depositors)."""
     import openpyxl
@@ -133,56 +104,45 @@ def strucgp(paths):
     return out, "as published (depositor-filtered result table)"
 
 
-def byonic_mzid(paths):
-    """Byonic mzIdentML — the OPEN alternative to `.byrslt`, needing no proprietary reader
-    and no SQLite. Parsed with the standard library; mzIdentML is plain XML.
-
-    Two details that are easy to get wrong:
-      * `spectrumID` is an INDEX (`index=40`), not a scan number. The scan is in the
-        `spectrum title` cvParam, in the classic `file.scan.scan` form.
-      * the glycan appears as a modification MASS DELTA, not a composition, so tables from
-        this reader carry `glycan` as `mass:<delta>` and compare by mass rather than by
-        composition. That is a weaker comparison than pGlyco2 allows, and is labelled so.
-    """
-    import xml.etree.ElementTree as ET
-    out = []
-    for path in paths:
-        run = os.path.basename(path).replace(".raw.mzid", "").replace(".mzid", "")
-        root = ET.parse(path).getroot()
-        ns = root.tag.split("}")[0].strip("{")
-        peps = {}
-        for p in root.iter(f"{{{ns}}}Peptide"):
-            seq = p.find(f"{{{ns}}}PeptideSequence")
-            deltas = [float(m.get("monoisotopicMassDelta", 0))
-                      for m in p.findall(f"{{{ns}}}Modification")]
-            peps[p.get("id")] = (seq.text if seq is not None else "", deltas)
-        for sr in root.iter(f"{{{ns}}}SpectrumIdentificationResult"):
-            title = next((c.get("value") for c in sr.findall(f"{{{ns}}}cvParam")
-                          if c.get("name") == "spectrum title"), "")
-            # `file.SCAN.SCAN.charge_INDEXn` -- do NOT anchor at end; an earlier version
-            # did, having only seen the value truncated to 60 chars in a terminal, and
-            # matched nothing. Anchor on the repeated scan number instead.
-            m = re.search(r"\.(\d+)\.\1\.", title or "")
-            if not m:
+def msfragger(paths):
+    """Philosopher-filtered MSFragger-Glyco `psm.tsv` (already at the depositors' PSM FDR;
+    decoys removed). The glycan is the `Observed Modifications` column, e.g.
+    `Hex(5)HexNAc(2)(1216.422863)`; several candidates may be listed comma-separated,
+    best first, and the first is kept. Rows whose observed modification is not made only
+    of HexNAc/Hex/dHex/NeuAc/NeuGc (chemical mods, isotope labels, Kdn, Pent, HexA...) are
+    NOT glycopeptides for this benchmark and are dropped. An optional second argument
+    keeps only runs whose name starts with it (`MouseLiver`)."""
+    prefix = paths[1] if len(paths) > 1 else ""
+    allowed = {"HexNAc": "n", "Hex": "h", "dHex": "f", "NeuAc": "a", "NeuGc": "g"}
+    out, dropped = [], 0
+    with open(paths[0]) as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            om = (r.get("Observed Modifications") or "").split(",")[0].split("%")[0].strip()
+            if not om:
                 continue
-            scan = m.group(1)
-            for it in sr.findall(f"{{{ns}}}SpectrumIdentificationItem"):
-                if it.get("passThreshold") != "true":
-                    continue
-                seq, deltas = peps.get(it.get("peptide_ref"), ("", []))
-                if not seq:
-                    continue
-                # the glycan is the largest delta; anything under 300 Da is a chemical mod
-                gly = max(deltas) if deltas else 0.0
-                out.append([run, scan, it.get("chargeState", ""),
-                            re.sub(r"[^A-Z]", "", seq.upper()),
-                            f"mass:{gly:.3f}" if gly > 300 else "", ""])
-                break
-    return out, "passThreshold=true (Byonic's own 2D-FDR threshold); glycan as MASS DELTA"
+            counts = {"n": 0, "h": 0, "f": 0, "a": 0, "g": 0}
+            ok = True
+            for name, num in re.findall(r"([A-Za-z:>\-\d]+)\((\d+)\)", om):
+                if name not in allowed:
+                    ok = False
+                    break
+                counts[allowed[name]] += int(num)
+            if not ok or counts["n"] == 0:
+                dropped += 1
+                continue
+            spec = r["Spectrum"]                      # MouseLiver-Z-T-1.01954.01954.3
+            run, scan = spec.split(".")[0], spec.split(".")[1].lstrip("0") or "0"
+            if prefix and not run.startswith(prefix):
+                continue
+            gly = "HexNAc{n}Hex{h}Fuc{f}NeuAc{a}NeuGc{g}".format(**counts)
+            out.append([run, scan, r.get("Charge", ""),
+                        re.sub(r"[^A-Z]", "", r["Peptide"].upper()), gly, ""])
+    print(f"# msfragger: dropped {dropped} rows whose observed modification is not an N-glycan",
+          file=sys.stderr)
+    return out, "Philosopher-filtered psm.tsv as deposited; Observed Modifications parsed as HexNAc/Hex/dHex/NeuAc/NeuGc only"
 
 
-READERS = {"pglyco2": pglyco2, "byonic": byonic, "byonic_mzid": byonic_mzid,
-           "strucgp": strucgp}
+READERS = {"pglyco2": pglyco2, "strucgp": strucgp, "msfragger": msfragger}
 
 if __name__ == "__main__":
     if len(sys.argv) < 3 or sys.argv[1] not in READERS:

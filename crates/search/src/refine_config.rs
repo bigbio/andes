@@ -11,7 +11,7 @@ pub struct RefineMod {
     pub residues: Vec<String>, // e.g. ["M"], ["N","Q"], ["*"]
     #[serde(default = "loc_anywhere")]
     pub location: String, // anywhere | n_term | c_term | protein_n_term
-    pub class: String,    // oxidation | deamidation | nterm_acetyl | nterm_loss | alkyl | other
+    pub class: String, // oxidation | deamidation | nterm_acetyl | nterm_loss | alkyl | other
 }
 fn loc_anywhere() -> String {
     "anywhere".into()
@@ -52,11 +52,29 @@ impl RefineConfig {
                 // hydroxylysine — heavily-modified proteins whose peptides never
                 // match unmodified, so a closed search loses the whole protein.
                 // (P+K widen the oxidation candidate space ~3-5× vs M-only.)
-                m("Oxidation", 15.994915, &["M", "P", "K"], "anywhere", "oxidation"),
-                m("Deamidation", 0.984016, &["N", "Q"], "anywhere", "deamidation"),
+                m(
+                    "Oxidation",
+                    15.994915,
+                    &["M", "P", "K"],
+                    "anywhere",
+                    "oxidation",
+                ),
+                m(
+                    "Deamidation",
+                    0.984016,
+                    &["N", "Q"],
+                    "anywhere",
+                    "deamidation",
+                ),
                 m("Gln->pyro-Glu", -17.026549, &["Q"], "n_term", "nterm_loss"),
                 m("Glu->pyro-Glu", -18.010565, &["E"], "n_term", "nterm_loss"),
-                m("Acetyl", 42.010565, &["*"], "protein_n_term", "nterm_acetyl"),
+                m(
+                    "Acetyl",
+                    42.010565,
+                    &["*"],
+                    "protein_n_term",
+                    "nterm_acetyl",
+                ),
             ],
         }
     }
@@ -79,15 +97,22 @@ impl RefineConfig {
         // the `anywhere` default.
         const VALID_LOCATIONS: &[&str] = &[
             "anywhere",
-            "n_term", "n-term", "nterm",
-            "c_term", "c-term", "cterm",
-            "protein_n_term", "prot-n-term", "prot_n_term",
-            "protein_c_term", "prot-c-term", "prot_c_term",
+            "n_term",
+            "n-term",
+            "nterm",
+            "c_term",
+            "c-term",
+            "cterm",
+            "protein_n_term",
+            "prot-n-term",
+            "prot_n_term",
+            "protein_c_term",
+            "prot-c-term",
+            "prot_c_term",
         ];
         for m in &self.mods {
             for r in &m.residues {
-                let ok = r == "*"
-                    || (r.len() == 1 && r.as_bytes()[0].is_ascii_uppercase());
+                let ok = r == "*" || (r.len() == 1 && r.as_bytes()[0].is_ascii_uppercase());
                 if !ok {
                     return Err(format!(
                         "refine-config mod '{}': invalid residue token {:?} \
@@ -131,7 +156,10 @@ mod tests {
         assert_eq!(t.mods.len(), 5);
         assert_eq!(t.max_mods, 2);
         assert!(t.high_res_only);
-        assert!(t.mods.iter().any(|m| m.name == "Deamidation" && m.class == "deamidation"));
+        assert!(t
+            .mods
+            .iter()
+            .any(|m| m.name == "Deamidation" && m.class == "deamidation"));
     }
 
     #[test]

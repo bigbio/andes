@@ -35,8 +35,12 @@ pub struct Spectrum {
 }
 
 impl Spectrum {
-    pub fn len(&self) -> usize { self.peaks.len() }
-    pub fn is_empty(&self) -> bool { self.peaks.is_empty() }
+    pub fn len(&self) -> usize {
+        self.peaks.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.peaks.is_empty()
+    }
 }
 
 impl Default for Spectrum {
@@ -97,11 +101,16 @@ mod tests {
     #[test]
     fn is_empty_true_no_peaks() {
         let s = Spectrum {
-            title: "x".into(), precursor_mz: 0.0, precursor_intensity: None,
-            precursor_charge: None, rt_seconds: None, scan: None,
+            title: "x".into(),
+            precursor_mz: 0.0,
+            precursor_intensity: None,
+            precursor_charge: None,
+            rt_seconds: None,
+            scan: None,
             peaks: vec![],
             activation_method: None,
-            isolation_lower_offset: None, isolation_upper_offset: None,
+            isolation_lower_offset: None,
+            isolation_upper_offset: None,
         };
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);

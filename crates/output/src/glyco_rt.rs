@@ -135,7 +135,10 @@ pub fn populate_glyco_rt_features(
         if result.hits.is_empty() {
             continue;
         }
-        if let Some(s) = spectra.get(result.spectrum_idx).and_then(|sp| sp.rt_seconds) {
+        if let Some(s) = spectra
+            .get(result.spectrum_idx)
+            .and_then(|sp| sp.rt_seconds)
+        {
             if s.is_finite() {
                 let m = s / SECONDS_PER_MINUTE;
                 min_rt = min_rt.min(m);
@@ -272,7 +275,10 @@ mod tests {
     use search::psm::{PsmFeatures, PsmMatch};
 
     fn pep(seq: &[u8]) -> Peptide {
-        let residues: Vec<_> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+        let residues: Vec<_> = seq
+            .iter()
+            .map(|&r| AminoAcid::standard(r).unwrap())
+            .collect();
         Peptide::new(residues, b'K', b'-')
     }
 
@@ -303,7 +309,14 @@ mod tests {
     }
 
     fn glycan(hexnac: u8, hex: u8, fuc: u8, neuac: u8, neugc: u8) -> GlycanComp {
-        GlycanComp { hexnac, hex, fuc, neuac, neugc, mass: 0.0 }
+        GlycanComp {
+            hexnac,
+            hex,
+            fuc,
+            neuac,
+            neugc,
+            mass: 0.0,
+        }
     }
 
     fn key(glycan: Option<GlycanComp>) -> GlycoPsmKey {
@@ -316,33 +329,11 @@ mod tests {
             n_core_oxonium_ions: 0,
             y_ladder_intensity_score: 0.0,
             y_hit_frac: 0.0,
-            y_hit_frac_decoy: 0.0,
-            y_ladder_decoy_score: 0.0,
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 0,
             backbone_mass: 0.0,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
             cz_hyperscore: 0.0,
             cz_intensity: 0.0,
             cz_explained: 0.0,
@@ -367,7 +358,10 @@ mod tests {
     }
 
     fn hit(candidate_idx: u32, glycan: Option<GlycanComp>) -> FullGlycoPsm {
-        FullGlycoPsm { glycan_key: key(glycan), psm: psm(candidate_idx, 10.0) }
+        FullGlycoPsm {
+            glycan_key: key(glycan),
+            psm: psm(candidate_idx, 10.0),
+        }
     }
 
     // ── DeltaRTRank: known AbsDeltaRT → correct normalized ranks ──────────────
@@ -400,9 +394,11 @@ mod tests {
         }
         populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
         // Calibration succeeded via the skipped-decoy targets ⇒ RT populated.
-        let populated = results
-            .iter()
-            .any(|r| r.hits.iter().any(|h| h.psm.features.predicted_rt_min != 0.0));
+        let populated = results.iter().any(|r| {
+            r.hits
+                .iter()
+                .any(|h| h.psm.features.predicted_rt_min != 0.0)
+        });
         assert!(
             populated,
             "decoy-first scans must still calibrate via the next target hit"
@@ -502,7 +498,10 @@ mod tests {
         // depends on. (Guards against silently dropping the glycan offset.)
         let neutral = glycan_index_offset(&glycan(2, 3, 0, 0, 0), &coeffs);
         let sialic = glycan_index_offset(&glycan(2, 3, 0, 1, 0), &coeffs);
-        assert!(sialic > neutral, "NeuAc must raise the index (opposite sign)");
+        assert!(
+            sialic > neutral,
+            "NeuAc must raise the index (opposite sign)"
+        );
     }
 
     /// A hand-checkable single perturbed scan: DeltaRT = observed − predicted.
@@ -579,7 +578,10 @@ mod tests {
         }
         populate_glyco_rt_features(&spectra, &mut results, &candidates, &glycan_list);
         let m = results[0].hits[0].psm.features.isobaric_rt_margin;
-        assert!(m > 0.0, "assigned fits RT better than the isobaric alternative → margin>0, got {m}");
+        assert!(
+            m > 0.0,
+            "assigned fits RT better than the isobaric alternative → margin>0, got {m}"
+        );
     }
 
     // ── Neutral paths ────────────────────────────────────────────────────────
@@ -655,7 +657,10 @@ mod tests {
         }
         populate_glyco_rt_features(&spectra, &mut results, &candidates, &[]);
         for r in &results {
-            assert_eq!(r.hits[0].psm.features.delta_rt, 0.0, "decoy-only ⇒ no calibration");
+            assert_eq!(
+                r.hits[0].psm.features.delta_rt, 0.0,
+                "decoy-only ⇒ no calibration"
+            );
         }
     }
 }

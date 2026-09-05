@@ -96,7 +96,10 @@ fn train_writes_model_and_search_uses_it() {
 
     // The run summary is written next to the PIN as `statistics.log`.
     let stats_path = dir.path().join("statistics.log");
-    assert!(stats_path.exists(), "statistics.log should be written next to the PIN");
+    assert!(
+        stats_path.exists(),
+        "statistics.log should be written next to the PIN"
+    );
     let stats = std::fs::read_to_string(&stats_path).expect("read statistics.log");
     assert!(
         stats.contains("Final precursor tolerance") && stats.contains("PTM report"),

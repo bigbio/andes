@@ -69,11 +69,16 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
         for ion in &predicted {
             let tol_da = feat_tol.as_da(ion.mz);
             if let Some((_, obs_intensity, _)) = ss.nearest_peak_full(ion.mz, tol_da) {
-                let log_rel =
-                    ((obs_intensity as f64 / base_peak).max(1e-12)).ln() as f32;
+                let log_rel = ((obs_intensity as f64 / base_peak).max(1e-12)).ln() as f32;
 
-                let feats =
-                    extract_frag_features(row.peptide, ion.kind, ion.position, row.charge, ion.charge, 0.0);
+                let feats = extract_frag_features(
+                    row.peptide,
+                    ion.kind,
+                    ion.position,
+                    row.charge,
+                    ion.charge,
+                    0.0,
+                );
                 x.extend_from_slice(&feats);
                 y.push(log_rel);
                 groups.push(gid);
@@ -81,22 +86,27 @@ pub fn build_frag_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Regressio
         }
     }
 
-    RegressionDataset { x, y, groups, n_features }
+    RegressionDataset {
+        x,
+        y,
+        groups,
+        n_features,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ModelStore;
     use model::amino_acid::AminoAcid;
     use model::peptide::Peptide;
     use model::spectrum::Spectrum;
     use scoring_crate::scoring::fragment_ions::predict_by_ions;
-    use crate::ModelStore;
     use std::path::PathBuf;
 
     fn make_scorer() -> RankScorer {
         let store = ModelStore::open(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet"),
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models"),
         )
         .unwrap();
         RankScorer::new(&store.load_param("hcd_qexactive_tryp").unwrap())
@@ -104,7 +114,9 @@ mod tests {
 
     fn pep(seq: &str) -> Peptide {
         Peptide::new(
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect(),
+            seq.bytes()
+                .map(|b| AminoAcid::standard(b).unwrap())
+                .collect(),
             b'K',
             b'R',
         )
@@ -131,12 +143,15 @@ mod tests {
         let p = pep("PEPTIDEK"); // n=8
         let ions = predict_by_ions(&p, 1..=1);
         // place observed peaks at the m/z of the first two b/y ions, plus a junk peak
-        let mut peaks: Vec<(f64, f32)> =
-            ions.iter().take(2).map(|i| (i.mz, 1000.0_f32)).collect();
+        let mut peaks: Vec<(f64, f32)> = ions.iter().take(2).map(|i| (i.mz, 1000.0_f32)).collect();
         peaks.push((50.0, 10.0)); // junk + ensures >=... peaks
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let spec = spectrum(peaks, 500.0, 2);
-        let row = PsmRow { spectrum: &spec, peptide: &p, charge: 2 };
+        let row = PsmRow {
+            spectrum: &spec,
+            peptide: &p,
+            charge: 2,
+        };
         let ds = build_frag_dataset(&[row], &scorer);
         assert_eq!(ds.n_features, scoring_crate::frag_features::N_FRAG_FEATURES);
         assert!(

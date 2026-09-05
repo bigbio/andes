@@ -8,13 +8,13 @@
 //! are spectrum-only.  The peptide sequence is only used for theoretical-ion
 //! labeling (signal vs. noise ground truth).
 
+use crate::gbdt::labels::label_peaks;
+use crate::gbdt::train::Dataset;
+use model::peptide::Peptide;
+use model::spectrum::Spectrum;
 use scoring_crate::peak_features::{extract_peak_features, PeakFeatureCtx, N_FEATURES};
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
-use model::peptide::Peptide;
-use model::spectrum::Spectrum;
-use crate::gbdt::labels::label_peaks;
-use crate::gbdt::train::Dataset;
 
 /// One input PSM row for dataset building.
 pub struct PsmRow<'a> {
@@ -92,7 +92,12 @@ pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
 
         // Group by unmodified sequence + charge (prevents train/val leakage of
         // the same backbone; conservative across peptidoforms).
-        let seq: String = row.peptide.residues.iter().map(|aa| aa.residue as char).collect();
+        let seq: String = row
+            .peptide
+            .residues
+            .iter()
+            .map(|aa| aa.residue as char)
+            .collect();
         let gid = group_id(&seq, row.charge);
 
         for (feat, &label) in features.iter().zip(labels.iter()) {
@@ -102,32 +107,40 @@ pub fn build_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
         }
     }
 
-    Dataset { x, y, groups, n_features }
+    Dataset {
+        x,
+        y,
+        groups,
+        n_features,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
     use super::*;
+    use crate::ModelStore;
     use model::amino_acid::AminoAcid;
     use model::spectrum::Spectrum;
     use scoring_crate::RankScorer;
-    use crate::ModelStore;
+    use std::path::PathBuf;
 
     fn pep(seq: &str) -> Peptide {
-        let residues: Vec<AminoAcid> =
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect();
+        let residues: Vec<AminoAcid> = seq
+            .bytes()
+            .map(|b| AminoAcid::standard(b).unwrap())
+            .collect();
         Peptide::new(residues, b'K', b'R')
     }
 
     fn bundled_store_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/models.parquet")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models")
     }
 
     fn make_scorer() -> RankScorer {
         let store = ModelStore::open(&bundled_store_path()).expect("bundled model store");
-        let param = store.load_param("hcd_qexactive_tryp").expect("hcd_qexactive_tryp");
+        let param = store
+            .load_param("hcd_qexactive_tryp")
+            .expect("hcd_qexactive_tryp");
         RankScorer::new(&param)
     }
 
@@ -203,7 +216,10 @@ mod tests {
 
         let ds = build_dataset(&[row], &scorer);
         for &label in &ds.y {
-            assert!(label == 0 || label == 1, "label must be 0 or 1, got {label}");
+            assert!(
+                label == 0 || label == 1,
+                "label must be 0 or 1, got {label}"
+            );
         }
     }
 
@@ -212,7 +228,10 @@ mod tests {
         let g1 = group_id("PEPTIDE", 2);
         let g2 = group_id("SAMPLER", 2);
         let g3 = group_id("PEPTIDE", 3);
-        assert_ne!(g1, g2, "different sequences should give different group ids");
+        assert_ne!(
+            g1, g2,
+            "different sequences should give different group ids"
+        );
         assert_ne!(g1, g3, "different charges should give different group ids");
     }
 }

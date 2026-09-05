@@ -62,13 +62,20 @@ pub enum PercolatorError {
     /// Docker was requested/needed but the `docker` CLI is unavailable.
     DockerUnavailable,
     /// The Percolator process failed (non-zero exit). Carries captured stderr/stdout tail.
-    Run { backend: String, status: String, log_tail: String },
+    Run {
+        backend: String,
+        status: String,
+        log_tail: String,
+    },
     /// Spawning the process failed.
     Spawn(std::io::Error),
     /// I/O while reading the result file.
     Io(std::io::Error),
     /// The result TSV was missing a required column.
-    MissingColumn { column: &'static str, header: String },
+    MissingColumn {
+        column: &'static str,
+        header: String,
+    },
     /// A result row had fewer columns than the header requires (truncated/corrupt).
     MalformedRow { line: String },
     /// A `q-value`/PEP field was not a finite number — propagating it as NaN
@@ -90,28 +97,48 @@ impl std::fmt::Display for PercolatorError {
                  and image {DEFAULT_PERCOLATOR_IMAGE})"
             ),
             PercolatorError::BinaryNotFound(p) => {
-                write!(f, "--percolator-bin {} not found or not executable", p.display())
+                write!(
+                    f,
+                    "--percolator-bin {} not found or not executable",
+                    p.display()
+                )
             }
             PercolatorError::DockerUnavailable => {
-                write!(f, "docker fallback requested but the `docker` CLI is not available")
+                write!(
+                    f,
+                    "docker fallback requested but the `docker` CLI is not available"
+                )
             }
-            PercolatorError::Run { backend, status, log_tail } => write!(
+            PercolatorError::Run {
+                backend,
+                status,
+                log_tail,
+            } => write!(
                 f,
                 "Percolator ({backend}) failed ({status}); last log lines:\n{log_tail}"
             ),
             PercolatorError::Spawn(e) => write!(f, "failed to spawn Percolator: {e}"),
             PercolatorError::Io(e) => write!(f, "reading Percolator results: {e}"),
             PercolatorError::MissingColumn { column, header } => {
-                write!(f, "Percolator result missing `{column}` column; header was: {header}")
+                write!(
+                    f,
+                    "Percolator result missing `{column}` column; header was: {header}"
+                )
             }
             PercolatorError::MalformedRow { line } => {
                 write!(f, "Percolator result row has too few columns: {line}")
             }
             PercolatorError::NonFiniteScore { column, value } => {
-                write!(f, "Percolator result `{column}` is not a finite number: {value:?}")
+                write!(
+                    f,
+                    "Percolator result `{column}` is not a finite number: {value:?}"
+                )
             }
             PercolatorError::DuplicatePsmId { psm_id } => {
-                write!(f, "Percolator result has duplicate PSMId `{psm_id}` (join key must be unique)")
+                write!(
+                    f,
+                    "Percolator result has duplicate PSMId `{psm_id}` (join key must be unique)"
+                )
             }
         }
     }
@@ -144,7 +171,9 @@ pub fn resolve_backend(
     }
     if force_docker {
         if docker_available() {
-            return Ok(PercolatorBackend::Docker { image: image.to_string() });
+            return Ok(PercolatorBackend::Docker {
+                image: image.to_string(),
+            });
         }
         return Err(PercolatorError::DockerUnavailable);
     }
@@ -152,7 +181,9 @@ pub fn resolve_backend(
         return Ok(PercolatorBackend::Binary(p));
     }
     if docker_available() {
-        return Ok(PercolatorBackend::Docker { image: image.to_string() });
+        return Ok(PercolatorBackend::Docker {
+            image: image.to_string(),
+        });
     }
     Err(PercolatorError::NoBackend)
 }
@@ -245,9 +276,15 @@ fn docker_args(
     extra_args: &[String],
 ) -> Vec<String> {
     let pin_dir = pin.parent().unwrap_or_else(|| Path::new("."));
-    let pin_name = pin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let pin_name = pin
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let in_out = |p: &Path| {
-        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         format!("/out/{name}")
     };
     let mut args = vec![
@@ -288,7 +325,10 @@ pub fn run_percolator(
     extra_args: &[String],
 ) -> Result<HashMap<String, PercolatorPsm>, PercolatorError> {
     let out_dir = pin.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    let stem = pin.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "andes".to_string());
+    let stem = pin
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "andes".to_string());
     let out = ResultPaths::new(&out_dir, &stem);
     // Remove any stale outputs from a previous run BEFORE launching, so the
     // `out.target.exists()` success check below can only pass on a file this
@@ -344,7 +384,10 @@ fn tail_lines(s: &str, n: usize) -> String {
 fn parse_finite(s: &str, column: &'static str) -> Result<f64, PercolatorError> {
     match s.parse::<f64>() {
         Ok(v) if v.is_finite() => Ok(v),
-        _ => Err(PercolatorError::NonFiniteScore { column, value: s.to_string() }),
+        _ => Err(PercolatorError::NonFiniteScore {
+            column,
+            value: s.to_string(),
+        }),
     }
 }
 
@@ -355,7 +398,10 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
     let find = |name: &'static str| -> Result<usize, PercolatorError> {
         cols.iter()
             .position(|c| *c == name)
-            .ok_or(PercolatorError::MissingColumn { column: name, header: header.to_string() })
+            .ok_or(PercolatorError::MissingColumn {
+                column: name,
+                header: header.to_string(),
+            })
     };
     // Match a column by name-prefix. Percolator 3.7.x emits the PEP column as
     // `posterior_error_prob`; other builds/tools use the full
@@ -363,7 +409,10 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
     let find_prefix = |prefix: &'static str| -> Result<usize, PercolatorError> {
         cols.iter()
             .position(|c| c.starts_with(prefix))
-            .ok_or(PercolatorError::MissingColumn { column: prefix, header: header.to_string() })
+            .ok_or(PercolatorError::MissingColumn {
+                column: prefix,
+                header: header.to_string(),
+            })
     };
     let id_col = find("PSMId")?;
     let q_col = find("q-value")?;
@@ -381,7 +430,9 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
         // (truncated/corrupt) — silently skipping it would drop a PSM and bias FDR.
         let max_scalar = id_col.max(q_col).max(pep_col).max(pep_seq_col);
         if fields.len() <= max_scalar {
-            return Err(PercolatorError::MalformedRow { line: line.to_string() });
+            return Err(PercolatorError::MalformedRow {
+                line: line.to_string(),
+            });
         }
         let psm_id = fields[id_col].to_string();
         // A non-finite or unparseable q-value/PEP must be an error, never a
@@ -398,7 +449,13 @@ pub fn parse_psm_results(text: &str) -> Result<HashMap<String, PercolatorPsm>, P
         if map
             .insert(
                 psm_id.clone(),
-                PercolatorPsm { psm_id: psm_id.clone(), q_value, pep, peptide, proteins },
+                PercolatorPsm {
+                    psm_id: psm_id.clone(),
+                    q_value,
+                    pep,
+                    peptide,
+                    proteins,
+                },
             )
             .is_some()
         {
@@ -434,7 +491,8 @@ mod tests {
     fn parse_sage_style_extra_column() {
         // a comparison search engine adds a leading FileName column, shifting q-value to col 4. The
         // by-NAME lookup must still find every field correctly.
-        let text = "PSMId\tFileName\tscore\tq-value\tposterior_error_probability\tpeptide\tproteinIds\n\
+        let text =
+            "PSMId\tFileName\tscore\tq-value\tposterior_error_probability\tpeptide\tproteinIds\n\
                     sc_5_1\trun.mzML\t9.1\t0.004\t0.002\tK.SAGEPEPK.L\tDECOY_x\n";
         let m = parse_psm_results(text).unwrap();
         let r = &m["sc_5_1"];
@@ -465,8 +523,10 @@ mod tests {
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     x_1_1\t2.0\tnan\t0.01\tK.PK.A\tsp|P1\n";
         let err = parse_psm_results(text).unwrap_err();
-        assert!(matches!(err, PercolatorError::NonFiniteScore { column, .. } if column == "q-value"),
-            "got {err:?}");
+        assert!(
+            matches!(err, PercolatorError::NonFiniteScore { column, .. } if column == "q-value"),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -474,7 +534,10 @@ mod tests {
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     x_1_1\t2.0\t0.01\tnotanumber\tK.PK.A\tsp|P1\n";
         let err = parse_psm_results(text).unwrap_err();
-        assert!(matches!(err, PercolatorError::NonFiniteScore { .. }), "got {err:?}");
+        assert!(
+            matches!(err, PercolatorError::NonFiniteScore { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -482,7 +545,10 @@ mod tests {
         let text = "PSMId\tscore\tq-value\tposterior_error_prob\tpeptide\tproteinIds\n\
                     x_1_1\t2.0\t0.01\n";
         let err = parse_psm_results(text).unwrap_err();
-        assert!(matches!(err, PercolatorError::MalformedRow { .. }), "got {err:?}");
+        assert!(
+            matches!(err, PercolatorError::MalformedRow { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -491,8 +557,10 @@ mod tests {
                     dup_1_1\t2.0\t0.01\t0.005\tK.PK.A\tsp|P1\n\
                     dup_1_1\t1.0\t0.02\t0.006\tK.QK.A\tsp|P2\n";
         let err = parse_psm_results(text).unwrap_err();
-        assert!(matches!(err, PercolatorError::DuplicatePsmId { ref psm_id } if psm_id == "dup_1_1"),
-            "got {err:?}");
+        assert!(
+            matches!(err, PercolatorError::DuplicatePsmId { ref psm_id } if psm_id == "dup_1_1"),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -507,8 +575,12 @@ mod tests {
 
     #[test]
     fn resolve_explicit_missing_binary_errors() {
-        let err = resolve_backend(Some(Path::new("/no/such/percolator")), false, DEFAULT_PERCOLATOR_IMAGE)
-            .unwrap_err();
+        let err = resolve_backend(
+            Some(Path::new("/no/such/percolator")),
+            false,
+            DEFAULT_PERCOLATOR_IMAGE,
+        )
+        .unwrap_err();
         assert!(matches!(err, PercolatorError::BinaryNotFound(_)));
     }
 
@@ -524,7 +596,11 @@ mod tests {
     #[test]
     fn native_args_shape() {
         let out = ResultPaths::new(Path::new("/tmp/d"), "x");
-        let args = native_args(Path::new("/tmp/d/x.pin"), &out, &["--testFDR".into(), "0.05".into()]);
+        let args = native_args(
+            Path::new("/tmp/d/x.pin"),
+            &out,
+            &["--testFDR".into(), "0.05".into()],
+        );
         assert_eq!(args[0], "--seed");
         assert_eq!(args[1], "42");
         assert!(args.contains(&"--only-psms".to_string()));
@@ -550,6 +626,8 @@ mod tests {
         assert!(args.contains(&DEFAULT_PERCOLATOR_IMAGE.to_string()));
         assert_eq!(args.last().unwrap(), "/pin/run.pin");
         // result paths rewritten under /out
-        assert!(args.iter().any(|a| a == "/out/run.percolator.target.psms.txt"));
+        assert!(args
+            .iter()
+            .any(|a| a == "/out/run.percolator.target.psms.txt"));
     }
 }

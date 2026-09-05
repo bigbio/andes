@@ -166,8 +166,16 @@ pub fn bootstrap_labels(
     // ── 4. Sort by rank_score DESCENDING (best/most-confident first) ──────────
     // Tie-break by is_decoy ascending (target before decoy) for stability.
     best_psms.sort_by(|a, b| {
-        let av = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
-        let bv = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+        let av = if a.rank_score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            a.rank_score
+        };
+        let bv = if b.rank_score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            b.rank_score
+        };
         bv.partial_cmp(&av)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.is_decoy.cmp(&b.is_decoy))
@@ -237,11 +245,7 @@ pub fn bootstrap_labels(
 /// target at a given FDR when a tied decoy should make the whole bucket fail.
 ///
 /// Shared by [`bootstrap_labels`] and [`crate::gate::count_target_psms`].
-pub(crate) fn assign_bucket_worst_q<T>(
-    psms: &[T],
-    q: &mut [f64],
-    score_of: impl Fn(&T) -> f32,
-) {
+pub(crate) fn assign_bucket_worst_q<T>(psms: &[T], q: &mut [f64], score_of: impl Fn(&T) -> f32) {
     debug_assert_eq!(psms.len(), q.len());
     let mut start = 0usize;
     while start < psms.len() {
@@ -289,8 +293,16 @@ mod tests {
         // Step 4: target-before-decoy tie-break (the original, "optimistic"
         // ordering) — the conservative bucket pass must neutralise its bias.
         psms.sort_by(|a, b| {
-            let av = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
-            let bv = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+            let av = if a.rank_score.is_nan() {
+                f32::NEG_INFINITY
+            } else {
+                a.rank_score
+            };
+            let bv = if b.rank_score.is_nan() {
+                f32::NEG_INFINITY
+            } else {
+                b.rank_score
+            };
             bv.partial_cmp(&av)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.is_decoy.cmp(&b.is_decoy))
@@ -299,12 +311,18 @@ mod tests {
         let mut q = vec![1.0_f64; n];
         let (mut t, mut d) = (0u64, 0u64);
         for (i, p) in psms.iter().enumerate() {
-            if p.is_decoy { d += 1 } else { t += 1 }
+            if p.is_decoy {
+                d += 1
+            } else {
+                t += 1
+            }
             q[i] = d as f64 / t.max(1) as f64;
         }
         let mut min_q = 1.0;
         for qi in q.iter_mut().rev() {
-            if *qi < min_q { min_q = *qi; }
+            if *qi < min_q {
+                min_q = *qi;
+            }
             *qi = min_q;
         }
         assign_bucket_worst_q(&psms, &mut q, |p| p.rank_score);
@@ -325,14 +343,26 @@ mod tests {
         // (worst) q, so the tied decoy makes the bucket fail and the tied target
         // is NOT accepted.
         let psms = vec![
-            P { rank_score: 10.0, is_decoy: false }, // clearly good target
-            P { rank_score: 5.0, is_decoy: false },  // tied with decoy below
-            P { rank_score: 5.0, is_decoy: true },   // tied decoy
+            P {
+                rank_score: 10.0,
+                is_decoy: false,
+            }, // clearly good target
+            P {
+                rank_score: 5.0,
+                is_decoy: false,
+            }, // tied with decoy below
+            P {
+                rank_score: 5.0,
+                is_decoy: true,
+            }, // tied decoy
         ];
         let (q, accepted) = fdr(psms, 0.01);
         // The two tied PSMs share the worst q in their bucket (q = 0.5 here),
         // so neither passes 1% FDR. Only the first, clearly-good target does.
-        assert_eq!(accepted, 1, "tied target must not be accepted when its bucket has a decoy");
+        assert_eq!(
+            accepted, 1,
+            "tied target must not be accepted when its bucket has a decoy"
+        );
         assert_eq!(q[1], q[2], "tied PSMs must share a q-value");
         assert!(q[1] > 0.01, "tied bucket q must reflect the decoy");
     }
@@ -342,9 +372,18 @@ mod tests {
         // With strictly distinct scores the bucket pass is a no-op: each PSM is
         // its own bucket, so q-values match the plain monotone TDC result.
         let psms = vec![
-            P { rank_score: 10.0, is_decoy: false },
-            P { rank_score: 9.0, is_decoy: false },
-            P { rank_score: 8.0, is_decoy: true },
+            P {
+                rank_score: 10.0,
+                is_decoy: false,
+            },
+            P {
+                rank_score: 9.0,
+                is_decoy: false,
+            },
+            P {
+                rank_score: 8.0,
+                is_decoy: true,
+            },
         ];
         let (q, accepted) = fdr(psms, 0.01);
         assert_eq!(accepted, 2, "both distinct-score targets pass at 1% FDR");

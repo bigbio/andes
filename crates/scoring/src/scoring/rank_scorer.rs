@@ -86,13 +86,24 @@ const FREQ_FLOOR: f32 = 1e-9;
 /// so happy-path scoring is unchanged.
 #[inline]
 fn finite_llr(ion_freq: f32, noise_freq: f32, norm: f32) -> f32 {
-    let num = if ion_freq.is_finite() && ion_freq > 0.0 { ion_freq } else { FREQ_FLOOR };
+    let num = if ion_freq.is_finite() && ion_freq > 0.0 {
+        ion_freq
+    } else {
+        FREQ_FLOOR
+    };
     let den_raw = noise_freq * norm;
-    let den = if den_raw.is_finite() && den_raw > 0.0 { den_raw } else { FREQ_FLOOR };
+    let den = if den_raw.is_finite() && den_raw > 0.0 {
+        den_raw
+    } else {
+        FREQ_FLOOR
+    };
     let llr = (num / den).ln();
     // For any valid model the floor is never hit, so this assert documents the
     // invariant (finite LLRs) without affecting release behavior.
-    debug_assert!(llr.is_finite(), "rank LLR must be finite (ion={ion_freq}, noise={noise_freq}, norm={norm})");
+    debug_assert!(
+        llr.is_finite(),
+        "rank LLR must be finite (ion={ion_freq}, noise={noise_freq}, norm={norm})"
+    );
     llr
 }
 
@@ -177,8 +188,16 @@ impl RankScorer {
         // reproducible scores.
         for logs in partition_loss_ion_logs.values_mut() {
             logs.sort_by_key(|(ion, _)| match *ion {
-                IonType::Prefix { charge, offset_bits, loss_class } => (0u8, charge, offset_bits, loss_class),
-                IonType::Suffix { charge, offset_bits, loss_class } => (1u8, charge, offset_bits, loss_class),
+                IonType::Prefix {
+                    charge,
+                    offset_bits,
+                    loss_class,
+                } => (0u8, charge, offset_bits, loss_class),
+                IonType::Suffix {
+                    charge,
+                    offset_bits,
+                    loss_class,
+                } => (1u8, charge, offset_bits, loss_class),
                 IonType::Noise => (2u8, 0, 0, 0),
             });
         }
@@ -337,7 +356,11 @@ impl RankScorer {
         };
         // Floor an exact-zero learned probability to 0.01 so ln stays finite;
         // a true 0 would otherwise force ln(0) = -inf for an observed pair.
-        let ion_prob = if table[index] == 0.0 { 0.01 } else { table[index] };
+        let ion_prob = if table[index] == 0.0 {
+            0.01
+        } else {
+            table[index]
+        };
         (ion_prob / noise_baseline).ln()
     }
 
@@ -354,8 +377,11 @@ impl RankScorer {
             return 0.0;
         }
         let mut err_index = (error * esf as f32).round() as i32;
-        if err_index > esf { err_index = esf; }
-        else if err_index < -esf { err_index = -esf; }
+        if err_index > esf {
+            err_index = esf;
+        } else if err_index < -esf {
+            err_index = -esf;
+        }
         err_index += esf;
         let idx = err_index as usize;
 
@@ -427,13 +453,31 @@ mod tests {
     #[test]
     fn finite_llr_stays_finite_on_corrupt_inputs() {
         // Zero / negative / NaN frequencies must NOT produce ±inf or NaN.
-        assert!(super::finite_llr(0.0, 0.1, 1.0).is_finite(), "zero ion freq");
-        assert!(super::finite_llr(0.6, 0.0, 1.0).is_finite(), "zero noise freq");
+        assert!(
+            super::finite_llr(0.0, 0.1, 1.0).is_finite(),
+            "zero ion freq"
+        );
+        assert!(
+            super::finite_llr(0.6, 0.0, 1.0).is_finite(),
+            "zero noise freq"
+        );
         assert!(super::finite_llr(0.6, 0.1, 0.0).is_finite(), "zero norm");
-        assert!(super::finite_llr(f32::NAN, 0.1, 1.0).is_finite(), "NaN ion freq");
-        assert!(super::finite_llr(0.6, f32::NAN, 1.0).is_finite(), "NaN noise freq");
-        assert!(super::finite_llr(-1.0, 0.1, 1.0).is_finite(), "negative ion freq");
-        assert!(super::finite_llr(0.6, -0.1, 1.0).is_finite(), "negative noise freq");
+        assert!(
+            super::finite_llr(f32::NAN, 0.1, 1.0).is_finite(),
+            "NaN ion freq"
+        );
+        assert!(
+            super::finite_llr(0.6, f32::NAN, 1.0).is_finite(),
+            "NaN noise freq"
+        );
+        assert!(
+            super::finite_llr(-1.0, 0.1, 1.0).is_finite(),
+            "negative ion freq"
+        );
+        assert!(
+            super::finite_llr(0.6, -0.1, 1.0).is_finite(),
+            "negative noise freq"
+        );
     }
 
     #[test]
@@ -441,12 +485,27 @@ mod tests {
         // Inject a degenerate ion table (a zero entry) and confirm the built
         // LLR table is finite throughout (no -inf from ln(0)).
         let mut param = tiny_param();
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let zeroed = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
-        param.rank_dist_table.get_mut(&part).unwrap().insert(zeroed, vec![0.0, 0.0, 0.0, 0.0]);
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        let zeroed = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
+        param
+            .rank_dist_table
+            .get_mut(&part)
+            .unwrap()
+            .insert(zeroed, vec![0.0, 0.0, 0.0, 0.0]);
         let scorer = RankScorer::new(&param);
         for table in scorer.log_table.values() {
-            assert!(table.iter().all(|v| v.is_finite()), "all LLR entries must be finite");
+            assert!(
+                table.iter().all(|v| v.is_finite()),
+                "all LLR entries must be finite"
+            );
         }
     }
 
@@ -454,12 +513,24 @@ mod tests {
     fn node_score_log_formula() {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        let ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
 
         // Rank 1 → index 0. chargeOrSeg = min(1, 1) = 1. log(0.6 / (0.1 * 1)) = log(6.0).
         let s1 = scorer.node_score(part, ion, 1);
-        assert!((s1 - 6.0_f32.ln()).abs() < 1e-5, "rank1: got {s1}, expected {}", 6.0_f32.ln());
+        assert!(
+            (s1 - 6.0_f32.ln()).abs() < 1e-5,
+            "rank1: got {s1}, expected {}",
+            6.0_f32.ln()
+        );
 
         // Rank 2 → index 1. log(0.3 / 0.2) = log(1.5).
         let s2 = scorer.node_score(part, ion, 2);
@@ -470,8 +541,16 @@ mod tests {
     fn rank_above_max_clamps() {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        let ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
 
         // rank > max_rank clamps to rank_index = max_rank - 1.
         // max_rank = 3 → rank_index = 2 → log(0.05 / 0.3).
@@ -484,8 +563,16 @@ mod tests {
     fn missing_ion_score_uses_last_slot() {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        let ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
 
         // missing slot = index `maxRank` = 3 (the last entry in length-4 array).
         // log(0.001 / 0.4) = log(0.0025).
@@ -500,10 +587,22 @@ mod tests {
         // charge_or_seg = min(3, 1) = 1.
         // Verify the log score uses 1 (not 3).
         let mut param = tiny_param();
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let ion3 = IonType::Prefix { charge: 3, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        let ion3 = IonType::Prefix {
+            charge: 3,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
         let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
-        param.rank_dist_table.get_mut(&part).unwrap().insert(ion3, ion_freqs);
+        param
+            .rank_dist_table
+            .get_mut(&part)
+            .unwrap()
+            .insert(ion3, ion_freqs);
 
         let scorer = RankScorer::new(&param);
         let s1 = scorer.node_score(part, ion3, 1);
@@ -515,8 +614,16 @@ mod tests {
     fn unknown_partition_returns_zero() {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
-        let unknown = Partition { charge: 99, parent_mass: 0.0, seg_num: 0 };
-        let ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let unknown = Partition {
+            charge: 99,
+            parent_mass: 0.0,
+            seg_num: 0,
+        };
+        let ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
         // Out-of-table partition → return 0 (neutral score).
         assert_eq!(scorer.node_score(unknown, ion, 1), 0.0);
         assert_eq!(scorer.missing_ion_score(unknown, ion), 0.0);
@@ -528,9 +635,21 @@ mod tests {
         // partition_loss_ion_logs; the intact hot path must filter it out so
         // the mass-indexed DP stays peptide-agnostic and intact-only.
         let mut param = tiny_param();
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let intact = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
-        let loss = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        let intact = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
+        let loss = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 1,
+        };
         // Give the loss ion a rank distribution (so it gets an LLR table).
         param
             .rank_dist_table
@@ -539,16 +658,27 @@ mod tests {
             .insert(loss, vec![0.6_f32, 0.3, 0.05, 0.001]);
         // Populate the ion-type cache with BOTH so we can prove the intact path
         // filters the loss ion out (an empty cache would pass trivially).
-        param.partition_ion_types_cache.insert(part, vec![intact, loss]);
+        param
+            .partition_ion_types_cache
+            .insert(part, vec![intact, loss]);
 
         let scorer = RankScorer::new(&param);
 
         // Hot path: intact only.
-        assert!(scorer.partition_ion_logs(&part).iter().all(|(ion, _)| !ion.is_loss()));
-        assert!(scorer.partition_ion_logs(&part).iter().any(|(ion, _)| *ion == intact));
+        assert!(scorer
+            .partition_ion_logs(&part)
+            .iter()
+            .all(|(ion, _)| !ion.is_loss()));
+        assert!(scorer
+            .partition_ion_logs(&part)
+            .iter()
+            .any(|(ion, _)| *ion == intact));
         // Loss path: carries the loss ion.
         assert!(scorer.has_loss_tables());
-        assert!(scorer.partition_loss_ion_logs(&part).iter().any(|(ion, _)| *ion == loss));
+        assert!(scorer
+            .partition_loss_ion_logs(&part)
+            .iter()
+            .any(|(ion, _)| *ion == loss));
         // A standard model has no loss tables.
         assert!(!RankScorer::new(&tiny_param()).has_loss_tables());
     }
@@ -557,15 +687,24 @@ mod tests {
     fn ion_existence_score_out_of_domain_prob_peak_is_bounded_zero() {
         // Build a param with an ion-existence table for one partition.
         let mut param = tiny_param();
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        param.ion_existence_table.insert(part, vec![0.7, 0.1, 0.1, 0.1]);
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        param
+            .ion_existence_table
+            .insert(part, vec![0.7, 0.1, 0.1, 0.1]);
         let scorer = RankScorer::new(&param);
 
         // prob_peak > 1 (dense spectrum): previously produced NaN→round→0.
         // Now returns an explicit, finite, bounded 0.0 — never NaN/±inf.
         for &index in &[0usize, 1, 2, 3] {
             let s = scorer.ion_existence_score(part, index, 1.5);
-            assert!(s.is_finite(), "out-of-domain prob_peak must give finite score");
+            assert!(
+                s.is_finite(),
+                "out-of-domain prob_peak must give finite score"
+            );
             assert_eq!(s, 0.0, "out-of-domain edge contributes neutral 0");
             // NaN prob_peak also neutralized.
             let s_nan = scorer.ion_existence_score(part, index, f32::NAN);
@@ -576,15 +715,26 @@ mod tests {
         // generally non-zero) — happy path unchanged.
         let s_valid = scorer.ion_existence_score(part, 3, 0.3);
         assert!(s_valid.is_finite());
-        assert_ne!(s_valid, 0.0, "valid prob_peak must score on the normal path");
+        assert_ne!(
+            s_valid, 0.0,
+            "valid prob_peak must score on the normal path"
+        );
     }
 
     #[test]
     fn unknown_ion_returns_zero() {
         let param = tiny_param();
         let scorer = RankScorer::new(&param);
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
-        let unknown_ion = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
+        let unknown_ion = IonType::Suffix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
         // Suffix isn't in the table → return 0.
         assert_eq!(scorer.node_score(part, unknown_ion, 1), 0.0);
     }

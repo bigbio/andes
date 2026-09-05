@@ -1,7 +1,7 @@
 //! Split a single-file model store into per-protocol Parquet partitions.
 //!
-//! The bundled store ships as one `resources/models.parquet` file. This module
-//! rewrites it as a Hive-style partitioned directory:
+//! Given a single-file model store (e.g. a freshly trained `--out-store`
+//! file), this module rewrites it as a Hive-style partitioned directory:
 //!
 //! ```text
 //! <dir>/protocol=Automatic/models.parquet
@@ -69,7 +69,9 @@ pub fn split_store_by_protocol(
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
     let schema = builder.schema().clone();
-    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    let reader = builder
+        .build()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     for batch in reader {
         let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
@@ -111,7 +113,10 @@ pub fn split_store_by_protocol(
             let filtered = filter_record_batch(&batch, &mask)
                 .map_err(|e| TrainError::Other(format!("filter_record_batch: {e}")))?;
             if filtered.num_rows() > 0 {
-                by_protocol.entry(proto.to_string()).or_default().push(filtered);
+                by_protocol
+                    .entry(proto.to_string())
+                    .or_default()
+                    .push(filtered);
             }
         }
     }
@@ -164,8 +169,12 @@ pub fn split_store_by_protocol(
         let out = std::fs::File::create(&part_path)?;
         let mut writer = ArrowWriter::try_new(out, schema.clone(), Some(props))
             .map_err(|e| TrainError::Parquet(e.to_string()))?;
-        writer.write(&merged).map_err(|e| TrainError::Parquet(e.to_string()))?;
-        writer.close().map_err(|e| TrainError::Parquet(e.to_string()))?;
+        writer
+            .write(&merged)
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
+        writer
+            .close()
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
         written.push((proto.clone(), part_path));
     }
@@ -180,7 +189,9 @@ fn read_model_protocols(
     let file = std::fs::File::open(src)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
-    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    let reader = builder
+        .build()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     let mut map = std::collections::HashMap::new();
     for batch in reader {
@@ -203,10 +214,7 @@ fn read_model_protocols(
     Ok(map)
 }
 
-fn str_col<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<&'a StringArray, TrainError> {
+fn str_col<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray, TrainError> {
     batch
         .column_by_name(name)
         .ok_or_else(|| TrainError::Other(format!("missing column {name}")))?

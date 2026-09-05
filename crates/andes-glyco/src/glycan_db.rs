@@ -163,7 +163,12 @@ pub fn n_glycan_list_reference_human() -> Vec<GlycanComp> {
                             continue;
                         }
                         out.push(GlycanComp {
-                            hexnac: hn, hex: hx, fuc: fc, neuac: na, neugc: ng, mass,
+                            hexnac: hn,
+                            hex: hx,
+                            fuc: fc,
+                            neuac: na,
+                            neugc: ng,
+                            mass,
                         });
                     }
                 }
@@ -172,7 +177,8 @@ pub fn n_glycan_list_reference_human() -> Vec<GlycanComp> {
     }
     add_paucimannose(&mut out);
     out.sort_by(|a, b| {
-        a.mass.total_cmp(&b.mass)
+        a.mass
+            .total_cmp(&b.mass)
             .then_with(|| a.hexnac.cmp(&b.hexnac))
             .then_with(|| a.hex.cmp(&b.hex))
             .then_with(|| a.fuc.cmp(&b.fuc))
@@ -303,7 +309,14 @@ fn add_paucimannose(out: &mut Vec<GlycanComp>) {
                 if mass < 150.0 {
                     continue;
                 }
-                out.push(GlycanComp { hexnac: hn, hex: hx, fuc: fc, neuac: 0, neugc: 0, mass });
+                out.push(GlycanComp {
+                    hexnac: hn,
+                    hex: hx,
+                    fuc: fc,
+                    neuac: 0,
+                    neugc: 0,
+                    mass,
+                });
             }
         }
     }
@@ -405,7 +418,11 @@ mod tests {
         let list = n_glycan_list_common();
         for g in &list {
             // GI-3 paucimannose floor is 150 Da (a lone HexNAc = 203).
-            assert!(g.mass >= 150.0 && g.mass <= 6000.0, "mass out of range: {}", g.mass);
+            assert!(
+                g.mass >= 150.0 && g.mass <= 6000.0,
+                "mass out of range: {}",
+                g.mass
+            );
             assert!(g.fuc <= g.hexnac, "fuc > hexnac: {:?}", g);
             let max_sialic = g.hexnac.saturating_sub(2);
             assert!(
@@ -435,12 +452,12 @@ mod tests {
     fn n_glycan_list_common_contains_high_mannose_cores() {
         // Man5 = HexNAc2Hex5; Man9 = HexNAc2Hex9 — must both be in common list.
         let list = n_glycan_list_common();
-        let has_man5 = list.iter().any(|g| {
-            g.hexnac == 2 && g.hex == 5 && g.fuc == 0 && g.neuac == 0 && g.neugc == 0
-        });
-        let has_man9 = list.iter().any(|g| {
-            g.hexnac == 2 && g.hex == 9 && g.fuc == 0 && g.neuac == 0 && g.neugc == 0
-        });
+        let has_man5 = list
+            .iter()
+            .any(|g| g.hexnac == 2 && g.hex == 5 && g.fuc == 0 && g.neuac == 0 && g.neugc == 0);
+        let has_man9 = list
+            .iter()
+            .any(|g| g.hexnac == 2 && g.hex == 9 && g.fuc == 0 && g.neuac == 0 && g.neugc == 0);
         assert!(has_man5, "Man5 (HexNAc2Hex5) not in common list");
         assert!(has_man9, "Man9 (HexNAc2Hex9) not in common list");
     }
@@ -449,9 +466,9 @@ mod tests {
     fn n_glycan_list_common_contains_biantennary_core_fucosylated() {
         // Biantennary + core-Fuc + 2 NeuAc = HexNAc4Hex5Fuc1NeuAc2 — very common in serum.
         let list = n_glycan_list_common();
-        let found = list.iter().any(|g| {
-            g.hexnac == 4 && g.hex == 5 && g.fuc == 1 && g.neuac == 2 && g.neugc == 0
-        });
+        let found = list
+            .iter()
+            .any(|g| g.hexnac == 4 && g.hex == 5 && g.fuc == 1 && g.neuac == 2 && g.neugc == 0);
         assert!(
             found,
             "HexNAc4Hex5Fuc1NeuAc2 (biantennary+Fuc+2NeuAc) not in common list"
@@ -471,11 +488,7 @@ mod tests {
                     && gf.neuac == gc.neuac
                     && gf.neugc == gc.neugc
             });
-            assert!(
-                found,
-                "common-list entry {:?} not found in full list",
-                gc
-            );
+            assert!(found, "common-list entry {:?} not found in full list", gc);
         }
     }
 
@@ -500,7 +513,11 @@ mod tests {
         );
         for g in &list {
             // Paucimannose floor is 150 Da (a lone HexNAc = 203); upper 6000.
-            assert!(g.mass >= 150.0 && g.mass <= 6000.0, "mass out of range: {}", g.mass);
+            assert!(
+                g.mass >= 150.0 && g.mass <= 6000.0,
+                "mass out of range: {}",
+                g.mass
+            );
         }
     }
 
@@ -595,11 +612,15 @@ pub fn taxon_from_headers<'a, I: IntoIterator<Item = &'a str>>(
     for d in descriptions {
         let Some(i) = d.find("OX=") else { continue };
         let rest = &d[i + 3..];
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
         if end == 0 {
             continue;
         }
-        let Ok(tax) = rest[..end].parse::<u32>() else { continue };
+        let Ok(tax) = rest[..end].parse::<u32>() else {
+            continue;
+        };
         with_ox += 1;
         if CMAH_NULL_TAXA.contains(&tax) {
             human += 1;
@@ -692,7 +713,8 @@ mod coverage_tests {
         let l = n_glycan_list_reference_human();
         for hx in 3u8..=12 {
             assert!(
-                l.iter().any(|g| g.hexnac == 2 && g.hex == hx && g.fuc == 0 && g.neuac == 0),
+                l.iter()
+                    .any(|g| g.hexnac == 2 && g.hex == hx && g.fuc == 0 && g.neuac == 0),
                 "Man{hx} (HexNAc2Hex{hx}) must be reachable"
             );
         }

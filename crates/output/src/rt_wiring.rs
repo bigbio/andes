@@ -170,7 +170,10 @@ mod tests {
 
     /// Build an unmodified peptide from a byte sequence.
     fn pep(seq: &[u8]) -> Peptide {
-        let residues: Vec<_> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+        let residues: Vec<_> = seq
+            .iter()
+            .map(|&r| AminoAcid::standard(r).unwrap())
+            .collect();
         Peptide::new(residues, b'K', b'-')
     }
 
@@ -239,8 +242,8 @@ mod tests {
         let model = RtIndexModel::seed();
         // A set of chemically-distinct peptides to spread indices apart.
         let seqs: Vec<&[u8]> = vec![
-            b"LLIIVV", b"PEPTIDE", b"AAAAAA", b"WFWFWF", b"DEKRDE", b"GGGGGG",
-            b"STSTST", b"MMMMMM", b"YYYYYY", b"NQNQNQ",
+            b"LLIIVV", b"PEPTIDE", b"AAAAAA", b"WFWFWF", b"DEKRDE", b"GGGGGG", b"STSTST",
+            b"MMMMMM", b"YYYYYY", b"NQNQNQ",
         ];
         let mut candidates = Vec::new();
         let mut spectra = Vec::new();
@@ -290,7 +293,10 @@ mod tests {
             f.abs_delta_rt
         );
         // DeltaRTNorm = DeltaRT / gradient span. Span = max−min observed RT.
-        let mins: Vec<f64> = spectra.iter().map(|s| s.rt_seconds.unwrap() / 60.0).collect();
+        let mins: Vec<f64> = spectra
+            .iter()
+            .map(|s| s.rt_seconds.unwrap() / 60.0)
+            .collect();
         let span = mins.iter().cloned().fold(f64::MIN, f64::max)
             - mins.iter().cloned().fold(f64::MAX, f64::min);
         let expected_norm = f.delta_rt as f64 / span;
@@ -378,7 +384,12 @@ mod tests {
                     && f.delta_rt_norm.is_finite()
                     && f.predicted_rt_min.is_finite(),
                 "non-finite RT feature leaked: {:?}",
-                (f.delta_rt, f.abs_delta_rt, f.delta_rt_norm, f.predicted_rt_min)
+                (
+                    f.delta_rt,
+                    f.abs_delta_rt,
+                    f.delta_rt_norm,
+                    f.predicted_rt_min
+                )
             );
         }
         // The two bad-RT rows are exactly neutral.

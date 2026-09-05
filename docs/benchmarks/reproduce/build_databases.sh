@@ -9,10 +9,13 @@
 #  * UniProt is versioned. A build today will not be byte-identical to the one behind the
 #    published counts; expect small differences in sequence count. Each database prints its
 #    sequence count and sha256 so you can state which build you used.
-#  * The Astral HYE database published by ProteoBench is not fetchable programmatically
-#    (no directory listing). This reconstructs an equivalent Human/Yeast/E.coli database
-#    from UniProt. For an exact match to the published Astral row, obtain ProteoBench's
-#    own FASTA and pass it instead.
+#  * The Astral row was searched against ProteoBench's own database,
+#    ProteoBenchFASTA_MixedSpecies_HYE.fasta (31,889 sequences,
+#    sha256 d9ac434d88492c10c8e9a587ee7dbc9480fa0995fa07a6ba35a7da8abf39aa25). Every URL it
+#    was ever served from returned 404 on 2026-09-05, so this script reconstructs an
+#    equivalent Human/Yeast/E.coli database from UniProt (~30.9k sequences). If you obtain
+#    the ProteoBench file, check its sha256 against the one above and copy it to
+#    <data-dir>/databases/hye.fasta before running run.sh for an exact match.
 set -euo pipefail
 
 DATA_DIR="${1:?usage: build_databases.sh <data-dir>}"

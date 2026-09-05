@@ -66,21 +66,15 @@ rescoring:
 
 glyco:
   enabled: false                 # intact N-glycopeptide search
-  # transfer: false              # experimental cross-spectrum backbone transfer
   # --- advanced tuning (validated defaults; see DOCS §9) ---
-  # backbone_top_k: 50
-  # gp_k: 10.0                   # glycan-Y ladder weight (was documented as 50; shipped default is 10)
+  # backbone_top_k: 150
+  # gp_k: 10.0                   # glycan-Y ladder weight
   # gp_cz: 15.0                  # ETD c/z hyperscore weight (inert on HCD/CID)
   # hcd_pair: true               # DEFAULT ON: generate from the paired HCD scan, score c/z on ETD
   #
-  # NOTE: --glyco-cz-gate, --glyco-etd-rank-glycan and --glyco-per-spectrum-model are
-  # CLI-only today (no config key yet) — both of the first two default to ON.
+  # The remaining glyco flags (glycan list, taxon, NeuGc, emission floors, ETD c/z
+  # knobs, retrieval tolerance, ...) are CLI-only; see DOCS.md §9 for the full table.
   # gp_j: 5.0
   # gp_h: 1.0
   # pf_charge: 2
   # max_pf: 1024
-  # decoy: false
-  # transfer_seed_fdr: 0.05
-  # rt_window: 1800
-  # transfer_min_support: 1
-  # transfer_core_y: 3

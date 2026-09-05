@@ -2,13 +2,15 @@
 
 use rustc_hash::FxHashMap;
 
-use model::{AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb, Spectrum, PROTON, Tolerance};
-use scoring_crate::{Param, RankScorer};
-use search::{match_spectra, SearchIndex, SearchParams};
 use model::activation::ActivationMethod;
 use model::instrument::InstrumentType;
-use scoring_crate::param_model::{IonType, Partition, SpecDataType};
 use model::protocol::Protocol;
+use model::{
+    AminoAcid, AminoAcidSetBuilder, Peptide, Protein, ProteinDb, Spectrum, Tolerance, PROTON,
+};
+use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+use scoring_crate::{Param, RankScorer};
+use search::{match_spectra, SearchIndex, SearchParams};
 
 fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
     Spectrum {
@@ -27,9 +29,21 @@ fn make_spectrum(precursor_mz: f64, charge: Option<i32>) -> Spectrum {
 
 /// Minimal RankScorer for smoke tests (no real peaks, just need valid scorer).
 fn tiny_scorer() -> RankScorer {
-    let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
-    let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 500.0,
+        seg_num: 0,
+    };
+    let prefix1 = IonType::Prefix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
+    let suffix1 = IonType::Suffix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
     let noise = IonType::Noise;
 
     let mut ion_table = FxHashMap::default();
@@ -70,8 +84,8 @@ fn tiny_scorer() -> RankScorer {
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
         gbdt_peak_model: None,
-            frag_intensity_model: None,
-            rich_ion_model: None,
+        frag_intensity_model: None,
+        rich_ion_model: None,
     };
     param.rebuild_cache();
     RankScorer::new(&param)
@@ -83,7 +97,8 @@ fn known_peptide_appears_in_top_n() {
     // Peptide "WVTFISLLR" (positions 2..11, length 9) is a perfect cleavage.
     let target = ProteinDb {
         proteins: vec![Protein {
-            accession: "P1".into(), description: "".into(),
+            accession: "P1".into(),
+            description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
         }],
     };
@@ -92,8 +107,10 @@ fn known_peptide_appears_in_top_n() {
     let mut params = SearchParams::default_tryptic(aa_set);
     params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
 
-    let target_residues: Vec<AminoAcid> = b"WVTFISLLR".iter()
-        .map(|&r| AminoAcid::standard(r).unwrap()).collect();
+    let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
     let target_peptide = Peptide::new(target_residues, b'K', b'-');
     let target_mass = target_peptide.mass();
     let charge = 2u8;
@@ -106,7 +123,12 @@ fn known_peptide_appears_in_top_n() {
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected at least one match");
     let best = &top[0];
-    assert_eq!(candidates[best.primary_candidate_idx() as usize].peptide.length(), 9);
+    assert_eq!(
+        candidates[best.primary_candidate_idx() as usize]
+            .peptide
+            .length(),
+        9
+    );
     assert!(!candidates[best.primary_candidate_idx() as usize].is_decoy);
     assert!(best.mass_error_ppm.abs() < 1.0);
 }
@@ -116,7 +138,8 @@ fn top_n_capacity_respected() {
     // NoCleavage gives exactly 1 candidate per protein. Top-N cap at 1.
     let target = ProteinDb {
         proteins: vec![Protein {
-            accession: "P1".into(), description: "".into(),
+            accession: "P1".into(),
+            description: "".into(),
             sequence: b"AAAAAAAAAA".to_vec(),
         }],
     };
@@ -127,8 +150,10 @@ fn top_n_capacity_respected() {
     params.top_n_psms_per_spectrum = 1;
     params.max_variable_mods_per_peptide = 0;
 
-    let target_residues: Vec<AminoAcid> = b"AAAAAAAAAA".iter()
-        .map(|&r| AminoAcid::standard(r).unwrap()).collect();
+    let target_residues: Vec<AminoAcid> = b"AAAAAAAAAA"
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
     let target_peptide = Peptide::new(target_residues, b'_', b'-');
     let mass = target_peptide.mass();
     let charge = 2u8;
@@ -143,7 +168,8 @@ fn top_n_capacity_respected() {
 fn spectrum_without_charge_tries_charge_range() {
     let target = ProteinDb {
         proteins: vec![Protein {
-            accession: "P1".into(), description: "".into(),
+            accession: "P1".into(),
+            description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
         }],
     };
@@ -152,14 +178,16 @@ fn spectrum_without_charge_tries_charge_range() {
     let mut params = SearchParams::default_tryptic(aa_set);
     params.min_peaks = 0; // peakless smoke spectra; not exercising the min-peaks filter
 
-    let target_residues: Vec<AminoAcid> = b"WVTFISLLR".iter()
-        .map(|&r| AminoAcid::standard(r).unwrap()).collect();
+    let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
     let target_peptide = Peptide::new(target_residues, b'K', b'-');
     let mass = target_peptide.mass();
     let charge = 2u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, None);  // no charge!
+    let spec = make_spectrum(mz, None); // no charge!
     let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
     assert!(!top.is_empty(), "expected charge_range to find a match");
@@ -180,7 +208,8 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     // Peptide "WVTFISLLR", a tryptic fragment from BSA-related sequences.
     let target = ProteinDb {
         proteins: vec![Protein {
-            accession: "P1".into(), description: "".into(),
+            accession: "P1".into(),
+            description: "".into(),
             sequence: b"MKWVTFISLLR".to_vec(),
         }],
     };
@@ -191,8 +220,10 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     params.charge_range = 2..=3;
     params.min_peaks = 0; // peakless smoke spectrum; not exercising the min-peaks filter
 
-    let target_residues: Vec<AminoAcid> = b"WVTFISLLR".iter()
-        .map(|&r| AminoAcid::standard(r).unwrap()).collect();
+    let target_residues: Vec<AminoAcid> = b"WVTFISLLR"
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
     let target_peptide = Peptide::new(target_residues, b'K', b'-');
     let mass = target_peptide.mass();
 
@@ -200,12 +231,15 @@ fn charge_missing_spectrum_uses_per_charge_scored_spec() {
     let charge = 3u8;
     let mz = (mass + charge as f64 * PROTON) / charge as f64;
 
-    let spec = make_spectrum(mz, None);  // charge-missing
+    let spec = make_spectrum(mz, None); // charge-missing
     let (queues, _candidates) = match_spectra(&[spec], &idx, &params, &tiny_scorer(), 0.05, "XXX");
     let top = queues.into_iter().next().unwrap().into_sorted_vec();
 
     // The only match must be at charge 3 (the precursor m/z is z=3-exact).
-    assert!(!top.is_empty(), "expected a charge-3 match for charge-missing spectrum");
+    assert!(
+        !top.is_empty(),
+        "expected a charge-3 match for charge-missing spectrum"
+    );
     assert!(
         top.iter().all(|p| p.charge_used == 3),
         "all PSMs should be at z=3; found charges: {:?}",

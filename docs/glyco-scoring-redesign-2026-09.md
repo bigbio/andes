@@ -1,5 +1,11 @@
 # Glyco scoring redesign — factored per-candidate likelihood with a two-stage election
 
+> **Status 2026-09-05.** Items 4 and 5 (the split election and its `--glyco-gp-g` weight)
+> were measured as losing (table below) and have been **removed from the code**, together
+> with `--glyco-gp-m`. The additive-column items (Y-tree, oxonium LLR, masked rank/chance
+> LLR) measured identification-neutral and were removed the same day. This document is
+> kept as the design record; none of the flags it names exist any more.
+
 **Date:** 2026-09-02. **Branch audited:** `feat/glyco-pin-curation` @ `69fbf354`.
 **Inputs:** six independent read-only audits (candidate generation / mass split; fused selector;
 glycan-evidence scoring; backbone scoring; PIN + decoy interface; competitor literature at formula
@@ -203,7 +209,7 @@ columns unchanged on every row, with the 11 added columns all zero.
 
 | Step | State | Flag |
 |---|---|---|
-| 0 Offline re-rank gate | `scripts/glyco_rerank_gate.py` | — |
+| 0 Offline re-rank gate | script removed 2026-09-05 (one-off analysis) | — |
 | 1 Wrong-spectrum / gate defects | done | `--glyco-pair-y-on-gen`, `--glyco-enum-fallback`, `--glyco-etd-require-oxonium` |
 | 1 `SialicConsistency` on the gate's spectrum | done, unconditional | — (byte-identical unpaired) |
 | 2 Peptide-channel rank | done | `--glyco-rank-masked` |

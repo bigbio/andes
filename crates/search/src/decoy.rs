@@ -35,10 +35,10 @@ impl DecoyStrategy {
     /// Parse the `--decoy-strategy` CLI value. Case-insensitive.
     pub fn from_name(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "reverse" | "rev"     => Some(Self::Reverse),
-            "shuffle" | "shuf"    => Some(Self::Shuffle),
+            "reverse" | "rev" => Some(Self::Reverse),
+            "shuffle" | "shuf" => Some(Self::Shuffle),
             "sequon-reverse" | "sequon" | "sequon_reverse" => Some(Self::SequonReverse),
-            "none" | "off"        => Some(Self::None),
+            "none" | "off" => Some(Self::None),
             _ => None,
         }
     }
@@ -81,11 +81,15 @@ impl DecoyStrategy {
 /// glyco q-values from an andes-generated decoy DB.
 pub fn reverse_db(db: &ProteinDb, prefix: &str) -> ProteinDb {
     let normalized = normalize_decoy_prefix(prefix);
-    let proteins = db.proteins.iter().map(|p| Protein {
-        accession: format!("{}_{}", normalized, p.accession),
-        description: p.description.clone(),
-        sequence: p.sequence.iter().rev().copied().collect(),
-    }).collect();
+    let proteins = db
+        .proteins
+        .iter()
+        .map(|p| Protein {
+            accession: format!("{}_{}", normalized, p.accession),
+            description: p.description.clone(),
+            sequence: p.sequence.iter().rev().copied().collect(),
+        })
+        .collect();
     ProteinDb { proteins }
 }
 
@@ -138,8 +142,7 @@ fn sequon_preserving_reverse(orig: &[u8]) -> Vec<u8> {
             // Donor: a later S/T that is NOT the 3rd residue of an existing sequon
             // (moving it would break that sequon, a net-zero swap). Scan ascending.
             if let Some(j) = (i + 3..n).find(|&j| {
-                (r[j] == b'S' || r[j] == b'T')
-                    && !(j >= 2 && r[j - 2] == b'N' && r[j - 1] != b'P')
+                (r[j] == b'S' || r[j] == b'T') && !(j >= 2 && r[j - 2] == b'N' && r[j - 1] != b'P')
             }) {
                 r.swap(i + 2, j);
                 // Verify the ACTUAL delta (the swap can break/create a sequon at the
@@ -294,11 +297,14 @@ mod tests {
 
     fn make_db(proteins: &[(&str, &[u8])]) -> ProteinDb {
         ProteinDb {
-            proteins: proteins.iter().map(|(acc, seq)| Protein {
-                accession: acc.to_string(),
-                description: String::new(),
-                sequence: seq.to_vec(),
-            }).collect(),
+            proteins: proteins
+                .iter()
+                .map(|(acc, seq)| Protein {
+                    accession: acc.to_string(),
+                    description: String::new(),
+                    sequence: seq.to_vec(),
+                })
+                .collect(),
         }
     }
 
@@ -355,7 +361,10 @@ mod tests {
         let db = make_db(&[("P1", b"MKWVLPASTNDE"), ("P2", b"AGCTFYHRQGIL")]);
         let a = shuffle_db(&db, "XXX", DEFAULT_DECOY_SEED);
         let b = shuffle_db(&db, "XXX", DEFAULT_DECOY_SEED);
-        assert_eq!(a.proteins[0].sequence, b.proteins[0].sequence, "same seed ⇒ same shuffle");
+        assert_eq!(
+            a.proteins[0].sequence, b.proteins[0].sequence,
+            "same seed ⇒ same shuffle"
+        );
         assert_eq!(a.proteins[1].sequence, b.proteins[1].sequence);
         // A different seed yields a different permutation (overwhelmingly likely
         // for a 12-mer), so shuffles are actually seed-dependent.
@@ -393,20 +402,31 @@ mod tests {
         a.sort();
         let mut b = rev.clone();
         b.sort();
-        assert_eq!(a, b, "must be a permutation of the target (composition preserved)");
+        assert_eq!(
+            a, b,
+            "must be a permutation of the target (composition preserved)"
+        );
         let t = super::count_sequon_starts(orig);
         let d = super::count_sequon_starts(&rev);
         let plain: Vec<u8> = orig.iter().rev().copied().collect();
         let p = super::count_sequon_starts(&plain);
         // No overshoot, and at least as many as plain reversal.
         assert!(d <= t, "must not overshoot the target count ({d} <= {t})");
-        assert!(d >= p, "must recover at least as many sequons as plain reversal ({d} >= {p})");
+        assert!(
+            d >= p,
+            "must recover at least as many sequons as plain reversal ({d} >= {p})"
+        );
     }
 
     #[test]
     fn build_search_db_sequon_reverse_appends_prefixed_decoys() {
         let target = make_db(&[("P1", b"NISCDENLTKR"), ("P2", b"AANGSVVK")]);
-        let built = build_search_db(&target, "XXX", DecoyStrategy::SequonReverse, DEFAULT_DECOY_SEED);
+        let built = build_search_db(
+            &target,
+            "XXX",
+            DecoyStrategy::SequonReverse,
+            DEFAULT_DECOY_SEED,
+        );
         assert_eq!(built.len(), 4, "target + 1:1 sequon-preserving decoy");
         assert!(built.proteins[2].accession.starts_with("XXX_"));
         assert!(built.proteins[3].accession.starts_with("XXX_"));
@@ -428,7 +448,10 @@ mod tests {
         assert_eq!(decoy_accession_needle("XXX_"), "XXX_"); // normalize is idempotent
         assert_eq!(decoy_accession_needle(""), "XXX_"); // empty → default prefix
         assert!(is_decoy_accession("XXX_P12345", "XXX"));
-        assert!(!is_decoy_accession("XXXP12345", "XXX"), "no '_' delimiter ⇒ target, not decoy");
+        assert!(
+            !is_decoy_accession("XXXP12345", "XXX"),
+            "no '_' delimiter ⇒ target, not decoy"
+        );
         assert!(!is_decoy_accession("P12345", "XXX"));
         // Short custom prefix: a real "rev..." target must NOT be misread as decoy.
         assert!(is_decoy_accession("rev_sp|P1", "rev"));
@@ -442,8 +465,16 @@ mod tests {
         assert!(!is_decoy_accession_affix("P12345", "XXX", None));
         // Suffix form recognizes quantms/OpenMS "<orig>_rev" decoys that the
         // prefix test alone misses.
-        assert!(is_decoy_accession_affix("sp|P02769|ALBU_BOVIN_rev", "XXX", Some("rev")));
-        assert!(!is_decoy_accession_affix("sp|P02769|ALBU_BOVIN", "XXX", Some("rev")));
+        assert!(is_decoy_accession_affix(
+            "sp|P02769|ALBU_BOVIN_rev",
+            "XXX",
+            Some("rev")
+        ));
+        assert!(!is_decoy_accession_affix(
+            "sp|P02769|ALBU_BOVIN",
+            "XXX",
+            Some("rev")
+        ));
         // Either affix qualifies; an empty suffix is ignored (no spurious match).
         assert!(is_decoy_accession_affix("XXX_P1", "XXX", Some("rev")));
         assert!(!is_decoy_accession_affix("P1", "XXX", Some("")));
@@ -451,8 +482,14 @@ mod tests {
 
     #[test]
     fn decoy_strategy_parses_names() {
-        assert_eq!(DecoyStrategy::from_name("reverse"), Some(DecoyStrategy::Reverse));
-        assert_eq!(DecoyStrategy::from_name("Shuffle"), Some(DecoyStrategy::Shuffle));
+        assert_eq!(
+            DecoyStrategy::from_name("reverse"),
+            Some(DecoyStrategy::Reverse)
+        );
+        assert_eq!(
+            DecoyStrategy::from_name("Shuffle"),
+            Some(DecoyStrategy::Shuffle)
+        );
         assert_eq!(DecoyStrategy::from_name("NONE"), Some(DecoyStrategy::None));
         assert_eq!(DecoyStrategy::from_name("bogus"), None);
         assert_eq!(DecoyStrategy::default(), DecoyStrategy::Reverse);

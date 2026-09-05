@@ -23,12 +23,12 @@ use crate::modification::Modification;
 #[derive(Debug, Clone)]
 pub struct AminoAcid {
     pub residue: u8,
-    pub mass:    f64,
+    pub mass: f64,
     /// `None` for unmodified residues; otherwise a shared handle to one of
     /// the per-search `Modification` records owned by `AminoAcidSet`. The
     /// `Arc` makes per-candidate `AminoAcid` clones a refcount bump — see
     /// the module-level note for why this matters at Astral scale.
-    pub mod_:    Option<Arc<Modification>>,
+    pub mod_: Option<Arc<Modification>>,
 }
 
 impl AminoAcid {
@@ -40,12 +40,19 @@ impl AminoAcid {
         // Without this, selenoprotein peptides (GPX1-4, SELENOP, TXNRD, ...) are
         // silently dropped by candidate generation.
         if residue == b'U' {
-            return Some(AminoAcid { residue: b'U', mass: 150.953636, mod_: None });
+            return Some(AminoAcid {
+                residue: b'U',
+                mass: 150.953636,
+                mod_: None,
+            });
         }
         let (c, h, n, o, s) = standard_composition(residue)?;
-        let mass = c as f64 * C + h as f64 * H + n as f64 * N
-                 + o as f64 * O + s as f64 * S;
-        Some(AminoAcid { residue, mass, mod_: None })
+        let mass = c as f64 * C + h as f64 * H + n as f64 * N + o as f64 * O + s as f64 * S;
+        Some(AminoAcid {
+            residue,
+            mass,
+            mod_: None,
+        })
     }
 
     /// Attach a modification, returning the modified residue. The `mass`
@@ -120,25 +127,25 @@ fn mods_eq(a: &Option<Arc<Modification>>, b: &Option<Arc<Modification>>) -> bool
 /// a canonical composition-based mass.
 fn standard_composition(residue: u8) -> Option<(u32, u32, u32, u32, u32)> {
     Some(match residue {
-        b'G' => (2,  3, 1, 1, 0),
-        b'A' => (3,  5, 1, 1, 0),
-        b'S' => (3,  5, 1, 2, 0),
-        b'P' => (5,  7, 1, 1, 0),
-        b'V' => (5,  9, 1, 1, 0),
-        b'T' => (4,  7, 1, 2, 0),
-        b'C' => (3,  5, 1, 1, 1),
+        b'G' => (2, 3, 1, 1, 0),
+        b'A' => (3, 5, 1, 1, 0),
+        b'S' => (3, 5, 1, 2, 0),
+        b'P' => (5, 7, 1, 1, 0),
+        b'V' => (5, 9, 1, 1, 0),
+        b'T' => (4, 7, 1, 2, 0),
+        b'C' => (3, 5, 1, 1, 1),
         b'L' => (6, 11, 1, 1, 0),
         b'I' => (6, 11, 1, 1, 0),
-        b'N' => (4,  6, 2, 2, 0),
-        b'D' => (4,  5, 1, 3, 0),
-        b'Q' => (5,  8, 2, 2, 0),
+        b'N' => (4, 6, 2, 2, 0),
+        b'D' => (4, 5, 1, 3, 0),
+        b'Q' => (5, 8, 2, 2, 0),
         b'K' => (6, 12, 2, 1, 0),
-        b'E' => (5,  7, 1, 3, 0),
-        b'M' => (5,  9, 1, 1, 1),
-        b'H' => (6,  7, 3, 1, 0),
-        b'F' => (9,  9, 1, 1, 0),
+        b'E' => (5, 7, 1, 3, 0),
+        b'M' => (5, 9, 1, 1, 1),
+        b'H' => (6, 7, 3, 1, 0),
+        b'F' => (9, 9, 1, 1, 0),
         b'R' => (6, 12, 4, 1, 0),
-        b'Y' => (9,  9, 1, 2, 0),
+        b'Y' => (9, 9, 1, 2, 0),
         b'W' => (11, 10, 2, 1, 0),
         _ => return None,
     })
@@ -147,15 +154,17 @@ fn standard_composition(residue: u8) -> Option<(u32, u32, u32, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modification::{Modification, ModLocation, ResidueSpec};
+    use crate::modification::{ModLocation, Modification, ResidueSpec};
 
     #[test]
     fn standard_g_mass_matches_composition() {
         let g = AminoAcid::standard(b'G').unwrap();
         assert_eq!(g.residue, b'G');
         // Glycine = C2H3NO = 2*12 + 3*1.007825035 + 1*14.003074 + 1*15.99491463
-        let expected = 2.0 * crate::mass::C + 3.0 * crate::mass::H
-                     + 1.0 * crate::mass::N + 1.0 * crate::mass::O;
+        let expected = 2.0 * crate::mass::C
+            + 3.0 * crate::mass::H
+            + 1.0 * crate::mass::N
+            + 1.0 * crate::mass::O;
         assert_eq!(g.mass.to_bits(), expected.to_bits());
         assert!(g.mod_.is_none());
     }
@@ -170,7 +179,11 @@ mod tests {
     fn selenocysteine_u_is_supported() {
         // Sec (U): C3H5NOSe monoisotopic residue mass ~150.95364.
         let u = AminoAcid::standard(b'U').expect("U (selenocysteine) must be recognized");
-        assert!((u.mass - 150.953636).abs() < 1e-4, "Sec mass {} off", u.mass);
+        assert!(
+            (u.mass - 150.953636).abs() < 1e-4,
+            "Sec mass {} off",
+            u.mass
+        );
         assert!(u.mod_.is_none());
         // Other non-standard residues still rejected.
         assert!(AminoAcid::standard(b'B').is_none());
@@ -201,7 +214,9 @@ mod tests {
             neutral_losses: Vec::new(),
             loss_class: 0,
         };
-        let m = AminoAcid::standard(b'M').unwrap().with_mod(oxidation.clone());
+        let m = AminoAcid::standard(b'M')
+            .unwrap()
+            .with_mod(oxidation.clone());
         assert!(m.is_modified());
         assert_eq!(m.mod_.as_ref().unwrap().mass_delta, 15.99491);
     }
@@ -231,7 +246,7 @@ mod tests {
 
         // Two AAs with the same residue but different mass are NOT equal.
         let mut c = a.clone();
-        c.mass = 57.0214637_f64;  // slightly off
+        c.mass = 57.0214637_f64; // slightly off
         assert_ne!(a, c);
     }
 

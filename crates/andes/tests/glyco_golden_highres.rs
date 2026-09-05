@@ -12,9 +12,8 @@
 //! Companion to `glyco_golden.rs`, which guards the LOW-RES path. This one exists
 //! because an MGF fixture *cannot* reach the high-res branch: selecting a high-res
 //! model for MGF requires `--fragment-tol-ppm`, which calls
-//! `set_fragment_tol_override` and replaces `mme` -- collapsing both arms of the
-//! `tight_high_res` conditional in `scored_spectrum.rs` to the same window. So the
-//! very flag needed to get there is the flag that neutralises what we want to guard.
+//! `set_fragment_tol_override` and replaces `mme` -- the very window we want to
+//! guard. So the flag needed to get there is the flag that neutralises the guard.
 //!
 //! An mzML fixture carries analyzer metadata, so the instrument is auto-detected and
 //! the override is never involved. That makes this the test that actually pins the
@@ -28,8 +27,8 @@
 //!
 //! MEASURED LIMIT, so nobody assumes more of this test than it delivers: on this
 //! fixture the high-res configuration is NOT sensitive to the fused-selector
-//! weights -- `--glyco-gp-m 0` vs `10` produces 0 differing lines, where the same
-//! sweep moves all 120 rows on the low-res path in `glyco_golden.rs`. The 20 ppm
+//! weights -- sweeping a `--glyco-gp-*` weight produces 0 differing lines, where
+//! the same sweep moves all 120 rows on the low-res path in `glyco_golden.rs`. The 20 ppm
 //! window leaves too little candidate competition for the weight to change a
 //! winner. So selector regressions are caught by the LOW-RES golden; this one
 //! catches model/detection regressions and any gross change to the emitted rows.
@@ -178,7 +177,11 @@ fn glyco_highres_pin_matches_golden() {
     );
 
     let actual = tmp.join("out.glyco.pin");
-    assert!(actual.exists(), "glyco PIN not written: {}", actual.display());
+    assert!(
+        actual.exists(),
+        "glyco PIN not written: {}",
+        actual.display()
+    );
 
     let g_txt = std::fs::read_to_string(&golden).expect("read golden");
     let a_txt = std::fs::read_to_string(&actual).expect("read actual");
@@ -200,9 +203,11 @@ fn glyco_highres_pin_matches_golden() {
     a_lines.sort_unstable_by_key(|r| spec_id(r));
     for (i, (g, a)) in g_lines.iter().zip(a_lines.iter()).enumerate() {
         if let Some(d) = row_diff(g, a) {
-            panic!("glyco PIN row mismatch at sorted index {i} ({d})
+            panic!(
+                "glyco PIN row mismatch at sorted index {i} ({d})
  golden: {g}
- actual: {a}");
+ actual: {a}"
+            );
         }
     }
 }

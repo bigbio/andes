@@ -1,7 +1,7 @@
 //! Handcrafted FASTA strings exercising parser edge cases.
 
-use std::io::Cursor;
 use input::{FastaParseError, FastaReader, Protein};
+use std::io::Cursor;
 
 fn parse_all(s: &str) -> Vec<Result<Protein, FastaParseError>> {
     FastaReader::new(Cursor::new(s)).collect()
@@ -124,7 +124,7 @@ fn orphan_sequence_errors() {
 
 #[test]
 fn last_protein_terminated_by_eof() {
-    let fa = ">P1\nMKWV\n>P2\nTFIS";  // no trailing newline
+    let fa = ">P1\nMKWV\n>P2\nTFIS"; // no trailing newline
     let v = parse_ok(fa);
     assert_eq!(v.len(), 2);
     assert_eq!(v[1].sequence, b"TFIS");

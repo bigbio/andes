@@ -19,13 +19,13 @@
 use std::io::{self, BufWriter, Write};
 
 use crate::row_context::{iter_ranked_by_rank_score, RowContext};
+use model::peptide::Peptide;
+use model::spectrum::Spectrum;
+use model::tolerance::Tolerance;
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
-use model::peptide::Peptide;
-use model::spectrum::Spectrum;
-use model::tolerance::Tolerance;
 
 // ── modifications helper ──────────────────────────────────────────────────────
 
@@ -56,7 +56,10 @@ pub(crate) fn modifications_field(peptide: &Peptide) -> String {
     // residues are iterated in index order so ascending is guaranteed, but
     // sort defensively in case the caller ever reorders.
     parts.sort_by_key(|s| {
-        s.split(':').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0)
+        s.split(':')
+            .next()
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0)
     });
     parts.join(";")
 }
@@ -77,7 +80,10 @@ pub(crate) fn modifications_field(peptide: &Peptide) -> String {
 ///
 /// `is_mgf` controls whether a `Title` column is emitted in the header and
 /// rows, matching MGF vs mzML output conventions.
-#[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API"
+)]
 pub fn write_tsv(
     output_path: &std::path::Path,
     spectra: &[Spectrum],
@@ -90,14 +96,26 @@ pub fn write_tsv(
 ) -> io::Result<()> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
-    write_tsv_to(&mut writer, spectra, queues, candidates, params, search_index, spec_file_name, is_mgf)
+    write_tsv_to(
+        &mut writer,
+        spectra,
+        queues,
+        candidates,
+        params,
+        search_index,
+        spec_file_name,
+        is_mgf,
+    )
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp
 /// files.
 ///
 /// See [`write_tsv`] for parameter documentation.
-#[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API"
+)]
 pub fn write_tsv_to<W: Write>(
     writer: &mut W,
     spectra: &[Spectrum],
@@ -114,20 +132,29 @@ pub fn write_tsv_to<W: Write>(
             continue;
         }
         let spec = &spectra[spec_idx];
-        write_spectrum_rows(writer, spec, queue, candidates, params, spec_file_name, is_mgf, search_index)?;
+        write_spectrum_rows(
+            writer,
+            spec,
+            queue,
+            candidates,
+            params,
+            spec_file_name,
+            is_mgf,
+            search_index,
+        )?;
     }
     Ok(())
 }
 
 // ── header ───────────────────────────────────────────────────────────────────
 
-fn write_header<W: Write>(
-    writer: &mut W,
-    params: &SearchParams,
-    is_mgf: bool,
-) -> io::Result<()> {
+fn write_header<W: Write>(writer: &mut W, params: &SearchParams, is_mgf: bool) -> io::Result<()> {
     let ppm_mode = matches!(params.precursor_tolerance.left, Tolerance::Ppm(_));
-    let prec_err_col = if ppm_mode { "PrecursorError(ppm)" } else { "PrecursorError(Da)" };
+    let prec_err_col = if ppm_mode {
+        "PrecursorError(ppm)"
+    } else {
+        "PrecursorError(Da)"
+    };
 
     let mut cols: Vec<&str> = vec!["#SpecFile", "SpecID", "ScanNum"];
     if is_mgf {
@@ -160,7 +187,10 @@ struct RowCtx<'a> {
     ppm_mode: bool,
 }
 
-#[allow(clippy::too_many_arguments, reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Writer API mirrors PIN writer; grouping into a struct would diverge from the parallel write_pin API"
+)]
 fn write_spectrum_rows<W: Write>(
     writer: &mut W,
     spec: &Spectrum,
@@ -280,12 +310,12 @@ fn write_psm_row<W: Write>(
 mod tests {
     use super::*;
     use model::amino_acid::AminoAcid;
-    use search::candidate_gen::Candidate;
-    use model::modification::{Modification, ModLocation, ResidueSpec};
+    use model::modification::{ModLocation, Modification, ResidueSpec};
     use model::peptide::Peptide;
     use model::protein::{Protein, ProteinDb};
-    use search::search_index::SearchIndex;
     use model::tolerance::PrecursorTolerance;
+    use search::candidate_gen::Candidate;
+    use search::search_index::SearchIndex;
 
     // ── fixture helpers ─────────────────────────────────────────────────────
 
@@ -409,7 +439,10 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands: Vec<search::candidate_gen::Candidate> = vec![];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
         assert_eq!(
@@ -445,10 +478,23 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands: Vec<search::candidate_gen::Candidate> = vec![];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mzML", false).unwrap();
+        write_tsv_to(
+            &mut buf,
+            &spectra,
+            &queues,
+            &cands,
+            &params,
+            &idx,
+            "test.mzML",
+            false,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
-        assert!(!cols.contains(&"Title".to_string()), "Title column must be absent when is_mgf=false");
+        assert!(
+            !cols.contains(&"Title".to_string()),
+            "Title column must be absent when is_mgf=false"
+        );
         assert!(cols.contains(&"ScanNum".to_string()));
         assert!(cols.contains(&"SpecID".to_string()));
     }
@@ -464,7 +510,10 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands: Vec<search::candidate_gen::Candidate> = vec![];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let rows = parse_rows(&buf);
         assert!(rows.is_empty(), "empty queue should produce no data rows");
@@ -480,14 +529,17 @@ mod tests {
         let mut queue = TopNQueue::new(10);
         // Push 3 PSMs with descending rank_score (best = largest)
         queue.push(make_psm(0, 10.0, 10.0)); // best (rank 1)
-        queue.push(make_psm(0, 8.0,  8.0));  // middle (rank 2)
-        queue.push(make_psm(0, 6.0,  6.0));  // worst (rank 3)
+        queue.push(make_psm(0, 8.0, 8.0)); // middle (rank 2)
+        queue.push(make_psm(0, 6.0, 6.0)); // worst (rank 3)
         let queues = vec![queue];
         let idx = make_empty_search_index();
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, false)];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 3, "should have 3 data rows");
@@ -559,7 +611,10 @@ mod tests {
             is_protein_c_term: false,
         };
         let cands = vec![cand];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
@@ -592,13 +647,19 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![make_candidate(0, false)];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        let prot_col = cols.iter().position(|c| c == "Protein").expect("Protein column missing");
+        let prot_col = cols
+            .iter()
+            .position(|c| c == "Protein")
+            .expect("Protein column missing");
         assert_eq!(
             rows[0][prot_col], accession,
             "Protein column should contain the real accession, not a PROT_N placeholder"
@@ -624,13 +685,19 @@ mod tests {
         let cands = vec![make_candidate(1, true)]; // decoy candidate at protein_index 1
 
         let mut buf = Vec::<u8>::new();
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        let prot_col = cols.iter().position(|c| c == "Protein").expect("Protein column missing");
+        let prot_col = cols
+            .iter()
+            .position(|c| c == "Protein")
+            .expect("Protein column missing");
         let expected_decoy = format!("XXX_{}", accession);
         assert_eq!(
             rows[0][prot_col], expected_decoy,
@@ -664,7 +731,10 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands: Vec<search::candidate_gen::Candidate> = vec![];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
         assert_eq!(
@@ -689,8 +759,11 @@ mod tests {
         };
         // 6 residues; mod at 0-based 5 → 1-based 6
         let residues = vec![
-            plain_aa.clone(), plain_aa.clone(), plain_aa.clone(),
-            plain_aa.clone(), plain_aa.clone(),
+            plain_aa.clone(),
+            plain_aa.clone(),
+            plain_aa.clone(),
+            plain_aa.clone(),
+            plain_aa.clone(),
             mod_aa,
         ];
         let peptide = Peptide::new(residues, b'K', b'S');
@@ -711,13 +784,19 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![cand];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        let mod_col = cols.iter().position(|c| c == "Modifications").expect("Modifications column missing");
+        let mod_col = cols
+            .iter()
+            .position(|c| c == "Modifications")
+            .expect("Modifications column missing");
         assert_eq!(
             rows[0][mod_col], "6:UNIMOD:393",
             "single mod at 0-based 5 should emit '6:UNIMOD:393', got: {}",
@@ -757,13 +836,19 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![cand];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        let mod_col = cols.iter().position(|c| c == "Modifications").expect("Modifications column missing");
+        let mod_col = cols
+            .iter()
+            .position(|c| c == "Modifications")
+            .expect("Modifications column missing");
         assert_eq!(
             rows[0][mod_col], "",
             "no-accession mod should emit empty Modifications field, got: {:?}",
@@ -791,11 +876,11 @@ mod tests {
         };
         let residues = vec![
             plain_aa.clone(),
-            mod1,             // 0-based 1 → 1-based 2
+            mod1, // 0-based 1 → 1-based 2
             plain_aa.clone(),
             plain_aa.clone(),
             plain_aa.clone(),
-            mod2,             // 0-based 5 → 1-based 6
+            mod2, // 0-based 5 → 1-based 6
             plain_aa.clone(),
         ];
         let peptide = Peptide::new(residues, b'K', b'S');
@@ -816,13 +901,19 @@ mod tests {
 
         let mut buf = Vec::<u8>::new();
         let cands = vec![cand];
-        write_tsv_to(&mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true).unwrap();
+        write_tsv_to(
+            &mut buf, &spectra, &queues, &cands, &params, &idx, "test.mgf", true,
+        )
+        .unwrap();
 
         let cols = parse_header(&buf);
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        let mod_col = cols.iter().position(|c| c == "Modifications").expect("Modifications column missing");
+        let mod_col = cols
+            .iter()
+            .position(|c| c == "Modifications")
+            .expect("Modifications column missing");
         assert_eq!(
             rows[0][mod_col], "2:UNIMOD:4;6:UNIMOD:393",
             "multiple mods should be ';'-joined ascending, got: {}",

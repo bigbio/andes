@@ -13,11 +13,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use model::{AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ProteinDb, ResidueSpec, Tolerance};
+use input::{FastaReader, MgfReader};
 use model::tolerance::PrecursorTolerance;
+use model::{
+    AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ProteinDb, ResidueSpec, Tolerance,
+};
 use scoring_crate::RankScorer;
 use search::{match_spectra, SearchIndex, SearchParams};
-use input::{FastaReader, MgfReader};
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -29,15 +31,28 @@ fn fixture(rel: &str) -> PathBuf {
 
 fn first_line(path: &std::path::Path) -> String {
     let f = File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
-    BufReader::new(f).lines().next().expect("file is empty").expect("read first line")
+    BufReader::new(f)
+        .lines()
+        .next()
+        .expect("file is empty")
+        .expect("read first line")
 }
 
 /// Columns that must NOT appear in the schema.
-const GF_COLUMNS: [&str; 4] = ["DeNovoScore", "lnSpecEValue", "lnEValue", "lnDeltaSpecEValue"];
+const GF_COLUMNS: [&str; 4] = [
+    "DeNovoScore",
+    "lnSpecEValue",
+    "lnEValue",
+    "lnDeltaSpecEValue",
+];
 
 /// Additive feature columns Andes emits between matchedIonRatio and Peptide.
-const ADDITIVE_COLUMNS: [&str; 4] =
-    ["EdgeScore", "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRankScore"];
+const ADDITIVE_COLUMNS: [&str; 4] = [
+    "EdgeScore",
+    "PrecursorIsotopeKL",
+    "PrecursorSNR",
+    "DeltaRankScore",
+];
 
 #[test]
 fn rust_pin_header_is_gf_free_schema() {
@@ -57,8 +72,14 @@ fn rust_pin_header_is_gf_free_schema() {
 
     // RankScore (rank-LLR, formerly "RawScore") + RawScore (fused, formerly
     // "StrongScore") present; GF columns absent.
-    assert!(cols.contains(&"RankScore"), "RankScore column must be present:\n{header}");
-    assert!(cols.contains(&"RawScore"), "RawScore column must be present:\n{header}");
+    assert!(
+        cols.contains(&"RankScore"),
+        "RankScore column must be present:\n{header}"
+    );
+    assert!(
+        cols.contains(&"RawScore"),
+        "RawScore column must be present:\n{header}"
+    );
     for gf in GF_COLUMNS {
         assert!(
             !cols.contains(&gf),
@@ -71,12 +92,14 @@ fn rust_pin_header_is_gf_free_schema() {
         .iter()
         .position(|c| *c == "matchedIonRatio")
         .expect("matchedIonRatio missing");
-    let peptide_pos = cols.iter().position(|c| *c == "Peptide").expect("Peptide missing");
+    let peptide_pos = cols
+        .iter()
+        .position(|c| *c == "Peptide")
+        .expect("Peptide missing");
     for name in ADDITIVE_COLUMNS {
-        let pos = cols
-            .iter()
-            .position(|c| *c == name)
-            .unwrap_or_else(|| panic!("Rust .pin header is missing the additive feature column {name}"));
+        let pos = cols.iter().position(|c| *c == name).unwrap_or_else(|| {
+            panic!("Rust .pin header is missing the additive feature column {name}")
+        });
         assert!(
             matched_ratio_pos < pos && pos < peptide_pos,
             "additive column {name} must sit between matchedIonRatio and Peptide"
@@ -106,7 +129,10 @@ fn rust_pin_rows_have_at_least_header_column_count() {
     // as the header (trailing Proteins columns may add more). Schema-only; no
     // value comparison against any external reference fixture.
 
-    let target_db = FastaReader::load_all(BufReader::new(File::open(fixture("test-fixtures/BSA.fasta")).unwrap())).unwrap();
+    let target_db = FastaReader::load_all(BufReader::new(
+        File::open(fixture("test-fixtures/BSA.fasta")).unwrap(),
+    ))
+    .unwrap();
     let idx = SearchIndex::from_target_db(&target_db, "XXX_");
 
     let cam = Modification {
@@ -136,9 +162,7 @@ fn rust_pin_rows_have_at_least_header_column_count() {
         .unwrap();
 
     // hcd_qexactive_tryp from the canonical Parquet store.
-    let store = model_train::store::ModelStore::open(
-        &fixture("resources/models.parquet"),
-    ).unwrap();
+    let store = model_train::store::ModelStore::open(&fixture("resources/models")).unwrap();
     let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);
 
@@ -157,14 +181,25 @@ fn rust_pin_rows_have_at_least_header_column_count() {
 
     let tmp_dir = tempfile::tempdir().expect("tempdir");
     let rust_pin_path = tmp_dir.path().join("bsa.pin");
-    output::write_pin(&rust_pin_path, &spectra, &queues, &candidates, &params, &idx).expect("write_pin");
+    output::write_pin(
+        &rust_pin_path,
+        &spectra,
+        &queues,
+        &candidates,
+        &params,
+        &idx,
+    )
+    .expect("write_pin");
 
     let rust_lines: Vec<_> = BufReader::new(File::open(&rust_pin_path).unwrap())
         .lines()
         .collect::<Result<_, _>>()
         .unwrap();
 
-    assert!(rust_lines.len() >= 6, "Rust pin should have at least 5 data rows");
+    assert!(
+        rust_lines.len() >= 6,
+        "Rust pin should have at least 5 data rows"
+    );
 
     let header_cols = rust_lines[0].split('\t').count();
     let mut row_count = 0;

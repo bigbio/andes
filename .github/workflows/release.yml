@@ -16,8 +16,7 @@ name: Release
 #   - the `andes` binary (or `andes.exe` on Windows)
 #   - `dotnet/` — bundled .NET 8 runtime (thermo targets only)
 #   - the `resources/` tree: the bundled model store (`resources/models/`, a
-#     per-protocol partitioned Parquet store — the binary prefers it over the
-#     legacy single-file `resources/models.parquet` fallback), plus `unimod.obo`
+#     per-protocol partitioned Parquet store), plus `unimod.obo`
 #   - LICENSE, NOTICE, README.md, and THERMO_LICENSE.txt (thermo targets)
 #
 # Thermo's RawFileReader is redistributed under Thermo's license (see the crate

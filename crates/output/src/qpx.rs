@@ -51,9 +51,7 @@ use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
 
 use crate::percolator::PercolatorPsm;
-use crate::pin::{
-    feature_value_type, format_feature_value, format_spec_id, psm_feature_values,
-};
+use crate::pin::{feature_value_type, format_feature_value, format_spec_id, psm_feature_values};
 use crate::row_context::{iter_ranked_by_rank_score, resolve_accession};
 
 /// QPX format version string written into every file's schema metadata.
@@ -113,14 +111,22 @@ pub fn write_qpx(
     write_parquet(&out_dir.join("proteins.parquet"), "proteins", prot_batch)?;
 
     let sp_batch = build_search_params_batch(params, fragment_tol, run_id, primary_ms_run_paths)?;
-    write_parquet(&out_dir.join("search_params.parquet"), "search_params", sp_batch)?;
+    write_parquet(
+        &out_dir.join("search_params.parquet"),
+        "search_params",
+        sp_batch,
+    )?;
 
     // OpenMS' QPX reader (PSMArrowIO::importFromParquet) requires a
     // protein_groups member to load the bundle, even though andes does not run
     // protein inference (that is the downstream ProteinInference/Percolator
     // step). Emit a valid zero-row file so OpenMS tools can read the idparquet.
     let pg_batch = build_protein_groups_batch();
-    write_parquet(&out_dir.join("protein_groups.parquet"), "protein_groups", pg_batch)?;
+    write_parquet(
+        &out_dir.join("protein_groups.parquet"),
+        "protein_groups",
+        pg_batch,
+    )?;
 
     Ok(())
 }
@@ -133,11 +139,13 @@ fn write_parquet(path: &Path, file_type: &str, batch: RecordBatch) -> std::io::R
     // Re-key the batch's schema with the QPX metadata so the written file
     // carries it (OpenMS readers key on these). UUID is per-file.
     let meta = qpx_metadata(file_type);
-    let schema_with_meta =
-        Arc::new(Schema::new_with_metadata(batch.schema().fields().clone(), meta));
+    let schema_with_meta = Arc::new(Schema::new_with_metadata(
+        batch.schema().fields().clone(),
+        meta,
+    ));
     // Rebuild the batch against the metadata-bearing schema (same columns).
-    let batch = RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec())
-        .map_err(to_io)?;
+    let batch =
+        RecordBatch::try_new(schema_with_meta.clone(), batch.columns().to_vec()).map_err(to_io)?;
 
     let props = WriterProperties::builder().build();
     let file = std::fs::File::create(path)?;
@@ -398,14 +406,10 @@ fn build_psms_batch(
     let mut psm_metavalues = list_struct_builder(metavalue_fields());
     let mut spectrum_metavalues = list_struct_builder(metavalue_fields());
     let mut run_identifier = StringBuilder::new();
-    let mut mz_array = primitive_list_builder(
-        arrow::array::Float32Builder::new(),
-        DataType::Float32,
-    );
-    let mut intensity_array = primitive_list_builder(
-        arrow::array::Float32Builder::new(),
-        DataType::Float32,
-    );
+    let mut mz_array =
+        primitive_list_builder(arrow::array::Float32Builder::new(), DataType::Float32);
+    let mut intensity_array =
+        primitive_list_builder(arrow::array::Float32Builder::new(), DataType::Float32);
     let mut charge_array = primitive_list_builder(Int32Builder::new(), DataType::Int32);
     let mut ion_type_array = primitive_list_builder(StringBuilder::new(), DataType::Utf8);
 
@@ -614,7 +618,9 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
     let sb = builder.values();
     for (i, aa) in cand.peptide.residues.iter().enumerate() {
         let Some(m) = aa.mod_.as_ref() else { continue };
-        sb.field_builder::<StringBuilder>(0).unwrap().append_value(&m.name);
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(&m.name);
         sb.field_builder::<StringBuilder>(1)
             .unwrap()
             .append_value(m.accession.as_deref().unwrap_or(""));
@@ -622,8 +628,12 @@ fn append_modifications(builder: &mut ListBuilder<StructBuilder>, cand: &Candida
         let pos_list = sb.field_builder::<ListBuilder<StructBuilder>>(2).unwrap();
         let psb = pos_list.values();
         let position = format!("{}.{}", aa.residue as char, i + 1);
-        psb.field_builder::<StringBuilder>(0).unwrap().append_value(&position);
-        psb.field_builder::<Float64Builder>(1).unwrap().append_null();
+        psb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(&position);
+        psb.field_builder::<Float64Builder>(1)
+            .unwrap()
+            .append_null();
         psb.append(true);
         pos_list.append(true);
         sb.append(true);
@@ -651,22 +661,37 @@ fn append_additional_scores(
         ("TailorScore", f.tailor_score as f64),
         ("DeltaRankScore", f.delta_raw_score as f64),
         ("EdgeScore", f.edge_score as f64),
-        ("ExplainedIonCurrentRatio", f.explained_ion_current_ratio as f64),
+        (
+            "ExplainedIonCurrentRatio",
+            f.explained_ion_current_ratio as f64,
+        ),
         ("MeanErrorTop7", f.mean_error_top7 as f64),
         ("RichIonLLR", f.rich_ion_llr as f64),
     ];
     let sb = builder.values();
     for (name, value) in entries {
-        sb.field_builder::<StringBuilder>(0).unwrap().append_value(name);
-        sb.field_builder::<Float64Builder>(1).unwrap().append_value(value);
-        sb.field_builder::<BooleanBuilder>(2).unwrap().append_value(true);
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(name);
+        sb.field_builder::<Float64Builder>(1)
+            .unwrap()
+            .append_value(value);
+        sb.field_builder::<BooleanBuilder>(2)
+            .unwrap()
+            .append_value(true);
         sb.append(true);
     }
     // Percolator q-value (lower is better) — only when rescore matched this row.
     if let Some(q) = q_value {
-        sb.field_builder::<StringBuilder>(0).unwrap().append_value("q-value");
-        sb.field_builder::<Float64Builder>(1).unwrap().append_value(q);
-        sb.field_builder::<BooleanBuilder>(2).unwrap().append_value(false);
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("q-value");
+        sb.field_builder::<Float64Builder>(1)
+            .unwrap()
+            .append_value(q);
+        sb.field_builder::<BooleanBuilder>(2)
+            .unwrap()
+            .append_value(false);
         sb.append(true);
     }
     builder.append(true);
@@ -690,11 +715,21 @@ fn append_protein_accessions(
         let aa_after = (cand.peptide.post as char).to_string();
         let start = cand.start_offset_in_protein as i32;
         let end = start + cand.peptide.length() as i32;
-        sb.field_builder::<StringBuilder>(0).unwrap().append_value(&accession);
-        sb.field_builder::<StringBuilder>(1).unwrap().append_value(&aa_before);
-        sb.field_builder::<StringBuilder>(2).unwrap().append_value(&aa_after);
-        sb.field_builder::<Int32Builder>(3).unwrap().append_value(start);
-        sb.field_builder::<Int32Builder>(4).unwrap().append_value(end);
+        sb.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value(&accession);
+        sb.field_builder::<StringBuilder>(1)
+            .unwrap()
+            .append_value(&aa_before);
+        sb.field_builder::<StringBuilder>(2)
+            .unwrap()
+            .append_value(&aa_after);
+        sb.field_builder::<Int32Builder>(3)
+            .unwrap()
+            .append_value(start);
+        sb.field_builder::<Int32Builder>(4)
+            .unwrap()
+            .append_value(end);
         sb.append(true);
     }
     builder.append(true);
@@ -711,9 +746,15 @@ fn spectrum_ref(spec: &Spectrum, scan: i32) -> String {
 }
 
 fn append_metavalue(sb: &mut StructBuilder, name: &str, value: &str, value_type: &str) {
-    sb.field_builder::<StringBuilder>(0).unwrap().append_value(name);
-    sb.field_builder::<StringBuilder>(1).unwrap().append_value(value);
-    sb.field_builder::<StringBuilder>(2).unwrap().append_value(value_type);
+    sb.field_builder::<StringBuilder>(0)
+        .unwrap()
+        .append_value(name);
+    sb.field_builder::<StringBuilder>(1)
+        .unwrap()
+        .append_value(value);
+    sb.field_builder::<StringBuilder>(2)
+        .unwrap()
+        .append_value(value_type);
     sb.append(true);
 }
 
@@ -924,7 +965,9 @@ fn build_search_params_batch(
     let columns: Vec<ArrayRef> = vec![
         Arc::new(arrow::array::StringArray::from(vec![run_id])),
         Arc::new(arrow::array::StringArray::from(vec!["andes"])),
-        Arc::new(arrow::array::StringArray::from(vec![env!("CARGO_PKG_VERSION")])),
+        Arc::new(arrow::array::StringArray::from(vec![env!(
+            "CARGO_PKG_VERSION"
+        )])),
         Arc::new(arrow::array::StringArray::from(vec!["andes:RawScore"])),
         Arc::new(arrow::array::BooleanArray::from(vec![true])),
         Arc::new(arrow::array::StringArray::from(vec!["MONOISOTOPIC"])),
@@ -934,7 +977,9 @@ fn build_search_params_batch(
         Arc::new(arrow::array::BooleanArray::from(vec![frag_ppm])),
         Arc::new(arrow::array::StringArray::from(vec![params.enzyme.name()])),
         Arc::new(arrow::array::StringArray::from(vec![term_spec])),
-        Arc::new(arrow::array::Int32Array::from(vec![params.max_missed_cleavages as i32])),
+        Arc::new(arrow::array::Int32Array::from(vec![
+            params.max_missed_cleavages as i32,
+        ])),
         Arc::new(string_list_singleton(fixed_mods)),
         Arc::new(string_list_singleton(variable_mods)),
         Arc::new(string_list_singleton(primary_ms_run_paths.to_vec())),

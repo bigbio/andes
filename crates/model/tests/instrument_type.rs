@@ -5,9 +5,9 @@ use model::InstrumentType;
 #[test]
 fn canonical_names_resolve() {
     let reference: &[(InstrumentType, &str)] = &[
-        (InstrumentType::LowRes,    "LowRes"),
-        (InstrumentType::HighRes,   "HighRes"),
-        (InstrumentType::TOF,       "TOF"),
+        (InstrumentType::LowRes, "LowRes"),
+        (InstrumentType::HighRes, "HighRes"),
+        (InstrumentType::TOF, "TOF"),
         (InstrumentType::QExactive, "QExactive"),
     ];
     for &(variant, name) in reference {

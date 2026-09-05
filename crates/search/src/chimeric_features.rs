@@ -175,11 +175,16 @@ mod tests {
         // Strong precursor (scale 1000) over a low noise floor (1.0).
         let ms1 = build_clean_envelope(mono_mz, charge, neutral_mass, n, 1000.0, 1.0);
 
-        let (kl, snr) =
-            precursor_isotope_match(&ms1, mono_mz, charge, neutral_mass, 0.01, n);
+        let (kl, snr) = precursor_isotope_match(&ms1, mono_mz, charge, neutral_mass, 0.01, n);
 
-        assert!(kl < 0.1, "clean averagine-shaped envelope should give small KL, got {kl}");
-        assert!(snr > 1.0, "strong precursor over low noise should give SNR > 1, got {snr}");
+        assert!(
+            kl < 0.1,
+            "clean averagine-shaped envelope should give small KL, got {kl}"
+        );
+        assert!(
+            snr > 1.0,
+            "strong precursor over low noise should give SNR > 1, got {snr}"
+        );
     }
 
     #[test]
@@ -197,11 +202,16 @@ mod tests {
             (mono_mz + 40.0, 700.0),
         ];
 
-        let (kl, snr) =
-            precursor_isotope_match(&ms1, mono_mz, charge, neutral_mass, 0.01, n);
+        let (kl, snr) = precursor_isotope_match(&ms1, mono_mz, charge, neutral_mass, 0.01, n);
 
-        assert!(kl >= 1.0, "no envelope at precursor m/z should give large KL, got {kl}");
-        assert!(snr.abs() < 1e-6, "no monoisotope peak should give SNR ~0, got {snr}");
+        assert!(
+            kl >= 1.0,
+            "no envelope at precursor m/z should give large KL, got {kl}"
+        );
+        assert!(
+            snr.abs() < 1e-6,
+            "no monoisotope peak should give SNR ~0, got {snr}"
+        );
     }
 
     #[test]
@@ -210,7 +220,10 @@ mod tests {
         let neutral_mass = 1500.0;
         let mono_mz = (neutral_mass + charge as f64 * model::mass::PROTON) / charge as f64;
         let (kl, snr) = precursor_isotope_match(&[], mono_mz, charge, neutral_mass, 0.01, 4);
-        assert_eq!(kl, 10.0, "empty MS1 should return the no-envelope KL sentinel");
+        assert_eq!(
+            kl, 10.0,
+            "empty MS1 should return the no-envelope KL sentinel"
+        );
         assert_eq!(snr, 0.0, "empty MS1 should return SNR 0.0");
     }
 
@@ -232,10 +245,12 @@ mod tests {
             (mono_mz + 30.0, 1.0), // noise floor
         ];
         ms1.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let (_kl, snr) =
-            precursor_isotope_match(&ms1, mono_mz, charge, neutral_mass, 0.01, n);
+        let (_kl, snr) = precursor_isotope_match(&ms1, mono_mz, charge, neutral_mass, 0.01, n);
         // mono intensity 900 / median nonzero. Median of {200,900,~270,~36,1}
         // is the middle value -> well below 900, so SNR comfortably > 1.
-        assert!(snr > 1.0, "max-within-tol monoisotope peak should give SNR > 1, got {snr}");
+        assert!(
+            snr > 1.0,
+            "max-within-tol monoisotope peak should give SNR > 1, got {snr}"
+        );
     }
 }

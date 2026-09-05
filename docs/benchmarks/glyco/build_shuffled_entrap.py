@@ -25,7 +25,7 @@ benchmark came out ~21% high:
     moves the q-value threshold and therefore the count — independently of any real change
     in engine behaviour.
 
-Use this script to reproduce the published mouse and plasma glyco numbers. Use
+Use this script to reproduce the published mouse glyco numbers. Use
 `build_entrap.py` when you deliberately want foreign-proteome entrapment, and then size the
 correction factor from the database you actually built rather than assuming 1:1.
 """

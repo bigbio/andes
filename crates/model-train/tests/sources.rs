@@ -1,5 +1,5 @@
 use model_train::counts::CountStats;
-use model_train::store::{ModelStore, SourceLedger, write_model_with_sources};
+use model_train::store::{write_model_with_sources, ModelStore, SourceLedger};
 use scoring_crate::param_model::{IonType, Param, Partition};
 use std::path::Path;
 
@@ -7,28 +7,44 @@ fn fixture_param() -> Param {
     // hcd_qexactive_tryp from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
-    let store = model_train::store::ModelStore::open(bundled)
-        .expect("open bundled models.parquet");
-    store.load_param("hcd_qexactive_tryp")
+    let store = model_train::store::ModelStore::open(bundled).expect("open bundled model store");
+    store
+        .load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp from store")
 }
 
 fn test_partition_a() -> Partition {
-    Partition { charge: 2, parent_mass: 800.0_f32, seg_num: 0 }
+    Partition {
+        charge: 2,
+        parent_mass: 800.0_f32,
+        seg_num: 0,
+    }
 }
 
 fn test_partition_b() -> Partition {
-    Partition { charge: 3, parent_mass: 1200.0_f32, seg_num: 1 }
+    Partition {
+        charge: 3,
+        parent_mass: 1200.0_f32,
+        seg_num: 1,
+    }
 }
 
 fn test_ion_prefix() -> IonType {
-    IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 }
+    IonType::Prefix {
+        charge: 1,
+        offset_bits: 1.007_f32.to_bits(),
+        loss_class: 0,
+    }
 }
 
 fn test_ion_suffix() -> IonType {
-    IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 }
+    IonType::Suffix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    }
 }
 
 fn make_count_stats_0() -> CountStats {
@@ -137,18 +153,30 @@ fn per_source_stats_round_trip_and_sum() {
     // each source's stats round-trip exactly
     let loaded_s0 = store.load_source_stats("m", "s0").unwrap();
     let loaded_s1 = store.load_source_stats("m", "s1").unwrap();
-    assert_eq!(loaded_s0, s0, "CountStats for s0 did not round-trip exactly");
-    assert_eq!(loaded_s1, s1, "CountStats for s1 did not round-trip exactly");
+    assert_eq!(
+        loaded_s0, s0,
+        "CountStats for s0 did not round-trip exactly"
+    );
+    assert_eq!(
+        loaded_s1, s1,
+        "CountStats for s1 did not round-trip exactly"
+    );
 
     // and load_param still works (search path unaffected)
-    assert!(store.load_param("m").is_ok(), "load_param failed on store with source/stat rows");
+    assert!(
+        store.load_param("m").is_ok(),
+        "load_param failed on store with source/stat rows"
+    );
 
     // sum of sources == an aggregate you can recompute
     let mut agg = s0.clone();
     agg.add(&s1);
     let mut from_store = store.load_source_stats("m", "s0").unwrap();
     from_store.add(&store.load_source_stats("m", "s1").unwrap());
-    assert_eq!(from_store, agg, "sum of loaded sources must equal direct aggregate");
+    assert_eq!(
+        from_store, agg,
+        "sum of loaded sources must equal direct aggregate"
+    );
 }
 
 #[test]
@@ -162,7 +190,10 @@ fn load_param_ignores_source_stat_rows() {
 
     let store = ModelStore::open(&path).unwrap();
     let loaded = store.load_param("only_model").unwrap();
-    assert_eq!(loaded, param, "load_param must still work with zero source rows");
+    assert_eq!(
+        loaded, param,
+        "load_param must still work with zero source rows"
+    );
     let sources = store.load_sources("only_model").unwrap();
     assert_eq!(sources.len(), 0);
 }

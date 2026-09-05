@@ -26,7 +26,10 @@ fn reads_real_d_when_env_set() {
     };
 
     let reader = TimsTofReader::open(&path).expect("open .d directory");
-    assert!(!reader.is_empty(), "expected at least one MS2 spectrum in the .d");
+    assert!(
+        !reader.is_empty(),
+        "expected at least one MS2 spectrum in the .d"
+    );
 
     let mut count = 0usize;
     for (i, result) in reader.enumerate().take(2000) {

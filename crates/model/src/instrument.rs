@@ -19,12 +19,12 @@ pub enum InstrumentType {
 impl InstrumentType {
     pub fn name(self) -> &'static str {
         match self {
-            InstrumentType::LowRes         => "LowRes",
-            InstrumentType::HighRes        => "HighRes",
-            InstrumentType::TOF            => "TOF",
-            InstrumentType::QExactive      => "QExactive",
+            InstrumentType::LowRes => "LowRes",
+            InstrumentType::HighRes => "HighRes",
+            InstrumentType::TOF => "TOF",
+            InstrumentType::QExactive => "QExactive",
             InstrumentType::OrbitrapAstral => "OrbitrapAstral",
-            InstrumentType::TimsTOF        => "TimsTOF",
+            InstrumentType::TimsTOF => "TimsTOF",
         }
     }
 
@@ -51,13 +51,13 @@ impl InstrumentType {
     /// Case-sensitive lookup.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {
-            "LowRes"         => Some(InstrumentType::LowRes),
-            "HighRes"        => Some(InstrumentType::HighRes),
-            "TOF"            => Some(InstrumentType::TOF),
-            "QExactive"      => Some(InstrumentType::QExactive),
+            "LowRes" => Some(InstrumentType::LowRes),
+            "HighRes" => Some(InstrumentType::HighRes),
+            "TOF" => Some(InstrumentType::TOF),
+            "QExactive" => Some(InstrumentType::QExactive),
             "OrbitrapAstral" => Some(InstrumentType::OrbitrapAstral),
-            "TimsTOF"        => Some(InstrumentType::TimsTOF),
-            _                => None,
+            "TimsTOF" => Some(InstrumentType::TimsTOF),
+            _ => None,
         }
     }
 
@@ -70,8 +70,8 @@ impl InstrumentType {
     pub fn family_fallback(self) -> Self {
         match self {
             InstrumentType::OrbitrapAstral => InstrumentType::QExactive,
-            InstrumentType::TimsTOF        => InstrumentType::TOF,
-            other                          => other,
+            InstrumentType::TimsTOF => InstrumentType::TOF,
+            other => other,
         }
     }
 }
@@ -83,9 +83,12 @@ mod tests {
     #[test]
     fn name_round_trips() {
         for i in [
-            InstrumentType::LowRes,         InstrumentType::HighRes,
-            InstrumentType::TOF,            InstrumentType::QExactive,
-            InstrumentType::OrbitrapAstral, InstrumentType::TimsTOF,
+            InstrumentType::LowRes,
+            InstrumentType::HighRes,
+            InstrumentType::TOF,
+            InstrumentType::QExactive,
+            InstrumentType::OrbitrapAstral,
+            InstrumentType::TimsTOF,
         ] {
             assert_eq!(InstrumentType::from_name(i.name()), Some(i));
         }
@@ -93,20 +96,35 @@ mod tests {
 
     #[test]
     fn from_name_known_variants() {
-        assert_eq!(InstrumentType::from_name("LowRes"),         Some(InstrumentType::LowRes));
-        assert_eq!(InstrumentType::from_name("HighRes"),        Some(InstrumentType::HighRes));
-        assert_eq!(InstrumentType::from_name("TOF"),            Some(InstrumentType::TOF));
-        assert_eq!(InstrumentType::from_name("QExactive"),      Some(InstrumentType::QExactive));
-        assert_eq!(InstrumentType::from_name("OrbitrapAstral"), Some(InstrumentType::OrbitrapAstral));
-        assert_eq!(InstrumentType::from_name("TimsTOF"),        Some(InstrumentType::TimsTOF));
+        assert_eq!(
+            InstrumentType::from_name("LowRes"),
+            Some(InstrumentType::LowRes)
+        );
+        assert_eq!(
+            InstrumentType::from_name("HighRes"),
+            Some(InstrumentType::HighRes)
+        );
+        assert_eq!(InstrumentType::from_name("TOF"), Some(InstrumentType::TOF));
+        assert_eq!(
+            InstrumentType::from_name("QExactive"),
+            Some(InstrumentType::QExactive)
+        );
+        assert_eq!(
+            InstrumentType::from_name("OrbitrapAstral"),
+            Some(InstrumentType::OrbitrapAstral)
+        );
+        assert_eq!(
+            InstrumentType::from_name("TimsTOF"),
+            Some(InstrumentType::TimsTOF)
+        );
     }
 
     #[test]
     fn from_name_case_sensitive() {
-        assert_eq!(InstrumentType::from_name("lowres"),         None);
-        assert_eq!(InstrumentType::from_name("tof"),            None);
+        assert_eq!(InstrumentType::from_name("lowres"), None);
+        assert_eq!(InstrumentType::from_name("tof"), None);
         assert_eq!(InstrumentType::from_name("orbitrapastral"), None);
-        assert_eq!(InstrumentType::from_name("timstof"),        None);
+        assert_eq!(InstrumentType::from_name("timstof"), None);
     }
 
     #[test]
@@ -117,13 +135,28 @@ mod tests {
 
     #[test]
     fn family_fallback_mapping() {
-        assert_eq!(InstrumentType::OrbitrapAstral.family_fallback(), InstrumentType::QExactive);
-        assert_eq!(InstrumentType::TimsTOF.family_fallback(),        InstrumentType::TOF);
+        assert_eq!(
+            InstrumentType::OrbitrapAstral.family_fallback(),
+            InstrumentType::QExactive
+        );
+        assert_eq!(
+            InstrumentType::TimsTOF.family_fallback(),
+            InstrumentType::TOF
+        );
         // All others map to themselves.
-        assert_eq!(InstrumentType::QExactive.family_fallback(),      InstrumentType::QExactive);
-        assert_eq!(InstrumentType::TOF.family_fallback(),            InstrumentType::TOF);
-        assert_eq!(InstrumentType::LowRes.family_fallback(),         InstrumentType::LowRes);
-        assert_eq!(InstrumentType::HighRes.family_fallback(),        InstrumentType::HighRes);
+        assert_eq!(
+            InstrumentType::QExactive.family_fallback(),
+            InstrumentType::QExactive
+        );
+        assert_eq!(InstrumentType::TOF.family_fallback(), InstrumentType::TOF);
+        assert_eq!(
+            InstrumentType::LowRes.family_fallback(),
+            InstrumentType::LowRes
+        );
+        assert_eq!(
+            InstrumentType::HighRes.family_fallback(),
+            InstrumentType::HighRes
+        );
     }
 
     #[test]

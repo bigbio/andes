@@ -9,16 +9,16 @@
 //! bounds, SpecKey expansion). End-to-end benchmark validation remains the
 //! harness's responsibility.
 
-use std::collections::HashMap;
 use rustc_hash::FxHashMap;
+use std::collections::HashMap;
 
-use model::{AminoAcidSetBuilder, Protein, ProteinDb, Spectrum};
-use scoring_crate::param_model::{IonType, Partition, SpecDataType};
-use scoring_crate::{Param, RankScorer};
 use model::activation::ActivationMethod;
 use model::instrument::InstrumentType;
 use model::protocol::Protocol;
 use model::tolerance::Tolerance;
+use model::{AminoAcidSetBuilder, Protein, ProteinDb, Spectrum};
+use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+use scoring_crate::{Param, RankScorer};
 use search::precursor_cal::{
     adjusted_observed_neutral_mass, constants as cal_constants, tightened_tolerance_ppm,
     PrecursorCalMode,
@@ -29,9 +29,21 @@ use search::{
 };
 
 fn tiny_scorer() -> RankScorer {
-    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
-    let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1000.0,
+        seg_num: 0,
+    };
+    let prefix1 = IonType::Prefix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
+    let suffix1 = IonType::Suffix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
     let noise = IonType::Noise;
 
     let mut ion_table = FxHashMap::default();
@@ -72,8 +84,8 @@ fn tiny_scorer() -> RankScorer {
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
         gbdt_peak_model: None,
-            frag_intensity_model: None,
-            rich_ion_model: None,
+        frag_intensity_model: None,
+        rich_ion_model: None,
     };
     param.rebuild_cache();
     RankScorer::new(&param)
@@ -96,15 +108,13 @@ fn threshold_skip_returns_empty_stats() {
     let prepared = PreparedSearch::prepare(&idx, &params, &scorer, 0.5, "XXX");
 
     let too_few_keys: Vec<SpecKey> = (0..(cal_constants::MIN_SPECKEYS_FOR_PREPASS - 1))
-        .map(|i| SpecKey { spectrum_idx: i, charge: 2 })
+        .map(|i| SpecKey {
+            spectrum_idx: i,
+            charge: 2,
+        })
         .collect();
 
-    let stats = learn_calibration_stats(
-        &too_few_keys,
-        &HashMap::new(),
-        &prepared,
-        &params,
-    );
+    let stats = learn_calibration_stats(&too_few_keys, &HashMap::new(), &prepared, &params);
     assert!(!stats.has_reliable_stats());
     assert_eq!(stats.shift_ppm, 0.0);
     assert_eq!(stats.confident_psm_count, 0);
@@ -112,8 +122,14 @@ fn threshold_skip_returns_empty_stats() {
 
 #[test]
 fn apply_shift_for_mode_respects_mode_and_reliability() {
-    let unreliable = CalibrationStats { shift_ppm: 5.0, ..Default::default() };
-    assert_eq!(apply_shift_for_mode(PrecursorCalMode::Auto, unreliable), 0.0);
+    let unreliable = CalibrationStats {
+        shift_ppm: 5.0,
+        ..Default::default()
+    };
+    assert_eq!(
+        apply_shift_for_mode(PrecursorCalMode::Auto, unreliable),
+        0.0
+    );
     assert_eq!(apply_shift_for_mode(PrecursorCalMode::On, unreliable), 5.0);
     assert_eq!(apply_shift_for_mode(PrecursorCalMode::Off, unreliable), 0.0);
 

@@ -115,7 +115,15 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
-            seq, charge, prec_mz, res_mod_pos, res_mod_delta, nterm, cterm, mz, intensity,
+            seq,
+            charge,
+            prec_mz,
+            res_mod_pos,
+            res_mod_delta,
+            nterm,
+            cterm,
+            mz,
+            intensity,
         ],
     )
     .expect("build record batch");
@@ -129,11 +137,11 @@ fn write_flat_parquet(path: &Path, rows: &[Row]) {
 /// A handful of fake peaks at plausible b/y-ion m/z values for PEPTIDEK.
 fn fake_peaks() -> Vec<(f32, f32)> {
     vec![
-        (98.06, 1000.0),   // b1 (P)
-        (227.10, 2000.0),  // b2 (PE)
-        (324.15, 3000.0),  // b3 (PEP)
-        (147.11, 1500.0),  // y1 (K)
-        (276.15, 2500.0),  // y2 (EK)
+        (98.06, 1000.0),  // b1 (P)
+        (227.10, 2000.0), // b2 (PE)
+        (324.15, 3000.0), // b3 (PEP)
+        (147.11, 1500.0), // y1 (K)
+        (276.15, 2500.0), // y2 (EK)
         (500.30, 500.0),
         (600.35, 800.0),
         (700.40, 700.0),

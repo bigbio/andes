@@ -7,7 +7,9 @@
 //! - per-model `load_param(id)` semantically identical (every field, every
 //!   table, every blob).
 //!
-//! The bundled-store test partitions `resources/models.parquet` into a temp
+//! The bundled-store test takes one shipped partition file
+//! (`resources/models/protocol=Automatic/models.parquet`, a plain single-file
+//! store of 9 models) as the single-file input, re-partitions it into a temp
 //! dir and proves equivalence. A second test does the same for an external
 //! v1 store if `ANDES_V1_STORE` points at one (used to build the shipped
 //! `resources/models/` partition set).
@@ -17,8 +19,11 @@ use std::path::PathBuf;
 use model_train::store::{split_store_by_protocol, ModelStore};
 use scoring_crate::param_model::Param;
 
+/// A shipped partition file is itself a complete single-file store (every row
+/// of its 9 models), so it stands in for the retired single-file bundle.
 fn bundled_single_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../resources/models/protocol=Automatic/models.parquet")
 }
 
 /// Assert two stores are equivalent: same model_ids, same selection_entries,
@@ -29,7 +34,10 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
     let mut b = partitioned.model_ids();
     a.sort();
     b.sort();
-    assert_eq!(a, b, "model_id sets differ between single file and partitioned dir");
+    assert_eq!(
+        a, b,
+        "model_id sets differ between single file and partitioned dir"
+    );
 
     // 2. Same selection_entries (as a sorted set).
     let mut sa: Vec<_> = single
@@ -60,7 +68,10 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
         .collect();
     sa.sort();
     sb.sort();
-    assert_eq!(sa, sb, "selection_entries differ between single file and partitioned dir");
+    assert_eq!(
+        sa, sb,
+        "selection_entries differ between single file and partitioned dir"
+    );
 
     // 3. Per-model Param equality.
     for id in &a {
@@ -72,10 +83,15 @@ fn assert_stores_equivalent(single: &ModelStore, partitioned: &ModelStore) {
     // 4. Per-model source ledgers + per-source stats equivalence.
     for id in &a {
         let mut la = single.load_sources(id).expect("load_sources single");
-        let mut lb = partitioned.load_sources(id).expect("load_sources partitioned");
+        let mut lb = partitioned
+            .load_sources(id)
+            .expect("load_sources partitioned");
         la.sort_by(|x, y| x.source_id.cmp(&y.source_id));
         lb.sort_by(|x, y| x.source_id.cmp(&y.source_id));
-        assert_eq!(la, lb, "[{id}] load_sources differ between single and partitioned");
+        assert_eq!(
+            la, lb,
+            "[{id}] load_sources differ between single and partitioned"
+        );
 
         // Each (model_id, source_id) that has stat rows must reconstruct
         // identical sufficient statistics from either layout (CountStats'
@@ -109,7 +125,10 @@ fn assert_params_equal(id: &str, a: &Param, b: &Param) {
     assert_eq!(a.version, b.version, "[{id}] version");
     assert_eq!(a.data_type, b.data_type, "[{id}] data_type");
     assert_eq!(a.mme, b.mme, "[{id}] mme");
-    assert_eq!(a.apply_deconvolution, b.apply_deconvolution, "[{id}] apply_deconvolution");
+    assert_eq!(
+        a.apply_deconvolution, b.apply_deconvolution,
+        "[{id}] apply_deconvolution"
+    );
     assert_eq!(
         a.deconvolution_error_tolerance.to_bits(),
         b.deconvolution_error_tolerance.to_bits(),
@@ -120,15 +139,36 @@ fn assert_params_equal(id: &str, a: &Param, b: &Param) {
     assert_eq!(a.max_charge, b.max_charge, "[{id}] max_charge");
     assert_eq!(a.num_segments, b.num_segments, "[{id}] num_segments");
     assert_eq!(a.partitions, b.partitions, "[{id}] partitions");
-    assert_eq!(a.num_precursor_off, b.num_precursor_off, "[{id}] num_precursor_off");
-    assert_eq!(a.precursor_off_map, b.precursor_off_map, "[{id}] precursor_off_map");
+    assert_eq!(
+        a.num_precursor_off, b.num_precursor_off,
+        "[{id}] num_precursor_off"
+    );
+    assert_eq!(
+        a.precursor_off_map, b.precursor_off_map,
+        "[{id}] precursor_off_map"
+    );
     assert_eq!(a.frag_off_table, b.frag_off_table, "[{id}] frag_off_table");
     assert_eq!(a.max_rank, b.max_rank, "[{id}] max_rank");
-    assert_eq!(a.rank_dist_table, b.rank_dist_table, "[{id}] rank_dist_table");
-    assert_eq!(a.error_scaling_factor, b.error_scaling_factor, "[{id}] error_scaling_factor");
-    assert_eq!(a.ion_err_dist_table, b.ion_err_dist_table, "[{id}] ion_err_dist_table");
-    assert_eq!(a.noise_err_dist_table, b.noise_err_dist_table, "[{id}] noise_err_dist_table");
-    assert_eq!(a.ion_existence_table, b.ion_existence_table, "[{id}] ion_existence_table");
+    assert_eq!(
+        a.rank_dist_table, b.rank_dist_table,
+        "[{id}] rank_dist_table"
+    );
+    assert_eq!(
+        a.error_scaling_factor, b.error_scaling_factor,
+        "[{id}] error_scaling_factor"
+    );
+    assert_eq!(
+        a.ion_err_dist_table, b.ion_err_dist_table,
+        "[{id}] ion_err_dist_table"
+    );
+    assert_eq!(
+        a.noise_err_dist_table, b.noise_err_dist_table,
+        "[{id}] noise_err_dist_table"
+    );
+    assert_eq!(
+        a.ion_existence_table, b.ion_existence_table,
+        "[{id}] ion_existence_table"
+    );
 
     // Model blobs: compare presence + serialized bytes.
     assert_eq!(
@@ -151,7 +191,13 @@ fn assert_params_equal(id: &str, a: &Param, b: &Param) {
 #[test]
 fn partitioned_store_loads_identical_to_bundled_single_file() {
     let single_path = bundled_single_file();
-    let single = ModelStore::open(&single_path).expect("open bundled single-file store");
+    let single =
+        ModelStore::open(&single_path).expect("open bundled partition as single-file store");
+    assert_eq!(
+        single.model_ids().len(),
+        9,
+        "Automatic partition ships 9 models"
+    );
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("models");
@@ -180,8 +226,7 @@ fn shipped_partitions_load_identical_to_v1_single_file() {
         eprintln!("ANDES_V1_STORE not set — skipping shipped-partition parity test");
         return;
     };
-    let shipped =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models");
+    let shipped = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models");
     if !shipped.is_dir() {
         eprintln!("resources/models/ not present — skipping shipped-partition parity test");
         return;

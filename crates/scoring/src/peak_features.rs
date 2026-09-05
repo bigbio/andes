@@ -113,7 +113,11 @@ pub fn extract_peak_features(
     ranks: &[u32],
     ctx: &PeakFeatureCtx,
 ) -> Vec<[f32; N_FEATURES]> {
-    debug_assert_eq!(peaks.len(), ranks.len(), "peaks and ranks must be 1:1 aligned");
+    debug_assert_eq!(
+        peaks.len(),
+        ranks.len(),
+        "peaks and ranks must be 1:1 aligned"
+    );
     let n = peaks.len();
     let kept_count = ranks.iter().filter(|&&r| r != u32::MAX).count().max(1);
     let tol = ctx.match_tol_da;
@@ -205,7 +209,10 @@ mod tests {
 
     #[test]
     fn feature_names_count_matches() {
-        assert_eq!(N_FEATURES, 18, "feature set changed — update the Python contract (feature_spec.py) and A2.10 fixtures");
+        assert_eq!(
+            N_FEATURES, 18,
+            "feature set changed — update the Python contract (feature_spec.py) and A2.10 fixtures"
+        );
     }
 
     #[test]
@@ -243,9 +250,9 @@ mod tests {
         assert!((p1[idx("is_top1_in_window")] - 1.0).abs() < 1e-6);
 
         // spacing sentinels at the ends:
-        assert!((f[0][idx("spacing_left")] - SPACING_SENTINEL).abs() < 1e-6);  // first peak: no left neighbor
+        assert!((f[0][idx("spacing_left")] - SPACING_SENTINEL).abs() < 1e-6); // first peak: no left neighbor
         assert!((f[2][idx("spacing_right")] - SPACING_SENTINEL).abs() < 1e-6); // last peak: no right neighbor
-        // spacing_right of peak 0 = 200.05 - 100.0 = 100.05
+                                                                               // spacing_right of peak 0 = 200.05 - 100.0 = 100.05
         assert!((f[0][idx("spacing_right")] - 100.05).abs() < 1e-3);
         // a binary partner flag: no isotope/complement/loss partner exists in this sparse scan → 0.0
         assert!((f[1][idx("has_isotope_plus1")] - 0.0).abs() < 1e-6);
@@ -257,14 +264,23 @@ mod tests {
         let peaks = vec![(150.0_f64, 5.0_f32), (250.0, 80.0)];
         let ranks = vec![u32::MAX, 1]; // first peak filtered out
         let ctx = PeakFeatureCtx {
-            precursor_mz: 400.0, charge: 2,
+            precursor_mz: 400.0,
+            charge: 2,
             parent_neutral_mass: (400.0 - PROTON) * 2.0,
-            total_intensity: 80.0, base_peak_intensity: 80.0,
-            window_da: 50.0, match_tol_da: 0.5,
+            total_intensity: 80.0,
+            base_peak_intensity: 80.0,
+            window_da: 50.0,
+            match_tol_da: 0.5,
         };
         let f = extract_peak_features(&peaks, &ranks, &ctx);
-        let gi = FEATURE_NAMES.iter().position(|&n| n == "global_rank_frac").unwrap();
-        assert!((f[0][gi] - 1.0).abs() < 1e-6, "filtered peak must get rank_frac 1.0");
+        let gi = FEATURE_NAMES
+            .iter()
+            .position(|&n| n == "global_rank_frac")
+            .unwrap();
+        assert!(
+            (f[0][gi] - 1.0).abs() < 1e-6,
+            "filtered peak must get rank_frac 1.0"
+        );
     }
 
     #[test]
@@ -272,7 +288,11 @@ mod tests {
         use model::tolerance::Tolerance;
         let peaks = vec![(100.0_f64, 10.0_f32), (200.0, 40.0), (300.0, 50.0)];
         let ctx = PeakFeatureCtx::for_spectrum(
-            500.0, 2, (500.0 - 1.00727649) * 2.0, &peaks, &Tolerance::Da(0.5),
+            500.0,
+            2,
+            (500.0 - 1.00727649) * 2.0,
+            &peaks,
+            &Tolerance::Da(0.5),
         );
         assert!((ctx.base_peak_intensity - 50.0).abs() < 1e-6);
         assert!((ctx.total_intensity - 100.0).abs() < 1e-9);
@@ -282,6 +302,9 @@ mod tests {
 
     // Test-only helper to look up a feature column by name.
     fn idx(name: &str) -> usize {
-        FEATURE_NAMES.iter().position(|&n| n == name).expect("feature exists")
+        FEATURE_NAMES
+            .iter()
+            .position(|&n| n == name)
+            .expect("feature exists")
     }
 }

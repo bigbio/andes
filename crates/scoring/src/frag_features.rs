@@ -129,12 +129,11 @@ pub fn extract_frag_features(
     f[FEAT_PRECURSOR_CHARGE] = precursor_charge as f32;
     f[FEAT_NFLANK] = res_idx(p.residues[ni].residue);
     f[FEAT_CFLANK] = res_idx(p.residues[ci].residue);
-    f[FEAT_PROLINE_FLANK] =
-        if p.residues[ni].residue == b'P' || p.residues[ci].residue == b'P' {
-            1.0
-        } else {
-            0.0
-        };
+    f[FEAT_PROLINE_FLANK] = if p.residues[ni].residue == b'P' || p.residues[ci].residue == b'P' {
+        1.0
+    } else {
+        0.0
+    };
     f[FEAT_POS_FRAC] = position as f32 / n as f32;
     f[FEAT_PEP_LEN] = n as f32;
     f[FEAT_NFLANK_MOD] = mod_delta(p, ni);
@@ -192,15 +191,19 @@ mod tests {
 
     fn pep(seq: &str) -> Peptide {
         Peptide::new(
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect(),
+            seq.bytes()
+                .map(|b| AminoAcid::standard(b).unwrap())
+                .collect(),
             b'K',
             b'R',
         )
     }
 
     fn pep_mod(seq: &str, pos1: usize, delta: f64) -> Peptide {
-        let mut r: Vec<AminoAcid> =
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect();
+        let mut r: Vec<AminoAcid> = seq
+            .bytes()
+            .map(|b| AminoAcid::standard(b).unwrap())
+            .collect();
         let res = r[pos1 - 1].residue;
         let m = Modification {
             name: "t".into(),
@@ -241,9 +244,9 @@ mod tests {
         let p = pep("PEPTIDER"); // R is basic, at C-term
         let f = extract_frag_features(&p, IonKind::B, 2, 2, 1, 0.0);
         assert_eq!(f[FEAT_PRECURSOR_CHARGE], 2.0);
-        assert_eq!(f[FEAT_N_BASIC], 1.0);                 // one R
+        assert_eq!(f[FEAT_N_BASIC], 1.0); // one R
         assert!((f[FEAT_PROTON_MOBILITY] - (1.0 - 2.0)).abs() < 1e-6); // 1 basic - charge 2 = -1
-        // b2 flanks E|P (neither basic); hydropathy of E = -3.5, P = -1.6
+                                                                       // b2 flanks E|P (neither basic); hydropathy of E = -3.5, P = -1.6
         assert_eq!(f[FEAT_BASIC_NFLANK], 0.0);
         assert!((f[FEAT_HYDRO_NFLANK] - (-3.5)).abs() < 1e-6);
         assert!((f[FEAT_HYDRO_CFLANK] - (-1.6)).abs() < 1e-6);

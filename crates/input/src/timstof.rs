@@ -109,9 +109,10 @@ impl TimsTofReader {
             }
         });
 
-        let precursor_intensity = precursor
-            .intensity
-            .and_then(|i| if i > 0.0 { Some(i as f32) } else { None });
+        let precursor_intensity =
+            precursor
+                .intensity
+                .and_then(|i| if i > 0.0 { Some(i as f32) } else { None });
 
         // The quadrupole isolation window is reported as a center m/z + total
         // width. Convert to the symmetric lower/upper offsets the model stores
@@ -261,14 +262,21 @@ mod tests {
 
     #[test]
     fn convert_skips_nonpositive_precursor_mz() {
-        let precursor = Precursor { mz: 0.0, ..Default::default() };
+        let precursor = Precursor {
+            mz: 0.0,
+            ..Default::default()
+        };
         let raw = spectrum(0, Some(precursor), 2.0, vec![100.0], vec![1.0]);
         assert!(TimsTofReader::convert(&raw).is_none());
     }
 
     #[test]
     fn convert_treats_zero_charge_as_unknown() {
-        let precursor = Precursor { mz: 500.0, charge: Some(0), ..Default::default() };
+        let precursor = Precursor {
+            mz: 500.0,
+            charge: Some(0),
+            ..Default::default()
+        };
         let raw = spectrum(0, Some(precursor), 0.0, vec![100.0], vec![1.0]);
         let spec = TimsTofReader::convert(&raw).expect("positive m/z is convertible");
         assert_eq!(spec.precursor_charge, None);
@@ -279,13 +287,7 @@ mod tests {
 
     #[test]
     fn extract_peaks_sorts_unordered_input() {
-        let raw = spectrum(
-            0,
-            None,
-            0.0,
-            vec![300.0, 100.0, 200.0],
-            vec![3.0, 1.0, 2.0],
-        );
+        let raw = spectrum(0, None, 0.0, vec![300.0, 100.0, 200.0], vec![3.0, 1.0, 2.0]);
         let peaks = extract_peaks(&raw);
         assert_eq!(
             peaks,

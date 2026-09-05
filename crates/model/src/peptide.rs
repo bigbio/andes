@@ -12,7 +12,7 @@ pub struct Peptide {
     /// Flanking residue at the N-terminus (the AA *before* this peptide
     /// in its source protein). `_` for protein N-term, `-` for protein
     /// C-term.
-    pub pre:  u8,
+    pub pre: u8,
     pub post: u8,
     pub charge: Option<u8>,
     neutral_mass: f64,
@@ -165,7 +165,12 @@ pub enum PeptideParseError {
     #[error("unknown residue {residue:?} at position {position}")]
     UnknownResidue { residue: char, position: usize },
     #[error("malformed mod-mass token {token:?} at position {position}: {source}")]
-    BadModMass { token: String, position: usize, #[source] source: std::num::ParseFloatError },
+    BadModMass {
+        token: String,
+        position: usize,
+        #[source]
+        source: std::num::ParseFloatError,
+    },
     #[error("mod {token:?} at position {position} does not match any variant in AminoAcidSet")]
     UnknownMod { token: String, position: usize },
     #[error("mod delta {token:?} at position {position} is ambiguous: matches multiple variants within tolerance")]
@@ -192,9 +197,13 @@ impl Peptide {
             return Err(PeptideParseError::Empty);
         }
         let bytes = s.as_bytes();
-        let first_dot = bytes.iter().position(|&b| b == b'.')
+        let first_dot = bytes
+            .iter()
+            .position(|&b| b == b'.')
             .ok_or_else(|| PeptideParseError::BadFlanking { got: s.to_string() })?;
-        let last_dot = bytes.iter().rposition(|&b| b == b'.')
+        let last_dot = bytes
+            .iter()
+            .rposition(|&b| b == b'.')
             .ok_or_else(|| PeptideParseError::BadFlanking { got: s.to_string() })?;
         if first_dot == last_dot || first_dot != 1 || last_dot != bytes.len() - 2 {
             return Err(PeptideParseError::BadFlanking { got: s.to_string() });
@@ -215,7 +224,10 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
     while i < bytes.len() {
         let r = bytes[i];
         if !r.is_ascii_uppercase() {
-            return Err(PeptideParseError::UnknownResidue { residue: r as char, position: i });
+            return Err(PeptideParseError::UnknownResidue {
+                residue: r as char,
+                position: i,
+            });
         }
         i += 1;
 
@@ -223,24 +235,29 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
             // ProForma-ish accession form: `[UNIMOD:NN]`. Match the variant by
             // accession (a lossless identity round trip).
             let start = i;
-            let close = s[i..].find(']')
-                .map(|off| i + off)
-                .ok_or_else(|| PeptideParseError::UnknownMod {
-                    token: format!("{}{}", r as char, &s[start..]), position: start - 1,
-                })?;
+            let close = s[i..].find(']').map(|off| i + off).ok_or_else(|| {
+                PeptideParseError::UnknownMod {
+                    token: format!("{}{}", r as char, &s[start..]),
+                    position: start - 1,
+                }
+            })?;
             let acc = s[start + 1..close].trim();
             i = close + 1;
 
             let variant = aa_set
                 .variants_for(r, crate::modification::ModLocation::Anywhere)
                 .iter()
-                .find(|aa| aa.mod_.as_ref()
-                    .and_then(|m| m.accession.as_deref())
-                    .map(|a| a == acc)
-                    .unwrap_or(false))
+                .find(|aa| {
+                    aa.mod_
+                        .as_ref()
+                        .and_then(|m| m.accession.as_deref())
+                        .map(|a| a == acc)
+                        .unwrap_or(false)
+                })
                 .cloned()
                 .ok_or_else(|| PeptideParseError::UnknownMod {
-                    token: format!("{}[{}]", r as char, acc), position: start - 1,
+                    token: format!("{}[{}]", r as char, acc),
+                    position: start - 1,
                 })?;
             out.push(variant);
         } else if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
@@ -250,9 +267,13 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
                 i += 1;
             }
             let token = &s[start..i];
-            let delta: f64 = token.parse().map_err(|source| {
-                PeptideParseError::BadModMass { token: token.to_string(), position: start, source }
-            })?;
+            let delta: f64 = token
+                .parse()
+                .map_err(|source| PeptideParseError::BadModMass {
+                    token: token.to_string(),
+                    position: start,
+                    source,
+                })?;
 
             // Tolerance match: the Display form rounds the delta to 5 dp, so an
             // exact bit-compare no longer round-trips (e.g. 57.021464 →
@@ -261,23 +282,31 @@ fn parse_middle(s: &str, aa_set: &AminoAcidSet) -> Result<Vec<AminoAcid>, Peptid
             let mut matches = aa_set
                 .variants_for(r, crate::modification::ModLocation::Anywhere)
                 .iter()
-                .filter(|aa| aa.mod_.as_ref()
-                    .map(|m| (m.mass_delta - delta).abs() <= MOD_DELTA_MATCH_TOL)
-                    .unwrap_or(false));
-            let variant = matches.next().cloned().ok_or_else(|| PeptideParseError::UnknownMod {
-                token: format!("{}{}", r as char, token), position: start - 1,
-            })?;
+                .filter(|aa| {
+                    aa.mod_
+                        .as_ref()
+                        .map(|m| (m.mass_delta - delta).abs() <= MOD_DELTA_MATCH_TOL)
+                        .unwrap_or(false)
+                });
+            let variant = matches
+                .next()
+                .cloned()
+                .ok_or_else(|| PeptideParseError::UnknownMod {
+                    token: format!("{}{}", r as char, token),
+                    position: start - 1,
+                })?;
             if matches.next().is_some() {
                 return Err(PeptideParseError::AmbiguousMod {
-                    token: format!("{}{}", r as char, token), position: start - 1,
+                    token: format!("{}{}", r as char, token),
+                    position: start - 1,
                 });
             }
             out.push(variant);
         } else {
-            let aa = AminoAcid::standard(r)
-                .ok_or_else(|| PeptideParseError::UnknownResidue {
-                    residue: r as char, position: i - 1
-                })?;
+            let aa = AminoAcid::standard(r).ok_or_else(|| PeptideParseError::UnknownResidue {
+                residue: r as char,
+                position: i - 1,
+            })?;
             out.push(aa);
         }
     }
@@ -289,10 +318,13 @@ mod tests {
     use super::*;
     use crate::amino_acid::AminoAcid;
     use crate::mass::H2O;
-    use crate::modification::{Modification, ModLocation, ResidueSpec};
+    use crate::modification::{ModLocation, Modification, ResidueSpec};
 
     fn unmod_pep(seq: &[u8]) -> Peptide {
-        let residues: Vec<_> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+        let residues: Vec<_> = seq
+            .iter()
+            .map(|&r| AminoAcid::standard(r).unwrap())
+            .collect();
         Peptide::new(residues, b'_', b'-')
     }
 
@@ -304,7 +336,7 @@ mod tests {
 
     #[test]
     fn mass_is_sum_plus_h2o() {
-        let p = unmod_pep(b"GA");  // G + A masses
+        let p = unmod_pep(b"GA"); // G + A masses
         let g = AminoAcid::standard(b'G').unwrap().mass;
         let a = AminoAcid::standard(b'A').unwrap().mass;
         let expected = g + a + H2O;

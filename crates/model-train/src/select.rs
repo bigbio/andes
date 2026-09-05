@@ -79,9 +79,7 @@ fn try_steps_1_to_3<'a>(
     // Filter to candidates that match activation, instrument, and enzyme.
     let candidates: Vec<&SelectionEntry> = entries
         .iter()
-        .filter(|e| {
-            e.activation == activation && e.instrument == instrument && e.enzyme == enzyme
-        })
+        .filter(|e| e.activation == activation && e.instrument == instrument && e.enzyme == enzyme)
         .collect();
 
     if candidates.is_empty() {
@@ -272,7 +270,10 @@ pub fn select_nearest<'a>(
     // 2. Relax the enzyme to the dominant tryptic models, KEEPING the activation
     //    and instrument.
     if key.enzyme != "Tryp" {
-        let k = SelectionKey { enzyme: "Tryp".to_string(), ..key.clone() };
+        let k = SelectionKey {
+            enzyme: "Tryp".to_string(),
+            ..key.clone()
+        };
         if let Some(id) = select(entries, &k, instrument_family, None) {
             return (id, true);
         }
@@ -294,12 +295,18 @@ pub fn select_nearest<'a>(
             _ => None,
         };
         if let Some(inst) = sibling {
-            let k = SelectionKey { instrument: inst.to_string(), ..key.clone() };
+            let k = SelectionKey {
+                instrument: inst.to_string(),
+                ..key.clone()
+            };
             if let Some(id) = select(entries, &k, instrument_family, None) {
                 return (id, true);
             }
             if key.enzyme != "Tryp" {
-                let k2 = SelectionKey { enzyme: "Tryp".to_string(), ..k };
+                let k2 = SelectionKey {
+                    enzyme: "Tryp".to_string(),
+                    ..k
+                };
                 if let Some(id) = select(entries, &k2, instrument_family, None) {
                     return (id, true);
                 }
@@ -371,7 +378,10 @@ mod tests {
         ];
         let k = key("ETD", "LowRes", "Tryp", &[]);
         let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
-        assert_eq!(id, "etd_highres_tryp", "an ETD query must not land on a b/y model");
+        assert_eq!(
+            id, "etd_highres_tryp",
+            "an ETD query must not land on a b/y model"
+        );
         assert!(substituted, "an inexact match must still warn");
     }
 
@@ -384,7 +394,10 @@ mod tests {
         let k = key("HCD", "QExactive", "Tryp", &[]);
         let (id, substituted) = select_nearest(&entries, &k, fam, "hcd_qexactive_tryp");
         assert_eq!(id, "hcd_qexactive_tryp");
-        assert!(!substituted, "an exact hit must not be reported as substituted");
+        assert!(
+            !substituted,
+            "an exact hit must not be reported as substituted"
+        );
     }
 
     #[test]
@@ -395,7 +408,6 @@ mod tests {
         assert_eq!(id, "hcd_qexactive_tryp");
         assert!(substituted);
     }
-
 
     fn set(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -524,12 +536,7 @@ mod tests {
     #[test]
     fn no_generic_id_returns_none() {
         assert_eq!(
-            select(
-                &manifest(),
-                &key("ETD", "LowRes", "Tryp", &[]),
-                fam,
-                None
-            ),
+            select(&manifest(), &key("ETD", "LowRes", "Tryp", &[]), fam, None),
             None
         );
     }
@@ -595,7 +602,13 @@ mod tests {
     fn generic_highres_hcd_prefers_qexactive_over_alphabetical_astral() {
         let m = vec![
             e("hcd_astral_tryp", "HCD", "OrbitrapAstral", "Tryp", &[]),
-            e("hcd_highres_nocleavage", "HCD", "HighRes", "NoCleavage", &[]),
+            e(
+                "hcd_highres_nocleavage",
+                "HCD",
+                "HighRes",
+                "NoCleavage",
+                &[],
+            ),
             e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
             e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[]),
         ];
@@ -606,12 +619,25 @@ mod tests {
             "hcd_qexactive_tryp",
         );
         assert_eq!(id, "hcd_qexactive_tryp");
-        assert!(sub, "a resolution-class swap is still a substitution and must WARN");
+        assert!(
+            sub,
+            "a resolution-class swap is still a substitution and must WARN"
+        );
         // The reverse swap holds too, and the exact ladder still wins when present.
         let m2 = vec![e("hcd_highres_tryp_x", "HCD", "HighRes", "Tryp", &[])];
-        let (id2, _) = select_nearest(&m2, &key("HCD", "QExactive", "Tryp", &[]), fam, "hcd_qexactive_tryp");
+        let (id2, _) = select_nearest(
+            &m2,
+            &key("HCD", "QExactive", "Tryp", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
         assert_eq!(id2, "hcd_highres_tryp_x");
-        let (id3, sub3) = select_nearest(&m, &key("HCD", "QExactive", "Tryp", &[]), fam, "hcd_qexactive_tryp");
+        let (id3, sub3) = select_nearest(
+            &m,
+            &key("HCD", "QExactive", "Tryp", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
         assert_eq!((id3, sub3), ("hcd_qexactive_tryp", false));
     }
 
@@ -627,9 +653,16 @@ mod tests {
             e("hcd_qexactive_tryp", "HCD", "QExactive", "Tryp", &[]),
         ];
         let (id, sub) = select_nearest(
-            &m, &key("CID", "LowRes", "Tryp", &["phospho"]), fam, "hcd_qexactive_tryp");
+            &m,
+            &key("CID", "LowRes", "Tryp", &["phospho"]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
         assert_eq!(id, "cid_lowres_tryp");
-        assert!(!sub, "empty-class fallback is the existing ladder, not a nearest substitution");
+        assert!(
+            !sub,
+            "empty-class fallback is the existing ladder, not a nearest substitution"
+        );
     }
 
     /// Enzyme backoff: a GluC query with no GluC model falls to the Tryp model of
@@ -638,7 +671,11 @@ mod tests {
     fn enzyme_backoff_to_tryp() {
         let m = vec![e("cid_lowres_tryp", "CID", "LowRes", "Tryp", &[])];
         let (id, sub) = select_nearest(
-            &m, &key("CID", "LowRes", "GluC", &[]), fam, "hcd_qexactive_tryp");
+            &m,
+            &key("CID", "LowRes", "GluC", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
         assert_eq!(id, "cid_lowres_tryp");
         assert!(sub);
     }
@@ -655,7 +692,11 @@ mod tests {
         // HCD/HighRes/Tryp (no exact, no HCD/HighRes model) → standard HCD, NOT the
         // ETD model (which only happens to share the HighRes instrument).
         let (id, sub) = select_nearest(
-            &m, &key("HCD", "HighRes", "Tryp", &[]), fam, "hcd_qexactive_tryp");
+            &m,
+            &key("HCD", "HighRes", "Tryp", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
         assert_eq!(id, "hcd_qexactive_tryp");
         assert!(sub);
     }
@@ -665,7 +706,11 @@ mod tests {
     fn falls_back_to_standard_base() {
         let m = vec![e("etd_highres_tryp", "ETD", "HighRes", "Tryp", &[])];
         let (id, sub) = select_nearest(
-            &m, &key("UVPD", "TimsTOF", "ArgC", &[]), fam, "hcd_qexactive_tryp");
+            &m,
+            &key("UVPD", "TimsTOF", "ArgC", &[]),
+            fam,
+            "hcd_qexactive_tryp",
+        );
         assert_eq!(id, "hcd_qexactive_tryp");
         assert!(sub);
     }
@@ -675,7 +720,11 @@ mod tests {
     fn exact_hit_not_substituted() {
         let m = manifest();
         let (id, sub) = select_nearest(
-            &m, &key("HCD", "OrbitrapAstral", "Tryp", &[]), fam, "generic");
+            &m,
+            &key("HCD", "OrbitrapAstral", "Tryp", &[]),
+            fam,
+            "generic",
+        );
         assert_eq!(id, "astral");
         assert!(!sub);
     }
@@ -716,6 +765,9 @@ mod tests {
 
     #[test]
     fn parse_lowercases() {
-        assert_eq!(parse_experiment_class("TMT+Phospho"), set(&["tmt", "phospho"]));
+        assert_eq!(
+            parse_experiment_class("TMT+Phospho"),
+            set(&["tmt", "phospho"])
+        );
     }
 }

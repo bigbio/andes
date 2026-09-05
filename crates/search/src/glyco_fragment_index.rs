@@ -88,7 +88,12 @@ impl FragmentIndex {
                 bins.entry(b).or_default().push((idx, ion.mz));
             }
         }
-        FragmentIndex { bin_width, tol, tol_ppm: None, bins }
+        FragmentIndex {
+            bin_width,
+            tol,
+            tol_ppm: None,
+            bins,
+        }
     }
 
     /// [`Self::build`] with a RELATIVE (ppm) acceptance window per ion. This is
@@ -211,10 +216,19 @@ mod tests {
     fn ppm_query_reaches_matches_beyond_the_bin_sizing_mz() {
         let aa = aa();
         let pep = Peptide::from_str("K.PEPTIDENK.R", &aa).expect("valid");
-        let theo = predict_by_ions(&pep, 1..=1).iter().map(|i| i.mz).fold(0.0f64, f64::max);
-        assert!(theo > 300.0, "test premise: heaviest ion above the sizing m/z");
+        let theo = predict_by_ions(&pep, 1..=1)
+            .iter()
+            .map(|i| i.mz)
+            .fold(0.0f64, f64::max);
+        assert!(
+            theo > 300.0,
+            "test premise: heaviest ion above the sizing m/z"
+        );
         let idx = FragmentIndex::build_ppm_sized([(0u32, &pep)], 20.0, 1, 300.0);
-        assert!(idx.neighbourhood(theo) > 1, "must need more than one bin per side here");
+        assert!(
+            idx.neighbourhood(theo) > 1,
+            "must need more than one bin per side here"
+        );
         // +18 ppm: inside the window, but several bins away at this bin width.
         let peaks = vec![(theo * (1.0 + 18e-6), 100.0f32)];
         assert_eq!(idx.query(&peaks, 1), vec![(0, 1)]);
@@ -234,14 +248,29 @@ mod tests {
         let da = FragmentIndex::build([(0u32, &pep)], 0.5, 1);
         let ppm = FragmentIndex::build_ppm([(0u32, &pep)], 20.0, 1);
         let off_by_0_3 = vec![(theo + 0.3, 100.0f32)];
-        assert_eq!(da.query(&off_by_0_3, 1), vec![(0, 1)], "0.5 Da index must accept +0.3 Da");
-        assert!(ppm.query(&off_by_0_3, 1).is_empty(), "20 ppm index must reject +0.3 Da");
+        assert_eq!(
+            da.query(&off_by_0_3, 1),
+            vec![(0, 1)],
+            "0.5 Da index must accept +0.3 Da"
+        );
+        assert!(
+            ppm.query(&off_by_0_3, 1).is_empty(),
+            "20 ppm index must reject +0.3 Da"
+        );
         let inside = vec![(theo * (1.0 + 10e-6), 100.0f32)];
-        assert_eq!(ppm.query(&inside, 1), vec![(0, 1)], "20 ppm index must accept +10 ppm");
+        assert_eq!(
+            ppm.query(&inside, 1),
+            vec![(0, 1)],
+            "20 ppm index must accept +10 ppm"
+        );
         // Floor: a light fragment at +4 mDa is inside the 5 mDa floor.
         let light = ions.iter().map(|i| i.mz).fold(f64::MAX, f64::min);
         let near_light = vec![(light + 0.004, 100.0f32)];
-        assert_eq!(ppm.query(&near_light, 1), vec![(0, 1)], "floor must admit +4 mDa on a light ion");
+        assert_eq!(
+            ppm.query(&near_light, 1),
+            vec![(0, 1)],
+            "floor must admit +4 mDa on a light ion"
+        );
         // tol_ppm <= 0 degrades to the Da index.
         let zero = FragmentIndex::build_ppm([(0u32, &pep)], 0.0, 1);
         assert_eq!(zero.query(&off_by_0_3, 1), vec![(0, 1)]);
@@ -272,8 +301,16 @@ mod tests {
             .collect();
 
         let hits = idx.query(&peaks, 3);
-        let a = hits.iter().find(|&&(i, _)| i == 0).map(|&(_, c)| c).unwrap_or(0);
-        let b = hits.iter().find(|&&(i, _)| i == 1).map(|&(_, c)| c).unwrap_or(0);
+        let a = hits
+            .iter()
+            .find(|&&(i, _)| i == 0)
+            .map(|&(_, c)| c)
+            .unwrap_or(0);
+        let b = hits
+            .iter()
+            .find(|&&(i, _)| i == 1)
+            .map(|&(_, c)| c)
+            .unwrap_or(0);
         assert!(a >= 3, "pep_a must match its own ladder (got {a})");
         assert!(a > b, "pep_a ({a}) must outscore the unrelated pep_b ({b})");
     }
@@ -297,8 +334,8 @@ mod tests {
         let first = ions[0].mz;
         let mut peaks: Vec<(f64, f32)> = vec![
             (first, 100.0),
-            (first + 0.005, 100.0),  // within tol → same ion, must not double-count
-            (first + 0.5, 100.0),    // far off → must not count
+            (first + 0.005, 100.0), // within tol → same ion, must not double-count
+            (first + 0.5, 100.0),   // far off → must not count
         ];
         // Add a couple more genuine ions so the peptide can pass a threshold of 3.
         peaks.push((ions[1].mz, 100.0));
@@ -306,12 +343,19 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         let hits = idx.query(&peaks, 1);
-        let c = hits.iter().find(|&&(i, _)| i == 0).map(|&(_, c)| c).unwrap_or(0);
+        let c = hits
+            .iter()
+            .find(|&&(i, _)| i == 0)
+            .map(|&(_, c)| c)
+            .unwrap_or(0);
         // Exactly 3 distinct ions matched (ions[0], [1], [2]); the duplicate and
         // the far peak add nothing.
         assert_eq!(c, 3, "must count 3 distinct tolerance-valid ions, got {c}");
         // And the far-off peak alone must not let it pass a threshold of 4.
-        assert!(idx.query(&peaks, 4).is_empty(), "must not inflate past distinct-ion count");
+        assert!(
+            idx.query(&peaks, 4).is_empty(),
+            "must not inflate past distinct-ion count"
+        );
     }
 
     /// Charge-aware: a spectrum of a peptide's +2 b/y ions selects it only when the
@@ -325,19 +369,27 @@ mod tests {
             .iter()
             .map(|i| (i.mz, 100.0))
             .collect();
-        let cnt = |z: u8| FragmentIndex::build([(0u32, &pep)], 0.02, z)
-            .query(&peaks, 1)
-            .iter()
-            .find(|&&(i, _)| i == 0)
-            .map(|&(_, c)| c)
-            .unwrap_or(0);
+        let cnt = |z: u8| {
+            FragmentIndex::build([(0u32, &pep)], 0.02, z)
+                .query(&peaks, 1)
+                .iter()
+                .find(|&&(i, _)| i == 0)
+                .map(|&(_, c)| c)
+                .unwrap_or(0)
+        };
         let c1 = cnt(1);
         let c2 = cnt(2);
         // The +2 index selects the peptide from its +2 ladder, and finds strictly
         // MORE +2 ions than the +1-only index (which can only match the rare +2/+1
         // m/z coincidence). This is the high-charge-glycopeptide capability.
-        assert!(c2 >= 3, "+2 index must select the peptide from its +2 ladder (got {c2})");
-        assert!(c2 > c1, "+2 index must match more +2 ions than +1-only ({c2} > {c1})");
+        assert!(
+            c2 >= 3,
+            "+2 index must select the peptide from its +2 ladder (got {c2})"
+        );
+        assert!(
+            c2 > c1,
+            "+2 index must match more +2 ions than +1-only ({c2} > {c1})"
+        );
     }
 
     /// Regression (adversarial review): with a multi-charge index, one observed
@@ -360,7 +412,11 @@ mod tests {
         theo.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let mut peaks: Vec<(f64, f32)> = Vec::new();
         for m in theo {
-            if peaks.last().map(|&(p, _)| (m - p).abs() > 0.02).unwrap_or(true) {
+            if peaks
+                .last()
+                .map(|&(p, _)| (m - p).abs() > 0.02)
+                .unwrap_or(true)
+            {
                 peaks.push((m, 100.0));
             }
         }
@@ -391,6 +447,9 @@ mod tests {
         let idx = FragmentIndex::build([(0u32, &pep)], 0.02, 1);
         let noise: Vec<(f64, f32)> = vec![(123.456, 1.0), (777.111, 1.0), (1500.9, 1.0)];
         let hits = idx.query(&noise, 3);
-        assert!(hits.is_empty(), "noise must not select the peptide, got {hits:?}");
+        assert!(
+            hits.is_empty(),
+            "noise must not select the peptide, got {hits:?}"
+        );
     }
 }

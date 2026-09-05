@@ -43,7 +43,9 @@ fn vec_sub(dst: &mut Vec<u64>, src: &[u64]) {
 /// Scale every element of `src` by `factor` (round half-away from zero) into
 /// a new `Vec<u64>`.
 fn vec_scale(src: &[u64], factor: f32) -> Vec<u64> {
-    src.iter().map(|&c| (c as f32 * factor).round() as u64).collect()
+    src.iter()
+        .map(|&c| (c as f32 * factor).round() as u64)
+        .collect()
 }
 
 /// Trim trailing zeros from `vec` so that `derive(PartialEq)` works correctly.
@@ -214,12 +216,8 @@ impl CountStats {
         }
         // charge
         for (&k, &v) in &other.charge {
-            *self.charge.entry(k).or_default() = self
-                .charge
-                .get(&k)
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(v);
+            *self.charge.entry(k).or_default() =
+                self.charge.get(&k).copied().unwrap_or(0).saturating_add(v);
         }
     }
 
@@ -287,7 +285,13 @@ impl CountStats {
             .iter()
             .map(|(&k, &v)| (k, (v as f32 * factor).round() as u64))
             .collect();
-        Self { rank, error, noise_error, existence, charge }
+        Self {
+            rank,
+            error,
+            noise_error,
+            existence,
+            charge,
+        }
     }
 }
 
@@ -300,11 +304,19 @@ mod tests {
     use super::*;
 
     fn test_partition() -> Partition {
-        Partition { charge: 2, parent_mass: 1000.0_f32, seg_num: 0 }
+        Partition {
+            charge: 2,
+            parent_mass: 1000.0_f32,
+            seg_num: 0,
+        }
     }
 
     fn test_prefix_ion() -> IonType {
-        IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 }
+        IonType::Prefix {
+            charge: 1,
+            offset_bits: 1.007_f32.to_bits(),
+            loss_class: 0,
+        }
     }
 
     #[test]
@@ -314,8 +326,8 @@ mod tests {
         let mut a = CountStats::new();
         a.bump_rank(p, ion, 3);
         let b = a.clone();
-        a.add(&b);   // count = 2
-        a.sub(&b);   // count = 1 again
+        a.add(&b); // count = 2
+        a.sub(&b); // count = 1 again
         assert_eq!(a, b);
     }
 
@@ -431,15 +443,29 @@ mod tests {
         a.bump_charge(3);
         let z = a.scaled(0.0);
         assert_eq!(z.rank_count(&p, ion, 1), 0);
-        assert_eq!(z.error.get(&p).map(|v| v.get(3).copied().unwrap_or(0)).unwrap_or(0), 0);
+        assert_eq!(
+            z.error
+                .get(&p)
+                .map(|v| v.get(3).copied().unwrap_or(0))
+                .unwrap_or(0),
+            0
+        );
         assert_eq!(z.existence.get(&(p, 0)).copied().unwrap_or(0), 0);
         assert_eq!(z.charge.get(&3).copied().unwrap_or(0), 0);
     }
 
     #[test]
     fn add_is_commutative_for_disjoint_keys() {
-        let p1 = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-        let p2 = Partition { charge: 3, parent_mass: 800.0, seg_num: 1 };
+        let p1 = Partition {
+            charge: 2,
+            parent_mass: 500.0,
+            seg_num: 0,
+        };
+        let p2 = Partition {
+            charge: 3,
+            parent_mass: 800.0,
+            seg_num: 1,
+        };
         let ion = test_prefix_ion();
 
         let mut a = CountStats::new();

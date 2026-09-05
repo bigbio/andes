@@ -12,14 +12,14 @@
 //! NOT deduplicated — they have a distinct search space (protein-N-term
 //! mod variants apply).
 
+use crate::decoy::is_decoy_accession_affix;
+use crate::search_index::SearchIndex;
+use crate::search_params::SearchParams;
 use model::amino_acid::AminoAcid;
 use model::enzyme::Enzyme;
 use model::modification::ModLocation;
 use model::peptide::Peptide;
 use model::protein::Protein;
-use crate::decoy::is_decoy_accession_affix;
-use crate::search_index::SearchIndex;
-use crate::search_params::SearchParams;
 
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -49,10 +49,15 @@ pub fn enumerate_candidates<'a>(
     // accession merely starting with the bare prefix is NOT a decoy); the suffix
     // form recognizes externally-built decoys (e.g. quantms "<orig>_rev").
     let suffix = idx.decoy_suffix.clone();
-    idx.db.proteins.iter().enumerate().flat_map(move |(p_idx, protein)| {
-        let is_decoy = is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix.as_deref());
-        enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
-    })
+    idx.db
+        .proteins
+        .iter()
+        .enumerate()
+        .flat_map(move |(p_idx, protein)| {
+            let is_decoy =
+                is_decoy_accession_affix(&protein.accession, decoy_prefix, suffix.as_deref());
+            enumerate_protein(protein, p_idx, is_decoy, params).into_iter()
+        })
 }
 
 fn enumerate_protein(
@@ -73,7 +78,13 @@ fn enumerate_protein(
     // N-terminus) and are NOT deduplicated — they differ by terminal-mod
     // search space.
     if seq.first() == Some(&b'M') && seq.len() > 1 {
-        out.extend(enumerate_protein_from_offset(seq, 1, protein_index, is_decoy, params));
+        out.extend(enumerate_protein_from_offset(
+            seq,
+            1,
+            protein_index,
+            is_decoy,
+            params,
+        ));
     }
 
     out
@@ -119,7 +130,14 @@ fn enumerate_protein_from_offset(
     // position loop below (which returns all positions 0..=n), preserving the
     // existing missed-cleavage semantics that the NonSpecific tests exercise.
     if ntt == 0 && !matches!(params.enzyme, Enzyme::NonSpecific) {
-        let ctx = EmitCtx { sub_seq, seq, seq_offset, protein_index, is_decoy, params };
+        let ctx = EmitCtx {
+            sub_seq,
+            seq,
+            seq_offset,
+            protein_index,
+            is_decoy,
+            params,
+        };
         return enumerate_all_spans(&ctx, n);
     }
 
@@ -146,7 +164,14 @@ fn enumerate_protein_from_offset(
     // Build a fast lookup for cleavage positions.
     let cleavage_set: std::collections::HashSet<u32> = cleavage_positions.iter().copied().collect();
 
-    let ctx = EmitCtx { sub_seq, seq, seq_offset, protein_index, is_decoy, params };
+    let ctx = EmitCtx {
+        sub_seq,
+        seq,
+        seq_offset,
+        protein_index,
+        is_decoy,
+        params,
+    };
 
     // ── Strict spans (ntt=2 behaviour) ───────────────────────────────────────
     // Also included in ntt=1, since a strict span satisfies "at least one end".
@@ -239,8 +264,16 @@ fn emit_span(ctx: &EmitCtx<'_>, start: u32, end: u32, out: &mut Vec<Candidate>) 
 
     let abs_start = start as usize + ctx.seq_offset;
     let abs_end = end as usize + ctx.seq_offset;
-    let pre = if abs_start == 0 { b'_' } else { ctx.seq[abs_start - 1] };
-    let post = if abs_end == ctx.seq.len() { b'-' } else { ctx.seq[abs_end] };
+    let pre = if abs_start == 0 {
+        b'_'
+    } else {
+        ctx.seq[abs_start - 1]
+    };
+    let post = if abs_end == ctx.seq.len() {
+        b'-'
+    } else {
+        ctx.seq[abs_end]
+    };
 
     let is_protein_n_term = start == 0;
     let is_protein_c_term = abs_end == ctx.seq.len();
@@ -301,30 +334,45 @@ pub(crate) fn expand_mod_combinations(
         build_terminal_variants(params, span[0], 0, n, is_protein_n_term, is_protein_c_term)
     });
     let pos_last_owned: Option<Vec<AminoAcid>> = (n > 1).then(|| {
-        build_terminal_variants(params, span[n - 1], n - 1, n, is_protein_n_term, is_protein_c_term)
+        build_terminal_variants(
+            params,
+            span[n - 1],
+            n - 1,
+            n,
+            is_protein_n_term,
+            is_protein_c_term,
+        )
     });
 
     // Collect per-position variant slices. Terminal positions reference the
     // owned vecs above; interior positions borrow directly from AminoAcidSet.
     // All borrows are valid for the duration of this function.
-    let position_variants_refs: Vec<&[AminoAcid]> = span.iter().enumerate().map(|(i, &r)| {
-        if i == 0 {
-            pos0_owned.as_ref().unwrap().as_slice()
-        } else if i == n - 1 {
-            // n > 1 guaranteed here because n == 1 means i == 0 == n-1,
-            // which is already handled by the first branch.
-            pos_last_owned.as_ref().unwrap().as_slice()
-        } else {
-            // Interior position: borrow Anywhere variants — no clone.
-            params.aa_set.variants_for(r, ModLocation::Anywhere)
-        }
-    }).collect();
+    let position_variants_refs: Vec<&[AminoAcid]> = span
+        .iter()
+        .enumerate()
+        .map(|(i, &r)| {
+            if i == 0 {
+                pos0_owned.as_ref().unwrap().as_slice()
+            } else if i == n - 1 {
+                // n > 1 guaranteed here because n == 1 means i == 0 == n-1,
+                // which is already handled by the first branch.
+                pos_last_owned.as_ref().unwrap().as_slice()
+            } else {
+                // Interior position: borrow Anywhere variants — no clone.
+                params.aa_set.variants_for(r, ModLocation::Anywhere)
+            }
+        })
+        .collect();
 
     let mut out = Vec::new();
     let mut current = Vec::with_capacity(n);
     expand_recursive(
-        &position_variants_refs, 0, &mut current, 0,
-        params.max_variable_mods_per_peptide, &mut out,
+        &position_variants_refs,
+        0,
+        &mut current,
+        0,
+        params.max_variable_mods_per_peptide,
+        &mut out,
     );
     out
 }
@@ -347,7 +395,9 @@ fn build_terminal_variants(
     // MUST carry it — the unmodified Anywhere variant is not a valid
     // candidate. Fixed mods are mandatory (Kim et al., Nat Commun 5:5277, 2014).
     let has_fixed_in = |term_variants: &[AminoAcid]| -> bool {
-        term_variants.iter().any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false))
+        term_variants
+            .iter()
+            .any(|aa| aa.mod_.as_ref().map(|m| m.fixed).unwrap_or(false))
     };
 
     // Peptide-terminal mods (NTerm/CTerm — e.g. the fixed TMT/iTRAQ N-term tag)
@@ -358,25 +408,35 @@ fn build_terminal_variants(
     // ProtNTerm XOR NTerm, silently dropping a fixed N-term tag on protein-N-term
     // peptides → wrong precursor/fragment mass for TMT/iTRAQ). Non-protein-term
     // and label-free cases are unchanged (the union adds nothing there).
-    let union_terminal =
-        |peptide_loc: ModLocation, protein_loc: ModLocation, at_protein_term: bool| -> Vec<AminoAcid> {
-            let mut v = params.aa_set.variants_for(residue, peptide_loc).to_vec();
-            if at_protein_term {
-                for pv in params.aa_set.variants_for(residue, protein_loc) {
-                    if !v.contains(pv) {
-                        v.push(pv.clone());
-                    }
+    let union_terminal = |peptide_loc: ModLocation,
+                          protein_loc: ModLocation,
+                          at_protein_term: bool|
+     -> Vec<AminoAcid> {
+        let mut v = params.aa_set.variants_for(residue, peptide_loc).to_vec();
+        if at_protein_term {
+            for pv in params.aa_set.variants_for(residue, protein_loc) {
+                if !v.contains(pv) {
+                    v.push(pv.clone());
                 }
             }
-            v
-        };
+        }
+        v
+    };
     let n_term_variants: Vec<AminoAcid> = if pos == 0 {
-        union_terminal(ModLocation::NTerm, ModLocation::ProtNTerm, is_protein_n_term)
+        union_terminal(
+            ModLocation::NTerm,
+            ModLocation::ProtNTerm,
+            is_protein_n_term,
+        )
     } else {
         Vec::new()
     };
     let c_term_variants: Vec<AminoAcid> = if pos == span_len - 1 {
-        union_terminal(ModLocation::CTerm, ModLocation::ProtCTerm, is_protein_c_term)
+        union_terminal(
+            ModLocation::CTerm,
+            ModLocation::ProtCTerm,
+            is_protein_c_term,
+        )
     } else {
         Vec::new()
     };
@@ -441,19 +501,13 @@ fn expand_recursive(
         //
         // Kim et al. (Nat Commun 5:5277, 2014): only variable mods consume
         // slots against the per-peptide modification cap.
-        let consumes_slot = variant
-            .mod_
-            .as_ref()
-            .map(|m| !m.fixed)
-            .unwrap_or(false);
+        let consumes_slot = variant.mod_.as_ref().map(|m| !m.fixed).unwrap_or(false);
         let new_mods = mods_used + if consumes_slot { 1 } else { 0 };
         if new_mods > max_mods {
             continue;
         }
         current.push(variant.clone());
-        expand_recursive(
-            position_variants, pos + 1, current, new_mods, max_mods, out,
-        );
+        expand_recursive(position_variants, pos + 1, current, new_mods, max_mods, out);
         current.pop();
     }
 }
@@ -683,8 +737,16 @@ pub fn lazy_candidates_for_precursor(
 
         // pre/post are determined by absolute coordinates exactly as emit_span
         // computes them (the N-term-Met case: abs_start==1 ⇒ pre = seq[0] = 'M').
-        let pre = if abs_start == 0 { b'_' } else { seq[abs_start - 1] };
-        let post = if abs_end == seq.len() { b'-' } else { seq[abs_end] };
+        let pre = if abs_start == 0 {
+            b'_'
+        } else {
+            seq[abs_start - 1]
+        };
+        let post = if abs_end == seq.len() {
+            b'-'
+        } else {
+            seq[abs_end]
+        };
 
         let mod_combinations =
             expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
@@ -815,8 +877,16 @@ pub fn lazy_candidates_for_nominal_window(
         let is_protein_c_term = rec.flags & flags::IS_PROTEIN_C_TERM != 0;
         let is_decoy = rec.flags & flags::IS_DECOY != 0;
 
-        let pre = if abs_start == 0 { b'_' } else { seq[abs_start - 1] };
-        let post = if abs_end == seq.len() { b'-' } else { seq[abs_end] };
+        let pre = if abs_start == 0 {
+            b'_'
+        } else {
+            seq[abs_start - 1]
+        };
+        let post = if abs_end == seq.len() {
+            b'-'
+        } else {
+            seq[abs_end]
+        };
 
         let mod_combinations =
             expand_mod_combinations(span, params, is_protein_n_term, is_protein_c_term);
@@ -912,7 +982,11 @@ mod tests {
 
         // Union: every Trypsin site AND every GluC site is a cut point.
         let both = compute_cleavage_positions(seq, Enzyme::GluC, &[Enzyme::Trypsin]);
-        assert_eq!(both, vec![0, 2, 4, 6, 8], "GluC+Trypsin = union of cut sites");
+        assert_eq!(
+            both,
+            vec![0, 2, 4, 6, 8],
+            "GluC+Trypsin = union of cut sites"
+        );
         // Order of primary vs extra must not matter for the cut-site set.
         let both_rev = compute_cleavage_positions(seq, Enzyme::Trypsin, &[Enzyme::GluC]);
         assert_eq!(both, both_rev, "union is order-independent");
@@ -925,12 +999,21 @@ mod tests {
         // Empty extras must be bit-identical to the legacy single-enzyme result
         // for every protease mode, including the NonSpecific/NoCleavage cases.
         let seq = b"MKAESRPEDK";
-        for e in [Enzyme::Trypsin, Enzyme::LysC, Enzyme::GluC, Enzyme::AspN,
-                  Enzyme::NonSpecific, Enzyme::NoCleavage] {
+        for e in [
+            Enzyme::Trypsin,
+            Enzyme::LysC,
+            Enzyme::GluC,
+            Enzyme::AspN,
+            Enzyme::NonSpecific,
+            Enzyme::NoCleavage,
+        ] {
             let single = compute_cleavage_positions(seq, e, &[]);
             // NoCleavage extras contribute no sites; result must equal the primary alone.
             let with_nocleave = compute_cleavage_positions(seq, e, &[Enzyme::NoCleavage]);
-            assert_eq!(single, with_nocleave, "{e:?}: NoCleavage extra adds no sites");
+            assert_eq!(
+                single, with_nocleave,
+                "{e:?}: NoCleavage extra adds no sites"
+            );
         }
         // A NonSpecific protease anywhere in the set makes the whole digest non-specific.
         let ns = compute_cleavage_positions(seq, Enzyme::Trypsin, &[Enzyme::NonSpecific]);
@@ -982,9 +1065,18 @@ mod tests {
             .into_iter()
             .filter(|c| !c.is_decoy)
             .find(|c| {
-                c.peptide.residues.iter().map(|aa| aa.residue).eq(seq.iter().copied())
+                c.peptide
+                    .residues
+                    .iter()
+                    .map(|aa| aa.residue)
+                    .eq(seq.iter().copied())
             })
-            .unwrap_or_else(|| panic!("no unmodified candidate spelling {:?}", std::str::from_utf8(seq)))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no unmodified candidate spelling {:?}",
+                    std::str::from_utf8(seq)
+                )
+            })
             .peptide
             .mass()
     }
@@ -1060,23 +1152,39 @@ mod tests {
     fn fixed_n_term_tag_applies_to_protein_n_term_peptides() {
         use model::modification::ResidueSpec;
         let tmt = Modification {
-            name: "TMT6plex".into(), mass_delta: 229.162932,
-            residue: ResidueSpec::Wildcard, location: ModLocation::NTerm,
-            fixed: true, accession: None, neutral_losses: Vec::new(), loss_class: 0,
+            name: "TMT6plex".into(),
+            mass_delta: 229.162932,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::NTerm,
+            fixed: true,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         let acetyl = Modification {
-            name: "Acetyl".into(), mass_delta: 42.010565,
-            residue: ResidueSpec::Wildcard, location: ModLocation::ProtNTerm,
-            fixed: false, accession: None, neutral_losses: Vec::new(), loss_class: 0,
+            name: "Acetyl".into(),
+            mass_delta: 42.010565,
+            residue: ResidueSpec::Wildcard,
+            location: ModLocation::ProtNTerm,
+            fixed: false,
+            accession: None,
+            neutral_losses: Vec::new(),
+            loss_class: 0,
         };
         // First tryptic peptide AAAPEPTIDEK sits at the protein N-terminus (offset 0).
-        let target = ProteinDb { proteins: vec![Protein {
-            accession: "P1".into(), description: "tmt protein-nterm".into(),
-            sequence: b"AAAPEPTIDEKQQQR".to_vec(),
-        }]};
+        let target = ProteinDb {
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "tmt protein-nterm".into(),
+                sequence: b"AAAPEPTIDEKQQQR".to_vec(),
+            }],
+        };
         let db = SearchIndex::from_target_db(&target, "XXX");
         let aa_set = AminoAcidSetBuilder::new_standard()
-            .add_fixed_mod(tmt).add_variable_mod(acetyl).build().unwrap();
+            .add_fixed_mod(tmt)
+            .add_variable_mod(acetyl)
+            .build()
+            .unwrap();
         let mut params = SearchParams::default_tryptic(aa_set);
         params.min_length = 3;
         params.max_variable_mods_per_peptide = 1;
@@ -1084,14 +1192,22 @@ mod tests {
         let pnt: Vec<_> = enumerate_candidates(&db, &params, "XXX")
             .filter(|c| !c.is_decoy && c.start_offset_in_protein == 0)
             .collect();
-        assert!(!pnt.is_empty(), "expected a protein-N-term peptide candidate");
+        assert!(
+            !pnt.is_empty(),
+            "expected a protein-N-term peptide candidate"
+        );
         let has_tmt = pnt.iter().any(|c| {
-            c.peptide.residues.first()
+            c.peptide
+                .residues
+                .first()
                 .and_then(|aa| aa.mod_.as_ref())
                 .map(|m| (m.mass_delta - 229.162932).abs() < 1e-3)
                 .unwrap_or(false)
         });
-        assert!(has_tmt, "protein-N-term peptide must carry the fixed N-term TMT tag (finding 2.3)");
+        assert!(
+            has_tmt,
+            "protein-N-term peptide must carry the fixed N-term TMT tag (finding 2.3)"
+        );
     }
 
     /// Set-equality assertion shared by both tests: the lazy candidate set for
@@ -1113,7 +1229,8 @@ mod tests {
             .map(|c| canonical_key(&c))
             .collect();
         assert_eq!(
-            lazy, inram,
+            lazy,
+            inram,
             "lazy enumeration must match the in-RAM candidate set\n\
              only-in-lazy: {:?}\n only-in-inram: {:?}",
             lazy.difference(&inram).collect::<Vec<_>>(),
@@ -1184,8 +1301,7 @@ mod tests {
         // from the exact f64 window at bucket boundaries. 0.5 Da → widen by 0,
         // so the nominal window is a single bucket while the f64 window spans
         // ±0.5 Da and can dip into the neighboring bucket.
-        params.precursor_tolerance =
-            PrecursorTolerance::symmetric(Tolerance::Da(0.5));
+        params.precursor_tolerance = PrecursorTolerance::symmetric(Tolerance::Da(0.5));
         let (_tmp, mi) = build_and_open(&db, &params);
 
         let z = 1u8;
@@ -1218,7 +1334,8 @@ mod tests {
                         .map(canonical_key)
                         .collect();
                 assert_eq!(
-                    mmap_nominal, ram,
+                    mmap_nominal,
+                    ram,
                     "NEW mmap nominal window must equal RAM bucket window \
                      (precursor={precursor})\n only-in-mmap: {:?}\n only-in-ram: {:?}",
                     mmap_nominal.difference(&ram).collect::<Vec<_>>(),
@@ -1231,7 +1348,12 @@ mod tests {
                 let tol_left = params.precursor_tolerance.left.as_da(neutral_obs);
                 let tol_right = params.precursor_tolerance.right.as_da(neutral_obs);
                 let old_f64: HashSet<_> = lazy_candidates_for_precursor(
-                    &mi, &db, &params, neutral_obs, tol_left, tol_right,
+                    &mi,
+                    &db,
+                    &params,
+                    neutral_obs,
+                    tol_left,
+                    tol_right,
                 )
                 .iter()
                 .map(canonical_key)
@@ -1265,7 +1387,11 @@ mod tests {
         assert!(
             lazy.iter().any(|c| {
                 !c.is_decoy
-                    && c.peptide.residues.iter().map(|aa| aa.residue).eq(b"PEPTMK".iter().copied())
+                    && c.peptide
+                        .residues
+                        .iter()
+                        .map(|aa| aa.residue)
+                        .eq(b"PEPTMK".iter().copied())
                     && c.peptide.residues.iter().any(|aa| aa.is_modified())
             }),
             "expected the Ox-M PEPTMK peptidoform"
@@ -1277,7 +1403,11 @@ mod tests {
         assert!(
             lazy_base.iter().any(|c| {
                 !c.is_decoy
-                    && c.peptide.residues.iter().map(|aa| aa.residue).eq(b"PEPTMK".iter().copied())
+                    && c.peptide
+                        .residues
+                        .iter()
+                        .map(|aa| aa.residue)
+                        .eq(b"PEPTMK".iter().copied())
                     && c.peptide.residues.iter().all(|aa| !aa.is_modified())
             }),
             "expected the unmodified PEPTMK peptidoform"

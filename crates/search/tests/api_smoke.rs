@@ -3,8 +3,8 @@
 //! without touching submodule paths.
 
 use model::{
-    AminoAcid, AminoAcidSetBuilder, Enzyme, ModLocation, Modification,
-    Peptide, PrecursorTolerance, ResidueSpec, Tolerance, H2O, PROTON,
+    AminoAcid, AminoAcidSetBuilder, Enzyme, ModLocation, Modification, Peptide, PrecursorTolerance,
+    ResidueSpec, Tolerance, H2O, PROTON,
 };
 
 #[test]
@@ -24,7 +24,8 @@ fn build_set_and_peptide_via_public_api() {
         .build()
         .unwrap();
 
-    let residues: Vec<AminoAcid> = b"PEPTIDE".iter()
+    let residues: Vec<AminoAcid> = b"PEPTIDE"
+        .iter()
         .map(|&r| AminoAcid::standard(r).unwrap())
         .collect();
     let p = Peptide::new(residues, b'_', b'-').with_charge(2);

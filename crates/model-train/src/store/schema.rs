@@ -105,11 +105,11 @@ pub fn tables_schema() -> SchemaRef {
         nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 (matches combined_schema)
         nf("part_seg", DataType::Int32),
         // --- ion descriptor ---
-        nf("ion_kind", DataType::Utf8),   // "prefix" | "suffix" | "noise" | "-"
+        nf("ion_kind", DataType::Utf8), // "prefix" | "suffix" | "noise" | "-"
         nf("ion_charge", DataType::Int32),
         // --- table kind ---
         nf("table_kind", DataType::Utf8), // "rank_dist"|"ion_err"|"noise_err"|
-                                          // "ion_existence"|"frag_off"|"precursor_off"
+        // "ion_existence"|"frag_off"|"precursor_off"
         // --- payload (one of the two is non-null per row) ---
         nf("values", list_of(DataType::Float32)),
         nf("offsets", offsets_dt),
@@ -205,7 +205,7 @@ pub fn combined_schema() -> SchemaRef {
         nf("part_charge", DataType::Int32),
         nf("part_mass_bits", DataType::Int32), // f32::to_bits() as i32 for bit-exact round-trip
         nf("part_seg", DataType::Int32),
-        nf("ion_kind", DataType::Utf8),        // "prefix"|"suffix"|"noise"|"-"
+        nf("ion_kind", DataType::Utf8), // "prefix"|"suffix"|"noise"|"-"
         nf("ion_charge", DataType::Int32),
         nf("ion_offset_bits", DataType::Int32), // f32::to_bits() as i32; 0 for noise/dist rows
         // loss_class for rank_dist/stat rows: 0=intact, 1=glyco, 2=phospho, 255=generic.
@@ -262,7 +262,11 @@ mod tests {
     fn model_id_is_non_null() {
         for schema in [models_schema(), tables_schema()] {
             let f = schema.field_with_name("model_id").unwrap();
-            assert!(!f.is_nullable(), "model_id must be non-null in {:?}", schema);
+            assert!(
+                !f.is_nullable(),
+                "model_id must be non-null in {:?}",
+                schema
+            );
         }
     }
 

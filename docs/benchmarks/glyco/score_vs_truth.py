@@ -73,19 +73,40 @@ def key_of(specid, full, tails):
     m = re.search(r"scan=(\d+)", specid)
     if not m:
         return None
-    run = next((r for r, v in full.items() if v in specid), None)
+    # Full-name match on token boundaries: a run called `R1` must not claim `R10`.
+    hits = [r for r, v in full.items() if re.search(rf"(^|[^A-Za-z0-9]){re.escape(v)}([^A-Za-z0-9]|$)", specid)]
+    if len(hits) > 1:
+        sys.exit(f"SpecId {specid!r} matches several runs by full name: {sorted(hits)}")
+    run = hits[0] if hits else None
     if run is None:
         run = next((r for r, t in tails.items() if re.search(rf"(^|[^A-Za-z0-9]){re.escape(t)}([^A-Za-z0-9]|$)", specid)), None)
     return (run, int(m.group(1))) if run else None
 
 
 def main():
+    # `--run NAME`: a single-file glyco run writes SpecIds with no file name at all
+    # (`controllerType=0 controllerNumber=1 scan=262_glyco_262_1`), so nothing could
+    # join it to a reference and the scorer reported 100% NOT_EMITTED. With --run every
+    # SpecId is attributed to that reference run.
+    forced_run = None
+    if "--run" in sys.argv:
+        i = sys.argv.index("--run")
+        forced_run = sys.argv[i + 1]
+        del sys.argv[i:i + 2]
     if len(sys.argv) < 4:
         sys.exit(__doc__)
     truth_p, pin_p, psms_p = sys.argv[1:4]
     qcut = float(sys.argv[4]) if len(sys.argv) > 4 else 0.01
     truth = load_truth(truth_p)
     full, tails = run_matchers({k[0] for k in truth})
+    if forced_run is not None:
+        if forced_run not in full:
+            sys.exit(f"--run {forced_run!r} is not a run in the reference: {sorted(full)}")
+        truth = {k: v for k, v in truth.items() if k[0] == forced_run}
+        full, tails = {forced_run: forced_run}, {}
+        def key_of(specid, full, tails):  # noqa: F811 -- deliberate override
+            m = re.search(r"scan=(\d+)", specid)
+            return (forced_run, int(m.group(1))) if m else None
 
     emitted = {}
     with open(pin_p) as fh:
@@ -95,6 +116,12 @@ def main():
         for r in rd:
             k = key_of(r[si], full, tails)
             if k:
+                # The production glyco PIN is collapsed to ONE row per scan by the search;
+                # a second row for the same (run, scan) means a --debug-glyco dump or a
+                # double-pooled file, where "which row is the winner" is undefined here.
+                if k in emitted:
+                    sys.exit(f"PIN has more than one row for {k}: this scorer needs the "
+                             f"top-1-per-scan production PIN, not a --debug-glyco dump")
                 emitted[k] = (bare(r[pi]), r[li])
 
     accepted = {}

@@ -14,7 +14,11 @@ pub struct MgfReader<R: BufRead> {
 
 impl<R: BufRead> MgfReader<R> {
     pub fn new(reader: R) -> Self {
-        Self { reader, line_no: 0, buf: String::new() }
+        Self {
+            reader,
+            line_no: 0,
+            buf: String::new(),
+        }
     }
 
     /// Read the next non-blank, non-comment line. Returns `Ok(None)`
@@ -22,8 +26,13 @@ impl<R: BufRead> MgfReader<R> {
     fn next_significant_line(&mut self) -> Result<Option<String>, MgfParseError> {
         loop {
             self.buf.clear();
-            let n = self.reader.read_line(&mut self.buf)
-                .map_err(|source| MgfParseError::Io { line: self.line_no + 1, source })?;
+            let n = self
+                .reader
+                .read_line(&mut self.buf)
+                .map_err(|source| MgfParseError::Io {
+                    line: self.line_no + 1,
+                    source,
+                })?;
             if n == 0 {
                 return Ok(None);
             }
@@ -49,7 +58,8 @@ impl<R: BufRead> Iterator for MgfReader<R> {
 
         if begin_line != "BEGIN IONS" {
             return Some(Err(MgfParseError::ExpectedBeginIons {
-                line: self.line_no, got: begin_line,
+                line: self.line_no,
+                got: begin_line,
             }));
         }
 
@@ -66,7 +76,9 @@ impl<R: BufRead> Iterator for MgfReader<R> {
         loop {
             let line = match self.next_significant_line() {
                 Ok(None) => {
-                    return Some(Err(MgfParseError::UnterminatedSpectrum { line: begin_line_no }));
+                    return Some(Err(MgfParseError::UnterminatedSpectrum {
+                        line: begin_line_no,
+                    }));
                 }
                 Ok(Some(l)) => l,
                 Err(e) => return Some(Err(e)),
@@ -80,30 +92,32 @@ impl<R: BufRead> Iterator for MgfReader<R> {
                 let key = line[..eq].to_ascii_uppercase();
                 let value = line[eq + 1..].trim().to_string();
                 match key.as_str() {
-                    "TITLE"       => title = value,
-                    "PEPMASS"     => {
-                        match parse_pepmass(&value) {
-                            Ok((mz, intensity)) => {
-                                precursor_mz = Some(mz);
-                                precursor_intensity = intensity;
-                            }
-                            Err(()) => return Some(Err(MgfParseError::BadPepmass {
-                                line: self.line_no, got: value,
-                            })),
+                    "TITLE" => title = value,
+                    "PEPMASS" => match parse_pepmass(&value) {
+                        Ok((mz, intensity)) => {
+                            precursor_mz = Some(mz);
+                            precursor_intensity = intensity;
                         }
-                    }
-                    "CHARGE"      => {
-                        match parse_charge(&value) {
-                            Ok(z) => precursor_charge = Some(z),
-                            Err(()) => return Some(Err(MgfParseError::BadCharge {
-                                line: self.line_no, got: value,
-                            })),
+                        Err(()) => {
+                            return Some(Err(MgfParseError::BadPepmass {
+                                line: self.line_no,
+                                got: value,
+                            }))
                         }
-                    }
+                    },
+                    "CHARGE" => match parse_charge(&value) {
+                        Ok(z) => precursor_charge = Some(z),
+                        Err(()) => {
+                            return Some(Err(MgfParseError::BadCharge {
+                                line: self.line_no,
+                                got: value,
+                            }))
+                        }
+                    },
                     "RTINSECONDS" => {
                         rt_seconds = value.parse().ok();
                     }
-                    "SCANS"       => {
+                    "SCANS" => {
                         scan = value.parse().ok();
                     }
                     _ => { /* ignore unknown keys */ }
@@ -117,15 +131,22 @@ impl<R: BufRead> Iterator for MgfReader<R> {
                 // still a hard error.
                 Ok(Some((mz, intensity))) => peaks.push((mz, intensity)),
                 Ok(None) => { /* peak out of domain: skip */ }
-                Err(()) => return Some(Err(MgfParseError::BadPeak {
-                    line: self.line_no, got: line,
-                })),
+                Err(()) => {
+                    return Some(Err(MgfParseError::BadPeak {
+                        line: self.line_no,
+                        got: line,
+                    }))
+                }
             }
         }
 
         let precursor_mz = match precursor_mz {
             Some(v) => v,
-            None => return Some(Err(MgfParseError::MissingPepmass { line: begin_line_no })),
+            None => {
+                return Some(Err(MgfParseError::MissingPepmass {
+                    line: begin_line_no,
+                }))
+            }
         };
 
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -157,7 +178,11 @@ fn parse_pepmass(value: &str) -> Result<(f64, Option<f32>), ()> {
     if !mz.is_finite() || mz <= 0.0 {
         return Err(());
     }
-    let intensity = iter.next().map(|s| s.parse::<f32>()).transpose().map_err(|_| ())?;
+    let intensity = iter
+        .next()
+        .map(|s| s.parse::<f32>())
+        .transpose()
+        .map_err(|_| ())?;
     Ok((mz, intensity))
 }
 
@@ -198,7 +223,11 @@ fn parse_peak(line: &str) -> Result<Option<(f64, f32)>, ()> {
 #[derive(thiserror::Error, Debug)]
 pub enum MgfParseError {
     #[error("I/O error at line {line}: {source}")]
-    Io { line: usize, #[source] source: std::io::Error },
+    Io {
+        line: usize,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("expected `BEGIN IONS` at line {line}, got {got:?}")]
     ExpectedBeginIons { line: usize, got: String },
@@ -225,7 +254,10 @@ mod tests {
 
     #[test]
     fn parse_pepmass_with_intensity() {
-        assert_eq!(parse_pepmass("500.5 1000.0").unwrap(), (500.5, Some(1000.0)));
+        assert_eq!(
+            parse_pepmass("500.5 1000.0").unwrap(),
+            (500.5, Some(1000.0))
+        );
     }
 
     #[test]

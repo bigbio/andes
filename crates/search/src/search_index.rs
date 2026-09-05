@@ -93,7 +93,11 @@ impl SearchIndex {
             }
         }
         let db = build_search_db(target, decoy_prefix, strategy, seed);
-        Self { db, decoy_prefix: norm, decoy_suffix: decoy_suffix.map(str::to_string) }
+        Self {
+            db,
+            decoy_prefix: norm,
+            decoy_suffix: decoy_suffix.map(str::to_string),
+        }
     }
 
     /// Look up the `Protein` at the given index in the combined target+decoy
@@ -147,8 +151,12 @@ impl SearchIndex {
     }
 
     fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
-        if needle.is_empty() { return true; }
-        if needle.len() > haystack.len() { return false; }
+        if needle.is_empty() {
+            return true;
+        }
+        if needle.len() > haystack.len() {
+            return false;
+        }
         haystack.windows(needle.len()).any(|w| w == needle)
     }
 
@@ -175,8 +183,16 @@ mod tests {
     fn from_target_db_doubles_protein_count() {
         let target = ProteinDb {
             proteins: vec![
-                Protein { accession: "P1".into(), description: "".into(), sequence: b"MKWV".to_vec() },
-                Protein { accession: "P2".into(), description: "".into(), sequence: b"AGCT".to_vec() },
+                Protein {
+                    accession: "P1".into(),
+                    description: "".into(),
+                    sequence: b"MKWV".to_vec(),
+                },
+                Protein {
+                    accession: "P2".into(),
+                    description: "".into(),
+                    sequence: b"AGCT".to_vec(),
+                },
             ],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -186,9 +202,11 @@ mod tests {
     #[test]
     fn from_target_db_first_half_is_target_second_half_is_decoy() {
         let target = ProteinDb {
-            proteins: vec![
-                Protein { accession: "P1".into(), description: "".into(), sequence: b"AB".to_vec() },
-            ],
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"AB".to_vec(),
+            }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         assert_eq!(idx.db.proteins[0].accession, "P1");
@@ -202,8 +220,16 @@ mod tests {
         // 2 targets with their original accessions, dropping the prefixed decoys.
         let target = ProteinDb {
             proteins: vec![
-                Protein { accession: "P1".into(), description: "".into(), sequence: b"MKWV".to_vec() },
-                Protein { accession: "P2".into(), description: "".into(), sequence: b"AGCT".to_vec() },
+                Protein {
+                    accession: "P1".into(),
+                    description: "".into(),
+                    sequence: b"MKWV".to_vec(),
+                },
+                Protein {
+                    accession: "P2".into(),
+                    description: "".into(),
+                    sequence: b"AGCT".to_vec(),
+                },
             ],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -211,7 +237,11 @@ mod tests {
 
         let recovered = idx.target_db();
         assert_eq!(recovered.len(), 2, "only the 2 target proteins survive");
-        let accs: Vec<&str> = recovered.proteins.iter().map(|p| p.accession.as_str()).collect();
+        let accs: Vec<&str> = recovered
+            .proteins
+            .iter()
+            .map(|p| p.accession.as_str())
+            .collect();
         assert_eq!(accs, vec!["P1", "P2"]);
         // Sequences are preserved verbatim (not reversed).
         assert_eq!(recovered.proteins[0].sequence, b"MKWV");
@@ -226,13 +256,11 @@ mod tests {
         // Target protein: MABCDEFGHIK (as bytes: M=77, A=65, B=66, ...)
         // Use a realistic amino acid sequence the model will accept.
         let target = ProteinDb {
-            proteins: vec![
-                Protein {
-                    accession: "P1".into(),
-                    description: "".into(),
-                    sequence: b"MABCDEFGHIK".to_vec(),
-                },
-            ],
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MABCDEFGHIK".to_vec(),
+            }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         assert!(
@@ -246,13 +274,11 @@ mod tests {
         // The decoy of MABCDEFGHIK is KIHLGFEDCBAM (reversed).
         // A peptide in the decoy but not the target should return false.
         let target = ProteinDb {
-            proteins: vec![
-                Protein {
-                    accession: "P1".into(),
-                    description: "".into(),
-                    sequence: b"MABCDEFGHIK".to_vec(),
-                },
-            ],
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MABCDEFGHIK".to_vec(),
+            }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         // "KIHLG" appears only in the reversed (decoy) sequence, not in the target.
@@ -266,13 +292,11 @@ mod tests {
     fn peptide_has_target_match_empty_peptide_matches_any_target_protein() {
         // An empty peptide is trivially a substring of any non-empty protein.
         let target = ProteinDb {
-            proteins: vec![
-                Protein {
-                    accession: "P1".into(),
-                    description: "".into(),
-                    sequence: b"MABCDEFGHIK".to_vec(),
-                },
-            ],
+            proteins: vec![Protein {
+                accession: "P1".into(),
+                description: "".into(),
+                sequence: b"MABCDEFGHIK".to_vec(),
+            }],
         };
         let idx = SearchIndex::from_target_db(&target, "XXX");
         assert!(
@@ -283,10 +307,22 @@ mod tests {
 
     #[test]
     fn searchindex_concat_keeps_self_decoy_prefix_and_appends_db() {
-        let a = SearchIndex { db: ProteinDb { proteins: vec![] }, decoy_prefix: "XXX".into(), decoy_suffix: None };
-        let b = SearchIndex { db: ProteinDb { proteins: vec![
-            model::protein::Protein { accession: "P".into(), description: String::new(), sequence: b"AK".to_vec() }
-        ]}, decoy_prefix: "ZZZ".into(), decoy_suffix: None };
+        let a = SearchIndex {
+            db: ProteinDb { proteins: vec![] },
+            decoy_prefix: "XXX".into(),
+            decoy_suffix: None,
+        };
+        let b = SearchIndex {
+            db: ProteinDb {
+                proteins: vec![model::protein::Protein {
+                    accession: "P".into(),
+                    description: String::new(),
+                    sequence: b"AK".to_vec(),
+                }],
+            },
+            decoy_prefix: "ZZZ".into(),
+            decoy_suffix: None,
+        };
         let c = a.concat(&b);
         assert_eq!(c.db.len(), 1);
         assert_eq!(c.decoy_prefix, "XXX");

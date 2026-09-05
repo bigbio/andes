@@ -24,13 +24,24 @@ command -v docker  >/dev/null || { echo "docker not found (needed for Percolator
 echo "provenance: andes $("$ANDES" --version 2>&1 | head -1) | $(uname -srm) | ${THREADS} threads | $(date -u +%FT%TZ)"
 printf '\n%-8s %10s %12s %14s\n' dataset wall "PSMs@q0.01" "entrap hits"
 
+# `ls a.raw b.mzML` SORTS its operands, so a combined glob returns the .mzML first and the
+# "prefer native" intent is lost. Pick the extensions in order instead.
+pick_spectra() {  # $1 = dataset dir
+  local ext f
+  for ext in raw mzML mzml; do
+    f=$(ls "$1"/*."$ext" 2>/dev/null | head -1) || true
+    [ -n "${f:-}" ] && [ -s "$f" ] && { printf '%s' "$f"; return; }
+  done
+  return 0   # not-found is normal; `set -e` must not abort the assignment below
+}
+
 for ds in "${SETS[@]}"; do
   case "$ds" in
-    astral) spec=$(ls "$DATA_DIR"/astral/*.raw "$DATA_DIR"/astral/*.mzML 2>/dev/null | head -1)   # .raw first: no conversion
+    astral) spec=$(pick_spectra "$DATA_DIR/astral")   # .raw first: no conversion
             fa="$DB/hye.fasta";          extra=(--mods "$HERE/../configs/astral_mods.txt" --precursor-tol 10ppm --enzyme trypsin) ;;
-    tmt)    spec=$(ls "$DATA_DIR"/tmt/*.raw "$DATA_DIR"/tmt/*.mzML 2>/dev/null | head -1)
+    tmt)    spec=$(pick_spectra "$DATA_DIR/tmt")
             fa="$DB/tmt_db.fasta";       extra=(--mods "$HERE/../configs/mods-tmt.txt") ;;
-    ups1)   spec=$(ls "$DATA_DIR"/ups1/*.raw "$DATA_DIR"/ups1/*.mzML 2>/dev/null | head -1)
+    ups1)   spec=$(pick_spectra "$DATA_DIR/ups1")
             fa="$DB/yeast_entrap.fasta"; extra=() ;;
     *) echo "unknown dataset '$ds'" >&2; exit 1 ;;
   esac

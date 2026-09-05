@@ -100,7 +100,10 @@ impl IntensityModel {
         let mut total_count: u64 = 0;
         let mut total_mean_sum = 0.0;
 
-        for batch_result in builder.build().map_err(|e| IntensityModelError::Parquet(e.to_string()))? {
+        for batch_result in builder
+            .build()
+            .map_err(|e| IntensityModelError::Parquet(e.to_string()))?
+        {
             let batch = batch_result.map_err(|e| IntensityModelError::Parquet(e.to_string()))?;
             let ion_col = str_col(&batch, "ion_type")?;
             let flank_n_col = str_col(&batch, "flank_n")?;
@@ -147,8 +150,18 @@ impl IntensityModel {
                 let Some(ion_type) = IntensityIonType::parse(ion_s) else {
                     continue;
                 };
-                let flank_n = flank_n_col.value(i).as_bytes().first().copied().unwrap_or(b'X');
-                let flank_c = flank_c_col.value(i).as_bytes().first().copied().unwrap_or(b'X');
+                let flank_n = flank_n_col
+                    .value(i)
+                    .as_bytes()
+                    .first()
+                    .copied()
+                    .unwrap_or(b'X');
+                let flank_c = flank_c_col
+                    .value(i)
+                    .as_bytes()
+                    .first()
+                    .copied()
+                    .unwrap_or(b'X');
                 let count_raw = count_col.value(i);
                 if count_raw < 0 {
                     // A negative count is corrupt; `as u64` would wrap it to a huge
@@ -360,8 +373,7 @@ mod tests {
         assert!((mean - (-0.5)).abs() < 1e-9);
         assert!((spread - 0.2_f64.sqrt()).abs() < 1e-9);
         // Sparse b-ion (count=5) backs off past the fine key to the global mean.
-        let (mean_b, _) =
-            model.predict_log_rel(IntensityIonType::B, b'A', b'L', 1, 2, "25");
+        let (mean_b, _) = model.predict_log_rel(IntensityIonType::B, b'A', b'L', 1, 2, "25");
         let global = (-0.5 * 100.0 - 3.0 * 5.0 - 1.0 * 500.0) / 605.0;
         assert!((mean_b - global).abs() < 1e-9);
         assert!((mean_b - (-3.0)).abs() > 0.1);
@@ -410,6 +422,9 @@ mod tests {
         let (b_al, _) = model.predict_log_rel(IntensityIonType::B, b'A', b'L', 5, 2, "unknown");
         assert!((y_kr - (-0.2)).abs() < 1e-9, "y(K|R) uses its own marginal");
         assert!((b_al - (-3.5)).abs() < 1e-9, "b(A|L) uses its own marginal");
-        assert!((y_kr - b_al).abs() > 1.0, "per-context predictions stay distinct (model consulted, not global)");
+        assert!(
+            (y_kr - b_al).abs() > 1.0,
+            "per-context predictions stay distinct (model consulted, not global)"
+        );
     }
 }

@@ -17,10 +17,20 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
     let hdr = String::from_utf8(buf.into_inner()).unwrap();
     let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
     for dead in [
-        "mass", "IsolationWindowEfficiency", "PrecursorIsotopeKL", "PrecursorSNR",
-        "IsRefinement", "NumMods", "RefinementModClass",
-        "ModSiteShiftedMatched", "ModSiteShiftedFrac", "ModSiteIntensFrac",
-        "ModSiteLocalized", "ModSiteDetCount", "RawScoreCal", "DeltaRTRank",
+        "mass",
+        "IsolationWindowEfficiency",
+        "PrecursorIsotopeKL",
+        "PrecursorSNR",
+        "IsRefinement",
+        "NumMods",
+        "RefinementModClass",
+        "ModSiteShiftedMatched",
+        "ModSiteShiftedFrac",
+        "ModSiteIntensFrac",
+        "ModSiteLocalized",
+        "ModSiteDetCount",
+        "RawScoreCal",
+        "DeltaRTRank",
     ] {
         assert!(
             !cols.contains(&dead),
@@ -28,8 +38,11 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
         );
     }
     // and the live ones the policy must NOT have taken with it
-    for live in ["RawScore", "RankScore", "YHitFrac", "CzHyperscore", "IsTransferred"] {
-        assert!(cols.contains(&live), "live column {live} missing from default header");
+    for live in ["RawScore", "RankScore", "YHitFrac", "CzHyperscore"] {
+        assert!(
+            cols.contains(&live),
+            "live column {live} missing from default header"
+        );
     }
 }
 
@@ -45,19 +58,53 @@ fn glyco_pin_curated_header_is_exactly_the_validated_set() {
     // charge one-hot or in the validated keep-list, and no keep-listed
     // non-charge column may be missing.
     let keep: &[&str] = &[
-        "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass",
-        "RankScore", "RankScoreFloat", "RawScore", "TailorScore", "EdgeScore",
-        "NumMatchedMainIons", "matchedIonRatio", "longest_y_pct",
-        "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
-        "ComplementaryIonBalance", "MeanMatchedIntensityRank", "PpmGaussianScore",
-        "ChanceMatchSurprise", "MassCompetitionEvidence", "RichIonLLR",
-        "FragPredExplained", "FragPredChanceLLR", "IntensitySignal",
-        "dm", "absdm", "peplen", "isotope_error",
-        "enzN", "enzC", "enzInt",
-        "DeltaRT", "AbsDeltaRT", "DeltaRTNorm", "IsobaricRTMargin",
-        "OxoniumScore", "NCoreOxoniumIons", "YLadderScore", "YHitFrac", "CoreYHits",
-        "PartialGlycanBY", "Y0Y1Anchor", "SialicConsistency", "GlycanMass",
-        "Peptide", "Proteins",
+        "SpecId",
+        "Label",
+        "ScanNr",
+        "ExpMass",
+        "CalcMass",
+        "RankScore",
+        "RankScoreFloat",
+        "RawScore",
+        "TailorScore",
+        "EdgeScore",
+        "NumMatchedMainIons",
+        "matchedIonRatio",
+        "longest_y_pct",
+        "ExplainedIonCurrentRatio",
+        "NTermIonCurrentRatio",
+        "CTermIonCurrentRatio",
+        "ComplementaryIonBalance",
+        "MeanMatchedIntensityRank",
+        "PpmGaussianScore",
+        "ChanceMatchSurprise",
+        "MassCompetitionEvidence",
+        "RichIonLLR",
+        "FragPredExplained",
+        "FragPredChanceLLR",
+        "IntensitySignal",
+        "dm",
+        "absdm",
+        "peplen",
+        "isotope_error",
+        "enzN",
+        "enzC",
+        "enzInt",
+        "DeltaRT",
+        "AbsDeltaRT",
+        "DeltaRTNorm",
+        "IsobaricRTMargin",
+        "OxoniumScore",
+        "NCoreOxoniumIons",
+        "YLadderScore",
+        "YHitFrac",
+        "CoreYHits",
+        "PartialGlycanBY",
+        "Y0Y1Anchor",
+        "SialicConsistency",
+        "GlycanMass",
+        "Peptide",
+        "Proteins",
     ];
     for c in &cols {
         assert!(
@@ -66,22 +113,32 @@ fn glyco_pin_curated_header_is_exactly_the_validated_set() {
         );
     }
     for k in keep {
-        assert!(cols.contains(k), "validated column {k} missing from curated PIN");
+        assert!(
+            cols.contains(k),
+            "validated column {k} missing from curated PIN"
+        );
     }
-    for gone in ["CzHyperscore", "IsTransferred", "MS2IonCurrent",
-                 "CandidateRankEntropy", "ListwiseScoreGap", "DeltaRankScore"] {
-        assert!(!cols.contains(&gone), "{gone} must not appear in curated mode");
+    for gone in [
+        "CzHyperscore",
+        "MS2IonCurrent",
+        "CandidateRankEntropy",
+        "ListwiseScoreGap",
+        "DeltaRankScore",
+    ] {
+        assert!(
+            !cols.contains(&gone),
+            "{gone} must not appear in curated mode"
+        );
     }
 }
 
-/// The redesign columns are ADDITIVE and experimental: they must appear in the
-/// default header (so their flags can be measured) and must NOT appear in the
-/// curated header, which pins the configuration that measured 384.6 +/- 23
-/// glycoPSMs @1%. Adding an unmeasured column to that set would silently change
-/// what "curated" means.
+/// The four ID-neutral research emitters (`--glyco-y-tree`, `--glyco-oxonium-llr`,
+/// `--glyco-rank-masked`, `--glyco-chance-llr-masked`) were measured
+/// identification-neutral and removed. Their columns must not reappear in
+/// either header, curated or default.
 #[test]
-fn redesign_columns_are_default_only() {
-    let redesign = [
+fn retired_research_columns_are_gone() {
+    let retired = [
         "YTreeLLR",
         "YTreeHitFrac",
         "YTreeHighPriorMissing",
@@ -91,30 +148,17 @@ fn redesign_columns_are_default_only() {
         "MaskedPeakCount",
         "ChanceLlrMasked",
         "ExplainedMasked",
-        "DeltaBackbone",
-        "DeltaGlycan",
-        "DeltaPeptide",
-        "NSplitsConsidered",
     ];
-
-    let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, false).unwrap();
-    let hdr = String::from_utf8(buf.into_inner()).unwrap();
-    let default_cols: Vec<&str> = hdr.trim_end().split('\t').collect();
-
-    let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, true).unwrap();
-    let hdr = String::from_utf8(buf.into_inner()).unwrap();
-    let curated_cols: Vec<&str> = hdr.trim_end().split('\t').collect();
-
-    for c in redesign {
-        assert!(
-            default_cols.contains(&c),
-            "{c} missing from the default glyco PIN: its flag can never be measured"
-        );
-        assert!(
-            !curated_cols.contains(&c),
-            "{c} leaked into the curated set, which pins a MEASURED configuration"
-        );
+    for curated in [false, true] {
+        let mut buf = Cursor::new(Vec::new());
+        output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, curated).unwrap();
+        let hdr = String::from_utf8(buf.into_inner()).unwrap();
+        let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
+        for c in retired {
+            assert!(
+                !cols.contains(&c),
+                "retired column {c} is back (curated={curated})"
+            );
+        }
     }
 }

@@ -1,9 +1,0 @@
-# Phase-1 gate data lives in the session scratchpad, NOT the repo.
-# Never commit raw/mzML/pepXML/truth artifacts here.
-*.raw
-*.mzML
-*.mzml
-*.pepXML
-*.pepxml
-*.tsv
-*.mgf

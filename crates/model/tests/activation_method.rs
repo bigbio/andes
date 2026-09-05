@@ -7,10 +7,10 @@ use model::ActivationMethod;
 #[test]
 fn canonical_names_resolve() {
     let reference: &[(ActivationMethod, &str)] = &[
-        (ActivationMethod::CID,  "CID"),
-        (ActivationMethod::ETD,  "ETD"),
-        (ActivationMethod::HCD,  "HCD"),
-        (ActivationMethod::PQD,  "PQD"),
+        (ActivationMethod::CID, "CID"),
+        (ActivationMethod::ETD, "ETD"),
+        (ActivationMethod::HCD, "HCD"),
+        (ActivationMethod::PQD, "PQD"),
         (ActivationMethod::UVPD, "UVPD"),
     ];
     for &(variant, name) in reference {
@@ -22,12 +22,21 @@ fn canonical_names_resolve() {
 #[test]
 fn no_extra_variants() {
     let names: Vec<_> = [
-        ActivationMethod::CID,  ActivationMethod::ETD,
-        ActivationMethod::HCD,  ActivationMethod::PQD,
+        ActivationMethod::CID,
+        ActivationMethod::ETD,
+        ActivationMethod::HCD,
+        ActivationMethod::PQD,
         ActivationMethod::UVPD,
-    ].iter().map(|m| m.name()).collect();
+    ]
+    .iter()
+    .map(|m| m.name())
+    .collect();
     let mut sorted = names.clone();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(names.len(), sorted.len(), "duplicate name(s) in ActivationMethod");
+    assert_eq!(
+        names.len(),
+        sorted.len(),
+        "duplicate name(s) in ActivationMethod"
+    );
 }

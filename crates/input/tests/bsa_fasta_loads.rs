@@ -30,7 +30,15 @@ fn bsa_protein_has_expected_accession_and_length() {
     let db = FastaReader::load_all(BufReader::new(file)).unwrap();
     let p = &db.proteins[0];
     assert_eq!(p.accession, "sp|P02769|ALBU_BOVIN");
-    assert!(p.sequence.len() >= 500, "BSA sequence too short: {}", p.sequence.len());
-    assert!(p.sequence.iter().all(|&b| b.is_ascii_uppercase() && b.is_ascii_alphabetic()),
-        "non-uppercase or non-alpha residue found");
+    assert!(
+        p.sequence.len() >= 500,
+        "BSA sequence too short: {}",
+        p.sequence.len()
+    );
+    assert!(
+        p.sequence
+            .iter()
+            .all(|&b| b.is_ascii_uppercase() && b.is_ascii_alphabetic()),
+        "non-uppercase or non-alpha residue found"
+    );
 }

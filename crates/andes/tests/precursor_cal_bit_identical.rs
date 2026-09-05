@@ -45,10 +45,9 @@ fn workspace_root() -> PathBuf {
 }
 
 fn read_sorted_rows(path: &PathBuf) -> (String, Vec<String>) {
-    let bytes = std::fs::read(path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let text = String::from_utf8(bytes)
-        .unwrap_or_else(|_| panic!("non-utf8 in {}", path.display()));
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        String::from_utf8(bytes).unwrap_or_else(|_| panic!("non-utf8 in {}", path.display()));
     let mut lines = text.lines();
     let header = lines
         .next()
@@ -73,10 +72,14 @@ fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
     let actual_tsv = outdir.path().join("actual.tsv");
 
     let status = Command::new(&binary)
-        .arg("--spectrum").arg(&spectra)
-        .arg("--database").arg(&fasta)
-        .arg("--output-pin").arg(&actual_pin)
-        .arg("--output-tsv").arg(&actual_tsv)
+        .arg("--spectrum")
+        .arg(&spectra)
+        .arg("--database")
+        .arg(&fasta)
+        .arg("--output-pin")
+        .arg(&actual_pin)
+        .arg("--output-tsv")
+        .arg(&actual_tsv)
         // No --precursor-cal flag → default 'off'.
         .status()
         .expect("run andes");
@@ -108,20 +111,24 @@ fn precursor_cal_off_pin_tsv_match_golden_after_sort() {
     );
 
     if actual_pin_rows != golden_pin_rows {
-        for (i, (a, g)) in actual_pin_rows.iter().zip(golden_pin_rows.iter()).enumerate() {
+        for (i, (a, g)) in actual_pin_rows
+            .iter()
+            .zip(golden_pin_rows.iter())
+            .enumerate()
+        {
             if a != g {
-                panic!(
-                    "PIN row mismatch at sorted index {i}:\n  actual: {a}\n  golden: {g}",
-                );
+                panic!("PIN row mismatch at sorted index {i}:\n  actual: {a}\n  golden: {g}",);
             }
         }
     }
     if actual_tsv_rows != golden_tsv_rows {
-        for (i, (a, g)) in actual_tsv_rows.iter().zip(golden_tsv_rows.iter()).enumerate() {
+        for (i, (a, g)) in actual_tsv_rows
+            .iter()
+            .zip(golden_tsv_rows.iter())
+            .enumerate()
+        {
             if a != g {
-                panic!(
-                    "TSV row mismatch at sorted index {i}:\n  actual: {a}\n  golden: {g}",
-                );
+                panic!("TSV row mismatch at sorted index {i}:\n  actual: {a}\n  golden: {g}",);
             }
         }
     }

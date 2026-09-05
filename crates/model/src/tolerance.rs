@@ -12,7 +12,7 @@ impl Tolerance {
     pub fn as_da(&self, mass: f64) -> f64 {
         match self {
             Tolerance::Ppm(ppm) => mass * ppm * 1e-6,
-            Tolerance::Da(da)   => *da,
+            Tolerance::Da(da) => *da,
         }
     }
 
@@ -22,7 +22,7 @@ impl Tolerance {
     pub fn raw_value(&self) -> f64 {
         match self {
             Tolerance::Ppm(v) => *v,
-            Tolerance::Da(v)  => *v,
+            Tolerance::Da(v) => *v,
         }
     }
 }
@@ -32,7 +32,7 @@ impl Tolerance {
 /// case constructed via `symmetric`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PrecursorTolerance {
-    pub left:  Tolerance,
+    pub left: Tolerance,
     pub right: Tolerance,
 }
 

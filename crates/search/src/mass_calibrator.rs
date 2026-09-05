@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
 use model::mass::{H2O, PROTON};
-use model::Spectrum;
 use model::tolerance::{PrecursorTolerance, Tolerance};
+use model::Spectrum;
 
 use crate::match_engine::PreparedSearch;
 use crate::precursor_cal::{
@@ -74,19 +74,36 @@ pub fn build_spec_keys(
     charge_range: &RangeInclusive<u8>,
     min_peaks: u32,
 ) -> Vec<SpecKey> {
+    build_spec_keys_from_counts(
+        spectra.iter().map(|s| (s.precursor_charge, s.peaks.len())),
+        charge_range,
+        min_peaks,
+    )
+}
+
+/// Same as [`build_spec_keys`] but from `(precursor_charge, peak_count)` pairs, so a
+/// metadata-only pre-pass need not materialise placeholder peak lists.
+pub fn build_spec_keys_from_counts(
+    spectra: impl IntoIterator<Item = (Option<i32>, usize)>,
+    charge_range: &RangeInclusive<u8>,
+    min_peaks: u32,
+) -> Vec<SpecKey> {
     let mut keys = Vec::new();
-    for (spectrum_idx, spec) in spectra.iter().enumerate() {
-        if spec.peaks.len() < min_peaks as usize {
+    for (spectrum_idx, (precursor_charge, n_peaks)) in spectra.into_iter().enumerate() {
+        if n_peaks < min_peaks as usize {
             continue;
         }
-        match spec.precursor_charge {
+        match precursor_charge {
             Some(z) if z > 0 => keys.push(SpecKey {
                 spectrum_idx,
                 charge: z as u8,
             }),
             _ => {
                 for z in charge_range.clone() {
-                    keys.push(SpecKey { spectrum_idx, charge: z });
+                    keys.push(SpecKey {
+                        spectrum_idx,
+                        charge: z,
+                    });
                 }
             }
         }
@@ -202,7 +219,8 @@ pub fn apply_tightened_precursor_tolerance(params: &mut SearchParams, stats: Cal
     let floor = constants::TIGHTENED_WINDOW_FLOOR_PPM;
     let margin = constants::TIGHTENED_WINDOW_MARGIN_PPM;
 
-    let tightened_left = tightened_tolerance_ppm(left_ppm, stats.robust_sigma_ppm, sigma_mult, floor, margin);
+    let tightened_left =
+        tightened_tolerance_ppm(left_ppm, stats.robust_sigma_ppm, sigma_mult, floor, margin);
     let tightened_right =
         tightened_tolerance_ppm(right_ppm, stats.robust_sigma_ppm, sigma_mult, floor, margin);
 
@@ -258,14 +276,11 @@ fn extract_residuals(
     // sampled SpecKeys (e.g. charge variants).
     let mut best_by_spec: HashMap<usize, crate::PsmMatch> = HashMap::new();
     for (key, queue) in sampled.iter().zip(queues.iter()) {
-        let Some(psm) = queue
-            .iter_psms()
-            .max_by(|a, b| {
-                a.rank_score
-                    .partial_cmp(&b.rank_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        else {
+        let Some(psm) = queue.iter_psms().max_by(|a, b| {
+            a.rank_score
+                .partial_cmp(&b.rank_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) else {
             continue;
         };
         filter.queues_with_psm += 1;
@@ -348,8 +363,16 @@ fn high_confidence_residuals(cands: &mut [CalCandidate], keep_top_n: usize) -> V
     // Rank by rank_score descending; tie-break is irrelevant to the gate
     // because tied buckets all take the worst q below, but keep it stable.
     cands.sort_by(|a, b| {
-        let av = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
-        let bv = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+        let av = if a.rank_score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            a.rank_score
+        };
+        let bv = if b.rank_score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            b.rank_score
+        };
         bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -511,17 +534,25 @@ mod tests {
     }
 
     fn cand(residual: f64, rank_score: f32, is_decoy: bool) -> CalCandidate {
-        CalCandidate { residual, rank_score, is_decoy }
+        CalCandidate {
+            residual,
+            rank_score,
+            is_decoy,
+        }
     }
 
     #[test]
     fn decoy_only_residuals_produce_no_calibration() {
         // A pre-pass that found only decoys at the top is NOT trustworthy: no
         // residual should survive the TD-q gate, so no shift can be computed.
-        let mut cands: Vec<CalCandidate> =
-            (0..50).map(|i| cand(3.0, 20.0 - i as f32 * 0.1, true)).collect();
+        let mut cands: Vec<CalCandidate> = (0..50)
+            .map(|i| cand(3.0, 20.0 - i as f32 * 0.1, true))
+            .collect();
         let residuals = high_confidence_residuals(&mut cands, constants::RESIDUAL_CAP);
-        assert!(residuals.is_empty(), "decoy-only set must yield no residuals");
+        assert!(
+            residuals.is_empty(),
+            "decoy-only set must yield no residuals"
+        );
     }
 
     #[test]
@@ -548,7 +579,10 @@ mod tests {
             .collect();
         cands.push(cand(9.0, 1.0, true)); // a single low-scoring decoy at the tail
         let residuals = high_confidence_residuals(&mut cands, constants::RESIDUAL_CAP);
-        assert!(!residuals.is_empty(), "confident targets must yield residuals");
+        assert!(
+            !residuals.is_empty(),
+            "confident targets must yield residuals"
+        );
         assert!(residuals.iter().all(|&r| (r - 4.0).abs() < 1e-9));
     }
 
@@ -571,7 +605,10 @@ mod tests {
             ppm_value(params.precursor_tolerance.left),
             ppm_value(params.precursor_tolerance.right),
         );
-        assert_eq!(before, after, "tolerance must not tighten on unreliable stats");
+        assert_eq!(
+            before, after,
+            "tolerance must not tighten on unreliable stats"
+        );
     }
 
     #[test]

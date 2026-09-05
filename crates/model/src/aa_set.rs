@@ -34,9 +34,9 @@ pub struct AminoAcidSet {
     max_residue_mod_mass: f64,
     max_fixed_term_mod_mass: f64,
     /// Cleavage score fields, set by `register_enzyme`. All default to 0.
-    peptide_cleavage_credit:      i32,
-    peptide_cleavage_penalty:     i32,
-    neighboring_aa_cleavage_credit:  i32,
+    peptide_cleavage_credit: i32,
+    peptide_cleavage_penalty: i32,
+    neighboring_aa_cleavage_credit: i32,
     neighboring_aa_cleavage_penalty: i32,
 }
 
@@ -55,11 +55,21 @@ impl AminoAcidSet {
             .find(|aa| !aa.is_modified())
     }
 
-    pub fn contains_cterm_mods(&self) -> bool { self.has_cterm_mods }
-    pub fn min_aa_mass(&self) -> f64           { self.min_aa_mass }
-    pub fn max_aa_mass(&self) -> f64           { self.max_aa_mass }
-    pub fn max_residue_mod_mass(&self) -> f64  { self.max_residue_mod_mass }
-    pub fn max_fixed_term_mod_mass(&self) -> f64 { self.max_fixed_term_mod_mass }
+    pub fn contains_cterm_mods(&self) -> bool {
+        self.has_cterm_mods
+    }
+    pub fn min_aa_mass(&self) -> f64 {
+        self.min_aa_mass
+    }
+    pub fn max_aa_mass(&self) -> f64 {
+        self.max_aa_mass
+    }
+    pub fn max_residue_mod_mass(&self) -> f64 {
+        self.max_residue_mod_mass
+    }
+    pub fn max_fixed_term_mod_mass(&self) -> f64 {
+        self.max_fixed_term_mod_mass
+    }
 
     pub fn iter_variants(&self) -> impl Iterator<Item = &AminoAcid> {
         self.table.values().flat_map(|v| v.iter())
@@ -271,12 +281,9 @@ impl AminoAcidSet {
         if prob <= 0.0 || prob >= 1.0 || peptide_efficiency == 0.0 {
             return;
         }
-        let credit = |eff: f32| -> i32 {
-            ((eff as f64 / prob as f64).ln()).round() as i32
-        };
-        let penalty = |eff: f32| -> i32 {
-            (((1.0 - eff) as f64 / (1.0 - prob) as f64).ln()).round() as i32
-        };
+        let credit = |eff: f32| -> i32 { ((eff as f64 / prob as f64).ln()).round() as i32 };
+        let penalty =
+            |eff: f32| -> i32 { (((1.0 - eff) as f64 / (1.0 - prob) as f64).ln()).round() as i32 };
         self.peptide_cleavage_credit = credit(peptide_efficiency);
         self.peptide_cleavage_penalty = penalty(peptide_efficiency);
         self.neighboring_aa_cleavage_credit = credit(neighboring_efficiency);
@@ -288,13 +295,16 @@ impl AminoAcidSet {
 /// checks and produces the immutable `AminoAcidSet`.
 #[derive(Debug, Clone)]
 pub struct AminoAcidSetBuilder {
-    fixed_mods:    Vec<Modification>,
+    fixed_mods: Vec<Modification>,
     variable_mods: Vec<Modification>,
 }
 
 impl AminoAcidSetBuilder {
     pub fn new_standard() -> Self {
-        Self { fixed_mods: vec![], variable_mods: vec![] }
+        Self {
+            fixed_mods: vec![],
+            variable_mods: vec![],
+        }
     }
 
     pub fn new_standard_with_carbamidomethyl_c() -> Self {
@@ -330,7 +340,7 @@ impl AminoAcidSetBuilder {
             // Strip an inline `#` comment (mods.txt convention).
             let no_comment = match raw.find('#') {
                 Some(i) => &raw[..i],
-                None    => raw,
+                None => raw,
             };
             let line = no_comment.trim();
             if line.is_empty() {
@@ -343,8 +353,12 @@ impl AminoAcidSetBuilder {
             if line.to_ascii_lowercase().starts_with("nummods=") {
                 continue;
             }
-            let m = Modification::from_mods_txt_line(line)
-                .map_err(|source| AaSetError::ModsTxtParse { line_no: line_no + 1, source })?;
+            let m = Modification::from_mods_txt_line(line).map_err(|source| {
+                AaSetError::ModsTxtParse {
+                    line_no: line_no + 1,
+                    source,
+                }
+            })?;
             if m.fixed {
                 self.fixed_mods.push(m);
             } else {
@@ -370,7 +384,7 @@ impl AminoAcidSetBuilder {
         for raw in text.lines() {
             let no_comment = match raw.find('#') {
                 Some(i) => &raw[..i],
-                None    => raw,
+                None => raw,
             };
             let line = no_comment.trim();
             if !line.to_ascii_lowercase().starts_with("nummods=") {
@@ -403,7 +417,7 @@ impl AminoAcidSetBuilder {
                 if mods_target_same_slot(fm, vm) {
                     let res_char = match fm.residue {
                         ResidueSpec::Specific(r) => r as char,
-                        ResidueSpec::Wildcard    => '*',
+                        ResidueSpec::Wildcard => '*',
                     };
                     return Err(AaSetError::ConflictingMods {
                         residue: res_char,
@@ -425,32 +439,26 @@ impl AminoAcidSetBuilder {
         // RSS. The intermediate fixed/variable match `Vec<Modification>`
         // copies below are gone; we hand out `Arc::clone(...)` calls
         // instead.
-        let fixed_mods_arc: Vec<Arc<Modification>> = self
-            .fixed_mods
-            .iter()
-            .cloned()
-            .map(Arc::new)
-            .collect();
-        let variable_mods_arc: Vec<Arc<Modification>> = self
-            .variable_mods
-            .iter()
-            .cloned()
-            .map(Arc::new)
-            .collect();
+        let fixed_mods_arc: Vec<Arc<Modification>> =
+            self.fixed_mods.iter().cloned().map(Arc::new).collect();
+        let variable_mods_arc: Vec<Arc<Modification>> =
+            self.variable_mods.iter().cloned().map(Arc::new).collect();
 
         let mut table: FxHashMap<(u8, ModLocation), Vec<AminoAcid>> = FxHashMap::default();
         let locations = [
-            ModLocation::Anywhere, ModLocation::NTerm, ModLocation::CTerm,
-            ModLocation::ProtNTerm, ModLocation::ProtCTerm,
+            ModLocation::Anywhere,
+            ModLocation::NTerm,
+            ModLocation::CTerm,
+            ModLocation::ProtNTerm,
+            ModLocation::ProtCTerm,
         ];
 
         for &r in STANDARD_RESIDUES {
             let std_aa = AminoAcid::standard(r).expect("STANDARD_RESIDUES has only valid residues");
 
             for &loc in &locations {
-                let fixed_match: Option<&Arc<Modification>> = fixed_mods_arc
-                    .iter()
-                    .find(|m| m.applies_to(r, loc));
+                let fixed_match: Option<&Arc<Modification>> =
+                    fixed_mods_arc.iter().find(|m| m.applies_to(r, loc));
 
                 let variable_matches: Vec<&Arc<Modification>> = variable_mods_arc
                     .iter()
@@ -482,9 +490,11 @@ impl AminoAcidSetBuilder {
                     // fixed-anywhere mass into a combined mod so the stacked form is
                     // enumerated. (The fixed-anywhere-only form is already present via the
                     // Anywhere list propagated into this terminal cache.)
-                    let fixed_anywhere: Option<&Arc<Modification>> = fixed_mods_arc
-                        .iter()
-                        .find(|m| m.location == ModLocation::Anywhere && m.applies_to(r, ModLocation::Anywhere));
+                    let fixed_anywhere: Option<&Arc<Modification>> =
+                        fixed_mods_arc.iter().find(|m| {
+                            m.location == ModLocation::Anywhere
+                                && m.applies_to(r, ModLocation::Anywhere)
+                        });
                     for vm in &variable_matches {
                         if vm.location == loc {
                             let aa = match fixed_anywhere {
@@ -515,11 +525,18 @@ impl AminoAcidSetBuilder {
         }
 
         // 4. Aggregates.
-        let standard_masses: Vec<f64> = STANDARD_RESIDUES.iter()
+        let standard_masses: Vec<f64> = STANDARD_RESIDUES
+            .iter()
             .filter_map(|&r| AminoAcid::standard(r).map(|aa| aa.mass))
             .collect();
-        let min_aa_mass = standard_masses.iter().copied().fold(f64::INFINITY, f64::min);
-        let max_aa_mass = standard_masses.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let min_aa_mass = standard_masses
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max_aa_mass = standard_masses
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
 
         let mut max_mod_delta = 0.0_f64;
         for m in self.fixed_mods.iter().chain(self.variable_mods.iter()) {
@@ -529,15 +546,25 @@ impl AminoAcidSetBuilder {
         }
         let max_residue_mod_mass = max_aa_mass + max_mod_delta;
 
-        let max_fixed_term_mod_mass = self.fixed_mods
+        let max_fixed_term_mod_mass = self
+            .fixed_mods
             .iter()
-            .filter(|m| matches!(m.location,
-                ModLocation::NTerm | ModLocation::CTerm |
-                ModLocation::ProtNTerm | ModLocation::ProtCTerm))
+            .filter(|m| {
+                matches!(
+                    m.location,
+                    ModLocation::NTerm
+                        | ModLocation::CTerm
+                        | ModLocation::ProtNTerm
+                        | ModLocation::ProtCTerm
+                )
+            })
             .map(|m| m.mass_delta)
             .fold(0.0_f64, f64::max);
 
-        let has_cterm_mods = self.fixed_mods.iter().chain(self.variable_mods.iter())
+        let has_cterm_mods = self
+            .fixed_mods
+            .iter()
+            .chain(self.variable_mods.iter())
             .any(|m| matches!(m.location, ModLocation::CTerm | ModLocation::ProtCTerm));
 
         // 5. Precompute the per-location AA lists used by `aa_list_for` and
@@ -556,8 +583,10 @@ impl AminoAcidSetBuilder {
             .collect();
         aa_lists_cache.insert(ModLocation::Anywhere, anywhere_list.clone());
         for &loc in &[
-            ModLocation::NTerm, ModLocation::CTerm,
-            ModLocation::ProtNTerm, ModLocation::ProtCTerm,
+            ModLocation::NTerm,
+            ModLocation::CTerm,
+            ModLocation::ProtNTerm,
+            ModLocation::ProtCTerm,
         ] {
             let mut list = anywhere_list.clone();
             for &r in STANDARD_RESIDUES {
@@ -603,15 +632,25 @@ fn mods_target_same_slot(a: &Modification, b: &Modification) -> bool {
 #[derive(thiserror::Error, Debug)]
 pub enum AaSetError {
     #[error("conflicting fixed and variable mod for residue {residue:?} at {location:?}")]
-    ConflictingMods { residue: char, location: ModLocation },
+    ConflictingMods {
+        residue: char,
+        location: ModLocation,
+    },
     #[error("mod {name:?} mass delta {delta} is implausible (>5000 Da)")]
     ImplausibleMassDelta { name: String, delta: f64 },
     #[error("malformed Mods.txt line {line_no}: {source}")]
-    ModsTxtParse { line_no: usize, #[source] source: ModParseError },
+    ModsTxtParse {
+        line_no: usize,
+        #[source]
+        source: ModParseError,
+    },
     #[error("invalid NumMods value {value:?} (expected non-negative integer)")]
     BadNumMods { value: String },
     #[error("Mods.txt I/O error: {source}")]
-    Io { #[from] source: std::io::Error },
+    Io {
+        #[from]
+        source: std::io::Error,
+    },
 }
 
 #[cfg(test)]
@@ -619,7 +658,7 @@ mod tests {
     use super::*;
     use crate::amino_acid::AminoAcid;
     use crate::enzyme::Enzyme;
-    use crate::modification::{Modification, ModLocation, ResidueSpec};
+    use crate::modification::{ModLocation, Modification, ResidueSpec};
 
     fn carbamidomethyl_c() -> Modification {
         Modification {
@@ -669,7 +708,8 @@ mod tests {
     fn fixed_mod_replaces_residue() {
         let set = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(carbamidomethyl_c())
-            .build().unwrap();
+            .build()
+            .unwrap();
         let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
         assert_eq!(c_variants.len(), 1);
         assert!(c_variants[0].is_modified());
@@ -679,7 +719,8 @@ mod tests {
     fn variable_mod_adds_residue_variant() {
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(oxidation_m())
-            .build().unwrap();
+            .build()
+            .unwrap();
         let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
         assert_eq!(m_variants.len(), 2);
         assert!(m_variants.iter().any(|aa| !aa.is_modified()));
@@ -697,7 +738,13 @@ mod tests {
             .add_variable_mod(cam_variable)
             .build()
             .unwrap_err();
-        assert!(matches!(err, AaSetError::ConflictingMods { residue: 'C', location: ModLocation::Anywhere }));
+        assert!(matches!(
+            err,
+            AaSetError::ConflictingMods {
+                residue: 'C',
+                location: ModLocation::Anywhere
+            }
+        ));
     }
 
     #[test]
@@ -714,7 +761,8 @@ mod tests {
         };
         let err = AminoAcidSetBuilder::new_standard()
             .add_fixed_mod(bad)
-            .build().unwrap_err();
+            .build()
+            .unwrap_err();
         assert!(matches!(err, AaSetError::ImplausibleMassDelta { .. }));
     }
 
@@ -740,7 +788,8 @@ mod tests {
     fn max_residue_mod_mass_includes_mods() {
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(oxidation_m())
-            .build().unwrap();
+            .build()
+            .unwrap();
         let w = AminoAcid::standard(b'W').unwrap().mass;
         let expected = w + 15.99491;
         assert!((set.max_residue_mod_mass() - expected).abs() < 1e-9);
@@ -766,13 +815,16 @@ mod tests {
         };
         let set = AminoAcidSetBuilder::new_standard()
             .add_variable_mod(cterm_mod)
-            .build().unwrap();
+            .build()
+            .unwrap();
         assert!(set.contains_cterm_mods());
     }
 
     #[test]
     fn standard_with_carbamidomethyl_c_convenience() {
-        let set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c().build().unwrap();
+        let set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .build()
+            .unwrap();
         let c_variants = set.variants_for(b'C', ModLocation::Anywhere);
         assert_eq!(c_variants.len(), 1);
         assert!(c_variants[0].is_modified());
@@ -788,12 +840,21 @@ mod tests {
     fn fixed_mod_deltas_reports_cam_c_once() {
         // Carbamidomethyl-C is the lone fixed mod; it must be reported exactly
         // once as (C, +57.02146) even though it is folded into several slots.
-        let set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c().build().unwrap();
+        let set = AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+            .build()
+            .unwrap();
         let deltas = set.fixed_mod_deltas();
-        assert_eq!(deltas.len(), 1, "exactly one distinct fixed mod, got {deltas:?}");
+        assert_eq!(
+            deltas.len(),
+            1,
+            "exactly one distinct fixed mod, got {deltas:?}"
+        );
         let (res, delta) = deltas[0];
         assert_eq!(res, b'C');
-        assert!((delta - 57.02146).abs() < 1e-6, "expected CAM-C delta, got {delta}");
+        assert!(
+            (delta - 57.02146).abs() < 1e-6,
+            "expected CAM-C delta, got {delta}"
+        );
     }
 
     #[test]
@@ -868,15 +929,20 @@ mod tests {
     #[test]
     fn add_mods_from_file_parses_real_format() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(),
+        std::fs::write(
+            tmp.path(),
             "# comment line\n\
              \n\
              57.021464,C,fix,any,Carbamidomethyl\n\
-             15.994915,M,opt,any,Oxidation\n").unwrap();
+             15.994915,M,opt,any,Oxidation\n",
+        )
+        .unwrap();
 
         let set = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path()).unwrap()
-            .build().unwrap();
+            .add_mods_from_file(tmp.path())
+            .unwrap()
+            .build()
+            .unwrap();
 
         assert_eq!(set.variants_for(b'C', ModLocation::Anywhere).len(), 1);
         assert!(set.variants_for(b'C', ModLocation::Anywhere)[0].is_modified());
@@ -897,17 +963,18 @@ mod tests {
         let set = AminoAcidSetBuilder::new_standard().build().unwrap();
         // K + R → 2 residues × 0.05 = 0.10
         let prob = set.prob_cleavage_sites(Enzyme::Trypsin);
-        assert!(
-            (prob - 0.1_f32).abs() < 1e-5,
-            "expected ~0.1, got {prob}"
-        );
+        assert!((prob - 0.1_f32).abs() < 1e-5, "expected ~0.1, got {prob}");
     }
 
     #[test]
     fn aa_list_for_anywhere_returns_20_residues() {
         let set = AminoAcidSetBuilder::new_standard().build().unwrap();
         let list = set.aa_list_for(ModLocation::Anywhere);
-        assert_eq!(list.len(), 20, "standard set should have exactly 20 standard residues");
+        assert_eq!(
+            list.len(),
+            20,
+            "standard set should have exactly 20 standard residues"
+        );
         // Every standard residue must appear
         for &r in STANDARD_RESIDUES {
             assert!(
@@ -944,7 +1011,12 @@ mod tests {
             .unwrap();
         let list = set.aa_list_for(ModLocation::NTerm);
         // Each of the 20 standard residues gets an NTerm variant → 20 anywhere + 20 nterm = 40.
-        assert_eq!(list.len(), 40, "expected 20 standard + 20 NTerm-mod variants, got {}", list.len());
+        assert_eq!(
+            list.len(),
+            40,
+            "expected 20 standard + 20 NTerm-mod variants, got {}",
+            list.len()
+        );
     }
 
     #[test]
@@ -975,12 +1047,16 @@ mod tests {
     #[test]
     fn add_mods_from_file_reports_line_number() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(),
+        std::fs::write(
+            tmp.path(),
             "57.021464,C,fix,any,Carbamidomethyl\n\
-             garbage_line\n").unwrap();
+             garbage_line\n",
+        )
+        .unwrap();
 
         let err = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path()).unwrap_err();
+            .add_mods_from_file(tmp.path())
+            .unwrap_err();
         match err {
             AaSetError::ModsTxtParse { line_no, .. } => assert_eq!(line_no, 2),
             other => panic!("expected ModsTxtParse, got {:?}", other),
@@ -992,13 +1068,16 @@ mod tests {
         // Real-world TMT 6-plex mods file: TMT6plex fixed on K + peptide
         // N-term, CAM fixed on C, Oxidation variable on M, NumMods=3.
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(),
+        std::fs::write(
+            tmp.path(),
             "# TMT 6-plex labelling, tryptic + CAM + Met-oxidation\n\
              NumMods=3\n\
              229.162932,K,fix,any,TMT6plex\n\
              229.162932,*,fix,N-term,TMT6plex\n\
              57.021464,C,fix,any,Carbamidomethyl\n\
-             15.994915,M,opt,any,Oxidation\n").unwrap();
+             15.994915,M,opt,any,Oxidation\n",
+        )
+        .unwrap();
 
         let set = AminoAcidSetBuilder::new_standard()
             .add_mods_from_file(tmp.path())
@@ -1009,8 +1088,15 @@ mod tests {
         // K must have a fixed TMT label folded into its Anywhere variant
         // (1 variant, modified).
         let k_variants = set.variants_for(b'K', ModLocation::Anywhere);
-        assert_eq!(k_variants.len(), 1, "K should have exactly one variant (TMT-modified)");
-        assert!(k_variants[0].is_modified(), "K's Anywhere variant must carry the TMT mod");
+        assert_eq!(
+            k_variants.len(),
+            1,
+            "K should have exactly one variant (TMT-modified)"
+        );
+        assert!(
+            k_variants[0].is_modified(),
+            "K's Anywhere variant must carry the TMT mod"
+        );
 
         // Wildcard N-term TMT applies to every residue at NTerm location.
         // Pick A (no other mod competing) and assert there is an NTerm variant.
@@ -1028,7 +1114,7 @@ mod tests {
         // M variable Oxidation — 2 variants (unmod + ox).
         let m_variants = set.variants_for(b'M', ModLocation::Anywhere);
         assert_eq!(m_variants.len(), 2);
-        assert!(m_variants.iter().any(|aa|  aa.is_modified()));
+        assert!(m_variants.iter().any(|aa| aa.is_modified()));
         assert!(m_variants.iter().any(|aa| !aa.is_modified()));
 
         // NumMods=3 is parsed via the sibling helper.
@@ -1057,7 +1143,8 @@ mod tests {
             .add_fixed_mod(carbamidomethyl_c())
             .add_variable_mod(oxidation_m())
             .add_variable_mod(acetyl)
-            .build().unwrap();
+            .build()
+            .unwrap();
 
         let anywhere = set.cached_aa_list(ModLocation::Anywhere);
         let prot_n = set.cached_aa_list(ModLocation::ProtNTerm);
@@ -1065,8 +1152,14 @@ mod tests {
         // Anywhere: 20 standard residues (C fixed-modified, M with 2 variants
         // unmod+ox, K+R get acetyl-only-at-ProtNTerm so NOT in Anywhere) = 21
         let n_any_modified = anywhere.iter().filter(|aa| aa.is_modified()).count();
-        let n_any_acetyl   = anywhere.iter().filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl")).count();
-        assert_eq!(n_any_acetyl, 0, "Acetyl Prot-N-term must NOT appear in Anywhere AA list");
+        let n_any_acetyl = anywhere
+            .iter()
+            .filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name == "Acetyl"))
+            .count();
+        assert_eq!(
+            n_any_acetyl, 0,
+            "Acetyl Prot-N-term must NOT appear in Anywhere AA list"
+        );
 
         // Prot-N-term: starts from Anywhere list + one acetyl-bearing variant per
         // residue (wildcard residue → 20 acetyl variants added at Prot-N-term).
@@ -1076,13 +1169,18 @@ mod tests {
             .iter()
             .filter(|aa| aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
             .count();
-        assert_eq!(n_pn_acetyl, 20, "Prot-N-term AA list must include 20 acetyl-bearing variants (one per residue)");
+        assert_eq!(
+            n_pn_acetyl, 20,
+            "Prot-N-term AA list must include 20 acetyl-bearing variants (one per residue)"
+        );
 
         // P1b regression: protein-N-term Cys must carry CAM+Acetyl (+99.032590),
         // NOT Acetyl-alone (+42.010565). The fixed CAM (+57.02146) is mandatory.
         let c_pn = prot_n
             .iter()
-            .find(|aa| aa.residue == b'C' && aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl")))
+            .find(|aa| {
+                aa.residue == b'C' && aa.mod_.as_ref().is_some_and(|m| m.name.contains("Acetyl"))
+            })
             .expect("Cys must have an acetyl-bearing Prot-N-term variant");
         let c_delta = c_pn.mod_.as_ref().unwrap().mass_delta;
         assert!(
@@ -1097,15 +1195,16 @@ mod tests {
             anywhere.len() + 20,
             "Prot-N-term list = Anywhere list + 20 acetyl-bearing variants; \
              actual Anywhere len = {}, Prot-N-term len = {}, Anywhere modified = {}",
-            anywhere.len(), prot_n.len(), n_any_modified
+            anywhere.len(),
+            prot_n.len(),
+            n_any_modified
         );
     }
 
     #[test]
     fn parse_num_mods_returns_none_when_absent() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(),
-            "57.021464,C,fix,any,Carbamidomethyl\n").unwrap();
+        std::fs::write(tmp.path(), "57.021464,C,fix,any,Carbamidomethyl\n").unwrap();
         let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
         assert_eq!(n, None);
     }
@@ -1113,8 +1212,7 @@ mod tests {
     #[test]
     fn parse_num_mods_rejects_bad_value() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(),
-            "NumMods=garbage\n").unwrap();
+        std::fs::write(tmp.path(), "NumMods=garbage\n").unwrap();
         let err = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap_err();
         match err {
             AaSetError::BadNumMods { value } => assert_eq!(value, "garbage"),
@@ -1125,12 +1223,17 @@ mod tests {
     #[test]
     fn add_mods_from_file_strips_inline_comments() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(),
+        std::fs::write(
+            tmp.path(),
             "57.021464,C,fix,any,Carbamidomethyl  # alkylation\n\
-             NumMods=3 # max variable mods per peptide\n").unwrap();
+             NumMods=3 # max variable mods per peptide\n",
+        )
+        .unwrap();
         let set = AminoAcidSetBuilder::new_standard()
-            .add_mods_from_file(tmp.path()).unwrap()
-            .build().unwrap();
+            .add_mods_from_file(tmp.path())
+            .unwrap()
+            .build()
+            .unwrap();
         assert_eq!(set.variants_for(b'C', ModLocation::Anywhere).len(), 1);
         let n = AminoAcidSetBuilder::parse_num_mods_from_file(tmp.path()).unwrap();
         assert_eq!(n, Some(3));

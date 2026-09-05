@@ -11,9 +11,9 @@
 use rustc_hash::FxHashMap;
 
 use model::{
-    activation::ActivationMethod, instrument::InstrumentType, protocol::Protocol,
-    AminoAcid, AminoAcidSetBuilder, ModLocation, Modification, Peptide, Protein, ProteinDb,
-    ResidueSpec, Spectrum, Tolerance, H2O, PROTON,
+    activation::ActivationMethod, instrument::InstrumentType, protocol::Protocol, AminoAcid,
+    AminoAcidSetBuilder, ModLocation, Modification, Peptide, Protein, ProteinDb, ResidueSpec,
+    Spectrum, Tolerance, H2O, PROTON,
 };
 use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Partition, SpecDataType};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
@@ -25,9 +25,21 @@ use search::{PreparedSearch, SearchIndex, SearchParams};
 
 /// Realistic-enough scorer so candidates score on placed b/y peaks.
 fn make_scorer(tol_da: f64) -> RankScorer {
-    let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits(), loss_class: 0 };
-    let suffix1 = IonType::Suffix { charge: 1, offset_bits: ((H2O + PROTON) as f32).to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 0.0,
+        seg_num: 0,
+    };
+    let prefix1 = IonType::Prefix {
+        charge: 1,
+        offset_bits: (PROTON as f32).to_bits(),
+        loss_class: 0,
+    };
+    let suffix1 = IonType::Suffix {
+        charge: 1,
+        offset_bits: ((H2O + PROTON) as f32).to_bits(),
+        loss_class: 0,
+    };
     let noise = IonType::Noise;
     let mut ion_table = FxHashMap::default();
     ion_table.insert(prefix1, vec![0.6_f32, 0.3, 0.05, 0.001]);
@@ -36,10 +48,19 @@ fn make_scorer(tol_da: f64) -> RankScorer {
     let mut rank_dist_table = FxHashMap::default();
     rank_dist_table.insert(part, ion_table);
     let mut frag_off_table = FxHashMap::default();
-    frag_off_table.insert(part, vec![
-        FragmentOffsetFrequency { ion_type: prefix1, frequency: 0.7 },
-        FragmentOffsetFrequency { ion_type: suffix1, frequency: 0.7 },
-    ]);
+    frag_off_table.insert(
+        part,
+        vec![
+            FragmentOffsetFrequency {
+                ion_type: prefix1,
+                frequency: 0.7,
+            },
+            FragmentOffsetFrequency {
+                ion_type: suffix1,
+                frequency: 0.7,
+            },
+        ],
+    );
     let mut param = Param {
         version: 10001,
         data_type: SpecDataType {
@@ -76,7 +97,10 @@ fn make_scorer(tol_da: f64) -> RankScorer {
 
 /// Build a peptide directly from residue bytes (no flanks of consequence here).
 fn residues(bytes: &[u8]) -> Vec<AminoAcid> {
-    bytes.iter().map(|&b| AminoAcid::standard(b).unwrap()).collect()
+    bytes
+        .iter()
+        .map(|&b| AminoAcid::standard(b).unwrap())
+        .collect()
 }
 
 /// Place charge-1 b/y peaks for `pep` so the candidate scores; add background.
@@ -228,9 +252,7 @@ fn psm_signature(queues: &[TopNQueue], candidates: &[Candidate]) -> Vec<Vec<Stri
                     let prots: Vec<String> = psm
                         .candidate_idxs
                         .iter()
-                        .map(|&ci| {
-                            candidates[ci as usize].protein_index.to_string()
-                        })
+                        .map(|&ci| candidates[ci as usize].protein_index.to_string())
                         .collect();
                     format!(
                         "pep={pep} z={} score={:.6} rank={:.6} iso={} decoy={} prots=[{}]",
@@ -313,10 +335,8 @@ fn mmap_result_identical_semitryptic() {
     params.num_tolerable_termini = 1;
     let scorer = make_scorer(0.05);
 
-    let (ram_q, ram_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
+    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
 
     let ram_set = psm_result_set(&ram_q, &ram_c);
     let mmap_set = psm_result_set(&mmap_q, &mmap_c);
@@ -362,8 +382,7 @@ fn mmap_result_identical_asymmetric_tol_cam_only() {
             // Tryptic peptides (cut after K/R): ELVISCLIVEK, SAMPLERPEPTIDEK,
             // DAVIDCMENGEK, GASLYCDEFGHIK, ... several Cys-bearing peptides so the
             // fixed CAM mass shifts each, and several near-mass neighbours.
-            sequence: b"ELVISCLIVEKSAMPLERPEPTIDEKDAVIDCMENGEKGASLYCDEFGHIKWANDACEDFGHIK"
-                .to_vec(),
+            sequence: b"ELVISCLIVEKSAMPLERPEPTIDEKDAVIDCMENGEKGASLYCDEFGHIKWANDACEDFGHIK".to_vec(),
         }],
     };
     let idx = SearchIndex::from_target_db(&target, "XXX");
@@ -442,10 +461,8 @@ fn mmap_result_identical_asymmetric_tol_cam_only() {
         spectra.push(s);
     }
 
-    let (ram_q, ram_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
+    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
 
     let ram_set = psm_result_set(&ram_q, &ram_c);
     let mmap_set = psm_result_set(&mmap_q, &mmap_c);
@@ -496,10 +513,8 @@ fn mmap_result_identical_collision_decoy_relabel() {
     let spectra = vec![spectrum_for(&maek, 2, "scan=collision")];
     let scorer = make_scorer(0.05);
 
-    let (ram_q, ram_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
+    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
 
     let ram_set = psm_result_set(&ram_q, &ram_c);
     let mmap_set = psm_result_set(&mmap_q, &mmap_c);
@@ -521,10 +536,8 @@ fn mmap_path_bit_identical_to_ram_on_fixture() {
     let (spectra, idx, params) = small_search_fixture();
     let scorer = make_scorer(0.05);
 
-    let (ram_q, ram_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
-    let (mmap_q, mmap_c) =
-        run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
+    let (ram_q, ram_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Ram, &scorer);
+    let (mmap_q, mmap_c) = run_prepared(&idx, &params, &spectra, CandidateBacking::Mmap, &scorer);
 
     let ram_sig = psm_signature(&ram_q, &ram_c);
     let mmap_sig = psm_signature(&mmap_q, &mmap_c);

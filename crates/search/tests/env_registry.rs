@@ -113,11 +113,7 @@ fn registry_has_no_stale_entries() {
         if !line.starts_with("| `ANDES_") {
             continue;
         }
-        if let Some(name) = line
-            .split('`')
-            .nth(1)
-            .filter(|n| n.starts_with("ANDES_"))
-        {
+        if let Some(name) = line.split('`').nth(1).filter(|n| n.starts_with("ANDES_")) {
             if !found.contains(name) {
                 stale.push(name.to_string());
             }

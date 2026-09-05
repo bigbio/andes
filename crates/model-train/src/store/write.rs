@@ -13,8 +13,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Float32Builder, Int32Builder, Int64Builder,
-    ListBuilder, StringArray, StringBuilder,
-    StructBuilder,
+    ListBuilder, StringArray, StringBuilder, StructBuilder,
 };
 use arrow::datatypes::{DataType, Field, Fields, Schema};
 use arrow::record_batch::RecordBatch;
@@ -92,15 +91,23 @@ fn write_models_inner(
     models: &[(&str, &Param)],
     blobs: &[Option<Vec<u8>>],
 ) -> Result<(), TrainError> {
-    debug_assert_eq!(blobs.len(), models.len(), "blobs slice must be 1:1 with models");
+    debug_assert_eq!(
+        blobs.len(),
+        models.len(),
+        "blobs slice must be 1:1 with models"
+    );
     // Delegate to write_model_with_sources with no source data.
     if models.is_empty() {
         let schema = combined_schema();
-        let props = WriterProperties::builder().set_compression(parquet::basic::Compression::SNAPPY).build();
+        let props = WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::SNAPPY)
+            .build();
         let file = std::fs::File::create(path)?;
         let writer = ArrowWriter::try_new(file, schema, Some(props))
             .map_err(|e| TrainError::Parquet(e.to_string()))?;
-        writer.close().map_err(|e| TrainError::Parquet(e.to_string()))?;
+        writer
+            .close()
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
         return Ok(());
     }
 
@@ -123,7 +130,9 @@ fn write_models_inner(
     let manifest_batch = build_manifest_batch(&schema, &sorted, &sorted_blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
-    let props = WriterProperties::builder().set_compression(parquet::basic::Compression::SNAPPY).build();
+    let props = WriterProperties::builder()
+        .set_compression(parquet::basic::Compression::SNAPPY)
+        .build();
     let file = std::fs::File::create(path)?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
@@ -139,7 +148,9 @@ fn write_models_inner(
             .map_err(|e| TrainError::Parquet(e.to_string()))?;
     }
 
-    writer.close().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    writer
+        .close()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
     Ok(())
 }
 
@@ -165,30 +176,42 @@ pub fn write_model_with_sources(
     let manifest_batch = build_manifest_batch(&schema, &sorted, &blobs)?;
     let table_batch = build_table_batch(&schema, &sorted)?;
 
-    let props = WriterProperties::builder().set_compression(parquet::basic::Compression::SNAPPY).build();
+    let props = WriterProperties::builder()
+        .set_compression(parquet::basic::Compression::SNAPPY)
+        .build();
     let file = std::fs::File::create(path)?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     if manifest_batch.num_rows() > 0 {
-        writer.write(&manifest_batch).map_err(|e| TrainError::Parquet(e.to_string()))?;
+        writer
+            .write(&manifest_batch)
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
     }
     if table_batch.num_rows() > 0 {
-        writer.write(&table_batch).map_err(|e| TrainError::Parquet(e.to_string()))?;
+        writer
+            .write(&table_batch)
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
     }
 
     if !sources.is_empty() {
         let source_batch = build_source_batch(&schema, model_id, sources)?;
         if source_batch.num_rows() > 0 {
-            writer.write(&source_batch).map_err(|e| TrainError::Parquet(e.to_string()))?;
+            writer
+                .write(&source_batch)
+                .map_err(|e| TrainError::Parquet(e.to_string()))?;
         }
         let stat_batch = build_stat_batch(&schema, model_id, sources)?;
         if stat_batch.num_rows() > 0 {
-            writer.write(&stat_batch).map_err(|e| TrainError::Parquet(e.to_string()))?;
+            writer
+                .write(&stat_batch)
+                .map_err(|e| TrainError::Parquet(e.to_string()))?;
         }
     }
 
-    writer.close().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    writer
+        .close()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
     Ok(())
 }
 
@@ -202,10 +225,10 @@ fn build_manifest_batch(
     let n = models.len();
 
     // Shared columns (non-null).
-    let record_kind: ArrayRef =
-        Arc::new(StringArray::from(vec!["manifest"; n]));
-    let model_id: ArrayRef =
-        Arc::new(StringArray::from(models.iter().map(|(id, _)| *id).collect::<Vec<_>>()));
+    let record_kind: ArrayRef = Arc::new(StringArray::from(vec!["manifest"; n]));
+    let model_id: ArrayRef = Arc::new(StringArray::from(
+        models.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    ));
 
     // Nullable manifest scalars.
     let mut activation = StringBuilder::new();
@@ -244,8 +267,7 @@ fn build_manifest_batch(
             Box::new(Int32Builder::new()) as Box<dyn arrow::array::ArrayBuilder>,
         ],
     );
-    let mut charge_hist = ListBuilder::new(charge_hist_builder)
-        .with_field(charge_item_field);
+    let mut charge_hist = ListBuilder::new(charge_hist_builder).with_field(charge_item_field);
 
     // gbdt_model_bytes: manifest-only binary column; null when no blob supplied.
     let mut gbdt_b = BinaryBuilder::new();
@@ -281,8 +303,12 @@ fn build_manifest_batch(
         // charge_hist entries
         let sb = charge_hist.values();
         for &(charge, count) in &param.charge_hist {
-            sb.field_builder::<Int32Builder>(0).unwrap().append_value(charge);
-            sb.field_builder::<Int32Builder>(1).unwrap().append_value(count);
+            sb.field_builder::<Int32Builder>(0)
+                .unwrap()
+                .append_value(charge);
+            sb.field_builder::<Int32Builder>(1)
+                .unwrap()
+                .append_value(count);
             sb.append(true);
         }
         charge_hist.append(true);
@@ -344,32 +370,32 @@ fn build_manifest_batch(
         Arc::new(max_charge.finish()),
         Arc::new(num_precursor_off.finish()),
         Arc::new(charge_hist.finish()),
-        Arc::new(gbdt_b.finish()),            // gbdt_model_bytes
-        Arc::new(fim_b.finish()),             // frag_intensity_model_bytes
-        Arc::new(rim_b.finish()),             // rich_ion_model_bytes
+        Arc::new(gbdt_b.finish()), // gbdt_model_bytes
+        Arc::new(fim_b.finish()),  // frag_intensity_model_bytes
+        Arc::new(rim_b.finish()),  // rich_ion_model_bytes
         // table-only → null
-        null_i32.clone(),     // part_charge
-        null_i32.clone(),     // part_mass_bits
-        null_i32.clone(),     // part_seg
-        null_utf8.clone(),    // ion_kind
-        null_i32.clone(),     // ion_charge
-        null_i32.clone(),     // ion_offset_bits
-        null_i32.clone(),     // ion_loss_class
-        null_utf8.clone(),    // table_kind
-        null_float_list,      // values
-        null_precursor_list,  // precursor_offsets
+        null_i32.clone(),        // part_charge
+        null_i32.clone(),        // part_mass_bits
+        null_i32.clone(),        // part_seg
+        null_utf8.clone(),       // ion_kind
+        null_i32.clone(),        // ion_charge
+        null_i32.clone(),        // ion_offset_bits
+        null_i32.clone(),        // ion_loss_class
+        null_utf8.clone(),       // table_kind
+        null_float_list,         // values
+        null_precursor_list,     // precursor_offsets
         null_int32_list.clone(), // frag_off_loss_classes
         // source/stat-only → null
-        null_utf8.clone(),    // source_id
-        null_utf8.clone(),    // dataset
-        null_i64,             // n_psms
-        null_utf8.clone(),    // date
-        null_f32.clone(),     // weight
-        null_f32.clone(),     // train_fdr
-        null_utf8.clone(),    // src_instrument
-        null_utf8.clone(),    // src_experiment_class
-        null_int64_list,      // counts
-        null_int32_list,      // charge_keys
+        null_utf8.clone(), // source_id
+        null_utf8.clone(), // dataset
+        null_i64,          // n_psms
+        null_utf8.clone(), // date
+        null_f32.clone(),  // weight
+        null_f32.clone(),  // train_fdr
+        null_utf8.clone(), // src_instrument
+        null_utf8.clone(), // src_experiment_class
+        null_int64_list,   // counts
+        null_int32_list,   // charge_keys
     ];
 
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
@@ -463,12 +489,26 @@ fn build_table_batch(
                 let mut loss_classes: Vec<i32> = Vec::with_capacity(frags.len());
                 for f in frags {
                     let (is_prefix, charge, off_f32, lc) = match f.ion_type {
-                        IonType::Prefix { charge, offset_bits, loss_class } => {
-                            (1.0f32, charge as f32, f32::from_bits(offset_bits), loss_class as i32)
-                        }
-                        IonType::Suffix { charge, offset_bits, loss_class } => {
-                            (0.0f32, charge as f32, f32::from_bits(offset_bits), loss_class as i32)
-                        }
+                        IonType::Prefix {
+                            charge,
+                            offset_bits,
+                            loss_class,
+                        } => (
+                            1.0f32,
+                            charge as f32,
+                            f32::from_bits(offset_bits),
+                            loss_class as i32,
+                        ),
+                        IonType::Suffix {
+                            charge,
+                            offset_bits,
+                            loss_class,
+                        } => (
+                            0.0f32,
+                            charge as f32,
+                            f32::from_bits(offset_bits),
+                            loss_class as i32,
+                        ),
                         IonType::Noise => (-1.0f32, 0.0f32, 0.0f32, 0i32),
                     };
                     flat.extend_from_slice(&[is_prefix, charge, off_f32, f.frequency]);
@@ -524,35 +564,71 @@ fn build_table_batch(
         for part in &param.partitions {
             if let Some(v) = param.ion_err_dist_table.get(part) {
                 emit_dist_row(
-                    &mut record_kinds, &mut model_ids, &mut part_charges,
-                    &mut part_mass_bits, &mut part_segs, &mut ion_kinds,
-                    &mut ion_charges, &mut ion_offset_bits, &mut ion_loss_classes,
-                    &mut table_kinds, &mut all_values, &mut all_precursor_offsets,
+                    &mut record_kinds,
+                    &mut model_ids,
+                    &mut part_charges,
+                    &mut part_mass_bits,
+                    &mut part_segs,
+                    &mut ion_kinds,
+                    &mut ion_charges,
+                    &mut ion_offset_bits,
+                    &mut ion_loss_classes,
+                    &mut table_kinds,
+                    &mut all_values,
+                    &mut all_precursor_offsets,
                     &mut all_frag_off_loss_classes,
-                    model_id, part.charge, part.parent_mass, part.seg_num,
-                    "ion_err", v,
+                    model_id,
+                    part.charge,
+                    part.parent_mass,
+                    part.seg_num,
+                    "ion_err",
+                    v,
                 );
             }
             if let Some(v) = param.noise_err_dist_table.get(part) {
                 emit_dist_row(
-                    &mut record_kinds, &mut model_ids, &mut part_charges,
-                    &mut part_mass_bits, &mut part_segs, &mut ion_kinds,
-                    &mut ion_charges, &mut ion_offset_bits, &mut ion_loss_classes,
-                    &mut table_kinds, &mut all_values, &mut all_precursor_offsets,
+                    &mut record_kinds,
+                    &mut model_ids,
+                    &mut part_charges,
+                    &mut part_mass_bits,
+                    &mut part_segs,
+                    &mut ion_kinds,
+                    &mut ion_charges,
+                    &mut ion_offset_bits,
+                    &mut ion_loss_classes,
+                    &mut table_kinds,
+                    &mut all_values,
+                    &mut all_precursor_offsets,
                     &mut all_frag_off_loss_classes,
-                    model_id, part.charge, part.parent_mass, part.seg_num,
-                    "noise_err", v,
+                    model_id,
+                    part.charge,
+                    part.parent_mass,
+                    part.seg_num,
+                    "noise_err",
+                    v,
                 );
             }
             if let Some(v) = param.ion_existence_table.get(part) {
                 emit_dist_row(
-                    &mut record_kinds, &mut model_ids, &mut part_charges,
-                    &mut part_mass_bits, &mut part_segs, &mut ion_kinds,
-                    &mut ion_charges, &mut ion_offset_bits, &mut ion_loss_classes,
-                    &mut table_kinds, &mut all_values, &mut all_precursor_offsets,
+                    &mut record_kinds,
+                    &mut model_ids,
+                    &mut part_charges,
+                    &mut part_mass_bits,
+                    &mut part_segs,
+                    &mut ion_kinds,
+                    &mut ion_charges,
+                    &mut ion_offset_bits,
+                    &mut ion_loss_classes,
+                    &mut table_kinds,
+                    &mut all_values,
+                    &mut all_precursor_offsets,
                     &mut all_frag_off_loss_classes,
-                    model_id, part.charge, part.parent_mass, part.seg_num,
-                    "ion_existence", v,
+                    model_id,
+                    part.charge,
+                    part.parent_mass,
+                    part.seg_num,
+                    "ion_existence",
+                    v,
                 );
             }
         }
@@ -569,13 +645,19 @@ fn build_table_batch(
 
     // ion_kind: Option<&str> → StringArray
     let ion_kind_arr: ArrayRef = Arc::new(StringArray::from(
-        ion_kinds.into_iter().map(|s| s.map(|x| x.to_string())).collect::<Vec<_>>(),
+        ion_kinds
+            .into_iter()
+            .map(|s| s.map(|x| x.to_string()))
+            .collect::<Vec<_>>(),
     ));
     let ion_charge_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(ion_charges));
     let ion_offset_bits_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(ion_offset_bits));
     let ion_loss_class_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(ion_loss_classes));
     let table_kind_arr: ArrayRef = Arc::new(StringArray::from(
-        table_kinds.into_iter().map(|s| s.map(|x| x.to_string())).collect::<Vec<_>>(),
+        table_kinds
+            .into_iter()
+            .map(|s| s.map(|x| x.to_string()))
+            .collect::<Vec<_>>(),
     ));
 
     // values: List<Float32>
@@ -607,22 +689,22 @@ fn build_table_batch(
         record_kind_arr,
         model_id_arr,
         // manifest-only → null
-        null_utf8.clone(),   // activation
-        null_utf8.clone(),   // instrument
-        null_utf8.clone(),   // enzyme
-        null_utf8.clone(),   // protocol
-        null_i32.clone(),    // version
-        null_f32.clone(),    // mme_val
-        null_bool.clone(),   // mme_is_ppm
-        null_bool.clone(),   // apply_deconv
-        null_f32.clone(),    // deconv_tol
-        null_i32.clone(),    // num_segments
-        null_i32.clone(),    // max_rank
-        null_i32.clone(),    // error_scaling_factor
-        null_i32.clone(),    // min_charge
-        null_i32.clone(),    // max_charge
-        null_i32.clone(),    // num_precursor_off
-        null_charge_hist,    // charge_hist
+        null_utf8.clone(),        // activation
+        null_utf8.clone(),        // instrument
+        null_utf8.clone(),        // enzyme
+        null_utf8.clone(),        // protocol
+        null_i32.clone(),         // version
+        null_f32.clone(),         // mme_val
+        null_bool.clone(),        // mme_is_ppm
+        null_bool.clone(),        // apply_deconv
+        null_f32.clone(),         // deconv_tol
+        null_i32.clone(),         // num_segments
+        null_i32.clone(),         // max_rank
+        null_i32.clone(),         // error_scaling_factor
+        null_i32.clone(),         // min_charge
+        null_i32.clone(),         // max_charge
+        null_i32.clone(),         // num_precursor_off
+        null_charge_hist,         // charge_hist
         null_binary_array(nrows), // gbdt_model_bytes
         null_binary_array(nrows), // frag_intensity_model_bytes
         null_binary_array(nrows), // rich_ion_model_bytes
@@ -639,16 +721,16 @@ fn build_table_batch(
         precursor_arr,
         frag_off_loss_classes_arr,
         // source/stat-only → null
-        null_utf8.clone(),   // source_id
-        null_utf8.clone(),   // dataset
-        null_i64,            // n_psms
-        null_utf8.clone(),   // date
-        null_f32.clone(),    // weight
-        null_f32.clone(),    // train_fdr
-        null_utf8.clone(),   // src_instrument
-        null_utf8.clone(),   // src_experiment_class
-        null_int64_list,     // counts
-        null_int32_list,     // charge_keys
+        null_utf8.clone(), // source_id
+        null_utf8.clone(), // dataset
+        null_i64,          // n_psms
+        null_utf8.clone(), // date
+        null_f32.clone(),  // weight
+        null_f32.clone(),  // train_fdr
+        null_utf8.clone(), // src_instrument
+        null_utf8.clone(), // src_experiment_class
+        null_int64_list,   // counts
+        null_int32_list,   // charge_keys
     ];
 
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
@@ -698,12 +780,16 @@ fn emit_dist_row<'a>(
 /// `loss_class` is the fourth field: 0 for intact ions and `IonType::Noise`.
 fn encode_ion_type(ion: &IonType) -> (&'static str, i32, i32, i32) {
     match ion {
-        IonType::Prefix { charge, offset_bits, loss_class } => {
-            ("prefix", *charge, *offset_bits as i32, *loss_class as i32)
-        }
-        IonType::Suffix { charge, offset_bits, loss_class } => {
-            ("suffix", *charge, *offset_bits as i32, *loss_class as i32)
-        }
+        IonType::Prefix {
+            charge,
+            offset_bits,
+            loss_class,
+        } => ("prefix", *charge, *offset_bits as i32, *loss_class as i32),
+        IonType::Suffix {
+            charge,
+            offset_bits,
+            loss_class,
+        } => ("suffix", *charge, *offset_bits as i32, *loss_class as i32),
         IonType::Noise => ("noise", 0, 0, 0),
     }
 }
@@ -758,11 +844,21 @@ fn build_precursor_list(rows: Vec<Option<Vec<PrecursorEntry>>>) -> ArrayRef {
             Some(entries) => {
                 for (rc, off, is_ppm, tol, freq) in entries {
                     let sb = lb.values();
-                    sb.field_builder::<Int32Builder>(0).unwrap().append_value(rc);
-                    sb.field_builder::<Float32Builder>(1).unwrap().append_value(off);
-                    sb.field_builder::<BooleanBuilder>(2).unwrap().append_value(is_ppm);
-                    sb.field_builder::<Float32Builder>(3).unwrap().append_value(tol);
-                    sb.field_builder::<Float32Builder>(4).unwrap().append_value(freq);
+                    sb.field_builder::<Int32Builder>(0)
+                        .unwrap()
+                        .append_value(rc);
+                    sb.field_builder::<Float32Builder>(1)
+                        .unwrap()
+                        .append_value(off);
+                    sb.field_builder::<BooleanBuilder>(2)
+                        .unwrap()
+                        .append_value(is_ppm);
+                    sb.field_builder::<Float32Builder>(3)
+                        .unwrap()
+                        .append_value(tol);
+                    sb.field_builder::<Float32Builder>(4)
+                        .unwrap()
+                        .append_value(freq);
                     sb.append(true);
                 }
                 lb.append(true);
@@ -777,31 +873,41 @@ fn build_precursor_list(rows: Vec<Option<Vec<PrecursorEntry>>>) -> ArrayRef {
 
 fn null_i32_array(n: usize) -> ArrayRef {
     let mut b = Int32Builder::new();
-    for _ in 0..n { b.append_null(); }
+    for _ in 0..n {
+        b.append_null();
+    }
     Arc::new(b.finish())
 }
 
 fn null_utf8_array(n: usize) -> ArrayRef {
     let mut b = StringBuilder::new();
-    for _ in 0..n { b.append_null(); }
+    for _ in 0..n {
+        b.append_null();
+    }
     Arc::new(b.finish())
 }
 
 fn null_bool_array(n: usize) -> ArrayRef {
     let mut b = BooleanBuilder::new();
-    for _ in 0..n { b.append_null(); }
+    for _ in 0..n {
+        b.append_null();
+    }
     Arc::new(b.finish())
 }
 
 fn null_f32_array(n: usize) -> ArrayRef {
     let mut b = Float32Builder::new();
-    for _ in 0..n { b.append_null(); }
+    for _ in 0..n {
+        b.append_null();
+    }
     Arc::new(b.finish())
 }
 
 fn null_float_list_array(n: usize) -> ArrayRef {
     let mut b = ListBuilder::new(Float32Builder::new());
-    for _ in 0..n { b.append(false); }
+    for _ in 0..n {
+        b.append(false);
+    }
     Arc::new(b.finish())
 }
 
@@ -825,31 +931,41 @@ fn null_struct_list_array(n: usize, fields: Vec<Field>) -> ArrayRef {
     ));
     let sb = StructBuilder::new(fs.clone(), child_builders);
     let mut lb = ListBuilder::new(sb).with_field(item_field);
-    for _ in 0..n { lb.append(false); }
+    for _ in 0..n {
+        lb.append(false);
+    }
     Arc::new(lb.finish())
 }
 
 fn null_binary_array(n: usize) -> ArrayRef {
     let mut b = BinaryBuilder::new();
-    for _ in 0..n { b.append_null(); }
+    for _ in 0..n {
+        b.append_null();
+    }
     Arc::new(b.finish())
 }
 
 fn null_i64_array(n: usize) -> ArrayRef {
     let mut b = Int64Builder::new();
-    for _ in 0..n { b.append_null(); }
+    for _ in 0..n {
+        b.append_null();
+    }
     Arc::new(b.finish())
 }
 
 fn null_int64_list_array(n: usize) -> ArrayRef {
     let mut b = ListBuilder::new(Int64Builder::new());
-    for _ in 0..n { b.append(false); }
+    for _ in 0..n {
+        b.append(false);
+    }
     Arc::new(b.finish())
 }
 
 fn null_int32_list_array(n: usize) -> ArrayRef {
     let mut b = ListBuilder::new(Int32Builder::new());
-    for _ in 0..n { b.append(false); }
+    for _ in 0..n {
+        b.append(false);
+    }
     Arc::new(b.finish())
 }
 
@@ -919,36 +1035,36 @@ fn build_source_batch(
         record_kind,
         model_id_col,
         // manifest-only → null
-        null_utf8.clone(),   // activation
-        null_utf8.clone(),   // instrument
-        null_utf8.clone(),   // enzyme
-        null_utf8.clone(),   // protocol
-        null_i32.clone(),    // version
-        null_f32.clone(),    // mme_val
-        null_bool.clone(),   // mme_is_ppm
-        null_bool.clone(),   // apply_deconv
-        null_f32.clone(),    // deconv_tol
-        null_i32.clone(),    // num_segments
-        null_i32.clone(),    // max_rank
-        null_i32.clone(),    // error_scaling_factor
-        null_i32.clone(),    // min_charge
-        null_i32.clone(),    // max_charge
-        null_i32.clone(),    // num_precursor_off
-        null_charge_hist,    // charge_hist
+        null_utf8.clone(),    // activation
+        null_utf8.clone(),    // instrument
+        null_utf8.clone(),    // enzyme
+        null_utf8.clone(),    // protocol
+        null_i32.clone(),     // version
+        null_f32.clone(),     // mme_val
+        null_bool.clone(),    // mme_is_ppm
+        null_bool.clone(),    // apply_deconv
+        null_f32.clone(),     // deconv_tol
+        null_i32.clone(),     // num_segments
+        null_i32.clone(),     // max_rank
+        null_i32.clone(),     // error_scaling_factor
+        null_i32.clone(),     // min_charge
+        null_i32.clone(),     // max_charge
+        null_i32.clone(),     // num_precursor_off
+        null_charge_hist,     // charge_hist
         null_binary_array(n), // gbdt_model_bytes
         null_binary_array(n), // frag_intensity_model_bytes
         null_binary_array(n), // rich_ion_model_bytes
         // table-only → null
-        null_i32s.clone(),   // part_charge
-        null_i32s.clone(),   // part_mass_bits
-        null_i32s.clone(),   // part_seg
-        null_utf8.clone(),   // ion_kind
-        null_i32s.clone(),   // ion_charge
-        null_i32s.clone(),   // ion_offset_bits
-        null_i32s.clone(),   // ion_loss_class
-        null_utf8.clone(),   // table_kind
-        null_float_list,     // values
-        null_precursor_list, // precursor_offsets
+        null_i32s.clone(),       // part_charge
+        null_i32s.clone(),       // part_mass_bits
+        null_i32s.clone(),       // part_seg
+        null_utf8.clone(),       // ion_kind
+        null_i32s.clone(),       // ion_charge
+        null_i32s.clone(),       // ion_offset_bits
+        null_i32s.clone(),       // ion_loss_class
+        null_utf8.clone(),       // table_kind
+        null_float_list,         // values
+        null_precursor_list,     // precursor_offsets
         null_int32_list.clone(), // frag_off_loss_classes
         // source-only → populated
         Arc::new(source_id_b.finish()),
@@ -960,8 +1076,8 @@ fn build_source_batch(
         Arc::new(src_instrument_b.finish()),
         Arc::new(src_experiment_class_b.finish()),
         // stat-only → null
-        null_int64_list,     // counts
-        null_int32_list,     // charge_keys
+        null_int64_list, // counts
+        null_int32_list, // charge_keys
     ];
 
     RecordBatch::try_new(schema.clone(), columns).map_err(|e| TrainError::Parquet(e.to_string()))
@@ -1031,12 +1147,23 @@ fn build_stat_batch(
         for part in error_keys {
             let counts_vec = &stats.error[part];
             push_partition_stat_row(
-                &mut record_kinds, &mut model_ids, &mut source_ids,
-                &mut part_charges, &mut part_mass_bits_col, &mut part_segs,
-                &mut ion_kinds, &mut ion_charges, &mut ion_offset_bits,
+                &mut record_kinds,
+                &mut model_ids,
+                &mut source_ids,
+                &mut part_charges,
+                &mut part_mass_bits_col,
+                &mut part_segs,
+                &mut ion_kinds,
+                &mut ion_charges,
+                &mut ion_offset_bits,
                 &mut ion_loss_classes_stat,
-                &mut table_kinds, &mut all_counts, &mut all_charge_keys,
-                model_id, sid, part, "error",
+                &mut table_kinds,
+                &mut all_counts,
+                &mut all_charge_keys,
+                model_id,
+                sid,
+                part,
+                "error",
                 counts_vec.iter().map(|&c| c as i64).collect(),
             );
         }
@@ -1047,12 +1174,23 @@ fn build_stat_batch(
         for part in ne_keys {
             let counts_vec = &stats.noise_error[part];
             push_partition_stat_row(
-                &mut record_kinds, &mut model_ids, &mut source_ids,
-                &mut part_charges, &mut part_mass_bits_col, &mut part_segs,
-                &mut ion_kinds, &mut ion_charges, &mut ion_offset_bits,
+                &mut record_kinds,
+                &mut model_ids,
+                &mut source_ids,
+                &mut part_charges,
+                &mut part_mass_bits_col,
+                &mut part_segs,
+                &mut ion_kinds,
+                &mut ion_charges,
+                &mut ion_offset_bits,
                 &mut ion_loss_classes_stat,
-                &mut table_kinds, &mut all_counts, &mut all_charge_keys,
-                model_id, sid, part, "noise_error",
+                &mut table_kinds,
+                &mut all_counts,
+                &mut all_charge_keys,
+                model_id,
+                sid,
+                part,
+                "noise_error",
                 counts_vec.iter().map(|&c| c as i64).collect(),
             );
         }
@@ -1063,7 +1201,10 @@ fn build_stat_batch(
         let mut existence_by_part: rustc_hash::FxHashMap<Partition, Vec<(u32, u64)>> =
             rustc_hash::FxHashMap::default();
         for (&(part, idx), &count) in &stats.existence {
-            existence_by_part.entry(part).or_default().push((idx, count));
+            existence_by_part
+                .entry(part)
+                .or_default()
+                .push((idx, count));
         }
         let mut ex_part_keys: Vec<Partition> = existence_by_part.keys().copied().collect();
         ex_part_keys.sort();
@@ -1076,19 +1217,32 @@ fn build_stat_batch(
                 flat[idx as usize] = count as i64;
             }
             push_partition_stat_row(
-                &mut record_kinds, &mut model_ids, &mut source_ids,
-                &mut part_charges, &mut part_mass_bits_col, &mut part_segs,
-                &mut ion_kinds, &mut ion_charges, &mut ion_offset_bits,
+                &mut record_kinds,
+                &mut model_ids,
+                &mut source_ids,
+                &mut part_charges,
+                &mut part_mass_bits_col,
+                &mut part_segs,
+                &mut ion_kinds,
+                &mut ion_charges,
+                &mut ion_offset_bits,
                 &mut ion_loss_classes_stat,
-                &mut table_kinds, &mut all_counts, &mut all_charge_keys,
-                model_id, sid, &part, "existence", flat,
+                &mut table_kinds,
+                &mut all_counts,
+                &mut all_charge_keys,
+                model_id,
+                sid,
+                &part,
+                "existence",
+                flat,
             );
         }
 
         // ── charge ────────────────────────────────────────────────────────────
         // One row per source with part fields zeroed; charge map → two parallel lists.
         if !stats.charge.is_empty() {
-            let mut charge_kv: Vec<(i32, u64)> = stats.charge.iter().map(|(&k, &v)| (k, v)).collect();
+            let mut charge_kv: Vec<(i32, u64)> =
+                stats.charge.iter().map(|(&k, &v)| (k, v)).collect();
             charge_kv.sort_by_key(|(k, _)| *k);
             let keys: Vec<i32> = charge_kv.iter().map(|(k, _)| *k).collect();
             let counts: Vec<i64> = charge_kv.iter().map(|(_, v)| *v as i64).collect();
@@ -1115,8 +1269,12 @@ fn build_stat_batch(
     }
 
     // ── build Arrow arrays ───────────────────────────────────────────────────
-    let record_kind_arr: ArrayRef = Arc::new(StringArray::from_iter_values(record_kinds.iter().map(|s| s.as_str())));
-    let model_id_arr: ArrayRef = Arc::new(StringArray::from_iter_values(model_ids.iter().map(|s| s.as_str())));
+    let record_kind_arr: ArrayRef = Arc::new(StringArray::from_iter_values(
+        record_kinds.iter().map(|s| s.as_str()),
+    ));
+    let model_id_arr: ArrayRef = Arc::new(StringArray::from_iter_values(
+        model_ids.iter().map(|s| s.as_str()),
+    ));
 
     let source_id_arr: ArrayRef = Arc::new(StringArray::from(
         source_ids.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
@@ -1125,12 +1283,12 @@ fn build_stat_batch(
     let part_charge_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_charges));
     let part_mass_bits_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_mass_bits_col));
     let part_seg_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(part_segs));
-    let ion_kind_arr: ArrayRef = Arc::new(StringArray::from(
-        ion_kinds.into_iter().collect::<Vec<_>>(),
-    ));
+    let ion_kind_arr: ArrayRef =
+        Arc::new(StringArray::from(ion_kinds.into_iter().collect::<Vec<_>>()));
     let ion_charge_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(ion_charges));
     let ion_offset_bits_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(ion_offset_bits));
-    let ion_loss_class_stat_arr: ArrayRef = Arc::new(arrow::array::Int32Array::from(ion_loss_classes_stat));
+    let ion_loss_class_stat_arr: ArrayRef =
+        Arc::new(arrow::array::Int32Array::from(ion_loss_classes_stat));
     let table_kind_arr: ArrayRef = Arc::new(StringArray::from(
         table_kinds.into_iter().collect::<Vec<_>>(),
     ));
@@ -1170,22 +1328,22 @@ fn build_stat_batch(
         record_kind_arr,
         model_id_arr,
         // manifest-only → null
-        null_utf8.clone(),   // activation
-        null_utf8.clone(),   // instrument
-        null_utf8.clone(),   // enzyme
-        null_utf8.clone(),   // protocol
-        null_i32.clone(),    // version
-        null_f32.clone(),    // mme_val
-        null_bool.clone(),   // mme_is_ppm
-        null_bool.clone(),   // apply_deconv
-        null_f32.clone(),    // deconv_tol
-        null_i32.clone(),    // num_segments
-        null_i32.clone(),    // max_rank
-        null_i32.clone(),    // error_scaling_factor
-        null_i32.clone(),    // min_charge
-        null_i32.clone(),    // max_charge
-        null_i32.clone(),    // num_precursor_off
-        null_charge_hist,    // charge_hist
+        null_utf8.clone(),        // activation
+        null_utf8.clone(),        // instrument
+        null_utf8.clone(),        // enzyme
+        null_utf8.clone(),        // protocol
+        null_i32.clone(),         // version
+        null_f32.clone(),         // mme_val
+        null_bool.clone(),        // mme_is_ppm
+        null_bool.clone(),        // apply_deconv
+        null_f32.clone(),         // deconv_tol
+        null_i32.clone(),         // num_segments
+        null_i32.clone(),         // max_rank
+        null_i32.clone(),         // error_scaling_factor
+        null_i32.clone(),         // min_charge
+        null_i32.clone(),         // max_charge
+        null_i32.clone(),         // num_precursor_off
+        null_charge_hist,         // charge_hist
         null_binary_array(nrows), // gbdt_model_bytes
         null_binary_array(nrows), // frag_intensity_model_bytes
         null_binary_array(nrows), // rich_ion_model_bytes
@@ -1198,18 +1356,18 @@ fn build_stat_batch(
         ion_offset_bits_arr,
         ion_loss_class_stat_arr,
         table_kind_arr,
-        null_float_list,     // values (table payload, not used by stat)
-        null_precursor_list, // precursor_offsets (table payload, not used by stat)
+        null_float_list,         // values (table payload, not used by stat)
+        null_precursor_list,     // precursor_offsets (table payload, not used by stat)
         null_int32_list.clone(), // frag_off_loss_classes (not used by stat)
         // source/stat-only
         source_id_arr,
-        null_utf8.clone(),   // dataset (stat rows don't repeat ledger fields)
-        null_i64,            // n_psms
-        null_utf8.clone(),   // date
-        null_f32.clone(),    // weight
-        null_f32.clone(),    // train_fdr
-        null_utf8.clone(),   // src_instrument
-        null_utf8.clone(),   // src_experiment_class
+        null_utf8.clone(), // dataset (stat rows don't repeat ledger fields)
+        null_i64,          // n_psms
+        null_utf8.clone(), // date
+        null_f32.clone(),  // weight
+        null_f32.clone(),  // train_fdr
+        null_utf8.clone(), // src_instrument
+        null_utf8.clone(), // src_experiment_class
         counts_arr,
         charge_keys_arr,
     ];
@@ -1239,7 +1397,10 @@ fn build_stat_batch_empty(schema: &Arc<Schema>) -> Result<RecordBatch, TrainErro
                     DataType::Float32 => null_float_list_array(n),
                     DataType::Int64 => null_int64_list_array(n),
                     DataType::Int32 => null_int32_list_array(n),
-                    DataType::Struct(fields) => null_struct_list_array(n, fields.iter().map(|f| f.as_ref().clone()).collect()),
+                    DataType::Struct(fields) => null_struct_list_array(
+                        n,
+                        fields.iter().map(|f| f.as_ref().clone()).collect(),
+                    ),
                     _ => null_float_list_array(n),
                 },
                 _ => null_utf8_array(n),

@@ -19,22 +19,33 @@ use model_train::accumulate::StatsAccumulator;
 use model_train::counts::CountStats;
 use model_train::estimate::{smooth_rank_window, Estimator, EstimatorConfig};
 
-use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{FragmentOffsetFrequency, SpecDataType};
 use model::activation::ActivationMethod;
 use model::instrument::InstrumentType;
 use model::protocol::Protocol;
 use model::tolerance::Tolerance;
+use rustc_hash::FxHashMap;
+use scoring_crate::param_model::{FragmentOffsetFrequency, SpecDataType};
 
 /// Minimal single-partition template with a configurable `max_rank` and one
 /// prefix ion, used to probe rank-distribution smoothing in isolation.
 fn one_partition_template(max_rank: i32) -> Param {
-    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1000.0,
+        seg_num: 0,
+    };
+    let prefix1 = IonType::Prefix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
     let mut frag_off_table = FxHashMap::default();
     frag_off_table.insert(
         part,
-        vec![FragmentOffsetFrequency { ion_type: prefix1, frequency: 0.7 }],
+        vec![FragmentOffsetFrequency {
+            ion_type: prefix1,
+            frequency: 0.7,
+        }],
     );
     let mut p = Param {
         version: 10001,
@@ -63,8 +74,8 @@ fn one_partition_template(max_rank: i32) -> Param {
         ion_existence_table: FxHashMap::default(),
         partition_ion_types_cache: FxHashMap::default(),
         gbdt_peak_model: None,
-            frag_intensity_model: None,
-            rich_ion_model: None,
+        frag_intensity_model: None,
+        rich_ion_model: None,
     };
     p.rebuild_cache();
     p
@@ -78,8 +89,16 @@ fn one_partition_template(max_rank: i32) -> Param {
 #[test]
 fn noise_rank_dist_stays_sharp_not_flattened_by_smoothing() {
     let max_rank = 150;
-    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1000.0,
+        seg_num: 0,
+    };
+    let prefix1 = IonType::Prefix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
     let template = one_partition_template(max_rank);
 
     let mut counts = CountStats::new();
@@ -91,7 +110,10 @@ fn noise_rank_dist_stays_sharp_not_flattened_by_smoothing() {
     let param = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
     let noise = &param.rank_dist_table[&part][&IonType::Noise];
     let peak = noise.iter().cloned().fold(0.0_f32, f32::max);
-    assert!(peak > 0.9, "noise peak should stay sharp (>0.9), got {peak}");
+    assert!(
+        peak > 0.9,
+        "noise peak should stay sharp (>0.9), got {peak}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -110,11 +132,11 @@ fn load_hcd_scorer() -> (Param, RankScorer) {
     // hcd_qexactive_tryp from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
-    let store = model_train::store::ModelStore::open(bundled)
-        .expect("open bundled models.parquet");
-    let param = store.load_param("hcd_qexactive_tryp")
+    let store = model_train::store::ModelStore::open(bundled).expect("open bundled model store");
+    let param = store
+        .load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp from store");
     let scorer = RankScorer::new(&param);
     (param, scorer)
@@ -163,8 +185,12 @@ fn build_synthetic_spectrum(
                         (false, IonType::Suffix { .. }) => ion.mz(nominal_mass),
                         _ => continue,
                     };
-                    if param.segment_num(theo_mz, parent_mass) != seg { continue; }
-                    if theo_mz <= 0.0 { continue; }
+                    if param.segment_num(theo_mz, parent_mass) != seg {
+                        continue;
+                    }
+                    if theo_mz <= 0.0 {
+                        continue;
+                    }
                     let _ = part; // partition is used implicitly via param lookups
                     let intensity = 100_000.0_f32 / (1.0 + global_index as f32);
                     all_ions.push((theo_mz, intensity));
@@ -230,23 +256,30 @@ fn estimated_param_is_scorable_and_finite() {
     let mut checked = 0usize;
     for (&part, ion_table) in &param.rank_dist_table {
         for &ion in ion_table.keys() {
-            if ion.is_noise() { continue; }
+            if ion.is_noise() {
+                continue;
+            }
             let s = scorer.node_score(part, ion, 1);
             assert!(
                 s.is_finite(),
                 "node_score({:?}, {:?}, rank=1) = {s} is not finite",
-                part, ion
+                part,
+                ion
             );
             let m = scorer.missing_ion_score(part, ion);
             assert!(
                 m.is_finite(),
                 "missing_ion_score({:?}, {:?}) = {m} is not finite",
-                part, ion
+                part,
+                ion
             );
             checked += 1;
         }
     }
-    assert!(checked > 0, "no (partition, ion) pairs were checked — rank_dist_table is empty");
+    assert!(
+        checked > 0,
+        "no (partition, ion) pairs were checked — rank_dist_table is empty"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -282,20 +315,27 @@ fn empty_partition_backs_off_not_zero() {
                 assert!(
                     f > 0.0,
                     "freq[{i}] = {f} <= 0 for partition {:?} ion {:?}",
-                    part, ion
+                    part,
+                    ion
                 );
             }
-            if ion.is_noise() { continue; }
+            if ion.is_noise() {
+                continue;
+            }
             let s = scorer.node_score(part, ion, 1);
             assert!(
                 s.is_finite(),
                 "node_score for {:?} {:?} = {s} is not finite after empty-count backoff",
-                part, ion
+                part,
+                ion
             );
             checked += 1;
         }
     }
-    assert!(checked > 0, "no entries checked — rank_dist_table unexpectedly empty");
+    assert!(
+        checked > 0,
+        "no entries checked — rank_dist_table unexpectedly empty"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +365,7 @@ fn dense_counts_recover_empirical_within_tolerance() {
     // Estimator with tiny pseudo to minimise smoothing bias.
     let cfg = EstimatorConfig {
         pseudo: 0.001,
-        min_count: 1,    // disable backoff (all partitions will exceed 1 count)
+        min_count: 1, // disable backoff (all partitions will exceed 1 count)
         backoff_weight: 0.0,
         ..Default::default()
     };
@@ -335,7 +375,9 @@ fn dense_counts_recover_empirical_within_tolerance() {
     // Find the (partition, ion) with the most counts at rank index 0.
     let mut best: Option<(Partition, IonType, u64, u64)> = None; // (part, ion, rank0, total)
     for (&(part, ion), v) in &counts.rank {
-        if ion.is_noise() { continue; }
+        if ion.is_noise() {
+            continue;
+        }
         let rank0 = v.first().copied().unwrap_or(0);
         let total: u64 = v.iter().sum();
         if rank0 > 0 && total > 0 && best.as_ref().is_none_or(|&(_, _, b_r, _)| rank0 > b_r) {
@@ -373,10 +415,16 @@ fn dense_counts_recover_empirical_within_tolerance() {
 #[test]
 fn sparse_existence_shrinks_toward_independent_prior() {
     let template = one_partition_template(150);
-    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1000.0,
+        seg_num: 0,
+    };
 
     let mut prior = one_partition_template(150);
-    prior.ion_existence_table.insert(part, vec![0.0, 0.0, 0.0, 1.0]); // mass on idx 3
+    prior
+        .ion_existence_table
+        .insert(part, vec![0.0, 0.0, 0.0, 1.0]); // mass on idx 3
 
     // No existence counts at all → n=0 < min_count → must use the prior.
     let counts = CountStats::new();
@@ -384,7 +432,10 @@ fn sparse_existence_shrinks_toward_independent_prior() {
     let with_prior = est.estimate_with_prior(&counts, &template, Some(&prior));
 
     let ex = &with_prior.ion_existence_table[&part];
-    assert!(ex[3] > 0.5, "existence should follow the prior's idx-3 peak, got {ex:?}");
+    assert!(
+        ex[3] > 0.5,
+        "existence should follow the prior's idx-3 peak, got {ex:?}"
+    );
 }
 
 /// A sparse partition (n < min_count) must shrink toward the INDEPENDENT PRIOR's
@@ -395,8 +446,16 @@ fn sparse_existence_shrinks_toward_independent_prior() {
 fn sparse_partition_shrinks_toward_independent_prior() {
     let max_rank = 150;
     let n_slots = (max_rank + 1) as usize;
-    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1000.0,
+        seg_num: 0,
+    };
+    let prefix1 = IonType::Prefix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
     let template = one_partition_template(max_rank);
 
     let mut prior = one_partition_template(max_rank);
@@ -443,9 +502,20 @@ fn rank_window_smoothing_preserves_head_smooths_tail() {
     let s: f32 = out.iter().sum();
     assert!((s - 1.0).abs() < 1e-4, "must renormalize, sum={s}");
     assert!(out[0] > 0.45, "rank-1 head must stay sharp, got {}", out[0]);
-    assert!(out[150] > 0.08, "missing slot must be preserved, got {}", out[150]);
-    assert!(out[40] < 0.40, "tail spike must be smoothed down, got {}", out[40]);
-    assert!(out[39] > 0.0 && out[41] > 0.0, "tail neighbors must receive mass");
+    assert!(
+        out[150] > 0.08,
+        "missing slot must be preserved, got {}",
+        out[150]
+    );
+    assert!(
+        out[40] < 0.40,
+        "tail spike must be smoothed down, got {}",
+        out[40]
+    );
+    assert!(
+        out[39] > 0.0 && out[41] > 0.0,
+        "tail neighbors must receive mass"
+    );
 }
 
 /// With rank_smoothing enabled, a signal ion's trained rank distribution is
@@ -454,8 +524,16 @@ fn rank_window_smoothing_preserves_head_smooths_tail() {
 #[test]
 fn rank_smoothing_softens_signal_not_noise() {
     let max_rank = 150;
-    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
-    let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1000.0,
+        seg_num: 0,
+    };
+    let prefix1 = IonType::Prefix {
+        charge: 1,
+        offset_bits: 0.0_f32.to_bits(),
+        loss_class: 0,
+    };
     let template = one_partition_template(max_rank);
 
     let mut counts = CountStats::new();
@@ -464,17 +542,26 @@ fn rank_smoothing_softens_signal_not_noise() {
         counts.bump_rank(part, IonType::Noise, 0);
     }
 
-    let cfg_on = EstimatorConfig { rank_smoothing: true, ..Default::default() };
+    let cfg_on = EstimatorConfig {
+        rank_smoothing: true,
+        ..Default::default()
+    };
     let on = Estimator::new(cfg_on).estimate(&counts, &template);
     let off = Estimator::new(EstimatorConfig::default()).estimate(&counts, &template);
 
     let sig_on = on.rank_dist_table[&part][&prefix1][25];
     let sig_off = off.rank_dist_table[&part][&prefix1][25];
-    assert!(sig_on < sig_off, "smoothing must lower the signal peak: on={sig_on} off={sig_off}");
+    assert!(
+        sig_on < sig_off,
+        "smoothing must lower the signal peak: on={sig_on} off={sig_off}"
+    );
 
     let noise_on = &on.rank_dist_table[&part][&IonType::Noise];
     let noise_off = &off.rank_dist_table[&part][&IonType::Noise];
-    assert_eq!(noise_on, noise_off, "noise dist must be unchanged by rank smoothing");
+    assert_eq!(
+        noise_on, noise_off,
+        "noise dist must be unchanged by rank smoothing"
+    );
 }
 
 /// Coverage for the error-table prior path: with a non-zero `error_scaling_factor`
@@ -482,13 +569,19 @@ fn rank_smoothing_softens_signal_not_noise() {
 /// ion-error distribution must follow the independent prior, not the global pool.
 #[test]
 fn sparse_error_table_shrinks_toward_independent_prior() {
-    let part = Partition { charge: 2, parent_mass: 1000.0, seg_num: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1000.0,
+        seg_num: 0,
+    };
     let mut template = one_partition_template(150);
     template.error_scaling_factor = 2; // dist_len = 2*2 + 1 = 5
 
     let mut prior = one_partition_template(150);
     prior.error_scaling_factor = 2;
-    prior.ion_err_dist_table.insert(part, vec![0.0, 0.0, 0.0, 0.0, 1.0]); // mass on last bin
+    prior
+        .ion_err_dist_table
+        .insert(part, vec![0.0, 0.0, 0.0, 0.0, 1.0]); // mass on last bin
 
     // No error counts → n = 0 < min_count → blend collapses to the prior.
     let counts = CountStats::new();
@@ -497,5 +590,8 @@ fn sparse_error_table_shrinks_toward_independent_prior() {
 
     let ie = &trained.ion_err_dist_table[&part];
     assert_eq!(ie.len(), 5);
-    assert!(ie[4] > 0.5, "ion error dist should follow the prior's last-bin peak, got {ie:?}");
+    assert!(
+        ie[4] > 0.5,
+        "ion error dist should follow the prior's last-bin peak, got {ie:?}"
+    );
 }

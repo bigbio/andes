@@ -133,7 +133,12 @@ mod tests {
 
     /// Backbone peaks shared by all synthetic spectra (away from reporter region).
     fn backbone() -> Vec<(f64, f32)> {
-        vec![(300.0, 500.0), (450.0, 800.0), (620.0, 1000.0), (780.0, 400.0)]
+        vec![
+            (300.0, 500.0),
+            (450.0, 800.0),
+            (620.0, 1000.0),
+            (780.0, 400.0),
+        ]
     }
 
     fn tmt_spectrum() -> Spectrum {
@@ -255,7 +260,11 @@ mod tests {
                 spec_with(p)
             })
             .collect();
-        assert_eq!(detect_isobaric(&run, true), None, "high-res glyco must not be read as TMT");
+        assert_eq!(
+            detect_isobaric(&run, true),
+            None,
+            "high-res glyco must not be read as TMT"
+        );
         // And with a loose (low-res) window this WOULD have false-triggered —
         // documents why high-res must use the tight window.
         assert_eq!(detect_isobaric(&run, false), Some(IsobaricLabel::Tmt));

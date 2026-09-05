@@ -154,7 +154,9 @@ impl Estimator {
             self.cfg.noise_pseudo
         );
         let max_rank = template.max_rank;
-        let esf = self.cfg.error_scaling_factor_override
+        let esf = self
+            .cfg
+            .error_scaling_factor_override
             .unwrap_or(template.error_scaling_factor);
 
         let rank_dist_table = self.build_rank_dist_table(counts, template, max_rank, prior);
@@ -249,8 +251,7 @@ impl Estimator {
         // pooled z4-z6 statistics rather than the z2/z3-dominated global pool.
         let charge_neighbor = build_charge_neighbor_pool(&counts.rank, n_slots);
 
-        let mut out: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> =
-            FxHashMap::default();
+        let mut out: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = FxHashMap::default();
 
         for &part in &all_partitions {
             // Only emit partitions that have an ion list in the template;
@@ -265,8 +266,7 @@ impl Estimator {
             // Precompute the segment-collapsed parent map for this partition's
             // (charge, parent_mass.to_bits()) key (used by all ions in this partition).
             let seg_key = (part.charge, part.parent_mass.to_bits());
-            let seg_parent: Option<&FxHashMap<IonType, Vec<u64>>> =
-                seg_collapsed.get(&seg_key);
+            let seg_parent: Option<&FxHashMap<IonType, Vec<u64>>> = seg_collapsed.get(&seg_key);
 
             // Helper: compute a normalised parent vector for `ion` using the
             // given pseudo-count (signal vs noise differ — see `noise_pseudo`).
@@ -304,14 +304,14 @@ impl Estimator {
                     }
                 }
                 // Level 2: global pool.
-                let graw = global_pool.get(&ion)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
+                let graw = global_pool.get(&ion).map(|v| v.as_slice()).unwrap_or(&[]);
                 normalize_with_pseudo(graw, n_slots, ps)
             };
 
             for &ion in &ions {
-                let raw = counts.rank.get(&(part, ion))
+                let raw = counts
+                    .rank
+                    .get(&(part, ion))
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
                 let n: u64 = raw.iter().sum();
@@ -358,13 +358,20 @@ impl Estimator {
             // Noise is required by RankScorer::new. It uses a much smaller
             // pseudo-count (`noise_pseudo`) so its sharp, concentrated shape is
             // preserved rather than flattened across all `max_rank` slots.
-            let noise_raw = counts.rank.get(&(part, IonType::Noise))
+            let noise_raw = counts
+                .rank
+                .get(&(part, IonType::Noise))
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
             let noise_n: u64 = noise_raw.iter().sum();
             let noise_emp = normalize_with_pseudo(noise_raw, n_slots, noise_pseudo);
             let noise_dist = if noise_n < min_count {
-                blend(&noise_emp, &parent_vec(IonType::Noise, noise_pseudo), noise_n as f32, w)
+                blend(
+                    &noise_emp,
+                    &parent_vec(IonType::Noise, noise_pseudo),
+                    noise_n as f32,
+                    w,
+                )
             } else {
                 noise_emp
             };
@@ -386,7 +393,10 @@ impl Estimator {
         template: &Param,
         esf: i32,
         prior: Option<&Param>,
-    ) -> (FxHashMap<Partition, Vec<f32>>, FxHashMap<Partition, Vec<f32>>) {
+    ) -> (
+        FxHashMap<Partition, Vec<f32>>,
+        FxHashMap<Partition, Vec<f32>>,
+    ) {
         if esf <= 0 {
             return (FxHashMap::default(), FxHashMap::default());
         }
@@ -434,7 +444,11 @@ impl Estimator {
             };
             ion_out.insert(part, ion_dist);
 
-            let noise_raw = counts.noise_error.get(&part).map(|v| v.as_slice()).unwrap_or(&[]);
+            let noise_raw = counts
+                .noise_error
+                .get(&part)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let noise_n: u64 = noise_raw.iter().sum();
             let noise_emp = normalize_with_pseudo(noise_raw, dist_len, pseudo);
             let noise_parent: Vec<f32> = prior
@@ -520,22 +534,42 @@ pub fn smooth_rank_window(dist: &[f32], max_rank: usize) -> Vec<f32> {
     let last = max_rank.min(n.saturating_sub(1));
     let mut out = dist.to_vec();
     let halfwidth = |r: usize| -> usize {
-        if r < 3 { 0 } else if r < 5 { 1 } else if r < 10 { 2 }
-        else if r < 20 { 3 } else if r < 50 { 4 } else { 5 }
+        if r < 3 {
+            0
+        } else if r < 5 {
+            1
+        } else if r < 10 {
+            2
+        } else if r < 20 {
+            3
+        } else if r < 50 {
+            4
+        } else {
+            5
+        }
     };
     for (i, slot) in out.iter_mut().enumerate().take(last) {
         let hw = halfwidth(i);
-        if hw == 0 { continue; }
+        if hw == 0 {
+            continue;
+        }
         let lo = i.saturating_sub(hw);
         let hi = (i + hw + 1).min(last);
         let mut s = 0.0f32;
         let mut c = 0usize;
-        for v in dist.iter().take(hi).skip(lo) { s += *v; c += 1; }
-        if c > 0 { *slot = s / c as f32; }
+        for v in dist.iter().take(hi).skip(lo) {
+            s += *v;
+            c += 1;
+        }
+        if c > 0 {
+            *slot = s / c as f32;
+        }
     }
     let tot: f32 = out.iter().sum();
     if tot > 0.0 {
-        for x in &mut out { *x /= tot; }
+        for x in &mut out {
+            *x /= tot;
+        }
     }
     out
 }
@@ -668,7 +702,15 @@ fn charge_range(hist: &[(i32, i32)], template: &Param) -> (i32, i32) {
     if hist.is_empty() {
         return (template.min_charge, template.max_charge);
     }
-    let min = hist.iter().map(|(c, _)| *c).min().unwrap_or(template.min_charge);
-    let max = hist.iter().map(|(c, _)| *c).max().unwrap_or(template.max_charge);
+    let min = hist
+        .iter()
+        .map(|(c, _)| *c)
+        .min()
+        .unwrap_or(template.min_charge);
+    let max = hist
+        .iter()
+        .map(|(c, _)| *c)
+        .max()
+        .unwrap_or(template.max_charge);
     (min, max)
 }

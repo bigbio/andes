@@ -15,15 +15,13 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use arrow::array::{Array, Float64Array};
+use input::{FastaReader, MgfReader};
 use model::tolerance::PrecursorTolerance;
-use model::{
-    AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ResidueSpec, Tolerance,
-};
+use model::{AminoAcidSetBuilder, Enzyme, ModLocation, Modification, ResidueSpec, Tolerance};
 use output::PercolatorPsm;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use scoring_crate::RankScorer;
 use search::{match_spectra, SearchIndex, SearchParams};
-use input::{FastaReader, MgfReader};
 
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -41,9 +39,10 @@ fn run_bsa_search() -> (
     SearchIndex,
     SearchParams,
 ) {
-    let target_db =
-        FastaReader::load_all(BufReader::new(File::open(fixture("test-fixtures/BSA.fasta")).unwrap()))
-            .unwrap();
+    let target_db = FastaReader::load_all(BufReader::new(
+        File::open(fixture("test-fixtures/BSA.fasta")).unwrap(),
+    ))
+    .unwrap();
     let idx = SearchIndex::from_target_db(&target_db, "XXX_");
 
     let cam = Modification {
@@ -73,9 +72,7 @@ fn run_bsa_search() -> (
         .unwrap();
 
     // hcd_qexactive_tryp from the canonical Parquet store.
-    let store = model_train::store::ModelStore::open(
-        &fixture("resources/models.parquet"),
-    ).unwrap();
+    let store = model_train::store::ModelStore::open(&fixture("resources/models")).unwrap();
     let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);
 
@@ -97,14 +94,28 @@ fn run_bsa_search() -> (
 /// Read the PEP column from a written `psms.parquet`.
 fn read_pep_column(psms_path: &Path) -> Vec<Option<f64>> {
     let file = File::open(psms_path).unwrap();
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file).unwrap().build().unwrap();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .unwrap()
+        .build()
+        .unwrap();
     let mut out = Vec::new();
     for batch in reader {
         let batch = batch.unwrap();
-        let idx = batch.schema().index_of("posterior_error_probability").unwrap();
-        let col = batch.column(idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        let idx = batch
+            .schema()
+            .index_of("posterior_error_probability")
+            .unwrap();
+        let col = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
         for i in 0..col.len() {
-            out.push(if col.is_null(i) { None } else { Some(col.value(i)) });
+            out.push(if col.is_null(i) {
+                None
+            } else {
+                Some(col.value(i))
+            });
         }
     }
     out
@@ -130,14 +141,22 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
     let pin_path = tmp.path().join("bsa.pin");
     output::write_pin(&pin_path, &spectra, &queues, &candidates, &params, &idx).unwrap();
     let spec_ids = pin_spec_ids(&pin_path);
-    assert!(spec_ids.len() >= 5, "expected several PIN rows, got {}", spec_ids.len());
+    assert!(
+        spec_ids.len() >= 5,
+        "expected several PIN rows, got {}",
+        spec_ids.len()
+    );
 
     // Sanity: at least one multi-row scan exercises the `_{row_idx}` suffix path
     // (a SpecId with 4 underscore-segments after the title). Not required for the
     // join correctness check below, but documents that both formats are present
     // across the fixture when chimeric/ties occur.
     let has_multi = spec_ids.iter().any(|s| s.matches('_').count() >= 3);
-    eprintln!("PIN rows={} multi_row_present={}", spec_ids.len(), has_multi);
+    eprintln!(
+        "PIN rows={} multi_row_present={}",
+        spec_ids.len(),
+        has_multi
+    );
 
     // 2. Build a mock Percolator map keyed by EVERY PIN SpecId, with a distinct
     //    PEP/q per row so a mismatched join would be detectable.
@@ -191,7 +210,11 @@ fn qpx_spec_id_matches_pin_and_pep_joins() {
     // The keys actually consumed are exactly the PIN SpecIds (no leftovers means
     // the QPX reconstructed every key the PIN produced).
     let pin_set: HashSet<&String> = spec_ids.iter().collect();
-    assert_eq!(pin_set.len(), map.len(), "mock map should have one entry per distinct PIN SpecId");
+    assert_eq!(
+        pin_set.len(),
+        map.len(),
+        "mock map should have one entry per distinct PIN SpecId"
+    );
 
     // 4. Write QPX WITHOUT the rescore map → every PEP must be null (schema parity).
     let qdir_off = tmp.path().join("plain.idparquet");

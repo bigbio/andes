@@ -21,8 +21,16 @@ pub fn confident_target_indices(items: &[ScoredLabel], q_threshold: f64) -> Vec<
     let n = items.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
-        let sa = if items[a].score.is_nan() { f32::NEG_INFINITY } else { items[a].score };
-        let sb = if items[b].score.is_nan() { f32::NEG_INFINITY } else { items[b].score };
+        let sa = if items[a].score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            items[a].score
+        };
+        let sb = if items[b].score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            items[b].score
+        };
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut q = vec![1.0_f64; n];
@@ -79,8 +87,16 @@ pub fn qvalues(items: &[ScoredLabel]) -> Vec<f64> {
     }
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
-        let sa = if items[a].score.is_nan() { f32::NEG_INFINITY } else { items[a].score };
-        let sb = if items[b].score.is_nan() { f32::NEG_INFINITY } else { items[b].score };
+        let sa = if items[a].score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            items[a].score
+        };
+        let sb = if items[b].score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            items[b].score
+        };
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut q = vec![1.0_f64; n];
@@ -136,7 +152,9 @@ mod tests {
 
     #[test]
     fn confident_targets_pass_and_indices_are_targets() {
-        let mut items: Vec<_> = (0..200).map(|i| sl(30.0 - i as f32 * 0.05, false)).collect();
+        let mut items: Vec<_> = (0..200)
+            .map(|i| sl(30.0 - i as f32 * 0.05, false))
+            .collect();
         items.push(sl(1.0, true)); // lone tail decoy
         let conf = confident_target_indices(&items, 0.01);
         assert!(!conf.is_empty());

@@ -7,13 +7,13 @@ use model::enzyme::Enzyme;
 /// (variant, residues_cleaved_after, residues_cleaved_before)
 fn reference_rules() -> Vec<(Enzyme, &'static [u8], &'static [u8])> {
     vec![
-        (Enzyme::Trypsin,      b"KR",      b""),
-        (Enzyme::Chymotrypsin, b"FYWL",    b""),
-        (Enzyme::LysC,         b"K",       b""),
-        (Enzyme::AspN,         b"",        b"D"),
-        (Enzyme::GluC,         b"E",       b""),
-        (Enzyme::LysN,         b"",        b"K"),
-        (Enzyme::ArgC,         b"R",       b""),
+        (Enzyme::Trypsin, b"KR", b""),
+        (Enzyme::Chymotrypsin, b"FYWL", b""),
+        (Enzyme::LysC, b"K", b""),
+        (Enzyme::AspN, b"", b"D"),
+        (Enzyme::GluC, b"E", b""),
+        (Enzyme::LysN, b"", b"K"),
+        (Enzyme::ArgC, b"R", b""),
     ]
 }
 
@@ -23,8 +23,11 @@ fn cleavage_after_matches_reference() {
         for r in b'A'..=b'Z' {
             let expected = after.contains(&r);
             assert_eq!(
-                e.is_cleavable_after(r), expected,
-                "{:?}.is_cleavable_after({}) drift", e, r as char
+                e.is_cleavable_after(r),
+                expected,
+                "{:?}.is_cleavable_after({}) drift",
+                e,
+                r as char
             );
         }
     }
@@ -36,8 +39,11 @@ fn cleavage_before_matches_reference() {
         for r in b'A'..=b'Z' {
             let expected = before.contains(&r);
             assert_eq!(
-                e.is_cleavable_before(r), expected,
-                "{:?}.is_cleavable_before({}) drift", e, r as char
+                e.is_cleavable_before(r),
+                expected,
+                "{:?}.is_cleavable_before({}) drift",
+                e,
+                r as char
             );
         }
     }

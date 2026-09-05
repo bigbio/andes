@@ -46,6 +46,11 @@ def bare(pep):
 
 
 def main():
+    forced_run = None                      # see score_vs_truth.py: single-file SpecIds carry no run name
+    if "--run" in sys.argv:
+        i = sys.argv.index("--run")
+        forced_run = sys.argv[i + 1]
+        del sys.argv[i:i + 2]
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     truth_p, psms_p = sys.argv[1], sys.argv[2]
@@ -55,14 +60,33 @@ def main():
         trows = list(csv.DictReader((l for l in fh if not l.startswith("#")), delimiter="\t"))
     truth = {(r["run"], int(r["scan"])): bare(r["peptide"]) for r in trows}
     truth_gly = {(r["run"], int(r["scan"])): norm_glycan(r.get("glycan", "")) for r in trows}
+    if forced_run is not None:
+        if forced_run not in {k[0] for k in truth}:
+            sys.exit(f"--run {forced_run!r} is not a run in the reference")
+        truth = {k: v for k, v in truth.items() if k[0] == forced_run}
+        truth_gly = {k: v for k, v in truth_gly.items() if k[0] == forced_run}
     runs = {k[0] for k in truth}
+    # Same tail-token fallback as score_vs_truth.py, including its refusal to guess: two
+    # runs sharing a tail (sample_R1, control_R1) would otherwise both bind to whichever
+    # dict order happened to reach `next()` first, and the agreement numbers would be
+    # silently wrong rather than absent.
     tails = {r: r.rsplit("_", 1)[-1] for r in runs}
+    if len(set(tails.values())) != len(tails):
+        dupes = [r for r in runs if list(tails.values()).count(tails[r]) > 1]
+        sys.exit(f"run names are ambiguous after trimming: {sorted(dupes)}; rename the "
+                 f"truth `run` column or pool with matching tags")
 
     def key_of(specid):
         m = re.search(r"scan=(\d+)", specid)
         if not m:
             return None
-        run = next((r for r in runs if r in specid), None)
+        if forced_run is not None:
+            return (forced_run, int(m.group(1)))
+        # Full-name match on token boundaries: a run called `R1` must not claim `R10`.
+        hits = [r for r in runs if re.search(rf"(^|[^A-Za-z0-9]){re.escape(r)}([^A-Za-z0-9]|$)", specid)]
+        if len(hits) > 1:
+            sys.exit(f"SpecId {specid!r} matches several runs by full name: {sorted(hits)}")
+        run = hits[0] if hits else None
         if run is None:
             run = next((r for r, t in tails.items()
                         if re.search(rf"(^|[^A-Za-z0-9]){re.escape(t)}([^A-Za-z0-9]|$)", specid)), None)

@@ -33,11 +33,11 @@ fn load_hcd_scorer() -> (Param, RankScorer) {
     // Load the hcd_qexactive_tryp model from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
-    let store = model_train::store::ModelStore::open(bundled)
-        .expect("open bundled models.parquet");
-    let param = store.load_param("hcd_qexactive_tryp")
+    let store = model_train::store::ModelStore::open(bundled).expect("open bundled model store");
+    let param = store
+        .load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp from store");
     let scorer = RankScorer::new(&param);
     (param, scorer)
@@ -128,7 +128,10 @@ fn build_synthetic_spectrum(
         }
     }
 
-    assert!(!all_ions.is_empty(), "expected at least one ion from the peptide/scorer combo");
+    assert!(
+        !all_ions.is_empty(),
+        "expected at least one ion from the peptide/scorer combo"
+    );
 
     // Sort peaks by m/z (required by scoring) — this does NOT change relative
     // intensity ordering because we want rank determined by our intensity
@@ -205,7 +208,10 @@ fn accumulator_records_rank_one_for_most_intense_matched_ion() {
         count >= 1,
         "expected rank_count({:?}, {:?}, rank_index={}) >= 1, got {}. \
          Ion list may be empty or partition mismatch.",
-        expected_partition, expected_ion, rank_index, count
+        expected_partition,
+        expected_ion,
+        rank_index,
+        count
     );
 
     // Charge histogram must be bumped exactly once (one PSM).
@@ -287,7 +293,10 @@ fn accumulator_records_ion_existence_both_absent_on_empty_spectrum() {
     let mut stats = CountStats::new();
     accumulator.accumulate(&mut stats, &empty_spec, &peptide, charge);
 
-    assert!(!stats.existence.is_empty(), "existence counts must be recorded");
+    assert!(
+        !stats.existence.is_empty(),
+        "existence counts must be recorded"
+    );
     let nonzero_idx: Vec<u32> = stats
         .existence
         .iter()
@@ -334,9 +343,10 @@ fn accumulator_records_missing_ions_on_empty_spectrum() {
     // With no peaks, every ion is unmatched.  The rank map must have at least
     // one (partition, ion) key with a non-zero count at max_rank index.
     let max_rank = scorer.max_rank();
-    let has_missing = stats.rank.iter().any(|(_, vec)| {
-        vec.get(max_rank as usize).copied().unwrap_or(0) > 0
-    });
+    let has_missing = stats
+        .rank
+        .iter()
+        .any(|(_, vec)| vec.get(max_rank as usize).copied().unwrap_or(0) > 0);
     assert!(
         has_missing,
         "expected missing-ion counts at rank_index={max_rank} on empty spectrum"
@@ -344,7 +354,8 @@ fn accumulator_records_missing_ions_on_empty_spectrum() {
 
     // Charge must still be bumped.
     assert_eq!(
-        stats.charge.get(&(charge as i32)).copied().unwrap_or(0), 1,
+        stats.charge.get(&(charge as i32)).copied().unwrap_or(0),
+        1,
         "charge must be bumped even for empty spectrum"
     );
 }
@@ -388,7 +399,11 @@ fn merge_doubles_counts_for_same_psm() {
 #[test]
 fn merge_empty_is_default() {
     let merged = merge(vec![]);
-    assert_eq!(merged, CountStats::new(), "merge([]) must equal empty CountStats");
+    assert_eq!(
+        merged,
+        CountStats::new(),
+        "merge([]) must equal empty CountStats"
+    );
 }
 
 /// Verify that the scorer's `ion_match_facts` method (used internally) produces

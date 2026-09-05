@@ -1,24 +1,30 @@
 //! Pin commonly-used modification monoisotopic mass deltas to UniMod
 //! (https://www.unimod.org) reference values.
 
-use model::modification::{Modification, ModLocation, ResidueSpec};
+use model::modification::{ModLocation, Modification, ResidueSpec};
 
-fn bit_eq(a: f64, b: f64) -> bool { a.to_bits() == b.to_bits() }
+fn bit_eq(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
 
 /// (mods_txt_line, expected_name, expected_mass_delta).
 fn unimod_reference_mods() -> Vec<(&'static str, &'static str, f64)> {
     vec![
-        ("57.021464,C,fix,any,Carbamidomethyl",      "Carbamidomethyl",  57.021464),
-        ("15.994915,M,opt,any,Oxidation",            "Oxidation",        15.994915),
-        ("79.966331,S,opt,any,Phospho",              "Phospho",          79.966331),
-        ("42.010565,*,opt,Prot-N-term,Acetyl",       "Acetyl",           42.010565),
-        ("229.162932,K,fix,any,TMT6plex",            "TMT6plex",         229.162932),
-        ("229.162932,*,fix,N-term,TMT6plex",         "TMT6plex",         229.162932),
-        ("144.102063,K,fix,any,iTRAQ4plex",          "iTRAQ4plex",       144.102063),
-        ("304.205360,K,fix,any,iTRAQ8plex",          "iTRAQ8plex",       304.205360),
-        ("14.015650,K,opt,any,Methyl",               "Methyl",           14.015650),
-        ("28.031300,K,opt,any,Dimethyl",             "Dimethyl",         28.031300),
-        ("42.046950,K,opt,any,Trimethyl",            "Trimethyl",        42.046950),
+        (
+            "57.021464,C,fix,any,Carbamidomethyl",
+            "Carbamidomethyl",
+            57.021464,
+        ),
+        ("15.994915,M,opt,any,Oxidation", "Oxidation", 15.994915),
+        ("79.966331,S,opt,any,Phospho", "Phospho", 79.966331),
+        ("42.010565,*,opt,Prot-N-term,Acetyl", "Acetyl", 42.010565),
+        ("229.162932,K,fix,any,TMT6plex", "TMT6plex", 229.162932),
+        ("229.162932,*,fix,N-term,TMT6plex", "TMT6plex", 229.162932),
+        ("144.102063,K,fix,any,iTRAQ4plex", "iTRAQ4plex", 144.102063),
+        ("304.205360,K,fix,any,iTRAQ8plex", "iTRAQ8plex", 304.205360),
+        ("14.015650,K,opt,any,Methyl", "Methyl", 14.015650),
+        ("28.031300,K,opt,any,Dimethyl", "Dimethyl", 28.031300),
+        ("42.046950,K,opt,any,Trimethyl", "Trimethyl", 42.046950),
     ]
 }
 
@@ -31,7 +37,9 @@ fn parses_to_expected_name_and_mass() {
         assert!(
             bit_eq(m.mass_delta, expected_mass),
             "mass drift on {:?}: rust={}, expected={}",
-            line, m.mass_delta, expected_mass
+            line,
+            m.mass_delta,
+            expected_mass
         );
     }
 }

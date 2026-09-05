@@ -84,9 +84,16 @@ mod tests {
     #[test]
     fn protein_boundary_short_circuits_for_all_enzymes() {
         for e in [
-            Enzyme::Trypsin, Enzyme::Chymotrypsin, Enzyme::LysC, Enzyme::LysN,
-            Enzyme::GluC, Enzyme::ArgC, Enzyme::AspN, Enzyme::AlphaLP,
-            Enzyme::NoCleavage, Enzyme::NonSpecific,
+            Enzyme::Trypsin,
+            Enzyme::Chymotrypsin,
+            Enzyme::LysC,
+            Enzyme::LysN,
+            Enzyme::GluC,
+            Enzyme::ArgC,
+            Enzyme::AspN,
+            Enzyme::AlphaLP,
+            Enzyme::NoCleavage,
+            Enzyme::NonSpecific,
         ] {
             // Either side `-` or `_` always cleavable.
             assert!(is_enzymatic_boundary(b'-', b'A', e), "{e:?}");

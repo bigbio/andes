@@ -1,45 +1,69 @@
-use model_train::store::{write_models, write_models_with_gbdt, write_all_models_with_sources_and_gbdt_pub, ModelStore};
-use model_train::store::SourceLedger;
-use model_train::counts::CountStats;
-use rustc_hash::FxHashMap;
-use scoring_crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
 use model::activation::ActivationMethod;
 use model::instrument::InstrumentType;
 use model::protocol::Protocol;
 use model::tolerance::Tolerance;
+use model_train::counts::CountStats;
+use model_train::store::SourceLedger;
+use model_train::store::{
+    write_all_models_with_sources_and_gbdt_pub, write_models, write_models_with_gbdt, ModelStore,
+};
+use rustc_hash::FxHashMap;
+use scoring_crate::param_model::{
+    FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType,
+};
 use std::path::Path;
 
 /// Open the canonical bundled Parquet store.
 fn bundled_store() -> model_train::store::ModelStore {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
-    model_train::store::ModelStore::open(bundled).expect("open bundled models.parquet")
+    model_train::store::ModelStore::open(bundled).expect("open bundled model store")
 }
 
 // Two distinct bundled models used purely as round-trip Param fixtures (any
 // two distinct own-trained v1 models work; the previously used `cid_tof_alp` /
 // `hcd_tof_alp` were dropped as un-sourceable in the v1 own-trained bundle).
 fn fixture() -> Param {
-    bundled_store().load_param("hcd_qexactive_tryp").expect("load hcd_qexactive_tryp from store")
+    bundled_store()
+        .load_param("hcd_qexactive_tryp")
+        .expect("load hcd_qexactive_tryp from store")
 }
 
 fn fixture2() -> Param {
-    bundled_store().load_param("uvpd_qexactive_tryp").expect("load uvpd_qexactive_tryp from store")
+    bundled_store()
+        .load_param("uvpd_qexactive_tryp")
+        .expect("load uvpd_qexactive_tryp from store")
 }
 
 /// Construct a minimal `Param` that contains loss-ion entries (loss_class != 0)
 /// in both `rank_dist_table` and `frag_off_table`.
 fn param_with_loss_ions() -> Param {
-    let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1500.0,
+        seg_num: 0,
+    };
 
     // intact prefix ion (loss_class = 0)
-    let intact = IonType::Prefix { charge: 1, offset_bits: 1.0_f32.to_bits(), loss_class: 0 };
+    let intact = IonType::Prefix {
+        charge: 1,
+        offset_bits: 1.0_f32.to_bits(),
+        loss_class: 0,
+    };
     // phospho-loss prefix ion (loss_class = 2)
-    let phospho_loss = IonType::Prefix { charge: 1, offset_bits: 2.0_f32.to_bits(), loss_class: 2 };
+    let phospho_loss = IonType::Prefix {
+        charge: 1,
+        offset_bits: 2.0_f32.to_bits(),
+        loss_class: 2,
+    };
     // generic-loss suffix ion (loss_class = 255)
-    let generic_loss = IonType::Suffix { charge: 1, offset_bits: 3.0_f32.to_bits(), loss_class: 255 };
+    let generic_loss = IonType::Suffix {
+        charge: 1,
+        offset_bits: 3.0_f32.to_bits(),
+        loss_class: 255,
+    };
     let noise = IonType::Noise;
 
     let mut ion_table: FxHashMap<IonType, Vec<f32>> = FxHashMap::default();
@@ -48,15 +72,29 @@ fn param_with_loss_ions() -> Param {
     ion_table.insert(generic_loss, vec![0.3, 0.15, 0.02, 0.001]);
     ion_table.insert(noise, vec![0.1, 0.2, 0.3, 0.4]);
 
-    let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = FxHashMap::default();
+    let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> =
+        FxHashMap::default();
     rank_dist_table.insert(part, ion_table);
 
-    let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> = FxHashMap::default();
-    frag_off_table.insert(part, vec![
-        FragmentOffsetFrequency { ion_type: intact, frequency: 0.7 },
-        FragmentOffsetFrequency { ion_type: phospho_loss, frequency: 0.5 },
-        FragmentOffsetFrequency { ion_type: generic_loss, frequency: 0.3 },
-    ]);
+    let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
+        FxHashMap::default();
+    frag_off_table.insert(
+        part,
+        vec![
+            FragmentOffsetFrequency {
+                ion_type: intact,
+                frequency: 0.7,
+            },
+            FragmentOffsetFrequency {
+                ion_type: phospho_loss,
+                frequency: 0.5,
+            },
+            FragmentOffsetFrequency {
+                ion_type: generic_loss,
+                frequency: 0.3,
+            },
+        ],
+    );
 
     let mut p = Param {
         version: 10001,
@@ -108,7 +146,10 @@ fn roundtrip_param_is_equal() {
     write_models(&path, &[("m".to_string(), &original)]).unwrap();
     let store = ModelStore::open(&path).unwrap();
     let loaded = store.load_param("m").unwrap();
-    assert_eq!(loaded, original, "round-tripped Param must equal the original");
+    assert_eq!(
+        loaded, original,
+        "round-tripped Param must equal the original"
+    );
 }
 
 #[test]
@@ -145,31 +186,60 @@ fn loss_class_survives_store_round_trip() {
     let store = ModelStore::open(&path).unwrap();
     let loaded = store.load_param("loss_model").unwrap();
 
-    assert_eq!(loaded, original, "round-tripped loss-ion Param must equal the original");
+    assert_eq!(
+        loaded, original,
+        "round-tripped loss-ion Param must equal the original"
+    );
 
     // Also directly verify that the specific loss_class values are preserved.
-    let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 1500.0,
+        seg_num: 0,
+    };
 
     // Check rank_dist_table ion keys
-    let ion_map = loaded.rank_dist_table.get(&part)
+    let ion_map = loaded
+        .rank_dist_table
+        .get(&part)
         .expect("partition must exist in rank_dist_table");
-    let phospho = IonType::Prefix { charge: 1, offset_bits: 2.0_f32.to_bits(), loss_class: 2 };
-    let generic  = IonType::Suffix { charge: 1, offset_bits: 3.0_f32.to_bits(), loss_class: 255 };
-    assert!(ion_map.contains_key(&phospho),
+    let phospho = IonType::Prefix {
+        charge: 1,
+        offset_bits: 2.0_f32.to_bits(),
+        loss_class: 2,
+    };
+    let generic = IonType::Suffix {
+        charge: 1,
+        offset_bits: 3.0_f32.to_bits(),
+        loss_class: 255,
+    };
+    assert!(
+        ion_map.contains_key(&phospho),
         "rank_dist_table must contain phospho-loss ion (loss_class=2); got keys: {:?}",
-        ion_map.keys().collect::<Vec<_>>());
-    assert!(ion_map.contains_key(&generic),
+        ion_map.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        ion_map.contains_key(&generic),
         "rank_dist_table must contain generic-loss ion (loss_class=255); got keys: {:?}",
-        ion_map.keys().collect::<Vec<_>>());
+        ion_map.keys().collect::<Vec<_>>()
+    );
 
     // Check frag_off_table ion types
-    let frags = loaded.frag_off_table.get(&part)
+    let frags = loaded
+        .frag_off_table
+        .get(&part)
         .expect("partition must exist in frag_off_table");
     let all_loss_classes: Vec<u8> = frags.iter().map(|f| f.ion_type.loss_class()).collect();
-    assert!(all_loss_classes.contains(&2),
-        "frag_off_table must contain an entry with loss_class=2; got {:?}", all_loss_classes);
-    assert!(all_loss_classes.contains(&255),
-        "frag_off_table must contain an entry with loss_class=255; got {:?}", all_loss_classes);
+    assert!(
+        all_loss_classes.contains(&2),
+        "frag_off_table must contain an entry with loss_class=2; got {:?}",
+        all_loss_classes
+    );
+    assert!(
+        all_loss_classes.contains(&255),
+        "frag_off_table must contain an entry with loss_class=255; got {:?}",
+        all_loss_classes
+    );
 }
 
 /// A GBDT blob stored via `write_models_with_gbdt` must survive a round-trip:
@@ -206,11 +276,8 @@ fn gbdt_blob_roundtrips_through_store() {
     // blob is passed separately via write_models_with_gbdt.
     let param = param_with_loss_ions();
 
-    write_models_with_gbdt(
-        &store_path,
-        &[("toy", &param, Some(blob.clone()))],
-    )
-    .expect("write_models_with_gbdt failed");
+    write_models_with_gbdt(&store_path, &[("toy", &param, Some(blob.clone()))])
+        .expect("write_models_with_gbdt failed");
 
     let loaded = ModelStore::open(&store_path)
         .unwrap()
@@ -228,17 +295,22 @@ fn gbdt_blob_roundtrips_through_store() {
     );
 }
 
-/// Reading the existing bundled store (written without the loss_class column)
-/// must yield all ion types with loss_class == 0.
+/// Every bundled model carries only loss_class == 0 ion types: the bundle was
+/// trained before neutral-loss classes existed, and the reader must surface
+/// that as an explicit zero rather than anything else.
 #[test]
-fn old_store_without_loss_class_reads_as_zero() {
+fn bundled_store_ion_types_have_zero_loss_class() {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
-    let store = ModelStore::open(bundled).expect("open bundled models.parquet");
+    let store = ModelStore::open(bundled).expect("open bundled model store");
     let ids = store.model_ids();
-    assert!(ids.len() >= 17, "expected >=17 bundled models, got {}", ids.len());
+    assert!(
+        ids.len() >= 17,
+        "expected >=17 bundled models, got {}",
+        ids.len()
+    );
 
     for id in &ids {
         let param = store.load_param(id).expect("load bundled model");
@@ -247,9 +319,11 @@ fn old_store_without_loss_class_reads_as_zero() {
         for (part, ion_map) in &param.rank_dist_table {
             for ion in ion_map.keys() {
                 assert_eq!(
-                    ion.loss_class(), 0,
+                    ion.loss_class(),
+                    0,
                     "bundled model {id} partition {:?}: ion {:?} has non-zero loss_class",
-                    part, ion
+                    part,
+                    ion
                 );
             }
         }
@@ -258,9 +332,11 @@ fn old_store_without_loss_class_reads_as_zero() {
         for (part, frags) in &param.frag_off_table {
             for fof in frags {
                 assert_eq!(
-                    fof.ion_type.loss_class(), 0,
+                    fof.ion_type.loss_class(),
+                    0,
                     "bundled model {id} partition {:?}: frag_off ion {:?} has non-zero loss_class",
-                    part, fof.ion_type
+                    part,
+                    fof.ion_type
                 );
             }
         }
@@ -295,7 +371,7 @@ fn multi_model_write_preserves_blobs_and_sources() {
     let blob_a = model.to_bytes();
 
     let param_a = param_with_loss_ions(); // model A: will get GBDT blob
-    let param_b = fixture();              // model B: no GBDT blob
+    let param_b = fixture(); // model B: no GBDT blob
 
     // Build a minimal SourceLedger + empty CountStats for each model.
     let make_ledger = |id: &str| SourceLedger {
@@ -308,8 +384,10 @@ fn multi_model_write_preserves_blobs_and_sources() {
         instrument: "QExactive".to_string(),
         experiment_class: "standard".to_string(),
     };
-    let sources_a: Vec<(SourceLedger, CountStats)> = vec![(make_ledger("src_a"), CountStats::new())];
-    let sources_b: Vec<(SourceLedger, CountStats)> = vec![(make_ledger("src_b"), CountStats::new())];
+    let sources_a: Vec<(SourceLedger, CountStats)> =
+        vec![(make_ledger("src_a"), CountStats::new())];
+    let sources_b: Vec<(SourceLedger, CountStats)> =
+        vec![(make_ledger("src_b"), CountStats::new())];
 
     let tmp = tempfile::tempdir().unwrap();
     let store_path = tmp.path().join("multi_blob.parquet");
@@ -335,7 +413,8 @@ fn multi_model_write_preserves_blobs_and_sources() {
 
     // model A: blob present + correct prediction
     let loaded_a = store.load_param("model_a").expect("load model_a");
-    let gm_a = loaded_a.gbdt_peak_model
+    let gm_a = loaded_a
+        .gbdt_peak_model
         .expect("model_a must have gbdt_peak_model after round-trip");
     let logit = gm_a.predict_logit(&[1.0]);
     assert!(
@@ -366,8 +445,8 @@ fn multi_model_write_preserves_blobs_and_sources() {
 /// expected raw tree sum.
 #[test]
 fn frag_intensity_model_roundtrips_through_store() {
-    use std::sync::Arc;
     use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+    use std::sync::Arc;
 
     // Minimal model: single leaf → constant 3.5.
     let model = GbdtPeakModel {
@@ -414,7 +493,11 @@ fn frag_intensity_model_roundtrips_through_store() {
     );
 
     // Verify the blob byte-matches.
-    assert_eq!(fim.to_bytes(), blob, "round-tripped blob must be byte-identical");
+    assert_eq!(
+        fim.to_bytes(),
+        blob,
+        "round-tripped blob must be byte-identical"
+    );
 }
 
 /// A `rich_ion_model_bytes` blob stored alongside a manifest row must
@@ -423,8 +506,8 @@ fn frag_intensity_model_roundtrips_through_store() {
 /// expected raw tree sum.
 #[test]
 fn rich_ion_model_round_trips_through_store() {
-    use std::sync::Arc;
     use scoring_crate::gbdt_eval::{GbdtPeakModel, Tree};
+    use std::sync::Arc;
 
     // Minimal model: single leaf → constant 2.71.
     let model = GbdtPeakModel {
@@ -471,7 +554,11 @@ fn rich_ion_model_round_trips_through_store() {
     );
 
     // Verify the blob byte-matches.
-    assert_eq!(rim.to_bytes(), blob, "round-tripped blob must be byte-identical");
+    assert_eq!(
+        rim.to_bytes(),
+        blob,
+        "round-tripped blob must be byte-identical"
+    );
 }
 
 /// A model written WITHOUT `rich_ion_model` (None) must load with

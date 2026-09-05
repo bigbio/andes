@@ -1,7 +1,7 @@
 //! Handcrafted MGF strings exercising parser edge cases.
 
-use std::io::Cursor;
 use input::{MgfParseError, MgfReader, Spectrum};
+use std::io::Cursor;
 
 fn parse_all(s: &str) -> Vec<Result<Spectrum, MgfParseError>> {
     MgfReader::new(Cursor::new(s)).collect()
@@ -58,7 +58,9 @@ fn full_spectrum_with_all_fields() {
 fn charge_strips_sign() {
     for (line, expected) in [("CHARGE=2+", 2), ("CHARGE=3+", 3), ("CHARGE=1-", 1)] {
         let mgf = format!(
-            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{}\n100 1\nEND IONS\n", line);
+            "BEGIN IONS\nTITLE=x\nPEPMASS=500\n{}\n100 1\nEND IONS\n",
+            line
+        );
         let v = parse_ok(&mgf);
         assert_eq!(v[0].precursor_charge, Some(expected), "line={line}");
     }

@@ -22,7 +22,10 @@ const PROTON: f64 = 1.007_276_49;
 const H2O: f64 = 18.010_564_68;
 
 fn make_peptide(seq: &[u8]) -> Peptide {
-    let residues = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+    let residues = seq
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
     Peptide::new(residues, b'_', b'-')
 }
 
@@ -31,10 +34,10 @@ fn make_peptide(seq: &[u8]) -> Peptide {
 fn load_base() -> Param {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
     ModelStore::open(bundled)
-        .expect("open bundled models.parquet")
+        .expect("open bundled model store")
         .load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp")
 }
@@ -46,8 +49,12 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     // Own corpus of (charge, parent_mass): the partition tiers are derived from
     // THIS, not inherited from the seed.
     let corpus: Vec<(i32, f32)> = vec![
-        (2, 700.0), (2, 800.0), (2, 900.0), (2, 1000.0),
-        (3, 1200.0), (3, 1500.0),
+        (2, 700.0),
+        (2, 800.0),
+        (2, 900.0),
+        (2, 1000.0),
+        (3, 1200.0),
+        (3, 1500.0),
     ];
     // occupancy=1, max=2 → each charge gets min(n_masses, 2) = 2 tiers.
     let cfg = GeometryConfig {
@@ -67,8 +74,14 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     // 2 charges × 2 tiers × 2 segments = 8 partitions, each with a Noise entry.
     assert_eq!(derived.partitions.len(), 8);
     for part in &derived.partitions {
-        let frags = derived.frag_off_table.get(part).expect("frag entry per partition");
-        assert!(frags.iter().any(|f| f.ion_type.is_noise()), "Noise per partition");
+        let frags = derived
+            .frag_off_table
+            .get(part)
+            .expect("frag entry per partition");
+        assert!(
+            frags.iter().any(|f| f.ion_type.is_noise()),
+            "Noise per partition"
+        );
     }
 
     // (1) RankScorer accepts the geometry-only template (empty tables → no panic).
@@ -82,7 +95,10 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
 
     // Place peaks AT the peptide's own b/y ion m/z (charge 1) so the model's
     // enumerated fragments actually match and record real ranks.
-    let res: Vec<f64> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap().mass).collect();
+    let res: Vec<f64> = seq
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap().mass)
+        .collect();
     let mut peaks: Vec<(f64, f32)> = Vec::new();
     let mut cum = 0.0;
     for (i, &m) in res.iter().take(res.len() - 1).enumerate() {
@@ -92,7 +108,10 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
     let mut cum_y = 0.0;
     for (i, &m) in res.iter().rev().take(res.len() - 1).enumerate() {
         cum_y += m;
-        peaks.push((cum_y + H2O + PROTON, (1900 - i as i32 * 120).max(100) as f32)); // y(i+1)+
+        peaks.push((
+            cum_y + H2O + PROTON,
+            (1900 - i as i32 * 120).max(100) as f32,
+        )); // y(i+1)+
     }
     peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
@@ -126,10 +145,16 @@ fn derived_geometry_trains_a_scorable_model_end_to_end() {
 
     // (4) The trained own-geometry model is scorable: non-empty rank tables, every
     //     slot strictly positive (Laplace floor), and RankScorer accepts it.
-    assert!(!estimated.rank_dist_table.is_empty(), "trained model has rank tables");
+    assert!(
+        !estimated.rank_dist_table.is_empty(),
+        "trained model has rank tables"
+    );
     for ion_tab in estimated.rank_dist_table.values() {
         for v in ion_tab.values() {
-            assert!(v.iter().all(|&x| x > 0.0), "every rank-dist slot strictly positive");
+            assert!(
+                v.iter().all(|&x| x > 0.0),
+                "every rank-dist slot strictly positive"
+            );
         }
     }
     let _trained_scorer = RankScorer::new(&estimated);

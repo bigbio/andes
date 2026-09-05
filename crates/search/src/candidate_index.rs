@@ -26,8 +26,8 @@
 //! and the existing file is re-opened.  This makes repeated searches over the same
 //! database pay the build cost only once.
 
-use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -96,7 +96,13 @@ impl IndexRecord {
         let start_offset = u32::from_le_bytes(buf[12..16].try_into().unwrap());
         let length = u16::from_le_bytes(buf[16..18].try_into().unwrap());
         let flags = u16::from_le_bytes(buf[18..20].try_into().unwrap());
-        Self { mass_milli, protein_index, start_offset, length, flags }
+        Self {
+            mass_milli,
+            protein_index,
+            start_offset,
+            length,
+            flags,
+        }
     }
 }
 
@@ -197,9 +203,8 @@ pub fn ram_candidate_index_fits(
     const PER_CANDIDATE_OVERHEAD: u64 = 120; // struct + Vec header + bucket-idx entry + alloc overhead
     let mut acc: u64 = 0;
     for c in enumerate_candidates(idx, params, decoy_prefix) {
-        acc = acc.saturating_add(
-            PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE,
-        );
+        acc = acc
+            .saturating_add(PER_CANDIDATE_OVERHEAD + c.peptide.residues.len() as u64 * PER_RESIDUE);
         if acc > budget_bytes {
             return false;
         }
@@ -464,7 +469,11 @@ impl MmapCandidateIndex {
     /// # Panics
     /// Panics if `i >= self.len()`.
     pub fn record_at(&self, i: usize) -> IndexRecord {
-        assert!(i < self.len, "record_at index {i} out of bounds (len={})", self.len);
+        assert!(
+            i < self.len,
+            "record_at index {i} out of bounds (len={})",
+            self.len
+        );
         let start = INDEX_HEADER_SIZE + i * INDEX_RECORD_SIZE;
         let chunk: &[u8; INDEX_RECORD_SIZE] = self.mmap[start..start + INDEX_RECORD_SIZE]
             .try_into()
@@ -533,12 +542,12 @@ impl MmapCandidateIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::aa_set::AminoAcidSetBuilder;
-    use model::modification::{Modification, ModLocation, ResidueSpec};
-    use model::protein::{Protein, ProteinDb};
     use crate::candidate_gen::enumerate_candidates;
     use crate::search_index::SearchIndex;
     use crate::search_params::SearchParams;
+    use model::aa_set::AminoAcidSetBuilder;
+    use model::modification::{ModLocation, Modification, ResidueSpec};
+    use model::protein::{Protein, ProteinDb};
 
     /// Build a fixture index file containing base peptides from the toy protein.
     /// Returns the path wrapped in a `tempfile::NamedTempFile` (dropped = deleted).
@@ -568,7 +577,8 @@ mod tests {
         let win = mi.mass_window(target - 5, target + 5);
         // Every returned record must lie within [target-5, target+5].
         assert!(
-            win.iter().all(|r| r.mass_milli >= target - 5 && r.mass_milli <= target + 5),
+            win.iter()
+                .all(|r| r.mass_milli >= target - 5 && r.mass_milli <= target + 5),
             "mass_window returned out-of-range records"
         );
         // At least one record must have exactly the target mass.
@@ -649,11 +659,14 @@ mod tests {
         params.min_length = 3;
 
         let mut buf: Vec<u8> = Vec::new();
-        let n = build_base_peptide_index(&idx, &params, "XXX", &mut buf)
-            .expect("write failed");
+        let n = build_base_peptide_index(&idx, &params, "XXX", &mut buf).expect("write failed");
 
         assert!(n > 0, "expected at least one record, got 0");
-        assert_eq!(buf.len(), INDEX_HEADER_SIZE + n * INDEX_RECORD_SIZE, "buffer size mismatch");
+        assert_eq!(
+            buf.len(),
+            INDEX_HEADER_SIZE + n * INDEX_RECORD_SIZE,
+            "buffer size mismatch"
+        );
 
         let records = read_records(&buf);
         assert_eq!(records.len(), n);
@@ -778,8 +791,7 @@ mod tests {
             max_variable_mods_per_peptide: 0,
             ..params.clone()
         };
-        let base_candidates: Vec<_> =
-            enumerate_candidates(&idx, &base_params, "XXX").collect();
+        let base_candidates: Vec<_> = enumerate_candidates(&idx, &base_params, "XXX").collect();
         assert_eq!(
             base_records.len(),
             base_candidates.len(),
@@ -801,8 +813,7 @@ mod tests {
         // --- RHS: enumerate_candidates with full mods, filter to unmodified ---
         // A candidate is "unmodified" when none of its residues carries a
         // variable (non-fixed) mod.
-        let all_candidates: Vec<_> =
-            enumerate_candidates(&idx, &params, "XXX").collect();
+        let all_candidates: Vec<_> = enumerate_candidates(&idx, &params, "XXX").collect();
         let mut rhs: Vec<(Vec<u8>, u64)> = all_candidates
             .iter()
             .filter(|c| {
@@ -810,7 +821,7 @@ mod tests {
                     aa.mod_
                         .as_ref()
                         .map(|m| m.fixed) // fixed mods are OK; variable are not
-                        .unwrap_or(true)  // no mod at all = unmodified
+                        .unwrap_or(true) // no mod at all = unmodified
                 })
             })
             .map(|c| {
@@ -867,9 +878,8 @@ mod tests {
         // let open_or_build create a fresh file.  Actually `NamedTempFile::new`
         // creates a zero-byte file; `open_or_build` treats 0-byte files as a
         // cache miss (size % 20 == 0 but len == 0 fails the `len > 0` guard).
-        let (mi1, was_built1) =
-            MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
-                .expect("first open_or_build failed");
+        let (mi1, was_built1) = MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
+            .expect("first open_or_build failed");
         assert!(was_built1, "first call must build the index (cache miss)");
         assert!(!mi1.is_empty(), "built index must be non-empty");
 
@@ -880,9 +890,8 @@ mod tests {
             .expect("mtime after build");
 
         // Second call with identical inputs: cache hit — must NOT rebuild.
-        let (mi2, was_built2) =
-            MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
-                .expect("second open_or_build failed");
+        let (mi2, was_built2) = MmapCandidateIndex::open_or_build(cache_path, &idx, &params, "XXX")
+            .expect("second open_or_build failed");
         assert!(!was_built2, "second call must reuse the cache (cache hit)");
 
         // File must not have been rewritten (mtime unchanged).
@@ -917,7 +926,9 @@ mod tests {
 
         // A 40-byte blob (two 20-byte "records") with NO magic header.
         let tmp = tempfile::NamedTempFile::new().expect("NamedTempFile");
-        tmp.as_file().write_all(&[0u8; 2 * INDEX_RECORD_SIZE]).unwrap();
+        tmp.as_file()
+            .write_all(&[0u8; 2 * INDEX_RECORD_SIZE])
+            .unwrap();
         tmp.as_file().sync_all().unwrap();
 
         // `open` rejects it outright.
@@ -926,9 +937,8 @@ mod tests {
             "open must reject a file with no magic header"
         );
         // `open_or_build` treats it as a miss and rebuilds a valid index.
-        let (mi, was_built) =
-            MmapCandidateIndex::open_or_build(tmp.path(), &idx, &params, "XXX")
-                .expect("open_or_build");
+        let (mi, was_built) = MmapCandidateIndex::open_or_build(tmp.path(), &idx, &params, "XXX")
+            .expect("open_or_build");
         assert!(was_built, "header-less file must force a rebuild");
         assert!(!mi.is_empty(), "rebuilt index must be non-empty");
     }
@@ -954,7 +964,8 @@ mod tests {
         let path_b = index_cache_path(&idx, &params_b);
 
         assert_ne!(
-            path_a, path_b,
+            path_a,
+            path_b,
             "cache paths must differ when min_length differs ({} vs {})",
             path_a.display(),
             path_b.display()
@@ -972,7 +983,9 @@ mod tests {
             SearchParams::default_tryptic(AminoAcidSetBuilder::new_standard().build().unwrap());
         p_nomod.min_length = 3;
         let mut p_cam = SearchParams::default_tryptic(
-            AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c().build().unwrap(),
+            AminoAcidSetBuilder::new_standard_with_carbamidomethyl_c()
+                .build()
+                .unwrap(),
         );
         p_cam.min_length = 3;
         assert_ne!(

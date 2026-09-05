@@ -29,6 +29,7 @@ fn f13_mgf_parses_1406_spectra() {
     assert_eq!(count, 1406, "expected 1406 spectra, got {count}");
     assert!(
         elapsed.as_secs_f32() < 3.0,
-        "F13.mgf parse took {:.2}s, target < 3s", elapsed.as_secs_f32()
+        "F13.mgf parse took {:.2}s, target < 3s",
+        elapsed.as_secs_f32()
     );
 }

@@ -12,7 +12,9 @@
 // PROTON`), i.e. the peptide NEUTRAL mass (water included). We subtract H2O
 // here so both branches agree on one convention before union/dedup/filter.
 
-use crate::backbone::{core_y_intensity, solve_backbone_min, BackboneCandidate, SpectrumStats, H2O};
+use crate::backbone::{
+    core_y_intensity, solve_backbone_min, BackboneCandidate, SpectrumStats, H2O,
+};
 use crate::glycan_db::GlycanComp;
 use crate::oxonium::oxonium_gate;
 
@@ -23,9 +25,6 @@ pub enum Source {
     Db,
     /// Backbone proposed by the de-novo Y-ladder solver.
     DeNovo,
-    /// Backbone borrowed from a confident co-eluting sibling spectrum
-    /// (cross-spectrum transfer). Carries no per-spectrum core-Y anchor.
-    Transferred,
 }
 
 /// A single backbone candidate from either the DB branch or the de-novo solver.
@@ -52,21 +51,6 @@ pub struct BackboneHit {
     /// for the intact `CalcMass` rather than `glycan.map(|g| g.mass).unwrap_or(0.0)`,
     /// which silently reported the bare peptide for novel glycans.
     pub glycan_mass_residual: f64,
-    /// Cross-spectrum transfer provenance (inert for natively-generated hits).
-    pub is_transferred: bool,
-    pub transfer_graph_support: u32,
-    pub transfer_seed_score: f32,
-    pub transfer_rt_delta: f32,
-    pub transfer_ungated: bool,
-    /// FDR-soundness (design bug #1): a transferred backbone is LOCKED to the
-    /// exact Pass-1 seed peptide it was borrowed from. `Some(candidate_idx)` for
-    /// a transferred hit; `None` for every natively-generated hit. When set,
-    /// Pass-2 MUST score ONLY this candidate (not every mass-matching peptide),
-    /// so a decoy seed emits a decoy-labeled row and the target/decoy graph stays
-    /// symmetric. `transfer_seed_is_decoy` is the seed's label, asserted equal to
-    /// `candidates[transfer_peptide_idx].is_decoy` at scoring time (fail loud).
-    pub transfer_peptide_idx: Option<u32>,
-    pub transfer_seed_is_decoy: bool,
 }
 
 /// DB-branch backbone enumeration.
@@ -104,13 +88,6 @@ pub fn db_branch(
                     // By construction bb = precursor − g.mass, so the observed
                     // residual is exactly the glycan mass.
                     glycan_mass_residual: precursor_neutral - bb,
-                    is_transferred: false,
-                    transfer_graph_support: 0,
-                    transfer_seed_score: 0.0,
-                    transfer_rt_delta: 0.0,
-                    transfer_ungated: false,
-                    transfer_peptide_idx: None,
-                    transfer_seed_is_decoy: false,
                 })
             } else {
                 None
@@ -183,7 +160,15 @@ pub fn hybrid_candidates(
     tol_ppm: f64,
     top_k: usize,
 ) -> Vec<BackboneHit> {
-    hybrid_candidates_with_isotope(peaks, precursor_neutral, precursor_z, 0, glycans, tol_ppm, top_k)
+    hybrid_candidates_with_isotope(
+        peaks,
+        precursor_neutral,
+        precursor_z,
+        0,
+        glycans,
+        tol_ppm,
+        top_k,
+    )
 }
 
 /// Same as [`hybrid_candidates`] but records the isotope offset that produced
@@ -205,7 +190,8 @@ pub fn hybrid_candidates_with_isotope(
     // `solve_backbones_for_charge` ONCE per charge (at the widest precursor) and
     // `hybrid_candidates_presolved` per isotope — the Y-ladder bin voting is
     // isotope-independent, so solving once is ~N× cheaper (see those fns).
-    let presolved = solve_backbones_for_charge(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
+    let presolved =
+        solve_backbones_for_charge(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
     hybrid_candidates_presolved(
         presolved.as_deref(),
         peaks,
@@ -216,8 +202,7 @@ pub fn hybrid_candidates_with_isotope(
         tol_ppm,
         top_k,
         false,
-        false, // isobar_rep: convenience wrapper keeps the historical default
-        0.0,   // sialic oxonium gate: off
+        0.0, // sialic oxonium gate: off
     )
 }
 
@@ -291,9 +276,6 @@ pub fn hybrid_candidates_presolved(
     tol_ppm: f64,
     top_k: usize,
     force_db_on_none: bool,
-    // Resolve isobaric-composition collisions on Y-ladder evidence instead of sort
-    // order. See the block below for why the original A/B under-measured this.
-    isobar_rep: bool,
     // When > 0, a composition may only claim NeuAc/NeuGc if the matching oxonium reaches
     // this fraction of base peak. 0 disables the gate (historical behaviour).
     sialic_oxonium_min_frac: f32,
@@ -403,13 +385,6 @@ pub fn hybrid_candidates_presolved(
             // Keep the observed residual even when annotation returned None so a
             // novel glycan's intact mass is not lost (Codex finding #3).
             glycan_mass_residual: residual,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
-            transfer_peptide_idx: None,
-            transfer_seed_is_decoy: false,
         });
     }
 
@@ -473,58 +448,13 @@ pub fn hybrid_candidates_presolved(
         return combined;
     }
 
-    // Round-7 (audit F5): this clustered on backbone mass ALONE and kept whichever
-    // member sorted first, which is composition-blind. The monosaccharide constants
-    // make that systematic rather than random:
-    //     HEX - FUC   = 15.994915
-    //     NEUGC - NEUAC = 15.994914
-    // so {hex=h, fuc=f, neuac=a, neugc=g} and {hex=h-1, fuc=f+1, neuac=a-1, neugc=g+1}
-    // are isobaric to ~1 uDa. In the default 600-composition list that collapses ~23%
-    // of entries, and because the Hex+NeuAc twin has the (1 uDa) larger glycan mass it
-    // always sorts first, so the Fuc+NeuGc twin is ALWAYS the one deleted. PXD011533 is
-    // mouse, which expresses NeuGc — i.e. the biologically correct member was being
-    // dropped by sort order. The backbone mass is identical either way, but the
-    // surviving composition drives the glycan-Y ladder (gp_k, the largest selector
-    // weight) and sialic_consistency, so a wrong composition depresses the ladder for
-    // the TRUE backbone and can lose it the argmax.
-    // Fix: when a cluster holds >1 DISTINCT composition, pick the representative by
-    // composition-specific Y-ladder evidence instead of sort order. Peptide-independent,
-    // so target/decoy symmetric. Candidate count is unchanged (still one per cluster).
-    // MEASURED NEGATIVE ON THE WRONG METRIC (-8 backbone-correct @1%, 3-fraction pool)
-    // and disabled. That A/B scored peptide-level yield, and as the original note itself
-    // observed, "the backbone mass is identical either way, so the peptide-level outcome
-    // barely moves" — i.e. the metric was structurally unable to see what this changes.
-    //
-    // What it changes is WHICH COMPOSITION is named for a given glycan mass, and that is
-    // measurably broken. Head-to-head against the depositors' own Byonic results on
-    // PXD030622 human plasma (their FASTA, their published QC): andes emits 131 distinct
-    // composition strings over only 53 distinct glycan MASSES (~2.5 compositions per mass)
-    // where Byonic is 1.0 — i.e. two spectra of the same glycan can be annotated with
-    // different compositions, because the survivor among isobaric twins is chosen by
-    // `to_bits()` sort order. The masses themselves are largely right: 74% of andes PSMs
-    // carry a mass Byonic also observed and the median is 2205 Da in both.
-    //
-    // So this is now a flag (`--glyco-isobar-rep`), to be judged on
-    // COMPOSITIONS-PER-MASS against a reference distribution, not on yield.
-    let iso_stats = isobar_rep.then(|| SpectrumStats::new(peaks));
-    // Y-ladder evidence for a hit's own composition (0.0 for de-novo / no comp).
-    let comp_evidence = |h: &BackboneHit| -> f64 {
-        match (&h.glycan, iso_stats.as_ref()) {
-            (Some(g), Some(st)) => crate::backbone::glycan_y_intensity(
-                peaks,
-                st,
-                h.backbone_mass + H2O,
-                g,
-                tol_ppm,
-                precursor_z,
-            ),
-            _ => 0.0,
-        }
-    };
-
+    // Clusters on backbone mass alone; within a cluster the representative is the
+    // member that sorts first (Db before DeNovo, then by glycan mass). Isobaric
+    // compositions at the same backbone mass are therefore resolved by sort order.
+    // Which composition survives affects only the named composition, never the
+    // backbone mass or the candidate count (still one per cluster).
     let mut deduped: Vec<BackboneHit> = Vec::with_capacity(combined.len());
     let mut rep = combined.remove(0);
-    let mut rep_ev: Option<f64> = None; // lazily computed only on a real collision
 
     for next in combined {
         let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.01);
@@ -535,25 +465,11 @@ pub fn hybrid_candidates_presolved(
             // but guard defensively):
             if rep.source == Source::DeNovo && next.source == Source::Db {
                 rep = next;
-                rep_ev = None;
-            } else if isobar_rep
-                && rep.source == Source::Db
-                && next.source == Source::Db
-                && rep.glycan != next.glycan
-            {
-                // Isobaric composition collision — resolve on evidence, not order.
-                let r = *rep_ev.get_or_insert_with(|| comp_evidence(&rep));
-                let n = comp_evidence(&next);
-                if n > r {
-                    rep = next;
-                    rep_ev = Some(n);
-                }
             }
             // else keep rep as-is
         } else {
             deduped.push(rep);
             rep = next;
-            rep_ev = None;
         }
     }
     deduped.push(rep);
@@ -568,15 +484,23 @@ pub fn hybrid_candidates_presolved(
         let stats = SpectrumStats::new(peaks);
         let mut scored: Vec<(f64, BackboneHit)> = deduped
             .into_iter()
-            .map(|h| (core_y_intensity(peaks, &stats, h.backbone_mass + H2O, tol_ppm, precursor_z), h))
+            .map(|h| {
+                (
+                    core_y_intensity(peaks, &stats, h.backbone_mass + H2O, tol_ppm, precursor_z),
+                    h,
+                )
+            })
             .collect();
         scored.sort_by(|a, b| {
             // DET-1: total_cmp on the intensity primary key (was partial_cmp +
             // unwrap_or(Equal), which silently mapped any NaN to a tie). The mass
             // to_bits tiebreak is already a total order, so this is behaviour-
             // preserving on finite intensities and only hardens the NaN edge.
-            b.0.total_cmp(&a.0)
-                .then_with(|| a.1.backbone_mass.to_bits().cmp(&b.1.backbone_mass.to_bits()))
+            b.0.total_cmp(&a.0).then_with(|| {
+                a.1.backbone_mass
+                    .to_bits()
+                    .cmp(&b.1.backbone_mass.to_bits())
+            })
         });
         scored.truncate(top_k);
         deduped = scored.into_iter().map(|(_, h)| h).collect();
@@ -607,7 +531,11 @@ mod tests {
         let found = hits
             .iter()
             .any(|h| (h.backbone_mass - true_backbone).abs() < 0.01 && h.source == Source::Db);
-        assert!(found, "did not find backbone at {:.4} in DB branch", true_backbone);
+        assert!(
+            found,
+            "did not find backbone at {:.4} in DB branch",
+            true_backbone
+        );
     }
 
     /// DB branch must filter out backbones below min_backbone.
@@ -618,7 +546,11 @@ mod tests {
         let precursor = 600.0; // glycan of ~100 Da not in list; backbone ~100 Da
         let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
         for h in &hits {
-            assert!(h.backbone_mass >= 500.0, "backbone below min: {}", h.backbone_mass);
+            assert!(
+                h.backbone_mass >= 500.0,
+                "backbone below min: {}",
+                h.backbone_mass
+            );
         }
     }
 
@@ -661,9 +593,9 @@ mod tests {
 
         // Build a synthetic spectrum: oxonium peaks + full core-Y ladder.
         let mut peaks: Vec<(f64, f32)> = vec![
-            (204.08665, 200.0), // HexNAc oxonium
-            (138.05496, 150.0), // HexNAc fragment
-            (186.07608, 80.0),  // HexNAc ring-open
+            (204.08665, 200.0),           // HexNAc oxonium
+            (138.05496, 150.0),           // HexNAc fragment
+            (186.07608, 80.0),            // HexNAc ring-open
             (y0_neutral + proton, 100.0), // Y0
         ];
         for &s in steps.iter() {
@@ -676,7 +608,11 @@ mod tests {
         // The recovered backbone must annotate to the known HexNAc2Hex3
         // composition (Source::Db), since the implied glycan mass matches.
         let has_db = hits.iter().any(|h| h.source == Source::Db);
-        assert!(has_db, "expected at least one annotated (Db) hit, got {:?}", hits);
+        assert!(
+            has_db,
+            "expected at least one annotated (Db) hit, got {:?}",
+            hits
+        );
     }
 
     /// Phase 2b (DB-union): when the Y-ladder solver has evidence, the DB branch
@@ -705,11 +641,18 @@ mod tests {
 
         let top_k = 5;
         let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, top_k);
-        assert!(hits.len() <= top_k, "DB-union must stay bounded to top_k, got {}", hits.len());
+        assert!(
+            hits.len() <= top_k,
+            "DB-union must stay bounded to top_k, got {}",
+            hits.len()
+        );
         let found = hits
             .iter()
             .any(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.05);
-        assert!(found, "true backbone (real core-Y ladder) must survive core-Y-ranked truncation");
+        assert!(
+            found,
+            "true backbone (real core-Y ladder) must survive core-Y-ranked truncation"
+        );
     }
 
     /// SPEED FACTORING equivalence: solving the Y-ladder ONCE per charge at the
@@ -754,7 +697,6 @@ mod tests {
             let src = match h.source {
                 Source::Db => 0u8,
                 Source::DeNovo => 1u8,
-                Source::Transferred => 0u8, // Mirror Db: transferred backbones are DB-annotated glycans
             };
             (
                 (h.backbone_mass * 100.0).round() as i64,
@@ -802,12 +744,14 @@ mod tests {
                 tol,
                 top_k,
                 false,
-                false, // isobar_rep: this test pins isotope-sweep equivalence only
-                0.0,   // sialic oxonium gate: off
+                0.0, // sialic oxonium gate: off
             ));
         }
 
-        assert!(!old.is_empty(), "expected non-empty union to make the test meaningful");
+        assert!(
+            !old.is_empty(),
+            "expected non-empty union to make the test meaningful"
+        );
         assert_eq!(
             sorted(&old),
             sorted(&new),
@@ -849,7 +793,12 @@ mod tests {
             .iter()
             .filter(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.02)
             .collect();
-        assert_eq!(near.len(), 1, "expected exactly one candidate near true backbone after dedup, got {}", near.len());
+        assert_eq!(
+            near.len(),
+            1,
+            "expected exactly one candidate near true backbone after dedup, got {}",
+            near.len()
+        );
         assert_eq!(
             near[0].source,
             Source::Db,
@@ -963,14 +912,19 @@ mod tests {
             (900.0, 20.0),
         ];
         // Premise: both solver quorums find nothing.
-        assert!(crate::backbone::solve_backbone_min(&peaks, precursor, 2, 20.0, 50, 1).is_empty(),
-            "premise: even quorum-1 solver must be empty for a 0-core-Y spectrum");
+        assert!(
+            crate::backbone::solve_backbone_min(&peaks, precursor, 2, 20.0, 50, 1).is_empty(),
+            "premise: even quorum-1 solver must be empty for a 0-core-Y spectrum"
+        );
 
         let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 50);
         let found = hits.iter().any(|h| {
             (h.backbone_mass - true_backbone_residue).abs() < 0.02 && h.source == Source::Db
         });
-        assert!(found, "DB fallback must recover the 0-core-Y known-glycan backbone; got {hits:?}");
+        assert!(
+            found,
+            "DB fallback must recover the 0-core-Y known-glycan backbone; got {hits:?}"
+        );
     }
 
     /// Finding #3 regression (Codex adversarial review): a Y-first backbone
@@ -1046,7 +1000,10 @@ mod tests {
         assert!(!hits.is_empty());
         for h in &hits {
             assert_eq!(h.charge, 3, "charge must be threaded onto BackboneHit");
-            assert_eq!(h.isotope_offset, -1, "isotope_offset must be threaded onto BackboneHit");
+            assert_eq!(
+                h.isotope_offset, -1,
+                "isotope_offset must be threaded onto BackboneHit"
+            );
         }
     }
 
@@ -1126,64 +1083,11 @@ mod tests {
         let hits = hybrid_candidates_with_isotope(&peaks, precursor, 2, 2, &glycans, 20.0, 10);
         assert!(!hits.is_empty(), "expected hybrid hits");
         for h in &hits {
-            assert_eq!(h.isotope_offset, 2, "every hit must carry the caller's isotope offset");
+            assert_eq!(
+                h.isotope_offset, 2,
+                "every hit must carry the caller's isotope offset"
+            );
             assert_eq!(h.charge, 2, "every hit must carry the caller's charge");
         }
-    }
-
-    #[test]
-    fn source_has_transferred_variant_distinct_from_db_and_denovo() {
-        assert_ne!(Source::Transferred, Source::Db);
-        assert_ne!(Source::Transferred, Source::DeNovo);
-        // clone + eq hold (derives intact)
-        assert_eq!(Source::Transferred, Source::Transferred.clone());
-    }
-
-    /// Task 8a: `BackboneHit` must carry cross-spectrum transfer provenance
-    /// fields, inert (false/0/0.0) for natively-generated hits, so a
-    /// transferred backbone's provenance can reach the PIN via `GlycoPsmKey`.
-    #[test]
-    fn backbone_hit_carries_transfer_provenance_fields() {
-        let native = BackboneHit {
-            backbone_mass: 1500.0,
-            glycan: None,
-            source: Source::Db,
-            charge: 2,
-            isotope_offset: 0,
-            glycan_mass_residual: 892.317,
-            is_transferred: false,
-            transfer_graph_support: 0,
-            transfer_seed_score: 0.0,
-            transfer_rt_delta: 0.0,
-            transfer_ungated: false,
-            transfer_peptide_idx: None,
-            transfer_seed_is_decoy: false,
-        };
-        assert!(!native.is_transferred);
-        assert_eq!(native.transfer_graph_support, 0);
-        assert_eq!(native.transfer_peptide_idx, None);
-
-        let transferred = BackboneHit {
-            backbone_mass: 1500.0,
-            glycan: None,
-            source: Source::Transferred,
-            charge: 2,
-            isotope_offset: 0,
-            glycan_mass_residual: 892.317,
-            is_transferred: true,
-            transfer_graph_support: 5,
-            transfer_seed_score: 0.87,
-            transfer_rt_delta: 12.5,
-            transfer_ungated: true,
-            transfer_peptide_idx: Some(42),
-            transfer_seed_is_decoy: true,
-        };
-        assert!(transferred.is_transferred);
-        assert_eq!(transferred.transfer_graph_support, 5);
-        assert_eq!(transferred.transfer_seed_score, 0.87);
-        assert_eq!(transferred.transfer_rt_delta, 12.5);
-        assert!(transferred.transfer_ungated);
-        assert_eq!(transferred.transfer_peptide_idx, Some(42));
-        assert!(transferred.transfer_seed_is_decoy);
     }
 }

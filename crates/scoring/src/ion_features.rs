@@ -154,7 +154,9 @@ mod tests {
 
     fn pep(seq: &str) -> Peptide {
         Peptide::new(
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect(),
+            seq.bytes()
+                .map(|b| AminoAcid::standard(b).unwrap())
+                .collect(),
             b'K',
             b'R',
         )

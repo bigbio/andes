@@ -30,8 +30,19 @@ fn each_protein_well_formed() {
     let db = FastaReader::load_all(BufReader::new(file)).unwrap();
     for (i, p) in db.iter().enumerate() {
         assert!(!p.accession.is_empty(), "protein {} has empty accession", i);
-        assert!(!p.sequence.is_empty(), "protein {} ({}) has empty sequence", i, p.accession);
-        assert!(p.sequence.iter().all(|&b| b.is_ascii_uppercase() && b.is_ascii_alphabetic()),
-            "protein {} ({}) has non-uppercase or non-alpha residue", i, p.accession);
+        assert!(
+            !p.sequence.is_empty(),
+            "protein {} ({}) has empty sequence",
+            i,
+            p.accession
+        );
+        assert!(
+            p.sequence
+                .iter()
+                .all(|&b| b.is_ascii_uppercase() && b.is_ascii_alphabetic()),
+            "protein {} ({}) has non-uppercase or non-alpha residue",
+            i,
+            p.accession
+        );
     }
 }

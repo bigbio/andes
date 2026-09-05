@@ -4,8 +4,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 
-use search::{reverse_db, target_plus_decoy};
 use input::FastaReader;
+use search::{reverse_db, target_plus_decoy};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

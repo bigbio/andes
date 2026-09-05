@@ -136,7 +136,11 @@ pub fn build_partition_skeleton(
     for &(charge, ref tiers) in tiers_by_charge {
         for &parent_mass in tiers {
             for seg_num in 0..num_segments.max(1) {
-                parts.push(Partition { charge, parent_mass, seg_num });
+                parts.push(Partition {
+                    charge,
+                    parent_mass,
+                    seg_num,
+                });
             }
         }
     }
@@ -175,15 +179,26 @@ pub fn build_frag_off_table(
         let mut frags: Vec<FragmentOffsetFrequency> = Vec::new();
         for fc in 1..=max_frag_charge {
             frags.push(FragmentOffsetFrequency {
-                ion_type: IonType::Prefix { charge: fc, offset_bits: prefix_off, loss_class: 0 },
+                ion_type: IonType::Prefix {
+                    charge: fc,
+                    offset_bits: prefix_off,
+                    loss_class: 0,
+                },
                 frequency: 0.0,
             });
             frags.push(FragmentOffsetFrequency {
-                ion_type: IonType::Suffix { charge: fc, offset_bits: suffix_off, loss_class: 0 },
+                ion_type: IonType::Suffix {
+                    charge: fc,
+                    offset_bits: suffix_off,
+                    loss_class: 0,
+                },
                 frequency: 0.0,
             });
         }
-        frags.push(FragmentOffsetFrequency { ion_type: IonType::Noise, frequency: 0.0 });
+        frags.push(FragmentOffsetFrequency {
+            ion_type: IonType::Noise,
+            frequency: 0.0,
+        });
         table.insert(part, frags);
     }
     table
@@ -220,8 +235,11 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
     } else {
         cfg.max_fragment_charge
     };
-    let frag_off_table =
-        build_frag_off_table(&partitions, effective_frag_charge, base.data_type.activation);
+    let frag_off_table = build_frag_off_table(
+        &partitions,
+        effective_frag_charge,
+        base.data_type.activation,
+    );
 
     // Charge histogram + span from the corpus.
     let mut charge_counts: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
@@ -229,8 +247,16 @@ pub fn derive_geometry(charge_masses: &[(i32, f32)], base: &Param, cfg: &Geometr
         *charge_counts.entry(charge).or_insert(0) += 1;
     }
     let charge_hist: Vec<(i32, i32)> = charge_counts.iter().map(|(&c, &n)| (c, n)).collect();
-    let min_charge = charge_counts.keys().next().copied().unwrap_or(base.min_charge);
-    let max_charge = charge_counts.keys().next_back().copied().unwrap_or(base.max_charge);
+    let min_charge = charge_counts
+        .keys()
+        .next()
+        .copied()
+        .unwrap_or(base.min_charge);
+    let max_charge = charge_counts
+        .keys()
+        .next_back()
+        .copied()
+        .unwrap_or(base.max_charge);
 
     let mut param = Param {
         // Non-geometry metadata cloned from the base/seed.
@@ -285,7 +311,11 @@ mod tests {
 
     /// Minimal non-geometry base `Param` (the metadata `derive_geometry` clones).
     fn base_param() -> Param {
-        let part = Partition { charge: 2, parent_mass: 1500.0, seg_num: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 1500.0,
+            seg_num: 0,
+        };
         let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
             FxHashMap::default();
         frag_off_table.insert(part, vec![]);
@@ -328,15 +358,28 @@ mod tests {
         use model::amino_acid::AminoAcid;
         use model::peptide::Peptide;
         fn pep(seq: &[u8]) -> Peptide {
-            let residues = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+            let residues = seq
+                .iter()
+                .map(|&r| AminoAcid::standard(r).unwrap())
+                .collect();
             Peptide::new(residues, b'_', b'-')
         }
         let p1 = pep(b"PEPTIDE");
         let p2 = pep(b"PEPTIDER");
         let (m1, m2) = (p1.mass() as f32, p2.mass() as f32);
         let labels = vec![
-            LabeledMatch { spectrum_index: 0, peptide: p1, charge: 2, confidence: 0.001 },
-            LabeledMatch { spectrum_index: 1, peptide: p2, charge: 3, confidence: 0.001 },
+            LabeledMatch {
+                spectrum_index: 0,
+                peptide: p1,
+                charge: 2,
+                confidence: 0.001,
+            },
+            LabeledMatch {
+                spectrum_index: 1,
+                peptide: p2,
+                charge: 3,
+                confidence: 0.001,
+            },
         ];
         assert_eq!(corpus_charge_masses(&labels), vec![(2, m1), (3, m2)]);
     }
@@ -350,13 +393,22 @@ mod tests {
         base.apply_deconvolution = true;
         let charge_masses = vec![(2, 1000.0), (4, 2500.0)];
         let cfg = GeometryConfig {
-            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
-            max_mass_tiers: 1, max_fragment_charge: 3,
+            num_segments: 1,
+            max_rank: 150,
+            mass_tier_occupancy: 1,
+            max_mass_tiers: 1,
+            max_fragment_charge: 3,
         };
         let p = derive_geometry(&charge_masses, &base, &cfg);
         for frags in p.frag_off_table.values() {
-            assert!(ion_charges(frags, true).iter().all(|&c| c == 1), "deconv -> b charge 1 only");
-            assert!(ion_charges(frags, false).iter().all(|&c| c == 1), "deconv -> y charge 1 only");
+            assert!(
+                ion_charges(frags, true).iter().all(|&c| c == 1),
+                "deconv -> b charge 1 only"
+            );
+            assert!(
+                ion_charges(frags, false).iter().all(|&c| c == 1),
+                "deconv -> y charge 1 only"
+            );
         }
     }
 
@@ -370,8 +422,11 @@ mod tests {
         base.data_type.activation = ActivationMethod::ETD;
         let charge_masses = vec![(2, 1000.0), (5, 3000.0)];
         let cfg = GeometryConfig {
-            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
-            max_mass_tiers: 1, max_fragment_charge: 5,
+            num_segments: 1,
+            max_rank: 150,
+            mass_tier_occupancy: 1,
+            max_mass_tiers: 1,
+            max_fragment_charge: 5,
         };
         let p = derive_geometry(&charge_masses, &base, &cfg);
         // c-offset = PROTON + NH3; z-offset = H2O + PROTON + Z_DOT_OFFSET.
@@ -381,7 +436,11 @@ mod tests {
         for (part, frags) in &p.frag_off_table {
             for f in frags {
                 match f.ion_type {
-                    IonType::Prefix { charge, offset_bits, .. } => {
+                    IonType::Prefix {
+                        charge,
+                        offset_bits,
+                        ..
+                    } => {
                         assert_eq!(offset_bits, c_off, "ETD prefix must be c-ion");
                         if charge > 1 {
                             saw_multicharge = true;
@@ -412,20 +471,31 @@ mod tests {
         base.apply_deconvolution = false;
         let charge_masses = vec![(3, 2000.0)];
         let cfg = GeometryConfig {
-            num_segments: 1, max_rank: 150, mass_tier_occupancy: 1,
-            max_mass_tiers: 1, max_fragment_charge: 3,
+            num_segments: 1,
+            max_rank: 150,
+            mass_tier_occupancy: 1,
+            max_mass_tiers: 1,
+            max_fragment_charge: 3,
         };
         let p = derive_geometry(&charge_masses, &base, &cfg);
         let frags = p.frag_off_table.values().next().expect("a partition");
-        assert_eq!(ion_charges(frags, true), vec![1, 2], "no deconv, charge-3 -> b at 1,2");
+        assert_eq!(
+            ion_charges(frags, true),
+            vec![1, 2],
+            "no deconv, charge-3 -> b at 1,2"
+        );
     }
 
     #[test]
     fn derive_geometry_assembles_geometry_only_param() {
         let base = base_param();
         let charge_masses = vec![
-            (2, 1000.0), (2, 1200.0), (2, 1400.0), (2, 1600.0),
-            (3, 2000.0), (3, 2400.0),
+            (2, 1000.0),
+            (2, 1200.0),
+            (2, 1400.0),
+            (2, 1600.0),
+            (3, 2000.0),
+            (3, 2400.0),
         ];
         let cfg = GeometryConfig {
             num_segments: 2,
@@ -445,7 +515,10 @@ mod tests {
         assert_eq!(p.max_charge, 3);
         // Every partition carries a Noise entry (RankScorer requires it).
         for part in &p.partitions {
-            let frags = p.frag_off_table.get(part).expect("frag entry per partition");
+            let frags = p
+                .frag_off_table
+                .get(part)
+                .expect("frag entry per partition");
             assert!(frags.iter().any(|f| f.ion_type.is_noise()));
         }
         // Non-geometry metadata cloned from base.
@@ -471,9 +544,7 @@ mod tests {
     #[test]
     fn equal_occupancy_tiers_split_uniform_distribution() {
         // 8 distinct masses, 4 tiers -> boundaries at indices 0,2,4,6.
-        let masses = vec![
-            100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0,
-        ];
+        let masses = vec![100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0];
         let tiers = derive_mass_tiers(&masses, 4);
         assert_eq!(tiers, vec![100.0, 300.0, 500.0, 700.0]);
     }
@@ -482,8 +553,12 @@ mod tests {
     fn tiers_by_charge_groups_and_quantiles_per_charge() {
         // charge 2: 4 masses, 2 tiers -> [100,300]; charge 3: 2 masses -> [500,600].
         let pairs = vec![
-            (2, 100.0), (2, 200.0), (2, 300.0), (2, 400.0),
-            (3, 500.0), (3, 600.0),
+            (2, 100.0),
+            (2, 200.0),
+            (2, 300.0),
+            (2, 400.0),
+            (3, 500.0),
+            (3, 600.0),
         ];
         // occupancy=1, max=2 → each charge gets min(n_masses, 2) tiers = 2.
         let got = derive_tiers_by_charge(&pairs, 1, 2);
@@ -520,41 +595,86 @@ mod tests {
 
     #[test]
     fn skeleton_is_cartesian_product_sorted_lex() {
-        let tiers_by_charge = vec![
-            (2, vec![100.0, 500.0]),
-            (3, vec![200.0, 600.0]),
-        ];
+        let tiers_by_charge = vec![(2, vec![100.0, 500.0]), (3, vec![200.0, 600.0])];
         let parts = build_partition_skeleton(&tiers_by_charge, 2);
         // Canonical Partition Ord is charge -> seg_num -> parent_mass
         // (param_model.rs: load-bearing for find_partition's floor lookup).
         let expect = vec![
-            Partition { charge: 2, parent_mass: 100.0, seg_num: 0 },
-            Partition { charge: 2, parent_mass: 500.0, seg_num: 0 },
-            Partition { charge: 2, parent_mass: 100.0, seg_num: 1 },
-            Partition { charge: 2, parent_mass: 500.0, seg_num: 1 },
-            Partition { charge: 3, parent_mass: 200.0, seg_num: 0 },
-            Partition { charge: 3, parent_mass: 600.0, seg_num: 0 },
-            Partition { charge: 3, parent_mass: 200.0, seg_num: 1 },
-            Partition { charge: 3, parent_mass: 600.0, seg_num: 1 },
+            Partition {
+                charge: 2,
+                parent_mass: 100.0,
+                seg_num: 0,
+            },
+            Partition {
+                charge: 2,
+                parent_mass: 500.0,
+                seg_num: 0,
+            },
+            Partition {
+                charge: 2,
+                parent_mass: 100.0,
+                seg_num: 1,
+            },
+            Partition {
+                charge: 2,
+                parent_mass: 500.0,
+                seg_num: 1,
+            },
+            Partition {
+                charge: 3,
+                parent_mass: 200.0,
+                seg_num: 0,
+            },
+            Partition {
+                charge: 3,
+                parent_mass: 600.0,
+                seg_num: 0,
+            },
+            Partition {
+                charge: 3,
+                parent_mass: 200.0,
+                seg_num: 1,
+            },
+            Partition {
+                charge: 3,
+                parent_mass: 600.0,
+                seg_num: 1,
+            },
         ];
         assert_eq!(parts, expect);
     }
 
     #[test]
     fn frag_off_table_caps_fragment_charge() {
-        let p2 = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-        let p3 = Partition { charge: 3, parent_mass: 800.0, seg_num: 0 };
+        let p2 = Partition {
+            charge: 2,
+            parent_mass: 500.0,
+            seg_num: 0,
+        };
+        let p3 = Partition {
+            charge: 3,
+            parent_mass: 800.0,
+            seg_num: 0,
+        };
 
         // cap=1 (seed-matching, fast): every partition gets charge-1 b/y only,
         // even the charge-3 precursor — this is what kept the seed at ~298 spec/s.
         let t1 = build_frag_off_table(&[p2, p3], 1, ActivationMethod::HCD);
         assert_eq!(ion_charges(t1.get(&p2).unwrap(), true), vec![1]);
-        assert_eq!(ion_charges(t1.get(&p3).unwrap(), true), vec![1], "charge-3 capped to frag 1");
+        assert_eq!(
+            ion_charges(t1.get(&p3).unwrap(), true),
+            vec![1],
+            "charge-3 capped to frag 1"
+        );
         assert_eq!(t1.get(&p3).unwrap().len(), 3, "b1,y1,Noise");
 
         // cap=2: charge-3 precursor gets b/y at {1,2}; charge-2 still bounded by C-1=1.
         let t2 = build_frag_off_table(&[p2, p3], 2, ActivationMethod::HCD);
-        assert_eq!(ion_charges(t2.get(&p2).unwrap(), true), vec![1], "charge-2 bounded by C-1");
+        assert_eq!(
+            ion_charges(t2.get(&p2).unwrap(), true),
+            vec![1],
+            "charge-2 bounded by C-1"
+        );
         assert_eq!(ion_charges(t2.get(&p3).unwrap(), true), vec![1, 2]);
         assert_eq!(t2.get(&p3).unwrap().len(), 5, "b1,b2,y1,y2,Noise");
     }

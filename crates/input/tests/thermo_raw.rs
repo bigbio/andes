@@ -21,9 +21,7 @@ fn thermo_raw_reads_ms2_spectra() {
     let path = match test_raw_path() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "skipping thermo_raw_reads_ms2_spectra: set ANDES_TEST_RAW to a .raw to run"
-            );
+            eprintln!("skipping thermo_raw_reads_ms2_spectra: set ANDES_TEST_RAW to a .raw to run");
             return;
         }
     };
@@ -50,12 +48,18 @@ fn thermo_raw_reads_ms2_spectra() {
             );
             // Peaks must be finite and intensities non-negative.
             for &(mz, intensity) in spec.peaks.iter().take(50) {
-                assert!(mz.is_finite() && mz > 0.0, "peak m/z must be positive finite");
+                assert!(
+                    mz.is_finite() && mz > 0.0,
+                    "peak m/z must be positive finite"
+                );
                 assert!(intensity >= 0.0, "peak intensity must be non-negative");
             }
         }
     }
-    assert!(ms2 > 0, "the default reader should emit at least one MS2 spectrum");
+    assert!(
+        ms2 > 0,
+        "the default reader should emit at least one MS2 spectrum"
+    );
 }
 
 /// The MS1-linked chunked reader (used by `--chimeric`) must emit every MS2 and
@@ -65,9 +69,7 @@ fn thermo_raw_chunked_ms1_link_is_consistent() {
     let path = match test_raw_path() {
         Some(p) => p,
         None => {
-            eprintln!(
-                "skipping thermo_raw_chunked_ms1_link_is_consistent: set ANDES_TEST_RAW"
-            );
+            eprintln!("skipping thermo_raw_chunked_ms1_link_is_consistent: set ANDES_TEST_RAW");
             return;
         }
     };

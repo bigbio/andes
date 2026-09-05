@@ -17,7 +17,12 @@ pub struct FastaReader<R: BufRead> {
 
 impl<R: BufRead> FastaReader<R> {
     pub fn new(reader: R) -> Self {
-        Self { reader, line_no: 0, buf: String::new(), pending_header: None }
+        Self {
+            reader,
+            line_no: 0,
+            buf: String::new(),
+            pending_header: None,
+        }
     }
 
     /// Eager-load all proteins into a `ProteinDb`.
@@ -33,8 +38,13 @@ impl<R: BufRead> FastaReader<R> {
     /// Advances `line_no`.
     fn read_one_line(&mut self) -> Result<Option<()>, FastaParseError> {
         self.buf.clear();
-        let n = self.reader.read_line(&mut self.buf)
-            .map_err(|source| FastaParseError::Io { line: self.line_no + 1, source })?;
+        let n = self
+            .reader
+            .read_line(&mut self.buf)
+            .map_err(|source| FastaParseError::Io {
+                line: self.line_no + 1,
+                source,
+            })?;
         if n == 0 {
             Ok(None)
         } else {
@@ -62,7 +72,8 @@ impl<R: BufRead> Iterator for FastaReader<R> {
                 }
                 if !trimmed.starts_with('>') {
                     return Some(Err(FastaParseError::OrphanSequence {
-                        line: self.line_no, got: trimmed.to_string(),
+                        line: self.line_no,
+                        got: trimmed.to_string(),
                     }));
                 }
                 break trimmed.to_string();
@@ -73,7 +84,9 @@ impl<R: BufRead> Iterator for FastaReader<R> {
         let body = &header_line[1..];
         let (accession, description) = split_header(body);
         if accession.is_empty() {
-            return Some(Err(FastaParseError::EmptyAccession { line: header_line_no }));
+            return Some(Err(FastaParseError::EmptyAccession {
+                line: header_line_no,
+            }));
         }
 
         let mut sequence = Vec::with_capacity(64);
@@ -98,7 +111,11 @@ impl<R: BufRead> Iterator for FastaReader<R> {
             }
         }
 
-        Some(Ok(Protein { accession, description, sequence }))
+        Some(Ok(Protein {
+            accession,
+            description,
+            sequence,
+        }))
     }
 }
 
@@ -116,9 +133,11 @@ fn split_header(s: &str) -> (String, String) {
 #[derive(thiserror::Error, Debug)]
 pub enum FastaParseError {
     #[error("I/O error at line {line}: {source}")]
-    Io { line: usize, #[source] source: std::io::Error },
-    #[error("malformed FASTA at line {line}: expected `>` at start of header, got {got:?}")]
-    NotAHeader { line: usize, got: String },
+    Io {
+        line: usize,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("FASTA header at line {line} has empty accession")]
     EmptyAccession { line: usize },
     #[error("sequence data at line {line} appears before any `>` header: {got:?}")]

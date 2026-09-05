@@ -9,11 +9,11 @@
 //! Features come from the SINGLE source [`scoring_crate::ion_features`] so train
 //! and serve features match by construction.
 
+use model::peptide::Peptide;
 use scoring_crate::ion_features::{extract_ion_features, N_ION_FEATURES};
 use scoring_crate::scoring::fragment_ions::predict_by_ions;
 use scoring_crate::scoring::scored_spectrum::ScoredSpectrum;
 use scoring_crate::RankScorer;
-use model::peptide::Peptide;
 
 use crate::gbdt::dataset::{group_id, PsmRow};
 use crate::gbdt::train::Dataset;
@@ -47,13 +47,22 @@ pub fn build_ion_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
             continue;
         }
         let ss = ScoredSpectrum::new(row.spectrum, scorer, row.charge);
-        let seq: String = row.peptide.residues.iter().map(|aa| aa.residue as char).collect();
+        let seq: String = row
+            .peptide
+            .residues
+            .iter()
+            .map(|aa| aa.residue as char)
+            .collect();
         let gid = group_id(&seq, row.charge);
         let decoy = reverse_peptide(row.peptide);
 
         for (pep, label) in [(row.peptide, 1u8), (&decoy, 0u8)] {
             for ion in predict_by_ions(pep, 1..=2) {
-                let td = if is_ppm { ion.mz * tol_val / 1e6 } else { tol_val };
+                let td = if is_ppm {
+                    ion.mz * tol_val / 1e6
+                } else {
+                    tol_val
+                };
                 if ss.nearest_peak_full(ion.mz, td).is_some() {
                     let f = extract_ion_features(
                         pep,
@@ -73,20 +82,25 @@ pub fn build_ion_dataset(rows: &[PsmRow<'_>], scorer: &RankScorer) -> Dataset {
         }
     }
 
-    Dataset { x, y, groups, n_features }
+    Dataset {
+        x,
+        y,
+        groups,
+        n_features,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ModelStore;
     use model::amino_acid::AminoAcid;
     use model::spectrum::Spectrum;
-    use crate::ModelStore;
     use std::path::PathBuf;
 
     fn make_scorer() -> RankScorer {
         let store = ModelStore::open(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet"),
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models"),
         )
         .unwrap();
         RankScorer::new(&store.load_param("hcd_qexactive_tryp").unwrap())
@@ -94,7 +108,9 @@ mod tests {
 
     fn pep(seq: &str) -> Peptide {
         Peptide::new(
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect(),
+            seq.bytes()
+                .map(|b| AminoAcid::standard(b).unwrap())
+                .collect(),
             b'K',
             b'R',
         )
@@ -133,7 +149,11 @@ mod tests {
         }
         peaks.push((50.0, 5.0)); // junk
         let spec = spectrum(peaks, 500.0, 2);
-        let row = PsmRow { spectrum: &spec, peptide: &p, charge: 2 };
+        let row = PsmRow {
+            spectrum: &spec,
+            peptide: &p,
+            charge: 2,
+        };
 
         let ds = build_ion_dataset(&[row], &scorer);
         assert_eq!(ds.n_features, N_ION_FEATURES);
@@ -148,6 +168,9 @@ mod tests {
         let p = pep("PEPTIDEK");
         let r = reverse_peptide(&p);
         assert_eq!(r.length(), p.length());
-        assert!((r.mass() - p.mass()).abs() < 1e-6, "reverse keeps precursor mass");
+        assert!(
+            (r.mass() - p.mass()).abs() < 1e-6,
+            "reverse keeps precursor mass"
+        );
     }
 }

@@ -78,16 +78,11 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "andes-glyco"
 version = "0.3.0"
-dependencies = [
- "input",
- "model",
-]
 
 [[package]]
 name = "android-tzdata"
@@ -1614,7 +1609,6 @@ dependencies = [
  "input",
  "model",
  "parquet",
- "rayon",
  "rustc-hash",
  "scoring",
  "search",
@@ -1798,7 +1792,6 @@ dependencies = [
  "arrow",
  "chrono",
  "input",
- "memchr",
  "model",
  "model-train",
  "parquet",
@@ -1806,7 +1799,6 @@ dependencies = [
  "search",
  "smallvec",
  "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]

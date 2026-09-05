@@ -42,9 +42,9 @@ pub const CORE_OXONIUM_MZ: [f64; 5] = [
 /// Y-ion offsets above the peptide backbone for the trimannosyl core ladder (Y1..Y5).
 /// Y1 = +HexNAc; Y2 = +2HexNAc; Y3 = +2HexNAc+Hex; Y4 = +2HexNAc+2Hex; Y5 = +2HexNAc+3Hex.
 pub const CORE_Y_STEPS: [f64; 5] = [
-    HEXNAC,               // Y1: +HexNAc
-    2.0 * HEXNAC,         // Y2: +2HexNAc
-    2.0 * HEXNAC + HEX,   // Y3: +2HexNAc+Hex
+    HEXNAC,                   // Y1: +HexNAc
+    2.0 * HEXNAC,             // Y2: +2HexNAc
+    2.0 * HEXNAC + HEX,       // Y3: +2HexNAc+Hex
     2.0 * HEXNAC + 2.0 * HEX, // Y4: +2HexNAc+2Hex
     2.0 * HEXNAC + 3.0 * HEX, // Y5: +2HexNAc+3Hex
 ];
@@ -52,11 +52,11 @@ pub const CORE_Y_STEPS: [f64; 5] = [
 /// Single-monosaccharide + common combo steps for the Y-ladder walk. Combos are
 /// computed from the residue masses so they cannot drift from the standard.
 pub const MONO_STEPS: [f64; 5] = [
-    HEXNAC,        // 203.079373
-    HEX,           // 162.052824
-    FUC,           // 146.057909
-    HEX + HEXNAC,  // HexHexNAc combo (365.132197)
-    2.0 * HEX,     // 2x Hex (324.105648)
+    HEXNAC,       // 203.079373
+    HEX,          // 162.052824
+    FUC,          // 146.057909
+    HEX + HEXNAC, // HexHexNAc combo (365.132197)
+    2.0 * HEX,    // 2x Hex (324.105648)
 ];
 
 #[cfg(test)]

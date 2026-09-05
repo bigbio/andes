@@ -39,11 +39,7 @@ impl ProtocolCatalog {
                 },
                 CatalogEntry {
                     slug: "phospho",
-                    aliases: &[
-                        "phosphorylation",
-                        "phospho-enrichment",
-                        "phosphorylated",
-                    ],
+                    aliases: &["phosphorylation", "phospho-enrichment", "phosphorylated"],
                     // +79.96633 Da on Ser / Thr / Tyr
                     inference: Some((79.96633, 0.01, "STY")),
                 },
@@ -190,7 +186,10 @@ mod tests {
     fn folds_aliases_to_canonical_slugs() {
         let c = ProtocolCatalog::builtin();
         assert_eq!(c.canonical("Phosphorylation"), Some("phospho".to_string()));
-        assert_eq!(c.canonical("phospho-enrichment"), Some("phospho".to_string()));
+        assert_eq!(
+            c.canonical("phospho-enrichment"),
+            Some("phospho".to_string())
+        );
         assert_eq!(c.canonical("TMT"), Some("tmt".to_string()));
         assert_eq!(c.canonical("phospho"), Some("phospho".to_string())); // already canonical
         assert_eq!(c.canonical("nonsense"), None);
@@ -224,7 +223,10 @@ mod tests {
     #[test]
     fn canonical_set_deduplicates() {
         let c = ProtocolCatalog::builtin();
-        assert_eq!(c.canonical_set(["phospho", "phosphorylation", "tmt"]), "phospho+tmt");
+        assert_eq!(
+            c.canonical_set(["phospho", "phosphorylation", "tmt"]),
+            "phospho+tmt"
+        );
     }
 
     #[test]

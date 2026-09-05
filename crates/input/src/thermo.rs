@@ -216,7 +216,13 @@ impl ThermoRawReader {
         }
 
         if !chunk.is_empty() {
-            on_chunk(chunk, Ms1Link { ms1_peaks, ms2_to_ms1 });
+            on_chunk(
+                chunk,
+                Ms1Link {
+                    ms1_peaks,
+                    ms2_to_ms1,
+                },
+            );
         }
         if skipped_higher_ms > 0 {
             eprintln!(
@@ -382,11 +388,11 @@ pub fn detect_activation_instrument<P: AsRef<Path>>(
         // Deterministic tie-break (HashMap order is randomised per process).
         .max_by_key(|&(k, n)| (n, std::cmp::Reverse(k as u8)))
         .map(|(k, _)| match k {
-            x if x == InstrumentType::LowRes as u8         => InstrumentType::LowRes,
-            x if x == InstrumentType::TOF as u8            => InstrumentType::TOF,
-            x if x == InstrumentType::HighRes as u8        => InstrumentType::HighRes,
+            x if x == InstrumentType::LowRes as u8 => InstrumentType::LowRes,
+            x if x == InstrumentType::TOF as u8 => InstrumentType::TOF,
+            x if x == InstrumentType::HighRes as u8 => InstrumentType::HighRes,
             x if x == InstrumentType::OrbitrapAstral as u8 => InstrumentType::OrbitrapAstral,
-            x if x == InstrumentType::TimsTOF as u8        => InstrumentType::TimsTOF,
+            x if x == InstrumentType::TimsTOF as u8 => InstrumentType::TimsTOF,
             _ => InstrumentType::QExactive,
         });
     Some((activation, instrument))
@@ -428,14 +434,14 @@ mod tests {
         // intensity; sort ascending by m/z.
         let pairs = vec![
             (300.0, 1000.0f32),
-            (f64::NAN, 500.0),     // bad m/z
-            (0.0, 100.0),          // non-positive m/z
-            (-5.0, 100.0),         // negative m/z
-            (150.0, 2000.0),       // valid, out of order
-            (400.0, f32::NAN),     // bad intensity
-            (450.0, f32::INFINITY),// bad intensity
-            (500.0, -1.0),         // negative intensity
-            (250.0, 0.0),          // valid (zero intensity allowed)
+            (f64::NAN, 500.0),      // bad m/z
+            (0.0, 100.0),           // non-positive m/z
+            (-5.0, 100.0),          // negative m/z
+            (150.0, 2000.0),        // valid, out of order
+            (400.0, f32::NAN),      // bad intensity
+            (450.0, f32::INFINITY), // bad intensity
+            (500.0, -1.0),          // negative intensity
+            (250.0, 0.0),           // valid (zero intensity allowed)
         ];
         let out = super::sanitize_thermo_peaks(pairs);
         assert_eq!(out, vec![(150.0, 2000.0), (250.0, 0.0), (300.0, 1000.0)]);
@@ -443,26 +449,44 @@ mod tests {
 
     #[test]
     fn dissociation_maps_to_activation() {
-        assert_eq!(map_dissociation(DissociationMethod(1)), Some(ActivationMethod::CID));
-        assert_eq!(map_dissociation(DissociationMethod(2)), Some(ActivationMethod::HCD));
+        assert_eq!(
+            map_dissociation(DissociationMethod(1)),
+            Some(ActivationMethod::CID)
+        );
+        assert_eq!(
+            map_dissociation(DissociationMethod(2)),
+            Some(ActivationMethod::HCD)
+        );
         // Pure electron transfer/capture (ETD=4, ECD=8, NETD=16) → ETD.
         for v in [4u8, 8, 16] {
-            assert_eq!(map_dissociation(DissociationMethod(v)), Some(ActivationMethod::ETD));
+            assert_eq!(
+                map_dissociation(DissociationMethod(v)),
+                Some(ActivationMethod::ETD)
+            );
         }
         // H6: supplemental activation (ETciD=5, EThcD=6, ECciD=9, EChcD=10) →
         // HCD (b/y), not pure ETD — the collisional supplement makes b/y ions.
         for v in [5u8, 6, 9, 10] {
-            assert_eq!(map_dissociation(DissociationMethod(v)), Some(ActivationMethod::HCD));
+            assert_eq!(
+                map_dissociation(DissociationMethod(v)),
+                Some(ActivationMethod::HCD)
+            );
         }
         assert_eq!(map_dissociation(DissociationMethod(0)), None); // Unknown
     }
 
     #[test]
     fn analyzer_maps_to_instrument() {
-        assert_eq!(map_analyzer(MassAnalyzer(1)), Some(InstrumentType::LowRes));         // ITMS
-        assert_eq!(map_analyzer(MassAnalyzer(4)), Some(InstrumentType::TOF));            // TOFMS
-        assert_eq!(map_analyzer(MassAnalyzer(5)), Some(InstrumentType::QExactive));      // FTMS (Orbitrap)
-        assert_eq!(map_analyzer(MassAnalyzer(7)), Some(InstrumentType::OrbitrapAstral)); // ASTMS (Astral)
+        assert_eq!(map_analyzer(MassAnalyzer(1)), Some(InstrumentType::LowRes)); // ITMS
+        assert_eq!(map_analyzer(MassAnalyzer(4)), Some(InstrumentType::TOF)); // TOFMS
+        assert_eq!(
+            map_analyzer(MassAnalyzer(5)),
+            Some(InstrumentType::QExactive)
+        ); // FTMS (Orbitrap)
+        assert_eq!(
+            map_analyzer(MassAnalyzer(7)),
+            Some(InstrumentType::OrbitrapAstral)
+        ); // ASTMS (Astral)
         assert_eq!(map_analyzer(MassAnalyzer(0)), None); // Unknown
     }
 }

@@ -14,10 +14,10 @@ pub enum ActivationMethod {
 impl ActivationMethod {
     pub fn name(self) -> &'static str {
         match self {
-            ActivationMethod::CID  => "CID",
-            ActivationMethod::ETD  => "ETD",
-            ActivationMethod::HCD  => "HCD",
-            ActivationMethod::PQD  => "PQD",
+            ActivationMethod::CID => "CID",
+            ActivationMethod::ETD => "ETD",
+            ActivationMethod::HCD => "HCD",
+            ActivationMethod::PQD => "PQD",
             ActivationMethod::UVPD => "UVPD",
         }
     }
@@ -47,12 +47,12 @@ impl ActivationMethod {
     /// bundled models.
     pub fn from_name(s: &str) -> Option<Self> {
         match s {
-            "CID"  => Some(ActivationMethod::CID),
-            "ETD"  => Some(ActivationMethod::ETD),
-            "HCD"  => Some(ActivationMethod::HCD),
-            "PQD"  => Some(ActivationMethod::PQD),
+            "CID" => Some(ActivationMethod::CID),
+            "ETD" => Some(ActivationMethod::ETD),
+            "HCD" => Some(ActivationMethod::HCD),
+            "PQD" => Some(ActivationMethod::PQD),
             "UVPD" => Some(ActivationMethod::UVPD),
-            _      => None,
+            _ => None,
         }
     }
 }
@@ -64,8 +64,10 @@ mod tests {
     #[test]
     fn name_round_trips() {
         for m in [
-            ActivationMethod::CID, ActivationMethod::ETD,
-            ActivationMethod::HCD, ActivationMethod::PQD,
+            ActivationMethod::CID,
+            ActivationMethod::ETD,
+            ActivationMethod::HCD,
+            ActivationMethod::PQD,
             ActivationMethod::UVPD,
         ] {
             assert_eq!(ActivationMethod::from_name(m.name()), Some(m));
@@ -74,11 +76,26 @@ mod tests {
 
     #[test]
     fn from_name_known_variants() {
-        assert_eq!(ActivationMethod::from_name("CID"),  Some(ActivationMethod::CID));
-        assert_eq!(ActivationMethod::from_name("ETD"),  Some(ActivationMethod::ETD));
-        assert_eq!(ActivationMethod::from_name("HCD"),  Some(ActivationMethod::HCD));
-        assert_eq!(ActivationMethod::from_name("PQD"),  Some(ActivationMethod::PQD));
-        assert_eq!(ActivationMethod::from_name("UVPD"), Some(ActivationMethod::UVPD));
+        assert_eq!(
+            ActivationMethod::from_name("CID"),
+            Some(ActivationMethod::CID)
+        );
+        assert_eq!(
+            ActivationMethod::from_name("ETD"),
+            Some(ActivationMethod::ETD)
+        );
+        assert_eq!(
+            ActivationMethod::from_name("HCD"),
+            Some(ActivationMethod::HCD)
+        );
+        assert_eq!(
+            ActivationMethod::from_name("PQD"),
+            Some(ActivationMethod::PQD)
+        );
+        assert_eq!(
+            ActivationMethod::from_name("UVPD"),
+            Some(ActivationMethod::UVPD)
+        );
     }
 
     #[test]
@@ -92,8 +109,14 @@ mod tests {
         // ASWRITTEN and FUSION are runtime metadata strings that should
         // never appear in bundled models; we omit them and return
         // None so the loader can surface BadEnum.
-        assert_eq!(ActivationMethod::from_name("As written in the spectrum or CID if no info"), None);
-        assert_eq!(ActivationMethod::from_name("Merge spectra from the same precursor"), None);
+        assert_eq!(
+            ActivationMethod::from_name("As written in the spectrum or CID if no info"),
+            None
+        );
+        assert_eq!(
+            ActivationMethod::from_name("Merge spectra from the same precursor"),
+            None
+        );
     }
 
     #[test]

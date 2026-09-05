@@ -46,9 +46,14 @@ mod tests {
         let env = averagine_isotope_envelope(1000.0, 4);
         assert_eq!(env.len(), 4);
         let sum: f64 = env.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-9, "envelope must sum to 1.0, got {sum}");
-        assert!(env[0] > env[1] && env[1] > env[2],
-            "a ~1000 Da peptide's envelope should decay from the monoisotope: {env:?}");
+        assert!(
+            (sum - 1.0).abs() < 1e-9,
+            "envelope must sum to 1.0, got {sum}"
+        );
+        assert!(
+            env[0] > env[1] && env[1] > env[2],
+            "a ~1000 Da peptide's envelope should decay from the monoisotope: {env:?}"
+        );
     }
 
     #[test]
@@ -59,8 +64,10 @@ mod tests {
         let large = averagine_isotope_envelope(3000.0, 4);
         let ratio_small = small[1] / small[0];
         let ratio_large = large[1] / large[0];
-        assert!(ratio_large > ratio_small,
-            "+1/+0 ratio should grow with mass: small {ratio_small} vs large {ratio_large}");
+        assert!(
+            ratio_large > ratio_small,
+            "+1/+0 ratio should grow with mass: small {ratio_small} vs large {ratio_large}"
+        );
     }
 
     #[test]
@@ -68,6 +75,9 @@ mod tests {
         assert!(averagine_isotope_envelope(1000.0, 0).is_empty());
         let one = averagine_isotope_envelope(1000.0, 1);
         assert_eq!(one.len(), 1);
-        assert!((one[0] - 1.0).abs() < 1e-9, "single-isotope envelope is all monoisotope");
+        assert!(
+            (one[0] - 1.0).abs() < 1e-9,
+            "single-isotope envelope is all monoisotope"
+        );
     }
 }

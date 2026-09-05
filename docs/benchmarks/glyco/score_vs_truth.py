@@ -116,6 +116,12 @@ def main():
         for r in rd:
             k = key_of(r[si], full, tails)
             if k:
+                # The production glyco PIN is collapsed to ONE row per scan by the search;
+                # a second row for the same (run, scan) means a --debug-glyco dump or a
+                # double-pooled file, where "which row is the winner" is undefined here.
+                if k in emitted:
+                    sys.exit(f"PIN has more than one row for {k}: this scorer needs the "
+                             f"top-1-per-scan production PIN, not a --debug-glyco dump")
                 emitted[k] = (bare(r[pi]), r[li])
 
     accepted = {}

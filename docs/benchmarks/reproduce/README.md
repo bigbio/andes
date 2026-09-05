@@ -13,7 +13,8 @@ DATA=~/andes-bench                     # anywhere with ~200 GB free for the raw 
 
 Add `glyco-mouse` (12.6 GB; the quick tier uses only the first fraction) to
 `fetch_spectra.sh` for the glyco dataset; it is run through the harness in
-[`../glyco/`](../glyco/) rather than `run.sh`, because fractions must be pooled before Percolator.
+[`../glyco/`](../glyco/) rather than `run.sh`: the deep tier pools the five fractions before
+Percolator, the quick tier runs `MouseLiver-Z-T-1` alone.
 
 ## What each script does
 

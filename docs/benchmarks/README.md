@@ -19,8 +19,10 @@ published number in this project, and each is explained where it applies below.
    costs nothing. If you must convert, use ThermoRawFileParser **1.4.3**.
 2. **Measure the entrapment ratio; never assume 1:1.** `FDP = hits/total x (1 + T/E)`,
    and `T/E` is a property of the database you built.
-3. **Pool at least three files for glyco, all from ONE acquisition regime.** A single file
-   returns zero at 1% FDR because Percolator's floor is `1/T_top`.
+3. **Check Percolator's q floor before trusting a single glyco file.** The smallest
+   attainable q is `1/T_top`; a file with too few confident targets returns zero at 1%
+   regardless of quality, and must be pooled with others from ONE acquisition regime. A
+   rich fraction (the liver quick tier) clears the floor on its own; the plasma files did not.
 4. **Report the metric you computed.** `q <= 0.01` is a claim; an entrapment FDP is a
    measurement. On these datasets they differ by 2-3x.
 
@@ -433,7 +435,7 @@ of you — never assumed to be 1:
 | a genuine 1:1 database | 1 : 1 | 2.00 |
 
 Assuming 1:1 has produced wrong published numbers here **twice** — understating UPS1's true
-error, roughly fivefold on a foreign-proteome database. Peptide space is the better basis: it is
+error by 1.7x, and a foreign-proteome glyco database's (factor ~4.9) by ~2.5x. Peptide space is the better basis: it is
 what the search samples, and entrapment proteomes usually have a different length
 distribution from the target.
 

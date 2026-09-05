@@ -62,9 +62,15 @@ fn search_writes_qpx_idparquet_bundle() {
     let md = schema.metadata();
     assert_eq!(md.get("qpx_version").map(String::as_str), Some("1.0"));
     assert_eq!(md.get("creator").map(String::as_str), Some("andes"));
-    assert_eq!(md.get("software_provider").map(String::as_str), Some("andes"));
+    assert_eq!(
+        md.get("software_provider").map(String::as_str),
+        Some("andes")
+    );
     assert_eq!(md.get("file_type").map(String::as_str), Some("psms"));
-    assert!(md.contains_key("creation_date"), "creation_date metadata missing");
+    assert!(
+        md.contains_key("creation_date"),
+        "creation_date metadata missing"
+    );
     assert!(md.contains_key("uuid"), "uuid metadata missing");
 
     // Expected (column name, Arrow DataType string) for the scalar columns +

@@ -89,17 +89,27 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
         // loud on anything else rather than defaulting to target and corrupting
         // the FDR.
         let raw = f[label_i].trim();
-        let label: i32 = raw.parse().ok().filter(|&l| l == 1 || l == -1).ok_or_else(|| {
-            format!("PIN line {} Label is {raw:?} (expected 1 or -1)", lineno + 2)
-        })?;
+        let label: i32 = raw
+            .parse()
+            .ok()
+            .filter(|&l| l == 1 || l == -1)
+            .ok_or_else(|| {
+                format!(
+                    "PIN line {} Label is {raw:?} (expected 1 or -1)",
+                    lineno + 2
+                )
+            })?;
         d.is_decoy.push(label < 0);
         d.spec_ids.push(f[id_i].to_string());
         // ScanNr drives the CV fold assignment — a bad value would silently
         // mis-fold the spectrum, so fail loud instead of defaulting to 0.
         let scan_raw = f[scan_i].trim();
-        let scan: u32 = scan_raw
-            .parse()
-            .map_err(|_| format!("PIN line {} ScanNr is {scan_raw:?} (expected integer)", lineno + 2))?;
+        let scan: u32 = scan_raw.parse().map_err(|_| {
+            format!(
+                "PIN line {} ScanNr is {scan_raw:?} (expected integer)",
+                lineno + 2
+            )
+        })?;
         d.scans.push(scan);
         d.peptides.push(f[pep_i].to_string());
         d.proteins
@@ -107,7 +117,10 @@ fn parse_pin(text: &str) -> Result<PinData, String> {
         for &ci in &feat_cols {
             let raw = f[ci].trim();
             let v: f32 = raw.parse().map_err(|_| {
-                format!("PIN line {} feature column {ci} is {raw:?} (expected number)", lineno + 2)
+                format!(
+                    "PIN line {} feature column {ci} is {raw:?} (expected number)",
+                    lineno + 2
+                )
             })?;
             if !v.is_finite() {
                 return Err(format!(
@@ -154,7 +167,12 @@ fn cv_scores(d: &PinData, seed: u64) -> Vec<f32> {
         if y.is_empty() || y.iter().all(|&v| v == 0) || y.iter().all(|&v| v == 1) {
             continue;
         }
-        let ds = Dataset { x, y, groups, n_features: nf };
+        let ds = Dataset {
+            x,
+            y,
+            groups,
+            n_features: nf,
+        };
         // A fold that fails the trainer's quality gate (too few rows, no
         // held-out signal, etc.) contributes no held-out scores — same as the
         // degenerate-fold skip above. The native rescorer is an opt-in
@@ -188,7 +206,10 @@ pub fn native_rescore_pin(
     }
     let scores = cv_scores(&d, seed);
     let items: Vec<ScoredLabel> = (0..n)
-        .map(|i| ScoredLabel { score: scores[i], is_decoy: d.is_decoy[i] })
+        .map(|i| ScoredLabel {
+            score: scores[i],
+            is_decoy: d.is_decoy[i],
+        })
         .collect();
     let q = qvalues(&items);
     let mut map = HashMap::with_capacity(n);
@@ -219,7 +240,10 @@ pub fn native_rescore_pin(
             // SpecIds are unique per emitted PSM (multi-row scans carry a per-row
             // suffix); a collision means a corrupt PIN whose last-wins overwrite
             // would silently drop a target — fail loud instead.
-            return Err(format!("duplicate target PSM identifier {:?} in PIN", d.spec_ids[i]));
+            return Err(format!(
+                "duplicate target PSM identifier {:?} in PIN",
+                d.spec_ids[i]
+            ));
         }
     }
     Ok(map)
@@ -239,7 +263,10 @@ pub fn native_rescore_qvalues(
     }
     let scores = cv_scores(&d, seed);
     let items: Vec<ScoredLabel> = (0..n)
-        .map(|i| ScoredLabel { score: scores[i], is_decoy: d.is_decoy[i] })
+        .map(|i| ScoredLabel {
+            score: scores[i],
+            is_decoy: d.is_decoy[i],
+        })
         .collect();
     let q = qvalues(&items);
     Ok((0..n)
@@ -261,7 +288,11 @@ mod tests {
             // deterministic pseudo-noise in [0,1)
             let noise = (((i as u64).wrapping_mul(2654435761) >> 8) % 1000) as f32 / 1000.0;
             let f1 = if separable {
-                if is_decoy { noise } else { 1.0 + noise }
+                if is_decoy {
+                    noise
+                } else {
+                    1.0 + noise
+                }
             } else {
                 noise
             };
@@ -283,14 +314,20 @@ mod tests {
             .values()
             .filter(|p| !p.psm_id.ends_with("_-1") && p.q_value <= 0.01)
             .count();
-        assert!(confident > 50, "expected many confident targets, got {confident}");
+        assert!(
+            confident > 50,
+            "expected many confident targets, got {confident}"
+        );
         // a clearly-high-scoring target must have a small PEP
         let min_pep = map
             .values()
             .filter(|p| !p.psm_id.ends_with("_-1"))
             .map(|p| p.pep)
             .fold(1.0f64, f64::min);
-        assert!(min_pep < 0.5, "best target PEP should be small, got {min_pep}");
+        assert!(
+            min_pep < 0.5,
+            "best target PEP should be small, got {min_pep}"
+        );
     }
 
     #[test]
@@ -319,17 +356,33 @@ mod tests {
             "a decoy SpecId leaked into the target-only result map"
         );
         // And the synthetic PIN had n/2 decoys, so the map must be target-only.
-        assert!(map.len() <= 300, "result map must exclude decoys, got {} entries", map.len());
+        assert!(
+            map.len() <= 300,
+            "result map must exclude decoys, got {} entries",
+            map.len()
+        );
     }
 
     #[test]
     fn malformed_rows_fail_loud() {
         // Truncated row, bad label, bad scan, and non-numeric feature must all error.
         let base = "SpecId\tLabel\tScanNr\tf1\tPeptide\tProteins\n";
-        assert!(native_rescore_pin(&format!("{base}s1\t1\t10\n"), 1).is_err(), "truncated");
-        assert!(native_rescore_pin(&format!("{base}s1\t2\t10\t0.5\tK.P.K\tP1\n"), 1).is_err(), "label=2");
-        assert!(native_rescore_pin(&format!("{base}s1\t1\tNaN\t0.5\tK.P.K\tP1\n"), 1).is_err(), "bad scan");
-        assert!(native_rescore_pin(&format!("{base}s1\t1\t10\tabc\tK.P.K\tP1\n"), 1).is_err(), "bad feature");
+        assert!(
+            native_rescore_pin(&format!("{base}s1\t1\t10\n"), 1).is_err(),
+            "truncated"
+        );
+        assert!(
+            native_rescore_pin(&format!("{base}s1\t2\t10\t0.5\tK.P.K\tP1\n"), 1).is_err(),
+            "label=2"
+        );
+        assert!(
+            native_rescore_pin(&format!("{base}s1\t1\tNaN\t0.5\tK.P.K\tP1\n"), 1).is_err(),
+            "bad scan"
+        );
+        assert!(
+            native_rescore_pin(&format!("{base}s1\t1\t10\tabc\tK.P.K\tP1\n"), 1).is_err(),
+            "bad feature"
+        );
     }
 
     #[test]
@@ -344,13 +397,27 @@ mod tests {
         let pin = synth_pin(600, true);
         let rows = native_rescore_qvalues(&pin, 42).unwrap();
         // Unlike native_rescore_pin (target-only), every PIN row must come back.
-        assert_eq!(rows.len(), 600, "expected all rows (targets+decoys), got {}", rows.len());
+        assert_eq!(
+            rows.len(),
+            600,
+            "expected all rows (targets+decoys), got {}",
+            rows.len()
+        );
         let n_decoys = rows.iter().filter(|(_, is_decoy, _, _)| *is_decoy).count();
         let n_targets = rows.len() - n_decoys;
-        assert_eq!(n_decoys, 300, "expected the synthetic PIN's 300 decoy rows preserved");
-        assert_eq!(n_targets, 300, "expected the synthetic PIN's 300 target rows preserved");
+        assert_eq!(
+            n_decoys, 300,
+            "expected the synthetic PIN's 300 decoy rows preserved"
+        );
+        assert_eq!(
+            n_targets, 300,
+            "expected the synthetic PIN's 300 target rows preserved"
+        );
         for (spec_id, _is_decoy, q, score) in &rows {
-            assert!(q.is_finite() && *q >= 0.0 && *q <= 1.0, "q-value out of range for {spec_id}: {q}");
+            assert!(
+                q.is_finite() && *q >= 0.0 && *q <= 1.0,
+                "q-value out of range for {spec_id}: {q}"
+            );
             assert!(score.is_finite(), "score not finite for {spec_id}: {score}");
         }
         // Separable synthetic data: many confident targets should reach q<=0.01,
@@ -359,7 +426,10 @@ mod tests {
             .iter()
             .filter(|(_, is_decoy, q, _)| !is_decoy && *q <= 0.01)
             .count();
-        assert!(confident_targets > 50, "expected many confident targets, got {confident_targets}");
+        assert!(
+            confident_targets > 50,
+            "expected many confident targets, got {confident_targets}"
+        );
     }
 
     #[test]

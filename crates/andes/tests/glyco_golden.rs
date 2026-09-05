@@ -51,7 +51,10 @@ fn read_sorted_rows(p: &std::path::Path) -> (String, Vec<String>) {
     let text = std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     let mut lines = text.lines();
     let header = lines.next().unwrap_or_default().to_string();
-    let mut rows: Vec<String> = lines.filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
+    let mut rows: Vec<String> = lines
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect();
     // Sort on the SpecId column, not the whole line: a last-digit float
     // difference in a later column would otherwise reorder rows and produce a
     // spurious mismatch against the golden.
@@ -138,10 +141,13 @@ fn glyco_pin_matches_golden_after_sort() {
     let outdir = tempfile::tempdir().expect("tempdir");
     let out_pin = outdir.path().join("actual.pin");
     let status = Command::new(&binary)
-        .arg("--spectrum").arg(&spectra)
-        .arg("--database").arg(&fasta)
+        .arg("--spectrum")
+        .arg(&spectra)
+        .arg("--database")
+        .arg(&fasta)
         .arg("--glyco")
-        .arg("--glyco-tol-ppm").arg("20")
+        .arg("--glyco-tol-ppm")
+        .arg("20")
         // NOTE ON COVERAGE. This resolves to `cid_lowres_tryp`, so the golden guards the
         // LOW-RES glyco path: column set, row count, oxonium gating, backbone generation,
         // the fused selector and the collapse. It does NOT guard the high-res
@@ -150,21 +156,28 @@ fn glyco_pin_matches_golden_after_sort() {
         // calls `set_fragment_tol_override` and replaces `mme`. Guarding it requires an mzML fixture,
         // where the analyzer is auto-detected and the override is ignored. Verified by
         // experiment, not assumed.
-        .arg("--fragmentation").arg("HCD")
+        .arg("--fragmentation")
+        .arg("HCD")
         // Pin the taxon EXPLICITLY. The fixture FASTA carries an E. coli background (to
         // create candidate competition), and those headers carry OX= tags, so
         // `--glyco-taxon auto` resolves the FASTA to CmahCompetent and KEEPS NeuGc --
         // the opposite of the validated human config. Without this the golden would pin
         // whatever the padding happens to imply rather than the intended behaviour.
-        .arg("--glyco-taxon").arg("human")
-        .arg("--output-pin").arg(&out_pin)
+        .arg("--glyco-taxon")
+        .arg("human")
+        .arg("--output-pin")
+        .arg(&out_pin)
         .status()
         .expect("run andes");
     assert!(status.success(), "andes exited {status}");
 
     // --glyco writes alongside --output-pin with a .glyco.pin suffix.
     let actual = outdir.path().join("actual.glyco.pin");
-    assert!(actual.exists(), "glyco PIN not written: {}", actual.display());
+    assert!(
+        actual.exists(),
+        "glyco PIN not written: {}",
+        actual.display()
+    );
 
     let (g_hdr, g_rows) = read_sorted_rows(&golden);
     let (a_hdr, a_rows) = read_sorted_rows(&actual);

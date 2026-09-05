@@ -11,31 +11,49 @@ use std::path::PathBuf;
 
 use model::{activation::ActivationMethod, InstrumentType};
 use model_train::{
-    ModelStore,
     select::{select, SelectionEntry, SelectionKey},
+    ModelStore,
 };
 
 // ── helpers (mirrors the search binary's ladder) ─────────────────────────────
 
 /// CLI Protocol enum (mirrors the binary's `Protocol`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Protocol { Auto, Phospho, Itraq, ItraqPhospho, Tmt, Standard }
+enum Protocol {
+    Auto,
+    Phospho,
+    Itraq,
+    ItraqPhospho,
+    Tmt,
+    Standard,
+}
 
 /// Fragmentation enum (mirrors the binary's `Fragmentation`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fragmentation { Auto, Cid, Etd, Hcd, Uvpd }
+enum Fragmentation {
+    Auto,
+    Cid,
+    Etd,
+    Hcd,
+    Uvpd,
+}
 
 /// Instrument CLI enum (mirrors the binary's `Instrument`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Instrument { LowRes, HighRes, Tof, QExactive }
+enum Instrument {
+    LowRes,
+    HighRes,
+    Tof,
+    QExactive,
+}
 
 fn protocol_suffix(p: Protocol) -> &'static str {
     match p {
         Protocol::Auto | Protocol::Standard => "",
-        Protocol::Phospho      => "_Phosphorylation",
-        Protocol::Itraq        => "_iTRAQ",
+        Protocol::Phospho => "_Phosphorylation",
+        Protocol::Itraq => "_iTRAQ",
         Protocol::ItraqPhospho => "_iTRAQPhospho",
-        Protocol::Tmt          => "_TMT",
+        Protocol::Tmt => "_TMT",
     }
 }
 
@@ -56,15 +74,15 @@ fn resolve_model_id_old(
 
     let frag = match fragmentation {
         Fragmentation::Auto => "CID",
-        Fragmentation::Cid  => "CID",
-        Fragmentation::Etd  => "ETD",
-        Fragmentation::Hcd  => "HCD",
+        Fragmentation::Cid => "CID",
+        Fragmentation::Etd => "ETD",
+        Fragmentation::Hcd => "HCD",
         Fragmentation::Uvpd => "UVPD",
     };
     let inst = match instrument {
-        Instrument::LowRes    => "LowRes",
-        Instrument::HighRes   => "HighRes",
-        Instrument::Tof       => "TOF",
+        Instrument::LowRes => "LowRes",
+        Instrument::HighRes => "HighRes",
+        Instrument::Tof => "TOF",
         Instrument::QExactive => "QExactive",
     };
     // H5: low-res (ion-trap) HCD is NOT routed to the high-res model. With no
@@ -81,11 +99,15 @@ fn resolve_model_id_old(
     // in the v1 (N=19) store, so ETD/HighRes/Phospho exact-matches it rather
     // than falling back to the base model. This check reads the store's actual
     // experiment_class, so it tracks the manifest protocol key automatically.)
-    if bundled_with_protocol(&exact, protocol) { return exact; }
+    if bundled_with_protocol(&exact, protocol) {
+        return exact;
+    }
 
     if !prot_suffix.is_empty() {
         let no_prot = model_id(frag, inst, "");
-        if let Some(id) = try_bundled(&no_prot) { return id; }
+        if let Some(id) = try_bundled(&no_prot) {
+            return id;
+        }
     }
 
     // Final fallback ladder. Each fallback target is gated through the bundle:
@@ -110,18 +132,18 @@ fn resolve_model_id_old(
         // NOT normalized and (being unbundled) fall through to the global default
         // rather than etd_lowres_tryp or the generic cid_lowres_tryp LowRes arm.
         ("ETD", "LowRes") | ("ETD", "HighRes") => None,
-        ("ETD", _)                          => Some("etd_lowres_tryp"),
+        ("ETD", _) => Some("etd_lowres_tryp"),
         // The binary rewrites these to cid_lowres_tryp (drop_protocol arms).
-        ("CID", "QExactive") | ("UVPD", _)  => Some("cid_lowres_tryp"),
+        ("CID", "QExactive") | ("UVPD", _) => Some("cid_lowres_tryp"),
         // CID/HCD on LowRes resolve to the low-res b/y model.
-        (_, "LowRes")                       => Some("cid_lowres_tryp"),
+        (_, "LowRes") => Some("cid_lowres_tryp"),
         // Anything else (notably CID/PQD on TOF or QExactive-family without a
         // matching model) has no normalization arm → global default.
-        _                                   => None,
+        _ => None,
     };
     match final_fallback {
         Some(id) => try_bundled(id).unwrap_or_else(|| "hcd_qexactive_tryp".to_string()),
-        None     => "hcd_qexactive_tryp".to_string(),
+        None => "hcd_qexactive_tryp".to_string(),
     }
 }
 
@@ -138,20 +160,20 @@ fn resolve_for_activation_old(
     protocol: Protocol,
 ) -> String {
     let frag = match method {
-        ActivationMethod::CID  => Fragmentation::Cid,
-        ActivationMethod::ETD  => Fragmentation::Etd,
-        ActivationMethod::HCD  => Fragmentation::Hcd,
+        ActivationMethod::CID => Fragmentation::Cid,
+        ActivationMethod::ETD => Fragmentation::Etd,
+        ActivationMethod::HCD => Fragmentation::Hcd,
         ActivationMethod::UVPD => Fragmentation::Uvpd,
-        ActivationMethod::PQD  => Fragmentation::Cid,
+        ActivationMethod::PQD => Fragmentation::Cid,
     };
     let inst = match detected_instrument.map(|i| i.family_fallback()) {
-        Some(InstrumentType::LowRes)         => Instrument::LowRes,
-        Some(InstrumentType::HighRes)        => Instrument::HighRes,
-        Some(InstrumentType::TOF)            => Instrument::Tof,
-        Some(InstrumentType::QExactive)      => Instrument::QExactive,
+        Some(InstrumentType::LowRes) => Instrument::LowRes,
+        Some(InstrumentType::HighRes) => Instrument::HighRes,
+        Some(InstrumentType::TOF) => Instrument::Tof,
+        Some(InstrumentType::QExactive) => Instrument::QExactive,
         Some(InstrumentType::OrbitrapAstral) => Instrument::QExactive,
-        Some(InstrumentType::TimsTOF)        => Instrument::Tof,
-        None                                 => Instrument::LowRes,
+        Some(InstrumentType::TimsTOF) => Instrument::Tof,
+        None => Instrument::LowRes,
     };
     resolve_model_id_old(frag, inst, protocol)
 }
@@ -162,8 +184,7 @@ fn bundled_model_ids() -> &'static std::collections::BTreeSet<String> {
     use std::sync::OnceLock;
     static IDS: OnceLock<std::collections::BTreeSet<String>> = OnceLock::new();
     IDS.get_or_init(|| {
-        let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/models");
+        let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models");
         let store = model_train::ModelStore::open(&store_path)
             .unwrap_or_else(|e| panic!("failed to open bundled model store: {e}"));
         store.model_ids().into_iter().collect()
@@ -175,8 +196,7 @@ fn bundled_model_classes() -> &'static std::collections::BTreeMap<String, BTreeS
     use std::sync::OnceLock;
     static MAP: OnceLock<std::collections::BTreeMap<String, BTreeSet<String>>> = OnceLock::new();
     MAP.get_or_init(|| {
-        let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/models");
+        let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models");
         let store = model_train::ModelStore::open(&store_path)
             .unwrap_or_else(|e| panic!("failed to open bundled model store: {e}"));
         store
@@ -215,12 +235,14 @@ fn try_bundled(model_id: &str) -> Option<String> {
 /// the exact-match step finds the combo models and the empty-class fallback
 /// still fires when no combo model is bundled.
 fn protocol_to_experiment_class(p: Protocol) -> BTreeSet<String> {
-    fn s(v: &str) -> String { v.to_string() }
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
     match p {
         Protocol::Auto | Protocol::Standard => BTreeSet::new(),
-        Protocol::Tmt          => [s("tmt")].into(),
-        Protocol::Phospho      => [s("phospho")].into(),
-        Protocol::Itraq        => [s("itraq")].into(),
+        Protocol::Tmt => [s("tmt")].into(),
+        Protocol::Phospho => [s("phospho")].into(),
+        Protocol::Itraq => [s("itraq")].into(),
         // Keep as single "itraqphospho" slug to match the parquet row
         // and avoid spurious phospho-subset matches (step 2) when the
         // combo file is not bundled.
@@ -257,9 +279,7 @@ fn normalize_activation_instrument(act: &str, inst: &str) -> (String, String, bo
         ("CID", "QExactive") => ("CID".into(), "LowRes".into(), true),
         // ETD + any non-(LowRes|HighRes) → ETD + LowRes (final fallback
         // `("ETD", _)` → etd_lowres_tryp). Protocol dropped.
-        ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => {
-            ("ETD".into(), "LowRes".into(), true)
-        }
+        ("ETD", i) if !matches!(i, "LowRes" | "HighRes") => ("ETD".into(), "LowRes".into(), true),
         // UVPD + non-QExactive → CID + LowRes (only uvpd_qexactive_tryp
         // is bundled; final fallback default arm → cid_lowres_tryp).
         // Protocol dropped.
@@ -279,7 +299,7 @@ fn build_key(
     // 1. PQD → CID (PQD is scored with the CID model).
     let act = match method {
         ActivationMethod::PQD => "CID",
-        other                 => other.name(),
+        other => other.name(),
     };
     // 2. Apply family fallback (OrbitrapAstral→QExactive, TimsTOF→TOF).
     let inst = instrument.family_fallback().name();
@@ -347,8 +367,7 @@ fn all_protocols() -> Vec<Protocol> {
 /// Note: `ItraqPhospho` entries use experiment_class `{"itraqphospho"}` so
 /// that exact-match in select() works for the bundled combo models.
 fn bundled_selection_entries() -> Vec<SelectionEntry> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/models");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models");
     let store = ModelStore::open(&path).expect("failed to open bundled model store");
     store.selection_entries()
 }
@@ -377,8 +396,12 @@ fn store_selection_matches_old_ladder_for_all_combos() {
                 if new_id != old_id {
                     failures.push(format!(
                         "{:?}/{:?}/{:?}: old={old_id} new={new_id}  key=({},{},{},[{:?}])",
-                        act, inst, prot,
-                        key.activation, key.instrument, key.enzyme,
+                        act,
+                        inst,
+                        prot,
+                        key.activation,
+                        key.instrument,
+                        key.enzyme,
                         key.experiment_class.iter().collect::<Vec<_>>()
                     ));
                 }
@@ -405,8 +428,11 @@ fn store_selection_matches_old_ladder_for_all_combos() {
             if new_id != old_id {
                 failures.push(format!(
                     "{:?}/None/{:?}: old={old_id} new={new_id}  key=({},{},{},[{:?}])",
-                    act, prot,
-                    key.activation, key.instrument, key.enzyme,
+                    act,
+                    prot,
+                    key.activation,
+                    key.instrument,
+                    key.enzyme,
                     key.experiment_class.iter().collect::<Vec<_>>()
                 ));
             }
@@ -440,7 +466,11 @@ fn metadataless_no_flags_default_selects_cid_lowres() {
     // case: no detected activation, Fragmentation::Auto, no fragment-tol.
     // → activation = CID, instrument = None (→ LowRes via the empty-instrument
     //   normalization), protocol = Auto.
-    let key = build_key(ActivationMethod::CID, InstrumentType::LowRes, Protocol::Auto);
+    let key = build_key(
+        ActivationMethod::CID,
+        InstrumentType::LowRes,
+        Protocol::Auto,
+    );
     let new_id = select(
         &entries,
         &key,

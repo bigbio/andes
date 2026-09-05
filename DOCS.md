@@ -25,7 +25,7 @@ Run `andes --help` for auto-generated help derived from the same `Cli` struct do
 
 ## 1. CLI reference
 
-All flags use kebab-case long options (`--flag-name`). Several flags also accept legacy Java MS-GF+ numeric values (see §8). The CLI is implemented in `crates/andes/src/bin/andes.rs`.
+All flags use kebab-case long options (`--flag-name`). Several flags also accept legacy Java MS-GF+ numeric values (see §8). The CLI is implemented in `crates/andes/src/bin/andes/cli.rs` (flags and parsers), with the search driver in `search.rs`, glyco in `glyco_run.rs`, model selection in `model_select.rs`, spectrum loading in `spectra.rs`, and training in `train.rs` / `train_intensity.rs` alongside it.
 
 ### Input formats
 

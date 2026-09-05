@@ -177,7 +177,11 @@ fn glyco_highres_pin_matches_golden() {
     );
 
     let actual = tmp.join("out.glyco.pin");
-    assert!(actual.exists(), "glyco PIN not written: {}", actual.display());
+    assert!(
+        actual.exists(),
+        "glyco PIN not written: {}",
+        actual.display()
+    );
 
     let g_txt = std::fs::read_to_string(&golden).expect("read golden");
     let a_txt = std::fs::read_to_string(&actual).expect("read actual");
@@ -199,9 +203,11 @@ fn glyco_highres_pin_matches_golden() {
     a_lines.sort_unstable_by_key(|r| spec_id(r));
     for (i, (g, a)) in g_lines.iter().zip(a_lines.iter()).enumerate() {
         if let Some(d) = row_diff(g, a) {
-            panic!("glyco PIN row mismatch at sorted index {i} ({d})
+            panic!(
+                "glyco PIN row mismatch at sorted index {i} ({d})
  golden: {g}
- actual: {a}");
+ actual: {a}"
+            );
         }
     }
 }

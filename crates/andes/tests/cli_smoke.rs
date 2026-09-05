@@ -115,7 +115,10 @@ fn cli_accepts_max_missed_cleavages_flag() {
     .status()
     .expect("run andes");
 
-    assert!(status.success(), "--max-missed-cleavages 2 should exit 0, got: {status}");
+    assert!(
+        status.success(),
+        "--max-missed-cleavages 2 should exit 0, got: {status}"
+    );
 }
 
 #[test]
@@ -133,7 +136,10 @@ fn cli_accepts_min_peaks_flag() {
     .status()
     .expect("run andes");
 
-    assert!(status.success(), "--min-peaks 5 should exit 0, got: {status}");
+    assert!(
+        status.success(),
+        "--min-peaks 5 should exit 0, got: {status}"
+    );
 }
 
 #[test]
@@ -153,7 +159,10 @@ fn cli_accepts_min_length_max_length_flags() {
     .status()
     .expect("run andes");
 
-    assert!(status.success(), "--min-length 7 --max-length 35 should exit 0, got: {status}");
+    assert!(
+        status.success(),
+        "--min-length 7 --max-length 35 should exit 0, got: {status}"
+    );
 }
 
 // ── mzML integration smoke test: format dispatch + non-empty PIN ─────────────
@@ -177,20 +186,25 @@ fn cli_accepts_mod_fragmentation_protocol_flags() {
          229.162932,*,fix,N-term,TMT6plex\n\
          57.021464,C,fix,any,Carbamidomethyl\n\
          15.994915,M,opt,any,Oxidation\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let status = base_cmd(
         "test-fixtures/test.mgf.gz",
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--mods").arg(&mods_path)
-    .arg("--fragmentation").arg("HCD")
-    .arg("--protocol").arg("TMT")
+    .arg("--mods")
+    .arg(&mods_path)
+    .arg("--fragmentation")
+    .arg("HCD")
+    .arg("--protocol")
+    .arg("TMT")
     // Allow a wider tolerance — the TMT-labelled candidates differ in mass
     // and we just want to confirm the binary exits cleanly, not assert
     // recall on a non-TMT fixture.
-    .arg("--precursor-tol").arg("100ppm")
+    .arg("--precursor-tol")
+    .arg("100ppm")
     .status()
     .expect("run andes with TMT flags");
 
@@ -213,7 +227,8 @@ fn cli_rejects_invalid_protocol_index() {
         "test-fixtures/BSA.fasta",
         &pin_path,
     )
-    .arg("--protocol").arg("42")
+    .arg("--protocol")
+    .arg("42")
     .status()
     .expect("run andes with bad protocol");
 
@@ -248,7 +263,10 @@ fn cli_runs_end_to_end_on_tiny_mzml() {
         status.success(),
         "andes should exit 0 on mzML input, got: {status}"
     );
-    assert!(pin_path.exists(), "PIN output should be written for mzML input");
+    assert!(
+        pin_path.exists(),
+        "PIN output should be written for mzML input"
+    );
 
     // The PIN must at least contain a header row.
     let pin_content = std::fs::read_to_string(&pin_path).unwrap();
@@ -383,27 +401,40 @@ fn cli_accepts_canonical_named_param_values() {
          229.162932,*,fix,N-term,TMT6plex\n\
          57.021464,C,fix,any,Carbamidomethyl\n\
          15.994915,M,opt,any,Oxidation\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let tmp = tempfile::tempdir().expect("tmpdir");
     let pin = tmp.path().join("named.pin");
 
-    let status = base_cmd(test_mgf.to_str().unwrap(),
-                          bsa_fasta.to_str().unwrap(),
-                          &pin)
-        .arg("--mods").arg(&mods_path)
-        .arg("--fragmentation").arg("HCD")
-        .arg("--protocol").arg("TMT")
-        .arg("--enzyme-specificity").arg("fully")
-        .arg("--charge").arg("2..5")
-        .arg("--isotope-error").arg("-1..2")
-        .arg("--precursor-tol").arg("100ppm")
-        .status()
-        .expect("named form exit");
+    let status = base_cmd(
+        test_mgf.to_str().unwrap(),
+        bsa_fasta.to_str().unwrap(),
+        &pin,
+    )
+    .arg("--mods")
+    .arg(&mods_path)
+    .arg("--fragmentation")
+    .arg("HCD")
+    .arg("--protocol")
+    .arg("TMT")
+    .arg("--enzyme-specificity")
+    .arg("fully")
+    .arg("--charge")
+    .arg("2..5")
+    .arg("--isotope-error")
+    .arg("-1..2")
+    .arg("--precursor-tol")
+    .arg("100ppm")
+    .status()
+    .expect("named form exit");
     assert!(status.success(), "canonical named CLI form failed");
 
     let pin_content = std::fs::read_to_string(&pin).expect("read pin");
-    assert!(!pin_content.lines().next().unwrap_or("").is_empty(), "PIN must have a header");
+    assert!(
+        !pin_content.lines().next().unwrap_or("").is_empty(),
+        "PIN must have a header"
+    );
 }
 
 // ── MGF metadata-less model-selection routing tests ──────────────────────────
@@ -425,7 +456,10 @@ fn mgf_no_flags_defaults_to_cid_lowres_with_warning() {
     .unwrap();
 
     let err = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "andes exited non-zero; stderr: {err}");
+    assert!(
+        output.status.success(),
+        "andes exited non-zero; stderr: {err}"
+    );
     assert!(err.to_lowercase().contains("cid_lowres"), "stderr: {err}");
     assert!(
         err.to_lowercase().contains("assuming") || err.to_lowercase().contains("warn"),
@@ -452,7 +486,10 @@ fn mgf_fragment_tol_ppm_selects_high_res_model() {
     .unwrap();
 
     let err = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "andes exited non-zero; stderr: {err}");
+    assert!(
+        output.status.success(),
+        "andes exited non-zero; stderr: {err}"
+    );
     assert!(err.to_lowercase().contains("qexactive"), "stderr: {err}");
 }
 

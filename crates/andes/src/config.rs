@@ -205,8 +205,18 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set_opt!("output_parquet", output_parquet, cfg.io.output_parquet);
 
     // ── search ──
-    set_parsed!("precursor_tol", precursor_tol, cfg.search.precursor_tol, crate::parse_precursor_tol);
-    set_parsed!("charge", charge, cfg.search.charge, crate::parse_charge_range);
+    set_parsed!(
+        "precursor_tol",
+        precursor_tol,
+        cfg.search.precursor_tol,
+        crate::parse_precursor_tol
+    );
+    set_parsed!(
+        "charge",
+        charge,
+        cfg.search.charge,
+        crate::parse_charge_range
+    );
     // isotope_error is Option<(i8,i8)> on the CLI so an EXPLICIT range is
     // distinguishable from the default (which is mode-dependent: 0..2 under --glyco).
     // A config-file value counts as explicit, so wrap it in Some.
@@ -216,8 +226,17 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         }
     }
     set!("enzyme", enzyme, cfg.search.enzyme);
-    set_parsed!("enzyme_specificity", enzyme_specificity, cfg.search.enzyme_specificity, crate::parse_enzyme_specificity);
-    set!("max_missed_cleavages", max_missed_cleavages, cfg.search.max_missed_cleavages);
+    set_parsed!(
+        "enzyme_specificity",
+        enzyme_specificity,
+        cfg.search.enzyme_specificity,
+        crate::parse_enzyme_specificity
+    );
+    set!(
+        "max_missed_cleavages",
+        max_missed_cleavages,
+        cfg.search.max_missed_cleavages
+    );
     set!("min_length", min_length, cfg.search.min_length);
     set!("max_length", max_length, cfg.search.max_length);
     set!("max_mods", max_mods, cfg.search.max_mods);
@@ -226,17 +245,54 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
     set_opt!("mods", mods, cfg.search.mods);
 
     // ── scoring ──
-    set_parsed!("score", score, cfg.scoring.score, parse_value_enum::<crate::ScoreFlag>);
-    set_parsed!("precursor_cal", precursor_cal, cfg.scoring.precursor_cal, crate::parse_precursor_cal);
+    set_parsed!(
+        "score",
+        score,
+        cfg.scoring.score,
+        parse_value_enum::<crate::ScoreFlag>
+    );
+    set_parsed!(
+        "precursor_cal",
+        precursor_cal,
+        cfg.scoring.precursor_cal,
+        crate::parse_precursor_cal
+    );
     set!("threads", threads, cfg.scoring.threads);
-    set_parsed!("fragmentation", fragmentation, cfg.scoring.fragmentation, crate::parse_fragmentation);
-    set_parsed!("protocol", protocol, cfg.scoring.protocol, crate::parse_protocol);
-    set_opt!("fragment_tol_ppm", fragment_tol_ppm, cfg.scoring.fragment_tol_ppm);
-    set_opt!("fragment_tol_da", fragment_tol_da, cfg.scoring.fragment_tol_da);
+    set_parsed!(
+        "fragmentation",
+        fragmentation,
+        cfg.scoring.fragmentation,
+        crate::parse_fragmentation
+    );
+    set_parsed!(
+        "protocol",
+        protocol,
+        cfg.scoring.protocol,
+        crate::parse_protocol
+    );
+    set_opt!(
+        "fragment_tol_ppm",
+        fragment_tol_ppm,
+        cfg.scoring.fragment_tol_ppm
+    );
+    set_opt!(
+        "fragment_tol_da",
+        fragment_tol_da,
+        cfg.scoring.fragment_tol_da
+    );
     set_opt!("model_store", model_store, cfg.scoring.model_store);
     set_opt!("model_id_override", model_id_override, cfg.scoring.model);
-    set_opt!("intensity_model", intensity_model, cfg.scoring.intensity_model);
-    set_parsed!("candidate_index", candidate_index, cfg.scoring.candidate_index, parse_value_enum::<crate::CandidateIndexFlag>);
+    set_opt!(
+        "intensity_model",
+        intensity_model,
+        cfg.scoring.intensity_model
+    );
+    set_parsed!(
+        "candidate_index",
+        candidate_index,
+        cfg.scoring.candidate_index,
+        parse_value_enum::<crate::CandidateIndexFlag>
+    );
     set!("ms_level", ms_level, cfg.scoring.ms_level);
     set!("max_spectra", max_spectra, cfg.scoring.max_spectra);
 
@@ -248,28 +304,56 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
 
     // ── chimeric ──
     set!("chimeric", chimeric, cfg.chimeric.enabled);
-    set!("chimeric_max_coisolated", chimeric_max_coisolated, cfg.chimeric.max_coisolated);
+    set!(
+        "chimeric_max_coisolated",
+        chimeric_max_coisolated,
+        cfg.chimeric.max_coisolated
+    );
     set!("chimeric_max_kl", chimeric_max_kl, cfg.chimeric.max_kl);
 
     // ── refine ──
     set!("refine", refine, cfg.refine.enabled);
     set_opt!("refine_config", refine_config, cfg.refine.config);
-    set!("refine_select_psm_fdr", refine_select_psm_fdr, cfg.refine.select_psm_fdr);
+    set!(
+        "refine_select_psm_fdr",
+        refine_select_psm_fdr,
+        cfg.refine.select_psm_fdr
+    );
 
     // ── rescoring ──
     set!("rescore", rescore, cfg.rescoring.enabled);
     set!("rescore_native", rescore_native, cfg.rescoring.native);
     set_opt!("fdr", fdr, cfg.rescoring.fdr);
     set_opt!("pep", pep, cfg.rescoring.pep);
-    set_opt!("percolator_bin", percolator_bin, cfg.rescoring.percolator_bin);
-    set!("percolator_docker", percolator_docker, cfg.rescoring.percolator_docker);
-    set!("percolator_image", percolator_image, cfg.rescoring.percolator_image);
-    set!("percolator_args", percolator_args, cfg.rescoring.percolator_args);
+    set_opt!(
+        "percolator_bin",
+        percolator_bin,
+        cfg.rescoring.percolator_bin
+    );
+    set!(
+        "percolator_docker",
+        percolator_docker,
+        cfg.rescoring.percolator_docker
+    );
+    set!(
+        "percolator_image",
+        percolator_image,
+        cfg.rescoring.percolator_image
+    );
+    set!(
+        "percolator_args",
+        percolator_args,
+        cfg.rescoring.percolator_args
+    );
     set!("keep_pin", keep_pin, cfg.rescoring.keep_pin);
 
     // ── glyco ──
     set!("glyco", glyco, cfg.glyco.enabled);
-    set!("glyco_backbone_top_k", glyco_backbone_top_k, cfg.glyco.backbone_top_k);
+    set!(
+        "glyco_backbone_top_k",
+        glyco_backbone_top_k,
+        cfg.glyco.backbone_top_k
+    );
     set!("glyco_gp_k", glyco_gp_k, cfg.glyco.gp_k);
     set!("glyco_gp_j", glyco_gp_j, cfg.glyco.gp_j);
     set!("glyco_gp_h", glyco_gp_h, cfg.glyco.gp_h);
@@ -329,7 +413,9 @@ fn check_unit_fraction(field: &str, v: f64) -> Result<(), String> {
 /// Same bound the CLI's `parse_positive_tol` enforces: finite and > 0.
 fn check_positive(field: &str, v: f64) -> Result<(), String> {
     if !v.is_finite() || v <= 0.0 {
-        return Err(format!("config: `{field}` must be finite and > 0 (got {v})"));
+        return Err(format!(
+            "config: `{field}` must be finite and > 0 (got {v})"
+        ));
     }
     Ok(())
 }
@@ -341,7 +427,10 @@ mod tests {
     #[test]
     fn unknown_key_is_rejected() {
         let y = "search:\n  precursor_tol: 20ppm\n  bogus_key: 1\n";
-        assert!(RunConfig::from_yaml_str(y).is_err(), "unknown key must error");
+        assert!(
+            RunConfig::from_yaml_str(y).is_err(),
+            "unknown key must error"
+        );
     }
 
     #[test]
@@ -376,7 +465,10 @@ glyco:
         assert!(check_unit_fraction("fdr", 0.01).is_ok());
         assert!(check_unit_fraction("fdr", 0.0).is_ok());
         assert!(check_unit_fraction("fdr", 1.0).is_ok());
-        assert!(check_unit_fraction("fdr", 5.0).is_err(), "fdr>1 must reject");
+        assert!(
+            check_unit_fraction("fdr", 5.0).is_err(),
+            "fdr>1 must reject"
+        );
         assert!(check_unit_fraction("fdr", -0.1).is_err());
         assert!(check_unit_fraction("fdr", f64::NAN).is_err());
         assert!(check_positive("frag", 20.0).is_ok());
@@ -389,7 +481,15 @@ glyco:
     fn apply_rejects_out_of_range_and_conflicting_yaml() {
         use clap::{CommandFactory, FromArgMatches};
         let matches = crate::TopCli::command()
-            .try_get_matches_from(["andes", "--spectrum", "x", "--database", "y", "--output-pin", "o"])
+            .try_get_matches_from([
+                "andes",
+                "--spectrum",
+                "x",
+                "--database",
+                "y",
+                "--output-pin",
+                "o",
+            ])
             .expect("parse baseline args");
 
         // out-of-range fdr from YAML → error
@@ -400,13 +500,20 @@ glyco:
 
         // both fragment tolerances from YAML → mutual-exclusion error
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let both = RunConfig::from_yaml_str("scoring:\n  fragment_tol_ppm: 20\n  fragment_tol_da: 0.02\n").unwrap();
+        let both =
+            RunConfig::from_yaml_str("scoring:\n  fragment_tol_ppm: 20\n  fragment_tol_da: 0.02\n")
+                .unwrap();
         let e = apply(both, &mut a, &matches).unwrap_err();
-        assert!(e.contains("mutually exclusive"), "expected conflict error, got: {e}");
+        assert!(
+            e.contains("mutually exclusive"),
+            "expected conflict error, got: {e}"
+        );
 
         // a valid config still applies cleanly
         let mut a = crate::SearchArgs::from_arg_matches(&matches).unwrap();
-        let ok = RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n").unwrap();
+        let ok =
+            RunConfig::from_yaml_str("rescoring:\n  fdr: 0.01\nscoring:\n  fragment_tol_ppm: 20\n")
+                .unwrap();
         assert!(apply(ok, &mut a, &matches).is_ok());
     }
 

@@ -222,7 +222,10 @@ fn run_train_env(in_parquet: &Path, store: &Path, extra: &[&str], env: &[(&str, 
         cmd.env(k, v);
     }
     let status = cmd.status().expect("run andes train-from-msnet");
-    assert!(status.success(), "train-from-msnet should exit 0, got {status}");
+    assert!(
+        status.success(),
+        "train-from-msnet should exit 0, got {status}"
+    );
 }
 
 /// An order-independent signature of a trained model's partition geometry
@@ -259,7 +262,10 @@ fn train_from_msnet_writes_model_with_rank_dist() {
         !param.rank_dist_table.is_empty(),
         "trained rank_dist_table should be non-empty"
     );
-    assert!(!param.partitions.is_empty(), "trained model should have partitions");
+    assert!(
+        !param.partitions.is_empty(),
+        "trained model should have partitions"
+    );
 }
 
 /// Wiring guard (finding 3.9): `run_train` — the binary's default training path —
@@ -277,7 +283,12 @@ fn geometry_derived_by_default_differs_from_seed() {
 
     // DEFAULT: derive geometry from the (tiny) corpus.
     let store_derived = dir.path().join("derived.parquet");
-    run_train_env(&in_parquet, &store_derived, &["--fragment-tol-ppm", "20"], &[]);
+    run_train_env(
+        &in_parquet,
+        &store_derived,
+        &["--fragment-tol-ppm", "20"],
+        &[],
+    );
 
     // OPT-OUT: reuse the bundled seed's full partition geometry.
     let store_seed = dir.path().join("seed.parquet");
@@ -290,12 +301,21 @@ fn geometry_derived_by_default_differs_from_seed() {
         &[],
     );
 
-    let derived = ModelStore::open(&store_derived).unwrap().load_param("default").unwrap();
-    let seed = ModelStore::open(&store_seed).unwrap().load_param("default").unwrap();
+    let derived = ModelStore::open(&store_derived)
+        .unwrap()
+        .load_param("default")
+        .unwrap();
+    let seed = ModelStore::open(&store_seed)
+        .unwrap()
+        .load_param("default")
+        .unwrap();
 
     let sd = geometry_sig(&derived.partitions);
     let ss = geometry_sig(&seed.partitions);
-    assert!(!sd.is_empty() && !ss.is_empty(), "both trained models must have partitions");
+    assert!(
+        !sd.is_empty() && !ss.is_empty(),
+        "both trained models must have partitions"
+    );
     assert_ne!(
         sd, ss,
         "default training must DERIVE geometry from the corpus, but it matched the seed geometry \
@@ -361,11 +381,16 @@ fn data_type_override_sets_selection_columns() {
         &in_parquet,
         &store,
         &[
-            "--fragment-tol-da", "0.5",
-            "--activation", "CID",
-            "--instrument", "LowRes",
-            "--enzyme", "Trypsin",
-            "--protocol", "TMT",
+            "--fragment-tol-da",
+            "0.5",
+            "--activation",
+            "CID",
+            "--instrument",
+            "LowRes",
+            "--enzyme",
+            "Trypsin",
+            "--protocol",
+            "TMT",
         ],
     );
 
@@ -376,9 +401,18 @@ fn data_type_override_sets_selection_columns() {
         .find(|e| e.model_id == "default")
         .expect("manifest entry for 'default'");
 
-    assert_eq!(entry.activation, "CID", "activation column must reflect --activation");
-    assert_eq!(entry.instrument, "LowRes", "instrument column must reflect --instrument");
-    assert_eq!(entry.enzyme, "Trypsin", "enzyme column must reflect --enzyme");
+    assert_eq!(
+        entry.activation, "CID",
+        "activation column must reflect --activation"
+    );
+    assert_eq!(
+        entry.instrument, "LowRes",
+        "instrument column must reflect --instrument"
+    );
+    assert_eq!(
+        entry.enzyme, "Trypsin",
+        "enzyme column must reflect --enzyme"
+    );
     assert_eq!(
         entry.protocol, "TMT",
         "protocol column must reflect --protocol (drives experiment_class=tmt selection)"
@@ -439,7 +473,11 @@ fn train_from_msnet_accepts_rank_smoothing() {
     let store = dir.path().join("models.parquet");
     write_flat_parquet(&in_parquet, &synthetic_rows());
 
-    run_train(&in_parquet, &store, &["--fragment-tol-ppm", "20", "--rank-smoothing"]);
+    run_train(
+        &in_parquet,
+        &store,
+        &["--fragment-tol-ppm", "20", "--rank-smoothing"],
+    );
 
     assert!(store.exists(), "store should be written");
     let ms = ModelStore::open(&store).expect("open store");

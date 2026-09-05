@@ -686,7 +686,7 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-min-matched-ions` | 0 | Require N matched b/y sequence ions before reporting (MSFragger's equivalent is 4). 0 disables. |
 | `--glyco-min-raw-score` / `--glyco-min-raw-score-quantile` | unset | Absolute or run-adaptive (quantile of the run's decoy winners) emission floor. Unset emits a best guess for every gated scan. |
 | `--glyco-sialic-oxonium-min-frac` | 0 | Require a sialic oxonium ion (as a fraction of base peak) before a composition may claim NeuAc/NeuGc. 0 disables. |
-| `--glyco-pin-curated` | off | Write the curated 52-column glyco PIN instead of the full one. On pooled plasma it measured 385 vs 257 glycoPSMs @1% (+50%) at 0.00% entrapment on every seed; the benchmarks in `docs/benchmarks/` use it. |
+| `--glyco-pin-curated` | off | Write the curated 52-column glyco PIN instead of the full one. On pooled plasma it measured 385 vs 257 glycoPSMs @1% (+50%) at 0.00% entrapment on every seed (that set has since been retired from the benchmark). |
 | `--glyco-scans <FILE>` / `--glyco-diag-splits <FILE>` / `--debug-glyco` | off | Diagnostics: restrict scoring to listed scans; dump per-candidate split evidence; emit all candidate rows. A `--debug-glyco` PIN must never be fed to an FDR tool. |
 
 **Hidden tuning knobs** (`hide = true`; the shipped values are validated and rarely need changing):

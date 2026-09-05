@@ -3,7 +3,7 @@
 #
 #   ./fetch_spectra.sh <data-dir> [dataset ...]
 #
-# Datasets: astral tmt ups1 glyco-mouse glyco-plasma   (default: astral tmt ups1)
+# Datasets: astral tmt ups1 glyco-mouse   (default: astral tmt ups1)
 # Resolves real download URLs through the PRIDE API rather than hardcoding FTP paths,
 # so it keeps working when the archive layout changes. Re-running skips files already
 # present, and prints a checksum for each so you can confirm you have what we had.
@@ -16,7 +16,7 @@ API="https://www.ebi.ac.uk/pride/ws/archive/v3/projects"
 # dataset -> accession, then the exact filenames we use from it
 declare -A ACC=(
   [astral]=PXD070049 [tmt]=PXD007683 [ups1]=PXD001819
-  [glyco-mouse]=PXD005553 [glyco-plasma]=PXD030622
+  [glyco-mouse]=PXD005553
 )
 declare -A WANT=(
   # VERIFIED against the PRIDE file listing on 2026-09-05 -- each pattern resolves to
@@ -25,7 +25,6 @@ declare -A WANT=(
   [tmt]='a05058\.raw'                                          # 1 file, 0.54 GB
   [ups1]='UPS1_5000amol_R1\.raw'                               # 1 file, 1.70 GB
   [glyco-mouse]='MouseLiver-Z-T-[1-5]\.raw'                    # 5 fractions, 12.6 GB (deep tier); pGlyco2 liver
-  [glyco-plasma]='.*-sceHCD-R[1-3]\.raw'                       # 3 files, 0.39 GB; excludes the sceHCD-EThcD acquisitions
 )
 
 # The PRIDE API serves AT MOST 100 files per page whatever pageSize you ask for. PXD070049

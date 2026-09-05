@@ -11,9 +11,9 @@ DATA=~/andes-bench                     # anywhere with ~200 GB free for the raw 
 ./run.sh             "$DATA" tmt ups1  # search + Percolator + results table
 ```
 
-Add `glyco-plasma` (0.39 GB, the quick tier) or `glyco-mouse` (12.6 GB, the deep tier) to
-`fetch_spectra.sh` for the glyco datasets; those are run through the harness in
-[`../glyco/`](../glyco/) rather than `run.sh`, because they must be pooled before Percolator.
+Add `glyco-mouse` (12.6 GB; the quick tier uses only the first fraction) to
+`fetch_spectra.sh` for the glyco dataset; it is run through the harness in
+[`../glyco/`](../glyco/) rather than `run.sh`, because fractions must be pooled before Percolator.
 
 ## What each script does
 
@@ -37,7 +37,7 @@ andes reads Thermo `.raw` directly (`--features thermo`, plus the .NET 8 runtime
 time). **Use it.** Conversion is an extra step that can silently change your results, and
 native reading costs nothing:
 
-| input (plasma sceHCD-R1) | andes spectra | PIN rows | wall |
+| input (a human-plasma glyco file, since retired from the benchmark) | andes spectra | PIN rows | wall |
 |---|---:|---:|---:|
 | `.raw` native | 24,857 | 7,257 | 152 s |
 | TRFP 1.4.3 mzML | 24,857 | 7,257 | 149 s |
@@ -91,7 +91,6 @@ pages through the whole listing, and every file the benchmarks use resolved on 2
 | tmt | PXD007683 | `a05058.raw` | 0.54 GB |
 | ups1 | PXD001819 | `UPS1_5000amol_R1.raw` | 1.70 GB |
 | glyco-mouse | PXD005553 | `MouseLiver-Z-T-{1..5}.raw` (pGlyco2 liver) | 12.6 GB |
-| glyco-plasma | PXD030622 | `…-sceHCD-R{1,2,3}.raw` | 0.39 GB |
 
 ## Reading the output
 

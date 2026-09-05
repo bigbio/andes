@@ -62,7 +62,7 @@ re-measured, this document says so rather than carrying the old value forward si
 
 Every row names what produced it. Standard and opt-in rows: commit `1b8520f8`, benchmark
 VM (8-thread Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`, **2026-09-04,
-one session**. Glyco rows: commit `6b37bb2c`, Codon, 5 Percolator seeds, native `.raw`
+one session**. Glyco rows: commit `6b37bb2c` (see the caveat in §2), 5 Percolator seeds, native `.raw`
 (or TRFP 1.4.3, which is byte-identical on these files).
 
 | benchmark | dataset | what is measured | andes | reference | measured error | wall (andes) |
@@ -75,10 +75,9 @@ one session**. Glyco rows: commit `6b37bb2c`, Codon, 5 Percolator seeds, native 
 | | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 48 s |
 | **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **43,929** (+14.4%) | baseline 38,394 | not measurable by entrapment (pass 2 is protein-anchored) | 345 s |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
-| **Glyco, quick tier** | plasma PXD030622, 3 sceHCD files pooled | glycoPSMs @1% | **385** (384.6 ± 22, 5 seeds) | Byonic reference 629 spectra: 47.7% confirmed | 0.00% entrapment on all seeds (design cannot resolve below ~1 hit) | ~460 s |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions | glycoPSMs @1% | **31,658 ± 34** | pGlyco2 17,855: **78.8% confirmed**, 92.2% of its peptides found | **1.02% ± 0.03 true FDP** (1:1 shuffled database) | ~25 min / fraction, 16 cores |
 | | | same-scan agreement | 83.8% peptidoform · 99.1% backbone | (`glyco/agreement.py`) | | |
-| **Glyco, development tier** | one liver fraction | glycoPSMs @1% | 6,554 | — | 1.04% true FDP | 4,592 s, 8 threads |
+| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`) | glycoPSMs @1% | 6,554 | — | 1.04% true FDP (1:1 database) | 4,592 s, 8 threads |
 
 † Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
@@ -186,26 +185,29 @@ on an entrapment sequence by the mechanism the metric relies on.
 
 ## 2. Glyco
 
-Three tiers, because glyco cannot be benchmarked from a single file the way the standard
-datasets can — see the q-floor note below. Quick is the one to run by default; Deep needs a
-cluster; Development is a single fraction for iterating, and does not give a valid 1% answer.
+Two tiers of one dataset, pGlyco2 mouse liver (PXD005553), whose deposited pGlyco2
+identifications ship in `glyco/truth/`. Quick is one fraction on a VM; Deep is all five
+fractions on a cluster. The earlier human-plasma set was retired: its reference was a
+proprietary Byonic `.byrslt` export, which cannot be rebuilt from public artifacts.
 
-### Quick tier — 3 files, 0.39 GB, ~8 min on 8 threads
+### Quick tier — one pGlyco2 liver fraction, VM-local, 76 min
 
-Human plasma PXD030622, the three **sceHCD replicates** (R1-R3). This is the smallest
-configuration that produces a valid 1% FDR answer.
-
-| | measured |
-|---|---|
-| glycoPSMs @1% | **385** (5 seeds, 384.6 ± 22) |
-| wall | ~460 s search + Percolator, VM, 8 threads |
-| download | 0.39 GB |
-| reference | `truth/byonic_plasma.tsv.gz` (Byonic, 629 spectra) |
+`MouseLiver-Z-T-1.raw` from PXD005553 (2.7 GB) against the 1:1 shuffled mouse database, on
+a VM at 8 threads: **4,592 s search**, **6,554 glycoPSMs @1%**, **1.04% true FDP**. It
+needs no cluster, which is the point, but 76 minutes is a pre-merge check, not an inner
+loop. One fraction clears Percolator's q floor here because a liver fraction carries
+thousands of confident targets; see the floor rule below before assuming that of any
+other single file.
 
 ### Deep tier — pGlyco2 mouse liver, 5 fractions, cluster-scale
 
-PXD005553, ~25 min per fraction on 16 cores, **ThermoRawFileParser 1.4.3**. Commit `6b37bb2c`, 5 Percolator seeds,
-against a 1:1 shuffled-mouse entrapment database built by `glyco/build_shuffled_entrap.py`:
+PXD005553, ~25 min per fraction on 16 cores, **ThermoRawFileParser 1.4.3**, 5 Percolator seeds,
+against a 1:1 shuffled-mouse entrapment database built by `glyco/build_shuffled_entrap.py`
+(17,537 targets, UniProt reviewed mouse as served on 2026-09-03). Measured at commit
+`6b37bb2c`, which is **not an ancestor of `main`** (a development branch whose glyco output
+was later shown byte-identical to `main` on the mouse-brain set, but that equivalence has
+not been re-checked on this dataset). Treat the row as provisional until re-measured on a
+`main` commit; see §5.
 
 | | measured |
 |---|---|
@@ -219,28 +221,19 @@ against a 1:1 shuffled-mouse entrapment database built by `glyco/build_shuffled_
 
 **The FDR is right where it claims to be** — 1.02% measured against a nominal 1%, on a
 database where the correction factor is exactly 2 and there is nothing to get wrong.
-**Generation is not the bottleneck here**: 0.1% of reference spectra produce no row, against
-5.4% on plasma. **Selection is**, at 20.5% — the same failure mode as plasma but half the
-size, and decoys win 1,972 of those.
+**Generation is not the bottleneck here**: 0.1% of reference spectra produce no row.
+**Selection is**, at 20.5%, and decoys win 1,972 of those.
 
 andes accepts 31,602 spectra of which 17,530 are not in the pGlyco2 reference. At 1.02%
 measured true FDP those are mostly not false positives, but the two searches used different
 databases (UniProt mouse reviewed + shuffled twin here; pGlyco2's own there), so read this
 as "accepts substantially more at comparable measured error", not as a clean gain.
 
-### Development tier — one fraction, VM-local, but slow
-
-One pGlyco2 liver fraction on a VM at 8 threads: **4,592 s search (76 min)**, 6,554
-glycoPSMs @1%, 1.04% true FDP. It needs no cluster, which is the point, but 76 minutes is
-too slow to run after every change — treat it as a pre-merge check, not an inner loop. It
-is 17x richer than the 3-file plasma set (6,554 against 385), so it can actually resolve a
-1% effect, which the plasma set cannot.
-
 ### ⚠ Why a single glyco file cannot be benchmarked
 
 Percolator's smallest attainable q is `1/T_top`, so a run with too few confident targets
-cannot reach `q = 0.01` **at all** — the answer is 0 regardless of data quality. Measured on
-one plasma replicate each:
+cannot reach `q = 0.01` **at all** — the answer is 0 regardless of data quality. Measured
+(2026-09, on a human-plasma set since retired from this benchmark; the mechanism is general):
 
 | configuration | PIN rows | glycoPSMs @1% |
 |---|---:|---:|
@@ -257,28 +250,10 @@ model and the feature distributions differ between fragmentation chemistries.
 
 
 
-### Where the plasma loss is
-
-**Human plasma, PXD030622** (R1–R3, pure-HCD), decomposed per scan against the depositors'
-own Byonic results — 629 truth spectra, 2026-09-04:
-
-| outcome | share |
-|---|---:|
-| confirmed | **47.7%** |
-| wrong target won the collapse | 21.3% |
-| **a decoy won the collapse** | 15.6% |
-| rejected at 1% FDR | 9.1% |
-| no row emitted at all | 5.4% |
-| peptide not reachable by the digest | 1.0% |
-
-**Selection, not evidence, is the dominant loss** — 37% of truth is generated and scored
-but loses the per-scan collapse. Reproduce with `glyco/score_vs_truth.py`, which asserts
-its own preconditions.
-
 ### Refuted — do not re-try without new evidence
 
 Each was measured, not argued: the matched-ion selector term `--glyco-gp-m` (every weight
-worse on plasma, and the selection buckets do not move); the two-stage split election
+worse, and the selection buckets do not move); the two-stage split election
 (fewer correct identifications at higher error); generation-side expansion in general —
 wider glycan box, two-axis Y retention, isobar resolution all moved yield **down**; and the
 oxonium gate as an explanation for unemitted spectra (it fires for 33 of the 34).
@@ -325,7 +300,8 @@ since precursor calibration can tighten a window mid-run.
 # 0. Build the database FIRST. It is 1:1 SHUFFLED-SELF entrapment, not a foreign proteome.
 GLYCO=1 ./reproduce/build_databases.sh "$DATA"     # writes databases/mouse_entrap.fasta
 
-# 1. One search per fraction. --decoy-strategy sequon-reverse is REQUIRED, not optional:
+# One search per fraction (the quick tier is the same recipe on MouseLiver-Z-T-1 alone).
+# 1. --decoy-strategy sequon-reverse is REQUIRED, not optional:
 #    plain reversal maps an N-X-S/T sequon to S/T-X-N, so reversed decoys sail through the
 #    glyco sequon gate and q-values come out anti-conservative.
 for f in MouseLiver-Z-T-1 MouseLiver-Z-T-2 MouseLiver-Z-T-3 MouseLiver-Z-T-4 MouseLiver-Z-T-5; do
@@ -358,8 +334,7 @@ accession, not at the start of the header.
 
 `score_vs_truth.py` works on **any** dataset with a committed reference in `truth/`; it
 replaced a plasma-only script that hardcoded one dataset's paths and could not run
-elsewhere. `make_truth.py` builds those references from pGlyco2 TSV, Byonic `.byrslt`
-(SQLite) or Byonic mzIdentML, and StrucGP xlsx.
+elsewhere. `make_truth.py` builds those references from pGlyco2 TSV or StrucGP xlsx.
 
 **To reproduce any of this from scratch**, see [`reproduce/`](reproduce/) — three scripts that
 pull the data from PRIDE, rebuild the databases from UniProt, and run the whole thing with no
@@ -405,12 +380,6 @@ between runs. Differences measured that way are noise.
 function* of any threshold you sweep, and plateaus in such a sweep are artifacts. Below
 ~101 targets the answer is always zero.
 
-**Filter the comparator.** Byonic's `PQMs` table emits one row per (PSM, protein), so a
-peptide in several proteins is counted several times unless deduped by `(fraction, scan)` —
-that mistake once inflated a truth set from 629 spectra to 1,068 rows and manufactured a
-false finding. A raw MSFragger `psm.tsv` is pre-FDR, and roughly a third of its rank-1
-glyco rows are that engine's own decoys.
-
 **Replicate over seeds.** Single-seed glyco differences are routinely inside seed noise;
 the 5-seed design here has a floor of about 117 PSMs, below which an effect is *not
 demonstrable* rather than refuted.
@@ -431,11 +400,10 @@ of you — never assumed to be 1:
 | database | T : E | factor |
 |---|---|---:|
 | `yeast_entrap.fasta` (UPS1) | 734,280 : 303,537 tryptic peptides | **3.42** |
-| plasma `human_entrap.fasta` | 20,411 : 4,531 proteins | **9.81** |
 | a genuine 1:1 database | 1 : 1 | 2.00 |
 
 Assuming 1:1 has produced wrong published numbers here **twice** — understating UPS1's true
-error and understating plasma's roughly fivefold. Peptide space is the better basis: it is
+error, roughly fivefold on a foreign-proteome database. Peptide space is the better basis: it is
 what the search samples, and entrapment proteomes usually have a different length
 distribution from the target.
 
@@ -465,6 +433,9 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
   Comet's newer fragment-index mode nor MSFragger has been benchmarked here at all.
 - **Two of three databases cannot support an entrapment claim.** Astral has no entrapment
   component; UPS1's is not 1:1. Rebuilding both near 1:1 is the fix.
+- **The deep glyco tier was measured off-`main`** (commit `6b37bb2c`) and must be
+  re-measured on a `main` commit before it is quoted as current. The quick tier is measured
+  on this branch with the scripted database (above), so it no longer has that problem.
 - **No PTM-enriched benchmark exists.** `--refine` is measured only on Astral, and the four
   bundled phosphorylation models have never been scored against a reference dataset. A
   public phospho-enrichment set with a deposited identification list is the next dataset

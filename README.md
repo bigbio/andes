@@ -437,9 +437,7 @@ and **confirms 78.8% of the reference** (same scan, same backbone), at a measure
 false-discovery proportion of **1.02% ± 0.03** against a 1:1 shuffled entrapment database
 — the reported 1% is where it claims to be. Where andes and pGlyco2 identify the same scan,
 99.1% agree on the backbone and 83.8% on the full peptidoform (backbone + glycan
-composition). On human plasma (PXD030622) against the depositors' Byonic results, 47.7% of
-reference spectra are confirmed; the dominant loss there is per-scan candidate selection,
-not missing evidence.
+composition).
 
 Treat these as a calibration point, not a guarantee. Glyco results depend heavily on
 activation type, glycan class, and how the reference set itself was filtered.

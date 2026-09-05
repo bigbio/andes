@@ -66,7 +66,7 @@ safe for your data — which is the argument for skipping conversion altogether.
 If you must convert, use **1.4.3**, and state the converter version with any number you
 publish. All figures here were produced with native reading or 1.4.3, which agree exactly.
 
-## Two things that will not reproduce exactly## Two things that will not reproduce exactly, stated up front
+## Two things that will not reproduce exactly, stated up front
 
 **The Astral row cannot be fetched at all.** Our records name
 `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` in PXD070049, but that project does not

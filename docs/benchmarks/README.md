@@ -155,8 +155,9 @@ on an entrapment sequence by the mechanism the metric relies on.
 
 ## 2. Glyco
 
-Two tiers, because glyco cannot be benchmarked from a single file the way the standard
-datasets can — see the q-floor note below.
+Three tiers, because glyco cannot be benchmarked from a single file the way the standard
+datasets can — see the q-floor note below. Quick is the one to run by default; Deep needs a
+cluster; Development is a single fraction for iterating, and does not give a valid 1% answer.
 
 ### Quick tier — 3 files, 0.39 GB, ~8 min on 8 threads
 

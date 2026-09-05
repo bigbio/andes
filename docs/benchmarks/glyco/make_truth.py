@@ -172,11 +172,17 @@ def byonic_mzid(paths):
                 seq, deltas = peps.get(it.get("peptide_ref"), ("", []))
                 if not seq:
                     continue
-                # the glycan is the largest delta; anything under 300 Da is a chemical mod
+                # The glycan is the largest delta; anything under 300 Da is a chemical
+                # mod, i.e. the PSM is not a glycopeptide. `byonic()` never sees those --
+                # it requires an 'ngly'-class modification -- so drop them here too, or
+                # this reader would put plain peptides in a glyco truth table and inflate
+                # every denominator computed from it.
                 gly = max(deltas) if deltas else 0.0
+                if gly <= 300:
+                    break   # this scan's best hit is not a glycopeptide; take no other
                 out.append([run, scan, it.get("chargeState", ""),
                             re.sub(r"[^A-Z]", "", seq.upper()),
-                            f"mass:{gly:.3f}" if gly > 300 else "", ""])
+                            f"mass:{gly:.3f}", ""])
                 break
     return out, "passThreshold=true (Byonic's own 2D-FDR threshold); glycan as MASS DELTA"
 

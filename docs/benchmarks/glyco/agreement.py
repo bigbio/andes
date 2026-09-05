@@ -56,7 +56,15 @@ def main():
     truth = {(r["run"], int(r["scan"])): bare(r["peptide"]) for r in trows}
     truth_gly = {(r["run"], int(r["scan"])): norm_glycan(r.get("glycan", "")) for r in trows}
     runs = {k[0] for k in truth}
+    # Same tail-token fallback as score_vs_truth.py, including its refusal to guess: two
+    # runs sharing a tail (sample_R1, control_R1) would otherwise both bind to whichever
+    # dict order happened to reach `next()` first, and the agreement numbers would be
+    # silently wrong rather than absent.
     tails = {r: r.rsplit("_", 1)[-1] for r in runs}
+    if len(set(tails.values())) != len(tails):
+        dupes = [r for r in runs if list(tails.values()).count(tails[r]) > 1]
+        sys.exit(f"run names are ambiguous after trimming: {sorted(dupes)}; rename the "
+                 f"truth `run` column or pool with matching tags")
 
     def key_of(specid):
         m = re.search(r"scan=(\d+)", specid)

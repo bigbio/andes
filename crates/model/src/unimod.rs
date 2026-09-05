@@ -83,8 +83,7 @@ impl UnimodDb {
                       name: &mut Option<String>,
                       mass: &mut Option<f64>,
                       sites: &mut Vec<String>| {
-            if let (Some(id_v), Some(name_v), Some(mass_v)) =
-                (id.take(), name.take(), mass.take())
+            if let (Some(id_v), Some(name_v), Some(mass_v)) = (id.take(), name.take(), mass.take())
             {
                 let entry = UnimodMod {
                     accession: id_v.clone(),

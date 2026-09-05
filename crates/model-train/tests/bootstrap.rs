@@ -61,9 +61,9 @@ fn load_hcd_scorer() -> RankScorer {
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models"
     ));
-    let store = model_train::store::ModelStore::open(bundled)
-        .expect("open bundled model store");
-    let param = store.load_param("hcd_qexactive_tryp")
+    let store = model_train::store::ModelStore::open(bundled).expect("open bundled model store");
+    let param = store
+        .load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp from store");
     RankScorer::new(&param)
 }
@@ -89,7 +89,10 @@ fn load_bsa_spectra() -> Vec<model::Spectrum> {
 #[test]
 fn bootstrap_labels_bsa_smoke() {
     let spectra = load_bsa_spectra();
-    assert!(!spectra.is_empty(), "test.mgf must contain at least one spectrum");
+    assert!(
+        !spectra.is_empty(),
+        "test.mgf must contain at least one spectrum"
+    );
 
     let scorer = load_hcd_scorer();
     let db_path = fixture("test-fixtures/BSA.fasta");
@@ -97,7 +100,11 @@ fn bootstrap_labels_bsa_smoke() {
     let train_fdr = 0.5_f64;
 
     let result = bootstrap_labels(&spectra, &db_path, &scorer, &params, train_fdr);
-    assert!(result.is_ok(), "bootstrap_labels must succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "bootstrap_labels must succeed: {:?}",
+        result.err()
+    );
 
     let matches = result.unwrap();
 
@@ -174,10 +181,10 @@ fn bootstrap_labels_bsa_lenient_ge_strict() {
     let db_path = fixture("test-fixtures/BSA.fasta");
     let params = SearchParams::default_tryptic(bsa_aa_set());
 
-    let lenient = bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.5)
-        .expect("lenient bootstrap");
-    let strict = bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.05)
-        .expect("strict bootstrap");
+    let lenient =
+        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.5).expect("lenient bootstrap");
+    let strict =
+        bootstrap_labels(&spectra, &db_path, &scorer, &params, 0.05).expect("strict bootstrap");
 
     assert!(
         lenient.len() >= strict.len(),

@@ -31,7 +31,11 @@ fn bench_predict_value_batch() {
         .collect();
     let n = rows_flat.len() / nf;
     let rows: Vec<&[f32]> = (0..n).map(|i| &rows_flat[i * nf..(i + 1) * nf]).collect();
-    eprintln!("model: {} trees, {} features; rows: {n}", model.trees.len(), nf);
+    eprintln!(
+        "model: {} trees, {} features; rows: {n}",
+        model.trees.len(),
+        nf
+    );
 
     let mut out = vec![0.0f32; n];
     // Per-PSM batch size ~ 4*(n-1) ions for a 13-mer at two charges: 48 rows.

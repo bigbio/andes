@@ -17,8 +17,7 @@ fn fixture_path() -> PathBuf {
 #[test]
 fn test_mgf_parses_completely() {
     let path = fixture_path();
-    let file = input::open_buf_maybe_gz(&path)
-        .unwrap_or_else(|e| panic!("open {path:?}: {e}"));
+    let file = input::open_buf_maybe_gz(&path).unwrap_or_else(|e| panic!("open {path:?}: {e}"));
     let reader = MgfReader::new(BufReader::new(file));
     let mut count = 0;
     for result in reader {

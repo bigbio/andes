@@ -202,13 +202,13 @@ mod tests {
         params.top_n_psms_per_spectrum = 1;
         assert_eq!(params.hot_loop_retention_cap(), 1);
         params.score_mode = ScoreMode::Strong;
-        assert_eq!(
-            params.hot_loop_retention_cap(),
-            STRONG_SCORE_RETENTION_K
-        );
+        assert_eq!(params.hot_loop_retention_cap(), STRONG_SCORE_RETENTION_K);
         // User top_n larger than K → user value wins.
         params.top_n_psms_per_spectrum = STRONG_SCORE_RETENTION_K + 5;
-        assert_eq!(params.hot_loop_retention_cap(), STRONG_SCORE_RETENTION_K + 5);
+        assert_eq!(
+            params.hot_loop_retention_cap(),
+            STRONG_SCORE_RETENTION_K + 5
+        );
     }
 
     #[test]

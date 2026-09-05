@@ -6,8 +6,7 @@
 //! Byte-parity for the PIN/TSV peptide formats lives in the `output` crate.
 
 use model::{
-    AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Modification,
-    Peptide, ResidueSpec,
+    AminoAcid, AminoAcidSet, AminoAcidSetBuilder, ModLocation, Modification, Peptide, ResidueSpec,
 };
 
 fn corpus_aa_set() -> AminoAcidSet {
@@ -57,7 +56,8 @@ fn build_peptide(
     mods: &[(usize, &str)],
     aa_set: &AminoAcidSet,
 ) -> Peptide {
-    let mut residues: Vec<AminoAcid> = seq.iter()
+    let mut residues: Vec<AminoAcid> = seq
+        .iter()
         .map(|&r| AminoAcid::standard(r).unwrap())
         .collect();
     for &(idx, mod_name) in mods {
@@ -65,7 +65,12 @@ fn build_peptide(
         let variant = aa_set
             .variants_for(r, ModLocation::Anywhere)
             .iter()
-            .find(|aa| aa.mod_.as_ref().map(|m| m.name == mod_name).unwrap_or(false))
+            .find(|aa| {
+                aa.mod_
+                    .as_ref()
+                    .map(|m| m.name == mod_name)
+                    .unwrap_or(false)
+            })
             .cloned()
             .unwrap_or_else(|| panic!("mod {mod_name:?} not found for residue {}", r as char));
         residues[idx] = variant;
@@ -77,23 +82,25 @@ fn build_peptide(
 fn round_trip_unmodified_corpus() {
     let aa_set = corpus_aa_set();
     let cases: &[(&[u8], u8, u8)] = &[
-        (b"PEPTIDE",      b'_', b'-'),
-        (b"PEPTIDE",      b'K', b'R'),
-        (b"GAVL",         b'_', b'A'),
-        (b"AAAAA",        b'A', b'A'),
-        (b"WYRFLMHK",     b'R', b'P'),
-        (b"GG",           b'_', b'-'),  // shortest realistic
-        (b"M",            b'_', b'-'),  // single residue
+        (b"PEPTIDE", b'_', b'-'),
+        (b"PEPTIDE", b'K', b'R'),
+        (b"GAVL", b'_', b'A'),
+        (b"AAAAA", b'A', b'A'),
+        (b"WYRFLMHK", b'R', b'P'),
+        (b"GG", b'_', b'-'), // shortest realistic
+        (b"M", b'_', b'-'),  // single residue
     ];
     for &(seq, pre, post) in cases {
         let p = build_peptide(seq, pre, post, &[], &aa_set);
         let serialized = p.to_string();
         let parsed = Peptide::from_str(&serialized, &aa_set)
             .unwrap_or_else(|e| panic!("from_str failed on {serialized:?}: {e}"));
-        assert_eq!(parsed.to_string(), serialized,
-            "Display→from_str→Display drift on {serialized:?}");
-        assert_eq!(parsed, p,
-            "Structural mismatch on {serialized:?}");
+        assert_eq!(
+            parsed.to_string(),
+            serialized,
+            "Display→from_str→Display drift on {serialized:?}"
+        );
+        assert_eq!(parsed, p, "Structural mismatch on {serialized:?}");
     }
 }
 
@@ -132,8 +139,13 @@ fn round_trip_with_negative_mass_mod() {
 #[test]
 fn round_trip_with_multi_mod() {
     let aa_set = corpus_aa_set();
-    let p = build_peptide(b"MCEM", b'K', b'R',
-        &[(1, "Carbamidomethyl"), (3, "Oxidation")], &aa_set);
+    let p = build_peptide(
+        b"MCEM",
+        b'K',
+        b'R',
+        &[(1, "Carbamidomethyl"), (3, "Oxidation")],
+        &aa_set,
+    );
     let serialized = p.to_string();
     let parsed = Peptide::from_str(&serialized, &aa_set).unwrap();
     assert_eq!(parsed, p);

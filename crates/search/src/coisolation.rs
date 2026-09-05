@@ -218,7 +218,8 @@ pub(crate) fn search_secondary(
     //    shift would exclude the true secondary before GF scoring. The GF below
     //    derives its own window from `co_spec`'s raw precursor m/z and applies the
     //    shift internally, so it stays consistent.
-    let co_neutral = adjusted_observed_neutral_mass(co.neutral_mass, params.precursor_mass_shift_ppm);
+    let co_neutral =
+        adjusted_observed_neutral_mass(co.neutral_mass, params.precursor_mass_shift_ppm);
     let nominal = |m: f64| nominal_from(m - H2O);
     let tol = params.precursor_tolerance.left.as_da(co_neutral).max(0.01);
     let lo = nominal(co_neutral - tol) - 1;
@@ -311,21 +312,22 @@ pub(crate) fn search_secondary(
     // 1, so selecting `.next()` would be heap-order dependent (nondeterministic)
     // in a user-visible ranking path. Order by largest rank_score, then smallest
     // candidate index as a deterministic final tiebreak.
-    let mut best = queue
-        .drain_into_vec()
-        .into_iter()
-        .min_by(|a, b| {
-            b.rank_score
-                .partial_cmp(&a.rank_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
-        })?;
+    let mut best = queue.drain_into_vec().into_iter().min_by(|a, b| {
+        b.rank_score
+            .partial_cmp(&a.rank_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.primary_candidate_idx().cmp(&b.primary_candidate_idx()))
+    })?;
     // Features on the RESIDUAL (the spectrum the secondary was scored against), so
     // they stay consistent with its RawScore / SpecEValue. The override makes the
     // PIN writer compute ExpMass/dm/absdm from the co-isolated mass.
     let cand_peptide = &candidates[best.primary_candidate_idx() as usize].peptide;
     let mut features = crate::match_engine::compute_psm_features(
-        &res_ss, cand_peptide, scorer, z, intensity_model,
+        &res_ss,
+        cand_peptide,
+        scorer,
+        z,
+        intensity_model,
     );
     features.edge_score = best.edge_score;
     // TailorScore / DeltaRawScore over this secondary's residual candidate
@@ -341,19 +343,17 @@ pub(crate) fn search_secondary(
     };
     let mut sorted_secondary = secondary_scores.clone();
     sorted_secondary.sort_by(|a, b| b.total_cmp(a)); // total order; release-safe
-    features.listwise_score_gap =
-        scoring_crate::scoring::listwise_score_gap(&sorted_secondary);
+    features.listwise_score_gap = scoring_crate::scoring::listwise_score_gap(&sorted_secondary);
     features.candidate_rank_entropy =
         scoring_crate::scoring::candidate_rank_entropy(&sorted_secondary);
-    features.strong_score = scoring_crate::scoring::fuse_strong_score(
-        &scoring_crate::scoring::StrongScoreInputs {
+    features.strong_score =
+        scoring_crate::scoring::fuse_strong_score(&scoring_crate::scoring::StrongScoreInputs {
             intensity_signal: features.intensity_signal,
             chance_match_surprise: features.chance_match_surprise,
             mass_competition_evidence: features.mass_competition_evidence,
             candidate_rank_entropy: features.candidate_rank_entropy,
             listwise_score_gap: features.listwise_score_gap,
-        },
-    );
+        });
     let mut strong_null = scoring_crate::scoring::OnlineStats::default();
     for &s in &secondary_scores {
         strong_null.push(s);
@@ -424,7 +424,11 @@ mod tests {
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         let got = detect_coisolated(&peaks, 599.0, 601.5, selected_mz, 2..=3, 0.02, 0.5, 0);
-        assert!(got.is_empty(), "max_n=0 must emit zero secondaries, got {}", got.len());
+        assert!(
+            got.is_empty(),
+            "max_n=0 must emit zero secondaries, got {}",
+            got.len()
+        );
         // And max_n=1 still caps at exactly one.
         let one = detect_coisolated(&peaks, 599.0, 601.5, selected_mz, 2..=3, 0.02, 0.5, 1);
         assert_eq!(one.len(), 1, "max_n=1 caps at one");
@@ -436,28 +440,43 @@ mod tests {
         let selected_mz = 600.0;
         let peaks = envelope(selected_mz, z, (selected_mz - PROTON) * z as f64, 1000.0);
         let got = detect_coisolated(&peaks, 599.0, 601.5, selected_mz, 2..=3, 0.02, 0.5, 2);
-        assert!(got.is_empty(), "only the selected precursor -> no co-isolation");
+        assert!(
+            got.is_empty(),
+            "only the selected precursor -> no co-isolation"
+        );
     }
 
     // ── Targeted second-peptide residual search ─────────────────────────────
 
-    use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
-    use rustc_hash::FxHashMap;
-    use scoring_crate::param_model::{IonType, Partition, SpecDataType};
-    use scoring_crate::scoring::fragment_ions::predict_by_ions;
-    use scoring_crate::Param;
     use crate::PreparedSearch;
     use model::activation::ActivationMethod;
     use model::instrument::InstrumentType;
     use model::protocol::Protocol;
     use model::Tolerance;
+    use model::{AminoAcid, AminoAcidSetBuilder, Protein, ProteinDb};
+    use rustc_hash::FxHashMap;
+    use scoring_crate::param_model::{IonType, Partition, SpecDataType};
+    use scoring_crate::scoring::fragment_ions::predict_by_ions;
+    use scoring_crate::Param;
 
     /// Minimal RankScorer (mirrors `tests/match_engine_smoke.rs::tiny_scorer`):
     /// non-trivial prefix/suffix rank tables so b/y matches earn positive score.
     fn tiny_scorer() -> RankScorer {
-        let part = Partition { charge: 2, parent_mass: 500.0, seg_num: 0 };
-        let prefix1 = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
-        let suffix1 = IonType::Suffix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 500.0,
+            seg_num: 0,
+        };
+        let prefix1 = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
+        let suffix1 = IonType::Suffix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
         let noise = IonType::Noise;
 
         let mut ion_table = FxHashMap::default();
@@ -541,7 +560,11 @@ mod tests {
         let z = 2u8;
         let co_neutral = planted.mass();
         let co_mz = (co_neutral + z as f64 * PROTON) / z as f64;
-        let co = CoIsolated { mono_mz: co_mz, charge: z, neutral_mass: co_neutral };
+        let co = CoIsolated {
+            mono_mz: co_mz,
+            charge: z,
+            neutral_mass: co_neutral,
+        };
 
         // Spectrum peaks = planted peptide's predicted charge-1 b/y ions.
         let peaks: Vec<(f64, f32)> = predict_by_ions(&planted, 1..=1)
@@ -582,7 +605,8 @@ mod tests {
             None,
         );
 
-        let (psm, winner_claimed) = got.expect("secondary search should return a PSM at the co-isolated mass");
+        let (psm, winner_claimed) =
+            got.expect("secondary search should return a PSM at the co-isolated mass");
         let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;
         assert_eq!(
             found.residues, planted.residues,
@@ -594,7 +618,10 @@ mod tests {
         // peptide can no longer earn its fragment matches — it must NOT come back
         // with the same evidence. (Proves prior_claimed removes shared peaks so two
         // co-isolated precursors can't double-count the same leftover signal.)
-        assert!(!winner_claimed.is_empty(), "winner should claim its matched peaks");
+        assert!(
+            !winner_claimed.is_empty(),
+            "winner should claim its matched peaks"
+        );
         let again = search_secondary(
             &spec,
             &primary,
@@ -659,7 +686,11 @@ mod tests {
         let true_mass = planted.mass();
         let raw_neutral = true_mass / (1.0 - shift_ppm * 1e-6);
         let co_mz = (raw_neutral + z as f64 * PROTON) / z as f64;
-        let co = CoIsolated { mono_mz: co_mz, charge: z, neutral_mass: raw_neutral };
+        let co = CoIsolated {
+            mono_mz: co_mz,
+            charge: z,
+            neutral_mass: raw_neutral,
+        };
 
         let mut peaks: Vec<(f64, f32)> = predict_by_ions(&planted, 1..=1)
             .into_iter()
@@ -682,13 +713,25 @@ mod tests {
         };
 
         let got = search_secondary(
-            &spec, &primary, &std::collections::HashSet::new(), co, &prepared.candidates,
-            &prepared.bucket_index, &scorer, &prepared.aa_set_for_scoring,
-            &params, frag_tol, None,
+            &spec,
+            &primary,
+            &std::collections::HashSet::new(),
+            co,
+            &prepared.candidates,
+            &prepared.bucket_index,
+            &scorer,
+            &prepared.aa_set_for_scoring,
+            &params,
+            frag_tol,
+            None,
         );
-        let (psm, _claimed) = got.expect("secondary must be found at the calibration-adjusted mass");
+        let (psm, _claimed) =
+            got.expect("secondary must be found at the calibration-adjusted mass");
         let found = &prepared.candidates[psm.primary_candidate_idx() as usize].peptide;
-        assert_eq!(found.residues, planted.residues, "should resolve to the planted peptide");
+        assert_eq!(
+            found.residues, planted.residues,
+            "should resolve to the planted peptide"
+        );
         // The candidate matches the ADJUSTED mass, so the reported error is ~0,
         // not ~-30 ppm (which is what the un-calibrated raw mass would report).
         assert!(

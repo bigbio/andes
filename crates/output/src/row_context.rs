@@ -4,10 +4,10 @@
 //! accession string, scan number, spec_id) once per PSM, so each format
 //! only has to format columns from a stable struct.
 
+use model::spectrum::Spectrum;
 use search::candidate_gen::Candidate;
 use search::psm::PsmMatch;
 use search::search_index::SearchIndex;
-use model::spectrum::Spectrum;
 
 /// Fields derived once per PSM that are used by both PIN and TSV writers.
 ///
@@ -34,7 +34,11 @@ impl RowContext {
             spec.title.clone()
         };
         let accession = resolve_accession(cand, search_index);
-        Self { scan, spec_id, accession }
+        Self {
+            scan,
+            spec_id,
+            accession,
+        }
     }
 }
 

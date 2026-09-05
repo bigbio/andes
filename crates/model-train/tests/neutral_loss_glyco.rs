@@ -50,12 +50,23 @@ const PROTON: f64 = 1.007_276_49;
 /// peptide. CID predicts neutral losses, so the training matcher emits loss
 /// facts for loss-bearing peptides.
 fn seed_template() -> Param {
-    let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-    let bion = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits(), loss_class: 0 };
+    let part = Partition {
+        charge: 2,
+        parent_mass: 0.0,
+        seg_num: 0,
+    };
+    let bion = IonType::Prefix {
+        charge: 1,
+        offset_bits: (PROTON as f32).to_bits(),
+        loss_class: 0,
+    };
     let mut frag_off_table = FxHashMap::default();
     frag_off_table.insert(
         part,
-        vec![FragmentOffsetFrequency { ion_type: bion, frequency: 0.9 }],
+        vec![FragmentOffsetFrequency {
+            ion_type: bion,
+            frequency: 0.9,
+        }],
     );
     // Seed rank tables for the b-ion + Noise so the seed scorer's
     // partition_ion_logs is non-empty (the training matcher iterates that intact
@@ -63,12 +74,15 @@ fn seed_template() -> Param {
     // tables are re-estimated from the accumulated counts.
     let max_rank = 10usize;
     let n_slots = max_rank + 1;
-    let bion_freqs: Vec<f32> = (0..n_slots).map(|r| 0.5_f32 * 0.7_f32.powi(r as i32)).collect();
+    let bion_freqs: Vec<f32> = (0..n_slots)
+        .map(|r| 0.5_f32 * 0.7_f32.powi(r as i32))
+        .collect();
     let noise_freqs: Vec<f32> = vec![1.0_f32 / n_slots as f32; n_slots];
     let mut ion_table: FxHashMap<IonType, Vec<f32>> = FxHashMap::default();
     ion_table.insert(bion, bion_freqs);
     ion_table.insert(IonType::Noise, noise_freqs);
-    let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = FxHashMap::default();
+    let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> =
+        FxHashMap::default();
     rank_dist_table.insert(part, ion_table);
     let mut p = Param {
         version: 10001,
@@ -115,7 +129,11 @@ fn glyco_peptide(declare_losses: bool) -> Peptide {
         location: ModLocation::Anywhere,
         fixed: false,
         accession: Some("UNIMOD:393".into()),
-        neutral_losses: if declare_losses { vec![HEX_LOSS] } else { vec![] },
+        neutral_losses: if declare_losses {
+            vec![HEX_LOSS]
+        } else {
+            vec![]
+        },
         loss_class: if declare_losses { 1 } else { 0 },
     };
     let arc = Arc::new(m);
@@ -124,7 +142,11 @@ fn glyco_peptide(declare_losses: bool) -> Peptide {
         .enumerate()
         .map(|(i, &r)| {
             let aa = AminoAcid::standard(r).unwrap();
-            if i == 3 { aa.with_mod(arc.clone()) } else { aa }
+            if i == 3 {
+                aa.with_mod(arc.clone())
+            } else {
+                aa
+            }
         })
         .collect();
     Peptide::new(residues, b'_', b'-')
@@ -134,7 +156,11 @@ fn glyco_peptide(declare_losses: bool) -> Peptide {
 /// (-Hex) peak for every prefix that spans the loss residue (index 3). Peaks
 /// are intensity-ordered so split-1 ions rank high.
 fn glyco_spectrum(peptide: &Peptide, charge: u8) -> Spectrum {
-    let bion = IonType::Prefix { charge: 1, offset_bits: (PROTON as f32).to_bits(), loss_class: 0 };
+    let bion = IonType::Prefix {
+        charge: 1,
+        offset_bits: (PROTON as f32).to_bits(),
+        loss_class: 0,
+    };
     let n = peptide.length();
     let loss_index = 3usize;
     let mut peaks: Vec<(f64, f32)> = Vec::new();
@@ -229,8 +255,7 @@ fn glyco_loss_table_is_learned_and_lifts_the_score() {
         "loss tables must survive the parquet round-trip"
     );
     let ss2 = ScoredSpectrum::new(&spec, &reloaded_scorer, charge);
-    let with_losses_reloaded =
-        score_psm(&ss2, &glyco_peptide(true), &reloaded_scorer, charge, 0.5);
+    let with_losses_reloaded = score_psm(&ss2, &glyco_peptide(true), &reloaded_scorer, charge, 0.5);
     assert_eq!(
         with_losses_reloaded, with_losses,
         "reloaded model must score the glyco peptide identically to the in-memory model"

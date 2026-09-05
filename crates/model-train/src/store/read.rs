@@ -255,16 +255,16 @@ fn collect_parquet_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Train
 pub fn protocol_to_experiment_class(protocol: &str) -> std::collections::BTreeSet<String> {
     match protocol {
         "Automatic" | "Standard" => std::collections::BTreeSet::new(),
-        "TMT"                    => parse_experiment_class("tmt"),
-        "Phosphorylation"        => parse_experiment_class("phospho"),
-        "iTRAQ"                  => parse_experiment_class("itraq"),
+        "TMT" => parse_experiment_class("tmt"),
+        "Phosphorylation" => parse_experiment_class("phospho"),
+        "iTRAQ" => parse_experiment_class("itraq"),
         // Keep as a single opaque slug — do NOT split into {"itraq","phospho"}.
-        "iTRAQPhospho"           => {
+        "iTRAQPhospho" => {
             let mut s = std::collections::BTreeSet::new();
             s.insert("itraqphospho".to_string());
             s
         }
-        other                    => parse_experiment_class(other),
+        other => parse_experiment_class(other),
     }
 }
 
@@ -274,7 +274,9 @@ fn read_manifest(path: &Path) -> Result<Vec<RawManifestEntry>, TrainError> {
     let file = std::fs::File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
-    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    let reader = builder
+        .build()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     let mut entries: Vec<RawManifestEntry> = Vec::new();
     for batch in reader {
@@ -286,26 +288,52 @@ fn read_manifest(path: &Path) -> Result<Vec<RawManifestEntry>, TrainError> {
             .column_by_name("model_id")
             .ok_or_else(|| TrainError::Other("missing model_id column".into()))?;
 
-        let rk = record_kind.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-            TrainError::Other("record_kind not StringArray".into())
-        })?;
-        let mid = model_id_col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-            TrainError::Other("model_id not StringArray".into())
-        })?;
+        let rk = record_kind
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| TrainError::Other("record_kind not StringArray".into()))?;
+        let mid = model_id_col
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| TrainError::Other("model_id not StringArray".into()))?;
 
         for i in 0..batch.num_rows() {
             if !rk.is_null(i) && rk.value(i) == "manifest" {
                 let activation = str_col(&batch, "activation")
-                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .map(|c| {
+                        if c.is_null(i) {
+                            String::new()
+                        } else {
+                            c.value(i).to_string()
+                        }
+                    })
                     .unwrap_or_default();
                 let instrument = str_col(&batch, "instrument")
-                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .map(|c| {
+                        if c.is_null(i) {
+                            String::new()
+                        } else {
+                            c.value(i).to_string()
+                        }
+                    })
                     .unwrap_or_default();
                 let enzyme = str_col(&batch, "enzyme")
-                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .map(|c| {
+                        if c.is_null(i) {
+                            String::new()
+                        } else {
+                            c.value(i).to_string()
+                        }
+                    })
                     .unwrap_or_default();
                 let protocol = str_col(&batch, "protocol")
-                    .map(|c| if c.is_null(i) { String::new() } else { c.value(i).to_string() })
+                    .map(|c| {
+                        if c.is_null(i) {
+                            String::new()
+                        } else {
+                            c.value(i).to_string()
+                        }
+                    })
                     .unwrap_or_default();
                 entries.push(RawManifestEntry {
                     model_id: mid.value(i).to_string(),
@@ -362,8 +390,7 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     let mut manifest_opt: Option<ManifestRow> = None;
     // partition list (in stored order)
     let mut partitions: Vec<Partition> = Vec::new();
-    let mut precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>> =
-        FxHashMap::default();
+    let mut precursor_off_map: FxHashMap<i32, Vec<PrecursorOffsetFrequency>> = FxHashMap::default();
     let mut frag_off_table: FxHashMap<Partition, Vec<FragmentOffsetFrequency>> =
         FxHashMap::default();
     let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> =
@@ -381,231 +408,335 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
         let file = std::fs::File::open(path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(|e| TrainError::Parquet(e.to_string()))?;
-        let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+        let reader = builder
+            .build()
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
-    for batch in reader {
-        let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
+        for batch in reader {
+            let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
 
-        let record_kind = str_col(&batch, "record_kind")?;
-        let mid_col = str_col(&batch, "model_id")?;
+            let record_kind = str_col(&batch, "record_kind")?;
+            let mid_col = str_col(&batch, "model_id")?;
 
-        for i in 0..batch.num_rows() {
-            if mid_col.value(i) != model_id {
-                continue;
-            }
-            let rk = if record_kind.is_null(i) { "" } else { record_kind.value(i) };
-            match rk {
-                "manifest" => {
-                    manifest_opt = Some(parse_manifest_row(&batch, i)?);
+            for i in 0..batch.num_rows() {
+                if mid_col.value(i) != model_id {
+                    continue;
                 }
-                "table" => {
-                    let table_kind = str_col(&batch, "table_kind")?;
-                    if table_kind.is_null(i) { continue; }
-                    let tk = table_kind.value(i);
-
-                    let part_charge = i32_col(&batch, "part_charge")?;
-                    let part_mass_bits = i32_col(&batch, "part_mass_bits")?;
-                    let part_seg = i32_col(&batch, "part_seg")?;
-
-                    match tk {
-                        "partition" => {
-                            let charge = part_charge.value(i);
-                            let mass_bits = part_mass_bits.value(i) as u32;
-                            let seg = part_seg.value(i);
-                            partitions.push(Partition {
-                                charge,
-                                parent_mass: f32::from_bits(mass_bits),
-                                seg_num: seg,
-                            });
+                let rk = if record_kind.is_null(i) {
+                    ""
+                } else {
+                    record_kind.value(i)
+                };
+                match rk {
+                    "manifest" => {
+                        manifest_opt = Some(parse_manifest_row(&batch, i)?);
+                    }
+                    "table" => {
+                        let table_kind = str_col(&batch, "table_kind")?;
+                        if table_kind.is_null(i) {
+                            continue;
                         }
-                        "precursor_off" => {
-                            let charge = part_charge.value(i);
-                            let prec_arr = batch
-                                .column_by_name("precursor_offsets")
-                                .ok_or_else(|| TrainError::Other("missing precursor_offsets".into()))?;
-                            let list = prec_arr
-                                .as_any()
-                                .downcast_ref::<ListArray>()
-                                .ok_or_else(|| TrainError::Other("precursor_offsets not ListArray".into()))?;
-                            if list.is_null(i) { continue; }
-                            let sa = list.value(i);
-                            let structs = sa
-                                .as_any()
-                                .downcast_ref::<StructArray>()
-                                .ok_or_else(|| TrainError::Other("precursor_offsets item not StructArray".into()))?;
-                            let rc_col = structs.column_by_name("reduced_charge")
-                                .ok_or_else(|| TrainError::Other("missing reduced_charge".into()))?;
-                            let off_col = structs.column_by_name("offset")
-                                .ok_or_else(|| TrainError::Other("missing offset".into()))?;
-                            let tol_is_ppm_col = structs.column_by_name("tol_is_ppm")
-                                .ok_or_else(|| TrainError::Other("missing tol_is_ppm".into()))?;
-                            let tol_val_col = structs.column_by_name("tol_val")
-                                .ok_or_else(|| TrainError::Other("missing tol_val".into()))?;
-                            let freq_col = structs.column_by_name("frequency")
-                                .ok_or_else(|| TrainError::Other("missing frequency".into()))?;
-                            let rcs = rc_col.as_any().downcast_ref::<Int32Array>()
-                                .ok_or_else(|| TrainError::Other("column reduced_charge has unexpected arrow type".into()))?;
-                            let offs = off_col.as_any().downcast_ref::<Float32Array>()
-                                .ok_or_else(|| TrainError::Other("column offset has unexpected arrow type".into()))?;
-                            let tols = tol_is_ppm_col.as_any().downcast_ref::<BooleanArray>()
-                                .ok_or_else(|| TrainError::Other("column tol_is_ppm has unexpected arrow type".into()))?;
-                            let tolvs = tol_val_col.as_any().downcast_ref::<Float32Array>()
-                                .ok_or_else(|| TrainError::Other("column tol_val has unexpected arrow type".into()))?;
-                            let freqs = freq_col.as_any().downcast_ref::<Float32Array>()
-                                .ok_or_else(|| TrainError::Other("column frequency has unexpected arrow type".into()))?;
-                            let entries = precursor_off_map.entry(charge).or_default();
-                            for j in 0..structs.len() {
-                                let is_ppm = tols.value(j);
-                                let tol_raw = tolvs.value(j) as f64;
-                                let tolerance = if is_ppm {
-                                    Tolerance::Ppm(tol_raw)
-                                } else {
-                                    Tolerance::Da(tol_raw)
-                                };
-                                entries.push(PrecursorOffsetFrequency {
-                                    reduced_charge: rcs.value(j),
-                                    offset: offs.value(j),
-                                    tolerance,
-                                    frequency: freqs.value(j),
+                        let tk = table_kind.value(i);
+
+                        let part_charge = i32_col(&batch, "part_charge")?;
+                        let part_mass_bits = i32_col(&batch, "part_mass_bits")?;
+                        let part_seg = i32_col(&batch, "part_seg")?;
+
+                        match tk {
+                            "partition" => {
+                                let charge = part_charge.value(i);
+                                let mass_bits = part_mass_bits.value(i) as u32;
+                                let seg = part_seg.value(i);
+                                partitions.push(Partition {
+                                    charge,
+                                    parent_mass: f32::from_bits(mass_bits),
+                                    seg_num: seg,
                                 });
                             }
-                        }
-                        "frag_off" => {
-                            let charge = part_charge.value(i);
-                            let mass = f32::from_bits(part_mass_bits.value(i) as u32);
-                            let seg = part_seg.value(i);
-                            let part = Partition { charge, parent_mass: mass, seg_num: seg };
-
-                            let values_arr = list_col(&batch, "values")?;
-                            if values_arr.is_null(i) { continue; }
-                            let flat_arr = values_arr.value(i);
-                            let flat = flat_arr.as_any().downcast_ref::<Float32Array>()
-                                .ok_or_else(|| TrainError::Other("frag_off values not Float32Array".into()))?;
-                            let len = flat.len();
-                            if len % 4 != 0 {
-                                return Err(TrainError::Other(
-                                    format!("frag_off flat length {} not multiple of 4", len),
-                                ));
-                            }
-
-                            // Read the parallel frag_off_loss_classes column if present.
-                            // Old stores (without this column) yield all loss_class=0.
-                            let loss_classes_vec: Vec<i32> = match batch.column_by_name("frag_off_loss_classes") {
-                                Some(col) => {
-                                    if let Some(list) = col.as_any().downcast_ref::<ListArray>() {
-                                        if list.is_null(i) {
-                                            Vec::new()
-                                        } else {
-                                            let item = list.value(i);
-                                            if let Some(arr) = item.as_any().downcast_ref::<Int32Array>() {
-                                                (0..arr.len()).map(|k| arr.value(k)).collect()
-                                            } else {
-                                                Vec::new()
-                                            }
-                                        }
-                                    } else {
-                                        Vec::new()
-                                    }
+                            "precursor_off" => {
+                                let charge = part_charge.value(i);
+                                let prec_arr =
+                                    batch.column_by_name("precursor_offsets").ok_or_else(|| {
+                                        TrainError::Other("missing precursor_offsets".into())
+                                    })?;
+                                let list = prec_arr
+                                    .as_any()
+                                    .downcast_ref::<ListArray>()
+                                    .ok_or_else(|| {
+                                        TrainError::Other("precursor_offsets not ListArray".into())
+                                    })?;
+                                if list.is_null(i) {
+                                    continue;
                                 }
-                                None => Vec::new(),
-                            };
-
-                            let mut frags: Vec<FragmentOffsetFrequency> =
-                                Vec::with_capacity(len / 4);
-                            let mut j = 0;
-                            let mut entry_idx = 0usize;
-                            while j + 3 < len {
-                                let is_prefix_f = flat.value(j);
-                                let ion_charge = flat.value(j + 1) as i32;
-                                let offset_bits_f = flat.value(j + 2);
-                                // Use to_bits() to recover the exact u32 bit pattern;
-                                // the writer stored f32::from_bits(offset_bits) so this
-                                // round-trips without precision loss.
-                                let offset_bits = offset_bits_f.to_bits();
-                                let frequency = flat.value(j + 3);
-                                // Read per-entry loss_class from parallel column; default 0.
-                                let lc: u8 = loss_classes_vec
-                                    .get(entry_idx)
-                                    .map(|&v| v.clamp(0, 255) as u8)
-                                    .unwrap_or(0);
-                                let ion_type = if is_prefix_f > 0.5 {
-                                    IonType::Prefix { charge: ion_charge, offset_bits, loss_class: lc }
-                                } else if is_prefix_f < -0.5 {
-                                    IonType::Noise
-                                } else {
-                                    IonType::Suffix { charge: ion_charge, offset_bits, loss_class: lc }
+                                let sa = list.value(i);
+                                let structs =
+                                    sa.as_any().downcast_ref::<StructArray>().ok_or_else(|| {
+                                        TrainError::Other(
+                                            "precursor_offsets item not StructArray".into(),
+                                        )
+                                    })?;
+                                let rc_col =
+                                    structs.column_by_name("reduced_charge").ok_or_else(|| {
+                                        TrainError::Other("missing reduced_charge".into())
+                                    })?;
+                                let off_col = structs
+                                    .column_by_name("offset")
+                                    .ok_or_else(|| TrainError::Other("missing offset".into()))?;
+                                let tol_is_ppm_col =
+                                    structs.column_by_name("tol_is_ppm").ok_or_else(|| {
+                                        TrainError::Other("missing tol_is_ppm".into())
+                                    })?;
+                                let tol_val_col = structs
+                                    .column_by_name("tol_val")
+                                    .ok_or_else(|| TrainError::Other("missing tol_val".into()))?;
+                                let freq_col = structs
+                                    .column_by_name("frequency")
+                                    .ok_or_else(|| TrainError::Other("missing frequency".into()))?;
+                                let rcs = rc_col.as_any().downcast_ref::<Int32Array>().ok_or_else(
+                                    || {
+                                        TrainError::Other(
+                                            "column reduced_charge has unexpected arrow type"
+                                                .into(),
+                                        )
+                                    },
+                                )?;
+                                let offs = off_col
+                                    .as_any()
+                                    .downcast_ref::<Float32Array>()
+                                    .ok_or_else(|| {
+                                        TrainError::Other(
+                                            "column offset has unexpected arrow type".into(),
+                                        )
+                                    })?;
+                                let tols = tol_is_ppm_col
+                                    .as_any()
+                                    .downcast_ref::<BooleanArray>()
+                                    .ok_or_else(|| {
+                                    TrainError::Other(
+                                        "column tol_is_ppm has unexpected arrow type".into(),
+                                    )
+                                })?;
+                                let tolvs = tol_val_col
+                                    .as_any()
+                                    .downcast_ref::<Float32Array>()
+                                    .ok_or_else(|| {
+                                        TrainError::Other(
+                                            "column tol_val has unexpected arrow type".into(),
+                                        )
+                                    })?;
+                                let freqs = freq_col
+                                    .as_any()
+                                    .downcast_ref::<Float32Array>()
+                                    .ok_or_else(|| {
+                                        TrainError::Other(
+                                            "column frequency has unexpected arrow type".into(),
+                                        )
+                                    })?;
+                                let entries = precursor_off_map.entry(charge).or_default();
+                                for j in 0..structs.len() {
+                                    let is_ppm = tols.value(j);
+                                    let tol_raw = tolvs.value(j) as f64;
+                                    let tolerance = if is_ppm {
+                                        Tolerance::Ppm(tol_raw)
+                                    } else {
+                                        Tolerance::Da(tol_raw)
+                                    };
+                                    entries.push(PrecursorOffsetFrequency {
+                                        reduced_charge: rcs.value(j),
+                                        offset: offs.value(j),
+                                        tolerance,
+                                        frequency: freqs.value(j),
+                                    });
+                                }
+                            }
+                            "frag_off" => {
+                                let charge = part_charge.value(i);
+                                let mass = f32::from_bits(part_mass_bits.value(i) as u32);
+                                let seg = part_seg.value(i);
+                                let part = Partition {
+                                    charge,
+                                    parent_mass: mass,
+                                    seg_num: seg,
                                 };
-                                frags.push(FragmentOffsetFrequency { ion_type, frequency });
-                                j += 4;
-                                entry_idx += 1;
+
+                                let values_arr = list_col(&batch, "values")?;
+                                if values_arr.is_null(i) {
+                                    continue;
+                                }
+                                let flat_arr = values_arr.value(i);
+                                let flat = flat_arr
+                                    .as_any()
+                                    .downcast_ref::<Float32Array>()
+                                    .ok_or_else(|| {
+                                        TrainError::Other("frag_off values not Float32Array".into())
+                                    })?;
+                                let len = flat.len();
+                                if len % 4 != 0 {
+                                    return Err(TrainError::Other(format!(
+                                        "frag_off flat length {} not multiple of 4",
+                                        len
+                                    )));
+                                }
+
+                                // Read the parallel frag_off_loss_classes column if present.
+                                // Old stores (without this column) yield all loss_class=0.
+                                let loss_classes_vec: Vec<i32> = match batch
+                                    .column_by_name("frag_off_loss_classes")
+                                {
+                                    Some(col) => {
+                                        if let Some(list) = col.as_any().downcast_ref::<ListArray>()
+                                        {
+                                            if list.is_null(i) {
+                                                Vec::new()
+                                            } else {
+                                                let item = list.value(i);
+                                                if let Some(arr) =
+                                                    item.as_any().downcast_ref::<Int32Array>()
+                                                {
+                                                    (0..arr.len()).map(|k| arr.value(k)).collect()
+                                                } else {
+                                                    Vec::new()
+                                                }
+                                            }
+                                        } else {
+                                            Vec::new()
+                                        }
+                                    }
+                                    None => Vec::new(),
+                                };
+
+                                let mut frags: Vec<FragmentOffsetFrequency> =
+                                    Vec::with_capacity(len / 4);
+                                let mut j = 0;
+                                let mut entry_idx = 0usize;
+                                while j + 3 < len {
+                                    let is_prefix_f = flat.value(j);
+                                    let ion_charge = flat.value(j + 1) as i32;
+                                    let offset_bits_f = flat.value(j + 2);
+                                    // Use to_bits() to recover the exact u32 bit pattern;
+                                    // the writer stored f32::from_bits(offset_bits) so this
+                                    // round-trips without precision loss.
+                                    let offset_bits = offset_bits_f.to_bits();
+                                    let frequency = flat.value(j + 3);
+                                    // Read per-entry loss_class from parallel column; default 0.
+                                    let lc: u8 = loss_classes_vec
+                                        .get(entry_idx)
+                                        .map(|&v| v.clamp(0, 255) as u8)
+                                        .unwrap_or(0);
+                                    let ion_type = if is_prefix_f > 0.5 {
+                                        IonType::Prefix {
+                                            charge: ion_charge,
+                                            offset_bits,
+                                            loss_class: lc,
+                                        }
+                                    } else if is_prefix_f < -0.5 {
+                                        IonType::Noise
+                                    } else {
+                                        IonType::Suffix {
+                                            charge: ion_charge,
+                                            offset_bits,
+                                            loss_class: lc,
+                                        }
+                                    };
+                                    frags.push(FragmentOffsetFrequency {
+                                        ion_type,
+                                        frequency,
+                                    });
+                                    j += 4;
+                                    entry_idx += 1;
+                                }
+                                frag_off_table.insert(part, frags);
                             }
-                            frag_off_table.insert(part, frags);
-                        }
-                        "rank_dist" => {
-                            let charge = part_charge.value(i);
-                            let mass = f32::from_bits(part_mass_bits.value(i) as u32);
-                            let seg = part_seg.value(i);
-                            let part = Partition { charge, parent_mass: mass, seg_num: seg };
+                            "rank_dist" => {
+                                let charge = part_charge.value(i);
+                                let mass = f32::from_bits(part_mass_bits.value(i) as u32);
+                                let seg = part_seg.value(i);
+                                let part = Partition {
+                                    charge,
+                                    parent_mass: mass,
+                                    seg_num: seg,
+                                };
 
-                            let ik_col = str_col(&batch, "ion_kind")?;
-                            let ic_col = i32_col(&batch, "ion_charge")?;
-                            let iob_col = i32_col(&batch, "ion_offset_bits")?;
+                                let ik_col = str_col(&batch, "ion_kind")?;
+                                let ic_col = i32_col(&batch, "ion_charge")?;
+                                let iob_col = i32_col(&batch, "ion_offset_bits")?;
 
-                            let kind = ik_col.value(i);
-                            let ic = ic_col.value(i);
-                            let iob = iob_col.value(i) as u32;
-                            // Read ion_loss_class; default 0 for old stores (column absent).
-                            let lc: u8 = match batch.column_by_name("ion_loss_class") {
-                                Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
-                                    Some(arr) if !arr.is_null(i) => arr.value(i).clamp(0, 255) as u8,
-                                    _ => 0,
-                                },
-                                None => 0,
-                            };
-                            let ion_type = decode_ion_type(kind, ic, iob, lc)?;
+                                let kind = ik_col.value(i);
+                                let ic = ic_col.value(i);
+                                let iob = iob_col.value(i) as u32;
+                                // Read ion_loss_class; default 0 for old stores (column absent).
+                                let lc: u8 = match batch.column_by_name("ion_loss_class") {
+                                    Some(col) => match col.as_any().downcast_ref::<Int32Array>() {
+                                        Some(arr) if !arr.is_null(i) => {
+                                            arr.value(i).clamp(0, 255) as u8
+                                        }
+                                        _ => 0,
+                                    },
+                                    None => 0,
+                                };
+                                let ion_type = decode_ion_type(kind, ic, iob, lc)?;
 
-                            let values_arr = list_col(&batch, "values")?;
-                            if values_arr.is_null(i) { continue; }
-                            let v_arr = values_arr.value(i);
-                            let v = v_arr.as_any().downcast_ref::<Float32Array>()
-                                .ok_or_else(|| TrainError::Other("rank_dist values not Float32Array".into()))?;
-                            let freqs: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
+                                let values_arr = list_col(&batch, "values")?;
+                                if values_arr.is_null(i) {
+                                    continue;
+                                }
+                                let v_arr = values_arr.value(i);
+                                let v = v_arr.as_any().downcast_ref::<Float32Array>().ok_or_else(
+                                    || {
+                                        TrainError::Other(
+                                            "rank_dist values not Float32Array".into(),
+                                        )
+                                    },
+                                )?;
+                                let freqs: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
 
-                            rank_dist_table
-                                .entry(part)
-                                .or_default()
-                                .insert(ion_type, freqs);
-                        }
-                        "ion_err" | "noise_err" | "ion_existence" => {
-                            let charge = part_charge.value(i);
-                            let mass = f32::from_bits(part_mass_bits.value(i) as u32);
-                            let seg = part_seg.value(i);
-                            let part = Partition { charge, parent_mass: mass, seg_num: seg };
-
-                            let values_arr = list_col(&batch, "values")?;
-                            if values_arr.is_null(i) { continue; }
-                            let v_arr = values_arr.value(i);
-                            let v = v_arr.as_any().downcast_ref::<Float32Array>()
-                                .ok_or_else(|| TrainError::Other("dist values not Float32Array".into()))?;
-                            let vals: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
-                            match tk {
-                                "ion_err" => { ion_err_dist_table.insert(part, vals); }
-                                "noise_err" => { noise_err_dist_table.insert(part, vals); }
-                                "ion_existence" => { ion_existence_table.insert(part, vals); }
-                                _ => {}
+                                rank_dist_table
+                                    .entry(part)
+                                    .or_default()
+                                    .insert(ion_type, freqs);
                             }
+                            "ion_err" | "noise_err" | "ion_existence" => {
+                                let charge = part_charge.value(i);
+                                let mass = f32::from_bits(part_mass_bits.value(i) as u32);
+                                let seg = part_seg.value(i);
+                                let part = Partition {
+                                    charge,
+                                    parent_mass: mass,
+                                    seg_num: seg,
+                                };
+
+                                let values_arr = list_col(&batch, "values")?;
+                                if values_arr.is_null(i) {
+                                    continue;
+                                }
+                                let v_arr = values_arr.value(i);
+                                let v = v_arr.as_any().downcast_ref::<Float32Array>().ok_or_else(
+                                    || TrainError::Other("dist values not Float32Array".into()),
+                                )?;
+                                let vals: Vec<f32> = (0..v.len()).map(|k| v.value(k)).collect();
+                                match tk {
+                                    "ion_err" => {
+                                        ion_err_dist_table.insert(part, vals);
+                                    }
+                                    "noise_err" => {
+                                        noise_err_dist_table.insert(part, vals);
+                                    }
+                                    "ion_existence" => {
+                                        ion_existence_table.insert(part, vals);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {} // unknown table_kind: skip
                         }
-                        _ => {} // unknown table_kind: skip
                     }
+                    _ => {} // unknown record_kind: skip
                 }
-                _ => {} // unknown record_kind: skip
             }
         }
-    }
     } // end per-part loop
 
-    let manifest = manifest_opt
-        .ok_or_else(|| TrainError::NoModel(model_id.to_string()))?;
+    let manifest = manifest_opt.ok_or_else(|| TrainError::NoModel(model_id.to_string()))?;
 
     // Reconstruct SpecDataType.
     let activation = model::activation::ActivationMethod::from_name(&manifest.activation)
@@ -622,7 +753,12 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     let protocol = model::protocol::Protocol::from_name(&manifest.protocol)
         .ok_or_else(|| TrainError::Other(format!("unknown protocol: {}", manifest.protocol)))?;
 
-    let data_type = SpecDataType { activation, instrument, enzyme, protocol };
+    let data_type = SpecDataType {
+        activation,
+        instrument,
+        enzyme,
+        protocol,
+    };
 
     let mme = if manifest.mme_is_ppm {
         Tolerance::Ppm(manifest.mme_val as f64)
@@ -667,8 +803,9 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
     // feature count doesn't match the in-process per-peak extractor would
     // otherwise mis-score via NaN→default_left traversal rather than erroring.
     if let Some(bytes) = manifest.gbdt_bytes.as_ref() {
-        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
-            .map_err(|e| TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}")))?;
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
+            TrainError::Other(format!("decode gbdt_model_bytes for '{model_id}': {e}"))
+        })?;
         model
             .validate_n_features(scoring_crate::peak_features::N_FEATURES, "peak")
             .map_err(|e| TrainError::Other(format!("gbdt_model_bytes for '{model_id}': {e}")))?;
@@ -677,25 +814,32 @@ fn reconstruct_param(parts: &[PathBuf], model_id: &str) -> Result<Param, TrainEr
 
     // Decode and attach the fragment-intensity regressor if a blob was stored.
     if let Some(bytes) = manifest.frag_intensity_bytes.as_ref() {
-        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
-            .map_err(|e| TrainError::Other(
-                format!("decode frag_intensity_model_bytes for '{model_id}': {e}")
-            ))?;
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
+            TrainError::Other(format!(
+                "decode frag_intensity_model_bytes for '{model_id}': {e}"
+            ))
+        })?;
         model
-            .validate_n_features(scoring_crate::frag_features::N_FRAG_FEATURES, "frag-intensity")
-            .map_err(|e| TrainError::Other(format!("frag_intensity_model_bytes for '{model_id}': {e}")))?;
+            .validate_n_features(
+                scoring_crate::frag_features::N_FRAG_FEATURES,
+                "frag-intensity",
+            )
+            .map_err(|e| {
+                TrainError::Other(format!("frag_intensity_model_bytes for '{model_id}': {e}"))
+            })?;
         param.frag_intensity_model = Some(std::sync::Arc::new(model));
     }
 
     // Decode and attach the rich-ion classifier if a blob was stored.
     if let Some(bytes) = manifest.rich_ion_bytes.as_ref() {
-        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes)
-            .map_err(|e| TrainError::Other(
-                format!("decode rich_ion_model_bytes for '{model_id}': {e}")
-            ))?;
+        let model = scoring_crate::gbdt_eval::GbdtPeakModel::from_bytes(bytes).map_err(|e| {
+            TrainError::Other(format!("decode rich_ion_model_bytes for '{model_id}': {e}"))
+        })?;
         model
             .validate_n_features(scoring_crate::ion_features::N_ION_FEATURES, "rich-ion")
-            .map_err(|e| TrainError::Other(format!("rich_ion_model_bytes for '{model_id}': {e}")))?;
+            .map_err(|e| {
+                TrainError::Other(format!("rich_ion_model_bytes for '{model_id}': {e}"))
+            })?;
         param.rich_ion_model = Some(std::sync::Arc::new(model));
     }
 
@@ -731,21 +875,35 @@ fn parse_manifest_row(
     let ch_col = batch
         .column_by_name("charge_hist")
         .ok_or_else(|| TrainError::Other("missing charge_hist".into()))?;
-    let ch_list = ch_col.as_any().downcast_ref::<ListArray>()
+    let ch_list = ch_col
+        .as_any()
+        .downcast_ref::<ListArray>()
         .ok_or_else(|| TrainError::Other("charge_hist not ListArray".into()))?;
     let mut charge_hist: Vec<(i32, i32)> = Vec::new();
     if !ch_list.is_null(i) {
         let sa = ch_list.value(i);
-        let structs = sa.as_any().downcast_ref::<StructArray>()
+        let structs = sa
+            .as_any()
+            .downcast_ref::<StructArray>()
             .ok_or_else(|| TrainError::Other("charge_hist item not StructArray".into()))?;
-        let charges = structs.column_by_name("charge")
+        let charges = structs
+            .column_by_name("charge")
             .ok_or_else(|| TrainError::Other("missing charge_hist.charge".into()))?;
-        let counts = structs.column_by_name("count")
+        let counts = structs
+            .column_by_name("count")
             .ok_or_else(|| TrainError::Other("missing charge_hist.count".into()))?;
-        let ca = charges.as_any().downcast_ref::<Int32Array>()
-            .ok_or_else(|| TrainError::Other("column charge_hist.charge has unexpected arrow type".into()))?;
-        let co = counts.as_any().downcast_ref::<Int32Array>()
-            .ok_or_else(|| TrainError::Other("column charge_hist.count has unexpected arrow type".into()))?;
+        let ca = charges
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .ok_or_else(|| {
+                TrainError::Other("column charge_hist.charge has unexpected arrow type".into())
+            })?;
+        let co = counts
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .ok_or_else(|| {
+                TrainError::Other("column charge_hist.count has unexpected arrow type".into())
+            })?;
         for j in 0..structs.len() {
             charge_hist.push((ca.value(j), co.value(j)));
         }
@@ -756,33 +914,45 @@ fn parse_manifest_row(
     let gbdt_bytes: Option<Vec<u8>> = match batch.column_by_name("gbdt_model_bytes") {
         None => None, // backward-compat: old store without the column
         Some(col) => {
-            let arr = col.as_any().downcast_ref::<BinaryArray>()
-                .ok_or_else(|| TrainError::Other("gbdt_model_bytes column is not BinaryArray".into()))?;
-            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
+            let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
+                TrainError::Other("gbdt_model_bytes column is not BinaryArray".into())
+            })?;
+            if arr.is_null(i) {
+                None
+            } else {
+                Some(arr.value(i).to_vec())
+            }
         }
     };
 
     // Read the optional fragment-intensity model blob (backward-compatible: column absent → None).
-    let frag_intensity_bytes: Option<Vec<u8>> = match batch.column_by_name("frag_intensity_model_bytes") {
-        None => None, // backward-compat: old store without the column
-        Some(col) => {
-            let arr = col.as_any().downcast_ref::<BinaryArray>()
-                .ok_or_else(|| TrainError::Other(
-                    "frag_intensity_model_bytes column is not BinaryArray".into()
-                ))?;
-            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
-        }
-    };
+    let frag_intensity_bytes: Option<Vec<u8>> =
+        match batch.column_by_name("frag_intensity_model_bytes") {
+            None => None, // backward-compat: old store without the column
+            Some(col) => {
+                let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
+                    TrainError::Other("frag_intensity_model_bytes column is not BinaryArray".into())
+                })?;
+                if arr.is_null(i) {
+                    None
+                } else {
+                    Some(arr.value(i).to_vec())
+                }
+            }
+        };
 
     // Read the optional rich-ion model blob (backward-compatible: column absent → None).
     let rich_ion_bytes: Option<Vec<u8>> = match batch.column_by_name("rich_ion_model_bytes") {
         None => None, // backward-compat: old store without the column
         Some(col) => {
-            let arr = col.as_any().downcast_ref::<BinaryArray>()
-                .ok_or_else(|| TrainError::Other(
-                    "rich_ion_model_bytes column is not BinaryArray".into()
-                ))?;
-            if arr.is_null(i) { None } else { Some(arr.value(i).to_vec()) }
+            let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
+                TrainError::Other("rich_ion_model_bytes column is not BinaryArray".into())
+            })?;
+            if arr.is_null(i) {
+                None
+            } else {
+                Some(arr.value(i).to_vec())
+            }
         }
     };
 
@@ -813,10 +983,23 @@ fn parse_manifest_row(
 ///
 /// `loss_class` defaults to `0` for stores written before the `ion_loss_class` column
 /// was added (backward-compatible: old files simply omit the column).
-fn decode_ion_type(kind: &str, charge: i32, offset_bits: u32, loss_class: u8) -> Result<IonType, TrainError> {
+fn decode_ion_type(
+    kind: &str,
+    charge: i32,
+    offset_bits: u32,
+    loss_class: u8,
+) -> Result<IonType, TrainError> {
     match kind {
-        "prefix" => Ok(IonType::Prefix { charge, offset_bits, loss_class }),
-        "suffix" => Ok(IonType::Suffix { charge, offset_bits, loss_class }),
+        "prefix" => Ok(IonType::Prefix {
+            charge,
+            offset_bits,
+            loss_class,
+        }),
+        "suffix" => Ok(IonType::Suffix {
+            charge,
+            offset_bits,
+            loss_class,
+        }),
         "noise" => Ok(IonType::Noise),
         other => Err(TrainError::Other(format!("unknown ion_kind: {other}"))),
     }
@@ -902,7 +1085,9 @@ fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainE
     let file = std::fs::File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
-    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    let reader = builder
+        .build()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     let mut ledgers: Vec<SourceLedger> = Vec::new();
 
@@ -932,16 +1117,34 @@ fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainE
             let experiment_class = opt_str_col(&batch, "src_experiment_class", i);
 
             let n_psms = if let Ok(col) = i64_col(&batch, "n_psms") {
-                if col.is_null(i) { 0 } else { col.value(i) }
-            } else { 0 };
+                if col.is_null(i) {
+                    0
+                } else {
+                    col.value(i)
+                }
+            } else {
+                0
+            };
 
             let weight = if let Ok(col) = f32_col(&batch, "weight") {
-                if col.is_null(i) { 1.0 } else { col.value(i) }
-            } else { 1.0 };
+                if col.is_null(i) {
+                    1.0
+                } else {
+                    col.value(i)
+                }
+            } else {
+                1.0
+            };
 
             let train_fdr = if let Ok(col) = f32_col(&batch, "train_fdr") {
-                if col.is_null(i) { 0.01 } else { col.value(i) }
-            } else { 0.01 };
+                if col.is_null(i) {
+                    0.01
+                } else {
+                    col.value(i)
+                }
+            } else {
+                0.01
+            };
 
             ledgers.push(SourceLedger {
                 source_id,
@@ -959,14 +1162,16 @@ fn read_sources(path: &Path, model_id: &str) -> Result<Vec<SourceLedger>, TrainE
     Ok(ledgers)
 }
 
-fn opt_str_col(
-    batch: &arrow::record_batch::RecordBatch,
-    name: &str,
-    i: usize,
-) -> String {
+fn opt_str_col(batch: &arrow::record_batch::RecordBatch, name: &str, i: usize) -> String {
     match batch.column_by_name(name) {
         Some(col) => match col.as_any().downcast_ref::<StringArray>() {
-            Some(arr) => if arr.is_null(i) { String::new() } else { arr.value(i).to_string() },
+            Some(arr) => {
+                if arr.is_null(i) {
+                    String::new()
+                } else {
+                    arr.value(i).to_string()
+                }
+            }
             None => String::new(),
         },
         None => String::new(),
@@ -975,11 +1180,17 @@ fn opt_str_col(
 
 // ── per-source stats reader ───────────────────────────────────────────────────
 
-fn read_source_stats(path: &Path, model_id: &str, source_id: &str) -> Result<CountStats, TrainError> {
+fn read_source_stats(
+    path: &Path,
+    model_id: &str,
+    source_id: &str,
+) -> Result<CountStats, TrainError> {
     let file = std::fs::File::open(path)?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .map_err(|e| TrainError::Parquet(e.to_string()))?;
-    let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    let reader = builder
+        .build()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
 
     let mut stats = CountStats::new();
     let mut found_any = false;
@@ -1013,7 +1224,9 @@ fn read_source_stats(path: &Path, model_id: &str, source_id: &str) -> Result<Cou
             found_any = true;
 
             let table_kind_col = str_col(&batch, "table_kind")?;
-            if table_kind_col.is_null(i) { continue; }
+            if table_kind_col.is_null(i) {
+                continue;
+            }
             let tk = table_kind_col.value(i);
 
             let counts_list = list_col(&batch, "counts")?;
@@ -1024,37 +1237,59 @@ fn read_source_stats(path: &Path, model_id: &str, source_id: &str) -> Result<Cou
                     let part = read_partition(&batch, i)?;
                     let ion = read_ion_type(&batch, i)?;
 
-                    if counts_list.is_null(i) { continue; }
+                    if counts_list.is_null(i) {
+                        continue;
+                    }
                     let arr = counts_list.value(i);
-                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                    let int64_arr = arr
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
                         .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
-                    let counts: Vec<u64> = (0..int64_arr.len()).map(|j| int64_arr.value(j) as u64).collect();
+                    let counts: Vec<u64> = (0..int64_arr.len())
+                        .map(|j| int64_arr.value(j) as u64)
+                        .collect();
                     stats.rank.insert((part, ion), counts);
                 }
                 "error" => {
                     let part = read_partition(&batch, i)?;
-                    if counts_list.is_null(i) { continue; }
+                    if counts_list.is_null(i) {
+                        continue;
+                    }
                     let arr = counts_list.value(i);
-                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                    let int64_arr = arr
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
                         .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
-                    let counts: Vec<u64> = (0..int64_arr.len()).map(|j| int64_arr.value(j) as u64).collect();
+                    let counts: Vec<u64> = (0..int64_arr.len())
+                        .map(|j| int64_arr.value(j) as u64)
+                        .collect();
                     stats.error.insert(part, counts);
                 }
                 "noise_error" => {
                     let part = read_partition(&batch, i)?;
-                    if counts_list.is_null(i) { continue; }
+                    if counts_list.is_null(i) {
+                        continue;
+                    }
                     let arr = counts_list.value(i);
-                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                    let int64_arr = arr
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
                         .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
-                    let counts: Vec<u64> = (0..int64_arr.len()).map(|j| int64_arr.value(j) as u64).collect();
+                    let counts: Vec<u64> = (0..int64_arr.len())
+                        .map(|j| int64_arr.value(j) as u64)
+                        .collect();
                     stats.noise_error.insert(part, counts);
                 }
                 "existence" => {
                     // counts[idx] = count for existence key (partition, idx).
                     let part = read_partition(&batch, i)?;
-                    if counts_list.is_null(i) { continue; }
+                    if counts_list.is_null(i) {
+                        continue;
+                    }
                     let arr = counts_list.value(i);
-                    let int64_arr = arr.as_any().downcast_ref::<Int64Array>()
+                    let int64_arr = arr
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
                         .ok_or_else(|| TrainError::Other("counts not Int64Array".into()))?;
                     for j in 0..int64_arr.len() {
                         let count = int64_arr.value(j) as u64;
@@ -1066,13 +1301,19 @@ fn read_source_stats(path: &Path, model_id: &str, source_id: &str) -> Result<Cou
                 "charge" => {
                     // counts parallel to charge_keys.
                     let charge_keys_col = list_col(&batch, "charge_keys")?;
-                    if counts_list.is_null(i) || charge_keys_col.is_null(i) { continue; }
+                    if counts_list.is_null(i) || charge_keys_col.is_null(i) {
+                        continue;
+                    }
 
                     let counts_arr = counts_list.value(i);
                     let keys_arr = charge_keys_col.value(i);
-                    let int64_arr = counts_arr.as_any().downcast_ref::<Int64Array>()
+                    let int64_arr = counts_arr
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
                         .ok_or_else(|| TrainError::Other("charge counts not Int64Array".into()))?;
-                    let int32_arr = keys_arr.as_any().downcast_ref::<Int32Array>()
+                    let int32_arr = keys_arr
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
                         .ok_or_else(|| TrainError::Other("charge_keys not Int32Array".into()))?;
                     for j in 0..int64_arr.len().min(int32_arr.len()) {
                         let charge_key = int32_arr.value(j);
@@ -1088,7 +1329,9 @@ fn read_source_stats(path: &Path, model_id: &str, source_id: &str) -> Result<Cou
     }
 
     if !found_any {
-        return Err(TrainError::NoModel(format!("source_stats({model_id}, {source_id})")));
+        return Err(TrainError::NoModel(format!(
+            "source_stats({model_id}, {source_id})"
+        )));
     }
 
     Ok(stats)
@@ -1151,8 +1394,7 @@ mod tests {
     #[test]
     fn selection_entries_returns_bundled_count_with_hcd_qexactive_tryp() {
         let path = bundled_store_path();
-        let store = ModelStore::open(&path)
-            .expect("failed to open bundled model store");
+        let store = ModelStore::open(&path).expect("failed to open bundled model store");
         let entries = store.selection_entries();
         // The bundle ships 17 own-trained models, one selection entry each. (Two
         // seed-copy phospho slugs with no own training data were dropped; their
@@ -1163,16 +1405,12 @@ mod tests {
             "expected 17 selection entries, got {}",
             entries.len()
         );
-        let found = entries
-            .iter()
-            .any(|e| e.model_id == "hcd_qexactive_tryp");
+        let found = entries.iter().any(|e| e.model_id == "hcd_qexactive_tryp");
         assert!(
             found,
             "expected an entry with model_id == \"hcd_qexactive_tryp\""
         );
-        let found_tmt = entries
-            .iter()
-            .any(|e| e.model_id == "cid_lowres_tryp_tmt");
+        let found_tmt = entries.iter().any(|e| e.model_id == "cid_lowres_tryp_tmt");
         assert!(
             found_tmt,
             "expected an entry with model_id == \"cid_lowres_tryp_tmt\""
@@ -1193,7 +1431,10 @@ mod tests {
             Ok(_) => panic!("duplicate model_id across parts must be rejected"),
             Err(e) => format!("{e}"),
         };
-        assert!(msg.contains("duplicate model_id"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("duplicate model_id"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
@@ -1209,7 +1450,10 @@ mod tests {
         std::fs::copy(&src, dir.path().join("models.tmp.parquet")).expect("copy temp2");
         let store = ModelStore::open(dir.path()).expect("temp partitions must be ignored");
         assert!(
-            store.model_ids().iter().any(|id| id == "hcd_qexactive_tryp"),
+            store
+                .model_ids()
+                .iter()
+                .any(|id| id == "hcd_qexactive_tryp"),
             "real partition must still load"
         );
     }

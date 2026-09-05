@@ -232,7 +232,9 @@ mod tests {
     /// Build an unmodified peptide from a residue string.
     fn pep(seq: &str) -> Peptide {
         Peptide::new(
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect(),
+            seq.bytes()
+                .map(|b| AminoAcid::standard(b).unwrap())
+                .collect(),
             b'K',
             b'R',
         )
@@ -328,8 +330,10 @@ mod tests {
         let p = pep("PEPTIDEK");
         // Put peaks at every b/y ion so matching is not the issue — the mod-site
         // detector must short-circuit to all-zero because there is no var mod.
-        let peaks: Vec<(f64, f32)> =
-            ions_of(&p).into_iter().map(|(_, _, mz)| (mz, 1000.0)).collect();
+        let peaks: Vec<(f64, f32)> = ions_of(&p)
+            .into_iter()
+            .map(|(_, _, mz)| (mz, 1000.0))
+            .collect();
         let spec = spectrum(peaks, 500.0, 2);
         let scorer = RankScorer::new(&tiny_param_with_ions());
         let ss = ScoredSpectrum::new(&spec, &scorer, 2);
@@ -343,8 +347,10 @@ mod tests {
         // A FIXED mod (e.g. Carbamidomethyl) is not localization-relevant: the
         // detector must treat the peptide as having no variable-mod site.
         let p = pep_with_fixed_mod("PEPCIDEK", 3, 57.02146);
-        let peaks: Vec<(f64, f32)> =
-            ions_of(&p).into_iter().map(|(_, _, mz)| (mz, 1000.0)).collect();
+        let peaks: Vec<(f64, f32)> = ions_of(&p)
+            .into_iter()
+            .map(|(_, _, mz)| (mz, 1000.0))
+            .collect();
         let spec = spectrum(peaks, 500.0, 2);
         let scorer = RankScorer::new(&tiny_param_with_ions());
         let ss = ScoredSpectrum::new(&spec, &scorer, 2);
@@ -359,8 +365,10 @@ mod tests {
         // position 4). Synthesize peaks at ALL b/y ions so the shifted ions and
         // the bracketing pair are present.
         let p = pep_with_var_mod("PEPMTIDEK", 3, 15.99491);
-        let peaks: Vec<(f64, f32)> =
-            ions_of(&p).into_iter().map(|(_, _, mz)| (mz, 1000.0)).collect();
+        let peaks: Vec<(f64, f32)> = ions_of(&p)
+            .into_iter()
+            .map(|(_, _, mz)| (mz, 1000.0))
+            .collect();
         let spec = spectrum(peaks, 500.0, 2);
         let scorer = RankScorer::new(&tiny_param_with_ions());
         let ss = ScoredSpectrum::new(&spec, &scorer, 2);
@@ -395,12 +403,15 @@ mod tests {
         let unshifted_b: Vec<(f64, f32)> = predict_by_ions(&p, 1..=1)
             .into_iter()
             .filter(|i| {
-                matches!(i.kind, IonKind::B)
-                    && !ion_is_shifted(i.kind, i.position, 4, n) // mod at pos 4
+                matches!(i.kind, IonKind::B) && !ion_is_shifted(i.kind, i.position, 4, n)
+                // mod at pos 4
             })
             .map(|i| (i.mz, 1000.0))
             .collect();
-        assert!(!unshifted_b.is_empty(), "fixture must have some unshifted b ions");
+        assert!(
+            !unshifted_b.is_empty(),
+            "fixture must have some unshifted b ions"
+        );
         let spec = spectrum(unshifted_b, 500.0, 2);
         let scorer = RankScorer::new(&tiny_param_with_ions());
         let ss = ScoredSpectrum::new(&spec, &scorer, 2);

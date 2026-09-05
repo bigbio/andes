@@ -370,7 +370,10 @@ mod tests {
     use model::modification::{ModLocation, Modification, ResidueSpec};
 
     fn unmod_pep(seq: &[u8]) -> Peptide {
-        let residues: Vec<_> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+        let residues: Vec<_> = seq
+            .iter()
+            .map(|&r| AminoAcid::standard(r).unwrap())
+            .collect();
         Peptide::new(residues, b'_', b'-')
     }
 
@@ -485,9 +488,8 @@ mod tests {
 
     #[test]
     fn fit_returns_none_when_underdetermined() {
-        let samples: Vec<(Vec<f32>, f64)> = (0..3)
-            .map(|_| (vec![1.0f32; N_RT_FEATURES], 1.0))
-            .collect();
+        let samples: Vec<(Vec<f32>, f64)> =
+            (0..3).map(|_| (vec![1.0f32; N_RT_FEATURES], 1.0)).collect();
         assert!(RtIndexModel::fit(&samples).is_none());
     }
 
@@ -519,7 +521,10 @@ mod tests {
         anchors[40].1 += 12000.0;
         let (slope, intercept) = calibrate(&anchors).expect("calibrate should succeed");
         assert!((slope - 2.5).abs() < 0.2, "slope {slope} not robust");
-        assert!((intercept - 100.0).abs() < 20.0, "intercept {intercept} not robust");
+        assert!(
+            (intercept - 100.0).abs() < 20.0,
+            "intercept {intercept} not robust"
+        );
     }
 
     #[test]
@@ -542,7 +547,8 @@ mod tests {
         // A clean line y = 2x + 1 with NaN/inf anchors injected. The bad anchors
         // must be dropped (not poison the fit into a NaN slope), leaving the
         // recovered line finite and correct.
-        let mut anchors: Vec<(f64, f64)> = (0..8).map(|i| (i as f64, 2.0 * i as f64 + 1.0)).collect();
+        let mut anchors: Vec<(f64, f64)> =
+            (0..8).map(|i| (i as f64, 2.0 * i as f64 + 1.0)).collect();
         anchors.push((f64::NAN, 5.0));
         anchors.push((3.0, f64::INFINITY));
         anchors.push((f64::NEG_INFINITY, f64::NAN));

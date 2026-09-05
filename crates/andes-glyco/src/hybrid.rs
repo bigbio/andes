@@ -12,7 +12,9 @@
 // PROTON`), i.e. the peptide NEUTRAL mass (water included). We subtract H2O
 // here so both branches agree on one convention before union/dedup/filter.
 
-use crate::backbone::{core_y_intensity, solve_backbone_min, BackboneCandidate, SpectrumStats, H2O};
+use crate::backbone::{
+    core_y_intensity, solve_backbone_min, BackboneCandidate, SpectrumStats, H2O,
+};
 use crate::glycan_db::GlycanComp;
 use crate::oxonium::oxonium_gate;
 
@@ -158,7 +160,15 @@ pub fn hybrid_candidates(
     tol_ppm: f64,
     top_k: usize,
 ) -> Vec<BackboneHit> {
-    hybrid_candidates_with_isotope(peaks, precursor_neutral, precursor_z, 0, glycans, tol_ppm, top_k)
+    hybrid_candidates_with_isotope(
+        peaks,
+        precursor_neutral,
+        precursor_z,
+        0,
+        glycans,
+        tol_ppm,
+        top_k,
+    )
 }
 
 /// Same as [`hybrid_candidates`] but records the isotope offset that produced
@@ -180,7 +190,8 @@ pub fn hybrid_candidates_with_isotope(
     // `solve_backbones_for_charge` ONCE per charge (at the widest precursor) and
     // `hybrid_candidates_presolved` per isotope — the Y-ladder bin voting is
     // isotope-independent, so solving once is ~N× cheaper (see those fns).
-    let presolved = solve_backbones_for_charge(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
+    let presolved =
+        solve_backbones_for_charge(peaks, precursor_neutral, precursor_z, tol_ppm, top_k);
     hybrid_candidates_presolved(
         presolved.as_deref(),
         peaks,
@@ -473,15 +484,23 @@ pub fn hybrid_candidates_presolved(
         let stats = SpectrumStats::new(peaks);
         let mut scored: Vec<(f64, BackboneHit)> = deduped
             .into_iter()
-            .map(|h| (core_y_intensity(peaks, &stats, h.backbone_mass + H2O, tol_ppm, precursor_z), h))
+            .map(|h| {
+                (
+                    core_y_intensity(peaks, &stats, h.backbone_mass + H2O, tol_ppm, precursor_z),
+                    h,
+                )
+            })
             .collect();
         scored.sort_by(|a, b| {
             // DET-1: total_cmp on the intensity primary key (was partial_cmp +
             // unwrap_or(Equal), which silently mapped any NaN to a tie). The mass
             // to_bits tiebreak is already a total order, so this is behaviour-
             // preserving on finite intensities and only hardens the NaN edge.
-            b.0.total_cmp(&a.0)
-                .then_with(|| a.1.backbone_mass.to_bits().cmp(&b.1.backbone_mass.to_bits()))
+            b.0.total_cmp(&a.0).then_with(|| {
+                a.1.backbone_mass
+                    .to_bits()
+                    .cmp(&b.1.backbone_mass.to_bits())
+            })
         });
         scored.truncate(top_k);
         deduped = scored.into_iter().map(|(_, h)| h).collect();
@@ -512,7 +531,11 @@ mod tests {
         let found = hits
             .iter()
             .any(|h| (h.backbone_mass - true_backbone).abs() < 0.01 && h.source == Source::Db);
-        assert!(found, "did not find backbone at {:.4} in DB branch", true_backbone);
+        assert!(
+            found,
+            "did not find backbone at {:.4} in DB branch",
+            true_backbone
+        );
     }
 
     /// DB branch must filter out backbones below min_backbone.
@@ -523,7 +546,11 @@ mod tests {
         let precursor = 600.0; // glycan of ~100 Da not in list; backbone ~100 Da
         let hits = db_branch(precursor, &glycans, 500.0, 2, 0, None);
         for h in &hits {
-            assert!(h.backbone_mass >= 500.0, "backbone below min: {}", h.backbone_mass);
+            assert!(
+                h.backbone_mass >= 500.0,
+                "backbone below min: {}",
+                h.backbone_mass
+            );
         }
     }
 
@@ -566,9 +593,9 @@ mod tests {
 
         // Build a synthetic spectrum: oxonium peaks + full core-Y ladder.
         let mut peaks: Vec<(f64, f32)> = vec![
-            (204.08665, 200.0), // HexNAc oxonium
-            (138.05496, 150.0), // HexNAc fragment
-            (186.07608, 80.0),  // HexNAc ring-open
+            (204.08665, 200.0),           // HexNAc oxonium
+            (138.05496, 150.0),           // HexNAc fragment
+            (186.07608, 80.0),            // HexNAc ring-open
             (y0_neutral + proton, 100.0), // Y0
         ];
         for &s in steps.iter() {
@@ -581,7 +608,11 @@ mod tests {
         // The recovered backbone must annotate to the known HexNAc2Hex3
         // composition (Source::Db), since the implied glycan mass matches.
         let has_db = hits.iter().any(|h| h.source == Source::Db);
-        assert!(has_db, "expected at least one annotated (Db) hit, got {:?}", hits);
+        assert!(
+            has_db,
+            "expected at least one annotated (Db) hit, got {:?}",
+            hits
+        );
     }
 
     /// Phase 2b (DB-union): when the Y-ladder solver has evidence, the DB branch
@@ -610,11 +641,18 @@ mod tests {
 
         let top_k = 5;
         let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, top_k);
-        assert!(hits.len() <= top_k, "DB-union must stay bounded to top_k, got {}", hits.len());
+        assert!(
+            hits.len() <= top_k,
+            "DB-union must stay bounded to top_k, got {}",
+            hits.len()
+        );
         let found = hits
             .iter()
             .any(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.05);
-        assert!(found, "true backbone (real core-Y ladder) must survive core-Y-ranked truncation");
+        assert!(
+            found,
+            "true backbone (real core-Y ladder) must survive core-Y-ranked truncation"
+        );
     }
 
     /// SPEED FACTORING equivalence: solving the Y-ladder ONCE per charge at the
@@ -710,7 +748,10 @@ mod tests {
             ));
         }
 
-        assert!(!old.is_empty(), "expected non-empty union to make the test meaningful");
+        assert!(
+            !old.is_empty(),
+            "expected non-empty union to make the test meaningful"
+        );
         assert_eq!(
             sorted(&old),
             sorted(&new),
@@ -752,7 +793,12 @@ mod tests {
             .iter()
             .filter(|h| (h.backbone_mass - true_backbone_residue).abs() < 0.02)
             .collect();
-        assert_eq!(near.len(), 1, "expected exactly one candidate near true backbone after dedup, got {}", near.len());
+        assert_eq!(
+            near.len(),
+            1,
+            "expected exactly one candidate near true backbone after dedup, got {}",
+            near.len()
+        );
         assert_eq!(
             near[0].source,
             Source::Db,
@@ -866,14 +912,19 @@ mod tests {
             (900.0, 20.0),
         ];
         // Premise: both solver quorums find nothing.
-        assert!(crate::backbone::solve_backbone_min(&peaks, precursor, 2, 20.0, 50, 1).is_empty(),
-            "premise: even quorum-1 solver must be empty for a 0-core-Y spectrum");
+        assert!(
+            crate::backbone::solve_backbone_min(&peaks, precursor, 2, 20.0, 50, 1).is_empty(),
+            "premise: even quorum-1 solver must be empty for a 0-core-Y spectrum"
+        );
 
         let hits = hybrid_candidates(&peaks, precursor, 2, &glycans, 20.0, 50);
         let found = hits.iter().any(|h| {
             (h.backbone_mass - true_backbone_residue).abs() < 0.02 && h.source == Source::Db
         });
-        assert!(found, "DB fallback must recover the 0-core-Y known-glycan backbone; got {hits:?}");
+        assert!(
+            found,
+            "DB fallback must recover the 0-core-Y known-glycan backbone; got {hits:?}"
+        );
     }
 
     /// Finding #3 regression (Codex adversarial review): a Y-first backbone
@@ -949,7 +1000,10 @@ mod tests {
         assert!(!hits.is_empty());
         for h in &hits {
             assert_eq!(h.charge, 3, "charge must be threaded onto BackboneHit");
-            assert_eq!(h.isotope_offset, -1, "isotope_offset must be threaded onto BackboneHit");
+            assert_eq!(
+                h.isotope_offset, -1,
+                "isotope_offset must be threaded onto BackboneHit"
+            );
         }
     }
 
@@ -1029,7 +1083,10 @@ mod tests {
         let hits = hybrid_candidates_with_isotope(&peaks, precursor, 2, 2, &glycans, 20.0, 10);
         assert!(!hits.is_empty(), "expected hybrid hits");
         for h in &hits {
-            assert_eq!(h.isotope_offset, 2, "every hit must carry the caller's isotope offset");
+            assert_eq!(
+                h.isotope_offset, 2,
+                "every hit must carry the caller's isotope offset"
+            );
             assert_eq!(h.charge, 2, "every hit must carry the caller's charge");
         }
     }

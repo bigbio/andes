@@ -66,7 +66,10 @@ pub fn theoretical_ion_mzs(peptide: &Peptide, z: u8) -> Vec<f64> {
 /// high-res runs don't admit chance matches), else 0. `peptides` is the
 /// confident set (union for chimeric IDs).
 pub fn label_peaks(peaks: &[(f64, f32)], peptides: &[&Peptide], z: u8, mme: &Tolerance) -> Vec<u8> {
-    let mut theo: Vec<f64> = peptides.iter().flat_map(|p| theoretical_ion_mzs(p, z)).collect();
+    let mut theo: Vec<f64> = peptides
+        .iter()
+        .flat_map(|p| theoretical_ion_mzs(p, z))
+        .collect();
     theo.sort_by(|a, b| a.partial_cmp(b).unwrap());
     peaks
         .iter()
@@ -85,16 +88,20 @@ mod tests {
 
     /// Build an unmodified test peptide from an uppercase sequence.
     fn pep(seq: &str) -> Peptide {
-        let residues: Vec<AminoAcid> =
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect();
+        let residues: Vec<AminoAcid> = seq
+            .bytes()
+            .map(|b| AminoAcid::standard(b).unwrap())
+            .collect();
         Peptide::new(residues, b'K', b'R')
     }
 
     /// Build a test peptide applying a mass delta to the residue at 1-based `pos`.
     fn pep_with_mod(seq: &str, pos: usize, delta: f64) -> Peptide {
         use model::modification::{ModLocation, Modification, ResidueSpec};
-        let mut residues: Vec<AminoAcid> =
-            seq.bytes().map(|b| AminoAcid::standard(b).unwrap()).collect();
+        let mut residues: Vec<AminoAcid> = seq
+            .bytes()
+            .map(|b| AminoAcid::standard(b).unwrap())
+            .collect();
         let r = residues[pos - 1].residue;
         let m = Modification {
             name: "test".to_string(),
@@ -116,7 +123,10 @@ mod tests {
         // junk peak; expect [signal, noise].
         let p = pep("PEPTIDE");
         let theo = theoretical_ion_mzs(&p, 2);
-        assert!(theo.iter().any(|m| (m - 227.1026).abs() < 0.02), "b2 not enumerated: {theo:?}");
+        assert!(
+            theo.iter().any(|m| (m - 227.1026).abs() < 0.02),
+            "b2 not enumerated: {theo:?}"
+        );
         let peaks = [(227.1026_f64, 500.0_f32), (999.999, 10.0)];
         let labels = label_peaks(&peaks, &[&p], 2, &Tolerance::Da(0.02));
         assert_eq!(labels, vec![1u8, 0]);
@@ -145,7 +155,9 @@ mod tests {
         let modded = theoretical_ion_mzs(&pep_with_mod("PEPTIDE", 2, 57.02146), 2);
         // Unmodified b2 ≈ 227.1026; modified b2 ≈ 284.1240 (shifted by the delta).
         assert!(
-            modded.iter().any(|m| (m - (227.1026 + 57.02146)).abs() < 0.01),
+            modded
+                .iter()
+                .any(|m| (m - (227.1026 + 57.02146)).abs() < 0.01),
             "modified b2 not at shifted mass: {modded:?}"
         );
         // A peak at the UNMODIFIED b2 must NOT be labeled signal for the modified
@@ -156,10 +168,18 @@ mod tests {
             2,
             &Tolerance::Da(0.02),
         );
-        assert_eq!(labels, vec![0u8], "unmodified b2 mass must be noise for the modified peptide");
+        assert_eq!(
+            labels,
+            vec![0u8],
+            "unmodified b2 mass must be noise for the modified peptide"
+        );
         // Sanity: the plain peptide DOES label that peak as signal.
-        let plain_labels =
-            label_peaks(&[(227.1026_f64, 100.0_f32)], &[&pep("PEPTIDE")], 2, &Tolerance::Da(0.02));
+        let plain_labels = label_peaks(
+            &[(227.1026_f64, 100.0_f32)],
+            &[&pep("PEPTIDE")],
+            2,
+            &Tolerance::Da(0.02),
+        );
         assert_eq!(plain_labels, vec![1u8]);
         assert_ne!(plain, modded, "mod must change the theoretical ion set");
     }
@@ -169,7 +189,12 @@ mod tests {
         // With a 20 ppm tolerance (high-res), a peak 0.4 Da off b2 is noise —
         // the old hardcoded 0.5 Da would have mislabeled it as signal.
         let p = pep("PEPTIDE");
-        let labels = label_peaks(&[(227.1026_f64 + 0.4, 100.0_f32)], &[&p], 2, &Tolerance::Ppm(20.0));
+        let labels = label_peaks(
+            &[(227.1026_f64 + 0.4, 100.0_f32)],
+            &[&p],
+            2,
+            &Tolerance::Ppm(20.0),
+        );
         assert_eq!(labels, vec![0u8], "0.4 Da off must be noise at 20 ppm");
     }
 }

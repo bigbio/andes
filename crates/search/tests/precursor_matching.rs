@@ -1,10 +1,13 @@
 //! Precursor-mass tolerance tests.
 
 use model::{AminoAcid, Peptide, PrecursorTolerance, Spectrum, Tolerance, PROTON};
-use search::{matches_precursor};
+use search::matches_precursor;
 
 fn make_peptide(seq: &[u8]) -> Peptide {
-    let residues: Vec<AminoAcid> = seq.iter().map(|&r| AminoAcid::standard(r).unwrap()).collect();
+    let residues: Vec<AminoAcid> = seq
+        .iter()
+        .map(|&r| AminoAcid::standard(r).unwrap())
+        .collect();
     Peptide::new(residues, b'_', b'-')
 }
 
@@ -32,7 +35,11 @@ fn exact_mass_match() {
     let spec = make_spectrum(mz, Some(charge as i32));
     let tol = PrecursorTolerance::symmetric(Tolerance::Ppm(20.0));
     let err = matches_precursor(&spec, &peptide, charge, 0, &tol, 0.0).expect("should match");
-    assert!(err.mass_error_ppm.abs() < 0.001, "error too large: {}", err.mass_error_ppm);
+    assert!(
+        err.mass_error_ppm.abs() < 0.001,
+        "error too large: {}",
+        err.mass_error_ppm
+    );
 }
 
 #[test]
@@ -86,7 +93,10 @@ fn asymmetric_tolerance_rejects_excessive_negative_drift() {
     // Asymmetric: 5 ppm left (negative), 20 ppm right (positive). 15 ppm > 5 → reject.
     let tol = PrecursorTolerance::asymmetric(Tolerance::Ppm(5.0), Tolerance::Ppm(20.0));
     let result = matches_precursor(&spec, &peptide, charge, 0, &tol, 0.0);
-    assert!(result.is_none(), "expected no match (15 ppm > 5 ppm left tolerance)");
+    assert!(
+        result.is_none(),
+        "expected no match (15 ppm > 5 ppm left tolerance)"
+    );
 }
 
 #[test]

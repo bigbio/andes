@@ -77,11 +77,17 @@ fn percolator_end_to_end_or_skip() {
         }
     };
 
-    assert!(!map.is_empty(), "expected at least one target PSM from Percolator");
+    assert!(
+        !map.is_empty(),
+        "expected at least one target PSM from Percolator"
+    );
     // PSMIds must round-trip (every key starts with our target prefix and parses).
     for (id, psm) in &map {
         assert_eq!(*id, psm.psm_id, "map key must equal the parsed PSMId");
-        assert!(psm.q_value.is_finite(), "q-value should parse to a finite number");
+        assert!(
+            psm.q_value.is_finite(),
+            "q-value should parse to a finite number"
+        );
         assert!(psm.pep.is_finite(), "PEP should parse to a finite number");
     }
     // At least one of our injected targets should survive.

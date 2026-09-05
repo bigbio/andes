@@ -24,29 +24,29 @@ use model::{ActivationMethod, InstrumentType, Spectrum};
 // (LTQ Velos data → cid_lowres; Orbitrap CID → cid_highres).
 //
 // Ion-trap family → InstrumentType::LowRes.
-const CV_ANALYZER_ION_TRAP:           &str = "MS:1000264"; // ion trap (generic)
-const CV_ANALYZER_QUAD_ION_TRAP:      &str = "MS:1000082"; // quadrupole ion trap
-const CV_ANALYZER_RADIAL_LIT:         &str = "MS:1000083"; // radial ejection linear ion trap
-const CV_ANALYZER_LINEAR_ION_TRAP:    &str = "MS:1000291"; // linear ion trap
-// Orbitrap / FT family → InstrumentType::QExactive / HighRes.
-const CV_ANALYZER_ORBITRAP:           &str = "MS:1000484"; // orbitrap
-const CV_ANALYZER_FTICR:              &str = "MS:1000079"; // Fourier transform ion cyclotron resonance
-// TOF.
-const CV_ANALYZER_TOF:                &str = "MS:1000084"; // time-of-flight
+const CV_ANALYZER_ION_TRAP: &str = "MS:1000264"; // ion trap (generic)
+const CV_ANALYZER_QUAD_ION_TRAP: &str = "MS:1000082"; // quadrupole ion trap
+const CV_ANALYZER_RADIAL_LIT: &str = "MS:1000083"; // radial ejection linear ion trap
+const CV_ANALYZER_LINEAR_ION_TRAP: &str = "MS:1000291"; // linear ion trap
+                                                        // Orbitrap / FT family → InstrumentType::QExactive / HighRes.
+const CV_ANALYZER_ORBITRAP: &str = "MS:1000484"; // orbitrap
+const CV_ANALYZER_FTICR: &str = "MS:1000079"; // Fourier transform ion cyclotron resonance
+                                              // TOF.
+const CV_ANALYZER_TOF: &str = "MS:1000084"; // time-of-flight
 
 // Instrument-model cvParams in `<instrument>` / `<referenceableParamGroup>`
 // that explicitly identify a QExactive-family box. We don't enumerate every
 // Orbitrap model — falling back to "MS:1000484 orbitrap analyzer ⇒ QExactive"
 // covers the typical case. These exist for cases where the analyzer cvParam
 // is absent but the instrument model is recorded.
-const CV_MODEL_Q_EXACTIVE:            &str = "MS:1001911";
-const CV_MODEL_Q_EXACTIVE_HF:         &str = "MS:1002523";
-const CV_MODEL_Q_EXACTIVE_HF_X:       &str = "MS:1002634";
-const CV_MODEL_Q_EXACTIVE_PLUS:       &str = "MS:1002877";
-const CV_MODEL_ORBITRAP_FUSION:       &str = "MS:1002416";
+const CV_MODEL_Q_EXACTIVE: &str = "MS:1001911";
+const CV_MODEL_Q_EXACTIVE_HF: &str = "MS:1002523";
+const CV_MODEL_Q_EXACTIVE_HF_X: &str = "MS:1002634";
+const CV_MODEL_Q_EXACTIVE_PLUS: &str = "MS:1002877";
+const CV_MODEL_ORBITRAP_FUSION: &str = "MS:1002416";
 // Orbitrap Astral instrument model (PSI-MS MS:1003378). Checked BEFORE the
 // generic Orbitrap-analyzer → QExactive mapping so Astral wins.
-const CV_MODEL_ORBITRAP_ASTRAL:       &str = "MS:1003378";
+const CV_MODEL_ORBITRAP_ASTRAL: &str = "MS:1003378";
 
 const CV_MS_LEVEL: &str = "MS:1000511";
 const CV_SCAN_TIME: &str = "MS:1000016";
@@ -73,16 +73,16 @@ const CV_ZLIB: &str = "MS:1000574";
 // Mapped to the five canonical ActivationMethod variants per PSI-MS
 // (HUPO-PSI MS ontology). Unknown / unhandled child terms fall through
 // and the spectrum's activation_method stays None.
-const CV_CID: &str  = "MS:1000133"; // collision-induced dissociation
-const CV_HCD: &str  = "MS:1000422"; // beam-type CID = HCD
-const CV_ETD: &str  = "MS:1000598"; // electron transfer dissociation
-const CV_PQD: &str  = "MS:1000599"; // pulsed Q dissociation
+const CV_CID: &str = "MS:1000133"; // collision-induced dissociation
+const CV_HCD: &str = "MS:1000422"; // beam-type CID = HCD
+const CV_ETD: &str = "MS:1000598"; // electron transfer dissociation
+const CV_PQD: &str = "MS:1000599"; // pulsed Q dissociation
 const CV_UVPD: &str = "MS:1000435"; // photodissociation (PSI-MS UVPD term)
-// ECD is MS:1000250; we don't have a dedicated variant for it — callers
-// that need ECD usually look up either ETD or treat as electron-based.
-// We map ECD → ETD for electron-based activation grouping when ECD is
-// the only signal (canonical table covers ETD/CID/HCD/PQD/UVPD).
-const CV_ECD: &str  = "MS:1000250"; // electron capture dissociation
+                                    // ECD is MS:1000250; we don't have a dedicated variant for it — callers
+                                    // that need ECD usually look up either ETD or treat as electron-based.
+                                    // We map ECD → ETD for electron-based activation grouping when ECD is
+                                    // the only signal (canonical table covers ETD/CID/HCD/PQD/UVPD).
+const CV_ECD: &str = "MS:1000250"; // electron capture dissociation
 
 /// Unit: minutes → multiply by 60 to get seconds.
 const CV_UNIT_MINUTE: &str = "UO:0000031";
@@ -107,7 +107,10 @@ pub enum MzMLParseError {
     LengthMismatch { mz_len: usize, int_len: usize },
 
     #[error("truncated binary array: decoded {decoded_len} bytes is not a multiple of the {elem_bytes}-byte element width")]
-    TruncatedBinary { decoded_len: usize, elem_bytes: usize },
+    TruncatedBinary {
+        decoded_len: usize,
+        elem_bytes: usize,
+    },
 }
 
 // io::Error → MzMLParseError via the Zlib variant.
@@ -313,7 +316,11 @@ impl CvParamInfo {
         let accession = attr_str(e, b"accession")?;
         let value = attr_str(e, b"value").unwrap_or_default();
         let unit_accession = attr_str(e, b"unitAccession").unwrap_or_default();
-        Some(CvParamInfo { accession, value, unit_accession })
+        Some(CvParamInfo {
+            accession,
+            value,
+            unit_accession,
+        })
     }
 }
 
@@ -626,7 +633,7 @@ impl<R: BufRead> MzMLReader<R> {
             // Why first-wins matters: TMT SPS-MS3 mzMLs chain CID (MS2
             // isolation) → HCD (MS3 fragmentation). First-wins routes those
             // to a CID-trained model.
-            CV_CID  if self.state == State::Activation => {
+            CV_CID if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_collisional = true;
                     if sb.activation_method.is_none() {
@@ -634,7 +641,7 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
             }
-            CV_HCD  if self.state == State::Activation => {
+            CV_HCD if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_collisional = true;
                     if sb.activation_method.is_none() {
@@ -642,14 +649,14 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
             }
-            CV_ETD  if self.state == State::Activation => {
+            CV_ETD if self.state == State::Activation => {
                 // ETD wins unconditionally over other activation methods.
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_electron = true;
                     sb.activation_method = Some(ActivationMethod::ETD);
                 }
             }
-            CV_ECD  if self.state == State::Activation => {
+            CV_ECD if self.state == State::Activation => {
                 // ECD is electron-based — group with ETD for param routing.
                 if let Some(sb) = self.current.as_mut() {
                     sb.act_saw_electron = true;
@@ -658,7 +665,7 @@ impl<R: BufRead> MzMLReader<R> {
                     }
                 }
             }
-            CV_PQD  if self.state == State::Activation => {
+            CV_PQD if self.state == State::Activation => {
                 if let Some(sb) = self.current.as_mut() {
                     if sb.activation_method.is_none() {
                         sb.activation_method = Some(ActivationMethod::PQD);
@@ -724,8 +731,10 @@ impl<R: BufRead> MzMLReader<R> {
                     match tag.as_slice() {
                         b"spectrum" => {
                             let id = attr_str(e, b"id").unwrap_or_default();
-                            self.current =
-                                Some(SpectrumBuilder { id, ..Default::default() });
+                            self.current = Some(SpectrumBuilder {
+                                id,
+                                ..Default::default()
+                            });
                             self.state = State::Spectrum;
                         }
                         b"scan" if self.state == State::Spectrum => {
@@ -839,8 +848,11 @@ impl<R: BufRead> MzMLReader<R> {
                                 // This branch is inert when `capture_ms1` is
                                 // false (default), keeping that path byte-exact.
                                 if self.capture_ms1 && sb.ms_level == Some(1) {
-                                    let peaks =
-                                        Self::build_peaks(sb.mz_array, sb.intensity_array, sb.is_profile)?;
+                                    let peaks = Self::build_peaks(
+                                        sb.mz_array,
+                                        sb.intensity_array,
+                                        sb.is_profile,
+                                    )?;
                                     self.captured_ms1.push(peaks);
                                     self.latest_ms1_idx = Some(self.captured_ms1.len() - 1);
                                     continue;
@@ -1029,7 +1041,10 @@ impl<R: BufRead> MzMLReader<R> {
                     if chunk.len() >= chunk_size {
                         on_chunk(
                             std::mem::take(&mut chunk),
-                            Ms1Link { ms1_peaks: std::mem::take(&mut chunk_ms1), ms2_to_ms1: std::mem::take(&mut links) },
+                            Ms1Link {
+                                ms1_peaks: std::mem::take(&mut chunk_ms1),
+                                ms2_to_ms1: std::mem::take(&mut links),
+                            },
                         );
                         chunk = Vec::with_capacity(chunk_size);
                         chunk_ms1 = Vec::new();
@@ -1055,7 +1070,13 @@ impl<R: BufRead> MzMLReader<R> {
         }
 
         if !chunk.is_empty() {
-            on_chunk(chunk, Ms1Link { ms1_peaks: chunk_ms1, ms2_to_ms1: links });
+            on_chunk(
+                chunk,
+                Ms1Link {
+                    ms1_peaks: chunk_ms1,
+                    ms2_to_ms1: links,
+                },
+            );
         }
         (err_count, first_errors)
     }
@@ -1079,7 +1100,10 @@ impl<R: BufRead> MzMLReader<R> {
                 }
                 Event::Start(ref e) if e.local_name().as_ref() == b"spectrum" => {
                     let id = attr_str(e, b"id").unwrap_or_default();
-                    self.current = Some(SpectrumBuilder { id, ..Default::default() });
+                    self.current = Some(SpectrumBuilder {
+                        id,
+                        ..Default::default()
+                    });
                     self.state = State::Spectrum;
                     return Ok(true);
                 }
@@ -1311,9 +1335,9 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                         // Within <analyzer>: pick up the mass-analyzer cvParam.
                         S::ComponentListAnalyzer => {
                             let typ = match acc.as_str() {
-                                CV_ANALYZER_ORBITRAP        => Some(InstrumentType::QExactive),
-                                CV_ANALYZER_FTICR           => Some(InstrumentType::HighRes),
-                                CV_ANALYZER_TOF             => Some(InstrumentType::TOF),
+                                CV_ANALYZER_ORBITRAP => Some(InstrumentType::QExactive),
+                                CV_ANALYZER_FTICR => Some(InstrumentType::HighRes),
+                                CV_ANALYZER_TOF => Some(InstrumentType::TOF),
                                 CV_ANALYZER_ION_TRAP
                                 | CV_ANALYZER_QUAD_ION_TRAP
                                 | CV_ANALYZER_RADIAL_LIT
@@ -1373,7 +1397,9 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                 let tag = e.local_name().as_ref().to_owned();
                 match tag.as_slice() {
                     b"referenceableParamGroup" if state == S::ReferenceableParamGroup => {
-                        if let (Some(id), Some(t)) = (current_rpg_id.take(), current_rpg_type.take()) {
+                        if let (Some(id), Some(t)) =
+                            (current_rpg_id.take(), current_rpg_type.take())
+                        {
                             rpg_map.insert(id, t);
                         }
                         state = S::ReferenceableParamGroupList;
@@ -1385,7 +1411,8 @@ pub fn detect_instrument_type<R: BufRead>(reader: R) -> Option<InstrumentType> {
                         state = S::InstrumentConfiguration;
                     }
                     b"instrumentConfiguration" if state == S::InstrumentConfiguration => {
-                        if let (Some(id), Some(t)) = (current_ic_id.take(), current_ic_type.take()) {
+                        if let (Some(id), Some(t)) = (current_ic_id.take(), current_ic_type.take())
+                        {
                             ic_map.insert(id, t);
                         }
                         state = S::InstrumentConfigurationList;
@@ -1485,7 +1512,11 @@ fn attr_str(e: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String
     e.attributes()
         .filter_map(|a| a.ok())
         .find(|a| a.key.local_name().as_ref() == name)
-        .and_then(|a| std::str::from_utf8(a.value.as_ref()).ok().map(str::to_owned))
+        .and_then(|a| {
+            std::str::from_utf8(a.value.as_ref())
+                .ok()
+                .map(str::to_owned)
+        })
 }
 
 /// Parse the scan number from a spectrum id attribute.
@@ -1520,7 +1551,11 @@ fn decode_binary_array(ctx: &BinaryArrayCtx) -> Result<Vec<f64>, MzMLParseError>
     // value; previously the `while let Ok(..)` loop silently rounded the count
     // down (treating `UnexpectedEof` as a clean end) and dropped the partial
     // value, hiding the corruption.
-    let elem_bytes = if ctx.precision_bits == 64 { 8usize } else { 4usize };
+    let elem_bytes = if ctx.precision_bits == 64 {
+        8usize
+    } else {
+        4usize
+    };
     if bytes.len() % elem_bytes != 0 {
         return Err(MzMLParseError::TruncatedBinary {
             decoded_len: bytes.len(),
@@ -1623,9 +1658,9 @@ mod tests {
         charge: Option<i32>,
     ) -> String {
         let charge_param = match charge {
-            Some(z) => format!(
-                r#"<cvParam accession="MS:1000041" name="charge state" value="{z}"/>"#
-            ),
+            Some(z) => {
+                format!(r#"<cvParam accession="MS:1000041" name="charge state" value="{z}"/>"#)
+            }
             None => String::new(),
         };
         format!(
@@ -1861,7 +1896,11 @@ mod tests {
         let spectra = collect_ok(&wrap_spectra(&spec));
         assert_eq!(spectra.len(), 1);
         let mzs: Vec<f64> = spectra[0].peaks.iter().map(|&(mz, _)| mz).collect();
-        assert_eq!(mzs, vec![100.0, 200.0], "only finite positive-m/z peaks survive");
+        assert_eq!(
+            mzs,
+            vec![100.0, 200.0],
+            "only finite positive-m/z peaks survive"
+        );
     }
 
     #[test]
@@ -1878,7 +1917,10 @@ mod tests {
             Some(2),
         );
         let spectra = collect_ok(&wrap_spectra(&spec));
-        assert!(spectra.is_empty(), "spectrum with precursor m/z 0 must be skipped");
+        assert!(
+            spectra.is_empty(),
+            "spectrum with precursor m/z 0 must be skipped"
+        );
     }
 
     // ── Test 7 ────────────────────────────────────────────────────────────────
@@ -2108,7 +2150,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         )
     }
@@ -2185,7 +2227,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         )
     }
@@ -2196,7 +2238,8 @@ mod tests {
         // Order ETD-then-HCD: pure-ETD precedence would mis-route to ETD; the
         // EThcD detector must override to HCD (b/y model).
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
-            "MS:1000598", "MS:1000422",
+            "MS:1000598",
+            "MS:1000422",
         )));
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
@@ -2206,7 +2249,8 @@ mod tests {
     fn ethcd_detection_is_order_independent() {
         // HCD-then-ETD: same EThcD shape, reversed cvParam order → still HCD.
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
-            "MS:1000422", "MS:1000598",
+            "MS:1000422",
+            "MS:1000598",
         )));
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
@@ -2216,7 +2260,8 @@ mod tests {
     fn etcid_etd_plus_cid_routes_to_hcd() {
         // ETciD: ETD (MS:1000598) + supplemental CID (MS:1000133) → HCD (b/y).
         let spectra = collect_ok(&wrap_spectra(&spectrum_xml_with_two_activations(
-            "MS:1000598", "MS:1000133",
+            "MS:1000598",
+            "MS:1000133",
         )));
         assert_eq!(spectra.len(), 1);
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::HCD));
@@ -2237,7 +2282,11 @@ mod tests {
         let c = centroid_profile(&prof);
         assert_eq!(c.len(), 1, "one peak ⇒ one centroid");
         // Symmetric ⇒ centroid m/z == apex m/z; intensity == apex.
-        assert!((c[0].0 - 100.2).abs() < 1e-9, "centroid m/z {} != 100.2", c[0].0);
+        assert!(
+            (c[0].0 - 100.2).abs() < 1e-9,
+            "centroid m/z {} != 100.2",
+            c[0].0
+        );
         assert_eq!(c[0].1, 9.0, "centroid intensity is the apex");
     }
 
@@ -2284,7 +2333,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         )
     }
@@ -2298,7 +2347,11 @@ mod tests {
 
         // Centroided spectrum (MS:1000127): the 3 points pass through unchanged.
         let cent = collect_ok(&wrap_spectra(&profile_spectrum_xml(false)));
-        assert_eq!(cent[0].peaks.len(), 3, "centroided spectrum is not re-centroided");
+        assert_eq!(
+            cent[0].peaks.len(),
+            3,
+            "centroided spectrum is not re-centroided"
+        );
     }
 
     /// SPS-MS3 mzMLs chain `<precursor><activation>` blocks (CID then HCD).
@@ -2341,7 +2394,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         );
 
@@ -2397,7 +2450,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         );
         let wrapped = format!(
@@ -2414,8 +2467,11 @@ mod tests {
             .collect();
         assert_eq!(spectra.len(), 1);
         // Must NOT be the false-positive EThcD→HCD; ETD wins per its precedence.
-        assert_ne!(spectra[0].activation_method, Some(ActivationMethod::HCD),
-                   "separate CID + ETD blocks must not be mis-detected as EThcD");
+        assert_ne!(
+            spectra[0].activation_method,
+            Some(ActivationMethod::HCD),
+            "separate CID + ETD blocks must not be mis-detected as EThcD"
+        );
         assert_eq!(spectra[0].activation_method, Some(ActivationMethod::ETD));
     }
 
@@ -2452,7 +2508,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         );
         let spectra = collect_ok(&wrap_spectra(&xml));
@@ -2497,7 +2553,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         );
         let spectra = collect_ok(&wrap_spectra(&xml));
@@ -2592,7 +2648,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         )
     }
@@ -2692,7 +2748,7 @@ mod tests {
                 {int}
               </binaryDataArrayList>
             </spectrum>"#,
-            mz  = bda_plain("MS:1000514", &mz_b64),
+            mz = bda_plain("MS:1000514", &mz_b64),
             int = bda_plain("MS:1000515", &int_b64),
         );
         let xml = wrap_with_instrument_configs(&ic_block("IC1", "MS:1000484"), "IC1", &spec);
@@ -2861,11 +2917,21 @@ mod tests {
             });
 
         assert_eq!(errc, 0, "clean input → no parse errors");
-        assert_eq!(chunked_spectra.len(), b_spectra.len(), "same MS2 count as batch");
+        assert_eq!(
+            chunked_spectra.len(),
+            b_spectra.len(),
+            "same MS2 count as batch"
+        );
         assert_eq!(chunked_resolved.len(), batch_resolved.len());
-        for (i, (cr, br)) in chunked_resolved.iter().zip(batch_resolved.iter()).enumerate() {
+        for (i, (cr, br)) in chunked_resolved
+            .iter()
+            .zip(batch_resolved.iter())
+            .enumerate()
+        {
             match (cr, br) {
-                (Some(c), Some(b)) => assert_eq!(c, *b, "MS2 #{i} linked to a different MS1 than batch"),
+                (Some(c), Some(b)) => {
+                    assert_eq!(c, *b, "MS2 #{i} linked to a different MS1 than batch")
+                }
                 (None, None) => {}
                 _ => panic!("MS2 #{i} linkage presence differs from batch: {cr:?} vs {br:?}"),
             }
@@ -2908,9 +2974,17 @@ mod tests {
         );
 
         let got = collect_ok(&xml);
-        assert_eq!(got.len(), 2, "both good spectra must survive the resync (no truncation)");
+        assert_eq!(
+            got.len(),
+            2,
+            "both good spectra must survive the resync (no truncation)"
+        );
         assert_eq!(got[0].scan, Some(1));
-        assert_eq!(got[1].scan, Some(3), "the post-error spectrum must still be parsed");
+        assert_eq!(
+            got[1].scan,
+            Some(3),
+            "the post-error spectrum must still be parsed"
+        );
     }
 
     #[test]
@@ -2953,9 +3027,17 @@ mod tests {
 
         assert_eq!(errc, 1, "exactly one malformed spectrum should be counted");
         assert_eq!(errs.len(), 1, "the error message should be captured");
-        assert_eq!(got.len(), 2, "both good spectra must survive the resync (no truncation)");
+        assert_eq!(
+            got.len(),
+            2,
+            "both good spectra must survive the resync (no truncation)"
+        );
         assert_eq!(got[0].scan, Some(1));
-        assert_eq!(got[1].scan, Some(3), "the post-error spectrum must still be parsed");
+        assert_eq!(
+            got[1].scan,
+            Some(3),
+            "the post-error spectrum must still be parsed"
+        );
     }
 
     /// An MS2 that appears BEFORE any MS1 links to `None`.
@@ -3030,7 +3112,10 @@ mod tests {
             .read_with_ms1()
             .expect("read_with_ms1 failed");
         assert_eq!(spectra.len(), 1);
-        assert!(link.ms1_peaks.is_empty(), "no MS1 captured when capture off");
+        assert!(
+            link.ms1_peaks.is_empty(),
+            "no MS1 captured when capture off"
+        );
         // ms2_to_ms1 still has one entry per emitted MS2 (all None).
         assert_eq!(link.ms2_to_ms1, vec![None]);
     }
@@ -3112,7 +3197,10 @@ mod tests {
         let mut reader = MzMLReader::new(Cursor::new(wrap_spectra(&spec))).strict();
         let first = reader.next().expect("should yield a result");
         assert!(
-            matches!(first, Err(MzMLParseError::TruncatedBinary { elem_bytes: 8, .. })),
+            matches!(
+                first,
+                Err(MzMLParseError::TruncatedBinary { elem_bytes: 8, .. })
+            ),
             "truncated f64 array must be rejected, got {first:?}"
         );
     }
@@ -3153,6 +3241,9 @@ mod tests {
         let mut reader = MzMLReader::new(Cursor::new(xml));
         let collected: Vec<_> = reader.by_ref().filter_map(|r| r.ok()).collect();
         assert_eq!(collected.len(), 1, "tolerant mode keeps the good spectrum");
-        assert!(reader.skipped_count() >= 1, "tolerant mode records the dropped scan");
+        assert!(
+            reader.skipped_count() >= 1,
+            "tolerant mode records the dropped scan"
+        );
     }
 }

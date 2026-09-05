@@ -40,10 +40,8 @@ pub fn matches_precursor(
         return None;
     }
     let z = charge as f64;
-    let spectrum_neutral_obs = adjusted_observed_neutral_mass(
-        spectrum.precursor_mz * z - z * PROTON,
-        shift_ppm,
-    );
+    let spectrum_neutral_obs =
+        adjusted_observed_neutral_mass(spectrum.precursor_mz * z - z * PROTON, shift_ppm);
     let spectrum_neutral = spectrum_neutral_obs - (isotope_offset as f64) * ISOTOPE;
     let peptide_mass = peptide.mass();
     let mass_error_da = peptide_mass - spectrum_neutral;
@@ -56,7 +54,11 @@ pub fn matches_precursor(
     };
 
     if mass_error_da.abs() <= allowed_da {
-        Some(MassError { mass_error_da, mass_error_ppm, isotope_offset })
+        Some(MassError {
+            mass_error_da,
+            mass_error_ppm,
+            isotope_offset,
+        })
     } else {
         None
     }
@@ -74,7 +76,10 @@ pub fn matches_precursor(
 /// measured against the nearest in-window neutral mass (clamped), so a peptide
 /// matching anywhere inside the window reports a near-zero error rather than a
 /// large error against the selected precursor.
-#[allow(clippy::too_many_arguments, reason = "isolation-window bounds + charge + offset + tolerance are all orthogonal inputs")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "isolation-window bounds + charge + offset + tolerance are all orthogonal inputs"
+)]
 pub fn matches_isolation_window(
     peptide: &Peptide,
     charge: u8,
@@ -103,7 +108,11 @@ pub fn matches_isolation_window(
         } else {
             0.0
         };
-        Some(MassError { mass_error_da, mass_error_ppm, isotope_offset })
+        Some(MassError {
+            mass_error_da,
+            mass_error_ppm,
+            isotope_offset,
+        })
     } else {
         None
     }
@@ -121,7 +130,10 @@ mod tests {
     }
 
     fn tol_20ppm() -> PrecursorTolerance {
-        PrecursorTolerance { left: Tolerance::Ppm(20.0), right: Tolerance::Ppm(20.0) }
+        PrecursorTolerance {
+            left: Tolerance::Ppm(20.0),
+            right: Tolerance::Ppm(20.0),
+        }
     }
 
     #[test]
@@ -140,17 +152,25 @@ mod tests {
         let tol = tol_20ppm();
 
         // Tight precursor check (selected m/z) → rejected (1.0 Da >> 20 ppm).
-        let spec = Spectrum { precursor_mz: selected_mz, ..Default::default() };
-        assert!(matches_precursor(&spec, &pep, charge, 0, &tol, 0.0).is_none(),
-            "tight precursor check should reject the 1 Da off-precursor peptide");
+        let spec = Spectrum {
+            precursor_mz: selected_mz,
+            ..Default::default()
+        };
+        assert!(
+            matches_precursor(&spec, &pep, charge, 0, &tol, 0.0).is_none(),
+            "tight precursor check should reject the 1 Da off-precursor peptide"
+        );
 
         // Isolation window ±1.5 Da → accepted, near-zero error.
         let lo_mz = selected_mz - 1.5;
         let hi_mz = selected_mz + 1.5;
         let m = matches_isolation_window(&pep, charge, 0, lo_mz, hi_mz, &tol, 0.0)
             .expect("isolation-window check should accept the in-window peptide");
-        assert!(m.mass_error_da.abs() <= tol.left.as_da(mass) + 1e-6,
-            "in-window peptide should report near-zero mass error, got {}", m.mass_error_da);
+        assert!(
+            m.mass_error_da.abs() <= tol.left.as_da(mass) + 1e-6,
+            "in-window peptide should report near-zero mass error, got {}",
+            m.mass_error_da
+        );
     }
 
     #[test]
@@ -165,7 +185,9 @@ mod tests {
         let tol = tol_20ppm();
         let lo_mz = selected_mz - 1.5;
         let hi_mz = selected_mz + 1.5;
-        assert!(matches_isolation_window(&pep, charge, 0, lo_mz, hi_mz, &tol, 0.0).is_none(),
-            "peptide 5 Da outside a ±1.5 Da window must be rejected");
+        assert!(
+            matches_isolation_window(&pep, charge, 0, lo_mz, hi_mz, &tol, 0.0).is_none(),
+            "peptide 5 Da outside a ±1.5 Da window must be rejected"
+        );
     }
 }

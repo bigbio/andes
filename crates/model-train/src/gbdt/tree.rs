@@ -33,7 +33,10 @@ struct BinHist {
 
 impl BinHist {
     fn new(n_bins: usize) -> Self {
-        Self { g: vec![0.0; n_bins], h: vec![0.0; n_bins] }
+        Self {
+            g: vec![0.0; n_bins],
+            h: vec![0.0; n_bins],
+        }
     }
 
     fn accumulate(&mut self, bin: u8, grad: f32, hess: f32) {
@@ -50,7 +53,7 @@ impl BinHist {
 
 struct Builder<'a> {
     params: &'a TreeParams,
-    binned: &'a [u8],  // row-major [row * n_features + feat]
+    binned: &'a [u8], // row-major [row * n_features + feat]
     grad: &'a [f32],
     hess: &'a [f32],
     bin_uppers: &'a [Vec<f32>],
@@ -179,8 +182,7 @@ impl<'a> Builder<'a> {
                 if hl < min_h || hr < min_h {
                     continue;
                 }
-                let gain =
-                    gl * gl / (hl + lambda) + gr * gr / (hr + lambda) - base_score;
+                let gain = gl * gl / (hl + lambda) + gr * gr / (hr + lambda) - base_score;
                 // Deterministic tie-break: prefer lower (feat, bin) — since we
                 // iterate feat then bin in ascending order, strictly-greater
                 // comparison keeps the first best found.
@@ -295,8 +297,7 @@ mod tests {
         let bin_uppers = vec![vec![0.5_f32, 1.5, 2.5, 3.5]; n_features];
         let tree: Tree = fit_tree(&binned, &grad, &hess, &params, &bin_uppers);
         assert_eq!(
-            tree.feature[0],
-            0,
+            tree.feature[0], 0,
             "root should split on feature 0, got {:?}",
             tree.feature
         );

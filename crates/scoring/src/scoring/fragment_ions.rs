@@ -26,9 +26,9 @@
 
 use std::ops::RangeInclusive;
 
+use crate::param_model::{IonType, Param};
 use model::amino_acid::AminoAcid;
 use model::mass::{H2O, PROTON};
-use crate::param_model::{IonType, Param};
 use model::peptide::Peptide;
 
 /// For a single prefix or suffix node at `nominal_mass`, enumerate the
@@ -49,9 +49,16 @@ pub fn ions_for_node(
     // Compat shim — callers in hot paths should use `for_each_ion_for_node`
     // to avoid the per-call Vec allocation.
     let mut out = Vec::new();
-    for_each_ion_for_node(nominal_mass, is_prefix, param, parent_mass, charge, |ion, theo_mz, _part| {
-        out.push((ion, theo_mz));
-    });
+    for_each_ion_for_node(
+        nominal_mass,
+        is_prefix,
+        param,
+        parent_mass,
+        charge,
+        |ion, theo_mz, _part| {
+            out.push((ion, theo_mz));
+        },
+    );
     out
 }
 
@@ -205,9 +212,8 @@ pub fn predict_by_ions_with_losses(
         Vec::new()
     };
 
-    let mut out = Vec::with_capacity(
-        2 * (n - 1) * (charge_range.end() - charge_range.start() + 1) as usize,
-    );
+    let mut out =
+        Vec::with_capacity(2 * (n - 1) * (charge_range.end() - charge_range.start() + 1) as usize);
     for charge in charge_range.clone() {
         let z = charge as f64;
         for k in 1..n {
@@ -222,7 +228,16 @@ pub fn predict_by_ions_with_losses(
                 mz: b_mz,
                 loss_class: 0,
             });
-            emit_loss_ions(&mut out, &loss_residues, 0..k, IonKind::B, k as u32, charge, z, b_mz);
+            emit_loss_ions(
+                &mut out,
+                &loss_residues,
+                0..k,
+                IonKind::B,
+                k as u32,
+                charge,
+                z,
+                b_mz,
+            );
 
             // y-ion at position k: neutral mass = sum of residues n-k..n + H2O.
             // The suffix fragment spans residue indices [n-k, n).
@@ -235,7 +250,16 @@ pub fn predict_by_ions_with_losses(
                 mz: y_mz,
                 loss_class: 0,
             });
-            emit_loss_ions(&mut out, &loss_residues, (n - k)..n, IonKind::Y, k as u32, charge, z, y_mz);
+            emit_loss_ions(
+                &mut out,
+                &loss_residues,
+                (n - k)..n,
+                IonKind::Y,
+                k as u32,
+                charge,
+                z,
+                y_mz,
+            );
         }
     }
     out
@@ -325,9 +349,7 @@ pub fn predict_cz_ions(
     // (byte-identical); with ANDES_GLYCO_CZ_REMNANT this is the remnant ladder.
     let span_shifts = cz_spanning_shifts(glycan_mass, cz_remnant_enabled());
     let mut out = Vec::with_capacity(
-        2 * (n - 1)
-            * (charge_range.end() - charge_range.start() + 1) as usize
-            * span_shifts.len(),
+        2 * (n - 1) * (charge_range.end() - charge_range.start() + 1) as usize * span_shifts.len(),
     );
     for charge in charge_range.clone() {
         let z = charge as f64;
@@ -452,21 +474,55 @@ mod tests {
         let by = predict_by_ions(&p, 1..=1);
         // No glycan → c = b + NH3, z• = y + Z_DOT_OFFSET, position/charge preserved.
         let cz = predict_cz_ions(&p, 1..=1, 0.0, 0);
-        let b_at = |k: u32| by.iter().find(|i| i.kind == IonKind::B && i.position == k).unwrap().mz;
-        let y_at = |k: u32| by.iter().find(|i| i.kind == IonKind::Y && i.position == k).unwrap().mz;
-        let c_at = |k: u32| cz.iter().find(|i| i.kind == IonKind::C && i.position == k).unwrap().mz;
-        let z_at = |k: u32| cz.iter().find(|i| i.kind == IonKind::Z && i.position == k).unwrap().mz;
+        let b_at = |k: u32| {
+            by.iter()
+                .find(|i| i.kind == IonKind::B && i.position == k)
+                .unwrap()
+                .mz
+        };
+        let y_at = |k: u32| {
+            by.iter()
+                .find(|i| i.kind == IonKind::Y && i.position == k)
+                .unwrap()
+                .mz
+        };
+        let c_at = |k: u32| {
+            cz.iter()
+                .find(|i| i.kind == IonKind::C && i.position == k)
+                .unwrap()
+                .mz
+        };
+        let z_at = |k: u32| {
+            cz.iter()
+                .find(|i| i.kind == IonKind::Z && i.position == k)
+                .unwrap()
+                .mz
+        };
         for k in 1..=6 {
             assert!((c_at(k) - (b_at(k) + NH3)).abs() < 1e-6, "c{k} != b{k}+NH3");
-            assert!((z_at(k) - (y_at(k) + Z_DOT_OFFSET)).abs() < 1e-6, "z{k} != y{k}+offset");
+            assert!(
+                (z_at(k) - (y_at(k) + Z_DOT_OFFSET)).abs() < 1e-6,
+                "z{k} != y{k}+offset"
+            );
         }
         // Glycan on glycosite (index 2, the second P here as a stand-in): every c_k
         // with k>2 and every z_k spanning index 2 gains exactly glycan_mass at z=1.
         let g = 1000.0;
         let czg = predict_cz_ions(&p, 1..=1, g, 2);
-        let cg = |k: u32| czg.iter().find(|i| i.kind == IonKind::C && i.position == k).unwrap().mz;
-        assert!((cg(2) - c_at(2)).abs() < 1e-6, "c2 must be naked (prefix [0,2) excludes site 2)");
-        assert!((cg(3) - (c_at(3) + g)).abs() < 1e-6, "c3 must carry glycan (prefix includes site 2)");
+        let cg = |k: u32| {
+            czg.iter()
+                .find(|i| i.kind == IonKind::C && i.position == k)
+                .unwrap()
+                .mz
+        };
+        assert!(
+            (cg(2) - c_at(2)).abs() < 1e-6,
+            "c2 must be naked (prefix [0,2) excludes site 2)"
+        );
+        assert!(
+            (cg(3) - (c_at(3) + g)).abs() < 1e-6,
+            "c3 must carry glycan (prefix includes site 2)"
+        );
     }
 
     #[test]
@@ -480,12 +536,17 @@ mod tests {
         assert_eq!(s[0], 1000.0, "intact glycan must be first");
         assert_eq!(s.len(), 6, "intact glycan + 5 remnants, no collision");
         for r in [0.0, 203.079373, 365.132196, 406.158746, 892.317218] {
-            assert!(s.iter().any(|&x| (x - r).abs() < 1e-9), "missing remnant {r}");
+            assert!(
+                s.iter().any(|&x| (x - r).abs() < 1e-9),
+                "missing remnant {r}"
+            );
         }
         // Dedup: when glycan_mass equals a remnant, it appears exactly once.
         let s2 = cz_spanning_shifts(203.079373, true);
         assert_eq!(
-            s2.iter().filter(|&&x| (x - 203.079373).abs() < 1e-6).count(),
+            s2.iter()
+                .filter(|&&x| (x - 203.079373).abs() < 1e-6)
+                .count(),
             1,
             "remnant equal to the intact glycan must not be duplicated"
         );

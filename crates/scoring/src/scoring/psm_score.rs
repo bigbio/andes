@@ -15,13 +15,13 @@
 
 use std::sync::OnceLock;
 
-use model::mass::nominal_from;
-use model::peptide::Peptide;
 use crate::param_model::Partition;
 use crate::scoring::fragment_ions::{predict_cz_ions, IonKind};
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
 use crate::scoring::strong_score::DENSITY_HW;
+use model::mass::nominal_from;
+use model::peptide::Peptide;
 
 /// Diagnostic peptide-trace filter, read once from the `Andes_TRACE_PEP`
 /// environment variable and memoized.
@@ -270,8 +270,11 @@ pub fn score_psm(
     let trace = match trace_pep_filter() {
         Some(filter) => {
             // Only build the per-residue String when the env var is set.
-            let pep_seq_string: String =
-                peptide.residues.iter().map(|aa| aa.residue as char).collect();
+            let pep_seq_string: String = peptide
+                .residues
+                .iter()
+                .map(|aa| aa.residue as char)
+                .collect();
             if pep_seq_string.contains(filter.as_str()) {
                 eprintln!(
                     "TRACE_RUST_HEADER\tpep={}\tcharge={}\tparent_mass={:.4}\tpeptide_nominal={}\tn={}\tfragment_tol_da={}",
@@ -293,7 +296,11 @@ pub fn score_psm(
     // loss tables, and (c) the peptide actually declares a loss-bearing mod.
     // For every standard peptide this is false, so the split loop adds nothing
     // and the integer RawScore is byte-identical to the pre-feature engine.
-    let score_losses = scorer.param().data_type.activation.predicts_neutral_losses()
+    let score_losses = scorer
+        .param()
+        .data_type
+        .activation
+        .predicts_neutral_losses()
         && scorer.has_loss_tables()
         && peptide.residues.iter().any(|aa| {
             aa.mod_
@@ -467,7 +474,6 @@ pub struct CzSettings {
     pub zmax_override: Option<u8>,
 }
 
-
 static CZ_SETTINGS: OnceLock<CzSettings> = OnceLock::new();
 
 /// Install the c/z settings. Call once, before scoring. A second call is ignored, so a
@@ -494,9 +500,7 @@ fn cz_settings() -> CzSettings {
 fn cz_zmax_override() -> Option<u8> {
     use std::sync::OnceLock;
     static CELL: OnceLock<Option<u8>> = OnceLock::new();
-    *CELL.get_or_init(|| {
-        cz_settings().zmax_override.filter(|&z| z >= 1)
-    })
+    *CELL.get_or_init(|| cz_settings().zmax_override.filter(|&z| z >= 1))
 }
 
 /// Effective c/z fragment-charge ceiling.
@@ -530,7 +534,12 @@ pub fn cz_hyperscore_psm(
     let fix = cz_fix_enabled();
     let mut c_hit = vec![false; n];
     let mut z_hit = vec![false; n];
-    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax_for(max_frag_charge, scored_spec.is_deconvoluted()), glycan_mass, glycosite) {
+    for ion in predict_cz_ions(
+        peptide,
+        1..=cz_effective_zmax_for(max_frag_charge, scored_spec.is_deconvoluted()),
+        glycan_mass,
+        glycosite,
+    ) {
         // Bug 1: ppm-scaled per-ion tolerance (was a flat 0.5 Da for every ion).
         let tol_da = if fix {
             (ion.mz * tol_ppm * 1e-6).max(0.01)
@@ -588,10 +597,19 @@ pub fn cz_matched_intensity_frac(
         return 0.0;
     }
     let (peaks, _) = scored_spec.active_peaks_and_ranks();
-    let base = peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9);
+    let base = peaks
+        .iter()
+        .map(|&(_, i)| i)
+        .fold(0.0f32, f32::max)
+        .max(1e-9);
     let mut c_int = vec![0.0f32; n];
     let mut z_int = vec![0.0f32; n];
-    for ion in predict_cz_ions(peptide, 1..=cz_effective_zmax_for(max_frag_charge, scored_spec.is_deconvoluted()), glycan_mass, glycosite) {
+    for ion in predict_cz_ions(
+        peptide,
+        1..=cz_effective_zmax_for(max_frag_charge, scored_spec.is_deconvoluted()),
+        glycan_mass,
+        glycosite,
+    ) {
         let tol_da = (ion.mz * tol_ppm * 1e-6).max(0.01);
         if let Some((_, intensity, _)) = scored_spec.nearest_peak_full(ion.mz, tol_da) {
             let pos = ion.position as usize;
@@ -727,13 +745,13 @@ pub fn score_psm_float(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use model::amino_acid::AminoAcid;
     use crate::param_model::{FragmentOffsetFrequency, IonType, Param, Partition, SpecDataType};
-    use model::peptide::Peptide;
     use crate::scoring::rank_scorer::RankScorer;
     use crate::scoring::scored_spectrum::ScoredSpectrum;
-    use model::spectrum::Spectrum;
     use crate::testutil::tiny_param;
+    use model::amino_acid::AminoAcid;
+    use model::peptide::Peptide;
+    use model::spectrum::Spectrum;
     use rustc_hash::FxHashMap;
 
     fn pep(seq: &[u8]) -> Peptide {
@@ -767,8 +785,16 @@ mod tests {
         use model::instrument::InstrumentType;
         use model::protocol::Protocol;
 
-        let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-        let prefix_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 0.0,
+            seg_num: 0,
+        };
+        let prefix_ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
         let noise_ion = IonType::Noise;
 
         let ion_freqs = vec![0.6_f32, 0.3, 0.05, 0.001];
@@ -778,11 +804,18 @@ mod tests {
         ion_table.insert(prefix_ion, ion_freqs);
         ion_table.insert(noise_ion, noise_freqs);
 
-        let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> = FxHashMap::default();
+        let mut rank_dist_table: FxHashMap<Partition, FxHashMap<IonType, Vec<f32>>> =
+            FxHashMap::default();
         rank_dist_table.insert(part, ion_table);
 
         let mut frag_off_table = FxHashMap::default();
-        frag_off_table.insert(part, vec![FragmentOffsetFrequency { ion_type: prefix_ion, frequency: 0.7 }]);
+        frag_off_table.insert(
+            part,
+            vec![FragmentOffsetFrequency {
+                ion_type: prefix_ion,
+                frequency: 0.7,
+            }],
+        );
 
         let mut p = Param {
             version: 10001,
@@ -821,8 +854,16 @@ mod tests {
     /// A param like `any_mass_param` but additionally carrying a trained
     /// loss-class-1 ion table (rank-1 dominant → positive LLR).
     fn loss_table_param() -> Param {
-        let part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-        let loss_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
+        let part = Partition {
+            charge: 2,
+            parent_mass: 0.0,
+            seg_num: 0,
+        };
+        let loss_ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 1,
+        };
         let mut p = any_mass_param();
         p.rank_dist_table
             .get_mut(&part)
@@ -857,17 +898,27 @@ mod tests {
     /// for loss-bearing peptides, and is byte-identical for non-loss peptides.
     #[test]
     fn score_psm_adds_neutral_loss_contribution_and_is_inert_otherwise() {
-        let _part = Partition { charge: 2, parent_mass: 0.0, seg_num: 0 };
-        let loss_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 1 };
+        let _part = Partition {
+            charge: 2,
+            parent_mass: 0.0,
+            seg_num: 0,
+        };
+        let loss_ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 1,
+        };
 
         // Loss peptide T*WW: at split s=2 the prefix {T*,W} spans the loss
         // residue and is heavy enough for a positive loss m/z. (At s=1 the
         // prefix {T*} would go negative and is skipped — no missing penalty.)
         let loss_pep = loss_peptide_twoheavy();
-        let prefix_nominal =
-            nominal_from(loss_pep.residues[0].mass + loss_pep.residues[1].mass); // T*+W
+        let prefix_nominal = nominal_from(loss_pep.residues[0].mass + loss_pep.residues[1].mass); // T*+W
         let loss_mz = loss_ion.mz(prefix_nominal as f64) - 162.0528;
-        assert!(loss_mz > 0.0, "test setup: loss m/z must be positive, got {loss_mz}");
+        assert!(
+            loss_mz > 0.0,
+            "test setup: loss m/z must be positive, got {loss_mz}"
+        );
 
         // Spectrum with a single peak exactly at the loss m/z (away from precursor).
         let s = Spectrum {
@@ -910,9 +961,24 @@ mod tests {
             isolation_lower_offset: None,
             isolation_upper_offset: None,
         };
-        let a = score_psm(&ScoredSpectrum::new(&sp, &loss_scorer, 2), &plain_pep, &loss_scorer, 2, 0.5);
-        let b = score_psm(&ScoredSpectrum::new(&sp, &plain_scorer, 2), &plain_pep, &plain_scorer, 2, 0.5);
-        assert_eq!(a, b, "non-loss peptide must be byte-identical across loss/no-loss models");
+        let a = score_psm(
+            &ScoredSpectrum::new(&sp, &loss_scorer, 2),
+            &plain_pep,
+            &loss_scorer,
+            2,
+            0.5,
+        );
+        let b = score_psm(
+            &ScoredSpectrum::new(&sp, &plain_scorer, 2),
+            &plain_pep,
+            &plain_scorer,
+            2,
+            0.5,
+        );
+        assert_eq!(
+            a, b,
+            "non-loss peptide must be byte-identical across loss/no-loss models"
+        );
     }
 
     #[test]
@@ -938,7 +1004,11 @@ mod tests {
         let param = any_mass_param();
 
         // Compute b-ion m/z for each split position of AGR.
-        let b_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let b_ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
         let mut prefix_acc = 0.0_f64;
         let mut peaks = Vec::new();
         for s in 1..peptide.length() {
@@ -946,7 +1016,7 @@ mod tests {
             prefix_acc += aa.mass;
             let nom = model::mass::nominal_from(prefix_acc) as f64;
             let mz = b_ion.mz(nom);
-            peaks.push((mz, 1000.0_f32 / s as f32));  // rank-1 intensity
+            peaks.push((mz, 1000.0_f32 / s as f32)); // rank-1 intensity
         }
         peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
@@ -965,7 +1035,10 @@ mod tests {
         let scored = ScoredSpectrum::new_without_filtering(&spec);
         let scorer = RankScorer::new(&param);
         let s = score_psm(&scored, &peptide, &scorer, 2, 0.2);
-        assert!(s > 0.0, "score with matched b-ions should be positive, got {s}");
+        assert!(
+            s > 0.0,
+            "score with matched b-ions should be positive, got {s}"
+        );
     }
 
     #[test]
@@ -974,7 +1047,11 @@ mod tests {
         let peptide = pep(b"AGR");
         let param = any_mass_param();
 
-        let b_ion = IonType::Prefix { charge: 1, offset_bits: 0.0_f32.to_bits(), loss_class: 0 };
+        let b_ion = IonType::Prefix {
+            charge: 1,
+            offset_bits: 0.0_f32.to_bits(),
+            loss_class: 0,
+        };
         let mut prefix_acc = 0.0_f64;
         let mut match_peaks = Vec::new();
         for s in 1..peptide.length() {
@@ -1005,7 +1082,10 @@ mod tests {
         let scored_empty = ScoredSpectrum::new_without_filtering(&empty_spec);
         let s_match = score_psm(&scored_match, &peptide, &scorer, 2, 0.2);
         let s_empty = score_psm(&scored_empty, &peptide, &scorer, 2, 0.2);
-        assert!(s_match > s_empty, "matched spectrum ({s_match}) should outscore empty ({s_empty})");
+        assert!(
+            s_match > s_empty,
+            "matched spectrum ({s_match}) should outscore empty ({s_empty})"
+        );
     }
 
     /// Verify that `score_psm` equals the manually summed `node_score` calls
@@ -1035,7 +1115,14 @@ mod tests {
             prefix_acc += aa.mass + aa.mod_.as_ref().map_or(0.0, |m| m.mass_delta);
             let pref = nominal_from(prefix_acc);
             let suf = peptide_nominal - pref;
-            manual_total += scored.node_score(pref as f64, suf as f64, &scorer, charge, parent_mass, tolerance_da);
+            manual_total += scored.node_score(
+                pref as f64,
+                suf as f64,
+                &scorer,
+                charge,
+                parent_mass,
+                tolerance_da,
+            );
         }
 
         let computed = score_psm(&scored, &peptide, &scorer, charge, tolerance_da);

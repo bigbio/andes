@@ -6,14 +6,14 @@
 //! Depends on `model` and `scoring` crates.
 
 pub mod candidate_gen;
-pub mod glyco_fragment_index;
-pub mod glyco_search;
 pub mod candidate_index;
 mod chimeric_features;
 pub(crate) mod coisolation;
 pub mod decoy;
-pub mod match_engine;
+pub mod glyco_fragment_index;
+pub mod glyco_search;
 pub mod mass_calibrator;
+pub mod match_engine;
 pub mod precursor_cal;
 pub mod precursor_matching;
 pub mod psm;
@@ -29,13 +29,13 @@ pub use decoy::{
     normalize_decoy_prefix, reverse_db, sequon_preserving_reverse_db, target_plus_decoy,
     DEFAULT_DECOY_PREFIX,
 };
-pub use match_engine::{match_spectra, run_pass2_coisolation, CandidateBacking, PreparedSearch};
 pub use mass_calibrator::{
     apply_shift_for_mode, apply_tightened_precursor_tolerance, build_spec_keys,
     learn_calibration_stats, prepass_search_params, CalibrationStats, SpecKey,
 };
+pub use match_engine::{match_spectra, run_pass2_coisolation, CandidateBacking, PreparedSearch};
 pub use precursor_cal::{
-    PrecursorCalMode, adjusted_observed_neutral_mass, robust_sigma_ppm, tightened_tolerance_ppm,
+    adjusted_observed_neutral_mass, robust_sigma_ppm, tightened_tolerance_ppm, PrecursorCalMode,
 };
 pub use precursor_matching::{matches_precursor, MassError};
 pub use psm::{PsmFeatures, PsmMatch, TopNQueue};

@@ -3,7 +3,6 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-
 /// Per-PSM fragment-ion feature columns computed from the scoring machinery
 /// and emitted into the Percolator `.pin` file.
 ///
@@ -27,7 +26,6 @@ pub struct PsmFeatures {
     pub matched_ion_ratio: f32,
 
     // ── Ion-current ratios ─────────────────────────────────────────────────
-
     /// `n_term_ion_current_ratio + c_term_ion_current_ratio`.
     pub explained_ion_current_ratio: f32,
     /// Sum of matched b-ion intensities divided by total MS2 ion current.
@@ -41,7 +39,6 @@ pub struct PsmFeatures {
     pub isolation_window_efficiency: f32,
 
     // ── Top-7 mass-error statistics ────────────────────────────────────────
-
     /// Mean of absolute Da errors for the top-7 most-intense matched ions.
     pub mean_error_top7: f32,
     /// Population standard deviation of absolute Da errors for top-7 ions
@@ -431,9 +428,19 @@ impl Ord for PsmMatch {
         use std::cmp::Ordering;
         // "Better" PSM = larger rank_score.
         // NaN values are treated as worst (sort last / lose to finite).
-        let self_rank  = if self.rank_score.is_nan()  { f32::NEG_INFINITY } else { self.rank_score };
-        let other_rank = if other.rank_score.is_nan() { f32::NEG_INFINITY } else { other.rank_score };
-        self_rank.partial_cmp(&other_rank).unwrap_or(Ordering::Equal)
+        let self_rank = if self.rank_score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            self.rank_score
+        };
+        let other_rank = if other.rank_score.is_nan() {
+            f32::NEG_INFINITY
+        } else {
+            other.rank_score
+        };
+        self_rank
+            .partial_cmp(&other_rank)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -449,8 +456,16 @@ fn rank_score_desc(a: &PsmMatch, b: &PsmMatch) -> std::cmp::Ordering {
     // TOTAL order. A `partial_cmp(..).unwrap_or(Equal)` comparator misbehaved
     // under release-mode `sort_by` on the pinned toolchain (left the vec
     // unsorted); total_cmp is codegen-robust and order-equivalent for finite values.
-    let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
-    let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
+    let ar = if a.rank_score.is_nan() {
+        f32::NEG_INFINITY
+    } else {
+        a.rank_score
+    };
+    let br = if b.rank_score.is_nan() {
+        f32::NEG_INFINITY
+    } else {
+        b.rank_score
+    };
     br.total_cmp(&ar)
 }
 
@@ -464,7 +479,10 @@ pub struct TopNQueue {
 
 impl TopNQueue {
     pub fn new(capacity: u32) -> Self {
-        Self { capacity, heap: BinaryHeap::with_capacity(capacity as usize) }
+        Self {
+            capacity,
+            heap: BinaryHeap::with_capacity(capacity as usize),
+        }
     }
 
     /// Insert a PSM. The queue keeps **at least** `capacity` of the *best*
@@ -512,8 +530,12 @@ impl TopNQueue {
         self.heap.push(Reverse(m));
     }
 
-    pub fn len(&self) -> usize { self.heap.len() }
-    pub fn is_empty(&self) -> bool { self.heap.is_empty() }
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
 
     /// Return the `rank_score` of the queue's WORST retained PSM in O(1).
     ///
@@ -533,7 +555,9 @@ impl TopNQueue {
     /// Queue capacity (the top-N target). Used by callers that need to
     /// distinguish "queue has spare capacity, accept everything" from
     /// "queue at capacity, must beat worst".
-    pub fn capacity(&self) -> u32 { self.capacity }
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
 
     /// Iterate over all PSMs in the queue (order not guaranteed).
     pub fn iter_psms(&self) -> impl Iterator<Item = &PsmMatch> {
@@ -664,14 +688,29 @@ impl TopNQueue {
             // the pinned toolchain, so the PIN winner (the first element — see
             // output/pin.rs) became wrong AND environment-dependent (a target vs
             // decoy tie flipped between CI runners). NaN → worst (NEG_INFINITY).
-            let ar = if a.rank_score.is_nan() { f32::NEG_INFINITY } else { a.rank_score };
-            let br = if b.rank_score.is_nan() { f32::NEG_INFINITY } else { b.rank_score };
-            br.total_cmp(&ar)
-                .then_with(|| {
-                    let asc = if a.score.is_nan() { f32::NEG_INFINITY } else { a.score };
-                    let bsc = if b.score.is_nan() { f32::NEG_INFINITY } else { b.score };
-                    bsc.total_cmp(&asc)
-                })
+            let ar = if a.rank_score.is_nan() {
+                f32::NEG_INFINITY
+            } else {
+                a.rank_score
+            };
+            let br = if b.rank_score.is_nan() {
+                f32::NEG_INFINITY
+            } else {
+                b.rank_score
+            };
+            br.total_cmp(&ar).then_with(|| {
+                let asc = if a.score.is_nan() {
+                    f32::NEG_INFINITY
+                } else {
+                    a.score
+                };
+                let bsc = if b.score.is_nan() {
+                    f32::NEG_INFINITY
+                } else {
+                    b.score
+                };
+                bsc.total_cmp(&asc)
+            })
         });
         v
     }
@@ -691,7 +730,7 @@ mod tests {
             charge_used: 2,
             mass_error_ppm: 0.0,
             score,
-            rank_score: score,  // fixture default: rank_score = score
+            rank_score: score, // fixture default: rank_score = score
             edge_score: 0,
             activation_method: None,
             features: PsmFeatures::default(),
@@ -717,23 +756,31 @@ mod tests {
     #[test]
     fn queue_below_capacity_keeps_everything() {
         let mut q = TopNQueue::new(5);
-        for s in [1.0, 2.0, 3.0] { q.push(make_match(0, s)); }
+        for s in [1.0, 2.0, 3.0] {
+            q.push(make_match(0, s));
+        }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
         // rank_score = score (fixture default) → sort by score descending.
-        assert_eq!(sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
-                   vec![3.0, 2.0, 1.0]);
+        assert_eq!(
+            sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
+            vec![3.0, 2.0, 1.0]
+        );
     }
 
     #[test]
     fn queue_at_capacity_keeps_top_n_by_score() {
         let mut q = TopNQueue::new(3);
-        for s in [1.0, 5.0, 2.0, 4.0, 3.0] { q.push(make_match(0, s)); }
+        for s in [1.0, 5.0, 2.0, 4.0, 3.0] {
+            q.push(make_match(0, s));
+        }
         assert_eq!(q.len(), 3);
         let sorted = q.into_sorted_vec();
         // rank_score = score → keeps top-3 by score.
-        assert_eq!(sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
-                   vec![5.0, 4.0, 3.0]);
+        assert_eq!(
+            sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
+            vec![5.0, 4.0, 3.0]
+        );
     }
 
     #[test]
@@ -744,8 +791,10 @@ mod tests {
         assert_eq!(q.len(), 2);
         q.push(make_match(0, 1.0));
         let sorted = q.into_sorted_vec();
-        assert_eq!(sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
-                   vec![5.0, 3.0]);
+        assert_eq!(
+            sorted.iter().map(|m| m.score).collect::<Vec<_>>(),
+            vec![5.0, 3.0]
+        );
     }
 
     #[test]
@@ -816,11 +865,24 @@ mod tests {
         // Expect: 2 groups — score=50 with idxs [10,20], score=40 with [30]
         assert_eq!(deduped.len(), 2, "should collapse to 2 unique-score groups");
 
-        let mut score_50 = deduped.iter().find(|p| (p.score as i32) == 50).unwrap().candidate_idxs.clone();
+        let mut score_50 = deduped
+            .iter()
+            .find(|p| (p.score as i32) == 50)
+            .unwrap()
+            .candidate_idxs
+            .clone();
         score_50.sort();
-        assert_eq!(score_50, vec![10, 20], "score=50 should aggregate both idxs");
+        assert_eq!(
+            score_50,
+            vec![10, 20],
+            "score=50 should aggregate both idxs"
+        );
 
-        let score_40 = &deduped.iter().find(|p| (p.score as i32) == 40).unwrap().candidate_idxs;
+        let score_40 = &deduped
+            .iter()
+            .find(|p| (p.score as i32) == 40)
+            .unwrap()
+            .candidate_idxs;
         assert_eq!(*score_40, vec![30]);
     }
 
@@ -833,7 +895,11 @@ mod tests {
             let key = psm.score as i32;
             groups
                 .entry(key)
-                .and_modify(|existing| existing.candidate_idxs.extend(psm.candidate_idxs.iter().copied()))
+                .and_modify(|existing| {
+                    existing
+                        .candidate_idxs
+                        .extend(psm.candidate_idxs.iter().copied())
+                })
                 .or_insert(psm);
         }
         groups.into_values().collect()
@@ -857,16 +923,18 @@ mod tests {
         // Higher rank_score means "better" → Ord-greater so the min-heap can
         // evict the worst.
         let better = make_match_with_rank(0, 5.0, 10.0);
-        let worse  = make_match_with_rank(0, 5.0, 1.0);
-        assert!(better > worse,
-            "PSM with higher rank_score should be Ord-greater (better in the min-heap)");
+        let worse = make_match_with_rank(0, 5.0, 1.0);
+        assert!(
+            better > worse,
+            "PSM with higher rank_score should be Ord-greater (better in the min-heap)"
+        );
     }
 
     #[test]
     fn queue_keeps_best_rank_score_psms_when_full() {
         // Three PSMs with same score but different rank_scores; capacity = 2.
         let mut q = TopNQueue::new(2);
-        q.push(make_match_with_rank(0, 5.0, 1.0));   // worst
+        q.push(make_match_with_rank(0, 5.0, 1.0)); // worst
         q.push(make_match_with_rank(0, 5.0, 100.0)); // best
         assert_eq!(q.len(), 2);
         // Push a medium one; it should evict the worst (rank 1.0).
@@ -875,14 +943,16 @@ mod tests {
         let sorted = q.into_sorted_vec();
         let ranks: Vec<f32> = sorted.iter().map(|m| m.rank_score).collect();
         assert!(ranks.contains(&100.0), "best rank 100.0 should be retained");
-        assert!(ranks.contains(&50.0),  "medium rank 50.0 should be retained");
-        assert!(!ranks.contains(&1.0),  "worst rank 1.0 should be evicted");
+        assert!(ranks.contains(&50.0), "medium rank 50.0 should be retained");
+        assert!(!ranks.contains(&1.0), "worst rank 1.0 should be evicted");
     }
 
     #[test]
     fn iter_psms_yields_all_psms() {
         let mut q = TopNQueue::new(5);
-        for s in [1.0_f32, 2.0, 3.0] { q.push(make_match(0, s)); }
+        for s in [1.0_f32, 2.0, 3.0] {
+            q.push(make_match(0, s));
+        }
         let scores: Vec<f32> = {
             let mut v: Vec<f32> = q.iter_psms().map(|m| m.score).collect();
             v.sort_by(|a, b| b.partial_cmp(a).unwrap());
@@ -898,8 +968,10 @@ mod tests {
     #[test]
     fn psm_match_default_isotope_offset_is_zero() {
         let m = make_match(0, 1.0);
-        assert_eq!(m.isotope_offset, 0,
-            "isotope_offset sentinel should be 0 before match_engine populates it");
+        assert_eq!(
+            m.isotope_offset, 0,
+            "isotope_offset sentinel should be 0 before match_engine populates it"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -978,35 +1050,63 @@ mod tests {
     #[test]
     fn psm_match_default_features_is_zeroed() {
         let m = make_match(0, 1.0);
-        assert_eq!(m.features.num_matched_main_ions, 0,
-            "features.num_matched_main_ions should default to 0");
-        assert_eq!(m.features.longest_b, 0,
-            "features.longest_b should default to 0");
-        assert_eq!(m.features.longest_y, 0,
-            "features.longest_y should default to 0");
-        assert_eq!(m.features.longest_y_pct, 0.0,
-            "features.longest_y_pct should default to 0.0");
-        assert_eq!(m.features.matched_ion_ratio, 0.0,
-            "features.matched_ion_ratio should default to 0.0");
+        assert_eq!(
+            m.features.num_matched_main_ions, 0,
+            "features.num_matched_main_ions should default to 0"
+        );
+        assert_eq!(
+            m.features.longest_b, 0,
+            "features.longest_b should default to 0"
+        );
+        assert_eq!(
+            m.features.longest_y, 0,
+            "features.longest_y should default to 0"
+        );
+        assert_eq!(
+            m.features.longest_y_pct, 0.0,
+            "features.longest_y_pct should default to 0.0"
+        );
+        assert_eq!(
+            m.features.matched_ion_ratio, 0.0,
+            "features.matched_ion_ratio should default to 0.0"
+        );
         // Ion-current + error-stat columns (9 fields)
-        assert_eq!(m.features.explained_ion_current_ratio, 0.0,
-            "explained_ion_current_ratio should default to 0.0");
-        assert_eq!(m.features.n_term_ion_current_ratio, 0.0,
-            "n_term_ion_current_ratio should default to 0.0");
-        assert_eq!(m.features.c_term_ion_current_ratio, 0.0,
-            "c_term_ion_current_ratio should default to 0.0");
-        assert_eq!(m.features.ms2_ion_current, 0.0,
-            "ms2_ion_current should default to 0.0");
-        assert_eq!(m.features.isolation_window_efficiency, 0.0,
-            "isolation_window_efficiency should default to 0.0");
-        assert_eq!(m.features.mean_error_top7, 0.0,
-            "mean_error_top7 should default to 0.0");
-        assert_eq!(m.features.stdev_error_top7, 0.0,
-            "stdev_error_top7 should default to 0.0");
-        assert_eq!(m.features.mean_rel_error_top7, 0.0,
-            "mean_rel_error_top7 should default to 0.0");
-        assert_eq!(m.features.stdev_rel_error_top7, 0.0,
-            "stdev_rel_error_top7 should default to 0.0");
+        assert_eq!(
+            m.features.explained_ion_current_ratio, 0.0,
+            "explained_ion_current_ratio should default to 0.0"
+        );
+        assert_eq!(
+            m.features.n_term_ion_current_ratio, 0.0,
+            "n_term_ion_current_ratio should default to 0.0"
+        );
+        assert_eq!(
+            m.features.c_term_ion_current_ratio, 0.0,
+            "c_term_ion_current_ratio should default to 0.0"
+        );
+        assert_eq!(
+            m.features.ms2_ion_current, 0.0,
+            "ms2_ion_current should default to 0.0"
+        );
+        assert_eq!(
+            m.features.isolation_window_efficiency, 0.0,
+            "isolation_window_efficiency should default to 0.0"
+        );
+        assert_eq!(
+            m.features.mean_error_top7, 0.0,
+            "mean_error_top7 should default to 0.0"
+        );
+        assert_eq!(
+            m.features.stdev_error_top7, 0.0,
+            "stdev_error_top7 should default to 0.0"
+        );
+        assert_eq!(
+            m.features.mean_rel_error_top7, 0.0,
+            "mean_rel_error_top7 should default to 0.0"
+        );
+        assert_eq!(
+            m.features.stdev_rel_error_top7, 0.0,
+            "stdev_rel_error_top7 should default to 0.0"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1018,7 +1118,7 @@ mod tests {
         // NaN rank_score should sort as WORSE than any finite value.
         // "Better" = greater in natural Ord (used by the min-heap via Reverse).
         let nan_rank = make_match_with_rank(0, 5.0, f32::NAN);
-        let finite   = make_match_with_rank(0, 0.0, 1.0);
+        let finite = make_match_with_rank(0, 0.0, 1.0);
         assert_eq!(
             nan_rank.cmp(&finite),
             std::cmp::Ordering::Less,

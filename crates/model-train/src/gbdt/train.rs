@@ -6,9 +6,9 @@
 
 use scoring_crate::gbdt_eval::GbdtPeakModel;
 
-use crate::TrainError;
 use super::isotonic::pava;
 use super::tree::{fit_tree, TreeParams};
+use crate::TrainError;
 
 // ---------------------------------------------------------------------------
 // Quality-gate thresholds (finding 3.6)
@@ -142,7 +142,11 @@ fn logloss(raw_val: &[f32], val_y: &[u8]) -> f32 {
         let label = y as f64;
         sum -= label * p.ln() + (1.0 - label) * (1.0 - p).ln();
     }
-    if val_y.is_empty() { f32::INFINITY } else { (sum / val_y.len() as f64) as f32 }
+    if val_y.is_empty() {
+        f32::INFINITY
+    } else {
+        (sum / val_y.len() as f64) as f32
+    }
 }
 
 /// ROC AUC of `scores` vs binary `labels` (Mann-Whitney U; ties get average
@@ -287,7 +291,11 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     };
     let n_pos = ds.y.iter().filter(|&&y| y == 1).count();
     if nf == 0 {
-        return gate_or_fallback(p.allow_degenerate, "classifier: zero features".into(), empty_classifier);
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "classifier: zero features".into(),
+            empty_classifier,
+        );
     }
     if n_rows < MIN_TRAIN_ROWS {
         return gate_or_fallback(
@@ -361,10 +369,16 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     }
 
     // --- Step 3: Negative undersample TRAIN rows (seeded) ---------------------
-    let train_pos: Vec<usize> =
-        train_rows.iter().copied().filter(|&r| ds.y[r] == 1).collect();
-    let mut train_neg: Vec<usize> =
-        train_rows.iter().copied().filter(|&r| ds.y[r] == 0).collect();
+    let train_pos: Vec<usize> = train_rows
+        .iter()
+        .copied()
+        .filter(|&r| ds.y[r] == 1)
+        .collect();
+    let mut train_neg: Vec<usize> = train_rows
+        .iter()
+        .copied()
+        .filter(|&r| ds.y[r] == 0)
+        .collect();
 
     let n_pos_train = train_pos.len();
     // Gate: no positives in the training split after the disjoint split.
@@ -376,8 +390,7 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
         );
     }
 
-    let n_neg_keep =
-        (p.neg_pos_ratio * n_pos_train as f32).ceil() as usize;
+    let n_neg_keep = (p.neg_pos_ratio * n_pos_train as f32).ceil() as usize;
     let mut rng = seed;
     if train_neg.len() > n_neg_keep {
         shuffle_indices(&mut train_neg, &mut rng);
@@ -424,8 +437,10 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
     // pos/neg, keeping only groups that have BOTH (the only ones that produce pairs).
     // `pair_groups[k] = (positives, negatives)` as active-index vectors.
     let pair_groups: Vec<(Vec<usize>, Vec<usize>)> = if p.pairwise {
-        let mut pos_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
-        let mut neg_map: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+        let mut pos_map: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut neg_map: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
         for i in 0..n_active {
             let g = ds.groups[active_train[i]];
             if train_y[i] == 1 {
@@ -434,9 +449,15 @@ pub fn train_gbdt(ds: &Dataset, p: &TrainParams, seed: u64) -> Result<GbdtPeakMo
                 neg_map.entry(g).or_default().push(i);
             }
         }
-        let mut gs: Vec<u32> = pos_map.keys().filter(|k| neg_map.contains_key(k)).copied().collect();
+        let mut gs: Vec<u32> = pos_map
+            .keys()
+            .filter(|k| neg_map.contains_key(k))
+            .copied()
+            .collect();
         gs.sort_unstable(); // determinism
-        gs.into_iter().map(|g| (pos_map[&g].clone(), neg_map[&g].clone())).collect()
+        gs.into_iter()
+            .map(|g| (pos_map[&g].clone(), neg_map[&g].clone()))
+            .collect()
     } else {
         Vec::new()
     };
@@ -734,7 +755,11 @@ pub fn train_gbdt_regression(
     };
     // Hard gate: degenerate input (finding 3.6).
     if nf == 0 {
-        return gate_or_fallback(p.allow_degenerate, "regressor: zero features".into(), empty_regressor);
+        return gate_or_fallback(
+            p.allow_degenerate,
+            "regressor: zero features".into(),
+            empty_regressor,
+        );
     }
     if n_rows < MIN_TRAIN_ROWS {
         return gate_or_fallback(
@@ -892,9 +917,7 @@ pub fn train_gbdt_regression(
 
     let (r, r2) = pearson_r2(&raw_val_final, &val_y);
     let n = val_n;
-    eprintln!(
-        "train-gbdt: regression val Pearson r = {r:.4}  R2 = {r2:.4}  (n_val={n})"
-    );
+    eprintln!("train-gbdt: regression val Pearson r = {r:.4}  R2 = {r2:.4}  (n_val={n})");
 
     // Hard gates (finding 3.6): an empty ensemble or a model that doesn't beat
     // the mean is not deployable.
@@ -973,17 +996,27 @@ mod tests {
             for f in 0..nf {
                 x[r * nf + f] = lcg(&mut s);
             }
-            let label = if x[r * nf] + 0.2 * lcg(&mut s) > 0.6 { 1u8 } else { 0 };
+            let label = if x[r * nf] + 0.2 * lcg(&mut s) > 0.6 {
+                1u8
+            } else {
+                0
+            };
             y[r] = label;
             groups[r] = (r as u32) % 50;
         }
-        Dataset { x, y, groups, n_features: nf }
+        Dataset {
+            x,
+            y,
+            groups,
+            n_features: nf,
+        }
     }
 
     #[test]
     fn separable_data_trains_and_separates() {
         let ds = separable(6, 4000, 0x1234);
-        let model = train_gbdt(&ds, &TrainParams::default(), 0xC0FFEE).expect("separable passes gate");
+        let model =
+            train_gbdt(&ds, &TrainParams::default(), 0xC0FFEE).expect("separable passes gate");
         assert!(model.apply_sigmoid);
         assert_eq!(model.n_features as usize, 6);
         assert!(!model.trees.is_empty(), "should fit at least one tree");
@@ -1035,9 +1068,17 @@ mod tests {
             x[r * 3] = (r % 2) as f32;
             y[r] = (r % 2) as u8; // both classes, separable, but too few rows
         }
-        let ds = Dataset { x, y, groups: (0..n as u32).collect(), n_features: 3 };
+        let ds = Dataset {
+            x,
+            y,
+            groups: (0..n as u32).collect(),
+            n_features: 3,
+        };
         let m = train_gbdt(&ds, &TrainParams::default(), 7);
-        assert!(matches!(m, Err(TrainError::QualityGate(_))), "too few rows must fail gate, got {m:?}");
+        assert!(
+            matches!(m, Err(TrainError::QualityGate(_))),
+            "too few rows must fail gate, got {m:?}"
+        );
     }
 
     #[test]
@@ -1050,9 +1091,15 @@ mod tests {
             groups: (0..10).collect(),
             n_features: 3,
         };
-        let p = TrainParams { allow_degenerate: true, ..TrainParams::default() };
+        let p = TrainParams {
+            allow_degenerate: true,
+            ..TrainParams::default()
+        };
         let m = train_gbdt(&ds, &p, 1).expect("fallback returns a model");
-        assert!(m.trees.is_empty(), "fallback model is the degenerate empty model");
+        assert!(
+            m.trees.is_empty(),
+            "fallback model is the degenerate empty model"
+        );
     }
 
     #[test]
@@ -1079,13 +1126,24 @@ mod tests {
             y.push(2.0 * x0 - 1.0);
             g.push(i as u32); // each row its own group
         }
-        let ds = RegressionDataset { x, y, groups: g, n_features: nf };
+        let ds = RegressionDataset {
+            x,
+            y,
+            groups: g,
+            n_features: nf,
+        };
         let p = TrainParams::default();
         let model = train_gbdt_regression(&ds, &p, 42).expect("linear target passes gate");
         let lo: f32 = model.trees.iter().map(|t| t.eval(&[0.0, 0.5])).sum();
         let hi: f32 = model.trees.iter().map(|t| t.eval(&[1.0, 0.5])).sum();
         assert!(hi > lo + 0.5, "must be monotone in x0: lo={lo} hi={hi}");
-        assert!(!model.apply_sigmoid, "regression model must not apply sigmoid");
-        assert!(model.iso_x.is_empty(), "regression model must have no isotonic calibration");
+        assert!(
+            !model.apply_sigmoid,
+            "regression model must not apply sigmoid"
+        );
+        assert!(
+            model.iso_x.is_empty(),
+            "regression model must have no isotonic calibration"
+        );
     }
 }

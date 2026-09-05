@@ -1,18 +1,18 @@
 //! Scoring-model training and the Parquet model store.
-pub mod gbdt;
 pub mod accumulate;
+pub mod catalog;
 pub mod counts;
 pub mod estimate;
-pub mod geometry;
-pub mod catalog;
-pub mod select;
-pub mod labeled;
-pub mod store;
 pub mod gate;
+pub mod gbdt;
+pub mod geometry;
+pub mod labeled;
+pub mod select;
+pub mod store;
 
 // Re-export the most commonly used types at the crate root.
-pub use store::{ModelStore, RawManifestEntry, protocol_to_experiment_class};
-pub use select::{SelectionEntry, SelectionKey, select, select_nearest, parse_experiment_class};
+pub use select::{parse_experiment_class, select, select_nearest, SelectionEntry, SelectionKey};
+pub use store::{protocol_to_experiment_class, ModelStore, RawManifestEntry};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TrainError {

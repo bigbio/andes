@@ -12,7 +12,7 @@ use model_train::{
     estimate::EstimatorConfig,
     gate::{evaluate_candidate, YieldDelta},
     store::{
-        commit_update, update_add, update_remove, update_reweight, update_decay,
+        commit_update, update_add, update_decay, update_remove, update_reweight,
         write_model_with_sources, ModelStore, SourceLedger,
     },
 };
@@ -28,16 +28,24 @@ fn fixture_param() -> Param {
         env!("CARGO_MANIFEST_DIR"),
         "/../../resources/models"
     ));
-    let store = model_train::store::ModelStore::open(bundled)
-        .expect("open bundled model store");
-    store.load_param("hcd_qexactive_tryp")
+    let store = model_train::store::ModelStore::open(bundled).expect("open bundled model store");
+    store
+        .load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp from store")
 }
 
 fn make_stats_s0() -> CountStats {
     use scoring_crate::param_model::{IonType, Partition};
-    let pa = Partition { charge: 2, parent_mass: 800.0_f32, seg_num: 0 };
-    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 };
+    let pa = Partition {
+        charge: 2,
+        parent_mass: 800.0_f32,
+        seg_num: 0,
+    };
+    let ion = IonType::Prefix {
+        charge: 1,
+        offset_bits: 1.007_f32.to_bits(),
+        loss_class: 0,
+    };
 
     let mut s = CountStats::new();
     s.bump_rank(pa, ion, 0);
@@ -56,8 +64,16 @@ fn make_stats_s0() -> CountStats {
 
 fn make_stats_s1() -> CountStats {
     use scoring_crate::param_model::{IonType, Partition};
-    let pa = Partition { charge: 2, parent_mass: 800.0_f32, seg_num: 0 };
-    let ion = IonType::Prefix { charge: 1, offset_bits: 1.007_f32.to_bits(), loss_class: 0 };
+    let pa = Partition {
+        charge: 2,
+        parent_mass: 800.0_f32,
+        seg_num: 0,
+    };
+    let ion = IonType::Prefix {
+        charge: 1,
+        offset_bits: 1.007_f32.to_bits(),
+        loss_class: 0,
+    };
 
     let mut s = CountStats::new();
     s.bump_rank(pa, ion, 0);
@@ -107,7 +123,10 @@ fn add_then_remove_source_restores_model() {
     // Verify P0 round-trips.
     let store = ModelStore::open(&path).unwrap();
     let loaded_p0 = store.load_param("m").unwrap();
-    assert_eq!(p0, loaded_p0, "P0 must round-trip exactly through the store");
+    assert_eq!(
+        p0, loaded_p0,
+        "P0 must round-trip exactly through the store"
+    );
 
     // update_add: append s1.
     let s1 = make_stats_s1();
@@ -149,7 +168,10 @@ fn remove_nonexistent_source_errors() {
 
     let cfg = EstimatorConfig::default();
     let result = update_remove(&path, "m", "nonexistent", cfg);
-    assert!(result.is_err(), "removing a nonexistent source must return an error");
+    assert!(
+        result.is_err(),
+        "removing a nonexistent source must return an error"
+    );
 }
 
 /// Reweighting a source changes the estimated param and the stored weight.
@@ -163,18 +185,10 @@ fn reweight_source_changes_param() {
     let s1 = make_stats_s1();
     let ledger0 = make_ledger("s0");
     let ledger1 = make_ledger("s1");
-    write_model_with_sources(
-        &path,
-        "m",
-        &param,
-        &[(ledger0, s0), (ledger1, s1)],
-        None,
-    )
-    .unwrap();
+    write_model_with_sources(&path, "m", &param, &[(ledger0, s0), (ledger1, s1)], None).unwrap();
 
     let cfg = EstimatorConfig::default();
-    let (candidate, sources) =
-        update_reweight(&path, "m", "s1", 0.0, cfg).unwrap();
+    let (candidate, sources) = update_reweight(&path, "m", "s1", 0.0, cfg).unwrap();
     commit_update(&path, "m", &candidate, &sources).unwrap();
 
     // After reweight to 0, s1 contributes nothing — check the weight was stored.
@@ -243,7 +257,10 @@ fn commit_update_preserves_other_models() {
 
     // "m" must still load.
     let store = ModelStore::open(&path2).unwrap();
-    assert!(store.load_param("m").is_ok(), "model 'm' must survive commit_update");
+    assert!(
+        store.load_param("m").is_ok(),
+        "model 'm' must survive commit_update"
+    );
     let ledgers = store.load_sources("m").unwrap();
     assert_eq!(ledgers.len(), 2, "must have 2 sources after add+commit");
 }
@@ -257,13 +274,22 @@ fn commit_update_preserves_other_models() {
 #[test]
 fn acceptance_gate_rule() {
     // Directly test the YieldDelta accept rule without running a real search.
-    let accepted = YieldDelta { current_count: 10, candidate_count: 10 };
+    let accepted = YieldDelta {
+        current_count: 10,
+        candidate_count: 10,
+    };
     assert!(accepted.is_accepted(), "equal counts must be accepted");
 
-    let better = YieldDelta { current_count: 10, candidate_count: 15 };
+    let better = YieldDelta {
+        current_count: 10,
+        candidate_count: 15,
+    };
     assert!(better.is_accepted(), "higher candidate must be accepted");
 
-    let worse = YieldDelta { current_count: 10, candidate_count: 5 };
+    let worse = YieldDelta {
+        current_count: 10,
+        candidate_count: 5,
+    };
     assert!(!worse.is_accepted(), "lower candidate must be rejected");
 }
 
@@ -274,10 +300,10 @@ fn acceptance_gate_rule() {
 #[cfg(test)]
 #[test]
 fn acceptance_gate_same_model_is_accepted() {
-    use std::io::BufReader;
     use input::MgfReader;
     use model::{AminoAcidSetBuilder, ModLocation, Modification, ResidueSpec};
     use search::SearchParams;
+    use std::io::BufReader;
 
     fn fixture(rel: &str) -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -327,15 +353,8 @@ fn acceptance_gate_same_model_is_accepted() {
     let search_params = SearchParams::default_tryptic(aa);
 
     // Same scorer for both current and candidate → counts should be equal.
-    let delta = evaluate_candidate(
-        &spectra,
-        &bsa_fasta,
-        &scorer,
-        &scorer,
-        &search_params,
-        0.5,
-    )
-    .expect("evaluate_candidate must succeed");
+    let delta = evaluate_candidate(&spectra, &bsa_fasta, &scorer, &scorer, &search_params, 0.5)
+        .expect("evaluate_candidate must succeed");
 
     assert_eq!(
         delta.current_count, delta.candidate_count,

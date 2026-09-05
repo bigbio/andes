@@ -78,13 +78,15 @@ fn predicted_linear_intensity(g: &GbdtPeakModel, feats: &[f32]) -> f64 {
     if !log_rel.is_finite() {
         return 0.0;
     }
-    log_rel.clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP).exp()
+    log_rel
+        .clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP)
+        .exp()
 }
 
 use crate::frag_features::extract_frag_features;
-use crate::ion_features::extract_ion_features;
 use crate::gbdt_eval::GbdtPeakModel;
 use crate::intensity_model::{IntensityIonType, IntensityModel};
+use crate::ion_features::extract_ion_features;
 use crate::scoring::fragment_ions::{predict_by_ions, IonKind};
 use crate::scoring::ScoredSpectrum;
 
@@ -186,7 +188,14 @@ pub fn intensity_signal(
             match precomputed.and_then(|p| p.get(ion_idx).copied()) {
                 Some(v) => v,
                 None => {
-                    let feats = extract_frag_features(peptide, ion.kind, ion.position, precursor_charge, ion.charge, 0.0);
+                    let feats = extract_frag_features(
+                        peptide,
+                        ion.kind,
+                        ion.position,
+                        precursor_charge,
+                        ion.charge,
+                        0.0,
+                    );
                     predicted_linear_intensity(g, &feats)
                 }
             }
@@ -214,7 +223,9 @@ pub fn intensity_signal(
             // happy-path cosine is byte-identical; only add finiteness/clamp.
             let log_rel = f64::from(mean_log as f32);
             if log_rel.is_finite() {
-                log_rel.clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP).exp()
+                log_rel
+                    .clamp(-LOG_INTENSITY_CLAMP, LOG_INTENSITY_CLAMP)
+                    .exp()
             } else {
                 0.0
             }
@@ -357,9 +368,7 @@ pub fn mass_competition_evidence(
             };
             let ambiguity = theo_mz_list
                 .iter()
-                .filter(|&&theo| {
-                    (theo - obs).abs() <= tol_da && (theo - pred).abs() > 1e-9
-                })
+                .filter(|&&theo| (theo - obs).abs() <= tol_da && (theo - pred).abs() > 1e-9)
                 .count();
             let rho = scored_spec.local_peak_density(obs, DENSITY_HW);
             let competition = ambiguity as f64 + rho;
@@ -384,10 +393,7 @@ pub fn candidate_rank_entropy(scores: &[f32]) -> f32 {
         return 0.0;
     }
     let max_s = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let exp_scores: Vec<f64> = scores
-        .iter()
-        .map(|&s| f64::from(s - max_s).exp())
-        .collect();
+    let exp_scores: Vec<f64> = scores.iter().map(|&s| f64::from(s - max_s).exp()).collect();
     let sum: f64 = exp_scores.iter().sum();
     if sum <= 0.0 {
         return 0.0;
@@ -396,7 +402,11 @@ pub fn candidate_rank_entropy(scores: &[f32]) -> f32 {
         .iter()
         .map(|&e| {
             let p = e / sum;
-            if p > 0.0 { -p * p.ln() } else { 0.0 }
+            if p > 0.0 {
+                -p * p.ln()
+            } else {
+                0.0
+            }
         })
         .sum::<f64>() as f32
 }
@@ -418,9 +428,7 @@ pub struct StrongScoreInputs {
 /// - competition: `−mass_competition_evidence`
 /// - listwise: `candidate_rank_entropy − listwise_score_gap`
 pub fn fuse_strong_score(f: &StrongScoreInputs) -> f32 {
-    let null = -f.chance_match_surprise
-        - f.mass_competition_evidence
-        + f.candidate_rank_entropy
+    let null = -f.chance_match_surprise - f.mass_competition_evidence + f.candidate_rank_entropy
         - f.listwise_score_gap;
     f.intensity_signal - null
 }
@@ -566,16 +574,19 @@ pub fn rich_ion_llr(
             feature_tol
         };
         if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
-            rows_buf.push(extract_ion_features(
-                peptide,
-                scored_spec,
-                ion.kind,
-                ion.position,
-                precursor_charge,
-                ion.charge,
-                feature_tol,
-                feature_tol_is_ppm,
-            ).to_vec());
+            rows_buf.push(
+                extract_ion_features(
+                    peptide,
+                    scored_spec,
+                    ion.kind,
+                    ion.position,
+                    precursor_charge,
+                    ion.charge,
+                    feature_tol,
+                    feature_tol_is_ppm,
+                )
+                .to_vec(),
+            );
         }
     }
     if rows_buf.is_empty() {
@@ -707,10 +718,30 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let good = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true, None);
+        let good = intensity_signal(
+            Some(&model),
+            None,
+            &ss,
+            &peptide,
+            2,
+            "unknown",
+            20.0,
+            true,
+            None,
+        );
 
         let wrong_pep = pep(b"FGHIK");
-        let bad = intensity_signal(Some(&model), None, &ss, &wrong_pep, 2, "unknown", 20.0, true, None);
+        let bad = intensity_signal(
+            Some(&model),
+            None,
+            &ss,
+            &wrong_pep,
+            2,
+            "unknown",
+            20.0,
+            true,
+            None,
+        );
         assert!(good > bad, "good={good} bad={bad}");
         assert!(good > 0.1);
     }
@@ -820,13 +851,33 @@ mod tests {
             ..Default::default()
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let partial = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true, None);
+        let partial = intensity_signal(
+            Some(&model),
+            None,
+            &ss,
+            &peptide,
+            2,
+            "unknown",
+            20.0,
+            true,
+            None,
+        );
         let empty_spec = Spectrum {
             peaks: vec![(400.0, 1000.0)],
             ..Default::default()
         };
         let ss_empty = ScoredSpectrum::new_without_filtering(&empty_spec);
-        let none = intensity_signal(Some(&model), None, &ss_empty, &peptide, 2, "unknown", 20.0, true, None);
+        let none = intensity_signal(
+            Some(&model),
+            None,
+            &ss_empty,
+            &peptide,
+            2,
+            "unknown",
+            20.0,
+            true,
+            None,
+        );
         assert!(partial > none);
     }
 
@@ -839,12 +890,13 @@ mod tests {
             n_features: crate::frag_features::N_FRAG_FEATURES as u32,
             apply_sigmoid: false,
             trees: vec![Tree {
-                feature: vec![-1],            // single leaf node
+                feature: vec![-1], // single leaf node
                 threshold: vec![0.0],
                 left: vec![-1],
                 right: vec![-1],
                 value: vec![leaf_value],
-                default_left: vec![1] }],
+                default_left: vec![1],
+            }],
             iso_x: vec![],
             iso_y: vec![],
         };
@@ -856,16 +908,25 @@ mod tests {
     fn predicted_linear_intensity_is_finite_for_extreme_leaf() {
         // An extreme positive leaf would `exp` to +inf without the clamp.
         let g_big = const_leaf_gbdt(1.0e6);
-        let v = super::predicted_linear_intensity(&g_big, &[0.0f32; crate::frag_features::N_FRAG_FEATURES]);
+        let v = super::predicted_linear_intensity(
+            &g_big,
+            &[0.0f32; crate::frag_features::N_FRAG_FEATURES],
+        );
         assert!(v.is_finite(), "clamped exp must be finite, got {v}");
         assert!(v > 0.0);
         // An extreme negative leaf clamps toward 0, still finite.
         let g_small = const_leaf_gbdt(-1.0e6);
-        let v2 = super::predicted_linear_intensity(&g_small, &[0.0f32; crate::frag_features::N_FRAG_FEATURES]);
+        let v2 = super::predicted_linear_intensity(
+            &g_small,
+            &[0.0f32; crate::frag_features::N_FRAG_FEATURES],
+        );
         assert!(v2.is_finite() && v2 >= 0.0, "got {v2}");
         // A normal leaf (0.0) is unchanged: exp(0) == 1.
         let g0 = const_leaf_gbdt(0.0);
-        let v3 = super::predicted_linear_intensity(&g0, &[0.0f32; crate::frag_features::N_FRAG_FEATURES]);
+        let v3 = super::predicted_linear_intensity(
+            &g0,
+            &[0.0f32; crate::frag_features::N_FRAG_FEATURES],
+        );
         assert!((v3 - 1.0).abs() < 1e-9, "exp(0) must be 1.0, got {v3}");
     }
 
@@ -874,9 +935,13 @@ mod tests {
         // A frag model with an extreme leaf must not produce NaN/inf features.
         let g = const_leaf_gbdt(1.0e6);
         let peptide = pep(b"ARCDE");
-        let spec = Spectrum { peaks: vec![(300.0, 1000.0)], ..Default::default() };
+        let spec = Spectrum {
+            peaks: vec![(300.0, 1000.0)],
+            ..Default::default()
+        };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
-        let (explained, chance, topk) = frag_llr_battery(Some(&g), &ss, &peptide, 2, 20.0, true, None);
+        let (explained, chance, topk) =
+            frag_llr_battery(Some(&g), &ss, &peptide, 2, 20.0, true, None);
         for (name, v) in [("explained", explained), ("chance", chance), ("topk", topk)] {
             assert!(v.is_finite(), "{name} must be finite, got {v}");
         }
@@ -901,7 +966,17 @@ mod tests {
         let ss = ScoredSpectrum::new_without_filtering(&spec);
 
         // frag_model Some, table model None => should still compute cosine > 0.
-        let sig = intensity_signal(None, Some(&g), &ss, &peptide, 2, "unknown", 20.0, true, None);
+        let sig = intensity_signal(
+            None,
+            Some(&g),
+            &ss,
+            &peptide,
+            2,
+            "unknown",
+            20.0,
+            true,
+            None,
+        );
         assert!(sig > 0.0, "expected signal > 0 with frag model, got {sig}");
     }
 
@@ -926,10 +1001,23 @@ mod tests {
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
 
-        let with_table = intensity_signal(Some(&model), None, &ss, &peptide, 2, "unknown", 20.0, true, None);
+        let with_table = intensity_signal(
+            Some(&model),
+            None,
+            &ss,
+            &peptide,
+            2,
+            "unknown",
+            20.0,
+            true,
+            None,
+        );
         // Same call was already exercised in `missing_observed_ions_reduce_signal`;
         // just verify it's > 0 (table path active, not early-return).
-        assert!(with_table > 0.0, "table fallback expected > 0, got {with_table}");
+        assert!(
+            with_table > 0.0,
+            "table fallback expected > 0, got {with_table}"
+        );
     }
 
     #[test]
@@ -937,8 +1025,14 @@ mod tests {
         // No rich-ion model loaded ⇒ neutral additive feature (0.0), RankScore untouched.
         let peptide = pep(b"ARCDE");
         let predicted = predict_by_ions(&peptide, 1..=1);
-        let y3 = predicted.iter().find(|p| p.kind == IonKind::Y && p.position == 3).unwrap();
-        let spec = Spectrum { peaks: vec![(y3.mz, 1000.0)], ..Default::default() };
+        let y3 = predicted
+            .iter()
+            .find(|p| p.kind == IonKind::Y && p.position == 3)
+            .unwrap();
+        let spec = Spectrum {
+            peaks: vec![(y3.mz, 1000.0)],
+            ..Default::default()
+        };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         assert_eq!(rich_ion_llr(None, &ss, &peptide, 2, 20.0, true), 0.0);
     }
@@ -951,7 +1045,17 @@ mod tests {
         };
         let ss = ScoredSpectrum::new_without_filtering(&spec);
         // Both None => must return 0.0 exactly.
-        let sig = intensity_signal(None, None, &ss, &pep(b"ARCDE"), 2, "unknown", 20.0, true, None);
+        let sig = intensity_signal(
+            None,
+            None,
+            &ss,
+            &pep(b"ARCDE"),
+            2,
+            "unknown",
+            20.0,
+            true,
+            None,
+        );
         assert_eq!(sig, 0.0, "no predictor must yield 0.0");
     }
 }

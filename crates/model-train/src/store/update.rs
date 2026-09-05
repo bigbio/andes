@@ -103,7 +103,10 @@ pub fn update_add(
     // Reject a duplicate source_id: appending it would list the source twice and
     // `estimate_from_sources` would double-count its weighted stats. Callers that
     // want to change an existing source should use --reweight / --remove-source.
-    if existing_ledgers.iter().any(|l| l.source_id == ledger.source_id) {
+    if existing_ledgers
+        .iter()
+        .any(|l| l.source_id == ledger.source_id)
+    {
         return Err(TrainError::Other(format!(
             "source '{}' already exists in model '{model_id}'; \
              use --reweight to change its weight or --remove-source first",
@@ -307,13 +310,16 @@ pub fn commit_update(
     // Write ALL models (including the updated one) using a single
     // write_all_models_with_sources_inner call. The updated model inherits
     // any GBDT blob from new_param.gbdt_peak_model.
-    let all_entries: Vec<_> = std::iter::once((model_id.to_string(), new_param, new_sources.to_vec()))
-        .chain(other_models.iter().map(|(id, p, s)| (id.clone(), p, s.clone())))
-        .collect();
+    let all_entries: Vec<_> =
+        std::iter::once((model_id.to_string(), new_param, new_sources.to_vec()))
+            .chain(
+                other_models
+                    .iter()
+                    .map(|(id, p, s)| (id.clone(), p, s.clone())),
+            )
+            .collect();
     let new_blob = new_param.gbdt_peak_model.as_ref().map(|m| m.to_bytes());
-    let all_blobs: Vec<Option<Vec<u8>>> = std::iter::once(new_blob)
-        .chain(other_blobs)
-        .collect();
+    let all_blobs: Vec<Option<Vec<u8>>> = std::iter::once(new_blob).chain(other_blobs).collect();
     let entries_slice: Vec<_> = all_entries
         .iter()
         .map(|(id, p, s)| (id.as_str(), *p, s.as_slice()))
@@ -408,9 +414,9 @@ fn write_all_models_with_sources_inner(
         "blobs slice must be 1:1 with models"
     );
     use crate::store::schema::combined_schema;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::ArrowWriter;
     use parquet::file::properties::WriterProperties;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     let schema = combined_schema();
     let props = WriterProperties::builder().build();
@@ -427,17 +433,23 @@ fn write_all_models_with_sources_inner(
         let tmp_file = std::fs::File::open(&tmp_path)?;
         let builder = ParquetRecordBatchReaderBuilder::try_new(tmp_file)
             .map_err(|e| TrainError::Parquet(e.to_string()))?;
-        let reader = builder.build().map_err(|e| TrainError::Parquet(e.to_string()))?;
+        let reader = builder
+            .build()
+            .map_err(|e| TrainError::Parquet(e.to_string()))?;
         for batch in reader {
             let batch = batch.map_err(|e| TrainError::Parquet(e.to_string()))?;
             if batch.num_rows() > 0 {
-                writer.write(&batch).map_err(|e| TrainError::Parquet(e.to_string()))?;
+                writer
+                    .write(&batch)
+                    .map_err(|e| TrainError::Parquet(e.to_string()))?;
             }
         }
         let _ = std::fs::remove_file(&tmp_path); // best-effort cleanup
     }
 
-    writer.close().map_err(|e| TrainError::Parquet(e.to_string()))?;
+    writer
+        .close()
+        .map_err(|e| TrainError::Parquet(e.to_string()))?;
     Ok(())
 }
 
@@ -486,10 +498,7 @@ fn julian_day_number(y: i32, m: u32, d: u32) -> i64 {
     let a = (14 - m as i32) / 12;
     let y2 = y + 4800 - a;
     let m2 = m as i32 + 12 * a - 3;
-    d as i64 + (153 * m2 + 2) as i64 / 5
-        + 365 * y2 as i64
-        + y2 as i64 / 4
-        - y2 as i64 / 100
+    d as i64 + (153 * m2 + 2) as i64 / 5 + 365 * y2 as i64 + y2 as i64 / 4 - y2 as i64 / 100
         + y2 as i64 / 400
         - 32045
 }
@@ -512,6 +521,9 @@ mod weight_validation_tests {
         assert!(validate_weight("s", f32::INFINITY).is_err(), "inf");
         assert!(validate_weight("s", f32::NEG_INFINITY).is_err(), "-inf");
         assert!(validate_weight("s", -1.0).is_err(), "negative");
-        assert!(validate_weight("s", MAX_SOURCE_WEIGHT * 2.0).is_err(), "too large");
+        assert!(
+            validate_weight("s", MAX_SOURCE_WEIGHT * 2.0).is_err(),
+            "too large"
+        );
     }
 }

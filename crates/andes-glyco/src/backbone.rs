@@ -191,8 +191,14 @@ pub fn solve_backbone_min(
 
     // Two-pass: collect best-weight per (backbone_bin, rung) then aggregate.
     // We use a flat HashMap keyed by (backbone_bin, rung_idx) for efficiency.
-    let mut rung_best: HashMap<(i64, u8), (f64 /*best_w*/, f64 /*mass for centroid*/, u32 /*vote count*/)> =
-        HashMap::new();
+    let mut rung_best: HashMap<
+        (i64, u8),
+        (
+            f64, /*best_w*/
+            f64, /*mass for centroid*/
+            u32, /*vote count*/
+        ),
+    > = HashMap::new();
 
     // Per-rung weights: Y0 (bare backbone) and Y1 (first HexNAc) are the most
     // diagnostic evidence for a specific backbone mass; they are unique to the
@@ -239,9 +245,7 @@ pub fn solve_backbone_min(
                 let rw = RUNG_WEIGHT[ri_u8 as usize];
                 let weighted_w = w * rw;
                 for k in (key - tol_key)..=(key + tol_key) {
-                    let e = rung_best
-                        .entry((k, ri_u8))
-                        .or_insert((0.0, 0.0, 0));
+                    let e = rung_best.entry((k, ri_u8)).or_insert((0.0, 0.0, 0));
                     // keep the best rung-weighted intensity seen (charge-dedup)
                     if weighted_w > e.0 {
                         e.0 = weighted_w;
@@ -276,14 +280,17 @@ pub fn solve_backbone_min(
     let sorted_peaks: Vec<(f64, f32)>;
     let sorted_norm: Vec<f64>;
     let (sp, sn): (&[(f64, f32)], &[f64]) = {
-        let already_sorted = peaks
-            .windows(2)
-            .all(|w| w[0].0 <= w[1].0);
+        let already_sorted = peaks.windows(2).all(|w| w[0].0 <= w[1].0);
         if already_sorted {
             (peaks, &norm_sqrt)
         } else {
             let mut idx: Vec<usize> = (0..peaks.len()).collect();
-            idx.sort_by(|&a, &b| peaks[a].0.partial_cmp(&peaks[b].0).unwrap_or(std::cmp::Ordering::Equal));
+            idx.sort_by(|&a, &b| {
+                peaks[a]
+                    .0
+                    .partial_cmp(&peaks[b].0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             sorted_peaks = idx.iter().map(|&i| peaks[i]).collect();
             sorted_norm = idx.iter().map(|&i| norm_sqrt[i]).collect();
             (&sorted_peaks, &sorted_norm)
@@ -339,8 +346,7 @@ pub fn solve_backbone_min(
             .then({
                 let sa = a.intensity_score + a.complement_score * COMPLEMENT_WEIGHT;
                 let sb = b.intensity_score + b.complement_score * COMPLEMENT_WEIGHT;
-                sb.partial_cmp(&sa)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
             })
             .then(
                 a.backbone_mass
@@ -606,7 +612,10 @@ fn glycan_cumulative_adds(comp: &crate::glycan_db::GlycanComp) -> Vec<f64> {
     let mut adds: Vec<f64> = Vec::new();
     adds.extend(std::iter::repeat_n(HEXNAC, core_hexnac as usize));
     adds.extend(std::iter::repeat_n(HEX, core_hex as usize));
-    adds.extend(std::iter::repeat_n(HEXNAC, (comp.hexnac - core_hexnac) as usize));
+    adds.extend(std::iter::repeat_n(
+        HEXNAC,
+        (comp.hexnac - core_hexnac) as usize,
+    ));
     adds.extend(std::iter::repeat_n(HEX, (comp.hex - core_hex) as usize));
     adds.extend(std::iter::repeat_n(FUC, comp.fuc as usize));
     adds.extend(std::iter::repeat_n(NEUAC, comp.neuac as usize));
@@ -911,7 +920,13 @@ pub fn acceptor_core_y_gate(
         return false;
     }
     // Y1 (peptide + innermost HexNAc) is mandatory among the matched rungs.
-    best_frag_intensity(peaks, stats.sorted, bb + CORE_Y_STEPS[0], tol_ppm, max_charge) > 0.0
+    best_frag_intensity(
+        peaks,
+        stats.sorted,
+        bb + CORE_Y_STEPS[0],
+        tol_ppm,
+        max_charge,
+    ) > 0.0
 }
 
 #[cfg(test)]
@@ -998,16 +1013,24 @@ mod tests {
         let bb = 2000.0_f64; // water-included neutral backbone
         let mz2 = |neutral: f64| (neutral + 2.0 * PROTON) / 2.0; // 2+ observed m/z
         let mut peaks = vec![
-            (mz2(bb), 100.0f32),                    // Y0 as 2+
-            (mz2(bb + CORE_Y_STEPS[0]), 100.0f32),  // Y1 as 2+
-            (mz2(bb + CORE_Y_STEPS[1]), 100.0f32),  // Y2 as 2+
+            (mz2(bb), 100.0f32),                   // Y0 as 2+
+            (mz2(bb + CORE_Y_STEPS[0]), 100.0f32), // Y1 as 2+
+            (mz2(bb + CORE_Y_STEPS[1]), 100.0f32), // Y2 as 2+
         ];
         peaks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let stats = SpectrumStats::new(&peaks);
         // +1-only matching misses all three 2+ ions.
-        assert_eq!(count_core_y_hits(&peaks, &stats, bb, 20.0, 1), 0, "z=1-only must miss 2+ Y-ions");
+        assert_eq!(
+            count_core_y_hits(&peaks, &stats, bb, 20.0, 1),
+            0,
+            "z=1-only must miss 2+ Y-ions"
+        );
         // Matching up to +2 recovers them.
-        assert_eq!(count_core_y_hits(&peaks, &stats, bb, 20.0, 2), 3, "z<=2 must match the 2+ Y-ions");
+        assert_eq!(
+            count_core_y_hits(&peaks, &stats, bb, 20.0, 2),
+            3,
+            "z<=2 must match the 2+ Y-ions"
+        );
         assert!(core_y_intensity(&peaks, &stats, bb, 20.0, 2) > 0.0);
     }
 
@@ -1051,7 +1074,11 @@ mod tests {
         let out = solve_backbone(&peaks, precursor, 2, 20.0, 5);
         assert!(!out.is_empty());
         // dedup_by merges candidates within 0.05 Da; the surviving rep may be up to 0.05 Da off
-        assert!((out[0].backbone_mass - bb).abs() < 0.05, "got {}", out[0].backbone_mass);
+        assert!(
+            (out[0].backbone_mass - bb).abs() < 0.05,
+            "got {}",
+            out[0].backbone_mass
+        );
         assert!(out[0].core_y_hits >= 2);
     }
 
@@ -1077,8 +1104,14 @@ mod tests {
         let bb = 1500.0_f64; // neutral backbone
 
         // True composition HexNAc2Hex3 (trimannosyl core).
-        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
-                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        let truth = GlycanComp {
+            hexnac: 2,
+            hex: 3,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 2.0 * HEXNAC + 3.0 * HEX,
+        };
         // Build the spectrum from the TRUE composition's Y-ladder.
         let mut cum = 0.0;
         let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 1000.0)]; // Y0
@@ -1094,14 +1127,25 @@ mod tests {
         // HexNAc3Hex2Fuc? keep same mass by construction is hard; instead use a
         // composition whose intermediate Y-ions differ (Hex-first is not built,
         // but HexNAc5 has different steps). Use HexNAc1Hex4 (~same count, diff steps).
-        let decoy = GlycanComp { hexnac: 1, hex: 4, fuc: 0, neuac: 0, neugc: 0,
-                                 mass: 1.0 * HEXNAC + 4.0 * HEX };
+        let decoy = GlycanComp {
+            hexnac: 1,
+            hex: 4,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 1.0 * HEXNAC + 4.0 * HEX,
+        };
 
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
         let s_decoy = glycan_y_intensity(&peaks, &stats, bb, &decoy, 20.0, 3);
-        assert!(s_true > s_decoy,
-            "true composition Y-ladder ({s_true}) must beat the decoy ({s_decoy})");
-        assert!(s_true > 0.0, "true composition must have positive Y-ladder intensity");
+        assert!(
+            s_true > s_decoy,
+            "true composition Y-ladder ({s_true}) must beat the decoy ({s_decoy})"
+        );
+        assert!(
+            s_true > 0.0,
+            "true composition must have positive Y-ladder intensity"
+        );
     }
 
     /// G2 Y0/Y1 peptide-mass ANCHOR: the score must be (a) high when the Y0 (bare
@@ -1115,12 +1159,12 @@ mod tests {
         use crate::glycan_mass::HEXNAC;
         let bb_a = 1500.0_f64; // neutral peptide mass A
         let bb_b = 1650.0_f64; // a different peptide mass B
-        // Spectrum carries Y0/Y1 (1+ and 2+) for backbone A only, plus noise.
+                               // Spectrum carries Y0/Y1 (1+ and 2+) for backbone A only, plus noise.
         let peaks: Vec<(f64, f32)> = vec![
-            (bb_a + PROTON, 1000.0),                       // Y0 1+
-            (bb_a + HEXNAC + PROTON, 800.0),               // Y1 1+
-            ((bb_a + 2.0 * PROTON) / 2.0, 500.0),          // Y0 2+
-            (204.087, 300.0),                              // oxonium noise
+            (bb_a + PROTON, 1000.0),              // Y0 1+
+            (bb_a + HEXNAC + PROTON, 800.0),      // Y1 1+
+            ((bb_a + 2.0 * PROTON) / 2.0, 500.0), // Y0 2+
+            (204.087, 300.0),                     // oxonium noise
         ];
         let stats = SpectrumStats::new(&peaks);
         let a = y0y1_anchor_intensity(&peaks, &stats, bb_a, 2, 20.0);
@@ -1131,7 +1175,10 @@ mod tests {
         // No Y0/Y1 anywhere → zero.
         let empty = vec![(204.087, 100.0), (366.14, 80.0)];
         let stats_empty = SpectrumStats::new(&empty);
-        assert_eq!(y0y1_anchor_intensity(&empty, &stats_empty, bb_a, 2, 20.0), 0.0);
+        assert_eq!(
+            y0y1_anchor_intensity(&empty, &stats_empty, bb_a, 2, 20.0),
+            0.0
+        );
     }
 
     /// G3 glycan-axis decoy: a DECOY glycan ladder keeps Y0/Y1 (core anchor +
@@ -1145,8 +1192,14 @@ mod tests {
         use crate::glycan_mass::{HEX, HEXNAC};
         let proton = PROTON;
         let bb = 1500.0_f64;
-        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
-                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        let truth = GlycanComp {
+            hexnac: 2,
+            hex: 3,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 2.0 * HEXNAC + 3.0 * HEX,
+        };
         // Spectrum built from the TRUE composition's full Y-ladder.
         let mut cum = 0.0;
         let mut peaks: Vec<(f64, f32)> = vec![(bb + proton, 1000.0)]; // Y0
@@ -1159,13 +1212,18 @@ mod tests {
 
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
         let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
-        assert!(s_decoy < s_true,
-            "decoy ladder ({s_decoy}) must score below the target ({s_true})");
+        assert!(
+            s_decoy < s_true,
+            "decoy ladder ({s_decoy}) must score below the target ({s_true})"
+        );
         // Decoy still retains Y0 + Y1 (bb + first HexNAc), so it is > 0 but small.
         assert!(s_decoy > 0.0, "decoy keeps Y0/Y1 anchor, should be > 0");
         // Determinism: same seed → identical score.
         let s_decoy2 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 12345);
-        assert!((s_decoy - s_decoy2).abs() < 1e-12, "decoy must be deterministic");
+        assert!(
+            (s_decoy - s_decoy2).abs() < 1e-12,
+            "decoy must be deterministic"
+        );
     }
 
     /// EXCHANGEABILITY regression: on a spectrum whose kept Y0/Y1 anchors appear
@@ -1179,8 +1237,14 @@ mod tests {
         use crate::glycan_db::GlycanComp;
         use crate::glycan_mass::{HEX, HEXNAC};
         let bb = 3200.0_f64; // large backbone → anchors observed at z=2
-        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
-                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        let truth = GlycanComp {
+            hexnac: 2,
+            hex: 3,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 2.0 * HEXNAC + 3.0 * HEX,
+        };
         // Build the ladder as DOUBLY-charged ions only: m/z = (neutral + 2·PROTON)/2.
         let mz2 = |neutral: f64| (neutral + 2.0 * PROTON) / 2.0;
         let mut cum = 0.0;
@@ -1198,14 +1262,21 @@ mod tests {
         // Fixed decoy keeps Y0 (z=2) + Y1 (z=2) → strictly positive. The OLD +1-only
         // decoy would have scored 0.0 here (the bug this test guards against).
         let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 777);
-        assert!(s_decoy > 0.0,
-            "decoy must match multi-charge Y0/Y1 anchors (exchangeable null); got {s_decoy}");
-        assert!(s_decoy < s_true,
-            "decoy ({s_decoy}) still below target ({s_true}): interior rungs shifted away");
+        assert!(
+            s_decoy > 0.0,
+            "decoy must match multi-charge Y0/Y1 anchors (exchangeable null); got {s_decoy}"
+        );
+        assert!(
+            s_decoy < s_true,
+            "decoy ({s_decoy}) still below target ({s_true}): interior rungs shifted away"
+        );
         // With max_charge=1 the z=2-only anchors vanish for BOTH → both ~0 (proves the
         // matcher, not a coincidence, drives the score).
         let s_decoy_z1 = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 1, 777);
-        assert!(s_decoy_z1 == 0.0, "z=1 matcher cannot see z=2 anchors; got {s_decoy_z1}");
+        assert!(
+            s_decoy_z1 == 0.0,
+            "z=1 matcher cannot see z=2 anchors; got {s_decoy_z1}"
+        );
     }
 
     /// Top-rung-KEPT regression: the decoy is mass-preserving, so its top rung sits
@@ -1218,8 +1289,14 @@ mod tests {
         use crate::glycan_db::GlycanComp;
         use crate::glycan_mass::{HEX, HEXNAC};
         let bb = 1500.0_f64;
-        let truth = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0,
-                                 mass: 2.0 * HEXNAC + 3.0 * HEX };
+        let truth = GlycanComp {
+            hexnac: 2,
+            hex: 3,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 2.0 * HEXNAC + 3.0 * HEX,
+        };
         let full = 2.0 * HEXNAC + 3.0 * HEX; // total glycan mass = last cumulative add
         let hexnac = HEXNAC;
         // Only Y0 (bb), Y1 (bb + HexNAc) and the TOP rung (bb + full) are present.
@@ -1232,8 +1309,10 @@ mod tests {
         let stats = SpectrumStats::new(&peaks);
         let s_true = glycan_y_intensity(&peaks, &stats, bb, &truth, 20.0, 3);
         let s_decoy = glycan_y_intensity_decoy(&peaks, &stats, bb, &truth, 20.0, 3, 42);
-        assert!((s_true - s_decoy).abs() < 1e-12,
-            "target ({s_true}) and decoy ({s_decoy}) must match when only kept rungs are present");
+        assert!(
+            (s_true - s_decoy).abs() < 1e-12,
+            "target ({s_true}) and decoy ({s_decoy}) must match when only kept rungs are present"
+        );
     }
 
     /// Convention + intensity regression: the core-Y ladder ions live at the
@@ -1255,11 +1334,21 @@ mod tests {
         let stats = SpectrumStats::new(&peaks);
 
         // NEUTRAL input → full ladder (6 rungs), positive intensity.
-        assert_eq!(count_core_y_hits(&peaks, &stats, neutral, 20.0, 3), 6, "neutral must match all 6 rungs");
+        assert_eq!(
+            count_core_y_hits(&peaks, &stats, neutral, 20.0, 3),
+            6,
+            "neutral must match all 6 rungs"
+        );
         let inten = core_y_intensity(&peaks, &stats, neutral, 20.0, 3);
-        assert!(inten > 0.0, "core_y_intensity must be positive for a real ladder, got {inten}");
+        assert!(
+            inten > 0.0,
+            "core_y_intensity must be positive for a real ladder, got {inten}"
+        );
         // Y0 (1.0 normalised) + 5×0.5 = 3.5 expected.
-        assert!((inten - 3.5).abs() < 1e-6, "expected 3.5 normalised intensity, got {inten}");
+        assert!(
+            (inten - 3.5).abs() < 1e-6,
+            "expected 3.5 normalised intensity, got {inten}"
+        );
 
         // RESIDUE input (neutral − H2O) → the ladder is missed (wrong convention).
         let residue = neutral - H2O;
@@ -1276,7 +1365,14 @@ mod tests {
         use crate::glycan_db::GlycanComp;
         use crate::glycan_mass::{HEX, HEXNAC};
         let bb = 1500.0_f64;
-        let g = GlycanComp { hexnac: 2, hex: 3, fuc: 0, neuac: 0, neugc: 0, mass: 2.0 * HEXNAC + 3.0 * HEX };
+        let g = GlycanComp {
+            hexnac: 2,
+            hex: 3,
+            fuc: 0,
+            neuac: 0,
+            neugc: 0,
+            mass: 2.0 * HEXNAC + 3.0 * HEX,
+        };
         // Full ladder present (Y0 + all 5 cumulative adds).
         let mut full: Vec<(f64, f32)> = vec![(bb + PROTON, 1000.0)];
         let mut cum = 0.0;
@@ -1286,7 +1382,10 @@ mod tests {
         }
         full.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let sf = SpectrumStats::new(&full);
-        assert!((glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs() < 1e-9, "full ladder → 1.0");
+        assert!(
+            (glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, None) - 1.0).abs() < 1e-9,
+            "full ladder → 1.0"
+        );
         // Only Y0 present → 1/6.
         let p0 = vec![(bb + PROTON, 1000.0)];
         let s0 = SpectrumStats::new(&p0);
@@ -1294,7 +1393,10 @@ mod tests {
         assert!((f0 - 1.0 / 6.0).abs() < 1e-9, "Y0 only → 1/6, got {f0}");
         // Decoy shifts interior rungs → fewer of ITS rungs match the true ladder.
         let dec = glycan_y_hit_frac(&full, &sf, bb, &g, 20.0, 3, Some(123));
-        assert!(dec < 1.0, "decoy ladder must miss shifted interior rungs, got {dec}");
+        assert!(
+            dec < 1.0,
+            "decoy ladder must miss shifted interior rungs, got {dec}"
+        );
     }
 
     /// Transfer acceptor gate: ≥min_hits core-Y AND Y1 (bb+HexNAc) mandatory.
@@ -1303,25 +1405,37 @@ mod tests {
         let bb = 1500.0_f64; // neutral backbone
         let mk = |rungs: &[usize]| {
             // rung 0 = Y0 (bb), rung k>=1 = bb + CORE_Y_STEPS[k-1].
-            let mut peaks: Vec<(f64, f32)> = rungs.iter().map(|&k| {
-                let neutral = if k == 0 { bb } else { bb + CORE_Y_STEPS[k - 1] };
-                (neutral + PROTON, 500.0)
-            }).collect();
+            let mut peaks: Vec<(f64, f32)> = rungs
+                .iter()
+                .map(|&k| {
+                    let neutral = if k == 0 { bb } else { bb + CORE_Y_STEPS[k - 1] };
+                    (neutral + PROTON, 500.0)
+                })
+                .collect();
             peaks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
             peaks
         };
         // Y0, Y1, Y2 present (3 hits incl Y1) → PASS at min_hits=3.
         let p = mk(&[0, 1, 2]);
         let s = SpectrumStats::new(&p);
-        assert!(acceptor_core_y_gate(&p, &s, bb, 20.0, 3, 3), "3 rungs incl Y1 must pass");
+        assert!(
+            acceptor_core_y_gate(&p, &s, bb, 20.0, 3, 3),
+            "3 rungs incl Y1 must pass"
+        );
         // Only Y0, Y1 (2 hits) → FAIL at min_hits=3.
         let p2 = mk(&[0, 1]);
         let s2 = SpectrumStats::new(&p2);
-        assert!(!acceptor_core_y_gate(&p2, &s2, bb, 20.0, 3, 3), "<3 rungs must fail");
+        assert!(
+            !acceptor_core_y_gate(&p2, &s2, bb, 20.0, 3, 3),
+            "<3 rungs must fail"
+        );
         // Y0, Y2, Y3 (3 hits but NO Y1) → FAIL (Y1 mandatory).
         let p3 = mk(&[0, 2, 3]);
         let s3 = SpectrumStats::new(&p3);
-        assert!(!acceptor_core_y_gate(&p3, &s3, bb, 20.0, 3, 3), "missing Y1 must fail even with 3 rungs");
+        assert!(
+            !acceptor_core_y_gate(&p3, &s3, bb, 20.0, 3, 3),
+            "missing Y1 must fail even with 3 rungs"
+        );
     }
 
     #[test]
@@ -1458,7 +1572,7 @@ mod tests {
         // A valid b-ion at b_mz and its complement y at y_mz = (true_bb + BY_COMPLEMENT_OFFSET) - b_mz.
         // Choose b_mz values far from the core-Y peaks to avoid confusion.
         let comp_target = true_bb + BY_COMPLEMENT_OFFSET; // 1500 + 20.025118 = 1520.025118
-        // Three b/y pairs: b at 300, 450, 600 Da → y = comp_target - b
+                                                          // Three b/y pairs: b at 300, 450, 600 Da → y = comp_target - b
         for &b_mz in &[300.0_f64, 450.0, 600.0] {
             let y_mz = comp_target - b_mz;
             // Only add if y_mz > 0 and distinct from existing peaks

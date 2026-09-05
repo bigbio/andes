@@ -55,8 +55,7 @@ use model_train::{
 
 /// Path to the bundled Parquet store (`resources/models/`).
 fn bundled_store_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/models")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models")
 }
 
 /// Standard HCD/tryptic amino-acid set: Carbamidomethyl-C (fixed) + Oxidation-M (variable).
@@ -92,9 +91,7 @@ fn standard_aa_set() -> model::AminoAcidSet {
 fn load_mzml(path: &Path) -> Vec<model::Spectrum> {
     let file = File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
     let reader = BufReader::new(file);
-    MzMLReader::new(reader)
-        .filter_map(|r| r.ok())
-        .collect()
+    MzMLReader::new(reader).filter_map(|r| r.ok()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -118,8 +115,8 @@ fn trained_model_yield_not_worse_than_fallback() {
 
     // ── Resolve paths ─────────────────────────────────────────────────────────
     let train_mzml = bench_dir.join("train.mzML");
-    let db_fasta   = bench_dir.join("db.fasta");
-    let val_mzml   = bench_dir.join("validate.mzML");
+    let db_fasta = bench_dir.join("db.fasta");
+    let val_mzml = bench_dir.join("validate.mzML");
 
     // validate.mzML is optional; fall back to training spectra if absent.
     let val_mzml_path: &Path = if val_mzml.exists() {
@@ -156,13 +153,15 @@ fn trained_model_yield_not_worse_than_fallback() {
     // ── Step 2: load bundled seed model ───────────────────────────────────────
     eprintln!("loading bundled seed model hcd_qexactive_tryp");
     let store_path = bundled_store_path();
-    let store = ModelStore::open(&store_path)
-        .expect("failed to open bundled model store");
+    let store = ModelStore::open(&store_path).expect("failed to open bundled model store");
     let seed_param: Param = store
         .load_param("hcd_qexactive_tryp")
         .expect("hcd_qexactive_tryp not found in bundled store");
     let seed_scorer = RankScorer::new(&seed_param);
-    eprintln!("  seed model loaded ({} partitions)", seed_param.partitions.len());
+    eprintln!(
+        "  seed model loaded ({} partitions)",
+        seed_param.partitions.len()
+    );
 
     // ── Step 3a: bootstrap confident labels from the training spectra ─────────
     let search_params = SearchParams::default_tryptic(standard_aa_set());
@@ -194,10 +193,16 @@ fn trained_model_yield_not_worse_than_fallback() {
     let estimator = Estimator::new(EstimatorConfig::default());
     let trained_param = estimator.estimate(&merged_stats, &seed_param);
     let trained_scorer = RankScorer::new(&trained_param);
-    eprintln!("  trained model estimated ({} partitions)", trained_param.partitions.len());
+    eprintln!(
+        "  trained model estimated ({} partitions)",
+        trained_param.partitions.len()
+    );
 
     // ── Step 4: load validation spectra ──────────────────────────────────────
-    eprintln!("loading validation spectra from {}", val_mzml_path.display());
+    eprintln!(
+        "loading validation spectra from {}",
+        val_mzml_path.display()
+    );
     let val_spectra = load_mzml(val_mzml_path);
     assert!(
         !val_spectra.is_empty(),
@@ -210,8 +215,8 @@ fn trained_model_yield_not_worse_than_fallback() {
     let delta = evaluate_candidate(
         &val_spectra,
         &db_fasta,
-        &seed_scorer,   // current (fallback)
-        &trained_scorer,// candidate (trained)
+        &seed_scorer,    // current (fallback)
+        &trained_scorer, // candidate (trained)
         &search_params,
         0.01_f64,
     )

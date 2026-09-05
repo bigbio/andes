@@ -71,14 +71,14 @@
 
 use std::io::{self, BufWriter, Write};
 
-use model::mass::{ISOTOPE, PROTON};
 use crate::percolator_enz::{count_internal_enzymatic, is_enzymatic_boundary};
 use crate::row_context::{iter_ranked_by_rank_score, RowContext};
+use model::mass::{ISOTOPE, PROTON};
+use model::spectrum::Spectrum;
 use search::candidate_gen::Candidate;
 use search::psm::{PsmMatch, TopNQueue};
 use search::search_index::SearchIndex;
 use search::search_params::SearchParams;
-use model::spectrum::Spectrum;
 
 // ── shared SpecId formatting ───────────────────────────────────────────────────
 
@@ -99,7 +99,13 @@ use model::spectrum::Spectrum;
 /// (under `--chimeric` or when ties at queue capacity are retained), in which
 /// case `_{row_idx}` disambiguates SpecIds that would otherwise collide on equal
 /// `rank`. Single-row scans keep the historical `specID_scan_rank` format.
-pub fn format_spec_id(spec_id: &str, scan: i32, rank: u32, row_idx: usize, multi_row: bool) -> String {
+pub fn format_spec_id(
+    spec_id: &str,
+    scan: i32,
+    rank: u32,
+    row_idx: usize,
+    multi_row: bool,
+) -> String {
     if multi_row {
         format!("{spec_id}_{scan}_{rank}_{row_idx}")
     } else {
@@ -153,7 +159,11 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
     // column, which writes `psm.score.round() as i32`).
     let rank_score = psm.score.round() as i32 as f64;
     // DeltaRankScore is per-spectrum and emitted only on the rank-1 row.
-    let delta_rank_score = if rank == 1 { f.delta_raw_score as f64 } else { 0.0 };
+    let delta_rank_score = if rank == 1 {
+        f.delta_raw_score as f64
+    } else {
+        0.0
+    };
     vec![
         ("RankScore", rank_score, Int),
         ("isotope_error", psm.isotope_offset as f64, Int),
@@ -161,11 +171,27 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("longest_b", f.longest_b as f64, Int),
         ("longest_y", f.longest_y as f64, Int),
         ("longest_y_pct", f.longest_y_pct as f64, Fixed6),
-        ("ExplainedIonCurrentRatio", f.explained_ion_current_ratio as f64, Double),
-        ("NTermIonCurrentRatio", f.n_term_ion_current_ratio as f64, Double),
-        ("CTermIonCurrentRatio", f.c_term_ion_current_ratio as f64, Double),
+        (
+            "ExplainedIonCurrentRatio",
+            f.explained_ion_current_ratio as f64,
+            Double,
+        ),
+        (
+            "NTermIonCurrentRatio",
+            f.n_term_ion_current_ratio as f64,
+            Double,
+        ),
+        (
+            "CTermIonCurrentRatio",
+            f.c_term_ion_current_ratio as f64,
+            Double,
+        ),
         ("MS2IonCurrent", f.ms2_ion_current as f64, Double),
-        ("IsolationWindowEfficiency", f.isolation_window_efficiency as f64, Double),
+        (
+            "IsolationWindowEfficiency",
+            f.isolation_window_efficiency as f64,
+            Double,
+        ),
         ("MeanErrorTop7", f.mean_error_top7 as f64, Double),
         ("StdevErrorTop7", f.stdev_error_top7 as f64, Double),
         ("MeanRelErrorTop7", f.mean_rel_error_top7 as f64, Double),
@@ -178,12 +204,36 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("TailorScore", f.tailor_score as f64, Double),
         ("PpmGaussianScore", f.ppm_gaussian_score as f64, Double),
         ("NeutralLossIonCount", f.neutral_loss_ion_count as f64, Int),
-        ("LongestComplementaryLadder", f.longest_complementary_ladder as f64, Int),
-        ("ComplementaryIonBalance", f.complementary_ion_balance as f64, Double),
-        ("MeanMatchedIntensityRank", f.mean_matched_intensity_rank as f64, Double),
-        ("DoublyChargedMatchedIonCount", f.doubly_charged_matched_ion_count as f64, Int),
-        ("UniqueMatchFraction", f.unique_match_fraction as f64, Double),
-        ("ChanceMatchSurprise", f.chance_match_surprise as f64, Double),
+        (
+            "LongestComplementaryLadder",
+            f.longest_complementary_ladder as f64,
+            Int,
+        ),
+        (
+            "ComplementaryIonBalance",
+            f.complementary_ion_balance as f64,
+            Double,
+        ),
+        (
+            "MeanMatchedIntensityRank",
+            f.mean_matched_intensity_rank as f64,
+            Double,
+        ),
+        (
+            "DoublyChargedMatchedIonCount",
+            f.doubly_charged_matched_ion_count as f64,
+            Int,
+        ),
+        (
+            "UniqueMatchFraction",
+            f.unique_match_fraction as f64,
+            Double,
+        ),
+        (
+            "ChanceMatchSurprise",
+            f.chance_match_surprise as f64,
+            Double,
+        ),
         ("IntensitySignal", f.intensity_signal as f64, Double),
         ("FragPredExplained", f.frag_pred_explained as f64, Double),
         ("FragPredChanceLLR", f.frag_pred_chance_llr as f64, Double),
@@ -192,13 +242,25 @@ pub fn psm_feature_values(psm: &PsmMatch, rank: u32) -> Vec<Feature> {
         ("IsRefinement", f.is_refinement as f64, Int),
         ("NumMods", f.num_mods as f64, Int),
         ("RefinementModClass", f.refine_mod_class as f64, Int),
-        ("ModSiteShiftedMatched", f.mod_site_shifted_matched as f64, Double),
+        (
+            "ModSiteShiftedMatched",
+            f.mod_site_shifted_matched as f64,
+            Double,
+        ),
         ("ModSiteShiftedFrac", f.mod_site_shifted_frac as f64, Double),
         ("ModSiteIntensFrac", f.mod_site_intens_frac as f64, Double),
         ("ModSiteLocalized", f.mod_site_localized as f64, Double),
         ("ModSiteDetCount", f.mod_site_det_count as f64, Double),
-        ("MassCompetitionEvidence", f.mass_competition_evidence as f64, Double),
-        ("CandidateRankEntropy", f.candidate_rank_entropy as f64, Double),
+        (
+            "MassCompetitionEvidence",
+            f.mass_competition_evidence as f64,
+            Double,
+        ),
+        (
+            "CandidateRankEntropy",
+            f.candidate_rank_entropy as f64,
+            Double,
+        ),
         ("ListwiseScoreGap", f.listwise_score_gap as f64, Double),
         ("RawScore", f.strong_score as f64, Double),
         ("RawScoreCal", f.strong_score_cal as f64, Double),
@@ -242,7 +304,14 @@ pub fn write_pin(
 ) -> io::Result<()> {
     let file = std::fs::File::create(output_path)?;
     let mut writer = BufWriter::new(file);
-    write_pin_to(&mut writer, spectra, queues, candidates, params, search_index)
+    write_pin_to(
+        &mut writer,
+        spectra,
+        queues,
+        candidates,
+        params,
+        search_index,
+    )
 }
 
 /// Write all PSMs to an arbitrary writer — useful for testing without temp files.
@@ -317,11 +386,7 @@ pub fn write_pin_to<W: Write>(
 
 // ── header ────────────────────────────────────────────────────────────────────
 
-fn write_header<W: Write>(
-    writer: &mut W,
-    min_charge: u8,
-    max_charge: u8,
-) -> io::Result<()> {
+fn write_header<W: Write>(writer: &mut W, min_charge: u8, max_charge: u8) -> io::Result<()> {
     // RawScore is the sole score column. The generating function has been
     // removed, so the GF-derived columns (DeNovoScore / lnSpecEValue / lnEValue
     // / lnDeltaSpecEValue) are not emitted: Percolator calibrates FDR from
@@ -623,7 +688,11 @@ fn write_psm_row<W: Write>(
     // SpecIds in the PIN (ambiguous downstream mapping). Append the per-row
     // emission index to disambiguate. Single-row-per-scan keeps the historical
     // `specID_scan_rank` format so the schema/common case is unchanged.
-    write!(writer, "{}", format_spec_id(&ctx.spec_id, ctx.scan, rank, row_idx, multi_row))?;
+    write!(
+        writer,
+        "{}",
+        format_spec_id(&ctx.spec_id, ctx.scan, rank, row_idx, multi_row)
+    )?;
     write!(writer, "\t{}\t{}\t", label, ctx.scan)?;
     write_double(writer, exp_mass)?;
     writer.write_all(b"\t")?;
@@ -651,7 +720,7 @@ fn write_psm_row<W: Write>(
     // crate::percolator_enz (OpenMS PercolatorInfile).
     let residues: Vec<u8> = cand.peptide.residues.iter().map(|aa| aa.residue).collect();
     let first = residues.first().copied().unwrap_or(b'-');
-    let last  = residues.last().copied().unwrap_or(b'-');
+    let last = residues.last().copied().unwrap_or(b'-');
     let enz_n: u8 = is_enzymatic_boundary(cand.peptide.pre, first, params.enzyme) as u8;
     let enz_c: u8 = is_enzymatic_boundary(last, cand.peptide.post, params.enzyme) as u8;
     let enz_int = count_internal_enzymatic(&residues, params.enzyme);
@@ -793,19 +862,18 @@ fn write_trim_scientific<W: Write>(writer: &mut W, s: &[u8]) -> io::Result<()> {
     write!(writer, "e{:+03}", exp_val)
 }
 
-
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use model::amino_acid::AminoAcid;
-    use search::candidate_gen::Candidate;
     use model::peptide::Peptide;
     use model::protein::{Protein, ProteinDb};
-    use search::search_index::SearchIndex;
     use model::tolerance::PrecursorTolerance;
     use model::tolerance::Tolerance;
+    use search::candidate_gen::Candidate;
+    use search::search_index::SearchIndex;
 
     // ── fixture helpers ─────────────────────────────────────────────────────
 
@@ -859,7 +927,13 @@ mod tests {
         }
     }
 
-    fn make_psm(spectrum_idx: usize, score: f32, rank_score: f32, candidate_idx: u32, charge: u8) -> PsmMatch {
+    fn make_psm(
+        spectrum_idx: usize,
+        score: f32,
+        rank_score: f32,
+        candidate_idx: u32,
+        charge: u8,
+    ) -> PsmMatch {
         PsmMatch {
             spectrum_idx,
             candidate_idxs: vec![candidate_idx],
@@ -936,18 +1010,41 @@ mod tests {
         // PrecursorIsotopeKL, PrecursorSNR, DeltaRawScore) sit between
         // matchedIonRatio and Peptide.
         let expected: Vec<&str> = vec![
-            "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass", "mass",
-            "RankScore", "isotope_error",
-            "peplen", "dm", "absdm",
-            "charge2", "charge3",
-            "enzN", "enzC", "enzInt",
-            "NumMatchedMainIons", "longest_b", "longest_y", "longest_y_pct",
-            "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
-            "MS2IonCurrent", "IsolationWindowEfficiency",
-            "MeanErrorTop7", "StdevErrorTop7", "MeanRelErrorTop7", "StdevRelErrorTop7",
+            "SpecId",
+            "Label",
+            "ScanNr",
+            "ExpMass",
+            "CalcMass",
+            "mass",
+            "RankScore",
+            "isotope_error",
+            "peplen",
+            "dm",
+            "absdm",
+            "charge2",
+            "charge3",
+            "enzN",
+            "enzC",
+            "enzInt",
+            "NumMatchedMainIons",
+            "longest_b",
+            "longest_y",
+            "longest_y_pct",
+            "ExplainedIonCurrentRatio",
+            "NTermIonCurrentRatio",
+            "CTermIonCurrentRatio",
+            "MS2IonCurrent",
+            "IsolationWindowEfficiency",
+            "MeanErrorTop7",
+            "StdevErrorTop7",
+            "MeanRelErrorTop7",
+            "StdevRelErrorTop7",
             "matchedIonRatio",
             "EdgeScore",
-            "PrecursorIsotopeKL", "PrecursorSNR", "DeltaRankScore", "TailorScore",
+            "PrecursorIsotopeKL",
+            "PrecursorSNR",
+            "DeltaRankScore",
+            "TailorScore",
             "PpmGaussianScore",
             "NeutralLossIonCount",
             "LongestComplementaryLadder",
@@ -975,8 +1072,11 @@ mod tests {
             "RawScore",
             "RawScoreCal",
             "RankScoreFloat",
-            "DeltaRT", "AbsDeltaRT", "DeltaRTNorm",
-            "Peptide", "Proteins",
+            "DeltaRT",
+            "AbsDeltaRT",
+            "DeltaRTNorm",
+            "Peptide",
+            "Proteins",
         ];
 
         let params = make_params(2..=3);
@@ -1059,7 +1159,10 @@ mod tests {
         let err = write_pin_to(&mut buf, &spectra, &queues, &cands, &params, &idx)
             .expect_err("duplicate SpecId base must error");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("duplicate PIN SpecId"), "got: {err}");
+        assert!(
+            err.to_string().contains("duplicate PIN SpecId"),
+            "got: {err}"
+        );
     }
 
     // ── Test 3: charge one-hot encoding ────────────────────────────────────
@@ -1083,11 +1186,23 @@ mod tests {
         assert_eq!(rows.len(), 1);
 
         // Find charge2 and charge3 column indices
-        let charge2_idx = cols.iter().position(|c| c == "charge2").expect("charge2 column missing");
-        let charge3_idx = cols.iter().position(|c| c == "charge3").expect("charge3 column missing");
+        let charge2_idx = cols
+            .iter()
+            .position(|c| c == "charge2")
+            .expect("charge2 column missing");
+        let charge3_idx = cols
+            .iter()
+            .position(|c| c == "charge3")
+            .expect("charge3 column missing");
 
-        assert_eq!(rows[0][charge2_idx], "1", "charge2 should be 1 for a charge-2 PSM");
-        assert_eq!(rows[0][charge3_idx], "0", "charge3 should be 0 for a charge-2 PSM");
+        assert_eq!(
+            rows[0][charge2_idx], "1",
+            "charge2 should be 1 for a charge-2 PSM"
+        );
+        assert_eq!(
+            rows[0][charge3_idx], "0",
+            "charge3 should be 0 for a charge-2 PSM"
+        );
     }
 
     // ── Test: chimeric SpecId uniqueness for co-fragmented peptides ─────────
@@ -1113,8 +1228,11 @@ mod tests {
 
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 2, "both co-fragmented PSMs should be emitted");
-        assert_ne!(rows[0][0], rows[1][0],
-            "chimeric SpecIds must be unique per row, got {:?} and {:?}", rows[0][0], rows[1][0]);
+        assert_ne!(
+            rows[0][0], rows[1][0],
+            "chimeric SpecIds must be unique per row, got {:?} and {:?}",
+            rows[0][0], rows[1][0]
+        );
     }
 
     // ── Test: non-chimeric tied-PSM SpecId uniqueness ──────────────────────
@@ -1189,7 +1307,10 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        let prot_idx = cols.iter().position(|c| c == "Proteins").expect("Proteins column missing");
+        let prot_idx = cols
+            .iter()
+            .position(|c| c == "Proteins")
+            .expect("Proteins column missing");
         assert_eq!(
             rows[0][prot_idx], accession,
             "Proteins column should contain the real accession, not a PROT_N placeholder"
@@ -1222,7 +1343,10 @@ mod tests {
         let rows = parse_rows(&buf);
         assert_eq!(rows.len(), 1);
 
-        let prot_idx = cols.iter().position(|c| c == "Proteins").expect("Proteins column missing");
+        let prot_idx = cols
+            .iter()
+            .position(|c| c == "Proteins")
+            .expect("Proteins column missing");
         let expected_decoy = format!("XXX_{}", accession);
         assert_eq!(
             rows[0][prot_idx], expected_decoy,
@@ -1299,10 +1423,20 @@ mod tests {
             .position(|c| c == "DeltaRankScore")
             .expect("DeltaRankScore column missing");
 
-        let r1: f64 = rows[0][col_idx].parse().expect("rank-1 DeltaRankScore numeric");
-        let r2: f64 = rows[1][col_idx].parse().expect("rank-2 DeltaRankScore numeric");
-        assert!((r1 - 7.0).abs() < 1e-6, "rank-1 DeltaRankScore should be 7.0, got {r1}");
-        assert_eq!(r2, 0.0, "rank-2 DeltaRankScore should be gated to 0.0, got {r2}");
+        let r1: f64 = rows[0][col_idx]
+            .parse()
+            .expect("rank-1 DeltaRankScore numeric");
+        let r2: f64 = rows[1][col_idx]
+            .parse()
+            .expect("rank-2 DeltaRankScore numeric");
+        assert!(
+            (r1 - 7.0).abs() < 1e-6,
+            "rank-1 DeltaRankScore should be 7.0, got {r1}"
+        );
+        assert_eq!(
+            r2, 0.0,
+            "rank-2 DeltaRankScore should be gated to 0.0, got {r2}"
+        );
     }
 
     /// Verify that `longest_y_pct` is formatted with 6 decimal places.

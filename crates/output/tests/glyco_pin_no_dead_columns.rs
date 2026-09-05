@@ -17,10 +17,20 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
     let hdr = String::from_utf8(buf.into_inner()).unwrap();
     let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
     for dead in [
-        "mass", "IsolationWindowEfficiency", "PrecursorIsotopeKL", "PrecursorSNR",
-        "IsRefinement", "NumMods", "RefinementModClass",
-        "ModSiteShiftedMatched", "ModSiteShiftedFrac", "ModSiteIntensFrac",
-        "ModSiteLocalized", "ModSiteDetCount", "RawScoreCal", "DeltaRTRank",
+        "mass",
+        "IsolationWindowEfficiency",
+        "PrecursorIsotopeKL",
+        "PrecursorSNR",
+        "IsRefinement",
+        "NumMods",
+        "RefinementModClass",
+        "ModSiteShiftedMatched",
+        "ModSiteShiftedFrac",
+        "ModSiteIntensFrac",
+        "ModSiteLocalized",
+        "ModSiteDetCount",
+        "RawScoreCal",
+        "DeltaRTRank",
     ] {
         assert!(
             !cols.contains(&dead),
@@ -29,7 +39,10 @@ fn glyco_pin_default_header_carries_no_dead_columns() {
     }
     // and the live ones the policy must NOT have taken with it
     for live in ["RawScore", "RankScore", "YHitFrac", "CzHyperscore"] {
-        assert!(cols.contains(&live), "live column {live} missing from default header");
+        assert!(
+            cols.contains(&live),
+            "live column {live} missing from default header"
+        );
     }
 }
 
@@ -45,19 +58,53 @@ fn glyco_pin_curated_header_is_exactly_the_validated_set() {
     // charge one-hot or in the validated keep-list, and no keep-listed
     // non-charge column may be missing.
     let keep: &[&str] = &[
-        "SpecId", "Label", "ScanNr", "ExpMass", "CalcMass",
-        "RankScore", "RankScoreFloat", "RawScore", "TailorScore", "EdgeScore",
-        "NumMatchedMainIons", "matchedIonRatio", "longest_y_pct",
-        "ExplainedIonCurrentRatio", "NTermIonCurrentRatio", "CTermIonCurrentRatio",
-        "ComplementaryIonBalance", "MeanMatchedIntensityRank", "PpmGaussianScore",
-        "ChanceMatchSurprise", "MassCompetitionEvidence", "RichIonLLR",
-        "FragPredExplained", "FragPredChanceLLR", "IntensitySignal",
-        "dm", "absdm", "peplen", "isotope_error",
-        "enzN", "enzC", "enzInt",
-        "DeltaRT", "AbsDeltaRT", "DeltaRTNorm", "IsobaricRTMargin",
-        "OxoniumScore", "NCoreOxoniumIons", "YLadderScore", "YHitFrac", "CoreYHits",
-        "PartialGlycanBY", "Y0Y1Anchor", "SialicConsistency", "GlycanMass",
-        "Peptide", "Proteins",
+        "SpecId",
+        "Label",
+        "ScanNr",
+        "ExpMass",
+        "CalcMass",
+        "RankScore",
+        "RankScoreFloat",
+        "RawScore",
+        "TailorScore",
+        "EdgeScore",
+        "NumMatchedMainIons",
+        "matchedIonRatio",
+        "longest_y_pct",
+        "ExplainedIonCurrentRatio",
+        "NTermIonCurrentRatio",
+        "CTermIonCurrentRatio",
+        "ComplementaryIonBalance",
+        "MeanMatchedIntensityRank",
+        "PpmGaussianScore",
+        "ChanceMatchSurprise",
+        "MassCompetitionEvidence",
+        "RichIonLLR",
+        "FragPredExplained",
+        "FragPredChanceLLR",
+        "IntensitySignal",
+        "dm",
+        "absdm",
+        "peplen",
+        "isotope_error",
+        "enzN",
+        "enzC",
+        "enzInt",
+        "DeltaRT",
+        "AbsDeltaRT",
+        "DeltaRTNorm",
+        "IsobaricRTMargin",
+        "OxoniumScore",
+        "NCoreOxoniumIons",
+        "YLadderScore",
+        "YHitFrac",
+        "CoreYHits",
+        "PartialGlycanBY",
+        "Y0Y1Anchor",
+        "SialicConsistency",
+        "GlycanMass",
+        "Peptide",
+        "Proteins",
     ];
     for c in &cols {
         assert!(
@@ -66,11 +113,22 @@ fn glyco_pin_curated_header_is_exactly_the_validated_set() {
         );
     }
     for k in keep {
-        assert!(cols.contains(k), "validated column {k} missing from curated PIN");
+        assert!(
+            cols.contains(k),
+            "validated column {k} missing from curated PIN"
+        );
     }
-    for gone in ["CzHyperscore", "MS2IonCurrent",
-                 "CandidateRankEntropy", "ListwiseScoreGap", "DeltaRankScore"] {
-        assert!(!cols.contains(&gone), "{gone} must not appear in curated mode");
+    for gone in [
+        "CzHyperscore",
+        "MS2IonCurrent",
+        "CandidateRankEntropy",
+        "ListwiseScoreGap",
+        "DeltaRankScore",
+    ] {
+        assert!(
+            !cols.contains(&gone),
+            "{gone} must not appear in curated mode"
+        );
     }
 }
 
@@ -97,7 +155,10 @@ fn retired_research_columns_are_gone() {
         let hdr = String::from_utf8(buf.into_inner()).unwrap();
         let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
         for c in retired {
-            assert!(!cols.contains(&c), "retired column {c} is back (curated={curated})");
+            assert!(
+                !cols.contains(&c),
+                "retired column {c} is back (curated={curated})"
+            );
         }
     }
 }

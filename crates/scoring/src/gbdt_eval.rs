@@ -30,7 +30,11 @@ pub enum GbdtError {
     #[error("malformed AGBD blob: {0}")]
     Malformed(String),
     #[error("GBDT feature-contract violation for {kind} model: blob declares {got} features but the evaluator extracts {expected}")]
-    FeatureCountMismatch { kind: &'static str, expected: u32, got: u32 },
+    FeatureCountMismatch {
+        kind: &'static str,
+        expected: u32,
+        got: u32,
+    },
 }
 
 /// Reject implausibly large counts from a corrupt/version-skewed blob before
@@ -38,7 +42,9 @@ pub enum GbdtError {
 /// bounds — a real per-peak GBDT is far smaller.
 fn checked_count(n: u32, what: &str, max: u32) -> Result<usize, GbdtError> {
     if n > max {
-        return Err(GbdtError::Malformed(format!("{what} count {n} exceeds max {max}")));
+        return Err(GbdtError::Malformed(format!(
+            "{what} count {n} exceeds max {max}"
+        )));
     }
     Ok(n as usize)
 }
@@ -47,12 +53,12 @@ fn checked_count(n: u32, what: &str, max: u32) -> Result<usize, GbdtError> {
 /// `n_nodes`; node 0 is the root.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tree {
-    pub feature: Vec<i32>,      // -1 => leaf
+    pub feature: Vec<i32>, // -1 => leaf
     pub threshold: Vec<f32>,
     pub left: Vec<i32>,
     pub right: Vec<i32>,
-    pub value: Vec<f32>,        // leaf output
-    pub default_left: Vec<u8>,  // 1 => NaN feature descends left
+    pub value: Vec<f32>,       // leaf output
+    pub default_left: Vec<u8>, // 1 => NaN feature descends left
 }
 
 impl Tree {
@@ -75,7 +81,11 @@ impl Tree {
             } else {
                 v <= self.threshold[node]
             };
-            node = if go_left { self.left[node] } else { self.right[node] } as usize;
+            node = if go_left {
+                self.left[node]
+            } else {
+                self.right[node]
+            } as usize;
         }
     }
 
@@ -89,9 +99,15 @@ impl Tree {
         if n == 0 {
             return Err(GbdtError::Malformed("tree has zero nodes".into()));
         }
-        if self.threshold.len() != n || self.left.len() != n || self.right.len() != n
-            || self.value.len() != n || self.default_left.len() != n {
-            return Err(GbdtError::Malformed("tree SoA arrays have mismatched lengths".into()));
+        if self.threshold.len() != n
+            || self.left.len() != n
+            || self.right.len() != n
+            || self.value.len() != n
+            || self.default_left.len() != n
+        {
+            return Err(GbdtError::Malformed(
+                "tree SoA arrays have mismatched lengths".into(),
+            ));
         }
         #[allow(clippy::needless_range_loop)] // indexing multiple parallel arrays by node index
         for node in 0..n {
@@ -152,14 +168,27 @@ impl GbdtPeakModel {
             let value = read_f32_vec(&mut c, n)?;
             let mut default_left = vec![0u8; n];
             c.read_exact(&mut default_left)?;
-            let tree = Tree { feature, threshold, left, right, value, default_left };
+            let tree = Tree {
+                feature,
+                threshold,
+                left,
+                right,
+                value,
+                default_left,
+            };
             tree.validate()?;
             trees.push(tree);
         }
         let n_iso = checked_count(c.read_u32::<LittleEndian>()?, "n_iso", 10_000_000)?;
         let iso_x = read_f32_vec(&mut c, n_iso)?;
         let iso_y = read_f32_vec(&mut c, n_iso)?;
-        Ok(Self { n_features, apply_sigmoid, trees, iso_x, iso_y })
+        Ok(Self {
+            n_features,
+            apply_sigmoid,
+            trees,
+            iso_x,
+            iso_y,
+        })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -167,8 +196,10 @@ impl GbdtPeakModel {
         b.extend_from_slice(MAGIC);
         b.write_u32::<LittleEndian>(FORMAT_VERSION).unwrap();
         b.write_u32::<LittleEndian>(self.n_features).unwrap();
-        b.write_u32::<LittleEndian>(if self.apply_sigmoid { FLAG_SIGMOID } else { 0 }).unwrap();
-        b.write_u32::<LittleEndian>(self.trees.len() as u32).unwrap();
+        b.write_u32::<LittleEndian>(if self.apply_sigmoid { FLAG_SIGMOID } else { 0 })
+            .unwrap();
+        b.write_u32::<LittleEndian>(self.trees.len() as u32)
+            .unwrap();
         for t in &self.trees {
             let n = t.feature.len();
             b.write_u32::<LittleEndian>(n as u32).unwrap();
@@ -179,7 +210,8 @@ impl GbdtPeakModel {
             write_f32_vec(&mut b, &t.value);
             b.extend_from_slice(&t.default_left);
         }
-        b.write_u32::<LittleEndian>(self.iso_x.len() as u32).unwrap();
+        b.write_u32::<LittleEndian>(self.iso_x.len() as u32)
+            .unwrap();
         write_f32_vec(&mut b, &self.iso_x);
         write_f32_vec(&mut b, &self.iso_y);
         b
@@ -195,7 +227,11 @@ impl GbdtPeakModel {
     ///
     /// `kind` is a short role label used only in the error message
     /// (`"peak"`, `"frag-intensity"`, `"rich-ion"`).
-    pub fn validate_n_features(&self, expected: usize, kind: &'static str) -> Result<(), GbdtError> {
+    pub fn validate_n_features(
+        &self,
+        expected: usize,
+        kind: &'static str,
+    ) -> Result<(), GbdtError> {
         if self.n_features as usize != expected {
             return Err(GbdtError::FeatureCountMismatch {
                 kind,
@@ -230,7 +266,11 @@ impl GbdtPeakModel {
     /// from 0.0 in tree order, and accumulating `out[r] += tree.eval(row_r)` visits
     /// the trees in that same order, so every partial sum matches exactly.
     pub fn predict_value_batch(&self, rows: &[&[f32]], out: &mut [f32]) {
-        assert_eq!(rows.len(), out.len(), "predict_value_batch: rows/out length mismatch");
+        assert_eq!(
+            rows.len(),
+            out.len(),
+            "predict_value_batch: rows/out length mismatch"
+        );
         out.fill(0.0);
         for t in &self.trees {
             for (o, x) in out.iter_mut().zip(rows.iter()) {
@@ -245,7 +285,11 @@ impl GbdtPeakModel {
         self.predict_value_batch(rows, out);
         for o in out.iter_mut() {
             let raw = *o;
-            let p = if self.apply_sigmoid { 1.0 / (1.0 + (-raw).exp()) } else { raw };
+            let p = if self.apply_sigmoid {
+                1.0 / (1.0 + (-raw).exp())
+            } else {
+                raw
+            };
             let s = self.isotonic(p).clamp(PROB_EPS, 1.0 - PROB_EPS);
             *o = (s / (1.0 - s)).ln();
         }
@@ -254,7 +298,11 @@ impl GbdtPeakModel {
     /// Calibrated P(signal) in [0,1].
     pub fn predict_proba(&self, x: &[f32]) -> f32 {
         let raw: f32 = self.trees.iter().map(|t| t.eval(x)).sum();
-        let p = if self.apply_sigmoid { 1.0 / (1.0 + (-raw).exp()) } else { raw };
+        let p = if self.apply_sigmoid {
+            1.0 / (1.0 + (-raw).exp())
+        } else {
+            raw
+        };
         self.isotonic(p)
     }
 
@@ -384,10 +432,16 @@ mod tests {
         let m = toy_model();
         // x0 = 0.0 → leaf -1.0; raw sum = -1.0 (no sigmoid/iso applied)
         let v_lo = m.predict_value(&[0.0]);
-        assert!((v_lo - (-1.0)).abs() < 1e-6, "predict_value([0.0]) expected -1.0, got {v_lo}");
+        assert!(
+            (v_lo - (-1.0)).abs() < 1e-6,
+            "predict_value([0.0]) expected -1.0, got {v_lo}"
+        );
         // x0 = 1.0 → leaf +2.0; raw sum = 2.0
         let v_hi = m.predict_value(&[1.0]);
-        assert!((v_hi - 2.0).abs() < 1e-6, "predict_value([1.0]) expected 2.0, got {v_hi}");
+        assert!(
+            (v_hi - 2.0).abs() < 1e-6,
+            "predict_value([1.0]) expected 2.0, got {v_hi}"
+        );
     }
 
     #[test]
@@ -399,8 +453,10 @@ mod tests {
         m.iso_x = vec![0.0, 1.0];
         m.iso_y = vec![0.5, 0.5]; // constant 0.5 — if applied, predict_value would be 0.5
         let v = m.predict_value(&[1.0]);
-        assert!((v - 2.0).abs() < 1e-6,
-            "predict_value must not apply isotonic map; expected 2.0, got {v}");
+        assert!(
+            (v - 2.0).abs() < 1e-6,
+            "predict_value must not apply isotonic map; expected 2.0, got {v}"
+        );
     }
 
     #[test]
@@ -412,11 +468,19 @@ mod tests {
         // Any other count is rejected (a wrong-slot / schema-skewed blob).
         assert!(matches!(
             m.validate_n_features(18, "peak"),
-            Err(GbdtError::FeatureCountMismatch { kind: "peak", expected: 18, got: 1 })
+            Err(GbdtError::FeatureCountMismatch {
+                kind: "peak",
+                expected: 18,
+                got: 1
+            })
         ));
         assert!(matches!(
             m.validate_n_features(0, "rich-ion"),
-            Err(GbdtError::FeatureCountMismatch { expected: 0, got: 1, .. })
+            Err(GbdtError::FeatureCountMismatch {
+                expected: 0,
+                got: 1,
+                ..
+            })
         ));
     }
 
@@ -427,9 +491,9 @@ mod tests {
             n_features: 1,
             apply_sigmoid: true,
             trees: vec![Tree {
-                feature: vec![0, -1],     // node 0 internal, node 1 leaf
+                feature: vec![0, -1], // node 0 internal, node 1 leaf
                 threshold: vec![0.5, 0.0],
-                left: vec![99, -1],       // 99 is out of range (n=2)
+                left: vec![99, -1], // 99 is out of range (n=2)
                 right: vec![1, -1],
                 value: vec![0.0, 1.0],
                 default_left: vec![1, 1],
@@ -438,7 +502,12 @@ mod tests {
             iso_y: vec![],
         };
         let bytes = bad.to_bytes();
-        assert!(matches!(GbdtPeakModel::from_bytes(&bytes), Err(GbdtError::Malformed(_))),
-            "out-of-range child must be rejected at decode");
+        assert!(
+            matches!(
+                GbdtPeakModel::from_bytes(&bytes),
+                Err(GbdtError::Malformed(_))
+            ),
+            "out-of-range child must be rejected at decode"
+        );
     }
 }

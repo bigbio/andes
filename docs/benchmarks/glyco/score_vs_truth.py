@@ -88,6 +88,14 @@ def main():
     # (`controllerType=0 controllerNumber=1 scan=262_glyco_262_1`), so nothing could
     # join it to a reference and the scorer reported 100% NOT_EMITTED. With --run every
     # SpecId is attributed to that reference run.
+    # `--buckets FILE`: also write one line per reference spectrum (run, scan, bucket,
+    # reference peptide, emitted peptide, emitted label) so a bucket can be pulled out
+    # and inspected -- e.g. every DECOY_WON scan for a --debug-glyco dump.
+    buckets_path = None
+    if "--buckets" in sys.argv:
+        i = sys.argv.index("--buckets")
+        buckets_path = sys.argv[i + 1]
+        del sys.argv[i:i + 2]
     forced_run = None
     if "--run" in sys.argv:
         i = sys.argv.index("--run")
@@ -141,7 +149,10 @@ def main():
                 accepted[k] = bare(r[pi])
 
     buckets = defaultdict(int)
-    for k, pep in truth.items():
+    dump = open(buckets_path, "w") if buckets_path else None
+    if dump:
+        dump.write("run\tscan\tbucket\treference_peptide\temitted_peptide\temitted_label\n")
+    for k, pep in sorted(truth.items()):
         if k not in emitted:
             b = "NOT_EMITTED"
         elif emitted[k][1] != "1":
@@ -153,6 +164,11 @@ def main():
         else:
             b = "FDR_REJECTED"
         buckets[b] += 1
+        if dump:
+            e = emitted.get(k, ("", ""))
+            dump.write(f"{k[0]}\t{k[1]}\t{b}\t{pep}\t{e[0]}\t{e[1]}\n")
+    if dump:
+        dump.close()
 
     n = len(truth)
     print(f"reference : {truth_p}")

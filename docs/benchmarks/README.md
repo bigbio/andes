@@ -77,7 +77,7 @@ one session**. Glyco rows: commit `6b37bb2c` (see the caveat in §2), 5 Percolat
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions | glycoPSMs @1% | **31,658 ± 34** | pGlyco2 17,855: **78.8% confirmed**, 92.2% of its peptides found | **1.02% ± 0.03 true FDP** (1:1 shuffled database) | ~25 min / fraction, 16 cores |
 | | | same-scan agreement | 83.8% peptidoform · 99.1% backbone | (`glyco/agreement.py`) | | |
-| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, commit `7f8ea03e` | glycoPSMs @1% | **6,532** | pGlyco2 77.9% confirmed · **MSFragger 87.8% confirmed**, 95.6% peptidoform agreement | **1.10% true FDP** (CI 0.76–1.54) | 6,335 s, 8 threads |
+| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, commit `d085c0fb` | glycoPSMs @1% | **6,532** | pGlyco2 77.9% confirmed · **MSFragger 87.8% confirmed**, 95.6% peptidoform agreement | **1.10% true FDP** (CI 0.76–1.54) | 6,329 s, 8 threads |
 
 † Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
@@ -197,12 +197,13 @@ proprietary Byonic `.byrslt` export, which cannot be rebuilt from public artifac
 `MouseLiver-Z-T-1.raw` (PXD005553, 2.70 GB, sha256 `2f0142b7…`) read natively, against
 `mouse_entrap.fasta` (34,554 sequences = 17,277 UniProt reviewed mouse + shuffled twins,
 sha256 `5ee15d8d…`), `--glyco --decoy-strategy sequon-reverse`, 8 threads, Percolator
-`--seed 42 -Y`. Measured 2026-09-05 at branch commit `7f8ea03e` (the glyco default path
-is unchanged through the later flag deletions, which removed only default-off switches):
+`--seed 42 -Y`. Measured 2026-09-05 at commit `d085c0fb`; an earlier build of the same
+branch (`7f8ea03e`, before the flag deletions) gave the identical PIN and identical counts,
+which is what those deletions promised:
 
 | | measured |
 |---|---|
-| search wall | **6,335 s** (105 min) — 45,905 MS2, 41,929 glyco rows |
+| search wall | **6,329 s** (105 min) — 45,905 MS2, 41,929 glyco rows |
 | glycoPSMs @1% | **6,532** (2,843 glycopeptides, 902 compositions) |
 | **true FDP** | **1.10%** (95% CI 0.76–1.54%, 34 entrapment hits, 1:1 database) |
 

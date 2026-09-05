@@ -487,7 +487,9 @@ cargo build --release
 **Native vendor formats** are feature-gated (the default build stays pure-Rust):
 
 ```bash
-# Thermo .raw — needs rustc >= 1.88 and, at run time, the .NET 8 runtime
+# Thermo .raw — needs rustc >= 1.88 and, at run time, the .NET 8 runtime (point DOTNET_ROOT
+# at an install that contains shared/Microsoft.NETCore.App, or "One of the dependent
+# libraries is missing" is the error you get).
 RUSTUP_TOOLCHAIN=stable cargo build --release -p andes --features thermo
 
 # Bruker timsTOF .d — pure Rust, no vendor runtime

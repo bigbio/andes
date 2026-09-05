@@ -14,8 +14,9 @@ GLYCO=1 ./reproduce/build_databases.sh "$DATA"      # ...plus the mouse glyco da
 **Four rules that are not optional.** Each exists because breaking it produced a wrong
 published number in this project, and each is explained where it applies below.
 
-1. **Pin the raw converter.** ThermoRawFileParser 1.4.3 and 2.0.0 differ by 26% of MS2
-   scans and 30% of identifications on the same file. Everything here used **1.4.3**.
+1. **Read `.raw` natively** (`--features thermo`), do not convert. A converter version
+   silently cost 30% of identifications on one file; native reading is the reference and
+   costs nothing. If you must convert, use ThermoRawFileParser **1.4.3**.
 2. **Measure the entrapment ratio; never assume 1:1.** `FDP = hits/total x (1 + T/E)`,
    and `T/E` is a property of the database you built.
 3. **Pool at least three files for glyco, all from ONE acquisition regime.** A single file
@@ -30,6 +31,24 @@ re-download, no proprietary parser.
 Below: current results, how to reproduce them, the methodology, and the known gaps.
 This folder was consolidated from eight documents in September 2026; the superseded ones
 are in git history.
+
+**One variable per comparison — the rule every inconsistency here violated.** Over one
+week of benchmarking, five results had to be withdrawn or corrected. Every single one came
+from comparing runs that differed in more than one respect, where each difference looked
+harmless on its own:
+
+| what looked like | what it actually was |
+|---|---|
+| a 30% engine regression | two different raw-converter versions |
+| `--chimeric` running *faster* than baseline | it forces `top_n=1`, baseline uses 10 |
+| andes 2.07x slower than Comet | a stale figure predating a default change |
+| a glyco dataset finding nothing | Percolator's q floor on a single file |
+| 21% more PSMs in an outside reproduction | a differently-built entrapment database |
+
+So: run every arm you intend to compare in **one session, on one host, with one binary**,
+and record binary commit, converter (or native), database build, thread count and date
+beside the number. A result measured otherwise is not comparable to these and should not
+be published next to them.
 
 **Provenance rule.** Every figure below names the commit, host, thread count and date that
 produced it. A number without that is not a result. Where something has *not* been
@@ -344,10 +363,13 @@ Many scripts under `scripts/` carry absolute paths from our hosts and predate
 
 ## 4. Methodology, and the traps
 
-**Pin the raw converter.** ThermoRawFileParser 1.4.3 and 2.0.0 write different numbers of
-spectra from the same `.raw` — measured on one pGlyco2 file, 45,905 MS2 against 33,893, and
-30% fewer identifications as a result. All figures here used **1.4.3**. Report the converter
-version with any number; it moves results more than any engine change measured this year.
+**Read `.raw` natively; do not convert.** andes does this with `--features thermo`, at no
+speed cost and with output identical to a correct conversion. Conversion is where a silent
+30% error entered: on one pGlyco2 file, ThermoRawFileParser 2.0.0 wrote 33,893 MS2 where
+1.4.3 wrote 45,905, and native reading — Thermo's own RawFileReader, hence the reference —
+confirms 45,905. So 1.4.3 is right and 2.0.0 dropped 26% of the scans. It is
+FILE-DEPENDENT: on the plasma file both versions agreed exactly, so no converter can be
+assumed safe for your data. All figures here used native reading or 1.4.3.
 
 **One rescorer for every engine.** Percolator 3.7.1, pinned, `--seed 42 -Y`. Comparing one
 engine's own score against another's rescored q-value is not a comparison. Percolator also

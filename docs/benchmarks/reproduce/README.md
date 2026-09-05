@@ -31,26 +31,42 @@ and a sha256 is printed for each so you can confirm you have the same inputs we 
 prints wall time, PSMs at `q ≤ 0.01`, and entrapment hits — with a provenance line naming
 the binary, platform, thread count and date.
 
-## ⚠ PIN YOUR RAW CONVERTER — it changes the answer by 30%
+## ⚠ Read `.raw` natively — do not convert
 
-Measured 2026-09-04 on one file (`MouseLiver-Z-T-1.raw`, 72,558 MS scans in the raw):
+andes reads Thermo `.raw` directly (`--features thermo`, plus the .NET 8 runtime at search
+time). **Use it.** Conversion is an extra step that can silently change your results, and
+native reading costs nothing:
 
-| ThermoRawFileParser | spectra written | MS2 | glycoPSMs @1% |
+| input (plasma sceHCD-R1) | andes spectra | PIN rows | wall |
 |---|---:|---:|---:|
-| **1.4.3** | ~56,000 | **45,905** | **6,554** |
-| 2.0.0 | 42,774 | 33,893 | 4,605 |
+| `.raw` native | 24,857 | 7,257 | 152 s |
+| TRFP 1.4.3 mzML | 24,857 | 7,257 | 149 s |
 
-Same raw file, same search, same database, same flags (`-f 2`). **v2.0.0 dropped roughly
-30,000 scans**, 26% of the MS2, and with them 30% of the identifications. This was found
-while chasing what looked like a code regression between two andes builds; it was the
-converter all along.
+Identical output, same speed, one less moving part.
 
-So: **pin the converter version and report it with any number**. The figures published here
-were produced with **ThermoRawFileParser 1.4.3**. A benchmark run with a different converter
-is not comparable to them, and the difference is far larger than any engine change we have
-measured this year.
+### Why this matters: a converter version silently changed results by 30%
 
-## Two things that will not reproduce exactly, stated up front
+Verified against native reading as the reference — native uses Thermo's own RawFileReader,
+so it is the ground truth for what a file contains:
+
+| `MouseLiver-Z-T-1.raw` | MS2 | glyco rows |
+|---|---:|---:|
+| **native (reference)** | **45,905** | **41,929** |
+| TRFP 1.4.3 | 45,905 | 41,929 |
+| TRFP 2.0.0 | 33,892 | 31,279 |
+
+**TRFP 1.4.3 is correct; 2.0.0 dropped 26% of the MS2 scans on this file**, and with them
+30% of the identifications. This surfaced only because the same file was searched on two
+machines and the counts disagreed.
+
+**It is file-dependent, not a blanket property of 2.0.0.** On the plasma file above, both
+converter versions produced identical output. So you cannot assume a given converter is
+safe for your data — which is the argument for skipping conversion altogether.
+
+If you must convert, use **1.4.3**, and state the converter version with any number you
+publish. All figures here were produced with native reading or 1.4.3, which agree exactly.
+
+## Two things that will not reproduce exactly## Two things that will not reproduce exactly, stated up front
 
 **The Astral row cannot be fetched at all.** Our records name
 `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` in PXD070049, but that project does not

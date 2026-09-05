@@ -21,6 +21,7 @@ use crate::param_model::Partition;
 use crate::scoring::fragment_ions::{predict_cz_ions, IonKind};
 use crate::scoring::rank_scorer::RankScorer;
 use crate::scoring::scored_spectrum::ScoredSpectrum;
+use crate::scoring::strong_score::DENSITY_HW;
 
 /// Diagnostic peptide-trace filter, read once from the `Andes_TRACE_PEP`
 /// environment variable and memoized.
@@ -630,7 +631,6 @@ pub fn cz_structure_features(
     max_frag_charge: u8,
     tol_ppm: f64,
 ) -> (f32, f32) {
-    const DENSITY_HW: f64 = 50.0;
     let n = peptide.length();
     if n < 2 || max_frag_charge == 0 {
         return (0.0, 0.0);

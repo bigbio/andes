@@ -55,53 +55,6 @@ pub const GLYCO_GP_H_DEFAULT: f32 = 1.0;
 /// c/z hyperscore is 0.0 there), so this is byte-identical on the closed-HCD path.
 pub const GLYCO_GP_CZ_DEFAULT: f32 = 15.0;
 
-/// Assign a split id to every backbone mass by single-linkage clustering within
-/// `tol_ppm`: masses sorted ascending start a new split whenever the gap to the
-/// previous mass exceeds the tolerance at that mass. Returns one id per input in
-/// input order; ids are dense from 0 in ascending-mass order.
-///
-/// WHY clustering and not a grid. The first split key divided the mass by a
-/// mass-PROPORTIONAL tolerance, which is the constant `1/ppm` at every mass, so the
-/// whole lattice collapsed into one split (caught only because the emitted split
-/// count was constant 1 on a fixture holding 123). Its replacement, a fixed grid in
-/// log-mass space, put two masses 5 ppm apart in different buckets whenever they
-/// straddled a boundary (about a quarter of such pairs at a 20 ppm width) and at
-/// `tol_ppm = 0` saturated back into one bucket. Clustering has neither edge.
-/// Non-finite or non-positive masses each get their own split.
-pub fn split_ids_by_clustering(masses: &[f64], tol_ppm: f64) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..masses.len()).collect();
-    order.sort_by(|&a, &b| masses[a].total_cmp(&masses[b]));
-    let mut ids = vec![0usize; masses.len()];
-    let mut current = 0usize;
-    let mut prev: Option<f64> = None;
-    for &i in &order {
-        let m = masses[i];
-        let joins = match prev {
-            Some(p) if m.is_finite() && p.is_finite() && m > 0.0 => {
-                (m - p).abs() <= m * tol_ppm.max(0.0) * 1e-6
-            }
-            _ => false,
-        };
-        if prev.is_some() && !joins {
-            current += 1;
-        }
-        ids[i] = current;
-        prev = Some(m);
-    }
-    ids
-}
-
-/// Default weight `G` on the per-candidate GLYCAN log-likelihood ratio (Y-ion tree
-/// plus oxonium-composition consistency) when a glycan-LLR path is enabled.
-///
-/// 1.0 because the term is already a log-odds: it shares the natural-log scale of
-/// the peptide rank LLR, so no rescaling constant is justified before the weight is
-/// fitted. pGlyco fits the analogous backbone/glycan balance by ranking SVM and
-/// reports `Score_GP = 0.35*Score_G + 0.65*Score_P` (Liu et al., Nat Commun 8:438,
-/// 2017), which is the measurement this default is a placeholder for. Inert unless
-/// `--glyco-split-election` or a glycan-LLR column flag is set.
-pub const GLYCO_GP_G_DEFAULT: f32 = 1.0;
-
 /// The `gp` fused selector score (leg 2): `rank + k·ladder + j·core_y_hits`.
 /// Higher is better.
 ///
@@ -129,36 +82,6 @@ pub fn glyco_gp_fused_score(
     h: f32,
 ) -> f32 {
     rank + k * ladder + j * core_y_hits + h * hyperscore
-}
-
-/// Default weight for the matched-b/y-ion term, `M` in
-/// [`glyco_gp_fused_score_with_matches`].
-///
-/// The collapse runs BEFORE feature extraction, so it cannot see the strong score — the
-/// best discriminator the engine computes. Measured over a benchmark's reference
-/// identifications, the terms it does see rank the correct candidate at median 15
-/// (`rank`) and median 44 (`ladder`, the heaviest weight), while the raw count of
-/// matched b/y ions ranks it at median 1-2. That count falls out of the hyperscore the
-/// selector already evaluates per candidate, so including it costs nothing.
-pub const GLYCO_GP_M_DEFAULT: f32 = 0.0;
-
-/// [`glyco_gp_fused_score`] plus `M * matched_b_y_ions`.
-///
-/// Additive: `m = 0.0` reproduces the previous score exactly, so the term can be
-/// switched on by measurement rather than by assumption.
-#[allow(clippy::too_many_arguments)]
-pub fn glyco_gp_fused_score_with_matches(
-    rank: f32,
-    ladder: f32,
-    core_y_hits: f32,
-    hyperscore: f32,
-    matched_ions: f32,
-    k: f32,
-    j: f32,
-    h: f32,
-    m: f32,
-) -> f32 {
-    glyco_gp_fused_score(rank, ladder, core_y_hits, hyperscore, k, j, h) + m * matched_ions
 }
 
 /// Total order for the top-1-per-scan collapse: `max_by(collapse_cmp(...))`
@@ -225,10 +148,6 @@ pub fn collapse_cmp(
 ///     masked_peak_count: 0,
 ///     chance_llr_masked: 0.0,
 ///     explained_masked: 0.0,
-///     delta_backbone: 0.0,
-///     delta_glycan: 0.0,
-///     delta_peptide: 0.0,
-///     n_splits_considered: 0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
 ///     is_transferred: false,
@@ -356,25 +275,6 @@ pub struct GlycoPsmKey {
     pub chance_llr_masked: f32,
     /// Fraction of predicted b/y (ion, charge) pairs matched under the same rules.
     pub explained_masked: f32,
-    /// Election margins (`--glyco-split-election`), 0.0 otherwise. Each names ONE
-    /// axis, unlike the shipped `DeltaRankScore`, whose runner-up may be a different
-    /// peptide, a different composition, or a different backbone mass — a conflation
-    /// that is why the curated column set drops it.
-    ///
-    /// `delta_backbone` is the elected split's multiplicity-controlled score minus the
-    /// runner-up SPLIT's. This is the axis the forensics point at: 96.9% of decoy
-    /// winners on contested scans sit at a different backbone mass than the truth.
-    pub delta_backbone: f32,
-    /// Winner minus the best competitor carrying a DIFFERENT composition at the same
-    /// backbone mass — the glycoform-axis margin, which no shipped column reports.
-    pub delta_glycan: f32,
-    /// Winner minus the best competitor carrying a different PEPTIDE at the same
-    /// backbone mass.
-    pub delta_peptide: f32,
-    /// Number of distinct backbone-mass splits that reached the election. A dense
-    /// split lattice is the plasma failure mechanism: large glycans make many
-    /// compositions fit the precursor, so some decoy always occupies one of them.
-    pub n_splits_considered: u32,
     pub core_y_hits: u8,
     /// Pre-computed monoisotopic mass of the glycan (0.0 when `glycan` is None).
     pub glycan_mass: f64,
@@ -520,10 +420,6 @@ mod tests {
             masked_peak_count: 0,
             chance_llr_masked: 0.0,
             explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
@@ -577,10 +473,6 @@ mod tests {
             masked_peak_count: 0,
             chance_llr_masked: 0.0,
             explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 5,
             backbone_mass: 1500.0,
             is_transferred: false,
@@ -623,10 +515,6 @@ mod tests {
             masked_peak_count: 0,
             chance_llr_masked: 0.0,
             explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
@@ -670,10 +558,6 @@ mod tests {
             masked_peak_count: 0,
             chance_llr_masked: 0.0,
             explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
@@ -689,64 +573,5 @@ mod tests {
         };
         assert!(!key.is_transferred);
         assert_eq!(key.transfer_graph_support, 0);
-    }
-}
-
-#[cfg(test)]
-mod split_id_tests {
-    use super::split_ids_by_clustering;
-
-    /// The defect the first key had: `mass / (mass * ppm)` is the constant `1/ppm`,
-    /// so every backbone mass in a scan collapsed into one split.
-    #[test]
-    fn distinct_masses_get_distinct_splits() {
-        let ids = split_ids_by_clustering(&[1000.0, 1500.0, 2000.0, 2500.0, 3000.0], 20.0);
-        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
-    }
-
-    /// Masses inside one tolerance share a split REGARDLESS of where they fall: the
-    /// grid key failed this for pairs straddling a bucket boundary.
-    #[test]
-    fn masses_within_tolerance_always_share_a_split() {
-        let tol = 20.0;
-        for k in 0..2000 {
-            let m = 1000.0 + k as f64 * 1.001;
-            let within = m * (1.0 + 5e-6);
-            let ids = split_ids_by_clustering(&[within, m], tol);
-            assert_eq!(ids[0], ids[1], "5 ppm apart at {m} Da split into two");
-        }
-    }
-
-    /// Resolution is constant in RELATIVE terms: 40 ppm separates at 1000 and 4000 Da.
-    #[test]
-    fn resolution_is_constant_in_relative_terms() {
-        for &m in &[1000.0_f64, 4000.0] {
-            let ids = split_ids_by_clustering(&[m, m * (1.0 + 40e-6)], 20.0);
-            assert_ne!(ids[0], ids[1], "40 ppm apart at {m} Da should be two splits");
-        }
-    }
-
-    /// Ids are assigned in input order but numbered in ascending-mass order, and
-    /// chaining is single-linkage: a-b within tol and b-c within tol => one split.
-    #[test]
-    fn input_order_preserved_and_single_linkage_chains() {
-        let m = 2000.0;
-        let ids = split_ids_by_clustering(&[m * (1.0 + 30e-6), m, m * (1.0 + 15e-6)], 20.0);
-        assert_eq!(ids, vec![0, 0, 0]);
-        let ids = split_ids_by_clustering(&[3000.0, 1000.0, 2000.0], 20.0);
-        assert_eq!(ids, vec![2, 0, 1]);
-    }
-
-    #[test]
-    fn degenerate_inputs_do_not_panic_or_collapse() {
-        assert!(split_ids_by_clustering(&[], 20.0).is_empty());
-        let ids = split_ids_by_clustering(&[0.0, -1.0, 1.0, f64::NAN, 1500.0], 20.0);
-        let mut uniq = ids.clone();
-        uniq.sort_unstable();
-        uniq.dedup();
-        assert_eq!(uniq.len(), ids.len(), "degenerate masses merged: {ids:?}");
-        // Zero tolerance: only EXACT duplicates share a split, never everything.
-        let ids = split_ids_by_clustering(&[1000.0, 1000.0, 1000.001], 0.0);
-        assert_eq!(ids, vec![0, 0, 1]);
     }
 }

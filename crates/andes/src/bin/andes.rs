@@ -441,7 +441,7 @@ struct SearchArgs {
     glyco: bool,
 
     /// Maximum backbone candidates per spectrum in glyco mode (DB + de-novo
-    /// combined, after union-dedup). Hidden advanced knob; default 50.
+    /// combined, after union-dedup). Hidden advanced knob; default 150.
     /// Raised from 20: core-Y evidence ranking means the cap now cuts fewer
     /// true positives, so more headroom is inexpensive and safe.
     #[arg(long = "glyco-backbone-top-k", hide = true, default_value_t = 150usize)]
@@ -619,62 +619,6 @@ struct SearchArgs {
     #[arg(long = "glyco-gp-cz", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_CZ_DEFAULT)]
     glyco_gp_cz: f32,
 
-    /// `gp` selector weight on the COUNT of matched b/y ions. The collapse runs before
-    /// feature extraction, so it cannot see the strong score — the engine's best
-    /// discriminator. Measured over a benchmark's reference identifications, the terms it
-    /// can see rank the correct candidate at median 15 (rank) and median 44 (ladder, the
-    /// heaviest weight), while this count ranks it at median 1-2. It is free: the count
-    /// falls out of the hyperscore the selector already computes per candidate.
-    /// Default 0 reproduces the previous selector exactly.
-    #[arg(long = "glyco-gp-m", hide = true, default_value_t = andes_glyco::glyco_psm::GLYCO_GP_M_DEFAULT)]
-    glyco_gp_m: f32,
-
-    /// Resolve isobaric glycan-composition collisions on Y-ladder evidence rather
-    /// than sort order. Two compositions can be isobaric to ~1 uDa (Hex-Fuc and
-    /// NeuGc-NeuAc both = 15.9949), and above 2000 Da more than half of the default
-    /// list has such a twin; without this the survivor is chosen by `to_bits()`
-    /// ordering, so the SAME glycan mass can be annotated with DIFFERENT compositions
-    /// on different spectra. Measured on PXD030622 plasma: andes emitted 131
-    /// composition strings over 53 distinct masses (~2.5 per mass) where Byonic was
-    /// 1.0. Off by default: the original A/B scored peptide YIELD (-8), which cannot
-    /// see this. Judge it on compositions-per-mass, not on ID count.
-    #[arg(long = "glyco-isobar-rep", default_value_t = false)]
-    glyco_isobar_rep: bool,
-
-    /// Keep backbones by GLYCAN-Y evidence as well as by peptide b/y ("two-axis
-    /// retention"), and enable glycan-Y-first candidate generation.
-    ///
-    /// Without this, backbone truncation retains on peptide b/y rank (axis 1), c/z
-    /// (axis 4, ETD-ONLY) and transfer (axis 3, off by default). On an HCD-only run --
-    /// the human plasma regime -- peptide b/y is therefore the ONLY surviving axis, and
-    /// it is the weakest one for large glycopeptides: a backbone anchored by a strong
-    /// core-Y ladder but with few b/y ions is truncated before the fused selector ever
-    /// sees it. The glycan-Y evidence is already computed and is otherwise used only as
-    /// a tiebreak.
-    ///
-    /// Default off (the validated baseline). Costs a second top-k retention pass.
-    #[arg(long = "glyco-y-index", default_value_t = false)]
-    glyco_y_index: bool,
-
-    /// Compute the PIN feature vector against the GLYCAN-DECORATED backbone instead of
-    /// the bare deglycosylated peptide.
-    ///
-    /// By default the ~40 feature columns are computed on the bare backbone, so every
-    /// glycosite-spanning fragment sits at the wrong theoretical mass -- roughly half the
-    /// b/y ladder of a glycopeptide. IntensitySignal, MatchedIonRatio,
-    /// ExplainedIonCurrentRatio, LongestComplementaryLadder and strong_score therefore
-    /// describe a molecule that was never in the tube, and those are the columns
-    /// Percolator weights most heavily.
-    ///
-    /// MEASURED AT -41% AND LEFT OFF. On PXD030622 plasma with an E. coli entrapment
-    /// database this took 365 glycoPSMs @0.55% FDP down to 215 @0.00%. The premise was
-    /// wrong: under HCD a glycopeptide fragments at the GLYCOSIDIC bonds first, so b/y
-    /// ions come from the backbone AFTER the glycan is lost -- the BARE backbone is the
-    /// correct theoretical ladder, and decorating moves half the predicted ladder to
-    /// masses with no peaks. Consistent with the -16 measured on the scoring peptide
-    #[arg(long = "glyco-decorated-features", default_value_t = false)]
-    glyco_decorated_features: bool,
-
     /// Require a matching sialic OXONIUM ion before a glycan composition may claim
     /// NeuAc or NeuGc, as a fraction of base-peak intensity. 0 disables the gate.
     ///
@@ -824,17 +768,6 @@ struct SearchArgs {
     /// with --glyco-retrieval-tol-ppm; retrieval only, scoring unchanged.
     #[arg(long = "glyco-retrieval-tol-da", value_parser = parse_positive_tol, conflicts_with = "glyco_retrieval_tol_ppm")]
     glyco_retrieval_tol_da: Option<f64>,
-
-    /// Elect the backbone mass split first, with multiplicity control, then elect the
-    /// glycoform and peptide inside it, instead of one global argmax over every
-    /// (peptide, composition) pair. Measured: 96.9% of decoy winners on contested scans
-    /// sit at a different backbone mass than the truth.
-    #[arg(long = "glyco-split-election", hide = true)]
-    glyco_split_election: bool,
-
-    /// Weight on the per-candidate glycan log-likelihood ratio in the election.
-    #[arg(long = "glyco-gp-g", hide = true)]
-    glyco_gp_g: Option<f32>,
 
     /// Charge states indexed by the peptide-first fragment index (b/y at 1..=N,
     /// clamped 1..=3); targets high-charge glycopeptides. Hidden knob; default 2.
@@ -2813,19 +2746,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    // --refine + --chimeric run together correctly but do NOT fully STACK.
+    // --refine + --chimeric run together correctly but do NOT fully stack.
     //
-    // MEASURED 2026-08-28 on Astral (PXD070049), same host and build:
-    //   default 38,402 PSMs | --chimeric 64,958 | --refine 46,410 | both 68,955
-    // The combination gains +6.2% over --chimeric alone, against roughly +13%
-    // if the two gains were additive.
-    //
-    // ⚠ The mechanism this comment previously asserted -- that the chimeric
-    // secondary PSMs COLLAPSE the refinement's confident-anchor set -- is
-    // REFUTED. The anchor set GREW: 14,813 anchors with --refine alone vs 15,762
-    // with both. What shrinks is the pool of spectra left to rescue: chimeric
-    // already explains 7,370 of them, so unidentified spectra fall from 101,664
-    // to 94,294. Refinement has less work available, not worse anchors.
+    // Mechanism: chimeric secondary PSMs do not collapse the refinement's
+    // confident-anchor set (the anchor set GROWS when both are on). What shrinks
+    // is the pool of spectra left for refinement to rescue: chimeric already
+    // explains many of them, so refinement has less work available, not worse
+    // anchors. See the docs for the measured numbers.
     //
     // Warn so the user isn't surprised that the combination is much closer to
     // chimeric alone than to the sum.
@@ -2833,8 +2760,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!(
             "WARN: --refine + --chimeric do not fully stack in this release — chimeric \
              already explains many of the spectra refinement would otherwise rescue, so \
-             refinement adds much less on top of chimeric than it does alone (measured: \
-             +6.2% over chimeric on Astral). Consider running them separately."
+             refinement adds much less on top of chimeric than it does alone. See \
+             docs/benchmarks/README.md for the measured combination."
         );
     }
     if params.score_mode == search::ScoreMode::Strong {
@@ -3511,16 +3438,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             gp_j: cli.glyco_gp_j,
             gp_h: cli.glyco_gp_h,
             gp_cz: cli.glyco_gp_cz,
-            gp_m: cli.glyco_gp_m,
             min_core_y: cli.glyco_min_core_y,
             min_raw_score: cli.glyco_min_raw_score,
             diag_splits: cli.glyco_diag_splits.clone(),
             min_matched_by: cli.glyco_min_matched_ions,
             max_gen_peaks: cli.glyco_max_peaks,
             cz_multisite: cli.glyco_cz_multisite,
-            isobar_rep: cli.glyco_isobar_rep,
-            y_index: cli.glyco_y_index,
-            decorated_features: cli.glyco_decorated_features,
             sialic_oxonium_min_frac: cli.glyco_sialic_oxonium_min_frac,
             scan_filter_path: cli.glyco_scans.clone(),
             pf_charge: cli.glyco_pf_charge,
@@ -3548,8 +3471,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             ox_llr: cli.glyco_oxonium_llr,
             rank_masked: cli.glyco_rank_masked,
             chance_llr_masked: cli.glyco_chance_llr_masked,
-            split_election: cli.glyco_split_election,
-            gp_g: cli.glyco_gp_g.unwrap_or(search::glyco_search::GlycoConfig::default().gp_g),
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,

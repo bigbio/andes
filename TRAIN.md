@@ -1,7 +1,7 @@
 # Training scoring models with andes
 
 andes can **generate its own scoring models** from your data and store them in a single
-Parquet model store (`resources/models.parquet` by default). This guide covers training a
+Parquet model store (the path you give `--out-store`). This guide covers training a
 model from scratch, where to get training data, the experiment-class catalog, incremental
 updates, and how a model is selected at search time.
 
@@ -13,8 +13,10 @@ For the full CLI/parameter reference see [`DOCS.md`](DOCS.md).
 
 A scoring model captures, per `(charge, parent-mass, fragment-segment)` partition, the
 intensity-rank and mass-error statistics of fragment ions — the numbers the generating-function
-scorer turns into per-peak scores. andes ships 39 models (consolidated into one Parquet
-store) covering common fragmentation × instrument × enzyme × protocol combinations.
+scorer turns into per-peak scores. andes ships 17 own-trained models in a per-protocol partitioned Parquet store
+(`resources/models/`) covering common fragmentation × instrument × enzyme × protocol
+combinations; the single-file `resources/models.parquet` holds the same 17 for the training
+seed path.
 
 **Train your own when:**
 - your **instrument** isn't well covered (e.g. Orbitrap Astral, Bruker timsTOF), or
@@ -139,7 +141,7 @@ matching experiment-class subset → instrument-family fallback → generic. Tra
 instrument-specific model into the store and it is selected automatically for that instrument.
 
 Overrides: `--model-store <path>` (use a different store), `--model <id>` (force a specific
-model), `--param-file <path>` (load a binary `.param` directly).
+model).
 
 ## 7. Evaluation & validation
 

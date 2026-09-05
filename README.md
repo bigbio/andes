@@ -24,15 +24,15 @@ Benchmarked at 1% FDR across three reference datasets — **read the metric note
 
 | Engine | Astral (high-res HCD) | TMT a05058 (low-res CID) | UPS1 (low-res LFQ) |
 |---|---:|---:|---:|
-| **andes** (own-geometry) | **36,873** | **11,163** | 15,061 |
-| Java MS-GF+ v20240326 | 26,542 † | 10,651 | **15,904** |
-| Comet 2025.01 | 28,401 | 8,566 | 14,708 |
-| *andes wall time* ‡ | *244 s* | *97 s* | *50 s* |
-| *Comet wall time* ‡ | *209 s* | *77 s* | *48 s* |
+| **andes** | **38,394** | **12,281** | 15,838 |
+| Comet 2025.01 | 31,435 | 10,504 | 14,734 |
+| Java MS-GF+ v20240326 † | 26,542 | 10,651 | **15,904** |
+| *andes wall time* | *244 s* | *97 s* | *50 s* |
+| *Comet wall time* | *209 s* | *77 s* | *48 s* |
 
-<sub>**Metric.** Counts are Percolator `q ≤ 0.01` under one uniform methodology (plain FASTA + andes `XXX_` decoys + Percolator 3.7.1 `--seed 42 -Y`) — that is what makes the rows comparable. They are **not** entrapment-validated: a 2026-09-04 audit found the Astral database has no entrapment component and the UPS1 one is not 1:1, so the nominal 1% there is really ~2.6–3.6% true FDP. The three andes counts come from the soft-fragment-matching validation ([`docs/soft-fragment-matching.md`](docs/soft-fragment-matching.md)) and predate the 2026-09 tree-count default — treat them as historical. The Comet 28,401 is the one figure in this table for which no recorded run was found. **‡** Wall times measured 2026-09-04, same host, 8 threads, Comet 2025.01 rev 1 — the version in the row above. andes is **1.04–1.26x slower than Comet** while finding 7.5–22.1% more PSMs at `q ≤ 0.01` (measured head-to-head: [`docs/benchmarks/`](docs/benchmarks/README.md)). Java MS-GF+ was not re-run; it remains ~10–40x slower than andes. **†** Java Astral at q≤1%. N=1 per dataset; Astral on converted mzML. Method, caveats and current measurements: [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
+<sub>**Metric.** PSMs at Percolator `q ≤ 0.01` under one methodology for every row (plain FASTA + andes `XXX_` decoys + Percolator 3.7.1 `--seed 42 -Y`). andes and Comet were measured head-to-head on **2026-09-04**, same host, 8 threads, one session, commit `1b8520f8`; andes finds **7.5–22.1% more PSMs** for **1.04–1.26x** Comet's wall time. **†** Java MS-GF+ was not re-run that day; its counts are from the same protocol in an earlier session, and it remains ~10–40x slower than andes. These counts are **not** entrapment-validated: the Astral and TMT databases carry no entrapment component, and on UPS1 the measured true FDP at a nominal 1% is **~3.6%**. N=1 per dataset. Every number, its provenance, the opt-in modes and the glyco tiers: [`docs/benchmarks/`](docs/benchmarks/README.md).</sub>
 
-**On FDR honesty.** Target-decoy q-values are self-consistent by construction, so andes is checked against entrapment databases where one exists — a target PSM matching only a foreign `ENTRAP_` protein is false by construction, which makes the true FDP measurable rather than assumed. That check is real and has repeatedly changed conclusions here. It is also **not uniformly available**: as of the 2026-09-04 audit the Astral benchmark database carries no entrapment component, and the UPS1 one is not 1:1, so the honest summary is that UPS1 sits at ~2.6–3.6% true FDP at a nominal 1% and Astral is unvalidated in this configuration. (Opt-in `--refine` PTM discovery runs on top, but its gains are not yet entrapment-validated — the entrapment metric is blind to its peptide-anchored second pass — so it ships as a capability, not a headline number.)
+**On FDR honesty.** Target-decoy q-values are self-consistent by construction, so andes is checked against entrapment databases where one exists — a target PSM matching only a foreign `ENTRAP_` protein is false by construction, which makes the true FDP measurable rather than assumed. That check is real and has repeatedly changed conclusions here. It is also **not uniformly available**: as of the 2026-09-04 audit the Astral benchmark database carries no entrapment component, and the UPS1 one is not 1:1, so the honest summary is that UPS1 sits at ~3.6% true FDP at a nominal 1% and Astral is unvalidated in this configuration. (Opt-in `--refine` PTM discovery runs on top, but its gains are not yet entrapment-validated — the entrapment metric is blind to its peptide-anchored second pass — so it ships as a capability, not a headline number.)
 
 <details>
 <summary>Bench methodology</summary>
@@ -272,7 +272,7 @@ For a regime that is not bundled, andes auto-selects the nearest covered model (
 
 | `model_id` | activation / instrument / enzyme / protocol | Training data (public PRIDE) | Benchmark |
 |---|---|---|---|
-| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | leads field +24–47% (Astral) |
+| `hcd_astral_tryp` | HCD / OrbitrapAstral / Trypsin / Automatic | PXD046453 | Astral: +22% PSMs vs Comet |
 | `hcd_qexactive_tryp` | HCD / QExactive / Trypsin / Automatic | ProteomeTools (PXD009449) | global default model |
 | `hcd_qexactive_tryp_tmt` | HCD / QExactive / Trypsin / TMT | PXD010429 | — |
 | `hcd_qexactive_tryp_itraq` | HCD / QExactive / Trypsin / iTRAQ | public PRIDE (see manifest) | — |
@@ -328,6 +328,9 @@ Optional (default in **bold**):
 | `--model <SLUG>` | Load a specific model from the store by id (bypass auto-select), e.g. `hcd_qexactive_tryp_tmt` | **auto-pick** |
 | `--model-store <PATH>` | Use a custom model store instead of the bundled `resources/models/` | **bundled** |
 | `--decoy-prefix <STR>` | Prefix for generated decoys | **XXX_** |
+| `--decoy-strategy <reverse\|shuffle\|sequon-reverse\|none>` | How decoys are generated; `sequon-reverse` with `--glyco`, `none` for a pre-built target+decoy FASTA | **reverse** |
+| `--enzyme <NAME>` | Digestion enzyme (`trypsin`, `chymotrypsin`, `lysc`, `aspn`, `gluc`, `lysn`, `argc`, `alphalp`, `nocleavage`, `nonspecific`; comma-list for multi-protease) | **trypsin** |
+| `--gbdt-max-trees <INT>` | Trees evaluated per GBDT ensemble (`0` = all). 100 is 33–41% faster than all trees and identification-neutral; `--glyco` uses all trees unless set | **100** |
 | `--ms-level <INT>` | MS level to search; MS1/MS3+ (e.g. TMT SPS-MS3) filtered out (mzML or `.raw`) | **2** |
 | `--threads <INT>` | Worker threads | **logical CPUs** |
 | `--chimeric` | Two-pass co-isolated-peptide cascade (mzML or Thermo `.raw`) | **off** — see below |
@@ -361,13 +364,13 @@ and prints a warning. These parameters have no effect on mzML/`.raw`/`.d`.
 
 DDA scans frequently co-isolate more than one precursor, and the second peptide is normally lost. With `--chimeric` (mzML or Thermo `.raw`), andes runs a **two-pass cascade**: Pass 1 is the normal top-1 search; Pass 2 then detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and runs a targeted search for the second peptide on the *residual* spectrum (the primary's matched peaks removed), emitting it as an extra PSM. This recovers co-isolated identifications without the FDR inflation of a blind wide-window search — gains are entrapment-FDP validated. It is **opt-in and off by default**; the default engine is unchanged.
 
-**Measured 2026-08-28.** On UPS1, which ships an entrapment database, `--chimeric` raised
-PSMs at q ≤ 0.01 from 15,938 to 17,294 (+8.5%) while the *true* entrapment FDP went slightly
-**down**, 2.57% → 2.44% — so the extra identifications are real rather than an artifact of
-the different target/decoy population the chimeric PIN presents (it emits ~2.5 candidate rows
-per scan against the default's ~10). On Astral the gain is far larger (38,402 → 64,958,
-+69.2%) but that database has no entrapment component, so the Astral figure is **not**
-entrapment-validated and should not be read as though it were. Details in
+**Measured 2026-09-04** (same session as the headline table). On UPS1, the one dataset
+with an entrapment database, `--chimeric` raised PSMs at q ≤ 0.01 from 15,838 to 17,112
+(+8.0%) while entrapment hits stayed flat (166 → 167) — the extra identifications are real,
+not an artifact of the different candidate population the chimeric PIN presents (it forces
+`top_n = 1` in pass 1). On Astral the gain is far larger (38,394 → 65,028, +69%) but that
+database has no entrapment component, so the Astral figure is **not** entrapment-validated
+and should not be read as though it were. Details in
 [`docs/benchmarks/`](docs/benchmarks/README.md).
 
 ## Soft fragment matching
@@ -428,12 +431,15 @@ one file per invocation.
 
 ### What to expect
 
-On a public AI-ETD mouse-brain dataset (PXD011533, 6 fractions, ~5,090 distinct
-glycopeptides in the reference identification set), andes recovers **~71% of that
-reference set** at 1% PSM-level q-value from Percolator, at a measured entrapment
-false-discovery proportion of **0.45%** — i.e. the reported 1% is conservative, not
-optimistic. Recovery is strongly charge-dependent: it is highest at 2+/3+ and falls off
-at 5+ and above, where multiply-charged fragment evidence dominates.
+On the pGlyco2 mouse-liver dataset (PXD005553, five fractions, 17,855 reference
+glycoPSMs), andes reports **31,658 ± 34 glycoPSMs** at 1% PSM-level q-value from Percolator
+and **confirms 78.8% of the reference** (same scan, same backbone), at a measured true
+false-discovery proportion of **1.02% ± 0.03** against a 1:1 shuffled entrapment database
+— the reported 1% is where it claims to be. Where andes and pGlyco2 identify the same scan,
+99.1% agree on the backbone and 83.8% on the full peptidoform (backbone + glycan
+composition). On human plasma (PXD030622) against the depositors' Byonic results, 47.7% of
+reference spectra are confirmed; the dominant loss there is per-scan candidate selection,
+not missing evidence.
 
 Treat these as a calibration point, not a guarantee. Glyco results depend heavily on
 activation type, glycan class, and how the reference set itself was filtered.

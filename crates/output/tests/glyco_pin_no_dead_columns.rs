@@ -91,10 +91,6 @@ fn redesign_columns_are_default_only() {
         "MaskedPeakCount",
         "ChanceLlrMasked",
         "ExplainedMasked",
-        "DeltaBackbone",
-        "DeltaGlycan",
-        "DeltaPeptide",
-        "NSplitsConsidered",
     ];
 
     let mut buf = Cursor::new(Vec::new());

@@ -7,8 +7,8 @@ DATA=~/andes-bench                                  # ~200 GB free for the stand
 
 ./reproduce/build_databases.sh "$DATA"              # databases from UniProt, ~1 min
 GLYCO=1 ./reproduce/build_databases.sh "$DATA"      # ...plus the mouse glyco database
-./reproduce/fetch_spectra.sh   "$DATA" tmt ups1     # spectra from PRIDE (see caveat on astral)
-./reproduce/run.sh             "$DATA" tmt ups1     # search + Percolator + results table
+./reproduce/fetch_spectra.sh   "$DATA"              # astral tmt ups1 from PRIDE (4.8 GB)
+./reproduce/run.sh             "$DATA"              # search + Percolator + results table
 ```
 
 **Four rules that are not optional.** Each exists because breaking it produced a wrong
@@ -58,10 +58,41 @@ re-measured, this document says so rather than carrying the old value forward si
 
 ## 1. Current results
 
-Commit `1b8520f8` (merged `main`), benchmark VM, 8 threads, Percolator 3.7.1
-(`quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`, `--seed 42 -Y`), counts at
-`q ≤ 0.01`, all measured **2026-09-04 in one session** so the three datasets are mutually
-comparable.
+### Everything measured, in one table
+
+Every row names what produced it. Standard and opt-in rows: commit `1b8520f8`, benchmark
+VM (8-thread Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`, **2026-09-04,
+one session**. Glyco rows: commit `6b37bb2c`, Codon, 5 Percolator seeds, native `.raw`
+(or TRFP 1.4.3, which is byte-identical on these files).
+
+| benchmark | dataset | what is measured | andes | reference | measured error | wall (andes) |
+|---|---|---|---:|---:|---|---:|
+| **Standard, high-res** | Astral, PXD070049, HCD LFQ | PSMs @ q≤0.01 | **38,394** | Comet 31,435 (+22.1%) · Java MS-GF+ 26,542 † | not measurable (no entrapment component) | 244 s |
+| **Standard + TMT labels** | a05058, PXD007683, ion-trap CID | PSMs @ q≤0.01 | **12,281** | Comet 10,504 (+16.9%) · Java 10,651 | not measurable | 97 s |
+| **Standard, low-res LFQ** | UPS1, PXD001819, ion-trap CID | PSMs @ q≤0.01 | 15,838 | Comet 14,734 (+7.5%) · **Java 15,904** | 166 entrapment hits ⇒ **3.6% true FDP** at nominal 1% | 50 s |
+| **Chimeric** (`--chimeric`) | Astral | PSMs @ q≤0.01 | **65,028** (+69%) | baseline 38,394 | not measurable | 322 s |
+| | TMT a05058 | PSMs @ q≤0.01 | 12,540 (+2.1%) | baseline 12,281 | not measurable | 72 s |
+| | UPS1 | PSMs @ q≤0.01 | **17,112** (+8.0%) | baseline 15,838 | 167 entrapment hits — flat against 166 | 48 s |
+| **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **43,929** (+14.4%) | baseline 38,394 | not measurable by entrapment (pass 2 is protein-anchored) | 345 s |
+| | TMT, UPS1 | — | skipped | high-res only, by design | | |
+| **Glyco, quick tier** | plasma PXD030622, 3 sceHCD files pooled | glycoPSMs @1% | **385** (384.6 ± 22, 5 seeds) | Byonic reference 629 spectra: 47.7% confirmed | 0.00% entrapment on all seeds (design cannot resolve below ~1 hit) | ~460 s |
+| **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions | glycoPSMs @1% | **31,658 ± 34** | pGlyco2 17,855: **78.8% confirmed**, 92.2% of its peptides found | **1.02% ± 0.03 true FDP** (1:1 shuffled database) | ~25 min / fraction, 16 cores |
+| | | same-scan agreement | 83.8% peptidoform · 99.1% backbone | (`glyco/agreement.py`) | | |
+| **Glyco, development tier** | one liver fraction | glycoPSMs @1% | 6,554 | — | 1.04% true FDP | 4,592 s, 8 threads |
+
+† Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
+(same protocol, earlier session) and it remains ~10-40x slower than andes.
+
+**Not benchmarked yet, and therefore not claimed:** a phospho-enriched (or any
+PTM-enriched) dataset, iTRAQ, timsTOF `.d`, MSFragger on the standard sets, and Comet's
+fragment-index mode. The four bundled phosphorylation models have never been scored against
+a reference. See §5.
+
+### Standard search, in detail
+
+
+Percolator image `quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2`; the three datasets
+were measured in one session so they are mutually comparable.
 
 | dataset | regime | wall | PSMs @ q≤0.01 |
 |---|---|---:|---:|
@@ -226,12 +257,7 @@ model and the feature distributions differ between fragmentation chemistries.
 
 
 
-Intact N-glycopeptide search (`--glyco`). The harness is
-[`glyco/`](glyco/); its README documents each script.
-
-**Mouse brain, PXD011533**, 6 fractions pooled, 5 Percolator seeds, entrapment-controlled
-(commit `6b37bb2c`, Codon): **4,915 ± 14 glycoPSMs**, 3,197 ± 8 backbone-correct against
-the depositors' Byonic reference, entrapment FDP ~0.97%.
+### Where the plasma loss is
 
 **Human plasma, PXD030622** (R1–R3, pure-HCD), decomposed per scan against the depositors'
 own Byonic results — 629 truth spectra, 2026-09-04:
@@ -273,18 +299,18 @@ count () { awk -F'\t' 'NR==1{for(i=1;i<=NF;i++) if($i=="q-value") q=i; next} $q<
 |---|---|---|
 | Astral | `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` | ProteoBench HYE, 31,889 seqs |
 | TMT a05058 | `a05058.raw` | `tmt_db.fasta`, human + yeast reviewed, 26,483 seqs |
-| UPS1 | `UPS1_5000amol_R1.mzML` | `yeast_entrap.fasta` (yeast + E. coli entrapment) |
+| UPS1 | `UPS1_5000amol_R1.raw` | `yeast_entrap.fasta` (yeast + E. coli entrapment) |
 
 ```bash
-andes --spectrum astral.mzML --database hye.fasta \
+andes --spectrum LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw --database hye.fasta \
       --mods configs/astral_mods.txt --precursor-tol 10ppm --enzyme trypsin \
       --threads 8 --output-pin astral.pin
 perc astral && count astral.t.psms
 
-andes --spectrum a05058.mzML --database tmt_db.fasta \
+andes --spectrum a05058.raw --database tmt_db.fasta \
       --mods configs/mods-tmt.txt --threads 8 --output-pin tmt.pin
 
-andes --spectrum UPS1_5000amol_R1.mzML --database yeast_entrap.fasta \
+andes --spectrum UPS1_5000amol_R1.raw --database yeast_entrap.fasta \
       --threads 8 --output-pin ups1.pin
 ```
 
@@ -302,8 +328,8 @@ GLYCO=1 ./reproduce/build_databases.sh "$DATA"     # writes databases/mouse_entr
 # 1. One search per fraction. --decoy-strategy sequon-reverse is REQUIRED, not optional:
 #    plain reversal maps an N-X-S/T sequon to S/T-X-N, so reversed decoys sail through the
 #    glyco sequon gate and q-values come out anti-conservative.
-for f in Frac1 Frac2 Frac3 Frac4 Frac5 Frac6; do
-  andes --spectrum $f.mzML --database "$DATA/databases/mouse_entrap.fasta" --glyco \
+for f in MouseLiver-Z-T-1 MouseLiver-Z-T-2 MouseLiver-Z-T-3 MouseLiver-Z-T-4 MouseLiver-Z-T-5; do
+  andes --spectrum $f.raw --database "$DATA/databases/mouse_entrap.fasta" --glyco \
         --decoy-strategy sequon-reverse \
         --threads 8 --output-pin $f.pin            # writes $f.glyco.pin
 done
@@ -431,20 +457,21 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 
 ## 5. Known gaps
 
-- **The README's headline table is historical.** Its andes counts (36,873 / 11,163 /
-  15,061) come from the soft-fragment-matching validation in `docs/soft-fragment-matching.md`
-  and predate the 2026-09 tree-count default; the Comet 28,401 has no recorded source found.
-  They should be re-measured under the current default and the native-read protocol.
-- **The Astral dataset is not reproducible from its documented accession.** Our records
-  name `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` in PXD070049; that project's
-  complete 100-file listing does not contain it (checked 2026-09-04). Either the accession
-  or the filename is wrong, and until that is resolved the Astral row cannot be regenerated
-  by anyone outside this project — including us, on a fresh machine.
+- **The Astral database is ProteoBench's own file and is no longer served.** The spectra
+  fetch (an earlier version of this document said they did not; that was a pagination bug
+  in our script, fixed 2026-09-05), but `ProteoBenchFASTA_MixedSpecies_HYE.fasta` returns
+  404 from every URL it was ever at, so `build_databases.sh` reconstructs a Human/Yeast/
+  E. coli equivalent from UniProt (30.9k vs 31.9k sequences). Expect the Astral count to
+  move by a few hundred PSMs on the reconstruction.
 - **Java MS-GF+ has not been re-run** under the current default; every Java figure is
   historical. Comet 2025.01 *was* re-run head-to-head on 2026-09-04 (above). Neither
   Comet's newer fragment-index mode nor MSFragger has been benchmarked here at all.
 - **Two of three databases cannot support an entrapment claim.** Astral has no entrapment
   component; UPS1's is not 1:1. Rebuilding both near 1:1 is the fix.
+- **No PTM-enriched benchmark exists.** `--refine` is measured only on Astral, and the four
+  bundled phosphorylation models have never been scored against a reference dataset. A
+  public phospho-enrichment set with a deposited identification list is the next dataset
+  to add, following the same rules as the glyco tiers (pool, measure T/E, native `.raw`).
 - **Glyco selection is the open problem**, and whether those 37% are recoverable by scoring
   at all is unknown — it needs a candidate-pool dump taken at retention time under
   production settings, which does not exist yet.

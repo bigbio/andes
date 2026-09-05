@@ -1,9 +1,9 @@
 //! Flag-ON guard for the glyco scoring-redesign columns.
 //!
 //! WHY THIS EXISTS. The goldens prove that every redesign flag is inert when OFF.
-//! Nothing proved the flag-ON paths produce a column that VARIES: the split key was
-//! once a constant (every scan reported one split) and no test noticed, because the
-//! only automated check was the OFF-path golden. This runs the fixture with every
+//! Nothing proved the flag-ON paths produce a column that VARIES: a flag-gated column
+//! was once a constant and no test noticed, because the only automated check was
+//! the OFF-path golden. This runs the fixture with every
 //! redesign flag on and requires each new column to take at least two distinct values
 //! across the rows. A column that is constant with its flag on is the silent-defect
 //! shape this repo's path-parity guards exist for.
@@ -45,7 +45,6 @@ fn redesign_columns_vary_when_their_flags_are_on() {
         .arg("--glyco-oxonium-llr")
         .arg("--glyco-rank-masked")
         .arg("--glyco-chance-llr-masked")
-        .arg("--glyco-split-election")
         .arg("--output-pin").arg(&out_pin)
         .status()
         .expect("run andes");
@@ -65,7 +64,6 @@ fn redesign_columns_vary_when_their_flags_are_on() {
     let must_vary = [
         "YTreeLLR", "YTreeHitFrac", "YTreeDecoyGap", "OxoniumCompLLR",
         "RankScoreMasked", "ChanceLlrMasked", "ExplainedMasked",
-        "DeltaBackbone", "DeltaPeptide", "NSplitsConsidered",
     ];
     let mut failures = Vec::new();
     for col in must_vary {
@@ -78,7 +76,7 @@ fn redesign_columns_vary_when_their_flags_are_on() {
             failures.push(format!("{col}: constant ({:?}) with its flag on", distinct));
         }
     }
-    for col in ["MaskedPeakCount", "YTreeHighPriorMissing", "DeltaGlycan"] {
+    for col in ["MaskedPeakCount", "YTreeHighPriorMissing"] {
         let Some(i) = header.iter().position(|h| *h == col) else {
             failures.push(format!("{col}: column missing"));
             continue;

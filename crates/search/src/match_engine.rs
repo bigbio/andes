@@ -1,7 +1,6 @@
 //! Top-level integration: spectra × candidates → top-N PSMs per spectrum.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
@@ -514,15 +513,10 @@ impl<'a> PreparedSearch<'a> {
         // Yield-accounting counters.
         // Aggregated across all worker threads via Relaxed atomics — exact counts
         // don't require ordering with other memory ops.
-        let skipped_min_peaks = AtomicU64::new(0);
-        let candidates_visited = AtomicU64::new(0);
-        let psms_pushed = AtomicU64::new(0);
-        let spectra_with_psms = AtomicU64::new(0);
-
-        // Research diagnostic (env-gated, chimeric only): measure the
-        // shared-fragment overlap between the top-2 co-emitted distinct peptides
-        // per scan. Tests the "fragment theft" hypothesis behind chimeric FDR
-        // inflation. Zero cost unless ANDES_CHIMERIC_OVERLAP is set AND --chimeric.
+        // Research diagnostic (chimeric only): measure the shared-fragment
+        // overlap between the top-2 co-emitted distinct peptides per scan. Tests
+        // the "fragment theft" hypothesis behind chimeric FDR inflation. Gated by
+        // `--chimeric-allow-overlap` together with `--chimeric`; zero cost otherwise.
         let chim_overlap = params.chimeric
             && params.chimeric_allow_overlap;
 
@@ -544,7 +538,6 @@ impl<'a> PreparedSearch<'a> {
 
             // Skip spectra with too few peaks.
             if spec.peaks.len() < params.min_peaks as usize {
-                skipped_min_peaks.fetch_add(1, Ordering::Relaxed);
                 return queue;
             }
 
@@ -792,66 +785,6 @@ impl<'a> PreparedSearch<'a> {
             let enz_is_n_term = params.enzyme.is_n_term();
             let enz = params.enzyme;
 
-            // Per-candidate cleavage credit:
-            //   `cleavage_score = n_term_cleavage_score + c_term_cleavage_score`
-            // added to the raw PSM score before queue insertion.
-            //
-            // Use the ENZYME-REGISTERED aa_set (cleavage credit/penalty are
-            // populated by register_enzyme — params.aa_set is unregistered).
-            //
-            // `fn` (not closure) + `#[inline(always)]` ensures LLVM
-            // monomorphizes + inlines into the candidate loop. Closure form
-            // was not being inlined and went through FnMut::call_mut dispatch.
-            #[inline(always)]
-            #[allow(clippy::too_many_arguments, reason = "private inner driver for the per-chunk search loop; all args are orthogonal cleavage parameters")]
-            fn compute_cleavage_credit(
-                cand: &Candidate,
-                enz: Enzyme,
-                enz_is_c_term: bool,
-                enz_is_n_term: bool,
-                credit_neighboring: i32,
-                penalty_neighboring: i32,
-                credit_peptide: i32,
-                penalty_peptide: i32,
-            ) -> i32 {
-                let mut score: i32 = 0;
-                let pre = cand.peptide.pre;
-                let post = cand.peptide.post;
-                if enz_is_c_term {
-                    // N-term cleavage (neighboring)
-                    score += if cand.is_protein_n_term || enz.is_cleavable(pre) {
-                        credit_neighboring
-                    } else {
-                        penalty_neighboring
-                    };
-                    // C-term cleavage (peptide). Inline residues.last() to avoid
-                    // the Option::map call_mut dispatch that perf flagged.
-                    let last = match cand.peptide.residues.last() {
-                        Some(aa) => aa.residue,
-                        None => 0,
-                    };
-                    score += if enz.is_cleavable(last) {
-                        credit_peptide
-                    } else {
-                        penalty_peptide
-                    };
-                } else if enz_is_n_term {
-                    // N-term cleavage (peptide)
-                    score += if enz.is_cleavable(pre) {
-                        credit_peptide
-                    } else {
-                        penalty_peptide
-                    };
-                    // C-term cleavage (neighboring)
-                    score += if cand.is_protein_c_term || enz.is_cleavable(post) {
-                        credit_neighboring
-                    } else {
-                        penalty_neighboring
-                    };
-                }
-                score
-            }
-
             // Per-charge queue keyed by charge state. Retains top-N PSMs
             // independently per precursor charge (Kim et al., Nat Commun 5:5277, 2014).
             let mut per_charge_queues: FxHashMap<u8, TopNQueue> = FxHashMap::default();
@@ -860,7 +793,7 @@ impl<'a> PreparedSearch<'a> {
             // candidate whose nominal mass falls in the precursor window.
             for &cand_slot in &window_cand_indices {
                 let (cand, cand_idx) = resolve_cand(cand_slot);
-                let cleavage_credit = compute_cleavage_credit(
+                let cleavage_credit = enzyme_cleavage_credit(
                     cand,
                     enz,
                     enz_is_c_term,
@@ -997,10 +930,8 @@ impl<'a> PreparedSearch<'a> {
                         .entry(z)
                         .or_insert_with(|| TopNQueue::new(retention_cap))
                         .push(psm);
-                    psms_pushed.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            candidates_visited.fetch_add(window_cand_indices.len() as u64, Ordering::Relaxed);
 
             // pepSeq + score dedup per-charge BEFORE GF compute.
             // Same peptide matched against multiple proteins collapses to one
@@ -1019,11 +950,6 @@ impl<'a> PreparedSearch<'a> {
             // (RawScore = node + cleavage + edge). The generating function has
             // been removed, so there is no per-charge SpecEValue DP — the
             // per-charge queues are merged directly into the spectrum queue.
-            let any_queue_nonempty = per_charge_queues.values().any(|q| !q.is_empty());
-            if any_queue_nonempty {
-                spectra_with_psms.fetch_add(1, Ordering::Relaxed);
-            }
-
             // Spectrum-level merge. The TopNQueue::push (Ordering::Equal arm)
             // keeps rank_score ties at capacity, matching Kim et al. (Nat Commun
             // 5:5277, 2014) tie-retention on the spectrum-level merge.
@@ -1108,7 +1034,7 @@ impl<'a> PreparedSearch<'a> {
                 // recoverable from the candidate alone; re-walking `score_psm` here
                 // only to subtract it out again was one of the two full cache walks
                 // per emitted PSM (competitive plan item 4.3). `cleavage_credit_for`
-                // mirrors `compute_cleavage_credit` branch for branch.
+                // resolves the enzyme constants and calls the same `enzyme_cleavage_credit`.
                 let credit = cleavage_credit_for(cand, enz, aa_set_for_scoring) as f32;
                 features.rank_score_float = score_psm_float(
                     ss, &cand.peptide, scorer, psm.charge_used, fragment_tolerance_da,
@@ -1193,22 +1119,6 @@ impl<'a> PreparedSearch<'a> {
             },
             )
             .collect();
-
-        // Yield-accounting summary.
-        // Helps disambiguate whether a PSM-yield gap comes from:
-        //   - filtering (skipped_min_peaks)
-        //   - enumeration (candidates_visited)
-        //   - scoring (psms_pushed)
-        //   - top-N retention (spectra_with_psms)
-        eprintln!(
-            "Yield (chunk): {} spectra in, {} skipped by min_peaks, {} candidates visited, \
-             {} PSMs pushed, {} spectra with non-empty queue",
-            spectra.len(),
-            skipped_min_peaks.load(Ordering::Relaxed),
-            candidates_visited.load(Ordering::Relaxed),
-            psms_pushed.load(Ordering::Relaxed),
-            spectra_with_psms.load(Ordering::Relaxed),
-        );
 
         queues
     }
@@ -1373,19 +1283,27 @@ pub fn run_pass2_coisolation(
     });
 }
 
-/// Per-candidate cleavage credit, module-level mirror of the nested
-/// `compute_cleavage_credit` in `run_chunk_inner`. `search_secondary` calls this
-/// so secondaries share the production RawScore scale (`score_psm(...) + credit`).
-/// Credit/penalty constants come from the ENZYME-REGISTERED `aa_set`; keep the
-/// branch structure bit-identical to `compute_cleavage_credit`.
-pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoAcidSet) -> i32 {
-    let credit_neighboring = aa_set.neighboring_aa_cleavage_credit();
-    let penalty_neighboring = aa_set.neighboring_aa_cleavage_penalty();
-    let credit_peptide = aa_set.peptide_cleavage_credit();
-    let penalty_peptide = aa_set.peptide_cleavage_penalty();
-    let enz_is_c_term = enz.is_c_term();
-    let enz_is_n_term = enz.is_n_term();
-
+/// Per-candidate enzymatic cleavage credit: the RawScore term for whether the
+/// peptide's two termini sit at cleavable positions. `cand.pre`/`post` are the
+/// flanking residues; protein termini always earn the neighboring credit.
+///
+/// Credit/penalty constants come from the ENZYME-REGISTERED `AminoAcidSet`
+/// (the one populated by `register_enzyme`), never from an unregistered set.
+///
+/// `fn` + `#[inline(always)]` so LLVM inlines it into the candidate loop of
+/// `run_chunk_inner`; a closure went through `FnMut::call_mut` dispatch.
+#[inline(always)]
+#[allow(clippy::too_many_arguments, reason = "hot-loop driver; all args are orthogonal cleavage parameters")]
+pub(crate) fn enzyme_cleavage_credit(
+    cand: &Candidate,
+    enz: Enzyme,
+    enz_is_c_term: bool,
+    enz_is_n_term: bool,
+    credit_neighboring: i32,
+    penalty_neighboring: i32,
+    credit_peptide: i32,
+    penalty_peptide: i32,
+) -> i32 {
     let mut score: i32 = 0;
     let pre = cand.peptide.pre;
     let post = cand.peptide.post;
@@ -1396,7 +1314,8 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
         } else {
             penalty_neighboring
         };
-        // C-term cleavage (peptide)
+        // C-term cleavage (peptide). Inline residues.last() to avoid
+        // the Option::map call_mut dispatch that perf flagged.
         let last = match cand.peptide.residues.last() {
             Some(aa) => aa.residue,
             None => 0,
@@ -1421,6 +1340,22 @@ pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoA
         };
     }
     score
+}
+
+/// [`enzyme_cleavage_credit`] with the constants resolved from the enzyme-registered
+/// `aa_set`. `search_secondary` calls this so secondaries share the production
+/// RawScore scale (`score_psm(...) + credit`).
+pub(crate) fn cleavage_credit_for(cand: &Candidate, enz: Enzyme, aa_set: &AminoAcidSet) -> i32 {
+    enzyme_cleavage_credit(
+        cand,
+        enz,
+        enz.is_c_term(),
+        enz.is_n_term(),
+        aa_set.neighboring_aa_cleavage_credit(),
+        aa_set.neighboring_aa_cleavage_penalty(),
+        aa_set.peptide_cleavage_credit(),
+        aa_set.peptide_cleavage_penalty(),
+    )
 }
 
 

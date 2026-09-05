@@ -28,8 +28,8 @@
 //!
 //! MEASURED LIMIT, so nobody assumes more of this test than it delivers: on this
 //! fixture the high-res configuration is NOT sensitive to the fused-selector
-//! weights -- `--glyco-gp-m 0` vs `10` produces 0 differing lines, where the same
-//! sweep moves all 120 rows on the low-res path in `glyco_golden.rs`. The 20 ppm
+//! weights -- sweeping a `--glyco-gp-*` weight produces 0 differing lines, where
+//! the same sweep moves all 120 rows on the low-res path in `glyco_golden.rs`. The 20 ppm
 //! window leaves too little candidate competition for the weight to change a
 //! winner. So selector regressions are caught by the LOW-RES golden; this one
 //! catches model/detection regressions and any gross change to the emitted rows.

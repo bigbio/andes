@@ -117,8 +117,6 @@ fn split_header(s: &str) -> (String, String) {
 pub enum FastaParseError {
     #[error("I/O error at line {line}: {source}")]
     Io { line: usize, #[source] source: std::io::Error },
-    #[error("malformed FASTA at line {line}: expected `>` at start of header, got {got:?}")]
-    NotAHeader { line: usize, got: String },
     #[error("FASTA header at line {line} has empty accession")]
     EmptyAccession { line: usize },
     #[error("sequence data at line {line} appears before any `>` header: {got:?}")]

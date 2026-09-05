@@ -216,8 +216,7 @@ pub fn hybrid_candidates_with_isotope(
         tol_ppm,
         top_k,
         false,
-        false, // isobar_rep: convenience wrapper keeps the historical default
-        0.0,   // sialic oxonium gate: off
+        0.0, // sialic oxonium gate: off
     )
 }
 
@@ -291,9 +290,6 @@ pub fn hybrid_candidates_presolved(
     tol_ppm: f64,
     top_k: usize,
     force_db_on_none: bool,
-    // Resolve isobaric-composition collisions on Y-ladder evidence instead of sort
-    // order. See the block below for why the original A/B under-measured this.
-    isobar_rep: bool,
     // When > 0, a composition may only claim NeuAc/NeuGc if the matching oxonium reaches
     // this fraction of base peak. 0 disables the gate (historical behaviour).
     sialic_oxonium_min_frac: f32,
@@ -473,58 +469,13 @@ pub fn hybrid_candidates_presolved(
         return combined;
     }
 
-    // Round-7 (audit F5): this clustered on backbone mass ALONE and kept whichever
-    // member sorted first, which is composition-blind. The monosaccharide constants
-    // make that systematic rather than random:
-    //     HEX - FUC   = 15.994915
-    //     NEUGC - NEUAC = 15.994914
-    // so {hex=h, fuc=f, neuac=a, neugc=g} and {hex=h-1, fuc=f+1, neuac=a-1, neugc=g+1}
-    // are isobaric to ~1 uDa. In the default 600-composition list that collapses ~23%
-    // of entries, and because the Hex+NeuAc twin has the (1 uDa) larger glycan mass it
-    // always sorts first, so the Fuc+NeuGc twin is ALWAYS the one deleted. PXD011533 is
-    // mouse, which expresses NeuGc — i.e. the biologically correct member was being
-    // dropped by sort order. The backbone mass is identical either way, but the
-    // surviving composition drives the glycan-Y ladder (gp_k, the largest selector
-    // weight) and sialic_consistency, so a wrong composition depresses the ladder for
-    // the TRUE backbone and can lose it the argmax.
-    // Fix: when a cluster holds >1 DISTINCT composition, pick the representative by
-    // composition-specific Y-ladder evidence instead of sort order. Peptide-independent,
-    // so target/decoy symmetric. Candidate count is unchanged (still one per cluster).
-    // MEASURED NEGATIVE ON THE WRONG METRIC (-8 backbone-correct @1%, 3-fraction pool)
-    // and disabled. That A/B scored peptide-level yield, and as the original note itself
-    // observed, "the backbone mass is identical either way, so the peptide-level outcome
-    // barely moves" — i.e. the metric was structurally unable to see what this changes.
-    //
-    // What it changes is WHICH COMPOSITION is named for a given glycan mass, and that is
-    // measurably broken. Head-to-head against the depositors' own Byonic results on
-    // PXD030622 human plasma (their FASTA, their published QC): andes emits 131 distinct
-    // composition strings over only 53 distinct glycan MASSES (~2.5 compositions per mass)
-    // where Byonic is 1.0 — i.e. two spectra of the same glycan can be annotated with
-    // different compositions, because the survivor among isobaric twins is chosen by
-    // `to_bits()` sort order. The masses themselves are largely right: 74% of andes PSMs
-    // carry a mass Byonic also observed and the median is 2205 Da in both.
-    //
-    // So this is now a flag (`--glyco-isobar-rep`), to be judged on
-    // COMPOSITIONS-PER-MASS against a reference distribution, not on yield.
-    let iso_stats = isobar_rep.then(|| SpectrumStats::new(peaks));
-    // Y-ladder evidence for a hit's own composition (0.0 for de-novo / no comp).
-    let comp_evidence = |h: &BackboneHit| -> f64 {
-        match (&h.glycan, iso_stats.as_ref()) {
-            (Some(g), Some(st)) => crate::backbone::glycan_y_intensity(
-                peaks,
-                st,
-                h.backbone_mass + H2O,
-                g,
-                tol_ppm,
-                precursor_z,
-            ),
-            _ => 0.0,
-        }
-    };
-
+    // Clusters on backbone mass alone; within a cluster the representative is the
+    // member that sorts first (Db before DeNovo, then by glycan mass). Isobaric
+    // compositions at the same backbone mass are therefore resolved by sort order.
+    // Which composition survives affects only the named composition, never the
+    // backbone mass or the candidate count (still one per cluster).
     let mut deduped: Vec<BackboneHit> = Vec::with_capacity(combined.len());
     let mut rep = combined.remove(0);
-    let mut rep_ev: Option<f64> = None; // lazily computed only on a real collision
 
     for next in combined {
         let tol = (rep.backbone_mass * tol_ppm * 1e-6_f64).max(0.01);
@@ -535,25 +486,11 @@ pub fn hybrid_candidates_presolved(
             // but guard defensively):
             if rep.source == Source::DeNovo && next.source == Source::Db {
                 rep = next;
-                rep_ev = None;
-            } else if isobar_rep
-                && rep.source == Source::Db
-                && next.source == Source::Db
-                && rep.glycan != next.glycan
-            {
-                // Isobaric composition collision — resolve on evidence, not order.
-                let r = *rep_ev.get_or_insert_with(|| comp_evidence(&rep));
-                let n = comp_evidence(&next);
-                if n > r {
-                    rep = next;
-                    rep_ev = Some(n);
-                }
             }
             // else keep rep as-is
         } else {
             deduped.push(rep);
             rep = next;
-            rep_ev = None;
         }
     }
     deduped.push(rep);
@@ -802,8 +739,7 @@ mod tests {
                 tol,
                 top_k,
                 false,
-                false, // isobar_rep: this test pins isotope-sweep equivalence only
-                0.0,   // sialic oxonium gate: off
+                0.0, // sialic oxonium gate: off
             ));
         }
 

@@ -152,8 +152,6 @@ fn write_glyco_header<W: Write>(
         // penalises a composition claiming a monosaccharide whose diagnostic ion is
         // absent. This does, per class, with the fucose asymmetry the chemistry requires.
         "OxoniumCompLLR".to_string(),
-        // Election margins (`--glyco-split-election`; 0.0 otherwise). One axis each,
-        // where the shipped DeltaRankScore conflated all three.
         // Peptide-channel rank (`--glyco-rank-masked`; 0.0 otherwise): the winner
         // re-scored after oxonium and Y-ladder peaks are masked and ranks recomputed.
         "RankScoreMasked".to_string(),
@@ -162,13 +160,6 @@ fn write_glyco_header<W: Write>(
         // fragment charges to z-1 (`--glyco-chance-llr-masked`; 0.0 otherwise).
         "ChanceLlrMasked".to_string(),
         "ExplainedMasked".to_string(),
-        "DeltaBackbone".to_string(),
-        "DeltaGlycan".to_string(),
-        "DeltaPeptide".to_string(),
-        // Distinct backbone-mass splits that reached the election. A dense split
-        // lattice is the measured plasma failure mechanism: with large glycans many
-        // compositions fit the precursor, so a decoy always occupies one of them.
-        "NSplitsConsidered".to_string(),
         "CzHyperscore".to_string(), // ETD c/z backbone hyperscore (additive; ETD/AI-ETD only, else 0)
         "CzIntensity".to_string(), // ETD c/z matched-intensity fraction (additive; ETD/AI-ETD only, else 0)
         "CzExplained".to_string(), // ETD c/z analytical explained-intensity LLR (additive; graded-model de-risk; ETD only, else 0)
@@ -377,10 +368,6 @@ if glyco_col_kept("SialicConsistency", curated) { write_double_tab(writer, siali
     if glyco_col_kept("MaskedPeakCount", curated) { write!(writer, "\t{}", key.masked_peak_count)?; }
     if glyco_col_kept("ChanceLlrMasked", curated) { write_double_tab(writer, key.chance_llr_masked as f64)?; }
     if glyco_col_kept("ExplainedMasked", curated) { write_double_tab(writer, key.explained_masked as f64)?; }
-    if glyco_col_kept("DeltaBackbone", curated) { write_double_tab(writer, key.delta_backbone as f64)?; }
-    if glyco_col_kept("DeltaGlycan", curated) { write_double_tab(writer, key.delta_glycan as f64)?; }
-    if glyco_col_kept("DeltaPeptide", curated) { write_double_tab(writer, key.delta_peptide as f64)?; }
-    if glyco_col_kept("NSplitsConsidered", curated) { write!(writer, "\t{}", key.n_splits_considered)?; }
 
     // ETD c/z backbone hyperscore (additive; ETD/AI-ETD spectra only, else 0.0).
     // A peptide-axis feature (backbone c/z ladder), so a glycan-decoy row emits the
@@ -905,10 +892,6 @@ mod tests {
             masked_peak_count: 0,
             chance_llr_masked: 0.0,
             explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 5,
             glycan_mass,
             backbone_mass: 1500.0,
@@ -1163,10 +1146,6 @@ mod tests {
             masked_peak_count: 0,
             chance_llr_masked: 0.0,
             explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 3,
             glycan_mass,
             backbone_mass: peptide_neutral_mass,
@@ -1360,10 +1339,6 @@ mod tests {
             masked_peak_count: 0,
             chance_llr_masked: 0.0,
             explained_masked: 0.0,
-            delta_backbone: 0.0,
-            delta_glycan: 0.0,
-            delta_peptide: 0.0,
-            n_splits_considered: 0,
             core_y_hits: 4,
             glycan_mass,
             backbone_mass: candidates[0].peptide.mass(),
@@ -1431,7 +1406,7 @@ mod tests {
         key.y_ladder_intensity_score = 1.25;
         key.core_y_hits = 3;
         key.oxonium_comp_llr = -0.75;
-        key.n_splits_considered = 7;
+        key.masked_peak_count = 7;
         key.cz_hyperscore = 2.5;
         let hit = FullGlycoPsm { glycan_key: key, psm: make_minimal_psm(0, 10.0) };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
@@ -1468,11 +1443,11 @@ mod tests {
                 assert_eq!(at("CoreYHits"), Some("3"), "curated={curated}");
                 if curated {
                     assert_eq!(at("OxoniumCompLLR"), None);
-                    assert_eq!(at("NSplitsConsidered"), None);
+                    assert_eq!(at("MaskedPeakCount"), None);
                     assert_eq!(at("CzHyperscore"), None);
                 } else {
                     assert_eq!(at("OxoniumCompLLR"), Some("-0.75"));
-                    assert_eq!(at("NSplitsConsidered"), Some("7"));
+                    assert_eq!(at("MaskedPeakCount"), Some("7"));
                     assert_eq!(at("CzHyperscore"), Some("2.5"));
                 }
                 // DeltaRTRank is dropped by the column policy (structurally 0 under the

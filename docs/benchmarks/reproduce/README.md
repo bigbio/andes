@@ -11,9 +11,9 @@ DATA=~/andes-bench                     # anywhere with ~200 GB free for the raw 
 ./run.sh             "$DATA" tmt ups1  # search + Percolator + results table
 ```
 
-Add `glyco-mouse` or `glyco-plasma` to `fetch_spectra.sh` for the glyco datasets; those are
-run through the harness in [`../glyco/`](../glyco/)
-rather than `run.sh`, because they must be pooled before Percolator.
+Add `glyco-plasma` (0.39 GB, the quick tier) or `glyco-mouse` (12.6 GB, the deep tier) to
+`fetch_spectra.sh` for the glyco datasets; those are run through the harness in
+[`../glyco/`](../glyco/) rather than `run.sh`, because they must be pooled before Percolator.
 
 ## What each script does
 
@@ -66,27 +66,32 @@ safe for your data — which is the argument for skipping conversion altogether.
 If you must convert, use **1.4.3**, and state the converter version with any number you
 publish. All figures here were produced with native reading or 1.4.3, which agree exactly.
 
-## Two things that will not reproduce exactly, stated up front
+## What will not reproduce byte-for-byte, stated up front
 
-**The Astral row cannot be fetched at all.** Our records name
-`LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` in PXD070049, but that project does not
-contain that file — verified against its complete 100-file listing on 2026-09-04. Either
-the accession or the filename in our records is wrong. `fetch_spectra.sh` refuses that
-dataset and says so rather than downloading nothing quietly. The other datasets are
-unaffected.
-
-**UniProt is versioned, so databases are not byte-identical to ours.** A build on
-2026-09-04 gave:
+**Databases: UniProt is versioned.** A build on 2026-09-04 gave:
 
 | database | this build | ours | note |
 |---|---:|---:|---|
 | `tmt_db.fasta` | 26,483 | 26,483 | exact match |
-| `hye.fasta` | 30,886 | 31,889 | ProteoBench's own file is not fetchable (no listing); this is a Human/Yeast/E.coli reconstruction |
+| `hye.fasta` | 30,886 | 31,889 | ours was ProteoBench's own file (sha256 `d9ac434d…`); every URL it was served from now returns 404, so this is a Human/Yeast/E.coli reconstruction |
 | `yeast_entrap.fasta` | 10,470 | 11,264 | different UniProt release |
 
 Counts will therefore differ slightly from the published table. That is expected and is why
 every script prints the sha256 and sequence count of what it actually built — quote those
 alongside any number you report.
+
+**Spectra: all five datasets fetch.** An earlier version of this document said the Astral
+file could not be found in PXD070049. That was this script's own bug: the PRIDE API serves
+at most 100 files per page, the project has 2,173, and the script read one page. It now
+pages through the whole listing, and every file the benchmarks use resolved on 2026-09-05:
+
+| dataset | accession | files | size |
+|---|---|---|---:|
+| astral | PXD070049 | `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` | 2.58 GB |
+| tmt | PXD007683 | `a05058.raw` | 0.54 GB |
+| ups1 | PXD001819 | `UPS1_5000amol_R1.raw` | 1.70 GB |
+| glyco-mouse | PXD005553 | `MouseLiver-Z-T-{1..5}.raw` (pGlyco2 liver) | 12.6 GB |
+| glyco-plasma | PXD030622 | `…-sceHCD-R{1,2,3}.raw` | 0.39 GB |
 
 ## Reading the output
 
@@ -98,5 +103,6 @@ FDP = (entrapment hits / total accepted) x (1 + T/E)
 ```
 
 with `T/E` from `build_databases.sh`. **Never assume 1:1 (factor 2)** — doing so has
-understated the true error in this project twice. Only the UPS1 database here has an
-entrapment component, so only it yields a true FDP.
+understated the true error in this project twice. Of the standard databases only UPS1 has an
+entrapment component, so only it yields a true FDP; the glyco mouse database is 1:1 by
+construction (factor exactly 2).

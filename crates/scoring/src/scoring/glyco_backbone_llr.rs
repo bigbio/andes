@@ -27,14 +27,13 @@
 
 use crate::scoring::fragment_ions::{predict_by_ions, IonKind};
 use crate::scoring::scored_spectrum::ScoredSpectrum;
+use crate::scoring::strong_score::DENSITY_HW;
 use model::peptide::Peptide;
 
 /// HexNAc residue mass (C8H13NO5), the stub left on a glycosite-spanning HCD fragment.
 pub const HEXNAC: f64 = 203.079_373;
 /// C13−C12 spacing used for the isotope confirmation of z≥3 fragments.
 const ISOTOPE: f64 = 1.003_354_83;
-/// Half-width (Da) of the local-density window; same as the c/z channel.
-const DENSITY_HW: f64 = 50.0;
 /// Fragment charge at or above which a match must be isotope-confirmed.
 const ISOTOPE_GATE_MIN_CHARGE: u8 = 3;
 /// Hard cap on the fragment charge sweep (doc: `1..min(z−1, 5)`).

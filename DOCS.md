@@ -53,6 +53,7 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
 | `--precursor-tol` | string | `20ppm` | Symmetric precursor mass tolerance, e.g. `20ppm` or `0.02da`. | Java `-t 20ppm` |
+| `--enzyme` | enum | `trypsin` | Digestion enzyme: `trypsin`, `chymotrypsin`, `lysc`, `aspn`, `gluc`, `lysn`, `argc`, `alphalp`, `nocleavage`, `nonspecific` (`elastase` is accepted as an alias of `nonspecific`). A comma-separated list (`gluc,trypsin`) digests with every listed enzyme. A wrong enzyme yields almost no PSMs rather than failing silently. | Java `-e` |
 | `--charge` | `MIN..MAX` | `2..5` | Precursor charge range to try when the spectrum record does not specify charge (inverted ranges are rejected at startup). | *(no direct Java flag; set via param file in Java)* |
 | `--enzyme-specificity` | enum | `fully` | Enzymatic cleavage enforcement at peptide termini (Number of Tolerable Termini). `fully`: both termini must be cleavage sites (Java `-ntt 2`). `semi`: at least one terminus (Java `-ntt 1`). `non-specific`: neither required (Java `-ntt 0`). | `--ntt` alias; numeric `0`/`1`/`2` |
 | `--max-missed-cleavages` | u32 | `1` | Maximum missed enzymatic cleavages allowed per candidate peptide. | Java `-maxMissedCleavages 1` |
@@ -73,28 +74,19 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 
 | Flag | Type | Default | Description | Legacy form |
 |---|---|---|---|---|
-| `--fragmentation` | enum | `auto` | Fragmentation method for bundled model resolution. Named: `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` on mzML triggers activation detection (§4); on MGF falls back to bundled defaults. | Java `-m`; numeric `0`=auto, `1`=CID, `2`=ETD, `3`=HCD, `4`=UVPD |
-| `--instrument` | enum | `low-res` | Instrument class for bundled model resolution. Named: `low-res`, `high-res`, `TOF`, `QExactive`. | Java `-inst`; numeric `0`=low-res, `1`=high-res, `2`=TOF, `3`=QExactive |
-| `--protocol` | enum | `auto` | Search protocol suffix for bundled model resolution. Named: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
-| `--param-file` | path | *(auto)* | Explicit path to a `.param` scoring model file. When set, overrides all auto-detection and bundled resolution. Required when running a release binary outside the source tree if bundled resources are not present. | Java `-conf` / model path |
-| `--model-store` | path | *(bundled)* | Path to a Parquet model store to use instead of the bundled `resources/models.parquet`. Model selection reads from this store when set. | *(no Java equivalent)* |
-| `--model` | string | *(auto-select)* | Exact model ID to load from the model store, skipping automatic selection by `(--fragmentation, --instrument, --protocol)`. Useful for searching with a freshly-trained model (see `andes train`). | *(no Java equivalent)* |
+| `--fragmentation` | enum | `auto` | Fragmentation method for model resolution: `auto`, `CID`, `ETD`, `HCD`, `UVPD`. `auto` reads the activation from mzML/`.raw`/`.d` (§4); on MGF, which carries no metadata, it falls back to CID and warns. | Java `-m`; numeric `0`=CID, `1`=ETD, `2`=HCD, `4`=UVPD |
+| `--protocol` | enum | `auto` | Search protocol: `auto`, `phospho`, `iTRAQ`, `iTRAQ-phospho`, `TMT`, `standard`. An explicit value selects the protocol-specific model (e.g. `hcd_qexactive_tryp_tmt`). `auto` does **not** change model selection; it samples the spectra for TMT/iTRAQ reporter ions *after* the model is loaded and, if found, engages the isobaric windowed peak filter and (with no `--mods`) the tag as a fixed modification. | Java `-protocol`; numeric `0`=auto, `1`=phospho, `2`=iTRAQ, `3`=iTRAQ-phospho, `4`=TMT, `5`=standard |
+| `--score` | enum | `auto` | What ranks candidates and fills the PIN `RawScore`: `rank` (generating-function rank score, the low-res path), `strong` (fused intensity + competition score, the high-res path), or `auto`, which picks by the resolved model's instrument class. | *(no Java equivalent)* |
+| `--gbdt-max-trees` | u32 | `100` | Trees evaluated per GBDT ensemble (fragment-intensity and rich-ion), `0` = all. Measured 2026-09: 100 trees is 33–41% faster than the full ensembles and identification-neutral on both regimes. `--glyco` uses all trees unless the flag is given explicitly. | *(no Java equivalent)* |
+| `--peak-filter` | `WINDOW_DA:PEAKS` | protocol default | Windowed peak filtering (keep the `PEAKS` most intense peaks per `WINDOW_DA` window). Unset = on for isobaric-labelled data (`100:20`), off otherwise; a window of `0` forces it off. | *(no Java equivalent)* |
+| `--ethcd-activation` | enum | `hcd` | How EThcD/ETciD spectra are labelled for model routing and scoring: `hcd` (the default; no EThcD model exists) or `etd` (routes them through the c/z scoring path). | *(no Java equivalent)* |
+| `--precursor-offset-clamp` | bool | `true` | When the model has no precursor-offset entry for a charge, use the nearest charge that has one instead of dropping the correction. | *(no Java equivalent)* |
+| `--density-on-active-list` | bool | `true` | Measure local peak density on the deconvoluted (active) peak list rather than the raw list. | *(no Java equivalent)* |
+| `--tight-highres-scoring` | flag | *(off)* | Serve high-resolution models at the 20 ppm window their rank tables were trained with instead of the stored 0.5 Da. **Measured and not recommended** — it is a real train/serve mismatch, but the wider window wins on identifications. | *(no Java equivalent)* |
+| `--model-store` | path | *(bundled)* | Parquet model store to use instead of the bundled `resources/models/` (a per-protocol partitioned directory, or a single `models.parquet`). | *(no Java equivalent)* |
+| `--model` | string | *(auto-select)* | Exact model ID to load from the store, skipping automatic selection. Useful for searching with a freshly trained model. | *(no Java equivalent)* |
 
-**Bundled default when all scoring flags are at their defaults** (`--fragmentation auto --instrument low-res --protocol auto`): `hcd_qexactive_tryp` (from the parquet model store). This preserves pre-auto-detect behaviour for MGF inputs and mzML files without activation metadata.
-
-**Model selection** (when `--param-file` is not set, resolved from `resources/models.parquet`):
-
-1. Build a selection key: `{Frag}_{Inst}_Trypsin` with optional protocol experiment class (e.g. `tmt`).
-2. Exact match on the key → use that model.
-3. If protocol-specific model absent, retry without the protocol class.
-4. Final fallback: `cid_tof_tryp` (HCD + TOF/HighRes), `etd_lowres_tryp` (ETD), or `cid_lowres_tryp` (everything else).
-
-**Normalisation rules:**
-
-- `auto` fragmentation → treated as `CID` for model selection (except mzML auto-detect path, §4).
-- HCD + `low-res` instrument → upgraded to `QExactive`.
-
-Only tryptic enzyme models are in the store; other enzymes require `--param-file` with a binary `.param` file.
+**Model selection.** andes builds a selection key from the resolved activation, instrument class, enzyme and protocol (§4) and picks the nearest bundled model: an exact match first, then the same key without the protocol class, then the closest instrument class. The bundle holds 17 own-trained models (see `README.md` → *Supported models*). There is no flag to force an instrument class — it is read from the file — and no external binary model file: `--model-store` plus `--model` is the way to search with any model that is not bundled.
 
 ### Calibration
 
@@ -109,6 +101,7 @@ Only tryptic enzyme models are in the store; other enzymes require `--param-file
 | `--threads` | usize | logical CPU count | Rayon worker threads for the search loop. Pool is initialised once per process. | Java `-thread N` |
 | `--ms-level` | u8 | `2` | MS level to search. Defaults to MS2 (identification); MS1 and MS3+ scans (e.g. TMT SPS-MS3 reporter-quant) are filtered at load so they never enter the search loop. Applies to mzML. Native `.raw`/`.d` always search MS2 regardless of this flag (a warning is printed if overridden), as does the chimeric cascade. MGF has no MS-level metadata and is always MS2. | *(no Java equivalent)* |
 | `--max-spectra` | usize | `0` | Bench mode: process only the first N MS2 spectra. `0` = full input. When > 0, TSV output is skipped (PIN is still written). | *(no Java equivalent)* |
+| `--rss-probe` | flag | *(off)* | Log resident set size at each phase boundary (Linux). Diagnostic only. | *(no Java equivalent)* |
 
 ### Output
 
@@ -117,7 +110,7 @@ Only tryptic enzyme models are in the store; other enzymes require `--param-file
 | `--output-tsv` | path | *(off)* | Optional tab-separated PSM report (§3b). Skipped in bench mode (`--max-spectra > 0`). | Java `-outputFormat 1` with output path |
 | `--output-parquet` | dir | *(off)* | Optional OpenMS-compatible QPX `.idparquet/` bundle (`psms`/`proteins`/`search_params`); see §3e. | *(no Java equivalent)* |
 
-**Environment variable:** set `ANDES_RSS_PROBE=1` on Linux to print `VmRSS` checkpoints to stderr during long runs (debugging memory use). See §9 for the full list of internal environment variables.
+The shipped binary reads **no environment variables**; everything is a flag. The test-harness variables are listed in [`docs/ENV_VARS.md`](docs/ENV_VARS.md).
 
 ---
 
@@ -145,6 +138,7 @@ Opt-in two-pass search for co-isolated (co-fragmented) peptides. Requires an MS1
 | `--chimeric` | flag | *(off)* | Enable the two-pass chimeric cascade: Pass 1 is the normal top-1 search; Pass 2 detects co-isolated precursors in each scan's MS1 isolation window (averagine envelope match) and searches the *residual* spectrum (primary's matched peaks removed) for a second peptide, emitted as an extra PSM. Forces top-1 per pass and always MS2. Entrapment-FDP validated. Experimental. |
 | `--chimeric-max-coisolated` | u32 | `4` | *(advanced)* Max co-isolated precursors considered per scan. |
 | `--chimeric-max-kl` | f64 | `0.3` | *(advanced)* Max isotope-envelope KL divergence to accept a co-isolated precursor. |
+| `--chimeric-allow-overlap` | flag | *(off)* | *(advanced)* Let a pass-2 candidate overlap the primary's matched peaks. Off because the residual spectrum has those peaks removed; allowing overlap lets one piece of evidence support two PSMs. |
 
 ### Refine — PTM discovery cascade
 
@@ -255,7 +249,7 @@ NumMods=2
 229.162932,*,fix,N-term,TMT10plex
 ```
 
-Pair with `--protocol TMT --fragmentation HCD --instrument QExactive` to select the `hcd_qexactive_tryp_tmt` model from the store (§4, §7).
+`--protocol TMT` selects the `hcd_qexactive_tryp_tmt` model; without it the default model is used and TMT reporter ions are only auto-detected for the peak filter (§4, §7).
 
 ### Example (c) — Phosphorylation on S, T, Y
 
@@ -435,15 +429,15 @@ For **mzML** inputs when `--fragmentation auto` (the default), andes peeks the i
 1. **Activation method** — histogram of `<activation>` cvParams across the first 64 MS2 spectra; dominant method wins. Mixed methods trigger an stderr warning but the dominant method is still used file-wide.
 2. **Instrument class** — scans `<instrumentConfiguration>` / analyzer cvParams via `input::detect_instrument_type`; dominant analyzer among MS2 spectra wins. `None` → `low-res` (the low-resolution ion-trap default).
 
-Precedence: whether auto-detection runs is gated **only** by `--fragmentation auto` (the default) on an mzML/`.raw`/`.d` input — *not* by `--instrument`. When it runs and the peek succeeds, the **detected** instrument is used and any `--instrument` value on the command line is **ignored** for model selection; to force an instrument, set an explicit `--fragmentation` (e.g. `HCD`) so the auto path is disabled and the flags drive resolution (§1). `--protocol` from the CLI is always applied to pick protocol-specific models from the parquet store (e.g. the `tmt` experiment-class entry).
+Precedence: auto-detection runs whenever `--fragmentation` is `auto` (the default) on an mzML/`.raw`/`.d` input. The detected activation and instrument class then drive model selection; `--protocol` still applies on top.
 
-MGF files carry no activation or instrument metadata → auto-detect returns `None` → bundled default `hcd_qexactive_tryp` model (from the parquet store) unless explicit `--fragmentation` / `--instrument` flags override the store selection key.
+MGF files carry no activation or instrument metadata, so auto-detection returns nothing and andes assumes CID / low-res / 0.5 Da (`cid_lowres_tryp`) with a warning. `--fragmentation` sets the activation; `--fragment-tol-ppm` implies a high-resolution (QExactive-class) instrument and `--fragment-tol-da` a low-resolution one.
 
-Non-auto `--fragmentation` (e.g. `HCD`, `3`) disables the activation peek and uses flag-based resolution directly (§1), including `--instrument` and `--protocol` from the CLI.
+A non-`auto` `--fragmentation` disables the activation peek and resolves the model from the flags alone (§1).
 
 ### Native Thermo `.raw`
 
-A `.raw` file carries the activation method and analyzer in vendor metadata, so andes reads them directly (no mzML peek) and routes through the same parquet-store selection as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `hcd_qexactive_tryp`. `--protocol` from the CLI still selects protocol-specific models (`tmt`, `itraq`); explicit `--fragmentation`/`--instrument` are not required.
+A `.raw` file carries the activation method and analyzer in vendor metadata, so andes reads them directly (no mzML peek) and routes through the same parquet-store selection as mzML — e.g. beam-type CID (HCD) on an Orbitrap → `hcd_qexactive_tryp`. `--protocol` from the CLI still selects protocol-specific models (`tmt`, `itraq`); no fragmentation flag is required.
 
 ### Native Bruker timsTOF `.d`
 
@@ -469,15 +463,15 @@ timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes 
 | FT-ICR | `MS:1000480` (FT) | `high-res` |
 | TOF | `MS:1000128` | `TOF` |
 
-### Bundled model store (`resources/models.parquet`)
+### Bundled model store (`resources/models/`)
 
-All 39 scoring models ship with the binary as a single Parquet model store
-(`resources/models.parquet`). The store covers the full
-fragmentation × instrument × protocol matrix (CID/ETD/HCD/UVPD ×
-LowRes/HighRes/TOF/QExactive × Trypsin, with protocol variants for Phospho, TMT,
-iTRAQ, iTRAQPhospho).
+The 17 bundled scoring models ship as a per-protocol partitioned Parquet store
+(`resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`; 9 / 3 / 4 / 1
+models), with the same 17 duplicated into the single-file `resources/models.parquet` for the
+training seed path. All are own-trained on public PRIDE data; the table in `README.md` →
+*Supported models* lists each with its regime and training accession.
 
-**When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): andes falls back to the `hcd_qexactive_tryp` model for default-flag runs, or to the resolution ladder in §1 for explicit flags. If no model resolves in the store, the process exits with an error instructing you to pass `--param-file <PATH>` with an external binary `.param` file.
+**When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): andes falls back to the `hcd_qexactive_tryp` model for default-flag runs, or to the closest bundled regime for the flags given, and says which model it chose in the run summary.
 
 ---
 
@@ -538,7 +532,7 @@ cargo test --release --workspace -- \
   --skip match_spectra_output_invariant_across_thread_counts
 ```
 
-Release archives bundle the binary, the `models.parquet` model store (all 39 scoring models), and `unimod.obo` under `resources/` — see [`README.md`](README.md) §Install.
+Release archives bundle the binary, the `resources/models/` model store (17 scoring models), and `unimod.obo` under `resources/` — see [`README.md`](README.md) §Install.
 
 ---
 
@@ -567,7 +561,7 @@ andes --spectrum more.mzML --database mydata.fasta --output-pin out.pin \
 
 See **[`TRAIN.md`](TRAIN.md)** for the full guide: where to get training data, the experiment-class catalog, incremental training (`--update --add` / `--remove-source` / `--reweight` / `--decay`), and how to evaluate a candidate model on held-out data before committing it.
 
-andes ships its own model store at `resources/models.parquet`, containing all 39 bundled scoring models. The `--param-file` flag can additionally load an external binary model file directly for custom or externally supplied models.
+andes ships its own 17-model store in `resources/models/`; a store you train is used with `--model-store <path>` (plus `--model <id>` to pin one model).
 
 ---
 
@@ -596,9 +590,7 @@ andes \
   --database hsapiens.fasta \
   --output-pin out.pin \
   --mods tmt_10plex_mods.txt \
-  --protocol TMT \
-  --fragmentation HCD \
-  --instrument QExactive
+  --protocol TMT
 ```
 
 ### iTRAQ (8-plex example)
@@ -622,9 +614,7 @@ andes \
   --database hsapiens.fasta \
   --output-pin out.pin \
   --mods itraq_8plex_mods.txt \
-  --protocol iTRAQ \
-  --fragmentation HCD \
-  --instrument QExactive
+  --protocol iTRAQ
 ```
 
 For phospho-enriched isobaric data use `--protocol iTRAQ-phospho` (legacy `--protocol 3`) and include phospho variable mods in `mods.txt` (§2 example c).
@@ -644,10 +634,6 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 | `--fragmentation` | `2` | `ETD` |
 | `--fragmentation` | `3` | `HCD` |
 | `--fragmentation` | `4` | `UVPD` |
-| `--instrument` | `0` | `low-res` |
-| `--instrument` | `1` | `high-res` |
-| `--instrument` | `2` | `TOF` |
-| `--instrument` | `3` | `QExactive` |
 | `--protocol` | `0` | `auto` |
 | `--protocol` | `1` | `phospho` |
 | `--protocol` | `2` | `iTRAQ` |
@@ -662,11 +648,14 @@ case-insensitively (`--fragmentation hcd` ≡ `HCD`).
 
 - **Spectrum inputs:** mzML, MGF, native Thermo `.raw` (`thermo` feature), and native
   Bruker timsTOF `.d` (`timstof` feature) — see §1 *Input formats*.
-- **Identification output:** Percolator PIN (always) plus an optional TSV; no mzIdentML.
-- **Decoys:** always auto-generated by reversing target sequences at search time
-  (prefix configurable via `--decoy-prefix`, default `XXX_`).
-- **Enzyme:** Trypsin in the bundled models; other enzymes require a custom
-  `--param-file`.
+- **Identification output:** Percolator PIN (always), an optional TSV, and an optional
+  OpenMS-compatible QPX `.idparquet` bundle; no mzIdentML.
+- **Decoys:** generated at search time by `--decoy-strategy` (`reverse` by default,
+  `shuffle`, `sequon-reverse` for glyco, or `none` for a pre-built target+decoy FASTA);
+  prefix configurable via `--decoy-prefix`, default `XXX_`.
+- **Enzyme:** `--enzyme` selects the digest (trypsin by default; ten enzymes and
+  multi-protease lists are supported, §1). The bundled models are trypsin-trained except
+  the three low-res LysC/ArgC/GluC models, and the nearest model is used otherwise.
 - **Modifications:** numeric Da masses only (composition strings are not parsed).
 - **Memory:** spectra are processed in chunked streaming (5000/chunk), so large mzML
   files do not load fully into memory.
@@ -680,29 +669,51 @@ backbone model is the N-X-S/T sequon). Cross-spectrum backbone transfer is an
 opt-in second pass via `--glyco-transfer`. All glyco tuning is exposed as **hidden
 CLI flags** (advanced; the shipped defaults are validated and rarely need changing):
 
+**Everyday flags** (visible in `--help`):
+
 | Flag | Default | Purpose |
 |---|---|---|
-| `--glyco-backbone-top-k` | 50 | Max backbone candidates per spectrum (set large to approximate an exhaustive ceiling). |
-| `--glyco-max-peaks` | 0 (no cap) | Caps the peaks the **generation** stage considers to the most intense N. The backbone solver is superlinear in peak count, so an uncentroided profile scan, or a very dense wide-window scan, can take tens of seconds while a typical scan takes milliseconds — the run looks hung. Scoring always reads the full spectrum, so a candidate that is generated is never scored on truncated evidence. 300–500 is a reasonable value if you hit this; setting it changes results. |
-| `--glyco-tol-ppm` | 20 | Fragment tolerance for **glyco-specific** matching — oxonium ions, the core-Y ladder, backbone mass search and c/z. Separate from `--fragment-tol-ppm`, which the scoring model owns. 20 ppm suits Orbitrap MS2; **raise it for low-resolution (ion-trap) MS2**, where a 0.3–0.5 Da peak can never match at 20 ppm, the oxonium gate never fires, and glyco IDs collapse to near zero. |
-| `--glyco-gp-k` | 10 | Weight `K` on the glycan-Y ladder term of the fused per-scan selector `rank + K·ladder + J·core_y + H·hyper + [ETD only] Cz·cz`. Lowered 50 → 10 in round-2: the ladder term is per-backbone and so cannot discriminate between isobaric peptides sharing a backbone mass. A sweep confirms both per-backbone terms are load-bearing for choosing the backbone/glycan-mass split (`gp_k=0` −20, `gp_j=0` −139, both 0 −248 backbone-correct @1%) — do not zero them. |
-| `--glyco-gp-j` | 5 | Weight `J` on the core-Y hit count. |
-| `--glyco-gp-h` | 1 | Weight `H` on the b/y hyperscore (`0` disables the term). |
-| `--glyco-gp-cz` | 15 | Weight on the ETD c/z hyperscore. Added **only** on ETD/AI-ETD spectra and inert on HCD/CID. Raised 5 → 15 in round-2 — c/z is the only *per-candidate* discriminator on ETD. |
-| `--glyco-cz-gate` | **on** | ETD only. Adds a c/z-evidence axis to the Phase-1 backbone-truncation gate, so a backbone supported mainly by glycosite-spanning c/z survives truncation. Union-only, so it cannot drop a candidate the other axes kept. Inert on HCD/CID. Disable with `--glyco-cz-gate false`. |
-| `--glyco-hcd-pair` | **on** | ETD only, single-file runs only. Generates candidate backbones from the paired HCD scan of the same precursor while scoring c/z on the ETD scan. Falls back to unpaired when a scan has no partner; **silently disabled (with a warning) for multi-file runs** — run one file per invocation and merge the PINs before Percolator. Disable with `--glyco-hcd-pair false`. |
-| `--glyco-etd-rank-glycan` | **on** | ETD only. Scores the rank/edge/hyperscore path against a peptide clone carrying the intact glycan at its glycosite, so glycosite-spanning fragments are predicted at their real (glycan-carrying) mass rather than the bare-backbone mass. Inert on HCD/CID. |
-| `--glyco-per-spectrum-model` | off | Mixed HCD/ETD files. andes otherwise picks ONE model per file by majority vote over the first 64 MS2 scans; with this set, each scan is scored by the model matching its own activation. |
-| `--glyco-pf-charge` | 2 | Charge states the peptide-first fragment index covers (b/y at 1..=N, clamped 1..=3); targets high-charge glycopeptides. |
-| `--glyco-max-pf` | 1024 | Max peptide-first candidates per spectrum. |
-| `--glyco-decoy` | off | Emit paired glycan-axis decoy rows for experimental 2D (peptide × glycan) FDR. |
-| `--glyco-transfer` | off | Enable cross-spectrum backbone transfer (two-pass). |
-| `--glyco-transfer-seed-fdr` | 0.05 | q-value threshold for confident donor seeds. |
-| `--glyco-rt-window` | 1800 | RT co-elution window (seconds) for transfer. |
-| `--glyco-transfer-ungated` | off | Skip the RT co-elution gate (unsafe research opt-in). |
-| `--glyco-transfer-min-support` | 1 | Minimum independent-donor graph support to inject a transfer. |
-| `--glyco-transfer-core-y` | 3 | Acceptor-side core-Y quorum (incl. mandatory Y1) to accept a transfer. |
-| `--debug-glyco` | off | **Diagnostic only:** emit all candidate rows per scan (incl. de-novo) + transfer diagnostics. The resulting PIN must NEVER be fed to an FDR tool. |
+| `--glyco-tol-ppm` | 20 | Fragment tolerance for the glyco-specific matching (oxonium ions, core-Y ladder, backbone mass search, c/z). Separate from the model's own fragment tolerance. **Raise it on ion-trap MS2** or the oxonium gate never fires. |
+| `--glyco-glycan-list` | `common` | Composition list: `common` (~600, the measured-best list the benchmarks use) or `reference-human` (~2,300; reaches high-antennary glycans but measured worse overall on plasma). |
+| `--glyco-taxon` | `auto` | Glycan biology: `auto` surveys the NeuGc/NeuAc oxonium ratio across the run and uses the FASTA `OX=` taxa as a veto; `human` / `mouse` force it. |
+| `--glyco-no-neugc` | off | Drop NeuGc compositions. Humans cannot synthesise NeuGc, and every NeuGc composition has an exact Hex+Fuc isobar, so on human samples this removes shadows; on mouse it removes real glycans. `--glyco-taxon auto` normally makes this decision for you. |
+| `--glyco-isotope-error` | `default` | Precursor isotope-error range: `default` is 0..=2 (dropping −1 measured +81 backbone-correct @1%), `negative` restores −1..=2. |
+| `--glyco-max-peaks` | 0 (no cap) | Cap the peaks the **generation** stage considers to the N most intense; scoring always sees the full spectrum. 300–500 rescues profile-mode or very dense scans that otherwise take seconds each. |
+| `--glyco-retrieval-tol-ppm` / `--glyco-retrieval-tol-da` | tol-ppm on high-res, 0.5 Da on low-res | Peptide-first candidate **retrieval** window (retrieval only; scoring is unchanged). 20 ppm retrieval on high-res data measured 6.9x faster at no identification cost. |
+| `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. Raising it reaches 4+/5+ Y ions on highly charged precursors at the cost of chance matches. |
+| `--glyco-cz-max-charge` | derived | Maximum c/z fragment charge probed on ETD spectra; derived from whether the spectrum was deconvoluted. |
+| `--glyco-cz-intensity` | off | Weight explained c/z by intensity instead of presence. Measured −48 backbone-correct @1%. |
+| `--glyco-cz-multisite` | off | Choose the glycosite by c/z evidence when a backbone carries several sequons (~8% of tryptic glycopeptides). Off pending a decoy-controlled A/B; by default such backbones report `@N?`. |
+| `--glyco-hcd-pair` | **on** | ETD only, single-file runs: generate backbones from the paired HCD scan of the same precursor, score c/z on the ETD scan (+153 backbone-correct @1%). `--glyco-hcd-pair false` disables. |
+| `--glyco-etd-rank-glycan` | **on** | ETD only: score the rank path against the glycan-carrying peptide so glycosite-spanning c/z land at their real mass (+33 backbone-correct @1%). |
+| `--glyco-min-core-y` | 0 | Require N trimannosyl-core Y ions before a scan reports a PSM. A measured trade-off (fewer, cleaner rows); 0 keeps every gated scan. |
+| `--glyco-min-matched-ions` | 0 | Require N matched b/y sequence ions before reporting (MSFragger's equivalent is 4). 0 disables. |
+| `--glyco-min-raw-score` / `--glyco-min-raw-score-quantile` | unset | Absolute or run-adaptive (quantile of the run's decoy winners) emission floor. Unset emits a best guess for every gated scan. |
+| `--glyco-sialic-oxonium-min-frac` | 0 | Require a sialic oxonium ion (as a fraction of base peak) before a composition may claim NeuAc/NeuGc. 0 disables. |
+| `--glyco-pin-curated` | off | Write the curated 52-column glyco PIN instead of the full one. On pooled plasma it measured 385 vs 257 glycoPSMs @1% (+50%) at 0.00% entrapment on every seed; the benchmarks in `docs/benchmarks/` use it. |
+| `--glyco-transfer` | off | Cross-spectrum backbone transfer (two-pass, single invocation). |
+| `--glyco-scans <FILE>` / `--glyco-diag-splits <FILE>` / `--debug-glyco` | off | Diagnostics: restrict scoring to listed scans; dump per-candidate split evidence; emit all candidate rows. A `--debug-glyco` PIN must never be fed to an FDR tool. |
+
+**Hidden tuning knobs** (`hide = true`; the shipped values are validated and rarely need changing):
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--glyco-backbone-top-k` | 150 | Max backbone candidates per spectrum after DB/de-novo union. |
+| `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 10 / 5 / 1 | Weights of the fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (`H = 0` disables the hyperscore term). |
+| `--glyco-gp-cz` | 15 | Weight of the ETD c/z hyperscore; added only on ETD/AI-ETD spectra. |
+| `--glyco-cz-gate` | on | ETD only: a c/z-evidence axis in the backbone-truncation gate (union-only, cannot drop a candidate). |
+| `--glyco-enum-fallback` | on | Promote the best enumerated candidate when the argmax picks a de-novo one. |
+| `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium` | off | ETD generation variants: read the Y ladder from the HCD partner; require the oxonium gate before full glycan enumeration on ETD scans. |
+| `--glyco-y-tree`, `--glyco-oxonium-llr`, `--glyco-rank-masked`, `--glyco-chance-llr-masked` | off | Emit additional PIN columns (composition-specific Y-tree LLR, oxonium-composition LLR, peptide-channel scores on a glycan-masked spectrum). Measured identification-neutral on both regimes; kept for rescoring research. |
+| `--glyco-per-spectrum-model` | off | Mixed HCD/ETD files: score each scan with the model matching its own activation. Measured to lose identifications (the HCD model fits these ETD scans better). |
+| `--glyco-pf-charge` / `--glyco-max-pf` | 2 / 1024 | Peptide-first fragment-index charge coverage and candidate cap. |
+| `--glyco-decoy` | off | Paired glycan-axis decoy rows for experimental 2D FDR. |
+| `--glyco-transfer-seed-fdr` / `--glyco-rt-window` / `--glyco-transfer-min-support` / `--glyco-transfer-core-y` / `--glyco-transfer-ungated` | 0.05 / 1800 s / 1 / 3 / off | Cross-spectrum transfer knobs. |
+
+Flags that an A/B measured as losing have been **deleted** rather than left behind a
+default (`--glyco-split-election`, `--glyco-gp-g`, `--glyco-gp-m`, `--glyco-isobar-rep`,
+`--glyco-y-index`, `--glyco-decorated-features`, removed 2026-09-05). The measurements are in
+`docs/benchmarks/README.md` → *Refuted*.
 
 By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.
 

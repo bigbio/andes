@@ -81,5 +81,6 @@ for f in files:
       echo "    sha256 $(shasum -a 256 "$dest" | cut -d' ' -f1)  $name"
     done
 done
-echo "done. Vendor .raw is read natively; convert to mzML only if you want to match the"
-echo "published Astral row, which was produced from converted mzML."
+echo "done. Search these .raw files DIRECTLY -- andes reads them natively with"
+echo "--features thermo (needs the .NET 8 runtime at search time). Converting first is an"
+echo "extra step that has silently changed results by 30%; see docs/benchmarks/README.md."

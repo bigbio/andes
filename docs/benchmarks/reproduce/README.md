@@ -31,7 +31,42 @@ and a sha256 is printed for each so you can confirm you have the same inputs we 
 prints wall time, PSMs at `q ≤ 0.01`, and entrapment hits — with a provenance line naming
 the binary, platform, thread count and date.
 
-## Two things that will not reproduce exactly, stated up front
+## ⚠ Read `.raw` natively — do not convert
+
+andes reads Thermo `.raw` directly (`--features thermo`, plus the .NET 8 runtime at search
+time). **Use it.** Conversion is an extra step that can silently change your results, and
+native reading costs nothing:
+
+| input (plasma sceHCD-R1) | andes spectra | PIN rows | wall |
+|---|---:|---:|---:|
+| `.raw` native | 24,857 | 7,257 | 152 s |
+| TRFP 1.4.3 mzML | 24,857 | 7,257 | 149 s |
+
+Identical output, same speed, one less moving part.
+
+### Why this matters: a converter version silently changed results by 30%
+
+Verified against native reading as the reference — native uses Thermo's own RawFileReader,
+so it is the ground truth for what a file contains:
+
+| `MouseLiver-Z-T-1.raw` | MS2 | glyco rows |
+|---|---:|---:|
+| **native (reference)** | **45,905** | **41,929** |
+| TRFP 1.4.3 | 45,905 | 41,929 |
+| TRFP 2.0.0 | 33,892 | 31,279 |
+
+**TRFP 1.4.3 is correct; 2.0.0 dropped 26% of the MS2 scans on this file**, and with them
+30% of the identifications. This surfaced only because the same file was searched on two
+machines and the counts disagreed.
+
+**It is file-dependent, not a blanket property of 2.0.0.** On the plasma file above, both
+converter versions produced identical output. So you cannot assume a given converter is
+safe for your data — which is the argument for skipping conversion altogether.
+
+If you must convert, use **1.4.3**, and state the converter version with any number you
+publish. All figures here were produced with native reading or 1.4.3, which agree exactly.
+
+## Two things that will not reproduce exactly## Two things that will not reproduce exactly, stated up front
 
 **The Astral row cannot be fetched at all.** Our records name
 `LFQ_Astral_DDA_15min_50ng_Condition_A_REP1.raw` in PXD070049, but that project does not

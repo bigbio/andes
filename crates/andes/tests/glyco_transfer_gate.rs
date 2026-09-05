@@ -76,12 +76,3 @@ fn transfer_flag_on_still_runs_and_emits_transfer_columns() {
         assert!(header.contains(col), "header missing {col}");
     }
 }
-
-/// Real functional check (transferred rows actually present + honest FDR) is
-/// Task 9's VM A/B on Fc3_r1 — this tiny fixture has no RT and too few
-/// spectra to produce a transfer. Placeholder only.
-#[test]
-#[ignore = "functional transfer recovery is validated end-to-end in Task 9's VM A/B (run_transfer_ab.sh), not on this tiny RT-less unit fixture"]
-fn transfer_flag_on_emits_transferred_rows_placeholder() {
-    unimplemented!("see Task 9: docs/plans/glyco/50-roadmap/run_transfer_ab.sh");
-}

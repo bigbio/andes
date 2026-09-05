@@ -285,12 +285,6 @@ pub struct ScoringSettings {
     /// Measure local peak density on the active (deconvoluted) peak list. Default true;
     /// false restores measuring it on the raw list.
     pub density_on_active_list: bool,
-    /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
-    /// with, rather than the model's stored `mme` (0.5 Da for every bundled model).
-    /// Default false, and measurement says keep it that way: it gains +4.9% on the glyco
-    /// benchmark but costs 21% of ordinary Astral identifications (36,719 -> 28,894 @1%).
-    /// The mismatch is real; closing it needs retrained models, not a re-served window.
-    pub tight_highres_scoring: bool,
 }
 
 impl Default for ScoringSettings {
@@ -299,7 +293,6 @@ impl Default for ScoringSettings {
             peak_filter: None,
             precursor_offset_clamp: true,
             density_on_active_list: true,
-            tight_highres_scoring: false,
         }
     }
 }
@@ -1198,19 +1191,6 @@ impl<'a> ScoredSpectrum<'a> {
             is_prefix,
             charge,
             parent_mass,
-            // TRAIN/SERVE TOLERANCE — HISTORICAL NOTE, NO LONGER THE CONTRACT.
-    // This block used to read "training matches high-res ions at 20 ppm (the two
-    // accumulator call sites below pass true)". All THREE accumulator call sites now pass
-    // `false`, i.e. training matches at the model's own `mme`, the same window serving
-    // uses. The 20 ppm training window was the defect: `IonType::mz` rebuilds theo m/z
-    // from the integer nominal mass (median 52 ppm displacement), so a 20 ppm window
-    // recorded ~80% of real fragments as missing and collapsed the absent-ion penalty.
-    //
-    // ⚠ `ANDES_TIGHT_HIGHRES` therefore now does the OPPOSITE of its original purpose:
-    // it no longer aligns serving to the training window, it CREATES a mismatch. It is
-    // retained only as an A/B escape hatch against pre-existing models and should be
-    // removed once the high-res store is retrained.
-            tight_highres_scoring(),
             |_, _, matched_peak, logs, theo_mz, tol_da| {
                 let missing = if max_rank_idx < logs.len() { logs[max_rank_idx] } else { 0.0 };
                 let score = match matched_peak {
@@ -1588,38 +1568,6 @@ impl<'a> ScoredSpectrum<'a> {
                     is_prefix,
                     self.charge,
                     self.parent_mass,
-                    // TRAINING NOW MATCHES AT THE MODEL'S OWN `mme`, as serving does.
-                    //
-                    // This used to pass `true` (a 20 ppm window on high-res instruments).
-                    // But `IonType::mz` reconstructs the theoretical m/z from the INTEGER
-                    // NOMINAL node mass (`real = node_nominal / INTEGER_MASS_SCALER`), which
-                    // displaces it by a MEDIAN 52 ppm (90th pct 133 ppm) for real peptide
-                    // compositions — measured over 300,333 simulated b-ion positions. Only
-                    // 20.0% of theoretical positions land inside a 20 ppm window, so ~80%
-                    // were recorded as "missing" DURING TRAINING even when the peak was there.
-                    //
-                    // Measured consequence in the shipped store (rank_dist missing-slot
-                    // frequency, prefix/suffix): hcd_qexactive_tryp 0.928/0.828 and
-                    // hcd_astral_tryp 0.854/0.773, against cid_lowres_tryp 0.452/0.421 —
-                    // a clean split on `is_high_resolution()`, i.e. exactly the models that
-                    // took this branch. The learned absent-ion penalty collapsed to ~-0.04
-                    // nats (vs ~-0.8 low-res), so a candidate could miss nearly every
-                    // predicted fragment almost for free and the score degenerated into a
-                    // sum of positive matched evidence only.
-                    //
-                    // Serving already uses `mme` (0.5 Da), which comfortably absorbs a
-                    // 0.036 Da displacement at m/z 700 — so SERVING was never the broken
-                    // side, and the earlier `ANDES_TIGHT_HIGHRES` experiment that tightened
-                    // SERVING (Astral 36,719 -> 28,894) was treating the symptom on the
-                    // wrong path. Matching train to serve here makes high-res models learn
-                    // the same way the low-res ones already do.
-                    //
-                    // NOTE: this changes TRAINING ONLY. Serving is untouched and every
-                    // existing model still scores byte-identically; the benefit requires a
-                    // RETRAIN. A genuine tight high-res window is still the better endpoint,
-                    // but it needs `IonType::mz` to carry the unquantised fragment mass
-                    // first (the nominal value is only needed as a cache KEY).
-                    false,
                     |partition, ion, matched_peak, _logs, theo_mz, _tol_da| {
                         // Reuse the matched peak's m/z from the driver's single
                         // window scan (no re-scan via `matched_peak_mz`).
@@ -1658,12 +1606,6 @@ impl<'a> ScoredSpectrum<'a> {
                         self.charge,
                         self.parent_mass,
                         losses,
-                        // Matches the intact-ion path: exact theoretical m/z matched at the
-                        // model's own `mme`. Previously `true` (a 20 ppm window) against a
-                        // nominal reconstruction displaced by a median 52 ppm, so the
-                        // neutral-loss tables were learned through the same ~50x-too-tight
-                        // window the intact tables were.
-                        false,
                         |partition, loss_ion, rank, theo_mz, tol_da| {
                             let (rank, error_bin) = ion_fact_rank_and_error(
                                 rank, peaks, ranks, theo_mz, tol_da, max_rank, esf,
@@ -1757,38 +1699,6 @@ impl<'a> ScoredSpectrum<'a> {
                     is_prefix,
                     self.charge,
                     self.parent_mass,
-                    // TRAINING NOW MATCHES AT THE MODEL'S OWN `mme`, as serving does.
-                    //
-                    // This used to pass `true` (a 20 ppm window on high-res instruments).
-                    // But `IonType::mz` reconstructs the theoretical m/z from the INTEGER
-                    // NOMINAL node mass (`real = node_nominal / INTEGER_MASS_SCALER`), which
-                    // displaces it by a MEDIAN 52 ppm (90th pct 133 ppm) for real peptide
-                    // compositions — measured over 300,333 simulated b-ion positions. Only
-                    // 20.0% of theoretical positions land inside a 20 ppm window, so ~80%
-                    // were recorded as "missing" DURING TRAINING even when the peak was there.
-                    //
-                    // Measured consequence in the shipped store (rank_dist missing-slot
-                    // frequency, prefix/suffix): hcd_qexactive_tryp 0.928/0.828 and
-                    // hcd_astral_tryp 0.854/0.773, against cid_lowres_tryp 0.452/0.421 —
-                    // a clean split on `is_high_resolution()`, i.e. exactly the models that
-                    // took this branch. The learned absent-ion penalty collapsed to ~-0.04
-                    // nats (vs ~-0.8 low-res), so a candidate could miss nearly every
-                    // predicted fragment almost for free and the score degenerated into a
-                    // sum of positive matched evidence only.
-                    //
-                    // Serving already uses `mme` (0.5 Da), which comfortably absorbs a
-                    // 0.036 Da displacement at m/z 700 — so SERVING was never the broken
-                    // side, and the earlier `ANDES_TIGHT_HIGHRES` experiment that tightened
-                    // SERVING (Astral 36,719 -> 28,894) was treating the symptom on the
-                    // wrong path. Matching train to serve here makes high-res models learn
-                    // the same way the low-res ones already do.
-                    //
-                    // NOTE: this changes TRAINING ONLY. Serving is untouched and every
-                    // existing model still scores byte-identically; the benefit requires a
-                    // RETRAIN. A genuine tight high-res window is still the better endpoint,
-                    // but it needs `IonType::mz` to carry the unquantised fragment mass
-                    // first (the nominal value is only needed as a cache KEY).
-                    false,
                     |partition, _ion, matched_peak, _logs, theo_mz, _tol_da| {
                         // Reuse the matched peak's m/z from the driver's single
                         // window scan (no re-scan via `matched_peak_mz`).
@@ -1807,15 +1717,6 @@ impl<'a> ScoredSpectrum<'a> {
 /// `ion_match_facts`. Invokes `visit` once per (segment, ion) that passes the
 /// directional filter and `segment_num` check.
 #[allow(clippy::too_many_arguments, reason = "mirrors the scoring loop's argument bundle")]
-/// Serve high-resolution models at the training match window instead of the model's
-/// `mme`. See the call site in `node_score` for why this exists. Requires an explicit
-/// "1" so that setting the variable to "0" cannot silently enable it.
-fn tight_highres_scoring() -> bool {
-    use std::sync::OnceLock;
-    static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| scoring_settings().tight_highres_scoring)
-}
-
 #[allow(clippy::too_many_arguments, reason = "private inner matcher for the node-scoring hot path; every argument is an orthogonal, already-resolved input and bundling them would add a struct build per call")]
 fn visit_directional_node_ion_matches<F>(
     peaks: &[(f64, f32)],
@@ -1848,12 +1749,6 @@ fn visit_directional_node_ion_matches<F>(
     is_prefix: bool,
     charge: u8,
     parent_mass: f64,
-    // TRAINING passes true: high-res instruments match within a tight ppm window so every
-    // learned table (rank/ion_err/noise_err/existence) is built from consistent few-ppm
-    // matches (sharp, seed-like). SCORING passes false: it keeps the model's wide `mme`
-    // (0.5 Da) and looks those sharp tables up against the 0.5 Da match — penalising
-    // off-centre peaks exactly as the seed does. (Bug-#2 wrongly tightened scoring too.)
-    tight_high_res: bool,
     mut visit: F,
 ) where
     // The closure receives the matched peak as `Option<(rank, peak_mz)>` so a
@@ -1907,11 +1802,7 @@ fn visit_directional_node_ion_matches<F>(
                 if param.segment_num(theo_mz, parent_mass) != seg {
                     continue;
                 }
-                let tol_da = if tight_high_res && param.data_type.instrument.is_high_resolution() {
-                    theo_mz * HIGHRES_ERR_PPM * 1e-6
-                } else {
-                    mme.as_da(theo_mz)
-                };
+                let tol_da = mme.as_da(theo_mz);
                 let matched = nearest_peak_rank_and_mz_in(peaks, ranks, theo_mz, tol_da);
                 visit(partition, *ion, matched, logs, theo_mz, tol_da);
             }
@@ -1940,11 +1831,7 @@ fn visit_directional_node_ion_matches<F>(
                 if param.segment_num(theo_mz, parent_mass) != seg {
                     continue;
                 }
-                let tol_da = if tight_high_res && param.data_type.instrument.is_high_resolution() {
-                    theo_mz * HIGHRES_ERR_PPM * 1e-6
-                } else {
-                    mme.as_da(theo_mz)
-                };
+                let tol_da = mme.as_da(theo_mz);
                 let matched = nearest_peak_rank_and_mz_in(peaks, ranks, theo_mz, tol_da);
                 visit(partition, ion, matched, &[], theo_mz, tol_da);
             }
@@ -2110,7 +1997,7 @@ fn ion_fact_rank_and_error_from_match(
 /// accumulator then builds that key's per-class loss rank table. The m/z formula
 /// (`intact_mz − loss/z`), segment selection and tolerance match the intact
 /// matcher exactly, so a loss key is later scored at the same m/z it was trained
-/// at. `tight_high_res` mirrors `visit_directional_node_ion_matches`.
+/// at.
 #[allow(clippy::too_many_arguments, reason = "mirrors visit_directional_node_ion_matches plus the active-loss slice")]
 fn visit_directional_loss_ion_facts<F>(
     peaks: &[(f64, f32)],
@@ -2126,7 +2013,6 @@ fn visit_directional_loss_ion_facts<F>(
     charge: u8,
     parent_mass: f64,
     active_losses: &[(f64, u8)],
-    tight_high_res: bool,
     mut visit: F,
 ) where
     F: FnMut(Partition, IonType, Option<u32>, f64, f64),
@@ -2168,11 +2054,7 @@ fn visit_directional_loss_ion_facts<F>(
                 if theo_mz <= 0.0 || param.segment_num(theo_mz, parent_mass) != seg {
                     continue;
                 }
-                let tol_da = if tight_high_res && param.data_type.instrument.is_high_resolution() {
-                    theo_mz * HIGHRES_ERR_PPM * 1e-6
-                } else {
-                    mme.as_da(theo_mz)
-                };
+                let tol_da = mme.as_da(theo_mz);
                 let rank = nearest_peak_rank_in(peaks, ranks, theo_mz, tol_da);
                 let loss_ion = if is_prefix {
                     IonType::Prefix { charge: icharge, offset_bits: ioff, loss_class: cls }
@@ -2189,10 +2071,6 @@ fn visit_directional_loss_ion_facts<F>(
 /// `target_mz`, or `None` if no such peak exists.  Mirrors the selection
 /// semantics of `nearest_peak_rank_in` (intensity-max, not nearest-m/z).
 /// Used by `ion_match_facts` to compute the mass error for each matched ion.
-/// Tight ppm window the TRAINING matcher uses for high-res instruments (see the
-/// `tight_high_res` parameter on `visit_directional_node_ion_matches`).
-const HIGHRES_ERR_PPM: f64 = 20.0;
-
 fn matched_peak_mz(peaks: &[(f64, f32)], ranks: &[u32], target_mz: f64, tolerance_da: f64) -> Option<f64> {
     if peaks.is_empty() {
         return None;

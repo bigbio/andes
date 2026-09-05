@@ -145,10 +145,9 @@ fn glyco_pin_matches_golden_after_sort() {
         // NOTE ON COVERAGE. This resolves to `cid_lowres_tryp`, so the golden guards the
         // LOW-RES glyco path: column set, row count, oxonium gating, backbone generation,
         // the fused selector and the collapse. It does NOT guard the high-res
-        // `tight_high_res` window that commit 539a3857 changed -- and an MGF fixture
-        // CANNOT: reaching a high-res model needs --fragment-tol-ppm, which calls
-        // `set_fragment_tol_override` and replaces `mme`, collapsing both branches of
-        // that conditional to the same window. Guarding it requires an mzML fixture,
+        // match window (the model's `mme`) that commit 539a3857 changed -- and an MGF
+        // fixture CANNOT: reaching a high-res model needs --fragment-tol-ppm, which
+        // calls `set_fragment_tol_override` and replaces `mme`. Guarding it requires an mzML fixture,
         // where the analyzer is auto-detected and the override is ignored. Verified by
         // experiment, not assumed.
         .arg("--fragmentation").arg("HCD")

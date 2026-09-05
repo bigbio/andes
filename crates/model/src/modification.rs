@@ -307,20 +307,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
-    fn oxidation_m() -> Modification {
-        Modification {
-            name: "Oxidation".to_string(),
-            mass_delta: 15.99491,
-            residue: ResidueSpec::Specific(b'M'),
-            location: ModLocation::Anywhere,
-            fixed: false,
-            accession: Some("UNIMOD:35".to_string()),
-            neutral_losses: Vec::new(),
-            loss_class: 0,
-        }
-    }
-
     #[test]
     fn applies_to_matching_residue_anywhere() {
         let m = carbamidomethyl_c();

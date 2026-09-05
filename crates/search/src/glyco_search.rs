@@ -598,14 +598,6 @@ fn dedup_backbone_hits(mut all_backbone: Vec<BackboneHit>, tol_ppm: f64) -> Vec<
 pub struct GlycoScoreCtx<'a> {
     pub params: &'a crate::search_params::SearchParams,
     pub scorer: &'a scoring_crate::scoring::RankScorer,
-    /// BUG5 (per-spectrum model dispatch prototype): an optional ETD-specific
-    /// `RankScorer`, used INSTEAD of `scorer` when the spectrum being scored
-    /// (or, for paired-scan generation, the spectrum being READ) is itself
-    /// ETD/AI-ETD. `None` unless the driver explicitly loaded a second model
-    /// (`--glyco-per-spectrum-model`) — so leaving this `None` reproduces the
-    /// prior whole-file single-model behavior byte-for-byte. See
-    /// `score_spectrum_glyco`'s `spec_scorer`/`gen_scorer`/`phase1_scorer`.
-    pub etd_scorer: Option<&'a scoring_crate::scoring::RankScorer>,
     pub candidates: &'a [crate::candidate_gen::Candidate],
     pub bucket_index: &'a std::collections::BTreeMap<i32, Vec<usize>>,
     pub fragment_tolerance_da: f64,
@@ -967,12 +959,10 @@ impl GlycoCtxOwned {
         tol_ppm: f64,
         all_spectra: &'a [Spectrum],
         hcd_partner: &'a [Option<usize>],
-        etd_scorer: Option<&'a scoring_crate::scoring::RankScorer>,
     ) -> GlycoScoreCtx<'a> {
         GlycoScoreCtx {
             params: prepared.params,
             scorer: prepared.scorer,
-            etd_scorer,
             candidates: &prepared.candidates,
             bucket_index: &prepared.bucket_index,
             fragment_tolerance_da: prepared.fragment_tolerance_da,
@@ -1299,32 +1289,14 @@ fn score_spectrum_glyco(
                 (&spec.peaks, &stats)
             };
 
-            // BUG5 (per-spectrum model dispatch prototype): score each spectrum's
-            // OWN evidence with the model matching ITS OWN activation method,
-            // instead of the single whole-file majority model (`scorer`) that was
-            // previously used for every scan regardless of activation.
-            //
-            // `spec_scorer` scores `spec` itself (`scored_per_charge` — the ETD
-            // scan's own b/y evidence, and every EMITTED PIN feature below).
-            // `gen_scorer` scores `gen_spec` — the spectrum candidate GENERATION
-            // and Phase-1 ranking read peaks from (the HCD partner when
-            // `--glyco-hcd-pair` is paired, else `spec` itself again). These are
-            // deliberately independent: in paired mode `gen_spec` is a genuine
-            // HCD spectrum, so it must stay on an HCD-appropriate model even
-            // while `spec` (the ETD scan) dispatches to the ETD model.
-            //
-            // `ctx.etd_scorer` is `None` unless the driver opted in
-            // (`--glyco-per-spectrum-model`); when `None`, both fall back to
-            // `scorer` (the file-level model), so this is byte-identical to the
-            // pre-dispatch behavior by default.
-            let spec_scorer: &scoring_crate::scoring::RankScorer =
-                if is_etd { ctx.etd_scorer.unwrap_or(scorer) } else { scorer };
+            // One file-level model scores every spectrum. Per-spectrum dispatch to an
+            // ETD-family model was measured and lost identifications.
+            let spec_scorer: &scoring_crate::scoring::RankScorer = scorer;
+            let gen_scorer: &scoring_crate::scoring::RankScorer = scorer;
             let gen_is_etd = matches!(
                 gen_spec.activation_method,
                 Some(model::activation::ActivationMethod::ETD)
             );
-            let gen_scorer: &scoring_crate::scoring::RankScorer =
-                if gen_is_etd { ctx.etd_scorer.unwrap_or(scorer) } else { scorer };
 
             // Oxonium evidence for the whole spectrum (charge-independent).
             let ox_ev = oxonium_gate(gen_peaks, OXONIUM_GATE_MIN_FRAC, tol_ppm);
@@ -2879,10 +2851,6 @@ pub fn glyco_search_run(
     tol_ppm: f64,
     backbone_top_k: usize,
     cfg: GlycoConfig,
-    // BUG5 per-spectrum model dispatch prototype: an optional ETD-specific
-    // RankScorer loaded by the driver (`--glyco-per-spectrum-model`). `None`
-    // reproduces the prior whole-file single-model behavior byte-for-byte.
-    etd_scorer: Option<&scoring_crate::scoring::RankScorer>,
 ) -> Vec<GlycoSpectrumResult> {
     let params = prepared.params;
     let candidates = &prepared.candidates;
@@ -2901,7 +2869,7 @@ pub fn glyco_search_run(
     let owned =
         GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg.clone());
     let cross_spectrum_on = owned.cross_spectrum_on;
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner, etd_scorer);
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &hcd_partner);
 
     // PASS 1: baseline candidate gen (+ peptide-first if on), no transfer.
     let pass1: Vec<GlycoSpectrumResult> = spectra
@@ -3083,8 +3051,6 @@ pub fn glyco_transfer_pass2(
     cfg: GlycoConfig,
     pass1: Vec<GlycoSpectrumResult>,
     injected: &std::collections::BTreeMap<usize, Vec<BackboneHit>>,
-    // BUG5 per-spectrum model dispatch prototype (see `glyco_search_run`).
-    etd_scorer: Option<&scoring_crate::scoring::RankScorer>,
 ) -> Vec<GlycoSpectrumResult> {
     let candidates = &prepared.candidates;
     let fragment_tolerance_da = prepared.fragment_tolerance_da;
@@ -3094,7 +3060,7 @@ pub fn glyco_transfer_pass2(
     let owned = GlycoCtxOwned::build(candidates, glycan_list, fragment_tolerance_da, backbone_top_k, cfg.clone());
     // B1 paired-scan generation is a Pass-1 concern; the transfer pass passes an
     // empty partner map (inert — score_spectrum_glyco falls back to spec.peaks).
-    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &[], etd_scorer);
+    let ctx = owned.as_ctx(prepared, glycan_list, tol_ppm, spectra, &[]);
 
     // Re-score only the spectra that actually received a transferred backbone.
     // Deterministic order: BTreeMap iteration is already key-sorted, and rayon
@@ -3747,7 +3713,7 @@ mod tests {
         // Pass 1 (no transfer) on this fixture: nothing to find (no oxonium/Y-ladder
         // evidence, peptide-first path needs real b/y matches on real peaks), so an
         // empty Pass-1 result is the expected, honest starting point for Pass 2.
-        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), None);
+        let pass1 = glyco_search_run(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default());
         assert!(
             pass1.iter().all(|r| r.hits.is_empty()) || pass1.is_empty(),
             "peakless fixture must not produce a Pass-1 hit on its own: {pass1:?}"
@@ -3785,7 +3751,7 @@ mod tests {
             std::collections::BTreeMap::new();
         injected.insert(0, vec![bb_hit]);
 
-        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), pass1, &injected, None);
+        let merged = glyco_transfer_pass2(&spectra, &prepared, &glycan_list, 20.0, 50, GlycoConfig::default(), pass1, &injected);
 
         assert_eq!(merged.len(), 1, "expected exactly one spectrum result: {merged:?}");
         let result = &merged[0];

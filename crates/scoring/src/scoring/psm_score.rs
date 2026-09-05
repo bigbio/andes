@@ -465,10 +465,6 @@ pub struct CzSettings {
     /// spectrum's deconvolution state, which is the correct behaviour in almost all
     /// cases; set it only to probe higher charges on data known to carry them.
     pub zmax_override: Option<u8>,
-    /// Weight the explained-c/z terms by observed peak intensity rather than treating
-    /// a match as presence-only. Off by default: it measured -48 on the benchmark,
-    /// though the presence-only form is a known weakness for large glycans.
-    pub use_intensity: bool,
 }
 
 
@@ -638,20 +634,6 @@ pub fn cz_structure_features(
     // Cap the fragment-charge sweep at 3: peaks deconvolve only to ~z3, so higher
     // predicted c/z are mostly random matches (audit finding F6).
     let zmax = cz_effective_zmax_for(max_frag_charge.min(3), scored_spec.is_deconvoluted());
-    // Round-7 (audit D1): the shipped form discarded the matched peak's INTENSITY
-    // (`nearest_peak_full(..).is_some()`), making `explained` a prior-weighted
-    // PRESENCE fraction — not the intensity-explained ratio it is documented as, and
-    // not evidence that graded intensity separates on the c/z channel. With
-    // ANDES_GLYCO_CZ_INTENSITY set, weight each matched ion by its observed
-    // base-peak-normalised intensity, making this a true explained-INTENSITY ratio.
-    // Unset = byte-identical to the shipped feature.
-    let use_intensity = cz_settings().use_intensity;
-    let base = if use_intensity {
-        let (peaks, _) = scored_spec.active_peaks_and_ranks();
-        peaks.iter().map(|&(_, i)| i).fold(0.0f32, f32::max).max(1e-9)
-    } else {
-        1.0
-    };
     let mut sum_p = 0.0f64;
     let mut sum_matched_p = 0.0f64;
     let mut sum_chance_llr = 0.0f64;
@@ -669,18 +651,12 @@ pub fn cz_structure_features(
         let p = if spanning { 0.15 } else { 1.0 } * charge_w;
         sum_p += p;
         let tol_da = (ion.mz * tol_ppm * 1e-6).max(0.01);
-        if let Some((_, intensity, _)) = scored_spec.nearest_peak_full(ion.mz, tol_da) {
-            // Presence (shipped) vs observed-intensity weighting (D1 A/B).
-            let obs_w = if use_intensity {
-                ((intensity / base) as f64).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
-            sum_matched_p += p * obs_w;
+        if scored_spec.nearest_peak_full(ion.mz, tol_da).is_some() {
+            sum_matched_p += p;
             let rho = scored_spec.local_peak_density(ion.mz, DENSITY_HW);
             let p_chance = (rho * 2.0 * tol_da).clamp(1e-12, 1.0);
             let surprise = (-p_chance.ln()).max(0.0);
-            sum_chance_llr += p * obs_w * surprise;
+            sum_chance_llr += p * surprise;
         }
     }
     let explained = if sum_p > 0.0 {

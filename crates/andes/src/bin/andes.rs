@@ -465,12 +465,6 @@ struct SearchArgs {
     #[arg(long = "glyco-cz-max-charge")]
     glyco_cz_max_charge: Option<u8>,
 
-    /// Weight the explained-c/z terms by observed peak intensity instead of treating a
-    /// match as presence-only. Off by default: it measured -48 backbone-correct @1% on
-    /// the benchmark, though presence-only scoring is a known weakness for large glycans.
-    #[arg(long = "glyco-cz-intensity", default_value_t = false)]
-    glyco_cz_intensity: bool,
-
     /// Maximum glycan-Y fragment charge. Default 3; raising it reaches 4+/5+ Y ions on
     /// highly-charged precursors at the cost of more chance matches.
     #[arg(long = "glyco-y-max-charge", default_value_t = 3u8)]
@@ -498,19 +492,6 @@ struct SearchArgs {
     /// raw list.
     #[arg(long = "density-on-active-list", default_value_t = true, action = clap::ArgAction::Set)]
     density_on_active_list: bool,
-
-    /// Serve high-resolution models at the 20 ppm window their rank tables were TRAINED
-    /// with instead of the model's stored tolerance (0.5 Da for every bundled model, so
-    /// ~50x wider at m/z 500).
-    ///
-    /// MEASURED AND NOT RECOMMENDED. It is a real train/serve mismatch and it does help
-    /// glyco (+4.9% on the AI-ETD benchmark), but on ordinary peptide search it is
-    /// catastrophic: Astral fell 36,719 -> 28,894 identifications at 1% FDR, a 21% loss.
-    /// The wide window is evidently load-bearing for the rank tables as trained, so
-    /// closing the mismatch requires retraining the models, not re-serving them. Kept as
-    /// a flag only so the experiment is repeatable.
-    #[arg(long = "tight-highres-scoring", default_value_t = false)]
-    tight_highres_scoring: bool,
 
     /// Allow a Pass-2 co-isolated candidate to overlap the primary's matched peaks.
     /// Off by default: the residual spectrum has the primary's peaks removed, and
@@ -810,23 +791,6 @@ struct SearchArgs {
     /// decoy-safe); inert on HCD/CID. Disable with `--glyco-etd-rank-glycan false`.
     #[arg(long = "glyco-etd-rank-glycan", default_value_t = true, action = clap::ArgAction::Set)]
     glyco_etd_rank_glycan: bool,
-
-    /// BUG5, EXPERIMENTAL: per-spectrum-activation model dispatch. andes normally
-    /// selects ONE scoring model for the whole file by majority vote over the
-    /// first 64 mzML spectra (`detect_dominant_activation`), so on a mixed
-    /// HCD/ETD (EThcD / AI-ETD) file every scan is scored with the dominant
-    /// model regardless of its own activation. When this is on, the glyco driver
-    /// ALSO loads the ETD-family model (same instrument/protocol/enzyme lookup,
-    /// activation forced to ETD) and dispatches each spectrum's own rank/edge/
-    /// hyperscore/RankScoreFloat scoring to whichever model matches ITS OWN
-    /// activation method — an ETD/AI-ETD scan scores against the ETD model, an
-    /// HCD scan (including an HCD partner read for `--glyco-hcd-pair`
-    /// candidate generation) still scores against the file's dominant model.
-    /// Off by default (byte-identical to the pre-dispatch single-model path).
-    /// Falls back to the single-model behavior with a WARN if no ETD-family
-    /// model exists in the store. Hidden.
-    #[arg(long = "glyco-per-spectrum-model", hide = true, default_value_t = false)]
-    glyco_per_spectrum_model: bool,
 
     /// Cross-spectrum transfer: q-value threshold for confident donor seeds
     /// (--glyco-transfer only). Hidden; default 0.05 (native GBDT q is conservative).
@@ -2379,58 +2343,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("[PHASE param_and_scorer: {:.2}s]", t_phase.elapsed().as_secs_f64());
 
-    // BUG5 (per-spectrum model dispatch prototype, `--glyco-per-spectrum-model`):
-    // load a SECOND model, forcing activation=ETD (same instrument/protocol/
-    // enzyme lookup that just resolved the primary `param`/`scorer`), so the
-    // glyco driver can dispatch each spectrum's rank/edge/hyperscore scoring to
-    // whichever model matches ITS OWN activation, instead of the single
-    // whole-file majority model every scan uses today (`detect_dominant_
-    // activation` picks one model for the whole file by majority vote over the
-    // first 64 spectra). `None` (the default — flag off, or no ETD-family model
-    // in the store) reproduces the prior single-model behavior exactly; only the
-    // glyco path reads this (see `GlycoScoreCtx::etd_scorer`).
-    let etd_scorer_owned: Option<RankScorer> = if cli.glyco && cli.glyco_per_spectrum_model {
-        let etd_instrument = detected_activation_instrument.and_then(|(_, inst)| inst);
-        match load_param_from_store(
-            ActivationMethod::ETD,
-            etd_instrument,
-            cli.protocol,
-            search_enzyme,
-            cli.model_store.as_deref(),
-            None,
-        ) {
-            Ok((etd_model_id, mut etd_param)) => {
-                // Reuse the resolved protocol (the auto-detected TMT/iTRAQ handling
-                // applied to the primary `param` above) rather than raw `cli.protocol`,
-                // so the ETD scorer's isobaric handling matches the primary scorer.
-                etd_param.data_type.protocol = param.data_type.protocol;
-                eprintln!(
-                    "[glyco] --glyco-per-spectrum-model: loaded ETD model '{etd_model_id}' — \
-                     ETD/AI-ETD spectra dispatch to this model for their own rank/edge/\
-                     hyperscore/RankScoreFloat scoring; HCD spectra (and the HCD partner read \
-                     for --glyco-hcd-pair candidate generation) keep the file's dominant model"
-                );
-                let mut etd_scorer = RankScorer::new(&etd_param);
-                // Apply the same MGF fragment-tol override the primary scorer got
-                // (ignored when the instrument was auto-detected from metadata).
-                if frag_tol_override.is_some() && !instrument_was_detected {
-                    etd_scorer.set_fragment_tol_override(frag_tol_override);
-                }
-                Some(etd_scorer)
-            }
-            Err(e) => {
-                eprintln!(
-                    "WARN: --glyco-per-spectrum-model: failed to load an ETD-family model \
-                     ({e}) — falling back to the whole-file dominant model for every spectrum \
-                     (no per-spectrum dispatch)"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     // ── 5. Build SearchParams ─────────────────────────────────────────────────
     let mut params = SearchParams::default_tryptic(aa);
     params.precursor_tolerance = PrecursorTolerance::symmetric(cli.precursor_tol);
@@ -2527,7 +2439,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         peak_filter,
         precursor_offset_clamp: cli.precursor_offset_clamp,
         density_on_active_list: cli.density_on_active_list,
-        tight_highres_scoring: cli.tight_highres_scoring,
     });
     input::mzml::init_ethcd_as_etd(cli.ethcd_activation == EthcdActivationFlag::Etd);
     params.chimeric_allow_overlap = cli.chimeric_allow_overlap;
@@ -3298,7 +3209,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // validated CLI values, so no scoring code has to read the environment.
         scoring_crate::scoring::init_cz_settings(scoring_crate::scoring::CzSettings {
             zmax_override: cli.glyco_cz_max_charge,
-            use_intensity: cli.glyco_cz_intensity,
         });
         andes_glyco::backbone::init_y_max_charge(cli.glyco_y_max_charge);
 
@@ -3479,7 +3389,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             glyco_tol_ppm,
             cli.glyco_backbone_top_k,
             glyco_cfg.clone(),
-            etd_scorer_owned.as_ref(),
         );
         let total_pass1_rows: usize = pass1.iter().map(|r| r.hits.len()).sum();
         eprintln!(
@@ -3800,7 +3709,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 glyco_cfg,
                 pass1,
                 &injected,
-                etd_scorer_owned.as_ref(),
             )
         } else {
             pass1

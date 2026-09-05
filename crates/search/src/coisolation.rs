@@ -3,8 +3,6 @@
 //! second-peptide search at each. Speed-correct chimeric path: scores few
 //! candidates at MS1-confirmed masses instead of thousands across the blind
 //! window.
-#![allow(dead_code)]
-
 use crate::candidate_gen::Candidate;
 use crate::chimeric_features::precursor_isotope_match;
 use crate::precursor_cal::adjusted_observed_neutral_mass;

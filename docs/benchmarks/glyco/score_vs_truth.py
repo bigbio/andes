@@ -73,7 +73,11 @@ def key_of(specid, full, tails):
     m = re.search(r"scan=(\d+)", specid)
     if not m:
         return None
-    run = next((r for r, v in full.items() if v in specid), None)
+    # Full-name match on token boundaries: a run called `R1` must not claim `R10`.
+    hits = [r for r, v in full.items() if re.search(rf"(^|[^A-Za-z0-9]){re.escape(v)}([^A-Za-z0-9]|$)", specid)]
+    if len(hits) > 1:
+        sys.exit(f"SpecId {specid!r} matches several runs by full name: {sorted(hits)}")
+    run = hits[0] if hits else None
     if run is None:
         run = next((r for r, t in tails.items() if re.search(rf"(^|[^A-Za-z0-9]){re.escape(t)}([^A-Za-z0-9]|$)", specid)), None)
     return (run, int(m.group(1))) if run else None

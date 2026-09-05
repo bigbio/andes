@@ -209,7 +209,7 @@ columns unchanged on every row, with the 11 added columns all zero.
 
 | Step | State | Flag |
 |---|---|---|
-| 0 Offline re-rank gate | `scripts/glyco_rerank_gate.py` | — |
+| 0 Offline re-rank gate | script removed 2026-09-05 (one-off analysis) | — |
 | 1 Wrong-spectrum / gate defects | done | `--glyco-pair-y-on-gen`, `--glyco-enum-fallback`, `--glyco-etd-require-oxonium` |
 | 1 `SialicConsistency` on the gate's spectrum | done, unconditional | — (byte-identical unpaired) |
 | 2 Peptide-channel rank | done | `--glyco-rank-masked` |

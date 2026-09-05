@@ -787,12 +787,12 @@ PASS requires ALL of:
 - `xfer` **decoys@1% still ~1** (honest FDR — a jump in decoys@1% = the feature is inflating ⇒ FAIL, revisit the symmetric decoy graph).
 - Determinism: run `xfer` twice, PIN md5 identical.
 
-- [ ] **Step 4: Record the result** in `docs/plans/glyco/STATUS.md` (numbers + verdict) and memory.
+- [ ] **Step 4: Record the result** in `the campaign STATUS record (archived outside the repo, 2026-09-05)` (numbers + verdict) and memory.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add docs/plans/glyco/50-roadmap/run_transfer_ab.sh docs/plans/glyco/STATUS.md
+git add docs/plans/glyco/50-roadmap/run_transfer_ab.sh   # the STATUS record lives outside the repo
 git commit -m "test(glyco): end-to-end transfer A/B harness + Fc3 result"
 ```
 

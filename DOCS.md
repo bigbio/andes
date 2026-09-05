@@ -82,7 +82,6 @@ Native `.raw`/`.d` search **MS2 (identification) scans only** — MS1 and MS3+ s
 | `--ethcd-activation` | enum | `hcd` | How EThcD/ETciD spectra are labelled for model routing and scoring: `hcd` (the default; no EThcD model exists) or `etd` (routes them through the c/z scoring path). | *(no Java equivalent)* |
 | `--precursor-offset-clamp` | bool | `true` | When the model has no precursor-offset entry for a charge, use the nearest charge that has one instead of dropping the correction. | *(no Java equivalent)* |
 | `--density-on-active-list` | bool | `true` | Measure local peak density on the deconvoluted (active) peak list rather than the raw list. | *(no Java equivalent)* |
-| `--tight-highres-scoring` | flag | *(off)* | Serve high-resolution models at the 20 ppm window their rank tables were trained with instead of the stored 0.5 Da. **Measured and not recommended** — it is a real train/serve mismatch, but the wider window wins on identifications. | *(no Java equivalent)* |
 | `--model-store` | path | *(bundled)* | Parquet model store to use instead of the bundled `resources/models/` (a per-protocol partitioned directory, or a single `models.parquet`). | *(no Java equivalent)* |
 | `--model` | string | *(auto-select)* | Exact model ID to load from the store, skipping automatic selection. Useful for searching with a freshly trained model. | *(no Java equivalent)* |
 
@@ -682,7 +681,6 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-retrieval-tol-ppm` / `--glyco-retrieval-tol-da` | tol-ppm on high-res, 0.5 Da on low-res | Peptide-first candidate **retrieval** window (retrieval only; scoring is unchanged). 20 ppm retrieval on high-res data measured 6.9x faster at no identification cost. |
 | `--glyco-y-max-charge` | 3 | Maximum glycan-Y fragment charge. Raising it reaches 4+/5+ Y ions on highly charged precursors at the cost of chance matches. |
 | `--glyco-cz-max-charge` | derived | Maximum c/z fragment charge probed on ETD spectra; derived from whether the spectrum was deconvoluted. |
-| `--glyco-cz-intensity` | off | Weight explained c/z by intensity instead of presence. Measured −48 backbone-correct @1%. |
 | `--glyco-cz-multisite` | off | Choose the glycosite by c/z evidence when a backbone carries several sequons (~8% of tryptic glycopeptides). Off pending a decoy-controlled A/B; by default such backbones report `@N?`. |
 | `--glyco-hcd-pair` | **on** | ETD only, single-file runs: generate backbones from the paired HCD scan of the same precursor, score c/z on the ETD scan (+153 backbone-correct @1%). `--glyco-hcd-pair false` disables. |
 | `--glyco-etd-rank-glycan` | **on** | ETD only: score the rank path against the glycan-carrying peptide so glycosite-spanning c/z land at their real mass (+33 backbone-correct @1%). |
@@ -705,14 +703,14 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-enum-fallback` | on | Promote the best enumerated candidate when the argmax picks a de-novo one. |
 | `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium` | off | ETD generation variants: read the Y ladder from the HCD partner; require the oxonium gate before full glycan enumeration on ETD scans. |
 | `--glyco-y-tree`, `--glyco-oxonium-llr`, `--glyco-rank-masked`, `--glyco-chance-llr-masked` | off | Emit additional PIN columns (composition-specific Y-tree LLR, oxonium-composition LLR, peptide-channel scores on a glycan-masked spectrum). Measured identification-neutral on both regimes; kept for rescoring research. |
-| `--glyco-per-spectrum-model` | off | Mixed HCD/ETD files: score each scan with the model matching its own activation. Measured to lose identifications (the HCD model fits these ETD scans better). |
 | `--glyco-pf-charge` / `--glyco-max-pf` | 2 / 1024 | Peptide-first fragment-index charge coverage and candidate cap. |
 | `--glyco-decoy` | off | Paired glycan-axis decoy rows for experimental 2D FDR. |
 | `--glyco-transfer-seed-fdr` / `--glyco-rt-window` / `--glyco-transfer-min-support` / `--glyco-transfer-core-y` / `--glyco-transfer-ungated` | 0.05 / 1800 s / 1 / 3 / off | Cross-spectrum transfer knobs. |
 
 Flags that an A/B measured as losing have been **deleted** rather than left behind a
 default (`--glyco-split-election`, `--glyco-gp-g`, `--glyco-gp-m`, `--glyco-isobar-rep`,
-`--glyco-y-index`, `--glyco-decorated-features`, removed 2026-09-05). The measurements are in
+`--glyco-y-index`, `--glyco-decorated-features`, `--glyco-cz-intensity`,
+`--glyco-per-spectrum-model`, and the engine-wide `--tight-highres-scoring`, removed 2026-09-05). The measurements are in
 `docs/benchmarks/README.md` → *Refuted*.
 
 By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.

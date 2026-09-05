@@ -12,9 +12,8 @@
 //! Companion to `glyco_golden.rs`, which guards the LOW-RES path. This one exists
 //! because an MGF fixture *cannot* reach the high-res branch: selecting a high-res
 //! model for MGF requires `--fragment-tol-ppm`, which calls
-//! `set_fragment_tol_override` and replaces `mme` -- collapsing both arms of the
-//! `tight_high_res` conditional in `scored_spectrum.rs` to the same window. So the
-//! very flag needed to get there is the flag that neutralises what we want to guard.
+//! `set_fragment_tol_override` and replaces `mme` -- the very window we want to
+//! guard. So the flag needed to get there is the flag that neutralises the guard.
 //!
 //! An mzML fixture carries analyzer metadata, so the instrument is auto-detected and
 //! the override is never involved. That makes this the test that actually pins the

@@ -10,6 +10,10 @@ set -euo pipefail
 DATA_DIR="${1:?usage: run.sh <data-dir> [dataset ...]}"; shift || true
 SETS=("$@"); [ ${#SETS[@]} -eq 0 ] && SETS=(astral tmt ups1)
 ANDES="${ANDES:-andes}"; THREADS="${THREADS:-8}"
+# Native .raw needs the .NET 8 runtime at search time; point DOTNET_ROOT at it if it is
+# not on a system path. Reading .raw directly avoids the conversion step entirely -- see
+# the README: a converter version silently cost 30% of identifications on one file.
+export DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 DB="$DATA_DIR/databases"; OUT="$DATA_DIR/results"; mkdir -p "$OUT"
 PIMG=quay.io/biocontainers/percolator:3.7.1--h3b5f4bd_2
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,11 +26,11 @@ printf '\n%-8s %10s %12s %14s\n' dataset wall "PSMs@q0.01" "entrap hits"
 
 for ds in "${SETS[@]}"; do
   case "$ds" in
-    astral) spec=$(ls "$DATA_DIR"/astral/*.mzML "$DATA_DIR"/astral/*.raw 2>/dev/null | head -1)
+    astral) spec=$(ls "$DATA_DIR"/astral/*.raw "$DATA_DIR"/astral/*.mzML 2>/dev/null | head -1)   # .raw first: no conversion
             fa="$DB/hye.fasta";          extra=(--mods "$HERE/../configs/astral_mods.txt" --precursor-tol 10ppm --enzyme trypsin) ;;
-    tmt)    spec=$(ls "$DATA_DIR"/tmt/*.mzML "$DATA_DIR"/tmt/*.raw 2>/dev/null | head -1)
+    tmt)    spec=$(ls "$DATA_DIR"/tmt/*.raw "$DATA_DIR"/tmt/*.mzML 2>/dev/null | head -1)
             fa="$DB/tmt_db.fasta";       extra=(--mods "$HERE/../configs/mods-tmt.txt") ;;
-    ups1)   spec=$(ls "$DATA_DIR"/ups1/*.mzML "$DATA_DIR"/ups1/*.raw 2>/dev/null | head -1)
+    ups1)   spec=$(ls "$DATA_DIR"/ups1/*.raw "$DATA_DIR"/ups1/*.mzML 2>/dev/null | head -1)
             fa="$DB/yeast_entrap.fasta"; extra=() ;;
     *) echo "unknown dataset '$ds'" >&2; exit 1 ;;
   esac

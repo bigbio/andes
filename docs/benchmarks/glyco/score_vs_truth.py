@@ -84,12 +84,29 @@ def key_of(specid, full, tails):
 
 
 def main():
+    # `--run NAME`: a single-file glyco run writes SpecIds with no file name at all
+    # (`controllerType=0 controllerNumber=1 scan=262_glyco_262_1`), so nothing could
+    # join it to a reference and the scorer reported 100% NOT_EMITTED. With --run every
+    # SpecId is attributed to that reference run.
+    forced_run = None
+    if "--run" in sys.argv:
+        i = sys.argv.index("--run")
+        forced_run = sys.argv[i + 1]
+        del sys.argv[i:i + 2]
     if len(sys.argv) < 4:
         sys.exit(__doc__)
     truth_p, pin_p, psms_p = sys.argv[1:4]
     qcut = float(sys.argv[4]) if len(sys.argv) > 4 else 0.01
     truth = load_truth(truth_p)
     full, tails = run_matchers({k[0] for k in truth})
+    if forced_run is not None:
+        if forced_run not in full:
+            sys.exit(f"--run {forced_run!r} is not a run in the reference: {sorted(full)}")
+        truth = {k: v for k, v in truth.items() if k[0] == forced_run}
+        full, tails = {forced_run: forced_run}, {}
+        def key_of(specid, full, tails):  # noqa: F811 -- deliberate override
+            m = re.search(r"scan=(\d+)", specid)
+            return (forced_run, int(m.group(1))) if m else None
 
     emitted = {}
     with open(pin_p) as fh:

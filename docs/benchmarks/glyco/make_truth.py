@@ -3,10 +3,11 @@
 
     make_truth.py pglyco2  <*-FDR.txt> ...      > truth.tsv
     make_truth.py strucgp  <*_result.xlsx> ...  > truth.tsv
+    make_truth.py msfragger <psm.tsv> [RUN-PREFIX]  > truth.tsv
 
 WHY THIS EXISTS
 Reference identifications ship in whatever format the original engine emitted: pGlyco2 in
-plain TSV, StrucGP in `.xlsx`. Re-parsing those
+plain TSV, StrucGP in `.xlsx`, MSFragger-Glyco in a Philosopher-filtered `psm.tsv`. Re-parsing those
 every time is slow, needs the multi-GB originals, and re-invites the two mistakes that have
 already produced wrong numbers here:
 
@@ -103,7 +104,45 @@ def strucgp(paths):
     return out, "as published (depositor-filtered result table)"
 
 
-READERS = {"pglyco2": pglyco2, "strucgp": strucgp}
+def msfragger(paths):
+    """Philosopher-filtered MSFragger-Glyco `psm.tsv` (already at the depositors' PSM FDR;
+    decoys removed). The glycan is the `Observed Modifications` column, e.g.
+    `Hex(5)HexNAc(2)(1216.422863)`; several candidates may be listed comma-separated,
+    best first, and the first is kept. Rows whose observed modification is not made only
+    of HexNAc/Hex/dHex/NeuAc/NeuGc (chemical mods, isotope labels, Kdn, Pent, HexA...) are
+    NOT glycopeptides for this benchmark and are dropped. An optional second argument
+    keeps only runs whose name starts with it (`MouseLiver`)."""
+    prefix = paths[1] if len(paths) > 1 else ""
+    allowed = {"HexNAc": "n", "Hex": "h", "dHex": "f", "NeuAc": "a", "NeuGc": "g"}
+    out, dropped = [], 0
+    with open(paths[0]) as fh:
+        for r in csv.DictReader(fh, delimiter="\t"):
+            om = (r.get("Observed Modifications") or "").split(",")[0].split("%")[0].strip()
+            if not om:
+                continue
+            counts = {"n": 0, "h": 0, "f": 0, "a": 0, "g": 0}
+            ok = True
+            for name, num in re.findall(r"([A-Za-z:>\-\d]+)\((\d+)\)", om):
+                if name not in allowed:
+                    ok = False
+                    break
+                counts[allowed[name]] += int(num)
+            if not ok or counts["n"] == 0:
+                dropped += 1
+                continue
+            spec = r["Spectrum"]                      # MouseLiver-Z-T-1.01954.01954.3
+            run, scan = spec.split(".")[0], spec.split(".")[1].lstrip("0") or "0"
+            if prefix and not run.startswith(prefix):
+                continue
+            gly = "HexNAc{n}Hex{h}Fuc{f}NeuAc{a}NeuGc{g}".format(**counts)
+            out.append([run, scan, r.get("Charge", ""),
+                        re.sub(r"[^A-Z]", "", r["Peptide"].upper()), gly, ""])
+    print(f"# msfragger: dropped {dropped} rows whose observed modification is not an N-glycan",
+          file=sys.stderr)
+    return out, "Philosopher-filtered psm.tsv as deposited; Observed Modifications parsed as HexNAc/Hex/dHex/NeuAc/NeuGc only"
+
+
+READERS = {"pglyco2": pglyco2, "strucgp": strucgp, "msfragger": msfragger}
 
 if __name__ == "__main__":
     if len(sys.argv) < 3 or sys.argv[1] not in READERS:

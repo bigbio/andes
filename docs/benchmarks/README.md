@@ -185,8 +185,11 @@ on an entrapment sequence by the mechanism the metric relies on.
 
 ## 2. Glyco
 
-Two tiers of one dataset, pGlyco2 mouse liver (PXD005553), whose deposited pGlyco2
-identifications ship in `glyco/truth/`. Quick is one fraction on a VM; Deep is all five
+Two tiers of one dataset, pGlyco2 mouse liver (PXD005553). Two independent references for
+the same spectra ship in `glyco/truth/`: the depositors' pGlyco2 identifications (17,855)
+and MSFragger-Glyco's, from the Philosopher-filtered table deposited in PXD031032
+(14,626). The MSFragger comparison has not been measured yet; the recipe below scores
+against both. Quick is one fraction on a VM; Deep is all five
 fractions on a cluster. The earlier human-plasma set was retired: its reference was a
 proprietary Byonic `.byrslt` export, which cannot be rebuilt from public artifacts.
 
@@ -318,7 +321,12 @@ perc pooled
 #    score_vs_truth.py attributes every miss to a stage against a committed reference.
 python3 glyco/eval_yield.py  pooled.pin pooled.t.psms
 python3 glyco/eval_entrap.py pooled.pin pooled.t.psms 0.01 "$DATA/databases/mouse_entrap.fasta"
-python3 glyco/score_vs_truth.py glyco/truth/pglyco2_mouse_liver.tsv.gz pooled.pin pooled.t.psms
+python3 glyco/score_vs_truth.py glyco/truth/pglyco2_mouse_liver.tsv.gz   pooled.pin pooled.t.psms
+python3 glyco/score_vs_truth.py glyco/truth/msfragger_mouse_liver.tsv.gz pooled.pin pooled.t.psms  # 2nd engine, same spectra
+python3 glyco/agreement.py      glyco/truth/msfragger_mouse_liver.tsv.gz pooled.t.psms             # peptidoform agreement
+#    Quick tier (ONE fraction, not pooled): a single-file run writes SpecIds with no file
+#    name, so tell the scorers which reference run it is:
+#      python3 glyco/score_vs_truth.py --run MouseLiver-Z-T-1 glyco/truth/pglyco2_mouse_liver.tsv.gz liver1.glyco.pin liver1.psms
 ```
 
 **The entrapment database is 1:1 shuffled-self, and swapping it changes the answer.**
@@ -436,6 +444,8 @@ so no entrapment FDP is computable from it and its counts are rescored `q ≤ 0.
 - **The deep glyco tier was measured off-`main`** (commit `6b37bb2c`) and must be
   re-measured on a `main` commit before it is quoted as current. The quick tier is measured
   on this branch with the scripted database (above), so it no longer has that problem.
+- **andes has not yet been scored against the MSFragger liver reference**; the table is
+  committed and the recipe scores it, but no run has been done since it was added.
 - **No PTM-enriched benchmark exists.** `--refine` is measured only on Astral, and the four
   bundled phosphorylation models have never been scored against a reference dataset. A
   public phospho-enrichment set with a deposited identification list is the next dataset

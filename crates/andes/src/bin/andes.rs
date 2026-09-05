@@ -355,8 +355,8 @@ struct SearchArgs {
     #[arg(long = "chimeric-max-kl", hide = true, default_value = "0.3")]
     chimeric_max_kl: f32,
 
-    /// Path to a Parquet model store to use instead of the bundled
-    /// `resources/models.parquet`. When set, model selection reads from
+    /// Path to a Parquet model store (a single file or a partitioned directory)
+    /// to use instead of the bundled `resources/models/`. When set, model selection reads from
     /// this store; when unset, the bundled store is used.
     #[arg(long = "model-store", hide = true)]
     model_store: Option<PathBuf>,
@@ -710,32 +710,6 @@ struct SearchArgs {
     /// glycan-database split lattice. ETD scans otherwise bypass every glycan gate.
     #[arg(long = "glyco-etd-require-oxonium", hide = true)]
     glyco_etd_require_oxonium: bool,
-
-    /// Emit the composition-specific Y-ion-tree log-likelihood columns. The shipped
-    /// ladder is a single linear chain that appends fucose after every antenna, so the
-    /// core-fucose Y ions a true fucosylated composition should claim are never
-    /// predicted. Additive PIN columns only.
-    #[arg(long = "glyco-y-tree", hide = true)]
-    glyco_y_tree: bool,
-
-    /// Emit the per-candidate oxonium-composition log-likelihood columns, including the
-    /// penalty for a composition that claims a monosaccharide whose diagnostic ion is
-    /// absent. No diagnostic oxonium ion currently influences which composition wins.
-    #[arg(long = "glyco-oxonium-llr", hide = true)]
-    glyco_oxonium_llr: bool,
-
-    /// Emit the peptide-channel rank score, computed after masking oxonium and Y-ladder
-    /// peaks so the rank model is not reading a spectrum whose most intense peaks are
-    /// all glycan-derived. Additive PIN column only.
-    #[arg(long = "glyco-rank-masked", hide = true)]
-    glyco_rank_masked: bool,
-
-    /// Emit the peptide-channel backbone chance LLR: on the same masked spectrum as
-    /// --glyco-rank-masked, every glycosite-spanning b/y ion is scored as the best of
-    /// its bare, +HexNAc and +2HexNAc forms, and fragment charges run to z-1 with an
-    /// isotope check from z3. Additive PIN columns only.
-    #[arg(long = "glyco-chance-llr-masked", hide = true)]
-    glyco_chance_llr_masked: bool,
 
     /// Peptide-first candidate RETRIEVAL tolerance in ppm. Default: --glyco-tol-ppm
     /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
@@ -3377,10 +3351,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             pair_y_on_gen: cli.glyco_pair_y_on_gen,
             enum_fallback: cli.glyco_enum_fallback,
             etd_require_oxonium: cli.glyco_etd_require_oxonium,
-            y_tree: cli.glyco_y_tree,
-            ox_llr: cli.glyco_oxonium_llr,
-            rank_masked: cli.glyco_rank_masked,
-            chance_llr_masked: cli.glyco_chance_llr_masked,
         };
         let pass1 = search::glyco_search::glyco_search_run(
             spectra_for_glyco,
@@ -6319,11 +6289,9 @@ fn detect_instrument_type_for_path(spectrum_path: &std::path::Path) -> Option<In
 
 /// Resolve the path to the bundled model store.
 ///
-/// The store may ship either as a single `resources/models.parquet` file or as
-/// a per-protocol partitioned directory `resources/models/` (Hive-style
-/// `protocol=<P>/models.parquet`). [`ModelStore::open`] accepts both, so the
-/// resolver prefers the partitioned **directory** when present and falls back
-/// to the single file.
+/// The store ships as a per-protocol partitioned directory `resources/models/`
+/// (Hive-style `protocol=<P>/models.parquet`), which [`ModelStore::open`]
+/// reads as one store.
 ///
 /// A packaged release ships `resources/` next to the binary, so prefer
 /// `<exe_dir>/resources/...` when it exists — that makes an installed binary
@@ -6344,14 +6312,10 @@ fn bundled_store_path() -> PathBuf {
         if partitioned.is_dir() {
             return partitioned;
         }
-        let single = root.join("models.parquet");
-        if single.exists() {
-            return single;
-        }
     }
 
-    // Last-resort default (source tree single file) for error messages.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet")
+    // Last-resort default (source tree directory) for error messages.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models")
 }
 
 /// Build a [`SelectionKey`] from `(activation, instrument, protocol)` applying
@@ -6437,8 +6401,8 @@ fn build_selection_key(
 /// reference resolution ladder by the equivalence gate test
 /// `store_selection_matches_old_ladder_for_all_combos`.
 ///
-/// `custom_store_path`: when `Some`, use that Parquet file instead of the
-/// bundled `resources/models.parquet` (honours `--model-store`).
+/// `custom_store_path`: when `Some`, use that Parquet store instead of the
+/// bundled `resources/models/` (honours `--model-store`).
 ///
 /// `model_id_override`: when `Some`, skip automatic selection and load this
 /// exact model ID (honours `--model`).
@@ -6777,7 +6741,7 @@ mod param_resolver_tests {
     use super::*;
 
     // ── Model resolution is store-based: all bundled models live in
-    //    resources/models.parquet and are selected by `model_id`.
+    //    resources/models/ and are selected by `model_id`.
     //    The store_selection_equivalence integration test covers the
     //    activation/instrument/protocol → model_id selection invariant.
 

@@ -21,7 +21,7 @@
 //!
 //! 1. Load training spectra (`train.mzML`) using the production `MzMLReader`.
 //! 2. Load the bundled `hcd_qexactive_tryp` seed model from
-//!    `resources/models.parquet` via `ModelStore`.
+//!    `resources/models` via `ModelStore`.
 //! 3. Run the full model-train pipeline (library calls, not the CLI):
 //!    `bootstrap_labels` → `StatsAccumulator` → `Estimator::estimate` → trained `RankScorer`.
 //! 4. Load validation spectra (`validate.mzML` if present, else `train.mzML`).
@@ -53,10 +53,10 @@ use model_train::{
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Path to the bundled Parquet store (`resources/models.parquet`).
+/// Path to the bundled Parquet store (`resources/models/`).
 fn bundled_store_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/models.parquet")
+        .join("../../resources/models")
 }
 
 /// Standard HCD/tryptic amino-acid set: Carbamidomethyl-C (fixed) + Oxidation-M (variable).
@@ -157,7 +157,7 @@ fn trained_model_yield_not_worse_than_fallback() {
     eprintln!("loading bundled seed model hcd_qexactive_tryp");
     let store_path = bundled_store_path();
     let store = ModelStore::open(&store_path)
-        .expect("failed to open bundled models.parquet");
+        .expect("failed to open bundled model store");
     let seed_param: Param = store
         .load_param("hcd_qexactive_tryp")
         .expect("hcd_qexactive_tryp not found in bundled store");

@@ -61,7 +61,7 @@ impl ModelStore {
     /// Open the store and read the manifest.
     ///
     /// `path` may be either:
-    /// - a single Parquet file (the historical layout, `resources/models.parquet`), or
+    /// - a single Parquet file (the historical single-file layout), or
     /// - a **directory** of per-protocol Parquet partitions written in the
     ///   Hive-style layout `protocol=<Protocol>/models.parquet` (or, more
     ///   generally, any tree of `*.parquet` files). Every partition is read and
@@ -1135,18 +1135,24 @@ fn read_ion_type(
 mod tests {
     use super::*;
 
-    /// Resolve the bundled `models.parquet` path relative to this file's
+    /// Resolve the bundled partitioned store directory relative to this file's
     /// manifest dir (same convention the binary uses via `CARGO_MANIFEST_DIR`).
     fn bundled_store_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/models.parquet")
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models")
+    }
+
+    /// One real partition file of the bundled store (the `Automatic` protocol,
+    /// which carries `hcd_qexactive_tryp`), for tests that need a single
+    /// Parquet file to copy around.
+    fn bundled_partition_file() -> std::path::PathBuf {
+        bundled_store_path().join("protocol=Automatic/models.parquet")
     }
 
     #[test]
     fn selection_entries_returns_bundled_count_with_hcd_qexactive_tryp() {
         let path = bundled_store_path();
         let store = ModelStore::open(&path)
-            .expect("failed to open bundled models.parquet");
+            .expect("failed to open bundled model store");
         let entries = store.selection_entries();
         // The bundle ships 17 own-trained models, one selection entry each. (Two
         // seed-copy phospho slugs with no own training data were dropped; their
@@ -1177,10 +1183,10 @@ mod tests {
     fn duplicate_model_id_across_parts_is_rejected() {
         // Finding 3.7: two partitions that both declare the same model_id make
         // load order-dependent, so `open` must reject it.
-        let src = bundled_store_path();
+        let src = bundled_partition_file();
         let dir = tempfile::tempdir().expect("tempdir");
-        // Two real partitions, each a full copy of the bundle → every model_id
-        // appears twice across parts.
+        // Two real partitions, each a full copy of one bundled partition → every
+        // model_id in it appears twice across parts.
         std::fs::copy(&src, dir.path().join("part_a.parquet")).expect("copy a");
         std::fs::copy(&src, dir.path().join("part_b.parquet")).expect("copy b");
         let msg = match ModelStore::open(dir.path()) {
@@ -1194,7 +1200,7 @@ mod tests {
     fn temp_suffix_partition_is_ignored() {
         // Finding 3.7: a stale temp partition (dotfile / `.tmp.parquet`) must be
         // skipped so it neither shadows nor duplicates a real partition.
-        let src = bundled_store_path();
+        let src = bundled_partition_file();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::copy(&src, dir.path().join("models.parquet")).expect("copy real");
         // A leftover temp copy of the same data — would otherwise trip the

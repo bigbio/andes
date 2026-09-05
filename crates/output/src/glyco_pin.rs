@@ -132,34 +132,6 @@ fn write_glyco_header<W: Write>(
         "IsGlycanDb".to_string(),
         "Y0Y1Anchor".to_string(), // G2 peptide-mass anchor (additive, peptide-discriminating)
         "SialicConsistency".to_string(), // GI-2 composition-conditioned sialic-oxonium (additive)
-        // Composition-specific Y-ion-TREE block (`--glyco-y-tree`; all 0.0 when off).
-        // YLadderScore walks ONE linear chain that appends fucose after every antenna,
-        // so a core-fucosylated composition can never claim its own Y1+Fuc / Y2+Fuc
-        // diagnostic rungs while an afucosylated isobar loses nothing. These score the
-        // nodes a composition's topology actually permits, hits AND misses.
-        "YTreeLLR".to_string(),
-        "YTreeHitFrac".to_string(),
-        // Missed nodes with class prior >= 0.5 (Y0 and the trimannosyl core). Positive
-        // alongside a positive YTreeLLR is the "fits by antenna coincidence" signature.
-        "YTreeHighPriorMissing".to_string(),
-        // Target minus mass-shifted-Y twin on the SAME node set and spectrum. A GAP,
-        // not a second row: the shipped glycan-decoy ROW copies 45 of ~48 columns from
-        // its target, which measured as Percolator finding no direction on five seeds.
-        "YTreeDecoyGap".to_string(),
-        // Per-candidate oxonium-COMPOSITION log-likelihood (`--glyco-oxonium-llr`).
-        // OxoniumScore is a spectrum constant (one distinct value per 600 candidates)
-        // and SialicConsistency only flips the sign of observed intensity, so neither
-        // penalises a composition claiming a monosaccharide whose diagnostic ion is
-        // absent. This does, per class, with the fucose asymmetry the chemistry requires.
-        "OxoniumCompLLR".to_string(),
-        // Peptide-channel rank (`--glyco-rank-masked`; 0.0 otherwise): the winner
-        // re-scored after oxonium and Y-ladder peaks are masked and ranks recomputed.
-        "RankScoreMasked".to_string(),
-        "MaskedPeakCount".to_string(),
-        // Peptide-channel chance LLR with HexNAc-stub max-over-forms and isotope-gated
-        // fragment charges to z-1 (`--glyco-chance-llr-masked`; 0.0 otherwise).
-        "ChanceLlrMasked".to_string(),
-        "ExplainedMasked".to_string(),
         "CzHyperscore".to_string(), // ETD c/z backbone hyperscore (additive; ETD/AI-ETD only, else 0)
         "CzIntensity".to_string(), // ETD c/z matched-intensity fraction (additive; ETD/AI-ETD only, else 0)
         "CzExplained".to_string(), // ETD c/z analytical explained-intensity LLR (additive; graded-model de-risk; ETD only, else 0)
@@ -339,35 +311,6 @@ if glyco_col_kept("YHitFrac", curated) { write_double_tab(writer, y_frac as f64)
         key.sialic_consistency
     };
 if glyco_col_kept("SialicConsistency", curated) { write_double_tab(writer, sialic as f64)?; }
-    // Y-tree block. On a glycan-decoy ROW report the twin's own values, so the row
-    // stays a like-for-like control of its target rather than a copy of it (the same
-    // rule YHitFrac follows above). The gap is NEGATED on the decoy row, as
-    // SialicConsistency is: writing 0.0 there would let Percolator learn
-    // `gap == 0 => decoy`, a label leak rather than a feature.
-    let (y_tree_llr, y_tree_gap, y_tree_hit_frac, y_tree_hpm) = if glycan_decoy_override.is_some() {
-        (
-            key.y_tree_llr_decoy,
-            key.y_tree_llr_decoy - key.y_tree_llr,
-            key.y_tree_hit_frac_decoy,
-            key.y_tree_high_prior_missing_decoy,
-        )
-    } else {
-        (
-            key.y_tree_llr,
-            key.y_tree_llr - key.y_tree_llr_decoy,
-            key.y_tree_hit_frac,
-            key.y_tree_high_prior_missing,
-        )
-    };
-    if glyco_col_kept("YTreeLLR", curated) { write_double_tab(writer, y_tree_llr as f64)?; }
-    if glyco_col_kept("YTreeHitFrac", curated) { write_double_tab(writer, y_tree_hit_frac as f64)?; }
-    if glyco_col_kept("YTreeHighPriorMissing", curated) { write!(writer, "\t{}", y_tree_hpm)?; }
-    if glyco_col_kept("YTreeDecoyGap", curated) { write_double_tab(writer, y_tree_gap as f64)?; }
-    if glyco_col_kept("OxoniumCompLLR", curated) { write_double_tab(writer, key.oxonium_comp_llr as f64)?; }
-    if glyco_col_kept("RankScoreMasked", curated) { write_double_tab(writer, key.rank_score_masked as f64)?; }
-    if glyco_col_kept("MaskedPeakCount", curated) { write!(writer, "\t{}", key.masked_peak_count)?; }
-    if glyco_col_kept("ChanceLlrMasked", curated) { write_double_tab(writer, key.chance_llr_masked as f64)?; }
-    if glyco_col_kept("ExplainedMasked", curated) { write_double_tab(writer, key.explained_masked as f64)?; }
 
     // ETD c/z backbone hyperscore (additive; ETD/AI-ETD spectra only, else 0.0).
     // A peptide-axis feature (backbone c/z ladder), so a glycan-decoy row emits the
@@ -881,17 +824,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 5,
             glycan_mass,
             backbone_mass: 1500.0,
@@ -1135,17 +1067,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 3,
             glycan_mass,
             backbone_mass: peptide_neutral_mass,
@@ -1328,17 +1249,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.6,
             sialic_consistency: 0.15,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 4,
             glycan_mass,
             backbone_mass: candidates[0].peptide.mass(),
@@ -1405,8 +1315,6 @@ mod tests {
         // under its own header name.
         key.y_ladder_intensity_score = 1.25;
         key.core_y_hits = 3;
-        key.oxonium_comp_llr = -0.75;
-        key.masked_peak_count = 7;
         key.cz_hyperscore = 2.5;
         let hit = FullGlycoPsm { glycan_key: key, psm: make_minimal_psm(0, 10.0) };
         let results = vec![GlycoSpectrumResult { spectrum_idx: 0, hits: vec![hit] }];
@@ -1442,12 +1350,8 @@ mod tests {
                 assert_eq!(at("YLadderScore"), Some("1.25"), "curated={curated}");
                 assert_eq!(at("CoreYHits"), Some("3"), "curated={curated}");
                 if curated {
-                    assert_eq!(at("OxoniumCompLLR"), None);
-                    assert_eq!(at("MaskedPeakCount"), None);
                     assert_eq!(at("CzHyperscore"), None);
                 } else {
-                    assert_eq!(at("OxoniumCompLLR"), Some("-0.75"));
-                    assert_eq!(at("MaskedPeakCount"), Some("7"));
                     assert_eq!(at("CzHyperscore"), Some("2.5"));
                 }
                 // DeltaRTRank is dropped by the column policy (structurally 0 under the

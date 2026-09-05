@@ -122,7 +122,7 @@ mod tests {
 
     fn bundled_store_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/models.parquet")
+            .join("../../resources/models")
     }
 
     fn make_scorer() -> RankScorer {

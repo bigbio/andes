@@ -74,7 +74,7 @@ fn run_bsa_search() -> (
 
     // hcd_qexactive_tryp from the canonical Parquet store.
     let store = model_train::store::ModelStore::open(
-        &fixture("resources/models.parquet"),
+        &fixture("resources/models"),
     ).unwrap();
     let param = store.load_param("hcd_qexactive_tryp").unwrap();
     let scorer = RankScorer::new(&param);

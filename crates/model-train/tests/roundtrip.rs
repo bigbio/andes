@@ -13,9 +13,9 @@ use std::path::Path;
 fn bundled_store() -> model_train::store::ModelStore {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
-    model_train::store::ModelStore::open(bundled).expect("open bundled models.parquet")
+    model_train::store::ModelStore::open(bundled).expect("open bundled model store")
 }
 
 // Two distinct bundled models used purely as round-trip Param fixtures (any
@@ -228,15 +228,16 @@ fn gbdt_blob_roundtrips_through_store() {
     );
 }
 
-/// Reading the existing bundled store (written without the loss_class column)
-/// must yield all ion types with loss_class == 0.
+/// Every bundled model carries only loss_class == 0 ion types: the bundle was
+/// trained before neutral-loss classes existed, and the reader must surface
+/// that as an explicit zero rather than anything else.
 #[test]
-fn old_store_without_loss_class_reads_as_zero() {
+fn bundled_store_ion_types_have_zero_loss_class() {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
-    let store = ModelStore::open(bundled).expect("open bundled models.parquet");
+    let store = ModelStore::open(bundled).expect("open bundled model store");
     let ids = store.model_ids();
     assert!(ids.len() >= 17, "expected >=17 bundled models, got {}", ids.len());
 

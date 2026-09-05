@@ -31,10 +31,10 @@ fn make_peptide(seq: &[u8]) -> Peptide {
 fn load_base() -> Param {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
     ModelStore::open(bundled)
-        .expect("open bundled models.parquet")
+        .expect("open bundled model store")
         .load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp")
 }

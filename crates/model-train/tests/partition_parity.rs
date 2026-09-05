@@ -7,7 +7,9 @@
 //! - per-model `load_param(id)` semantically identical (every field, every
 //!   table, every blob).
 //!
-//! The bundled-store test partitions `resources/models.parquet` into a temp
+//! The bundled-store test takes one shipped partition file
+//! (`resources/models/protocol=Automatic/models.parquet`, a plain single-file
+//! store of 9 models) as the single-file input, re-partitions it into a temp
 //! dir and proves equivalence. A second test does the same for an external
 //! v1 store if `ANDES_V1_STORE` points at one (used to build the shipped
 //! `resources/models/` partition set).
@@ -17,8 +19,11 @@ use std::path::PathBuf;
 use model_train::store::{split_store_by_protocol, ModelStore};
 use scoring_crate::param_model::Param;
 
+/// A shipped partition file is itself a complete single-file store (every row
+/// of its 9 models), so it stands in for the retired single-file bundle.
 fn bundled_single_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../resources/models/protocol=Automatic/models.parquet")
 }
 
 /// Assert two stores are equivalent: same model_ids, same selection_entries,
@@ -151,7 +156,8 @@ fn assert_params_equal(id: &str, a: &Param, b: &Param) {
 #[test]
 fn partitioned_store_loads_identical_to_bundled_single_file() {
     let single_path = bundled_single_file();
-    let single = ModelStore::open(&single_path).expect("open bundled single-file store");
+    let single = ModelStore::open(&single_path).expect("open bundled partition as single-file store");
+    assert_eq!(single.model_ids().len(), 9, "Automatic partition ships 9 models");
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("models");

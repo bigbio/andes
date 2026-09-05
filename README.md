@@ -61,7 +61,7 @@ flowchart TD
     subgraph TRAIN["🧠 Scoring models · trained offline on public data"]
       direction LR
       PRIDE[("PRIDE<br/>public datasets")] -->|"SDRF · quantms curation"| TR["andes train<br/>own model per regime"]
-      TR --> STORE[["models.parquet<br/>activation × instrument × enzyme × protocol"]]
+      TR --> STORE[["resources/models/<br/>activation × instrument × enzyme × protocol"]]
     end
 
     %% ---- Inputs ----
@@ -375,7 +375,7 @@ and should not be read as though it were. Details in
 
 ## Soft fragment matching
 
-andes replaces the hard fragment-tolerance cliff with a smooth Gaussian weighting of each matched peak by its mass error, blended toward the missing-ion score — so an off-centre (likely-noise) peak inside a wide low-res window is discounted instead of counting in full. It is **on by default and parameter-free**: the Gaussian width is the model's own match tolerance (`σ = tolerance`), so it scales per regime automatically (meaningful on low-res, ~inert on high-res, which deconvolves to a tight window) with nothing to tune. Net-positive across all three regimes at 1% entrapment-FDP (UPS1 +0.8%, TMT +0.3%, Astral +0.5%). See [docs/soft-fragment-matching.md](docs/soft-fragment-matching.md).
+andes replaces the hard fragment-tolerance cliff with a smooth Gaussian weighting of each matched peak by its mass error, blended toward the missing-ion score — so an off-centre (likely-noise) peak inside a wide low-res window is discounted instead of counting in full. It is **on by default and parameter-free**: the Gaussian width is the model's own match tolerance (`σ = tolerance`), so it scales per regime automatically (meaningful on low-res, ~inert on high-res, which deconvolves to a tight window) with nothing to tune. Measured net-positive across all three regimes when it shipped (2026-08: UPS1 +0.8%, TMT +0.3%, Astral +0.5% at 1% entrapment-FDP).
 
 ## Intact N-glycopeptide search (`--glyco`, experimental)
 

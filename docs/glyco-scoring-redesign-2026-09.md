@@ -3,8 +3,8 @@
 > **Status 2026-09-05.** Items 4 and 5 (the split election and its `--glyco-gp-g` weight)
 > were measured as losing (table below) and have been **removed from the code**, together
 > with `--glyco-gp-m`. The additive-column items (Y-tree, oxonium LLR, masked rank/chance
-> LLR) remain as hidden research flags, measured identification-neutral. This document is
-> kept as the design record; the flags it names in those sections no longer exist.
+> LLR) measured identification-neutral and were removed the same day. This document is
+> kept as the design record; none of the flags it names exist any more.
 
 **Date:** 2026-09-02. **Branch audited:** `feat/glyco-pin-curation` @ `69fbf354`.
 **Inputs:** six independent read-only audits (candidate generation / mass split; fused selector;

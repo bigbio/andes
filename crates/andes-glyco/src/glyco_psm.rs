@@ -137,17 +137,6 @@ pub fn collapse_cmp(
 ///     partial_glycan_by: 0.0,
 ///     y0y1_anchor_score: 0.0,
 ///     sialic_consistency: 0.0,
-///     y_tree_llr: 0.0,
-///     y_tree_hit_frac: 0.0,
-///     y_tree_high_prior_missing: 0,
-///     y_tree_llr_decoy: 0.0,
-///     y_tree_hit_frac_decoy: 0.0,
-///     y_tree_high_prior_missing_decoy: 0,
-///     oxonium_comp_llr: 0.0,
-///     rank_score_masked: 0.0,
-///     masked_peak_count: 0,
-///     chance_llr_masked: 0.0,
-///     explained_masked: 0.0,
 ///     core_y_hits: 0,
 ///     backbone_mass: 0.0,
 ///     is_transferred: false,
@@ -217,64 +206,6 @@ pub struct GlycoPsmKey {
     /// sialic content on one spectrum. 0.0 when no glycan is resolved.
     pub sialic_consistency: f32,
     /// Number of core-Y ions matched in the spectrum.
-    /// Composition-specific Y-ion-TREE evidence (`--glyco-y-tree`), all zero when the
-    /// flag is off or the hit carries no composition.
-    ///
-    /// The shipped `y_ladder_intensity_score` walks ONE linear chain that appends
-    /// fucose after every antenna, so a core-fucosylated composition can never claim
-    /// the Y1+Fuc / Y2+Fuc rungs that are its own strongest diagnostic ions, while an
-    /// afucosylated isobar loses nothing. The tree predicts the nodes a composition's
-    /// topology actually permits and scores hits AND misses, in the form the field
-    /// converged on (Polasky et al., Mol Cell Proteomics 2022; Liu et al., Nat Commun
-    /// 8:438, 2017).
-    pub y_tree_llr: f32,
-    /// Fraction of the composition's OWN predicted tree nodes that matched, in [0,1].
-    /// Size-free companion to `y_tree_llr`, which is not zero-mean in composition size.
-    pub y_tree_hit_frac: f32,
-    /// Count of MISSED nodes whose class prior is >= 0.5 (Y0 and the trimannosyl core).
-    /// A positive value alongside a positive `y_tree_llr` is the "fits by antenna
-    /// coincidence" signature — a composition accumulating score from peripheral nodes
-    /// while missing the ions every true N-glycan produces.
-    pub y_tree_high_prior_missing: u16,
-    /// Mass-shifted-Y decoy twin of `y_tree_llr` on the SAME node set and the SAME
-    /// spectrum, so the pair is exchangeable. Emitted as a GAP feature rather than a
-    /// separate PIN row: the previous glycan-decoy row copied 45 of ~48 columns
-    /// verbatim from its target, leaving Percolator no direction to find.
-    pub y_tree_llr_decoy: f32,
-    /// The twin's own `hit_frac` / `high_prior_missing`, so a glycan-decoy ROW reports
-    /// the decoy's completeness, not a copy of its target's.
-    pub y_tree_hit_frac_decoy: f32,
-    pub y_tree_high_prior_missing_decoy: u16,
-    /// Per-candidate oxonium-COMPOSITION log-likelihood (`--glyco-oxonium-llr`), 0.0
-    /// when off or composition-less. The shipped `oxonium_summed_frac` is a spectrum
-    /// constant (measured: one distinct value per 600 candidates), and
-    /// `sialic_consistency` only flips the sign of observed intensity, so neither can
-    /// penalise a composition that CLAIMS a monosaccharide whose diagnostic ion is
-    /// absent. This term does, per class, with the fucose asymmetry the ion chemistry
-    /// requires.
-    pub oxonium_comp_llr: f32,
-    /// Rank LLR of the winning peptide re-scored on the PEPTIDE-CHANNEL spectrum
-    /// (`--glyco-rank-masked`), i.e. after oxonium and this backbone's Y-ladder m/z are
-    /// removed and per-peak ranks, base peak and noise density are recomputed on the
-    /// survivors. 0.0 when the flag is off.
-    ///
-    /// The rank model is trained on unmodified tryptic peptides, where b/y ions occupy
-    /// the top intensity ranks. On a glycopeptide spectrum the most intense peaks are
-    /// glycan-derived, so every backbone ion is ranked 20-40 places lower than the model
-    /// expects. The mask depends on the backbone MASS only, never on the sequence, so it
-    /// is identical for a target and its reversed decoy.
-    pub rank_score_masked: f32,
-    /// Peaks the mask removed. Distinguishes "mask applied, nothing matched" from "mask
-    /// never wired" — the silent-defect shape the repo's path-parity guards exist for.
-    pub masked_peak_count: u32,
-    /// Peptide-channel backbone chance LLR (`--glyco-chance-llr-masked`), 0.0 when
-    /// off: mean over predicted b/y (ion, charge) pairs of the matched peak's
-    /// intensity-weighted local-density surprise on the SAME masked spectrum as
-    /// `rank_score_masked`, with glycosite-spanning ions scored as the max over the
-    /// bare / +HexNAc / +2HexNAc stub forms and z>=3 fragments isotope-confirmed.
-    pub chance_llr_masked: f32,
-    /// Fraction of predicted b/y (ion, charge) pairs matched under the same rules.
-    pub explained_masked: f32,
     pub core_y_hits: u8,
     /// Pre-computed monoisotopic mass of the glycan (0.0 when `glycan` is None).
     pub glycan_mass: f64,
@@ -409,17 +340,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.4,
             sialic_consistency: 0.1,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 4,
             glycan_mass: None::<GlycanComp>.as_ref().map(|g| g.mass).unwrap_or(0.0),
             backbone_mass: 1200.5,
@@ -462,17 +382,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.7,
             sialic_consistency: 0.2,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 5,
             backbone_mass: 1500.0,
             is_transferred: false,
@@ -504,17 +413,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,
@@ -547,17 +445,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

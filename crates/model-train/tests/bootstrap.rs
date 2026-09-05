@@ -59,10 +59,10 @@ fn bsa_aa_set() -> model::AminoAcidSet {
 fn load_hcd_scorer() -> RankScorer {
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
     let store = model_train::store::ModelStore::open(bundled)
-        .expect("open bundled models.parquet");
+        .expect("open bundled model store");
     let param = store.load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp from store");
     RankScorer::new(&param)

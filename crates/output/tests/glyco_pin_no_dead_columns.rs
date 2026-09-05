@@ -74,14 +74,13 @@ fn glyco_pin_curated_header_is_exactly_the_validated_set() {
     }
 }
 
-/// The redesign columns are ADDITIVE and experimental: they must appear in the
-/// default header (so their flags can be measured) and must NOT appear in the
-/// curated header, which pins the configuration that measured 384.6 +/- 23
-/// glycoPSMs @1%. Adding an unmeasured column to that set would silently change
-/// what "curated" means.
+/// The four ID-neutral research emitters (`--glyco-y-tree`, `--glyco-oxonium-llr`,
+/// `--glyco-rank-masked`, `--glyco-chance-llr-masked`) were measured
+/// identification-neutral and removed. Their columns must not reappear in
+/// either header, curated or default.
 #[test]
-fn redesign_columns_are_default_only() {
-    let redesign = [
+fn retired_research_columns_are_gone() {
+    let retired = [
         "YTreeLLR",
         "YTreeHitFrac",
         "YTreeHighPriorMissing",
@@ -92,25 +91,13 @@ fn redesign_columns_are_default_only() {
         "ChanceLlrMasked",
         "ExplainedMasked",
     ];
-
-    let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, false).unwrap();
-    let hdr = String::from_utf8(buf.into_inner()).unwrap();
-    let default_cols: Vec<&str> = hdr.trim_end().split('\t').collect();
-
-    let mut buf = Cursor::new(Vec::new());
-    output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, true).unwrap();
-    let hdr = String::from_utf8(buf.into_inner()).unwrap();
-    let curated_cols: Vec<&str> = hdr.trim_end().split('\t').collect();
-
-    for c in redesign {
-        assert!(
-            default_cols.contains(&c),
-            "{c} missing from the default glyco PIN: its flag can never be measured"
-        );
-        assert!(
-            !curated_cols.contains(&c),
-            "{c} leaked into the curated set, which pins a MEASURED configuration"
-        );
+    for curated in [false, true] {
+        let mut buf = Cursor::new(Vec::new());
+        output::glyco_pin::write_glyco_header_for_test(&mut buf, 2, 4, curated).unwrap();
+        let hdr = String::from_utf8(buf.into_inner()).unwrap();
+        let cols: Vec<&str> = hdr.trim_end().split('\t').collect();
+        for c in retired {
+            assert!(!cols.contains(&c), "retired column {c} is back (curated={curated})");
+        }
     }
 }

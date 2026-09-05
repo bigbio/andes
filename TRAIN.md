@@ -15,8 +15,7 @@ A scoring model captures, per `(charge, parent-mass, fragment-segment)` partitio
 intensity-rank and mass-error statistics of fragment ions — the numbers the generating-function
 scorer turns into per-peak scores. andes ships 17 own-trained models in a per-protocol partitioned Parquet store
 (`resources/models/`) covering common fragmentation × instrument × enzyme × protocol
-combinations; the single-file `resources/models.parquet` holds the same 17 for the training
-seed path.
+combinations; the same store is the default seed source for `andes train`.
 
 **Train your own when:**
 - your **instrument** isn't well covered (e.g. Orbitrap Astral, Bruker timsTOF), or

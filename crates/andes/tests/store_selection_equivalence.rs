@@ -163,9 +163,9 @@ fn bundled_model_ids() -> &'static std::collections::BTreeSet<String> {
     static IDS: OnceLock<std::collections::BTreeSet<String>> = OnceLock::new();
     IDS.get_or_init(|| {
         let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/models.parquet");
+            .join("../../resources/models");
         let store = model_train::ModelStore::open(&store_path)
-            .unwrap_or_else(|e| panic!("failed to open bundled models.parquet: {e}"));
+            .unwrap_or_else(|e| panic!("failed to open bundled model store: {e}"));
         store.model_ids().into_iter().collect()
     })
 }
@@ -176,9 +176,9 @@ fn bundled_model_classes() -> &'static std::collections::BTreeMap<String, BTreeS
     static MAP: OnceLock<std::collections::BTreeMap<String, BTreeSet<String>>> = OnceLock::new();
     MAP.get_or_init(|| {
         let store_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/models.parquet");
+            .join("../../resources/models");
         let store = model_train::ModelStore::open(&store_path)
-            .unwrap_or_else(|e| panic!("failed to open bundled models.parquet: {e}"));
+            .unwrap_or_else(|e| panic!("failed to open bundled model store: {e}"));
         store
             .selection_entries()
             .into_iter()
@@ -348,8 +348,8 @@ fn all_protocols() -> Vec<Protocol> {
 /// that exact-match in select() works for the bundled combo models.
 fn bundled_selection_entries() -> Vec<SelectionEntry> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../resources/models.parquet");
-    let store = ModelStore::open(&path).expect("failed to open bundled models.parquet");
+        .join("../../resources/models");
+    let store = ModelStore::open(&path).expect("failed to open bundled model store");
     store.selection_entries()
 }
 

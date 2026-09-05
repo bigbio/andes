@@ -73,7 +73,7 @@ fn main() {
     let seed_slug = a.get(3).map(|s| s.as_str()).unwrap_or("hcd_qexactive_tryp");
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let store = ModelStore::open(&root.join("resources/models.parquet")).expect("store");
+    let store = ModelStore::open(&root.join("resources/models")).expect("store");
     let seed_param: Param = store.load_param(seed_slug).expect("seed");
     let seed_scorer = RankScorer::new(&seed_param);
 

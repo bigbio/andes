@@ -466,8 +466,7 @@ timsTOF DDA-PASEF is beam-type CID on a TOF analyzer, so `.d` input auto-routes 
 
 The 17 bundled scoring models ship as a per-protocol partitioned Parquet store
 (`resources/models/protocol=<Automatic|TMT|Phosphorylation|iTRAQ>/models.parquet`; 9 / 3 / 4 / 1
-models), with the same 17 duplicated into the single-file `resources/models.parquet` for the
-training seed path. All are own-trained on public PRIDE data; the table in `README.md` →
+models). All are own-trained on public PRIDE data; the table in `README.md` →
 *Supported models* lists each with its regime and training accession.
 
 **When auto-detection fails** (missing activation block, unknown CV term, or running outside the source tree without bundled resources): andes falls back to the `hcd_qexactive_tryp` model for default-flag runs, or to the closest bundled regime for the flags given, and says which model it chose in the run summary.
@@ -702,7 +701,6 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | `--glyco-cz-gate` | on | ETD only: a c/z-evidence axis in the backbone-truncation gate (union-only, cannot drop a candidate). |
 | `--glyco-enum-fallback` | on | Promote the best enumerated candidate when the argmax picks a de-novo one. |
 | `--glyco-pair-y-on-gen`, `--glyco-etd-require-oxonium` | off | ETD generation variants: read the Y ladder from the HCD partner; require the oxonium gate before full glycan enumeration on ETD scans. |
-| `--glyco-y-tree`, `--glyco-oxonium-llr`, `--glyco-rank-masked`, `--glyco-chance-llr-masked` | off | Emit additional PIN columns (composition-specific Y-tree LLR, oxonium-composition LLR, peptide-channel scores on a glycan-masked spectrum). Measured identification-neutral on both regimes; kept for rescoring research. |
 | `--glyco-pf-charge` / `--glyco-max-pf` | 2 / 1024 | Peptide-first fragment-index charge coverage and candidate cap. |
 | `--glyco-decoy` | off | Paired glycan-axis decoy rows for experimental 2D FDR. |
 | `--glyco-transfer-seed-fdr` / `--glyco-rt-window` / `--glyco-transfer-min-support` / `--glyco-transfer-core-y` / `--glyco-transfer-ungated` | 0.05 / 1800 s / 1 / 3 / off | Cross-spectrum transfer knobs. |
@@ -710,7 +708,9 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 Flags that an A/B measured as losing have been **deleted** rather than left behind a
 default (`--glyco-split-election`, `--glyco-gp-g`, `--glyco-gp-m`, `--glyco-isobar-rep`,
 `--glyco-y-index`, `--glyco-decorated-features`, `--glyco-cz-intensity`,
-`--glyco-per-spectrum-model`, and the engine-wide `--tight-highres-scoring`, removed 2026-09-05). The measurements are in
+`--glyco-per-spectrum-model`, the engine-wide `--tight-highres-scoring`, and the four
+identification-neutral column emitters `--glyco-y-tree`, `--glyco-oxonium-llr`,
+`--glyco-rank-masked`, `--glyco-chance-llr-masked`, all removed 2026-09-05). The measurements are in
 `docs/benchmarks/README.md` → *Refuted*.
 
 By default FDR is computed **externally**: andes writes the glyco `.pin` and you run Percolator on it. The only exception is the opt-in in-process rescoring flags (`--rescore` → Percolator, or `--rescore-native` → the non-production built-in GBDT rescorer); see the Rescoring group in §1a. Glycopeptide runs use the external Percolator path.

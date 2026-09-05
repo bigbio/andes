@@ -37,10 +37,6 @@ use andes_glyco::backbone::{
     partial_glycan_by_intensity, y0y1_anchor_intensity, SpectrumStats,
 };
 use andes_glyco::glycan_db::GlycanComp;
-use andes_glyco::glycan_mass::{CORE_OXONIUM_MZ, CORE_Y_STEPS};
-use andes_glyco::oxonium::{NEUAC_OXONIUM_MZ, NEUGC_OXONIUM_MZ};
-use andes_glyco::glycan_y_tree::{score_y_tree, score_y_tree_decoy};
-use andes_glyco::oxonium_llr::{oxonium_composition_llr, oxonium_profile};
 use andes_glyco::glyco_psm::{
     collapse_cmp, GlycoPsmKey, GLYCO_GP_CZ_DEFAULT, GLYCO_GP_H_DEFAULT,
     GLYCO_GP_J_DEFAULT, GLYCO_GP_K_DEFAULT, glyco_gp_fused_score,
@@ -154,21 +150,6 @@ pub struct GlycoConfig {
     /// glyco evidence, which is a direct feeder of the measured junk-emission
     /// stratum. Default off (shipped behaviour).
     pub etd_require_oxonium: bool,
-    /// Emit the composition-specific Y-ion-tree LLR columns (`--glyco-y-tree`).
-    /// Additive PIN only; see `andes_glyco::glycan_y_tree`.
-    pub y_tree: bool,
-    /// Emit the per-candidate oxonium-composition LLR columns (`--glyco-oxonium-llr`).
-    /// Additive PIN only; see `andes_glyco::oxonium_llr`.
-    pub ox_llr: bool,
-    /// Emit the peptide-channel (oxonium- and Y-masked) rank score as a PIN column
-    /// (`--glyco-rank-masked`). Tests the rank-poisoning hypothesis: the rank model is
-    /// trained on unmodified peptides, and intense oxonium/Y peaks push every backbone
-    /// ion 20-40 ranks down before it is scored.
-    pub rank_masked: bool,
-    /// Emit the peptide-channel backbone chance LLR with HexNAc-stub max-over-forms
-    /// and isotope-gated fragment charges to z-1 (`--glyco-chance-llr-masked`).
-    /// Additive PIN only; see `scoring::glyco_backbone_llr`.
-    pub chance_llr_masked: bool,
     /// c/z truncation gate (`--glyco-cz-gate`, default ON). Adds AXIS 4 to the
     /// Phase-1 backbone truncation: keep the top-k backbones by glycosite-spanning
     /// c/z evidence too, so high-charge ETD glycopeptides supported mainly by c/z
@@ -201,10 +182,6 @@ impl Default for GlycoConfig {
             pair_y_on_gen: false,
             enum_fallback: true,
             etd_require_oxonium: false,
-            y_tree: false,
-            ox_llr: false,
-            rank_masked: false,
-            chance_llr_masked: false,
             debug: false,
             glyco_decoy: false,
         }
@@ -228,7 +205,6 @@ use crate::psm::PsmFeatures;
 /// (peptide, glycan-composition) identity used to collapse to one PSM per scan.
 type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
 
-use scoring_crate::scoring::glyco_backbone_llr::{masked_backbone_llr, DEFAULT_STUB_FORMS};
 use scoring_crate::scoring::{
     candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features,
     fuse_strong_score,
@@ -624,14 +600,6 @@ pub struct GlycoScoreCtx<'a> {
     pub enum_fallback: bool,
     /// See `GlycoConfig::etd_require_oxonium`.
     pub etd_require_oxonium: bool,
-    /// See `GlycoConfig::y_tree`.
-    pub y_tree: bool,
-    /// See `GlycoConfig::ox_llr`.
-    pub ox_llr: bool,
-    /// See `GlycoConfig::rank_masked`.
-    pub rank_masked: bool,
-    /// See `GlycoConfig::chance_llr_masked`.
-    pub chance_llr_masked: bool,
     /// See `GlycoConfig::min_core_y`.
     pub min_core_y: u32,
     /// See `GlycoConfig::min_raw_score`.
@@ -688,10 +656,6 @@ pub struct GlycoCtxOwned {
     pair_y_on_gen: bool,
     enum_fallback: bool,
     etd_require_oxonium: bool,
-    y_tree: bool,
-    ox_llr: bool,
-    rank_masked: bool,
-    chance_llr_masked: bool,
     min_core_y: u32,
     min_raw_score: Option<f32>,
     diag_splits: Option<std::sync::Arc<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>>,
@@ -794,10 +758,6 @@ impl GlycoCtxOwned {
         let pair_y_on_gen_cfg = cfg.pair_y_on_gen;
         let enum_fallback_cfg = cfg.enum_fallback;
         let etd_require_oxonium_cfg = cfg.etd_require_oxonium;
-        let y_tree_cfg = cfg.y_tree;
-        let ox_llr_cfg = cfg.ox_llr;
-        let rank_masked_cfg = cfg.rank_masked;
-        let chance_llr_masked_cfg = cfg.chance_llr_masked;
         let min_core_y_cfg = cfg.min_core_y;
         let min_raw_score_cfg = cfg.min_raw_score;
         let diag_splits_cfg = cfg.diag_splits.as_ref().map(|path| {
@@ -927,10 +887,6 @@ impl GlycoCtxOwned {
             pair_y_on_gen: pair_y_on_gen_cfg,
             enum_fallback: enum_fallback_cfg,
             etd_require_oxonium: etd_require_oxonium_cfg,
-            y_tree: y_tree_cfg,
-            ox_llr: ox_llr_cfg,
-            rank_masked: rank_masked_cfg,
-            chance_llr_masked: chance_llr_masked_cfg,
             min_core_y: min_core_y_cfg,
             min_raw_score: min_raw_score_cfg,
             diag_splits: diag_splits_cfg,
@@ -982,10 +938,6 @@ impl GlycoCtxOwned {
             pair_y_on_gen: self.pair_y_on_gen,
             enum_fallback: self.enum_fallback,
             etd_require_oxonium: self.etd_require_oxonium,
-            y_tree: self.y_tree,
-            ox_llr: self.ox_llr,
-            rank_masked: self.rank_masked,
-            chance_llr_masked: self.chance_llr_masked,
             min_core_y: self.min_core_y,
             min_raw_score: self.min_raw_score,
             diag_splits: self.diag_splits.clone(),
@@ -1100,11 +1052,7 @@ fn score_spectrum_glyco(
     let min_core_y = ctx.min_core_y;
     let min_raw_score = ctx.min_raw_score;
     let pair_y_on_gen = ctx.pair_y_on_gen;
-    let rank_masked_on = ctx.rank_masked;
-    let chance_masked_on = ctx.chance_llr_masked;
     let enum_fallback = ctx.enum_fallback;
-    let y_tree_on = ctx.y_tree;
-    let ox_llr_on = ctx.ox_llr;
     let diag_splits = ctx.diag_splits.clone();
     let min_matched_by = ctx.min_matched_by;
     // ETD c/z collapse term: on electron-transfer spectra the intact-glycan c/z
@@ -1300,12 +1248,6 @@ fn score_spectrum_glyco(
 
             // Oxonium evidence for the whole spectrum (charge-independent).
             let ox_ev = oxonium_gate(gen_peaks, OXONIUM_GATE_MIN_FRAC, tol_ppm);
-            // Per-class diagnostic-oxonium intensities, computed ONCE per spectrum on
-            // the same peaks as the gate. The per-CANDIDATE term consumes this profile;
-            // the profile itself is a spectrum constant and carries no candidate
-            // information, which is exactly why `oxonium_summed_frac` alone can gate
-            // but cannot select.
-            let ox_profile = ox_llr_on.then(|| oxonium_profile(gen_peaks, gen_stats, tol_ppm));
 
             // Determine which charges to try. `glyco_charges_to_try` expands the set
             // UPWARD by `ANDES_GLYCO_CHARGE_EXPAND` (default 0 = exact legacy set) so a
@@ -2365,77 +2307,6 @@ fn score_spectrum_glyco(
                     };
                 features.rank_score_float =
                     score_psm_float(ss, &rank_float_pep, spec_scorer, w.z, fragment_tolerance_da);
-                // PEPTIDE-CHANNEL rank (`--glyco-rank-masked`). The rank model assigns
-                // per-peak intensity ranks over the whole spectrum and was trained on
-                // unmodified tryptic peptides, where b/y ions sit at the top ranks. On a
-                // glycopeptide spectrum the 20-40 most intense peaks are oxonium and
-                // Y-ladder ions, so every backbone ion is pushed 20-40 ranks down and is
-                // scored as if it were a mediocre peak of an ordinary peptide. Masking
-                // the glycan channel before ranking recomputes ranks, base peak and noise
-                // density on the survivors. The mask is a function of the backbone MASS
-                // only, never of the sequence, so it is identical for a target and its
-                // reversed decoy and cannot bias the competition.
-                // Carried on the glyco PSM key rather than the shared `PsmFeatures`
-                // struct: these are glyco-only quantities, and the standard search's
-                // feature vector is the source of the ~50 shared PIN columns that must
-                // stay byte-identical.
-                let mut rank_score_masked: f32 = 0.0;
-                let mut masked_peak_count: u32 = 0;
-                let mut chance_llr_masked: f32 = 0.0;
-                let mut explained_masked: f32 = 0.0;
-                if rank_masked_on || chance_masked_on {
-                    let mut windows: Vec<(f64, f64)> = Vec::new();
-                    let mut push = |mz: f64| {
-                        let tol = (mz * tol_ppm / 1e6).max(0.01);
-                        windows.push((mz - tol, mz + tol));
-                    };
-                    for &mz in CORE_OXONIUM_MZ.iter() {
-                        push(mz);
-                    }
-                    for &mz in NEUAC_OXONIUM_MZ.iter().chain(NEUGC_OXONIUM_MZ.iter()) {
-                        push(mz);
-                    }
-                    // Y rungs of THIS backbone mass, at every charge the Y matcher
-                    // probes, with their M+1 and M+2 isotopologues: an intense Y ion's
-                    // isotope peaks are as bright as many backbone ions and would
-                    // otherwise stay at the top ranks of the "peptide channel".
-                    const ISOTOPE: f64 = 1.003_354_83;
-                    for step in std::iter::once(0.0).chain(CORE_Y_STEPS.iter().copied()) {
-                        let neutral = bb_neutral + step;
-                        for z in 1..=max_frag_charge.clamp(1, 3) {
-                            let mono = (neutral + z as f64 * PROTON) / z as f64;
-                            for iso in 0..3 {
-                                push(mono + iso as f64 * ISOTOPE / z as f64);
-                            }
-                        }
-                    }
-                    windows.sort_by(|a, b| a.0.total_cmp(&b.0));
-                    let masked = ScoredSpectrum::new_with_excluded_mz(
-                        spec, spec_scorer, w.z, &windows,
-                    );
-                    masked_peak_count = masked.excluded_peak_count() as u32;
-                    if rank_masked_on {
-                        rank_score_masked = score_psm_float(
-                            &masked, &cand.peptide, spec_scorer, w.z, fragment_tolerance_da,
-                        );
-                    }
-                    if chance_masked_on {
-                        // Step 6: chance LLR on the same peptide-channel spectrum, with
-                        // glycosite-spanning b/y taking the max over {bare, +HexNAc,
-                        // +2HexNAc} and z>=3 fragments isotope-confirmed. The site is
-                        // the same first/boundary sequon every other HCD term uses.
-                        let r = masked_backbone_llr(
-                            &masked,
-                            &cand.peptide,
-                            glyco_site_for(&cand.peptide),
-                            w.z,
-                            tol_ppm,
-                            &DEFAULT_STUB_FORMS,
-                        );
-                        chance_llr_masked = r.chance_llr;
-                        explained_masked = r.explained;
-                    }
-                }
                 features.tailor_score = if tailor_denom > 0.0 {
                     w.score / tailor_denom
                 } else {
@@ -2487,24 +2358,6 @@ fn score_spectrum_glyco(
                     .map(|g| g.mass)
                     .unwrap_or(bb_hit.glycan_mass_residual);
                 let cz_struct_vals = cz_struct(&w);
-                // Score the Y-tree ONCE: the three columns below are three fields of a
-                // single traversal, and the traversal costs one matcher call per node
-                // (up to 40 for a large composition).
-                let y_tree_vals = match (&bb_hit.glycan, y_tree_on) {
-                    (Some(g), true) => Some((
-                        score_y_tree(y_peaks, y_stats, bb_neutral, g, tol_ppm, max_frag_charge),
-                        score_y_tree_decoy(
-                            y_peaks,
-                            y_stats,
-                            bb_neutral,
-                            g,
-                            tol_ppm,
-                            max_frag_charge,
-                            glycan_decoy_seed(g),
-                        ),
-                    )),
-                    _ => None,
-                };
                 let glycan_key = GlycoPsmKey {
                     spectrum_idx: spec_idx,
                     glycan: bb_hit.glycan.clone(),
@@ -2611,34 +2464,6 @@ fn score_spectrum_glyco(
                     // Threaded from the per-backbone Y-ladder evidence computed
                     // earlier in `core_y_counts` (previously discarded/hardcoded
                     // to 0, so the `CoreYHits` PIN feature was always dead).
-                    // Composition-specific Y-ion tree (`--glyco-y-tree`). Scored on the
-                    // SAME peaks as the shipped ladder (`y_peaks`) so the two columns
-                    // describe one spectrum, and skipped entirely when the flag is off
-                    // so the default PIN is byte-identical.
-                    y_tree_llr: y_tree_vals.map_or(0.0, |(t, _)| t.llr),
-                    y_tree_hit_frac: y_tree_vals.map_or(0.0, |(t, _)| t.hit_frac),
-                    y_tree_high_prior_missing: y_tree_vals.map_or(0, |(t, _)| t.high_prior_missing),
-                    y_tree_hit_frac_decoy: y_tree_vals.map_or(0.0, |(_, d)| d.hit_frac),
-                    y_tree_high_prior_missing_decoy: y_tree_vals
-                        .map_or(0, |(_, d)| d.high_prior_missing),
-                    // Mass-shifted-Y twin on the SAME node set and spectrum, seeded from
-                    // the composition so one decoy "structure" exists per glycan, matching
-                    // the existing ladder decoy's convention. Emitted as a GAP against its
-                    // target rather than as a separate PIN row: the shipped glycan-decoy
-                    // row copies 45 of ~48 columns verbatim from its target, which left
-                    // Percolator with no direction to find on all five seeds measured.
-                    y_tree_llr_decoy: y_tree_vals.map_or(0.0, |(_, d)| d.llr),
-                    // Per-candidate oxonium-composition consistency
-                    // (`--glyco-oxonium-llr`). Reads the profile built from `gen_peaks`,
-                    // the same peaks the oxonium gate reads.
-                    oxonium_comp_llr: match (&bb_hit.glycan, ox_llr_on, &ox_profile) {
-                        (Some(g), true, Some(profile)) => oxonium_composition_llr(profile, g),
-                        _ => 0.0,
-                    },
-                    rank_score_masked,
-                    masked_peak_count,
-                    chance_llr_masked,
-                    explained_masked,
                     core_y_hits: core_y_counts[w.bb_hit_idx],
                     glycan_mass,
                     backbone_mass: bb_neutral,
@@ -3412,17 +3237,6 @@ mod tests {
             partial_glycan_by: 0.0,
             y0y1_anchor_score: 0.0,
             sialic_consistency: 0.0,
-            y_tree_llr: 0.0,
-            y_tree_hit_frac: 0.0,
-            y_tree_high_prior_missing: 0,
-            y_tree_llr_decoy: 0.0,
-            y_tree_hit_frac_decoy: 0.0,
-            y_tree_high_prior_missing_decoy: 0,
-            oxonium_comp_llr: 0.0,
-            rank_score_masked: 0.0,
-            masked_peak_count: 0,
-            chance_llr_masked: 0.0,
-            explained_masked: 0.0,
             core_y_hits: 0,
             glycan_mass: 0.0,
             backbone_mass: 0.0,

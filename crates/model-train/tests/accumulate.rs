@@ -33,10 +33,10 @@ fn load_hcd_scorer() -> (Param, RankScorer) {
     // Load the hcd_qexactive_tryp model from the canonical Parquet store.
     let bundled = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../resources/models.parquet"
+        "/../../resources/models"
     ));
     let store = model_train::store::ModelStore::open(bundled)
-        .expect("open bundled models.parquet");
+        .expect("open bundled model store");
     let param = store.load_param("hcd_qexactive_tryp")
         .expect("load hcd_qexactive_tryp from store");
     let scorer = RankScorer::new(&param);

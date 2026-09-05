@@ -96,7 +96,7 @@ mod tests {
 
     fn make_scorer() -> RankScorer {
         let store = ModelStore::open(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models.parquet"),
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources/models"),
         )
         .unwrap();
         RankScorer::new(&store.load_param("hcd_qexactive_tryp").unwrap())

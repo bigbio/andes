@@ -204,7 +204,16 @@ fn dedup_by_composition(out: &mut Vec<GlycanComp>) {
     });
 }
 
-/// Enumerate a curated set of common human N-glycan compositions.
+/// The shipped default list: [`n_glycan_list_common_with_neugc`] at the human-validated
+/// NeuGc bound of 1. Kept as a zero-argument function because tests, the list registry
+/// and `n_glycan_list_reference_human` all pin THIS list; the driver calls the bounded
+/// form directly so it can raise NeuGc on a CMAH-competent sample.
+pub fn n_glycan_list_common() -> Vec<GlycanComp> {
+    n_glycan_list_common_with_neugc(1)
+}
+
+/// Enumerate a curated set of common N-glycan compositions, with the NeuGc-per-
+/// composition bound as a parameter.
 ///
 /// This is the default list for `--glyco` searches.  It is smaller than
 /// `n_glycan_list()` (~600 vs ~4034 entries) which makes it tractable to
@@ -212,19 +221,27 @@ fn dedup_by_composition(out: &mut Vec<GlycanComp>) {
 /// avoiding the pre-filter ceiling caused by ranking on Y-ladder evidence alone.
 ///
 /// Constraints tighter than the broad list:
-///   - HexNAc ∈ [2, 6], Hex ∈ [3, 10], Fuc ∈ [0, 2], NeuAc ∈ [0, 4], NeuGc ∈ [0, 1]
+///   - HexNAc ∈ [2, 6], Hex ∈ [3, 10], Fuc ∈ [0, 2], NeuAc ∈ [0, 4], NeuGc ∈ [0, `max_neugc`]
 ///   - Standard N-glycan plausibility: fuc ≤ min(hexnac, 2), sialic ≤ hexnac−2
 ///   - mass ∈ [500, 6000]
 ///
-/// Coverage on human plasma/serum glycoproteomics truth sets: ≥ 92 % at 20 ppm.
-/// The remaining ~8 % corresponds to rare or non-human glycan compositions
-/// (e.g. NeuGc-rich, high-fucosylation) that are captured by the de-novo
-/// Y-ladder branch (which runs independently of the DB list).
+/// `max_neugc` = 1 is the human-tuned list (600 compositions): coverage on human
+/// plasma/serum truth sets ≥ 92 % at 20 ppm, the remainder being non-human
+/// compositions (NeuGc-rich, high-fucosylation). Those fall to the de-novo branch --
+/// which never reaches the FDR PIN, because a bare mass residual is not an
+/// identification -- so on a CMAH-competent sample the cap is a hard ceiling, not a
+/// soft one. Measured on pGlyco2 mouse liver T-1 (3,877 reference spectra): 501 carry
+/// NeuGc ≥ 2 (12.9 %), and 442 of the run's 838 selection losses (52.7 %) were exactly
+/// those -- right backbone retained, glycan unnameable. `max_neugc` = 4 (NeuAc's own
+/// bound) reaches them all at 840 compositions, a ×1.4 widening; the ×3.9 widening that
+/// was refuted (see the comment inside) grew the NeuAc-only space, which this does not.
+/// The NeuGc-free subset is identical in content and order at every bound, so a run
+/// that excludes NeuGc is byte-identical whatever bound was used to build the list.
 ///
 /// Returns a Vec sorted by mass ascending (deterministic: total-order sort on
 /// mass bits, tiebroken by composition fields in lexicographic order).
-pub fn n_glycan_list_common() -> Vec<GlycanComp> {
-    let mut out: Vec<GlycanComp> = Vec::with_capacity(700);
+pub fn n_glycan_list_common_with_neugc(max_neugc: u8) -> Vec<GlycanComp> {
+    let mut out: Vec<GlycanComp> = Vec::with_capacity(900);
 
     // MEASURED-BEST DEFAULT. A reference-fitted, much wider box was tried and LOST:
     // fitting to a curated 160-composition human list (HexNAc<=11, Hex<=HexNAc+5) raised
@@ -249,7 +266,7 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
                 }
                 let max_sialic = hn.saturating_sub(2);
                 for na in 0u8..=4 {
-                    for ng in 0u8..=1 {
+                    for ng in 0u8..=max_neugc {
                         if na + ng > max_sialic {
                             continue; // sialic acids cap at one per antennal HexNAc
                         }
@@ -381,6 +398,98 @@ mod tests {
                 common.iter().any(|g| (g.mass - m).abs() < 0.05),
                 "paucimannose {m} Da must be in the DEFAULT common list too"
             );
+        }
+    }
+
+    // --- n_glycan_list_common_with_neugc tests ---
+
+    /// The bound-1 list IS the shipped default, entry for entry: the refactor must not
+    /// move a single composition or its position.
+    #[test]
+    fn common_with_neugc_1_is_the_default_list() {
+        let a = n_glycan_list_common();
+        let b = n_glycan_list_common_with_neugc(1);
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(
+                (x.hexnac, x.hex, x.fuc, x.neuac, x.neugc),
+                (y.hexnac, y.hex, y.fuc, y.neuac, y.neugc)
+            );
+            assert_eq!(x.mass.to_bits(), y.mass.to_bits());
+        }
+    }
+
+    /// Raising the bound must not touch the NeuGc-free subset in content OR order --
+    /// that subset is what every human run searches after `retain(neugc == 0)`, and the
+    /// glyco goldens pin it byte-for-byte.
+    #[test]
+    fn raising_the_neugc_bound_leaves_the_neugc_free_subset_identical() {
+        let base: Vec<GlycanComp> = n_glycan_list_common_with_neugc(1)
+            .into_iter()
+            .filter(|g| g.neugc == 0)
+            .collect();
+        for bound in 2u8..=4 {
+            let wide: Vec<GlycanComp> = n_glycan_list_common_with_neugc(bound)
+                .into_iter()
+                .filter(|g| g.neugc == 0)
+                .collect();
+            assert_eq!(base.len(), wide.len(), "bound {bound}");
+            for (x, y) in base.iter().zip(&wide) {
+                assert_eq!(
+                    (x.hexnac, x.hex, x.fuc, x.neuac),
+                    (y.hexnac, y.hex, y.fuc, y.neuac),
+                    "bound {bound}"
+                );
+                assert_eq!(x.mass.to_bits(), y.mass.to_bits(), "bound {bound}");
+            }
+        }
+    }
+
+    /// Each step of the bound adds compositions, and the widest (NeuAc-symmetric) list
+    /// is ~840: a ×1.4 widening, not the ×3.9 that was refuted.
+    #[test]
+    fn common_with_neugc_size_grows_monotonically_and_stays_bounded() {
+        let mut prev = 0usize;
+        for bound in 1u8..=4 {
+            let n = n_glycan_list_common_with_neugc(bound).len();
+            assert!(n > prev, "bound {bound}: {n} <= {prev}");
+            prev = n;
+        }
+        assert!((800..=900).contains(&prev), "widest list: {prev}");
+    }
+
+    /// The compositions the mouse-liver reference needs and the shipped list cannot
+    /// name: NeuGc2 (455 of 3,877 pGlyco2 T-1 spectra) and NeuGc3 (46). The default
+    /// must still cap at 1.
+    #[test]
+    fn common_with_neugc_4_reaches_the_neugc_rich_mouse_compositions() {
+        let l = n_glycan_list_common_with_neugc(4);
+        for &(hn, hx, fc, na, ng) in &[(4u8, 5u8, 0u8, 0u8, 2u8), (5, 6, 1, 0, 3), (6, 7, 0, 0, 4)]
+        {
+            assert!(
+                l.iter()
+                    .any(|g| (g.hexnac, g.hex, g.fuc, g.neuac, g.neugc) == (hn, hx, fc, na, ng)),
+                "HexNAc{hn}Hex{hx}Fuc{fc}NeuAc{na}NeuGc{ng} must be reachable"
+            );
+        }
+        assert!(
+            !n_glycan_list_common().iter().any(|g| g.neugc >= 2),
+            "the default list must still cap NeuGc at 1"
+        );
+    }
+
+    /// Plausibility constraints hold at every bound.
+    #[test]
+    fn common_with_neugc_plausibility_at_every_bound() {
+        for bound in 1u8..=4 {
+            for g in n_glycan_list_common_with_neugc(bound) {
+                assert!(g.neugc <= bound, "{g:?}");
+                assert!(g.fuc <= g.hexnac, "{g:?}");
+                assert!(
+                    g.neuac + g.neugc <= g.hexnac.saturating_sub(2),
+                    "sialic > antennae HexNAc: {g:?}"
+                );
+            }
         }
     }
 

@@ -696,6 +696,7 @@ CLI flags** (advanced; the shipped defaults are validated and rarely need changi
 | Flag | Default | Purpose |
 |---|---|---|
 | `--glyco-backbone-top-k` | 150 | Max backbone candidates per spectrum after DB/de-novo union. |
+| `--glyco-max-neugc` | auto | NeuGc per composition in the default list: 4 (NeuAc's bound) when NeuGc is kept on positive evidence (`--glyco-taxon mammal`, or `auto` with a conclusive survey that finds NeuGc), else the human-validated 1. Runs that exclude NeuGc are byte-identical either way. `1` reproduces the pre-2026-09 behaviour on a CMAH-competent sample. Why: the list is human-tuned, and a composition it cannot name falls to de-novo, which never reaches the FDR PIN — on pGlyco2 mouse liver T-1, 501 of 3,877 reference spectra carry NeuGc ≥ 2. |
 | `--glyco-gp-k` / `--glyco-gp-j` / `--glyco-gp-h` | 10 / 5 / 1 | Weights of the fused per-scan selector `rank + K·ladder + J·core_y + H·hyper` (`H = 0` disables the hyperscore term). |
 | `--glyco-gp-cz` | 15 | Weight of the ETD c/z hyperscore; added only on ETD/AI-ETD spectra. |
 | `--glyco-cz-gate` | on | ETD only: a c/z-evidence axis in the backbone-truncation gate (union-only, cannot drop a candidate). |

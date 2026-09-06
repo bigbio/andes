@@ -111,10 +111,15 @@ def pglyco2(paths):
             scored = sorted(((hits(o), o) for o in itertools.permutations(MASS)), reverse=True)
             best_n, best_o = scored[0]
             assumed = hits(ORDER)
-            if best_o != ORDER or assumed < 0.99 * len(vectors):
-                sys.exit(f"{p}: Glycan column order is not {' '.join(ORDER)} -- best fit is "
-                         f"{' '.join(best_o)} ({best_n}/{len(vectors)}), assumed order fits "
-                         f"{assumed}/{len(vectors)}. Refusing to emit a mislabelled table.")
+            # `sorted` breaks a tied hit count by the order tuple, so `best_o == ORDER` alone
+            # would accept a file on which another ordering fits equally well; require that
+            # exactly one ordering reaches the best count.
+            unique_best = sum(1 for n, _ in scored if n == best_n) == 1
+            if best_o != ORDER or not unique_best or assumed < 0.99 * len(vectors):
+                sys.exit(f"{p}: Glycan column order is not uniquely {' '.join(ORDER)} -- best fit is "
+                         f"{' '.join(best_o)} ({best_n}/{len(vectors)}, "
+                         f"{sum(1 for n, _ in scored if n == best_n)} ordering(s) at that count), "
+                         f"assumed order fits {assumed}/{len(vectors)}. Refusing to emit a mislabelled table.")
             print(f"# {os.path.basename(p)}: Glycan order {' '.join(ORDER)} reproduces GlyMass on "
                   f"{assumed}/{len(vectors)} rows (next-best ordering: {scored[1][0]})", file=sys.stderr)
     return out, "GlyDecoy=0 AND PepDecoy=0 AND TotalFDR<=0.01"

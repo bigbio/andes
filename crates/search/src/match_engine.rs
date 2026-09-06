@@ -31,8 +31,8 @@ use scoring_crate::scoring::fragment_ions::{
 use scoring_crate::scoring::{
     frag_llr_battery, fuse_strong_score, intensity_signal, mass_competition_evidence,
     predict_frag_intensities, psm_edge_score, rich_ion_llr, score_psm, score_psm_float,
-    strong_score_calibrated, OnlineStats, RankScorer, ScoredSpectrum, StrongScoreInputs,
-    DENSITY_HW,
+    scored_for_charge, strong_score_calibrated, OnlineStats, RankScorer, ScoredSpectrum,
+    StrongScoreInputs, DENSITY_HW,
 };
 
 // One-time-built state shared across every chunk of a streamed search.
@@ -598,10 +598,7 @@ impl<'a> PreparedSearch<'a> {
                     }
                 }
                 let scored_spec_for_charge = |z: u8| {
-                    scored_per_charge
-                        .iter()
-                        .find(|(charge, _)| *charge == z)
-                        .map(|(_, spec)| spec)
+                    scored_for_charge(&scored_per_charge, z)
                         .expect("scored spectrum exists for candidate charge")
                 };
 

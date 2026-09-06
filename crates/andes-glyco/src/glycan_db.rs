@@ -238,9 +238,15 @@ pub fn n_glycan_list_common() -> Vec<GlycanComp> {
 /// The NeuGc-free subset is identical in content and order at every bound, so a run
 /// that excludes NeuGc is byte-identical whatever bound was used to build the list.
 ///
+/// `max_neugc` is clamped to 4, NeuAc's bound: the plausibility rule below caps
+/// `neuac + neugc` at `hexnac - 2 <= 4` regardless, so every larger bound builds the
+/// same list, and the clamp keeps the public entry point safe for callers that bypass
+/// the CLI's `1..=4` range check.
+///
 /// Returns a Vec sorted by mass ascending (deterministic: total-order sort on
 /// mass bits, tiebroken by composition fields in lexicographic order).
 pub fn n_glycan_list_common_with_neugc(max_neugc: u8) -> Vec<GlycanComp> {
+    let max_neugc = max_neugc.min(4);
     let mut out: Vec<GlycanComp> = Vec::with_capacity(900);
 
     // MEASURED-BEST DEFAULT. A reference-fitted, much wider box was tried and LOST:
@@ -267,7 +273,7 @@ pub fn n_glycan_list_common_with_neugc(max_neugc: u8) -> Vec<GlycanComp> {
                 let max_sialic = hn.saturating_sub(2);
                 for na in 0u8..=4 {
                     for ng in 0u8..=max_neugc {
-                        if na + ng > max_sialic {
+                        if na.saturating_add(ng) > max_sialic {
                             continue; // sialic acids cap at one per antennal HexNAc
                         }
                         let mass = hn as f64 * HEXNAC
@@ -479,6 +485,15 @@ mod tests {
     }
 
     /// Plausibility constraints hold at every bound.
+    #[test]
+    fn common_with_neugc_bound_above_4_is_clamped_to_4() {
+        // The public entry point must not overflow or widen on a bound the CLI would
+        // reject; the sialic rule makes every bound above 4 equivalent to 4.
+        let at4 = n_glycan_list_common_with_neugc(4);
+        assert_eq!(n_glycan_list_common_with_neugc(5), at4);
+        assert_eq!(n_glycan_list_common_with_neugc(u8::MAX), at4);
+    }
+
     #[test]
     fn common_with_neugc_plausibility_at_every_bound() {
         for bound in 1u8..=4 {

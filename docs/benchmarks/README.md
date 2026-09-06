@@ -64,8 +64,9 @@ re-measured, this document says so rather than carrying the old value forward si
 
 Every row names what produced it. Standard and opt-in rows: commit `1b8520f8`, benchmark
 VM (8-thread Xeon Gold 6238), Percolator 3.7.1 `--seed 42 -Y`, `q ≤ 0.01`, **2026-09-04,
-one session**. Glyco rows: `main` commit `14818d3e`, 5 Percolator seeds, native `.raw` (quick tier) or TRFP
-1.4.3 mzML (deep tier; byte-identical on these files).
+one session**. Glyco rows: 5 Percolator seeds; deep tier at `main` commit `14818d3e`, TRFP
+1.4.3 mzML (byte-identical to native reading on these files), NeuGc ≤ 1 glycan list; quick tier
+re-measured 2026-09-06 at the commit introducing the gated NeuGc bound, native `.raw`.
 
 | benchmark | dataset | what is measured | andes | reference | measured error | wall (andes) |
 |---|---|---|---:|---:|---|---:|
@@ -78,7 +79,7 @@ one session**. Glyco rows: `main` commit `14818d3e`, 5 Percolator seeds, native 
 | **PTM discovery** (`--refine`) | Astral | PSMs @ q≤0.01 | **43,929** (+14.4%) | baseline 38,394 | not measurable by entrapment (pass 2 is protein-anchored) | 345 s |
 | | TMT, UPS1 | — | skipped | high-res only, by design | | |
 | **Glyco, deep tier** | pGlyco2 mouse liver PXD005553, 5 fractions, TRFP 1.4.3, `main` `14818d3e` | glycoPSMs @1% | **31,666 ± 9** | pGlyco2 **78.9% confirmed** · MSFragger **88.0% confirmed**, 95.8% peptidoform agreement | **1.11% ± 0.03 true FDP** (1:1 database) | 23–29 min / fraction, 16 cores |
-| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, commit `d085c0fb` | glycoPSMs @1% | **6,532** | pGlyco2 77.9% confirmed · **MSFragger 87.8% confirmed**, 95.6% peptidoform agreement | **1.10% true FDP** (CI 0.76–1.54) | 6,329 s, 8 threads |
+| **Glyco, quick tier** | one pGlyco2 liver fraction (`MouseLiver-Z-T-1`), native `.raw`, gated NeuGc bound (2026-09-06) | glycoPSMs @1% | **7,122** (6,532 with the previous NeuGc ≤ 1 list, same binary) | pGlyco2 **86.7% confirmed** (was 77.9%) · MSFragger 87.8% confirmed, 96.3% / 95.6% peptidoform agreement | **1.13% true FDP** (CI 0.80–1.55; 1.10% before) | 8,145 s, 8 threads (WSL2 host) |
 
 † Java MS-GF+ v20240326 was not re-run in the 2026-09 session; its counts are historical
 (same protocol, earlier session) and it remains ~10-40x slower than andes.
@@ -193,34 +194,69 @@ and MSFragger-Glyco's, from the Philosopher-filtered table deposited in PXD03103
 fractions on a cluster. The earlier human-plasma set was retired: its reference was a
 proprietary Byonic `.byrslt` export, which cannot be rebuilt from public artifacts.
 
-### Quick tier — one pGlyco2 liver fraction, VM-local, ~105 min
+### Quick tier — one pGlyco2 liver fraction, VM-local, ~2 h
 
 `MouseLiver-Z-T-1.raw` (PXD005553, 2.70 GB, sha256 `2f0142b7…`) read natively, against
 `mouse_entrap.fasta` (34,554 sequences = 17,277 UniProt reviewed mouse + shuffled twins,
 sha256 `5ee15d8d…`), `--glyco --decoy-strategy sequon-reverse`, 8 threads, Percolator
-`--seed 42 -Y`. Measured 2026-09-05 at commit `d085c0fb`; an earlier build of the same
-branch (`7f8ea03e`, before the flag deletions) gave the identical PIN and identical counts,
-which is what those deletions promised:
+`--seed 42 -Y`. **Measured 2026-09-06 at the commit that introduced the gated NeuGc bound**
+(`--glyco-max-neugc`, parent `fdf1f689`) on an 8-thread WSL2 host with 47 GB. The gate
+raised the default glycan list from 612 to 852 compositions on the run's own evidence (log
+line `glycan list: NeuGc <= 4 per composition`). The same binary with `--glyco-max-neugc 1`
+reproduces the previous default byte-for-byte — 6,532 glycoPSMs, 34 entrapment hits, the
+numbers measured 2026-09-05 at `d085c0fb` on the benchmark VM — so the two columns below are
+a controlled A/B: one binary, one database, one fraction, one Percolator container.
 
-| | measured |
-|---|---|
-| search wall | **6,329 s** (105 min) — 45,905 MS2, 41,929 glyco rows |
-| glycoPSMs @1% | **6,532** (2,843 glycopeptides, 902 compositions) |
-| **true FDP** | **1.10%** (95% CI 0.76–1.54%, 34 entrapment hits, 1:1 database) |
+| | NeuGc ≤ 1 (previous default) | **gated bound (current default)** |
+|---|---:|---:|
+| glycan compositions searched | 612 | **852** |
+| search wall (WSL2, 8 threads) | 8,717 s ‡ | **8,145 s** |
+| glyco rows | 41,929 | 42,108 |
+| glycoPSMs @1%, seed 42 | 6,532 (2,843 glycopeptides, 902 compositions) | **7,122** (3,047 glycopeptides, 932 compositions) |
+| 5 seeds | 6,475 – 6,565 | **7,078 – 7,122** |
+| **true FDP** | 1.10% (95% CI 0.76–1.54%, 34 entrapment hits) | **1.13%** (95% CI 0.80–1.55%, 38 hits, 1:1 database) |
+| pGlyco2 confirmed (3,877 spectra) | 77.9% | **86.7%** |
+| pGlyco2 spectra carrying NeuGc ≥ 2 confirmed (of 501) | 58 | **393** |
+| accepted PSMs whose glycan carries NeuGc ≥ 2 | 0 | 770 |
+| MSFragger confirmed (3,040 spectra) | 87.8% | 87.8% |
 
-Scored against both deposited references for this fraction:
+‡ Run at the memory ceiling of a 24 GB guest (peak RSS 23.3 GB); the gated run peaked at
+27.0 GB with headroom. Not a runtime comparison. The benchmark VM measured 6,329 s for the
+NeuGc ≤ 1 list.
+
+**Why the bound matters here.** The default glycan list is human-tuned and allowed at most
+one NeuGc per composition. Mouse is CMAH-competent, and 501 of the 3,877 pGlyco2 reference
+spectra on this fraction (12.9%) carry two or more NeuGc; under the old list not one
+accepted identification did. A spectrum whose true composition cannot be enumerated is not
+left unidentified — it is scored anyway and the best available wrong answer wins — which is
+why the loss surfaced as `wrong target` and `decoy won`, not as `never emitted`. Raising the
+bound moved 335 of those 501 spectra to `confirmed` and the entrapment FDP did not move
+(1.10% → 1.13%, inside one CI); this is the same check that caught the 4,034-composition
+list inflating error 5.4×. Against the MSFragger reference, which carries no NeuGc ≥ 2
+calls, the two lists are identical (2,669 confirmed either way). `--glyco-taxon human` or
+`--glyco-no-neugc` keep the previous behaviour, and on human samples the gate never fires:
+the PIN is byte-identical.
+
+Scored against both deposited references for this fraction (gated default, seed 42):
 
 | reference (fraction 1) | spectra | confirmed | wrong target | decoy won | never emitted | peptide coverage | same-scan backbone | same-scan **peptidoform** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| pGlyco2 (depositors) | 3,877 | **77.9%** | 9.5% | 12.1% | 0.1% | 91.5% | 99.1% | 83.3% |
-| MSFragger-Glyco (PXD031032) | 3,040 | **87.8%** | 5.4% | 6.6% | 0.1% | 94.3% | 99.7% | **95.6%** |
+| pGlyco2 (depositors) | 3,877 | **86.7%** | 5.6% | 7.3% | 0.1% | 95.1% | 99.4% | **96.3%** |
+| MSFragger-Glyco (PXD031032) | 3,040 | **87.8%** | 5.3% | 6.8% | 0.1% | 94.1% | 99.7% | **95.6%** |
 
-Where both engines identify a scan, andes and MSFragger agree on the full peptidoform
-95.6% of the time; against pGlyco2 it is 83.3%, the difference being pGlyco2's
-composition calls rather than the backbone (99.1% agree). andes accepts 6,532 spectra of
-which roughly 3,500–3,900 are in neither reference at a measured 1.1% FDP.
+Where both engines identify a scan, andes agrees on the full peptidoform 96.3% of the time
+with pGlyco2 and 95.6% with MSFragger; the residual disagreements are the isobaric
+compositions (Hex + NeuAc ≡ Fuc + NeuGc exactly; Hex + Fuc vs NeuGc within 1.02 Da). An
+earlier version of this table reported 83.3% against pGlyco2. That was an artefact:
+`make_truth.py` read pGlyco2's five-column glycan vector in the wrong monosaccharide order,
+rotating the Fuc/NeuAc/NeuGc labels, and the committed `pglyco2_mouse_*.tsv.gz` tables
+carried the rotation. The reader now checks the order against pGlyco2's own `GlyMass`
+column on every row of every file and refuses a file that does not fit; the tables were
+regenerated 2026-09-06 (on the previous list the corrected figure is 95.2%). Backbone-based
+columns — confirmed, coverage, same-scan backbone — were never affected. andes accepts 7,122
+spectra of which roughly 3,800–4,500 are in neither reference at a measured 1.13% FDP.
 
-This number needs no cluster, which is the point, but 105 minutes is a pre-merge check,
+This number needs no cluster, which is the point, but two hours is a pre-merge check,
 not an inner loop. One fraction clears Percolator's q floor here because a liver fraction
 carries thousands of confident targets; see the floor rule below before assuming that of
 any other single file.
@@ -233,7 +269,9 @@ sequences, sha256 `5ee15d8d…`, 1:1 shuffled, factor exactly 2.0), `--glyco
 --decoy-strategy sequon-reverse`, 16 threads per fraction on the EMBL-EBI Codon cluster,
 pooled before Percolator 3.7.1, 5 seeds. **Measured 2026-09-05 at `main` commit `14818d3e`**
 (binary sha256 `6de3c8db…`, rustc 1.85); the earlier off-`main` figure of 31,658 ± 34
-reproduces within seed noise.
+reproduces within seed noise. **These numbers pre-date the gated NeuGc bound** (NeuGc ≤ 1
+list, 612 compositions). The single-fraction A/B in the quick tier shows +9% glycoPSMs at flat
+FDP from the bound alone, so the deep tier is expected to move; it has not been re-measured.
 
 | | measured |
 |---|---|
@@ -245,8 +283,13 @@ Scored against both deposited references (seed 1):
 
 | reference | spectra | confirmed | wrong target | decoy won | FDR-rejected | never emitted | peptide coverage | same-scan backbone | same-scan **peptidoform** |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| pGlyco2 (depositors) | 17,855 | **78.9%** | 9.5% | 11.0% | 0.5% | 0.1% | 92.3% | 99.1% | 83.8% |
+| pGlyco2 (depositors) | 17,855 | **78.9%** | 9.5% | 11.0% | 0.5% | 0.1% | 92.3% | 99.1% | n/a § |
 | MSFragger-Glyco (PXD031032) | 14,626 | **88.0%** | 5.3% | 6.2% | 0.5% | 0.1% | 96.4% | 99.9% | **95.8%** |
+
+§ The 83.8% previously in this cell was computed against the mislabelled pGlyco2 tables (see
+the quick tier) and the deep-tier Percolator outputs were not retained, so it cannot be
+re-scored without re-running the tier. Every other column of this row is backbone-based
+and unaffected.
 
 **The FDR is right where it claims to be**, and **generation is not the bottleneck**: 0.1%
 of reference spectra produce no row. **Selection is**: 20.5% of pGlyco2's spectra (11.5%

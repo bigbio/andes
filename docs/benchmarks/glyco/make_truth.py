@@ -52,10 +52,36 @@ def emit(rows, source, filt):
 
 
 def pglyco2(paths):
-    """pGlyco2 `*-FDR.txt`. 'J' marks the glycosylated asparagine -> N."""
+    """pGlyco2 `*-FDR.txt`. 'J' marks the glycosylated asparagine -> N.
+
+    The Glycan column is a count vector in the order `Hex HexNAc NeuAc NeuGc Fuc`. That
+    order is not assumed: for every file, every accepted row's vector is summed under all
+    120 orderings of the five monosaccharide masses and compared with pGlyco2's own
+    GlyMass column. The assumed order must be the unique best and must reproduce GlyMass
+    on at least 99% of rows, or the reader refuses the file. Measured on the T-1 fraction
+    of each tissue it reproduces GlyMass on 3,995/3,995 (liver), 3,142/3,142 (lung) and
+    1,759/1,759 (heart) rows; every other ordering fails on hundreds.
+
+    WHY THE CHECK EXISTS. Two earlier readings were wrong and each looked verified:
+      * `Hex HexNAc Fuc NeuAc NeuGc` was "verified against GlyMass" on ~200 mostly
+        non-sialylated, non-fucosylated rows -- where the order of the last three fields
+        does not change the mass, so the check could not see the error. It rotated three
+        labels: what it called Fuc was NeuAc, what it called NeuAc was NeuGc, and what it
+        called NeuGc was Fuc. On a CMAH-competent mouse sample that inverts the dominant
+        sialic acid in the committed tables.
+      * A first correction moved only NeuGc into place, on a test restricted to sialylated
+        rows that could not distinguish Fuc from NeuAc; the rows it left unexplained were
+        exactly the fucosylated ones (NeuAc - Fuc = 145.037 Da).
+    The exhaustive check below is what a partial check could not be: it cannot be
+    satisfied by a wrong order on any file that carries fucose or sialic acid at all."""
+    MASS = {"Hex": 162.052824, "HexNAc": 203.079373, "Fuc": 146.057909,
+            "NeuAc": 291.095417, "NeuGc": 307.090331}
+    ORDER = ("Hex", "HexNAc", "NeuAc", "NeuGc", "Fuc")
+    import itertools
     out = []
     for p in paths:
         run = os.path.basename(p).replace("-FDR.txt", "")
+        vectors = []
         for r in csv.DictReader(open(p), delimiter="\t"):
             if (r.get("GlyDecoy") or "0") not in ("0", "") or (r.get("PepDecoy") or "0") not in ("0", ""):
                 continue
@@ -68,18 +94,29 @@ def pglyco2(paths):
             if len(spec) < 4:
                 continue
             pep = re.sub(r"[^A-Z]", "", r.get("Peptide", "").upper().replace("J", "N"))
-            # pGlyco2's Glycan column is a count vector in the order Hex HexNAc Fuc NeuAc
-            # NeuGc -- verified against its own GlyMass column, where the alternative
-            # HexNAc-first reading matches 0/200 rows and this one matches 156/200 (the
-            # remainder carry modifications outside the five-vector). Normalise to the
-            # canonical HexNAc/Hex/Fuc/NeuAc/NeuGc string so it can be compared with what
-            # andes writes.
             v = (r.get("Glycan") or "").split()
             gly = ""
             if len(v) == 5:
-                h, n, f, a, g = v
+                h, n, a, g, f = v
                 gly = f"HexNAc{n}Hex{h}Fuc{f}NeuAc{a}NeuGc{g}"
+                try:
+                    vectors.append((tuple(map(int, v)), float(r.get("GlyMass"))))
+                except (TypeError, ValueError):
+                    pass
             out.append([run, spec[1], spec[3], pep, gly, r.get("GlySite", "")])
+        if vectors:
+            def hits(order):
+                return sum(1 for v, gm in vectors
+                           if abs(sum(c * MASS[m] for c, m in zip(v, order)) - gm) < 0.02)
+            scored = sorted(((hits(o), o) for o in itertools.permutations(MASS)), reverse=True)
+            best_n, best_o = scored[0]
+            assumed = hits(ORDER)
+            if best_o != ORDER or assumed < 0.99 * len(vectors):
+                sys.exit(f"{p}: Glycan column order is not {' '.join(ORDER)} -- best fit is "
+                         f"{' '.join(best_o)} ({best_n}/{len(vectors)}), assumed order fits "
+                         f"{assumed}/{len(vectors)}. Refusing to emit a mislabelled table.")
+            print(f"# {os.path.basename(p)}: Glycan order {' '.join(ORDER)} reproduces GlyMass on "
+                  f"{assumed}/{len(vectors)} rows (next-best ordering: {scored[1][0]})", file=sys.stderr)
     return out, "GlyDecoy=0 AND PepDecoy=0 AND TotalFDR<=0.01"
 
 

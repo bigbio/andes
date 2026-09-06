@@ -487,6 +487,24 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-no-neugc", default_value_t = false)]
     pub(crate) glyco_no_neugc: bool,
 
+    /// Upper bound on NeuGc per composition in the default (`common`) glycan list.
+    ///
+    /// Unset resolves automatically: 4 (NeuAc's own bound) when NeuGc is kept ON
+    /// EVIDENCE -- `--glyco-taxon mammal`, or `auto` with a conclusive oxonium survey
+    /// that finds NeuGc -- and the human-validated 1 otherwise. A run that excludes NeuGc
+    /// is unaffected either way, so human results are byte-identical. Pass `1` to
+    /// reproduce the pre-2026-09 behaviour on a CMAH-competent sample (the A/B baseline).
+    /// Applies to the `common` list only; `full` and `reference-human` keep their own
+    /// bounds.
+    ///
+    /// WHY: the shipped list is human-tuned, and a composition it cannot name falls to
+    /// the de-novo branch, which is excluded from the FDR PIN by design. On pGlyco2 mouse
+    /// liver T-1, 501 of 3,877 reference spectra carry NeuGc >= 2; andes computed the
+    /// right precursor residual for every one of them and could not name it.
+    #[arg(long = "glyco-max-neugc", hide = true,
+          value_parser = clap::value_parser!(u8).range(1..=4))]
+    pub(crate) glyco_max_neugc: Option<u8>,
+
     /// Glycan biology to assume for the search space.
     ///
     /// `auto` (default) surveys the NeuGc/NeuAc oxonium ratio across the run, and treats

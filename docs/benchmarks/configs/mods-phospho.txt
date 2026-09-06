@@ -1,0 +1,12 @@
+# Phospho-enriched search (PXD007653, mouse liver EasyPhos).
+# Format: <mass>,<residue>,<fix|opt>,<location>,<name>
+#
+# Matches the depositors' MaxQuant search, which is the reference this benchmark scores
+# against: Carbamidomethyl fixed on C, Oxidation on M and protein-N-term Acetyl variable,
+# plus Phospho on S/T/Y. NumMods is 3 so a peptide may carry up to three variable mods,
+# which is what a multiply-phosphorylated tryptic peptide needs.
+NumMods=3
+57.02146,C,fix,any,Carbamidomethyl
+15.99491,M,opt,any,Oxidation
+42.01057,*,opt,Prot-N-term,Acetyl
+79.96633,STY,opt,any,Phospho

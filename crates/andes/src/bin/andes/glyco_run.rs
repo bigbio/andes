@@ -200,6 +200,7 @@ pub(crate) fn run_glyco(
         pair_y_on_gen: cli.glyco_pair_y_on_gen,
         enum_fallback: cli.glyco_enum_fallback,
         etd_require_oxonium: cli.glyco_etd_require_oxonium,
+        elect_top_k: cli.glyco_elect_top_k,
     };
     let pass1 = search::glyco_search::glyco_search_run(
         spectra_for_glyco,

@@ -125,6 +125,7 @@ pub struct RescoringCfg {
 pub struct GlycoCfg {
     pub enabled: Option<bool>,
     pub backbone_top_k: Option<usize>,
+    pub elect_top_k: Option<usize>,
     pub gp_k: Option<f32>,
     pub gp_j: Option<f32>,
     pub gp_h: Option<f32>,
@@ -353,6 +354,11 @@ pub fn apply(cfg: RunConfig, args: &mut SearchArgs, m: &clap::ArgMatches) -> Res
         "glyco_backbone_top_k",
         glyco_backbone_top_k,
         cfg.glyco.backbone_top_k
+    );
+    set!(
+        "glyco_elect_top_k",
+        glyco_elect_top_k,
+        cfg.glyco.elect_top_k
     );
     set!("glyco_gp_k", glyco_gp_k, cfg.glyco.gp_k);
     set!("glyco_gp_j", glyco_gp_j, cfg.glyco.gp_j);

@@ -196,3 +196,38 @@ fn glyco_pin_matches_golden_after_sort() {
         }
     }
 }
+
+/// `--glyco-elect-top-k 1` keeps only the fused winner in the re-election pool,
+/// so it must write the same `.glyco.pin` as the flag being off.
+#[test]
+fn glyco_elect_top_k_one_is_identical_to_off() {
+    let root = workspace_root();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
+    let spectra = root.join("test-fixtures/glyco_fixture.mgf.gz");
+    let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let outdir = tempfile::tempdir().expect("tempdir");
+    let run = |name: &str, extra: &[&str]| -> String {
+        let out_pin = outdir.path().join(format!("{name}.pin"));
+        let mut cmd = Command::new(&binary);
+        cmd.arg("--spectrum")
+            .arg(&spectra)
+            .arg("--database")
+            .arg(&fasta)
+            .args(["--glyco", "--glyco-tol-ppm", "20", "--fragmentation", "HCD"])
+            .args(["--glyco-taxon", "human"])
+            .args(extra)
+            .arg("--output-pin")
+            .arg(&out_pin);
+        let status = cmd.status().expect("run andes");
+        assert!(status.success(), "andes exited {status}");
+        let glyco = outdir.path().join(format!("{name}.glyco.pin"));
+        std::fs::read_to_string(&glyco).unwrap_or_else(|e| panic!("read {}: {e}", glyco.display()))
+    };
+    let off = run("off", &[]);
+    let one = run("one", &["--glyco-elect-top-k", "1"]);
+    assert!(off.lines().count() > 1, "fixture produced no glyco rows");
+    assert_eq!(
+        off, one,
+        "--glyco-elect-top-k 1 must be byte-identical to off"
+    );
+}

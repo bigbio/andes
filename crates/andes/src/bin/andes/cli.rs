@@ -651,6 +651,12 @@ pub(crate) struct SearchArgs {
     #[arg(long = "glyco-etd-require-oxonium", hide = true)]
     pub(crate) glyco_etd_require_oxonium: bool,
 
+    /// Re-elect the per-scan glyco winner by strong score among the top-N
+    /// candidates of the fused selector. 0 = fused argmax (shipped behaviour).
+    /// A/B switch, measured on the glyco quick tier on 2026-09-05.
+    #[arg(long = "glyco-elect-top-k", hide = true, default_value_t = 0usize)]
+    pub(crate) glyco_elect_top_k: usize,
+
     /// Peptide-first candidate RETRIEVAL tolerance in ppm. Default: --glyco-tol-ppm
     /// on high-resolution MS2, the rank model's 0.5 Da window on low-resolution.
     /// Retrieval only; the rank scorer and its tolerance are unchanged. Measured

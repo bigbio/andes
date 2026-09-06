@@ -146,6 +146,9 @@ pub struct GlycoConfig {
     /// glyco evidence, which is a direct feeder of the measured junk-emission
     /// stratum. Default off (shipped behaviour).
     pub etd_require_oxonium: bool,
+    /// Re-elect the per-scan winner by strong score among the top-N fused
+    /// candidates (`--glyco-elect-top-k`). 0 = fused argmax (shipped behaviour).
+    pub elect_top_k: usize,
     /// c/z truncation gate (`--glyco-cz-gate`, default ON). Adds AXIS 4 to the
     /// Phase-1 backbone truncation: keep the top-k backbones by glycosite-spanning
     /// c/z evidence too, so high-charge ETD glycopeptides supported mainly by c/z
@@ -178,6 +181,7 @@ impl Default for GlycoConfig {
             pair_y_on_gen: false,
             enum_fallback: true,
             etd_require_oxonium: false,
+            elect_top_k: 0,
             debug: false,
         }
     }
@@ -191,7 +195,6 @@ use andes_glyco::sequon::{boundary_nxst_site, has_nxst_sequon};
 use crate::glyco_fragment_index::FragmentIndex;
 
 use crate::match_engine::{compute_psm_features, PreparedSearch};
-#[cfg(test)]
 use crate::psm::PsmFeatures;
 use crate::psm::PsmMatch;
 
@@ -204,6 +207,48 @@ use scoring_crate::scoring::{
     fuse_strong_score, hyperscore_psm_with_matches, listwise_score_gap, psm_edge_score, score_psm,
     score_psm_float, strong_score_calibrated_loo, ScoredSpectrum, StrongScoreInputs,
 };
+
+/// Per-candidate PIN feature vector against the bare deglycosylated backbone,
+/// plus the strong score fused from it and the spectrum-level context. Shared by
+/// the winner feature fill and the `elect_top_k` re-election so both see the
+/// same number.
+#[allow(clippy::too_many_arguments)]
+fn glyco_candidate_strong_score(
+    ss: &ScoredSpectrum<'_>,
+    peptide: &model::peptide::Peptide,
+    spec_scorer: &scoring_crate::scoring::RankScorer,
+    z: u8,
+    intensity_model: Option<&scoring_crate::intensity_model::IntensityModel>,
+    spectrum_rank_entropy: f32,
+    spectrum_listwise_gap: f32,
+) -> (PsmFeatures, f32) {
+    let features = compute_psm_features(ss, peptide, spec_scorer, z, intensity_model);
+    let strong = fuse_strong_score(&StrongScoreInputs {
+        intensity_signal: features.intensity_signal,
+        chance_match_surprise: features.chance_match_surprise,
+        mass_competition_evidence: features.mass_competition_evidence,
+        candidate_rank_entropy: spectrum_rank_entropy,
+        listwise_score_gap: spectrum_listwise_gap,
+    });
+    (features, strong)
+}
+
+/// Index of the strong-score maximum over candidates listed in fused order;
+/// ties keep the earlier (better-fused) position; a NaN score never wins.
+/// Label-blind.
+pub(crate) fn elect_by_strong_score(strong: &[f32]) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, &s) in strong.iter().enumerate() {
+        if s.is_nan() {
+            continue;
+        }
+        match best {
+            Some((_, b)) if s.total_cmp(&b) != std::cmp::Ordering::Greater => {}
+            _ => best = Some((i, s)),
+        }
+    }
+    best.map(|(i, _)| i)
+}
 
 /// A scored glyco-PSM: the bare-backbone PSM + all glycan-level evidence.
 #[derive(Debug, Clone)]
@@ -574,6 +619,8 @@ pub struct GlycoScoreCtx<'a> {
     pub enum_fallback: bool,
     /// See `GlycoConfig::etd_require_oxonium`.
     pub etd_require_oxonium: bool,
+    /// See `GlycoConfig::elect_top_k`.
+    pub elect_top_k: usize,
     /// See `GlycoConfig::min_core_y`.
     pub min_core_y: u32,
     /// See `GlycoConfig::min_raw_score`.
@@ -625,6 +672,7 @@ pub struct GlycoCtxOwned {
     pair_y_on_gen: bool,
     enum_fallback: bool,
     etd_require_oxonium: bool,
+    elect_top_k: usize,
     min_core_y: u32,
     min_raw_score: Option<f32>,
     diag_splits: Option<std::sync::Arc<std::sync::Mutex<std::io::BufWriter<std::fs::File>>>>,
@@ -711,6 +759,7 @@ impl GlycoCtxOwned {
         let pair_y_on_gen_cfg = cfg.pair_y_on_gen;
         let enum_fallback_cfg = cfg.enum_fallback;
         let etd_require_oxonium_cfg = cfg.etd_require_oxonium;
+        let elect_top_k_cfg = cfg.elect_top_k;
         let min_core_y_cfg = cfg.min_core_y;
         let min_raw_score_cfg = cfg.min_raw_score;
         let diag_splits_cfg = cfg.diag_splits.as_ref().map(|path| {
@@ -847,6 +896,7 @@ impl GlycoCtxOwned {
             pair_y_on_gen: pair_y_on_gen_cfg,
             enum_fallback: enum_fallback_cfg,
             etd_require_oxonium: etd_require_oxonium_cfg,
+            elect_top_k: elect_top_k_cfg,
             min_core_y: min_core_y_cfg,
             min_raw_score: min_raw_score_cfg,
             diag_splits: diag_splits_cfg,
@@ -896,6 +946,7 @@ impl GlycoCtxOwned {
             pair_y_on_gen: self.pair_y_on_gen,
             enum_fallback: self.enum_fallback,
             etd_require_oxonium: self.etd_require_oxonium,
+            elect_top_k: self.elect_top_k,
             min_core_y: self.min_core_y,
             min_raw_score: self.min_raw_score,
             diag_splits: self.diag_splits.clone(),
@@ -1004,6 +1055,7 @@ fn score_spectrum_glyco(
     let min_raw_score = ctx.min_raw_score;
     let pair_y_on_gen = ctx.pair_y_on_gen;
     let enum_fallback = ctx.enum_fallback;
+    let elect_top_k = ctx.elect_top_k;
     let diag_splits = ctx.diag_splits.clone();
     let min_matched_by = ctx.min_matched_by;
     // ETD c/z collapse term: on electron-transfer spectra the intact-glycan c/z
@@ -2011,25 +2063,58 @@ fn score_spectrum_glyco(
         // weak-b/y but strong-ladder truth must not be pre-filtered by bare
         // rank). MUST match the PIN writer's select_emitted_hits gp branch
         // exactly (the shared collapse source of truth).
-        let best = accepted_winners
-            .iter()
-            .map(|e| {
-                let cy = core_y_counts[e.1.bb_hit_idx] as f32;
-                let s = glyco_gp_fused_score(
-                    rank_sel(&e.1),
-                    ladder(&e.1),
-                    cy,
-                    hyper(&e.1),
-                    gp_k,
-                    gp_j,
-                    gp_h,
-                ) + gp_cz * cz(&e.1);
-                (e, s)
-            })
-            .max_by(|(ea, sa), (eb, sb)| {
-                sa.total_cmp(sb).then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
-            })
-            .map(|(e, _)| e);
+        let fused_of = |e: &(GlycanWinnerKey, CheapWinner)| {
+            let cy = core_y_counts[e.1.bb_hit_idx] as f32;
+            glyco_gp_fused_score(
+                rank_sel(&e.1),
+                ladder(&e.1),
+                cy,
+                hyper(&e.1),
+                gp_k,
+                gp_j,
+                gp_h,
+            ) + gp_cz * cz(&e.1)
+        };
+        let best = if elect_top_k == 0 {
+            accepted_winners
+                .iter()
+                .map(|e| (e, fused_of(e)))
+                .max_by(|(ea, sa), (eb, sb)| {
+                    sa.total_cmp(sb).then_with(|| eb.0.cmp(&ea.0)) // lower gl_key wins a full tie
+                })
+                .map(|(e, _)| e)
+        } else {
+            // Fused order (fused DESC, gl_key ASC — the same total order as the
+            // argmax above), keep the top N, then elect by strong score. Runs
+            // on every accepted candidate regardless of label, so targets and
+            // decoys are re-elected symmetrically.
+            let mut ranked: Vec<(&(GlycanWinnerKey, CheapWinner), f32)> =
+                accepted_winners.iter().map(|e| (e, fused_of(e))).collect();
+            ranked.sort_by(|(ea, sa), (eb, sb)| sb.total_cmp(sa).then_with(|| ea.0.cmp(&eb.0)));
+            ranked.truncate(elect_top_k);
+            let strong: Vec<f32> = ranked
+                .iter()
+                .map(|(e, _)| {
+                    let w = &e.1;
+                    let ss = scored_per_charge
+                        .iter()
+                        .find(|(c, _)| *c == w.z)
+                        .map(|(_, s)| s)
+                        .expect("ScoredSpectrum must exist for candidate charge");
+                    glyco_candidate_strong_score(
+                        ss,
+                        &candidates[w.cand_slot].peptide,
+                        spec_scorer,
+                        w.z,
+                        ctx.intensity_model,
+                        spectrum_rank_entropy,
+                        spectrum_listwise_gap,
+                    )
+                    .1
+                })
+                .collect();
+            elect_by_strong_score(&strong).map(|i| ranked[i].0)
+        };
         match best {
             Some((gl_key, w)) => {
                 let is_enum = deduped_backbone[w.bb_hit_idx].glycan.is_some();
@@ -2160,8 +2245,15 @@ fn score_spectrum_glyco(
         // fragmentation, so the bare backbone is the correct b/y ladder.
         let feat_pep: std::borrow::Cow<'_, model::peptide::Peptide> =
             std::borrow::Cow::Borrowed(&cand.peptide);
-        let mut features =
-            compute_psm_features(ss, &feat_pep, spec_scorer, w.z, ctx.intensity_model);
+        let (mut features, strong_score) = glyco_candidate_strong_score(
+            ss,
+            &feat_pep,
+            spec_scorer,
+            w.z,
+            ctx.intensity_model,
+            spectrum_rank_entropy,
+            spectrum_listwise_gap,
+        );
         // Wire the per-spectrum calibration features compute_psm_features leaves
         // at 0.0 for glyco (the glyco path skips the standard fill_post_topn).
         // Additive PIN features; give Percolator the calibration signals + the
@@ -2196,13 +2288,7 @@ fn score_spectrum_glyco(
         features.candidate_rank_entropy = spectrum_rank_entropy;
         features.delta_raw_score = spectrum_delta_raw;
         features.listwise_score_gap = spectrum_listwise_gap;
-        features.strong_score = fuse_strong_score(&StrongScoreInputs {
-            intensity_signal: features.intensity_signal,
-            chance_match_surprise: features.chance_match_surprise,
-            mass_competition_evidence: features.mass_competition_evidence,
-            candidate_rank_entropy: spectrum_rank_entropy,
-            listwise_score_gap: spectrum_listwise_gap,
-        });
+        features.strong_score = strong_score;
 
         let mass_error_ppm = if bb_residue > 0.0 {
             (w.cand_residue_mass - bb_residue) / bb_residue * 1e6
@@ -2566,6 +2652,22 @@ mod tests {
     //
     // Smoke test: verify the public types compile and are accessible.
     use super::*;
+
+    /// `elect_by_strong_score` picks the strong-score maximum over a fused-ordered
+    /// top-K and is label-blind: a decoy sitting below the fused winner wins
+    /// when its strong score is higher, and ties keep the fused order.
+    #[test]
+    fn elect_by_strong_score_picks_strong_max_label_blind() {
+        // (is_decoy, strong) in fused order: the fused winner is a target.
+        let top_k = [(false, 1.2f32), (false, 0.9), (true, 2.5), (false, 2.5)];
+        let strong: Vec<f32> = top_k.iter().map(|c| c.1).collect();
+        let i = elect_by_strong_score(&strong).unwrap();
+        assert_eq!(i, 2, "strong max wins; tie keeps the earlier fused slot");
+        assert!(top_k[i].0, "a decoy can be elected");
+        assert_eq!(elect_by_strong_score(&[0.5]), Some(0));
+        assert_eq!(elect_by_strong_score(&[]), None);
+        assert_eq!(elect_by_strong_score(&[f32::NAN, 1.0]), Some(1));
+    }
 
     /// B1: `build_hcd_partners` pairs each ETD spectrum to the nearest HCD
     /// spectrum with a matching precursor m/z; non-ETD spectra and ETD spectra

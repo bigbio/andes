@@ -205,7 +205,8 @@ type GlycanWinnerKey = (u32, u8, u8, u8, u8, u8);
 use scoring_crate::scoring::{
     candidate_rank_entropy, cz_hyperscore_psm, cz_matched_intensity_frac, cz_structure_features,
     fuse_strong_score, hyperscore_psm_with_matches, listwise_score_gap, psm_edge_score, score_psm,
-    score_psm_float, strong_score_calibrated_loo, ScoredSpectrum, StrongScoreInputs,
+    score_psm_float, scored_for_charge, strong_score_calibrated_loo, ScoredSpectrum,
+    StrongScoreInputs,
 };
 
 /// Per-candidate PIN feature vector against the bare deglycosylated backbone,
@@ -1575,21 +1576,22 @@ fn score_spectrum_glyco(
         let tol_da = (bb_residue * tol_ppm * 1e-6_f64).max(0.01);
         let widen = (tol_da - 0.4999_f64).max(0.0_f64).round() as i32;
 
-        let candidate_slots: Vec<usize> = bucket_index
-            .range((nb - widen)..=(nb + widen))
-            .flat_map(|(_, v)| v.iter().copied())
-            .collect();
-
         // Phase-1 gating/selection ranks on the generation spectrum (HCD
         // partner when paired; ETD scan otherwise — see `phase1_scored`).
-        let ss = match phase1_scored.iter().find(|(c, _)| *c == z) {
-            Some((_, s)) => s,
+        let ss = match scored_for_charge(phase1_scored, z) {
+            Some(s) => s,
             // The backbone's charge fell outside `charges_to_try`
             // (shouldn't happen since `hybrid_candidates_with_isotope`
             // is only called for charges in that set, but guard
             // defensively rather than panic).
             None => continue,
         };
+
+        // Candidate slots in bucket order, walked straight off the index
+        // (no per-backbone Vec).
+        let candidate_slots = bucket_index
+            .range((nb - widen)..=(nb + widen))
+            .flat_map(|(_, v)| v.iter().copied());
 
         for cand_slot in candidate_slots {
             let cand = &candidates[cand_slot];
@@ -1660,7 +1662,7 @@ fn score_spectrum_glyco(
                     .map(|g| g.mass)
                     .unwrap_or(bb_hit.glycan_mass_residual);
                 if gmass > 0.0 {
-                    if let Some((_, etd_ss)) = scored_per_charge.iter().find(|(c, _)| *c == z) {
+                    if let Some(etd_ss) = scored_for_charge(&scored_per_charge, z) {
                         let czs = cz_score_best_site(
                             etd_ss,
                             &cand.peptide,
@@ -1834,8 +1836,8 @@ fn score_spectrum_glyco(
     // compute_psm_features) breaks the rank tie; gl_key breaks a full tie.
     // Enumerated-only: a de-novo winner drops the scan (ANDES_GLYCO_DENOVO=1
     // keeps it); ANDES_GLYCO_ALL_HITS=1 keeps the full multi-row dump.
-    let ladder = |w: &CheapWinner| -> f32 {
-        let bb = &deduped_backbone[w.bb_hit_idx];
+    let ladder_raw = |bb_hit_idx: usize| -> f32 {
+        let bb = &deduped_backbone[bb_hit_idx];
         let bbn = bb.backbone_mass + H2O;
         // y_peaks/y_stats = HCD partner under ANDES_GLYCO_PAIR_Y_ON_GEN, else
         // the scored (ETD) spectrum — glycan-Y is a glycosidic product.
@@ -1846,6 +1848,19 @@ fn score_spectrum_glyco(
             None => core_y_intensity(y_peaks, y_stats, bbn, tol_ppm, max_frag_charge) as f32,
         }
     };
+    // Memoised per backbone: the ladder is a pure function of the backbone
+    // (spectrum, tolerance and charge cap are fixed), and many winners share a
+    // `bb_hit_idx`, so each backbone's Y-ladder is walked at most once.
+    let ladder_memo: std::cell::RefCell<Vec<Option<f32>>> =
+        std::cell::RefCell::new(vec![None; deduped_backbone.len()]);
+    let ladder = |w: &CheapWinner| -> f32 {
+        if let Some(v) = ladder_memo.borrow()[w.bb_hit_idx] {
+            return v;
+        }
+        let v = ladder_raw(w.bb_hit_idx);
+        ladder_memo.borrow_mut()[w.bb_hit_idx] = Some(v);
+        v
+    };
 
     // v2 peptide channel: count-rewarding hyperscore over the naked-backbone
     // b/y ions (ln N_matched!). Computed only inside the gp branch below, on
@@ -1854,8 +1869,8 @@ fn score_spectrum_glyco(
     // the glycan-aware peptide clone so glycosite-spanning fragments are
     // matchable (see `glyco_aware_peptide`); bare otherwise.
     let hyper_m_raw = |w: &CheapWinner| -> (f32, u32) {
-        match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
-            Some((_, ss)) => {
+        match scored_for_charge(&scored_per_charge, w.z) {
+            Some(ss) => {
                 let pep = &candidates[w.cand_slot].peptide;
                 if is_etd && etd_rank_glycan {
                     let bb = &deduped_backbone[w.bb_hit_idx];
@@ -1911,8 +1926,8 @@ fn score_spectrum_glyco(
         if !is_etd {
             return 0.0;
         }
-        let ss = match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
-            Some((_, ss)) => ss,
+        let ss = match scored_for_charge(&scored_per_charge, w.z) {
+            Some(ss) => ss,
             None => return 0.0,
         };
         let bb = &deduped_backbone[w.bb_hit_idx];
@@ -1932,8 +1947,8 @@ fn score_spectrum_glyco(
         if !is_etd {
             return 0.0;
         }
-        let ss = match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
-            Some((_, ss)) => ss,
+        let ss = match scored_for_charge(&scored_per_charge, w.z) {
+            Some(ss) => ss,
             None => return 0.0,
         };
         let bb = &deduped_backbone[w.bb_hit_idx];
@@ -1963,8 +1978,8 @@ fn score_spectrum_glyco(
         if !is_etd || !cz_struct_on {
             return (0.0, 0.0);
         }
-        let ss = match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
-            Some((_, ss)) => ss,
+        let ss = match scored_for_charge(&scored_per_charge, w.z) {
+            Some(ss) => ss,
             None => return (0.0, 0.0),
         };
         let bb = &deduped_backbone[w.bb_hit_idx];
@@ -2010,8 +2025,8 @@ fn score_spectrum_glyco(
         if !pair_rank_etd {
             return w.rank;
         }
-        match scored_per_charge.iter().find(|(c, _)| *c == w.z) {
-            Some((_, ss)) => {
+        match scored_for_charge(&scored_per_charge, w.z) {
+            Some(ss) => {
                 let pep = &candidates[w.cand_slot].peptide;
                 // Round-7 (audit F1): `--glyco-etd-rank-glycan` decorates the
                 // hyperscore and RankScoreFloat, but NOT this term — the
@@ -2096,10 +2111,7 @@ fn score_spectrum_glyco(
                 .iter()
                 .map(|(e, _)| {
                     let w = &e.1;
-                    let ss = scored_per_charge
-                        .iter()
-                        .find(|(c, _)| *c == w.z)
-                        .map(|(_, s)| s)
+                    let ss = scored_for_charge(&scored_per_charge, w.z)
                         .expect("ScoredSpectrum must exist for candidate charge");
                     glyco_candidate_strong_score(
                         ss,
@@ -2234,10 +2246,7 @@ fn score_spectrum_glyco(
         let bb_residue = bb_hit.backbone_mass;
         let bb_neutral = bb_residue + H2O;
 
-        let ss = scored_per_charge
-            .iter()
-            .find(|(c, _)| *c == w.z)
-            .map(|(_, s)| s)
+        let ss = scored_for_charge(&scored_per_charge, w.z)
             .expect("ScoredSpectrum must exist for winning charge");
         let cand = &candidates[w.cand_slot];
         // The ~40-column PIN feature vector is computed against the BARE

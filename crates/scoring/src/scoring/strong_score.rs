@@ -159,11 +159,7 @@ pub fn intensity_signal(
         return 0.0;
     }
 
-    let base_peak = scored_spec
-        .dump_active_peaks()
-        .iter()
-        .map(|(_, _, intensity)| *intensity as f64)
-        .fold(0.0_f64, f64::max);
+    let base_peak = scored_spec.max_active_intensity();
     if base_peak <= 0.0 {
         return 0.0;
     }

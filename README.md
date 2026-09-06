@@ -432,14 +432,14 @@ one file per invocation.
 ### What to expect
 
 On the pGlyco2 mouse-liver dataset (PXD005553, five fractions, 17,855 reference
-glycoPSMs), andes reports **31,658 ± 34 glycoPSMs** at 1% PSM-level q-value from Percolator
-and **confirms 78.8% of the reference** (same scan, same backbone), at a measured true
-false-discovery proportion of **1.02% ± 0.03** against a 1:1 shuffled entrapment database
+glycoPSMs), andes reports **31,666 ± 9 glycoPSMs** at 1% PSM-level q-value from Percolator
+and **confirms 78.9% of the reference** (same scan, same backbone), at a measured true
+false-discovery proportion of **1.11% ± 0.03** against a 1:1 shuffled entrapment database
 — the reported 1% is where it claims to be. Where andes and pGlyco2 identify the same scan,
 99.1% agree on the backbone and 83.8% on the full peptidoform (backbone + glycan
 composition). Against MSFragger-Glyco's deposited identifications for the same spectra
-(PXD031032), andes confirms 87.8% of its glycoPSMs on the first fraction and agrees on the
-full peptidoform 95.6% of the time where both identify a scan.
+(PXD031032), andes confirms 88.0% of its glycoPSMs across the five fractions and agrees on
+the full peptidoform 95.8% of the time where both identify a scan.
 
 Treat these as a calibration point, not a guarantee. Glyco results depend heavily on
 activation type, glycan class, and how the reference set itself was filtered.

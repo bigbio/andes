@@ -88,6 +88,14 @@ def main():
     # (`controllerType=0 controllerNumber=1 scan=262_glyco_262_1`), so nothing could
     # join it to a reference and the scorer reported 100% NOT_EMITTED. With --run every
     # SpecId is attributed to that reference run.
+    # `--buckets FILE`: also write one line per reference spectrum (run, scan, bucket,
+    # reference peptide, emitted peptide, emitted label) so a bucket can be pulled out
+    # and inspected -- e.g. every DECOY_WON scan for a --debug-glyco dump.
+    buckets_path = None
+    if "--buckets" in sys.argv:
+        i = sys.argv.index("--buckets")
+        buckets_path = sys.argv[i + 1]
+        del sys.argv[i:i + 2]
     forced_run = None
     if "--run" in sys.argv:
         i = sys.argv.index("--run")
@@ -99,12 +107,14 @@ def main():
     qcut = float(sys.argv[4]) if len(sys.argv) > 4 else 0.01
     truth = load_truth(truth_p)
     full, tails = run_matchers({k[0] for k in truth})
+    keyfn = key_of
     if forced_run is not None:
         if forced_run not in full:
             sys.exit(f"--run {forced_run!r} is not a run in the reference: {sorted(full)}")
         truth = {k: v for k, v in truth.items() if k[0] == forced_run}
         full, tails = {forced_run: forced_run}, {}
-        def key_of(specid, full, tails):  # noqa: F811 -- deliberate override
+
+        def keyfn(specid, full, tails):
             m = re.search(r"scan=(\d+)", specid)
             return (forced_run, int(m.group(1))) if m else None
 
@@ -114,7 +124,7 @@ def main():
         hdr = next(rd)
         si, li, pi = hdr.index("SpecId"), hdr.index("Label"), hdr.index("Peptide")
         for r in rd:
-            k = key_of(r[si], full, tails)
+            k = keyfn(r[si], full, tails)
             if k:
                 # The production glyco PIN is collapsed to ONE row per scan by the search;
                 # a second row for the same (run, scan) means a --debug-glyco dump or a
@@ -132,7 +142,7 @@ def main():
         for r in rd:
             if len(r) <= pi:
                 continue
-            k = key_of(r[0], full, tails)
+            k = keyfn(r[0], full, tails)
             try:
                 q = float(r[qi])
             except ValueError:
@@ -141,7 +151,10 @@ def main():
                 accepted[k] = bare(r[pi])
 
     buckets = defaultdict(int)
-    for k, pep in truth.items():
+    dump = open(buckets_path, "w") if buckets_path else None
+    if dump:
+        dump.write("run\tscan\tbucket\treference_peptide\temitted_peptide\temitted_label\n")
+    for k, pep in sorted(truth.items()):
         if k not in emitted:
             b = "NOT_EMITTED"
         elif emitted[k][1] != "1":
@@ -153,6 +166,11 @@ def main():
         else:
             b = "FDR_REJECTED"
         buckets[b] += 1
+        if dump:
+            e = emitted.get(k, ("", ""))
+            dump.write(f"{k[0]}\t{k[1]}\t{b}\t{pep}\t{e[0]}\t{e[1]}\n")
+    if dump:
+        dump.close()
 
     n = len(truth)
     print(f"reference : {truth_p}")

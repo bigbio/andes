@@ -134,6 +134,10 @@ pub struct ScoredSpectrum<'a> {
     /// Summed intensity of the peaks kept after precursor-peak filtering
     /// (the fragment ion current).
     total_intensity: f64,
+    /// Highest intensity over the ACTIVE peak list (post-deconvolution when
+    /// applied, else the kept set) — the base peak `intensity_signal`
+    /// normalises against. `0.0` when no peak is active.
+    max_active_intensity: f64,
     /// Peak density: the fraction of theoretical m/z bins that hold an observed
     /// peak. `prob_peak = peak_count / max(approx_num_bins, 1)` where
     /// `approx_num_bins = parent_mass / (mme.raw_value() * 2)` estimates the
@@ -581,11 +585,19 @@ impl<'a> ScoredSpectrum<'a> {
         let observed_mass_cache =
             std::cell::RefCell::new(vec![f64::NEG_INFINITY; parent_nominal + 1]);
 
+        // Base peak of the ACTIVE list — the same peak set `dump_active_peaks`
+        // exposes, taken in one pass instead of a filter/collect/sort.
+        let max_active_intensity = match (&deconv_peaks, &deconv_ranks) {
+            (Some(peaks), Some(dranks)) => max_active_intensity_of(peaks, dranks),
+            _ => max_active_intensity_of(&spec.peaks, &ranks),
+        };
+
         Self {
             spec,
             ranks,
             kept_count,
             total_intensity,
+            max_active_intensity,
             prob_peak,
             main_ion,
             parent_mass,
@@ -667,11 +679,13 @@ impl<'a> ScoredSpectrum<'a> {
         for (rank_minus_one, &(orig_idx, _, _)) in kept.iter().enumerate() {
             ranks[orig_idx] = (rank_minus_one + 1) as u32;
         }
+        let max_active_intensity = max_active_intensity_of(&spec.peaks, &ranks);
         Self {
             spec,
             ranks,
             kept_count,
             total_intensity,
+            max_active_intensity,
             prob_peak: ctx.prob_peak,
             main_ion: ctx.main_ion,
             parent_mass: ctx.parent_mass,
@@ -863,6 +877,13 @@ impl<'a> ScoredSpectrum<'a> {
     /// Returns 0.0 for an empty spectrum.
     pub fn total_intensity(&self) -> f64 {
         self.total_intensity
+    }
+
+    /// Highest intensity over the active peak list (the base peak). Equal to
+    /// the maximum over [`Self::dump_active_peaks`] folded from `0.0` with
+    /// `f64::max`, without building or sorting that list.
+    pub fn max_active_intensity(&self) -> f64 {
+        self.max_active_intensity
     }
 
     /// Find the **highest-intensity** peak within `tolerance_da` of
@@ -2172,6 +2193,32 @@ fn nearest_peak_rank_and_mz_in(
 /// carry more charge than its precursor, so only `2 ≤ ionCharge < precursor_charge`
 /// is considered. For `precursor_charge <= 2` that range is empty and the
 /// output equals the input modulo a mass-sort.
+/// Base-peak intensity over the active peaks (rank != `u32::MAX`), folded
+/// from `0.0` with `f64::max` — the exact reduction `intensity_signal` used
+/// to apply to `dump_active_peaks()`.
+fn max_active_intensity_of(peaks: &[(f64, f32)], ranks: &[u32]) -> f64 {
+    peaks
+        .iter()
+        .zip(ranks.iter())
+        .filter(|(_, &rank)| rank != u32::MAX)
+        .map(|(&(_, intensity), _)| intensity as f64)
+        .fold(0.0_f64, f64::max)
+}
+
+/// Look up the per-charge `ScoredSpectrum` a search built for precursor
+/// charge `z` in its `(charge, scored)` cache. Shared by every site that
+/// used to open-code the linear `find`.
+#[inline]
+pub fn scored_for_charge<'s, 'a>(
+    scored_per_charge: &'s [(u8, ScoredSpectrum<'a>)],
+    z: u8,
+) -> Option<&'s ScoredSpectrum<'a>> {
+    scored_per_charge
+        .iter()
+        .find(|(charge, _)| *charge == z)
+        .map(|(_, scored)| scored)
+}
+
 fn deconvolute_spectrum(
     peaks: &[(f64, f32)],
     ranks: &[u32],

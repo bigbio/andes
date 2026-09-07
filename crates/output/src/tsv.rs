@@ -410,6 +410,7 @@ mod tests {
             score_mode: search::ScoreMode::Rank,
             refine_select_psm_fdr: 0.01,
             candidate_index: search::CandidateIndexMode::Ram,
+            require_nxst_sequon: false,
         }
     }
 

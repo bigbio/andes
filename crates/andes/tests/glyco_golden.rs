@@ -231,3 +231,45 @@ fn glyco_elect_top_k_one_is_identical_to_off() {
         "--glyco-elect-top-k 1 must be byte-identical to off"
     );
 }
+
+/// `--precursor-mono auto` needs MS1. On MGF there is none, so the flag must warn
+/// and write the same `.glyco.pin` as the flag being off (bigbio/andes#64:
+/// "byte-identical when no MS1 is available or the flag is off").
+#[test]
+fn glyco_precursor_mono_on_mgf_is_identical_to_off() {
+    let root = workspace_root();
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
+    let spectra = root.join("test-fixtures/glyco_fixture.mgf.gz");
+    let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let outdir = tempfile::tempdir().expect("tempdir");
+    let run = |name: &str, extra: &[&str]| -> (String, String) {
+        let out_pin = outdir.path().join(format!("{name}.pin"));
+        let mut cmd = Command::new(&binary);
+        cmd.arg("--spectrum")
+            .arg(&spectra)
+            .arg("--database")
+            .arg(&fasta)
+            .args(["--glyco", "--glyco-tol-ppm", "20", "--fragmentation", "HCD"])
+            .args(["--glyco-taxon", "human"])
+            .args(extra)
+            .arg("--output-pin")
+            .arg(&out_pin);
+        let out = cmd.output().expect("run andes");
+        assert!(out.status.success(), "andes exited {}", out.status);
+        let glyco = outdir.path().join(format!("{name}.glyco.pin"));
+        let pin = std::fs::read_to_string(&glyco)
+            .unwrap_or_else(|e| panic!("read {}: {e}", glyco.display()));
+        (pin, String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (off, _) = run("off", &[]);
+    let (auto, log) = run("auto", &["--precursor-mono", "auto"]);
+    assert!(off.lines().count() > 1, "fixture produced no glyco rows");
+    assert_eq!(
+        off, auto,
+        "--precursor-mono auto on MGF must be byte-identical to off"
+    );
+    assert!(
+        log.contains("--precursor-mono auto needs --glyco and an input with MS1"),
+        "expected the no-MS1 warning, got:\n{log}"
+    );
+}

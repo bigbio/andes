@@ -211,3 +211,78 @@ fn glyco_highres_pin_matches_golden() {
         }
     }
 }
+
+/// `--precursor-mono auto` on an mzML with NO MS1 scans (this fixture declares
+/// "MS1 spectrum" only in its file-content header): the run streams with the MS1
+/// link, fits nothing, says so, and writes a `.glyco.pin` byte-identical to the
+/// golden — no Mono columns — while the diagnostic dump still has one NA row
+/// per MS2. (The linked case is covered by the `mono` unit tests and the
+/// measured pGlyco2 liver run in docs/benchmarks/README.md.)
+#[test]
+fn glyco_highres_precursor_mono_without_ms1_is_identical_to_golden() {
+    let root = repo_root();
+    let spectra = root.join("test-fixtures/orbitrap_lumos_120.mzML.gz");
+    let fasta = root.join("test-fixtures/glyco_fixture.fasta");
+    let golden = root.join("test-fixtures/parity/goldens/glyco_highres.pin");
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let out = tmpdir.path().join("out.pin");
+    let dump = tmpdir.path().join("mono.tsv");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_andes"));
+    let result = Command::new(&binary)
+        .arg("--spectrum")
+        .arg(&spectra)
+        .arg("--database")
+        .arg(&fasta)
+        .args(["--glyco", "--glyco-tol-ppm", "20", "--glyco-taxon", "human"])
+        .args(["--precursor-mono", "auto", "--precursor-mono-dump"])
+        .arg(&dump)
+        .arg("--output-pin")
+        .arg(&out)
+        .output()
+        .expect("run andes");
+    let log = String::from_utf8_lossy(&result.stderr).into_owned();
+    assert!(
+        result.status.success(),
+        "andes exited {}\n{log}",
+        result.status
+    );
+    assert!(
+        log.contains("precursor-mono: streamed 120 MS2 spectra (0 MS1 scans linked)"),
+        "expected the MS1-linked stream summary, got:\n{log}"
+    );
+    assert!(
+        log.contains("no MS2 could be fitted"),
+        "expected the nothing-fitted warning, got:\n{log}"
+    );
+
+    let actual = std::fs::read_to_string(tmpdir.path().join("out.glyco.pin")).expect("read pin");
+    let golden_txt = std::fs::read_to_string(&golden).expect("read golden");
+    let a_hdr = actual.lines().next().unwrap();
+    assert!(
+        !a_hdr.contains("MonoShift"),
+        "no Mono columns without a fitted MS2: {a_hdr}"
+    );
+    // Same rows as the golden (order-insensitive, like the golden test above).
+    let mut a_rows: Vec<&str> = actual.lines().skip(1).collect();
+    let mut g_rows: Vec<&str> = golden_txt.lines().skip(1).collect();
+    a_rows.sort_by_key(|r| spec_id(r).to_string());
+    g_rows.sort_by_key(|r| spec_id(r).to_string());
+    assert_eq!(a_hdr, golden_txt.lines().next().unwrap());
+    assert_eq!(
+        a_rows.len(),
+        g_rows.len(),
+        "row count differs from the golden"
+    );
+    for (i, (g, a)) in g_rows.iter().zip(a_rows.iter()).enumerate() {
+        if let Some(d) = row_diff(g, a) {
+            panic!("row {i} differs from the golden ({d})\n golden: {g}\n actual: {a}");
+        }
+    }
+
+    let dump_txt = std::fs::read_to_string(&dump).expect("read dump");
+    assert_eq!(dump_txt.lines().count(), 121, "header + one row per MS2");
+    assert!(
+        dump_txt.lines().skip(1).all(|l| l.ends_with("\tNA")),
+        "no MS2 has a linked MS1, so every row is NA"
+    );
+}

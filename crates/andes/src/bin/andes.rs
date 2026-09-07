@@ -20,6 +20,8 @@ mod config;
 mod glyco_run;
 #[path = "andes/model_select.rs"]
 mod model_select;
+#[path = "andes/mono.rs"]
+mod mono;
 #[path = "../rescore.rs"]
 mod rescore;
 #[path = "andes/search.rs"]

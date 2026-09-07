@@ -126,7 +126,9 @@ flowchart TD
    pre-pass and tightens the precursor window. MGF carries no metadata, so there you say it.
 2. **Candidate generation.** The FASTA is digested (one or several enzymes, missed cleavages,
    variable mods) and decoys are generated per `--decoy-strategy`. The candidate index stays in
-   RAM or goes out-of-core (`mmap`) when it would not fit (`--candidate-index auto|ram|mmap`).
+   RAM or goes out-of-core (`mmap`) when it would not fit (`--candidate-index auto|ram|mmap`);
+   `auto` budgets against `min(node MemAvailable, cgroup limit)`, so a SLURM or container
+   allowance below the host's free memory is respected.
 3. **Pass 1.** Every spectrum is scored against its candidates. Low-resolution data ranks by the
    generating-function **rank score**; high-resolution data by the fused **strong score**
    (`--score auto`). Two GBDT ensembles add fragment-intensity and rich-ion features; 100

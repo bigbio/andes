@@ -18,6 +18,8 @@ mod cli;
 mod config;
 #[path = "andes/glyco_run.rs"]
 mod glyco_run;
+#[path = "andes/memlimit.rs"]
+mod memlimit;
 #[path = "andes/model_select.rs"]
 mod model_select;
 #[path = "../rescore.rs"]
@@ -46,21 +48,6 @@ use crate::train_intensity::{
     run_train_intensity, run_train_intensity_gbdt, run_train_rich_ion_llr, TrainIntensityArgs,
     TrainIntensityGbdtArgs, TrainRichIonLlrArgs,
 };
-
-/// Available system memory in bytes, from Linux `/proc/meminfo` (`MemAvailable`).
-/// Returns `None` when it cannot be determined (non-Linux, restricted sandbox);
-/// callers should then keep the conservative RAM default.
-fn available_memory_bytes() -> Option<u64> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    for line in meminfo.lines() {
-        if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            // e.g. "MemAvailable:   12345678 kB"
-            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
-            return Some(kb.saturating_mul(1024));
-        }
-    }
-    None
-}
 
 /// Emit a one-line search-progress update after each scored chunk: cumulative
 /// spectra scored, throughput, and elapsed time. The streaming search has no

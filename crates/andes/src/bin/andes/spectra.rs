@@ -361,20 +361,16 @@ pub(crate) fn run_precursor_calibration(
 ///
 /// This warns rather than aborts: the estimate is a linear fit, machines differ, and
 /// refusing to start a run that would have succeeded is worse than a noisy warning.
-/// Only Linux exposes MemAvailable cheaply; elsewhere the check is skipped.
+/// Only Linux exposes the memory figures cheaply; elsewhere the check is skipped.
 pub(crate) fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
     const BYTES_PER_CANDIDATE_PLAIN: f64 = 665.0;
     const BYTES_PER_CANDIDATE_GLYCO: f64 = 940.0;
 
-    let available = match std::fs::read_to_string("/proc/meminfo") {
-        Ok(text) => text
-            .lines()
-            .find_map(|l| l.strip_prefix("MemAvailable:"))
-            .and_then(|v| v.split_whitespace().next()?.parse::<u64>().ok())
-            .map(|kb| kb * 1024),
-        Err(_) => None,
+    // Shared with the `--candidate-index auto` decision, so both compare against
+    // `min(node MemAvailable, cgroup limit)` rather than the node's free memory.
+    let Some(available) = crate::memlimit::available_memory_budget() else {
+        return;
     };
-    let Some(available) = available else { return };
 
     let per = if glyco {
         BYTES_PER_CANDIDATE_GLYCO
@@ -382,17 +378,18 @@ pub(crate) fn warn_if_index_will_not_fit(n_candidates: usize, glyco: bool) {
         BYTES_PER_CANDIDATE_PLAIN
     };
     let estimate = (n_candidates as f64 * per) as u64;
-    if estimate <= available {
+    if estimate <= available.bytes {
         return;
     }
     let gb = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
     eprintln!(
         "WARNING: this search needs roughly {:.1} GB for the in-RAM candidate index \
-         ({} candidates) but only {:.1} GB is available. The process is likely to be \
-         killed by the operating system partway through, with no result written.",
+         ({} candidates) but only {:.1} GB is available (from {}). The process is likely \
+         to be killed by the operating system partway through, with no result written.",
         gb(estimate),
         n_candidates,
-        gb(available)
+        gb(available.bytes),
+        available.source.describe()
     );
     if glyco {
         eprintln!(

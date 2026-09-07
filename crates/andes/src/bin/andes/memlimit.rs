@@ -308,6 +308,52 @@ mod tests {
     }
 
     #[test]
+    fn real_slurm_v2_layout_from_codon_finds_the_job_limit() {
+        // Captured from a live `--mem=240G` job on the EMBL-EBI Codon cluster
+        // (cgroup v2, unified mount). The LEAF is `max`: SLURM puts the limit on
+        // the `user` scope and the job scope above it, so a reader that only
+        // consulted the leaf would conclude "unlimited" and reproduce the OOM
+        // this function exists to prevent. Two ancestors carry the same 240 GiB.
+        let limit = cgroup_memory_limit_from(
+            "0::/system.slice/slurmstepd.scope/job_37031082/step_batch/user/task_0\n",
+            fake_fs(&[
+                (
+                    "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_37031082/step_batch/user/task_0/memory.max",
+                    "max\n",
+                ),
+                (
+                    "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_37031082/step_batch/user/task_0/memory.high",
+                    "max\n",
+                ),
+                (
+                    "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_37031082/step_batch/user/memory.max",
+                    "257698037760\n",
+                ),
+                (
+                    "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_37031082/step_batch/memory.max",
+                    "max\n",
+                ),
+                (
+                    "/sys/fs/cgroup/system.slice/slurmstepd.scope/job_37031082/memory.max",
+                    "257698037760\n",
+                ),
+                (
+                    "/sys/fs/cgroup/system.slice/slurmstepd.scope/memory.max",
+                    "max\n",
+                ),
+                ("/sys/fs/cgroup/system.slice/memory.max", "max\n"),
+            ]),
+        );
+        assert_eq!(limit, Some(257_698_037_760));
+
+        // And the budget must take that allowance, not the node's 1.2 TiB.
+        let node = 1_296_452_256u64 * 1024;
+        let budget = budget_from(Some(node), limit).unwrap();
+        assert_eq!(budget.bytes, 257_698_037_760);
+        assert_eq!(budget.source, MemorySource::CgroupLimit);
+    }
+
+    #[test]
     fn budget_is_the_minimum_of_node_memory_and_the_cgroup_limit() {
         // The reported SLURM failure: 641 GiB node, 240 GiB allowance.
         let budget = budget_from(Some(641 * GIB), Some(240 * GIB)).unwrap();

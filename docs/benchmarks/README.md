@@ -313,6 +313,47 @@ computed one isotope from the searched mono), and three lose the collapse. Arms 
 reached 58 by widening the window, at the cost of the degenerate tiers above. The
 offline envelope fit alone reaches 85 of the 88 reference scans at +4 (below).
 
+**Arm F: the `0..1` window, measured 2026-09-07** (same commit and database, a second
+4-thread 16 GB VM, native `.raw`, Percolator 3.7.1 `--seed 42 -Y`, `--glyco-index-sequon-only`).
+Once the corrector is on, the `+2` step of the sweep is the one that carries the
+(k, X) ≡ (k−1, X + Hex + Fuc − NeuGc) degeneracy, so this arm runs
+`--precursor-mono auto --isotope-error 0..1`. The MS1 pass is bit-identical to arm E
+(447 of 45,905 MS2 shifted, 1:106 2:37 3:202 4:74 5:28). Search wall 11,740 s and peak
+RSS 13.4 GB on this host; not a runtime comparison with the rows above (different VM,
+arm B not re-run here, so the per-scan gained/lost column is not available).
+
+| | B: off, `0..2` | E: auto, `0..2` | **F: auto, `0..1`** | #64 acceptance |
+|---|---:|---:|---:|---|
+| glycoPSMs @1% (seed 42) | 7,109 | 7,225 | **7,149** (seeds 1–5: 7,117–7,158) | — |
+| **true FDP** (sequon-corrected, 1:1 database) | 1.10% (37; CI 0.78–1.52%) | 0.91% (31; CI 0.62–1.29%) | **0.98%** (33; CI 0.67–1.38%) | inside B's CI ✔ |
+| pGlyco2 confirmed (3,877) | 3,361 (86.7%) | 3,444 (88.8%) | **3,466 (89.4%)** | ≥ 3,386 ✔ |
+| pGlyco2 wrong target / decoy / FDR-rejected / not emitted | — | — | 162 / 226 / **21** / 2 | — |
+| MSFragger confirmed (3,040) | 2,669 (87.8%) | 2,746 (90.3%) | **2,749 (90.4%)** | — |
+| same-scan peptidoform agreement vs pGlyco2 / MSFragger | 96.3% / 95.7% | 96.8% / 95.9% | **96.9% / 96.0%** | ≥ 96.3% ✔ |
+| the 84 target spectra | 0 confirmed | 69 confirmed, 5 FDR-rejected, 6 wrong target, 4 decoy | **71 confirmed**, 0 FDR-rejected, 9 wrong target, 4 decoy | — |
+| the 62 targets at +4 | 0 | 55 confirmed + 4 FDR-rejected | **59 confirmed** | ≥ 58 ✔ |
+| accepted PSMs by effective offset | +0 5,332 · +1 1,347 · +2 430 | +0 5,325 · +1 1,337 · +2 402 · +3 16 · +4 80 · +5 50 · +6 15 | +0 5,419 · **+1 1,552 · +2 21** · +3 14 · +4 87 · +5 48 · +6 8 | decreasing beyond +1 ✔ |
+| HexNAc3 share at +0 / +1 / +2..+6 | 5.4% / — / — | 5.5% / — / 1.2% at +4 | 5.5% / 4.1% / **0%** | matches offset-0 ✔ |
+| entrapment hits at +0 / +1 / +2..+6 | — | 0 in +3..+6 | 26 / 7 / **0** | — |
+| reference coverage of +4 / +5 / +6 | — | 71 of 80 / 15 of 50 / 4 of 15 | **78 of 87** / 13 of 48 / 3 of 8 | — |
+
+**What the `+2` tier was.** Arm B accepted 430 PSMs at `isotope_error = 2` and arm E 402;
+with the window closed to `0..1` only 21 survive (all through a corrector shift), yet the
+total goes up against B (+40 PSMs, +105 pGlyco2 confirmed, +80 MSFragger confirmed) and
+the `+1` tier grows by about 200. Those are the same scans re-accepted one isotope lower
+with the other composition of the degenerate pair, and the peptidoform agreement rising
+from 96.3% to 96.9% against pGlyco2 says the lower one is the right one more often. Against
+E the arm gives up 76 PSMs at 1% (the collapsed `+2` tier) and gains 22 pGlyco2 and 3
+MSFragger confirmations; the four `+4` targets E emitted correctly but lost at q are
+confirmed here, because their competitors at `isotope_error = 2` no longer exist.
+
+**The three `+4` targets still missed** (of 62): scans 13348 (+3.920 Da) and 30044
+(+3.963 Da) sit 40–80 mDa off an isotope multiple, so they are not clean firmware picks
+and no envelope correction can place them; scan 15490 (HexNAc4Hex7Fuc1 on YHHYSSNFSIPK,
++4.011 Da) is corrected but a different sequon peptide wins the collapse. The other ten
+misses among the 84 are the +5/+6 and non-integer cases (19835 at +5.852, 26334 at +5.105,
+27562 at +2.876, 35708 at +6.147), unchanged from arms B–E.
+
 **Offline validation of the corrector** (`--precursor-mono-dump`, 23 s for the file, no
 search). For every pGlyco2 reference scan the true offset is the integer k that makes
 recorded − (peptide + Cam-C + Ox-M + glycan) an isotope multiple. Best-fitting
@@ -341,7 +382,7 @@ window target and the trailer `Monoisotopic M/Z` on all 45,905 MS2 of this file 
 over `thermorawfilereader` 0.7.0), so the trailer holds nothing the reader is not already
 using; the +4 scans are firmware picks.
 
-Reproduce: the quick-tier recipe with `--precursor-mono auto` (add
+Reproduce: the quick-tier recipe with `--precursor-mono auto --isotope-error 0..1` (add
 `--glyco-index-sequon-only` on a < 32 GB host); score with `score_vs_truth.py --run
 MouseLiver-Z-T-1 --buckets ...` and read the `MonoShift` / `isotope_error` PIN columns for
 the per-offset table.

@@ -858,7 +858,7 @@ pub fn lazy_candidates_for_nominal_window(
     // RAM path (which iterates candidates in enumerate_candidates order via
     // ascending global indices). A HashSet was used for dedup in step (3), so
     // the vec order is non-deterministic without this sort.
-    base_records.sort_unstable_by_key(|r| (r.protein_index, r.start_offset, r.flags));
+    base_records.sort_unstable_by_key(|r| (r.protein_index, r.start_offset, r.length, r.flags));
 
     // (4) Reconstruct + place mods exactly as the precursor-window path, but gate
     //     acceptance on the RAM nominal-bucket predicate.

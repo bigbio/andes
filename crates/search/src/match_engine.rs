@@ -260,6 +260,39 @@ pub(crate) fn candidate_nominal_bounds(
     (min_nominal, max_nominal)
 }
 
+/// The charge states a spectrum is searched at: the explicit precursor charge
+/// when present, otherwise the configured charge range.
+fn charges_to_try(spec: &Spectrum, params: &SearchParams) -> SmallVec<[u8; 4]> {
+    match spec.precursor_charge {
+        Some(z) if z > 0 => smallvec![z as u8],
+        _ => params.charge_range.clone().collect(),
+    }
+}
+
+/// Cache key for the out-of-core per-chunk candidate cache: the ordered list of
+/// nominal-mass windows this spectrum enumerates, one per charge state.
+///
+/// `shift_ppm` is `params.precursor_mass_shift_ppm`, a run-level constant, so it
+/// is fully captured by `params` and needs no separate key component.
+fn mmap_window_key(spec: &Spectrum, params: &SearchParams) -> MmapWindowKey {
+    let shift_ppm = params.precursor_mass_shift_ppm;
+    charges_to_try(spec, params)
+        .into_iter()
+        .map(|z| candidate_nominal_bounds(spec, z, params, shift_ppm))
+        .collect()
+}
+
+/// Upper bound on distinct windows cached per chunk. Beyond it the remaining
+/// windows fall back to direct per-spectrum expansion, so peak extra memory is
+/// bounded regardless of how mass-diverse a chunk is.
+const MMAP_WINDOW_CACHE_MAX: usize = 4096;
+
+/// One spectrum's nominal-mass windows, one per charge state tried.
+type MmapWindowKey = SmallVec<[(i32, i32); 4]>;
+
+/// Per-chunk map from a window key to its fully-prepared candidate list.
+type MmapWindowCache = FxHashMap<MmapWindowKey, Vec<Candidate>>;
+
 impl<'a> PreparedSearch<'a> {
     /// Build the per-search state once. Enumerates candidates, builds the
     /// mass-bucket index, and clones+registers the aa_set for cleavage
@@ -488,6 +521,143 @@ impl<'a> PreparedSearch<'a> {
         self.run_chunk_inner(spectra, spectrum_idx_offset, params)
     }
 
+    /// Expand the fully-prepared per-spectrum candidate list for one set of
+    /// nominal-mass `windows` (one entry per charge state to try) on the
+    /// out-of-core (`Mmap`) backing.
+    ///
+    /// The result is a pure function of `(windows, params, index)` — it depends
+    /// on the spectrum ONLY through those nominal bounds — which is what makes
+    /// the per-chunk window cache in `run_chunk_inner` result-identical.
+    fn expand_mmap_window_candidates(
+        &self,
+        params: &SearchParams,
+        windows: &[(i32, i32)],
+    ) -> Vec<Candidate> {
+        let mut mmap_cands: Vec<Candidate> = Vec::new();
+        let mi = self
+            .mmap_index
+            .as_ref()
+            .expect("Mmap backing requires an mmap index");
+        // Union of candidates over the same (charge, isotope-offset)
+        // grid the in-RAM precursor match scans, deduped by peptidoform
+        // identity (residues+mods+protein+offset+termini+decoy).
+        //
+        // `base_mult` reproduces the in-RAM enumeration MULTIPLICITY: a
+        // base peptide can appear in `enumerate_candidates` more than
+        // once at the SAME coordinates (notably the N-terminal-Met
+        // re-enumeration emits an identical-coordinate span), and the
+        // in-RAM `candidates` Vec keeps each copy as a distinct index.
+        // `dedup_pepseq_score` later aggregates those indices into one
+        // PSM's `candidate_idxs` — so the PIN `Proteins` column repeats
+        // the accession once per copy. `lazy_candidates_for_precursor`
+        // de-duplicates base records, so to stay byte-identical we count
+        // each base record's raw multiplicity here and replicate the
+        // expanded peptidoforms that many times. The on-disk index
+        // preserves the duplicates (it is built from the same
+        // `enumerate_candidates`), so the count is exact.
+        let mut seen: FxHashSet<GlobalCandKey> = FxHashSet::default();
+        let mut deduped: Vec<Candidate> = Vec::new();
+        for &(min_nominal, max_nominal) in windows {
+            // RESULT-IDENTITY: the in-RAM (`Ram`) backing scores
+            // exactly the candidates whose nominal residue mass lands
+            // in the coarse integer bucket window
+            // `candidate_nominal_bounds(spec, z, ..)` (via
+            // `bucket_index.range(min..=max)`). The earlier f64
+            // directional milli-Da window used here was a DIFFERENT set
+            // at bucket boundaries (proven divergence on scan 33203:
+            // RAM kept an iso=+2 candidate, mmap an iso=−1). To stay
+            // result-identical to RAM we derive the SAME nominal bounds
+            // (reusing `candidate_nominal_bounds`, the single source of
+            // truth) and gate per-candidate ACCEPTANCE on the EXACT RAM
+            // nominal-bucket predicate
+            // `nominal_from(peptide.mass() − H2O) ∈ [min, max]`.
+            // `lazy_candidates_for_nominal_window` over-fetches base
+            // records over a padded mass window (bounded-RSS preserved)
+            // and applies that predicate — making the scored multiset
+            // identical to RAM's `bucket_index.range(..)` set.
+            for cand in
+                lazy_candidates_for_nominal_window(mi, self.idx, params, min_nominal, max_nominal)
+            {
+                if seen.insert(GlobalCandKey::from_candidate(&cand)) {
+                    deduped.push(cand);
+                }
+            }
+        }
+        // Replicate each deduped peptidoform by its base record's raw
+        // multiplicity, so the per-spectrum candidate set matches the
+        // in-RAM enumeration copy-for-copy (collapsed identically by the
+        // later `dedup_pepseq_score`). The raw count is a fixed property
+        // of the index: query it at the candidate's EXACT base mass
+        // (peptide mass minus its mod deltas) and count records sharing
+        // the same (protein, start, length, flags) key.
+        //
+        // The copies are NOT adjacent in the RAM enumeration:
+        // `enumerate_protein` walks the WHOLE protein at
+        // `seq_offset = 0`, then walks it AGAIN at `seq_offset = 1`
+        // (N-terminal-Met cleavage). So RAM's global order inside one
+        // protein is `[every pass-0 span, offset ASC] ++ [every pass-1
+        // span, offset ASC]`. Pushing a candidate's copies back to back
+        // and sorting only on `(protein, start_offset)` interleaves them
+        // differently, which perturbs the order-dependent per-spectrum
+        // float accumulators (`strong_null_stats` → the PIN
+        // `RawScoreCal`) even when the multiset is identical.
+        //
+        // Tag each copy with its PASS index and sort on it, so the two
+        // walks land in RAM's block order:
+        //  - copy `k` of a span reachable from both walks is pass `k`;
+        //  - a span at `start_offset == 1` carrying `is_protein_n_term`
+        //    is reachable ONLY from the Met-cleaved walk (the flag is
+        //    set iff the span starts at `seq_offset`), so it is pass 1
+        //    even though it has a single copy.
+        let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = Vec::new();
+        for cand in deduped {
+            let mult = base_record_multiplicity(mi, &cand);
+            let met_clipped_only = cand.is_protein_n_term && cand.start_offset_in_protein == 1;
+            for k in 0..mult {
+                let pass = if met_clipped_only { 1 } else { k };
+                tagged.push((
+                    cand.protein_index as u32,
+                    pass,
+                    cand.start_offset_in_protein as u32,
+                    cand.peptide.residues.len() as u16,
+                    cand.clone(),
+                ));
+            }
+        }
+        // Collision-decoy relabeling against the GLOBAL target
+        // bare-sequence set (built once at `prepare_mmap` from the full
+        // index). This is IDENTICAL to the in-RAM path, which relabels
+        // once globally over all candidates: a decoy is relabeled iff
+        // its bare sequence matches ANY DB target. Relabeling against
+        // only this window's targets would be WRONG — a collision decoy
+        // whose target twin is outside the current precursor window
+        // would keep its decoy flag and diverge the TDC label from RAM.
+        let target_bare_seqs = self
+            .mmap_target_bare_seqs
+            .as_ref()
+            .expect("Mmap backing requires the global target bare-seq set");
+        // Canonical enumeration order: protein_index ASC, then PASS
+        // (see above), then start offset ASC, then span length ASC —
+        // exactly the order `enumerate_protein` emits spans in.
+        // Within each such group, candidates
+        // retain the order produced by `lazy_candidates_for_nominal_window`
+        // → `expand_mod_combinations`, which is the SAME order
+        // `enumerate_candidates` uses.  `sort_by` is stable, so the
+        // within-group ordering from `lazy_candidates_for_nominal_window`
+        // is preserved — reproducing the RAM path's ascending global-index
+        // iteration order exactly.
+        //
+        // DO NOT add residues/mod_units tie-breaking here: lexicographic
+        // residue order diverges from `expand_mod_combinations` recursive
+        // output order and causes tie-breaking differences vs RAM.
+        //
+        // Relabeling is order-independent, so it runs after the sort.
+        tagged.sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
+        mmap_cands.extend(tagged.into_iter().map(|t| t.4));
+        relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
+        mmap_cands
+    }
+
     fn run_chunk_inner(
         &self,
         spectra: &[Spectrum],
@@ -500,8 +670,35 @@ impl<'a> PreparedSearch<'a> {
         let bucket_index = &self.bucket_index;
         let aa_set_for_scoring = &self.aa_set_for_scoring;
         // Out-of-core (`Mmap`) backing handles, `None` on the default `Ram` path.
-        let mmap_index = self.mmap_index.as_ref();
         let mmap_accum = self.mmap_accum.as_ref();
+
+        // Out-of-core per-chunk window cache. Every (spectrum, charge) search
+        // unit re-derives its candidate list from the on-disk index; on the test
+        // fixture 49,066 units cover only 1,657 distinct nominal windows (29.6x
+        // mean reuse), so expanding each distinct window once removes ~97% of the
+        // repeated base-record fetch / mod expansion / multiplicity / relabel /
+        // sort work. The map is built before the scoring loop and only read from
+        // it, so the hot path stays lock-free.
+        let window_cache: Option<MmapWindowCache> = if self.backing_mode == CandidateBacking::Mmap {
+            let mut keys: Vec<MmapWindowKey> = spectra
+                .iter()
+                .filter(|s| s.peaks.len() >= params.min_peaks as usize)
+                .map(|s| mmap_window_key(s, params))
+                .collect();
+            keys.sort_unstable();
+            keys.dedup();
+            keys.truncate(MMAP_WINDOW_CACHE_MAX);
+            Some(
+                keys.into_par_iter()
+                    .map(|k| {
+                        let v = self.expand_mmap_window_candidates(params, &k);
+                        (k, v)
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
 
         // Yield-accounting counters.
         // Aggregated across all worker threads via Relaxed atomics — exact counts
@@ -576,10 +773,7 @@ impl<'a> PreparedSearch<'a> {
                 // Determine which charge states to try for this spectrum.
                 // For charge-explicit spectra this is a single entry; for charge-missing,
                 // typically 2-3 entries (small overhead, correct behavior).
-                let charges_to_try: SmallVec<[u8; 4]> = match spec.precursor_charge {
-                    Some(z) if z > 0 => smallvec![z as u8],
-                    _ => params.charge_range.clone().collect(),
-                };
+                let charges_to_try: SmallVec<[u8; 4]> = charges_to_try(spec, params);
 
                 // Build (and cache) a ScoredSpectrum per charge to evaluate.
                 //
@@ -629,7 +823,10 @@ impl<'a> PreparedSearch<'a> {
                 // the per-spectrum set — a collision decoy and its target twin share a
                 // bare sequence (hence mass), so both land in the same window.
                 let mut window_cand_indices: Vec<usize> = Vec::new();
-                let mut mmap_cands: Vec<Candidate> = Vec::new();
+                // Mmap backing: either a borrow of the per-chunk cache entry
+                // (`_ref`) or a directly expanded list owned here (`_owned`).
+                let mut mmap_cands_owned: Vec<Candidate> = Vec::new();
+                let mut mmap_cands_ref: Option<&[Candidate]> = None;
                 match self.backing_mode {
                     CandidateBacking::Ram => {
                         window_cand_indices.reserve(2048);
@@ -644,132 +841,20 @@ impl<'a> PreparedSearch<'a> {
                         window_cand_indices.dedup();
                     }
                     CandidateBacking::Mmap => {
-                        let mi = mmap_index.expect("Mmap backing requires an mmap index");
-                        // Union of candidates over the same (charge, isotope-offset)
-                        // grid the in-RAM precursor match scans, deduped by peptidoform
-                        // identity (residues+mods+protein+offset+termini+decoy).
-                        //
-                        // `base_mult` reproduces the in-RAM enumeration MULTIPLICITY: a
-                        // base peptide can appear in `enumerate_candidates` more than
-                        // once at the SAME coordinates (notably the N-terminal-Met
-                        // re-enumeration emits an identical-coordinate span), and the
-                        // in-RAM `candidates` Vec keeps each copy as a distinct index.
-                        // `dedup_pepseq_score` later aggregates those indices into one
-                        // PSM's `candidate_idxs` — so the PIN `Proteins` column repeats
-                        // the accession once per copy. `lazy_candidates_for_precursor`
-                        // de-duplicates base records, so to stay byte-identical we count
-                        // each base record's raw multiplicity here and replicate the
-                        // expanded peptidoforms that many times. The on-disk index
-                        // preserves the duplicates (it is built from the same
-                        // `enumerate_candidates`), so the count is exact.
-                        let mut seen: FxHashSet<GlobalCandKey> = FxHashSet::default();
-                        let mut deduped: Vec<Candidate> = Vec::new();
-                        for &z in &charges_to_try {
-                            // RESULT-IDENTITY: the in-RAM (`Ram`) backing scores
-                            // exactly the candidates whose nominal residue mass lands
-                            // in the coarse integer bucket window
-                            // `candidate_nominal_bounds(spec, z, ..)` (via
-                            // `bucket_index.range(min..=max)`). The earlier f64
-                            // directional milli-Da window used here was a DIFFERENT set
-                            // at bucket boundaries (proven divergence on scan 33203:
-                            // RAM kept an iso=+2 candidate, mmap an iso=−1). To stay
-                            // result-identical to RAM we derive the SAME nominal bounds
-                            // (reusing `candidate_nominal_bounds`, the single source of
-                            // truth) and gate per-candidate ACCEPTANCE on the EXACT RAM
-                            // nominal-bucket predicate
-                            // `nominal_from(peptide.mass() − H2O) ∈ [min, max]`.
-                            // `lazy_candidates_for_nominal_window` over-fetches base
-                            // records over a padded mass window (bounded-RSS preserved)
-                            // and applies that predicate — making the scored multiset
-                            // identical to RAM's `bucket_index.range(..)` set.
-                            let (min_nominal, max_nominal) =
-                                candidate_nominal_bounds(spec, z, params, shift_ppm);
-                            for cand in lazy_candidates_for_nominal_window(
-                                mi,
-                                self.idx,
-                                params,
-                                min_nominal,
-                                max_nominal,
-                            ) {
-                                if seen.insert(GlobalCandKey::from_candidate(&cand)) {
-                                    deduped.push(cand);
-                                }
+                        // Per-chunk window cache: the expansion above is a pure
+                        // function of the nominal-mass windows, so spectra that
+                        // share a window share its fully-prepared candidate list
+                        // (measured 29.6x mean reuse on the test fixture). On a
+                        // cache miss (cap exceeded) expand directly.
+                        let key = mmap_window_key(spec, params);
+                        match window_cache.as_ref().and_then(|c| c.get(&key)) {
+                            Some(cached) => mmap_cands_ref = Some(cached.as_slice()),
+                            None => {
+                                mmap_cands_owned = self.expand_mmap_window_candidates(params, &key);
                             }
                         }
-                        // Replicate each deduped peptidoform by its base record's raw
-                        // multiplicity, so the per-spectrum candidate set matches the
-                        // in-RAM enumeration copy-for-copy (collapsed identically by the
-                        // later `dedup_pepseq_score`). The raw count is a fixed property
-                        // of the index: query it at the candidate's EXACT base mass
-                        // (peptide mass minus its mod deltas) and count records sharing
-                        // the same (protein, start, length, flags) key.
-                        //
-                        // The copies are NOT adjacent in the RAM enumeration:
-                        // `enumerate_protein` walks the WHOLE protein at
-                        // `seq_offset = 0`, then walks it AGAIN at `seq_offset = 1`
-                        // (N-terminal-Met cleavage). So RAM's global order inside one
-                        // protein is `[every pass-0 span, offset ASC] ++ [every pass-1
-                        // span, offset ASC]`. Pushing a candidate's copies back to back
-                        // and sorting only on `(protein, start_offset)` interleaves them
-                        // differently, which perturbs the order-dependent per-spectrum
-                        // float accumulators (`strong_null_stats` → the PIN
-                        // `RawScoreCal`) even when the multiset is identical.
-                        //
-                        // Tag each copy with its PASS index and sort on it, so the two
-                        // walks land in RAM's block order:
-                        //  - copy `k` of a span reachable from both walks is pass `k`;
-                        //  - a span at `start_offset == 1` carrying `is_protein_n_term`
-                        //    is reachable ONLY from the Met-cleaved walk (the flag is
-                        //    set iff the span starts at `seq_offset`), so it is pass 1
-                        //    even though it has a single copy.
-                        let mut tagged: Vec<(u32, u32, u32, u16, Candidate)> = Vec::new();
-                        for cand in deduped {
-                            let mult = base_record_multiplicity(mi, &cand);
-                            let met_clipped_only =
-                                cand.is_protein_n_term && cand.start_offset_in_protein == 1;
-                            for k in 0..mult {
-                                let pass = if met_clipped_only { 1 } else { k };
-                                tagged.push((
-                                    cand.protein_index as u32,
-                                    pass,
-                                    cand.start_offset_in_protein as u32,
-                                    cand.peptide.residues.len() as u16,
-                                    cand.clone(),
-                                ));
-                            }
-                        }
-                        // Collision-decoy relabeling against the GLOBAL target
-                        // bare-sequence set (built once at `prepare_mmap` from the full
-                        // index). This is IDENTICAL to the in-RAM path, which relabels
-                        // once globally over all candidates: a decoy is relabeled iff
-                        // its bare sequence matches ANY DB target. Relabeling against
-                        // only this window's targets would be WRONG — a collision decoy
-                        // whose target twin is outside the current precursor window
-                        // would keep its decoy flag and diverge the TDC label from RAM.
-                        let target_bare_seqs = self
-                            .mmap_target_bare_seqs
-                            .as_ref()
-                            .expect("Mmap backing requires the global target bare-seq set");
-                        // Canonical enumeration order: protein_index ASC, then PASS
-                        // (see above), then start offset ASC, then span length ASC —
-                        // exactly the order `enumerate_protein` emits spans in.
-                        // Within each such group, candidates
-                        // retain the order produced by `lazy_candidates_for_nominal_window`
-                        // → `expand_mod_combinations`, which is the SAME order
-                        // `enumerate_candidates` uses.  `sort_by` is stable, so the
-                        // within-group ordering from `lazy_candidates_for_nominal_window`
-                        // is preserved — reproducing the RAM path's ascending global-index
-                        // iteration order exactly.
-                        //
-                        // DO NOT add residues/mod_units tie-breaking here: lexicographic
-                        // residue order diverges from `expand_mod_combinations` recursive
-                        // output order and causes tie-breaking differences vs RAM.
-                        //
-                        // Relabeling is order-independent, so it runs after the sort.
-                        tagged.sort_by(|a, b| (a.0, a.1, a.2, a.3).cmp(&(b.0, b.1, b.2, b.3)));
-                        mmap_cands.extend(tagged.into_iter().map(|t| t.4));
-                        relabel_collision_decoys_with(&mut mmap_cands, target_bare_seqs);
-                        window_cand_indices = (0..mmap_cands.len()).collect();
+                        window_cand_indices =
+                            (0..mmap_cands_ref.unwrap_or(&mmap_cands_owned).len()).collect();
                     }
                 }
                 // Per-spectrum candidate resolution slice, uniform across both
@@ -781,9 +866,10 @@ impl<'a> PreparedSearch<'a> {
                 // against `self.candidates`. The local→global remap happens once at the
                 // END of the closure (see `mmap_global_idx` below), so everything in
                 // between is identical to the in-RAM path.
+                let mmap_cands: &[Candidate] = mmap_cands_ref.unwrap_or(&mmap_cands_owned);
                 let cand_slice: &[Candidate] = match self.backing_mode {
                     CandidateBacking::Ram => candidates,
-                    CandidateBacking::Mmap => &mmap_cands,
+                    CandidateBacking::Mmap => mmap_cands,
                 };
                 // Resolve a per-spectrum candidate slot to its `&Candidate` and the
                 // value to store in `candidate_idxs`. For both backings this is the

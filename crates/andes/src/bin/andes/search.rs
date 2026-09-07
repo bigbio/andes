@@ -11,6 +11,7 @@ use crate::cli::{
     GlycoIsotopeFlag, PrecursorMonoFlag, Protocol, ScoreFlag,
 };
 use crate::glyco_run::run_glyco;
+use crate::memlimit::available_memory_budget;
 use crate::model_select::{
     cli_fragment_tol_override, default_aa_set_with_tag, load_param_from_store, parse_enzymes,
     resolve_metadataless_selection, warn_if_universal_protease_combo,
@@ -22,10 +23,7 @@ use crate::spectra::{
     input_format_flags, merge_parse_stats, prefix_spectrum_titles, run_precursor_calibration,
     send_chunks, title_prefix_for, tolerance_ppm_display, warn_if_index_will_not_fit, ParseStats,
 };
-use crate::{
-    arg_present, available_memory_bytes, log_rss, report_search_progress,
-    EXPLICIT_MISSED_CLEAVAGES, RSS_PROBE,
-};
+use crate::{arg_present, log_rss, report_search_progress, EXPLICIT_MISSED_CLEAVAGES, RSS_PROBE};
 use input::{FastaReader, MgfReader, Ms1Link, MzMLReader};
 use model::{
     activation::ActivationMethod, AminoAcidSetBuilder, InstrumentType, PrecursorTolerance, Spectrum,
@@ -617,11 +615,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if params.chimeric || cli.refine || cli.glyco {
                 search::CandidateIndexMode::Ram
             } else {
-                match available_memory_bytes() {
+                // The figure is `min(node MemAvailable, cgroup limit)`: under
+                // SLURM/containers the node's free memory is not ours to spend.
+                match available_memory_budget() {
                     Some(avail) => {
                         // Budget 60% of available memory for the candidate index;
                         // the rest covers spectra, the model, scoring scratch, etc.
-                        let budget = (avail as f64 * 0.60) as u64;
+                        let budget = (avail.bytes as f64 * 0.60) as u64;
                         if search::candidate_index::ram_candidate_index_fits(
                             &idx,
                             &params,
@@ -632,10 +632,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             eprintln!(
                                 "[auto] in-RAM candidate index would exceed the ~{} GiB budget \
-                                 (60% of {} GiB available) → using out-of-core mmap \
+                                 (60% of {} GiB from {}) → using out-of-core mmap \
                                  (force with --candidate-index ram)",
                                 budget >> 30,
-                                avail >> 30
+                                avail.bytes >> 30,
+                                avail.source.describe()
                             );
                             search::CandidateIndexMode::Mmap
                         }

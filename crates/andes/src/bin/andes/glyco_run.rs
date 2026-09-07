@@ -225,7 +225,7 @@ pub(crate) fn run_glyco(
         pf_charge: cli.glyco_pf_charge,
         // Peptide-first RETRIEVAL window. High-resolution MS2 defaults to the
         // glyco ppm tolerance; low-resolution keeps the rank model's 0.5 Da.
-        // Measured 2026-09-02 (HPC, five seeds): on high-res data the 0.5 Da
+        // Measured 2026-09-02 (five seeds): on high-res data the 0.5 Da
         // window admitted b/y matches ~50x wider than every glycan-side matcher
         // and was the dominant glyco cost — 20 ppm was 6.9x faster on mouse
         // PXD011533 and 7x on plasma PXD030622 with identifications neutral

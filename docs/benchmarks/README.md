@@ -356,7 +356,7 @@ any other single file.
 PXD005553 `MouseLiver-Z-T-{1..5}.raw` (12.6 GB) as **ThermoRawFileParser 1.4.3** mzML
 (byte-identical to native reading on these files), against `mouse_entrap.fasta` (34,554
 sequences, sha256 `5ee15d8d…`, 1:1 shuffled, factor exactly 2.0), `--glyco
---decoy-strategy sequon-reverse`, 16 threads per fraction on the SLURM cluster,
+--decoy-strategy sequon-reverse`, 16 threads per fraction on a SLURM cluster,
 pooled before Percolator 3.7.1, 5 seeds. **Measured 2026-09-05 at `main` commit `14818d3e`**
 (binary sha256 `6de3c8db…`, rustc 1.85); the earlier off-`main` figure of 31,658 ± 34
 reproduces within seed noise. **These numbers pre-date the gated NeuGc bound** (NeuGc ≤ 1

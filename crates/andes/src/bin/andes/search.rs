@@ -586,8 +586,12 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         params.max_variable_mods_per_peptide = n; // NumMods= in --mods overrides --max-mods
     }
     params.precursor_cal_mode = cli.precursor_cal;
-    // params.cal_min_spec_keys keeps its SearchParams default
-    // (MIN_SPECKEYS_FOR_PREPASS); it is an internal threshold, no longer a flag.
+    if let Some(n) = cli.cal_min_spec_keys {
+        params.cal_min_spec_keys = n;
+    }
+    if let Some(n) = cli.mmap_window_cache_candidates {
+        params.mmap_window_cache_max_candidates = n;
+    }
     params.precursor_mass_shift_ppm = 0.0;
     params.refine_select_psm_fdr = cli.refine_select_psm_fdr;
     params.score_mode = match cli.score {

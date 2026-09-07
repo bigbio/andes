@@ -63,6 +63,10 @@ fn run_search(
         .arg("1")
         .arg("--precursor-cal")
         .arg(precursor_cal)
+        // The fixture has ~5.8k SpecKeys, below the 10k production threshold;
+        // force the pre-pass so the calibration-on case actually calibrates.
+        .arg("--cal-min-spec-keys")
+        .arg("1000")
         .arg("--candidate-index")
         .arg(backing)
         .arg("--output-pin")
@@ -77,6 +81,13 @@ fn run_search(
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if precursor_cal != "off" {
+        assert!(
+            stderr.contains("Precursor mass shift learned"),
+            "[{backing}] the calibration pre-pass did not run, so the calibration-on \
+             gate would be vacuous:\n{stderr}"
+        );
+    }
     if backing == "mmap" {
         assert!(
             stderr.contains("out-of-core candidate-index: mmap"),
